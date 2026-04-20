@@ -50,6 +50,15 @@ pub enum CreateProposalParams {
     },
 }
 
+/// Live on-chain proposal detail fields not cached by `OnchainState`.
+#[derive(Debug)]
+pub struct ProposalDetails {
+    pub creator: Address,
+    pub votes: Vec<Address>,
+    pub quorum_threshold_bps: u64,
+    pub metadata: hashi_types::move_types::VecMap<String, String>,
+}
+
 /// Result of a transaction simulation (dry-run)
 #[derive(Debug)]
 pub struct SimulationResult {
@@ -170,6 +179,19 @@ impl HashiClient {
     // Read operations (delegating to OnchainState)
     // ========================================================================
 
+    /// Highest package version currently known on-chain, i.e. the version of
+    /// the latest published upgrade (or the original package before any
+    /// upgrade). Returns `None` only if the state hasn't been scraped yet,
+    /// which shouldn't happen after `HashiClient::new`.
+    pub fn highest_package_version(&self) -> Option<u64> {
+        self.onchain_state
+            .state()
+            .package_versions()
+            .keys()
+            .copied()
+            .max()
+    }
+
     /// Fetch current epoch from on-chain state
     pub fn fetch_epoch(&self) -> u64 {
         self.onchain_state.epoch()
@@ -188,6 +210,106 @@ impl HashiClient {
     /// Fetch committee members for the current epoch
     pub fn fetch_committee_members(&self) -> Vec<MemberInfo> {
         self.onchain_state.committee_members()
+    }
+
+    /// Fetch the current `Committee` (with weights). Returns `None` before DKG.
+    pub fn fetch_current_committee(&self) -> Option<hashi_types::committee::Committee> {
+        self.onchain_state.current_committee()
+    }
+
+    /// Live-fetch the full on-chain `Proposal<T>` (votes + quorum threshold +
+    /// metadata) for a specific proposal via one `list_dynamic_fields` call on
+    /// the proposals bag. Separate from the cached `fetch_proposal` because
+    /// validators don't need these fields in their in-memory state.
+    ///
+    /// The proposal type is derived from the matched child object's
+    /// `object_type` — callers don't pass it, so they can't pass the wrong one.
+    pub async fn fetch_proposal_details(&self, proposal_id: Address) -> Result<ProposalDetails> {
+        use crate::onchain::parse_proposal_type;
+        use crate::onchain::types::ProposalType;
+        use futures::TryStreamExt;
+        use hashi_types::move_types;
+        use sui_rpc::field::FieldMask;
+        use sui_rpc::field::FieldMaskUtil;
+        use sui_rpc::proto::sui::rpc::v2::DynamicField;
+        use sui_rpc::proto::sui::rpc::v2::ListDynamicFieldsRequest;
+
+        let proposals_bag_id = self.onchain_state.state().hashi().proposals.id;
+        let client = self.onchain_state.client();
+        // Proposals are now stored in an `ObjectBag`, so each entry's payload
+        // lives on `child_object` (a standalone object), not inline on the
+        // `DynamicField` itself.
+        let mut stream = Box::pin(
+            client.list_dynamic_fields(
+                ListDynamicFieldsRequest::default()
+                    .with_parent(proposals_bag_id)
+                    .with_page_size(u32::MAX)
+                    .with_read_mask(FieldMask::from_paths([
+                        DynamicField::path_builder().name().finish(),
+                        DynamicField::path_builder().child_object().object_type(),
+                        DynamicField::path_builder()
+                            .child_object()
+                            .contents()
+                            .finish(),
+                    ])),
+            ),
+        );
+
+        while let Some(field) = stream.try_next().await? {
+            // The bag key is BCS-encoded `ID`, which is equivalent to `Address`.
+            let Ok(key) = bcs::from_bytes::<Address>(field.name().value()) else {
+                continue;
+            };
+            if key != proposal_id {
+                continue;
+            }
+
+            let object_type_str = field.child_object().object_type();
+            let type_tag: TypeTag = object_type_str
+                .parse()
+                .with_context(|| format!("parse object_type {object_type_str:?}"))?;
+            let proposal_type = parse_proposal_type(&type_tag);
+
+            let value_bytes = field.child_object().contents().value();
+            let (creator, votes, quorum_threshold_bps, metadata) = match proposal_type {
+                ProposalType::UpdateConfig => {
+                    let p: move_types::Proposal<move_types::UpdateConfig> =
+                        bcs::from_bytes(value_bytes).context("deserialize UpdateConfig")?;
+                    (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                }
+                ProposalType::EnableVersion => {
+                    let p: move_types::Proposal<move_types::EnableVersion> =
+                        bcs::from_bytes(value_bytes).context("deserialize EnableVersion")?;
+                    (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                }
+                ProposalType::DisableVersion => {
+                    let p: move_types::Proposal<move_types::DisableVersion> =
+                        bcs::from_bytes(value_bytes).context("deserialize DisableVersion")?;
+                    (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                }
+                ProposalType::Upgrade => {
+                    let p: move_types::Proposal<move_types::Upgrade> =
+                        bcs::from_bytes(value_bytes).context("deserialize Upgrade")?;
+                    (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                }
+                ProposalType::EmergencyPause => {
+                    let p: move_types::Proposal<move_types::EmergencyPause> =
+                        bcs::from_bytes(value_bytes).context("deserialize EmergencyPause")?;
+                    (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                }
+                ProposalType::Unknown(s) => {
+                    anyhow::bail!("Cannot fetch details for unknown proposal type: {s}")
+                }
+            };
+            return Ok(ProposalDetails {
+                creator,
+                votes,
+                quorum_threshold_bps,
+                metadata,
+            });
+        }
+
+        anyhow::bail!("Proposal {proposal_id} not found in proposals bag")
     }
 
     /// Fetch the MPC public key bytes from on-chain state
@@ -222,31 +344,7 @@ impl HashiClient {
         proposal_id: Address,
         type_arg: TypeTag,
     ) -> TransactionBuilder {
-        let mut builder = TransactionBuilder::new();
-
-        let hashi_arg = builder.object(
-            ObjectInput::new(self.hashi_ids.hashi_object_id)
-                .as_shared()
-                .with_mutable(true),
-        );
-        let proposal_id_arg = builder.pure(&proposal_id);
-        let clock_arg = builder.object(
-            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
-                .as_shared()
-                .with_mutable(false),
-        );
-
-        builder.move_call(
-            Function::new(
-                self.hashi_ids.package_id,
-                Identifier::from_static("proposal"),
-                Identifier::from_static("vote"),
-            )
-            .with_type_args(vec![type_arg]),
-            vec![hashi_arg, proposal_id_arg, clock_arg],
-        );
-
-        builder
+        build_vote_transaction(self.hashi_ids, proposal_id, type_arg)
     }
 
     /// Build a remove_vote transaction for a proposal.
@@ -494,18 +592,14 @@ fn build_metadata(
     map
 }
 
-/// Build a `TransactionBuilder` for voting on an `UpdateConfig` proposal.
-///
-/// Calls: `proposal::vote<UpdateConfig>(hashi, proposal_id, clock, ctx)`
-///
-/// This is a standalone function so it can be reused outside `HashiClient`
-/// (e.g., in test infrastructure where a `HashiClient` is not available).
-pub fn build_vote_update_config_transaction(
+/// Build a `proposal::vote<T>` transaction as a standalone. Reusable outside
+/// `HashiClient` — e2e test infra needs to build vote PTBs for every
+/// committee member.
+pub fn build_vote_transaction(
     hashi_ids: HashiIds,
     proposal_id: Address,
+    type_arg: TypeTag,
 ) -> TransactionBuilder {
-    let type_arg = update_config_type_tag(hashi_ids.package_id);
-
     let mut builder = TransactionBuilder::new();
     let hashi_arg = builder.object(
         ObjectInput::new(hashi_ids.hashi_object_id)
@@ -530,52 +624,6 @@ pub fn build_vote_update_config_transaction(
     );
 
     builder
-}
-
-/// Build a `TransactionBuilder` for executing an `UpdateConfig` proposal once
-/// quorum has been reached.
-///
-/// Calls: `update_config::execute(hashi, proposal_id, clock)`
-///
-/// This is a standalone function so it can be reused outside `HashiClient`
-/// (e.g., in test infrastructure where a `HashiClient` is not available).
-pub fn build_execute_update_config_transaction(
-    hashi_ids: HashiIds,
-    proposal_id: Address,
-) -> TransactionBuilder {
-    let mut builder = TransactionBuilder::new();
-    let hashi_arg = builder.object(
-        ObjectInput::new(hashi_ids.hashi_object_id)
-            .as_shared()
-            .with_mutable(true),
-    );
-    let proposal_id_arg = builder.pure(&proposal_id);
-    let clock_arg = builder.object(
-        ObjectInput::new(SUI_CLOCK_OBJECT_ID)
-            .as_shared()
-            .with_mutable(false),
-    );
-
-    builder.move_call(
-        Function::new(
-            hashi_ids.package_id,
-            Identifier::from_static("update_config"),
-            Identifier::from_static("execute"),
-        ),
-        vec![hashi_arg, proposal_id_arg, clock_arg],
-    );
-
-    builder
-}
-
-/// Returns the `TypeTag` for the `UpdateConfig` proposal type.
-fn update_config_type_tag(package_id: Address) -> TypeTag {
-    TypeTag::Struct(Box::new(StructTag::new(
-        package_id,
-        Identifier::from_static("update_config"),
-        Identifier::from_static("UpdateConfig"),
-        vec![],
-    )))
 }
 
 /// Get the TypeTag for a proposal type (from on-chain type)

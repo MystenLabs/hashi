@@ -65,6 +65,9 @@ pub struct CommitteeSet {
 
     tls_private_key: Option<ed25519_dalek::SigningKey>,
     grpc_max_decoding_message_size: Option<usize>,
+    // Optional metrics registry propagated to every outbound `Client`
+    // so the tower callback layer can observe RPC traffic.
+    metrics: Option<std::sync::Arc<crate::metrics::Metrics>>,
     clients: BTreeMap<Address, Client>,
 }
 
@@ -120,6 +123,7 @@ impl CommitteeSet {
             committees: BTreeMap::new(),
             tls_private_key: None,
             grpc_max_decoding_message_size: None,
+            metrics: None,
             clients: BTreeMap::new(),
         }
     }
@@ -183,6 +187,12 @@ impl CommitteeSet {
         self
     }
 
+    pub fn set_metrics(&mut self, metrics: std::sync::Arc<crate::metrics::Metrics>) -> &mut Self {
+        self.metrics = Some(metrics);
+        self.update_all_clients();
+        self
+    }
+
     pub fn set_members(&mut self, members: BTreeMap<Address, MemberInfo>) -> &mut Self {
         self.tls_public_key_to_address = members
             .values()
@@ -220,6 +230,9 @@ impl CommitteeSet {
                     .ok()?;
                 if let Some(limit) = self.grpc_max_decoding_message_size {
                     client = client.max_decoding_message_size(limit);
+                }
+                if let Some(metrics) = &self.metrics {
+                    client = client.with_metrics(metrics.clone());
                 }
                 Some((validator, client))
             })
@@ -259,6 +272,9 @@ impl CommitteeSet {
             {
                 if let Some(limit) = self.grpc_max_decoding_message_size {
                     client = client.max_decoding_message_size(limit);
+                }
+                if let Some(metrics) = &self.metrics {
+                    client = client.with_metrics(metrics.clone());
                 }
                 self.clients.insert(validator, client);
             }
@@ -469,9 +485,9 @@ pub struct Config {
 // This constant mirrors the value in btc_config.move and must be kept in sync.
 const DUST_RELAY_MIN_VALUE: u64 = 546;
 
-// These mirror the defaults in mpc_config.move and must be kept in sync.
-pub const DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS: u16 = 3333;
-pub const DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
+pub use hashi_types::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
+pub use hashi_types::committee::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
+pub use hashi_types::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 
 impl Config {
     /// Minimum deposit amount, mirroring the floor logic in btc_config.move.
@@ -530,6 +546,15 @@ impl Config {
                 u16::try_from(*v).expect("mpc_weight_reduction_allowed_delta exceeds u16::MAX")
             }
             _ => DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        }
+    }
+
+    pub fn mpc_max_faulty_in_basis_points(&self) -> u16 {
+        match self.config.get("mpc_max_faulty_in_basis_points") {
+            Some(ConfigValue::U64(v)) => {
+                u16::try_from(*v).expect("mpc_max_faulty_in_basis_points exceeds u16::MAX")
+            }
+            _ => DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
         }
     }
 }

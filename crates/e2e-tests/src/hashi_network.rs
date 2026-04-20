@@ -58,7 +58,7 @@ impl HashiNodeHandle {
     ///
     /// After shutdown, there may be a brief delay before the database lock is released.
     async fn create_hashi_retry(config: &HashiConfig) -> Result<Arc<Hashi>> {
-        const MAX_ATTEMPTS: u32 = 3;
+        const MAX_ATTEMPTS: u32 = 10;
 
         for attempt in 1..=MAX_ATTEMPTS {
             match Self::create_hashi(config) {
@@ -98,7 +98,20 @@ impl HashiNodeHandle {
             "Cannot open DB while node is running"
         );
         let db_path = self.config.db.as_deref().expect("db path not set");
+        for _ in 0..10 {
+            if let Ok(db) = hashi::db::Database::open(db_path) {
+                return Ok(db);
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
         hashi::db::Database::open(db_path)
+    }
+
+    /// Read-only access to the node's underlying `HashiConfig`. Useful for
+    /// tests that need to serialise the config to disk (e.g. backup/restore
+    /// round-trip tests) without forcing every caller to build their own.
+    pub fn config(&self) -> &HashiConfig {
+        &self.config
     }
 
     pub fn validator_address(&self) -> sui_sdk_types::Address {

@@ -15,7 +15,7 @@ use hashi::{
     hashi::Hashi,
     update_config
 };
-use sui::{bag, bls12381, clock::Clock, vec_map};
+use sui::{bag, bls12381, clock::Clock, object_bag, vec_map};
 
 // ======== Transaction Context Helpers ========
 
@@ -109,7 +109,7 @@ public fun create_hashi_with_weighted_committee(
     };
 
     // Create the committee
-    let committee = committee::new_committee(ctx.epoch(), members);
+    let committee = committee::new_committee(ctx.epoch(), members, 3334, 800, 3333);
 
     let sk = bls_sk_for_testing();
     let pub_key = bls12381::g1_from_bytes(&bls_min_pk_from_sk(&sk));
@@ -131,7 +131,7 @@ public fun create_hashi_with_weighted_committee(
     let treasury = hashi::treasury::create(ctx);
 
     // Create proposals bag
-    let proposals = bag::new(ctx);
+    let proposals = object_bag::new(ctx);
 
     // Create TOB bag
     let tob = bag::new(ctx);

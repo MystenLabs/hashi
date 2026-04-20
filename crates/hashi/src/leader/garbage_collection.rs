@@ -10,6 +10,7 @@ use crate::onchain::types::ProposalType;
 use crate::sui_tx_executor::SuiTxExecutor;
 use std::sync::Arc;
 use sui_sdk_types::Address;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -65,9 +66,9 @@ impl LeaderService {
         );
 
         let inner = self.inner.clone();
-        self.deposit_gc_task = Some(tokio::task::spawn(async move {
+        self.deposit_gc_task = Some(AbortOnDropHandle::new(tokio::task::spawn(async move {
             Self::delete_expired_deposit_requests(inner, expired_requests).await
-        }));
+        })));
     }
 
     async fn delete_expired_deposit_requests(
@@ -126,9 +127,9 @@ impl LeaderService {
         );
 
         let inner = self.inner.clone();
-        self.proposal_gc_task = Some(tokio::task::spawn(async move {
+        self.proposal_gc_task = Some(AbortOnDropHandle::new(tokio::task::spawn(async move {
             Self::delete_expired_proposals(inner, expired_proposals).await
-        }));
+        })));
     }
 
     async fn delete_expired_proposals(

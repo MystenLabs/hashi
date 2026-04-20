@@ -86,6 +86,7 @@ struct Inner {
     state: RwLock<State>,
     tls_private_key: Option<ed25519_dalek::SigningKey>,
     grpc_max_decoding_message_size: Option<usize>,
+    metrics: Option<Arc<crate::metrics::Metrics>>,
 }
 
 #[derive(Debug)]
@@ -124,6 +125,9 @@ impl OnchainState {
                 .committees
                 .set_grpc_max_decoding_message_size(limit);
         }
+        if let Some(metrics) = metrics.clone() {
+            state.hashi.committees.set_metrics(metrics);
+        }
 
         let (sender, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let (checkpoint, _) = watch::channel(checkpoint);
@@ -135,6 +139,7 @@ impl OnchainState {
             state: RwLock::new(state),
             tls_private_key,
             grpc_max_decoding_message_size,
+            metrics: metrics.clone(),
         }
         .pipe(Arc::new)
         .pipe(Self);
@@ -208,6 +213,9 @@ impl OnchainState {
         }
         if let Some(limit) = self.0.grpc_max_decoding_message_size {
             hashi.committees.set_grpc_max_decoding_message_size(limit);
+        }
+        if let Some(metrics) = &self.0.metrics {
+            hashi.committees.set_metrics(metrics.clone());
         }
         self.state_mut().hashi = hashi;
     }
@@ -405,11 +413,16 @@ impl OnchainState {
             .mpc_weight_reduction_allowed_delta()
     }
 
+    pub fn mpc_max_faulty_in_basis_points(&self) -> u16 {
+        self.state().hashi().config.mpc_max_faulty_in_basis_points()
+    }
+
     pub fn bridge_service_client(
         &self,
         validator: &Address,
-    ) -> Option<hashi_types::proto::bridge_service_client::BridgeServiceClient<tonic_rustls::Channel>>
-    {
+    ) -> Option<
+        hashi_types::proto::bridge_service_client::BridgeServiceClient<crate::grpc::BoxedChannel>,
+    > {
         self.state()
             .hashi()
             .committees
@@ -420,7 +433,7 @@ impl OnchainState {
     pub fn mpc_service_client(
         &self,
         validator: &Address,
-    ) -> Option<hashi_types::proto::mpc_service_client::MpcServiceClient<tonic_rustls::Channel>>
+    ) -> Option<hashi_types::proto::mpc_service_client::MpcServiceClient<crate::grpc::BoxedChannel>>
     {
         self.state()
             .hashi()
@@ -730,6 +743,7 @@ async fn scrape_treasury(
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
                     DynamicField::path_builder().value().finish(),
+                    DynamicField::path_builder().child_object().object_type(),
                     DynamicField::path_builder()
                         .child_object()
                         .contents()
@@ -739,7 +753,16 @@ async fn scrape_treasury(
         .pipe(Box::pin);
 
     while let Some(field) = stream.try_next().await? {
-        let type_tag = field.child_object().contents().name().parse()?;
+        let object_type = field.child_object().object_type();
+        let type_tag: TypeTag = match object_type.parse() {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    "skipping treasury dynamic field with unparseable type {object_type:?}: {e}"
+                );
+                continue;
+            }
+        };
         let contents = field.child_object().contents().value();
 
         if let Some(treasury_cap) = types::TreasuryCap::try_from_contents(&type_tag, contents) {
@@ -906,13 +929,9 @@ async fn scrape_committees(
             Ok(committee)
         })
         .map_ok(|move_committee| {
-            let members = move_committee
-                .members
-                .into_iter()
-                .map(convert_move_committee_member)
-                .collect();
-            let committee = Committee::new(members, move_committee.epoch);
-            (move_committee.epoch, committee)
+            let epoch = move_committee.epoch;
+            let committee = convert_move_committee(move_committee);
+            (epoch, committee)
         })
         .try_collect()
         .await?;
@@ -946,14 +965,7 @@ async fn scrape_committee(
         .deserialize()
         .map_err(|e| tonic::Status::from_error(e.into()))?;
 
-    let members = field
-        .value
-        .members
-        .into_iter()
-        .map(convert_move_committee_member)
-        .collect();
-    let committee = Committee::new(members, field.value.epoch);
-    Ok(committee)
+    Ok(convert_move_committee(field.value))
 }
 
 fn convert_move_committee_member(
@@ -973,6 +985,27 @@ fn convert_move_committee_member(
             .map(Into::into)
             .unwrap_or_else(fallback_encryption_public_key),
         weight,
+    )
+}
+
+fn convert_move_committee(c: move_types::Committee) -> Committee {
+    let members = c
+        .members
+        .into_iter()
+        .map(convert_move_committee_member)
+        .collect();
+    let threshold_in_basis_points = u16::try_from(c.mpc_threshold_in_basis_points)
+        .expect("mpc_threshold_in_basis_points exceeds u16::MAX");
+    let weight_reduction_allowed_delta = u16::try_from(c.mpc_weight_reduction_allowed_delta)
+        .expect("mpc_weight_reduction_allowed_delta exceeds u16::MAX");
+    let max_faulty_in_basis_points = u16::try_from(c.mpc_max_faulty_in_basis_points)
+        .expect("mpc_max_faulty_in_basis_points exceeds u16::MAX");
+    Committee::new(
+        members,
+        c.epoch,
+        threshold_in_basis_points,
+        weight_reduction_allowed_delta,
+        max_faulty_in_basis_points,
     )
 }
 
@@ -1205,10 +1238,14 @@ async fn scrape_spent_utxos(
 
 async fn scrape_proposals(
     client: Client,
-    proposals_bag: move_types::Bag,
+    proposals_bag: move_types::ObjectBag,
 ) -> Result<types::Proposals> {
     let mut proposals: BTreeMap<Address, types::Proposal> = BTreeMap::new();
 
+    // Proposals live in a `0x2::object_bag::ObjectBag`, so each entry's
+    // payload is a standalone child object. Read `child_object` directly —
+    // fullnode gRPC populates `child_object.object_type` + BCS `contents`
+    // for dynamic-object-field kinds.
     let mut stream = client
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
@@ -1216,6 +1253,7 @@ async fn scrape_proposals(
                 .with_page_size(u32::MAX)
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
+                    DynamicField::path_builder().child_object().object_type(),
                     DynamicField::path_builder()
                         .child_object()
                         .contents()
@@ -1225,13 +1263,23 @@ async fn scrape_proposals(
         .pipe(Box::pin);
 
     while let Some(field) = stream.try_next().await? {
-        // Parse the proposal type from the type tag
-        // The type will be something like: <package>::proposal::Proposal<<package>::update_deposit_fee::UpdateDepositFee>
-        let type_tag: TypeTag = field.child_object().contents().name().parse()?;
+        // `child_object.object_type` is the fully-qualified type, e.g.
+        //   <package>::proposal::Proposal<<package>::update_config::UpdateConfig>
+        let object_type = field.child_object().object_type();
+        let type_tag: TypeTag = match object_type.parse() {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    "skipping proposal dynamic object field with unparseable type \
+                     {object_type:?}: {e}"
+                );
+                continue;
+            }
+        };
         let proposal_type = parse_proposal_type(&type_tag);
 
         // Deserialize proposal based on the proposal type
-        let contents = field.child_object().contents().value();
+        let contents: &[u8] = field.child_object().contents().value();
         let result: Option<(Address, u64)> = match &proposal_type {
             types::ProposalType::UpdateConfig => {
                 bcs::from_bytes::<move_types::Proposal<move_types::UpdateConfig>>(contents)
@@ -1282,7 +1330,7 @@ async fn scrape_proposals(
     })
 }
 
-fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
+pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
     let TypeTag::Struct(struct_tag) = type_tag else {
         return types::ProposalType::Unknown(format!("{:?}", type_tag));
     };

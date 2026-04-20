@@ -289,6 +289,9 @@ fun verify_proof_of_possession(
 fun new_committee_from_validator_set(
     self: &CommitteeSet,
     sui_system: &sui_system::sui_system::SuiSystemState,
+    mpc_threshold_in_basis_points: u64,
+    mpc_weight_reduction_allowed_delta: u64,
+    mpc_max_faulty_in_basis_points: u64,
     ctx: &TxContext,
 ): Committee {
     let epoch = ctx.epoch();
@@ -329,7 +332,13 @@ fun new_committee_from_validator_set(
 
     // XXX do we sort by address or weight?
 
-    committee::new_committee(epoch, committee_members)
+    committee::new_committee(
+        epoch,
+        committee_members,
+        mpc_threshold_in_basis_points,
+        mpc_weight_reduction_allowed_delta,
+        mpc_max_faulty_in_basis_points,
+    )
 }
 
 public(package) fun is_reconfiguring(self: &CommitteeSet): bool {
@@ -347,6 +356,9 @@ public(package) fun get_committee(self: &CommitteeSet, epoch: u64): &Committee {
 public(package) fun start_reconfig(
     self: &mut CommitteeSet,
     sui_system: &sui_system::sui_system::SuiSystemState,
+    mpc_threshold_in_basis_points: u64,
+    mpc_weight_reduction_allowed_delta: u64,
+    mpc_max_faulty_in_basis_points: u64,
     ctx: &TxContext,
 ): u64 {
     // We can't trigger reconfig if we are already reconfiguring
@@ -358,7 +370,13 @@ public(package) fun start_reconfig(
     // our current epoch is not the same as Sui's epoch
     assert!(self.epoch == 0 || self.epoch != ctx.epoch());
 
-    let committee = self.new_committee_from_validator_set(sui_system, ctx);
+    let committee = self.new_committee_from_validator_set(
+        sui_system,
+        mpc_threshold_in_basis_points,
+        mpc_weight_reduction_allowed_delta,
+        mpc_max_faulty_in_basis_points,
+        ctx,
+    );
 
     // Ensure 95% of stake has registered.
     let mut sui_system_weight = 0;

@@ -10,9 +10,11 @@ use tower::ServiceBuilder;
 use crate::Hashi;
 
 mod client;
+pub use client::BoxedChannel;
 pub use client::Client;
 
 pub mod bridge_service;
+pub mod metrics_layer;
 pub mod screener_client;
 
 /// Wrapper that triggers graceful HTTP server shutdown on drop.
@@ -102,7 +104,7 @@ impl HttpService {
             // Add middleware for mapping a request to a known validator
             .map_request(lookup_validator_middleware(self.inner.clone()))
             .layer(sui_http::middleware::callback::CallbackLayer::new(
-                crate::metrics::RpcMetricsMakeCallbackHandler::new(self.inner.metrics.clone()),
+                metrics_layer::RpcMetricsMakeCallbackHandler::server(self.inner.metrics.clone()),
             ));
 
         let router = router.merge(health_endpoint).layer(layers);
@@ -141,12 +143,15 @@ impl HttpService {
             .ok_or_else(|| tonic::Status::unavailable("DKG manager not yet initialized"))
     }
 
-    pub fn signing_manager(
+    pub fn signing_manager_for(
         &self,
-    ) -> Result<Arc<std::sync::RwLock<crate::mpc::SigningManager>>, tonic::Status> {
-        self.inner
-            .try_signing_manager()
-            .ok_or_else(|| tonic::Status::unavailable("SigningManager not yet initialized"))
+        epoch: u64,
+    ) -> Result<Arc<crate::mpc::SigningManager>, tonic::Status> {
+        self.inner.signing_manager_for(epoch).ok_or_else(|| {
+            tonic::Status::unavailable(format!(
+                "SigningManager not available for epoch {epoch}; retry"
+            ))
+        })
     }
 
     pub fn btc_monitor(&self) -> &crate::btc_monitor::monitor::MonitorClient {

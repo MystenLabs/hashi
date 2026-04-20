@@ -36,10 +36,22 @@ public struct Committee has copy, drop, store {
     members: vector<CommitteeMember>,
     /// Total voting weight of the committee.
     total_weight: u64,
+    /// MPC threshold in basis points
+    mpc_threshold_in_basis_points: u64,
+    /// Allowed delta for weight reduction
+    mpc_weight_reduction_allowed_delta: u64,
+    /// MPC max faulty parties in basis points
+    mpc_max_faulty_in_basis_points: u64,
 }
 
 /// Constructor for committee.
-public(package) fun new_committee(epoch: u64, members: vector<CommitteeMember>): Committee {
+public(package) fun new_committee(
+    epoch: u64,
+    members: vector<CommitteeMember>,
+    mpc_threshold_in_basis_points: u64,
+    mpc_weight_reduction_allowed_delta: u64,
+    mpc_max_faulty_in_basis_points: u64,
+): Committee {
     assert!(!members.is_empty());
 
     // Compute the total weight
@@ -50,7 +62,14 @@ public(package) fun new_committee(epoch: u64, members: vector<CommitteeMember>):
         total_weight = total_weight + weight;
     });
 
-    Committee { members, total_weight, epoch }
+    Committee {
+        members,
+        total_weight,
+        epoch,
+        mpc_threshold_in_basis_points,
+        mpc_weight_reduction_allowed_delta,
+        mpc_max_faulty_in_basis_points,
+    }
 }
 
 /// Constructor for committee member.

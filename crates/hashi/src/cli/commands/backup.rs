@@ -1,47 +1,30 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Backup command implementations
+//! CLI backup command implementations
+//!
+//! Orchestrates config loading, recipient/identity resolution, and user-facing
+//! output. The core archive logic lives in [`crate::backup`].
 
 use age::Decryptor;
-use age::Encryptor;
 use age::IdentityFile;
 use age::cli_common::UiCallbacks;
 use age::plugin;
 use anyhow::Context;
 use anyhow::Result;
-use std::collections::HashMap;
-use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
-use std::fs::OpenOptions;
-use std::io;
-use std::io::ErrorKind;
-use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-use std::path::PathBuf;
 use std::str::FromStr;
 
+use tracing::info;
+
+use crate::backup;
 use crate::cli::config::BackupRecipient;
 use crate::cli::config::CliConfig;
-use crate::cli::print_info;
 use crate::cli::print_success;
 
-const BACKUP_MANIFEST_FILE_NAME: &str = "hashi-config-backup-manifest.toml";
-
-#[derive(serde::Deserialize, serde::Serialize)]
-struct BackupManifest {
-    files: Vec<BackupManifestFile>,
-}
-
-#[derive(serde::Deserialize, serde::Serialize)]
-struct BackupManifestFile {
-    archive_name: PathBuf,
-    original_path: PathBuf,
-}
-
-/// Save an encrypted backup of the current config and referenced files
+/// Save an encrypted backup of the current config, referenced files, and database
 pub fn save(
     config: &CliConfig,
     backup_age_pubkey_override: Option<String>,
@@ -57,13 +40,10 @@ pub fn save(
             )
         })?;
 
-    if config.loaded_from_path.is_none() {
-        anyhow::bail!(
-            "No config file is currently in use. Pass --config with a config file path before running backup."
-        );
-    }
-
-    let files = config.backup_file_paths();
+    // `backup_file_paths` enforces all the structural invariants we need
+    // (CLI config in use, node config path set, node config loadable, key
+    // file paths actually exist).
+    let files = config.backup_file_paths()?;
 
     for file in &files {
         if !file.exists() {
@@ -71,21 +51,93 @@ pub fn save(
         }
     }
 
+    // The DB path lives in the node config and isn't part of `files`, so we
+    // load the node config a second time here. `backup_file_paths` already
+    // proved this load succeeds, so an error here would have to be a TOCTOU
+    // — fine to surface as-is.
+    let node_config_path = config
+        .node_config_path
+        .as_ref()
+        .expect("backup_file_paths verified node_config_path is set");
+    let node_config = crate::config::Config::load(node_config_path).with_context(|| {
+        format!(
+            "Failed to load node config from {}",
+            node_config_path.display()
+        )
+    })?;
+    let db_path = node_config.db.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Node config at {} does not specify a database path",
+            node_config_path.display()
+        )
+    })?;
+
+    // Refuse to silently create an empty DB at a typo'd path. `fjall` would
+    // otherwise happily `create_dir_all` on open and we'd ship a zero-row
+    // backup with no warning.
+    if !db_path
+        .try_exists()
+        .with_context(|| format!("Failed to stat database path {}", db_path.display()))?
+    {
+        anyhow::bail!(
+            "Database path {} does not exist. Fix the `db` field in {} before running backup save.",
+            db_path.display(),
+            node_config_path.display(),
+        );
+    }
+
+    // Open the database — fails with a clear message if the node is running.
+    // `Database::open` preserves `fjall::Error` as the source, so the
+    // downcast below matches on the underlying variant.
+    let db = crate::db::Database::open(db_path).map_err(|e| {
+        if e.downcast_ref::<fjall::Error>()
+            .is_some_and(|fe| matches!(fe, fjall::Error::Locked))
+        {
+            anyhow::anyhow!(
+                "Cannot open database at {}: it is locked by a running hashi node. \
+                 Stop the node before running backup save.",
+                db_path.display()
+            )
+        } else {
+            e.context(format!("Failed to open database at {}", db_path.display()))
+        }
+    })?;
+
+    // Snapshot the database into a subdirectory of a temp dir. `snapshot_to_path`
+    // requires a non-existent destination, so we create the parent tempdir and
+    // point at a yet-to-be-created child.
+    let tmp_parent = tempfile::Builder::new()
+        .prefix("hashi-db-snapshot-")
+        .tempdir()
+        .context("Failed to create temp directory for database snapshot")?;
+    let snapshot_path = tmp_parent.path().join("db");
+    db.snapshot_to_path(&snapshot_path)
+        .context("Failed to snapshot database")?;
+    drop(db);
+
+    info!(source = %db_path.display(), "Database snapshot created");
+
     fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create output directory {}", output_dir.display()))?;
 
-    let manifest = build_backup_manifest(&files)?;
+    let manifest = backup::build_backup_manifest(&files, db_path, &snapshot_path)?;
 
-    print_info(&format!(
-        "Backing up {} file(s) using age recipient {}",
-        files.len(),
-        recipient
-    ));
+    info!(
+        file_count = files.len(),
+        %recipient,
+        "Backing up files + database",
+    );
 
     let encryptor_recipient = build_encryptor_recipient(&recipient)?;
 
-    let output_path = output_dir.join(encrypted_backup_file_name());
-    encrypt_files_to_age_archive(&manifest, encryptor_recipient.as_ref(), &output_path)?;
+    let output_path = output_dir.join(backup::encrypted_backup_file_name());
+    backup::encrypt_files_to_age_archive(
+        &manifest,
+        &snapshot_path,
+        encryptor_recipient.as_ref(),
+        &output_path,
+    )?;
+    drop(tmp_parent);
 
     print_success(&format!("Backup completed: {}", output_path.display()));
 
@@ -122,13 +174,32 @@ pub fn restore(
 ) -> Result<()> {
     let identities = load_backup_identities(backup_age_identity)?;
 
-    let extract_dir = output_dir.join(extract_dir_name(backup_tarball)?);
-    fs::create_dir_all(&extract_dir).with_context(|| {
-        format!(
-            "Failed to create output directory {}",
+    let extract_dir = output_dir.join(backup::extract_dir_name(backup_tarball)?);
+    if extract_dir
+        .try_exists()
+        .with_context(|| format!("Failed to stat {}", extract_dir.display()))?
+    {
+        anyhow::bail!(
+            "Refusing to overwrite existing extract directory: {}",
             extract_dir.display()
-        )
-    })?;
+        );
+    }
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("Failed to create output directory {}", output_dir.display()))?;
+
+    // Extract into a sibling staging directory and rename into place on
+    // success. A failure mid-extract leaves the staging dir behind (auto-
+    // cleaned on `TempDir` drop) so the user can retry without manual cleanup
+    // and the final `extract_dir` never appears half-populated.
+    let staging = tempfile::Builder::new()
+        .prefix(".hashi-restore-")
+        .tempdir_in(output_dir)
+        .with_context(|| {
+            format!(
+                "Failed to create staging directory in {}",
+                output_dir.display()
+            )
+        })?;
 
     let input = File::open(backup_tarball)
         .with_context(|| format!("Failed to open backup tarball {}", backup_tarball.display()))?;
@@ -149,12 +220,28 @@ pub fn restore(
         .next()
         .transpose()?
         .ok_or_else(|| anyhow::anyhow!("Backup archive is empty"))?;
-    let (manifest, manifest_toml) = read_backup_manifest(manifest_entry)?;
-    write_manifest_to_extract_dir(&extract_dir, &manifest_toml)?;
-    let restored_files = restore_backup_entries(entries, &extract_dir, &manifest)?;
+    let (manifest, manifest_toml) = backup::read_backup_manifest(manifest_entry)?;
+    backup::restore_backup_entries(entries, staging.path(), &manifest)?;
+    // Manifest is written last so it acts as a marker that extraction finished
+    // successfully. Any earlier failure leaves the staging dir without a
+    // manifest, so partial state can never be confused for a complete restore.
+    backup::write_manifest_to_extract_dir(staging.path(), &manifest_toml)?;
+
+    // Promote the staged dir into its final location atomically. Same-
+    // filesystem rename is required for atomicity, which `tempdir_in` of a
+    // sibling guarantees.
+    let staging_path = staging.keep();
+    fs::rename(&staging_path, &extract_dir).map_err(|e| {
+        let _ = fs::remove_dir_all(&staging_path);
+        anyhow::Error::from(e).context(format!(
+            "Failed to move staged restore into place at {}",
+            extract_dir.display()
+        ))
+    })?;
 
     if copy_to_original_paths {
-        copy_restored_files_to_original_paths(&restored_files, &manifest)?;
+        backup::copy_restored_files_to_original_paths(&extract_dir, &manifest)?;
+        backup::copy_db_snapshot_to_original_path(&extract_dir, &manifest)?;
     }
 
     print_success(&format!(
@@ -163,167 +250,6 @@ pub fn restore(
         extract_dir.display()
     ));
 
-    Ok(())
-}
-
-/// Determine the directory name to extract a backup tarball into.
-///
-/// Uses the tarball's file name with the `.tar.age` suffix stripped, so
-/// `hashi-config-backup-20260409T230419Z.tar.age` becomes
-/// `hashi-config-backup-20260409T230419Z`.
-fn extract_dir_name(backup_tarball: &Path) -> Result<PathBuf> {
-    let file_name = backup_tarball
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Backup tarball path has no file name: {}",
-                backup_tarball.display()
-            )
-        })?;
-
-    let stem = file_name
-        .strip_suffix(".tar.age")
-        .or_else(|| file_name.strip_suffix(".age"))
-        .unwrap_or(file_name);
-
-    if stem.is_empty() {
-        anyhow::bail!(
-            "Cannot derive extract directory name from {}",
-            backup_tarball.display()
-        );
-    }
-
-    Ok(PathBuf::from(stem))
-}
-
-/// Write the raw manifest TOML into the extract directory so the user can
-/// inspect it alongside the restored files.
-fn write_manifest_to_extract_dir(extract_dir: &Path, manifest_toml: &str) -> Result<()> {
-    let manifest_path = extract_dir.join(BACKUP_MANIFEST_FILE_NAME);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&manifest_path)
-        .map_err(|e| match e.kind() {
-            ErrorKind::AlreadyExists => anyhow::anyhow!(
-                "Refusing to overwrite existing file: {}",
-                manifest_path.display()
-            ),
-            _ => anyhow::Error::from(e)
-                .context(format!("Failed to create {}", manifest_path.display())),
-        })?;
-    io::Write::write_all(&mut file, manifest_toml.as_bytes())
-        .with_context(|| format!("Failed to write manifest to {}", manifest_path.display()))?;
-    print_info(&format!("Restored manifest to {}", manifest_path.display()));
-    Ok(())
-}
-
-fn encrypt_files_to_age_archive(
-    manifest: &BackupManifest,
-    recipient: &dyn age::Recipient,
-    output_path: &Path,
-) -> Result<()> {
-    let output = File::create(output_path)
-        .with_context(|| format!("Failed to create {}", output_path.display()))?;
-    let encryptor = Encryptor::with_recipients(std::iter::once(recipient))?;
-    let mut encrypted = encryptor.wrap_output(output)?;
-    {
-        let mut archive = tar::Builder::new(&mut encrypted);
-        append_backup_manifest(&mut archive, manifest)?;
-
-        for file in &manifest.files {
-            archive.append_path_with_name(&file.original_path, &file.archive_name)?;
-            print_info(&format!(
-                "Added {} to {}",
-                file.original_path.display(),
-                file.archive_name.display()
-            ));
-        }
-
-        archive.finish()?;
-    }
-    encrypted.finish()?;
-
-    Ok(())
-}
-
-fn encrypted_backup_file_name() -> PathBuf {
-    // ISO 8601 basic format in UTC, e.g. 20260409T230419Z. Compact, sorts
-    // lexicographically, and contains no characters that need escaping on any
-    // common filesystem.
-    let timestamp = jiff::Timestamp::now()
-        .to_zoned(jiff::tz::TimeZone::UTC)
-        .strftime("%Y%m%dT%H%M%SZ")
-        .to_string();
-    PathBuf::from(format!("hashi-config-backup-{timestamp}.tar.age"))
-}
-
-fn build_backup_manifest(files: &[PathBuf]) -> Result<BackupManifest> {
-    let mut archive_names = HashSet::new();
-    let mut manifest_files = Vec::with_capacity(files.len());
-
-    for file in files {
-        let base_name = file
-            .file_name()
-            .ok_or_else(|| {
-                anyhow::anyhow!("Backup input does not have a file name: {}", file.display())
-            })?
-            .to_string_lossy();
-
-        let archive_name = if archive_names.contains(base_name.as_ref()) {
-            let stem = Path::new(base_name.as_ref())
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy();
-            let ext = Path::new(base_name.as_ref())
-                .extension()
-                .map(|e| format!(".{}", e.to_string_lossy()))
-                .unwrap_or_default();
-
-            let mut suffix = 2u32;
-            loop {
-                let candidate = format!("{stem}-{suffix}{ext}");
-                if archive_names.insert(candidate.clone()) {
-                    print_info(&format!(
-                        "Archive name collision for {base_name}: renamed to {candidate} (original: {})",
-                        file.display()
-                    ));
-                    break PathBuf::from(candidate);
-                }
-                suffix += 1;
-            }
-        } else {
-            archive_names.insert(base_name.to_string());
-            PathBuf::from(base_name.as_ref())
-        };
-
-        manifest_files.push(BackupManifestFile {
-            archive_name,
-            original_path: file.clone(),
-        });
-    }
-
-    Ok(BackupManifest {
-        files: manifest_files,
-    })
-}
-
-fn append_backup_manifest<W: std::io::Write>(
-    archive: &mut tar::Builder<W>,
-    manifest: &BackupManifest,
-) -> Result<()> {
-    let manifest_bytes = toml::to_string_pretty(manifest)?.into_bytes();
-    let mut header = tar::Header::new_gnu();
-    header.set_size(manifest_bytes.len() as u64);
-    header.set_mode(0o644);
-    header.set_cksum();
-    archive.append_data(
-        &mut header,
-        BACKUP_MANIFEST_FILE_NAME,
-        manifest_bytes.as_slice(),
-    )?;
     Ok(())
 }
 
@@ -342,169 +268,14 @@ fn load_backup_identities(
         .map_err(Into::into)
 }
 
-fn read_backup_manifest<R: Read>(mut entry: tar::Entry<'_, R>) -> Result<(BackupManifest, String)> {
-    let path = entry.path()?.into_owned();
-    let file_name = path.file_name().ok_or_else(|| {
-        anyhow::anyhow!(
-            "First tar entry does not have a file name: {}",
-            path.display()
-        )
-    })?;
-    if file_name != BACKUP_MANIFEST_FILE_NAME {
-        anyhow::bail!(
-            "Expected backup manifest {} as the first tar entry, found {}",
-            BACKUP_MANIFEST_FILE_NAME,
-            path.display()
-        );
-    }
-
-    let mut manifest_toml = String::new();
-    entry.read_to_string(&mut manifest_toml)?;
-    let manifest: BackupManifest = toml::from_str(&manifest_toml)?;
-
-    Ok((manifest, manifest_toml))
-}
-
-fn restore_backup_entries<R: Read>(
-    entries: tar::Entries<'_, R>,
-    output_dir: &Path,
-    manifest: &BackupManifest,
-) -> Result<HashMap<PathBuf, PathBuf>> {
-    let expected_files: HashMap<_, _> = manifest
-        .files
-        .iter()
-        .map(|file| (file.archive_name.clone(), file))
-        .collect();
-    let mut restored_files = HashMap::new();
-
-    for entry in entries {
-        let mut entry = entry?;
-        let archive_path = entry.path()?.into_owned();
-        let archive_name = PathBuf::from(archive_path.file_name().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Backup entry does not have a file name: {}",
-                archive_path.display()
-            )
-        })?);
-
-        let entry_type = entry.header().entry_type();
-        if entry_type != tar::EntryType::Regular {
-            anyhow::bail!(
-                "Backup entry {} has unexpected type {:?}; only regular files are supported",
-                archive_name.display(),
-                entry_type
-            );
-        }
-
-        if archive_path != archive_name {
-            anyhow::bail!(
-                "Backup entry must be at the tar root: {}",
-                archive_path.display()
-            );
-        }
-
-        if !expected_files.contains_key(&archive_name) {
-            anyhow::bail!(
-                "Backup archive contains unexpected file: {}",
-                archive_name.display()
-            );
-        }
-
-        let output_path = output_dir.join(&archive_name);
-        let mut output_file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&output_path)
-            .map_err(|e| match e.kind() {
-                ErrorKind::AlreadyExists => anyhow::anyhow!(
-                    "Refusing to overwrite existing file: {}",
-                    output_path.display()
-                ),
-                _ => anyhow::Error::from(e)
-                    .context(format!("Failed to create {}", output_path.display())),
-            })?;
-        io::copy(&mut entry, &mut output_file).with_context(|| {
-            format!(
-                "Failed to write restored file contents to {}",
-                output_path.display()
-            )
-        })?;
-        print_info(&format!(
-            "Restored {} to {}",
-            archive_name.display(),
-            output_path.display()
-        ));
-        restored_files.insert(archive_name, output_path);
-    }
-
-    if restored_files.len() != manifest.files.len() {
-        anyhow::bail!(
-            "Backup archive is missing file entries: expected {}, restored {}",
-            manifest.files.len(),
-            restored_files.len()
-        );
-    }
-
-    Ok(restored_files)
-}
-
-fn copy_restored_files_to_original_paths(
-    restored_files: &HashMap<PathBuf, PathBuf>,
-    manifest: &BackupManifest,
-) -> Result<()> {
-    for file in &manifest.files {
-        let restored_path = restored_files.get(&file.archive_name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Restored file missing for archive entry {}",
-                file.archive_name.display()
-            )
-        })?;
-
-        if let Some(parent) = file.original_path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("Failed to create parent directory {}", parent.display())
-            })?;
-        }
-
-        let mut source = File::open(restored_path)
-            .with_context(|| format!("Failed to open {}", restored_path.display()))?;
-        let mut dest = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&file.original_path)
-            .map_err(|e| match e.kind() {
-                ErrorKind::AlreadyExists => anyhow::anyhow!(
-                    "Refusing to overwrite existing original path: {}",
-                    file.original_path.display()
-                ),
-                _ => anyhow::Error::from(e)
-                    .context(format!("Failed to create {}", file.original_path.display())),
-            })?;
-        io::copy(&mut source, &mut dest).with_context(|| {
-            format!(
-                "Failed to copy {} to {}",
-                restored_path.display(),
-                file.original_path.display()
-            )
-        })?;
-        print_info(&format!(
-            "Copied {} to {}",
-            restored_path.display(),
-            file.original_path.display()
-        ));
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cli::config::BitcoinConfig;
     use age::secrecy::ExposeSecret;
     use age::x25519;
+    use std::path::Path;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     const CONFIG_CONTENTS: &[u8] = b"sui_rpc_url = \"https://fullnode.mainnet.sui.io:443\"\n";
@@ -521,20 +292,40 @@ mod tests {
     }
 
     impl TestFixture {
-        /// Create a new fixture with a config file and two referenced key files on disk.
+        fn db_path(&self) -> PathBuf {
+            let node_config =
+                crate::config::Config::load(self.config.node_config_path.as_ref().unwrap())
+                    .unwrap();
+            node_config.db.unwrap()
+        }
+
+        /// Create a new fixture with a config file, two referenced key files,
+        /// a node config pointing to a database, and an empty database on disk.
         fn new() -> Self {
             let src = tempfile::Builder::new().tempdir().unwrap();
             let config_path = src.path().join("hashi-cli.toml");
             let keypair_path = src.path().join("keypair.pem");
             let btc_key_path = src.path().join("btc.wif");
+            let db_path = src.path().join("db");
 
             fs::write(&config_path, CONFIG_CONTENTS).unwrap();
             fs::write(&keypair_path, KEYPAIR_CONTENTS).unwrap();
             fs::write(&btc_key_path, BTC_KEY_CONTENTS).unwrap();
 
+            // Create a node config file with a db path and initialise the database.
+            // Drop the handle immediately so subsequent opens can acquire the lock.
+            let node_config_path = src.path().join("config.toml");
+            let node_config = crate::config::Config {
+                db: Some(db_path.clone()),
+                ..Default::default()
+            };
+            node_config.save(&node_config_path).unwrap();
+            drop(crate::db::Database::open(&db_path).unwrap());
+
             let config = CliConfig {
                 loaded_from_path: Some(config_path.clone()),
                 keypair_path: Some(keypair_path.clone()),
+                node_config_path: Some(node_config_path),
                 bitcoin: Some(BitcoinConfig {
                     private_key_path: Some(btc_key_path.clone()),
                     ..BitcoinConfig::default()
@@ -560,13 +351,13 @@ mod tests {
     }
 
     /// Run `save` with a freshly generated age identity and return everything `restore` needs.
-    fn save_with_fresh_identity(config: &CliConfig) -> SavedBackup {
+    fn save_with_fresh_identity(fixture: &TestFixture) -> SavedBackup {
         let dir = tempfile::Builder::new().tempdir().unwrap();
 
         let identity = x25519::Identity::generate();
         let recipient = identity.to_public();
 
-        save(config, Some(recipient.to_string()), dir.path()).unwrap();
+        save(&fixture.config, Some(recipient.to_string()), dir.path()).unwrap();
 
         let tarball = fs::read_dir(dir.path())
             .unwrap()
@@ -618,13 +409,13 @@ mod tests {
     /// Compute the nested directory that `restore` will extract into, given the
     /// tarball path and the user-supplied output directory.
     fn expected_extract_dir(tarball: &Path, output_dir: &Path) -> PathBuf {
-        output_dir.join(super::extract_dir_name(tarball).unwrap())
+        output_dir.join(backup::extract_dir_name(tarball).unwrap())
     }
 
     #[test]
     fn round_trip_restores_files_to_output_dir() {
         let fixture = TestFixture::new();
-        let backup = save_with_fresh_identity(&fixture.config);
+        let backup = save_with_fresh_identity(&fixture);
 
         let out = tempfile::Builder::new().tempdir().unwrap();
         restore(&backup.tarball, &backup.identity_file, out.path(), false).unwrap();
@@ -640,7 +431,7 @@ mod tests {
         assert_mode_0600(&extract_dir.join("btc.wif"));
 
         // The manifest should also be extracted alongside the restored files.
-        let manifest_path = extract_dir.join(BACKUP_MANIFEST_FILE_NAME);
+        let manifest_path = extract_dir.join(backup::BACKUP_MANIFEST_FILE_NAME);
         assert!(
             manifest_path.exists(),
             "manifest not extracted to {}",
@@ -657,12 +448,16 @@ mod tests {
     #[test]
     fn round_trip_copy_to_original_paths_rewrites_originals() {
         let fixture = TestFixture::new();
-        let backup = save_with_fresh_identity(&fixture.config);
+        let backup = save_with_fresh_identity(&fixture);
+
+        let db_path = fixture.db_path();
 
         // Delete the originals so copy_to_original_paths can recreate them.
         fs::remove_file(&fixture.config_path).unwrap();
+        fs::remove_file(fixture.config.node_config_path.as_ref().unwrap()).unwrap();
         fs::remove_file(&fixture.keypair_path).unwrap();
         fs::remove_file(&fixture.btc_key_path).unwrap();
+        fs::remove_dir_all(&db_path).unwrap();
 
         let out = tempfile::Builder::new().tempdir().unwrap();
         restore(&backup.tarball, &backup.identity_file, out.path(), true).unwrap();
@@ -680,12 +475,15 @@ mod tests {
         assert_mode_0600(&fixture.config_path);
         assert_mode_0600(&fixture.keypair_path);
         assert_mode_0600(&fixture.btc_key_path);
+
+        // The restored database should be openable.
+        let _db = crate::db::Database::open(&db_path).unwrap();
     }
 
     #[test]
     fn restore_refuses_to_overwrite_existing_original_paths() {
         let fixture = TestFixture::new();
-        let backup = save_with_fresh_identity(&fixture.config);
+        let backup = save_with_fresh_identity(&fixture);
 
         // Delete keypair and btc key but leave the config in place. The config file is
         // the first entry in `backup_file_paths()`, so the copy-back loop will bail on
@@ -724,14 +522,24 @@ mod tests {
 
         let keypair_path = sui_dir.join("key.pem");
         let btc_key_path = btc_dir.join("key.pem");
+        let db_path = src.path().join("db");
 
         fs::write(&config_path, CONFIG_CONTENTS).unwrap();
         fs::write(&keypair_path, KEYPAIR_CONTENTS).unwrap();
         fs::write(&btc_key_path, BTC_KEY_CONTENTS).unwrap();
 
+        let node_config_path = src.path().join("config.toml");
+        let node_config = crate::config::Config {
+            db: Some(db_path.clone()),
+            ..Default::default()
+        };
+        node_config.save(&node_config_path).unwrap();
+        drop(crate::db::Database::open(&db_path).unwrap());
+
         let config = CliConfig {
             loaded_from_path: Some(config_path.clone()),
             keypair_path: Some(keypair_path.clone()),
+            node_config_path: Some(node_config_path),
             bitcoin: Some(BitcoinConfig {
                 private_key_path: Some(btc_key_path.clone()),
                 ..BitcoinConfig::default()
@@ -739,7 +547,15 @@ mod tests {
             ..CliConfig::default()
         };
 
-        let backup = save_with_fresh_identity(&config);
+        let fixture = TestFixture {
+            _src: src,
+            config,
+            config_path: config_path.clone(),
+            keypair_path: keypair_path.clone(),
+            btc_key_path: btc_key_path.clone(),
+        };
+
+        let backup = save_with_fresh_identity(&fixture);
 
         // Verify the archive contains both key.pem and key-2.pem.
         let out = tempfile::Builder::new().tempdir().unwrap();
@@ -751,14 +567,259 @@ mod tests {
 
         // Now test that --copy-to-original-paths uses the real paths, not the
         // disambiguated archive names.
+        let db_path = fixture.db_path();
         fs::remove_file(&config_path).unwrap();
+        fs::remove_file(fixture.config.node_config_path.as_ref().unwrap()).unwrap();
         fs::remove_file(&keypair_path).unwrap();
         fs::remove_file(&btc_key_path).unwrap();
+        fs::remove_dir_all(&db_path).unwrap();
 
         let out2 = tempfile::Builder::new().tempdir().unwrap();
         restore(&backup.tarball, &backup.identity_file, out2.path(), true).unwrap();
 
         assert_file_eq(&keypair_path, KEYPAIR_CONTENTS);
         assert_file_eq(&btc_key_path, BTC_KEY_CONTENTS);
+    }
+
+    #[test]
+    fn round_trip_preserves_db_contents_after_extraction() {
+        use hashi_types::committee::EncryptionPrivateKey;
+
+        let fixture = TestFixture::new();
+        let db_path = fixture.db_path();
+
+        // Write a known row to the source db before taking the backup.
+        let enc_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        {
+            let db = crate::db::Database::open(&db_path).unwrap();
+            db.store_encryption_key(42, &enc_key).unwrap();
+        }
+
+        let backup = save_with_fresh_identity(&fixture);
+
+        let out = tempfile::Builder::new().tempdir().unwrap();
+        restore(&backup.tarball, &backup.identity_file, out.path(), false).unwrap();
+
+        // Open the extracted snapshot directory directly — no copy-to-original step.
+        // This is the real test of the stated goal: a decrypted/extracted snapshot
+        // dir is immediately usable as a fjall db.
+        let extract_dir = expected_extract_dir(&backup.tarball, out.path());
+        let snapshot_dir = extract_dir.join(backup::DB_SNAPSHOT_TAR_PREFIX);
+        let restored_db = crate::db::Database::open(&snapshot_dir).unwrap();
+
+        let restored_key = restored_db.get_encryption_key(42).unwrap().unwrap();
+        assert_eq!(restored_key, enc_key);
+    }
+
+    #[test]
+    fn save_errors_when_node_config_path_unset() {
+        // If the CLI config doesn't declare `node_config_path`, save must
+        // refuse — otherwise we'd silently back up without the DB.
+        let fixture = TestFixture::new();
+        let mut config = fixture.config.clone();
+        config.node_config_path = None;
+
+        let out = tempfile::Builder::new().tempdir().unwrap();
+        let identity = x25519::Identity::generate();
+        let err = save(&config, Some(identity.to_public().to_string()), out.path()).unwrap_err();
+
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("node_config_path is not set"),
+            "expected node_config_path error, got: {chain}"
+        );
+    }
+
+    #[test]
+    fn save_errors_when_db_path_does_not_exist() {
+        // A typo'd `db` field in the node config would otherwise let fjall
+        // silently `create_dir_all` and produce an empty backup.
+        let fixture = TestFixture::new();
+        let db_path = fixture.db_path();
+        fs::remove_dir_all(&db_path).unwrap();
+
+        let out = tempfile::Builder::new().tempdir().unwrap();
+        let identity = x25519::Identity::generate();
+        let err = save(
+            &fixture.config,
+            Some(identity.to_public().to_string()),
+            out.path(),
+        )
+        .unwrap_err();
+
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("does not exist"),
+            "expected missing-db error, got: {chain}"
+        );
+        assert!(
+            chain.contains(&db_path.display().to_string()),
+            "error chain did not mention db path: {chain}"
+        );
+        // The DB directory must not have been created as a side-effect.
+        assert!(
+            !db_path.exists(),
+            "save should not create the db dir when it was missing"
+        );
+    }
+
+    #[test]
+    fn save_surfaces_locked_db_error_when_node_is_running() {
+        // Simulate a running node by holding the fjall lock ourselves while
+        // save runs. The friendly "node is running" message proves the
+        // fjall::Error::Locked downcast in save() is actually reachable,
+        // which was broken before because Database::open stringified errors.
+        let fixture = TestFixture::new();
+        let db_path = fixture.db_path();
+        let _running_node = crate::db::Database::open(&db_path).unwrap();
+
+        let out = tempfile::Builder::new().tempdir().unwrap();
+        let identity = x25519::Identity::generate();
+        let err = save(
+            &fixture.config,
+            Some(identity.to_public().to_string()),
+            out.path(),
+        )
+        .unwrap_err();
+
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("locked by a running hashi node"),
+            "expected locked-db friendly error, got: {chain}"
+        );
+    }
+
+    #[test]
+    fn save_includes_path_style_node_config_key_files() {
+        // `tls_private_key` / `operator_private_key` in the node config are
+        // path-or-inline-PEM strings. When a path is used, the referenced
+        // file must be captured in the backup so the key material survives.
+        let fixture = TestFixture::new();
+
+        // Point the node config at two real key files on disk.
+        let tls_key_path = fixture._src.path().join("tls.pem");
+        let op_key_path = fixture._src.path().join("operator.pem");
+        fs::write(&tls_key_path, b"tls-key-bytes").unwrap();
+        fs::write(&op_key_path, b"operator-key-bytes").unwrap();
+
+        let mut node_config =
+            crate::config::Config::load(fixture.config.node_config_path.as_ref().unwrap()).unwrap();
+        node_config.tls_private_key = Some(tls_key_path.to_string_lossy().into_owned());
+        node_config.operator_private_key = Some(op_key_path.to_string_lossy().into_owned());
+        node_config
+            .save(fixture.config.node_config_path.as_ref().unwrap())
+            .unwrap();
+
+        let backup = save_with_fresh_identity(&fixture);
+
+        let out = tempfile::Builder::new().tempdir().unwrap();
+        restore(&backup.tarball, &backup.identity_file, out.path(), false).unwrap();
+
+        let extract_dir = expected_extract_dir(&backup.tarball, out.path());
+        assert_file_eq(&extract_dir.join("tls.pem"), b"tls-key-bytes");
+        assert_file_eq(&extract_dir.join("operator.pem"), b"operator-key-bytes");
+    }
+
+    #[test]
+    fn save_errors_when_node_config_key_path_does_not_exist() {
+        // A path-shaped value pointing at a missing file is almost certainly a
+        // typo. Silently skipping it would produce a backup that can't restore
+        // the node, so we bail instead.
+        let fixture = TestFixture::new();
+
+        let mut node_config =
+            crate::config::Config::load(fixture.config.node_config_path.as_ref().unwrap()).unwrap();
+        node_config.tls_private_key = Some("/this/path/definitely/does/not/exist.pem".to_string());
+        node_config
+            .save(fixture.config.node_config_path.as_ref().unwrap())
+            .unwrap();
+
+        let out = tempfile::Builder::new().tempdir().unwrap();
+        let identity = x25519::Identity::generate();
+        let err = save(
+            &fixture.config,
+            Some(identity.to_public().to_string()),
+            out.path(),
+        )
+        .unwrap_err();
+
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("tls_private_key"),
+            "expected error to name the offending field, got: {chain}"
+        );
+        assert!(
+            chain.contains("neither inline PEM nor an existing file"),
+            "expected missing-key error, got: {chain}"
+        );
+    }
+
+    #[test]
+    fn save_ignores_inline_pem_node_config_key_values() {
+        // When tls_private_key is inline PEM (not a real file), it must not
+        // leak into backup_file_paths as a bogus path. The node config file
+        // itself already captures inline values.
+        let fixture = TestFixture::new();
+
+        let mut node_config =
+            crate::config::Config::load(fixture.config.node_config_path.as_ref().unwrap()).unwrap();
+        node_config.tls_private_key = Some(
+            "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA==\n-----END PRIVATE KEY-----\n"
+                .to_string(),
+        );
+        node_config
+            .save(fixture.config.node_config_path.as_ref().unwrap())
+            .unwrap();
+
+        // Just running save without error is the assertion: if the inline
+        // PEM were treated as a path, the pre-flight `file.exists()` check
+        // in save() would bail.
+        let _ = save_with_fresh_identity(&fixture);
+    }
+
+    #[test]
+    fn restore_rejects_tarball_without_age_suffix() {
+        let fixture = TestFixture::new();
+        let backup = save_with_fresh_identity(&fixture);
+
+        // Rename the tarball to strip the suffix entirely.
+        let bad = backup.tarball.with_file_name("totally-not-a-backup");
+        fs::rename(&backup.tarball, &bad).unwrap();
+
+        let out = tempfile::Builder::new().tempdir().unwrap();
+        let err = restore(&bad, &backup.identity_file, out.path(), false).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains(".tar.age or .age suffix"),
+            "expected suffix-required error, got: {chain}"
+        );
+    }
+
+    #[test]
+    fn restore_copy_to_original_paths_refuses_to_overwrite_existing_db_dir() {
+        let fixture = TestFixture::new();
+        let backup = save_with_fresh_identity(&fixture);
+
+        let db_path = fixture.db_path();
+
+        // Delete the config-file originals so the config-copy loop succeeds and we
+        // reach the db-copy step, but leave the db dir in place.
+        fs::remove_file(&fixture.config_path).unwrap();
+        fs::remove_file(fixture.config.node_config_path.as_ref().unwrap()).unwrap();
+        fs::remove_file(&fixture.keypair_path).unwrap();
+        fs::remove_file(&fixture.btc_key_path).unwrap();
+        assert!(db_path.exists(), "db dir should still exist for this test");
+
+        let out = tempfile::Builder::new().tempdir().unwrap();
+        let err = restore(&backup.tarball, &backup.identity_file, out.path(), true).unwrap_err();
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("Refusing to overwrite existing database directory"),
+            "error chain did not mention db overwrite refusal: {chain}"
+        );
+        assert!(
+            chain.contains(&db_path.display().to_string()),
+            "error chain did not mention the colliding db path: {chain}"
+        );
     }
 }

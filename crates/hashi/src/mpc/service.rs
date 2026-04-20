@@ -43,6 +43,7 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PROTOCOL_ATTEMPTS: u32 = 3;
 const START_RECONFIG_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const MPC_PROTOCOL_TIMEOUT: Duration = Duration::from_secs(1200);
+const RECONCILE_TICK: Duration = Duration::from_secs(15);
 
 #[derive(Clone)]
 pub struct MpcHandle {
@@ -66,7 +67,7 @@ impl MpcHandle {
                 }
             }
             if rx.changed().await.is_err() {
-                panic!("Key ready channel closed unexpectedly");
+                std::future::pending().await
             }
         }
     }
@@ -81,6 +82,7 @@ pub struct MpcService {
     key_ready_tx: watch::Sender<Option<G>>,
     refill_tx: Arc<watch::Sender<u32>>,
     refill_rx: watch::Receiver<u32>,
+    reconciling: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl MpcService {
@@ -92,6 +94,7 @@ impl MpcService {
             key_ready_tx,
             refill_tx: Arc::new(refill_tx),
             refill_rx,
+            reconciling: Arc::new(tokio::sync::Mutex::new(())),
         };
         let handle = MpcHandle { key_ready_rx };
         (service, handle)
@@ -123,28 +126,10 @@ impl MpcService {
             self.try_submit_genesis_reconfig().await;
         } else if self.inner.is_in_current_committee() {
             loop {
-                match self.recover_mpc_state().await {
-                    Ok(output) => {
-                        let epoch = self.inner.onchain_state().epoch();
-                        match self.recover_presigning_state(&output).await {
-                            Ok(()) => {
-                                info!("Recovered presigning state from DB");
-                            }
-                            Err(e) => {
-                                debug!(
-                                    "No presigning state in DB ({e}), running fresh nonce generation"
-                                );
-                                if let Err(e) = self.prepare_signing(epoch, &output).await {
-                                    error!("Failed to init signing after DKG recovery: {e}");
-                                }
-                            }
-                        }
-                        let _ = self.key_ready_tx.send(Some(output.public_key));
-                        break;
-                    }
-                    Err(e) => {
-                        error!("MPC state recovery failed: {e:?}");
-                    }
+                self.sync_if_stale().await;
+                let epoch = self.inner.onchain_state().epoch();
+                if self.inner.signing_manager_for(epoch).is_some() {
+                    break;
                 }
                 tokio::time::sleep(RETRY_INTERVAL).await;
             }
@@ -152,6 +137,9 @@ impl MpcService {
             info!("Node is not in the current committee, waiting for reconfig notification...");
         }
         let mut notifications = self.inner.onchain_state().subscribe();
+        let mut checkpoint_rx = self.inner.onchain_state().subscribe_checkpoint();
+        let mut reconcile_tick = tokio::time::interval(RECONCILE_TICK);
+        reconcile_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             // Check for pending reconfig before blocking on `recv()`.
             if let Some(epoch) = self.get_pending_epoch_change() {
@@ -175,6 +163,12 @@ impl MpcService {
                             notifications = self.inner.onchain_state().subscribe();
                         }
                     }
+                }
+                Ok(()) = checkpoint_rx.changed() => {
+                    self.sync_if_stale().await;
+                }
+                _ = reconcile_tick.tick() => {
+                    self.sync_if_stale().await;
                 }
                 Ok(()) = self.refill_rx.changed() => {
                     let next_batch = *self.refill_rx.borrow();
@@ -398,7 +392,7 @@ impl MpcService {
             PRESIG_REFILL_DIVISOR,
             self.refill_tx.clone(),
         );
-        self.inner.set_or_init_signing_manager(signing_manager);
+        self.inner.store_signing_manager(signing_manager);
         Ok(())
     }
 
@@ -462,7 +456,7 @@ impl MpcService {
             PRESIG_REFILL_DIVISOR,
             self.refill_tx.clone(),
         );
-        self.inner.set_or_init_signing_manager(signing_manager);
+        self.inner.store_signing_manager(signing_manager);
         info!(
             "Recovered presigning state: batch_index={batch_index}, \
              batch_start={batch_start}, batch_size={batch_size} \
@@ -471,17 +465,60 @@ impl MpcService {
         Ok(())
     }
 
+    async fn sync_if_stale(&self) {
+        if self.is_awaiting_genesis() || !self.inner.is_in_current_committee() {
+            return;
+        }
+        let epoch = self.inner.onchain_state().epoch();
+        if self.inner.signing_manager_for(epoch).is_some() {
+            return;
+        }
+        let _guard = match self.reconciling.try_lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        let epoch = self.inner.onchain_state().epoch();
+        if self.inner.signing_manager_for(epoch).is_some() {
+            return;
+        }
+        info!("sync_if_stale: rebuilding SigningManager for epoch {epoch}");
+        let output = match self.recover_mpc_state().await {
+            Ok(output) => output,
+            Err(e) => {
+                error!("sync_if_stale: recover_mpc_state failed for epoch {epoch}: {e}");
+                return;
+            }
+        };
+        match self.recover_presigning_state(&output).await {
+            Ok(()) => {
+                info!("sync_if_stale: recovered epoch {epoch} via certs path");
+            }
+            Err(certs_err) => {
+                info!(
+                    "sync_if_stale: certs path failed for epoch {epoch} ({certs_err}), \
+                     falling back to protocol"
+                );
+                if let Err(e) = self.prepare_signing(epoch, &output).await {
+                    error!("sync_if_stale: protocol fallback failed for epoch {epoch}: {e}");
+                    return;
+                }
+                info!("sync_if_stale: recovered epoch {epoch} via protocol path");
+            }
+        }
+        let _ = self.key_ready_tx.send(Some(output.public_key));
+    }
+
     async fn refill_presignatures(&self, batch_index: u32) -> anyhow::Result<()> {
         let epoch = self.inner.onchain_state().epoch();
+        let signing_manager = self
+            .inner
+            .signing_manager_for(epoch)
+            .ok_or_else(|| anyhow::anyhow!("SigningManager not available for epoch {epoch}"))?;
         let (_, presignatures) = self.generate_presignatures(epoch, batch_index).await?;
         if self.inner.onchain_state().epoch() != epoch {
             return Err(anyhow::anyhow!("Epoch changed during presignature refill"));
         }
-        let signing_manager = self.inner.signing_manager();
-        signing_manager
-            .write()
-            .unwrap()
-            .set_next_batch(presignatures);
+        signing_manager.set_next_batch(presignatures);
         Ok(())
     }
 

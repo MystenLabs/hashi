@@ -54,26 +54,13 @@ impl MpcConfig {
         nodes: Nodes<EncryptionGroupElement>,
         threshold: u16,
         max_faulty: u16,
-    ) -> Result<Self, MpcError> {
-        if threshold <= max_faulty {
-            return Err(MpcError::InvalidThreshold(
-                "threshold must be greater than max_faulty".into(),
-            ));
-        }
-        let total_weight = nodes.total_weight();
-        if threshold + 2 * max_faulty > total_weight {
-            return Err(MpcError::InvalidThreshold(format!(
-                "t + 2f ({}) must be <= total weight ({})",
-                threshold + 2 * max_faulty,
-                total_weight
-            )));
-        }
-        Ok(Self {
+    ) -> Self {
+        Self {
             epoch,
             nodes,
             threshold,
             max_faulty,
-        })
+        }
     }
 }
 
@@ -391,7 +378,7 @@ impl CertificateV1 {
 
 pub type MpcResult<T> = Result<T, MpcError>;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum MpcError {
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
@@ -554,78 +541,12 @@ mod tests {
     }
 
     #[test]
-    fn test_dkg_config_threshold_too_low() {
-        let validators = (0..5).map(|i| create_test_validator(i, 1)).collect();
-        let nodes = build_nodes(validators);
-        let config = MpcConfig::new(100, nodes, 2, 2);
-        assert!(config.is_err());
-        match config.unwrap_err() {
-            MpcError::InvalidThreshold(msg) => {
-                assert!(msg.contains("threshold must be greater than max_faulty"));
-            }
-            _ => panic!("Wrong error type"),
-        }
-    }
-
-    #[test]
-    fn test_dkg_config_threshold_equals_faulty() {
-        let validators = (0..7).map(|i| create_test_validator(i, 1)).collect();
-        let nodes = build_nodes(validators);
-        let config = MpcConfig::new(100, nodes, 3, 3);
-        assert!(config.is_err());
-        match config.unwrap_err() {
-            MpcError::InvalidThreshold(msg) => {
-                assert!(msg.contains("threshold must be greater than max_faulty"));
-            }
-            _ => panic!("Wrong error type"),
-        }
-    }
-
-    #[test]
-    fn test_dkg_config_byzantine_constraint_violated() {
-        let validators = (0..5).map(|i| create_test_validator(i, 1)).collect();
-        let nodes = build_nodes(validators);
-        let config = MpcConfig::new(100, nodes, 4, 2);
-        assert!(config.is_err());
-        match config.unwrap_err() {
-            MpcError::InvalidThreshold(msg) => {
-                assert!(msg.contains("t + 2f (8) must be <= total weight (5)"));
-            }
-            _ => panic!("Wrong error type"),
-        }
-    }
-
-    #[test]
-    fn test_dkg_config_minimum_validators() {
-        let validators = (0..3).map(|i| create_test_validator(i, 1)).collect();
-        let nodes = build_nodes(validators);
-        let config = MpcConfig::new(100, nodes, 2, 0);
-        assert!(config.is_ok());
-    }
-
-    #[test]
-    fn test_dkg_config_single_validator() {
-        let validators = vec![create_test_validator(0, 1)];
-        let nodes = build_nodes(validators);
-        let config = MpcConfig::new(100, nodes, 1, 0);
-        assert!(config.is_ok());
-    }
-
-    #[test]
     #[should_panic(expected = "InvalidInput")]
     fn test_dkg_config_zero_weight_sum() {
         // Nodes::new() will fail when trying to create nodes with zero weights
         // This is the expected behavior - invalid node configuration is caught early
         let validators = vec![create_test_validator(0, 0), create_test_validator(1, 0)];
         let _nodes = build_nodes(validators);
-    }
-
-    #[test]
-    fn test_optimal_byzantine_tolerance() {
-        let validators = (0..7).map(|i| create_test_validator(i, 1)).collect();
-        let nodes = build_nodes(validators);
-        let config = MpcConfig::new(100, nodes, 3, 2);
-        assert!(config.is_ok());
     }
 
     #[test]
@@ -719,7 +640,7 @@ mod tests {
                 )
             })
             .collect();
-        let committee = Committee::new(members, epoch);
+        let committee = Committee::new(members, epoch, 3334u16, 0u16, 3333u16);
 
         // Create a DealerMessagesHash
         let dealer_address = Address::new([0u8; 32]);

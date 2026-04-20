@@ -43,8 +43,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use sui_futures::service::Service;
 use sui_sdk_types::Address;
-use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -61,14 +61,14 @@ pub struct LeaderService {
     withdrawal_commitment_retry_tracker: GlobalRetryTracker<WithdrawalCommitmentErrorKind>,
     deposit_tasks: JoinSet<(Address, anyhow::Result<()>)>,
     inflight_deposits: HashSet<Address>,
-    withdrawal_approval_task: Option<JoinHandle<anyhow::Result<()>>>,
-    withdrawal_commitment_task: Option<JoinHandle<anyhow::Result<()>>>,
+    withdrawal_approval_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
+    withdrawal_commitment_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     withdrawal_signing_tasks: JoinSet<(Address, anyhow::Result<()>)>,
     inflight_withdrawal_signings: HashSet<Address>,
     withdrawal_broadcast_tasks: JoinSet<(Address, anyhow::Result<()>)>,
     inflight_withdrawal_broadcasts: HashSet<Address>,
-    deposit_gc_task: Option<JoinHandle<anyhow::Result<()>>>,
-    proposal_gc_task: Option<JoinHandle<anyhow::Result<()>>>,
+    deposit_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
+    proposal_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
 }
 
 impl LeaderService {
@@ -539,15 +539,16 @@ impl LeaderService {
         let inner = self.inner.clone();
         let retry_tracker = self.withdrawal_approval_retry_tracker.clone();
 
-        self.withdrawal_approval_task = Some(tokio::task::spawn(async move {
-            Self::process_unapproved_withdrawal_requests_task(
-                inner,
-                retry_tracker,
-                to_process,
-                checkpoint_timestamp_ms,
-            )
-            .await
-        }));
+        self.withdrawal_approval_task =
+            Some(AbortOnDropHandle::new(tokio::task::spawn(async move {
+                Self::process_unapproved_withdrawal_requests_task(
+                    inner,
+                    retry_tracker,
+                    to_process,
+                    checkpoint_timestamp_ms,
+                )
+                .await
+            })));
     }
 
     #[tracing::instrument(level = "info", skip_all, fields(batch_size = to_process.len()))]
@@ -887,33 +888,34 @@ impl LeaderService {
         let inner = self.inner.clone();
         let retry_tracker = self.withdrawal_commitment_retry_tracker.clone();
 
-        self.withdrawal_commitment_task = Some(tokio::task::spawn(async move {
-            let task_result = tokio::time::timeout(
-                LEADER_TASK_TIMEOUT,
-                Self::process_approved_withdrawal_request_batch(
-                    inner.clone(),
-                    retry_tracker.clone(),
-                    batch,
-                    checkpoint_timestamp_ms,
-                ),
-            )
-            .await;
+        self.withdrawal_commitment_task =
+            Some(AbortOnDropHandle::new(tokio::task::spawn(async move {
+                let task_result = tokio::time::timeout(
+                    LEADER_TASK_TIMEOUT,
+                    Self::process_approved_withdrawal_request_batch(
+                        inner.clone(),
+                        retry_tracker.clone(),
+                        batch,
+                        checkpoint_timestamp_ms,
+                    ),
+                )
+                .await;
 
-            match task_result {
-                Ok(result) => result,
-                Err(_) => {
-                    let kind = WithdrawalCommitmentErrorKind::TimedOut;
-                    inner
-                        .metrics
-                        .leader_retries_total
-                        .with_label_values(&["withdrawal_commitment", &format!("{kind:?}")])
-                        .inc();
-                    Err(anyhow::anyhow!(
-                        "withdrawal commitment timed out after {LEADER_TASK_TIMEOUT:?}"
-                    ))
+                match task_result {
+                    Ok(result) => result,
+                    Err(_) => {
+                        let kind = WithdrawalCommitmentErrorKind::TimedOut;
+                        inner
+                            .metrics
+                            .leader_retries_total
+                            .with_label_values(&["withdrawal_commitment", &format!("{kind:?}")])
+                            .inc();
+                        Err(anyhow::anyhow!(
+                            "withdrawal commitment timed out after {LEADER_TASK_TIMEOUT:?}"
+                        ))
+                    }
                 }
-            }
-        }));
+            })));
     }
 
     #[tracing::instrument(level = "info", skip_all, fields(batch_size = requests.len()))]
@@ -1015,16 +1017,15 @@ impl LeaderService {
             let num_inputs = approval.selected_utxos.len() as u64;
             let num_consumed = inner.onchain_state().state().hashi().num_consumed_presigs;
             let needed_end = num_consumed + num_inputs;
-            if let Some(sm) = inner.try_signing_manager() {
-                let mgr = sm.read().unwrap();
-                let available_end = mgr.available_presig_end_index();
+            if let Some(signing_manager) = inner.current_signing_manager() {
+                let available_end = signing_manager.available_presig_end_index();
                 if needed_end > available_end {
                     info!(
                         "Presig pool may be insufficient for this withdrawal: \
                          need index {needed_end}, pool ends at {available_end}. \
                          Triggering proactive refill.",
                     );
-                    mgr.trigger_refill();
+                    signing_manager.trigger_refill();
                 }
             }
         }

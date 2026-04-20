@@ -18,11 +18,14 @@ use std::process::Command;
 
 use anyhow::Result;
 
+pub mod backup_restore;
 pub mod bitcoin_node;
 pub mod e2e_flow;
 pub mod hashi_network;
 mod publish;
 pub mod sui_network;
+pub mod test_helpers;
+pub mod upgrade_flow;
 
 pub use bitcoin_node::BitcoinNodeBuilder;
 pub use bitcoin_node::BitcoinNodeHandle;
@@ -67,6 +70,10 @@ impl TestNetworks {
 
     pub fn bitcoin_node(&self) -> &BitcoinNodeHandle {
         &self.bitcoin_node
+    }
+
+    pub fn dir(&self) -> &Path {
+        self.dir.path()
     }
 
     pub async fn restart(&mut self) -> Result<()> {
@@ -265,15 +272,19 @@ impl TestNetworksBuilder {
 /// Waits for DKG to complete first so the committee is ready to vote.
 /// All nodes vote on every proposal, ensuring quorum is always reached
 /// regardless of the number of nodes or their weight distribution.
-async fn apply_onchain_config_overrides(
+pub(crate) async fn apply_onchain_config_overrides(
     networks: &mut TestNetworks,
     overrides: &[(String, hashi_types::move_types::ConfigValue)],
 ) -> Result<()> {
     use hashi::cli::client::CreateProposalParams;
     use hashi::cli::client::build_create_proposal_transaction;
-    use hashi::cli::client::build_execute_update_config_transaction;
-    use hashi::cli::client::build_vote_update_config_transaction;
+    use hashi::cli::client::build_vote_transaction;
+    use hashi::cli::upgrade::build_execute_proposal_transaction;
+    use hashi::cli::upgrade::extract_proposal_id_from_response;
     use hashi::sui_tx_executor::SuiTxExecutor;
+    use sui_sdk_types::Identifier;
+    use sui_sdk_types::StructTag;
+    use sui_sdk_types::TypeTag;
 
     let nodes = networks.hashi_network.nodes();
 
@@ -298,6 +309,13 @@ async fn apply_onchain_config_overrides(
     // to wait for all nodes to catch up to the last applied override.
     let mut exec_checkpoint: u64 = 0;
 
+    let update_config_type_tag = TypeTag::Struct(Box::new(StructTag::new(
+        hashi_ids.package_id,
+        Identifier::from_static("update_config"),
+        Identifier::from_static("UpdateConfig"),
+        vec![],
+    )));
+
     //TODO could we build the proposals and vote/execute on them all at the same time vs doing them
     //one at a time?
     for (key, value) in overrides {
@@ -318,31 +336,14 @@ async fn apply_onchain_config_overrides(
             "create UpdateConfig proposal for '{key}' failed"
         );
 
-        // Extract the proposal ID from the ProposalCreatedEvent. The event BCS
-        // layout is (Address, u64) — proposal_id followed by timestamp_ms.
-        let proposal_id = response
-            .transaction()
-            .events()
-            .events()
-            .iter()
-            .find(|e| e.contents().name().contains("ProposalCreatedEvent"))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "ProposalCreatedEvent not found after creating proposal for '{key}'"
-                )
-            })
-            .and_then(|e| {
-                let (id, _ts): (sui_sdk_types::Address, u64) =
-                    bcs::from_bytes(e.contents().value())?;
-                Ok(id)
-            })?;
-
+        let proposal_id = extract_proposal_id_from_response(&response)?;
         tracing::info!("proposal {proposal_id} created for '{key}'; collecting votes");
 
         // 2. All remaining nodes vote. This gives 100% of total weight,
         //    guaranteeing the 66.67% quorum threshold is met.
         for executor in &mut executors[1..] {
-            let vote_tx = build_vote_update_config_transaction(hashi_ids, proposal_id);
+            let vote_tx =
+                build_vote_transaction(hashi_ids, proposal_id, update_config_type_tag.clone());
             let vote_resp = executor.execute(vote_tx).await?;
             anyhow::ensure!(
                 vote_resp.transaction().effects().status().success(),
@@ -351,7 +352,12 @@ async fn apply_onchain_config_overrides(
         }
 
         // 3. Node 0 executes the proposal now that quorum is reached.
-        let execute_tx = build_execute_update_config_transaction(hashi_ids, proposal_id);
+        let execute_tx = build_execute_proposal_transaction(
+            hashi_ids,
+            proposal_id,
+            hashi_ids.package_id,
+            "update_config",
+        )?;
         let exec_resp = executors[0].execute(execute_tx).await?;
         anyhow::ensure!(
             exec_resp.transaction().effects().status().success(),
@@ -435,6 +441,33 @@ mod tests {
             result.unwrap_or_else(|e| panic!("Node {i} failed to reach epoch {target_epoch}: {e}"));
         }
         nodes[0].current_epoch().unwrap()
+    }
+
+    async fn wait_for_signing_manager(
+        nodes: &[HashiNodeHandle],
+        epoch: u64,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let all_ready = nodes
+                .iter()
+                .all(|node| node.hashi().signing_manager_for(epoch).is_some());
+            if all_ready {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let statuses: Vec<_> = nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, node)| (i, node.hashi().signing_manager_for(epoch).is_some()))
+                    .collect();
+                return Err(anyhow::anyhow!(
+                    "Timed out waiting for SigningManager for epoch {epoch} on all nodes: {statuses:?}"
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
     }
 
     async fn force_rotate_and_assert_key_agreement(
@@ -634,7 +667,7 @@ mod tests {
                 hashi::constants::PRESIG_REFILL_DIVISOR,
                 std::sync::Arc::new(refill_tx),
             );
-            node.hashi().set_signing_manager(signing_manager);
+            node.hashi().store_signing_manager(signing_manager);
         }
         vk
     }
@@ -653,7 +686,10 @@ mod tests {
         let sign_futures: Vec<_> = nodes
             .iter()
             .map(|node| {
-                let signing_manager = node.hashi().signing_manager();
+                let signing_manager = node
+                    .hashi()
+                    .signing_manager_for(epoch)
+                    .unwrap_or_else(|| panic!("SigningManager not initialized for epoch {epoch}"));
                 let onchain_state = node.hashi().onchain_state().clone();
                 let p2p_channel = hashi::mpc::rpc::RpcP2PChannel::new(
                     onchain_state,
@@ -665,18 +701,18 @@ mod tests {
                 let message = message.to_vec();
                 let metrics = node.hashi().metrics.clone();
                 async move {
-                    hashi::mpc::SigningManager::sign(
-                        &signing_manager,
-                        &p2p_channel,
-                        sui_request_id,
-                        &message,
-                        global_presig_index,
-                        &beacon,
-                        None,
-                        SIGNING_TIMEOUT,
-                        &metrics,
-                    )
-                    .await
+                    signing_manager
+                        .sign(
+                            &p2p_channel,
+                            sui_request_id,
+                            &message,
+                            global_presig_index,
+                            &beacon,
+                            None,
+                            SIGNING_TIMEOUT,
+                            &metrics,
+                        )
+                        .await
                 }
             })
             .collect();
@@ -1270,6 +1306,53 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_sync_if_stale_recovers_cleared_signing_manager() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+        const RECOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+        crate::test_helpers::init_test_logging();
+
+        let test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+
+        let epoch = nodes[0].current_epoch().unwrap();
+        wait_for_signing_manager(nodes, epoch, DKG_TIMEOUT).await?;
+
+        nodes[0].hashi().clear_signing_manager_for_test();
+        assert!(
+            nodes[0].hashi().signing_manager_for(epoch).is_none(),
+            "clear_signing_manager_for_test should have nulled the stored manager"
+        );
+
+        wait_for_signing_manager(&nodes[..1], epoch, RECOVERY_TIMEOUT).await?;
+
+        let request_id = sui_sdk_types::Address::ZERO;
+        let results = sign_on_all_nodes(
+            nodes,
+            b"msg-after-sync-if-stale-recovery",
+            epoch,
+            request_id,
+            0,
+        )
+        .await;
+        assert_all_signatures_match(results);
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_mid_protocol_restart_recovery() -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
 
@@ -1474,8 +1557,11 @@ mod tests {
 
         let epoch = nodes[0].hashi().onchain_state().epoch();
 
-        let signing_manager = nodes[0].hashi().signing_manager();
-        let pool_size = signing_manager.read().unwrap().initial_presig_count();
+        let signing_manager = nodes[0]
+            .hashi()
+            .signing_manager_for(epoch)
+            .unwrap_or_else(|| panic!("SigningManager not initialized for epoch {epoch}"));
+        let pool_size = signing_manager.initial_presig_count();
         let refill_trigger_at = pool_size - pool_size / hashi::constants::PRESIG_REFILL_DIVISOR;
         // Sign pool_size + 1 times: exhaust batch 0 and prove batch 1 swap works.
         let num_signings = pool_size + 1;
@@ -1483,7 +1569,9 @@ mod tests {
         let wait_at = refill_trigger_at + (pool_size - refill_trigger_at) / 2;
 
         for i in 0..num_signings {
-            let request_id = sui_sdk_types::Address::new([i as u8; 32]);
+            let mut bytes = [0u8; 32];
+            bytes[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            let request_id = sui_sdk_types::Address::new(bytes);
             let results =
                 sign_on_all_nodes(nodes, b"refill test", epoch, request_id, i as u64).await;
             assert_all_signatures_match(results);
@@ -1492,7 +1580,7 @@ mod tests {
             // complete before we exhaust the pool.
             if i == wait_at {
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
-                while !signing_manager.read().unwrap().has_next_batch() {
+                while !signing_manager.has_next_batch() {
                     assert!(
                         tokio::time::Instant::now() < deadline,
                         "Timed out waiting for presignature refill"
@@ -1502,7 +1590,7 @@ mod tests {
             }
         }
 
-        assert_eq!(signing_manager.read().unwrap().batch_index(), 1);
+        assert_eq!(signing_manager.batch_index(), 1);
         Ok(())
     }
 

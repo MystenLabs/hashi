@@ -30,6 +30,9 @@ use crate::withdrawals::MAX_ANCESTOR_DEPTH;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod sim;
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// Base weight of a segwit transaction input (non-witness portion).

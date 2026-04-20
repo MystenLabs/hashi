@@ -25,7 +25,7 @@ use sui_sdk_types::Address;
 pub struct RpcP2PChannel {
     onchain_state: OnchainState,
     epoch: u64,
-    metrics: Arc<Metrics>,
+    _metrics: Arc<Metrics>,
     protocol_label: &'static str,
 }
 
@@ -39,7 +39,7 @@ impl RpcP2PChannel {
         Self {
             onchain_state,
             epoch,
-            metrics,
+            _metrics: metrics,
             protocol_label,
         }
     }
@@ -61,17 +61,7 @@ impl P2PChannel for RpcP2PChannel {
         recipient: &Address,
         request: &SendMessagesRequest,
     ) -> ChannelResult<SendMessagesResponse> {
-        if let Ok(bytes) = bcs::to_bytes(request) {
-            let size = bytes.len() as u64;
-            self.metrics
-                .mpc_p2p_message_size_bytes
-                .with_label_values(&[self.protocol_label])
-                .observe(size as f64);
-            self.metrics
-                .mpc_bytes_sent_total
-                .with_label_values(&[self.protocol_label])
-                .inc_by(size);
-        }
+        let _ = self.protocol_label;
         self.get_client(recipient)?
             .send_messages(self.epoch, request)
             .await
@@ -83,18 +73,10 @@ impl P2PChannel for RpcP2PChannel {
         party: &Address,
         request: &RetrieveMessagesRequest,
     ) -> ChannelResult<RetrieveMessagesResponse> {
-        let response = self
-            .get_client(party)?
+        self.get_client(party)?
             .retrieve_messages(request)
             .await
-            .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
-        if let Ok(bytes) = bcs::to_bytes(&response) {
-            self.metrics
-                .mpc_bytes_received_total
-                .with_label_values(&[self.protocol_label])
-                .inc_by(bytes.len() as u64);
-        }
-        Ok(response)
+            .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
 
     async fn complain(
@@ -102,12 +84,6 @@ impl P2PChannel for RpcP2PChannel {
         party: &Address,
         request: &ComplainRequest,
     ) -> ChannelResult<ComplaintResponses> {
-        if let Ok(bytes) = bcs::to_bytes(request) {
-            self.metrics
-                .mpc_bytes_sent_total
-                .with_label_values(&[self.protocol_label])
-                .inc_by(bytes.len() as u64);
-        }
         self.get_client(party)?
             .complain(request)
             .await

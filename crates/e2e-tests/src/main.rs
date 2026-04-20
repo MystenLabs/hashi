@@ -303,22 +303,22 @@ async fn cmd_start(
         .to_pem()
         .context("Failed to serialize funded key as PEM")?;
     std::fs::create_dir_all(data_dir)?;
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&funded_key_path)
-            .with_context(|| {
-                format!(
-                    "Failed to write funded key to {}",
-                    funded_key_path.display()
-                )
-            })?;
-        file.write_all(pem.as_bytes())?;
+    write_pem_to_disk(&funded_key_path, &pem)?;
+
+    // Write each validator's operator key so CLI governance commands can
+    // use them. The `hashi` CLI needs a committee-member key to propose /
+    // vote / execute; these aren't persisted anywhere else for localnet.
+    let validators_dir = data_dir.join("validators");
+    std::fs::create_dir_all(&validators_dir)?;
+    for (i, node) in test_networks.hashi_network().nodes().iter().enumerate() {
+        let operator_pem = node
+            .hashi()
+            .config
+            .operator_private_key
+            .as_ref()
+            .context("validator has no operator_private_key")?;
+        let path = validators_dir.join(format!("validator_{i}.pem"));
+        write_pem_to_disk(&path, operator_pem)?;
     }
 
     let state = LocalnetState {
@@ -805,6 +805,22 @@ fn cli_config_path(data_dir: &Path) -> std::path::PathBuf {
     data_dir.join("hashi-cli.toml")
 }
 
+/// Write a PEM-encoded key to disk with restrictive permissions (0600 on unix).
+fn write_pem_to_disk(path: &Path, pem: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("Failed to open {} for writing", path.display()))?;
+    file.write_all(pem.as_bytes())
+        .with_context(|| format!("Failed to write PEM to {}", path.display()))?;
+    Ok(())
+}
+
 /// Write a `hashi-cli.toml` config file that the main `hashi` CLI can read.
 fn write_cli_config(data_dir: &Path, state: &LocalnetState) -> Result<()> {
     let config = hashi::cli::config::CliConfig {
@@ -818,6 +834,7 @@ fn write_cli_config(data_dir: &Path, state: &LocalnetState) -> Result<()> {
             .map(std::path::PathBuf::from),
         backup_age_pubkey: None,
         gas_coin: None,
+        node_config_path: None,
         bitcoin: Some(hashi::cli::config::BitcoinConfig {
             rpc_url: Some(state.btc_rpc_url.clone()),
             rpc_user: Some(state.btc_rpc_user.clone()),
@@ -853,6 +870,11 @@ fn print_connection_details(state: &LocalnetState) {
         "  {} {}",
         "CLI Config:".bold(),
         cli_config_path(&state.data_dir).display()
+    );
+    println!(
+        "  {} {}",
+        "Validator Keys:".bold(),
+        state.data_dir.join("validators").display()
     );
     println!("{}", "━".repeat(50));
 }

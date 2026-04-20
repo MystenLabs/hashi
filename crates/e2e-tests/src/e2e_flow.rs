@@ -10,20 +10,14 @@ mod tests {
 
     use futures::StreamExt;
     use hashi::sui_tx_executor::SuiTxExecutor;
-    use hashi_types::move_types::DepositConfirmedEvent;
     use hashi_types::move_types::WithdrawalConfirmedEvent;
     use hashi_types::move_types::WithdrawalPickedForProcessingEvent;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
-    use std::sync::atomic::Ordering;
     use std::time::Duration;
     use sui_rpc::field::FieldMask;
     use sui_rpc::field::FieldMaskUtil;
     use sui_rpc::proto::sui::rpc::v2::Checkpoint;
-    use sui_rpc::proto::sui::rpc::v2::GetBalanceRequest;
     use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
     use sui_sdk_types::Address;
-    use sui_sdk_types::StructTag;
     use sui_sdk_types::bcs::FromBcs;
     use tracing::debug;
     use tracing::info;
@@ -31,16 +25,12 @@ mod tests {
     use crate::TestNetworks;
     use crate::TestNetworksBuilder;
 
-    fn init_test_logging() {
-        tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::from_default_env()
-                    .add_directive(tracing::Level::INFO.into()),
-            )
-            .try_init()
-            .ok();
-    }
+    use crate::test_helpers::BackgroundMiner;
+    use crate::test_helpers::create_deposit_and_wait;
+    use crate::test_helpers::get_hbtc_balance;
+    use crate::test_helpers::init_test_logging;
+    use crate::test_helpers::lookup_vout;
+    use crate::test_helpers::txid_to_address;
 
     async fn setup_test_networks() -> Result<TestNetworks> {
         info!("Setting up test networks...");
@@ -58,84 +48,6 @@ mod tests {
         info!("MPC key ready");
 
         Ok(networks)
-    }
-
-    fn txid_to_address(txid: &Txid) -> Address {
-        hashi_types::bitcoin_txid::BitcoinTxid::from(*txid).into()
-    }
-
-    async fn wait_for_deposit_confirmation(
-        sui_client: &mut sui_rpc::Client,
-        request_id: Address,
-        timeout: Duration,
-    ) -> Result<()> {
-        info!(
-            "Waiting for deposit confirmation for request_id: {}",
-            request_id
-        );
-
-        let start = std::time::Instant::now();
-        let subscription_read_mask = FieldMask::from_paths([Checkpoint::path_builder()
-            .transactions()
-            .events()
-            .events()
-            .contents()
-            .finish()]);
-        let mut subscription = sui_client
-            .subscription_client()
-            .subscribe_checkpoints(
-                SubscribeCheckpointsRequest::default().with_read_mask(subscription_read_mask),
-            )
-            .await?
-            .into_inner();
-
-        while let Some(item) = subscription.next().await {
-            if start.elapsed() > timeout {
-                return Err(anyhow!(
-                    "Timeout waiting for deposit confirmation after {:?}",
-                    timeout
-                ));
-            }
-
-            let checkpoint = match item {
-                Ok(checkpoint) => checkpoint,
-                Err(e) => {
-                    debug!("Error in checkpoint stream: {}", e);
-                    continue;
-                }
-            };
-
-            debug!(
-                "Received checkpoint {}, checking for DepositConfirmedEvent...",
-                checkpoint.cursor()
-            );
-
-            for txn in checkpoint.checkpoint().transactions() {
-                for event in txn.events().events() {
-                    let event_type = event.contents().name();
-
-                    if event_type.contains("DepositConfirmedEvent") {
-                        match DepositConfirmedEvent::from_bcs(event.contents().value()) {
-                            Ok(event_data) => {
-                                if event_data.request_id == request_id {
-                                    info!(
-                                        "Deposit confirmed! Found DepositConfirmedEvent for request_id: {}",
-                                        request_id
-                                    );
-                                    return Ok(());
-                                }
-                            }
-                            Err(e) => {
-                                debug!("Failed to parse DepositConfirmedEvent: {}", e);
-                            }
-                        }
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-
-        Err(anyhow!("Checkpoint subscription ended unexpectedly"))
     }
 
     async fn wait_for_withdrawal_confirmation(
@@ -205,151 +117,6 @@ mod tests {
         }
 
         Err(anyhow!("Checkpoint subscription ended unexpectedly"))
-    }
-
-    async fn get_hbtc_balance(
-        sui_client: &mut sui_rpc::Client,
-        package_id: Address,
-        owner: Address,
-    ) -> Result<u64> {
-        let btc_type = format!("{}::btc::BTC", package_id);
-        let btc_struct_tag: StructTag = btc_type.parse()?;
-        let request = GetBalanceRequest::default()
-            .with_owner(owner.to_string())
-            .with_coin_type(btc_struct_tag.to_string());
-
-        let response = sui_client
-            .state_client()
-            .get_balance(request)
-            .await?
-            .into_inner();
-
-        let balance = response.balance().balance_opt().unwrap_or(0);
-        debug!("hBTC balance for {}: {} sats", owner, balance);
-        Ok(balance)
-    }
-
-    fn lookup_vout(
-        networks: &TestNetworks,
-        txid: Txid,
-        address: bitcoin::Address,
-        amount: u64,
-    ) -> Result<usize> {
-        let tx = networks
-            .bitcoin_node
-            .rpc_client()
-            .get_raw_transaction(txid)
-            .and_then(|r| r.transaction().map_err(Into::into))?;
-        let vout = tx
-            .output
-            .iter()
-            .position(|output| {
-                output.value == Amount::from_sat(amount)
-                    && output.script_pubkey == address.script_pubkey()
-            })
-            .ok_or_else(|| {
-                anyhow!(
-                    "Could not find output with amount {} and deposit address",
-                    amount
-                )
-            })?;
-        debug!("Found deposit in tx output {}", vout);
-        Ok(vout)
-    }
-
-    async fn create_deposit_and_wait(
-        networks: &mut TestNetworks,
-        amount_sats: u64,
-    ) -> Result<Address> {
-        let user_key = networks.sui_network.user_keys.first().unwrap();
-        let hbtc_recipient = user_key.public_key().derive_address();
-        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
-        // Use the on-chain MPC key rather than the local key-ready channel.
-        // The on-chain key is set during end_reconfig and is guaranteed
-        // available once HashiNetworkBuilder::build() returns.
-        let deposit_address =
-            hashi.get_deposit_address(&hashi.get_onchain_mpc_pubkey()?, Some(&hbtc_recipient))?;
-
-        info!("Sending Bitcoin to deposit address...");
-        let txid = networks
-            .bitcoin_node
-            .send_to_address(&deposit_address, Amount::from_sat(amount_sats))?;
-        info!("Transaction sent: {}", txid);
-
-        info!("Mining blocks for confirmation...");
-        let blocks_to_mine = 10;
-        networks.bitcoin_node.generate_blocks(blocks_to_mine)?;
-        info!("{blocks_to_mine} blocks mined");
-
-        info!("Creating deposit request on Sui...");
-        let vout = lookup_vout(networks, txid, deposit_address, amount_sats)?;
-        let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
-            .with_signer(user_key.clone());
-        let request_id = executor
-            .execute_create_deposit_request(
-                txid_to_address(&txid),
-                vout as u32,
-                amount_sats,
-                Some(hbtc_recipient),
-            )
-            .await?;
-        info!("Deposit request created: {}", request_id);
-
-        // Mine blocks in the background so the leader's BTC-block-driven
-        // deposit processing loop fires.
-        let _miner = BackgroundMiner::start(&networks.bitcoin_node);
-        wait_for_deposit_confirmation(
-            &mut networks.sui_network.client,
-            request_id,
-            Duration::from_secs(300),
-        )
-        .await?;
-        info!("Deposit confirmed on Sui");
-
-        Ok(hbtc_recipient)
-    }
-
-    /// Mines one block per second on Bitcoin regtest until stopped.
-    /// Stops automatically when dropped.
-    struct BackgroundMiner {
-        stop_flag: Arc<AtomicBool>,
-        handle: Option<std::thread::JoinHandle<()>>,
-    }
-
-    impl BackgroundMiner {
-        fn start(bitcoin_node: &crate::BitcoinNodeHandle) -> Self {
-            let stop_flag = Arc::new(AtomicBool::new(false));
-            let stop_clone = stop_flag.clone();
-            let rpc_url = bitcoin_node.rpc_url().to_string();
-            let handle = std::thread::spawn(move || {
-                let rpc = corepc_client::client_sync::v29::Client::new_with_auth(
-                    &rpc_url,
-                    corepc_client::client_sync::Auth::UserPass(
-                        crate::bitcoin_node::RPC_USER.to_string(),
-                        crate::bitcoin_node::RPC_PASSWORD.to_string(),
-                    ),
-                )
-                .expect("failed to create mining RPC client");
-                let addr = rpc.new_address().expect("failed to get mining address");
-                while !stop_clone.load(Ordering::Relaxed) {
-                    let _ = rpc.generate_to_address(1, &addr);
-                    std::thread::sleep(Duration::from_secs(1));
-                }
-            });
-            Self {
-                stop_flag,
-                handle: Some(handle),
-            }
-        }
-    }
-
-    impl Drop for BackgroundMiner {
-        fn drop(&mut self) {
-            self.stop_flag.store(true, Ordering::Relaxed);
-            if let Some(handle) = self.handle.take() {
-                let _ = handle.join();
-            }
-        }
     }
 
     fn extract_witness_program(address: &bitcoin::Address) -> Result<Vec<u8>> {
@@ -1326,6 +1093,7 @@ mod tests {
             .wait_for_mpc_key(Duration::from_secs(60))
             .await?;
 
+        use hashi::onchain::types::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
         use hashi::onchain::types::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
         use hashi::onchain::types::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 
@@ -1333,6 +1101,7 @@ mod tests {
         let threshold_bps = hashi.onchain_state().mpc_threshold_in_basis_points();
         let weight_reduction_allowed_delta =
             hashi.onchain_state().mpc_weight_reduction_allowed_delta();
+        let max_faulty_bps = hashi.onchain_state().mpc_max_faulty_in_basis_points();
 
         assert_eq!(
             threshold_bps, DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
@@ -1342,6 +1111,155 @@ mod tests {
             weight_reduction_allowed_delta, DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
             "on-chain mpc_weight_reduction_allowed_delta ({weight_reduction_allowed_delta}) != Rust default ({DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA})"
         );
+        assert_eq!(
+            max_faulty_bps, DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
+            "on-chain mpc_max_faulty_in_basis_points ({max_faulty_bps}) != Rust default ({DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS})"
+        );
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_varying_t_and_allowed_delta_across_epochs() -> Result<()> {
+        init_test_logging();
+
+        let mut networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+
+        use hashi::onchain::types::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
+        use hashi::onchain::types::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
+        use hashi::onchain::types::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
+
+        // Wait for DKG (epoch 1 committee created with defaults).
+        let nodes = networks.hashi_network.nodes();
+        let futs: Vec<_> = nodes
+            .iter()
+            .map(|n| n.wait_for_mpc_key(Duration::from_secs(120)))
+            .collect();
+        for (i, r) in futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .enumerate()
+        {
+            r.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+
+        let initial_epoch = nodes[0].current_epoch().unwrap();
+        let pk_before = nodes[0].hashi().mpc_handle().unwrap().public_key().unwrap();
+
+        // Verify epoch 1 committee has defaults.
+        let epoch1_committee = nodes[0]
+            .hashi()
+            .onchain_state()
+            .current_committee()
+            .unwrap();
+        assert_eq!(
+            epoch1_committee.mpc_threshold_in_basis_points(),
+            DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS
+        );
+        assert_eq!(
+            epoch1_committee.mpc_weight_reduction_allowed_delta(),
+            DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA
+        );
+        assert_eq!(
+            epoch1_committee.mpc_max_faulty_in_basis_points(),
+            DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS
+        );
+
+        // Change config between epochs.
+        let new_threshold: u64 = 5000;
+        let new_delta: u64 = 1200;
+        let new_max_faulty: u64 = 2000;
+        crate::apply_onchain_config_overrides(
+            &mut networks,
+            &[
+                (
+                    "mpc_threshold_in_basis_points".into(),
+                    hashi_types::move_types::ConfigValue::U64(new_threshold),
+                ),
+                (
+                    "mpc_weight_reduction_allowed_delta".into(),
+                    hashi_types::move_types::ConfigValue::U64(new_delta),
+                ),
+                (
+                    "mpc_max_faulty_in_basis_points".into(),
+                    hashi_types::move_types::ConfigValue::U64(new_max_faulty),
+                ),
+            ],
+        )
+        .await?;
+
+        // Force key rotation → epoch 2 committee created with new config.
+        let target_epoch = initial_epoch + 1;
+        networks.sui_network.force_close_epoch().await?;
+        let futs: Vec<_> = networks
+            .hashi_network()
+            .nodes()
+            .iter()
+            .map(|n| n.wait_for_epoch(target_epoch, Duration::from_secs(480)))
+            .collect();
+        for (i, r) in futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .enumerate()
+        {
+            r.unwrap_or_else(|e| panic!("Node {i} failed to reach epoch {target_epoch}: {e}"));
+        }
+
+        // Verify key rotation succeeded: all nodes agree and key is preserved.
+        let nodes = networks.hashi_network().nodes();
+        let pk_after = nodes[0].hashi().mpc_handle().unwrap().public_key().unwrap();
+        assert_eq!(
+            pk_before, pk_after,
+            "MPC public key changed during rotation"
+        );
+        for (i, node) in nodes.iter().enumerate().skip(1) {
+            let pk = node.hashi().mpc_handle().unwrap().public_key().unwrap();
+            assert_eq!(
+                pk, pk_after,
+                "Node {i} MPC key differs from node 0 after rotation"
+            );
+        }
+
+        // Epoch 1 committee retains original defaults.
+        let state = networks.hashi_network.nodes()[0].hashi().onchain_state();
+        let committees = {
+            let s = state.state();
+            s.hashi().committees.committees().clone()
+        };
+        let epoch1 = committees.get(&initial_epoch).expect("epoch 1 committee");
+        assert_eq!(
+            epoch1.mpc_threshold_in_basis_points(),
+            DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
+            "epoch {initial_epoch} committee should retain original threshold_basis_points"
+        );
+        assert_eq!(
+            epoch1.mpc_weight_reduction_allowed_delta(),
+            DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            "epoch {initial_epoch} committee should retain original allowed_delta"
+        );
+        assert_eq!(
+            epoch1.mpc_max_faulty_in_basis_points(),
+            DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
+            "epoch {initial_epoch} committee should retain original max_faulty_basis_points"
+        );
+
+        // Epoch 2 committee has new values.
+        let epoch2 = committees.get(&target_epoch).expect("epoch 2 committee");
+        assert_eq!(
+            epoch2.mpc_threshold_in_basis_points(),
+            new_threshold as u16,
+            "epoch {target_epoch} committee should have updated threshold_basis_points"
+        );
+        assert_eq!(
+            epoch2.mpc_weight_reduction_allowed_delta(),
+            new_delta as u16,
+            "epoch {target_epoch} committee should have updated allowed_delta"
+        );
+        assert_eq!(
+            epoch2.mpc_max_faulty_in_basis_points(),
+            new_max_faulty as u16,
+            "epoch {target_epoch} committee should have updated max_faulty_basis_points"
+        );
+
         Ok(())
     }
 

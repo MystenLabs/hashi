@@ -9,7 +9,7 @@ sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "21
 sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1" }
 sui-transaction-builder = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1" }
 
-sui-http = "0.1.0"
+sui-http = "0.2.0"
 bitcoin = { version = "0.32.8", features =["serde"] }
 corepc-client = { version = "0.10.0", features = ["client-sync"] }
 jsonrpc = "0.18.0"
@@ -34,6 +34,7 @@ axum = "0.8.4"
 tower = "0.5.3"
 reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls"] }
 tokio = { version = "1.46.1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 prometheus = "0.14"
 tracing = "0.1.41"
 
@@ -78,8 +79,8 @@ jiff = "0.2"
 tar = "0.4"
 
 # fastcrypto
-fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "ff39c4b8e7fa041ecc43789be214e3b2dc8027c2" }
-fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "ff39c4b8e7fa041ecc43789be214e3b2dc8027c2" }
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "d6539fd65ce7f9a5a786af3340e511b7dae454c1" }
+fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "d6539fd65ce7f9a5a786af3340e511b7dae454c1" }
 
 # Sui monorepo deps
 bin-version = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }

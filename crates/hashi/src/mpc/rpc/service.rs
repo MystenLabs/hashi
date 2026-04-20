@@ -164,11 +164,13 @@ impl MpcService for HttpService {
         let external_request = request.into_inner();
         let internal_request = types::GetPartialSignaturesRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let request_epoch = external_request
+            .epoch
+            .ok_or_else(|| Status::invalid_argument("epoch: missing required field"))?;
         let response = {
-            let signing_manager = self.signing_manager()?;
-            let mgr = signing_manager.read().unwrap();
-            validate_epoch(mgr.epoch(), external_request.epoch)?;
-            mgr.handle_get_partial_signatures_request(&internal_request)
+            let signing_manager = self.signing_manager_for(request_epoch)?;
+            signing_manager
+                .handle_get_partial_signatures_request(&internal_request)
                 .map_err(|e| {
                     match &e {
                         SigningError::NotFound(_) => {
