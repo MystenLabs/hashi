@@ -23,7 +23,6 @@ use async_trait::async_trait;
 use sui_sdk_types::Address;
 
 tokio::task_local! {
-    /// MPC protocol label for outbound requests
     pub static MPC_PROTOCOL_LABEL: &'static str;
 }
 
