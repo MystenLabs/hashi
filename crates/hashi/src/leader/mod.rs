@@ -496,6 +496,11 @@ impl LeaderService {
             return;
         }
 
+        if self.inner.config.test_disable_withdrawal_processing() {
+            debug!("Withdrawal processing disabled (test flag), skipping approval");
+            return;
+        }
+
         if self.withdrawal_approval_task.is_some() {
             debug!("Withdrawal approval task already in-flight, skipping");
             return;
@@ -814,6 +819,11 @@ impl LeaderService {
         debug!("Entering process_approved_withdrawal_requests");
         if self.is_reconfiguring() {
             debug!("Reconfig in progress, skipping withdrawal commitment processing");
+            return;
+        }
+
+        if self.inner.config.test_disable_withdrawal_processing() {
+            debug!("Withdrawal processing disabled (test flag), skipping commit");
             return;
         }
 
@@ -1817,7 +1827,7 @@ fn deposit_request_to_proto(req: &DepositRequest) -> SignDepositConfirmationRequ
     }
 }
 
-fn parse_member_signature(
+pub(crate) fn parse_member_signature(
     member_signature: hashi_types::proto::MemberSignature,
 ) -> anyhow::Result<MemberSignature> {
     let epoch = member_signature
@@ -1847,7 +1857,7 @@ impl WithdrawalRequestApproval {
 }
 
 impl WithdrawalTxCommitment {
-    fn to_proto(&self) -> SignWithdrawalTxConstructionRequest {
+    pub(crate) fn to_proto(&self) -> SignWithdrawalTxConstructionRequest {
         SignWithdrawalTxConstructionRequest {
             request_ids: self
                 .request_ids

@@ -77,6 +77,12 @@ enum Commands {
         #[clap(long, default_value = "18443")]
         btc_rpc_port: u16,
 
+        /// Disable node-side withdrawal processing. Requests stay in
+        /// Requested/Approved state until cancelled or the localnet is
+        /// restarted without this flag. Debug/test only.
+        #[clap(long, hide = true)]
+        disable_withdrawal_processing: bool,
+
         #[command(flatten)]
         opts: LocalnetOpts,
     },
@@ -231,8 +237,18 @@ async fn main() -> Result<()> {
             num_validators,
             sui_rpc_port,
             btc_rpc_port,
+            disable_withdrawal_processing,
             opts,
-        } => cmd_start(num_validators, sui_rpc_port, btc_rpc_port, &opts.data_dir).await,
+        } => {
+            cmd_start(
+                num_validators,
+                sui_rpc_port,
+                btc_rpc_port,
+                disable_withdrawal_processing,
+                &opts.data_dir,
+            )
+            .await
+        }
         Commands::Stop { opts } => cmd_stop(&opts.data_dir).await,
         Commands::Status { opts } => cmd_status(&opts.data_dir),
         Commands::Info { opts } => cmd_info(&opts.data_dir),
@@ -260,6 +276,7 @@ async fn cmd_start(
     num_validators: usize,
     sui_rpc_port: u16,
     btc_rpc_port: u16,
+    disable_withdrawal_processing: bool,
     data_dir: &Path,
 ) -> Result<()> {
     // Check for existing running instance
@@ -285,6 +302,7 @@ async fn cmd_start(
         .with_nodes(num_validators)
         .with_sui_rpc_port(sui_rpc_port)
         .with_btc_rpc_port(btc_rpc_port)
+        .with_test_disable_withdrawal_processing(disable_withdrawal_processing)
         .build()
         .await?;
 

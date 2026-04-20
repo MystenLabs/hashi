@@ -10,6 +10,7 @@ mod tests {
 
     use futures::StreamExt;
     use hashi::sui_tx_executor::SuiTxExecutor;
+    use hashi_types::move_types::WithdrawalApprovedEvent;
     use hashi_types::move_types::WithdrawalConfirmedEvent;
     use hashi_types::move_types::WithdrawalPickedForProcessingEvent;
     use std::time::Duration;
@@ -1684,6 +1685,419 @@ mod tests {
         drop(miner);
 
         info!("=== Large Withdrawal Signature Chunking Test Passed ===");
+        Ok(())
+    }
+
+    /// Test cancelling a withdrawal request before it gets approved.
+    ///
+    /// Strategy: shut down 2 of 4 nodes after creating the request so the
+    /// committee cannot reach quorum for approval. The request stays in
+    /// `Requested` state and can be cancelled.
+    #[tokio::test]
+    #[ignore = "requires localnet (run with --ignored)"]
+    async fn test_cancel_withdrawal_before_approval() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting Cancel Withdrawal (Before Approval) Test ===");
+
+        let mut networks = setup_test_networks().await?;
+
+        // Deposit to get hBTC
+        let deposit_amount_sats = 100_000u64;
+        let hbtc_recipient = create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+
+        let balance_before = get_hbtc_balance(
+            &mut networks.sui_network.client,
+            networks.hashi_network.ids().package_id,
+            hbtc_recipient,
+        )
+        .await?;
+        assert_eq!(balance_before, deposit_amount_sats);
+        info!("hBTC balance before withdrawal: {balance_before}");
+
+        // Shut down 2 of 4 nodes to prevent quorum
+        info!("Shutting down nodes 2 and 3 to prevent approval quorum...");
+        networks.hashi_network.nodes_mut()[2].shutdown().await;
+        networks.hashi_network.nodes_mut()[3].shutdown().await;
+
+        // Create withdrawal request — will stay in Requested state (no quorum)
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let user_key = networks.sui_network.user_keys.first().unwrap();
+        let withdrawal_amount_sats = 30_000u64;
+        let btc_destination = networks.bitcoin_node.get_new_address()?;
+        let destination_bytes = extract_witness_program(&btc_destination)?;
+
+        let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+            .with_signer(user_key.clone());
+        let request_id = executor
+            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes)
+            .await?;
+        info!("Withdrawal request created: {request_id}");
+
+        // Small delay to ensure the request is visible on-chain
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // Cancel the request
+        info!("Cancelling withdrawal request...");
+        executor.execute_cancel_withdrawal(&request_id).await?;
+        info!("Withdrawal cancelled successfully");
+
+        // Verify hBTC balance is fully restored
+        let balance_after = get_hbtc_balance(
+            &mut networks.sui_network.client,
+            networks.hashi_network.ids().package_id,
+            hbtc_recipient,
+        )
+        .await?;
+        assert_eq!(
+            balance_after, deposit_amount_sats,
+            "hBTC balance should be fully restored after cancellation"
+        );
+        info!("hBTC balance restored: {balance_after}");
+
+        info!("=== Cancel Withdrawal (Before Approval) Test Passed ===");
+        Ok(())
+    }
+
+    /// Wait for a `WithdrawalApprovedEvent` for a specific request ID.
+    async fn wait_for_withdrawal_approved(
+        sui_client: &mut sui_rpc::Client,
+        request_id: Address,
+        timeout: Duration,
+    ) -> Result<()> {
+        info!("Waiting for withdrawal approval for request: {request_id}");
+
+        let start = std::time::Instant::now();
+        let subscription_read_mask = FieldMask::from_paths([Checkpoint::path_builder()
+            .transactions()
+            .events()
+            .events()
+            .contents()
+            .finish()]);
+        let mut subscription = sui_client
+            .subscription_client()
+            .subscribe_checkpoints(
+                SubscribeCheckpointsRequest::default().with_read_mask(subscription_read_mask),
+            )
+            .await?
+            .into_inner();
+
+        while let Some(item) = subscription.next().await {
+            if start.elapsed() > timeout {
+                return Err(anyhow!(
+                    "Timeout waiting for withdrawal approval after {:?}",
+                    timeout
+                ));
+            }
+
+            let checkpoint = match item {
+                Ok(cp) => cp,
+                Err(e) => {
+                    debug!("Error in checkpoint stream: {e}");
+                    continue;
+                }
+            };
+
+            for txn in checkpoint.checkpoint().transactions() {
+                for event in txn.events().events() {
+                    if event.contents().name().contains("WithdrawalApprovedEvent")
+                        && let Ok(evt) = WithdrawalApprovedEvent::from_bcs(event.contents().value())
+                        && evt.request_id == request_id
+                    {
+                        info!("Withdrawal approved: {request_id}");
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        Err(anyhow!("Checkpoint subscription ended unexpectedly"))
+    }
+
+    /// Test cancelling a withdrawal request after it has been approved but
+    /// before the committee commits it to a WithdrawalTransaction.
+    ///
+    /// Strategy: use a very large `withdrawal_batching_delay_ms` so the leader
+    /// approves the request but waits before committing. The request stays in
+    /// `Approved` state and can be cancelled.
+    #[tokio::test]
+    #[ignore = "requires localnet (run with --ignored)"]
+    async fn test_cancel_approved_withdrawal() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting Cancel Approved Withdrawal Test ===");
+
+        // Use a 1-hour batching delay so approved requests are not committed
+        let mut networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_withdrawal_batching_delay_ms(3_600_000) // 1 hour
+            .build()
+            .await?;
+
+        networks.hashi_network.nodes()[0]
+            .wait_for_mpc_key(Duration::from_secs(120))
+            .await?;
+
+        // Deposit to get hBTC
+        let deposit_amount_sats = 100_000u64;
+        let hbtc_recipient = create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+
+        let balance_before = get_hbtc_balance(
+            &mut networks.sui_network.client,
+            networks.hashi_network.ids().package_id,
+            hbtc_recipient,
+        )
+        .await?;
+        assert_eq!(balance_before, deposit_amount_sats);
+        info!("hBTC balance before withdrawal: {balance_before}");
+
+        // Create withdrawal request — will be auto-approved by committee
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let user_key = networks.sui_network.user_keys.first().unwrap();
+        let withdrawal_amount_sats = 30_000u64;
+        let btc_destination = networks.bitcoin_node.get_new_address()?;
+        let destination_bytes = extract_witness_program(&btc_destination)?;
+
+        let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+            .with_signer(user_key.clone());
+        let request_id = executor
+            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes)
+            .await?;
+        info!("Withdrawal request created: {request_id}");
+
+        // Wait for the committee to approve the request
+        wait_for_withdrawal_approved(
+            &mut networks.sui_network.client,
+            request_id,
+            Duration::from_secs(60),
+        )
+        .await?;
+        info!("Request is now in Approved state");
+
+        // Cancel the approved request — this is the new behavior we're testing
+        info!("Cancelling approved withdrawal request...");
+        executor.execute_cancel_withdrawal(&request_id).await?;
+        info!("Approved withdrawal cancelled successfully");
+
+        // Verify hBTC balance is fully restored
+        let balance_after = get_hbtc_balance(
+            &mut networks.sui_network.client,
+            networks.hashi_network.ids().package_id,
+            hbtc_recipient,
+        )
+        .await?;
+        assert_eq!(
+            balance_after, deposit_amount_sats,
+            "hBTC balance should be fully restored after cancelling approved withdrawal"
+        );
+        info!("hBTC balance restored: {balance_after}");
+
+        info!("=== Cancel Approved Withdrawal Test Passed ===");
+        Ok(())
+    }
+
+    /// Race test: cancel lands before `commit_withdrawal_tx`.
+    ///
+    /// Stages a request in `Approved` state (leader held off by a 1-hour
+    /// batching delay), builds the commit PTB directly via the shared
+    /// `build_and_sign_withdrawal_commitment` helper WITHOUT broadcasting,
+    /// then broadcasts the cancellation first. The subsequent commit must
+    /// fail because the request is gone from the `requests` bag, and the
+    /// user's hBTC balance must be fully restored.
+    #[tokio::test]
+    #[ignore = "requires localnet (run with --ignored)"]
+    async fn test_cancel_race_cancel_wins() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting Cancel-Race (Cancel Wins) Test ===");
+
+        let mut networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_withdrawal_batching_delay_ms(3_600_000) // 1 hour — blocks commit
+            .build()
+            .await?;
+
+        networks.hashi_network.nodes()[0]
+            .wait_for_mpc_key(Duration::from_secs(120))
+            .await?;
+
+        let deposit_amount_sats = 100_000u64;
+        let hbtc_recipient = create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+
+        let balance_before = get_hbtc_balance(
+            &mut networks.sui_network.client,
+            networks.hashi_network.ids().package_id,
+            hbtc_recipient,
+        )
+        .await?;
+        assert_eq!(balance_before, deposit_amount_sats);
+
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+        let withdrawal_amount_sats = 30_000u64;
+        let btc_destination = networks.bitcoin_node.get_new_address()?;
+        let destination_bytes = extract_witness_program(&btc_destination)?;
+
+        let mut user_executor =
+            SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?.with_signer(user_key);
+        let request_id = user_executor
+            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes)
+            .await?;
+        info!("Withdrawal request created: {request_id}");
+
+        wait_for_withdrawal_approved(
+            &mut networks.sui_network.client,
+            request_id,
+            Duration::from_secs(60),
+        )
+        .await?;
+        info!("Request is in Approved state");
+
+        // Build the commit PTB directly without broadcasting it.
+        let request = hashi
+            .onchain_state()
+            .withdrawal_request(&request_id)
+            .ok_or_else(|| anyhow!("approved request disappeared from state"))?;
+        let (approval, cert) = hashi
+            .build_and_sign_withdrawal_commitment(&[request])
+            .await?;
+        info!(
+            "Built commit PTB with txid {:?}; NOT broadcasting yet",
+            approval.txid
+        );
+
+        // Cancel first — this must win.
+        user_executor.execute_cancel_withdrawal(&request_id).await?;
+        info!("Cancellation executed");
+
+        // Now try to broadcast the commit — it must fail because the request
+        // is gone from the `requests` bag.
+        let mut leader_executor = SuiTxExecutor::from_hashi(hashi.clone())?;
+        let commit_result = leader_executor
+            .execute_commit_withdrawal_tx(&approval, &cert)
+            .await;
+        assert!(
+            commit_result.is_err(),
+            "commit_withdrawal_tx must fail after the request was cancelled; got Ok"
+        );
+        info!(
+            "commit_withdrawal_tx correctly failed: {:?}",
+            commit_result.err()
+        );
+
+        // hBTC must be fully restored.
+        let balance_after = get_hbtc_balance(
+            &mut networks.sui_network.client,
+            networks.hashi_network.ids().package_id,
+            hbtc_recipient,
+        )
+        .await?;
+        assert_eq!(
+            balance_after, deposit_amount_sats,
+            "hBTC balance should be fully restored after cancel-wins race"
+        );
+
+        info!("=== Cancel-Race (Cancel Wins) Test Passed ===");
+        Ok(())
+    }
+
+    /// Race test: `commit_withdrawal_tx` lands before cancel.
+    ///
+    /// Stages a request in `Approved` state, directly broadcasts the commit
+    /// (bypassing the 1-hour batching delay that would otherwise hold the
+    /// leader off), waits for the `WithdrawalPickedForProcessingEvent`, then
+    /// attempts to cancel and asserts it fails with
+    /// `ECannotCancelProcessingWithdrawal`. hBTC must NOT be restored.
+    #[tokio::test]
+    #[ignore = "requires localnet (run with --ignored)"]
+    async fn test_cancel_race_commit_wins() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting Cancel-Race (Commit Wins) Test ===");
+
+        let mut networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_withdrawal_batching_delay_ms(3_600_000) // 1 hour — keeps leader out of our way
+            .build()
+            .await?;
+
+        networks.hashi_network.nodes()[0]
+            .wait_for_mpc_key(Duration::from_secs(120))
+            .await?;
+
+        let deposit_amount_sats = 100_000u64;
+        let hbtc_recipient = create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+
+        let balance_before = get_hbtc_balance(
+            &mut networks.sui_network.client,
+            networks.hashi_network.ids().package_id,
+            hbtc_recipient,
+        )
+        .await?;
+        assert_eq!(balance_before, deposit_amount_sats);
+
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+        let withdrawal_amount_sats = 30_000u64;
+        let btc_destination = networks.bitcoin_node.get_new_address()?;
+        let destination_bytes = extract_witness_program(&btc_destination)?;
+
+        let mut user_executor =
+            SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?.with_signer(user_key);
+        let request_id = user_executor
+            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes)
+            .await?;
+
+        wait_for_withdrawal_approved(
+            &mut networks.sui_network.client,
+            request_id,
+            Duration::from_secs(60),
+        )
+        .await?;
+
+        // Build and submit the commit PTB now — commit wins.
+        let request = hashi
+            .onchain_state()
+            .withdrawal_request(&request_id)
+            .ok_or_else(|| anyhow!("approved request disappeared from state"))?;
+        let (approval, cert) = hashi
+            .build_and_sign_withdrawal_commitment(&[request])
+            .await?;
+        let mut leader_executor = SuiTxExecutor::from_hashi(hashi.clone())?;
+        leader_executor
+            .execute_commit_withdrawal_tx(&approval, &cert)
+            .await?;
+        info!("commit_withdrawal_tx submitted successfully");
+
+        wait_for_withdrawal_picked(&mut networks.sui_network.client, Duration::from_secs(30))
+            .await?;
+        info!("Request moved to Processing state");
+
+        // Cancel must now fail with ECannotCancelProcessingWithdrawal.
+        let cancel_result = user_executor.execute_cancel_withdrawal(&request_id).await;
+        assert!(
+            cancel_result.is_err(),
+            "cancel_withdrawal must fail once the request is in Processing; got Ok"
+        );
+        let err = cancel_result.err().unwrap();
+        let err_msg = format!("{err:?}");
+        assert!(
+            err_msg.contains("ECannotCancelProcessingWithdrawal")
+                || err_msg.contains("cancel_withdrawal"),
+            "expected ECannotCancelProcessingWithdrawal abort, got: {err_msg}"
+        );
+        info!("cancel correctly failed: {err_msg}");
+
+        // hBTC must NOT be restored — the BTC was burned at commit time.
+        let balance_after = get_hbtc_balance(
+            &mut networks.sui_network.client,
+            networks.hashi_network.ids().package_id,
+            hbtc_recipient,
+        )
+        .await?;
+        assert_eq!(
+            balance_after,
+            deposit_amount_sats - withdrawal_amount_sats,
+            "hBTC balance must reflect the burned commit amount"
+        );
+
+        info!("=== Cancel-Race (Commit Wins) Test Passed ===");
         Ok(())
     }
 }

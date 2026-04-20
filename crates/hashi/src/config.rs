@@ -174,6 +174,13 @@ pub struct Config {
     /// complaint recovery flow. Must not be set on mainnet or testnet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_corrupt_shares_for: Option<Address>,
+
+    /// Test-only: when true, the leader skips the withdrawal approval and
+    /// commit phases. Requests created while set stay in Requested/Approved
+    /// state indefinitely. Used by localnet to stage manual cancellation
+    /// tests. Must not be set on mainnet or testnet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_disable_withdrawal_processing: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
@@ -365,6 +372,10 @@ impl Config {
     pub fn max_mempool_chain_depth(&self) -> usize {
         self.max_mempool_chain_depth
             .unwrap_or(crate::utxo_pool::CoinSelectionParams::DEFAULT_MAX_MEMPOOL_CHAIN_DEPTH)
+    }
+
+    pub fn test_disable_withdrawal_processing(&self) -> bool {
+        self.test_disable_withdrawal_processing.unwrap_or(false)
     }
 
     // Creates a new config suitable for testing. In particular this config will:
