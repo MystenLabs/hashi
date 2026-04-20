@@ -185,6 +185,7 @@ impl TestSetup {
             epoch,
             TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            TEST_MAX_FAULTY_IN_BASIS_POINTS,
         );
         // Also create a previous committee for key rotation tests
         let previous_committee = Committee::new(
@@ -192,6 +193,7 @@ impl TestSetup {
             epoch - 1,
             TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            TEST_MAX_FAULTY_IN_BASIS_POINTS,
         );
 
         let mut committees = BTreeMap::new();
@@ -261,6 +263,7 @@ impl TestSetup {
             epoch,
             TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            TEST_MAX_FAULTY_IN_BASIS_POINTS,
         );
         // Also create a previous committee for key rotation tests
         let previous_committee = Committee::new(
@@ -268,6 +271,7 @@ impl TestSetup {
             epoch - 1,
             TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            TEST_MAX_FAULTY_IN_BASIS_POINTS,
         );
 
         let mut committees = BTreeMap::new();
@@ -309,7 +313,6 @@ impl TestSetup {
             self.encryption_keys[validator_index].clone(),
             self.signing_keys[validator_index].clone(),
             store,
-            TEST_MAX_FAULTY_IN_BASIS_POINTS,
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
@@ -922,7 +925,6 @@ fn test_mpc_manager_new_from_committee_set() {
         encryption_key,
         signing_key,
         Box::new(MockPublicMessagesStore),
-        TEST_MAX_FAULTY_IN_BASIS_POINTS,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -985,7 +987,6 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         encryption_keys[0].clone(),
         signing_keys[0].clone(),
         Box::new(MockPublicMessagesStore),
-        TEST_MAX_FAULTY_IN_BASIS_POINTS,
         "test",
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -6131,6 +6132,7 @@ async fn test_prepare_previous_output_for_new_member() {
         epoch,
         TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
     );
     let previous_committee = rotation_setup
         .setup
@@ -6158,7 +6160,6 @@ async fn test_prepare_previous_output_for_new_member() {
         new_member_encryption_key,
         new_member_signing_key,
         Box::new(InMemoryPublicMessagesStore::new()),
-        TEST_MAX_FAULTY_IN_BASIS_POINTS,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7256,12 +7257,14 @@ fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
         epoch,
         TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
     );
     let target_committee = Committee::new(
         target_members,
         target_epoch,
         TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
     );
 
     // Build CommitteeSet simulating a live reconfig:
@@ -7308,7 +7311,6 @@ fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
         Box::new(store),
-        TEST_MAX_FAULTY_IN_BASIS_POINTS,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7444,12 +7446,14 @@ fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
         epoch,
         TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
     );
     let target_committee = Committee::new(
         members,
         target_epoch,
         TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
     );
 
     let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
@@ -7480,7 +7484,6 @@ fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
         setup.encryption_keys[target_index].clone(),
         setup.signing_keys[target_index].clone(),
         Box::new(store),
-        TEST_MAX_FAULTY_IN_BASIS_POINTS,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7536,12 +7539,14 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
         dkg_epoch,
         TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
     );
     let committee_at_101 = Committee::new(
         members.clone(),
         rotation_epoch,
         TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
     );
 
     let mut rotation_committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
@@ -7570,7 +7575,6 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             rotation_setup.setup.encryption_keys[dealer_idx].clone(),
             rotation_setup.setup.signing_keys[dealer_idx].clone(),
             Box::new(InMemoryPublicMessagesStore::new()),
-            TEST_MAX_FAULTY_IN_BASIS_POINTS,
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7601,7 +7605,6 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             rotation_setup.setup.encryption_keys[other_idx].clone(),
             rotation_setup.setup.signing_keys[other_idx].clone(),
             Box::new(InMemoryPublicMessagesStore::new()),
-            TEST_MAX_FAULTY_IN_BASIS_POINTS,
             TEST_CHAIN_ID,
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
@@ -7656,12 +7659,14 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
         rotation_epoch,
         TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
     );
     let target_committee = Committee::new(
         target_members,
         target_epoch,
         TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
     );
 
     let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
@@ -7698,7 +7703,6 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
         Box::new(store),
-        TEST_MAX_FAULTY_IN_BASIS_POINTS,
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,

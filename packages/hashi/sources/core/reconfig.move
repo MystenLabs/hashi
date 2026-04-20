@@ -27,12 +27,14 @@ entry fun start_reconfig(
     assert!(!self.committee_set().is_reconfiguring());
     let mpc_threshold_in_basis_points = hashi::mpc_config::threshold_in_basis_points(self.config());
     let mpc_weight_reduction_allowed_delta = hashi::mpc_config::weight_reduction_allowed_delta(self.config());
+    let mpc_max_faulty_in_basis_points = hashi::mpc_config::max_faulty_in_basis_points(self.config());
     let epoch = self
         .committee_set_mut()
         .start_reconfig(
             sui_system,
             mpc_threshold_in_basis_points,
             mpc_weight_reduction_allowed_delta,
+            mpc_max_faulty_in_basis_points,
             ctx,
         );
     sui::event::emit(StartReconfigEvent { epoch });

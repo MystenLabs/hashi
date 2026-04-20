@@ -47,6 +47,7 @@ use std::num::NonZeroU16;
 use sui_sdk_types::Address as SuiAddress;
 use sui_sdk_types::bcs::FromBcs;
 
+use crate::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
 use crate::committee::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
 use crate::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 
@@ -194,6 +195,7 @@ fn mock_committee_with_one_member(epoch: u64) -> HashiCommittee {
         epoch,
         DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
         DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
     )
 }
 

@@ -114,7 +114,6 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
         let mut manager = {
             let state = onchain_state.state();
             let hashi = state.hashi();
-            let max_faulty_in_basis_points = hashi.config.mpc_max_faulty_in_basis_points();
             MpcManager::new(
                 validator_address,
                 &hashi.committees,
@@ -122,7 +121,6 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
                 encryption_key,
                 dummy_signing_key.clone(),
                 Box::new(store),
-                max_faulty_in_basis_points,
                 chain_id,
                 None, // weight_divisor
                 0,    // batch_size_per_weight (unused for reconstruction)

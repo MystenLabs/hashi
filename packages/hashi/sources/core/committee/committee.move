@@ -40,6 +40,8 @@ public struct Committee has copy, drop, store {
     mpc_threshold_in_basis_points: u64,
     /// Allowed delta for weight reduction
     mpc_weight_reduction_allowed_delta: u64,
+    /// MPC max faulty parties in basis points
+    mpc_max_faulty_in_basis_points: u64,
 }
 
 /// Constructor for committee.
@@ -48,6 +50,7 @@ public(package) fun new_committee(
     members: vector<CommitteeMember>,
     mpc_threshold_in_basis_points: u64,
     mpc_weight_reduction_allowed_delta: u64,
+    mpc_max_faulty_in_basis_points: u64,
 ): Committee {
     assert!(!members.is_empty());
 
@@ -65,6 +68,7 @@ public(package) fun new_committee(
         epoch,
         mpc_threshold_in_basis_points,
         mpc_weight_reduction_allowed_delta,
+        mpc_max_faulty_in_basis_points,
     }
 }
 

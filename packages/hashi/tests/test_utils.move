@@ -109,7 +109,7 @@ public fun create_hashi_with_weighted_committee(
     };
 
     // Create the committee
-    let committee = committee::new_committee(ctx.epoch(), members, 3333, 800);
+    let committee = committee::new_committee(ctx.epoch(), members, 3334, 800, 3333);
 
     let sk = bls_sk_for_testing();
     let pub_key = bls12381::g1_from_bytes(&bls_min_pk_from_sk(&sk));

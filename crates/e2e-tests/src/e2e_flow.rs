@@ -1124,6 +1124,7 @@ mod tests {
 
         let mut networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
 
+        use hashi::onchain::types::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
         use hashi::onchain::types::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
         use hashi::onchain::types::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 
@@ -1158,10 +1159,15 @@ mod tests {
             epoch1_committee.mpc_weight_reduction_allowed_delta(),
             DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA
         );
+        assert_eq!(
+            epoch1_committee.mpc_max_faulty_in_basis_points(),
+            DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS
+        );
 
         // Change config between epochs.
         let new_threshold: u64 = 5000;
         let new_delta: u64 = 1200;
+        let new_max_faulty: u64 = 2000;
         crate::apply_onchain_config_overrides(
             &mut networks,
             &[
@@ -1172,6 +1178,10 @@ mod tests {
                 (
                     "mpc_weight_reduction_allowed_delta".into(),
                     hashi_types::move_types::ConfigValue::U64(new_delta),
+                ),
+                (
+                    "mpc_max_faulty_in_basis_points".into(),
+                    hashi_types::move_types::ConfigValue::U64(new_max_faulty),
                 ),
             ],
         )
@@ -1226,6 +1236,11 @@ mod tests {
             DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
             "epoch {initial_epoch} committee should retain original allowed_delta"
         );
+        assert_eq!(
+            epoch1.mpc_max_faulty_in_basis_points(),
+            DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
+            "epoch {initial_epoch} committee should retain original max_faulty_basis_points"
+        );
 
         // Epoch 2 committee has new values.
         let epoch2 = committees.get(&target_epoch).expect("epoch 2 committee");
@@ -1238,6 +1253,11 @@ mod tests {
             epoch2.mpc_weight_reduction_allowed_delta(),
             new_delta as u16,
             "epoch {target_epoch} committee should have updated allowed_delta"
+        );
+        assert_eq!(
+            epoch2.mpc_max_faulty_in_basis_points(),
+            new_max_faulty as u16,
+            "epoch {target_epoch} committee should have updated max_faulty_basis_points"
         );
 
         Ok(())

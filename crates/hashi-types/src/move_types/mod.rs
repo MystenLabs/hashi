@@ -163,6 +163,8 @@ pub struct Committee {
     pub mpc_threshold_in_basis_points: u64,
     /// Allowed delta for weight reduction
     pub mpc_weight_reduction_allowed_delta: u64,
+    /// MPC max faulty parties in basis points
+    pub mpc_max_faulty_in_basis_points: u64,
 }
 
 /// Rust version of the Move hashi::config::Config type.
@@ -1150,6 +1152,7 @@ impl From<&crate::committee::Committee> for Committee {
             total_weight: c.total_weight(),
             mpc_threshold_in_basis_points: c.mpc_threshold_in_basis_points() as u64,
             mpc_weight_reduction_allowed_delta: c.mpc_weight_reduction_allowed_delta() as u64,
+            mpc_max_faulty_in_basis_points: c.mpc_max_faulty_in_basis_points() as u64,
         }
     }
 }
@@ -1170,6 +1173,8 @@ impl TryFrom<Committee> for crate::committee::Committee {
                 .expect("mpc_threshold_in_basis_points exceeds u16::MAX"),
             u16::try_from(c.mpc_weight_reduction_allowed_delta)
                 .expect("mpc_weight_reduction_allowed_delta exceeds u16::MAX"),
+            u16::try_from(c.mpc_max_faulty_in_basis_points)
+                .expect("mpc_max_faulty_in_basis_points exceeds u16::MAX"),
         ))
     }
 }
