@@ -43,6 +43,18 @@ pub type BoxedChannel = BoxCloneService<http::Request<Body>, http::Response<Body
 
 const DEFAULT_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 
+pub const MPC_PROTOCOL_METADATA_KEY: &str = "mpc-protocol";
+
+fn with_mpc_metadata<T>(message: T) -> tonic::Request<T> {
+    let mut req = tonic::Request::new(message);
+    if let Ok(label) = crate::mpc::rpc::MPC_PROTOCOL_LABEL.try_with(|l| *l)
+        && let Ok(value) = label.parse()
+    {
+        req.metadata_mut().insert(MPC_PROTOCOL_METADATA_KEY, value);
+    }
+    req
+}
+
 #[derive(Clone)]
 pub struct Client {
     uri: http::Uri,
@@ -174,7 +186,7 @@ impl Client {
         epoch: u64,
         request: &SendMessagesRequest,
     ) -> Result<SendMessagesResponse> {
-        let proto_request = request.to_proto(epoch);
+        let proto_request = with_mpc_metadata(request.to_proto(epoch));
         let response = self
             .mpc_service_client()
             .send_messages(proto_request)
@@ -187,7 +199,7 @@ impl Client {
         &self,
         request: &RetrieveMessagesRequest,
     ) -> Result<RetrieveMessagesResponse> {
-        let proto_request = request.to_proto();
+        let proto_request = with_mpc_metadata(request.to_proto());
         let response = self
             .mpc_service_client()
             .retrieve_messages(proto_request)
@@ -197,7 +209,7 @@ impl Client {
     }
 
     pub async fn complain(&self, request: &ComplainRequest) -> Result<ComplaintResponses> {
-        let proto_request = request.to_proto();
+        let proto_request = with_mpc_metadata(request.to_proto());
         let response = self.mpc_service_client().complain(proto_request).await?;
         ComplaintResponses::try_from(response.get_ref())
             .map_err(|e| tonic::Status::internal(e.to_string()))
@@ -207,7 +219,7 @@ impl Client {
         &self,
         request: &GetPublicMpcOutputRequest,
     ) -> Result<GetPublicMpcOutputResponse> {
-        let proto_request = request.to_proto();
+        let proto_request = with_mpc_metadata(request.to_proto());
         let response = self
             .mpc_service_client()
             .get_public_mpc_output(proto_request)
@@ -221,7 +233,7 @@ impl Client {
         epoch: u64,
         request: &GetPartialSignaturesRequest,
     ) -> Result<GetPartialSignaturesResponse> {
-        let proto_request = request.to_proto(epoch);
+        let proto_request = with_mpc_metadata(request.to_proto(epoch));
         let response = self
             .mpc_service_client()
             .get_partial_signatures(proto_request)

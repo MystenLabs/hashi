@@ -12,6 +12,7 @@ use crate::Hashi;
 mod client;
 pub use client::BoxedChannel;
 pub use client::Client;
+pub use client::MPC_PROTOCOL_METADATA_KEY;
 
 pub mod bridge_service;
 pub mod metrics_layer;

@@ -25,6 +25,12 @@ pub struct Metrics {
     pub(crate) bytes_sent_total: IntCounterVec,
     pub(crate) bytes_received_total: IntCounterVec,
 
+    // Per-MPC-protocol body-size metrics.
+    pub(crate) mpc_request_size_bytes: HistogramVec,
+    pub(crate) mpc_response_size_bytes: HistogramVec,
+    pub(crate) mpc_bytes_sent_total: IntCounterVec,
+    pub(crate) mpc_bytes_received_total: IntCounterVec,
+
     pub screener_enabled: IntGauge,
 
     // Kyoto (Bitcoin light client) metrics
@@ -195,6 +201,36 @@ impl Metrics {
                 "hashi_bytes_received_total",
                 "Total bytes received by this node over HTTP/gRPC bodies, per route",
                 &["path", "role"],
+                registry,
+            )
+            .unwrap(),
+            mpc_request_size_bytes: register_histogram_vec_with_registry!(
+                "hashi_mpc_request_size_bytes",
+                "Size of MPC RPC request bodies in bytes, labeled by MPC protocol",
+                &["protocol"],
+                MESSAGE_SIZE_BYTES_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_response_size_bytes: register_histogram_vec_with_registry!(
+                "hashi_mpc_response_size_bytes",
+                "Size of MPC RPC response bodies in bytes, labeled by MPC protocol",
+                &["protocol"],
+                MESSAGE_SIZE_BYTES_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_bytes_sent_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_bytes_sent_total",
+                "Total bytes sent in MPC RPC bodies, labeled by MPC protocol",
+                &["protocol"],
+                registry,
+            )
+            .unwrap(),
+            mpc_bytes_received_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_bytes_received_total",
+                "Total bytes received in MPC RPC bodies, labeled by MPC protocol",
+                &["protocol"],
                 registry,
             )
             .unwrap(),

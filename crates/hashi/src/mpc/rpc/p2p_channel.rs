@@ -22,6 +22,11 @@ use crate::onchain::OnchainState;
 use async_trait::async_trait;
 use sui_sdk_types::Address;
 
+tokio::task_local! {
+    /// MPC protocol label for outbound requests
+    pub static MPC_PROTOCOL_LABEL: &'static str;
+}
+
 pub struct RpcP2PChannel {
     onchain_state: OnchainState,
     epoch: u64,
@@ -61,9 +66,12 @@ impl P2PChannel for RpcP2PChannel {
         recipient: &Address,
         request: &SendMessagesRequest,
     ) -> ChannelResult<SendMessagesResponse> {
-        let _ = self.protocol_label;
-        self.get_client(recipient)?
-            .send_messages(self.epoch, request)
+        let client = self.get_client(recipient)?;
+        MPC_PROTOCOL_LABEL
+            .scope(
+                self.protocol_label,
+                client.send_messages(self.epoch, request),
+            )
             .await
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
@@ -73,8 +81,9 @@ impl P2PChannel for RpcP2PChannel {
         party: &Address,
         request: &RetrieveMessagesRequest,
     ) -> ChannelResult<RetrieveMessagesResponse> {
-        self.get_client(party)?
-            .retrieve_messages(request)
+        let client = self.get_client(party)?;
+        MPC_PROTOCOL_LABEL
+            .scope(self.protocol_label, client.retrieve_messages(request))
             .await
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
@@ -84,8 +93,9 @@ impl P2PChannel for RpcP2PChannel {
         party: &Address,
         request: &ComplainRequest,
     ) -> ChannelResult<ComplaintResponses> {
-        self.get_client(party)?
-            .complain(request)
+        let client = self.get_client(party)?;
+        MPC_PROTOCOL_LABEL
+            .scope(self.protocol_label, client.complain(request))
             .await
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
@@ -95,8 +105,9 @@ impl P2PChannel for RpcP2PChannel {
         party: &Address,
         request: &GetPublicMpcOutputRequest,
     ) -> ChannelResult<GetPublicMpcOutputResponse> {
-        self.get_client(party)?
-            .get_public_mpc_output(request)
+        let client = self.get_client(party)?;
+        MPC_PROTOCOL_LABEL
+            .scope(self.protocol_label, client.get_public_mpc_output(request))
             .await
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
@@ -106,8 +117,12 @@ impl P2PChannel for RpcP2PChannel {
         party: &Address,
         request: &GetPartialSignaturesRequest,
     ) -> ChannelResult<GetPartialSignaturesResponse> {
-        self.get_client(party)?
-            .get_partial_signatures(self.epoch, request)
+        let client = self.get_client(party)?;
+        MPC_PROTOCOL_LABEL
+            .scope(
+                self.protocol_label,
+                client.get_partial_signatures(self.epoch, request),
+            )
             .await
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }

@@ -88,6 +88,8 @@ struct SizeTally {
     path: Cow<'static, str>,
     role: Role,
     direction: Direction,
+    /// MPC protocol label
+    mpc_protocol: Option<&'static str>,
     bytes: u64,
 }
 
@@ -97,12 +99,14 @@ impl SizeTally {
         path: Cow<'static, str>,
         role: Role,
         direction: Direction,
+        mpc_protocol: Option<&'static str>,
     ) -> Self {
         Self {
             metrics,
             path,
             role,
             direction,
+            mpc_protocol,
             bytes: 0,
         }
     }
@@ -120,13 +124,14 @@ impl Drop for SizeTally {
         // tracking the request or the response body:
         //   client + outbound = request sent; server + inbound = request received
         //   client + inbound  = response received; server + outbound = response sent
-        let size_histogram = match (self.role, self.direction) {
-            (Role::Client, Direction::Outbound) | (Role::Server, Direction::Inbound) => {
-                &self.metrics.request_size_bytes
-            }
-            (Role::Client, Direction::Inbound) | (Role::Server, Direction::Outbound) => {
-                &self.metrics.response_size_bytes
-            }
+        let is_request = matches!(
+            (self.role, self.direction),
+            (Role::Client, Direction::Outbound) | (Role::Server, Direction::Inbound)
+        );
+        let size_histogram = if is_request {
+            &self.metrics.request_size_bytes
+        } else {
+            &self.metrics.response_size_bytes
         };
         size_histogram
             .with_label_values(labels)
@@ -137,6 +142,23 @@ impl Drop for SizeTally {
             Direction::Inbound => &self.metrics.bytes_received_total,
         };
         bytes_counter.with_label_values(labels).inc_by(self.bytes);
+
+        if let Some(protocol) = self.mpc_protocol {
+            let mpc_labels = &[protocol];
+            let mpc_size_histogram = if is_request {
+                &self.metrics.mpc_request_size_bytes
+            } else {
+                &self.metrics.mpc_response_size_bytes
+            };
+            mpc_size_histogram
+                .with_label_values(mpc_labels)
+                .observe(self.bytes as f64);
+            let mpc_counter = match self.direction {
+                Direction::Outbound => &self.metrics.mpc_bytes_sent_total,
+                Direction::Inbound => &self.metrics.mpc_bytes_received_total,
+            };
+            mpc_counter.with_label_values(mpc_labels).inc_by(self.bytes);
+        }
     }
 }
 
@@ -175,6 +197,7 @@ impl callback::MakeCallbackHandler for RpcMetricsMakeCallbackHandler {
         let metrics = self.metrics.clone();
         let label = self.role.label();
         let path = extract_path(request, self.role);
+        let mpc_protocol = extract_mpc_protocol(request);
 
         metrics
             .inflight_requests
@@ -187,6 +210,7 @@ impl callback::MakeCallbackHandler for RpcMetricsMakeCallbackHandler {
                 path.clone(),
                 self.role,
                 self.role.request_direction(),
+                mpc_protocol,
             ),
         };
         let response_handler = ResponseHandler {
@@ -195,6 +219,7 @@ impl callback::MakeCallbackHandler for RpcMetricsMakeCallbackHandler {
                 path.clone(),
                 self.role,
                 self.role.response_direction(),
+                mpc_protocol,
             ),
             metrics,
             role: self.role,
@@ -203,6 +228,21 @@ impl callback::MakeCallbackHandler for RpcMetricsMakeCallbackHandler {
             counted_response: false,
         };
         (request_handler, response_handler)
+    }
+}
+
+fn extract_mpc_protocol(request: &request::Parts) -> Option<&'static str> {
+    let value = request
+        .headers
+        .get(crate::grpc::MPC_PROTOCOL_METADATA_KEY)?
+        .to_str()
+        .ok()?;
+    match value {
+        crate::metrics::MPC_LABEL_DKG => Some(crate::metrics::MPC_LABEL_DKG),
+        crate::metrics::MPC_LABEL_KEY_ROTATION => Some(crate::metrics::MPC_LABEL_KEY_ROTATION),
+        crate::metrics::MPC_LABEL_NONCE_GEN => Some(crate::metrics::MPC_LABEL_NONCE_GEN),
+        crate::metrics::MPC_LABEL_SIGNING => Some(crate::metrics::MPC_LABEL_SIGNING),
+        _ => None,
     }
 }
 
