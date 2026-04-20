@@ -23,6 +23,10 @@ pub const BITCOIN_REGTEST_CHAIN_ID: &str =
 /// `initial_pool_size / PRESIG_REFILL_DIVISOR`.
 pub const PRESIG_REFILL_DIVISOR: usize = 2;
 
+pub fn is_production_sui_chain(chain_id: &str) -> bool {
+    chain_id == SUI_MAINNET_CHAIN_ID || chain_id == SUI_TESTNET_CHAIN_ID
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

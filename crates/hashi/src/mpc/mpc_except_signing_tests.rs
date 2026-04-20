@@ -4982,6 +4982,7 @@ impl RotationTestSetup {
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_WEIGHT_DIVISOR,
+            TEST_CHAIN_ID,
         )
         .unwrap();
         let mut result = Vec::new();
@@ -5009,6 +5010,7 @@ impl RotationTestSetup {
                 TEST_MAX_FAULTY_IN_BASIS_POINTS,
                 TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
                 TEST_WEIGHT_DIVISOR,
+                TEST_CHAIN_ID,
             )
             .unwrap();
             manager.previous_nodes = Some(nodes);
