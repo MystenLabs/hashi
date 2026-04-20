@@ -120,7 +120,7 @@ pub fn save(
     fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create output directory {}", output_dir.display()))?;
 
-    let manifest = backup::build_backup_manifest(&files, db_path)?;
+    let manifest = backup::build_backup_manifest(&files, db_path, &snapshot_path)?;
 
     info!(
         file_count = files.len(),

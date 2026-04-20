@@ -67,6 +67,7 @@ fn create_dir_strict(path: &Path) -> Result<()> {
 #[derive(serde::Deserialize, serde::Serialize)]
 pub struct BackupManifest {
     pub paths: Vec<BackupManifestEntry>,
+    pub db_archive_entries: Vec<PathBuf>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -75,7 +76,11 @@ pub struct BackupManifestEntry {
     pub original_path: PathBuf,
 }
 
-pub fn build_backup_manifest(files: &[PathBuf], db_original_path: &Path) -> Result<BackupManifest> {
+pub fn build_backup_manifest(
+    files: &[PathBuf],
+    db_original_path: &Path,
+    db_snapshot_dir: &Path,
+) -> Result<BackupManifest> {
     let mut archive_names = HashSet::new();
     // Reserve the db snapshot prefix so a user file with the same basename
     // gets disambiguated instead of silently colliding with the db entry.
@@ -131,7 +136,40 @@ pub fn build_backup_manifest(files: &[PathBuf], db_original_path: &Path) -> Resu
 
     Ok(BackupManifest {
         paths: manifest_paths,
+        db_archive_entries: collect_db_archive_entries(
+            db_snapshot_dir,
+            Path::new(DB_SNAPSHOT_TAR_PREFIX),
+        )?,
     })
+}
+
+fn collect_db_archive_entries(src_dir: &Path, tar_prefix: &Path) -> Result<Vec<PathBuf>> {
+    let mut archive_entries = Vec::new();
+
+    for entry in walkdir::WalkDir::new(src_dir).min_depth(1) {
+        let entry = entry.with_context(|| {
+            format!(
+                "Failed to walk database snapshot directory {}",
+                src_dir.display()
+            )
+        })?;
+
+        if entry.file_type().is_symlink() {
+            anyhow::bail!(
+                "Refusing to archive symlink inside database snapshot directory: {}",
+                entry.path().display()
+            );
+        }
+
+        let relative = entry
+            .path()
+            .strip_prefix(src_dir)
+            .expect("walkdir entry is always under src_dir");
+        archive_entries.push(tar_prefix.join(relative));
+    }
+
+    archive_entries.sort();
+    Ok(archive_entries)
 }
 
 pub fn encrypt_files_to_age_archive(
@@ -140,8 +178,7 @@ pub fn encrypt_files_to_age_archive(
     recipient: &dyn age::Recipient,
     output_path: &Path,
 ) -> Result<()> {
-    let output = File::create(output_path)
-        .with_context(|| format!("Failed to create {}", output_path.display()))?;
+    let output = create_file_strict(output_path)?;
     let encryptor = Encryptor::with_recipients(std::iter::once(recipient))?;
     let mut encrypted = encryptor.wrap_output(output)?;
     {
@@ -336,6 +373,9 @@ pub fn restore_backup_entries<R: Read>(
         .filter(|entry| entry.archive_name != db_prefix)
         .map(|entry| entry.archive_name.clone())
         .collect();
+    let expected_db_entries: HashSet<PathBuf> =
+        manifest.db_archive_entries.iter().cloned().collect();
+    let mut restored_db_entries = HashSet::new();
     let mut restored_count: usize = 0;
 
     for entry in entries {
@@ -343,6 +383,19 @@ pub fn restore_backup_entries<R: Read>(
         let archive_path = entry.path()?.into_owned();
 
         if archive_path.starts_with(db_prefix) {
+            validate_db_archive_path(&archive_path)?;
+            if !expected_db_entries.contains(&archive_path) {
+                anyhow::bail!(
+                    "Backup archive contains unexpected database entry: {}",
+                    archive_path.display()
+                );
+            }
+            if !restored_db_entries.insert(archive_path.clone()) {
+                anyhow::bail!(
+                    "Backup archive contains duplicate database entry: {}",
+                    archive_path.display()
+                );
+            }
             restore_db_entry(&mut entry, &archive_path, output_dir)?;
         } else {
             restore_config_entry(&mut entry, &archive_path, output_dir, &expected_files)?;
@@ -358,6 +411,22 @@ pub fn restore_backup_entries<R: Read>(
         );
     }
 
+    if restored_db_entries != expected_db_entries {
+        let mut missing_db_entries: Vec<_> = expected_db_entries
+            .difference(&restored_db_entries)
+            .cloned()
+            .collect();
+        missing_db_entries.sort();
+        anyhow::bail!(
+            "Backup archive is missing database entries: {}",
+            missing_db_entries
+                .into_iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
     Ok(())
 }
 
@@ -365,6 +434,31 @@ pub fn restore_backup_entries<R: Read>(
 /// `output_dir`, preserving the relative directory structure. Directory
 /// entries are created (recursively, since the tar may stream them in any
 /// order); file entries are written with mode 0o600.
+fn validate_db_archive_path(archive_path: &Path) -> Result<()> {
+    let mut components = archive_path.components();
+    if !matches!(components.next(), Some(Component::Normal(prefix)) if prefix == DB_SNAPSHOT_TAR_PREFIX)
+    {
+        anyhow::bail!(
+            "Database entry must live under {}: {}",
+            DB_SNAPSHOT_TAR_PREFIX,
+            archive_path.display()
+        );
+    }
+
+    if archive_path
+        .components()
+        .skip(1)
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        anyhow::bail!(
+            "Database entry must not contain `..`, `.`, or absolute path components: {}",
+            archive_path.display()
+        );
+    }
+
+    Ok(())
+}
+
 fn restore_db_entry<R: Read>(
     entry: &mut tar::Entry<'_, R>,
     archive_path: &Path,
@@ -514,6 +608,9 @@ pub fn copy_restored_files_to_original_paths(
 /// staging directory and renames it into place on success. The rename is
 /// atomic on a single filesystem, so a crash mid-copy leaves the staging
 /// directory behind without ever creating a half-populated DB at `dest`.
+/// The staging directory is created with `tempdir_in(dest.parent())`, so it
+/// lives on the same filesystem as `dest`; that same-filesystem placement is
+/// required because `rename` does not work across mount points.
 ///
 /// Fails if `dest` already exists.
 pub fn copy_db_snapshot_to_original_path(
@@ -573,9 +670,12 @@ pub fn copy_db_snapshot_to_original_path(
         )
     })?;
 
-    // Disarm the TempDir guard before rename so it doesn't try to delete the
-    // path we just moved away.
+    // Convert the TempDir into an owned path before rename so we can do
+    // explicit best-effort cleanup ourselves if the rename fails.
     let staging_path = staging.keep();
+    // `staging_path` was created as a sibling of `dest`, so this rename stays
+    // on one filesystem rather than crossing mounts; `fs::rename` does not
+    // work across mount points.
     fs::rename(&staging_path, dest).map_err(|e| {
         // Best-effort cleanup of the staging directory if the rename failed,
         // since `into_path` consumed the auto-deleting guard.
@@ -648,6 +748,49 @@ fn copy_dir_recursive_strict(src: &Path, dest: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+
+    fn create_empty_db_snapshot_dir() -> tempfile::TempDir {
+        let parent = tempfile::tempdir().unwrap();
+        fs::create_dir(parent.path().join("db")).unwrap();
+        parent
+    }
+
+    fn db_only_manifest(db_archive_entries: Vec<PathBuf>) -> BackupManifest {
+        BackupManifest {
+            paths: vec![BackupManifestEntry {
+                archive_name: PathBuf::from(DB_SNAPSHOT_TAR_PREFIX),
+                original_path: PathBuf::from("/var/lib/hashi/db"),
+            }],
+            db_archive_entries,
+        }
+    }
+
+    fn append_regular_file<W: std::io::Write>(
+        archive: &mut tar::Builder<W>,
+        path: &str,
+        contents: &[u8],
+    ) {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_mode(0o600);
+        header.set_size(contents.len() as u64);
+        header.set_cksum();
+        archive.append_data(&mut header, path, contents).unwrap();
+    }
+
+    fn build_archive_bytes(manifest: &BackupManifest, db_files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut tar_bytes = Vec::new();
+        {
+            let mut archive = tar::Builder::new(&mut tar_bytes);
+            append_backup_manifest(&mut archive, manifest).unwrap();
+            for (path, contents) in db_files {
+                append_regular_file(&mut archive, path, contents);
+            }
+            archive.finish().unwrap();
+        }
+        tar_bytes
+    }
 
     #[test]
     fn manifest_disambiguates_user_file_colliding_with_db_prefix() {
@@ -655,10 +798,13 @@ mod tests {
         // must be renamed so it doesn't collide with the db snapshot entry.
         let files = vec![PathBuf::from("/etc/hashi/hashi-db-snapshot")];
         let db_path = PathBuf::from("/var/lib/hashi/db");
+        let snapshot_parent = create_empty_db_snapshot_dir();
 
-        let manifest = build_backup_manifest(&files, &db_path).unwrap();
+        let manifest =
+            build_backup_manifest(&files, &db_path, &snapshot_parent.path().join("db")).unwrap();
 
         assert_eq!(manifest.paths.len(), 2);
+        assert!(manifest.db_archive_entries.is_empty());
 
         // The user's file should have been renamed away from the reserved prefix.
         let user_entry = &manifest.paths[0];
@@ -698,10 +844,13 @@ mod tests {
             PathBuf::from("/etc/hashi/hashi-db-snapshot-2"),
         ];
         let db_path = PathBuf::from("/var/lib/hashi/db");
+        let snapshot_parent = create_empty_db_snapshot_dir();
 
-        let manifest = build_backup_manifest(&files, &db_path).unwrap();
+        let manifest =
+            build_backup_manifest(&files, &db_path, &snapshot_parent.path().join("db")).unwrap();
 
         assert_eq!(manifest.paths.len(), 3);
+        assert!(manifest.db_archive_entries.is_empty());
         assert_eq!(
             manifest.paths[0].archive_name,
             PathBuf::from("hashi-db-snapshot-2")
@@ -713,6 +862,90 @@ mod tests {
         assert_eq!(
             manifest.paths[2].archive_name,
             PathBuf::from(DB_SNAPSHOT_TAR_PREFIX)
+        );
+    }
+
+    #[test]
+    fn manifest_records_db_archive_entries() {
+        let files = Vec::new();
+        let db_path = PathBuf::from("/var/lib/hashi/db");
+        let snapshot_parent = tempfile::tempdir().unwrap();
+        let snapshot_dir = snapshot_parent.path().join("db");
+        fs::create_dir(&snapshot_dir).unwrap();
+        fs::create_dir(snapshot_dir.join("partitions")).unwrap();
+        fs::write(snapshot_dir.join("CURRENT"), b"manifest").unwrap();
+        fs::write(snapshot_dir.join("partitions").join("0001.sst"), b"sst").unwrap();
+
+        let manifest = build_backup_manifest(&files, &db_path, &snapshot_dir).unwrap();
+
+        assert_eq!(
+            manifest.db_archive_entries,
+            vec![
+                PathBuf::from("hashi-db-snapshot/CURRENT"),
+                PathBuf::from("hashi-db-snapshot/partitions"),
+                PathBuf::from("hashi-db-snapshot/partitions/0001.sst"),
+            ]
+        );
+    }
+
+    #[test]
+    fn restore_backup_entries_rejects_missing_db_entries() {
+        let manifest = db_only_manifest(vec![PathBuf::from("hashi-db-snapshot/CURRENT")]);
+        let tar_bytes = build_archive_bytes(&manifest, &[]);
+        let mut archive = tar::Archive::new(Cursor::new(tar_bytes));
+        let mut entries = archive.entries().unwrap();
+        let manifest_entry = entries.next().unwrap().unwrap();
+        let (parsed_manifest, _) = read_backup_manifest(manifest_entry).unwrap();
+        let output_dir = tempfile::tempdir().unwrap();
+
+        let err = restore_backup_entries(entries, output_dir.path(), &parsed_manifest).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Backup archive is missing database entries: hashi-db-snapshot/CURRENT")
+        );
+    }
+
+    #[test]
+    fn restore_backup_entries_rejects_unexpected_db_entries() {
+        let manifest = db_only_manifest(vec![PathBuf::from("hashi-db-snapshot/CURRENT")]);
+        let tar_bytes = build_archive_bytes(
+            &manifest,
+            &[
+                ("hashi-db-snapshot/CURRENT", b"ok"),
+                ("hashi-db-snapshot/EXTRA", b"nope"),
+            ],
+        );
+        let mut archive = tar::Archive::new(Cursor::new(tar_bytes));
+        let mut entries = archive.entries().unwrap();
+        let manifest_entry = entries.next().unwrap().unwrap();
+        let (parsed_manifest, _) = read_backup_manifest(manifest_entry).unwrap();
+        let output_dir = tempfile::tempdir().unwrap();
+
+        let err = restore_backup_entries(entries, output_dir.path(), &parsed_manifest).unwrap_err();
+
+        assert!(err.to_string().contains(
+            "Backup archive contains unexpected database entry: hashi-db-snapshot/EXTRA"
+        ));
+    }
+
+    #[test]
+    fn restore_backup_entries_rejects_db_parent_dir_traversal() {
+        let err = validate_db_archive_path(Path::new("hashi-db-snapshot/../escape")).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Database entry must not contain `..`, `.`, or absolute path components")
+        );
+    }
+
+    #[test]
+    fn restore_backup_entries_rejects_absolute_db_path() {
+        let err = validate_db_archive_path(Path::new("/hashi-db-snapshot/escape")).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Database entry must live under hashi-db-snapshot")
         );
     }
 }
