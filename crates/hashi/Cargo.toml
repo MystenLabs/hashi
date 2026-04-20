@@ -34,6 +34,7 @@ tonic-reflection.workspace = true
 axum.workspace = true
 tower.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 prometheus.workspace = true
 tracing.workspace = true
 

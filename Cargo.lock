@@ -2861,6 +2861,7 @@ dependencies = [
  "test-strategy",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "toml 0.9.12+spec-1.1.0",
  "tonic",
  "tonic-health",
@@ -6152,6 +6153,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
