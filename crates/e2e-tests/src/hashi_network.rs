@@ -101,6 +101,13 @@ impl HashiNodeHandle {
         hashi::db::Database::open(db_path)
     }
 
+    /// Read-only access to the node's underlying `HashiConfig`. Useful for
+    /// tests that need to serialise the config to disk (e.g. backup/restore
+    /// round-trip tests) without forcing every caller to build their own.
+    pub fn config(&self) -> &HashiConfig {
+        &self.config
+    }
+
     pub fn validator_address(&self) -> sui_sdk_types::Address {
         self.config
             .validator_address()

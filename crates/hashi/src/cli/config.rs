@@ -98,6 +98,10 @@ pub struct CliConfig {
     /// Optional: Gas coin object ID to use for transactions
     pub gas_coin: Option<Address>,
 
+    /// Path to the validator node config file (same as used by `hashi server`).
+    /// Required for backup commands that need access to the database.
+    pub node_config_path: Option<PathBuf>,
+
     /// Optional Bitcoin configuration for deposit/withdrawal commands
     #[serde(default)]
     pub bitcoin: Option<BitcoinConfig>,
@@ -105,6 +109,52 @@ pub struct CliConfig {
 
 fn default_sui_rpc_url() -> String {
     "https://fullnode.mainnet.sui.io:443".to_string()
+}
+
+/// Return the set of external files referenced by path-style node config
+/// fields.
+///
+/// Both `tls_private_key` and `operator_private_key` are `Option<String>`
+/// interpreted as path-first, inline-PEM-fallback by the node. We classify
+/// the value here so the backup either includes the referenced file or, when
+/// the value is inline PEM, relies on the node config file itself to capture
+/// the key material. A path-shaped value that doesn't resolve to a file is
+/// an error: it would mean the node config points at a missing key, and
+/// silently skipping it would produce a backup that can't actually restore
+/// the node.
+fn node_config_referenced_files(node_config: &crate::config::Config) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+
+    for (field_name, raw) in [
+        ("tls_private_key", node_config.tls_private_key.as_deref()),
+        (
+            "operator_private_key",
+            node_config.operator_private_key.as_deref(),
+        ),
+    ] {
+        let Some(raw) = raw else { continue };
+
+        if is_inline_pem(raw) {
+            continue;
+        }
+
+        let candidate = Path::new(raw);
+        if !candidate.is_file() {
+            anyhow::bail!(
+                "node config field `{field_name}` is set to {raw:?} which is neither inline PEM nor an existing file. \
+                 Fix the value or remove it before running backup."
+            );
+        }
+        paths.push(candidate.to_path_buf());
+    }
+
+    Ok(paths)
+}
+
+/// Heuristic: PEM blobs start with the armor header `-----BEGIN`, optionally
+/// after some leading whitespace. A real path on any sane filesystem won't.
+fn is_inline_pem(value: &str) -> bool {
+    value.trim_start().starts_with("-----BEGIN")
 }
 
 /// Default path for the CLI config file written by `hashi-localnet start`.
@@ -120,6 +170,7 @@ impl Default for CliConfig {
             keypair_path: None,
             backup_age_pubkey: None,
             gas_coin: None,
+            node_config_path: None,
             bitcoin: None,
         }
     }
@@ -306,12 +357,41 @@ sui_rpc_url = "https://fullnode.mainnet.sui.io:443"
     }
 
     /// All file paths which must be backed up to enable full node recovery
-    pub fn backup_file_paths(&self) -> Vec<PathBuf> {
-        let mut paths = Vec::new();
+    /// (other than the db, which is backed up separately).
+    ///
+    /// Requires both `loaded_from_path` (the CLI config in use) and
+    /// `node_config_path` to be set — without them the resulting archive
+    /// can't fully restore the node, and any caller (today or future) should
+    /// fail loudly rather than ship a half-complete backup.
+    ///
+    /// The node config's `tls_private_key` and `operator_private_key` fields
+    /// are path-or-inline-PEM strings. When they resolve to an existing file,
+    /// that file is added here so the referenced key material isn't left
+    /// behind; inline PEM values are already captured by backing up the node
+    /// config file itself.
+    pub fn backup_file_paths(&self) -> Result<Vec<PathBuf>> {
+        let cli_config_path = self.loaded_from_path.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "No config file is currently in use. Pass --config with a config file path before running backup."
+            )
+        })?;
+        let node_config_path = self.node_config_path.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "node_config_path is not set in the CLI config file. Set it before running backup save."
+            )
+        })?;
 
-        if let Some(path) = &self.loaded_from_path {
-            paths.push(path.clone());
-        }
+        // Load the node config eagerly: a broken node config should fail the
+        // backup loudly rather than produce a subtly incomplete archive.
+        let node_config = crate::config::Config::load(node_config_path).with_context(|| {
+            format!(
+                "Failed to load node config from {} while collecting backup paths",
+                node_config_path.display()
+            )
+        })?;
+
+        let mut paths = vec![cli_config_path.clone(), node_config_path.clone()];
+        paths.extend(node_config_referenced_files(&node_config)?);
 
         if let Some(path) = &self.keypair_path {
             paths.push(path.clone());
@@ -323,7 +403,7 @@ sui_rpc_url = "https://fullnode.mainnet.sui.io:443"
             paths.push(path.clone());
         }
 
-        paths
+        Ok(paths)
     }
 
     /// Get a Bitcoin RPC client from the config, if configured.

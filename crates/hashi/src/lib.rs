@@ -9,6 +9,7 @@ use std::sync::RwLock;
 use anyhow::anyhow;
 use sui_futures::service::Service;
 
+pub mod backup;
 pub mod btc_monitor;
 pub mod cli;
 pub mod communication;
