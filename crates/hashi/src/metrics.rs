@@ -109,7 +109,7 @@ const MPC_SIGN_DURATION_BUCKETS: &[f64] = &[0.1, 0.25, 0.5, 1., 1.5, 2., 2.5, 3.
 
 pub const MPC_LABEL_DKG: &str = "dkg";
 pub const MPC_LABEL_KEY_ROTATION: &str = "key_rotation";
-pub const MPC_LABEL_NONCE_GEN: &str = "nonce_gen";
+pub const MPC_LABEL_NONCE_GENERATION: &str = "nonce_generation";
 pub const MPC_LABEL_SIGNING: &str = "signing";
 
 const MPC_PROTOCOL_DURATION_BUCKETS: &[f64] = &[0.1, 0.25, 0.5, 1., 2., 5., 10., 20., 30., 60.];

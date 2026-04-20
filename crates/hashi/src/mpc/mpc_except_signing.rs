@@ -8,7 +8,7 @@ use crate::communication::with_timeout_and_retry;
 use crate::constants::is_production_sui_chain;
 use crate::metrics::MPC_LABEL_DKG;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
-use crate::metrics::MPC_LABEL_NONCE_GEN;
+use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::metrics::Metrics;
 use crate::mpc::types::CertificateV1;
 pub use crate::mpc::types::ComplainRequest;
@@ -1303,7 +1303,7 @@ impl MpcManager {
     ) -> MpcResult<()> {
         let _timer = metrics
             .mpc_dealer_crypto_duration_seconds
-            .with_label_values(&[MPC_LABEL_NONCE_GEN])
+            .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
             .start_timer();
         let dealer_data = {
             let mgr = Arc::clone(mpc_manager);
@@ -1325,7 +1325,7 @@ impl MpcManager {
             .expect("first signature should always be valid");
         let _timer = metrics
             .mpc_p2p_broadcast_duration_seconds
-            .with_label_values(&[MPC_LABEL_NONCE_GEN])
+            .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
             .start_timer();
         let results = send_to_many(
             dealer_data.recipients.iter().copied(),
@@ -1354,7 +1354,7 @@ impl MpcManager {
             };
             let _timer = metrics
                 .mpc_cert_publish_duration_seconds
-                .with_label_values(&[MPC_LABEL_NONCE_GEN])
+                .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
                 .start_timer();
             with_timeout_and_retry(|| tob_channel.publish(cert.clone()))
                 .await
@@ -1385,7 +1385,7 @@ impl MpcManager {
             }
             let _timer = metrics
                 .mpc_tob_poll_duration_seconds
-                .with_label_values(&[MPC_LABEL_NONCE_GEN])
+                .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
                 .start_timer();
             let cert = tob_channel
                 .receive()
@@ -1406,7 +1406,7 @@ impl MpcManager {
             {
                 let _timer = metrics
                     .mpc_cert_verify_duration_seconds
-                    .with_label_values(&[MPC_LABEL_NONCE_GEN])
+                    .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
                     .start_timer();
                 let mgr = Arc::clone(mpc_manager);
                 let cert = nonce_cert.clone();
@@ -1436,7 +1436,7 @@ impl MpcManager {
                 );
                 let _timer = metrics
                     .mpc_message_retrieval_duration_seconds
-                    .with_label_values(&[MPC_LABEL_NONCE_GEN])
+                    .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
                     .start_timer();
                 Self::retrieve_nonce_message(
                     mpc_manager,
@@ -1465,7 +1465,7 @@ impl MpcManager {
             }
             let _timer = metrics
                 .mpc_message_process_duration_seconds
-                .with_label_values(&[MPC_LABEL_NONCE_GEN])
+                .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
                 .start_timer();
             let has_complaint = {
                 let mgr = Arc::clone(mpc_manager);
@@ -1493,7 +1493,7 @@ impl MpcManager {
                 );
                 let _timer = metrics
                     .mpc_complaint_recovery_duration_seconds
-                    .with_label_values(&[MPC_LABEL_NONCE_GEN])
+                    .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
                     .start_timer();
                 let (signers, epoch) = {
                     let mgr = mpc_manager.read().unwrap();

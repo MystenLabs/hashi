@@ -36,7 +36,7 @@ impl MpcService for HttpService {
         let label = match &internal_request.messages {
             types::Messages::Dkg(_) => crate::metrics::MPC_LABEL_DKG,
             types::Messages::Rotation(_) => crate::metrics::MPC_LABEL_KEY_ROTATION,
-            types::Messages::NonceGeneration(_) => crate::metrics::MPC_LABEL_NONCE_GEN,
+            types::Messages::NonceGeneration(_) => crate::metrics::MPC_LABEL_NONCE_GENERATION,
         };
         let mpc_manager = self.mpc_manager()?;
         let _timer = self

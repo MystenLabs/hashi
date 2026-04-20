@@ -22,7 +22,7 @@ use crate::communication::fetch_certificates;
 use crate::constants::PRESIG_REFILL_DIVISOR;
 use crate::metrics::MPC_LABEL_DKG;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
-use crate::metrics::MPC_LABEL_NONCE_GEN;
+use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::mpc::MpcManager;
 use crate::mpc::MpcOutput;
 use crate::mpc::SigningManager;
@@ -326,7 +326,8 @@ impl MpcService {
             .mpc_manager()
             .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized"))?;
         let signer = self.inner.config.operator_private_key()?;
-        let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), epoch, MPC_LABEL_NONCE_GEN);
+        let p2p_channel =
+            RpcP2PChannel::new(onchain_state.clone(), epoch, MPC_LABEL_NONCE_GENERATION);
         let mut tob_channel = SuiTobChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,
@@ -337,7 +338,7 @@ impl MpcService {
         let metrics = &self.inner.metrics;
         let _timer = metrics
             .mpc_total_duration_seconds
-            .with_label_values(&[MPC_LABEL_NONCE_GEN])
+            .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
             .start_timer();
         let nonce_result = MpcManager::run_nonce_generation(
             &mpc_manager,
@@ -359,7 +360,7 @@ impl MpcService {
         };
         let _timer = metrics
             .mpc_presig_conversion_duration_seconds
-            .with_label_values(&[MPC_LABEL_NONCE_GEN])
+            .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
             .start_timer();
         let presignatures = Presignatures::new(nonce_outputs, batch_size_per_weight, f)
             .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
@@ -532,7 +533,7 @@ impl MpcService {
         let p2p_channel = RpcP2PChannel::new(
             self.inner.onchain_state().clone(),
             epoch,
-            MPC_LABEL_NONCE_GEN,
+            MPC_LABEL_NONCE_GENERATION,
         );
         let outputs = MpcManager::reconstruct_presignatures_with_complaint_recovery(
             mpc_manager,

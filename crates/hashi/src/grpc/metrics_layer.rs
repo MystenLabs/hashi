@@ -240,7 +240,9 @@ fn extract_mpc_protocol(request: &request::Parts) -> Option<&'static str> {
     match value {
         crate::metrics::MPC_LABEL_DKG => Some(crate::metrics::MPC_LABEL_DKG),
         crate::metrics::MPC_LABEL_KEY_ROTATION => Some(crate::metrics::MPC_LABEL_KEY_ROTATION),
-        crate::metrics::MPC_LABEL_NONCE_GEN => Some(crate::metrics::MPC_LABEL_NONCE_GEN),
+        crate::metrics::MPC_LABEL_NONCE_GENERATION => {
+            Some(crate::metrics::MPC_LABEL_NONCE_GENERATION)
+        }
         crate::metrics::MPC_LABEL_SIGNING => Some(crate::metrics::MPC_LABEL_SIGNING),
         _ => None,
     }
