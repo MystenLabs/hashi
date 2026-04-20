@@ -9117,3 +9117,88 @@ async fn test_run_nonce_generation_with_complaint_recovery() {
         "Nonce complaint should be removed after recovery"
     );
 }
+
+#[test]
+fn test_handle_get_public_mpc_output_serves_current_and_previous() {
+    let rotation_setup = RotationTestSetup::new();
+    let (mut manager, output) = rotation_setup.create_receiver_with_completed_dkg(0);
+    let current_epoch = manager.mpc_config.epoch;
+    let previous_epoch = current_epoch - 1;
+
+    let expected_public = PublicMpcOutput::from_mpc_output(&output);
+
+    // Both slots empty: queries for N and N-1 get "not yet available".
+    for epoch in [current_epoch, previous_epoch] {
+        let err = manager
+            .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest { epoch })
+            .unwrap_err();
+        assert!(
+            matches!(err, MpcError::NotFound(ref msg) if msg.contains("not yet available")),
+            "epoch {epoch}: expected 'not yet available', got {err:?}",
+        );
+    }
+
+    // Query for an out-of-range epoch with both slots empty.
+    let err = manager
+        .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest {
+            epoch: current_epoch + 1,
+        })
+        .unwrap_err();
+    assert!(
+        matches!(err, MpcError::NotFound(ref msg) if msg.contains("no DKG output for epoch")),
+        "expected out-of-range NotFound, got {err:?}",
+    );
+    let err = manager
+        .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest {
+            epoch: previous_epoch - 1,
+        })
+        .unwrap_err();
+    assert!(
+        matches!(err, MpcError::NotFound(ref msg) if msg.contains("no DKG output for epoch")),
+        "expected out-of-range NotFound, got {err:?}",
+    );
+
+    // Set only previous_output: N-1 served, N still unavailable.
+    manager.previous_output = Some(output.clone());
+    let response = manager
+        .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest {
+            epoch: previous_epoch,
+        })
+        .unwrap();
+    assert_eq!(response.output, expected_public);
+    let err = manager
+        .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest {
+            epoch: current_epoch,
+        })
+        .unwrap_err();
+    assert!(
+        matches!(err, MpcError::NotFound(ref msg) if msg.contains("not yet available")),
+        "current epoch should still be unavailable, got {err:?}",
+    );
+
+    // Set current_output: N now served alongside N-1.
+    manager.current_output = Some(output.clone());
+    let response = manager
+        .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest {
+            epoch: current_epoch,
+        })
+        .unwrap();
+    assert_eq!(response.output, expected_public);
+    let response = manager
+        .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest {
+            epoch: previous_epoch,
+        })
+        .unwrap();
+    assert_eq!(response.output, expected_public);
+
+    // Out-of-range requests still rejected.
+    let err = manager
+        .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest {
+            epoch: current_epoch + 1,
+        })
+        .unwrap_err();
+    assert!(
+        matches!(err, MpcError::NotFound(ref msg) if msg.contains("no DKG output for epoch")),
+        "expected out-of-range NotFound, got {err:?}",
+    );
+}

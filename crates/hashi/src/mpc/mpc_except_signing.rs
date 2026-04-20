@@ -93,6 +93,7 @@ pub struct MpcManager {
     /// The epoch from which to read previous messages during reconstruction.
     pub source_epoch: u64,
     previous_output: Option<MpcOutput>,
+    current_output: Option<MpcOutput>,
     pub batch_size_per_weight: u16,
 
     // TODO: Rename these fields so it is clear at the call site which are
@@ -235,6 +236,7 @@ impl MpcManager {
             chain_id: chain_id.to_string(),
             source_epoch,
             previous_output: None,
+            current_output: None,
             batch_size_per_weight,
             dealer_nonce_outputs: BTreeMap::new(),
             test_corrupt_shares_for,
@@ -473,18 +475,17 @@ impl MpcManager {
         &self,
         request: &GetPublicMpcOutputRequest,
     ) -> MpcResult<GetPublicMpcOutputResponse> {
-        let previous_epoch = self
-            .mpc_config
-            .epoch
-            .checked_sub(1)
-            .ok_or_else(|| MpcError::InvalidConfig("no previous epoch exists".to_string()))?;
-        if request.epoch != previous_epoch {
+        let output = if request.epoch == self.mpc_config.epoch {
+            self.current_output.as_ref()
+        } else if Some(request.epoch) == self.mpc_config.epoch.checked_sub(1) {
+            self.previous_output.as_ref()
+        } else {
             return Err(MpcError::NotFound(format!(
                 "no DKG output for epoch {} (current epoch is {})",
                 request.epoch, self.mpc_config.epoch
             )));
-        }
-        let output = self.previous_output.as_ref().ok_or_else(|| {
+        };
+        let output = output.ok_or_else(|| {
             MpcError::NotFound(format!(
                 "DKG output for epoch {} not yet available",
                 request.epoch
@@ -522,7 +523,9 @@ impl MpcManager {
         {
             tracing::error!("Dealer phase failed: {}. Continuing as party only.", e);
         }
-        Self::run_dkg_as_party(mpc_manager, p2p_channel, tob_channel).await
+        let output = Self::run_dkg_as_party(mpc_manager, p2p_channel, tob_channel).await?;
+        mpc_manager.write().unwrap().current_output = Some(output.clone());
+        Ok(output)
     }
 
     pub async fn run_key_rotation(
@@ -601,13 +604,15 @@ impl MpcManager {
             );
         }
         tracing::info!("run_key_rotation: entering party phase");
-        Self::run_key_rotation_as_party(
+        let output = Self::run_key_rotation_as_party(
             mpc_manager,
             &previous,
             p2p_channel,
             ordered_broadcast_channel,
         )
-        .await
+        .await?;
+        mpc_manager.write().unwrap().current_output = Some(output.clone());
+        Ok(output)
     }
 
     pub async fn run_nonce_generation(
