@@ -58,7 +58,7 @@ impl HashiNodeHandle {
     ///
     /// After shutdown, there may be a brief delay before the database lock is released.
     async fn create_hashi_retry(config: &HashiConfig) -> Result<Arc<Hashi>> {
-        const MAX_ATTEMPTS: u32 = 3;
+        const MAX_ATTEMPTS: u32 = 10;
 
         for attempt in 1..=MAX_ATTEMPTS {
             match Self::create_hashi(config) {
