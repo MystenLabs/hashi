@@ -5,8 +5,7 @@ use crate::communication::OrderedBroadcastChannel;
 use crate::communication::P2PChannel;
 use crate::communication::send_to_many;
 use crate::communication::with_timeout_and_retry;
-use crate::constants::SUI_MAINNET_CHAIN_ID;
-use crate::constants::SUI_TESTNET_CHAIN_ID;
+use crate::constants::is_production_sui_chain;
 use crate::mpc::types::CertificateV1;
 pub use crate::mpc::types::ComplainRequest;
 pub use crate::mpc::types::ComplaintResponses;
@@ -130,7 +129,7 @@ impl MpcManager {
     ) -> MpcResult<Self> {
         if weight_divisor.is_some() {
             assert!(
-                chain_id != SUI_MAINNET_CHAIN_ID && chain_id != SUI_TESTNET_CHAIN_ID,
+                !is_production_sui_chain(chain_id),
                 "weight_divisor must not be set on mainnet or testnet"
             );
         }
@@ -149,6 +148,7 @@ impl MpcManager {
             max_faulty_in_basis_points,
             committee.mpc_weight_reduction_allowed_delta(),
             weight_divisor,
+            chain_id,
         )?;
         let total_weight = nodes.total_weight();
         let mpc_config = MpcConfig::new(epoch, nodes, threshold, max_faulty);
@@ -208,6 +208,7 @@ impl MpcManager {
                     max_faulty_in_basis_points,
                     prev_committee.mpc_weight_reduction_allowed_delta(),
                     weight_divisor,
+                    chain_id,
                 )?;
                 (Some(nodes), Some(threshold))
             }
@@ -3593,6 +3594,7 @@ fn build_reduced_nodes(
     max_faulty_in_basis_points: u16,
     weight_reduction_allowed_delta: u16,
     test_weight_divisor: u16,
+    chain_id: &str,
 ) -> MpcResult<(Nodes<EncryptionGroupElement>, u16, u16)> {
     let nodes_vec: Vec<Node<EncryptionGroupElement>> = committee
         .members()
@@ -3609,9 +3611,11 @@ fn build_reduced_nodes(
         (total_weight as u32 * threshold_in_basis_points as u32).div_ceil(MAX_BASIS_POINTS) as u16;
     let max_faulty =
         (total_weight as u32 * max_faulty_in_basis_points as u32).div_ceil(MAX_BASIS_POINTS) as u16;
-    // Cap at `total_weight` for unit tests with small weights (< 100).
-    // In production `total_weight` >> 100 so the cap never fires.
-    let lower_bound = MIN_TOTAL_WEIGHT_AFTER_REDUCTION.min(total_weight);
+    let lower_bound = if is_production_sui_chain(chain_id) {
+        MIN_TOTAL_WEIGHT_AFTER_REDUCTION
+    } else {
+        MIN_TOTAL_WEIGHT_AFTER_REDUCTION.min(total_weight)
+    };
     Nodes::new_reduced_with_f(
         nodes_vec,
         threshold,
