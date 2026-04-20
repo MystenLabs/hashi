@@ -1,13 +1,10 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
-
 use crate::communication::ChannelError;
 use crate::communication::ChannelResult;
 use crate::communication::P2PChannel;
 use crate::grpc::Client;
-use crate::metrics::Metrics;
 use crate::mpc::types::ComplainRequest;
 use crate::mpc::types::ComplaintResponses;
 use crate::mpc::types::GetPartialSignaturesRequest;
@@ -29,21 +26,14 @@ tokio::task_local! {
 pub struct RpcP2PChannel {
     onchain_state: OnchainState,
     epoch: u64,
-    _metrics: Arc<Metrics>,
     protocol_label: &'static str,
 }
 
 impl RpcP2PChannel {
-    pub fn new(
-        onchain_state: OnchainState,
-        epoch: u64,
-        protocol_label: &'static str,
-        metrics: Arc<Metrics>,
-    ) -> Self {
+    pub fn new(onchain_state: OnchainState, epoch: u64, protocol_label: &'static str) -> Self {
         Self {
             onchain_state,
             epoch,
-            _metrics: metrics,
             protocol_label,
         }
     }

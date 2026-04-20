@@ -695,7 +695,6 @@ mod tests {
                     onchain_state,
                     epoch,
                     hashi::metrics::MPC_LABEL_SIGNING,
-                    node.hashi().metrics.clone(),
                 );
                 let beacon = beacon_value;
                 let message = message.to_vec();

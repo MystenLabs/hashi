@@ -288,12 +288,7 @@ impl MpcService {
             .mpc_manager()
             .expect("MpcManager must be set before run_dkg");
         let signer = self.inner.config.operator_private_key()?;
-        let p2p_channel = RpcP2PChannel::new(
-            onchain_state.clone(),
-            target_epoch,
-            MPC_LABEL_DKG,
-            self.inner.metrics.clone(),
-        );
+        let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), target_epoch, MPC_LABEL_DKG);
         let mut tob_channel = SuiTobChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,
@@ -331,12 +326,7 @@ impl MpcService {
             .mpc_manager()
             .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized"))?;
         let signer = self.inner.config.operator_private_key()?;
-        let p2p_channel = RpcP2PChannel::new(
-            onchain_state.clone(),
-            epoch,
-            MPC_LABEL_NONCE_GEN,
-            self.inner.metrics.clone(),
-        );
+        let p2p_channel = RpcP2PChannel::new(onchain_state.clone(), epoch, MPC_LABEL_NONCE_GEN);
         let mut tob_channel = SuiTobChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,
@@ -543,7 +533,6 @@ impl MpcService {
             self.inner.onchain_state().clone(),
             epoch,
             MPC_LABEL_NONCE_GEN,
-            self.inner.metrics.clone(),
         );
         let outputs = MpcManager::reconstruct_presignatures_with_complaint_recovery(
             mpc_manager,
@@ -771,12 +760,8 @@ impl MpcService {
             previous_certs.len(),
         );
         let signer = self.inner.config.operator_private_key()?;
-        let p2p_channel = RpcP2PChannel::new(
-            onchain_state.clone(),
-            target_epoch,
-            MPC_LABEL_KEY_ROTATION,
-            self.inner.metrics.clone(),
-        );
+        let p2p_channel =
+            RpcP2PChannel::new(onchain_state.clone(), target_epoch, MPC_LABEL_KEY_ROTATION);
         let mut tob_channel = SuiTobChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,
