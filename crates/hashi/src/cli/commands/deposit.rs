@@ -272,22 +272,36 @@ async fn request_all(
     );
     println!("{}", "━".repeat(50).dimmed());
 
-    // Submit batch deposit request
+    // Submit batch deposit request, chunked to fit within Sui's 1024-command PTB cap.
+    // Each deposit emits 3 move calls, so 300 deposits ≈ 900 commands + shared-object setup.
+    const CHUNK_SIZE: usize = 300;
+
     let sui_client = sui_rpc::Client::new(&config.sui_rpc_url)?;
     let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(sui_client, signer, hashi_ids);
 
     let txid_address =
         sui_sdk_types::Address::new(bitcoin::hashes::Hash::to_byte_array(parsed_txid));
 
-    print_info("Submitting batch deposit request on Sui...");
+    let total = matching_utxos.len();
+    let mut all_request_ids: Vec<sui_sdk_types::Address> = Vec::with_capacity(total);
 
-    let request_ids = executor
-        .execute_create_deposit_requests_batch(txid_address, &matching_utxos, derivation_path)
-        .await?;
+    for (chunk_idx, chunk) in matching_utxos.chunks(CHUNK_SIZE).enumerate() {
+        print_info(&format!(
+            "Submitting batch {}/{} ({} deposits) on Sui...",
+            chunk_idx + 1,
+            total.div_ceil(CHUNK_SIZE),
+            chunk.len()
+        ));
+
+        let request_ids = executor
+            .execute_create_deposit_requests_batch(txid_address, chunk, derivation_path)
+            .await?;
+        all_request_ids.extend(request_ids);
+    }
 
     println!("\n{}", "Deposit requests created".bold().green());
     println!("{}", "━".repeat(50).dimmed());
-    for (i, request_id) in request_ids.iter().enumerate() {
+    for (i, request_id) in all_request_ids.iter().enumerate() {
         let (vout, amount) = matching_utxos[i];
         println!("  vout {}: {} sats -> request {}", vout, amount, request_id);
     }
