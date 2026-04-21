@@ -177,6 +177,14 @@ mod tests {
             .shutdown()
             .await;
 
+        // `shutdown()` can return slightly before the DB lock is observable as
+        // released. Reopen the DB here to reuse the existing retry logic and
+        // only proceed to `backup::save` once the lock is definitely gone.
+        {
+            let db = test_networks.hashi_network().nodes()[0].open_db()?;
+            drop(db);
+        }
+
         // Snapshot the config now, before any deletion below touches the
         // filesystem layout.
         let node0_config = test_networks.hashi_network().nodes()[0].config().clone();
