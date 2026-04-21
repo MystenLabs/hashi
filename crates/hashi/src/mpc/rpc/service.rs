@@ -81,7 +81,14 @@ impl MpcService for HttpService {
             )?;
             mgr.handle_retrieve_messages_request(&internal_request)
                 .map_err(|e| {
-                    tracing::warn!("retrieve_messages failed: {e}");
+                    match &e {
+                        MpcError::NotFound(_) => {
+                            tracing::debug!("retrieve_messages: {e}");
+                        }
+                        _ => {
+                            tracing::warn!("retrieve_messages failed: {e}");
+                        }
+                    }
                     mpc_error_to_status(e)
                 })?
         };
