@@ -16,16 +16,6 @@ use sui_http::middleware::callback::CallbackLayer;
 
 use crate::grpc::metrics_layer::RpcMetricsMakeCallbackHandler;
 use crate::metrics::Metrics;
-use crate::mpc::types::ComplainRequest;
-use crate::mpc::types::ComplaintResponses;
-use crate::mpc::types::GetPartialSignaturesRequest;
-use crate::mpc::types::GetPartialSignaturesResponse;
-use crate::mpc::types::GetPublicMpcOutputRequest;
-use crate::mpc::types::GetPublicMpcOutputResponse;
-use crate::mpc::types::RetrieveMessagesRequest;
-use crate::mpc::types::RetrieveMessagesResponse;
-use crate::mpc::types::SendMessagesRequest;
-use crate::mpc::types::SendMessagesResponse;
 use crate::tls::make_client_config_no_verification;
 use hashi_types::proto::GetReconfigCompletionSignatureRequest;
 use hashi_types::proto::GetServiceInfoRequest;
@@ -43,17 +33,10 @@ pub type BoxedChannel = BoxCloneService<http::Request<Body>, http::Response<Body
 
 const DEFAULT_MAX_DECODING_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 
-pub const MPC_PROTOCOL_METADATA_KEY: &str = "mpc-protocol";
-
-fn with_mpc_metadata<T>(message: T) -> tonic::Request<T> {
-    let mut req = tonic::Request::new(message);
-    if let Ok(label) = crate::mpc::rpc::MPC_PROTOCOL_LABEL.try_with(|l| *l)
-        && let Ok(value) = label.parse()
-    {
-        req.metadata_mut().insert(MPC_PROTOCOL_METADATA_KEY, value);
-    }
-    req
-}
+/// Metadata key used to tag outbound MPC RPCs with the originating protocol
+/// (e.g. DKG, signing). Set by `mpc::rpc::p2p_channel::RpcP2PChannel` and
+/// read by metrics middleware to label per-protocol traffic.
+pub const MPC_PROTOCOL_METADATA_KEY: &str = "x-hashi-mpc-protocol";
 
 #[derive(Clone)]
 pub struct Client {
@@ -179,67 +162,6 @@ impl Client {
         self.bridge_service_client()
             .get_service_info(GetServiceInfoRequest::default())
             .await
-    }
-
-    pub async fn send_messages(
-        &self,
-        epoch: u64,
-        request: &SendMessagesRequest,
-    ) -> Result<SendMessagesResponse> {
-        let proto_request = with_mpc_metadata(request.to_proto(epoch));
-        let response = self
-            .mpc_service_client()
-            .send_messages(proto_request)
-            .await?;
-        SendMessagesResponse::try_from(response.get_ref())
-            .map_err(|e| tonic::Status::internal(e.to_string()))
-    }
-
-    pub async fn retrieve_messages(
-        &self,
-        request: &RetrieveMessagesRequest,
-    ) -> Result<RetrieveMessagesResponse> {
-        let proto_request = with_mpc_metadata(request.to_proto());
-        let response = self
-            .mpc_service_client()
-            .retrieve_messages(proto_request)
-            .await?;
-        RetrieveMessagesResponse::try_from(response.get_ref())
-            .map_err(|e| tonic::Status::internal(e.to_string()))
-    }
-
-    pub async fn complain(&self, request: &ComplainRequest) -> Result<ComplaintResponses> {
-        let proto_request = with_mpc_metadata(request.to_proto());
-        let response = self.mpc_service_client().complain(proto_request).await?;
-        ComplaintResponses::try_from(response.get_ref())
-            .map_err(|e| tonic::Status::internal(e.to_string()))
-    }
-
-    pub async fn get_public_mpc_output(
-        &self,
-        request: &GetPublicMpcOutputRequest,
-    ) -> Result<GetPublicMpcOutputResponse> {
-        let proto_request = with_mpc_metadata(request.to_proto());
-        let response = self
-            .mpc_service_client()
-            .get_public_mpc_output(proto_request)
-            .await?;
-        GetPublicMpcOutputResponse::try_from(response.get_ref())
-            .map_err(|e| tonic::Status::internal(e.to_string()))
-    }
-
-    pub async fn get_partial_signatures(
-        &self,
-        epoch: u64,
-        request: &GetPartialSignaturesRequest,
-    ) -> Result<GetPartialSignaturesResponse> {
-        let proto_request = with_mpc_metadata(request.to_proto(epoch));
-        let response = self
-            .mpc_service_client()
-            .get_partial_signatures(proto_request)
-            .await?;
-        GetPartialSignaturesResponse::try_from(response.get_ref())
-            .map_err(|e| tonic::Status::internal(e.to_string()))
     }
 
     pub async fn get_reconfig_completion_signature(&self, epoch: u64) -> Result<Option<Vec<u8>>> {

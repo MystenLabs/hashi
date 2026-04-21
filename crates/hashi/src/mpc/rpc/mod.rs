@@ -5,5 +5,4 @@ mod p2p_channel;
 mod proto_conversions;
 mod service;
 
-pub use p2p_channel::MPC_PROTOCOL_LABEL;
 pub use p2p_channel::RpcP2PChannel;
