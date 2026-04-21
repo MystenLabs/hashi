@@ -272,9 +272,7 @@ async fn request_all(
     );
     println!("{}", "━".repeat(50).dimmed());
 
-    // Each `deposit` call does 3 dynamic-field ops on the shared Hashi object,
-    // and Sui's object-runtime caps store entries at 1000 per PTB — so 333
-    // deposits/PTB is the ceiling.
+    // 3 dynamic-field ops per deposit × 1000 object-runtime cap = 333/PTB.
     const CHUNK_SIZE: usize = 333;
 
     let sui_client = sui_rpc::Client::new(&config.sui_rpc_url)?;
