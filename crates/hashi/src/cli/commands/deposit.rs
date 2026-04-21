@@ -272,9 +272,14 @@ async fn request_all(
     );
     println!("{}", "━".repeat(50).dimmed());
 
-    // Submit batch deposit request, chunked to fit within Sui's 1024-command PTB cap.
-    // Each deposit emits 3 move calls, so 300 deposits ≈ 900 commands + shared-object setup.
-    const CHUNK_SIZE: usize = 300;
+    // Submit batch deposit request, chunked to fit Sui's per-PTB runtime limits.
+    // Each `deposit` call does 3 dynamic-field ops on the shared Hashi object
+    // (two `contains` probes on the utxo pool + one `add` into the request bag),
+    // and the object-runtime caps store entries at 1000. So the binding ceiling
+    // is ⌊1000 / 3⌋ = 333 deposits/PTB — tighter than the 1024 command cap
+    // (which would allow 341). Shared objects and pure args are PTB inputs, not
+    // commands.
+    const CHUNK_SIZE: usize = 333;
 
     let sui_client = sui_rpc::Client::new(&config.sui_rpc_url)?;
     let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(sui_client, signer, hashi_ids);
