@@ -480,6 +480,7 @@ impl MpcManager {
         request: &GetPublicMpcOutputRequest,
     ) -> MpcResult<GetPublicMpcOutputResponse> {
         let output = if request.epoch == self.mpc_config.epoch {
+            // Reduce availability lag
             self.current_output.as_ref()
         } else if Some(request.epoch) == self.mpc_config.epoch.checked_sub(1) {
             self.previous_output.as_ref()
