@@ -196,11 +196,16 @@ pub struct RetrieveMessagesResponse {
 #[allow(clippy::large_enum_variant)]
 pub enum ReconstructionOutcome {
     Success(MpcOutput),
-    NeedsComplaintRecovery {
+    NeedsDkgComplaintRecovery {
         dealer_address: Address,
         complaint: complaint::Complaint,
         message: avss::Message,
-        protocol_type: ProtocolTypeIndicator,
+    },
+    NeedsRotationComplaintRecovery {
+        dealer_address: Address,
+        share_index: ShareIndex,
+        complaint: complaint::Complaint,
+        message: avss::Message,
     },
 }
 
