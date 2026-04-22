@@ -59,7 +59,7 @@ impl Hashi {
     pub async fn validate_deposit_request(
         &self,
         deposit_request: &DepositRequest,
-    ) -> Result<(), DepositValidationError> {
+    ) -> Result<(), DepositError> {
         self.validate_deposit_request_on_sui(deposit_request)?;
         self.validate_deposit_request_on_bitcoin(deposit_request)
             .await?;
@@ -70,10 +70,7 @@ impl Hashi {
     /// Run AML/Sanctions checks for the deposit request.
     /// If no screener client is configured, checks are skipped.
     #[tracing::instrument(level = "debug", skip_all, fields(deposit_id = %deposit_request.id))]
-    async fn screen_deposit(
-        &self,
-        deposit_request: &DepositRequest,
-    ) -> Result<(), DepositValidationError> {
+    async fn screen_deposit(&self, deposit_request: &DepositRequest) -> Result<(), DepositError> {
         let Some(screener) = self.screener_client() else {
             tracing::debug!("AML checks skipped: no screener configured");
             return Ok(());
@@ -95,10 +92,10 @@ impl Hashi {
                 &sui_chain_id,
             )
             .await
-            .map_err(|e| DepositValidationError::AmlServiceError(anyhow!(e)))?;
+            .map_err(|e| DepositError::AmlServiceError(anyhow!(e)))?;
 
         if !approved {
-            return Err(DepositValidationError::NeverRetry(anyhow!(
+            return Err(DepositError::AmlRejected(anyhow!(
                 "AML checks failed for source tx {source_tx_hash}, destination {destination_address}, bitcoin chain {bitcoin_chain_id}, sui chain {sui_chain_id}"
             )));
         }
@@ -111,18 +108,18 @@ impl Hashi {
     fn validate_deposit_request_on_sui(
         &self,
         deposit_request: &DepositRequest,
-    ) -> Result<(), DepositValidationError> {
+    ) -> Result<(), DepositError> {
         let state = self.onchain_state().state();
         let deposit_queue = &state.hashi().deposit_queue;
         match deposit_queue.requests().get(&deposit_request.id) {
             None => {
-                return Err(DepositValidationError::NeverRetry(anyhow!(
+                return Err(DepositError::InvalidOnchainRequest(anyhow!(
                     "Deposit request not found on Sui"
                 )));
             }
             Some(onchain_request) => {
                 if onchain_request != deposit_request {
-                    return Err(DepositValidationError::NeverRetry(anyhow!(
+                    return Err(DepositError::InvalidOnchainRequest(anyhow!(
                         "Deposit request fields do not match on-chain state"
                     )));
                 }
@@ -137,7 +134,7 @@ impl Hashi {
                 .spent_utxos()
                 .contains_key(&deposit_request.utxo.id)
         {
-            return Err(DepositValidationError::NeverRetry(anyhow!(
+            return Err(DepositError::DuplicateOrSpentOnSui(anyhow!(
                 "UTXO {:?} is already active or spent",
                 deposit_request.utxo.id
             )));
@@ -159,7 +156,7 @@ impl Hashi {
     async fn validate_deposit_request_on_bitcoin(
         &self,
         deposit_request: &DepositRequest,
-    ) -> Result<(), DepositValidationError> {
+    ) -> Result<(), DepositError> {
         let outpoint = bitcoin::OutPoint {
             txid: deposit_request.utxo.id.txid.into(),
             vout: deposit_request.utxo.id.vout,
@@ -171,14 +168,12 @@ impl Hashi {
             .map_err(|e| match e {
                 DepositConfirmError::UtxoSpent { .. } => {
                     self.metrics.deposits_rejected_utxo_spent.inc();
-                    DepositValidationError::NeverRetry(anyhow!(e))
+                    DepositError::BitcoinUtxoSpent(anyhow!(e))
                 }
-                DepositConfirmError::Other(err) => {
-                    DepositValidationError::BitcoinConfirmFailed(err)
-                }
+                DepositConfirmError::Other(err) => DepositError::BitcoinConfirmFailed(err),
             })?;
         if txout.value.to_sat() != deposit_request.utxo.amount {
-            return Err(DepositValidationError::NeverRetry(anyhow!(
+            return Err(DepositError::DepositDataMismatch(anyhow!(
                 "Bitcoin deposit amount mismatch: got {}, onchain is {}",
                 deposit_request.utxo.amount,
                 txout.value.to_sat(),
@@ -194,24 +189,22 @@ impl Hashi {
         &self,
         script_pubkey: &ScriptBuf,
         deposit_request: &DepositRequest,
-    ) -> Result<(), DepositValidationError> {
+    ) -> Result<(), DepositError> {
         let deposit_address =
             bitcoin::Address::from_script(script_pubkey, self.config.bitcoin_network()).map_err(
                 |e| {
-                    DepositValidationError::NeverRetry(anyhow!(
+                    DepositError::DepositDataMismatch(anyhow!(
                         "Failed to extract address from script_pubkey: {e}"
                     ))
                 },
             )?;
-        let hashi_pubkey = self
-            .get_hashi_pubkey()
-            .map_err(DepositValidationError::NotReady)?;
+        let hashi_pubkey = self.get_hashi_pubkey().map_err(DepositError::NotReady)?;
         let expected_address = self
             .get_deposit_address(&hashi_pubkey, deposit_request.utxo.derivation_path.as_ref())
-            .map_err(DepositValidationError::NeverRetry)?;
+            .map_err(DepositError::DepositDataMismatch)?;
 
         if deposit_address != expected_address {
-            return Err(DepositValidationError::NeverRetry(anyhow!(
+            return Err(DepositError::DepositDataMismatch(anyhow!(
                 "Expected address {expected_address}, got address {deposit_address}",
             )));
         }
@@ -332,8 +325,14 @@ impl Hashi {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum DepositErrorKind {
+    RetryOnNextBlock,
+    NeverRetry,
+}
+
 #[derive(Debug, Error)]
-pub enum DepositValidationError {
+pub enum DepositError {
     #[error("Failed to confirm Bitcoin deposit: {0}")]
     BitcoinConfirmFailed(#[source] anyhow::Error),
 
@@ -343,6 +342,53 @@ pub enum DepositValidationError {
     #[error("Not ready: {0}")]
     NotReady(#[source] anyhow::Error),
 
-    #[error("Never retry: {0}")]
-    NeverRetry(#[source] anyhow::Error),
+    #[error("Invalid on-chain deposit request: {0}")]
+    InvalidOnchainRequest(#[source] anyhow::Error),
+
+    #[error("UTXO is already active or spent on Sui: {0}")]
+    DuplicateOrSpentOnSui(#[source] anyhow::Error),
+
+    #[error("Deposit UTXO has already been spent on Bitcoin: {0}")]
+    BitcoinUtxoSpent(#[source] anyhow::Error),
+
+    #[error("Deposit data mismatch: {0}")]
+    DepositDataMismatch(#[source] anyhow::Error),
+
+    #[error("AML checks rejected deposit: {0}")]
+    AmlRejected(#[source] anyhow::Error),
+
+    #[error("Failed quorum: weight {weight} < {required_weight}")]
+    FailedQuorum { weight: u64, required_weight: u64 },
+
+    #[error("Failed to build deposit certificate: {0}")]
+    CertificateBuildFailed(#[source] anyhow::Error),
+
+    #[error("Failed to create Sui transaction executor: {0}")]
+    ExecutorInitFailed(#[source] anyhow::Error),
+
+    #[error("Failed to confirm deposit on Sui: {0}")]
+    ConfirmDepositFailed(#[source] anyhow::Error),
+
+    #[error("Deposit processing timed out after {0:?}")]
+    TimedOut(std::time::Duration),
+}
+
+impl DepositError {
+    pub(crate) fn kind(&self) -> DepositErrorKind {
+        match self {
+            Self::BitcoinConfirmFailed(_)
+            | Self::AmlServiceError(_)
+            | Self::NotReady(_)
+            | Self::FailedQuorum { .. }
+            | Self::CertificateBuildFailed(_)
+            | Self::ExecutorInitFailed(_)
+            | Self::ConfirmDepositFailed(_)
+            | Self::TimedOut(_) => DepositErrorKind::RetryOnNextBlock,
+            Self::InvalidOnchainRequest(_)
+            | Self::DuplicateOrSpentOnSui(_)
+            | Self::BitcoinUtxoSpent(_)
+            | Self::DepositDataMismatch(_)
+            | Self::AmlRejected(_) => DepositErrorKind::NeverRetry,
+        }
+    }
 }

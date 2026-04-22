@@ -8,6 +8,8 @@ pub(crate) use retry::RetryPolicy;
 use crate::Hashi;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::config::ForceRunAsLeader;
+use crate::deposits::DepositError;
+use crate::deposits::DepositErrorKind;
 use crate::leader::retry::GlobalRetryTracker;
 use crate::leader::retry::RetryTracker;
 use crate::onchain::types::DepositConfirmationMessage;
@@ -59,8 +61,9 @@ pub struct LeaderService {
     inner: Arc<Hashi>,
     withdrawal_approval_retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
     withdrawal_commitment_retry_tracker: GlobalRetryTracker<WithdrawalCommitmentErrorKind>,
-    deposit_tasks: JoinSet<(Address, anyhow::Result<()>)>,
-    deposit_refill_pending: bool,
+    deposit_tasks: JoinSet<(Address, Result<(), DepositError>)>,
+    pending_deposit_requests: Vec<DepositRequest>,
+    never_retry_deposit_ids: HashSet<Address>,
     inflight_deposits: HashSet<Address>,
     withdrawal_approval_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     withdrawal_commitment_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
@@ -79,7 +82,8 @@ impl LeaderService {
             withdrawal_approval_retry_tracker: RetryTracker::new(),
             withdrawal_commitment_retry_tracker: GlobalRetryTracker::new(),
             deposit_tasks: JoinSet::new(),
-            deposit_refill_pending: false,
+            pending_deposit_requests: Vec::new(),
+            never_retry_deposit_ids: HashSet::new(),
             inflight_deposits: HashSet::new(),
             withdrawal_approval_task: None,
             withdrawal_commitment_task: None,
@@ -141,8 +145,7 @@ impl LeaderService {
                     self.process_signed_withdrawal_txns();
                     self.check_delete_proposals(checkpoint_timestamp_ms);
 
-                    if self.deposit_refill_pending {
-                        self.deposit_refill_pending = false;
+                    if !self.pending_deposit_requests.is_empty() {
                         self.process_deposit_requests();
                     }
                 }
@@ -164,6 +167,7 @@ impl LeaderService {
                     debug!("New Bitcoin block {block_height}: processing deposit requests");
 
                     self.check_delete_expired_deposit_requests(checkpoint_timestamp_ms);
+                    self.reload_pending_deposit_requests();
                     self.process_deposit_requests();
                 }
                 Some(result) = self.deposit_tasks.join_next() => {
@@ -171,11 +175,6 @@ impl LeaderService {
                     while let Some(result) = self.deposit_tasks.try_join_next() {
                         self.handle_completed_deposit_task(result);
                     }
-
-                    // Wait for the on-chain watcher to advance before refilling from the
-                    // cached deposit queue, otherwise we can immediately requeue a request
-                    // that was already removed on-chain by the completed task.
-                    self.deposit_refill_pending = true;
                 }
                 Some(result) = self.withdrawal_signing_tasks.join_next() => {
                     self.handle_completed_withdrawal_signing_task(result);
@@ -206,16 +205,31 @@ impl LeaderService {
 
     fn handle_completed_deposit_task(
         &mut self,
-        result: Result<(Address, anyhow::Result<()>), tokio::task::JoinError>,
+        result: Result<(Address, Result<(), DepositError>), tokio::task::JoinError>,
     ) {
-        let mapped = match result {
-            Ok((deposit_id, inner)) => {
+        match result {
+            Ok((deposit_id, result)) => {
                 self.inflight_deposits.remove(&deposit_id);
-                Ok(inner)
+                self.pending_deposit_requests
+                    .retain(|request| request.id != deposit_id);
+                match result {
+                    Ok(()) => {
+                        info!(deposit_id = %deposit_id, "Deposit processed successfully");
+                    }
+                    Err(err) => match err.kind() {
+                        DepositErrorKind::RetryOnNextBlock => {
+                            warn!(deposit_id = %deposit_id, "Deferring deposit until next block: {err:#}");
+                        }
+                        DepositErrorKind::NeverRetry => {
+                            self.never_retry_deposit_ids.insert(deposit_id);
+                            warn!(deposit_id = %deposit_id, "Marking deposit as never retry: {err:#}");
+                        }
+                    },
+                }
             }
-            Err(e) => Err(e),
-        };
-        Self::log_task_result("deposit", mapped);
+            Err(err) if err.is_panic() => error!("deposit task panicked: {err}"),
+            Err(err) => error!("deposit task failed to join: {err}"),
+        }
     }
 
     fn handle_completed_withdrawal_signing_task(
@@ -292,6 +306,26 @@ impl LeaderService {
         is_leader
     }
 
+    fn reload_pending_deposit_requests(&mut self) {
+        let mut deposit_requests = self.inner.onchain_state().deposit_requests();
+        deposit_requests.sort_by_key(|r| r.timestamp_ms);
+        let deposit_ids: HashSet<Address> =
+            deposit_requests.iter().map(|request| request.id).collect();
+        self.inflight_deposits
+            .retain(|deposit_id| deposit_ids.contains(deposit_id));
+        self.never_retry_deposit_ids
+            .retain(|deposit_id| deposit_ids.contains(deposit_id));
+        self.pending_deposit_requests = deposit_requests
+            .into_iter()
+            .filter(|request| !self.never_retry_deposit_ids.contains(&request.id))
+            .collect();
+        debug!(
+            pending_deposits = self.pending_deposit_requests.len(),
+            never_retry_deposits = self.never_retry_deposit_ids.len(),
+            "Reloaded pending deposit worklist"
+        );
+    }
+
     fn is_reconfiguring(&self) -> bool {
         self.inner
             .onchain_state()
@@ -305,27 +339,21 @@ impl LeaderService {
     fn process_deposit_requests(&mut self) {
         if self.inner.onchain_state().state().hashi().config.paused() || self.is_reconfiguring() {
             self.deposit_tasks.abort_all();
+            self.pending_deposit_requests.clear();
             self.inflight_deposits.clear();
             return;
         }
 
-        let mut deposit_requests = self.inner.onchain_state().deposit_requests();
-        deposit_requests.sort_by_key(|r| r.timestamp_ms);
-
-        let deposit_ids: Vec<Address> = deposit_requests.iter().map(|r| r.id).collect();
-        self.inflight_deposits
-            .retain(|deposit_id| deposit_ids.contains(deposit_id));
-
         let max_concurrent = self.inner.config.max_concurrent_leader_job_tasks();
-        for deposit_request in deposit_requests {
+        for deposit_request in self.pending_deposit_requests.clone() {
             if self.deposit_tasks.len() >= max_concurrent {
                 break;
             }
-            if self.inflight_deposits.contains(&deposit_request.id) {
+            let deposit_id = deposit_request.id;
+            if self.inflight_deposits.contains(&deposit_id) {
                 continue;
             }
 
-            let deposit_id = deposit_request.id;
             let inner = self.inner.clone();
 
             self.inflight_deposits.insert(deposit_id);
@@ -338,9 +366,7 @@ impl LeaderService {
 
                 let result = match result {
                     Ok(result) => result,
-                    Err(_) => Err(anyhow::anyhow!(
-                        "deposit {deposit_id} timed out after {LEADER_TASK_TIMEOUT:?}"
-                    )),
+                    Err(_) => Err(DepositError::TimedOut(LEADER_TASK_TIMEOUT)),
                 };
 
                 (deposit_id, result)
@@ -352,17 +378,14 @@ impl LeaderService {
     async fn process_deposit_request(
         inner: Arc<Hashi>,
         deposit_request: DepositRequest,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), DepositError> {
         info!("Processing deposit request");
 
         // Validate deposit_request before asking for signatures
         inner
             .validate_deposit_request(&deposit_request)
             .await
-            .map_err(|e| {
-                debug!("Deposit validation failed: {e}");
-                anyhow::anyhow!(e)
-            })?;
+            .inspect_err(|err| debug!("Deposit validation failed: {err}"))?;
 
         info!("Deposit request validated successfully");
 
@@ -406,14 +429,20 @@ impl LeaderService {
         }
 
         if aggregator.weight() < required_weight {
-            anyhow::bail!(
-                "Aggregate weight of signatures {} is less than required weight {required_weight}",
-                aggregator.weight()
-            );
+            return Err(DepositError::FailedQuorum {
+                weight: aggregator.weight(),
+                required_weight,
+            });
         }
 
-        let signed_message = aggregator.finish()?;
-        let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
+        let signed_message = match aggregator.finish() {
+            Ok(signed_message) => signed_message,
+            Err(err) => return Err(DepositError::CertificateBuildFailed(err.into())),
+        };
+        let mut executor = match SuiTxExecutor::from_hashi(inner.clone()) {
+            Ok(executor) => executor,
+            Err(err) => return Err(DepositError::ExecutorInitFailed(err)),
+        };
         executor
             .execute_confirm_deposit(&deposit_request, signed_message)
             .await
@@ -433,7 +462,8 @@ impl LeaderService {
                     .sui_tx_submissions_total
                     .with_label_values(&["confirm_deposit", "failure"])
                     .inc();
-            })?;
+            })
+            .map_err(DepositError::ConfirmDepositFailed)?;
         Ok(())
     }
 
