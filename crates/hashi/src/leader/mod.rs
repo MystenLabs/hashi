@@ -60,6 +60,7 @@ pub struct LeaderService {
     withdrawal_approval_retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
     withdrawal_commitment_retry_tracker: GlobalRetryTracker<WithdrawalCommitmentErrorKind>,
     deposit_tasks: JoinSet<(Address, anyhow::Result<()>)>,
+    deposit_refill_pending: bool,
     inflight_deposits: HashSet<Address>,
     withdrawal_approval_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     withdrawal_commitment_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
@@ -78,6 +79,7 @@ impl LeaderService {
             withdrawal_approval_retry_tracker: RetryTracker::new(),
             withdrawal_commitment_retry_tracker: GlobalRetryTracker::new(),
             deposit_tasks: JoinSet::new(),
+            deposit_refill_pending: false,
             inflight_deposits: HashSet::new(),
             withdrawal_approval_task: None,
             withdrawal_commitment_task: None,
@@ -138,6 +140,11 @@ impl LeaderService {
                     self.process_unsigned_withdrawal_txns();
                     self.process_signed_withdrawal_txns();
                     self.check_delete_proposals(checkpoint_timestamp_ms);
+
+                    if self.deposit_refill_pending {
+                        self.deposit_refill_pending = false;
+                        self.process_deposit_requests();
+                    }
                 }
                 wait_result = btc_block_rx.changed() => {
                     if let Err(e) = wait_result {
@@ -156,18 +163,19 @@ impl LeaderService {
 
                     debug!("New Bitcoin block {block_height}: processing deposit requests");
 
+                    self.check_delete_expired_deposit_requests(checkpoint_timestamp_ms);
+                    self.process_deposit_requests();
+                }
+                Some(result) = self.deposit_tasks.join_next() => {
+                    self.handle_completed_deposit_task(result);
                     while let Some(result) = self.deposit_tasks.try_join_next() {
                         self.handle_completed_deposit_task(result);
                     }
 
-                    self.process_deposit_requests(checkpoint_timestamp_ms);
-                }
-                Some(result) = self.deposit_tasks.join_next() => {
-                    self.handle_completed_deposit_task(result);
-                    // Drain any other completed tasks while we're here.
-                    while let Some(result) = self.deposit_tasks.try_join_next() {
-                        self.handle_completed_deposit_task(result);
-                    }
+                    // Wait for the on-chain watcher to advance before refilling from the
+                    // cached deposit queue, otherwise we can immediately requeue a request
+                    // that was already removed on-chain by the completed task.
+                    self.deposit_refill_pending = true;
                 }
                 Some(result) = self.withdrawal_signing_tasks.join_next() => {
                     self.handle_completed_withdrawal_signing_task(result);
@@ -294,26 +302,22 @@ impl LeaderService {
             .is_some()
     }
 
-    fn process_deposit_requests(&mut self, checkpoint_timestamp_ms: u64) {
-        debug!("Entering process_deposit_requests");
-        if self.is_reconfiguring() {
-            debug!("Reconfig in progress, skipping deposit request processing");
+    fn process_deposit_requests(&mut self) {
+        if self.inner.onchain_state().state().hashi().config.paused() || self.is_reconfiguring() {
+            self.deposit_tasks.abort_all();
+            self.inflight_deposits.clear();
             return;
         }
 
         let mut deposit_requests = self.inner.onchain_state().deposit_requests();
-        // Sort deposit_requests by timestamp, from earliest to latest
         deposit_requests.sort_by_key(|r| r.timestamp_ms);
+
         let deposit_ids: Vec<Address> = deposit_requests.iter().map(|r| r.id).collect();
-        // TODO: If we keep AbortHandles for deposit tasks, explicitly abort tasks whose
-        // deposit IDs are no longer present here so they do not linger until timeout.
         self.inflight_deposits
             .retain(|deposit_id| deposit_ids.contains(deposit_id));
 
-        debug!("Processing {} deposit requests", deposit_requests.len());
-
         let max_concurrent = self.inner.config.max_concurrent_leader_job_tasks();
-        for deposit_request in deposit_requests.iter().cloned() {
+        for deposit_request in deposit_requests {
             if self.deposit_tasks.len() >= max_concurrent {
                 break;
             }
@@ -342,8 +346,6 @@ impl LeaderService {
                 (deposit_id, result)
             });
         }
-
-        self.check_delete_expired_deposit_requests(&deposit_requests, checkpoint_timestamp_ms);
     }
 
     #[tracing::instrument(level = "info", skip_all, fields(deposit_id = %deposit_request.id))]

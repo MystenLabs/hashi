@@ -26,17 +26,16 @@ const PROPOSAL_DELETE_DELAY_MS: u64 = 1000 * 60 * 60 * 24; // 1 day
 
 impl LeaderService {
     /// Check for and delete expired deposit requests.
-    /// Deposit requests must be sorted by timestamp, and will be deleted if they are older
-    /// than MAX_DEPOSIT_REQUEST_AGE_MS.
-    pub(crate) fn check_delete_expired_deposit_requests(
-        &mut self,
-        deposit_requests: &[DepositRequest],
-        checkpoint_timestamp_ms: u64,
-    ) {
+    /// Deposit requests are sorted by timestamp and deleted if they are older than
+    /// MAX_DEPOSIT_REQUEST_AGE_MS.
+    pub(crate) fn check_delete_expired_deposit_requests(&mut self, checkpoint_timestamp_ms: u64) {
         if self.deposit_gc_task.is_some() {
             debug!("Deposit GC task already in-flight, skipping");
             return;
         }
+
+        let mut deposit_requests = self.inner.onchain_state().deposit_requests();
+        deposit_requests.sort_by_key(|r| r.timestamp_ms);
 
         let Some(oldest_request) = deposit_requests.first() else {
             return;
