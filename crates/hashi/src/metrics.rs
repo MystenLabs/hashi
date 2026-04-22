@@ -66,6 +66,7 @@ pub struct Metrics {
 
     pub deposits_confirmed_total: IntCounter,
     pub deposits_rejected_utxo_spent: IntCounter,
+    pub never_retry_deposit_ids: IntGauge,
     pub withdrawals_finalized_total: IntCounter,
     pub presig_pool_remaining: IntGauge,
     pub sui_tx_submissions_total: IntCounterVec,
@@ -407,6 +408,12 @@ impl Metrics {
             deposits_rejected_utxo_spent: register_int_counter_with_registry!(
                 "hashi_deposits_rejected_utxo_spent_total",
                 "Deposit requests rejected because the UTXO was already spent",
+                registry,
+            )
+            .unwrap(),
+            never_retry_deposit_ids: register_int_gauge_with_registry!(
+                "hashi_never_retry_deposit_ids",
+                "Number of deposit requests currently marked as never retry by the leader",
                 registry,
             )
             .unwrap(),

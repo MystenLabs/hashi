@@ -222,6 +222,10 @@ impl LeaderService {
                         }
                         DepositErrorKind::NeverRetry => {
                             self.never_retry_deposit_ids.insert(deposit_id);
+                            self.inner
+                                .metrics
+                                .never_retry_deposit_ids
+                                .set(self.never_retry_deposit_ids.len() as i64);
                             warn!(deposit_id = %deposit_id, "Marking deposit as never retry: {err:#}");
                         }
                     },
@@ -315,6 +319,10 @@ impl LeaderService {
             .retain(|deposit_id| deposit_ids.contains(deposit_id));
         self.never_retry_deposit_ids
             .retain(|deposit_id| deposit_ids.contains(deposit_id));
+        self.inner
+            .metrics
+            .never_retry_deposit_ids
+            .set(self.never_retry_deposit_ids.len() as i64);
         self.pending_deposit_requests = deposit_requests
             .into_iter()
             .filter(|request| !self.never_retry_deposit_ids.contains(&request.id))
