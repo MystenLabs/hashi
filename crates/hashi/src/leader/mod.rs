@@ -60,6 +60,7 @@ pub struct LeaderService {
     withdrawal_approval_retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
     withdrawal_commitment_retry_tracker: GlobalRetryTracker<WithdrawalCommitmentErrorKind>,
     deposit_tasks: JoinSet<(Address, anyhow::Result<()>)>,
+    deposit_refill_pending: bool,
     inflight_deposits: HashSet<Address>,
     withdrawal_approval_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     withdrawal_commitment_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
@@ -78,6 +79,7 @@ impl LeaderService {
             withdrawal_approval_retry_tracker: RetryTracker::new(),
             withdrawal_commitment_retry_tracker: GlobalRetryTracker::new(),
             deposit_tasks: JoinSet::new(),
+            deposit_refill_pending: false,
             inflight_deposits: HashSet::new(),
             withdrawal_approval_task: None,
             withdrawal_commitment_task: None,
@@ -138,6 +140,11 @@ impl LeaderService {
                     self.process_unsigned_withdrawal_txns();
                     self.process_signed_withdrawal_txns();
                     self.check_delete_proposals(checkpoint_timestamp_ms);
+
+                    if self.deposit_refill_pending {
+                        self.deposit_refill_pending = false;
+                        self.process_deposit_requests();
+                    }
                 }
                 wait_result = btc_block_rx.changed() => {
                     if let Err(e) = wait_result {
@@ -165,9 +172,10 @@ impl LeaderService {
                         self.handle_completed_deposit_task(result);
                     }
 
-                    // Refill freed concurrency slots so one Bitcoin block can drain the entire
-                    // pending deposit queue instead of stopping after one batch.
-                    self.process_deposit_requests();
+                    // Wait for the on-chain watcher to advance before refilling from the
+                    // cached deposit queue, otherwise we can immediately requeue a request
+                    // that was already removed on-chain by the completed task.
+                    self.deposit_refill_pending = true;
                 }
                 Some(result) = self.withdrawal_signing_tasks.join_next() => {
                     self.handle_completed_withdrawal_signing_task(result);
