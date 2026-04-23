@@ -1008,6 +1008,18 @@ pub struct GetGuardianInfoResponse {
     /// Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
     #[prost(message, optional, tag = "3")]
     pub signed_info: ::core::option::Option<SignedGuardianInfo>,
+    /// Current rate limiter state (if initialized). Hashi nodes cache this
+    /// at startup to drive a local emulator of the guardian limiter — the
+    /// local state owns the next `seq` for hard reserves and the capacity
+    /// projection used by coin selection. The guardian remains authoritative;
+    /// local state is periodically reconciled against a fresh snapshot.
+    #[prost(message, optional, tag = "4")]
+    pub limiter_state: ::core::option::Option<LimiterState>,
+    /// Immutable limiter configuration (refill rate, bucket ceiling). Paired
+    /// with `limiter_state` so clients can construct a faithful local
+    /// emulator without a second RPC.
+    #[prost(message, optional, tag = "5")]
+    pub limiter_config: ::core::option::Option<LimiterConfig>,
 }
 /// Guardian-signed wrapper around `GuardianInfoData`.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1179,6 +1191,17 @@ pub struct LimiterState {
     /// Next expected withdrawal sequence number.
     #[prost(uint64, optional, tag = "3")]
     pub next_seq: ::core::option::Option<u64>,
+}
+/// Immutable limiter configuration returned by `GetGuardianInfo` so a
+/// hashi node can build a local emulator without a second RPC.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LimiterConfig {
+    /// Token refill rate in sats per second.
+    #[prost(uint64, optional, tag = "1")]
+    pub refill_rate_sats_per_sec: ::core::option::Option<u64>,
+    /// Maximum bucket capacity in sats.
+    #[prost(uint64, optional, tag = "2")]
+    pub max_bucket_capacity_sats: ::core::option::Option<u64>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProvisionerInitResponse {}

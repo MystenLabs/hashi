@@ -21,6 +21,7 @@ use super::GuardianSigned;
 use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
+use super::LimiterConfig;
 use super::LimiterState;
 use super::OperatorInitRequest;
 use super::ProvisionerInitRequest;
@@ -200,10 +201,15 @@ impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
         let signed_info_pb = resp.signed_info.ok_or_else(|| missing("signed_info"))?;
         let signed_info = pb_to_signed_guardian_info(signed_info_pb)?;
 
+        let limiter_state = resp.limiter_state.map(pb_to_limiter_state).transpose()?;
+        let limiter_config = resp.limiter_config.map(pb_to_limiter_config).transpose()?;
+
         Ok(GetGuardianInfoResponse {
             attestation: attestation.to_vec(),
             signing_pub_key,
             signed_info,
+            limiter_state,
+            limiter_config,
         })
     }
 }
@@ -335,6 +341,8 @@ pub fn get_guardian_info_response_to_pb(r: GetGuardianInfoResponse) -> pb::GetGu
         attestation: Some(r.attestation.into()),
         signing_pub_key: Some(r.signing_pub_key.to_bytes().to_vec().into()),
         signed_info: Some(signed_guardian_info_to_pb(r.signed_info)),
+        limiter_state: r.limiter_state.map(limiter_state_to_pb),
+        limiter_config: r.limiter_config.map(limiter_config_to_pb),
     }
 }
 
@@ -656,6 +664,26 @@ fn limiter_state_to_pb(state: LimiterState) -> pb::LimiterState {
         num_tokens_available_sats: Some(state.num_tokens_available),
         last_updated_at_secs: Some(state.last_updated_at),
         next_seq: Some(state.next_seq),
+    }
+}
+
+fn pb_to_limiter_config(cfg: pb::LimiterConfig) -> GuardianResult<LimiterConfig> {
+    let refill_rate = cfg
+        .refill_rate_sats_per_sec
+        .ok_or_else(|| missing("refill_rate_sats_per_sec"))?;
+    let max_bucket_capacity = cfg
+        .max_bucket_capacity_sats
+        .ok_or_else(|| missing("max_bucket_capacity_sats"))?;
+    Ok(LimiterConfig {
+        refill_rate,
+        max_bucket_capacity,
+    })
+}
+
+fn limiter_config_to_pb(cfg: LimiterConfig) -> pb::LimiterConfig {
+    pb::LimiterConfig {
+        refill_rate_sats_per_sec: Some(cfg.refill_rate),
+        max_bucket_capacity_sats: Some(cfg.max_bucket_capacity),
     }
 }
 

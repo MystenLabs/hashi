@@ -178,6 +178,13 @@ pub struct GetGuardianInfoResponse {
     pub signing_pub_key: GuardianPubKey,
     /// Signed guardian info
     pub signed_info: GuardianSigned<GuardianInfo>,
+    /// Current rate limiter state (if initialized). Paired with
+    /// `limiter_config`, this is the snapshot a hashi node uses to
+    /// bootstrap its local emulator of the guardian limiter.
+    pub limiter_state: Option<LimiterState>,
+    /// Immutable limiter configuration (if initialized). Needed alongside
+    /// `limiter_state` so the client can project capacity into the future.
+    pub limiter_config: Option<LimiterConfig>,
 }
 
 /// TODO: Add network?
