@@ -828,7 +828,7 @@ impl MpcManager {
             spawn_blocking(move || {
                 let mut rng = rand::thread_rng();
                 let mut mgr = mgr.write().unwrap();
-                mgr.prepare_dealer_flow(&mut rng)
+                mgr.prepare_dkg_dealer_flow(&mut rng)
             })
             .await?
         };
@@ -2173,17 +2173,27 @@ impl MpcManager {
         )))
     }
 
-    fn prepare_dealer_flow(
+    fn prepare_dkg_dealer_flow(
         &mut self,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> MpcResult<DealerFlowData> {
         let messages = match self.dkg_messages.get(&self.address) {
             Some(msg) => Messages::Dkg(msg.clone()),
-            None => {
-                let msg = self.create_dealer_message(rng);
-                self.store_dkg_message(self.mpc_config.epoch, self.address, &msg)?;
-                Messages::Dkg(msg)
-            }
+            None => match self
+                .public_messages_store
+                .get_dealer_message(self.mpc_config.epoch, &self.address)
+            {
+                Ok(Some(msg)) => {
+                    self.dkg_messages.insert(self.address, msg.clone());
+                    Messages::Dkg(msg)
+                }
+                Ok(None) => {
+                    let msg = self.create_dealer_message(rng);
+                    self.store_dkg_message(self.mpc_config.epoch, self.address, &msg)?;
+                    Messages::Dkg(msg)
+                }
+                Err(e) => return Err(MpcError::StorageError(e.to_string())),
+            },
         };
         let signature = self.try_sign_dkg_message(self.address, &messages)?;
         Ok(self.build_dealer_flow_data(messages, signature))
@@ -2196,11 +2206,21 @@ impl MpcManager {
     ) -> MpcResult<DealerFlowData> {
         let messages = match self.rotation_messages.get(&self.address) {
             Some(msgs) => Messages::Rotation(msgs.clone()),
-            None => {
-                let msgs = self.create_rotation_messages(previous, rng);
-                self.store_rotation_messages(self.mpc_config.epoch, self.address, &msgs)?;
-                Messages::Rotation(msgs)
-            }
+            None => match self
+                .public_messages_store
+                .get_rotation_messages(self.mpc_config.epoch, &self.address)
+            {
+                Ok(Some(msgs)) => {
+                    self.rotation_messages.insert(self.address, msgs.clone());
+                    Messages::Rotation(msgs)
+                }
+                Ok(None) => {
+                    let msgs = self.create_rotation_messages(previous, rng);
+                    self.store_rotation_messages(self.mpc_config.epoch, self.address, &msgs)?;
+                    Messages::Rotation(msgs)
+                }
+                Err(e) => return Err(MpcError::StorageError(e.to_string())),
+            },
         };
         let signature = self.try_sign_rotation_messages(previous, self.address, &messages)?;
         Ok(self.build_dealer_flow_data(messages, signature))
@@ -2213,13 +2233,29 @@ impl MpcManager {
     ) -> MpcResult<DealerFlowData> {
         let messages = match self.nonce_messages.get(&(batch_index, self.address)) {
             Some(nonce) => Messages::NonceGeneration(nonce.clone()),
-            None => {
-                let msgs = self.create_nonce_dealer_message(batch_index, rng)?;
-                if let Messages::NonceGeneration(ref nonce) = msgs {
-                    self.store_nonce_message(self.mpc_config.epoch, self.address, nonce)?;
+            None => match self.public_messages_store.get_nonce_message(
+                self.mpc_config.epoch,
+                batch_index,
+                &self.address,
+            ) {
+                Ok(Some(msg)) => {
+                    let nonce = NonceMessage {
+                        batch_index,
+                        message: msg,
+                    };
+                    self.nonce_messages
+                        .insert((batch_index, self.address), nonce.clone());
+                    Messages::NonceGeneration(nonce)
                 }
-                msgs
-            }
+                Ok(None) => {
+                    let msgs = self.create_nonce_dealer_message(batch_index, rng)?;
+                    if let Messages::NonceGeneration(ref nonce) = msgs {
+                        self.store_nonce_message(self.mpc_config.epoch, self.address, nonce)?;
+                    }
+                    msgs
+                }
+                Err(e) => return Err(MpcError::StorageError(e.to_string())),
+            },
         };
         let signature = self.try_sign_nonce_message(self.address, &messages)?;
         Ok(self.build_dealer_flow_data(messages, signature))

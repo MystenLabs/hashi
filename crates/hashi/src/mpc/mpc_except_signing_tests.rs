@@ -3215,6 +3215,118 @@ fn test_process_certified_nonce_message_db_fallback() {
 }
 
 #[test]
+fn test_prepare_dealer_flow_survives_restart() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let mut manager =
+        setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+
+    // First call: generates and persists.
+    let flow1 = manager.prepare_dkg_dealer_flow(&mut rng).unwrap();
+    let hash1 = compute_messages_hash(&flow1.request.messages);
+
+    // Simulate restart: wipe in-memory cache.
+    manager.dkg_messages.clear();
+
+    // Second call: must load from DB, not regenerate.
+    let flow2 = manager.prepare_dkg_dealer_flow(&mut rng).unwrap();
+    let hash2 = compute_messages_hash(&flow2.request.messages);
+
+    assert_eq!(
+        hash1, hash2,
+        "DKG dealer message should be identical after simulated restart",
+    );
+    // Cache should be re-populated on DB hit.
+    assert!(
+        manager.dkg_messages.contains_key(&manager.address),
+        "in-memory cache should be re-populated after DB hit",
+    );
+}
+
+#[test]
+fn test_prepare_rotation_dealer_flow_survives_restart() {
+    let mut rng = rand::thread_rng();
+    let rotation_setup = RotationTestSetup::new();
+    let (mut manager, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
+    manager.session_id = SessionId::new(
+        TEST_CHAIN_ID,
+        rotation_setup.setup.epoch(),
+        &ProtocolType::KeyRotation,
+    );
+
+    let flow1 = manager
+        .prepare_rotation_dealer_flow(&dkg_output, &mut rng)
+        .unwrap();
+    let hash1 = compute_messages_hash(&flow1.request.messages);
+
+    // Simulate restart: wipe in-memory caches that `try_sign_rotation_messages`
+    // uses to track which shares it already processed. On a real restart,
+    // `dealer_outputs` is wiped; the DB-backed messages persist.
+    manager.rotation_messages.clear();
+    manager.dealer_outputs.clear();
+
+    let flow2 = manager
+        .prepare_rotation_dealer_flow(&dkg_output, &mut rng)
+        .unwrap();
+    let hash2 = compute_messages_hash(&flow2.request.messages);
+
+    assert_eq!(
+        hash1, hash2,
+        "rotation dealer message should be identical after simulated restart",
+    );
+    assert!(
+        manager.rotation_messages.contains_key(&manager.address),
+        "in-memory cache should be re-populated after DB hit",
+    );
+}
+
+#[test]
+fn test_prepare_nonce_dealer_flow_survives_restart() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let mut manager =
+        setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+    let batch_index = 0u32;
+
+    let flow1 = manager
+        .prepare_nonce_dealer_flow(batch_index, &mut rng)
+        .unwrap();
+    let hash1 = compute_messages_hash(&flow1.request.messages);
+
+    manager.nonce_messages.clear();
+
+    let flow2 = manager
+        .prepare_nonce_dealer_flow(batch_index, &mut rng)
+        .unwrap();
+    let hash2 = compute_messages_hash(&flow2.request.messages);
+
+    assert_eq!(
+        hash1, hash2,
+        "nonce dealer message should be identical after simulated restart",
+    );
+    assert!(
+        manager
+            .nonce_messages
+            .contains_key(&(batch_index, manager.address)),
+        "in-memory cache should be re-populated after DB hit",
+    );
+}
+
+#[test]
+fn test_prepare_dealer_flow_propagates_db_read_error() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let mut manager = setup.create_manager_with_store(0, Box::new(FailingPublicMessagesStore));
+    // Cache is empty (fresh manager) → falls through to DB read → error.
+    let err = manager.prepare_dkg_dealer_flow(&mut rng).err();
+    assert!(
+        matches!(err, Some(MpcError::StorageError(_))),
+        "expected StorageError propagation, got: {:?}",
+        err
+    );
+}
+
+#[test]
 fn test_handle_complain_request_no_message_from_dealer() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
