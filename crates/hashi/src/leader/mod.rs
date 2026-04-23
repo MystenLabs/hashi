@@ -35,6 +35,7 @@ use hashi_types::committee::MemberSignature;
 use hashi_types::committee::certificate_threshold;
 use hashi_types::guardian::bitcoin_utils;
 use hashi_types::proto::SignDepositConfirmationRequest;
+use hashi_types::proto::SignGuardianWithdrawalRequestRequest;
 use hashi_types::proto::SignWithdrawalConfirmationRequest;
 use hashi_types::proto::SignWithdrawalRequestApprovalRequest;
 use hashi_types::proto::SignWithdrawalTransactionRequest;
@@ -73,6 +74,10 @@ pub struct LeaderService {
     inflight_withdrawal_broadcasts: HashSet<Address>,
     deposit_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     proposal_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
+    /// Whether this node was leader on the previous checkpoint tick. Used
+    /// to detect the false→true edge so we can resync the local guardian
+    /// limiter once, at promotion, before acting on withdrawals.
+    was_leader_last_checkpoint: bool,
 }
 
 impl LeaderService {
@@ -93,6 +98,7 @@ impl LeaderService {
             inflight_withdrawal_broadcasts: HashSet::new(),
             deposit_gc_task: None,
             proposal_gc_task: None,
+            was_leader_last_checkpoint: false,
         }
     }
 
@@ -132,12 +138,26 @@ impl LeaderService {
 
                     let is_leader = self.is_current_leader(checkpoint_height);
                     self.inner.metrics.is_leader.set(i64::from(is_leader));
-                    if is_leader {
-                        debug!("Checkpoint {checkpoint_height}: We are the leader node");
-                    } else {
+                    if !is_leader {
                         trace!("We are not the leader node");
+                        self.was_leader_last_checkpoint = false;
                         continue;
                     }
+                    debug!("Checkpoint {checkpoint_height}: We are the leader node");
+
+                    // On the false→true leader edge, snap the local limiter
+                    // from the guardian so our first `validate_consume` sees
+                    // fresh state instead of burning an MPC round on a stale
+                    // `seq`. Steady-state leaders stay in sync via
+                    // `apply_consume` after every successful guardian RPC;
+                    // this hook only fires at promotion.
+                    if !self.was_leader_last_checkpoint
+                        && let Some(guardian) = self.inner.guardian_client()
+                    {
+                        info!("Leader promotion: snapping local limiter from guardian");
+                        Self::snap_local_limiter_from_guardian(&self.inner, guardian).await;
+                    }
+                    self.was_leader_last_checkpoint = true;
 
                     self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms);
                     self.process_approved_withdrawal_requests(checkpoint_timestamp_ms);
@@ -989,6 +1009,39 @@ impl LeaderService {
             }
         };
 
+        // Capacity pre-check against the local limiter emulator BEFORE the
+        // expensive committee BLS fan-out and on-chain commit. The local
+        // state is kept in sync with the guardian via bootstrap +
+        // reconciliation, so this mirrors what a remote probe would
+        // answer, without the round-trip. No-op when no guardian is
+        // configured (or when the local limiter hasn't been populated yet,
+        // in which case the hard-reserve in Step 3 will fail fast and the
+        // leader retries on the next tick).
+        if let Some(local_limiter) = inner.local_limiter() {
+            let num_requests = approval.request_ids.len();
+            let amount_sats: u64 = approval
+                .outputs
+                .iter()
+                .take(num_requests)
+                .map(|o| o.amount)
+                .sum();
+            let ts_secs = checkpoint_timestamp_ms / 1000;
+            let available = local_limiter.capacity_at(ts_secs).await;
+            if amount_sats > available {
+                inner
+                    .metrics
+                    .leader_retries_total
+                    .with_label_values(&["withdrawal_commitment", "LocalRateLimited"])
+                    .inc();
+                warn!(
+                    amount_sats,
+                    available,
+                    "Local rate limiter indicates insufficient capacity; skipping iteration"
+                );
+                return Ok(());
+            }
+        }
+
         // Fan out to committee for BLS signatures over the commitment message
         let members = inner
             .onchain_state()
@@ -1111,7 +1164,19 @@ impl LeaderService {
         self.inflight_withdrawal_signings
             .retain(|id| pending_ids.contains(id));
 
-        let max_concurrent = self.inner.config.max_concurrent_leader_job_tasks();
+        // Guardian's limiter enforces strictly increasing `seq` and
+        // monotonic `timestamp`, so hard-reserves must arrive in
+        // `txn.timestamp_ms` order (the sort above). Running multiple MPC
+        // signings concurrently would let them finish out-of-order and
+        // starve the earliest-timestamped txn via a late timestamp at the
+        // guardian. Cap to one in-flight when guardian is configured;
+        // fall back to the configured cap when it isn't (preserves the
+        // pre-integration baseline).
+        let max_concurrent = if self.inner.guardian_client().is_some() {
+            1
+        } else {
+            self.inner.config.max_concurrent_leader_job_tasks()
+        };
         for txn in withdrawal_txns {
             if self.withdrawal_signing_tasks.len() >= max_concurrent {
                 break;
@@ -1165,12 +1230,12 @@ impl LeaderService {
             // Return and let the next checkpoint iteration pick up the updated state.
             return Ok(());
         }
-        info!("MPC signing withdrawal transaction");
-
         let members = inner
             .onchain_state()
             .current_committee_members()
             .expect("No current committee members");
+
+        info!("MPC signing withdrawal transaction");
 
         // 1. Request signed withdrawal tx witnesses from committee members.
         // MPC signing requires all threshold members to participate simultaneously
@@ -1185,7 +1250,30 @@ impl LeaderService {
             .map(|s| s.to_byte_array().to_vec())
             .collect();
 
-        // 3. Build the WithdrawalTxSigning and get BLS certificate via fan-out
+        // 3. Guardian rate-limiting hard reserve (after MPC, before on-chain sign).
+        //
+        // Scope note: *this PR wires the rate-limit consume only*. The guardian
+        // will currently also compute BTC Schnorr signatures over the withdrawal
+        // UTXOs and return them in `enclave_signatures`; they are received and
+        // verified via the Ed25519 response envelope but NOT placed into the
+        // on-chain witness. The witness remains MPC-only (`witness_signatures`
+        // from step 1 above).
+        //
+        // TODO: Integrate the guardian's `enclave_signatures` into the witness
+        // as the second signature of a 2-of-2 taproot script-path spend. That
+        // requires 2-of-2 taproot deposits to land first; until then the
+        // guardian acts purely as the authoritative rate limiter.
+        //
+        // When a `guardian_endpoint` is configured we forward a committee-
+        // signed `StandardWithdrawalRequest` to the guardian and only proceed
+        // if it approves. Any guardian error — rate limited, unavailable,
+        // not-yet-bootstrapped — aborts this iteration so the leader picks
+        // the txn back up on the next tick (MPC sigs are re-collected then).
+        if let Some(guardian) = inner.guardian_client() {
+            Self::finalize_withdrawal_through_guardian(&inner, &txn, &members, guardian).await?;
+        }
+
+        // 4. Build the WithdrawalTxSigning and get BLS certificate via fan-out
         let signed_message = WithdrawalTxSigning {
             withdrawal_id: txn.id,
             request_ids: txn.request_ids.clone(),
@@ -1229,7 +1317,7 @@ impl LeaderService {
 
         let signed = aggregator.finish()?;
 
-        // 4. Submit sign_withdrawal to Sui (writes signatures on-chain).
+        // 5. Submit sign_withdrawal to Sui (writes signatures on-chain).
         // Broadcast + confirm happens via process_signed_withdrawal_txns on the next tick.
         Self::submit_sign_withdrawal(
             &inner,
@@ -1727,6 +1815,289 @@ impl LeaderService {
                 }
             }
         }
+    }
+
+    // ========================================================================
+    // Guardian: rate-limiting hard reserve (runs after MPC signing, before
+    // submitting sign_withdrawal on-chain)
+    // ========================================================================
+
+    /// Build a committee-signed `StandardWithdrawalRequest` and forward it to
+    /// the guardian. Returns `Ok(())` when the guardian approves; otherwise
+    /// propagates an error so the caller can skip this iteration.
+    ///
+    /// The `timestamp_secs` comes from the on-chain `WithdrawalTransaction`
+    /// so it is monotonic across leader rotations and restarts. The `seq`
+    /// comes from the local limiter's `next_seq`; the guardian's own seq
+    /// check catches any drift (which we then reconcile by snapping back
+    /// to the guardian's authoritative state).
+    ///
+    /// Serialization in timestamp order is enforced upstream: when a
+    /// guardian is configured, `process_unsigned_withdrawal_txns` runs
+    /// only one in-flight task at a time. That ensures each hard-reserve
+    /// arrives at the guardian with `timestamp_secs >= last_updated_at`.
+    #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id))]
+    async fn finalize_withdrawal_through_guardian(
+        inner: &Arc<Hashi>,
+        txn: &WithdrawalTransaction,
+        members: &[CommitteeMember],
+        guardian: &crate::grpc::guardian_client::GuardianClient,
+    ) -> anyhow::Result<()> {
+        let timestamp_secs = txn.timestamp_ms / 1000;
+
+        let local_limiter = inner.local_limiter().ok_or_else(|| {
+            inner
+                .metrics
+                .leader_retries_total
+                .with_label_values(&["withdrawal_signing", "GuardianNotBootstrapped"])
+                .inc();
+            anyhow::anyhow!(
+                "Local guardian limiter not initialized; reconciliation task will pick it up"
+            )
+        })?;
+
+        // External-out amount: first N outputs pay the user; any trailing
+        // output is change back to the bridge.
+        let num_requests = txn.request_ids.len();
+        let amount_sats: u64 = txn
+            .all_outputs()
+            .iter()
+            .take(num_requests)
+            .map(|o| o.amount)
+            .sum();
+
+        // Local pre-check: pick the next seq and confirm capacity. This
+        // does not mutate state; we only apply after the guardian
+        // accepts. A stale / over-capacity error here means we need to
+        // snap to the guardian — the leader tick will retry.
+        let seq = match local_limiter
+            .validate_consume(timestamp_secs, amount_sats)
+            .await
+        {
+            Ok(seq) => seq,
+            Err(e) => {
+                inner
+                    .metrics
+                    .leader_retries_total
+                    .with_label_values(&["withdrawal_signing", "LocalValidateFailed"])
+                    .inc();
+                Self::snap_local_limiter_from_guardian(inner, guardian).await;
+                anyhow::bail!("Local limiter rejected hard reserve: {e}")
+            }
+        };
+
+        let signed_request =
+            Self::collect_guardian_withdrawal_signatures(inner, txn, members, timestamp_secs, seq)
+                .await?;
+
+        let proto_request =
+            hashi_types::guardian::proto_conversions::signed_standard_withdrawal_request_to_pb(
+                &signed_request,
+            );
+
+        match guardian.standard_withdrawal(proto_request).await {
+            Ok(response_pb) => {
+                // Verify the guardian's Ed25519 signature on the response
+                // before trusting the approval. If the pubkey wasn't
+                // cached at startup (guardian was unreachable then) we
+                // warn and proceed — the response still passed the
+                // guardian's rate-limit check end to end, we just can't
+                // cryptographically prove it came from the expected
+                // enclave.
+                //
+                // TODO: The parsed response also carries the guardian's BTC
+                // Schnorr signatures (`signed_response.data.enclave_signatures`);
+                // they are intentionally dropped here. When 2-of-2 taproot
+                // deposits are in, thread them back up to
+                // `process_unsigned_withdrawal_txn` so they can be combined
+                // with the MPC signatures into the on-chain witness. For now
+                // we only use the envelope verification to confirm the
+                // rate-limit approval came from the expected enclave.
+                if let Some(pubkey) = inner.guardian_signing_pubkey() {
+                    let signed_response = hashi_types::guardian::GuardianSigned::<
+                        hashi_types::guardian::StandardWithdrawalResponse,
+                    >::try_from(response_pb)
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to parse guardian withdrawal response: {e}")
+                    })?;
+                    signed_response.verify(pubkey).map_err(|e| {
+                        anyhow::anyhow!("Guardian response signature verification failed: {e:?}")
+                    })?;
+                    info!(
+                        seq,
+                        "Guardian approved withdrawal (rate limit passed, signature verified)"
+                    );
+                } else {
+                    warn!(
+                        seq,
+                        "Guardian approved withdrawal but signing pubkey not available; \
+                         skipping response verification"
+                    );
+                }
+
+                // Apply the consume locally so the next hard reserve sees
+                // an advanced seq + debited bucket.
+                if let Err(e) = local_limiter
+                    .apply_consume(seq, timestamp_secs, amount_sats)
+                    .await
+                {
+                    warn!(
+                        "Local limiter apply_consume failed after guardian success: {e}; \
+                         snapping to guardian to restore consistency"
+                    );
+                    Self::snap_local_limiter_from_guardian(inner, guardian).await;
+                }
+                Ok(())
+            }
+            Err(status) => {
+                let label = if status.message().contains("seq mismatch") {
+                    "GuardianSeqMismatch"
+                } else if status.message().contains("Rate limit exceeded") {
+                    warn!("Guardian rate-limited withdrawal, will retry later");
+                    "GuardianRateLimited"
+                } else {
+                    error!("Guardian call failed: {}", status.message());
+                    "GuardianUnavailable"
+                };
+                inner
+                    .metrics
+                    .leader_retries_total
+                    .with_label_values(&["withdrawal_signing", label])
+                    .inc();
+                Self::snap_local_limiter_from_guardian(inner, guardian).await;
+                anyhow::bail!("Guardian rejected withdrawal: {}", status.message())
+            }
+        }
+    }
+
+    /// Best-effort snap of the local limiter to the guardian's authoritative
+    /// state. Called whenever we detect potential drift — the next leader
+    /// tick will retry cleanly with fresh state.
+    async fn snap_local_limiter_from_guardian(
+        inner: &Arc<Hashi>,
+        guardian: &crate::grpc::guardian_client::GuardianClient,
+    ) {
+        let Some(local_limiter) = inner.local_limiter() else {
+            return;
+        };
+        match guardian.get_guardian_info().await {
+            Ok(info_pb) => {
+                match hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb) {
+                    Ok(info) => {
+                        if let Some(state) = info.limiter_state {
+                            local_limiter.snap_to(state).await;
+                        }
+                    }
+                    Err(e) => warn!("Failed to parse guardian info for snap: {e:?}"),
+                }
+            }
+            Err(e) => warn!("Failed to fetch guardian info for snap: {e}"),
+        }
+    }
+
+    /// Fan out `SignGuardianWithdrawalRequest` to the committee and aggregate
+    /// BLS signatures until the certificate threshold is reached.
+    ///
+    /// Each validator independently reconstructs the same
+    /// `StandardWithdrawalRequest` from on-chain `WithdrawalTransaction` data
+    /// plus the leader-supplied `timestamp_secs` and `seq`, then signs it.
+    async fn collect_guardian_withdrawal_signatures(
+        inner: &Arc<Hashi>,
+        txn: &WithdrawalTransaction,
+        members: &[CommitteeMember],
+        timestamp_secs: u64,
+        seq: u64,
+    ) -> anyhow::Result<
+        hashi_types::committee::SignedMessage<hashi_types::guardian::StandardWithdrawalRequest>,
+    > {
+        let guardian_request =
+            crate::withdrawals::build_guardian_withdrawal_request(inner, txn, timestamp_secs, seq)?;
+
+        let committee = inner
+            .onchain_state()
+            .current_committee()
+            .expect("No current committee");
+        let required_weight = certificate_threshold(committee.total_weight());
+
+        let proto_request = SignGuardianWithdrawalRequestRequest {
+            withdrawal_txn_id: txn.id.as_bytes().to_vec().into(),
+            timestamp_secs,
+            seq,
+        };
+
+        let mut sig_tasks = JoinSet::new();
+        for member in members {
+            let inner = inner.clone();
+            let proto_request = proto_request.clone();
+            let member = member.clone();
+            sig_tasks.spawn(async move {
+                Self::request_guardian_withdrawal_signature(&inner, proto_request, &member).await
+            });
+        }
+
+        let mut aggregator = BlsSignatureAggregator::new(&committee, guardian_request);
+        while let Some(result) = sig_tasks.join_next().await {
+            let Ok(Some(sig)) = result else { continue };
+            if let Err(e) = aggregator.add_signature(sig) {
+                error!(
+                    withdrawal_txn_id = %txn.id,
+                    "Failed to add guardian withdrawal signature: {e}"
+                );
+            }
+            if aggregator.weight() >= required_weight {
+                break;
+            }
+        }
+
+        let weight = aggregator.weight();
+        if weight < required_weight {
+            anyhow::bail!(
+                "Insufficient guardian withdrawal signatures: weight {weight} < {required_weight}"
+            );
+        }
+
+        Ok(aggregator.finish()?)
+    }
+
+    #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
+    async fn request_guardian_withdrawal_signature(
+        inner: &Arc<Hashi>,
+        proto_request: SignGuardianWithdrawalRequestRequest,
+        member: &CommitteeMember,
+    ) -> Option<MemberSignature> {
+        let validator_address = member.validator_address();
+        trace!("Requesting guardian withdrawal signature");
+
+        let mut rpc_client = inner
+            .onchain_state()
+            .bridge_service_client(&validator_address)
+            .or_else(|| {
+                error!(
+                    "Cannot find client for validator address: {:?}",
+                    validator_address
+                );
+                None
+            })?;
+
+        let response = rpc_client
+            .sign_guardian_withdrawal_request(proto_request.clone())
+            .await
+            .inspect_err(|e| {
+                error!("Failed to get guardian withdrawal signature from {validator_address}: {e}");
+            })
+            .ok()?;
+
+        response
+            .into_inner()
+            .member_signature
+            .ok_or_else(|| anyhow::anyhow!("No member_signature in response"))
+            .and_then(parse_member_signature)
+            .inspect_err(|e| {
+                error!(
+                    "Failed to parse guardian withdrawal member signature from {validator_address}: {e}"
+                );
+            })
+            .ok()
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
