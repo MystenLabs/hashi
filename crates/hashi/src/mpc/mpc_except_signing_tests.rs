@@ -3153,7 +3153,7 @@ fn test_handle_retrieve_messages_request_nonce_db_fallback() {
             &nonce_msg.message,
         )
         .unwrap();
-    assert!(!manager.nonce_messages.contains_key(&dealer_address));
+    assert!(!manager.nonce_messages.contains_key(&(0, dealer_address)));
 
     // DB fallback should serve nonce gen messages when batch_index is provided.
     let result = manager.handle_retrieve_messages_request(&RetrieveMessagesRequest {
@@ -3168,6 +3168,49 @@ fn test_handle_retrieve_messages_request_nonce_db_fallback() {
     assert_eq!(
         received_hash, expected_hash,
         "DB fallback should serve the correct nonce message"
+    );
+}
+
+#[test]
+fn test_process_certified_nonce_message_db_fallback() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let dealer_idx = 1;
+    let dealer_addr = setup.address(dealer_idx);
+    let batch_index = 0u32;
+
+    let nonce_msg = create_nonce_dealer_message(&setup, dealer_idx, batch_index, &mut rng);
+
+    // Receiver has the message in DB but NOT in the in-memory cache —
+    // simulates post-prune state.
+    let mut receiver =
+        setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+    receiver
+        .public_messages_store
+        .store_nonce_message(
+            receiver.mpc_config.epoch,
+            batch_index,
+            &dealer_addr,
+            &nonce_msg.message,
+        )
+        .unwrap();
+    assert!(
+        !receiver
+            .nonce_messages
+            .contains_key(&(batch_index, dealer_addr)),
+        "precondition: in-memory cache empty for this batch/dealer"
+    );
+
+    // Falls back to DB, processes the message, populates the dealer output.
+    receiver
+        .process_certified_nonce_message(dealer_addr, batch_index)
+        .expect("should succeed via DB fallback");
+
+    assert!(
+        receiver
+            .dealer_nonce_outputs
+            .contains_key(&(batch_index, dealer_addr)),
+        "dealer output should be populated after processing via DB fallback"
     );
 }
 
@@ -3291,7 +3334,9 @@ fn test_handle_complain_request_caches_response() {
     assert!(
         party2_manager
             .complaint_responses
-            .contains_key(&(dealer_addr, ProtocolTypeIndicator::Dkg))
+            .contains_key(&ComplaintResponsesKey::Dkg {
+                dealer: dealer_addr,
+            })
     );
 
     // Second call - should return cached response
@@ -4428,14 +4473,17 @@ async fn test_handle_send_messages_request_invalid_shares_cached_on_retry() {
     );
 
     // Verify the error was cached so subsequent retries don't re-process.
+    let dkg_cache_key = MessageResponsesKey::Dkg {
+        sender: dealer_addr,
+    };
     assert!(
         receiver_manager
             .message_responses
-            .contains_key(&dealer_addr),
+            .contains_key(&dkg_cache_key),
         "Error should be cached for invalid shares"
     );
     assert!(
-        receiver_manager.message_responses[&dealer_addr].is_err(),
+        receiver_manager.message_responses[&dkg_cache_key].is_err(),
         "Cached response should be an error"
     );
 
@@ -4486,10 +4534,13 @@ async fn test_handle_send_messages_request_post_restart_reprocesses() {
         receiver_manager.dkg_messages.contains_key(&dealer_addr),
         "precondition: stored message present"
     );
+    let dkg_cache_key = MessageResponsesKey::Dkg {
+        sender: dealer_addr,
+    };
     assert!(
         !receiver_manager
             .message_responses
-            .contains_key(&dealer_addr),
+            .contains_key(&dkg_cache_key),
         "precondition: no cached response"
     );
 
@@ -4507,7 +4558,7 @@ async fn test_handle_send_messages_request_post_restart_reprocesses() {
     assert!(
         receiver_manager
             .message_responses
-            .contains_key(&dealer_addr),
+            .contains_key(&dkg_cache_key),
         "response should be cached after successful re-processing"
     );
 
@@ -6925,7 +6976,9 @@ fn test_handle_complain_request_success() {
     assert!(
         responder_manager
             .complaint_responses
-            .contains_key(&(dealer_addr, ProtocolTypeIndicator::KeyRotation)),
+            .contains_key(&ComplaintResponsesKey::Rotation {
+                dealer: dealer_addr
+            }),
         "Response should be cached"
     );
 }
@@ -8060,16 +8113,19 @@ fn retrieve_and_verify_hash(
     dealer_address: Address,
     expected_messages: &Messages,
 ) {
-    let protocol_type = match expected_messages {
-        Messages::Dkg(_) => ProtocolTypeIndicator::Dkg,
-        Messages::Rotation(_) => ProtocolTypeIndicator::KeyRotation,
-        Messages::NonceGeneration(_) => ProtocolTypeIndicator::NonceGeneration,
+    let (protocol_type, batch_index) = match expected_messages {
+        Messages::Dkg(_) => (ProtocolTypeIndicator::Dkg, None),
+        Messages::Rotation(_) => (ProtocolTypeIndicator::KeyRotation, None),
+        Messages::NonceGeneration(nonce) => (
+            ProtocolTypeIndicator::NonceGeneration,
+            Some(nonce.batch_index),
+        ),
     };
     let request = RetrieveMessagesRequest {
         dealer: dealer_address,
         protocol_type,
         epoch: manager.mpc_config.epoch,
-        batch_index: None,
+        batch_index,
     };
     let response = manager.handle_retrieve_messages_request(&request).unwrap();
     assert_eq!(
@@ -8084,12 +8140,13 @@ fn complain_and_assert_no_message(
     dealer_address: Address,
     complaint: complaint::Complaint,
     share_index: Option<ShareIndex>,
+    batch_index: Option<u32>,
     protocol_type: ProtocolTypeIndicator,
 ) {
     let request = ComplainRequest {
         dealer: dealer_address,
         share_index,
-        batch_index: None,
+        batch_index,
         complaint,
         protocol_type,
         epoch: manager.mpc_config.epoch,
@@ -8237,6 +8294,7 @@ fn test_handle_complain_request_rotation_no_message_from_dealer() {
         dealer_addr,
         complaint,
         Some(share_index),
+        None,
         ProtocolTypeIndicator::KeyRotation,
     );
 }
@@ -8465,6 +8523,111 @@ fn test_handle_send_messages_request_nonce_equivocation() {
 }
 
 #[test]
+fn test_handle_send_messages_request_allows_different_batches_same_dealer() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let dealer_idx = 1;
+    let dealer_addr = setup.address(dealer_idx);
+
+    let batch_0_msg = create_nonce_dealer_message(&setup, dealer_idx, 0, &mut rng);
+    let batch_1_msg = create_nonce_dealer_message(&setup, dealer_idx, 1, &mut rng);
+
+    let mut receiver = setup.create_manager(0);
+
+    send_and_assert_ok(
+        &mut receiver,
+        dealer_addr,
+        &Messages::NonceGeneration(batch_0_msg),
+    );
+
+    let req = SendMessagesRequest {
+        messages: Messages::NonceGeneration(batch_1_msg),
+    };
+    let result = receiver.handle_send_messages_request(dealer_addr, &req);
+
+    assert!(
+        result.is_ok(),
+        "batch 1 from same dealer should be accepted as a distinct batch, \
+         not rejected as equivocation. got: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_handle_send_messages_request_different_protocols_same_sender_coexist() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let sender_idx = 1;
+    let sender_addr = setup.address(sender_idx);
+
+    // Build a DKG message from sender.
+    let dealer_mgr = setup.create_dealer_with_message(sender_idx, &mut rng);
+    let dkg_message = dealer_mgr
+        .dkg_messages
+        .get(&sender_addr)
+        .expect("dealer should have stored its own DKG message")
+        .clone();
+
+    // Build a NonceGen message from the same sender.
+    let nonce_message = create_nonce_dealer_message(&setup, sender_idx, 0, &mut rng);
+
+    let mut receiver = setup.create_manager(0);
+    send_and_assert_ok(&mut receiver, sender_addr, &Messages::Dkg(dkg_message));
+    send_and_assert_ok(
+        &mut receiver,
+        sender_addr,
+        &Messages::NonceGeneration(nonce_message),
+    );
+
+    // Both protocols' responses should coexist in the cache.
+    assert!(
+        receiver
+            .message_responses
+            .contains_key(&MessageResponsesKey::Dkg {
+                sender: sender_addr
+            }),
+        "DKG response should be cached"
+    );
+    assert!(
+        receiver
+            .message_responses
+            .contains_key(&MessageResponsesKey::NonceGen {
+                batch_index: 0,
+                sender: sender_addr,
+            }),
+        "NonceGen response should be cached independently"
+    );
+}
+
+#[test]
+fn test_handle_complain_request_nonce_missing_batch_index_rejected() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let dealer_idx = 1;
+    let dealer_addr = setup.address(dealer_idx);
+    let nonce_messages = create_nonce_dealer_message(&setup, dealer_idx, 0, &mut rng);
+    let complaint = create_nonce_complaint(&setup, &nonce_messages, 0, dealer_idx, &mut rng);
+
+    let mut receiver = setup.create_manager(0);
+    let request = ComplainRequest {
+        dealer: dealer_addr,
+        share_index: None,
+        batch_index: None, // <-- missing; should be rejected.
+        complaint,
+        protocol_type: ProtocolTypeIndicator::NonceGeneration,
+        epoch: receiver.mpc_config.epoch,
+    };
+    let err = receiver
+        .handle_complain_request(&request)
+        .expect_err("missing batch_index should be rejected");
+    assert!(
+        matches!(err, MpcError::InvalidMessage { .. }),
+        "expected InvalidMessage, got: {:?}",
+        err
+    );
+}
+
+#[test]
 fn test_handle_retrieve_messages_request_nonce_success() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
@@ -8498,6 +8661,7 @@ fn test_handle_complain_request_nonce_no_message_from_dealer() {
         dealer_addr,
         complaint,
         None,
+        Some(0),
         ProtocolTypeIndicator::NonceGeneration,
     );
 }
@@ -8517,7 +8681,7 @@ fn test_handle_complain_request_nonce_rederives_output_rejects_invalid_proof() {
     let mut receiver = setup.create_manager(0);
     receiver
         .nonce_messages
-        .insert(dealer_addr, nonce_messages.clone());
+        .insert((0, dealer_addr), nonce_messages.clone());
 
     let request = ComplainRequest {
         dealer: dealer_addr,
@@ -8577,7 +8741,7 @@ fn test_handle_complain_request_nonce_caches_response() {
         dealer_addr,
         &Messages::NonceGeneration(cheating_messages.clone()),
     );
-    assert!(party2.dealer_nonce_outputs.contains_key(&dealer_addr));
+    assert!(party2.dealer_nonce_outputs.contains_key(&(0, dealer_addr)));
 
     let request = ComplainRequest {
         dealer: dealer_addr,
@@ -8594,7 +8758,10 @@ fn test_handle_complain_request_nonce_caches_response() {
     assert!(
         party2
             .complaint_responses
-            .contains_key(&(dealer_addr, ProtocolTypeIndicator::NonceGeneration))
+            .contains_key(&ComplaintResponsesKey::NonceGen {
+                batch_index: 0,
+                dealer: dealer_addr,
+            })
     );
 
     // Second call → returns cached
@@ -8705,7 +8872,7 @@ async fn test_run_nonce_generation() {
     assert!(
         !mgr.complaints_to_process
             .keys()
-            .any(|k| matches!(k, ComplaintsToProcessKey::NonceGeneration(_))),
+            .any(|k| matches!(k, ComplaintsToProcessKey::NonceGeneration { .. })),
         "Should have no nonce complaints after successful run"
     );
 }
@@ -8813,7 +8980,7 @@ async fn test_run_as_nonce_party_recovers_from_hash_mismatch() {
     // Get the expected nonce output for dealer 0 from a clean manager (validator 1)
     let expected_pks_0 = managers[1]
         .dealer_nonce_outputs
-        .get(&dealer_addr_0)
+        .get(&(batch_index, dealer_addr_0))
         .map(|o| o.public_keys.clone());
 
     // Set up test_manager: it has wrong output in dealer_nonce_outputs for dealer 0
@@ -8845,7 +9012,7 @@ async fn test_run_as_nonce_party_recovers_from_hash_mismatch() {
     let mgr = test_manager.read().unwrap();
     let actual_pks_0 = mgr
         .dealer_nonce_outputs
-        .get(&dealer_addr_0)
+        .get(&(batch_index, dealer_addr_0))
         .map(|o| o.public_keys.clone());
     assert_eq!(
         actual_pks_0, expected_pks_0,
@@ -8928,6 +9095,83 @@ async fn test_run_nonce_generation_skips_dealer_phase() {
     assert!(
         !outputs.is_empty(),
         "Should have nonce outputs after party phase"
+    );
+}
+
+#[tokio::test]
+async fn test_run_nonce_generation_preserves_other_batch_state() {
+    let mut rng = rand::thread_rng();
+    let weights: [u16; 5] = [1, 1, 1, 2, 2];
+    let num_validators = weights.len();
+    let setup = TestSetup::with_weights(&weights);
+    let batch_index = 0u32;
+
+    let mut managers: Vec<_> = (0..num_validators)
+        .map(|i| setup.create_manager(i))
+        .collect();
+
+    let dealer_messages: Vec<NonceMessage> = (0..num_validators)
+        .map(|i| create_nonce_dealer_message(&setup, i, batch_index, &mut rng))
+        .collect();
+
+    let mut certificates = Vec::new();
+    for (dealer_idx, nonce_msg) in dealer_messages.iter().enumerate() {
+        let dealer_addr = setup.address(dealer_idx);
+        let messages = Messages::NonceGeneration(nonce_msg.clone());
+        let mut signatures = Vec::new();
+        for manager in managers.iter_mut() {
+            let response = send_and_assert_ok(manager, dealer_addr, &messages);
+            let sig = MemberSignature::new(
+                manager.mpc_config.epoch,
+                manager.address,
+                response.signature,
+            );
+            signatures.push(sig);
+        }
+        let cert =
+            create_test_certificate(setup.committee(), &messages, dealer_addr, signatures).unwrap();
+        certificates.push(CertificateV1::NonceGeneration { batch_index, cert });
+    }
+
+    let test_manager = managers.remove(0);
+    let other_managers: HashMap<_, _> = managers
+        .into_iter()
+        .enumerate()
+        .map(|(idx, mgr)| (setup.address(idx + 1), mgr))
+        .collect();
+    let mock_p2p = MockP2PChannel::new(other_managers, setup.address(0));
+
+    let test_manager = Arc::new(RwLock::new(test_manager));
+    let mut mock_tob = MockOrderedBroadcastChannel::new(certificates);
+
+    // Pre-populate batch 99 state (arbitrary other batch) that must survive.
+    let fake_batch: u32 = 99;
+    let fake_dealer = setup.address(2);
+    {
+        let mut mgr = test_manager.write().unwrap();
+        let fake_msg = NonceMessage {
+            batch_index: fake_batch,
+            message: dealer_messages[2].message.clone(),
+        };
+        mgr.nonce_messages
+            .insert((fake_batch, fake_dealer), fake_msg);
+    }
+
+    MpcManager::run_nonce_generation(
+        &test_manager,
+        batch_index,
+        &mock_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
+
+    let mgr = test_manager.read().unwrap();
+    assert!(
+        mgr.nonce_messages.contains_key(&(fake_batch, fake_dealer)),
+        "batch {fake_batch} state must survive run_nonce_generation({batch_index}) — \
+         clear block must not return"
     );
 }
 
@@ -9057,18 +9301,23 @@ async fn test_recover_nonce_shares_via_complaint() {
 
     // Process cheating message → generates complaint
     test_manager
-        .process_certified_nonce_message(dealer_addr)
+        .process_certified_nonce_message(dealer_addr, batch_index)
         .unwrap();
 
     // Verify complaint was generated
     assert!(
         test_manager
             .complaints_to_process
-            .contains_key(&ComplaintsToProcessKey::NonceGeneration(dealer_addr)),
+            .contains_key(&ComplaintsToProcessKey::NonceGeneration {
+                batch_index,
+                dealer: dealer_addr,
+            }),
         "Should have complaint for cheating dealer"
     );
     assert!(
-        !test_manager.dealer_nonce_outputs.contains_key(&dealer_addr),
+        !test_manager
+            .dealer_nonce_outputs
+            .contains_key(&(batch_index, dealer_addr)),
         "Should not have nonce output before recovery"
     );
 
@@ -9082,7 +9331,11 @@ async fn test_recover_nonce_shares_via_complaint() {
             dealer_addr,
             &Messages::NonceGeneration(cheating_messages.clone()),
         );
-        assert!(manager.dealer_nonce_outputs.contains_key(&dealer_addr));
+        assert!(
+            manager
+                .dealer_nonce_outputs
+                .contains_key(&(batch_index, dealer_addr))
+        );
         other_managers_map.insert(setup.address(i), manager);
     }
 
@@ -9096,6 +9349,7 @@ async fn test_recover_nonce_shares_via_complaint() {
     let result = MpcManager::recover_nonce_shares_via_complaint(
         &test_manager,
         &dealer_addr,
+        batch_index,
         signers,
         &mock_p2p,
         setup.epoch(),
@@ -9112,12 +9366,95 @@ async fn test_recover_nonce_shares_via_complaint() {
     let mgr = test_manager.read().unwrap();
     assert!(
         !mgr.complaints_to_process
-            .contains_key(&ComplaintsToProcessKey::NonceGeneration(dealer_addr)),
+            .contains_key(&ComplaintsToProcessKey::NonceGeneration {
+                batch_index,
+                dealer: dealer_addr,
+            }),
         "Complaint should be removed after recovery"
     );
     assert!(
-        mgr.dealer_nonce_outputs.contains_key(&dealer_addr),
+        mgr.dealer_nonce_outputs
+            .contains_key(&(batch_index, dealer_addr)),
         "Nonce output should exist after recovery"
+    );
+}
+
+#[tokio::test]
+async fn test_recover_nonce_shares_via_complaint_db_fallback() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let batch_index = 0u32;
+
+    let test_party_idx = 0;
+    // Use a real in-memory store so DB fallback has something to fall back to.
+    let mut test_manager = setup
+        .create_manager_with_store(test_party_idx, Box::new(InMemoryPublicMessagesStore::new()));
+    let test_addr = setup.address(test_party_idx);
+
+    let dealer_idx = 1;
+    let dealer_addr = setup.address(dealer_idx);
+
+    let cheating_messages =
+        create_cheating_nonce_message(&setup, dealer_idx, batch_index, &mut rng);
+
+    // Store the message (populates both cache AND DB) and process it to
+    // generate the complaint we'll later try to recover from.
+    test_manager
+        .store_nonce_message(
+            test_manager.mpc_config.epoch,
+            dealer_addr,
+            &cheating_messages,
+        )
+        .unwrap();
+    test_manager
+        .process_certified_nonce_message(dealer_addr, batch_index)
+        .unwrap();
+
+    // Simulate post-prune state: in-memory cache is empty, DB still has the message.
+    test_manager.nonce_messages.clear();
+    assert!(
+        !test_manager
+            .nonce_messages
+            .contains_key(&(batch_index, dealer_addr)),
+        "precondition: cache cleared"
+    );
+
+    // Set up peers and mock p2p as in the non-fallback test.
+    let mut other_managers_map = HashMap::new();
+    for i in 1..5 {
+        let mut manager = setup.create_manager(i);
+        send_and_assert_ok(
+            &mut manager,
+            dealer_addr,
+            &Messages::NonceGeneration(cheating_messages.clone()),
+        );
+        other_managers_map.insert(setup.address(i), manager);
+    }
+    let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
+    let signers: Vec<Address> = (1..5).map(|i| setup.address(i)).collect();
+
+    let test_manager = Arc::new(RwLock::new(test_manager));
+
+    let result = MpcManager::recover_nonce_shares_via_complaint(
+        &test_manager,
+        &dealer_addr,
+        batch_index,
+        signers,
+        &mock_p2p,
+        setup.epoch(),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "recovery should succeed via DB fallback when cache is empty: {:?}",
+        result.err()
+    );
+    let mgr = test_manager.read().unwrap();
+    assert!(
+        mgr.dealer_nonce_outputs
+            .contains_key(&(batch_index, dealer_addr)),
+        "nonce output should exist after recovery via DB fallback"
     );
 }
 
@@ -9224,12 +9561,16 @@ async fn test_run_nonce_generation_with_complaint_recovery() {
     // Verify cheating dealer's output was recovered
     let cheating_addr = setup.address(cheating_dealer_idx);
     assert!(
-        mgr.dealer_nonce_outputs.contains_key(&cheating_addr),
+        mgr.dealer_nonce_outputs
+            .contains_key(&(batch_index, cheating_addr)),
         "Should have recovered nonce output for cheating dealer"
     );
     assert!(
         !mgr.complaints_to_process
-            .contains_key(&ComplaintsToProcessKey::NonceGeneration(cheating_addr)),
+            .contains_key(&ComplaintsToProcessKey::NonceGeneration {
+                batch_index,
+                dealer: cheating_addr,
+            }),
         "Nonce complaint should be removed after recovery"
     );
 }

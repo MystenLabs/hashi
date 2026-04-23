@@ -13,6 +13,7 @@ use crate::metrics::Metrics;
 use crate::mpc::types::CertificateV1;
 pub use crate::mpc::types::ComplainRequest;
 pub use crate::mpc::types::ComplaintResponses;
+pub use crate::mpc::types::ComplaintResponsesKey;
 pub use crate::mpc::types::ComplaintsToProcessKey;
 use crate::mpc::types::DealerCertificate;
 pub use crate::mpc::types::DealerFlowData;
@@ -22,6 +23,7 @@ pub use crate::mpc::types::EncryptionGroupElement;
 pub use crate::mpc::types::GetPublicMpcOutputRequest;
 pub use crate::mpc::types::GetPublicMpcOutputResponse;
 pub use crate::mpc::types::MessageHash;
+pub use crate::mpc::types::MessageResponsesKey;
 pub use crate::mpc::types::Messages;
 use crate::mpc::types::MpcConfig;
 pub use crate::mpc::types::MpcError;
@@ -100,19 +102,20 @@ pub struct MpcManager {
     current_output: Option<MpcOutput>,
     pub batch_size_per_weight: u16,
 
+    // Mutable during the epoch
     // TODO: Rename these fields so it is clear at the call site which are
     // backed by persistent store and which live only in memory.
     pub dealer_outputs: HashMap<DealerOutputsKey, avss::PartialOutput>,
     pub dkg_messages: HashMap<Address, avss::Message>,
     pub rotation_messages: HashMap<Address, RotationMessages>,
-    pub nonce_messages: HashMap<Address, NonceMessage>,
-    pub message_responses: HashMap<Address, MpcResult<SendMessagesResponse>>,
+    pub nonce_messages: HashMap<(u32, Address), NonceMessage>,
+    pub message_responses: HashMap<MessageResponsesKey, MpcResult<SendMessagesResponse>>,
     pub complaints_to_process: HashMap<ComplaintsToProcessKey, complaint::Complaint>,
-    pub complaint_responses: HashMap<(Address, ProtocolTypeIndicator), ComplaintResponses>,
+    pub complaint_responses: HashMap<ComplaintResponsesKey, ComplaintResponses>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
     /// Must be `BTreeMap` so that all nodes iterate outputs in
     /// the same deterministic order when constructing `Presignatures`.
-    pub dealer_nonce_outputs: BTreeMap<Address, batch_avss::ReceiverOutput>,
+    pub dealer_nonce_outputs: BTreeMap<(u32, Address), batch_avss::ReceiverOutput>,
     /// Test-only: corrupt shares for this target address during dealing.
     test_corrupt_shares_for: Option<Address>,
 }
@@ -259,7 +262,20 @@ impl MpcManager {
         sender: Address,
         request: &SendMessagesRequest,
     ) -> MpcResult<SendMessagesResponse> {
-        let existing = self.get_dealer_messages(request.messages.protocol_type(), &sender);
+        let cache_key = match &request.messages {
+            Messages::Dkg(_) => MessageResponsesKey::Dkg { sender },
+            Messages::Rotation(_) => MessageResponsesKey::Rotation { sender },
+            Messages::NonceGeneration(nonce) => MessageResponsesKey::NonceGen {
+                batch_index: nonce.batch_index,
+                sender,
+            },
+        };
+        let batch_index = match &request.messages {
+            Messages::NonceGeneration(nonce) => Some(nonce.batch_index),
+            _ => None,
+        };
+        let existing =
+            self.get_dealer_messages(request.messages.protocol_type(), &sender, batch_index);
         if let Some(existing_messages) = existing {
             let existing_hash = compute_messages_hash(&existing_messages);
             let incoming_hash = compute_messages_hash(&request.messages);
@@ -269,7 +285,7 @@ impl MpcManager {
                     reason: "Dealer sent different messages".to_string(),
                 });
             }
-            if let Some(cached) = self.message_responses.get(&sender) {
+            if let Some(cached) = self.message_responses.get(&cache_key) {
                 return cached.clone();
             }
             tracing::info!(
@@ -296,7 +312,7 @@ impl MpcManager {
             }
         }
         .map(|signature| SendMessagesResponse { signature });
-        self.message_responses.insert(sender, result.clone());
+        self.message_responses.insert(cache_key, result.clone());
         result
     }
 
@@ -305,7 +321,11 @@ impl MpcManager {
         request: &RetrieveMessagesRequest,
     ) -> MpcResult<RetrieveMessagesResponse> {
         if request.epoch == self.mpc_config.epoch
-            && let Some(messages) = self.get_dealer_messages(request.protocol_type, &request.dealer)
+            && let Some(messages) = self.get_dealer_messages(
+                request.protocol_type,
+                &request.dealer,
+                request.batch_index,
+            )
         {
             return Ok(RetrieveMessagesResponse { messages });
         }
@@ -344,11 +364,28 @@ impl MpcManager {
         &mut self,
         request: &ComplainRequest,
     ) -> MpcResult<ComplaintResponses> {
+        let cache_key = match request.protocol_type {
+            ProtocolTypeIndicator::Dkg => ComplaintResponsesKey::Dkg {
+                dealer: request.dealer,
+            },
+            ProtocolTypeIndicator::KeyRotation => ComplaintResponsesKey::Rotation {
+                dealer: request.dealer,
+            },
+            ProtocolTypeIndicator::NonceGeneration => {
+                let batch_index = request
+                    .batch_index
+                    .ok_or_else(|| MpcError::InvalidMessage {
+                        sender: request.dealer,
+                        reason: "batch_index required for nonce complaint".into(),
+                    })?;
+                ComplaintResponsesKey::NonceGen {
+                    batch_index,
+                    dealer: request.dealer,
+                }
+            }
+        };
         // It is safe to return a response from cache since we already know that dealer was malicious.
-        if let Some(cached_response) = self
-            .complaint_responses
-            .get(&(request.dealer, request.protocol_type))
-        {
+        if let Some(cached_response) = self.complaint_responses.get(&cache_key) {
             return Ok(cached_response.clone());
         }
         let messages = self
@@ -385,9 +422,13 @@ impl MpcManager {
                         "Rotation not started yet — previous output not available".into(),
                     )
                 })?;
-                let complained_share_index = request.share_index.ok_or_else(|| {
-                    MpcError::ProtocolFailed("Rotation complaint requires share_index".into())
-                })?;
+                let complained_share_index =
+                    request
+                        .share_index
+                        .ok_or_else(|| MpcError::InvalidMessage {
+                            sender: request.dealer,
+                            reason: "Rotation complaint requires share_index".into(),
+                        })?;
                 let (nodes, party_id, threshold) = self.config_for_epoch(request.epoch)?;
                 let mut all_outputs: BTreeMap<ShareIndex, avss::PartialOutput> = BTreeMap::new();
                 for (&share_index, message) in &rotation_messages {
@@ -449,8 +490,9 @@ impl MpcManager {
                 batch_index,
                 message,
             }) => {
-                let nonce_output = if let Some(output) =
-                    self.dealer_nonce_outputs.get(&request.dealer)
+                let nonce_output = if let Some(output) = self
+                    .dealer_nonce_outputs
+                    .get(&(batch_index, request.dealer))
                 {
                     output.clone()
                 } else {
@@ -471,7 +513,7 @@ impl MpcManager {
             }
         };
         self.complaint_responses
-            .insert((request.dealer, request.protocol_type), responses.clone());
+            .insert(cache_key, responses.clone());
         Ok(responses)
     }
 
@@ -637,15 +679,6 @@ impl MpcManager {
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
     ) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
-        // Clear stale state from previous batch.
-        {
-            let mut mgr = mpc_manager.write().unwrap();
-            mgr.dealer_nonce_outputs.clear();
-            mgr.nonce_messages.clear();
-            mgr.complaints_to_process.clear();
-            mgr.message_responses.clear();
-            mgr.complaint_responses.clear();
-        }
         let certified = tob_channel.certified_dealers().await;
         let (certified_reduced_weight, required_reduced_weight) = {
             let mgr = mpc_manager.read().unwrap();
@@ -684,17 +717,32 @@ impl MpcManager {
         // Keep only the outputs selected by the party phase. The RPC handler's
         // `try_sign_nonce_message` may have inserted additional outputs
         // concurrently — discard them so all nodes use the same deterministic set.
-        let pre_filter = mgr.dealer_nonce_outputs.len();
-        mgr.dealer_nonce_outputs
-            .retain(|addr, _| certified.contains(addr));
-        let dealers: Vec<_> = mgr.dealer_nonce_outputs.keys().collect();
+        let pre_filter = mgr
+            .dealer_nonce_outputs
+            .keys()
+            .filter(|(b, _)| *b == batch_index)
+            .count();
+        let mut dealers = Vec::new();
+        let mut outputs = Vec::new();
+        mgr.dealer_nonce_outputs.retain(|(b, addr), output| {
+            if *b != batch_index {
+                return true;
+            }
+            if certified.contains(addr) {
+                dealers.push(*addr);
+                outputs.push(output.clone());
+                true
+            } else {
+                false
+            }
+        });
         tracing::info!(
             "run_nonce_generation: epoch={}, batch_index={batch_index}, \
              {pre_filter} outputs before filter, {} after. dealers={dealers:?}",
             mgr.mpc_config.epoch,
             dealers.len(),
         );
-        Ok(mgr.dealer_nonce_outputs.values().cloned().collect())
+        Ok(outputs)
     }
 
     pub fn reconstruct_presignatures(
@@ -712,7 +760,7 @@ impl MpcManager {
             if !certified_dealers.contains(&dealer) {
                 continue;
             }
-            if let Some(output) = self.dealer_nonce_outputs.get(&dealer) {
+            if let Some(output) = self.dealer_nonce_outputs.get(&(batch_index, dealer)) {
                 outputs.insert(dealer, output.clone());
                 continue;
             }
@@ -1467,7 +1515,7 @@ impl MpcManager {
                     .write()
                     .unwrap()
                     .dealer_nonce_outputs
-                    .remove(&dealer);
+                    .remove(&(batch_index, dealer));
             }
             let _timer = metrics
                 .mpc_message_process_duration_seconds
@@ -1477,17 +1525,24 @@ impl MpcManager {
                 let mgr = Arc::clone(mpc_manager);
                 spawn_blocking(move || {
                     let mut mgr = mgr.write().unwrap();
-                    if !mgr.dealer_nonce_outputs.contains_key(&dealer)
-                        && !mgr
-                            .complaints_to_process
-                            .contains_key(&ComplaintsToProcessKey::NonceGeneration(dealer))
+                    if !mgr
+                        .dealer_nonce_outputs
+                        .contains_key(&(batch_index, dealer))
+                        && !mgr.complaints_to_process.contains_key(
+                            &ComplaintsToProcessKey::NonceGeneration {
+                                batch_index,
+                                dealer,
+                            },
+                        )
                     {
-                        mgr.process_certified_nonce_message(dealer)?;
+                        mgr.process_certified_nonce_message(dealer, batch_index)?;
                     }
-                    Ok::<_, MpcError>(
-                        mgr.complaints_to_process
-                            .contains_key(&ComplaintsToProcessKey::NonceGeneration(dealer)),
-                    )
+                    Ok::<_, MpcError>(mgr.complaints_to_process.contains_key(
+                        &ComplaintsToProcessKey::NonceGeneration {
+                            batch_index,
+                            dealer,
+                        },
+                    ))
                 })
                 .await?
             };
@@ -1511,6 +1566,7 @@ impl MpcManager {
                 Self::recover_nonce_shares_via_complaint(
                     mpc_manager,
                     &dealer,
+                    batch_index,
                     signers,
                     p2p_channel,
                     epoch,
@@ -1520,7 +1576,10 @@ impl MpcManager {
             }
             let dealer_weight = {
                 let mgr = mpc_manager.read().unwrap();
-                if !mgr.dealer_nonce_outputs.contains_key(&dealer) {
+                if !mgr
+                    .dealer_nonce_outputs
+                    .contains_key(&(batch_index, dealer))
+                {
                     tracing::warn!("No nonce output for {:?} after processing", dealer);
                     continue;
                 }
@@ -1587,7 +1646,8 @@ impl MpcManager {
         dealer: Address,
         nonce: &NonceMessage,
     ) -> MpcResult<()> {
-        self.nonce_messages.insert(dealer, nonce.clone());
+        self.nonce_messages
+            .insert((nonce.batch_index, dealer), nonce.clone());
         self.public_messages_store
             .store_nonce_message(epoch, nonce.batch_index, &dealer, &nonce.message)
             .map_err(|e| MpcError::StorageError(e.to_string()))?;
@@ -1600,7 +1660,7 @@ impl MpcManager {
         batch_index: u32,
         expected_hash: &MessageHash,
     ) -> bool {
-        if let Some(stored) = self.nonce_messages.get(&dealer) {
+        if let Some(stored) = self.nonce_messages.get(&(batch_index, dealer)) {
             return compute_messages_hash(&Messages::NonceGeneration(stored.clone()))
                 != *expected_hash;
         }
@@ -1620,7 +1680,7 @@ impl MpcManager {
             };
             let hash_mismatch =
                 compute_messages_hash(&Messages::NonceGeneration(nonce.clone())) != *expected_hash;
-            self.nonce_messages.insert(dealer, nonce);
+            self.nonce_messages.insert((batch_index, dealer), nonce);
             hash_mismatch
         } else {
             true
@@ -1742,7 +1802,8 @@ impl MpcManager {
         let result = receiver.process_message(message)?;
         match result {
             batch_avss::ProcessedMessage::Valid(output) => {
-                self.dealer_nonce_outputs.insert(dealer, output);
+                self.dealer_nonce_outputs
+                    .insert((batch_index, dealer), output);
                 let nonce_message = DealerMessagesHash {
                     dealer_address: dealer,
                     messages_hash: compute_messages_hash(messages),
@@ -1765,7 +1826,7 @@ impl MpcManager {
         let message = self
             .dkg_messages
             .get(&dealer)
-            .ok_or_else(|| MpcError::ProtocolFailed("No message for dealer".into()))?
+            .ok_or_else(|| MpcError::NotFound("No DKG message for dealer".into()))?
             .clone();
         let session_id = self.session_id.dealer_session_id(&dealer).to_vec();
         self.process_and_store_message(
@@ -1780,12 +1841,19 @@ impl MpcManager {
         )
     }
 
-    fn process_certified_nonce_message(&mut self, dealer: Address) -> MpcResult<()> {
-        let nonce = self
-            .nonce_messages
-            .get(&dealer)
-            .ok_or_else(|| MpcError::ProtocolFailed("No message for dealer".into()))?;
-        let (batch_index, message) = (nonce.batch_index, nonce.message.clone());
+    fn process_certified_nonce_message(
+        &mut self,
+        dealer: Address,
+        batch_index: u32,
+    ) -> MpcResult<()> {
+        let message = match self.nonce_messages.get(&(batch_index, dealer)) {
+            Some(nonce) => nonce.message.clone(),
+            None => self
+                .public_messages_store
+                .get_nonce_message(self.mpc_config.epoch, batch_index, &dealer)
+                .map_err(|e| MpcError::StorageError(e.to_string()))?
+                .ok_or_else(|| MpcError::NotFound("No nonce message for dealer".into()))?,
+        };
         let dealer_party_id =
             self.committee
                 .index_of(&dealer)
@@ -1811,11 +1879,17 @@ impl MpcManager {
         .map_err(|e| MpcError::CryptoError(e.to_string()))?;
         match receiver.process_message(&message)? {
             batch_avss::ProcessedMessage::Valid(output) => {
-                self.dealer_nonce_outputs.insert(dealer, output);
+                self.dealer_nonce_outputs
+                    .insert((batch_index, dealer), output);
             }
             batch_avss::ProcessedMessage::Complaint(complaint) => {
-                self.complaints_to_process
-                    .insert(ComplaintsToProcessKey::NonceGeneration(dealer), complaint);
+                self.complaints_to_process.insert(
+                    ComplaintsToProcessKey::NonceGeneration {
+                        batch_index,
+                        dealer,
+                    },
+                    complaint,
+                );
             }
         }
         Ok(())
@@ -2112,7 +2186,7 @@ impl MpcManager {
         batch_index: u32,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> MpcResult<DealerFlowData> {
-        let messages = match self.nonce_messages.get(&self.address) {
+        let messages = match self.nonce_messages.get(&(batch_index, self.address)) {
             Some(nonce) => Messages::NonceGeneration(nonce.clone()),
             None => {
                 let msgs = self.create_nonce_dealer_message(batch_index, rng)?;
@@ -2323,6 +2397,7 @@ impl MpcManager {
     pub(crate) async fn recover_nonce_shares_via_complaint(
         mpc_manager: &Arc<RwLock<Self>>,
         dealer: &Address,
+        batch_index: u32,
         signers: Vec<Address>,
         p2p_channel: &impl P2PChannel,
         epoch: u64,
@@ -2331,13 +2406,19 @@ impl MpcManager {
             let mgr = mpc_manager.read().unwrap();
             let complaint = mgr
                 .complaints_to_process
-                .get(&ComplaintsToProcessKey::NonceGeneration(*dealer))
+                .get(&ComplaintsToProcessKey::NonceGeneration {
+                    batch_index,
+                    dealer: *dealer,
+                })
                 .ok_or_else(|| MpcError::ProtocolFailed("No nonce complaint for dealer".into()))?;
-            let nonce = mgr
-                .nonce_messages
-                .get(dealer)
-                .expect("cannot have complaint without message");
-            let (batch_index, message) = (nonce.batch_index, nonce.message.clone());
+            let message = match mgr.nonce_messages.get(&(batch_index, *dealer)) {
+                Some(nonce) => nonce.message.clone(),
+                None => mgr
+                    .public_messages_store
+                    .get_nonce_message(epoch, batch_index, dealer)
+                    .map_err(|e| MpcError::StorageError(e.to_string()))?
+                    .ok_or_else(|| MpcError::NotFound("No nonce message for dealer".into()))?,
+            };
             let (nodes, party_id, threshold) = mgr.config_for_epoch(epoch)?;
             let complaint_request = ComplainRequest {
                 dealer: *dealer,
@@ -2395,9 +2476,13 @@ impl MpcManager {
             match result {
                 Ok(output) => {
                     let mut mgr = mpc_manager.write().unwrap();
-                    mgr.dealer_nonce_outputs.insert(*dealer, output);
+                    mgr.dealer_nonce_outputs
+                        .insert((batch_index, *dealer), output);
                     mgr.complaints_to_process
-                        .remove(&ComplaintsToProcessKey::NonceGeneration(*dealer));
+                        .remove(&ComplaintsToProcessKey::NonceGeneration {
+                            batch_index,
+                            dealer: *dealer,
+                        });
                     return Ok(());
                 }
                 Err(FastCryptoError::InputTooShort(_)) => {
@@ -3357,10 +3442,15 @@ impl MpcManager {
                     let signers = {
                         let mut mgr = mpc_manager.write().unwrap();
                         mgr.complaints_to_process.insert(
-                            ComplaintsToProcessKey::NonceGeneration(dealer_address),
+                            ComplaintsToProcessKey::NonceGeneration {
+                                batch_index: complaint_batch_index,
+                                dealer: dealer_address,
+                            },
                             complaint,
                         );
-                        if !mgr.nonce_messages.contains_key(&dealer_address)
+                        if !mgr
+                            .nonce_messages
+                            .contains_key(&(complaint_batch_index, dealer_address))
                             && let Ok(Some(msg)) = mgr.public_messages_store.get_nonce_message(
                                 epoch,
                                 complaint_batch_index,
@@ -3368,7 +3458,7 @@ impl MpcManager {
                             )
                         {
                             mgr.nonce_messages.insert(
-                                dealer_address,
+                                (complaint_batch_index, dealer_address),
                                 NonceMessage {
                                     batch_index: complaint_batch_index,
                                     message: msg,
@@ -3393,6 +3483,7 @@ impl MpcManager {
                     Self::recover_nonce_shares_via_complaint(
                         mpc_manager,
                         &dealer_address,
+                        complaint_batch_index,
                         signers,
                         p2p_channel,
                         epoch,
@@ -3640,6 +3731,7 @@ impl MpcManager {
         &self,
         protocol_type: ProtocolTypeIndicator,
         dealer: &Address,
+        batch_index: Option<u32>,
     ) -> Option<Messages> {
         match protocol_type {
             ProtocolTypeIndicator::Dkg => self
@@ -3650,10 +3742,12 @@ impl MpcManager {
                 .rotation_messages
                 .get(dealer)
                 .map(|m| Messages::Rotation(m.clone())),
-            ProtocolTypeIndicator::NonceGeneration => self
-                .nonce_messages
-                .get(dealer)
-                .map(|m| Messages::NonceGeneration(m.clone())),
+            ProtocolTypeIndicator::NonceGeneration => {
+                let batch_index = batch_index?;
+                self.nonce_messages
+                    .get(&(batch_index, *dealer))
+                    .map(|m| Messages::NonceGeneration(m.clone()))
+            }
         }
     }
 
@@ -3664,7 +3758,7 @@ impl MpcManager {
         epoch: u64,
         batch_index: Option<u32>,
     ) -> Option<Messages> {
-        if let Some(messages) = self.get_dealer_messages(protocol_type, dealer) {
+        if let Some(messages) = self.get_dealer_messages(protocol_type, dealer, batch_index) {
             return Some(messages);
         }
         match protocol_type {
