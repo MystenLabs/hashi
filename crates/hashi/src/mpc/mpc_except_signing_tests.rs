@@ -9176,6 +9176,95 @@ async fn test_run_nonce_generation_preserves_other_batch_state() {
 }
 
 #[tokio::test]
+async fn test_run_nonce_generation_prunes_old_batch_state() {
+    let mut rng = rand::thread_rng();
+    let weights: [u16; 5] = [1, 1, 1, 2, 2];
+    let num_validators = weights.len();
+    let setup = TestSetup::with_weights(&weights);
+    let run_batch_index = 3u32;
+
+    let mut managers: Vec<_> = (0..num_validators)
+        .map(|i| setup.create_manager(i))
+        .collect();
+
+    let dealer_messages: Vec<NonceMessage> = (0..num_validators)
+        .map(|i| create_nonce_dealer_message(&setup, i, run_batch_index, &mut rng))
+        .collect();
+
+    let mut certificates = Vec::new();
+    for (dealer_idx, nonce_msg) in dealer_messages.iter().enumerate() {
+        let dealer_addr = setup.address(dealer_idx);
+        let messages = Messages::NonceGeneration(nonce_msg.clone());
+        let mut signatures = Vec::new();
+        for manager in managers.iter_mut() {
+            let response = send_and_assert_ok(manager, dealer_addr, &messages);
+            let sig = MemberSignature::new(
+                manager.mpc_config.epoch,
+                manager.address,
+                response.signature,
+            );
+            signatures.push(sig);
+        }
+        let cert =
+            create_test_certificate(setup.committee(), &messages, dealer_addr, signatures).unwrap();
+        certificates.push(CertificateV1::NonceGeneration {
+            batch_index: run_batch_index,
+            cert,
+        });
+    }
+
+    let test_manager = managers.remove(0);
+    let other_managers: HashMap<_, _> = managers
+        .into_iter()
+        .enumerate()
+        .map(|(idx, mgr)| (setup.address(idx + 1), mgr))
+        .collect();
+    let mock_p2p = MockP2PChannel::new(other_managers, setup.address(0));
+
+    let test_manager = Arc::new(RwLock::new(test_manager));
+    let mut mock_tob = MockOrderedBroadcastChannel::new(certificates);
+
+    // Pre-populate state for older batches 0, 1, 2.
+    let fake_dealer = setup.address(2);
+    {
+        let mut mgr = test_manager.write().unwrap();
+        for b in [0u32, 1, 2] {
+            mgr.nonce_messages.insert(
+                (b, fake_dealer),
+                NonceMessage {
+                    batch_index: b,
+                    message: dealer_messages[2].message.clone(),
+                },
+            );
+        }
+    }
+
+    MpcManager::run_nonce_generation(
+        &test_manager,
+        run_batch_index,
+        &mock_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
+
+    let mgr = test_manager.read().unwrap();
+    assert!(
+        !mgr.nonce_messages.contains_key(&(0, fake_dealer)),
+        "batch 0 entries should be pruned"
+    );
+    assert!(
+        !mgr.nonce_messages.contains_key(&(1, fake_dealer)),
+        "batch 1 entries should be pruned"
+    );
+    assert!(
+        mgr.nonce_messages.contains_key(&(2, fake_dealer)),
+        "batch 2 entries should be retained (most recent before run_batch_index)"
+    );
+}
+
+#[tokio::test]
 async fn test_run_as_nonce_party_loads_from_store_after_restart() {
     let mut rng = rand::thread_rng();
     let weights: [u16; 4] = [1, 1, 1, 1];
