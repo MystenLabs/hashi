@@ -48,9 +48,6 @@ use thiserror::Error;
 
 const WITHDRAWAL_SIGNING_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Default confirmation target for fee estimation (3 blocks ~ 30 minutes).
-const WITHDRAWAL_FEE_CONF_TARGET: u16 = 3;
-
 /// Fee rate tolerance multiplier for validation.
 const FEE_RATE_TOLERANCE_MULTIPLIER: u64 = 5;
 
@@ -343,7 +340,7 @@ impl Hashi {
             // a floor of 1 sat/vB, then cap at the tolerance multiplier.
             let kyoto_fee_rate = self
                 .btc_monitor()
-                .get_recent_fee_rate(WITHDRAWAL_FEE_CONF_TARGET)
+                .get_recent_fee_rate(self.config.withdrawal_fee_conf_target())
                 .await?;
             let clamped_fee_rate = std::cmp::max(kyoto_fee_rate, min_fee_rate);
             let estimated_fee = clamped_fee_rate
@@ -731,7 +728,7 @@ impl Hashi {
         // fee rate threshold to avoid overpaying during fee spikes.
         let kyoto_fee_rate = self
             .btc_monitor()
-            .get_recent_fee_rate(WITHDRAWAL_FEE_CONF_TARGET)
+            .get_recent_fee_rate(self.config.withdrawal_fee_conf_target())
             .await
             .map_err(|e| WithdrawalCommitmentError::FeeEstimateFailed(anyhow!(e)))?;
         let min_fee_rate = CoinSelectionParams::DEFAULT_MIN_FEE_RATE;

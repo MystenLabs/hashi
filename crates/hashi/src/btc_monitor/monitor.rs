@@ -521,8 +521,16 @@ impl Monitor {
         conf_target: u16,
         result_tx: oneshot::Sender<Result<FeeRate>>,
     ) {
+        // ECONOMICAL tracks spot fees more closely than the default
+        // CONSERVATIVE, which blends in a long-horizon max.
         let result = btc_rpc_call(&bitcoind_rpc, move |rpc| {
-            rpc.estimate_smart_fee(conf_target as u32)
+            rpc.call::<corepc_client::types::v29::EstimateSmartFee>(
+                "estimatesmartfee",
+                &[
+                    serde_json::json!(conf_target as u32),
+                    serde_json::json!("ECONOMICAL"),
+                ],
+            )
         })
         .await
         .map_err(anyhow::Error::from)
