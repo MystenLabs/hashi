@@ -47,4 +47,15 @@ impl GuardianClient {
             .await?;
         Ok(response.into_inner())
     }
+
+    pub async fn standard_withdrawal(
+        &self,
+        request: hashi_types::proto::SignedStandardWithdrawalRequest,
+    ) -> Result<hashi_types::proto::SignedStandardWithdrawalResponse, tonic::Status> {
+        let response = self
+            .guardian_service_client()
+            .standard_withdrawal(request)
+            .await?;
+        Ok(response.into_inner())
+    }
 }

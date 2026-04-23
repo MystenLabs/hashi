@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
         .add_service(GuardianServiceServer::new(svc))
         .serve(addr);
 
-    let heartbeat_future = HeartbeatWriter::new(enclave, MAX_HEARTBEAT_FAILURES_INTERVAL)
+    let heartbeat_future = HeartbeatWriter::new(enclave.clone(), MAX_HEARTBEAT_FAILURES_INTERVAL)
         .run(HEARTBEAT_INTERVAL, HEARTBEAT_RETRY_INTERVAL);
 
     tokio::select! {

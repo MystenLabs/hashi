@@ -99,9 +99,11 @@ async fn normal_withdrawal_inner(
 
     info!("Checking rate limits.");
     let consumed_amount_sats = request.utxos().external_out_amount().to_sat();
+    let wid = *request.wid();
     let limiter_guard = enclave
         .state
         .consume_from_limiter(
+            wid,
             request.seq(),
             request.timestamp_secs(),
             consumed_amount_sats,

@@ -302,6 +302,7 @@ impl EnclaveState {
 
     pub async fn consume_from_limiter(
         &self,
+        wid: u64,
         seq: u64,
         timestamp: u64,
         amount_sats: u64,
@@ -316,7 +317,7 @@ impl EnclaveState {
         )
         .await
         .map_err(|_| InvalidInputs("timed out waiting for rate limiter lock".into()))?;
-        guard.consume(seq, timestamp, amount_sats)?;
+        guard.consume(wid, seq, timestamp, amount_sats)?;
         Ok(LimiterGuard::new(guard))
     }
 
