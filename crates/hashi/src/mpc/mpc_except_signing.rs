@@ -79,8 +79,10 @@ const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
 const EXPECT_THRESHOLD_VALIDATED: &str = "Threshold already validated";
 const EXPECT_THRESHOLD_MET: &str = "Already checked earlier that threshold is met";
 const EXPECT_SERIALIZATION_SUCCESS: &str = "Serialization should always succeed";
+
 const MAX_BASIS_POINTS: u32 = 10000;
 const MIN_TOTAL_WEIGHT_AFTER_REDUCTION: u16 = 100;
+const PRUNE_KEEP_RECENT_BATCHES: u32 = 2;
 
 pub struct MpcManager {
     // Immutable during the epoch
@@ -679,6 +681,7 @@ impl MpcManager {
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         metrics: &Metrics,
     ) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
+        Self::prune_nonce_state(mpc_manager, batch_index);
         let certified = tob_channel.certified_dealers().await;
         let (certified_reduced_weight, required_reduced_weight) = {
             let mgr = mpc_manager.read().unwrap();
@@ -1818,6 +1821,28 @@ impl MpcManager {
                 reason: "Invalid nonce shares".to_string(),
             }),
         }
+    }
+
+    fn prune_nonce_state(mpc_manager: &Arc<RwLock<Self>>, batch_index: u32) {
+        let cutoff = batch_index.saturating_sub(PRUNE_KEEP_RECENT_BATCHES - 1);
+        if cutoff == 0 {
+            return;
+        }
+        let mut mgr = mpc_manager.write().unwrap();
+        mgr.nonce_messages.retain(|(b, _), _| *b >= cutoff);
+        mgr.dealer_nonce_outputs.retain(|(b, _), _| *b >= cutoff);
+        mgr.complaints_to_process.retain(|k, _| match k {
+            ComplaintsToProcessKey::NonceGeneration { batch_index: b, .. } => *b >= cutoff,
+            _ => true,
+        });
+        mgr.message_responses.retain(|k, _| match k {
+            MessageResponsesKey::NonceGen { batch_index: b, .. } => *b >= cutoff,
+            _ => true,
+        });
+        mgr.complaint_responses.retain(|k, _| match k {
+            ComplaintResponsesKey::NonceGen { batch_index: b, .. } => *b >= cutoff,
+            _ => true,
+        });
     }
 
     fn process_certified_dkg_message(&mut self, dealer: Address) -> MpcResult<()> {
