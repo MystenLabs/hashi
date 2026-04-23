@@ -327,6 +327,16 @@ impl EnclaveState {
         guard.consume(seq, timestamp, amount_sats)?;
         Ok(LimiterGuard::new(guard))
     }
+
+    pub async fn limiter_state(&self) -> Option<LimiterState> {
+        let limiter = self.rate_limiter.get()?;
+        Some(*limiter.lock().await.state())
+    }
+
+    pub async fn limiter_config(&self) -> Option<hashi_types::guardian::LimiterConfig> {
+        let limiter = self.rate_limiter.get()?;
+        Some(*limiter.lock().await.config())
+    }
 }
 
 impl Enclave {

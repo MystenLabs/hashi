@@ -37,4 +37,14 @@ impl GuardianClient {
     pub fn guardian_service_client(&self) -> GuardianServiceClient<Channel> {
         GuardianServiceClient::new(self.channel.clone())
     }
+
+    pub async fn get_guardian_info(
+        &self,
+    ) -> Result<hashi_types::proto::GetGuardianInfoResponse, tonic::Status> {
+        let response = self
+            .guardian_service_client()
+            .get_guardian_info(hashi_types::proto::GetGuardianInfoRequest {})
+            .await?;
+        Ok(response.into_inner())
+    }
 }

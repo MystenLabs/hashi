@@ -178,6 +178,10 @@ pub struct GetGuardianInfoResponse {
     pub signing_pub_key: GuardianPubKey,
     /// Signed guardian info
     pub signed_info: GuardianSigned<GuardianInfo>,
+    /// Current rate limiter state (if initialized).
+    pub limiter_state: Option<LimiterState>,
+    /// Immutable limiter configuration (if initialized).
+    pub limiter_config: Option<LimiterConfig>,
 }
 
 /// TODO: Add network?

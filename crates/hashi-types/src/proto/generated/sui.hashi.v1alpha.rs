@@ -1008,6 +1008,12 @@ pub struct GetGuardianInfoResponse {
     /// Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
     #[prost(message, optional, tag = "3")]
     pub signed_info: ::core::option::Option<SignedGuardianInfo>,
+    /// Current rate limiter state (if initialized).
+    #[prost(message, optional, tag = "4")]
+    pub limiter_state: ::core::option::Option<LimiterState>,
+    /// Immutable limiter configuration (if initialized).
+    #[prost(message, optional, tag = "5")]
+    pub limiter_config: ::core::option::Option<LimiterConfig>,
 }
 /// Guardian-signed wrapper around `GuardianInfoData`.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1179,6 +1185,16 @@ pub struct LimiterState {
     /// Next expected withdrawal sequence number.
     #[prost(uint64, optional, tag = "3")]
     pub next_seq: ::core::option::Option<u64>,
+}
+/// Immutable limiter configuration.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LimiterConfig {
+    /// Token refill rate in sats per second.
+    #[prost(uint64, optional, tag = "1")]
+    pub refill_rate_sats_per_sec: ::core::option::Option<u64>,
+    /// Maximum bucket capacity in sats.
+    #[prost(uint64, optional, tag = "2")]
+    pub max_bucket_capacity_sats: ::core::option::Option<u64>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProvisionerInitResponse {}

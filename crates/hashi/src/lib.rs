@@ -18,6 +18,7 @@ pub mod constants;
 pub mod db;
 pub mod deposits;
 pub mod grpc;
+pub mod guardian_limiter;
 pub mod leader;
 pub mod metrics;
 pub mod mpc;
@@ -50,6 +51,12 @@ pub struct Hashi {
     btc_monitor: OnceLock<crate::btc_monitor::monitor::MonitorClient>,
     screener_client: OnceLock<Option<grpc::screener_client::ScreenerClient>>,
     guardian_client: OnceLock<Option<grpc::guardian_client::GuardianClient>>,
+    guardian_signing_pubkey: OnceLock<Option<hashi_types::guardian::GuardianPubKey>>,
+    /// Local emulator of the guardian rate limiter. Populated at startup
+    /// from the same `GetGuardianInfo` response that caches
+    /// `guardian_signing_pubkey`; if the guardian wasn't ready then, the
+    /// reconciliation task fills it in on its first successful poll.
+    local_limiter: RwLock<Option<Arc<guardian_limiter::LocalLimiter>>>,
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
 }
@@ -72,6 +79,8 @@ impl Hashi {
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
+            guardian_signing_pubkey: OnceLock::new(),
+            local_limiter: RwLock::new(None),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
@@ -97,6 +106,8 @@ impl Hashi {
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
+            guardian_signing_pubkey: OnceLock::new(),
+            local_limiter: RwLock::new(None),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
@@ -190,6 +201,25 @@ impl Hashi {
 
     pub fn guardian_client(&self) -> Option<&grpc::guardian_client::GuardianClient> {
         self.guardian_client.get().and_then(|opt| opt.as_ref())
+    }
+
+    pub fn guardian_signing_pubkey(&self) -> Option<&hashi_types::guardian::GuardianPubKey> {
+        self.guardian_signing_pubkey
+            .get()
+            .and_then(|opt| opt.as_ref())
+    }
+
+    /// Local emulator of the guardian rate limiter. `None` when no
+    /// guardian is configured or the guardian hadn't initialized a limiter
+    /// by the time the reconciliation task polled it.
+    pub fn local_limiter(&self) -> Option<Arc<guardian_limiter::LocalLimiter>> {
+        self.local_limiter.read().unwrap().clone()
+    }
+
+    /// Install a local limiter. Used by the reconciliation task when
+    /// bootstrap at startup missed the guardian (late-start case).
+    pub(crate) fn install_local_limiter(&self, limiter: Arc<guardian_limiter::LocalLimiter>) {
+        *self.local_limiter.write().unwrap() = Some(limiter);
     }
 
     async fn initialize_onchain_state(&self) -> anyhow::Result<Service> {
@@ -397,6 +427,59 @@ impl Hashi {
             match grpc::guardian_client::GuardianClient::new(endpoint) {
                 Ok(client) => {
                     tracing::info!("Guardian client configured for {}", client.endpoint());
+                    // Best-effort fetch at startup. We cache two things:
+                    //   1. the guardian's Ed25519 signing pubkey (so we can
+                    //      verify `StandardWithdrawalResponse` signatures), and
+                    //   2. the limiter state + config, which seed the local
+                    //      emulator that drives coin-selection capacity checks
+                    //      and picks the next `seq` for hard reserves.
+                    // If either piece is missing (guardian not bootstrapped yet
+                    // or network hiccup), the reconciliation task spawned below
+                    // will fill it in on its first successful poll.
+                    match client.get_guardian_info().await {
+                        Ok(info_pb) => {
+                            match hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb)
+                            {
+                                Ok(info) => {
+                                    tracing::info!(
+                                        "Guardian signing pubkey cached for response verification"
+                                    );
+                                    let _ = self
+                                        .guardian_signing_pubkey
+                                        .set(Some(info.signing_pub_key));
+                                    if let (Some(state), Some(config)) =
+                                        (info.limiter_state, info.limiter_config)
+                                    {
+                                        tracing::info!(
+                                            ?state,
+                                            ?config,
+                                            "Local guardian limiter seeded from GetGuardianInfo",
+                                        );
+                                        *self.local_limiter.write().unwrap() = Some(Arc::new(
+                                            guardian_limiter::LocalLimiter::new(config, state),
+                                        ));
+                                    } else {
+                                        tracing::info!(
+                                            "Guardian has no limiter yet; local emulator will \
+                                             initialize from the reconciliation task"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to parse guardian info: {e}; \
+                                         response signature verification disabled"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to fetch guardian info: {e}; \
+                                 response signature verification disabled"
+                            );
+                        }
+                    }
                     Some(client)
                 }
                 Err(e) => {
@@ -466,15 +549,114 @@ impl Hashi {
         let (_http_addr, http_service) = grpc::HttpService::new(self.clone()).start().await;
         let leader_service = leader::LeaderService::new(self.clone()).start();
         let mpc_service = mpc_service.start();
+        let limiter_reconcile_service = self.clone().start_limiter_reconcile_service();
 
         let service = Service::new()
             .merge(onchain_service)
             .merge(btc_monitor_service)
             .merge(http_service)
             .merge(leader_service)
-            .merge(mpc_service);
+            .merge(mpc_service)
+            .merge(limiter_reconcile_service);
 
         Ok(service)
+    }
+
+    /// Spawn a background task that periodically re-fetches the guardian's
+    /// limiter state and snaps the local emulator onto the authoritative
+    /// view. Covers three cases:
+    ///
+    /// 1. **Late bootstrap**: if the guardian wasn't initialized when
+    ///    `Hashi::start()` ran, the task installs the local limiter on its
+    ///    first successful poll.
+    /// 2. **Non-leader drift**: non-leader nodes never talk to the guardian
+    ///    on the withdrawal hot path, so they'd otherwise see stale state.
+    ///    When they later become leader, they'd submit with a bad seq /
+    ///    timestamp. Periodic reconciliation keeps them fresh.
+    /// 3. **Leader rotation**: a new leader's local state is at most
+    ///    `LIMITER_RECONCILE_INTERVAL` stale; the first guardian rejection
+    ///    also triggers an immediate snap.
+    fn start_limiter_reconcile_service(self: Arc<Self>) -> Service {
+        const LIMITER_RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+        Service::new().spawn_aborting(async move {
+            if self.guardian_client().is_none() {
+                return Ok(());
+            }
+            let mut ticker = tokio::time::interval(LIMITER_RECONCILE_INTERVAL);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // First tick fires immediately; skip it so we don't overlap the
+            // bootstrap fetch that already ran in Hashi::start.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let Some(client) = self.guardian_client() else {
+                    return Ok(());
+                };
+                let info_pb = match client.get_guardian_info().await {
+                    Ok(info) => info,
+                    Err(e) => {
+                        tracing::debug!("limiter reconcile: GetGuardianInfo failed: {e}");
+                        continue;
+                    }
+                };
+                let info = match hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb) {
+                    Ok(info) => info,
+                    Err(e) => {
+                        tracing::debug!("limiter reconcile: parse failed: {e:?}");
+                        continue;
+                    }
+                };
+                // Cache the guardian signing pubkey if bootstrap missed it
+                // (e.g. the guardian wasn't reachable when `Hashi::start`
+                // ran). `OnceLock::set` returns Err when already populated
+                // — that's the steady-state happy path, ignore it.
+                let _ = self.guardian_signing_pubkey.set(Some(info.signing_pub_key));
+                let (Some(state), Some(config)) = (info.limiter_state, info.limiter_config) else {
+                    tracing::debug!("limiter reconcile: guardian has no limiter yet");
+                    continue;
+                };
+                match self.local_limiter() {
+                    Some(limiter) => {
+                        let local = limiter.snapshot().await;
+                        // Only snap when the guardian is strictly ahead.
+                        // A "same next_seq but guardian's last_updated_at
+                        // later" delta means the guardian observed a later
+                        // timestamp without consuming — extremely rare but
+                        // still ahead. If local is ahead (e.g. a guardian
+                        // rehydrate from a stale S3 snapshot), don't clobber
+                        // — warn and wait for the guardian to catch up.
+                        let guardian_ahead = state.next_seq > local.next_seq
+                            || (state.next_seq == local.next_seq
+                                && state.last_updated_at > local.last_updated_at);
+                        if guardian_ahead {
+                            tracing::info!(
+                                ?local,
+                                guardian = ?state,
+                                "limiter reconcile: snapping local state to guardian"
+                            );
+                            limiter.snap_to(state).await;
+                        } else if local.next_seq > state.next_seq {
+                            tracing::warn!(
+                                ?local,
+                                guardian = ?state,
+                                "limiter reconcile: local ahead of guardian; not snapping \
+                                 (possible guardian rehydrate from a stale snapshot)"
+                            );
+                        }
+                    }
+                    None => {
+                        tracing::info!(
+                            ?state,
+                            ?config,
+                            "limiter reconcile: installing local limiter from first successful poll"
+                        );
+                        self.install_local_limiter(Arc::new(guardian_limiter::LocalLimiter::new(
+                            config, state,
+                        )));
+                    }
+                }
+            }
+        })
     }
 
     pub(crate) fn is_in_current_committee(&self) -> bool {
