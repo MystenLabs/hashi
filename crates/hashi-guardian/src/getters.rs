@@ -6,18 +6,19 @@ use hashi_types::guardian::*;
 use std::sync::Arc;
 use tracing::info;
 
-// Only needed in non-test builds (for NSM hardware interaction)
-#[cfg(not(test))]
+// Only needed in enclave builds (for NSM hardware interaction).
+// The `non-enclave-dev` feature and `cfg(test)` both route to the stub below.
+#[cfg(not(any(test, feature = "non-enclave-dev")))]
 use crate::GuardianError;
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "non-enclave-dev")))]
 use nsm_api::api::Request as NsmRequest;
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "non-enclave-dev")))]
 use nsm_api::api::Response as NsmResponse;
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "non-enclave-dev")))]
 use nsm_api::driver;
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "non-enclave-dev")))]
 use serde_bytes::ByteBuf;
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "non-enclave-dev")))]
 use tracing::error;
 
 /// Endpoint that returns an attestation committed to the enclave's signing public key
@@ -33,7 +34,7 @@ pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuard
     })
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "non-enclave-dev")))]
 pub fn get_attestation(signing_pk: &GuardianPubKey) -> GuardianResult<Attestation> {
     let signing_pk_bytes = signing_pk.to_bytes();
 
@@ -65,8 +66,7 @@ pub fn get_attestation(signing_pk: &GuardianPubKey) -> GuardianResult<Attestatio
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "non-enclave-dev"))]
 pub fn get_attestation(_: &GuardianPubKey) -> GuardianResult<Attestation> {
-    // Return a mock attestation for testing
-    Ok("mock_attestation_document_hex".as_bytes().to_vec())
+    Ok(b"mock_attestation_document_hex".to_vec())
 }

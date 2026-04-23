@@ -7,6 +7,7 @@ on:
       # - 'crates/**'
       - 'docker/hashi/**'
       - 'docker/hashi-screener/**'
+      - 'docker/hashi-guardian-k8s/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/deterministic-build.yml'
@@ -21,38 +22,44 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [hashi, hashi-screener]
         os: [ubuntu-latest, ubuntu-22.04]
+        image:
+          - name: hashi
+            dir: hashi
+          - name: hashi-screener
+            dir: hashi-screener
+          - name: hashi-guardian
+            dir: hashi-guardian-k8s
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Build ${{ matrix.image }} image
+      - name: Build ${{ matrix.image.name }} image
         env:
           GIT_REVISION: ${{ github.sha }}
-          IMAGE_NAME: ${{ matrix.image }}
-        run: bash docker/${{ matrix.image }}/build.sh --no-cache
+          IMAGE_NAME: ${{ matrix.image.name }}
+        run: bash docker/${{ matrix.image.dir }}/build.sh --no-cache
 
       - name: Compute sha256
         id: hash
         run: |
-          BIN="out/${{ matrix.image }}"
+          BIN="out/${{ matrix.image.name }}"
           HASH=$(sha256sum "${BIN}" | awk '{print $1}')
           echo "sha256=${HASH}" >> "$GITHUB_OUTPUT"
-          echo "${HASH}  ${{ matrix.image }}" > "out/${{ matrix.image }}.sha256"
+          echo "${HASH}  ${{ matrix.image.name }}" > "out/${{ matrix.image.name }}.sha256"
 
       - name: Upload sha256
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.image }}-${{ matrix.os }}-sha256
-          path: out/${{ matrix.image }}.sha256
+          name: ${{ matrix.image.name }}-${{ matrix.os }}-sha256
+          path: out/${{ matrix.image.name }}.sha256
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.image }}-${{ matrix.os }}-binary
-          path: out/${{ matrix.image }}
+          name: ${{ matrix.image.name }}-${{ matrix.os }}-binary
+          path: out/${{ matrix.image.name }}
 
   verify:
     needs: build
@@ -60,7 +67,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [hashi, hashi-screener]
+        image: [hashi, hashi-screener, hashi-guardian]
     steps:
       - name: Download ubuntu-latest hash
         uses: actions/download-artifact@v4
