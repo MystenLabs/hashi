@@ -49,6 +49,7 @@ pub struct Hashi {
     mpc_handle: OnceLock<mpc::MpcHandle>,
     btc_monitor: OnceLock<crate::btc_monitor::monitor::MonitorClient>,
     screener_client: OnceLock<Option<grpc::screener_client::ScreenerClient>>,
+    guardian_client: OnceLock<Option<grpc::guardian_client::GuardianClient>>,
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
 }
@@ -70,6 +71,7 @@ impl Hashi {
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
+            guardian_client: OnceLock::new(),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
@@ -94,6 +96,7 @@ impl Hashi {
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
+            guardian_client: OnceLock::new(),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
@@ -183,6 +186,10 @@ impl Hashi {
 
     pub fn screener_client(&self) -> Option<&grpc::screener_client::ScreenerClient> {
         self.screener_client.get().and_then(|opt| opt.as_ref())
+    }
+
+    pub fn guardian_client(&self) -> Option<&grpc::guardian_client::GuardianClient> {
+        self.guardian_client.get().and_then(|opt| opt.as_ref())
     }
 
     async fn initialize_onchain_state(&self) -> anyhow::Result<Service> {
@@ -385,6 +392,30 @@ impl Hashi {
         self.screener_client
             .set(screener)
             .map_err(|_| anyhow!("Screener client already initialized"))?;
+
+        let guardian = if let Some(endpoint) = self.config.guardian_endpoint() {
+            match grpc::guardian_client::GuardianClient::new(endpoint) {
+                Ok(client) => {
+                    tracing::info!("Guardian client configured for {}", client.endpoint());
+                    Some(client)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to configure guardian client for {}: {}",
+                        endpoint,
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            tracing::info!("No guardian endpoint configured; guardian integration disabled");
+            None
+        };
+
+        self.guardian_client
+            .set(guardian)
+            .map_err(|_| anyhow!("Guardian client already initialized"))?;
 
         // Verify Sui RPC is on the expected chain before loading any state.
         self.verify_sui_chain_id().await?;

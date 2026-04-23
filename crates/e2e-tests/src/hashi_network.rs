@@ -248,6 +248,7 @@ pub struct HashiNetworkBuilder {
     /// Node index whose shares should be corrupted by all other nodes,
     /// triggering the complaint recovery flow.
     pub test_corrupt_shares_target: Option<usize>,
+    pub guardian_endpoint: Option<String>,
 }
 
 impl HashiNetworkBuilder {
@@ -261,7 +262,13 @@ impl HashiNetworkBuilder {
             withdrawal_max_batch_size: None,
             max_mempool_chain_depth: None,
             test_corrupt_shares_target: None,
+            guardian_endpoint: None,
         }
+    }
+
+    pub fn with_guardian_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.guardian_endpoint = Some(endpoint.into());
+        self
     }
 
     pub fn with_num_nodes(mut self, num_nodes: usize) -> Self {
@@ -363,6 +370,9 @@ impl HashiNetworkBuilder {
             config.bitcoin_chain_id = Some(hashi::constants::BITCOIN_REGTEST_CHAIN_ID.to_string());
             config.sui_chain_id = service_info.chain_id.clone();
             config.screener_endpoint = Some(screener_endpoint.clone());
+            if let Some(ref guardian_endpoint) = self.guardian_endpoint {
+                config.guardian_endpoint = Some(guardian_endpoint.clone());
+            }
             config.db = Some(dir.join(validator_address.to_string()));
             configs.push(config);
         }
