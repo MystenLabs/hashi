@@ -170,6 +170,14 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_mempool_chain_depth: Option<usize>,
 
+    /// Confirmation target (blocks) passed to `estimatesmartfee` when
+    /// pricing withdrawal miner fees. Low-traffic chains (e.g. signet)
+    /// need a high value (≥ 49) so Core's long-horizon estimator is used.
+    ///
+    /// Defaults to 3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawal_fee_conf_target: Option<u16>,
+
     /// Test-only: corrupt AVSS shares sent to this address, triggering the
     /// complaint recovery flow. Must not be set on mainnet or testnet.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -365,6 +373,10 @@ impl Config {
     pub fn max_mempool_chain_depth(&self) -> usize {
         self.max_mempool_chain_depth
             .unwrap_or(crate::utxo_pool::CoinSelectionParams::DEFAULT_MAX_MEMPOOL_CHAIN_DEPTH)
+    }
+
+    pub fn withdrawal_fee_conf_target(&self) -> u16 {
+        self.withdrawal_fee_conf_target.unwrap_or(3)
     }
 
     // Creates a new config suitable for testing. In particular this config will:

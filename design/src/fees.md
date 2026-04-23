@@ -49,8 +49,10 @@ usually well below the worst case, so the user receives more.
 ## Fee rate estimation
 
 Hashi obtains the current fee rate from the connected Bitcoin Core
-node via `estimatesmartfee`, targeting confirmation within 3 blocks
-(~30 minutes).
+node via `estimatesmartfee` in `ECONOMICAL` mode, targeting
+confirmation within `withdrawal_fee_conf_target` blocks (default `3`,
+~30 minutes). Low-traffic chains like signet may need a higher target
+to route the estimator to its long-horizon bucket.
 
 The estimated fee rate is then capped at a high fee rate threshold
 (30 sat/vB by default). This prevents a single fee spike from
