@@ -74,6 +74,10 @@ pub struct LeaderService {
     inflight_withdrawal_broadcasts: HashSet<Address>,
     deposit_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     proposal_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
+    /// Whether this node was leader on the previous checkpoint tick. Used
+    /// to detect the false→true edge so we can resync the local guardian
+    /// limiter once, at promotion, before acting on withdrawals.
+    was_leader_last_checkpoint: bool,
 }
 
 impl LeaderService {
@@ -94,6 +98,7 @@ impl LeaderService {
             inflight_withdrawal_broadcasts: HashSet::new(),
             deposit_gc_task: None,
             proposal_gc_task: None,
+            was_leader_last_checkpoint: false,
         }
     }
 
@@ -133,12 +138,26 @@ impl LeaderService {
 
                     let is_leader = self.is_current_leader(checkpoint_height);
                     self.inner.metrics.is_leader.set(i64::from(is_leader));
-                    if is_leader {
-                        debug!("Checkpoint {checkpoint_height}: We are the leader node");
-                    } else {
+                    if !is_leader {
                         trace!("We are not the leader node");
+                        self.was_leader_last_checkpoint = false;
                         continue;
                     }
+                    debug!("Checkpoint {checkpoint_height}: We are the leader node");
+
+                    // On the false→true leader edge, snap the local limiter
+                    // from the guardian so our first `validate_consume` sees
+                    // fresh state instead of burning an MPC round on a stale
+                    // `seq`. Steady-state leaders stay in sync via
+                    // `apply_consume` after every successful guardian RPC;
+                    // this hook only fires at promotion.
+                    if !self.was_leader_last_checkpoint
+                        && let Some(guardian) = self.inner.guardian_client()
+                    {
+                        info!("Leader promotion: snapping local limiter from guardian");
+                        Self::snap_local_limiter_from_guardian(&self.inner, guardian).await;
+                    }
+                    self.was_leader_last_checkpoint = true;
 
                     self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms);
                     self.process_approved_withdrawal_requests(checkpoint_timestamp_ms);
