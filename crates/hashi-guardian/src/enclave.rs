@@ -319,6 +319,22 @@ impl EnclaveState {
         guard.consume(seq, timestamp, amount_sats)?;
         Ok(LimiterGuard::new(guard))
     }
+
+    /// Snapshot the current rate limiter state, if the limiter has been
+    /// initialized. Used by `GetGuardianInfo` so that clients can seed their
+    /// local emulator's state and `next_seq`.
+    pub async fn limiter_state(&self) -> Option<LimiterState> {
+        let limiter = self.rate_limiter.get()?;
+        Some(*limiter.lock().await.state())
+    }
+
+    /// Snapshot the immutable limiter config, if the limiter has been
+    /// initialized. Returned alongside `limiter_state` so clients can
+    /// project capacity into the future.
+    pub async fn limiter_config(&self) -> Option<hashi_types::guardian::LimiterConfig> {
+        let limiter = self.rate_limiter.get()?;
+        Some(*limiter.lock().await.config())
+    }
 }
 
 impl Enclave {

@@ -33,6 +33,18 @@ message GetGuardianInfoResponse {
 
   // Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
   SignedGuardianInfo signed_info = 3;
+
+  // Current rate limiter state (if initialized). Hashi nodes cache this
+  // at startup to drive a local emulator of the guardian limiter — the
+  // local state owns the next `seq` for hard reserves and the capacity
+  // projection used by coin selection. The guardian remains authoritative;
+  // local state is periodically reconciled against a fresh snapshot.
+  LimiterState limiter_state = 4;
+
+  // Immutable limiter configuration (refill rate, bucket ceiling). Paired
+  // with `limiter_state` so clients can construct a faithful local
+  // emulator without a second RPC.
+  LimiterConfig limiter_config = 5;
 }
 
 // Guardian-signed wrapper around `GuardianInfoData`.
@@ -198,6 +210,16 @@ message LimiterState {
 
   // Next expected withdrawal sequence number.
   optional uint64 next_seq = 3;
+}
+
+// Immutable limiter configuration returned by `GetGuardianInfo` so a
+// hashi node can build a local emulator without a second RPC.
+message LimiterConfig {
+  // Token refill rate in sats per second.
+  optional uint64 refill_rate_sats_per_sec = 1;
+
+  // Maximum bucket capacity in sats.
+  optional uint64 max_bucket_capacity_sats = 2;
 }
 
 message ProvisionerInitResponse {}

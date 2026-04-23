@@ -18,6 +18,7 @@ pub mod constants;
 pub mod db;
 pub mod deposits;
 pub mod grpc;
+pub mod guardian_limiter;
 pub mod leader;
 pub mod metrics;
 pub mod mpc;
@@ -50,8 +51,28 @@ pub struct Hashi {
     btc_monitor: OnceLock<crate::btc_monitor::monitor::MonitorClient>,
     screener_client: OnceLock<Option<grpc::screener_client::ScreenerClient>>,
     guardian_client: OnceLock<Option<grpc::guardian_client::GuardianClient>>,
+    /// Guardian Ed25519 signing pubkey, cached at startup so the leader can
+    /// verify `StandardWithdrawalResponse` signatures before trusting them.
+    guardian_signing_pubkey: OnceLock<Option<hashi_types::guardian::GuardianPubKey>>,
+    /// Local emulator of the guardian rate limiter. Populated at startup
+    /// from the same `GetGuardianInfo` response that caches
+    /// `guardian_signing_pubkey`; if the guardian wasn't ready then, a
+    /// short-lived background retry seeds it on the first successful
+    /// poll and exits.
+    local_limiter: RwLock<Option<Arc<guardian_limiter::LocalLimiter>>>,
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
+}
+
+/// Outcome of a single `try_seed_guardian_state` attempt.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum SeedOutcome {
+    /// `guardian_signing_pubkey` and `local_limiter` are both populated
+    /// after this call. The caller can stop retrying.
+    FullySeeded,
+    /// The guardian was unreachable, its response failed to parse, or it
+    /// hasn't initialized its limiter yet. The caller should retry.
+    NotReady,
 }
 
 impl Hashi {
@@ -72,6 +93,8 @@ impl Hashi {
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
+            guardian_signing_pubkey: OnceLock::new(),
+            local_limiter: RwLock::new(None),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
@@ -97,6 +120,8 @@ impl Hashi {
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
+            guardian_signing_pubkey: OnceLock::new(),
+            local_limiter: RwLock::new(None),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
@@ -190,6 +215,24 @@ impl Hashi {
 
     pub fn guardian_client(&self) -> Option<&grpc::guardian_client::GuardianClient> {
         self.guardian_client.get().and_then(|opt| opt.as_ref())
+    }
+
+    /// Guardian Ed25519 signing pubkey, cached at startup. Returns `None`
+    /// when no guardian is configured, or the guardian was unreachable at
+    /// startup.
+    pub fn guardian_signing_pubkey(&self) -> Option<&hashi_types::guardian::GuardianPubKey> {
+        self.guardian_signing_pubkey
+            .get()
+            .and_then(|opt| opt.as_ref())
+    }
+
+    /// Local emulator of the guardian rate limiter. `None` when no
+    /// guardian is configured, or when the guardian hasn't been seeded
+    /// yet because it was unreachable / uninitialized at startup — the
+    /// background bootstrap retry will install one on the first
+    /// successful `GetGuardianInfo`.
+    pub fn local_limiter(&self) -> Option<Arc<guardian_limiter::LocalLimiter>> {
+        self.local_limiter.read().unwrap().clone()
     }
 
     async fn initialize_onchain_state(&self) -> anyhow::Result<Service> {
@@ -418,6 +461,15 @@ impl Hashi {
             .set(guardian)
             .map_err(|_| anyhow!("Guardian client already initialized"))?;
 
+        // Synchronously seed the guardian signing pubkey and local limiter
+        // so they're populated before any other service starts. Happy path
+        // (guardian up and initialized) completes here. On anything else,
+        // the background retry task below takes over with bounded
+        // exponential backoff and exits on first success.
+        if self.guardian_client().is_some() {
+            let _ = self.try_seed_guardian_state().await;
+        }
+
         // Verify Sui RPC is on the expected chain before loading any state.
         self.verify_sui_chain_id().await?;
 
@@ -467,15 +519,103 @@ impl Hashi {
         let (_http_addr, http_service) = grpc::HttpService::new(self.clone()).start().await;
         let leader_service = leader::LeaderService::new(self.clone()).start();
         let mpc_service = mpc_service.start();
+        let bootstrap_retry_service = self.clone().start_guardian_bootstrap_retry();
 
         let service = Service::new()
             .merge(onchain_service)
             .merge(btc_monitor_service)
             .merge(http_service)
             .merge(leader_service)
-            .merge(mpc_service);
+            .merge(mpc_service)
+            .merge(bootstrap_retry_service);
 
         Ok(service)
+    }
+
+    /// Fetch `GetGuardianInfo` once and seed `guardian_signing_pubkey`
+    /// and `local_limiter` as far as the response allows.
+    ///
+    /// Idempotent — safe to call from both the synchronous bootstrap in
+    /// `Hashi::start` and the background retry task. `OnceLock::set`
+    /// ignores duplicate writes for the pubkey, and the `RwLock`-guarded
+    /// slot keeps the first-installed `LocalLimiter`.
+    async fn try_seed_guardian_state(&self) -> SeedOutcome {
+        let Some(client) = self.guardian_client() else {
+            return SeedOutcome::NotReady;
+        };
+        let info_pb = match client.get_guardian_info().await {
+            Ok(info) => info,
+            Err(e) => {
+                tracing::debug!("guardian bootstrap: GetGuardianInfo failed: {e}");
+                return SeedOutcome::NotReady;
+            }
+        };
+        let info = match hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb) {
+            Ok(info) => info,
+            Err(e) => {
+                tracing::warn!("guardian bootstrap: parse failed: {e:?}");
+                return SeedOutcome::NotReady;
+            }
+        };
+        let _ = self.guardian_signing_pubkey.set(Some(info.signing_pub_key));
+        let (Some(state), Some(config)) = (info.limiter_state, info.limiter_config) else {
+            tracing::debug!("guardian bootstrap: guardian has no limiter yet");
+            return SeedOutcome::NotReady;
+        };
+        let mut slot = self.local_limiter.write().unwrap();
+        if slot.is_none() {
+            tracing::info!(
+                ?state,
+                ?config,
+                "Local guardian limiter seeded from GetGuardianInfo",
+            );
+            *slot = Some(Arc::new(guardian_limiter::LocalLimiter::new(config, state)));
+        }
+        SeedOutcome::FullySeeded
+    }
+
+    /// Short-lived background task that retries `try_seed_guardian_state`
+    /// with bounded exponential backoff until it succeeds, then exits.
+    /// Exits immediately when no guardian is configured, or when the
+    /// synchronous attempt in `Hashi::start` already fully seeded state
+    /// (the happy path).
+    ///
+    /// Covers:
+    /// - guardian unreachable at startup (later becomes reachable),
+    /// - guardian reachable but its limiter hasn't been initialized yet
+    ///   (provisioner_init still pending).
+    ///
+    /// Steady-state drift and leader-rotation are handled by the
+    /// error-path snap on any guardian RPC rejection and by an
+    /// on-promotion snap in the leader service (added in the PR that
+    /// wires the local limiter into withdrawals). No recurring timer is
+    /// needed in the simplest case.
+    fn start_guardian_bootstrap_retry(self: Arc<Self>) -> Service {
+        Service::new().spawn_aborting(async move {
+            if self.guardian_client().is_none() {
+                return Ok(());
+            }
+            if self.guardian_signing_pubkey().is_some() && self.local_limiter().is_some() {
+                return Ok(());
+            }
+            tracing::info!(
+                "Guardian not fully seeded at startup; retrying in background with \
+                 exponential backoff"
+            );
+            const MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
+            let mut delay = std::time::Duration::from_secs(1);
+            loop {
+                tokio::time::sleep(delay).await;
+                if matches!(
+                    self.try_seed_guardian_state().await,
+                    SeedOutcome::FullySeeded
+                ) {
+                    tracing::info!("Guardian bootstrap complete via retry task");
+                    return Ok(());
+                }
+                delay = (delay * 2).min(MAX_DELAY);
+            }
+        })
     }
 
     pub(crate) fn is_in_current_committee(&self) -> bool {
