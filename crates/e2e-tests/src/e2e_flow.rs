@@ -368,12 +368,13 @@ mod tests {
                 "guardian client should be populated after Hashi::start()"
             );
         }
-        let harness = networks
-            .guardian_harness
-            .as_ref()
-            .expect("harness present when .with_guardian() is set");
         assert!(
-            harness.enclave().is_fully_initialized(),
+            networks
+                .guardian_harness
+                .as_ref()
+                .expect("harness present when .with_guardian() is set")
+                .enclave()
+                .is_fully_initialized(),
             "guardian harness should have reached fully-initialized state"
         );
 
@@ -434,6 +435,32 @@ mod tests {
             Duration::from_secs(30),
         )
         .await?;
+
+        // Assert that the leader's local limiter is consistent with the
+        // guardian's authoritative state after a successful withdrawal.
+        // This is the core parity invariant for the local emulator.
+        let guardian_state = networks
+            .guardian_harness
+            .as_ref()
+            .expect("harness present when .with_guardian() is set")
+            .enclave()
+            .state
+            .limiter_state()
+            .await
+            .expect("guardian limiter state present after a successful withdrawal");
+        assert_eq!(
+            guardian_state.next_seq, 1,
+            "exactly one consume should have advanced the guardian's next_seq"
+        );
+        let local_limiter = hashi
+            .local_limiter()
+            .expect("local limiter present on leader after bootstrap");
+        let local_state = local_limiter.snapshot().await;
+        assert_eq!(
+            local_state, guardian_state,
+            "local limiter state must match guardian after withdrawal (local={local_state:?}, \
+             guardian={guardian_state:?})"
+        );
 
         info!("=== Bitcoin Withdrawal E2E Test (with guardian) Passed ===");
         Ok(())
