@@ -20,6 +20,7 @@ use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::time::Duration;
 use tonic::transport::Server;
+use tonic_health::server::health_reporter;
 use tracing::info;
 
 mod getters;
@@ -131,7 +132,14 @@ async fn main() -> Result<()> {
     let addr = "0.0.0.0:3000".parse()?;
     info!("gRPC server listening on {}.", addr);
 
+    // gRPC health reporter — used by the K8s gRPC probe and GKE HealthCheckPolicy.
+    let (health_reporter, health_service) = health_reporter();
+    health_reporter
+        .set_serving::<GuardianServiceServer<GuardianGrpc>>()
+        .await;
+
     let server_future = Server::builder()
+        .add_service(health_service)
         .add_service(GuardianServiceServer::new(svc))
         .serve(addr);
 
