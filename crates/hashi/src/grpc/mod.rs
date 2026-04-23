@@ -15,6 +15,7 @@ pub use client::Client;
 pub use client::MPC_PROTOCOL_METADATA_KEY;
 
 pub mod bridge_service;
+pub mod guardian_client;
 pub mod metrics_layer;
 pub mod screener_client;
 

@@ -2088,6 +2088,7 @@ dependencies = [
  "fastcrypto-tbls",
  "futures",
  "hashi",
+ "hashi-guardian",
  "hashi-screener",
  "hashi-types",
  "nix",
@@ -2104,6 +2105,8 @@ dependencies = [
  "sui-transaction-builder",
  "tempfile",
  "tokio",
+ "tokio-stream",
+ "tonic",
  "tracing",
  "tracing-subscriber",
 ]
