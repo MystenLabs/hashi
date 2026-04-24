@@ -127,7 +127,7 @@ fn receive_dealer_messages(
     let Messages::Dkg(msg) = messages else {
         panic!("receive_dealer_messages called with rotation messages");
     };
-    manager.store_dkg_message(manager.mpc_config.epoch, dealer, msg)?;
+    manager.cache_and_persist_dkg_message(manager.mpc_config.epoch, dealer, msg)?;
     let sig = manager.try_sign_dkg_message(dealer, messages)?;
     Ok(MemberSignature::new(
         manager.mpc_config.epoch,
@@ -1533,7 +1533,7 @@ async fn test_run_dkg_with_complaint_recovery() {
                     unreachable!()
                 };
                 manager
-                    .store_dkg_message(manager.mpc_config.epoch, dealer_addr, msg)
+                    .cache_and_persist_dkg_message(manager.mpc_config.epoch, dealer_addr, msg)
                     .unwrap();
                 continue;
             }
@@ -1893,7 +1893,7 @@ async fn test_run_as_party_recovers_shares_via_complaint() {
 
     // Party 2 stores dealer 1's cheating message and creates complaint during processing
     party_manager
-        .store_dkg_message(party_manager.mpc_config.epoch, dealer_1_addr, &dealer_1_msg)
+        .cache_and_persist_dkg_message(party_manager.mpc_config.epoch, dealer_1_addr, &dealer_1_msg)
         .unwrap();
     party_manager
         .process_certified_dkg_message(dealer_1_addr)
@@ -3481,7 +3481,7 @@ async fn test_recover_shares_via_complaint_succeeds_with_exact_threshold() {
         unreachable!()
     };
     party_manager
-        .store_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
+        .cache_and_persist_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
         .unwrap();
     party_manager
         .process_certified_dkg_message(dealer_addr)
@@ -3556,7 +3556,7 @@ async fn test_recover_shares_via_complaint_skips_failed_signers() {
         unreachable!()
     };
     party_manager
-        .store_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
+        .cache_and_persist_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
         .unwrap();
     party_manager
         .process_certified_dkg_message(dealer_addr)
@@ -3736,7 +3736,7 @@ async fn test_recover_shares_via_complaint_insufficient_signers() {
         unreachable!()
     };
     party_manager
-        .store_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
+        .cache_and_persist_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
         .unwrap();
     party_manager
         .process_certified_dkg_message(dealer_addr)
@@ -3805,7 +3805,7 @@ async fn test_recover_shares_via_complaint_no_dealer_message() {
         unreachable!()
     };
     party_manager
-        .store_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
+        .cache_and_persist_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
         .unwrap();
     party_manager
         .process_certified_dkg_message(dealer_addr)
@@ -3865,7 +3865,7 @@ async fn test_recover_shares_via_complaint_crypto_error() {
         unreachable!()
     };
     party_manager
-        .store_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
+        .cache_and_persist_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
         .unwrap();
     party_manager
         .process_certified_dkg_message(dealer_addr)
@@ -4636,7 +4636,7 @@ async fn test_handle_send_messages_request_post_restart_reprocesses() {
     // reloaded the message but `message_responses` is empty.
     let mut receiver_manager = setup.create_manager(0);
     receiver_manager
-        .store_dkg_message(
+        .cache_and_persist_dkg_message(
             receiver_manager.mpc_config.epoch,
             dealer_addr,
             &dealer_message,
@@ -7229,7 +7229,11 @@ fn test_dealer_restart_reuses_stored_rotation_messages() {
         // Create and store rotation messages
         let msgs = dealer_manager.create_rotation_messages(&dkg_output, &mut rng);
         dealer_manager
-            .store_rotation_messages(dealer_manager.mpc_config.epoch, dealer_addr, &msgs)
+            .cache_and_persist_rotation_messages(
+                dealer_manager.mpc_config.epoch,
+                dealer_addr,
+                &msgs,
+            )
             .unwrap();
 
         // Return the messages for comparison
@@ -9493,7 +9497,7 @@ async fn test_recover_nonce_shares_via_complaint() {
 
     // Store the cheating message in test manager
     test_manager
-        .store_nonce_message(
+        .cache_and_persist_nonce_message(
             test_manager.mpc_config.epoch,
             dealer_addr,
             &cheating_messages,
@@ -9601,7 +9605,7 @@ async fn test_recover_nonce_shares_via_complaint_db_fallback() {
     // Store the message (populates both cache AND DB) and process it to
     // generate the complaint we'll later try to recover from.
     test_manager
-        .store_nonce_message(
+        .cache_and_persist_nonce_message(
             test_manager.mpc_config.epoch,
             dealer_addr,
             &cheating_messages,
@@ -9697,7 +9701,11 @@ async fn test_run_nonce_generation_with_complaint_recovery() {
             if dealer_idx == cheating_dealer_idx && mgr_idx == test_party_idx {
                 // Validator 0 can't sign — just store the message
                 manager
-                    .store_nonce_message(manager.mpc_config.epoch, dealer_addr, nonce_msg)
+                    .cache_and_persist_nonce_message(
+                        manager.mpc_config.epoch,
+                        dealer_addr,
+                        nonce_msg,
+                    )
                     .unwrap();
                 continue;
             }
