@@ -31,7 +31,7 @@ use sui_sdk_types::Address;
 use crate::Hashi;
 use crate::btc_monitor::monitor::TxStatus;
 use crate::leader::RetryPolicy;
-use crate::mpc::rpc::RpcP2PChannel;
+use crate::mpc_p2p_channel::RpcP2PChannel;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
@@ -586,7 +586,7 @@ impl Hashi {
                     &beacon,
                     derivation_address.as_ref(),
                     WITHDRAWAL_SIGNING_TIMEOUT,
-                    &self.metrics,
+                    &self.metrics.mpc,
                 )
                 .await;
             let sign_duration = sign_start.elapsed().as_secs_f64();
@@ -607,12 +607,12 @@ impl Hashi {
                         .with_label_values(&["failure"])
                         .observe(sign_duration);
                     let reason = match e {
-                        crate::mpc::types::SigningError::Timeout { .. } => "timeout",
-                        crate::mpc::types::SigningError::PoolExhausted => "pool_exhausted",
-                        crate::mpc::types::SigningError::TooManyInvalidSignatures { .. } => {
+                        mpc::types::SigningError::Timeout { .. } => "timeout",
+                        mpc::types::SigningError::PoolExhausted => "pool_exhausted",
+                        mpc::types::SigningError::TooManyInvalidSignatures { .. } => {
                             "too_many_invalid"
                         }
-                        crate::mpc::types::SigningError::CryptoError(_) => "crypto_error",
+                        mpc::types::SigningError::CryptoError(_) => "crypto_error",
                         _ => "other",
                     };
                     self.metrics
