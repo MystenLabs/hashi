@@ -16,19 +16,20 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
+use mpc::MpcManager;
+use mpc::MpcOutput;
+use mpc::SigningManager;
+use mpc::metrics::MPC_LABEL_DKG;
+use mpc::metrics::MPC_LABEL_KEY_ROTATION;
+use mpc::metrics::MPC_LABEL_NONCE_GENERATION;
+use mpc::types::CertificateV1;
+use mpc::types::ProtocolType;
+
 use crate::Hashi;
-use crate::communication::SuiTobChannel;
-use crate::communication::fetch_certificates;
 use crate::constants::PRESIG_REFILL_DIVISOR;
-use crate::metrics::MPC_LABEL_DKG;
-use crate::metrics::MPC_LABEL_KEY_ROTATION;
-use crate::metrics::MPC_LABEL_NONCE_GENERATION;
-use crate::mpc::MpcManager;
-use crate::mpc::MpcOutput;
-use crate::mpc::SigningManager;
-use crate::mpc::rpc::RpcP2PChannel;
-use crate::mpc::types::CertificateV1;
-use crate::mpc::types::ProtocolType;
+use crate::mpc_p2p_channel::RpcP2PChannel;
+use crate::mpc_sui_tob::SuiTobChannel;
+use crate::mpc_sui_tob::fetch_certificates;
 use crate::onchain::Notification;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
@@ -300,7 +301,7 @@ impl MpcService {
             &mpc_manager,
             &p2p_channel,
             &mut tob_channel,
-            &self.inner.metrics,
+            &self.inner.metrics.mpc,
         )
         .await
         .map_err(|e| anyhow::anyhow!("DKG failed: {e}"))?;
@@ -335,8 +336,9 @@ impl MpcService {
             Some(batch_index),
             signer,
         );
-        let metrics = &self.inner.metrics;
-        let _timer = metrics
+        let _timer = self
+            .inner
+            .metrics
             .mpc_total_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
             .start_timer();
@@ -345,7 +347,7 @@ impl MpcService {
             batch_index,
             &p2p_channel,
             &mut tob_channel,
-            metrics,
+            &self.inner.metrics.mpc,
         )
         .await;
         drop(_timer);
@@ -358,7 +360,9 @@ impl MpcService {
                 mgr.mpc_config.max_faulty as usize,
             )
         };
-        let _timer = metrics
+        let _timer = self
+            .inner
+            .metrics
             .mpc_presig_conversion_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
             .start_timer();
@@ -775,7 +779,7 @@ impl MpcService {
             &previous_certs,
             &p2p_channel,
             &mut tob_channel,
-            &self.inner.metrics,
+            &self.inner.metrics.mpc,
         )
         .await
         .map_err(|e| anyhow::anyhow!("Key rotation failed: {e}"))?;

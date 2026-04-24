@@ -42,19 +42,19 @@ impl HttpService {
         Self { inner: hashi }
     }
 
-    pub(crate) fn metrics(&self) -> &crate::metrics::Metrics {
-        &self.inner.metrics
-    }
-
     pub async fn start(self) -> (std::net::SocketAddr, Service) {
         let router = {
             let max_decoding_message_size = self.inner.config.grpc_max_decoding_message_size();
             let bridge_service =
                 hashi_types::proto::bridge_service_server::BridgeServiceServer::new(self.clone())
                     .max_decoding_message_size(max_decoding_message_size);
-            let mpc_service =
-                hashi_types::proto::mpc_service_server::MpcServiceServer::new(self.clone())
-                    .max_decoding_message_size(max_decoding_message_size);
+            let mpc_service = hashi_types::proto::mpc_service_server::MpcServiceServer::new(
+                mpc::MpcServiceImpl::new(
+                    self.inner.mpc_state.clone(),
+                    Arc::new(self.inner.metrics.mpc.clone()),
+                ),
+            )
+            .max_decoding_message_size(max_decoding_message_size);
 
             let (health_reporter, health_service) = tonic_health::server::health_reporter();
 
@@ -136,31 +136,8 @@ impl HttpService {
         (local_addr, service)
     }
 
-    pub fn mpc_manager(
-        &self,
-    ) -> Result<Arc<std::sync::RwLock<crate::mpc::MpcManager>>, tonic::Status> {
-        self.inner
-            .mpc_manager()
-            .ok_or_else(|| tonic::Status::unavailable("DKG manager not yet initialized"))
-    }
-
-    pub fn signing_manager_for(
-        &self,
-        epoch: u64,
-    ) -> Result<Arc<crate::mpc::SigningManager>, tonic::Status> {
-        self.inner.signing_manager_for(epoch).ok_or_else(|| {
-            tonic::Status::unavailable(format!(
-                "SigningManager not available for epoch {epoch}; retry"
-            ))
-        })
-    }
-
     pub fn btc_monitor(&self) -> &crate::btc_monitor::monitor::MonitorClient {
         self.inner.btc_monitor()
-    }
-
-    pub fn get_reconfig_signature(&self, epoch: u64) -> Option<Vec<u8>> {
-        self.inner.get_reconfig_signature(epoch)
     }
 }
 

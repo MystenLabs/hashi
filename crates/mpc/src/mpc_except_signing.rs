@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::committee_view::CommitteeSetView;
 use crate::communication::OrderedBroadcastChannel;
 use crate::communication::P2PChannel;
 use crate::communication::send_to_many;
@@ -9,41 +10,40 @@ use crate::constants::is_production_sui_chain;
 use crate::metrics::MPC_LABEL_DKG;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
 use crate::metrics::MPC_LABEL_NONCE_GENERATION;
-use crate::metrics::Metrics;
-use crate::mpc::types::CertificateV1;
-pub use crate::mpc::types::ComplainRequest;
-pub use crate::mpc::types::ComplaintResponses;
-pub use crate::mpc::types::ComplaintResponsesKey;
-pub use crate::mpc::types::ComplaintsToProcessKey;
-use crate::mpc::types::DealerCertificate;
-pub use crate::mpc::types::DealerFlowData;
-use crate::mpc::types::DealerMessagesHash;
-pub use crate::mpc::types::DealerOutputsKey;
-pub use crate::mpc::types::EncryptionGroupElement;
-pub use crate::mpc::types::GetPublicMpcOutputRequest;
-pub use crate::mpc::types::GetPublicMpcOutputResponse;
-pub use crate::mpc::types::MessageHash;
-pub use crate::mpc::types::MessageResponsesKey;
-pub use crate::mpc::types::Messages;
-use crate::mpc::types::MpcConfig;
-pub use crate::mpc::types::MpcError;
-pub use crate::mpc::types::MpcOutput;
-pub use crate::mpc::types::MpcResult;
-pub use crate::mpc::types::NonceMessage;
-pub use crate::mpc::types::NonceReconstructionOutcome;
-pub use crate::mpc::types::ProtocolType;
-pub use crate::mpc::types::ProtocolTypeIndicator;
-pub use crate::mpc::types::PublicMpcOutput;
-use crate::mpc::types::ReconstructionOutcome;
-pub use crate::mpc::types::RetrieveMessagesRequest;
-pub use crate::mpc::types::RetrieveMessagesResponse;
-use crate::mpc::types::RotationComplainContext;
-use crate::mpc::types::RotationMessages;
-pub use crate::mpc::types::SendMessagesRequest;
-pub use crate::mpc::types::SendMessagesResponse;
-pub use crate::mpc::types::SessionId;
-use crate::onchain::types::CommitteeSet;
+use crate::metrics::MpcMetrics;
 use crate::storage::PublicMessagesStore;
+use crate::types::CertificateV1;
+pub use crate::types::ComplainRequest;
+pub use crate::types::ComplaintResponses;
+pub use crate::types::ComplaintResponsesKey;
+pub use crate::types::ComplaintsToProcessKey;
+use crate::types::DealerCertificate;
+pub use crate::types::DealerFlowData;
+use crate::types::DealerMessagesHash;
+pub use crate::types::DealerOutputsKey;
+pub use crate::types::EncryptionGroupElement;
+pub use crate::types::GetPublicMpcOutputRequest;
+pub use crate::types::GetPublicMpcOutputResponse;
+pub use crate::types::MessageHash;
+pub use crate::types::MessageResponsesKey;
+pub use crate::types::Messages;
+use crate::types::MpcConfig;
+pub use crate::types::MpcError;
+pub use crate::types::MpcOutput;
+pub use crate::types::MpcResult;
+pub use crate::types::NonceMessage;
+pub use crate::types::NonceReconstructionOutcome;
+pub use crate::types::ProtocolType;
+pub use crate::types::ProtocolTypeIndicator;
+pub use crate::types::PublicMpcOutput;
+use crate::types::ReconstructionOutcome;
+pub use crate::types::RetrieveMessagesRequest;
+pub use crate::types::RetrieveMessagesResponse;
+use crate::types::RotationComplainContext;
+use crate::types::RotationMessages;
+pub use crate::types::SendMessagesRequest;
+pub use crate::types::SendMessagesResponse;
+pub use crate::types::SessionId;
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::groups::HashToGroupElement;
@@ -126,7 +126,7 @@ impl MpcManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         address: Address,
-        committee_set: &CommitteeSet,
+        committee_set: &dyn CommitteeSetView,
         session_id: SessionId,
         encryption_key: PrivateKey<EncryptionGroupElement>,
         signing_key: Bls12381PrivateKey,
@@ -578,7 +578,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-        metrics: &Metrics,
+        metrics: &MpcMetrics,
     ) -> MpcResult<MpcOutput> {
         let certified = tob_channel.certified_dealers().await;
         let (certified_reduced_weight, threshold) = {
@@ -612,7 +612,7 @@ impl MpcManager {
         previous_certificates: &[CertificateV1],
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-        metrics: &Metrics,
+        metrics: &MpcMetrics,
     ) -> MpcResult<MpcOutput> {
         tracing::info!("run_key_rotation: starting prepare_previous_output");
         let _timer = metrics
@@ -707,7 +707,7 @@ impl MpcManager {
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-        metrics: &Metrics,
+        metrics: &MpcMetrics,
     ) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
         Self::prune_nonce_state(mpc_manager, batch_index);
         let certified = tob_channel.certified_dealers().await;
@@ -844,7 +844,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-        metrics: &Metrics,
+        metrics: &MpcMetrics,
     ) -> MpcResult<()> {
         // TODO(Optimization): Skip dealer phase if certificate is already on TOB
         let _timer = metrics
@@ -913,7 +913,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-        metrics: &Metrics,
+        metrics: &MpcMetrics,
     ) -> MpcResult<MpcOutput> {
         let threshold = {
             let mgr = mpc_manager.read().unwrap();
@@ -1110,7 +1110,7 @@ impl MpcManager {
         previous: &MpcOutput,
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-        metrics: &Metrics,
+        metrics: &MpcMetrics,
     ) -> MpcResult<()> {
         // TODO(Optimization): Skip dealer phase if certificate is already on TOB
         let _timer = metrics
@@ -1184,7 +1184,7 @@ impl MpcManager {
         previous: &MpcOutput,
         p2p_channel: &impl P2PChannel,
         ordered_broadcast_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-        metrics: &Metrics,
+        metrics: &MpcMetrics,
     ) -> MpcResult<MpcOutput> {
         let mut certified_share_indices: Vec<ShareIndex> = Vec::new();
         let mut certified_dealers = HashSet::new();
@@ -1405,7 +1405,7 @@ impl MpcManager {
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-        metrics: &Metrics,
+        metrics: &MpcMetrics,
     ) -> MpcResult<()> {
         let _timer = metrics
             .mpc_dealer_crypto_duration_seconds
@@ -1477,7 +1477,7 @@ impl MpcManager {
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
-        metrics: &Metrics,
+        metrics: &MpcMetrics,
     ) -> MpcResult<HashSet<Address>> {
         let required_weight = {
             let mgr = mpc_manager.read().unwrap();
@@ -3549,7 +3549,7 @@ impl MpcManager {
 
     /// Reconstruct presignatures from DB, recovering via Complain RPCs if
     /// cheating dealers' corrupted nonce messages are encountered.
-    pub(crate) async fn reconstruct_presignatures_with_complaint_recovery(
+    pub async fn reconstruct_presignatures_with_complaint_recovery(
         mpc_manager: &Arc<RwLock<Self>>,
         epoch: u64,
         batch_index: u32,

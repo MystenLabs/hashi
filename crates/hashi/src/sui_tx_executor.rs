@@ -175,12 +175,12 @@ use sui_transaction_builder::intent::CoinWithBalance;
 use crate::Hashi;
 use crate::config::Config;
 use crate::config::HashiIds;
-use crate::mpc::types::CertificateV1;
 use crate::onchain;
 use crate::onchain::OnchainState;
 use crate::onchain::types::DepositConfirmationMessage;
 use crate::onchain::types::DepositRequest;
 use crate::withdrawals::WithdrawalTxCommitment;
+use mpc::types::CertificateV1;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
 

@@ -27,12 +27,12 @@ use tokio::time::Instant;
 use crate::communication::P2PChannel;
 use crate::communication::send_to_many;
 use crate::metrics::MPC_LABEL_SIGNING;
-use crate::metrics::Metrics;
-use crate::mpc::types::GetPartialSignaturesRequest;
-use crate::mpc::types::GetPartialSignaturesResponse;
-use crate::mpc::types::PartialSigningOutput;
-use crate::mpc::types::SigningError;
-use crate::mpc::types::SigningResult;
+use crate::metrics::MpcMetrics;
+use crate::types::GetPartialSignaturesRequest;
+use crate::types::GetPartialSignaturesResponse;
+use crate::types::PartialSigningOutput;
+use crate::types::SigningError;
+use crate::types::SigningResult;
 
 /// A single contiguous batch of presignatures.
 struct PresigBatch {
@@ -229,7 +229,7 @@ impl SigningManager {
         beacon_value: &S,
         derivation_address: Option<&DerivationAddress>,
         timeout: Duration,
-        metrics: &Metrics,
+        metrics: &MpcMetrics,
     ) -> SigningResult<SchnorrSignature> {
         let config = &self.config;
         let threshold = config.threshold;
@@ -570,14 +570,14 @@ mod tests {
     use super::*;
     use crate::communication::ChannelError;
     use crate::communication::ChannelResult;
-    use crate::mpc::types::ComplainRequest;
-    use crate::mpc::types::ComplaintResponses;
-    use crate::mpc::types::GetPublicMpcOutputRequest;
-    use crate::mpc::types::GetPublicMpcOutputResponse;
-    use crate::mpc::types::RetrieveMessagesRequest;
-    use crate::mpc::types::RetrieveMessagesResponse;
-    use crate::mpc::types::SendMessagesRequest;
-    use crate::mpc::types::SendMessagesResponse;
+    use crate::types::ComplainRequest;
+    use crate::types::ComplaintResponses;
+    use crate::types::GetPublicMpcOutputRequest;
+    use crate::types::GetPublicMpcOutputResponse;
+    use crate::types::RetrieveMessagesRequest;
+    use crate::types::RetrieveMessagesResponse;
+    use crate::types::SendMessagesRequest;
+    use crate::types::SendMessagesResponse;
     use fastcrypto::groups::GroupElement;
     use fastcrypto::groups::Scalar;
     use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
@@ -591,8 +591,8 @@ mod tests {
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 
-    fn test_metrics() -> Metrics {
-        Metrics::new(&prometheus::Registry::new())
+    fn test_metrics() -> MpcMetrics {
+        MpcMetrics::new(&prometheus::Registry::new())
     }
 
     fn mock_shares(rng: &mut impl AllowedRng, secret: S, t: u16, n: u16) -> Vec<Eval<S>> {

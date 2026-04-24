@@ -6,6 +6,7 @@ publish = false
 
 [dependencies]
 hashi = { path = "../hashi" }
+mpc = { path = "../mpc" }
 hashi-types = { path = "../hashi-types" }
 
 fastcrypto.workspace = true

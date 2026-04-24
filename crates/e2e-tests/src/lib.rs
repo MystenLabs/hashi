@@ -655,7 +655,7 @@ mod tests {
                 mgr.committee.clone()
             };
             let (refill_tx, _) = tokio::sync::watch::channel(0u32);
-            let signing_manager = hashi::mpc::SigningManager::new(
+            let signing_manager = mpc::SigningManager::new(
                 info.address,
                 committee,
                 t,
@@ -679,9 +679,8 @@ mod tests {
         epoch: u64,
         sui_request_id: sui_sdk_types::Address,
         global_presig_index: u64,
-    ) -> Vec<
-        hashi::mpc::types::SigningResult<fastcrypto::groups::secp256k1::schnorr::SchnorrSignature>,
-    > {
+    ) -> Vec<mpc::types::SigningResult<fastcrypto::groups::secp256k1::schnorr::SchnorrSignature>>
+    {
         let beacon_value = S::rand(&mut rand::thread_rng());
         let sign_futures: Vec<_> = nodes
             .iter()
@@ -691,7 +690,7 @@ mod tests {
                     .signing_manager_for(epoch)
                     .unwrap_or_else(|| panic!("SigningManager not initialized for epoch {epoch}"));
                 let onchain_state = node.hashi().onchain_state().clone();
-                let p2p_channel = hashi::mpc::rpc::RpcP2PChannel::new(
+                let p2p_channel = hashi::mpc_p2p_channel::RpcP2PChannel::new(
                     onchain_state,
                     epoch,
                     hashi::metrics::MPC_LABEL_SIGNING,
@@ -709,7 +708,7 @@ mod tests {
                             &beacon,
                             None,
                             SIGNING_TIMEOUT,
-                            &metrics,
+                            &metrics.mpc,
                         )
                         .await
                 }
@@ -720,9 +719,7 @@ mod tests {
 
     fn assert_all_signatures_match(
         results: Vec<
-            hashi::mpc::types::SigningResult<
-                fastcrypto::groups::secp256k1::schnorr::SchnorrSignature,
-            >,
+            mpc::types::SigningResult<fastcrypto::groups::secp256k1::schnorr::SchnorrSignature>,
         >,
     ) {
         let mut signatures = Vec::new();

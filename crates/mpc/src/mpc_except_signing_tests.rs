@@ -3,16 +3,12 @@
 
 use super::*;
 use crate::communication::ChannelResult;
-use crate::metrics::Metrics;
-
-fn test_metrics() -> Metrics {
-    Metrics::new(&prometheus::Registry::new())
-}
-use crate::mpc::types::GetPartialSignaturesRequest;
-use crate::mpc::types::GetPartialSignaturesResponse;
-use crate::mpc::types::ProtocolType;
-use crate::mpc::types::RotationMessages;
-use crate::onchain::types::MemberInfo;
+use crate::metrics::MpcMetrics;
+use crate::test_committee_set::TestCommitteeSet;
+use crate::types::GetPartialSignaturesRequest;
+use crate::types::GetPartialSignaturesResponse;
+use crate::types::ProtocolType;
+use crate::types::RotationMessages;
 use fastcrypto::encoding::Encoding;
 use fastcrypto::encoding::Hex;
 use fastcrypto::groups::Scalar;
@@ -37,6 +33,10 @@ const TEST_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 0;
 const TEST_WEIGHT_DIVISOR: u16 = 1;
 const TEST_CHAIN_ID: &str = "testchain";
 const TEST_BATCH_SIZE_PER_WEIGHT: u16 = 50;
+
+fn test_metrics() -> MpcMetrics {
+    MpcMetrics::new(&prometheus::Registry::new())
+}
 
 fn unwrap_reconstruction_success(outcome: ReconstructionOutcome) -> MpcOutput {
     match outcome {
@@ -73,7 +73,7 @@ fn receive_dealer_messages(
     ))
 }
 struct TestSetup {
-    pub committee_set: CommitteeSet,
+    pub committee_set: TestCommitteeSet,
     pub encryption_keys: Vec<PrivateKey<EncryptionGroupElement>>,
     pub signing_keys: Vec<Bls12381PrivateKey>,
 }
@@ -91,24 +91,6 @@ impl TestSetup {
             .collect();
 
         let epoch = 100u64;
-
-        // Build MemberInfo for each validator
-        let member_infos: BTreeMap<Address, MemberInfo> = (0..num_validators)
-            .map(|i| {
-                let addr = Address::new([i as u8; 32]);
-                let next_epoch_encryption_public_key =
-                    Some(PublicKey::from_private_key(&encryption_keys[i]));
-                let member_info = MemberInfo {
-                    validator_address: addr,
-                    operator_address: addr,
-                    next_epoch_public_key: signing_keys[i].public_key(),
-                    endpoint_url: None,
-                    tls_public_key: None,
-                    next_epoch_encryption_public_key,
-                };
-                (addr, member_info)
-            })
-            .collect();
 
         // Build Committee
         let members: Vec<_> = (0..num_validators)
@@ -142,11 +124,8 @@ impl TestSetup {
         committees.insert(epoch - 1, previous_committee);
         committees.insert(epoch, committee);
 
-        let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
-        committee_set
-            .set_epoch(epoch)
-            .set_members(member_infos)
-            .set_committees(committees);
+        let mut committee_set = TestCommitteeSet::new();
+        committee_set.set_epoch(epoch).set_committees(committees);
 
         Self {
             committee_set,
@@ -168,24 +147,6 @@ impl TestSetup {
             .collect();
 
         let epoch = 100u64;
-
-        // Build MemberInfo for each validator
-        let member_infos: BTreeMap<Address, MemberInfo> = (0..num_validators)
-            .map(|i| {
-                let addr = Address::new([i as u8; 32]);
-                let next_epoch_encryption_public_key =
-                    Some(PublicKey::from_private_key(&encryption_keys[i]));
-                let member_info = MemberInfo {
-                    validator_address: addr,
-                    operator_address: addr,
-                    next_epoch_public_key: signing_keys[i].public_key(),
-                    endpoint_url: None,
-                    tls_public_key: None,
-                    next_epoch_encryption_public_key,
-                };
-                (addr, member_info)
-            })
-            .collect();
 
         // Build Committee with custom weights
         let members: Vec<_> = (0..num_validators)
@@ -220,11 +181,8 @@ impl TestSetup {
         committees.insert(epoch - 1, previous_committee);
         committees.insert(epoch, committee);
 
-        let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
-        committee_set
-            .set_epoch(epoch)
-            .set_members(member_infos)
-            .set_committees(committees);
+        let mut committee_set = TestCommitteeSet::new();
+        committee_set.set_epoch(epoch).set_committees(committees);
 
         Self {
             committee_set,
@@ -900,29 +858,14 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
 
     let epoch = 100u64;
 
-    let members: BTreeMap<Address, MemberInfo> = (0..5)
-        .map(|i| {
-            let addr = Address::new([i as u8; 32]);
-            let member_info = MemberInfo {
-                validator_address: addr,
-                operator_address: addr,
-                next_epoch_public_key: signing_keys[i].public_key(),
-                endpoint_url: None,
-                tls_public_key: None,
-                next_epoch_encryption_public_key: Some(PublicKey::from_private_key(
-                    &encryption_keys[i],
-                )),
-            };
-            (addr, member_info)
-        })
-        .collect();
+    // Silence unused-var warnings for keys we build above but don't need here.
+    let _ = (&encryption_keys, &signing_keys);
 
     // Empty committees map - no committee for the epoch
-    let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+    let mut committee_set = TestCommitteeSet::new();
     committee_set
         .set_epoch(epoch)
-        .set_members(members)
-        .set_committees(BTreeMap::new()); // Empty!
+        .set_committees(BTreeMap::new());
 
     let session_id = SessionId::new("test", epoch, &ProtocolType::Dkg);
     let result = MpcManager::new(
@@ -6287,7 +6230,7 @@ async fn test_prepare_previous_output_for_new_member() {
     committees.insert(epoch - 1, previous_committee);
     committees.insert(epoch, new_current_committee);
 
-    let mut new_committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+    let mut new_committee_set = TestCommitteeSet::new();
     new_committee_set
         .set_epoch(epoch - 1)
         .set_pending_epoch_change(Some(epoch))
@@ -7417,7 +7360,7 @@ fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
 
     // Build CommitteeSet simulating a live reconfig:
     // epoch = 100 (current), pending_epoch_change = 101 (target)
-    let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+    let mut committee_set = TestCommitteeSet::new();
     let mut committees = BTreeMap::new();
     committees.insert(epoch, previous_committee);
     committees.insert(target_epoch, target_committee);
@@ -7604,7 +7547,7 @@ fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
     );
 
-    let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+    let mut committee_set = TestCommitteeSet::new();
     let mut committees = BTreeMap::new();
     committees.insert(epoch, previous_committee);
     committees.insert(target_epoch, target_committee);
@@ -7697,7 +7640,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
     );
 
-    let mut rotation_committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+    let mut rotation_committee_set = TestCommitteeSet::new();
     let mut rotation_committees = BTreeMap::new();
     rotation_committees.insert(dkg_epoch, committee_at_100);
     rotation_committees.insert(rotation_epoch, committee_at_101);
@@ -7817,7 +7760,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
     );
 
-    let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+    let mut committee_set = TestCommitteeSet::new();
     let mut committees = BTreeMap::new();
     committees.insert(rotation_epoch, previous_committee);
     committees.insert(target_epoch, target_committee);

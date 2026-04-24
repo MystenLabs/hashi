@@ -3,16 +3,16 @@
 
 //! Communication channel interfaces
 
-use crate::mpc::ComplainRequest;
-use crate::mpc::ComplaintResponses;
-use crate::mpc::GetPublicMpcOutputRequest;
-use crate::mpc::GetPublicMpcOutputResponse;
-use crate::mpc::RetrieveMessagesRequest;
-use crate::mpc::RetrieveMessagesResponse;
-use crate::mpc::SendMessagesRequest;
-use crate::mpc::SendMessagesResponse;
-use crate::mpc::types::GetPartialSignaturesRequest;
-use crate::mpc::types::GetPartialSignaturesResponse;
+use crate::ComplainRequest;
+use crate::ComplaintResponses;
+use crate::GetPublicMpcOutputRequest;
+use crate::GetPublicMpcOutputResponse;
+use crate::RetrieveMessagesRequest;
+use crate::RetrieveMessagesResponse;
+use crate::SendMessagesRequest;
+use crate::SendMessagesResponse;
+use crate::types::GetPartialSignaturesRequest;
+use crate::types::GetPartialSignaturesResponse;
 use async_trait::async_trait;
 use sui_sdk_types::Address;
 use thiserror::Error;
