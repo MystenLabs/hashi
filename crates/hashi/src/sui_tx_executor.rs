@@ -182,7 +182,7 @@ use crate::onchain::types::DepositConfirmationMessage;
 use crate::onchain::types::DepositRequest;
 use crate::withdrawals::WithdrawalTxCommitment;
 
-const DEFAULT_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
 /// Well-known Sui Clock object address (0x6)
 pub const SUI_CLOCK_OBJECT_ID: Address = Address::from_static("0x6");
