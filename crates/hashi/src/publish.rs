@@ -5,7 +5,7 @@
 //!
 //! Provides a reusable [`build_package`] + [`publish_and_init`] workflow that can be called
 //! from both the CLI and integration tests. Uses a 900s checkpoint-wait timeout
-//! to accommodate slower checkpoint cadence on private-testnet.
+//! to accommodate slower checkpoint cadence on private-testnet (15 min upper bound).
 
 use std::path::Path;
 use std::process::Command;
