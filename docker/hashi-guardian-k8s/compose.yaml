@@ -1,0 +1,47 @@
+# Copyright (c) Mysten Labs, Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Local MinIO with an Object-Lock-enabled bucket, standing in for AWS S3.
+# Console: http://localhost:9001 (minioadmin / minioadmin).
+
+name: hashi-guardian-dev
+
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  bucket-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mc alias set local http://minio:9000 minioadmin minioadmin
+        if ! mc ls local/hashi-guardian-dev >/dev/null 2>&1; then
+          mc mb --with-lock local/hashi-guardian-dev
+          echo "Created hashi-guardian-dev with Object Lock enabled"
+        else
+          echo "Bucket hashi-guardian-dev already exists"
+        fi
+
+volumes:
+  minio-data:

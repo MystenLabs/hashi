@@ -63,7 +63,20 @@ impl S3Logger {
             .retry_config(retry_config)
             .load()
             .await;
-        let client = S3Client::new(&aws_config);
+
+        // Dev overrides for pointing at a local S3-compatible service (MinIO, LocalStack).
+        // MinIO requires path-style addressing. Both unset in production.
+        let mut s3_builder = aws_sdk_s3::config::Builder::from(&aws_config);
+        if let Ok(endpoint) = std::env::var("AWS_ENDPOINT_URL_S3") {
+            s3_builder = s3_builder.endpoint_url(endpoint);
+        }
+        if std::env::var("AWS_S3_FORCE_PATH_STYLE")
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1"))
+            .unwrap_or(false)
+        {
+            s3_builder = s3_builder.force_path_style(true);
+        }
+        let client = S3Client::from_conf(s3_builder.build());
 
         Self {
             client,
