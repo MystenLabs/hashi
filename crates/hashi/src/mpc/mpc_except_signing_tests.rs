@@ -41,81 +41,18 @@ const TEST_BATCH_SIZE_PER_WEIGHT: u16 = 50;
 fn unwrap_reconstruction_success(outcome: ReconstructionOutcome) -> MpcOutput {
     match outcome {
         ReconstructionOutcome::Success(output) => output,
-        ReconstructionOutcome::NeedsComplaintRecovery { dealer_address, .. } => {
-            panic!("Expected Success, got NeedsComplaintRecovery for dealer {dealer_address}")
+        ReconstructionOutcome::NeedsDkgComplaintRecovery { dealer_address, .. } => {
+            panic!("Expected Success, got NeedsDkgComplaintRecovery for dealer {dealer_address}")
         }
-    }
-}
-
-struct MockPublicMessagesStore;
-
-impl PublicMessagesStore for MockPublicMessagesStore {
-    fn store_dealer_message(
-        &mut self,
-        _epoch: u64,
-        _dealer: &Address,
-        _message: &avss::Message,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    fn get_dealer_message(
-        &self,
-        _epoch: u64,
-        _dealer: &Address,
-    ) -> anyhow::Result<Option<avss::Message>> {
-        Ok(None)
-    }
-
-    fn list_all_dealer_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
-        Ok(vec![])
-    }
-
-    fn store_rotation_messages(
-        &mut self,
-        _epoch: u64,
-        _dealer: &Address,
-        _messages: &RotationMessages,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    fn get_rotation_messages(
-        &self,
-        _epoch: u64,
-        _dealer: &Address,
-    ) -> anyhow::Result<Option<RotationMessages>> {
-        Ok(None)
-    }
-
-    fn list_all_rotation_messages(&self) -> anyhow::Result<Vec<(Address, Messages)>> {
-        Ok(vec![])
-    }
-
-    fn store_nonce_message(
-        &mut self,
-        _epoch: u64,
-        _batch_index: u32,
-        _dealer: &Address,
-        _message: &batch_avss::Message,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    fn get_nonce_message(
-        &self,
-        _epoch: u64,
-        _batch_index: u32,
-        _dealer: &Address,
-    ) -> anyhow::Result<Option<batch_avss::Message>> {
-        Ok(None)
-    }
-
-    fn list_nonce_messages(
-        &self,
-        _batch_index: u32,
-    ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
-        Ok(vec![])
+        ReconstructionOutcome::NeedsRotationComplaintRecovery {
+            dealer_address,
+            share_index,
+            ..
+        } => {
+            panic!(
+                "Expected Success, got NeedsRotationComplaintRecovery for dealer {dealer_address} share {share_index}"
+            )
+        }
     }
 }
 
@@ -297,7 +234,10 @@ impl TestSetup {
     }
 
     fn create_manager(&self, validator_index: usize) -> MpcManager {
-        self.create_manager_with_store(validator_index, Box::new(MockPublicMessagesStore))
+        self.create_manager_with_store(
+            validator_index,
+            Box::new(InMemoryPublicMessagesStore::new()),
+        )
     }
 
     fn create_manager_with_store(
@@ -929,7 +869,7 @@ fn test_mpc_manager_new_from_committee_set() {
         session_id,
         encryption_key,
         signing_key,
-        Box::new(MockPublicMessagesStore),
+        Box::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -991,7 +931,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         session_id,
         encryption_keys[0].clone(),
         signing_keys[0].clone(),
-        Box::new(MockPublicMessagesStore),
+        Box::new(InMemoryPublicMessagesStore::new()),
         "test",
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
@@ -3515,6 +3455,7 @@ async fn test_recover_shares_via_complaint_succeeds_with_exact_threshold() {
     let result = MpcManager::recover_shares_via_complaint(
         &party_manager,
         &dealer_addr,
+        inner_msg,
         signer_addresses,
         &mock_p2p,
         setup.epoch(),
@@ -3594,6 +3535,7 @@ async fn test_recover_shares_via_complaint_skips_failed_signers() {
     let result = MpcManager::recover_shares_via_complaint(
         &party_manager,
         &dealer_addr,
+        inner_msg,
         signer_addresses,
         &mock_p2p,
         setup.epoch(),
@@ -3660,6 +3602,7 @@ async fn test_recover_shares_via_complaint_no_complaint_for_dealer() {
     let result = MpcManager::recover_shares_via_complaint(
         &party_manager,
         &dealer_addr,
+        dealer_message_raw,
         signers,
         &mock_p2p,
         setup.epoch(),
@@ -3701,9 +3644,13 @@ async fn test_recover_shares_via_complaint_p2p_failure() {
     // Call recover_shares_via_complaint - should fail because P2P call fails
     // With retry logic, failed signers are skipped (continue), so we get ProtocolFailed
     // instead of BroadcastError
+    let Messages::Dkg(inner_msg) = &dealer_message else {
+        unreachable!()
+    };
     let result = MpcManager::recover_shares_via_complaint(
         &party_manager,
         &dealer_addr,
+        inner_msg,
         signer_addresses,
         &mock_p2p,
         setup.epoch(),
@@ -3768,6 +3715,7 @@ async fn test_recover_shares_via_complaint_insufficient_signers() {
     let result = MpcManager::recover_shares_via_complaint(
         &party_manager,
         &dealer_addr,
+        inner_msg,
         signer_addresses,
         &mock_p2p,
         setup.epoch(),
@@ -3786,54 +3734,6 @@ async fn test_recover_shares_via_complaint_insufficient_signers() {
         "Error message should indicate insufficient responses, got: {}",
         err
     );
-}
-
-#[tokio::test]
-#[should_panic(expected = "cannot have complaint without message")]
-async fn test_recover_shares_via_complaint_no_dealer_message() {
-    let mut rng = rand::thread_rng();
-    let setup = TestSetup::new(5);
-    let dealer_addr = setup.address(0);
-
-    // Create cheating message with corrupted shares for party 1
-    let cheating_message = Messages::Dkg(create_cheating_message(&setup, 0, 1, &mut rng));
-
-    // Party 1 receives corrupted message and creates complaint
-    let party_addr = setup.address(1);
-    let mut party_manager = setup.create_manager(1);
-    let Messages::Dkg(inner_msg) = &cheating_message else {
-        unreachable!()
-    };
-    party_manager
-        .cache_and_persist_dkg_message(party_manager.mpc_config.epoch, dealer_addr, inner_msg)
-        .unwrap();
-    party_manager
-        .process_certified_dkg_message(dealer_addr)
-        .unwrap();
-    // DKG: complaints keyed by dealer address
-    assert!(
-        party_manager
-            .complaints_to_process
-            .contains_key(&ComplaintsToProcessKey::Dkg(dealer_addr))
-    );
-
-    // Remove the dealer message to simulate the edge case
-    party_manager.dkg_messages.remove(&dealer_addr);
-
-    // Create mock P2P (empty is fine since we should fail before contacting anyone)
-    let mock_p2p = MockP2PChannel::new(HashMap::new(), party_addr);
-
-    let party_manager = Arc::new(RwLock::new(party_manager));
-
-    // Try to recover - should fail because dealer message is missing
-    let _ = MpcManager::recover_shares_via_complaint(
-        &party_manager,
-        &dealer_addr,
-        vec![Address::new([2; 32])],
-        &mock_p2p,
-        setup.epoch(),
-    )
-    .await;
 }
 
 #[tokio::test]
@@ -3915,6 +3815,7 @@ async fn test_recover_shares_via_complaint_crypto_error() {
     let result = MpcManager::recover_shares_via_complaint(
         &party_manager,
         &dealer_addr,
+        inner_msg,
         vec![addr3, addr4],
         &p2p,
         setup.epoch(),
@@ -6788,7 +6689,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
 
     // Create test party (validator 2, weight=4) - this party will be the victim
     let test_party_idx = 2;
-    let (mut test_manager, test_dkg_output) =
+    let (mut test_manager, _test_dkg_output) =
         rotation_setup.create_receiver_with_memory_store(test_party_idx);
     let test_addr = rotation_setup.setup.address(test_party_idx);
 
@@ -6923,7 +6824,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
     let result = MpcManager::recover_rotation_shares_via_complaints(
         &test_manager,
         &dealer_addr,
-        &test_dkg_output,
+        cheating_map_ref,
         signers,
         &mock_p2p,
         rotation_setup.setup.epoch(),
