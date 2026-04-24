@@ -139,7 +139,7 @@ pub async fn publish_and_init(
             ExecuteTransactionRequest::new(transaction.into())
                 .with_signatures(vec![signature.into()])
                 .with_read_mask(FieldMask::from_str("*")),
-            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(900),
         )
         .await?
         .into_inner();
@@ -229,7 +229,7 @@ pub async fn publish_and_init(
             ExecuteTransactionRequest::new(transaction.into())
                 .with_signatures(vec![signature.into()])
                 .with_read_mask(FieldMask::from_str("*")),
-            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(900),
         )
         .await?
         .into_inner();
