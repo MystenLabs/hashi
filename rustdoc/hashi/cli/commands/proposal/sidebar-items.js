@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_disable_version_proposal","create_enable_version_proposal","create_update_config_proposal","create_upgrade_proposal","execute","list_proposals","remove_vote","view_proposal","vote"]};

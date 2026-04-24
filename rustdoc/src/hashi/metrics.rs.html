@@ -1,0 +1,854 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/hashi/src/metrics.rs`."><title>metrics.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-e56847b5.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="hashi" data-themes="" data-resource-suffix="" data-rustdoc-version="1.91.1 (ed61e7d7e 2025-11-07)" data-channel="1.91.1" data-search-js="search-e256b49e.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../../static.files/src-script-813739b1.js"></script><script defer src="../../src-files.js"></script><script defer src="../../static.files/main-6dc2a7f3.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">hashi/</div>metrics.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-3"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Copyright (c) Mysten Labs, Inc.
+<a href=#2 id=2 data-nosnippet>2</a>// SPDX-License-Identifier: Apache-2.0
+<a href=#3 id=3 data-nosnippet>3</a>
+<a href=#4 id=4 data-nosnippet>4</a></span><span class="kw">use </span>prometheus::HistogramVec;
+<a href=#5 id=5 data-nosnippet>5</a><span class="kw">use </span>prometheus::IntCounter;
+<a href=#6 id=6 data-nosnippet>6</a><span class="kw">use </span>prometheus::IntCounterVec;
+<a href=#7 id=7 data-nosnippet>7</a><span class="kw">use </span>prometheus::IntGauge;
+<a href=#8 id=8 data-nosnippet>8</a><span class="kw">use </span>prometheus::IntGaugeVec;
+<a href=#9 id=9 data-nosnippet>9</a><span class="kw">use </span>prometheus::Registry;
+<a href=#10 id=10 data-nosnippet>10</a><span class="kw">use </span>prometheus::register_histogram_vec_with_registry;
+<a href=#11 id=11 data-nosnippet>11</a><span class="kw">use </span>prometheus::register_int_counter_vec_with_registry;
+<a href=#12 id=12 data-nosnippet>12</a><span class="kw">use </span>prometheus::register_int_counter_with_registry;
+<a href=#13 id=13 data-nosnippet>13</a><span class="kw">use </span>prometheus::register_int_gauge_vec_with_registry;
+<a href=#14 id=14 data-nosnippet>14</a><span class="kw">use </span>prometheus::register_int_gauge_with_registry;
+<a href=#15 id=15 data-nosnippet>15</a>
+<a href=#16 id=16 data-nosnippet>16</a><span class="attr">#[derive(Clone)]
+<a href=#17 id=17 data-nosnippet>17</a></span><span class="kw">pub struct </span><a href="../../hashi/metrics/struct.Metrics.html">Metrics</a> {
+<a href=#18 id=18 data-nosnippet>18</a>    <span class="comment">// RPC metrics. Visible to `crate::grpc::metrics_layer`, which owns
+<a href=#19 id=19 data-nosnippet>19</a>    // the tower CallbackLayer handlers that write into them.
+<a href=#20 id=20 data-nosnippet>20</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) inflight_requests: IntGaugeVec,
+<a href=#21 id=21 data-nosnippet>21</a>    <span class="kw">pub</span>(<span class="kw">crate</span>) requests: IntCounterVec,
+<a href=#22 id=22 data-nosnippet>22</a>    <span class="kw">pub</span>(<span class="kw">crate</span>) request_latency: HistogramVec,
+<a href=#23 id=23 data-nosnippet>23</a>    <span class="kw">pub</span>(<span class="kw">crate</span>) request_size_bytes: HistogramVec,
+<a href=#24 id=24 data-nosnippet>24</a>    <span class="kw">pub</span>(<span class="kw">crate</span>) response_size_bytes: HistogramVec,
+<a href=#25 id=25 data-nosnippet>25</a>    <span class="kw">pub</span>(<span class="kw">crate</span>) bytes_sent_total: IntCounterVec,
+<a href=#26 id=26 data-nosnippet>26</a>    <span class="kw">pub</span>(<span class="kw">crate</span>) bytes_received_total: IntCounterVec,
+<a href=#27 id=27 data-nosnippet>27</a>
+<a href=#28 id=28 data-nosnippet>28</a>    <span class="comment">// Per-MPC-protocol body-size metrics.
+<a href=#29 id=29 data-nosnippet>29</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) mpc_request_size_bytes: HistogramVec,
+<a href=#30 id=30 data-nosnippet>30</a>    <span class="kw">pub</span>(<span class="kw">crate</span>) mpc_response_size_bytes: HistogramVec,
+<a href=#31 id=31 data-nosnippet>31</a>    <span class="kw">pub</span>(<span class="kw">crate</span>) mpc_bytes_sent_total: IntCounterVec,
+<a href=#32 id=32 data-nosnippet>32</a>    <span class="kw">pub</span>(<span class="kw">crate</span>) mpc_bytes_received_total: IntCounterVec,
+<a href=#33 id=33 data-nosnippet>33</a>
+<a href=#34 id=34 data-nosnippet>34</a>    <span class="kw">pub </span>screener_enabled: IntGauge,
+<a href=#35 id=35 data-nosnippet>35</a>
+<a href=#36 id=36 data-nosnippet>36</a>    <span class="comment">// Kyoto (Bitcoin light client) metrics
+<a href=#37 id=37 data-nosnippet>37</a>    </span><span class="kw">pub </span>kyoto_connected_peers: IntGauge,
+<a href=#38 id=38 data-nosnippet>38</a>    <span class="kw">pub </span>kyoto_synced: IntGauge,
+<a href=#39 id=39 data-nosnippet>39</a>    <span class="kw">pub </span>kyoto_best_height: IntGauge,
+<a href=#40 id=40 data-nosnippet>40</a>    <span class="kw">pub </span>kyoto_warnings: IntCounterVec,
+<a href=#41 id=41 data-nosnippet>41</a>    <span class="kw">pub </span>kyoto_restarts: IntCounter,
+<a href=#42 id=42 data-nosnippet>42</a>    <span class="kw">pub </span>kyoto_blocks_received: IntCounter,
+<a href=#43 id=43 data-nosnippet>43</a>    <span class="kw">pub </span>kyoto_reorgs: IntCounter,
+<a href=#44 id=44 data-nosnippet>44</a>    <span class="kw">pub </span>kyoto_consecutive_failures: IntGauge,
+<a href=#45 id=45 data-nosnippet>45</a>    <span class="kw">pub </span>kyoto_sync_percent: IntGauge,
+<a href=#46 id=46 data-nosnippet>46</a>
+<a href=#47 id=47 data-nosnippet>47</a>    <span class="comment">// General Sui metrics
+<a href=#48 id=48 data-nosnippet>48</a>    </span>sui_epoch: IntGauge,
+<a href=#49 id=49 data-nosnippet>49</a>    latest_checkpoint_height: IntGauge,
+<a href=#50 id=50 data-nosnippet>50</a>    latest_checkpoint_timestamp_ms: IntGauge,
+<a href=#51 id=51 data-nosnippet>51</a>
+<a href=#52 id=52 data-nosnippet>52</a>    <span class="comment">// Hashi Onchain state metrics
+<a href=#53 id=53 data-nosnippet>53</a>    </span>epoch: IntGauge,
+<a href=#54 id=54 data-nosnippet>54</a>    reconfig_in_progress: IntGauge,
+<a href=#55 id=55 data-nosnippet>55</a>    paused: IntGauge,
+<a href=#56 id=56 data-nosnippet>56</a>    deposit_queue_size: IntGauge,
+<a href=#57 id=57 data-nosnippet>57</a>    <span class="kw">pub </span>deposit_request_confirmations: IntGaugeVec,
+<a href=#58 id=58 data-nosnippet>58</a>    withdrawal_queue_size: IntGaugeVec,
+<a href=#59 id=59 data-nosnippet>59</a>    withdrawal_queue_value: IntGaugeVec,
+<a href=#60 id=60 data-nosnippet>60</a>    utxo_pool_size: IntGaugeVec,
+<a href=#61 id=61 data-nosnippet>61</a>    utxo_pool_value: IntGaugeVec,
+<a href=#62 id=62 data-nosnippet>62</a>    proposals: IntGaugeVec,
+<a href=#63 id=63 data-nosnippet>63</a>    num_consumed_presigs: IntGauge,
+<a href=#64 id=64 data-nosnippet>64</a>    treasury_supply: IntGaugeVec,
+<a href=#65 id=65 data-nosnippet>65</a>    package_version_enabled: IntGaugeVec,
+<a href=#66 id=66 data-nosnippet>66</a>
+<a href=#67 id=67 data-nosnippet>67</a>    <span class="kw">pub </span>deposits_confirmed_total: IntCounter,
+<a href=#68 id=68 data-nosnippet>68</a>    <span class="kw">pub </span>deposits_rejected_utxo_spent: IntCounter,
+<a href=#69 id=69 data-nosnippet>69</a>    <span class="kw">pub </span>never_retry_deposit_ids: IntGauge,
+<a href=#70 id=70 data-nosnippet>70</a>    <span class="kw">pub </span>withdrawals_finalized_total: IntCounter,
+<a href=#71 id=71 data-nosnippet>71</a>    <span class="kw">pub </span>presig_pool_remaining: IntGauge,
+<a href=#72 id=72 data-nosnippet>72</a>    <span class="kw">pub </span>sui_tx_submissions_total: IntCounterVec,
+<a href=#73 id=73 data-nosnippet>73</a>
+<a href=#74 id=74 data-nosnippet>74</a>    <span class="kw">pub </span>is_leader: IntGauge,
+<a href=#75 id=75 data-nosnippet>75</a>    <span class="kw">pub </span>leader_retries_total: IntCounterVec,
+<a href=#76 id=76 data-nosnippet>76</a>    <span class="kw">pub </span>leader_items_in_backoff: IntGaugeVec,
+<a href=#77 id=77 data-nosnippet>77</a>
+<a href=#78 id=78 data-nosnippet>78</a>    <span class="kw">pub </span>btc_fee_rate_sat_per_kvb: IntGauge,
+<a href=#79 id=79 data-nosnippet>79</a>
+<a href=#80 id=80 data-nosnippet>80</a>    <span class="kw">pub </span>mpc_sign_duration_seconds: HistogramVec,
+<a href=#81 id=81 data-nosnippet>81</a>    <span class="kw">pub </span>mpc_sign_failures_total: IntCounterVec,
+<a href=#82 id=82 data-nosnippet>82</a>
+<a href=#83 id=83 data-nosnippet>83</a>    <span class="comment">// MPC profiling metrics
+<a href=#84 id=84 data-nosnippet>84</a>    </span><span class="kw">pub </span>mpc_reconfig_total_duration_seconds: HistogramVec,
+<a href=#85 id=85 data-nosnippet>85</a>    <span class="kw">pub </span>mpc_end_reconfig_duration_seconds: HistogramVec,
+<a href=#86 id=86 data-nosnippet>86</a>    <span class="kw">pub </span>mpc_prepare_signing_duration_seconds: HistogramVec,
+<a href=#87 id=87 data-nosnippet>87</a>    <span class="kw">pub </span>mpc_total_duration_seconds: HistogramVec,
+<a href=#88 id=88 data-nosnippet>88</a>    <span class="kw">pub </span>mpc_dealer_crypto_duration_seconds: HistogramVec,
+<a href=#89 id=89 data-nosnippet>89</a>    <span class="kw">pub </span>mpc_p2p_broadcast_duration_seconds: HistogramVec,
+<a href=#90 id=90 data-nosnippet>90</a>    <span class="kw">pub </span>mpc_cert_publish_duration_seconds: HistogramVec,
+<a href=#91 id=91 data-nosnippet>91</a>    <span class="kw">pub </span>mpc_tob_poll_duration_seconds: HistogramVec,
+<a href=#92 id=92 data-nosnippet>92</a>    <span class="kw">pub </span>mpc_cert_verify_duration_seconds: HistogramVec,
+<a href=#93 id=93 data-nosnippet>93</a>    <span class="kw">pub </span>mpc_message_process_duration_seconds: HistogramVec,
+<a href=#94 id=94 data-nosnippet>94</a>    <span class="kw">pub </span>mpc_message_retrieval_duration_seconds: HistogramVec,
+<a href=#95 id=95 data-nosnippet>95</a>    <span class="kw">pub </span>mpc_complaint_recovery_duration_seconds: HistogramVec,
+<a href=#96 id=96 data-nosnippet>96</a>    <span class="kw">pub </span>mpc_completion_duration_seconds: HistogramVec,
+<a href=#97 id=97 data-nosnippet>97</a>    <span class="kw">pub </span>mpc_presig_conversion_duration_seconds: HistogramVec,
+<a href=#98 id=98 data-nosnippet>98</a>    <span class="kw">pub </span>mpc_rotation_prepare_previous_duration_seconds: HistogramVec,
+<a href=#99 id=99 data-nosnippet>99</a>    <span class="kw">pub </span>mpc_sign_partial_gen_duration_seconds: HistogramVec,
+<a href=#100 id=100 data-nosnippet>100</a>    <span class="kw">pub </span>mpc_sign_collection_duration_seconds: HistogramVec,
+<a href=#101 id=101 data-nosnippet>101</a>    <span class="kw">pub </span>mpc_sign_aggregation_duration_seconds: HistogramVec,
+<a href=#102 id=102 data-nosnippet>102</a>    <span class="kw">pub </span>mpc_rpc_handler_process_duration_seconds: HistogramVec,
+<a href=#103 id=103 data-nosnippet>103</a>}
+<a href=#104 id=104 data-nosnippet>104</a>
+<a href=#105 id=105 data-nosnippet>105</a><span class="kw">const </span>LATENCY_SEC_BUCKETS: <span class="kw-2">&amp;</span>[<a href="https://doc.rust-lang.org/1.91.1/std/primitive.f64.html">f64</a>] = <span class="kw-2">&amp;</span>[
+<a href=#106 id=106 data-nosnippet>106</a>    <span class="number">0.001</span>, <span class="number">0.005</span>, <span class="number">0.01</span>, <span class="number">0.05</span>, <span class="number">0.1</span>, <span class="number">0.25</span>, <span class="number">0.5</span>, <span class="number">1.</span>, <span class="number">2.5</span>, <span class="number">5.</span>, <span class="number">10.</span>, <span class="number">20.</span>, <span class="number">30.</span>, <span class="number">60.</span>, <span class="number">90.</span>,
+<a href=#107 id=107 data-nosnippet>107</a>];
+<a href=#108 id=108 data-nosnippet>108</a>
+<a href=#109 id=109 data-nosnippet>109</a><span class="kw">const </span>MPC_SIGN_DURATION_BUCKETS: <span class="kw-2">&amp;</span>[<a href="https://doc.rust-lang.org/1.91.1/std/primitive.f64.html">f64</a>] = <span class="kw-2">&amp;</span>[<span class="number">0.1</span>, <span class="number">0.25</span>, <span class="number">0.5</span>, <span class="number">1.</span>, <span class="number">1.5</span>, <span class="number">2.</span>, <span class="number">2.5</span>, <span class="number">3.</span>, <span class="number">4.</span>, <span class="number">5.</span>, <span class="number">7.5</span>, <span class="number">10.</span>];
+<a href=#110 id=110 data-nosnippet>110</a>
+<a href=#111 id=111 data-nosnippet>111</a><span class="kw">pub const </span><a href="../../hashi/metrics/constant.MPC_LABEL_DKG.html">MPC_LABEL_DKG</a>: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.str.html">str</a> = <span class="string">"dkg"</span>;
+<a href=#112 id=112 data-nosnippet>112</a><span class="kw">pub const </span><a href="../../hashi/metrics/constant.MPC_LABEL_KEY_ROTATION.html">MPC_LABEL_KEY_ROTATION</a>: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.str.html">str</a> = <span class="string">"key_rotation"</span>;
+<a href=#113 id=113 data-nosnippet>113</a><span class="kw">pub const </span><a href="../../hashi/metrics/constant.MPC_LABEL_NONCE_GENERATION.html">MPC_LABEL_NONCE_GENERATION</a>: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.str.html">str</a> = <span class="string">"nonce_generation"</span>;
+<a href=#114 id=114 data-nosnippet>114</a><span class="kw">pub const </span><a href="../../hashi/metrics/constant.MPC_LABEL_SIGNING.html">MPC_LABEL_SIGNING</a>: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.str.html">str</a> = <span class="string">"signing"</span>;
+<a href=#115 id=115 data-nosnippet>115</a>
+<a href=#116 id=116 data-nosnippet>116</a><span class="kw">pub const </span><a href="../../hashi/metrics/constant.CONFIRMATION_STATUS_LABELS.html">CONFIRMATION_STATUS_LABELS</a>: <span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.str.html">str</a>] = <span class="kw-2">&amp;</span>[
+<a href=#117 id=117 data-nosnippet>117</a>    <span class="string">"not_found"</span>,
+<a href=#118 id=118 data-nosnippet>118</a>    <span class="string">"mempool"</span>,
+<a href=#119 id=119 data-nosnippet>119</a>    <span class="string">"0"</span>,
+<a href=#120 id=120 data-nosnippet>120</a>    <span class="string">"1"</span>,
+<a href=#121 id=121 data-nosnippet>121</a>    <span class="string">"2"</span>,
+<a href=#122 id=122 data-nosnippet>122</a>    <span class="string">"3"</span>,
+<a href=#123 id=123 data-nosnippet>123</a>    <span class="string">"4"</span>,
+<a href=#124 id=124 data-nosnippet>124</a>    <span class="string">"5"</span>,
+<a href=#125 id=125 data-nosnippet>125</a>    <span class="string">"6_plus"</span>,
+<a href=#126 id=126 data-nosnippet>126</a>];
+<a href=#127 id=127 data-nosnippet>127</a>
+<a href=#128 id=128 data-nosnippet>128</a><span class="comment">// Body-size buckets spanning 256 B through 32 MiB. Powers of four keep
+<a href=#129 id=129 data-nosnippet>129</a>// the bucket count modest while still resolving small and large
+<a href=#130 id=130 data-nosnippet>130</a>// payloads.
+<a href=#131 id=131 data-nosnippet>131</a></span><span class="kw">const </span>MESSAGE_SIZE_BYTES_BUCKETS: <span class="kw-2">&amp;</span>[<a href="https://doc.rust-lang.org/1.91.1/std/primitive.f64.html">f64</a>] = <span class="kw-2">&amp;</span>[
+<a href=#132 id=132 data-nosnippet>132</a>    <span class="number">256.</span>,
+<a href=#133 id=133 data-nosnippet>133</a>    <span class="number">1_024.</span>,
+<a href=#134 id=134 data-nosnippet>134</a>    <span class="number">4_096.</span>,
+<a href=#135 id=135 data-nosnippet>135</a>    <span class="number">16_384.</span>,
+<a href=#136 id=136 data-nosnippet>136</a>    <span class="number">65_536.</span>,
+<a href=#137 id=137 data-nosnippet>137</a>    <span class="number">262_144.</span>,
+<a href=#138 id=138 data-nosnippet>138</a>    <span class="number">1_048_576.</span>,
+<a href=#139 id=139 data-nosnippet>139</a>    <span class="number">4_194_304.</span>,
+<a href=#140 id=140 data-nosnippet>140</a>    <span class="number">16_777_216.</span>,
+<a href=#141 id=141 data-nosnippet>141</a>    <span class="number">33_554_432.</span>,
+<a href=#142 id=142 data-nosnippet>142</a>];
+<a href=#143 id=143 data-nosnippet>143</a>
+<a href=#144 id=144 data-nosnippet>144</a><span class="kw">impl </span><a href="#17-103">Metrics</a> {
+<a href=#145 id=145 data-nosnippet>145</a>    <span class="kw">pub fn </span>new_default() -&gt; <span class="self">Self </span>{
+<a href=#146 id=146 data-nosnippet>146</a>        <a href="#149-641"><span class="self">Self</span>::new</a>(prometheus::default_registry())
+<a href=#147 id=147 data-nosnippet>147</a>    }
+<a href=#148 id=148 data-nosnippet>148</a>
+<a href=#149 id=149 data-nosnippet>149</a>    <span class="kw">pub fn </span>new(registry: <span class="kw-2">&amp;</span>Registry) -&gt; <span class="self">Self </span>{
+<a href=#150 id=150 data-nosnippet>150</a>        <span class="self">Self </span>{
+<a href=#151 id=151 data-nosnippet>151</a>            inflight_requests: <span class="macro">register_int_gauge_vec_with_registry!</span>(
+<a href=#152 id=152 data-nosnippet>152</a>                <span class="string">"hashi_inflight_requests"</span>,
+<a href=#153 id=153 data-nosnippet>153</a>                <span class="string">"Total in-flight RPC requests per route"</span>,
+<a href=#154 id=154 data-nosnippet>154</a>                <span class="kw-2">&amp;</span>[<span class="string">"path"</span>, <span class="string">"role"</span>],
+<a href=#155 id=155 data-nosnippet>155</a>                registry,
+<a href=#156 id=156 data-nosnippet>156</a>            )
+<a href=#157 id=157 data-nosnippet>157</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#158 id=158 data-nosnippet>158</a>            requests: <span class="macro">register_int_counter_vec_with_registry!</span>(
+<a href=#159 id=159 data-nosnippet>159</a>                <span class="string">"hashi_requests"</span>,
+<a href=#160 id=160 data-nosnippet>160</a>                <span class="string">"Total RPC requests per route and their http status"</span>,
+<a href=#161 id=161 data-nosnippet>161</a>                <span class="kw-2">&amp;</span>[<span class="string">"path"</span>, <span class="string">"status"</span>, <span class="string">"role"</span>],
+<a href=#162 id=162 data-nosnippet>162</a>                registry,
+<a href=#163 id=163 data-nosnippet>163</a>            )
+<a href=#164 id=164 data-nosnippet>164</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#165 id=165 data-nosnippet>165</a>            request_latency: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#166 id=166 data-nosnippet>166</a>                <span class="string">"hashi_request_latency"</span>,
+<a href=#167 id=167 data-nosnippet>167</a>                <span class="string">"Latency of RPC requests per route"</span>,
+<a href=#168 id=168 data-nosnippet>168</a>                <span class="kw-2">&amp;</span>[<span class="string">"path"</span>, <span class="string">"role"</span>],
+<a href=#169 id=169 data-nosnippet>169</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#170 id=170 data-nosnippet>170</a>                registry,
+<a href=#171 id=171 data-nosnippet>171</a>            )
+<a href=#172 id=172 data-nosnippet>172</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#173 id=173 data-nosnippet>173</a>            request_size_bytes: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#174 id=174 data-nosnippet>174</a>                <span class="string">"hashi_request_size_bytes"</span>,
+<a href=#175 id=175 data-nosnippet>175</a>                <span class="string">"Size of RPC request bodies in bytes, per route"</span>,
+<a href=#176 id=176 data-nosnippet>176</a>                <span class="kw-2">&amp;</span>[<span class="string">"path"</span>, <span class="string">"role"</span>],
+<a href=#177 id=177 data-nosnippet>177</a>                MESSAGE_SIZE_BYTES_BUCKETS.to_vec(),
+<a href=#178 id=178 data-nosnippet>178</a>                registry,
+<a href=#179 id=179 data-nosnippet>179</a>            )
+<a href=#180 id=180 data-nosnippet>180</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#181 id=181 data-nosnippet>181</a>            response_size_bytes: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#182 id=182 data-nosnippet>182</a>                <span class="string">"hashi_response_size_bytes"</span>,
+<a href=#183 id=183 data-nosnippet>183</a>                <span class="string">"Size of RPC response bodies in bytes, per route"</span>,
+<a href=#184 id=184 data-nosnippet>184</a>                <span class="kw-2">&amp;</span>[<span class="string">"path"</span>, <span class="string">"role"</span>],
+<a href=#185 id=185 data-nosnippet>185</a>                MESSAGE_SIZE_BYTES_BUCKETS.to_vec(),
+<a href=#186 id=186 data-nosnippet>186</a>                registry,
+<a href=#187 id=187 data-nosnippet>187</a>            )
+<a href=#188 id=188 data-nosnippet>188</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#189 id=189 data-nosnippet>189</a>            bytes_sent_total: <span class="macro">register_int_counter_vec_with_registry!</span>(
+<a href=#190 id=190 data-nosnippet>190</a>                <span class="string">"hashi_bytes_sent_total"</span>,
+<a href=#191 id=191 data-nosnippet>191</a>                <span class="string">"Total bytes sent from this node over HTTP/gRPC bodies, per route"</span>,
+<a href=#192 id=192 data-nosnippet>192</a>                <span class="kw-2">&amp;</span>[<span class="string">"path"</span>, <span class="string">"role"</span>],
+<a href=#193 id=193 data-nosnippet>193</a>                registry,
+<a href=#194 id=194 data-nosnippet>194</a>            )
+<a href=#195 id=195 data-nosnippet>195</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#196 id=196 data-nosnippet>196</a>            bytes_received_total: <span class="macro">register_int_counter_vec_with_registry!</span>(
+<a href=#197 id=197 data-nosnippet>197</a>                <span class="string">"hashi_bytes_received_total"</span>,
+<a href=#198 id=198 data-nosnippet>198</a>                <span class="string">"Total bytes received by this node over HTTP/gRPC bodies, per route"</span>,
+<a href=#199 id=199 data-nosnippet>199</a>                <span class="kw-2">&amp;</span>[<span class="string">"path"</span>, <span class="string">"role"</span>],
+<a href=#200 id=200 data-nosnippet>200</a>                registry,
+<a href=#201 id=201 data-nosnippet>201</a>            )
+<a href=#202 id=202 data-nosnippet>202</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#203 id=203 data-nosnippet>203</a>            mpc_request_size_bytes: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#204 id=204 data-nosnippet>204</a>                <span class="string">"hashi_mpc_request_size_bytes"</span>,
+<a href=#205 id=205 data-nosnippet>205</a>                <span class="string">"Size of MPC RPC request bodies in bytes, labeled by MPC protocol"</span>,
+<a href=#206 id=206 data-nosnippet>206</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#207 id=207 data-nosnippet>207</a>                MESSAGE_SIZE_BYTES_BUCKETS.to_vec(),
+<a href=#208 id=208 data-nosnippet>208</a>                registry,
+<a href=#209 id=209 data-nosnippet>209</a>            )
+<a href=#210 id=210 data-nosnippet>210</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#211 id=211 data-nosnippet>211</a>            mpc_response_size_bytes: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#212 id=212 data-nosnippet>212</a>                <span class="string">"hashi_mpc_response_size_bytes"</span>,
+<a href=#213 id=213 data-nosnippet>213</a>                <span class="string">"Size of MPC RPC response bodies in bytes, labeled by MPC protocol"</span>,
+<a href=#214 id=214 data-nosnippet>214</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#215 id=215 data-nosnippet>215</a>                MESSAGE_SIZE_BYTES_BUCKETS.to_vec(),
+<a href=#216 id=216 data-nosnippet>216</a>                registry,
+<a href=#217 id=217 data-nosnippet>217</a>            )
+<a href=#218 id=218 data-nosnippet>218</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#219 id=219 data-nosnippet>219</a>            mpc_bytes_sent_total: <span class="macro">register_int_counter_vec_with_registry!</span>(
+<a href=#220 id=220 data-nosnippet>220</a>                <span class="string">"hashi_mpc_bytes_sent_total"</span>,
+<a href=#221 id=221 data-nosnippet>221</a>                <span class="string">"Total bytes sent in MPC RPC bodies, labeled by MPC protocol"</span>,
+<a href=#222 id=222 data-nosnippet>222</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#223 id=223 data-nosnippet>223</a>                registry,
+<a href=#224 id=224 data-nosnippet>224</a>            )
+<a href=#225 id=225 data-nosnippet>225</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#226 id=226 data-nosnippet>226</a>            mpc_bytes_received_total: <span class="macro">register_int_counter_vec_with_registry!</span>(
+<a href=#227 id=227 data-nosnippet>227</a>                <span class="string">"hashi_mpc_bytes_received_total"</span>,
+<a href=#228 id=228 data-nosnippet>228</a>                <span class="string">"Total bytes received in MPC RPC bodies, labeled by MPC protocol"</span>,
+<a href=#229 id=229 data-nosnippet>229</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#230 id=230 data-nosnippet>230</a>                registry,
+<a href=#231 id=231 data-nosnippet>231</a>            )
+<a href=#232 id=232 data-nosnippet>232</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#233 id=233 data-nosnippet>233</a>            screener_enabled: <span class="macro">register_int_gauge_with_registry!</span>(
+<a href=#234 id=234 data-nosnippet>234</a>                <span class="string">"hashi_screener_enabled"</span>,
+<a href=#235 id=235 data-nosnippet>235</a>                <span class="string">"Whether AML screening is enabled (1) or disabled (0)"</span>,
+<a href=#236 id=236 data-nosnippet>236</a>                registry,
+<a href=#237 id=237 data-nosnippet>237</a>            )
+<a href=#238 id=238 data-nosnippet>238</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#239 id=239 data-nosnippet>239</a>
+<a href=#240 id=240 data-nosnippet>240</a>            <span class="comment">// Kyoto metrics
+<a href=#241 id=241 data-nosnippet>241</a>            </span>kyoto_connected_peers: <span class="macro">register_int_gauge_with_registry!</span>(
+<a href=#242 id=242 data-nosnippet>242</a>                <span class="string">"hashi_kyoto_connected_peers"</span>,
+<a href=#243 id=243 data-nosnippet>243</a>                <span class="string">"Number of currently connected Bitcoin P2P peers"</span>,
+<a href=#244 id=244 data-nosnippet>244</a>                registry,
+<a href=#245 id=245 data-nosnippet>245</a>            )
+<a href=#246 id=246 data-nosnippet>246</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#247 id=247 data-nosnippet>247</a>            kyoto_synced: <span class="macro">register_int_gauge_with_registry!</span>(
+<a href=#248 id=248 data-nosnippet>248</a>                <span class="string">"hashi_kyoto_synced"</span>,
+<a href=#249 id=249 data-nosnippet>249</a>                <span class="string">"Whether the Kyoto light client is fully synced (1) or not (0)"</span>,
+<a href=#250 id=250 data-nosnippet>250</a>                registry,
+<a href=#251 id=251 data-nosnippet>251</a>            )
+<a href=#252 id=252 data-nosnippet>252</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#253 id=253 data-nosnippet>253</a>            kyoto_best_height: <span class="macro">register_int_gauge_with_registry!</span>(
+<a href=#254 id=254 data-nosnippet>254</a>                <span class="string">"hashi_kyoto_best_height"</span>,
+<a href=#255 id=255 data-nosnippet>255</a>                <span class="string">"Best known Bitcoin block height from the Kyoto light client"</span>,
+<a href=#256 id=256 data-nosnippet>256</a>                registry,
+<a href=#257 id=257 data-nosnippet>257</a>            )
+<a href=#258 id=258 data-nosnippet>258</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#259 id=259 data-nosnippet>259</a>            kyoto_warnings: <span class="macro">register_int_counter_vec_with_registry!</span>(
+<a href=#260 id=260 data-nosnippet>260</a>                <span class="string">"hashi_kyoto_warnings_total"</span>,
+<a href=#261 id=261 data-nosnippet>261</a>                <span class="string">"Total Kyoto warnings by type"</span>,
+<a href=#262 id=262 data-nosnippet>262</a>                <span class="kw-2">&amp;</span>[<span class="string">"type"</span>],
+<a href=#263 id=263 data-nosnippet>263</a>                registry,
+<a href=#264 id=264 data-nosnippet>264</a>            )
+<a href=#265 id=265 data-nosnippet>265</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#266 id=266 data-nosnippet>266</a>            kyoto_restarts: <span class="macro">register_int_counter_with_registry!</span>(
+<a href=#267 id=267 data-nosnippet>267</a>                <span class="string">"hashi_kyoto_restarts_total"</span>,
+<a href=#268 id=268 data-nosnippet>268</a>                <span class="string">"Total number of Kyoto node restarts due to connectivity loss"</span>,
+<a href=#269 id=269 data-nosnippet>269</a>                registry,
+<a href=#270 id=270 data-nosnippet>270</a>            )
+<a href=#271 id=271 data-nosnippet>271</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#272 id=272 data-nosnippet>272</a>            kyoto_blocks_received: <span class="macro">register_int_counter_with_registry!</span>(
+<a href=#273 id=273 data-nosnippet>273</a>                <span class="string">"hashi_kyoto_blocks_received_total"</span>,
+<a href=#274 id=274 data-nosnippet>274</a>                <span class="string">"Total number of Bitcoin blocks received by the Kyoto light client"</span>,
+<a href=#275 id=275 data-nosnippet>275</a>                registry,
+<a href=#276 id=276 data-nosnippet>276</a>            )
+<a href=#277 id=277 data-nosnippet>277</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#278 id=278 data-nosnippet>278</a>            kyoto_reorgs: <span class="macro">register_int_counter_with_registry!</span>(
+<a href=#279 id=279 data-nosnippet>279</a>                <span class="string">"hashi_kyoto_reorgs_total"</span>,
+<a href=#280 id=280 data-nosnippet>280</a>                <span class="string">"Total number of Bitcoin chain reorganizations observed"</span>,
+<a href=#281 id=281 data-nosnippet>281</a>                registry,
+<a href=#282 id=282 data-nosnippet>282</a>            )
+<a href=#283 id=283 data-nosnippet>283</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#284 id=284 data-nosnippet>284</a>            kyoto_consecutive_failures: <span class="macro">register_int_gauge_with_registry!</span>(
+<a href=#285 id=285 data-nosnippet>285</a>                <span class="string">"hashi_kyoto_consecutive_failures"</span>,
+<a href=#286 id=286 data-nosnippet>286</a>                <span class="string">"Current number of consecutive peer connection failures"</span>,
+<a href=#287 id=287 data-nosnippet>287</a>                registry,
+<a href=#288 id=288 data-nosnippet>288</a>            )
+<a href=#289 id=289 data-nosnippet>289</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#290 id=290 data-nosnippet>290</a>            kyoto_sync_percent: <span class="macro">register_int_gauge_with_registry!</span>(
+<a href=#291 id=291 data-nosnippet>291</a>                <span class="string">"hashi_kyoto_sync_percent"</span>,
+<a href=#292 id=292 data-nosnippet>292</a>                <span class="string">"Compact block filter sync progress (0-100)"</span>,
+<a href=#293 id=293 data-nosnippet>293</a>                registry,
+<a href=#294 id=294 data-nosnippet>294</a>            )
+<a href=#295 id=295 data-nosnippet>295</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#296 id=296 data-nosnippet>296</a>
+<a href=#297 id=297 data-nosnippet>297</a>            epoch: <span class="macro">register_int_gauge_with_registry!</span>(
+<a href=#298 id=298 data-nosnippet>298</a>                <span class="string">"hashi_epoch"</span>,
+<a href=#299 id=299 data-nosnippet>299</a>                <span class="string">"current hashi epoch"</span>,
+<a href=#300 id=300 data-nosnippet>300</a>                registry,
+<a href=#301 id=301 data-nosnippet>301</a>            )
+<a href=#302 id=302 data-nosnippet>302</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#303 id=303 data-nosnippet>303</a>            sui_epoch: <span class="macro">register_int_gauge_with_registry!</span>(
+<a href=#304 id=304 data-nosnippet>304</a>                <span class="string">"hashi_sui_epoch"</span>,
+<a href=#305 id=305 data-nosnippet>305</a>                <span class="string">"current sui epoch from latest checkpoint"</span>,
+<a href=#306 id=306 data-nosnippet>306</a>                registry,
+<a href=#307 id=307 data-nosnippet>307</a>            )
+<a href=#308 id=308 data-nosnippet>308</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#309 id=309 data-nosnippet>309</a>            reconfig_in_progress: <span class="macro">register_int_gauge_with_registry!</span>(
+<a href=#310 id=310 data-nosnippet>310</a>                <span class="string">"hashi_reconfig_in_progress"</span>,
+<a href=#311 id=311 data-nosnippet>311</a>                <span class="string">"whether a reconfiguration is in progress (1) or not (0)"</span>,
+<a href=#312 id=312 data-nosnippet>312</a>                registry,
+<a href=#313 id=313 data-nosnippet>313</a>            )
+<a href=#314 id=314 data-nosnippet>314</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#315 id=315 data-nosnippet>315</a>            paused: <span class="macro">register_int_gauge_with_registry!</span>(
+<a href=#316 id=316 data-nosnippet>316</a>                <span class="string">"hashi_paused"</span>,
+<a href=#317 id=317 data-nosnippet>317</a>                <span class="string">"whether the system is paused (1) or not (0)"</span>,
+<a href=#318 id=318 data-nosnippet>318</a>                registry,
+<a href=#319 id=319 data-nosnippet>319</a>            )
+<a href=#320 id=320 data-nosnippet>320</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#321 id=321 data-nosnippet>321</a>            latest_checkpoint_height: <span class="macro">register_int_gauge_with_registry!</span>(
+<a href=#322 id=322 data-nosnippet>322</a>                <span class="string">"hashi_latest_checkpoint_height"</span>,
+<a href=#323 id=323 data-nosnippet>323</a>                <span class="string">"latest processed sui checkpoint height"</span>,
+<a href=#324 id=324 data-nosnippet>324</a>                registry,
+<a href=#325 id=325 data-nosnippet>325</a>            )
+<a href=#326 id=326 data-nosnippet>326</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#327 id=327 data-nosnippet>327</a>            latest_checkpoint_timestamp_ms: <span class="macro">register_int_gauge_with_registry!</span>(
+<a href=#328 id=328 data-nosnippet>328</a>                <span class="string">"hashi_latest_checkpoint_timestamp_ms"</span>,
+<a href=#329 id=329 data-nosnippet>329</a>                <span class="string">"timestamp of latest processed checkpoint in ms"</span>,
+<a href=#330 id=330 data-nosnippet>330</a>                registry,
+<a href=#331 id=331 data-nosnippet>331</a>            )
+<a href=#332 id=332 data-nosnippet>332</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#333 id=333 data-nosnippet>333</a>            deposit_queue_size: <span class="macro">register_int_gauge_with_registry!</span>(
+<a href=#334 id=334 data-nosnippet>334</a>                <span class="string">"hashi_deposit_queue_size"</span>,
+<a href=#335 id=335 data-nosnippet>335</a>                <span class="string">"number of pending deposit requests"</span>,
+<a href=#336 id=336 data-nosnippet>336</a>                registry,
+<a href=#337 id=337 data-nosnippet>337</a>            )
+<a href=#338 id=338 data-nosnippet>338</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#339 id=339 data-nosnippet>339</a>            deposit_request_confirmations: <span class="macro">register_int_gauge_vec_with_registry!</span>(
+<a href=#340 id=340 data-nosnippet>340</a>                <span class="string">"hashi_deposit_request_confirmations"</span>,
+<a href=#341 id=341 data-nosnippet>341</a>                <span class="string">"Pending deposit requests bucketed by their transaction status (and block confirmations) on Bitcoin. \
+<a href=#342 id=342 data-nosnippet>342</a>                 The `status` label is one of: not_found, mempool, 0, 1, 2, 3, 4, 5, 6_plus."</span>,
+<a href=#343 id=343 data-nosnippet>343</a>                <span class="kw-2">&amp;</span>[<span class="string">"status"</span>],
+<a href=#344 id=344 data-nosnippet>344</a>                registry,
+<a href=#345 id=345 data-nosnippet>345</a>            )
+<a href=#346 id=346 data-nosnippet>346</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#347 id=347 data-nosnippet>347</a>            withdrawal_queue_size: <span class="macro">register_int_gauge_vec_with_registry!</span>(
+<a href=#348 id=348 data-nosnippet>348</a>                <span class="string">"hashi_withdrawal_queue_size"</span>,
+<a href=#349 id=349 data-nosnippet>349</a>                <span class="string">"number of withdrawal requests by status"</span>,
+<a href=#350 id=350 data-nosnippet>350</a>                <span class="kw-2">&amp;</span>[<span class="string">"status"</span>],
+<a href=#351 id=351 data-nosnippet>351</a>                registry,
+<a href=#352 id=352 data-nosnippet>352</a>            )
+<a href=#353 id=353 data-nosnippet>353</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#354 id=354 data-nosnippet>354</a>            withdrawal_queue_value: <span class="macro">register_int_gauge_vec_with_registry!</span>(
+<a href=#355 id=355 data-nosnippet>355</a>                <span class="string">"hashi_withdrawal_queue_value"</span>,
+<a href=#356 id=356 data-nosnippet>356</a>                <span class="string">"total value of withdrawal requests by status and coin type in satoshis"</span>,
+<a href=#357 id=357 data-nosnippet>357</a>                <span class="kw-2">&amp;</span>[<span class="string">"status"</span>, <span class="string">"coin_type"</span>],
+<a href=#358 id=358 data-nosnippet>358</a>                registry,
+<a href=#359 id=359 data-nosnippet>359</a>            )
+<a href=#360 id=360 data-nosnippet>360</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#361 id=361 data-nosnippet>361</a>            utxo_pool_size: <span class="macro">register_int_gauge_vec_with_registry!</span>(
+<a href=#362 id=362 data-nosnippet>362</a>                <span class="string">"hashi_utxo_pool_size"</span>,
+<a href=#363 id=363 data-nosnippet>363</a>                <span class="string">"number of UTXOs in the pool by status"</span>,
+<a href=#364 id=364 data-nosnippet>364</a>                <span class="kw-2">&amp;</span>[<span class="string">"status"</span>],
+<a href=#365 id=365 data-nosnippet>365</a>                registry,
+<a href=#366 id=366 data-nosnippet>366</a>            )
+<a href=#367 id=367 data-nosnippet>367</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#368 id=368 data-nosnippet>368</a>            utxo_pool_value: <span class="macro">register_int_gauge_vec_with_registry!</span>(
+<a href=#369 id=369 data-nosnippet>369</a>                <span class="string">"hashi_utxo_pool_value"</span>,
+<a href=#370 id=370 data-nosnippet>370</a>                <span class="string">"value of UTXOs in the pool in satoshis by status"</span>,
+<a href=#371 id=371 data-nosnippet>371</a>                <span class="kw-2">&amp;</span>[<span class="string">"status"</span>],
+<a href=#372 id=372 data-nosnippet>372</a>                registry,
+<a href=#373 id=373 data-nosnippet>373</a>            )
+<a href=#374 id=374 data-nosnippet>374</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#375 id=375 data-nosnippet>375</a>            proposals: <span class="macro">register_int_gauge_vec_with_registry!</span>(
+<a href=#376 id=376 data-nosnippet>376</a>                <span class="string">"hashi_proposals"</span>,
+<a href=#377 id=377 data-nosnippet>377</a>                <span class="string">"number of active proposals by type"</span>,
+<a href=#378 id=378 data-nosnippet>378</a>                <span class="kw-2">&amp;</span>[<span class="string">"type"</span>],
+<a href=#379 id=379 data-nosnippet>379</a>                registry,
+<a href=#380 id=380 data-nosnippet>380</a>            )
+<a href=#381 id=381 data-nosnippet>381</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#382 id=382 data-nosnippet>382</a>            num_consumed_presigs: <span class="macro">register_int_gauge_with_registry!</span>(
+<a href=#383 id=383 data-nosnippet>383</a>                <span class="string">"hashi_num_consumed_presigs"</span>,
+<a href=#384 id=384 data-nosnippet>384</a>                <span class="string">"number of consumed presignatures"</span>,
+<a href=#385 id=385 data-nosnippet>385</a>                registry,
+<a href=#386 id=386 data-nosnippet>386</a>            )
+<a href=#387 id=387 data-nosnippet>387</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#388 id=388 data-nosnippet>388</a>            treasury_supply: <span class="macro">register_int_gauge_vec_with_registry!</span>(
+<a href=#389 id=389 data-nosnippet>389</a>                <span class="string">"hashi_treasury_supply"</span>,
+<a href=#390 id=390 data-nosnippet>390</a>                <span class="string">"supply of each treasury cap by coin type"</span>,
+<a href=#391 id=391 data-nosnippet>391</a>                <span class="kw-2">&amp;</span>[<span class="string">"coin_type"</span>],
+<a href=#392 id=392 data-nosnippet>392</a>                registry,
+<a href=#393 id=393 data-nosnippet>393</a>            )
+<a href=#394 id=394 data-nosnippet>394</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#395 id=395 data-nosnippet>395</a>            package_version_enabled: <span class="macro">register_int_gauge_vec_with_registry!</span>(
+<a href=#396 id=396 data-nosnippet>396</a>                <span class="string">"hashi_package_version_enabled"</span>,
+<a href=#397 id=397 data-nosnippet>397</a>                <span class="string">"enabled package versions (1 = enabled)"</span>,
+<a href=#398 id=398 data-nosnippet>398</a>                <span class="kw-2">&amp;</span>[<span class="string">"version"</span>, <span class="string">"package_id"</span>],
+<a href=#399 id=399 data-nosnippet>399</a>                registry,
+<a href=#400 id=400 data-nosnippet>400</a>            )
+<a href=#401 id=401 data-nosnippet>401</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#402 id=402 data-nosnippet>402</a>            deposits_confirmed_total: <span class="macro">register_int_counter_with_registry!</span>(
+<a href=#403 id=403 data-nosnippet>403</a>                <span class="string">"hashi_deposits_confirmed_total"</span>,
+<a href=#404 id=404 data-nosnippet>404</a>                <span class="string">"Total number of deposits successfully confirmed on Sui"</span>,
+<a href=#405 id=405 data-nosnippet>405</a>                registry,
+<a href=#406 id=406 data-nosnippet>406</a>            )
+<a href=#407 id=407 data-nosnippet>407</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#408 id=408 data-nosnippet>408</a>            deposits_rejected_utxo_spent: <span class="macro">register_int_counter_with_registry!</span>(
+<a href=#409 id=409 data-nosnippet>409</a>                <span class="string">"hashi_deposits_rejected_utxo_spent_total"</span>,
+<a href=#410 id=410 data-nosnippet>410</a>                <span class="string">"Deposit requests rejected because the UTXO was already spent"</span>,
+<a href=#411 id=411 data-nosnippet>411</a>                registry,
+<a href=#412 id=412 data-nosnippet>412</a>            )
+<a href=#413 id=413 data-nosnippet>413</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#414 id=414 data-nosnippet>414</a>            never_retry_deposit_ids: <span class="macro">register_int_gauge_with_registry!</span>(
+<a href=#415 id=415 data-nosnippet>415</a>                <span class="string">"hashi_never_retry_deposit_ids"</span>,
+<a href=#416 id=416 data-nosnippet>416</a>                <span class="string">"Number of deposit requests currently marked as never retry by the leader"</span>,
+<a href=#417 id=417 data-nosnippet>417</a>                registry,
+<a href=#418 id=418 data-nosnippet>418</a>            )
+<a href=#419 id=419 data-nosnippet>419</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#420 id=420 data-nosnippet>420</a>            withdrawals_finalized_total: <span class="macro">register_int_counter_with_registry!</span>(
+<a href=#421 id=421 data-nosnippet>421</a>                <span class="string">"hashi_withdrawals_finalized_total"</span>,
+<a href=#422 id=422 data-nosnippet>422</a>                <span class="string">"Total number of withdrawals successfully finalized on Sui"</span>,
+<a href=#423 id=423 data-nosnippet>423</a>                registry,
+<a href=#424 id=424 data-nosnippet>424</a>            )
+<a href=#425 id=425 data-nosnippet>425</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#426 id=426 data-nosnippet>426</a>            presig_pool_remaining: <span class="macro">register_int_gauge_with_registry!</span>(
+<a href=#427 id=427 data-nosnippet>427</a>                <span class="string">"hashi_presig_pool_remaining"</span>,
+<a href=#428 id=428 data-nosnippet>428</a>                <span class="string">"Number of presignatures remaining in the local MPC signing pool"</span>,
+<a href=#429 id=429 data-nosnippet>429</a>                registry,
+<a href=#430 id=430 data-nosnippet>430</a>            )
+<a href=#431 id=431 data-nosnippet>431</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#432 id=432 data-nosnippet>432</a>            sui_tx_submissions_total: <span class="macro">register_int_counter_vec_with_registry!</span>(
+<a href=#433 id=433 data-nosnippet>433</a>                <span class="string">"hashi_sui_tx_submissions_total"</span>,
+<a href=#434 id=434 data-nosnippet>434</a>                <span class="string">"Total Sui transaction submissions by operation and outcome"</span>,
+<a href=#435 id=435 data-nosnippet>435</a>                <span class="kw-2">&amp;</span>[<span class="string">"operation"</span>, <span class="string">"status"</span>],
+<a href=#436 id=436 data-nosnippet>436</a>                registry,
+<a href=#437 id=437 data-nosnippet>437</a>            )
+<a href=#438 id=438 data-nosnippet>438</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#439 id=439 data-nosnippet>439</a>            is_leader: <span class="macro">register_int_gauge_with_registry!</span>(
+<a href=#440 id=440 data-nosnippet>440</a>                <span class="string">"hashi_is_leader"</span>,
+<a href=#441 id=441 data-nosnippet>441</a>                <span class="string">"Whether this node is the current leader (1) or not (0)"</span>,
+<a href=#442 id=442 data-nosnippet>442</a>                registry,
+<a href=#443 id=443 data-nosnippet>443</a>            )
+<a href=#444 id=444 data-nosnippet>444</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#445 id=445 data-nosnippet>445</a>            leader_retries_total: <span class="macro">register_int_counter_vec_with_registry!</span>(
+<a href=#446 id=446 data-nosnippet>446</a>                <span class="string">"hashi_leader_retries_total"</span>,
+<a href=#447 id=447 data-nosnippet>447</a>                <span class="string">"Total leader retry attempts by operation and error kind"</span>,
+<a href=#448 id=448 data-nosnippet>448</a>                <span class="kw-2">&amp;</span>[<span class="string">"operation"</span>, <span class="string">"error_kind"</span>],
+<a href=#449 id=449 data-nosnippet>449</a>                registry,
+<a href=#450 id=450 data-nosnippet>450</a>            )
+<a href=#451 id=451 data-nosnippet>451</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#452 id=452 data-nosnippet>452</a>            leader_items_in_backoff: <span class="macro">register_int_gauge_vec_with_registry!</span>(
+<a href=#453 id=453 data-nosnippet>453</a>                <span class="string">"hashi_leader_items_in_backoff"</span>,
+<a href=#454 id=454 data-nosnippet>454</a>                <span class="string">"Number of requests currently in retry backoff by operation"</span>,
+<a href=#455 id=455 data-nosnippet>455</a>                <span class="kw-2">&amp;</span>[<span class="string">"operation"</span>],
+<a href=#456 id=456 data-nosnippet>456</a>                registry,
+<a href=#457 id=457 data-nosnippet>457</a>            )
+<a href=#458 id=458 data-nosnippet>458</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#459 id=459 data-nosnippet>459</a>            btc_fee_rate_sat_per_kvb: <span class="macro">register_int_gauge_with_registry!</span>(
+<a href=#460 id=460 data-nosnippet>460</a>                <span class="string">"hashi_btc_fee_rate_sat_per_kvb"</span>,
+<a href=#461 id=461 data-nosnippet>461</a>                <span class="string">"Current estimated Bitcoin fee rate in sat/kvB used for withdrawals"</span>,
+<a href=#462 id=462 data-nosnippet>462</a>                registry,
+<a href=#463 id=463 data-nosnippet>463</a>            )
+<a href=#464 id=464 data-nosnippet>464</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#465 id=465 data-nosnippet>465</a>            mpc_sign_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#466 id=466 data-nosnippet>466</a>                <span class="string">"hashi_mpc_sign_duration_seconds"</span>,
+<a href=#467 id=467 data-nosnippet>467</a>                <span class="string">"Duration of MPC signing operations"</span>,
+<a href=#468 id=468 data-nosnippet>468</a>                <span class="kw-2">&amp;</span>[<span class="string">"outcome"</span>],
+<a href=#469 id=469 data-nosnippet>469</a>                MPC_SIGN_DURATION_BUCKETS.to_vec(),
+<a href=#470 id=470 data-nosnippet>470</a>                registry,
+<a href=#471 id=471 data-nosnippet>471</a>            )
+<a href=#472 id=472 data-nosnippet>472</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#473 id=473 data-nosnippet>473</a>            mpc_sign_failures_total: <span class="macro">register_int_counter_vec_with_registry!</span>(
+<a href=#474 id=474 data-nosnippet>474</a>                <span class="string">"hashi_mpc_sign_failures_total"</span>,
+<a href=#475 id=475 data-nosnippet>475</a>                <span class="string">"Total MPC signing failures by reason"</span>,
+<a href=#476 id=476 data-nosnippet>476</a>                <span class="kw-2">&amp;</span>[<span class="string">"reason"</span>],
+<a href=#477 id=477 data-nosnippet>477</a>                registry,
+<a href=#478 id=478 data-nosnippet>478</a>            )
+<a href=#479 id=479 data-nosnippet>479</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#480 id=480 data-nosnippet>480</a>
+<a href=#481 id=481 data-nosnippet>481</a>            <span class="comment">// MPC profiling: reconfig-level
+<a href=#482 id=482 data-nosnippet>482</a>            </span>mpc_reconfig_total_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#483 id=483 data-nosnippet>483</a>                <span class="string">"hashi_mpc_reconfig_total_duration_seconds"</span>,
+<a href=#484 id=484 data-nosnippet>484</a>                <span class="string">"Duration of full handle_reconfig"</span>,
+<a href=#485 id=485 data-nosnippet>485</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#486 id=486 data-nosnippet>486</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#487 id=487 data-nosnippet>487</a>                registry,
+<a href=#488 id=488 data-nosnippet>488</a>            )
+<a href=#489 id=489 data-nosnippet>489</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#490 id=490 data-nosnippet>490</a>            mpc_end_reconfig_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#491 id=491 data-nosnippet>491</a>                <span class="string">"hashi_mpc_end_reconfig_duration_seconds"</span>,
+<a href=#492 id=492 data-nosnippet>492</a>                <span class="string">"Duration of submit_end_reconfig"</span>,
+<a href=#493 id=493 data-nosnippet>493</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#494 id=494 data-nosnippet>494</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#495 id=495 data-nosnippet>495</a>                registry,
+<a href=#496 id=496 data-nosnippet>496</a>            )
+<a href=#497 id=497 data-nosnippet>497</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#498 id=498 data-nosnippet>498</a>            mpc_prepare_signing_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#499 id=499 data-nosnippet>499</a>                <span class="string">"hashi_mpc_prepare_signing_duration_seconds"</span>,
+<a href=#500 id=500 data-nosnippet>500</a>                <span class="string">"Duration of prepare_signing"</span>,
+<a href=#501 id=501 data-nosnippet>501</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#502 id=502 data-nosnippet>502</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#503 id=503 data-nosnippet>503</a>                registry,
+<a href=#504 id=504 data-nosnippet>504</a>            )
+<a href=#505 id=505 data-nosnippet>505</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#506 id=506 data-nosnippet>506</a>
+<a href=#507 id=507 data-nosnippet>507</a>            <span class="comment">// MPC profiling: per-phase (labeled by protocol)
+<a href=#508 id=508 data-nosnippet>508</a>            </span>mpc_total_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#509 id=509 data-nosnippet>509</a>                <span class="string">"hashi_mpc_total_duration_seconds"</span>,
+<a href=#510 id=510 data-nosnippet>510</a>                <span class="string">"End-to-end duration of MPC protocol"</span>,
+<a href=#511 id=511 data-nosnippet>511</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#512 id=512 data-nosnippet>512</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#513 id=513 data-nosnippet>513</a>                registry,
+<a href=#514 id=514 data-nosnippet>514</a>            )
+<a href=#515 id=515 data-nosnippet>515</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#516 id=516 data-nosnippet>516</a>            mpc_dealer_crypto_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#517 id=517 data-nosnippet>517</a>                <span class="string">"hashi_mpc_dealer_crypto_duration_seconds"</span>,
+<a href=#518 id=518 data-nosnippet>518</a>                <span class="string">"Duration of dealer crypto"</span>,
+<a href=#519 id=519 data-nosnippet>519</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#520 id=520 data-nosnippet>520</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#521 id=521 data-nosnippet>521</a>                registry,
+<a href=#522 id=522 data-nosnippet>522</a>            )
+<a href=#523 id=523 data-nosnippet>523</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#524 id=524 data-nosnippet>524</a>            mpc_p2p_broadcast_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#525 id=525 data-nosnippet>525</a>                <span class="string">"hashi_mpc_p2p_broadcast_duration_seconds"</span>,
+<a href=#526 id=526 data-nosnippet>526</a>                <span class="string">"Duration of send_to_many"</span>,
+<a href=#527 id=527 data-nosnippet>527</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#528 id=528 data-nosnippet>528</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#529 id=529 data-nosnippet>529</a>                registry,
+<a href=#530 id=530 data-nosnippet>530</a>            )
+<a href=#531 id=531 data-nosnippet>531</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#532 id=532 data-nosnippet>532</a>            mpc_cert_publish_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#533 id=533 data-nosnippet>533</a>                <span class="string">"hashi_mpc_cert_publish_duration_seconds"</span>,
+<a href=#534 id=534 data-nosnippet>534</a>                <span class="string">"Duration of tob_channel.publish"</span>,
+<a href=#535 id=535 data-nosnippet>535</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#536 id=536 data-nosnippet>536</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#537 id=537 data-nosnippet>537</a>                registry,
+<a href=#538 id=538 data-nosnippet>538</a>            )
+<a href=#539 id=539 data-nosnippet>539</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#540 id=540 data-nosnippet>540</a>            mpc_tob_poll_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#541 id=541 data-nosnippet>541</a>                <span class="string">"hashi_mpc_tob_poll_duration_seconds"</span>,
+<a href=#542 id=542 data-nosnippet>542</a>                <span class="string">"Duration of tob_channel.receive"</span>,
+<a href=#543 id=543 data-nosnippet>543</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#544 id=544 data-nosnippet>544</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#545 id=545 data-nosnippet>545</a>                registry,
+<a href=#546 id=546 data-nosnippet>546</a>            )
+<a href=#547 id=547 data-nosnippet>547</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#548 id=548 data-nosnippet>548</a>            mpc_cert_verify_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#549 id=549 data-nosnippet>549</a>                <span class="string">"hashi_mpc_cert_verify_duration_seconds"</span>,
+<a href=#550 id=550 data-nosnippet>550</a>                <span class="string">"Duration of BLS certificate signature verification"</span>,
+<a href=#551 id=551 data-nosnippet>551</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#552 id=552 data-nosnippet>552</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#553 id=553 data-nosnippet>553</a>                registry,
+<a href=#554 id=554 data-nosnippet>554</a>            )
+<a href=#555 id=555 data-nosnippet>555</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#556 id=556 data-nosnippet>556</a>            mpc_message_process_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#557 id=557 data-nosnippet>557</a>                <span class="string">"hashi_mpc_message_process_duration_seconds"</span>,
+<a href=#558 id=558 data-nosnippet>558</a>                <span class="string">"Duration of AVSS message processing"</span>,
+<a href=#559 id=559 data-nosnippet>559</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#560 id=560 data-nosnippet>560</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#561 id=561 data-nosnippet>561</a>                registry,
+<a href=#562 id=562 data-nosnippet>562</a>            )
+<a href=#563 id=563 data-nosnippet>563</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#564 id=564 data-nosnippet>564</a>            mpc_message_retrieval_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#565 id=565 data-nosnippet>565</a>                <span class="string">"hashi_mpc_message_retrieval_duration_seconds"</span>,
+<a href=#566 id=566 data-nosnippet>566</a>                <span class="string">"Duration of retrieve_dealer_message"</span>,
+<a href=#567 id=567 data-nosnippet>567</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#568 id=568 data-nosnippet>568</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#569 id=569 data-nosnippet>569</a>                registry,
+<a href=#570 id=570 data-nosnippet>570</a>            )
+<a href=#571 id=571 data-nosnippet>571</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#572 id=572 data-nosnippet>572</a>            mpc_complaint_recovery_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#573 id=573 data-nosnippet>573</a>                <span class="string">"hashi_mpc_complaint_recovery_duration_seconds"</span>,
+<a href=#574 id=574 data-nosnippet>574</a>                <span class="string">"Duration of complaint recovery"</span>,
+<a href=#575 id=575 data-nosnippet>575</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#576 id=576 data-nosnippet>576</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#577 id=577 data-nosnippet>577</a>                registry,
+<a href=#578 id=578 data-nosnippet>578</a>            )
+<a href=#579 id=579 data-nosnippet>579</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#580 id=580 data-nosnippet>580</a>            mpc_completion_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#581 id=581 data-nosnippet>581</a>                <span class="string">"hashi_mpc_completion_duration_seconds"</span>,
+<a href=#582 id=582 data-nosnippet>582</a>                <span class="string">"Duration of final aggregation"</span>,
+<a href=#583 id=583 data-nosnippet>583</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#584 id=584 data-nosnippet>584</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#585 id=585 data-nosnippet>585</a>                registry,
+<a href=#586 id=586 data-nosnippet>586</a>            )
+<a href=#587 id=587 data-nosnippet>587</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#588 id=588 data-nosnippet>588</a>            mpc_presig_conversion_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#589 id=589 data-nosnippet>589</a>                <span class="string">"hashi_mpc_presig_conversion_duration_seconds"</span>,
+<a href=#590 id=590 data-nosnippet>590</a>                <span class="string">"Duration of Presignatures::new"</span>,
+<a href=#591 id=591 data-nosnippet>591</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#592 id=592 data-nosnippet>592</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#593 id=593 data-nosnippet>593</a>                registry,
+<a href=#594 id=594 data-nosnippet>594</a>            )
+<a href=#595 id=595 data-nosnippet>595</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#596 id=596 data-nosnippet>596</a>            mpc_rotation_prepare_previous_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#597 id=597 data-nosnippet>597</a>                <span class="string">"hashi_mpc_rotation_prepare_previous_duration_seconds"</span>,
+<a href=#598 id=598 data-nosnippet>598</a>                <span class="string">"Duration of prepare_previous_output"</span>,
+<a href=#599 id=599 data-nosnippet>599</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#600 id=600 data-nosnippet>600</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#601 id=601 data-nosnippet>601</a>                registry,
+<a href=#602 id=602 data-nosnippet>602</a>            )
+<a href=#603 id=603 data-nosnippet>603</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#604 id=604 data-nosnippet>604</a>
+<a href=#605 id=605 data-nosnippet>605</a>            <span class="comment">// MPC profiling: signing phase breakdown
+<a href=#606 id=606 data-nosnippet>606</a>            </span>mpc_sign_partial_gen_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#607 id=607 data-nosnippet>607</a>                <span class="string">"hashi_mpc_sign_partial_gen_duration_seconds"</span>,
+<a href=#608 id=608 data-nosnippet>608</a>                <span class="string">"Duration of generate_partial_signatures"</span>,
+<a href=#609 id=609 data-nosnippet>609</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#610 id=610 data-nosnippet>610</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#611 id=611 data-nosnippet>611</a>                registry,
+<a href=#612 id=612 data-nosnippet>612</a>            )
+<a href=#613 id=613 data-nosnippet>613</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#614 id=614 data-nosnippet>614</a>            mpc_sign_collection_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#615 id=615 data-nosnippet>615</a>                <span class="string">"hashi_mpc_sign_collection_duration_seconds"</span>,
+<a href=#616 id=616 data-nosnippet>616</a>                <span class="string">"Duration of P2P partial signature collection from peers"</span>,
+<a href=#617 id=617 data-nosnippet>617</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#618 id=618 data-nosnippet>618</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#619 id=619 data-nosnippet>619</a>                registry,
+<a href=#620 id=620 data-nosnippet>620</a>            )
+<a href=#621 id=621 data-nosnippet>621</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#622 id=622 data-nosnippet>622</a>            mpc_sign_aggregation_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#623 id=623 data-nosnippet>623</a>                <span class="string">"hashi_mpc_sign_aggregation_duration_seconds"</span>,
+<a href=#624 id=624 data-nosnippet>624</a>                <span class="string">"Duration of aggregate_signatures / RS recovery"</span>,
+<a href=#625 id=625 data-nosnippet>625</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#626 id=626 data-nosnippet>626</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#627 id=627 data-nosnippet>627</a>                registry,
+<a href=#628 id=628 data-nosnippet>628</a>            )
+<a href=#629 id=629 data-nosnippet>629</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#630 id=630 data-nosnippet>630</a>
+<a href=#631 id=631 data-nosnippet>631</a>            <span class="comment">// MPC profiling: RPC handler
+<a href=#632 id=632 data-nosnippet>632</a>            </span>mpc_rpc_handler_process_duration_seconds: <span class="macro">register_histogram_vec_with_registry!</span>(
+<a href=#633 id=633 data-nosnippet>633</a>                <span class="string">"hashi_mpc_rpc_handler_process_duration_seconds"</span>,
+<a href=#634 id=634 data-nosnippet>634</a>                <span class="string">"Duration of process_message in RPC handler"</span>,
+<a href=#635 id=635 data-nosnippet>635</a>                <span class="kw-2">&amp;</span>[<span class="string">"protocol"</span>],
+<a href=#636 id=636 data-nosnippet>636</a>                LATENCY_SEC_BUCKETS.to_vec(),
+<a href=#637 id=637 data-nosnippet>637</a>                registry,
+<a href=#638 id=638 data-nosnippet>638</a>            )
+<a href=#639 id=639 data-nosnippet>639</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>(),
+<a href=#640 id=640 data-nosnippet>640</a>        }
+<a href=#641 id=641 data-nosnippet>641</a>    }
+<a href=#642 id=642 data-nosnippet>642</a>
+<a href=#643 id=643 data-nosnippet>643</a>    <span class="kw">pub fn </span>update_onchain_state(<span class="kw-2">&amp;</span><span class="self">self</span>, state: <span class="kw-2">&amp;</span><a href="onchain/mod.rs.html#51"><span class="kw">crate</span>::onchain::OnchainState</a>) {
+<a href=#644 id=644 data-nosnippet>644</a>        <a class="self" href="#643">self</a>.latest_checkpoint_height
+<a href=#645 id=645 data-nosnippet>645</a>            .set(<a href="#643">state</a>.<a href="onchain/mod.rs.html#178-180">latest_checkpoint_height</a>() <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.i64.html">i64</a>);
+<a href=#646 id=646 data-nosnippet>646</a>        <a class="self" href="#643">self</a>.latest_checkpoint_timestamp_ms
+<a href=#647 id=647 data-nosnippet>647</a>            .set(<a href="#643">state</a>.<a href="onchain/mod.rs.html#182-184">latest_checkpoint_timestamp_ms</a>() <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.i64.html">i64</a>);
+<a href=#648 id=648 data-nosnippet>648</a>        <a class="self" href="#643">self</a>.sui_epoch.set(<a href="#643">state</a>.<a href="onchain/mod.rs.html#186-188">latest_checkpoint_epoch</a>() <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.i64.html">i64</a>);
+<a href=#649 id=649 data-nosnippet>649</a>
+<a href=#650 id=650 data-nosnippet>650</a>        <span class="kw">let </span>guard = <a href="#643">state</a>.<a href="onchain/mod.rs.html#164-166">state</a>();
+<a href=#651 id=651 data-nosnippet>651</a>        <span class="kw">let </span>hashi = <a href="#650">guard</a>.<a href="onchain/mod.rs.html#540-542">hashi</a>();
+<a href=#652 id=652 data-nosnippet>652</a>
+<a href=#653 id=653 data-nosnippet>653</a>        <a class="self" href="#643">self</a>.epoch.set(<a href="#651">hashi</a>.committees.<a href="onchain/types.rs.html#161-163">epoch</a>() <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.i64.html">i64</a>);
+<a href=#654 id=654 data-nosnippet>654</a>        <a class="self" href="#643">self</a>.reconfig_in_progress
+<a href=#655 id=655 data-nosnippet>655</a>            .set(<span class="kw">if </span><a href="#651">hashi</a>.committees.<a href="onchain/types.rs.html#169-171">pending_epoch_change</a>().<a href="https://doc.rust-lang.org/1.91.1/core/option/enum.Option.html#method.is_some">is_some</a>() {
+<a href=#656 id=656 data-nosnippet>656</a>                <span class="number">1
+<a href=#657 id=657 data-nosnippet>657</a>            </span>} <span class="kw">else </span>{
+<a href=#658 id=658 data-nosnippet>658</a>                <span class="number">0
+<a href=#659 id=659 data-nosnippet>659</a>            </span>});
+<a href=#660 id=660 data-nosnippet>660</a>        <a class="self" href="#643">self</a>.paused.set(<span class="kw">if </span><a href="#651">hashi</a>.config.<a href="onchain/types.rs.html#516-518">paused</a>() { <span class="number">1 </span>} <span class="kw">else </span>{ <span class="number">0 </span>});
+<a href=#661 id=661 data-nosnippet>661</a>        <a class="self" href="#643">self</a>.deposit_queue_size
+<a href=#662 id=662 data-nosnippet>662</a>            .set(<a href="#651">hashi</a>.deposit_queue.<a href="onchain/types.rs.html#581-583">requests</a>().<a href="https://doc.rust-lang.org/1.91.1/alloc/collections/btree/map/struct.BTreeMap.html#method.len">len</a>() <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.i64.html">i64</a>);
+<a href=#663 id=663 data-nosnippet>663</a>        <span class="kw">let </span>(requested, approved) = <a href="#651">hashi</a>
+<a href=#664 id=664 data-nosnippet>664</a>            .withdrawal_queue
+<a href=#665 id=665 data-nosnippet>665</a>            .<a href="onchain/types.rs.html#605-607">requests</a>()
+<a href=#666 id=666 data-nosnippet>666</a>            .<a href="https://doc.rust-lang.org/1.91.1/alloc/collections/btree/map/struct.BTreeMap.html#method.values">values</a>()
+<a href=#667 id=667 data-nosnippet>667</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.partition">partition</a>::&lt;<a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html">Vec</a>&lt;<span class="kw">_</span>&gt;, <span class="kw">_</span>&gt;(|r| <a href="#667">r</a>.status.<a href="../../hashi_types/move_types/enum.WithdrawalStatus.html#method.is_requested">is_requested</a>());
+<a href=#668 id=668 data-nosnippet>668</a>        <span class="kw">let </span>(signed, pending): (<a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html">Vec</a>&lt;<span class="kw">_</span>&gt;, <a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html">Vec</a>&lt;<span class="kw">_</span>&gt;) = <a href="#651">hashi</a>
+<a href=#669 id=669 data-nosnippet>669</a>            .withdrawal_queue
+<a href=#670 id=670 data-nosnippet>670</a>            .<a href="onchain/types.rs.html#617-619">withdrawal_txns</a>()
+<a href=#671 id=671 data-nosnippet>671</a>            .<a href="https://doc.rust-lang.org/1.91.1/alloc/collections/btree/map/struct.BTreeMap.html#method.values">values</a>()
+<a href=#672 id=672 data-nosnippet>672</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.partition">partition</a>(|w| <a href="#672">w</a>.signatures.<a href="https://doc.rust-lang.org/1.91.1/core/option/enum.Option.html#method.is_some">is_some</a>());
+<a href=#673 id=673 data-nosnippet>673</a>        <a class="self" href="#643">self</a>.withdrawal_queue_size
+<a href=#674 id=674 data-nosnippet>674</a>            .with_label_values(<span class="kw-2">&amp;</span>[<span class="string">"requested"</span>])
+<a href=#675 id=675 data-nosnippet>675</a>            .set(<a href="#663">requested</a>.<a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html#method.len">len</a>() <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.i64.html">i64</a>);
+<a href=#676 id=676 data-nosnippet>676</a>        <a class="self" href="#643">self</a>.withdrawal_queue_value
+<a href=#677 id=677 data-nosnippet>677</a>            .with_label_values(<span class="kw-2">&amp;</span>[<span class="string">"requested"</span>, <span class="string">"BTC"</span>])
+<a href=#678 id=678 data-nosnippet>678</a>            .set(<a href="#663">requested</a>.<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|r| <a href="#678">r</a>.btc_amount).<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>::&lt;<a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>&gt;() <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.i64.html">i64</a>);
+<a href=#679 id=679 data-nosnippet>679</a>        <a class="self" href="#643">self</a>.withdrawal_queue_size
+<a href=#680 id=680 data-nosnippet>680</a>            .with_label_values(<span class="kw-2">&amp;</span>[<span class="string">"approved"</span>])
+<a href=#681 id=681 data-nosnippet>681</a>            .set(<a href="#663">approved</a>.<a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html#method.len">len</a>() <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.i64.html">i64</a>);
+<a href=#682 id=682 data-nosnippet>682</a>        <a class="self" href="#643">self</a>.withdrawal_queue_value
+<a href=#683 id=683 data-nosnippet>683</a>            .with_label_values(<span class="kw-2">&amp;</span>[<span class="string">"approved"</span>, <span class="string">"BTC"</span>])
+<a href=#684 id=684 data-nosnippet>684</a>            .set(<a href="#663">approved</a>.<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|r| <a href="#684">r</a>.btc_amount).<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>::&lt;<a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>&gt;() <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.i64.html">i64</a>);
+<a href=#685 id=685 data-nosnippet>685</a>        <a class="self" href="#643">self</a>.withdrawal_queue_size
+<a href=#686 id=686 data-nosnippet>686</a>            .with_label_values(<span class="kw-2">&amp;</span>[<span class="string">"pending"</span>])
+<a href=#687 id=687 data-nosnippet>687</a>            .set(<a href="#668">pending</a>.<a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html#method.len">len</a>() <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.i64.html">i64</a>);
+<a href=#688 id=688 data-nosnippet>688</a>        <a class="self" href="#643">self</a>.withdrawal_queue_value
+<a href=#689 id=689 data-nosnippet>689</a>            .with_label_values(<span class="kw-2">&amp;</span>[<span class="string">"pending"</span>, <span class="string">"BTC"</span>])
+<a href=#690 id=690 data-nosnippet>690</a>            .set(
+<a href=#691 id=691 data-nosnippet>691</a>                <a href="#668">pending</a>
+<a href=#692 id=692 data-nosnippet>692</a>                    .<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>()
+<a href=#693 id=693 data-nosnippet>693</a>                    .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.flat_map">flat_map</a>(|w| <span class="kw-2">&amp;</span><a href="#693">w</a>.withdrawal_outputs)
+<a href=#694 id=694 data-nosnippet>694</a>                    .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|o| <a href="#694">o</a>.amount)
+<a href=#695 id=695 data-nosnippet>695</a>                    .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>::&lt;<a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>&gt;() <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.i64.html">i64</a>,
+<a href=#696 id=696 data-nosnippet>696</a>            );
+<a href=#697 id=697 data-nosnippet>697</a>        <a class="self" href="#643">self</a>.withdrawal_queue_size
+<a href=#698 id=698 data-nosnippet>698</a>            .with_label_values(<span class="kw-2">&amp;</span>[<span class="string">"signed"</span>])
+<a href=#699 id=699 data-nosnippet>699</a>            .set(<a href="#668">signed</a>.<a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html#method.len">len</a>() <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.i64.html">i64</a>);
+<a href=#700 id=700 data-nosnippet>700</a>        <a class="self" href="#643">self</a>.withdrawal_queue_value
+<a href=#701 id=701 data-nosnippet>701</a>            .with_label_values(<span class="kw-2">&amp;</span>[<span class="string">"signed"</span>, <span class="string">"BTC"</span>])
+<a href=#702 id=702 data-nosnippet>702</a>            .set(
+<a href=#703 id=703 data-nosnippet>703</a>                <a href="#668">signed</a>
+<a href=#704 id=704 data-nosnippet>704</a>                    .<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>()
+<a href=#705 id=705 data-nosnippet>705</a>                    .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.flat_map">flat_map</a>(|w| <span class="kw-2">&amp;</span><a href="#705">w</a>.withdrawal_outputs)
+<a href=#706 id=706 data-nosnippet>706</a>                    .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|o| <a href="#706">o</a>.amount)
+<a href=#707 id=707 data-nosnippet>707</a>                    .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>::&lt;<a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>&gt;() <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.i64.html">i64</a>,
+<a href=#708 id=708 data-nosnippet>708</a>            );
+<a href=#709 id=709 data-nosnippet>709</a>        <span class="comment">// Track three views of utxo_records:
+<a href=#710 id=710 data-nosnippet>710</a>        // - available:         all selectable UTXOs (locked_by = None), whether
+<a href=#711 id=711 data-nosnippet>711</a>        //                      confirmed or not; this is the coin-selection pool
+<a href=#712 id=712 data-nosnippet>712</a>        // - unconfirmed_change: subset of available whose producing withdrawal
+<a href=#713 id=713 data-nosnippet>713</a>        //                      has not yet confirmed on Bitcoin (produced_by =
+<a href=#714 id=714 data-nosnippet>714</a>        //                      Some); useful for gauging mempool chain depth
+<a href=#715 id=715 data-nosnippet>715</a>        // - locked:            committed to a pending withdrawal, awaiting
+<a href=#716 id=716 data-nosnippet>716</a>        //                      Bitcoin confirmation (locked_by = Some)
+<a href=#717 id=717 data-nosnippet>717</a>        </span><span class="kw">let </span><span class="kw-2">mut </span>available_count = <span class="number">0i64</span>;
+<a href=#718 id=718 data-nosnippet>718</a>        <span class="kw">let </span><span class="kw-2">mut </span>unconfirmed_change_count = <span class="number">0i64</span>;
+<a href=#719 id=719 data-nosnippet>719</a>        <span class="kw">let </span><span class="kw-2">mut </span>locked_count = <span class="number">0i64</span>;
+<a href=#720 id=720 data-nosnippet>720</a>        <span class="kw">let </span><span class="kw-2">mut </span>available_value = <span class="number">0u64</span>;
+<a href=#721 id=721 data-nosnippet>721</a>        <span class="kw">let </span><span class="kw-2">mut </span>unconfirmed_change_value = <span class="number">0u64</span>;
+<a href=#722 id=722 data-nosnippet>722</a>        <span class="kw">let </span><span class="kw-2">mut </span>locked_value = <span class="number">0u64</span>;
+<a href=#723 id=723 data-nosnippet>723</a>        <span class="kw">for </span>record <span class="kw">in </span>hashi.utxo_pool.utxo_records().values() {
+<a href=#724 id=724 data-nosnippet>724</a>            <span class="kw">if </span>record.locked_by.is_some() {
+<a href=#725 id=725 data-nosnippet>725</a>                locked_count += <span class="number">1</span>;
+<a href=#726 id=726 data-nosnippet>726</a>                locked_value += record.utxo.amount;
+<a href=#727 id=727 data-nosnippet>727</a>            } <span class="kw">else </span>{
+<a href=#728 id=728 data-nosnippet>728</a>                available_count += <span class="number">1</span>;
+<a href=#729 id=729 data-nosnippet>729</a>                available_value += record.utxo.amount;
+<a href=#730 id=730 data-nosnippet>730</a>                <span class="kw">if </span>record.produced_by.is_some() {
+<a href=#731 id=731 data-nosnippet>731</a>                    unconfirmed_change_count += <span class="number">1</span>;
+<a href=#732 id=732 data-nosnippet>732</a>                    unconfirmed_change_value += record.utxo.amount;
+<a href=#733 id=733 data-nosnippet>733</a>                }
+<a href=#734 id=734 data-nosnippet>734</a>            }
+<a href=#735 id=735 data-nosnippet>735</a>        }
+<a href=#736 id=736 data-nosnippet>736</a>        <a class="self" href="#643">self</a>.utxo_pool_size
+<a href=#737 id=737 data-nosnippet>737</a>            .with_label_values(<span class="kw-2">&amp;</span>[<span class="string">"available"</span>])
+<a href=#738 id=738 data-nosnippet>738</a>            .set(<a href="#717">available_count</a>);
+<a href=#739 id=739 data-nosnippet>739</a>        <a class="self" href="#643">self</a>.utxo_pool_size
+<a href=#740 id=740 data-nosnippet>740</a>            .with_label_values(<span class="kw-2">&amp;</span>[<span class="string">"unconfirmed_change"</span>])
+<a href=#741 id=741 data-nosnippet>741</a>            .set(<a href="#718">unconfirmed_change_count</a>);
+<a href=#742 id=742 data-nosnippet>742</a>        <a class="self" href="#643">self</a>.utxo_pool_size
+<a href=#743 id=743 data-nosnippet>743</a>            .with_label_values(<span class="kw-2">&amp;</span>[<span class="string">"locked"</span>])
+<a href=#744 id=744 data-nosnippet>744</a>            .set(<a href="#719">locked_count</a>);
+<a href=#745 id=745 data-nosnippet>745</a>        <a class="self" href="#643">self</a>.utxo_pool_value
+<a href=#746 id=746 data-nosnippet>746</a>            .with_label_values(<span class="kw-2">&amp;</span>[<span class="string">"available"</span>])
+<a href=#747 id=747 data-nosnippet>747</a>            .set(<a href="#720">available_value</a> <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.i64.html">i64</a>);
+<a href=#748 id=748 data-nosnippet>748</a>        <a class="self" href="#643">self</a>.utxo_pool_value
+<a href=#749 id=749 data-nosnippet>749</a>            .with_label_values(<span class="kw-2">&amp;</span>[<span class="string">"unconfirmed_change"</span>])
+<a href=#750 id=750 data-nosnippet>750</a>            .set(<a href="#721">unconfirmed_change_value</a> <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.i64.html">i64</a>);
+<a href=#751 id=751 data-nosnippet>751</a>        <a class="self" href="#643">self</a>.utxo_pool_value
+<a href=#752 id=752 data-nosnippet>752</a>            .with_label_values(<span class="kw-2">&amp;</span>[<span class="string">"locked"</span>])
+<a href=#753 id=753 data-nosnippet>753</a>            .set(<a href="#722">locked_value</a> <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.i64.html">i64</a>);
+<a href=#754 id=754 data-nosnippet>754</a>        {
+<a href=#755 id=755 data-nosnippet>755</a>            <span class="kw">use </span><a href="onchain/types.rs.html#445-452"><span class="kw">crate</span>::onchain::types::ProposalType</a>;
+<a href=#756 id=756 data-nosnippet>756</a>            <span class="kw">let </span><span class="kw-2">mut </span>counts = <a href="https://doc.rust-lang.org/1.91.1/std/collections/hash/map/struct.HashMap.html">std::collections::HashMap</a>::&lt;<span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.str.html">str</a>, <a href="https://doc.rust-lang.org/1.91.1/std/primitive.i64.html">i64</a>&gt;::new();
+<a href=#757 id=757 data-nosnippet>757</a>            <span class="kw">for </span>proposal <span class="kw">in </span>hashi.proposals.proposals().values() {
+<a href=#758 id=758 data-nosnippet>758</a>                <span class="kw-2">*</span>counts.entry(proposal.proposal_type.as_str()).or_default() += <span class="number">1</span>;
+<a href=#759 id=759 data-nosnippet>759</a>            }
+<a href=#760 id=760 data-nosnippet>760</a>            <span class="kw">for </span>label <span class="kw">in </span>ProposalType::all_labels() {
+<a href=#761 id=761 data-nosnippet>761</a>                <span class="self">self</span>.proposals
+<a href=#762 id=762 data-nosnippet>762</a>                    .with_label_values(<span class="kw-2">&amp;</span>[label])
+<a href=#763 id=763 data-nosnippet>763</a>                    .set(<span class="kw-2">*</span>counts.get(label).unwrap_or(<span class="kw-2">&amp;</span><span class="number">0</span>));
+<a href=#764 id=764 data-nosnippet>764</a>            }
+<a href=#765 id=765 data-nosnippet>765</a>        }
+<a href=#766 id=766 data-nosnippet>766</a>        <a class="self" href="#643">self</a>.num_consumed_presigs
+<a href=#767 id=767 data-nosnippet>767</a>            .set(<a href="#651">hashi</a>.num_consumed_presigs <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.i64.html">i64</a>);
+<a href=#768 id=768 data-nosnippet>768</a>        <span class="kw">for </span>(type_tag, cap) <span class="kw">in </span><span class="kw-2">&amp;</span>hashi.treasury.treasury_caps {
+<a href=#769 id=769 data-nosnippet>769</a>            <span class="kw">if let </span>sui_sdk_types::TypeTag::Struct(struct_tag) = type_tag {
+<a href=#770 id=770 data-nosnippet>770</a>                <span class="self">self</span>.treasury_supply
+<a href=#771 id=771 data-nosnippet>771</a>                    .with_label_values(<span class="kw-2">&amp;</span>[struct_tag.name().as_str()])
+<a href=#772 id=772 data-nosnippet>772</a>                    .set(cap.supply <span class="kw">as </span>i64);
+<a href=#773 id=773 data-nosnippet>773</a>            }
+<a href=#774 id=774 data-nosnippet>774</a>        }
+<a href=#775 id=775 data-nosnippet>775</a>
+<a href=#776 id=776 data-nosnippet>776</a>        <a class="self" href="#643">self</a>.package_version_enabled.reset();
+<a href=#777 id=777 data-nosnippet>777</a>        <span class="kw">for </span>version <span class="kw">in </span><span class="kw-2">&amp;</span>hashi.config.enabled_versions {
+<a href=#778 id=778 data-nosnippet>778</a>            <span class="kw">let </span>version_str = version.to_string();
+<a href=#779 id=779 data-nosnippet>779</a>            <span class="kw">let </span>package_id_str = guard
+<a href=#780 id=780 data-nosnippet>780</a>                .package_versions()
+<a href=#781 id=781 data-nosnippet>781</a>                .get(version)
+<a href=#782 id=782 data-nosnippet>782</a>                .map(|addr| addr.to_string())
+<a href=#783 id=783 data-nosnippet>783</a>                .unwrap_or_else(|| <span class="string">"unknown"</span>.to_string());
+<a href=#784 id=784 data-nosnippet>784</a>            <span class="self">self</span>.package_version_enabled
+<a href=#785 id=785 data-nosnippet>785</a>                .with_label_values(<span class="kw-2">&amp;</span>[<span class="kw-2">&amp;</span>version_str, <span class="kw-2">&amp;</span>package_id_str])
+<a href=#786 id=786 data-nosnippet>786</a>                .set(<span class="number">1</span>);
+<a href=#787 id=787 data-nosnippet>787</a>        }
+<a href=#788 id=788 data-nosnippet>788</a>    }
+<a href=#789 id=789 data-nosnippet>789</a>}
+<a href=#790 id=790 data-nosnippet>790</a>
+<a href=#791 id=791 data-nosnippet>791</a><span class="doccomment">/// Create a metric that measures the uptime from when this metric was constructed.
+<a href=#792 id=792 data-nosnippet>792</a>/// The metric is labeled with:
+<a href=#793 id=793 data-nosnippet>793</a>/// - 'version': binary version, generally be of the format: 'semver-gitrevision'
+<a href=#794 id=794 data-nosnippet>794</a>/// - 'chain_identifier': the identifier of the network which this process is part of
+<a href=#795 id=795 data-nosnippet>795</a></span><span class="kw">pub fn </span><a href="../../hashi/metrics/fn.uptime_metric.html">uptime_metric</a>(
+<a href=#796 id=796 data-nosnippet>796</a>    version: <span class="kw-2">&amp;</span><span class="lifetime">'static </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.str.html">str</a>,
+<a href=#797 id=797 data-nosnippet>797</a>    sui_chain_id: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.str.html">str</a>,
+<a href=#798 id=798 data-nosnippet>798</a>    bitcoin_chain_id: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.str.html">str</a>,
+<a href=#799 id=799 data-nosnippet>799</a>    package_id: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.str.html">str</a>,
+<a href=#800 id=800 data-nosnippet>800</a>    hashi_object_id: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.str.html">str</a>,
+<a href=#801 id=801 data-nosnippet>801</a>) -&gt; <a href="https://doc.rust-lang.org/1.91.1/alloc/boxed/struct.Box.html">Box</a>&lt;<span class="kw">dyn </span>prometheus::core::Collector&gt; {
+<a href=#802 id=802 data-nosnippet>802</a>    <span class="kw">let </span>opts = <span class="macro">prometheus::opts!</span>(<span class="string">"uptime"</span>, <span class="string">"uptime of the node service in seconds"</span>)
+<a href=#803 id=803 data-nosnippet>803</a>        .variable_label(<span class="string">"version"</span>)
+<a href=#804 id=804 data-nosnippet>804</a>        .variable_label(<span class="string">"sui_chain_id"</span>)
+<a href=#805 id=805 data-nosnippet>805</a>        .variable_label(<span class="string">"bitcoin_chain_id"</span>)
+<a href=#806 id=806 data-nosnippet>806</a>        .variable_label(<span class="string">"package_id"</span>)
+<a href=#807 id=807 data-nosnippet>807</a>        .variable_label(<span class="string">"hashi_object_id"</span>);
+<a href=#808 id=808 data-nosnippet>808</a>
+<a href=#809 id=809 data-nosnippet>809</a>    <span class="kw">let </span>start_time = <a href="https://doc.rust-lang.org/1.91.1/std/time/struct.Instant.html#method.now">std::time::Instant::now</a>();
+<a href=#810 id=810 data-nosnippet>810</a>    <span class="kw">let </span>uptime = <span class="kw">move </span>|| <a href="#809">start_time</a>.<a href="https://doc.rust-lang.org/1.91.1/std/time/struct.Instant.html#method.elapsed">elapsed</a>().<a href="https://doc.rust-lang.org/1.91.1/core/time/struct.Duration.html#method.as_secs">as_secs</a>();
+<a href=#811 id=811 data-nosnippet>811</a>    <span class="kw">let </span>metric = prometheus_closure_metric::ClosureMetric::new(
+<a href=#812 id=812 data-nosnippet>812</a>        <a href="#802">opts</a>,
+<a href=#813 id=813 data-nosnippet>813</a>        prometheus_closure_metric::ValueType::Counter,
+<a href=#814 id=814 data-nosnippet>814</a>        <a href="#810">uptime</a>,
+<a href=#815 id=815 data-nosnippet>815</a>        <span class="kw-2">&amp;</span>[
+<a href=#816 id=816 data-nosnippet>816</a>            <a href="#796">version</a>,
+<a href=#817 id=817 data-nosnippet>817</a>            <a href="#797">sui_chain_id</a>,
+<a href=#818 id=818 data-nosnippet>818</a>            <a href="#798">bitcoin_chain_id</a>,
+<a href=#819 id=819 data-nosnippet>819</a>            <a href="#799">package_id</a>,
+<a href=#820 id=820 data-nosnippet>820</a>            <a href="#800">hashi_object_id</a>,
+<a href=#821 id=821 data-nosnippet>821</a>        ],
+<a href=#822 id=822 data-nosnippet>822</a>    )
+<a href=#823 id=823 data-nosnippet>823</a>    .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>();
+<a href=#824 id=824 data-nosnippet>824</a>
+<a href=#825 id=825 data-nosnippet>825</a>    <a href="https://doc.rust-lang.org/1.91.1/alloc/boxed/struct.Box.html#method.new">Box::new</a>(<a href="#811">metric</a>)
+<a href=#826 id=826 data-nosnippet>826</a>}
+<a href=#827 id=827 data-nosnippet>827</a>
+<a href=#828 id=828 data-nosnippet>828</a><span class="kw">const </span>METRICS_ROUTE: <span class="kw-2">&amp;</span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.str.html">str</a> = <span class="string">"/metrics"</span>;
+<a href=#829 id=829 data-nosnippet>829</a>
+<a href=#830 id=830 data-nosnippet>830</a><span class="comment">// Creates a new http server that has as a sole purpose to expose
+<a href=#831 id=831 data-nosnippet>831</a>// an endpoint that prometheus agent can use to poll for the metrics.
+<a href=#832 id=832 data-nosnippet>832</a></span><span class="kw">pub fn </span><a href="../../hashi/metrics/fn.start_prometheus_server.html">start_prometheus_server</a>(
+<a href=#833 id=833 data-nosnippet>833</a>    addr: <a href="https://doc.rust-lang.org/1.91.1/core/net/socket_addr/enum.SocketAddr.html">std::net::SocketAddr</a>,
+<a href=#834 id=834 data-nosnippet>834</a>    registry: prometheus::Registry,
+<a href=#835 id=835 data-nosnippet>835</a>) -&gt; sui_http::ServerHandle {
+<a href=#836 id=836 data-nosnippet>836</a>    <span class="kw">let </span>router = axum::Router::new()
+<a href=#837 id=837 data-nosnippet>837</a>        .route(<a href="#828">METRICS_ROUTE</a>, axum::routing::get(<a href="#843-854">metrics</a>))
+<a href=#838 id=838 data-nosnippet>838</a>        .with_state(<a href="#834">registry</a>);
+<a href=#839 id=839 data-nosnippet>839</a>
+<a href=#840 id=840 data-nosnippet>840</a>    sui_http::Builder::new().serve(<a href="#833">addr</a>, <a href="#836">router</a>).<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.unwrap">unwrap</a>()
+<a href=#841 id=841 data-nosnippet>841</a>}
+<a href=#842 id=842 data-nosnippet>842</a>
+<a href=#843 id=843 data-nosnippet>843</a><span class="kw">async fn </span>metrics(
+<a href=#844 id=844 data-nosnippet>844</a>    axum::extract::State(registry): axum::extract::State&lt;prometheus::Registry&gt;,
+<a href=#845 id=845 data-nosnippet>845</a>) -&gt; (http::StatusCode, String) {
+<a href=#846 id=846 data-nosnippet>846</a>    <span class="kw">let </span>metrics_families = registry.gather();
+<a href=#847 id=847 data-nosnippet>847</a>    <span class="kw">match </span>prometheus::TextEncoder.encode_to_string(<span class="kw-2">&amp;</span>metrics_families) {
+<a href=#848 id=848 data-nosnippet>848</a>        <span class="prelude-val">Ok</span>(metrics) =&gt; (http::StatusCode::OK, metrics),
+<a href=#849 id=849 data-nosnippet>849</a>        <span class="prelude-val">Err</span>(error) =&gt; (
+<a href=#850 id=850 data-nosnippet>850</a>            http::StatusCode::INTERNAL_SERVER_ERROR,
+<a href=#851 id=851 data-nosnippet>851</a>            <span class="macro">format!</span>(<span class="string">"unable to encode metrics: {error}"</span>),
+<a href=#852 id=852 data-nosnippet>852</a>        ),
+<a href=#853 id=853 data-nosnippet>853</a>    }
+<a href=#854 id=854 data-nosnippet>854</a>}</code></pre></div></section></main></body></html>
