@@ -392,12 +392,16 @@ impl MpcManager {
         {
             return Ok(cached_response.clone());
         }
-        let messages = if cache_is_current
-            && let Some(m) = self.get_dealer_messages(
-                request.protocol_type,
-                &request.dealer,
-                request.batch_index,
-            ) {
+        let cached_messages = cache_is_current
+            .then(|| {
+                self.get_dealer_messages(
+                    request.protocol_type,
+                    &request.dealer,
+                    request.batch_index,
+                )
+            })
+            .flatten();
+        let messages = if let Some(m) = cached_messages {
             m
         } else {
             let from_db = match request.protocol_type {
@@ -411,19 +415,22 @@ impl MpcManager {
                     .get_rotation_messages(request.epoch, &request.dealer)
                     .map_err(|e| MpcError::StorageError(e.to_string()))?
                     .map(Messages::Rotation),
-                ProtocolTypeIndicator::NonceGeneration => match request.batch_index {
-                    Some(batch_index) => self
-                        .public_messages_store
-                        .get_nonce_message(request.epoch, batch_index, &request.dealer)
-                        .map_err(|e| MpcError::StorageError(e.to_string()))?
-                        .map(|msg| {
-                            Messages::NonceGeneration(NonceMessage {
-                                batch_index,
-                                message: msg,
-                            })
-                        }),
-                    None => None,
-                },
+                ProtocolTypeIndicator::NonceGeneration => request
+                    .batch_index
+                    .map(|batch_index| -> MpcResult<Option<Messages>> {
+                        Ok(self
+                            .public_messages_store
+                            .get_nonce_message(request.epoch, batch_index, &request.dealer)
+                            .map_err(|e| MpcError::StorageError(e.to_string()))?
+                            .map(|msg| {
+                                Messages::NonceGeneration(NonceMessage {
+                                    batch_index,
+                                    message: msg,
+                                })
+                            }))
+                    })
+                    .transpose()?
+                    .flatten(),
             };
             from_db.ok_or_else(|| MpcError::NotFound("No message from dealer".into()))?
         };
@@ -3403,14 +3410,14 @@ impl MpcManager {
                 }
                 ReconstructionOutcome::NeedsRotationComplaintRecovery {
                     dealer_address,
-                    share_index,
+                    share_index: complained_share_index,
                     complaint,
                     message: _message,
                 } => {
                     tracing::info!(
                         "Complaint during rotation reconstruction for dealer {:?} share {}, recovering via Complain RPC",
                         dealer_address,
-                        share_index,
+                        complained_share_index,
                     );
                     let (source_epoch, rotation_msgs) = {
                         let mgr = mpc_manager.read().unwrap();
@@ -3430,7 +3437,10 @@ impl MpcManager {
                     let signers = {
                         let mut mgr = mpc_manager.write().unwrap();
                         mgr.complaints_to_process.insert(
-                            ComplaintsToProcessKey::Rotation(dealer_address, share_index),
+                            ComplaintsToProcessKey::Rotation(
+                                dealer_address,
+                                complained_share_index,
+                            ),
                             complaint,
                         );
                         Self::collect_signers_for_dealer(
