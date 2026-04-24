@@ -157,9 +157,18 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
                 recovered_pubkey = Some(output.public_key);
                 all_shares.extend(output.key_shares.shares.iter().cloned());
             }
-            ReconstructionOutcome::NeedsComplaintRecovery { dealer_address, .. } => {
+            ReconstructionOutcome::NeedsDkgComplaintRecovery { dealer_address, .. } => {
                 println!(
-                    "  Warning: needs complaint recovery for dealer {dealer_address}, skipping"
+                    "  Warning: needs DKG complaint recovery for dealer {dealer_address}, skipping"
+                );
+            }
+            ReconstructionOutcome::NeedsRotationComplaintRecovery {
+                dealer_address,
+                share_index,
+                ..
+            } => {
+                println!(
+                    "  Warning: needs rotation complaint recovery for dealer {dealer_address} share {share_index}, skipping"
                 );
             }
         }
