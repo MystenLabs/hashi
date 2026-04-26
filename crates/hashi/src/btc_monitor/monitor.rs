@@ -109,11 +109,13 @@ impl Monitor {
         };
 
         let mut builder = kyoto::Builder::new(config.network)
-            .add_dns_peers(config.dns_peers.iter().cloned())
+            .add_peers(config.trusted_peers.iter().cloned())
             // Only connect to the configured trusted peers. Prevents Kyoto from
             // discovering additional peers via DNS seeding or addr gossip.
             // If all peers disconnect, the node exits with NoReachablePeers
-            // and the supervision loop rebuilds it.
+            // and the supervision loop rebuilds it (which is also what
+            // re-resolves hostname peers — they are consumed on use in
+            // bip157 ≥ 0.5.0).
             .whitelist_only()
             .chain_state(kyoto::ChainState::Checkpoint(checkpoint));
 
@@ -581,7 +583,7 @@ impl Monitor {
             }
         }
 
-        match requester.broadcast_tx(tx).await {
+        match requester.submit_package(tx).await {
             Ok(wtxid) => {
                 info!("Transaction {txid} broadcast acknowledged (wtxid: {wtxid})");
                 let _ = result_tx.send(Ok(()));
@@ -725,8 +727,9 @@ impl Monitor {
                     Ok(Some(height)) => height,
                     Ok(None) => {
                         warn!(
-                            "Block hash {block_hash} not found in kyoto's chain of most work. \
-                             Possibly malicious behavior by the Bitcoin Core node."
+                            "Block hash {block_hash} reported by bitcoind is not on kyoto's \
+                             canonical chain (sync lag, recent reorg, or malicious bitcoind). \
+                             Will retry once kyoto's tip advances."
                         );
                         return;
                     }

@@ -340,7 +340,7 @@ impl Hashi {
                 self.config.bitcoin_rpc().to_string(),
                 self.config.bitcoin_rpc_auth(),
             )
-            .dns_peers(self.config.bitcoin_dns_peers()?)
+            .trusted_peers(self.config.bitcoin_trusted_peers()?)
             .data_dir(
                 self.config
                     .db

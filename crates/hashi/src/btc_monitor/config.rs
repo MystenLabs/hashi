@@ -20,9 +20,11 @@ pub struct MonitorConfig {
     pub confirmation_threshold: u32,
 
     /// Peers for P2P connections, identified by hostname (or IP) and port.
-    /// Re-resolved via DNS on each connection attempt, so IP changes
-    /// (e.g., Kubernetes pod rotation) are followed automatically.
-    pub dns_peers: Vec<kyoto::DnsPeer>,
+    /// Hostnames are resolved when first popped from kyoto's whitelist; the
+    /// supervisor in [`super::monitor`] rebuilds the kyoto node on
+    /// connectivity loss, which is what re-resolves DNS so IP changes
+    /// (e.g. Kubernetes pod rotation) are eventually followed.
+    pub trusted_peers: Vec<kyoto::TrustedPeer>,
 
     /// Starting block height for synchronization
     pub start_height: u32,
@@ -42,7 +44,7 @@ impl Default for MonitorConfig {
         Self {
             network: Network::Bitcoin,
             confirmation_threshold: 6,
-            dns_peers: Vec::new(),
+            trusted_peers: Vec::new(),
             start_height: 800_000,
             bitcoind_rpc_url: "http://localhost:8332".to_string(),
             bitcoind_rpc_auth: corepc_client::client_sync::Auth::None,
@@ -63,7 +65,7 @@ impl MonitorConfig {
 pub struct MonitorConfigBuilder {
     network: Option<Network>,
     confirmation_threshold: Option<u32>,
-    dns_peers: Vec<kyoto::DnsPeer>,
+    trusted_peers: Vec<kyoto::TrustedPeer>,
     start_height: u32,
     bitcoind_rpc_url: Option<String>,
     bitcoind_rpc_auth: Option<corepc_client::client_sync::Auth>,
@@ -83,10 +85,13 @@ impl MonitorConfigBuilder {
         self
     }
 
-    /// Set peers for P2P connections. Accepts hostnames or IPs with port.
-    /// Hostnames are re-resolved via DNS on each connection attempt.
-    pub fn dns_peers(mut self, peers: Vec<kyoto::DnsPeer>) -> Self {
-        self.dns_peers = peers;
+    /// Set the whitelisted peers for P2P connections. Accepts hostnames or
+    /// IPs (constructed via [`kyoto::TrustedPeer::from_hostname`] etc.).
+    /// Hostnames are resolved at connection time and consumed on use; new
+    /// IPs are picked up when the supervisor rebuilds the kyoto node after
+    /// connectivity loss.
+    pub fn trusted_peers(mut self, peers: Vec<kyoto::TrustedPeer>) -> Self {
+        self.trusted_peers = peers;
         self
     }
 
@@ -121,7 +126,7 @@ impl MonitorConfigBuilder {
             confirmation_threshold: self
                 .confirmation_threshold
                 .unwrap_or(default.confirmation_threshold),
-            dns_peers: self.dns_peers,
+            trusted_peers: self.trusted_peers,
             start_height: self.start_height,
             bitcoind_rpc_url: self.bitcoind_rpc_url.unwrap_or(default.bitcoind_rpc_url),
             bitcoind_rpc_auth: self.bitcoind_rpc_auth.unwrap_or(default.bitcoind_rpc_auth),
