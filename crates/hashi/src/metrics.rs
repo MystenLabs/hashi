@@ -43,6 +43,8 @@ pub struct Metrics {
     pub kyoto_reorgs: IntCounter,
     pub kyoto_consecutive_failures: IntGauge,
     pub kyoto_sync_percent: IntGauge,
+    pub kyoto_peers_with_compact_filters: IntGauge,
+    pub kyoto_peers_v2: IntGauge,
 
     // General Sui metrics
     sui_epoch: IntGauge,
@@ -290,6 +292,20 @@ impl Metrics {
             kyoto_sync_percent: register_int_gauge_with_registry!(
                 "hashi_kyoto_sync_percent",
                 "Compact block filter sync progress (0-100)",
+                registry,
+            )
+            .unwrap(),
+            kyoto_peers_with_compact_filters: register_int_gauge_with_registry!(
+                "hashi_kyoto_peers_with_compact_filters",
+                "Number of currently connected peers advertising NODE_COMPACT_FILTERS. \
+                 If this drops to 0, kyoto cannot make filter sync progress even when \
+                 connection counts look healthy.",
+                registry,
+            )
+            .unwrap(),
+            kyoto_peers_v2: register_int_gauge_with_registry!(
+                "hashi_kyoto_peers_v2",
+                "Number of currently connected peers negotiated to BIP-324 (P2P V2) transport.",
                 registry,
             )
             .unwrap(),
