@@ -1095,8 +1095,9 @@ dependencies = [
 
 [[package]]
 name = "bip157"
-version = "0.4.2"
-source = "git+https://github.com/0xsiddharthks/kyoto?rev=f2ba601c#f2ba601ca6f01ecff0aaff02d74a9922cff2d1fc"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d021edf7317620df07c81006b17c9358e208e10477a4645543f6b9817ab85a95"
 dependencies = [
  "bip324",
  "bitcoin",

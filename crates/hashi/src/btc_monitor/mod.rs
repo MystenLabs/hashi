@@ -9,4 +9,4 @@
 pub mod config;
 pub mod monitor;
 
-pub use kyoto::DnsPeer;
+pub use kyoto::TrustedPeer;

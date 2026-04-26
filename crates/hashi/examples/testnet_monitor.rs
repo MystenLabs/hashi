@@ -17,7 +17,7 @@ use bitcoin::Network;
 use clap::Parser;
 use hashi::btc_monitor::config::MonitorConfig;
 use hashi::btc_monitor::monitor::Monitor;
-use kyoto::DnsPeer;
+use kyoto::TrustedPeer;
 use tracing::error;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -72,11 +72,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Starting BTC testnet4 monitor");
 
-    // DNS peers are re-resolved by kyoto on each connection attempt.
-    let dns_peers = vec![
-        DnsPeer::new("seed.testnet4.bitcoin.sprovoost.nl", 48333),
-        DnsPeer::new("seed.testnet4.wiz.biz", 48333),
+    // Hostname peers are resolved when popped from kyoto's whitelist;
+    // re-resolution requires rebuilding the node (handled by the monitor's
+    // connectivity supervisor).
+    let peer_specs: &[(&str, u16)] = &[
+        ("seed.testnet4.bitcoin.sprovoost.nl", 48333),
+        ("seed.testnet4.wiz.biz", 48333),
     ];
+    let trusted_peers: Vec<TrustedPeer> = peer_specs
+        .iter()
+        .map(|(host, port)| TrustedPeer::from_hostname(*host, *port))
+        .collect();
 
     let bitcoind_auth = match (args.bitcoind_user, args.bitcoind_password) {
         (Some(user), Some(pass)) => corepc_client::client_sync::Auth::UserPass(user, pass),
@@ -91,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = MonitorConfig::builder()
         .network(Network::Testnet4)
-        .dns_peers(dns_peers)
+        .trusted_peers(trusted_peers)
         .start_height(args.start_height)
         .bitcoind_rpc_config(args.bitcoind_url.clone(), bitcoind_auth)
         .build();
@@ -101,10 +107,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("  Confirmations required: {}", args.confirmations);
     info!("  Starting height: {}", config.start_height);
     info!("  bitcoind RPC URL: {}", config.bitcoind_rpc_url);
-    info!("  Initial peers: {}", config.dns_peers.len());
+    info!("  Initial peers: {}", config.trusted_peers.len());
     info!("  Peer addresses:");
-    for peer in &config.dns_peers {
-        info!("    - {}:{}", peer.hostname, peer.port);
+    for (host, port) in peer_specs {
+        info!("    - {host}:{port}");
     }
 
     // Create and start the monitor

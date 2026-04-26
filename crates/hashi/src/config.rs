@@ -311,10 +311,13 @@ impl Config {
             .to_corepc_auth()
     }
 
-    /// Parse configured Bitcoin peer strings as DNS peers. The hostnames are
-    /// NOT resolved here — kyoto re-resolves them on each connection attempt,
-    /// so IP changes (e.g., Kubernetes pod rotation) are followed automatically.
-    pub fn bitcoin_dns_peers(&self) -> anyhow::Result<Vec<kyoto::DnsPeer>> {
+    /// Parse configured Bitcoin peer strings into kyoto trusted peers. The
+    /// hostnames are NOT resolved here — kyoto resolves them at connection
+    /// time. To pick up new IPs, the supervisor in
+    /// [`crate::btc_monitor::monitor`] rebuilds the kyoto node on
+    /// connectivity loss, since `TrustedPeer::from_hostname` is consumed on
+    /// use in bip157 ≥ 0.5.0.
+    pub fn bitcoin_trusted_peers(&self) -> anyhow::Result<Vec<kyoto::TrustedPeer>> {
         let Some(peer_strs) = self.bitcoin_trusted_peers.as_ref() else {
             return Ok(Vec::new());
         };
@@ -327,7 +330,7 @@ impl Config {
             let port = port_str
                 .parse::<u16>()
                 .map_err(|e| anyhow::anyhow!("Invalid port in bitcoin peer '{s}': {e}"))?;
-            peers.push(kyoto::DnsPeer::new(host, port));
+            peers.push(kyoto::TrustedPeer::from_hostname(host, port));
         }
         Ok(peers)
     }
