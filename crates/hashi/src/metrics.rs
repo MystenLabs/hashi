@@ -42,6 +42,7 @@ pub struct Metrics {
     pub kyoto_blocks_received: IntCounter,
     pub kyoto_reorgs: IntCounter,
     pub kyoto_consecutive_failures: IntGauge,
+    pub kyoto_consecutive_stale_tips: IntGauge,
     pub kyoto_sync_percent: IntGauge,
     pub kyoto_peers_with_compact_filters: IntGauge,
     pub kyoto_peers_v2: IntGauge,
@@ -286,6 +287,14 @@ impl Metrics {
             kyoto_consecutive_failures: register_int_gauge_with_registry!(
                 "hashi_kyoto_consecutive_failures",
                 "Current number of consecutive peer connection failures",
+                registry,
+            )
+            .unwrap(),
+            kyoto_consecutive_stale_tips: register_int_gauge_with_registry!(
+                "hashi_kyoto_consecutive_stale_tips",
+                "Current number of consecutive Warning::PotentialStaleTip events. \
+                 Reset on any new tip (Connected, Reorganized, FiltersSynced). When \
+                 this hits the threshold the supervisor rebuilds the kyoto node.",
                 registry,
             )
             .unwrap(),

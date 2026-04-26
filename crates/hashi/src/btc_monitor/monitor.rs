@@ -37,6 +37,12 @@ const FALLBACK_FEE_RATE_SAT_PER_KWU: u64 = 250;
 /// whole node.
 const KYOTO_MAX_CONSECUTIVE_FAILURES: u32 = 15;
 
+/// Number of consecutive `Warning::PotentialStaleTip` events before
+/// rebuilding Kyoto. This catches the "connected but stuck" case that the
+/// connection-failure counter does not — peers are alive, kyoto is not
+/// reporting connectivity errors, but no new tip is being learned.
+const KYOTO_MAX_CONSECUTIVE_STALE_TIPS: u32 = 3;
+
 /// Delay before restarting Kyoto after connectivity loss.
 const KYOTO_RESTART_DELAY: Duration = Duration::from_secs(5);
 
@@ -81,8 +87,28 @@ pub enum DepositConfirmError {
 }
 
 enum KyotoEventLoopExit {
-    ConnectivityLost,
+    ConnectivityLost { reason: KyotoRebuildReason },
     Shutdown,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum KyotoRebuildReason {
+    /// `KYOTO_MAX_CONSECUTIVE_FAILURES` consecutive connection-failure
+    /// warnings without an intervening info event.
+    ConsecutiveConnectionFailures,
+    /// `KYOTO_MAX_CONSECUTIVE_STALE_TIPS` consecutive
+    /// `Warning::PotentialStaleTip` events without an intervening new tip
+    /// (Connected, Reorganized, or FiltersSynced).
+    ConsecutiveStaleTips,
+}
+
+impl KyotoRebuildReason {
+    fn as_str(&self) -> &'static str {
+        match self {
+            KyotoRebuildReason::ConsecutiveConnectionFailures => "consecutive_connection_failures",
+            KyotoRebuildReason::ConsecutiveStaleTips => "consecutive_stale_tips",
+        }
+    }
 }
 
 /// Monitor loop that tracks the state of the Bitcoin chain.
@@ -219,16 +245,17 @@ impl Monitor {
             kyoto_handle.abort();
 
             match result {
-                KyotoEventLoopExit::ConnectivityLost => {
+                KyotoEventLoopExit::ConnectivityLost { reason } => {
                     warn!(
-                        "Lost connectivity to Bitcoin peers after {KYOTO_MAX_CONSECUTIVE_FAILURES} \
-                         consecutive failures. Restarting Kyoto node..."
+                        reason = reason.as_str(),
+                        "Restarting Kyoto node after event-loop signaled rebuild"
                     );
 
                     self.metrics.kyoto_restarts.inc();
                     self.metrics.kyoto_connected_peers.set(0);
                     self.metrics.kyoto_synced.set(0);
                     self.metrics.kyoto_consecutive_failures.set(0);
+                    self.metrics.kyoto_consecutive_stale_tips.set(0);
 
                     // Wait before restarting to avoid tight restart loops.
                     tokio::time::sleep(KYOTO_RESTART_DELAY).await;
@@ -274,6 +301,7 @@ impl Monitor {
         client_rx: &mut tokio::sync::mpsc::Receiver<MonitorMessage>,
     ) -> KyotoEventLoopExit {
         let mut consecutive_failures: u32 = 0;
+        let mut consecutive_stale_tips: u32 = 0;
         let mut required_peers: usize = 0;
 
         let mut metrics_poll = tokio::time::interval(KYOTO_METRICS_POLL_INTERVAL);
@@ -290,6 +318,20 @@ impl Monitor {
                     ));
                 }
                 Some(event) = kyoto_client.event_rx.recv() => {
+                    // Any new tip — Connected, Reorganized, or FiltersSynced —
+                    // means kyoto is making progress, so reset the stale-tip
+                    // counter. We do this *before* dispatching the event
+                    // through `process_kyoto_event` to avoid moving `event`.
+                    if matches!(
+                        &event,
+                        kyoto::Event::ChainUpdate(
+                            kyoto::chain::BlockHeaderChanges::Connected(_)
+                            | kyoto::chain::BlockHeaderChanges::Reorganized { .. }
+                        ) | kyoto::Event::FiltersSynced(_)
+                    ) {
+                        consecutive_stale_tips = 0;
+                        self.metrics.kyoto_consecutive_stale_tips.set(0);
+                    }
                     self.process_kyoto_event(event);
                 }
                 Some(msg) = client_rx.recv() => {
@@ -325,7 +367,27 @@ impl Monitor {
                         consecutive_failures += 1;
                         self.metrics.kyoto_consecutive_failures.set(consecutive_failures as i64);
                         if consecutive_failures >= KYOTO_MAX_CONSECUTIVE_FAILURES {
-                            return KyotoEventLoopExit::ConnectivityLost;
+                            return KyotoEventLoopExit::ConnectivityLost {
+                                reason: KyotoRebuildReason::ConsecutiveConnectionFailures,
+                            };
+                        }
+                    }
+
+                    // PotentialStaleTip means peers are connected but no
+                    // new tip has been advertised within kyoto's expected
+                    // window. The connection-failure counter does not catch
+                    // this — track it separately and rebuild when it
+                    // accumulates, so we don't sit indefinitely against a
+                    // wedged peer set.
+                    if matches!(warning, Warning::PotentialStaleTip) {
+                        consecutive_stale_tips += 1;
+                        self.metrics
+                            .kyoto_consecutive_stale_tips
+                            .set(consecutive_stale_tips as i64);
+                        if consecutive_stale_tips >= KYOTO_MAX_CONSECUTIVE_STALE_TIPS {
+                            return KyotoEventLoopExit::ConnectivityLost {
+                                reason: KyotoRebuildReason::ConsecutiveStaleTips,
+                            };
                         }
                     }
                 }
