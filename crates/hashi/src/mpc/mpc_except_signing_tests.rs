@@ -9812,8 +9812,6 @@ fn make_single_committee_set(setup: &mut TestSetup) {
     setup.committee_set.set_committees(committees);
 }
 
-/// Fix #1 — constructor scan picks the most-recent-prior committee in a
-/// jumped state, regardless of gap size.
 #[test]
 fn test_mpc_manager_new_jumped_state_picks_actual_predecessor() {
     let mut setup = TestSetup::new(5);

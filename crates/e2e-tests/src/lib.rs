@@ -485,7 +485,18 @@ mod tests {
         nodes[0].hashi().mpc_handle().unwrap().public_key().unwrap()
     }
 
-    fn assert_nodes_agree_on_mpc_key(nodes: &[HashiNodeHandle]) {
+    async fn assert_nodes_agree_on_mpc_key(nodes: &[HashiNodeHandle]) {
+        // Wait for each node's local rotation to complete before asserting
+        // agreement.
+        let futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} MPC key not ready: {e}"));
+        }
+
         let pk = get_mpc_key(nodes);
         for (i, node) in nodes.iter().enumerate().skip(1) {
             let node_pk = node.hashi().mpc_handle().unwrap().public_key().unwrap();
@@ -541,7 +552,7 @@ mod tests {
         let key_before = get_mpc_key(test_networks.hashi_network().nodes());
         test_networks.sui_network.force_close_epoch().await.unwrap();
         let epoch = wait_for_rotation(test_networks.hashi_network().nodes(), target_epoch).await;
-        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes()).await;
         let key_after = get_mpc_key(test_networks.hashi_network().nodes());
         assert_eq!(
             key_before, key_after,
@@ -999,7 +1010,7 @@ mod tests {
             result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
         }
 
-        assert_nodes_agree_on_mpc_key(nodes);
+        assert_nodes_agree_on_mpc_key(nodes).await;
         Ok(())
     }
 
@@ -1166,7 +1177,7 @@ mod tests {
             for (i, result) in results.into_iter().enumerate() {
                 result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
             }
-            assert_nodes_agree_on_mpc_key(nodes);
+            assert_nodes_agree_on_mpc_key(nodes).await;
         }
 
         let initial_epoch = test_networks.hashi_network().nodes()[0]
@@ -1274,7 +1285,7 @@ mod tests {
             for (i, result) in results.into_iter().enumerate() {
                 result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
             }
-            assert_nodes_agree_on_mpc_key(active_nodes);
+            assert_nodes_agree_on_mpc_key(active_nodes).await;
         }
 
         let initial_epoch = test_networks.hashi_network().nodes()[0]
@@ -1291,7 +1302,7 @@ mod tests {
         // Force epoch change → key rotation 19→20.
         test_networks.sui_network.force_close_epoch().await?;
         wait_for_rotation(test_networks.hashi_network().nodes(), initial_epoch + 1).await;
-        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes()).await;
 
         Ok(())
     }
@@ -1328,7 +1339,7 @@ mod tests {
             for (i, result) in results.into_iter().enumerate() {
                 result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
             }
-            assert_nodes_agree_on_mpc_key(active_nodes);
+            assert_nodes_agree_on_mpc_key(active_nodes).await;
         }
 
         let initial_epoch = test_networks.hashi_network().nodes()[0]
@@ -1339,7 +1350,7 @@ mod tests {
         test_networks.sui_network.force_close_epoch().await?;
         let active_nodes = &test_networks.hashi_network().nodes()[..INITIAL_NODES];
         wait_for_rotation(active_nodes, initial_epoch + 1).await;
-        assert_nodes_agree_on_mpc_key(active_nodes);
+        assert_nodes_agree_on_mpc_key(active_nodes).await;
 
         // 3. Register and start the 20th node (new member)
         let client = test_networks.sui_network.client.clone();
@@ -1351,7 +1362,7 @@ mod tests {
         // 4. Force epoch change → key rotation 19→20.
         test_networks.sui_network.force_close_epoch().await?;
         wait_for_rotation(test_networks.hashi_network().nodes(), initial_epoch + 2).await;
-        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes()).await;
 
         Ok(())
     }
@@ -1443,7 +1454,7 @@ mod tests {
         for (i, result) in results.into_iter().enumerate() {
             result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
         }
-        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes()).await;
 
         let epoch = test_networks.hashi_network().nodes()[0]
             .current_epoch()
@@ -1484,13 +1495,13 @@ mod tests {
             .wait_for_mpc_key(DKG_TIMEOUT)
             .await
             .expect("DKG + nonce recovery with partial state should complete");
-        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes()).await;
 
         // Phase 2: Rotation + nonce recovery with partial state
         let next_epoch = epoch + 1;
         test_networks.sui_network.force_close_epoch().await?;
         wait_for_rotation(test_networks.hashi_network().nodes(), next_epoch).await;
-        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes()).await;
 
         let node0 = &mut test_networks.hashi_network_mut().nodes_mut()[0];
         node0.shutdown().await;
@@ -1526,7 +1537,7 @@ mod tests {
             .wait_for_mpc_key(std::time::Duration::from_secs(180))
             .await
             .expect("Rotation recovery with partial state should complete");
-        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes()).await;
 
         Ok(())
     }
@@ -1686,7 +1697,7 @@ mod tests {
         for (i, result) in results.into_iter().enumerate() {
             result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
         }
-        assert_nodes_agree_on_mpc_key(nodes);
+        assert_nodes_agree_on_mpc_key(nodes).await;
 
         // 2. Sign to verify nonce generation presigs (built via in-memory complaint recovery) work
         let epoch = nodes[0].hashi().onchain_state().epoch();
@@ -1842,7 +1853,7 @@ mod tests {
         for (i, result) in results.into_iter().enumerate() {
             result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
         }
-        assert_nodes_agree_on_mpc_key(nodes);
+        assert_nodes_agree_on_mpc_key(nodes).await;
         let initial_epoch = nodes[0].current_epoch().unwrap();
 
         // 2. Shut down node 0
@@ -1893,7 +1904,7 @@ mod tests {
         }
 
         // 6. All nodes agree on key (node 0 got shares from rotation)
-        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes()).await;
 
         Ok(())
     }
@@ -1926,7 +1937,7 @@ mod tests {
         for (i, result) in results.into_iter().enumerate() {
             result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
         }
-        assert_nodes_agree_on_mpc_key(nodes);
+        assert_nodes_agree_on_mpc_key(nodes).await;
         let initial_epoch = nodes[0].current_epoch().unwrap();
 
         // 2. Shut down node 0
@@ -1965,7 +1976,7 @@ mod tests {
         }
 
         // 6. All nodes agree on key
-        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes());
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes()).await;
 
         Ok(())
     }
