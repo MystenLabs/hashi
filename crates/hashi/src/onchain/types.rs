@@ -418,27 +418,41 @@ impl MemberInfo {
     }
 }
 
-/// Proposals bag - stores governance proposals by ID
+/// Two-bag store mirroring the on-chain `hashi::proposals::Proposals`
+/// shape. Active proposals are awaiting votes/execution; executed
+/// proposals are archived for historical inspection.
 #[derive(Debug)]
 pub struct Proposals {
-    pub id: Address,
-    pub size: u64,
-    pub(crate) proposals: BTreeMap<Address, Proposal>,
+    pub(crate) active_id: Address,
+    pub(crate) executed_id: Address,
+    pub(crate) active: BTreeMap<Address, Proposal>,
+    pub(crate) executed: BTreeMap<Address, Proposal>,
 }
 
 impl Proposals {
-    pub fn proposals(&self) -> &BTreeMap<Address, Proposal> {
-        &self.proposals
+    pub fn active_id(&self) -> Address {
+        self.active_id
+    }
+
+    pub fn executed_id(&self) -> Address {
+        self.executed_id
+    }
+
+    pub fn active(&self) -> &BTreeMap<Address, Proposal> {
+        &self.active
+    }
+
+    pub fn executed(&self) -> &BTreeMap<Address, Proposal> {
+        &self.executed
     }
 }
 
-/// A proposal stored in the proposals bag
+/// A proposal stored in either the active or executed bag.
 #[derive(Clone, Debug)]
 pub struct Proposal {
     pub id: Address,
     pub timestamp_ms: u64,
     pub proposal_type: ProposalType,
-    pub executed: bool,
 }
 
 /// The type of proposal data stored in a `Proposal<T>`

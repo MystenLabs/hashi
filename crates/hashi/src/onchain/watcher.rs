@@ -181,13 +181,12 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     proposal_type: parse_proposal_type_from_type_tag(
                         &proposal_created_event.proposal_type,
                     ),
-                    executed: false,
                 };
                 state
                     .state_mut()
                     .hashi
                     .proposals
-                    .proposals
+                    .active
                     .insert(proposal.id, proposal);
             }
             HashiEvent::ProposalDeletedEvent(proposal_deleted_event) => {
@@ -195,21 +194,24 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .state_mut()
                     .hashi
                     .proposals
-                    .proposals
+                    .active
                     .remove(&proposal_deleted_event.proposal_id);
             }
             HashiEvent::ProposalExecutedEvent(proposal_executed_event) => {
-                // Executed proposals stay in the on-chain ObjectBag so they
-                // remain inspectable; mirror that here by marking the entry
-                // executed instead of removing it.
-                if let Some(proposal) = state
-                    .state_mut()
-                    .hashi
-                    .proposals
-                    .proposals
-                    .get_mut(&proposal_executed_event.proposal_id)
+                // Move the entry from `active` to `executed` to mirror
+                // the on-chain dual-bag layout. Scope the write lock so
+                // it's released before the async config refetch below.
                 {
-                    proposal.executed = true;
+                    let mut state_lock = state.state_mut();
+                    let proposals = &mut state_lock.hashi.proposals;
+                    if let Some(proposal) = proposals
+                        .active
+                        .remove(&proposal_executed_event.proposal_id)
+                    {
+                        proposals
+                            .executed
+                            .insert(proposal_executed_event.proposal_id, proposal);
+                    }
                 }
 
                 // When an UpdateConfig or EmergencyPause proposal executes,

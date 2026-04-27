@@ -754,7 +754,7 @@ impl Metrics {
         {
             use crate::onchain::types::ProposalType;
             let mut counts = std::collections::HashMap::<&str, i64>::new();
-            for proposal in hashi.proposals.proposals().values() {
+            for proposal in hashi.proposals.active().values() {
                 *counts.entry(proposal.proposal_type.as_str()).or_default() += 1;
             }
             for label in ProposalType::all_labels() {

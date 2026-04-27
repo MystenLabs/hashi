@@ -37,10 +37,10 @@ fun test_create_proposal() {
     );
 
     // Verify proposal exists
-    assert!(hashi.proposals().contains(proposal_id));
+    assert!(hashi.proposals().active().contains(proposal_id));
 
     // Verify the creator voted automatically
-    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().active().borrow(proposal_id);
     assert!(prop.votes().length() == 1);
     assert!(prop.votes().contains(&VOTER1));
 
@@ -96,7 +96,7 @@ fun test_vote_on_proposal() {
     proposal::vote<UpdateConfig>(&mut hashi, proposal_id, &clock, ctx2);
 
     // Verify vote count is now 2
-    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().active().borrow(proposal_id);
     assert!(prop.votes().length() == 2);
     assert!(prop.votes().contains(&VOTER1));
     assert!(prop.votes().contains(&VOTER2));
@@ -180,7 +180,7 @@ fun test_remove_vote() {
 
     // Verify vote exists
     {
-        let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
+        let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().active().borrow(proposal_id);
         assert!(prop.votes().length() == 1);
     };
 
@@ -188,7 +188,7 @@ fun test_remove_vote() {
     proposal::remove_vote<UpdateConfig>(&mut hashi, proposal_id, ctx);
 
     // Verify vote was removed
-    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().active().borrow(proposal_id);
     assert!(prop.votes().length() == 0);
 
     // Clean up
@@ -465,7 +465,7 @@ fun test_delete_expired_proposal() {
     std::unit_test::destroy(data);
 
     // Verify proposal no longer exists
-    assert!(!hashi.proposals().contains(proposal_id));
+    assert!(!hashi.proposals().active().contains(proposal_id));
 
     // Clean up
     clock::destroy_for_testing(clock);
@@ -521,7 +521,7 @@ fun test_weighted_quorum() {
     );
 
     // 50% is not enough for 66.67% quorum - verify we need more votes
-    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().active().borrow(proposal_id);
     assert!(!proposal::quorum_reached(prop, &hashi));
 
     // VOTER2 votes (now 5/6 = 83% total weight, exceeds 66.67% threshold)
@@ -529,7 +529,7 @@ fun test_weighted_quorum() {
     proposal::vote<UpdateConfig>(&mut hashi, proposal_id, &clock, ctx2);
 
     // 83% exceeds the 66.67% quorum threshold
-    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().active().borrow(proposal_id);
     assert!(proposal::quorum_reached(prop, &hashi));
 
     // Execute should succeed
@@ -569,8 +569,8 @@ fun test_multiple_concurrent_proposals() {
     );
 
     // Both proposals should exist
-    assert!(hashi.proposals().contains(proposal_id_1));
-    assert!(hashi.proposals().contains(proposal_id_2));
+    assert!(hashi.proposals().active().contains(proposal_id_1));
+    assert!(hashi.proposals().active().contains(proposal_id_2));
 
     // Execute first proposal
     hashi::update_config::execute(&mut hashi, proposal_id_1, &clock);

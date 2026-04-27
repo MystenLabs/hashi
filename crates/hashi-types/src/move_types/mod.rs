@@ -42,7 +42,7 @@ pub struct Hashi {
     pub committees: CommitteeSet,
     pub config: Config,
     pub treasury: Treasury,
-    pub proposals: ObjectBag,
+    pub proposals: Proposals,
     /// TOB certificates by (epoch, batch_index) -> EpochCertsV1
     pub tob: Bag,
     /// Number of presignatures consumed in the current epoch.
@@ -222,6 +222,15 @@ pub struct MetadataCap {
 pub struct Coin {
     pub id: Address,
     pub balance: u64,
+}
+
+/// Rust version of the Move hashi::proposals::Proposals type.
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct Proposals {
+    /// Proposals that have been created but not yet executed.
+    pub active: ObjectBag,
+    /// Proposals that have executed successfully (kept indefinitely).
+    pub executed: ObjectBag,
 }
 
 /// Rust version of the Move hashi::deposit_queue::DepositRequestQueue type.
@@ -410,7 +419,6 @@ pub struct Proposal<T> {
     pub timestamp_ms: u64,
     pub metadata: VecMap<String, String>,
     pub data: T,
-    pub executed: bool,
 }
 
 /// Rust version of the Move hashi::update_config::UpdateConfig type.
