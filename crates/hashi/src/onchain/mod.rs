@@ -401,6 +401,15 @@ impl OnchainState {
     pub fn bitcoin_confirmation_threshold(&self) -> u32 {
         self.state().hashi().config.bitcoin_confirmation_threshold()
     }
+}
+
+impl crate::btc_monitor::config::ConfirmationThresholdSource for OnchainState {
+    fn current(&self) -> u32 {
+        self.bitcoin_confirmation_threshold()
+    }
+}
+
+impl OnchainState {
 
     pub fn mpc_threshold_in_basis_points(&self) -> u16 {
         self.state().hashi().config.mpc_threshold_in_basis_points()

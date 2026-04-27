@@ -507,7 +507,7 @@ impl Monitor {
         self.pending_deposit_workers
             .spawn(Monitor::process_pending_deposit(
                 tip.to_owned(),
-                self.config.confirmation_threshold,
+                self.config.confirmation_threshold.current(),
                 self.bitcoind_rpc.clone(),
                 self.requester.clone(),
                 self.client_tx.clone(),
@@ -644,7 +644,7 @@ impl Monitor {
             self.pending_deposit_workers
                 .spawn(Monitor::process_pending_deposit(
                     tip.to_owned(),
-                    self.config.confirmation_threshold,
+                    self.config.confirmation_threshold.current(),
                     self.bitcoind_rpc.clone(),
                     self.requester.clone(),
                     self.client_tx.clone(),

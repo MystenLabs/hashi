@@ -101,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("  Network: {:?}", config.network);
     info!(
         "  Confirmations required: {}",
-        config.confirmation_threshold
+        config.confirmation_threshold.current()
     );
     info!("  Starting height: {}", config.start_height);
     info!("  bitcoind RPC URL: {}", config.bitcoind_rpc_url);

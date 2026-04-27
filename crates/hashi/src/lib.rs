@@ -334,7 +334,7 @@ impl Hashi {
 
         let monitor_config = crate::btc_monitor::config::MonitorConfig::builder()
             .network(self.config.bitcoin_network())
-            .confirmation_threshold(self.onchain_state().bitcoin_confirmation_threshold())
+            .confirmation_threshold_source(std::sync::Arc::new(self.onchain_state().clone()))
             .start_height(self.config.bitcoin_start_height())
             .bitcoind_rpc_config(
                 self.config.bitcoin_rpc().to_string(),

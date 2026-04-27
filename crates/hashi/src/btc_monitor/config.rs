@@ -5,19 +5,45 @@
 
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
 
 pub use bitcoin::BlockHash;
 pub use bitcoin::Network;
 use bitcoin::blockdata::constants::genesis_block;
 pub use corepc_client;
 
-#[derive(Debug, Clone)]
+/// Live source of the BTC confirmation threshold, read on every deposit
+/// evaluation so on-chain governance changes (`update_config` for
+/// `bitcoin_confirmation_threshold`) take effect without a validator
+/// restart.
+///
+/// Implemented by `OnchainState` for production and by `StaticThreshold`
+/// for tests/examples that don't need live updates.
+pub trait ConfirmationThresholdSource: Send + Sync {
+    fn current(&self) -> u32;
+}
+
+/// Fixed-value implementation of `ConfirmationThresholdSource` for use
+/// in tests, the standalone `testnet_monitor` example, and as the
+/// fallback when no live source is wired in.
+#[derive(Debug, Clone, Copy)]
+pub struct StaticThreshold(pub u32);
+
+impl ConfirmationThresholdSource for StaticThreshold {
+    fn current(&self) -> u32 {
+        self.0
+    }
+}
+
+#[derive(Clone)]
 pub struct MonitorConfig {
     /// Bitcoin network to connect to
     pub network: Network,
 
-    /// Number of confirmations required for a transaction to be considered canonical
-    pub confirmation_threshold: u32,
+    /// Live source of the number of confirmations required for a
+    /// transaction to be considered canonical. Read at every deposit
+    /// evaluation so governance updates are picked up immediately.
+    pub confirmation_threshold: Arc<dyn ConfirmationThresholdSource>,
 
     /// Peers for P2P connections, identified by hostname (or IP) and port.
     /// Re-resolved via DNS on each connection attempt, so IP changes
@@ -41,7 +67,7 @@ impl Default for MonitorConfig {
     fn default() -> Self {
         Self {
             network: Network::Bitcoin,
-            confirmation_threshold: 6,
+            confirmation_threshold: Arc::new(StaticThreshold(6)),
             dns_peers: Vec::new(),
             start_height: 800_000,
             bitcoind_rpc_url: "http://localhost:8332".to_string(),
@@ -59,10 +85,10 @@ impl MonitorConfig {
 }
 
 /// Builder for constructing monitor configuration.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct MonitorConfigBuilder {
     network: Option<Network>,
-    confirmation_threshold: Option<u32>,
+    confirmation_threshold: Option<Arc<dyn ConfirmationThresholdSource>>,
     dns_peers: Vec<kyoto::DnsPeer>,
     start_height: u32,
     bitcoind_rpc_url: Option<String>,
@@ -77,9 +103,23 @@ impl MonitorConfigBuilder {
         self
     }
 
-    /// Set the confirmation threshold for deposits.
+    /// Set a fixed confirmation threshold for deposits. Useful for tests
+    /// and standalone tools that don't have a live governance source.
+    /// Production validators should use
+    /// [`Self::confirmation_threshold_source`] instead so on-chain
+    /// `update_config` actions take effect without a restart.
     pub fn confirmation_threshold(mut self, confirmations: u32) -> Self {
-        self.confirmation_threshold = Some(confirmations);
+        self.confirmation_threshold = Some(Arc::new(StaticThreshold(confirmations)));
+        self
+    }
+
+    /// Set a live source for the confirmation threshold, read at every
+    /// deposit evaluation.
+    pub fn confirmation_threshold_source(
+        mut self,
+        source: Arc<dyn ConfirmationThresholdSource>,
+    ) -> Self {
+        self.confirmation_threshold = Some(source);
         self
     }
 
@@ -200,6 +240,41 @@ pub fn network_from_chain_id(chain_id: &str) -> Option<Network> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Test fake whose threshold can be mutated post-construction so we
+    /// can verify the monitor reads the value live, not at boot.
+    struct AtomicThreshold(AtomicU32);
+
+    impl ConfirmationThresholdSource for AtomicThreshold {
+        fn current(&self) -> u32 {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    #[test]
+    fn static_threshold_returns_stored_value() {
+        let source = StaticThreshold(6);
+        assert_eq!(source.current(), 6);
+    }
+
+    #[test]
+    fn builder_with_u32_wraps_in_static_source() {
+        let config = MonitorConfig::builder().confirmation_threshold(3).build();
+        assert_eq!(config.confirmation_threshold.current(), 3);
+    }
+
+    #[test]
+    fn live_source_picks_up_updates() {
+        let live = Arc::new(AtomicThreshold(AtomicU32::new(6)));
+        let config = MonitorConfig::builder()
+            .confirmation_threshold_source(live.clone())
+            .build();
+        assert_eq!(config.confirmation_threshold.current(), 6);
+
+        live.0.store(3, Ordering::Relaxed);
+        assert_eq!(config.confirmation_threshold.current(), 3);
+    }
 
     #[test]
     fn test_mainnet_genesis_mapping() {
