@@ -72,16 +72,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Starting BTC testnet4 monitor");
 
-    // Hostname peers are resolved when popped from kyoto's whitelist;
-    // re-resolution requires rebuilding the node (handled by the monitor's
-    // connectivity supervisor).
     let peer_specs: &[(&str, u16)] = &[
         ("seed.testnet4.bitcoin.sprovoost.nl", 48333),
         ("seed.testnet4.wiz.biz", 48333),
     ];
     let trusted_peers: Vec<TrustedPeer> = peer_specs
         .iter()
-        .map(|(host, port)| TrustedPeer::from_hostname(*host, *port))
+        .map(|&(host, port)| TrustedPeer::from_hostname(host, port))
         .collect();
 
     let bitcoind_auth = match (args.bitcoind_user, args.bitcoind_password) {

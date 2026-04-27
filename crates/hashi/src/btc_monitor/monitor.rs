@@ -113,9 +113,7 @@ impl Monitor {
             // Only connect to the configured trusted peers. Prevents Kyoto from
             // discovering additional peers via DNS seeding or addr gossip.
             // If all peers disconnect, the node exits with NoReachablePeers
-            // and the supervision loop rebuilds it (which is also what
-            // re-resolves hostname peers — they are consumed on use in
-            // bip157 ≥ 0.5.0).
+            // and the supervision loop rebuilds it.
             .whitelist_only()
             .chain_state(kyoto::ChainState::Checkpoint(checkpoint));
 
@@ -737,9 +735,8 @@ impl Monitor {
                     Ok(Some(height)) => height,
                     Ok(None) => {
                         warn!(
-                            "Block hash {block_hash} reported by bitcoind is not on kyoto's \
-                             canonical chain (sync lag, recent reorg, or malicious bitcoind). \
-                             Will retry once kyoto's tip advances."
+                            "Block hash {block_hash} from bitcoind not yet on kyoto's chain \
+                             (sync lag, recent reorg, or malicious bitcoind); will retry."
                         );
                         return;
                     }

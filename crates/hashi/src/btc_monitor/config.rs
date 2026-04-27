@@ -17,10 +17,9 @@ pub struct MonitorConfig {
     pub network: Network,
 
     /// Peers for P2P connections, identified by hostname (or IP) and port.
-    /// Hostnames are resolved when first popped from kyoto's whitelist; the
-    /// supervisor in [`super::monitor`] rebuilds the kyoto node on
-    /// connectivity loss, which is what re-resolves DNS so IP changes
-    /// (e.g. Kubernetes pod rotation) are eventually followed.
+    /// Hostnames are resolved at connection time; the monitor's supervisor
+    /// rebuilds the kyoto node on disconnect, which re-resolves them so IP
+    /// changes (e.g. Kubernetes pod rotation) are followed.
     pub trusted_peers: Vec<kyoto::TrustedPeer>,
 
     /// Starting block height for synchronization
@@ -74,11 +73,8 @@ impl MonitorConfigBuilder {
         self
     }
 
-    /// Set the whitelisted peers for P2P connections. Accepts hostnames or
-    /// IPs (constructed via [`kyoto::TrustedPeer::from_hostname`] etc.).
-    /// Hostnames are resolved at connection time and consumed on use; new
-    /// IPs are picked up when the supervisor rebuilds the kyoto node after
-    /// connectivity loss.
+    /// Set peers for P2P connections. Accepts hostnames or IPs with port.
+    /// Hostnames are resolved at connection time.
     pub fn trusted_peers(mut self, peers: Vec<kyoto::TrustedPeer>) -> Self {
         self.trusted_peers = peers;
         self

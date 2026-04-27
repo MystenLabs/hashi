@@ -13,6 +13,7 @@ sui-http = "0.2.0"
 bitcoin = { version = "0.32.8", features =["serde"] }
 corepc-client = { version = "0.10.0", features = ["client-sync"] }
 jsonrpc = "0.18.0"
+kyoto = { package = "bip157", version = "0.5.0" }
 
 # Dependencies for grpc and protobuf
 tonic = { version = "0.14", features = ["zstd", "transport", "tls-webpki-roots"] }

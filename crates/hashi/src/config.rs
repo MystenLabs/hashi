@@ -311,12 +311,10 @@ impl Config {
             .to_corepc_auth()
     }
 
-    /// Parse configured Bitcoin peer strings into kyoto trusted peers. The
-    /// hostnames are NOT resolved here — kyoto resolves them at connection
-    /// time. To pick up new IPs, the supervisor in
-    /// [`crate::btc_monitor::monitor`] rebuilds the kyoto node on
-    /// connectivity loss, since `TrustedPeer::from_hostname` is consumed on
-    /// use in bip157 ≥ 0.5.0.
+    /// Parse configured Bitcoin peer strings into kyoto trusted peers.
+    /// Hostnames are not resolved here — kyoto resolves them at connection
+    /// time, and the monitor's supervisor rebuilds the node on disconnect
+    /// to re-resolve and follow IP changes (e.g., Kubernetes pod rotation).
     pub fn bitcoin_trusted_peers(&self) -> anyhow::Result<Vec<kyoto::TrustedPeer>> {
         let Some(peer_strs) = self.bitcoin_trusted_peers.as_ref() else {
             return Ok(Vec::new());
