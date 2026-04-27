@@ -32,11 +32,7 @@ mod tests {
     use crate::test_helpers::lookup_vout;
     use crate::test_helpers::txid_to_address;
 
-    async fn setup_test_networks() -> Result<TestNetworks> {
-        setup_test_networks_with(TestNetworksBuilder::new().with_nodes(4)).await
-    }
-
-    async fn setup_test_networks_with(builder: TestNetworksBuilder) -> Result<TestNetworks> {
+    async fn setup_test_networks(builder: TestNetworksBuilder) -> Result<TestNetworks> {
         info!("Setting up test networks...");
         let networks = builder.build().await?;
 
@@ -240,7 +236,7 @@ mod tests {
         init_test_logging();
         info!("=== Starting Bitcoin Deposit E2E Test ===");
 
-        let mut networks = setup_test_networks().await?;
+        let mut networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
         let amount_sats = 31337u64;
         let hbtc_recipient = create_deposit_and_wait(&mut networks, amount_sats).await?;
 
@@ -280,7 +276,7 @@ mod tests {
         if with_guardian {
             builder = builder.with_guardian();
         }
-        let mut networks = setup_test_networks_with(builder).await?;
+        let mut networks = setup_test_networks(builder).await?;
 
         if with_guardian {
             for node in networks.hashi_network.nodes() {
@@ -416,7 +412,7 @@ mod tests {
     #[tokio::test]
     async fn test_presigning_recovery_within_batch() -> Result<()> {
         init_test_logging();
-        let mut networks = setup_test_networks().await?;
+        let mut networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
         let deposit_amount_sats = 100_000u64;
         let withdrawal_amount_sats = 30_000u64;
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();
@@ -677,7 +673,7 @@ mod tests {
         init_test_logging();
         info!("=== Starting Unconfirmed Change UTXO Chaining Test ===");
 
-        let mut networks = setup_test_networks().await?;
+        let mut networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
 
         // Deposit enough that after withdrawal 1 there is substantial change.
         let deposit_amount_sats = 200_000u64;
