@@ -64,9 +64,7 @@ impl S3Logger {
             .load()
             .await;
 
-        // `AWS_ENDPOINT_URL_S3` is picked up automatically by aws-config. Path-style
-        // addressing (required by MinIO) has no SDK env, so we read it explicitly.
-        // Both knobs are only used for local dev against MinIO / LocalStack.
+        // Path-style addressing (required by MinIO) has no SDK env, so read it explicitly.
         let mut s3_builder = aws_sdk_s3::config::Builder::from(&aws_config);
         if std::env::var("AWS_S3_FORCE_PATH_STYLE")
             .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1"))
