@@ -161,9 +161,12 @@ impl Hashi {
             txid: deposit_request.utxo.id.txid.into(),
             vout: deposit_request.utxo.id.vout,
         };
+        // Read the threshold live from on-chain state so governance
+        // updates take effect for new deposits without a restart.
+        let confirmation_threshold = self.onchain_state().bitcoin_confirmation_threshold();
         let txout = self
             .btc_monitor()
-            .confirm_deposit(outpoint)
+            .confirm_deposit(outpoint, confirmation_threshold)
             .await
             .map_err(|e| match e {
                 DepositConfirmError::UtxoSpent { .. } => {
