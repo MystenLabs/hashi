@@ -180,7 +180,10 @@ fun test_remove_vote() {
 
     // Verify vote exists
     {
-        let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().active().borrow(proposal_id);
+        let prop: &proposal::Proposal<UpdateConfig> = hashi
+            .proposals()
+            .active()
+            .borrow(proposal_id);
         assert!(prop.votes().length() == 1);
     };
 

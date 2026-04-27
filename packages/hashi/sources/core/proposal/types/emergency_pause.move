@@ -26,7 +26,11 @@ public fun propose(
     ctx: &mut TxContext,
 ): ID {
     hashi.config().assert_version_enabled();
-    let threshold = if (pause) { PAUSE_THRESHOLD_BPS } else { UNPAUSE_THRESHOLD_BPS };
+    let threshold = if (pause) {
+        PAUSE_THRESHOLD_BPS
+    } else {
+        UNPAUSE_THRESHOLD_BPS
+    };
     proposal::create(hashi, EmergencyPause { pause }, threshold, metadata, clock, ctx)
 }
 

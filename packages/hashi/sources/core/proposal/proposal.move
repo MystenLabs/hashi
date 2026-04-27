@@ -84,10 +84,7 @@ public(package) fun execute<T: copy + drop + store>(
         !hashi.proposals().executed().contains(proposal_id.to_address()),
         EProposalAlreadyExecuted,
     );
-    let proposal: Proposal<T> = hashi
-        .proposals_mut()
-        .active_mut()
-        .remove(proposal_id);
+    let proposal: Proposal<T> = hashi.proposals_mut().active_mut().remove(proposal_id);
 
     assert!(!proposal.is_expired(clock), EProposalExpired);
     assert!(proposal.quorum_reached(hashi), EQuorumNotReached);
