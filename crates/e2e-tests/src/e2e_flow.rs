@@ -255,10 +255,65 @@ mod tests {
 
     #[tokio::test]
     async fn test_bitcoin_withdrawal_e2e_flow() -> Result<()> {
-        init_test_logging();
-        info!("=== Starting Bitcoin Withdrawal E2E Test ===");
+        run_bitcoin_withdrawal_e2e(false).await
+    }
 
-        let mut networks = setup_test_networks().await?;
+    /// Same flow as `test_bitcoin_withdrawal_e2e_flow`, but with an
+    /// in-process guardian in the loop.
+    #[tokio::test]
+    async fn test_bitcoin_withdrawal_with_guardian_e2e_flow() -> Result<()> {
+        run_bitcoin_withdrawal_e2e(true).await
+    }
+
+    /// Shared body for the bitcoin-withdrawal e2e tests, parameterized on
+    /// whether to spin up an in-process guardian alongside the bridge.
+    /// Keeping a single body forces the two flows to stay in lockstep.
+    async fn run_bitcoin_withdrawal_e2e(with_guardian: bool) -> Result<()> {
+        init_test_logging();
+        let label = if with_guardian {
+            " (with guardian)"
+        } else {
+            ""
+        };
+        info!("=== Starting Bitcoin Withdrawal E2E Test{label} ===");
+
+        let mut builder = TestNetworksBuilder::new().with_nodes(4);
+        if with_guardian {
+            builder = builder.with_guardian();
+        }
+        let mut networks = builder.build().await?;
+
+        info!("Test networks initialized");
+        info!("  - Sui RPC: {}", networks.sui_network.rpc_url);
+        info!("  - Bitcoin RPC: {}", networks.bitcoin_node.rpc_url());
+        info!("  - Hashi nodes: {}", networks.hashi_network.nodes().len());
+
+        info!("Waiting for MPC key to be ready...");
+        networks.hashi_network.nodes()[0]
+            .wait_for_mpc_key(Duration::from_secs(60))
+            .await?;
+        info!("MPC key ready");
+
+        if with_guardian {
+            for node in networks.hashi_network.nodes() {
+                assert!(
+                    node.hashi().config.guardian_endpoint().is_some(),
+                    "guardian endpoint should be configured on every test node"
+                );
+                assert!(
+                    node.hashi().guardian_client().is_some(),
+                    "guardian client should be populated after Hashi::start()"
+                );
+            }
+            let harness = networks
+                .guardian_harness
+                .as_ref()
+                .expect("harness present when .with_guardian() is set");
+            assert!(
+                harness.enclave().is_fully_initialized(),
+                "guardian harness should have reached fully-initialized state"
+            );
+        }
 
         let deposit_amount_sats = 100_000u64;
         let hbtc_recipient = create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
@@ -335,107 +390,7 @@ mod tests {
         )
         .await?;
 
-        info!("=== Bitcoin Withdrawal E2E Test Passed ===");
-        Ok(())
-    }
-
-    /// Same flow as `test_bitcoin_withdrawal_e2e_flow`, but with an
-    /// in-process guardian in the loop.
-    #[tokio::test]
-    async fn test_bitcoin_withdrawal_with_guardian_e2e_flow() -> Result<()> {
-        init_test_logging();
-        info!("=== Starting Bitcoin Withdrawal E2E Test (with guardian) ===");
-
-        let mut networks = TestNetworksBuilder::new()
-            .with_nodes(4)
-            .with_guardian()
-            .build()
-            .await?;
-
-        info!("Waiting for MPC key to be ready...");
-        networks.hashi_network.nodes()[0]
-            .wait_for_mpc_key(Duration::from_secs(60))
-            .await?;
-        info!("MPC key ready");
-
-        for node in networks.hashi_network.nodes() {
-            assert!(
-                node.hashi().config.guardian_endpoint().is_some(),
-                "guardian endpoint should be configured on every test node"
-            );
-            assert!(
-                node.hashi().guardian_client().is_some(),
-                "guardian client should be populated after Hashi::start()"
-            );
-        }
-        let harness = networks
-            .guardian_harness
-            .as_ref()
-            .expect("harness present when .with_guardian() is set");
-        assert!(
-            harness.enclave().is_fully_initialized(),
-            "guardian harness should have reached fully-initialized state"
-        );
-
-        let deposit_amount_sats = 100_000u64;
-        let hbtc_recipient = create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
-
-        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
-        let user_key = networks.sui_network.user_keys.first().unwrap();
-        let withdrawal_amount_sats = 30_000u64;
-        let btc_destination = networks.bitcoin_node.get_new_address()?;
-        let destination_bytes = extract_witness_program(&btc_destination)?;
-        info!(
-            "Requesting withdrawal of {} sats to {}",
-            withdrawal_amount_sats, btc_destination
-        );
-
-        let mut withdrawal_executor =
-            SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
-                .with_signer(user_key.clone());
-        withdrawal_executor
-            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes)
-            .await?;
-
-        let miner = BackgroundMiner::start(&networks.bitcoin_node);
-
-        let confirmed_event = wait_for_withdrawal_confirmation(
-            &mut networks.sui_network.client,
-            Duration::from_secs(60),
-        )
-        .await?;
-        info!("Withdrawal confirmed on Sui");
-
-        drop(miner);
-
-        let hbtc_balance_after = get_hbtc_balance(
-            &mut networks.sui_network.client,
-            networks.hashi_network.ids().package_id,
-            hbtc_recipient,
-        )
-        .await?;
-        let expected_remaining = deposit_amount_sats - withdrawal_amount_sats;
-        assert_eq!(
-            hbtc_balance_after, expected_remaining,
-            "Expected remaining hBTC after withdrawal"
-        );
-
-        let withdrawal_txid: Txid = confirmed_event.txid.into();
-        let max_output = Amount::from_sat(withdrawal_amount_sats);
-        let min_output = Amount::from_sat(
-            withdrawal_amount_sats.saturating_sub(hashi.onchain_state().worst_case_network_fee()),
-        );
-        wait_for_withdrawal_tx_success(
-            &networks.bitcoin_node,
-            &withdrawal_txid,
-            &btc_destination,
-            max_output,
-            min_output,
-            Duration::from_secs(30),
-        )
-        .await?;
-
-        info!("=== Bitcoin Withdrawal E2E Test (with guardian) Passed ===");
+        info!("=== Bitcoin Withdrawal E2E Test{label} Passed ===");
         Ok(())
     }
 
