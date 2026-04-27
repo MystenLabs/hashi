@@ -438,6 +438,7 @@ pub struct Proposal {
     pub id: Address,
     pub timestamp_ms: u64,
     pub proposal_type: ProposalType,
+    pub executed: bool,
 }
 
 /// The type of proposal data stored in a `Proposal<T>`

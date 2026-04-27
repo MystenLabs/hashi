@@ -14,7 +14,7 @@ use sui::{clock::Clock, vec_map::VecMap};
 const PAUSE_THRESHOLD_BPS: u64 = 5100; // 51% - low quorum for emergencies
 const UNPAUSE_THRESHOLD_BPS: u64 = 6667; // ~2/3 - higher bar for resuming
 
-public struct EmergencyPause has drop, store {
+public struct EmergencyPause has copy, drop, store {
     pause: bool,
 }
 

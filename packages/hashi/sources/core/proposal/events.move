@@ -24,8 +24,9 @@ public struct ProposalDeletedEvent<phantom T> has copy, drop {
     proposal_id: ID,
 }
 
-public struct ProposalExecutedEvent<phantom T> has copy, drop {
+public struct ProposalExecutedEvent<T> has copy, drop {
     proposal_id: ID,
+    data: T,
 }
 
 public struct QuorumReachedEvent<phantom T> has copy, drop {
@@ -70,9 +71,10 @@ public(package) fun emit_proposal_deleted_event<T>(proposal_id: ID) {
     });
 }
 
-public(package) fun emit_proposal_executed_event<T>(proposal_id: ID) {
+public(package) fun emit_proposal_executed_event<T: copy + drop>(proposal_id: ID, data: T) {
     event::emit(ProposalExecutedEvent<T> {
         proposal_id,
+        data,
     });
 }
 

@@ -1280,42 +1280,43 @@ async fn scrape_proposals(
 
         // Deserialize proposal based on the proposal type
         let contents: &[u8] = field.child_object().contents().value();
-        let result: Option<(Address, u64)> = match &proposal_type {
+        let result: Option<(Address, u64, bool)> = match &proposal_type {
             types::ProposalType::UpdateConfig => {
                 bcs::from_bytes::<move_types::Proposal<move_types::UpdateConfig>>(contents)
                     .ok()
-                    .map(|p| (p.id, p.timestamp_ms))
+                    .map(|p| (p.id, p.timestamp_ms, p.executed))
             }
             types::ProposalType::EnableVersion => {
                 bcs::from_bytes::<move_types::Proposal<move_types::EnableVersion>>(contents)
                     .ok()
-                    .map(|p| (p.id, p.timestamp_ms))
+                    .map(|p| (p.id, p.timestamp_ms, p.executed))
             }
             types::ProposalType::DisableVersion => {
                 bcs::from_bytes::<move_types::Proposal<move_types::DisableVersion>>(contents)
                     .ok()
-                    .map(|p| (p.id, p.timestamp_ms))
+                    .map(|p| (p.id, p.timestamp_ms, p.executed))
             }
             types::ProposalType::Upgrade => {
                 bcs::from_bytes::<move_types::Proposal<move_types::Upgrade>>(contents)
                     .ok()
-                    .map(|p| (p.id, p.timestamp_ms))
+                    .map(|p| (p.id, p.timestamp_ms, p.executed))
             }
             types::ProposalType::EmergencyPause => {
                 bcs::from_bytes::<move_types::Proposal<move_types::EmergencyPause>>(contents)
                     .ok()
-                    .map(|p| (p.id, p.timestamp_ms))
+                    .map(|p| (p.id, p.timestamp_ms, p.executed))
             }
             types::ProposalType::Unknown(_) => None,
         };
 
-        if let Some((id, timestamp_ms)) = result {
+        if let Some((id, timestamp_ms, executed)) = result {
             proposals.insert(
                 id,
                 types::Proposal {
                     id,
                     timestamp_ms,
                     proposal_type,
+                    executed,
                 },
             );
         } else {

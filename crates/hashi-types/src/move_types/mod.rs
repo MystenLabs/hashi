@@ -410,6 +410,7 @@ pub struct Proposal<T> {
     pub timestamp_ms: u64,
     pub metadata: VecMap<String, String>,
     pub data: T,
+    pub executed: bool,
 }
 
 /// Rust version of the Move hashi::update_config::UpdateConfig type.
@@ -768,15 +769,29 @@ impl From<ProposalDeletedEvent> for HashiEvent {
 pub struct ProposalExecutedEvent {
     pub proposal_id: Address,
     pub proposal_type: TypeTag,
+    /// BCS-encoded bytes of the proposal `data` payload (`T` in the Move
+    /// `ProposalExecutedEvent<T>`). Decode using `proposal_type` to get the
+    /// typed value.
+    pub data_bcs: Vec<u8>,
 }
 
 impl ProposalExecutedEvent {
     fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
         let proposal_type = extract_type_param::<Self>(event_type)?;
-        let proposal_id: Address = bcs::from_bytes(bcs)?;
+        // Layout is `(proposal_id: Address, data: T)`; Address is a fixed
+        // 32-byte BCS encoding with no length prefix, so split there.
+        if bcs.len() < 32 {
+            anyhow::bail!(
+                "ProposalExecutedEvent payload too short: {} bytes",
+                bcs.len()
+            );
+        }
+        let proposal_id: Address = bcs::from_bytes(&bcs[..32])?;
+        let data_bcs = bcs[32..].to_vec();
         Ok(Self {
             proposal_id,
             proposal_type,
+            data_bcs,
         })
     }
 }

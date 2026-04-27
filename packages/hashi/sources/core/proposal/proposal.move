@@ -19,6 +19,7 @@ public struct Proposal<T> has key, store {
     timestamp_ms: u64,
     metadata: VecMap<String, String>,
     data: T,
+    executed: bool,
 }
 
 // ~~~~~~~ Errors ~~~~~~~
@@ -34,6 +35,8 @@ const ENoVoteFound: vector<u8> = b"Vote doesn't exist";
 const EProposalNotExpired: vector<u8> = b"Proposal not expired";
 #[error(code = 5)]
 const EProposalExpired: vector<u8> = b"Proposal expired";
+#[error(code = 6)]
+const EProposalAlreadyExecuted: vector<u8> = b"Proposal already executed";
 
 // ~~~~~~~ Public Functions ~~~~~~~
 
@@ -59,6 +62,7 @@ public(package) fun create<T: store>(
         timestamp_ms,
         metadata,
         data,
+        executed: false,
     };
 
     let proposal_id = object::id(&proposal);
@@ -67,16 +71,25 @@ public(package) fun create<T: store>(
     proposal_id
 }
 
-public(package) fun execute<T: store>(hashi: &mut Hashi, proposal_id: ID, clock: &Clock): T {
-    let proposal: Proposal<T> = hashi.proposals_mut().remove(proposal_id);
-
-    assert!(proposal.quorum_reached(hashi), EQuorumNotReached);
-    assert!(!proposal.is_expired(clock), EProposalExpired);
-
+public(package) fun execute<T: copy + drop + store>(
+    hashi: &mut Hashi,
+    proposal_id: ID,
+    clock: &Clock,
+): T {
     hashi.config().assert_version_enabled();
 
-    proposal_events::emit_proposal_executed_event<T>(proposal.id.to_inner());
-    proposal.delete()
+    let proposal: &Proposal<T> = hashi.proposals().borrow(proposal_id);
+    assert!(!proposal.executed, EProposalAlreadyExecuted);
+    assert!(!proposal.is_expired(clock), EProposalExpired);
+    assert!(proposal.quorum_reached(hashi), EQuorumNotReached);
+
+    let proposal: &mut Proposal<T> = hashi.proposals_mut().borrow_mut(proposal_id);
+    proposal.executed = true;
+    let data = proposal.data;
+    let id = proposal.id.to_inner();
+
+    proposal_events::emit_proposal_executed_event<T>(id, data);
+    data
 }
 
 public fun vote<T: store>(hashi: &mut Hashi, proposal_id: ID, clock: &Clock, ctx: &mut TxContext) {
@@ -126,6 +139,7 @@ public fun is_expired<T>(proposal: &Proposal<T>, clock: &Clock): bool {
 public fun delete_expired<T: store>(hashi: &mut Hashi, proposal_id: ID, clock: &Clock): T {
     let proposal: Proposal<T> = hashi.proposals_mut().remove(proposal_id);
 
+    assert!(!proposal.executed, EProposalAlreadyExecuted);
     assert!(proposal.is_expired(clock), EProposalNotExpired);
     proposal.delete()
 }

@@ -353,6 +353,65 @@ fun test_vote_on_expired_proposal_fails() {
 }
 
 #[test]
+#[expected_failure(abort_code = proposal::EProposalAlreadyExecuted)]
+/// Test that re-executing an already-executed proposal fails
+fun test_re_execute_proposal_fails() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+
+    let voters = vector[VOTER1];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
+        &mut hashi,
+        1000,
+        &clock,
+        ctx,
+    );
+
+    // First execute succeeds.
+    hashi::update_config::execute(&mut hashi, proposal_id, &clock);
+
+    // Second execute on the same proposal must fail.
+    hashi::update_config::execute(&mut hashi, proposal_id, &clock);
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = proposal::EProposalAlreadyExecuted)]
+/// Test that delete_expired refuses to delete a proposal that was already executed
+fun test_delete_expired_executed_proposal_fails() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+
+    let voters = vector[VOTER1];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let mut clock = clock::create_for_testing(ctx);
+
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
+        &mut hashi,
+        1000,
+        &clock,
+        ctx,
+    );
+
+    // Execute, then advance past expiry.
+    hashi::update_config::execute(&mut hashi, proposal_id, &clock);
+    clock::increment_for_testing(&mut clock, MAX_PROPOSAL_DURATION_MS + 1);
+
+    // delete_expired must refuse — executed proposals are kept forever.
+    let _ = proposal::delete_expired<hashi::update_config::UpdateConfig>(
+        &mut hashi,
+        proposal_id,
+        &clock,
+    );
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
 #[expected_failure(abort_code = proposal::EProposalExpired)]
 /// Test that executing an expired proposal fails
 fun test_execute_expired_proposal_fails() {

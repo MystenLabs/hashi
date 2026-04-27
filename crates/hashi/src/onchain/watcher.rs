@@ -181,6 +181,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     proposal_type: parse_proposal_type_from_type_tag(
                         &proposal_created_event.proposal_type,
                     ),
+                    executed: false,
                 };
                 state
                     .state_mut()
@@ -198,17 +199,24 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .remove(&proposal_deleted_event.proposal_id);
             }
             HashiEvent::ProposalExecutedEvent(proposal_executed_event) => {
-                state
+                // Executed proposals stay in the on-chain ObjectBag so they
+                // remain inspectable; mirror that here by marking the entry
+                // executed instead of removing it.
+                if let Some(proposal) = state
                     .state_mut()
                     .hashi
                     .proposals
                     .proposals
-                    .remove(&proposal_executed_event.proposal_id);
+                    .get_mut(&proposal_executed_event.proposal_id)
+                {
+                    proposal.executed = true;
+                }
 
                 // When an UpdateConfig or EmergencyPause proposal executes,
-                // the Hashi object's config field changes on-chain. The event
-                // carries no key/value payload, so re-fetch the config from
-                // the Hashi object to keep the in-memory state current.
+                // the Hashi object's config field changes on-chain. Re-fetch
+                // the config from the Hashi object to keep the in-memory
+                // state current. (The event now carries the typed `data`,
+                // so this could be applied directly in the future.)
                 if matches!(
                     parse_proposal_type_from_type_tag(&proposal_executed_event.proposal_type),
                     ProposalType::UpdateConfig | ProposalType::EmergencyPause
