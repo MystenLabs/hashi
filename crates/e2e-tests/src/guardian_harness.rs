@@ -16,7 +16,6 @@ use hashi_guardian::rpc::GuardianGrpc;
 use hashi_types::committee::Committee as HashiCommittee;
 use hashi_types::guardian::BitcoinPubkey;
 use hashi_types::guardian::LimiterState;
-use hashi_types::guardian::ProvisionerInitState;
 use hashi_types::guardian::WithdrawalConfig;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
 use std::net::SocketAddr;
@@ -87,44 +86,14 @@ impl GuardianHarness {
         withdrawal_config: WithdrawalConfig,
         limiter_state: LimiterState,
     ) -> Result<()> {
-        use bitcoin::secp256k1::Keypair;
-        use bitcoin::secp256k1::Secp256k1;
-        use bitcoin::secp256k1::SecretKey;
-        use rand::RngCore;
-
-        let secp = Secp256k1::new();
-        let mut sk_bytes = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut sk_bytes);
-        let enclave_btc_keypair = Keypair::from_secret_key(
-            &secp,
-            &SecretKey::from_slice(&sk_bytes).expect("random bytes form a valid secp256k1 key"),
-        );
-        self.enclave
-            .config
-            .set_btc_keypair(enclave_btc_keypair)
-            .context("set enclave btc keypair")?;
-        self.enclave
-            .config
-            .set_hashi_btc_pk(master_pubkey)
-            .context("set hashi btc master pubkey")?;
-        self.enclave
-            .config
-            .set_withdrawal_config(withdrawal_config)
-            .context("set withdrawal config")?;
-
-        let init_state =
-            ProvisionerInitState::new(committee, withdrawal_config, limiter_state, master_pubkey)
-                .context("valid ProvisionerInitState")?;
-        self.enclave
-            .state
-            .init(init_state)
-            .context("init enclave state")?;
-
-        self.enclave
-            .scratchpad
-            .provisioner_init_logging_complete
-            .set(())
-            .map_err(|_| anyhow::anyhow!("provisioner_init already finalized"))?;
+        hashi_guardian::test_utils::finalize_enclave(
+            &self.enclave,
+            committee,
+            master_pubkey,
+            withdrawal_config,
+            limiter_state,
+        )
+        .map_err(|e| anyhow::anyhow!("finalize guardian enclave: {e:?}"))?;
 
         anyhow::ensure!(
             self.enclave.is_fully_initialized(),

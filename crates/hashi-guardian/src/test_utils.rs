@@ -107,8 +107,47 @@ pub struct FullyInitializedArgs {
     pub limiter_state: LimiterState,
 }
 
-/// Drive an enclave to fully-initialized state, skipping the real share
-/// encryption round-trip. Uses a freshly-generated BTC keypair.
+/// Drive an already operator-initialized enclave to fully-initialized state,
+/// skipping the real share-encryption round-trip. Generates a fresh random
+/// BTC keypair internally.
+///
+/// Used by [`create_fully_initialized_enclave`] and by the `e2e-tests`
+/// `GuardianHarness` when DKG output becomes available on chain.
+pub fn finalize_enclave(
+    enclave: &Arc<Enclave>,
+    committee: HashiCommittee,
+    master_pubkey: BitcoinPubkey,
+    withdrawal_config: WithdrawalConfig,
+    limiter_state: LimiterState,
+) -> GuardianResult<()> {
+    let secp = Secp256k1::new();
+    let mut sk_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut sk_bytes);
+    let enclave_btc_keypair = Keypair::from_secret_key(
+        &secp,
+        &SecretKey::from_slice(&sk_bytes).expect("random bytes form a valid secp256k1 key"),
+    );
+    enclave.config.set_btc_keypair(enclave_btc_keypair)?;
+    enclave.config.set_hashi_btc_pk(master_pubkey)?;
+    enclave.config.set_withdrawal_config(withdrawal_config)?;
+
+    let init_state =
+        ProvisionerInitState::new(committee, withdrawal_config, limiter_state, master_pubkey)?;
+    enclave.state.init(init_state)?;
+
+    enclave
+        .scratchpad
+        .provisioner_init_logging_complete
+        .set(())
+        .map_err(|_| {
+            GuardianError::InvalidInputs("provisioner_init_logging_complete already set".into())
+        })?;
+    Ok(())
+}
+
+/// Construct an operator-initialized enclave and drive it to fully-initialized
+/// state in one shot. Convenience for unit tests that don't need the
+/// intermediate "operator-init only" stage.
 pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc<Enclave> {
     let FullyInitializedArgs {
         network,
@@ -122,39 +161,14 @@ pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc
         create_operator_initialized_enclave(OperatorInitTestArgs::default().with_network(network))
             .await;
 
-    let secp = Secp256k1::new();
-    let mut sk_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut sk_bytes);
-    let enclave_btc_keypair = Keypair::from_secret_key(
-        &secp,
-        &SecretKey::from_slice(&sk_bytes).expect("random bytes form a valid secp256k1 key"),
-    );
-    enclave
-        .config
-        .set_btc_keypair(enclave_btc_keypair)
-        .expect("fresh enclave should not have a btc keypair set");
-    enclave
-        .config
-        .set_hashi_btc_pk(master_pubkey)
-        .expect("fresh enclave should not have a master pubkey set");
-    enclave
-        .config
-        .set_withdrawal_config(withdrawal_config)
-        .expect("fresh enclave should not have a withdrawal config set");
-
-    let init_state =
-        ProvisionerInitState::new(committee, withdrawal_config, limiter_state, master_pubkey)
-            .expect("valid ProvisionerInitState");
-    enclave
-        .state
-        .init(init_state)
-        .expect("provisioner state init should succeed on a fresh enclave");
-
-    enclave
-        .scratchpad
-        .provisioner_init_logging_complete
-        .set(())
-        .expect("provisioner_init_logging_complete should only be set once");
+    finalize_enclave(
+        &enclave,
+        committee,
+        master_pubkey,
+        withdrawal_config,
+        limiter_state,
+    )
+    .expect("finalize_enclave should succeed on a fresh enclave");
 
     assert!(enclave.is_fully_initialized());
     enclave
