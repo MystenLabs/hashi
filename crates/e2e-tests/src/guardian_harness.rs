@@ -30,7 +30,6 @@ use tonic::transport::Server;
 pub struct GuardianHarness {
     enclave: Arc<Enclave>,
     endpoint: String,
-    network: Network,
     shutdown_tx: Option<oneshot::Sender<()>>,
     server_handle: Option<JoinHandle<()>>,
 }
@@ -71,7 +70,6 @@ impl GuardianHarness {
         Ok(Self {
             enclave,
             endpoint,
-            network,
             shutdown_tx: Some(shutdown_tx),
             server_handle: Some(server_handle),
         })
@@ -108,11 +106,6 @@ impl GuardianHarness {
 
     pub fn enclave(&self) -> &Arc<Enclave> {
         &self.enclave
-    }
-
-    #[allow(dead_code)]
-    pub fn network(&self) -> Network {
-        self.network
     }
 }
 
