@@ -107,12 +107,8 @@ pub struct FullyInitializedArgs {
     pub limiter_state: LimiterState,
 }
 
-/// Drive an already operator-initialized enclave to fully-initialized state,
-/// skipping the real share-encryption round-trip. Generates a fresh random
-/// BTC keypair internally.
-///
-/// Used by [`create_fully_initialized_enclave`] and by the `e2e-tests`
-/// `GuardianHarness` when DKG output becomes available on chain.
+/// Drive an operator-initialized enclave to fully-initialized state without
+/// running the share-encryption round-trip. Generates a fresh BTC keypair.
 pub fn finalize_enclave(
     enclave: &Arc<Enclave>,
     committee: HashiCommittee,
@@ -145,9 +141,7 @@ pub fn finalize_enclave(
     Ok(())
 }
 
-/// Construct an operator-initialized enclave and drive it to fully-initialized
-/// state in one shot. Convenience for unit tests that don't need the
-/// intermediate "operator-init only" stage.
+/// Operator-init + finalize in one shot.
 pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc<Enclave> {
     let FullyInitializedArgs {
         network,

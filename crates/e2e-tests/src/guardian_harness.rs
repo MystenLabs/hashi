@@ -1,10 +1,9 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! In-process `hashi-guardian` for integration tests. Started in two
-//! stages because hashi-side DKG is a prerequisite for provisioner-init:
-//! [`GuardianHarness::start`] serves gRPC immediately; [`GuardianHarness::finalize`]
-//! completes provisioner-init once DKG output is on chain.
+//! In-process `hashi-guardian` for integration tests. Two stages:
+//! [`GuardianHarness::start`] serves gRPC; [`GuardianHarness::finalize`]
+//! runs provisioner-init once hashi DKG output is on chain.
 
 use anyhow::Context;
 use anyhow::Result;
@@ -25,8 +24,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tonic::transport::Server;
 
-/// In-process guardian reachable over gRPC on a local TCP socket. Drop
-/// shuts the server down.
+/// In-process guardian reachable over gRPC on a local TCP socket.
 pub struct GuardianHarness {
     enclave: Arc<Enclave>,
     endpoint: String,
@@ -35,8 +33,8 @@ pub struct GuardianHarness {
 }
 
 impl GuardianHarness {
-    /// Start an operator-init'd guardian. Withdrawal RPCs stay gated
-    /// on [`Self::finalize`] completing provisioner-init.
+    /// Start an operator-init'd guardian. Withdrawal RPCs stay gated until
+    /// [`Self::finalize`] completes provisioner-init.
     pub async fn start(network: Network) -> Result<Self> {
         let enclave = create_operator_initialized_enclave(
             OperatorInitTestArgs::default().with_network(network),
@@ -75,8 +73,7 @@ impl GuardianHarness {
         })
     }
 
-    /// Complete provisioner-init with the committee + BTC master pubkey
-    /// from hashi's DKG.
+    /// Complete provisioner-init using the committee and master pubkey from hashi DKG.
     pub async fn finalize(
         &self,
         committee: HashiCommittee,

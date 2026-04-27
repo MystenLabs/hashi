@@ -33,8 +33,12 @@ mod tests {
     use crate::test_helpers::txid_to_address;
 
     async fn setup_test_networks() -> Result<TestNetworks> {
+        setup_test_networks_with(TestNetworksBuilder::new().with_nodes(4)).await
+    }
+
+    async fn setup_test_networks_with(builder: TestNetworksBuilder) -> Result<TestNetworks> {
         info!("Setting up test networks...");
-        let networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+        let networks = builder.build().await?;
 
         info!("Test networks initialized");
         info!("  - Sui RPC: {}", networks.sui_network.rpc_url);
@@ -258,16 +262,11 @@ mod tests {
         run_bitcoin_withdrawal_e2e(false).await
     }
 
-    /// Same flow as `test_bitcoin_withdrawal_e2e_flow`, but with an
-    /// in-process guardian in the loop.
     #[tokio::test]
     async fn test_bitcoin_withdrawal_with_guardian_e2e_flow() -> Result<()> {
         run_bitcoin_withdrawal_e2e(true).await
     }
 
-    /// Shared body for the bitcoin-withdrawal e2e tests, parameterized on
-    /// whether to spin up an in-process guardian alongside the bridge.
-    /// Keeping a single body forces the two flows to stay in lockstep.
     async fn run_bitcoin_withdrawal_e2e(with_guardian: bool) -> Result<()> {
         init_test_logging();
         let label = if with_guardian {
@@ -281,38 +280,18 @@ mod tests {
         if with_guardian {
             builder = builder.with_guardian();
         }
-        let mut networks = builder.build().await?;
-
-        info!("Test networks initialized");
-        info!("  - Sui RPC: {}", networks.sui_network.rpc_url);
-        info!("  - Bitcoin RPC: {}", networks.bitcoin_node.rpc_url());
-        info!("  - Hashi nodes: {}", networks.hashi_network.nodes().len());
-
-        info!("Waiting for MPC key to be ready...");
-        networks.hashi_network.nodes()[0]
-            .wait_for_mpc_key(Duration::from_secs(60))
-            .await?;
-        info!("MPC key ready");
+        let mut networks = setup_test_networks_with(builder).await?;
 
         if with_guardian {
             for node in networks.hashi_network.nodes() {
-                assert!(
-                    node.hashi().config.guardian_endpoint().is_some(),
-                    "guardian endpoint should be configured on every test node"
-                );
-                assert!(
-                    node.hashi().guardian_client().is_some(),
-                    "guardian client should be populated after Hashi::start()"
-                );
+                assert!(node.hashi().config.guardian_endpoint().is_some());
+                assert!(node.hashi().guardian_client().is_some());
             }
             let harness = networks
                 .guardian_harness
                 .as_ref()
                 .expect("harness present when .with_guardian() is set");
-            assert!(
-                harness.enclave().is_fully_initialized(),
-                "guardian harness should have reached fully-initialized state"
-            );
+            assert!(harness.enclave().is_fully_initialized());
         }
 
         let deposit_amount_sats = 100_000u64;
