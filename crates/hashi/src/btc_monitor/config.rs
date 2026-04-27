@@ -240,7 +240,8 @@ pub fn network_from_chain_id(chain_id: &str) -> Option<Network> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::Ordering;
 
     /// Test fake whose threshold can be mutated post-construction so we
     /// can verify the monitor reads the value live, not at boot.

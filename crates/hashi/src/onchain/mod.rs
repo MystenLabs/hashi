@@ -410,7 +410,6 @@ impl crate::btc_monitor::config::ConfirmationThresholdSource for OnchainState {
 }
 
 impl OnchainState {
-
     pub fn mpc_threshold_in_basis_points(&self) -> u16 {
         self.state().hashi().config.mpc_threshold_in_basis_points()
     }
