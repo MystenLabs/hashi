@@ -64,12 +64,10 @@ impl S3Logger {
             .load()
             .await;
 
-        // Path-style addressing (required by MinIO) has no SDK env, so read it explicitly.
+        // A custom endpoint implies an S3-compatible service (MinIO, LocalStack), which
+        // need path-style addressing.
         let mut s3_builder = aws_sdk_s3::config::Builder::from(&aws_config);
-        if std::env::var("AWS_S3_FORCE_PATH_STYLE")
-            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1"))
-            .unwrap_or(false)
-        {
+        if std::env::var_os("AWS_ENDPOINT_URL_S3").is_some() {
             s3_builder = s3_builder.force_path_style(true);
         }
         let client = S3Client::from_conf(s3_builder.build());
