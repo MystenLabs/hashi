@@ -152,12 +152,6 @@ impl CommitteeSet {
         self.committees().get(&self.epoch())
     }
 
-    pub fn previous_committee(&self) -> Option<&Committee> {
-        self.epoch
-            .checked_sub(1)
-            .and_then(|e| self.committees().get(&e))
-    }
-
     pub fn epoch(&self) -> u64 {
         self.epoch
     }

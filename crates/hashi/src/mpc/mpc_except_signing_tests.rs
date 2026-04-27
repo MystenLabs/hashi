@@ -5137,7 +5137,13 @@ impl RotationTestSetup {
     /// DKG manager so it can be used for rotation tests. In production, these
     /// are set by MpcManager::new when pending_epoch_change is set.
     fn prepare_for_rotation(&self, manager: &mut MpcManager) {
-        let previous_committee = self.setup.committee_set.previous_committee().cloned();
+        let previous_committee = self
+            .setup
+            .committee_set
+            .committees()
+            .range(..self.setup.committee_set.epoch())
+            .next_back()
+            .map(|(_, c)| c.clone());
         if let Some(ref prev) = previous_committee {
             let (nodes, threshold, _max_faulty) = build_reduced_nodes(
                 prev,
@@ -5491,10 +5497,11 @@ async fn test_run_key_rotation() {
     let (mut test_manager, test_dkg_output, _) =
         rotation_setup.create_rotation_dealer_with_memory_store(0);
     let test_addr = rotation_setup.setup.address(0);
-    // In this test, DKG was done at epoch 100 (current epoch). The constructor
-    // sets source_epoch = 99 (rotation recovery heuristic), but reconstruction
-    // needs the epoch at which DKG messages were actually created.
-    test_manager.source_epoch = rotation_setup.setup.epoch();
+    // In this test, DKG was done at epoch 100 (current epoch). The constructor's
+    // post-rotation scan finds the immediate predecessor at 99, but
+    // reconstruction needs the epoch at which DKG messages were actually
+    // created (100), so override.
+    test_manager.previous_epoch = rotation_setup.setup.epoch();
     test_manager.previous_output = Some(test_dkg_output.clone());
     let test_manager = Arc::new(RwLock::new(test_manager));
 
@@ -5627,7 +5634,7 @@ async fn test_run_key_rotation_skips_dealer_phase() {
     let (mut test_manager, test_dkg_output, _) =
         rotation_setup.create_rotation_dealer_with_memory_store(0);
     let test_addr = rotation_setup.setup.address(0);
-    test_manager.source_epoch = rotation_setup.setup.epoch();
+    test_manager.previous_epoch = rotation_setup.setup.epoch();
     test_manager.previous_output = Some(test_dkg_output.clone());
     let test_manager = Arc::new(RwLock::new(test_manager));
 
@@ -5731,7 +5738,7 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
     let (mut test_manager, test_dkg_output, _) =
         rotation_setup.create_rotation_dealer_with_memory_store(0);
     let test_addr = rotation_setup.setup.address(0);
-    test_manager.source_epoch = rotation_setup.setup.epoch();
+    test_manager.previous_epoch = rotation_setup.setup.epoch();
     test_manager.previous_output = Some(test_dkg_output.clone());
 
     let mut other_managers_map = HashMap::new();
@@ -5884,7 +5891,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
     let (mut test_manager, test_dkg_output, _) =
         rotation_setup.create_rotation_dealer_with_memory_store(0);
     let test_addr = rotation_setup.setup.address(0);
-    test_manager.source_epoch = rotation_setup.setup.epoch();
+    test_manager.previous_epoch = rotation_setup.setup.epoch();
     test_manager.previous_output = Some(test_dkg_output.clone());
 
     // Create other managers for MockP2PChannel (validators 1-4)
@@ -6085,7 +6092,7 @@ async fn test_run_key_rotation_with_complaint_recovery() {
     let (mut test_manager, test_dkg_output, _) =
         rotation_setup.create_rotation_dealer_with_memory_store(test_party_idx);
     let test_addr = rotation_setup.setup.address(test_party_idx);
-    test_manager.source_epoch = rotation_setup.setup.epoch();
+    test_manager.previous_epoch = rotation_setup.setup.epoch();
     test_manager.previous_output = Some(test_dkg_output.clone());
 
     // Create cheating dealer (validator 3) to get DKG output and share values
@@ -6279,9 +6286,11 @@ async fn test_prepare_previous_output_for_new_member() {
     let previous_committee = rotation_setup
         .setup
         .committee_set
-        .previous_committee()
-        .unwrap()
-        .clone();
+        .committees()
+        .range(..rotation_setup.setup.committee_set.epoch())
+        .next_back()
+        .map(|(_, c)| c.clone())
+        .unwrap();
 
     let mut committees = BTreeMap::new();
     committees.insert(epoch - 1, previous_committee);
@@ -6376,7 +6385,7 @@ async fn test_prepare_previous_output_retrieves_missing_dkg_messages() {
     // override previous_committee to match the cert epoch so retrieval works.
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
     test_manager.public_messages_store = Box::new(InMemoryPublicMessagesStore::new());
-    test_manager.source_epoch = epoch;
+    test_manager.previous_epoch = epoch;
     let test_manager = Arc::new(RwLock::new(test_manager));
 
     // Peers have the messages in their in-memory dkg_messages map.
@@ -6386,7 +6395,7 @@ async fn test_prepare_previous_output_retrieves_missing_dkg_messages() {
     for i in 1..5 {
         let (mut manager, output) = rotation_setup.create_receiver_with_memory_store(i);
         manager.previous_output = Some(output);
-        manager.source_epoch = epoch;
+        manager.previous_epoch = epoch;
         for (j, msg) in rotation_setup.dealer_messages.iter().enumerate() {
             let dealer_addr = rotation_setup
                 .setup
@@ -6490,7 +6499,7 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
     let test_addr = rotation_setup.setup.address(2);
     test_manager.public_messages_store = Box::new(InMemoryPublicMessagesStore::new());
     test_manager.previous_committee = Some(rotation_setup.setup.committee().clone());
-    test_manager.source_epoch = epoch;
+    test_manager.previous_epoch = epoch;
     test_manager.previous_output = Some(test_dkg_output.clone());
     let test_manager = Arc::new(RwLock::new(test_manager));
 
@@ -9768,4 +9777,194 @@ fn test_handle_get_public_mpc_output_serves_current_and_previous() {
         matches!(err, MpcError::NotFound(ref msg) if msg.contains("no DKG output for epoch")),
         "expected out-of-range NotFound, got {err:?}",
     );
+}
+
+fn make_jumped_committee_set(setup: &mut TestSetup, prev_epoch: u64) {
+    let current_epoch = setup.committee_set.epoch();
+    assert!(prev_epoch < current_epoch - 1, "use a real gap");
+
+    let members = setup
+        .committee_set
+        .current_committee()
+        .unwrap()
+        .members()
+        .to_vec();
+    let prev_committee = Committee::new(
+        members,
+        prev_epoch,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
+    );
+    let current_committee = setup.committee_set.current_committee().unwrap().clone();
+
+    let mut committees = BTreeMap::new();
+    committees.insert(prev_epoch, prev_committee);
+    committees.insert(current_epoch, current_committee);
+    setup.committee_set.set_committees(committees);
+}
+
+fn make_single_committee_set(setup: &mut TestSetup) {
+    let current_epoch = setup.committee_set.epoch();
+    let current_committee = setup.committee_set.current_committee().unwrap().clone();
+    let mut committees = BTreeMap::new();
+    committees.insert(current_epoch, current_committee);
+    setup.committee_set.set_committees(committees);
+}
+
+/// Fix #1 — constructor scan picks the most-recent-prior committee in a
+/// jumped state, regardless of gap size.
+#[test]
+fn test_mpc_manager_new_jumped_state_picks_actual_predecessor() {
+    let mut setup = TestSetup::new(5);
+    let current_epoch = setup.committee_set.epoch(); // 100
+    let prev_epoch = current_epoch - 3; // 97; gap of 3, intermediate epochs absent.
+    make_jumped_committee_set(&mut setup, prev_epoch);
+
+    let manager = setup.create_manager(0);
+
+    assert_eq!(
+        manager.previous_epoch, prev_epoch,
+        "constructor should resolve previous_epoch to the actual stored \
+         predecessor (97), not current-1 (99)"
+    );
+    let prev_committee = manager
+        .previous_committee
+        .as_ref()
+        .expect("previous_committee should be populated for a jumped state");
+    assert_eq!(
+        prev_committee.epoch(),
+        prev_epoch,
+        "previous_committee should be the committee at {prev_epoch}",
+    );
+}
+
+#[test]
+fn test_mpc_manager_new_post_initial_dkg_single_committee() {
+    let mut setup = TestSetup::new(5);
+    let current_epoch = setup.committee_set.epoch();
+    make_single_committee_set(&mut setup);
+
+    let manager = setup.create_manager(0);
+
+    assert_eq!(
+        manager.previous_epoch, current_epoch,
+        "previous_epoch falls back to current when no predecessor is stored"
+    );
+    assert!(
+        manager.previous_committee.is_none(),
+        "previous_committee should be None when only one committee is stored"
+    );
+}
+
+#[test]
+fn test_handle_get_public_mpc_output_jumped_state_uses_previous_epoch() {
+    let mut setup = TestSetup::new(5);
+    let current_epoch = setup.committee_set.epoch();
+    let prev_epoch = current_epoch - 3;
+    make_jumped_committee_set(&mut setup, prev_epoch);
+
+    let mut manager = setup.create_manager(0);
+    assert_eq!(manager.previous_epoch, prev_epoch);
+
+    let rotation_setup = RotationTestSetup::new();
+    let (_, output) = rotation_setup.create_receiver_with_completed_dkg(0);
+    manager.previous_output = Some(output.clone());
+    let expected_public = PublicMpcOutput::from_mpc_output(&output);
+
+    let response = manager
+        .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest { epoch: prev_epoch })
+        .expect("request for actual source epoch should succeed");
+    assert_eq!(response.output, expected_public);
+
+    let stale_epoch = current_epoch - 1;
+    assert!(stale_epoch != prev_epoch, "test setup mistake");
+    let err = manager
+        .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest { epoch: stale_epoch })
+        .unwrap_err();
+    assert!(
+        matches!(err, MpcError::NotFound(ref msg) if msg.contains("no DKG output for epoch")),
+        "request for stale current-1 should be rejected as out-of-range, got {err:?}",
+    );
+}
+
+#[tokio::test]
+async fn test_fetch_public_mpc_output_uses_previous_epoch() {
+    let mut setup = TestSetup::new(5);
+    let current_epoch = setup.committee_set.epoch();
+    let prev_epoch = current_epoch - 3;
+    make_jumped_committee_set(&mut setup, prev_epoch);
+
+    let manager = setup.create_manager(0);
+    assert_eq!(manager.previous_epoch, prev_epoch);
+    assert!(manager.previous_committee.is_some());
+
+    // Spy channel: captures the requested epoch and returns failure so the
+    // function exits without needing a real quorum.
+    use std::sync::Mutex;
+    struct SpyChannel {
+        captured: Arc<Mutex<Vec<u64>>>,
+    }
+    #[async_trait::async_trait]
+    impl P2PChannel for SpyChannel {
+        async fn send_messages(
+            &self,
+            _party: &Address,
+            _request: &SendMessagesRequest,
+        ) -> ChannelResult<SendMessagesResponse> {
+            unimplemented!()
+        }
+        async fn retrieve_messages(
+            &self,
+            _party: &Address,
+            _request: &RetrieveMessagesRequest,
+        ) -> ChannelResult<RetrieveMessagesResponse> {
+            unimplemented!()
+        }
+        async fn complain(
+            &self,
+            _party: &Address,
+            _request: &ComplainRequest,
+        ) -> ChannelResult<ComplaintResponses> {
+            unimplemented!()
+        }
+        async fn get_public_mpc_output(
+            &self,
+            _party: &Address,
+            request: &GetPublicMpcOutputRequest,
+        ) -> ChannelResult<GetPublicMpcOutputResponse> {
+            self.captured.lock().unwrap().push(request.epoch);
+            Err(crate::communication::ChannelError::RequestFailed(
+                "spy".into(),
+            ))
+        }
+        async fn get_partial_signatures(
+            &self,
+            _party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            unimplemented!()
+        }
+    }
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let spy = SpyChannel {
+        captured: captured.clone(),
+    };
+
+    let mgr_arc = Arc::new(std::sync::RwLock::new(manager));
+    let _ = MpcManager::fetch_public_mpc_output_from_quorum(&mgr_arc, &spy, 1).await;
+
+    let captured = captured.lock().unwrap();
+    assert!(
+        !captured.is_empty(),
+        "spy should have captured at least one request"
+    );
+    for epoch in captured.iter() {
+        assert_eq!(
+            *epoch, prev_epoch,
+            "fetch should request the actual source epoch ({prev_epoch}), \
+             not current-1; got {epoch}",
+        );
+    }
 }
