@@ -24,15 +24,6 @@ use crate::metrics::Metrics;
 const FALLBACK_FEE_RATE_SAT_PER_KWU: u64 = 250;
 
 /// Number of consecutive connection failures before restarting Kyoto.
-///
-/// The rebuild path is also our only mechanism to re-resolve hostname peers:
-/// in `bip157` >= 0.5.0, `TrustedPeer::from_hostname` is consumed on use
-/// (popped from the whitelist when first tried, never reinstated), so once
-/// the resolved-IP set is exhausted only a fresh `Builder::build()` will
-/// run `lookup_host` again. We want this low enough that a Kubernetes pod
-/// rotation that swaps every IP recovers in tens of seconds rather than
-/// minutes, but high enough that a single peer flap does not churn the
-/// whole node.
 const KYOTO_MAX_CONSECUTIVE_FAILURES: u32 = 15;
 
 /// Delay before restarting Kyoto after connectivity loss.
