@@ -24,7 +24,7 @@ use crate::metrics::Metrics;
 const FALLBACK_FEE_RATE_SAT_PER_KWU: u64 = 250;
 
 /// Number of consecutive connection failures before restarting Kyoto.
-const KYOTO_MAX_CONSECUTIVE_FAILURES: u32 = 30;
+const KYOTO_MAX_CONSECUTIVE_FAILURES: u32 = 15;
 
 /// Delay before restarting Kyoto after connectivity loss.
 const KYOTO_RESTART_DELAY: Duration = Duration::from_secs(5);
