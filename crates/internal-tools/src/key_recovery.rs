@@ -44,38 +44,37 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
         bail!("--db-paths is required");
     }
 
-    let source_epoch = detect_epoch(&args.db_paths[0])?;
-    let reconstruction_epoch = source_epoch + 1;
+    let previous_epoch = detect_epoch(&args.db_paths[0])?;
+    let reconstruction_epoch = previous_epoch + 1;
 
     let committee = {
         let state = onchain_state.state();
         let committees = state.hashi().committees.committees();
         committees
             .get(&reconstruction_epoch)
-            .or_else(|| committees.get(&source_epoch))
+            .or_else(|| committees.get(&previous_epoch))
             .ok_or_else(|| {
-                anyhow!("no committee found for epoch {reconstruction_epoch} or {source_epoch}")
+                anyhow!("no committee found for epoch {reconstruction_epoch} or {previous_epoch}")
             })?
             .clone()
     };
 
     println!(
-        "Source epoch {source_epoch}: {} validators, fetching certificates...",
+        "Previous epoch {previous_epoch}: {} validators, fetching certificates...",
         committee.members().len()
     );
 
-    // Fetch certificates for the source epoch
-    let raw_certs = fetch_certificates(onchain_state, source_epoch, None)
+    let raw_certs = fetch_certificates(onchain_state, previous_epoch, None)
         .await
         .map_err(|e| anyhow!("failed to fetch certificates: {e}"))?;
     let certificates: Vec<CertificateV1> = raw_certs.into_iter().map(|(_, cert)| cert).collect();
     println!(
-        "Fetched {} certificates for epoch {source_epoch}",
+        "Fetched {} certificates for epoch {previous_epoch}",
         certificates.len()
     );
 
     if certificates.is_empty() {
-        bail!("No certificates found for epoch {source_epoch}. Try a different epoch.");
+        bail!("No certificates found for epoch {previous_epoch}. Try a different epoch.");
     }
 
     // For each validator DB, reconstruct their key shares
@@ -91,11 +90,11 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
                 .with_context(|| format!("failed to open DB: {}", db_path.display()))?,
         );
         let encryption_key = db
-            .get_encryption_key(source_epoch)
+            .get_encryption_key(previous_epoch)
             .map_err(|e| anyhow!("failed to read encryption key: {e}"))?
             .ok_or_else(|| {
                 anyhow!(
-                    "no encryption key found for epoch {source_epoch} in {}",
+                    "no encryption key found for epoch {previous_epoch} in {}",
                     db_path.display()
                 )
             })?;
@@ -104,12 +103,12 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
         let validator_address = find_validator_by_encryption_key(&committee, &my_enc_pk)
             .ok_or_else(|| {
                 anyhow!(
-                    "DB encryption key doesn't match any committee member (epoch {source_epoch})"
+                    "DB encryption key doesn't match any committee member (epoch {previous_epoch})"
                 )
             })?;
         println!("  Validator address: {validator_address}");
 
-        let store = EpochPublicMessagesStore::new(db.clone(), source_epoch);
+        let store = EpochPublicMessagesStore::new(db.clone(), previous_epoch);
         let session_id = SessionId::new(chain_id, reconstruction_epoch, &ProtocolType::KeyRotation);
         let mut manager = {
             let state = onchain_state.state();
@@ -129,9 +128,9 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
             .map_err(|e| anyhow!("failed to create MpcManager: {e}"))?
         };
 
-        // Override source_epoch to match the backed-up DB's epoch, since
+        // Override previous_epoch to match the backed-up DB's epoch, since
         // the on-chain epoch may have advanced past the backup.
-        manager.set_source_epoch(source_epoch);
+        manager.set_previous_epoch(previous_epoch);
 
         // Pass an empty complaint cache: the recovery tool runs reconstruction
         // once without retrying through complaint recovery, so there are no
