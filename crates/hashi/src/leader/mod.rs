@@ -1252,6 +1252,29 @@ impl LeaderService {
         }
         info!("MPC signing withdrawal transaction");
 
+        // Leader-side limiter check before broadcasting MPC: peek next_seq
+        // and validate locally so we don't waste an MPC round if our own
+        // limiter would reject the consume. The same expected_seq is
+        // forwarded to every committee member via the MPC request.
+        let expected_limiter_seq = if let Some(limiter) = inner.local_limiter() {
+            let amount_sats: u64 = txn.withdrawal_outputs.iter().map(|o| o.amount).sum();
+            let timestamp_secs = txn.timestamp_ms / 1000;
+            let next_seq = limiter.next_seq().await;
+            if let Err(e) = limiter
+                .validate_consume(next_seq, timestamp_secs, amount_sats)
+                .await
+            {
+                warn!(
+                    withdrawal_txn_id = %txn.id,
+                    "Leader local limiter rejected withdrawal; will retry on next checkpoint: {e}"
+                );
+                return Ok(());
+            }
+            Some(next_seq)
+        } else {
+            None
+        };
+
         let members = inner
             .onchain_state()
             .current_committee_members()
@@ -1260,9 +1283,12 @@ impl LeaderService {
         // 1. Request signed withdrawal tx witnesses from committee members.
         // MPC signing requires all threshold members to participate simultaneously
         // via P2P, so we must fan out requests in parallel.
-        let signatures_by_input = Self::collect_withdrawal_tx_signatures(&inner, &txn.id, &members)
-            .await
-            .ok_or_else(|| anyhow::anyhow!("Failed to collect MPC signatures for {:?}", txn.id))?;
+        let signatures_by_input =
+            Self::collect_withdrawal_tx_signatures(&inner, &txn.id, expected_limiter_seq, &members)
+                .await
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Failed to collect MPC signatures for {:?}", txn.id)
+                })?;
 
         // 2. Extract raw signature bytes for on-chain storage
         let witness_signatures: Vec<Vec<u8>> = signatures_by_input
@@ -1737,6 +1763,7 @@ impl LeaderService {
     async fn request_withdrawal_tx_signature(
         inner: &Arc<Hashi>,
         withdrawal_txn_id: &Address,
+        expected_limiter_seq: Option<u64>,
         member: &CommitteeMember,
     ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let validator_address = member.validator_address();
@@ -1754,6 +1781,7 @@ impl LeaderService {
 
         let proto_request = SignWithdrawalTransactionRequest {
             withdrawal_txn_id: withdrawal_txn_id.as_bytes().to_vec().into(),
+            expected_limiter_seq,
         };
 
         let response = rpc_client
@@ -1788,11 +1816,19 @@ impl LeaderService {
     async fn collect_withdrawal_tx_signatures(
         inner: &Arc<Hashi>,
         withdrawal_txn_id: &Address,
+        expected_limiter_seq: Option<u64>,
         members: &[CommitteeMember],
     ) -> Option<Vec<SchnorrSignature>> {
         let futures: Vec<_> = members
             .iter()
-            .map(|member| Self::request_withdrawal_tx_signature(inner, withdrawal_txn_id, member))
+            .map(|member| {
+                Self::request_withdrawal_tx_signature(
+                    inner,
+                    withdrawal_txn_id,
+                    expected_limiter_seq,
+                    member,
+                )
+            })
             .collect();
         let results = futures::future::join_all(futures).await;
 

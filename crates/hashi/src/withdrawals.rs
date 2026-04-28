@@ -507,9 +507,11 @@ impl Hashi {
     pub async fn validate_and_sign_withdrawal_tx(
         &self,
         withdrawal_txn_id: &Address,
+        expected_limiter_seq: Option<u64>,
     ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let (txn, unsigned_tx) = self.validate_withdrawal_signing(withdrawal_txn_id).await?;
-        self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx).await
+        self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx, expected_limiter_seq)
+            .await
     }
 
     pub async fn validate_withdrawal_signing(
@@ -549,6 +551,7 @@ impl Hashi {
         &self,
         txn: &crate::onchain::types::WithdrawalTransaction,
         unsigned_tx: &bitcoin::Transaction,
+        expected_limiter_seq: Option<u64>,
     ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let onchain_state = self.onchain_state().clone();
         let epoch = onchain_state.epoch();
@@ -561,6 +564,28 @@ impl Hashi {
                 txn.epoch,
                 epoch,
             );
+        }
+        // Read-only seq + capacity check before MPC. Local state is mutated
+        // by a downstream observer in a later commit in this stack, never by
+        // this signing path.
+        match (self.local_limiter(), expected_limiter_seq) {
+            (Some(limiter), Some(expected_seq)) => {
+                let amount_sats: u64 = txn.withdrawal_outputs.iter().map(|o| o.amount).sum();
+                let timestamp_secs = txn.timestamp_ms / 1000;
+                limiter
+                    .validate_consume(expected_seq, timestamp_secs, amount_sats)
+                    .await
+                    .map_err(|e| anyhow!("Limiter rejected withdrawal {}: {e}", txn.id))?;
+            }
+            (None, None) => {}
+            (local, expected) => {
+                tracing::warn!(
+                    withdrawal_txn_id = %txn.id,
+                    local_configured = local.is_some(),
+                    expected_seq_provided = expected.is_some(),
+                    "Skipping local limiter validation due to configuration mismatch"
+                );
+            }
         }
         let p2p_channel =
             RpcP2PChannel::new(onchain_state, epoch, crate::metrics::MPC_LABEL_SIGNING);
