@@ -322,6 +322,20 @@ impl CommitteeSet {
     }
 }
 
+impl mpc::CommitteeSetView for CommitteeSet {
+    fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    fn pending_epoch_change(&self) -> Option<u64> {
+        self.pending_epoch_change
+    }
+
+    fn committees(&self) -> &BTreeMap<u64, Committee> {
+        &self.committees
+    }
+}
+
 #[derive(Clone)]
 pub struct MemberInfo {
     /// Sui Validator Address of this node

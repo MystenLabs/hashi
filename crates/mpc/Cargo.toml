@@ -1,0 +1,44 @@
+[package]
+name = "mpc"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+hashi-types = { path = "../hashi-types" }
+
+sui-sdk-types.workspace = true
+sui-crypto.workspace = true
+sui-rpc.workspace = true
+
+# RPC
+tonic.workspace = true
+
+# Async + traits
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_derive.workspace = true
+bcs.workspace = true
+
+# Crypto
+fastcrypto.workspace = true
+fastcrypto-tbls.workspace = true
+rand.workspace = true
+hex.workspace = true
+
+# Metrics
+prometheus.workspace = true
+
+# Errors / observability
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# Retry helper used by communication::timeout_and_retry
+backon.workspace = true
+
+[dev-dependencies]
+tracing-test = "0.2"

@@ -1,25 +1,26 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::communication::ChannelError;
-use crate::communication::ChannelResult;
-use crate::communication::P2PChannel;
-use crate::grpc::Client;
-use crate::grpc::MPC_PROTOCOL_METADATA_KEY;
-use crate::mpc::types::ComplainRequest;
-use crate::mpc::types::ComplaintResponses;
-use crate::mpc::types::GetPartialSignaturesRequest;
-use crate::mpc::types::GetPartialSignaturesResponse;
-use crate::mpc::types::GetPublicMpcOutputRequest;
-use crate::mpc::types::GetPublicMpcOutputResponse;
-use crate::mpc::types::RetrieveMessagesRequest;
-use crate::mpc::types::RetrieveMessagesResponse;
-use crate::mpc::types::SendMessagesRequest;
-use crate::mpc::types::SendMessagesResponse;
-use crate::onchain::OnchainState;
 use async_trait::async_trait;
+use mpc::communication::ChannelError;
+use mpc::communication::ChannelResult;
+use mpc::communication::P2PChannel;
+use mpc::types::ComplainRequest;
+use mpc::types::ComplaintResponses;
+use mpc::types::GetPartialSignaturesRequest;
+use mpc::types::GetPartialSignaturesResponse;
+use mpc::types::GetPublicMpcOutputRequest;
+use mpc::types::GetPublicMpcOutputResponse;
+use mpc::types::RetrieveMessagesRequest;
+use mpc::types::RetrieveMessagesResponse;
+use mpc::types::SendMessagesRequest;
+use mpc::types::SendMessagesResponse;
 use sui_sdk_types::Address;
 use tonic::metadata::MetadataValue;
+
+use crate::grpc::Client;
+use crate::grpc::MPC_PROTOCOL_METADATA_KEY;
+use crate::onchain::OnchainState;
 
 pub struct RpcP2PChannel {
     onchain_state: OnchainState,

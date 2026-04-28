@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 hashi = { path = "../hashi" }
+mpc = { path = "../mpc" }
 hashi-screener = { path = "../hashi-screener", features = ["test-utils"] }
 hashi-types = { path = "../hashi-types" }
 

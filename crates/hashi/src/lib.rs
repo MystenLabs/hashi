@@ -1,10 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::RwLock;
 
 use anyhow::anyhow;
 use sui_futures::service::Service;
@@ -12,7 +10,6 @@ use sui_futures::service::Service;
 pub mod backup;
 pub mod btc_monitor;
 pub mod cli;
-pub mod communication;
 pub mod config;
 pub mod constants;
 pub mod db;
@@ -20,7 +17,9 @@ pub mod deposits;
 pub mod grpc;
 pub mod leader;
 pub mod metrics;
-pub mod mpc;
+pub mod mpc_p2p_channel;
+pub mod mpc_service;
+pub mod mpc_sui_tob;
 pub mod onchain;
 pub mod publish;
 pub mod storage;
@@ -43,14 +42,11 @@ pub struct Hashi {
     pub config: config::Config,
     pub metrics: Arc<metrics::Metrics>,
     pub db: Arc<db::Database>,
+    pub(crate) mpc_state: Arc<mpc::MpcServiceState>,
     onchain_state: OnceLock<onchain::OnchainState>,
-    mpc_manager: OnceLock<Arc<RwLock<mpc::MpcManager>>>,
-    signing_manager: RwLock<Option<Arc<mpc::SigningManager>>>,
-    mpc_handle: OnceLock<mpc::MpcHandle>,
-    btc_monitor: OnceLock<crate::btc_monitor::monitor::MonitorClient>,
+    mpc_handle: OnceLock<mpc_service::MpcHandle>,
+    btc_monitor: OnceLock<btc_monitor::monitor::MonitorClient>,
     screener_client: OnceLock<Option<grpc::screener_client::ScreenerClient>>,
-    /// Reconfig completion signatures by epoch.
-    reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
 }
 
 impl Hashi {
@@ -64,13 +60,11 @@ impl Hashi {
             config,
             metrics,
             db: Arc::new(db),
+            mpc_state: Arc::new(mpc::MpcServiceState::new()),
             onchain_state: OnceLock::new(),
-            mpc_manager: OnceLock::new(),
-            signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
-            reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
 
@@ -88,13 +82,11 @@ impl Hashi {
             config,
             metrics,
             db: Arc::new(db),
+            mpc_state: Arc::new(mpc::MpcServiceState::new()),
             onchain_state: OnceLock::new(),
-            mpc_manager: OnceLock::new(),
-            signing_manager: RwLock::new(None),
             mpc_handle: OnceLock::new(),
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
-            reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
 
@@ -110,30 +102,16 @@ impl Hashi {
         self.onchain_state.get()
     }
 
-    pub fn mpc_manager(&self) -> Option<Arc<RwLock<mpc::MpcManager>>> {
-        self.mpc_manager.get().cloned()
+    pub fn mpc_manager(&self) -> Option<Arc<std::sync::RwLock<mpc::MpcManager>>> {
+        self.mpc_state.mpc_manager()
     }
 
     pub fn set_mpc_manager(&self, manager: mpc::MpcManager) {
-        match self.mpc_manager.get() {
-            Some(lock) => {
-                // RwLock::write only fails if poisoned (a thread panicked while holding the lock).
-                // Poisoning indicates a bug, so we propagate the panic rather than recover.
-                *lock.write().unwrap() = manager;
-            }
-            None => {
-                // First-time initialization (e.g. new committee member joining mid-rotation).
-                let _ = self.mpc_manager.set(Arc::new(RwLock::new(manager)));
-            }
-        }
+        self.mpc_state.set_mpc_manager(manager);
     }
 
     pub fn signing_manager_for(&self, epoch: u64) -> Option<Arc<mpc::SigningManager>> {
-        let stored = self.signing_manager.read().unwrap();
-        stored
-            .as_ref()
-            .filter(|manager| manager.epoch() == epoch)
-            .cloned()
+        self.mpc_state.signing_manager_for(epoch)
     }
 
     pub fn current_signing_manager(&self) -> Option<Arc<mpc::SigningManager>> {
@@ -142,20 +120,16 @@ impl Hashi {
     }
 
     pub fn signing_verifying_key(&self) -> Option<fastcrypto_tbls::threshold_schnorr::G> {
-        self.signing_manager
-            .read()
-            .unwrap()
-            .as_ref()
-            .map(|manager| manager.verifying_key())
+        self.mpc_state.signing_verifying_key()
     }
 
     pub fn store_signing_manager(&self, manager: mpc::SigningManager) {
-        *self.signing_manager.write().unwrap() = Some(Arc::new(manager));
+        self.mpc_state.store_signing_manager(manager);
     }
 
     /// Test-only
     pub fn clear_signing_manager_for_test(&self) {
-        *self.signing_manager.write().unwrap() = None;
+        self.mpc_state.clear_signing_manager_for_test();
     }
 
     pub fn btc_monitor(&self) -> &crate::btc_monitor::monitor::MonitorClient {
@@ -163,21 +137,14 @@ impl Hashi {
     }
 
     pub fn store_reconfig_signature(&self, epoch: u64, signature: Vec<u8>) {
-        self.reconfig_signatures
-            .write()
-            .unwrap()
-            .insert(epoch, signature);
+        self.mpc_state.store_reconfig_signature(epoch, signature);
     }
 
     pub fn get_reconfig_signature(&self, epoch: u64) -> Option<Vec<u8>> {
-        self.reconfig_signatures
-            .read()
-            .unwrap()
-            .get(&epoch)
-            .cloned()
+        self.mpc_state.get_reconfig_signature(epoch)
     }
 
-    pub fn mpc_handle(&self) -> Option<&mpc::MpcHandle> {
+    pub fn mpc_handle(&self) -> Option<&mpc_service::MpcHandle> {
         self.mpc_handle.get()
     }
 
@@ -208,7 +175,8 @@ impl Hashi {
         let state = self.onchain_state().state();
         let hashi = state.hashi();
         let committee_set = &hashi.committees;
-        let session_id = mpc::SessionId::new(self.config.sui_chain_id(), epoch, &protocol_type);
+        let session_id =
+            mpc::types::SessionId::new(self.config.sui_chain_id(), epoch, &protocol_type);
         let encryption_key = self.config.encryption_private_key()?;
         self.db
             .store_encryption_key(epoch, &encryption_key)
@@ -421,7 +389,7 @@ impl Hashi {
             );
         }
 
-        let (mpc_service, mpc_handle) = mpc::MpcService::new(self.clone());
+        let (mpc_service, mpc_handle) = mpc_service::MpcService::new(self.clone());
         self.mpc_handle
             .set(mpc_handle)
             .expect("MpcHandle already set");

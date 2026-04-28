@@ -6,8 +6,8 @@ use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use sui_sdk_types::Address;
 
-pub use crate::mpc::types::Messages;
-pub use crate::mpc::types::RotationMessages;
+pub use crate::types::Messages;
+pub use crate::types::RotationMessages;
 
 pub trait PublicMessagesStore: Send + Sync {
     /// Store a dealer's DKG message at the given epoch.

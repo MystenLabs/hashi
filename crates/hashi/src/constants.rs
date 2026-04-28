@@ -19,9 +19,7 @@ pub const BITCOIN_SIGNET_CHAIN_ID: &str =
 pub const BITCOIN_REGTEST_CHAIN_ID: &str =
     "0f9188f13cb7b2c71f2a335e3a4fc328bf5beb436012afca590b1a11466e2206";
 
-/// Trigger presignature refill when remaining presignatures drop to
-/// `initial_pool_size / PRESIG_REFILL_DIVISOR`.
-pub const PRESIG_REFILL_DIVISOR: usize = 2;
+pub use mpc::constants::PRESIG_REFILL_DIVISOR;
 
 pub fn is_production_sui_chain(chain_id: &str) -> bool {
     chain_id == SUI_MAINNET_CHAIN_ID || chain_id == SUI_TESTNET_CHAIN_ID

@@ -1,11 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::grpc::HttpService;
-use crate::mpc::spawn_blocking;
-use crate::mpc::types;
-use crate::mpc::types::MpcError;
-use crate::mpc::types::SigningError;
+use std::sync::Arc;
+
 use hashi_types::proto::ComplainRequest;
 use hashi_types::proto::ComplainResponse;
 use hashi_types::proto::GetPartialSignaturesRequest;
@@ -22,8 +19,44 @@ use hashi_types::proto::mpc_service_server::MpcService;
 use sui_sdk_types::Address;
 use tonic::Status;
 
+use crate::MpcMetrics;
+use crate::MpcServiceState;
+use crate::metrics::MPC_LABEL_DKG;
+use crate::metrics::MPC_LABEL_KEY_ROTATION;
+use crate::metrics::MPC_LABEL_NONCE_GENERATION;
+use crate::spawn_blocking;
+use crate::types;
+use crate::types::MpcError;
+use crate::types::SigningError;
+
+#[derive(Clone)]
+pub struct MpcServiceImpl {
+    state: Arc<MpcServiceState>,
+    metrics: Arc<MpcMetrics>,
+}
+
+impl MpcServiceImpl {
+    pub fn new(state: Arc<MpcServiceState>, metrics: Arc<MpcMetrics>) -> Self {
+        Self { state, metrics }
+    }
+
+    fn mpc_manager(&self) -> Result<Arc<std::sync::RwLock<crate::MpcManager>>, Status> {
+        self.state
+            .mpc_manager()
+            .ok_or_else(|| Status::unavailable("DKG manager not yet initialized"))
+    }
+
+    fn signing_manager_for(&self, epoch: u64) -> Result<Arc<crate::SigningManager>, Status> {
+        self.state.signing_manager_for(epoch).ok_or_else(|| {
+            Status::unavailable(format!(
+                "SigningManager not available for epoch {epoch}; retry"
+            ))
+        })
+    }
+}
+
 #[tonic::async_trait]
-impl MpcService for HttpService {
+impl MpcService for MpcServiceImpl {
     #[tracing::instrument(skip(self, request))]
     async fn send_messages(
         &self,
@@ -34,13 +67,13 @@ impl MpcService for HttpService {
         let internal_request = types::SendMessagesRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         let label = match &internal_request.messages {
-            types::Messages::Dkg(_) => crate::metrics::MPC_LABEL_DKG,
-            types::Messages::Rotation(_) => crate::metrics::MPC_LABEL_KEY_ROTATION,
-            types::Messages::NonceGeneration(_) => crate::metrics::MPC_LABEL_NONCE_GENERATION,
+            types::Messages::Dkg(_) => MPC_LABEL_DKG,
+            types::Messages::Rotation(_) => MPC_LABEL_KEY_ROTATION,
+            types::Messages::NonceGeneration(_) => MPC_LABEL_NONCE_GENERATION,
         };
         let mpc_manager = self.mpc_manager()?;
         let _timer = self
-            .metrics()
+            .metrics
             .mpc_rpc_handler_process_duration_seconds
             .with_label_values(&[label])
             .start_timer();
@@ -156,7 +189,7 @@ impl MpcService for HttpService {
         let epoch = external_request
             .epoch
             .ok_or_else(|| Status::invalid_argument("epoch: missing required field"))?;
-        let signature = self.get_reconfig_signature(epoch).map(Into::into);
+        let signature = self.state.get_reconfig_signature(epoch).map(Into::into);
         Ok(tonic::Response::new(
             GetReconfigCompletionSignatureResponse { signature },
         ))

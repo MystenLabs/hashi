@@ -14,18 +14,18 @@ use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::S;
-use hashi::communication::fetch_certificates;
 use hashi::db::Database;
-use hashi::mpc::MpcManager;
-use hashi::mpc::types::CertificateV1;
-use hashi::mpc::types::ProtocolType;
-use hashi::mpc::types::ReconstructionOutcome;
-use hashi::mpc::types::SessionId;
+use hashi::mpc_sui_tob::fetch_certificates;
 use hashi::onchain::OnchainState;
 use hashi::storage::EpochPublicMessagesStore;
 use hashi_types::committee::Bls12381PrivateKey;
 use hashi_types::committee::Committee;
 use hashi_types::committee::EncryptionPublicKey;
+use mpc::MpcManager;
+use mpc::types::CertificateV1;
+use mpc::types::ProtocolType;
+use mpc::types::ReconstructionOutcome;
+use mpc::types::SessionId;
 use sui_sdk_types::Address;
 
 #[derive(Parser)]

@@ -7,10 +7,11 @@ use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use sui_sdk_types::Address;
 
+use mpc::PublicMessagesStore;
+use mpc::RotationMessages;
+use mpc::types::Messages;
+
 use crate::db::Database;
-use crate::mpc::types::Messages;
-use crate::mpc::types::RotationMessages;
-use crate::storage::PublicMessagesStore;
 
 pub struct EpochPublicMessagesStore {
     db: Arc<Database>,

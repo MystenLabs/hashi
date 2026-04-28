@@ -2090,6 +2090,7 @@ dependencies = [
  "hashi",
  "hashi-screener",
  "hashi-types",
+ "mpc",
  "nix",
  "prometheus",
  "rand 0.8.5",
@@ -2835,6 +2836,7 @@ dependencies = [
  "http 1.4.0",
  "jiff",
  "jsonrpc",
+ "mpc",
  "prometheus",
  "prometheus-closure-metric",
  "proptest",
@@ -3490,6 +3492,7 @@ dependencies = [
  "hashi",
  "hashi-types",
  "hex",
+ "mpc",
  "rand 0.8.5",
  "reqwest",
  "serde",
@@ -3962,6 +3965,33 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mpc"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "backon",
+ "bcs",
+ "fastcrypto",
+ "fastcrypto-tbls",
+ "futures",
+ "hashi-types",
+ "hex",
+ "prometheus",
+ "rand 0.8.5",
+ "serde",
+ "serde_derive",
+ "sui-crypto",
+ "sui-rpc",
+ "sui-sdk-types",
+ "thiserror 1.0.69",
+ "tokio",
+ "tonic",
+ "tracing",
+ "tracing-test",
 ]
 
 [[package]]

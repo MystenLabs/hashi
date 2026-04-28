@@ -12,6 +12,7 @@ sui-transaction-builder.workspace = true
 sui-futures = { workspace = true }
 
 hashi-types = { path = "../hashi-types" }
+mpc = { path = "../mpc" }
 
 # Bitcoin dependencies
 bitcoin.workspace = true

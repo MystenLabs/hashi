@@ -18,7 +18,7 @@ use hashi_types::committee::EncryptionPrivateKey;
 
 use serde::de::DeserializeOwned;
 
-use crate::mpc::types::RotationMessages;
+use mpc::types::RotationMessages;
 
 pub struct Database {
     db: fjall::Database,
@@ -442,13 +442,13 @@ fn prune_keyspace(keyspace: &Keyspace, cutoff_epoch: u64) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::mpc::EncryptionGroupElement;
     use fastcrypto_tbls::nodes::Node;
     use fastcrypto_tbls::nodes::Nodes;
     use fastcrypto_tbls::threshold_schnorr::avss;
     use fastcrypto_tbls::threshold_schnorr::batch_avss;
     use hashi_types::committee::EncryptionPrivateKey;
     use hashi_types::committee::EncryptionPublicKey;
+    use mpc::EncryptionGroupElement;
     use sui_sdk_types::Address;
 
     use super::Database;
@@ -1069,7 +1069,7 @@ mod tests {
     #[test]
     fn test_epoch_store_writes_at_explicit_epoch_not_self_epoch() {
         use crate::storage::EpochPublicMessagesStore;
-        use crate::storage::PublicMessagesStore;
+        use mpc::PublicMessagesStore;
         use std::collections::BTreeMap;
         use std::num::NonZeroU16;
 

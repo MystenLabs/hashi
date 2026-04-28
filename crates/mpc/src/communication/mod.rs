@@ -10,7 +10,6 @@
 #[cfg(test)]
 pub mod in_memory;
 pub mod interfaces;
-pub mod sui_tob;
 pub mod timeout_and_retry;
 
 #[cfg(test)]
@@ -19,7 +18,5 @@ pub use interfaces::ChannelError;
 pub use interfaces::ChannelResult;
 pub use interfaces::OrderedBroadcastChannel;
 pub use interfaces::P2PChannel;
-pub use sui_tob::SuiTobChannel;
-pub use sui_tob::fetch_certificates;
 pub use timeout_and_retry::send_to_many;
 pub use timeout_and_retry::with_timeout_and_retry;
