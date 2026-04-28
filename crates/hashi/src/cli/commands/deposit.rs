@@ -23,8 +23,19 @@ pub async fn run(action: DepositCommands, config: &CliConfig, tx_opts: &TxOption
         DepositCommands::GenerateAddress { recipient } => {
             generate_address(config, &recipient).await
         }
-        DepositCommands::Request { txid, recipient } => {
-            request_all(config, tx_opts, &txid, recipient.as_deref()).await
+        DepositCommands::Request {
+            txid,
+            outputs,
+            recipient,
+        } => {
+            request_all(
+                config,
+                tx_opts,
+                &txid,
+                outputs.as_deref(),
+                recipient.as_deref(),
+            )
+            .await
         }
         DepositCommands::RequestSingle {
             txid,
@@ -183,11 +194,10 @@ async fn request_all(
     config: &CliConfig,
     _tx_opts: &TxOptions,
     txid: &str,
+    outputs: Option<&str>,
     recipient: Option<&str>,
 ) -> Result<()> {
     config.validate()?;
-
-    let btc_rpc = config.require_btc_rpc_client()?;
 
     let hashi_ids = crate::config::HashiIds {
         package_id: config.package_id(),
@@ -213,43 +223,47 @@ async fn request_all(
         }
     };
 
-    // Fetch the MPC public key and derive the deposit address
-    let client = HashiClient::new(config).await?;
-    let mpc_pubkey = client.fetch_mpc_public_key();
-    if mpc_pubkey.is_empty() {
-        anyhow::bail!("MPC public key not available on-chain. Has the committee completed DKG?");
-    }
-
-    let btc_network = crate::btc_monitor::config::parse_btc_network(
-        config.bitcoin.as_ref().and_then(|b| b.network.as_deref()),
-    )?;
-
-    let deposit_address =
-        cli_derive_deposit_address(&mpc_pubkey, derivation_path.as_ref(), btc_network)?;
-
-    // Look up the transaction and find all matching outputs
     let parsed_txid: bitcoin::Txid = txid.parse().context("Invalid txid")?;
 
-    let raw_tx = btc_rpc
-        .get_raw_transaction(parsed_txid)
-        .map_err(anyhow::Error::from)
-        .and_then(|resp| resp.transaction().map_err(anyhow::Error::from))
-        .context("Failed to fetch transaction from Bitcoin RPC")?;
+    let matching_utxos: Vec<(u32, u64)> = if let Some(outputs) = outputs {
+        serde_json::from_str(outputs).context("Failed to parse --outputs JSON")?
+    } else {
+        let btc_rpc = config.require_btc_rpc_client()?;
 
-    let matching_utxos: Vec<(u32, u64)> = raw_tx
-        .output
-        .iter()
-        .enumerate()
-        .filter(|(_, output)| output.script_pubkey == deposit_address.script_pubkey())
-        .map(|(i, output)| (i as u32, output.value.to_sat()))
-        .collect();
+        // Fetch the MPC public key and derive the deposit address
+        let client = HashiClient::new(config).await?;
+        let mpc_pubkey = client.fetch_mpc_public_key();
+        if mpc_pubkey.is_empty() {
+            anyhow::bail!(
+                "MPC public key not available on-chain. Has the committee completed DKG?"
+            );
+        }
+
+        let btc_network = crate::btc_monitor::config::parse_btc_network(
+            config.bitcoin.as_ref().and_then(|b| b.network.as_deref()),
+        )?;
+
+        let deposit_address =
+            cli_derive_deposit_address(&mpc_pubkey, derivation_path.as_ref(), btc_network)?;
+
+        // Look up the transaction and find all matching outputs
+        let raw_tx = btc_rpc
+            .get_raw_transaction(parsed_txid)
+            .map_err(anyhow::Error::from)
+            .and_then(|resp| resp.transaction().map_err(anyhow::Error::from))
+            .context("Failed to fetch transaction from Bitcoin RPC")?;
+
+        raw_tx
+            .output
+            .iter()
+            .enumerate()
+            .filter(|(_, output)| output.script_pubkey == deposit_address.script_pubkey())
+            .map(|(i, output)| (i as u32, output.value.to_sat()))
+            .collect()
+    };
 
     if matching_utxos.is_empty() {
-        anyhow::bail!(
-            "No outputs in transaction {} match the deposit address {}",
-            txid,
-            deposit_address
-        );
+        anyhow::bail!("No deposit outputs found for transaction {}", txid);
     }
 
     let total_sats: u64 = matching_utxos.iter().map(|(_, amount)| amount).sum();
