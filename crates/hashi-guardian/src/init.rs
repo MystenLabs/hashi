@@ -284,11 +284,11 @@ mod tests {
                     i
                 );
                 assert!(
-                    enclave.config.enclave_btc_keypair.get().is_some(),
+                    enclave.config.is_enclave_btc_keypair_set(),
                     "Bitcoin key should be set after threshold"
                 );
                 assert!(
-                    enclave.config.hashi_btc_master_pubkey.get().is_some(),
+                    enclave.config.is_hashi_btc_master_pubkey_set(),
                     "Hashi BTC key should be set after threshold"
                 );
             } else if i >= THRESHOLD {
@@ -300,18 +300,18 @@ mod tests {
                     result
                 );
                 assert!(
-                    enclave.config.enclave_btc_keypair.get().is_some(),
+                    enclave.config.is_enclave_btc_keypair_set(),
                     "Bitcoin key should still be set"
                 );
             } else {
                 // Before threshold, call should succeed
                 assert!(result.is_ok(), "Init should succeed before threshold");
                 assert!(
-                    enclave.config.enclave_btc_keypair.get().is_none(),
+                    !enclave.config.is_enclave_btc_keypair_set(),
                     "Bitcoin key should not be set before threshold"
                 );
                 assert!(
-                    enclave.config.hashi_btc_master_pubkey.get().is_none(),
+                    !enclave.config.is_hashi_btc_master_pubkey_set(),
                     "Hashi BTC key should not be set before threshold"
                 );
             }

@@ -44,11 +44,11 @@ pub struct EnclaveConfig {
     /// S3 client & config (set in operator_init)
     s3_logger: OnceLock<S3Logger>,
     /// Enclave BTC private key (set in provisioner_init)
-    pub(crate) enclave_btc_keypair: OnceLock<Keypair>,
+    enclave_btc_keypair: OnceLock<Keypair>,
     /// BTC network: mainnet, testnet, regtest (set in operator_init)
     btc_network: OnceLock<Network>,
     /// Hashi BTC public key used to derive child keys (set in provisioner_init)
-    pub(crate) hashi_btc_master_pubkey: OnceLock<BitcoinPubkey>,
+    hashi_btc_master_pubkey: OnceLock<BitcoinPubkey>,
     /// Withdraw related config's (set in provisioner_init)
     withdrawal_config: OnceLock<WithdrawalConfig>,
 }
@@ -187,6 +187,14 @@ impl EnclaveConfig {
     // Initialization Status
     // ========================================================================
 
+    pub fn is_enclave_btc_keypair_set(&self) -> bool {
+        self.enclave_btc_keypair.get().is_some()
+    }
+
+    pub fn is_hashi_btc_master_pubkey_set(&self) -> bool {
+        self.hashi_btc_master_pubkey.get().is_some()
+    }
+
     /// Check if operator_init configuration is complete (S3 logger and network)
     pub fn is_operator_init_complete(&self) -> bool {
         self.s3_logger.get().is_some() && self.btc_network.get().is_some()
@@ -199,15 +207,15 @@ impl EnclaveConfig {
 
     /// Check if provisioner_init configuration is complete (BTC keys and withdrawal config)
     pub fn is_provisioner_init_complete(&self) -> bool {
-        self.enclave_btc_keypair.get().is_some()
-            && self.hashi_btc_master_pubkey.get().is_some()
+        self.is_enclave_btc_keypair_set()
+            && self.is_hashi_btc_master_pubkey_set()
             && self.withdrawal_config.get().is_some()
     }
 
     /// Check if any provisioner_init configuration has been set
     pub fn is_provisioner_init_partially_complete(&self) -> bool {
-        self.enclave_btc_keypair.get().is_some()
-            || self.hashi_btc_master_pubkey.get().is_some()
+        self.is_enclave_btc_keypair_set()
+            || self.is_hashi_btc_master_pubkey_set()
             || self.withdrawal_config.get().is_some()
     }
 }
