@@ -57,12 +57,6 @@ pub struct Hashi {
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum SeedOutcome {
-    FullySeeded,
-    NotReady,
-}
-
 impl Hashi {
     pub fn new(server_version: ServerVersion, config: config::Config) -> anyhow::Result<Arc<Self>> {
         init_crypto_provider();
@@ -509,29 +503,31 @@ impl Hashi {
     }
 
     /// Fetch `GetGuardianInfo` once and seed `guardian_signing_pubkey` and
-    /// `local_limiter` as far as the response allows. Idempotent.
-    async fn try_seed_guardian_state(&self) -> SeedOutcome {
+    /// `local_limiter` as far as the response allows. Idempotent. Returns
+    /// `true` once the local limiter slot is populated; the retry loop uses
+    /// this as its exit signal.
+    async fn try_seed_guardian_state(&self) -> bool {
         let Some(client) = self.guardian_client() else {
-            return SeedOutcome::NotReady;
+            return false;
         };
         let info_pb = match client.get_guardian_info().await {
             Ok(info) => info,
             Err(e) => {
                 tracing::debug!("guardian bootstrap: GetGuardianInfo failed: {e}");
-                return SeedOutcome::NotReady;
+                return false;
             }
         };
         let info = match hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb) {
             Ok(info) => info,
             Err(e) => {
                 tracing::warn!("guardian bootstrap: parse failed: {e:?}");
-                return SeedOutcome::NotReady;
+                return false;
             }
         };
         let _ = self.guardian_signing_pubkey.set(Some(info.signing_pub_key));
         let (Some(state), Some(config)) = (info.limiter_state, info.limiter_config) else {
             tracing::debug!("guardian bootstrap: guardian has no limiter yet");
-            return SeedOutcome::NotReady;
+            return false;
         };
         let mut slot = self.local_limiter.write().unwrap();
         if slot.is_none() {
@@ -542,7 +538,7 @@ impl Hashi {
             );
             *slot = Some(Arc::new(guardian_limiter::LocalLimiter::new(config, state)));
         }
-        SeedOutcome::FullySeeded
+        true
     }
 
     /// Retry `try_seed_guardian_state` with bounded exponential backoff
@@ -564,10 +560,7 @@ impl Hashi {
             let mut delay = std::time::Duration::from_secs(1);
             loop {
                 tokio::time::sleep(delay).await;
-                if matches!(
-                    self.try_seed_guardian_state().await,
-                    SeedOutcome::FullySeeded
-                ) {
+                if self.try_seed_guardian_state().await {
                     tracing::info!("Guardian bootstrap complete via retry task");
                     return Ok(());
                 }
