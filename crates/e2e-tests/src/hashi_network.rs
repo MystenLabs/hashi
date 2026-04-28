@@ -161,10 +161,7 @@ impl HashiNodeHandle {
     pub async fn wait_for_local_limiter(&self, timeout: std::time::Duration) -> Result<()> {
         tokio::time::timeout(timeout, self.wait_for_local_limiter_inner())
             .await
-            .map_err(|_| {
-                anyhow::anyhow!("local limiter bootstrap timed out after {:?}", timeout)
-            })?;
-        Ok(())
+            .map_err(|_| anyhow::anyhow!("local limiter bootstrap timed out after {:?}", timeout))
     }
 
     async fn wait_for_local_limiter_inner(&self) {

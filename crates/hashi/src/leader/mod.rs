@@ -1349,12 +1349,10 @@ impl LeaderService {
                 .inc();
         })?;
 
-        // Hold the txn in inflight_withdrawal_signings until the watcher
-        // sees the on-chain signatures; otherwise the next checkpoint may
-        // respawn this task and double-advance the guardian seq.
-        if inner.guardian_client().is_some() {
-            Self::wait_for_signed_withdrawal_visible(&inner, &txn.id).await;
-        }
+        // Hold inflight until the watcher sees on-chain signatures; otherwise
+        // the next checkpoint can respawn and double-advance the guardian seq
+        // (or push a duplicate sign_withdrawal without guardian).
+        Self::wait_until_signed_visible(&inner, &txn.id).await;
 
         Ok(())
     }
@@ -1937,22 +1935,19 @@ impl LeaderService {
             .await
     }
 
-    async fn wait_for_signed_withdrawal_visible(inner: &Arc<Hashi>, txn_id: &Address) {
+    async fn wait_until_signed_visible(inner: &Hashi, txn_id: &Address) {
         const VISIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
         let mut checkpoint_rx = inner.onchain_state().subscribe_checkpoint();
         let wait = async {
             loop {
                 let visible = inner
                     .onchain_state()
-                    .withdrawal_txns()
-                    .iter()
-                    .any(|p| p.id == *txn_id && p.signatures.is_some());
+                    .withdrawal_txn(txn_id)
+                    .is_some_and(|t| t.signatures.is_some());
                 if visible {
                     return;
                 }
-                if checkpoint_rx.changed().await.is_err() {
-                    return;
-                }
+                let _ = checkpoint_rx.changed().await;
             }
         };
         if tokio::time::timeout(VISIBILITY_TIMEOUT, wait)
@@ -1962,7 +1957,7 @@ impl LeaderService {
             warn!(
                 withdrawal_txn_id = %txn_id,
                 "Timeout waiting for watcher to observe signed withdrawal; \
-                 a duplicate guardian RPC may follow on the next checkpoint"
+                 a duplicate sign attempt may follow on the next checkpoint"
             );
         }
     }
