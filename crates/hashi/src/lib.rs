@@ -496,10 +496,6 @@ impl Hashi {
         Ok(service)
     }
 
-    /// Fetch `GetGuardianInfo` once and seed `guardian_signing_pubkey` and
-    /// `local_limiter` as far as the response allows. Idempotent. Returns
-    /// `true` once the local limiter slot is populated; the retry loop uses
-    /// this as its exit signal.
     async fn try_seed_guardian_state(&self) -> bool {
         let Some(client) = self.guardian_client() else {
             return false;
@@ -535,9 +531,6 @@ impl Hashi {
         true
     }
 
-    /// Drive `try_seed_guardian_state` with bounded exponential backoff
-    /// until the first success, then exit. The first attempt fires
-    /// immediately. No-op when no guardian is configured.
     fn start_guardian_bootstrap(self: Arc<Self>) -> Service {
         use backon::Retryable;
         Service::new().spawn_aborting(async move {
