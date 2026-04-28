@@ -1,10 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Local emulator of the guardian's token-bucket rate limiter, used by
-//! coin selection to project capacity and by the leader to pick the next
-//! `seq` without a guardian round-trip. The guardian remains authoritative;
-//! `snap_to` syncs from it on any drift.
+//! Local emulator of the guardian's token-bucket limiter. Bootstrapped
+//! from the guardian at startup and advanced on every accepted consume.
 
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
@@ -52,7 +50,6 @@ impl LocalLimiter {
         *self.state.lock().await
     }
 
-    /// Capacity projected to `timestamp_secs`, clamped to the config ceiling.
     pub async fn capacity_at(&self, timestamp_secs: u64) -> u64 {
         let state = *self.state.lock().await;
         project_capacity(&self.config, &state, timestamp_secs)
@@ -62,9 +59,8 @@ impl LocalLimiter {
         self.state.lock().await.next_seq
     }
 
-    /// Check whether a consume for `(timestamp_secs, amount_sats)` would
-    /// be accepted, and return the `seq` to submit. Does not mutate state;
-    /// the caller must call `apply_consume` once the guardian accepts.
+    /// Returns the `seq` the caller should submit to the guardian. Does
+    /// not mutate state — call `apply_consume` once the guardian accepts.
     pub async fn validate_consume(
         &self,
         timestamp_secs: u64,
@@ -87,8 +83,8 @@ impl LocalLimiter {
         Ok(state.next_seq)
     }
 
-    /// Mirror an accepted consume into local state. On any error the state
-    /// is left untouched and the caller should `snap_to` the guardian.
+    /// Advance local state to match an accepted consume. State is left
+    /// untouched on error.
     pub async fn apply_consume(
         &self,
         applied_seq: u64,
@@ -119,11 +115,6 @@ impl LocalLimiter {
         guard.last_updated_at = timestamp_secs;
         guard.next_seq += 1;
         Ok(())
-    }
-
-    /// Replace local state with the guardian's authoritative snapshot.
-    pub async fn snap_to(&self, state: LimiterState) {
-        *self.state.lock().await = state;
     }
 }
 
@@ -160,9 +151,8 @@ mod tests {
     #[tokio::test]
     async fn test_validate_consume_happy_path() {
         let limiter = make_limiter(0, 0, 7);
-        // 100 seconds of refill => 100k headroom.
         let seq = limiter.validate_consume(100, 80_000).await.unwrap();
-        assert_eq!(seq, 7, "validate returns the currently-next seq");
+        assert_eq!(seq, 7);
     }
 
     #[tokio::test]
@@ -175,7 +165,6 @@ mod tests {
     #[tokio::test]
     async fn test_validate_rejects_over_capacity() {
         let limiter = make_limiter(0, 0, 0);
-        // Only 10k refilled; ask for 50k.
         let err = limiter.validate_consume(10, 50_000).await.unwrap_err();
         match err {
             LocalLimiterError::InsufficientCapacity { needed, available } => {
@@ -207,22 +196,8 @@ mod tests {
     #[tokio::test]
     async fn test_capacity_at_refills_linearly_and_clamps_to_ceiling() {
         let limiter = make_limiter(100_000, 10, 0);
-        // refill 1000 sats/sec; elapsed 5s; base 100k; refill 5k => 105k.
         assert_eq!(limiter.capacity_at(15).await, 105_000);
-        // far-future => clamped at max_bucket_capacity 2_000_000.
         assert_eq!(limiter.capacity_at(u64::MAX).await, 2_000_000);
-    }
-
-    #[tokio::test]
-    async fn test_snap_to_replaces_state() {
-        let limiter = make_limiter(1_000, 10, 3);
-        let new_state = LimiterState {
-            num_tokens_available: 500_000,
-            last_updated_at: 999,
-            next_seq: 42,
-        };
-        limiter.snap_to(new_state).await;
-        assert_eq!(limiter.snapshot().await, new_state);
     }
 
     #[tokio::test]
