@@ -33,6 +33,12 @@ message GetGuardianInfoResponse {
 
   // Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
   SignedGuardianInfo signed_info = 3;
+
+  // Current rate limiter state (if initialized).
+  LimiterState limiter_state = 4;
+
+  // Immutable limiter configuration (if initialized).
+  LimiterConfig limiter_config = 5;
 }
 
 // Guardian-signed wrapper around `GuardianInfoData`.
@@ -198,6 +204,15 @@ message LimiterState {
 
   // Next expected withdrawal sequence number.
   optional uint64 next_seq = 3;
+}
+
+// Immutable limiter configuration.
+message LimiterConfig {
+  // Token refill rate in sats per second.
+  optional uint64 refill_rate_sats_per_sec = 1;
+
+  // Maximum bucket capacity in sats.
+  optional uint64 max_bucket_capacity_sats = 2;
 }
 
 message ProvisionerInitResponse {}

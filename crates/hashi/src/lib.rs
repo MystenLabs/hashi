@@ -18,6 +18,7 @@ pub mod constants;
 pub mod db;
 pub mod deposits;
 pub mod grpc;
+pub mod guardian_limiter;
 pub mod leader;
 pub mod metrics;
 pub mod mpc;
@@ -50,6 +51,8 @@ pub struct Hashi {
     btc_monitor: OnceLock<crate::btc_monitor::monitor::MonitorClient>,
     screener_client: OnceLock<Option<grpc::screener_client::ScreenerClient>>,
     guardian_client: OnceLock<Option<grpc::guardian_client::GuardianClient>>,
+    guardian_signing_pubkey: OnceLock<Option<hashi_types::guardian::GuardianPubKey>>,
+    local_limiter: RwLock<Option<Arc<guardian_limiter::LocalLimiter>>>,
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
 }
@@ -72,6 +75,8 @@ impl Hashi {
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
+            guardian_signing_pubkey: OnceLock::new(),
+            local_limiter: RwLock::new(None),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
@@ -97,6 +102,8 @@ impl Hashi {
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
+            guardian_signing_pubkey: OnceLock::new(),
+            local_limiter: RwLock::new(None),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
@@ -190,6 +197,16 @@ impl Hashi {
 
     pub fn guardian_client(&self) -> Option<&grpc::guardian_client::GuardianClient> {
         self.guardian_client.get().and_then(|opt| opt.as_ref())
+    }
+
+    pub fn guardian_signing_pubkey(&self) -> Option<&hashi_types::guardian::GuardianPubKey> {
+        self.guardian_signing_pubkey
+            .get()
+            .and_then(|opt| opt.as_ref())
+    }
+
+    pub fn local_limiter(&self) -> Option<Arc<guardian_limiter::LocalLimiter>> {
+        self.local_limiter.read().unwrap().clone()
     }
 
     async fn initialize_onchain_state(&self) -> anyhow::Result<Service> {
@@ -466,15 +483,76 @@ impl Hashi {
         let (_http_addr, http_service) = grpc::HttpService::new(self.clone()).start().await;
         let leader_service = leader::LeaderService::new(self.clone()).start();
         let mpc_service = mpc_service.start();
+        let guardian_bootstrap_service = self.clone().start_guardian_bootstrap();
 
         let service = Service::new()
             .merge(onchain_service)
             .merge(btc_monitor_service)
             .merge(http_service)
             .merge(leader_service)
-            .merge(mpc_service);
+            .merge(mpc_service)
+            .merge(guardian_bootstrap_service);
 
         Ok(service)
+    }
+
+    async fn try_seed_guardian_state(&self) -> bool {
+        let Some(client) = self.guardian_client() else {
+            return false;
+        };
+        let info_pb = match client.get_guardian_info().await {
+            Ok(info) => info,
+            Err(e) => {
+                tracing::warn!("guardian bootstrap: GetGuardianInfo failed: {e}");
+                return false;
+            }
+        };
+        let info = match hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb) {
+            Ok(info) => info,
+            Err(e) => {
+                tracing::warn!("guardian bootstrap: parse failed: {e:?}");
+                return false;
+            }
+        };
+        let _ = self.guardian_signing_pubkey.set(Some(info.signing_pub_key));
+        let (Some(state), Some(config)) = (info.limiter_state, info.limiter_config) else {
+            tracing::debug!("guardian bootstrap: guardian has no limiter yet");
+            return false;
+        };
+        let mut slot = self.local_limiter.write().unwrap();
+        if slot.is_none() {
+            tracing::info!(
+                ?state,
+                ?config,
+                "Local guardian limiter seeded from GetGuardianInfo",
+            );
+            *slot = Some(Arc::new(guardian_limiter::LocalLimiter::new(config, state)));
+        }
+        true
+    }
+
+    fn start_guardian_bootstrap(self: Arc<Self>) -> Service {
+        use backon::Retryable;
+        Service::new().spawn_aborting(async move {
+            if self.guardian_client().is_none() {
+                return Ok(());
+            }
+            let policy = backon::ExponentialBuilder::default()
+                .with_min_delay(std::time::Duration::from_secs(1))
+                .with_max_delay(std::time::Duration::from_secs(30))
+                .without_max_times();
+            let _ = (|| async {
+                if self.try_seed_guardian_state().await {
+                    Ok::<(), ()>(())
+                } else {
+                    Err(())
+                }
+            })
+            .retry(policy)
+            .await;
+            tracing::info!("Guardian bootstrap complete");
+            Ok(())
+        })
     }
 
     pub(crate) fn is_in_current_committee(&self) -> bool {
