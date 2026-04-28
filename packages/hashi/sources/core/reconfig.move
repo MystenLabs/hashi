@@ -7,7 +7,6 @@ module hashi::reconfig;
 use hashi::{committee::CommitteeSignature, hashi::Hashi};
 
 const ENotReconfiguring: u64 = 0;
-const EAbortReconfigDisabled: u64 = 1;
 
 /// Message that committee members sign to confirm successful key rotation.
 public struct ReconfigCompletionMessage has copy, drop, store {
@@ -57,9 +56,11 @@ entry fun end_reconfig(
     sui::event::emit(EndReconfigEvent { epoch, mpc_public_key });
 }
 
-// TODO: Re-enable with committee certificate verification.
-entry fun abort_reconfig(_self: &mut Hashi, _ctx: &TxContext) {
-    abort EAbortReconfigDisabled
+public(package) fun abort_reconfig(self: &mut Hashi, ctx: &TxContext) {
+    self.config().assert_version_enabled();
+    assert!(self.committee_set().is_reconfiguring(), ENotReconfiguring);
+    let epoch = self.committee_set_mut().abort_reconfig(ctx);
+    sui::event::emit(AbortReconfigEvent { epoch });
 }
 
 public struct StartReconfigEvent has copy, drop {

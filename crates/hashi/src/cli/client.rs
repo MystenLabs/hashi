@@ -48,6 +48,9 @@ pub enum CreateProposalParams {
         version: u64,
         metadata: Vec<(String, String)>,
     },
+    AbortReconfig {
+        metadata: Vec<(String, String)>,
+    },
 }
 
 /// Live on-chain proposal detail fields not cached by `OnchainState`.
@@ -302,6 +305,11 @@ impl HashiClient {
                             bcs::from_bytes(value_bytes).context("deserialize EmergencyPause")?;
                         (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
                     }
+                    ProposalType::AbortReconfig => {
+                        let p: move_types::Proposal<move_types::AbortReconfig> =
+                            bcs::from_bytes(value_bytes).context("deserialize AbortReconfig")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
                     ProposalType::Unknown(s) => {
                         anyhow::bail!("Cannot fetch details for unknown proposal type: {s}")
                     }
@@ -408,6 +416,7 @@ impl HashiClient {
             ProposalType::EnableVersion => "enable_version",
             ProposalType::DisableVersion => "disable_version",
             ProposalType::EmergencyPause => "emergency_pause",
+            ProposalType::AbortReconfig => "abort_reconfig",
             ProposalType::Upgrade => {
                 anyhow::bail!(
                     "Upgrade proposals require the full upgrade flow (execute + publish + finalize)"
@@ -517,6 +526,17 @@ pub fn build_create_proposal_transaction(
                     Identifier::from_static("propose"),
                 ),
                 vec![hashi_arg, version_arg, metadata_arg, clock_arg],
+            );
+        }
+        CreateProposalParams::AbortReconfig { metadata } => {
+            let metadata_arg = build_metadata(&mut builder, &metadata);
+            builder.move_call(
+                Function::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("abort_reconfig"),
+                    Identifier::from_static("propose"),
+                ),
+                vec![hashi_arg, metadata_arg, clock_arg],
             );
         }
     }
@@ -647,6 +667,7 @@ pub fn get_proposal_type_arg(
         ProposalType::EnableVersion => ("enable_version", "EnableVersion"),
         ProposalType::DisableVersion => ("disable_version", "DisableVersion"),
         ProposalType::EmergencyPause => ("emergency_pause", "EmergencyPause"),
+        ProposalType::AbortReconfig => ("abort_reconfig", "AbortReconfig"),
         ProposalType::Unknown(s) => {
             anyhow::bail!(
                 "Cannot vote on unknown proposal type '{}'. \

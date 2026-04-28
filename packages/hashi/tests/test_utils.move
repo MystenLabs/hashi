@@ -7,6 +7,7 @@
 module hashi::test_utils;
 
 use hashi::{
+    abort_reconfig,
     committee::{Self, CommitteeMember, CommitteeSignature},
     config_value,
     disable_version,
@@ -253,4 +254,13 @@ public fun create_emergency_pause_proposal(
 ): ID {
     let metadata = vec_map::empty();
     emergency_pause::propose(hashi, pause, metadata, clock, ctx)
+}
+
+/// Creates an abort reconfig proposal and returns its ID
+public fun create_abort_reconfig_proposal(
+    hashi: &mut Hashi,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): ID {
+    abort_reconfig::propose(hashi, vec_map::empty(), clock, ctx)
 }

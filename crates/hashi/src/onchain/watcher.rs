@@ -538,6 +538,7 @@ fn parse_proposal_type_from_type_tag(type_tag: &TypeTag) -> ProposalType {
         ("disable_version", "DisableVersion") => ProposalType::DisableVersion,
         ("upgrade", "Upgrade") => ProposalType::Upgrade,
         ("emergency_pause", "EmergencyPause") => ProposalType::EmergencyPause,
+        ("abort_reconfig", "AbortReconfig") => ProposalType::AbortReconfig,
         _ => ProposalType::Unknown(format!("{}::{}", struct_tag.module(), struct_tag.name())),
     }
 }

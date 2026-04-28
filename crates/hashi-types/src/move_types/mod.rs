@@ -452,6 +452,10 @@ pub struct EmergencyPause {
     pub pause: bool,
 }
 
+/// Rust version of the Move hashi::abort_reconfig::AbortReconfig type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct AbortReconfig {}
+
 /// Rust version of the Move sui::vec_map::VecMap type.
 #[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct VecMap<K, V> {

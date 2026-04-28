@@ -105,3 +105,35 @@ for the epoch by running the presigning protocol to generate a batch of
 presignatures needed for the threshold Schnorr signing protocol (see [MPC
 protocol](./mpc-protocol.md)). Once presignatures are ready, normal operations
 resume for processing deposits and withdrawals.
+
+### Abort Reconfig
+
+```mermaid
+graph LR
+    A[Start Reconfig] --> B[DKG or Key Rotation] --> C[Abort Reconfig]:::active
+    C --> A
+    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+```
+
+Reconfiguration can fail after `start_reconfig` has committed the pending
+committee but before `end_reconfig` can safely advance the Hashi epoch. Examples
+include:
+
+- The pending committee cannot complete initial DKG because too much registered
+  stake is offline or misconfigured.
+- Key rotation cannot complete because the old committee cannot supply enough
+  valid resharing material to the new committee.
+- The new committee completes the MPC protocol but cannot gather a threshold BLS
+  certificate over a single `ReconfigCompletionMessage`.
+- The MPC output is inconsistent with the on-chain invariant that the threshold
+  public key remains unchanged across key-rotation epochs.
+- A bad pending committee was formed from stale or incorrect validator metadata,
+  such as invalid endpoint, TLS, BLS, or encryption key updates.
+
+In these cases, governance can create and execute an
+`abort_reconfig::AbortReconfig` proposal. The proposal is voted on by the
+current committed committee. When quorum is reached, execution clears the
+pending epoch change, removes the pending committee, emits `AbortReconfigEvent`,
+and leaves the current Hashi epoch and MPC public key unchanged. Normal
+operations can then resume under the last committed committee, and a later Sui
+epoch notification can trigger a fresh `start_reconfig`.

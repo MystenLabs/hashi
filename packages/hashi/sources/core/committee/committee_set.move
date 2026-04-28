@@ -417,12 +417,20 @@ public(package) fun end_reconfig(
     next_epoch
 }
 
-// TODO include a cert from the current committee to abort a failed reconfig.
 public(package) fun abort_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u64 {
     assert!(self.is_reconfiguring());
     let next_epoch = self.pending_epoch_change.extract();
     self.remove_committee(next_epoch);
     next_epoch
+}
+
+#[test_only]
+public fun set_pending_reconfig_for_testing(self: &mut CommitteeSet, committee: Committee) {
+    let epoch = committee.epoch();
+    assert!(!self.is_reconfiguring());
+    assert!(!self.has_committee(epoch));
+    self.pending_epoch_change = option::some(epoch);
+    self.insert_committee(committee);
 }
 
 // ======== Test-only Functions ========

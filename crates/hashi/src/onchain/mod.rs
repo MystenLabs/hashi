@@ -1343,6 +1343,11 @@ async fn scrape_proposal_bag(
                     .ok()
                     .map(|p| (p.id, p.timestamp_ms))
             }
+            types::ProposalType::AbortReconfig => {
+                bcs::from_bytes::<move_types::Proposal<move_types::AbortReconfig>>(contents)
+                    .ok()
+                    .map(|p| (p.id, p.timestamp_ms))
+            }
             types::ProposalType::Unknown(_) => None,
         };
 
@@ -1387,6 +1392,7 @@ pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
         ("disable_version", "DisableVersion") => types::ProposalType::DisableVersion,
         ("upgrade", "Upgrade") => types::ProposalType::Upgrade,
         ("emergency_pause", "EmergencyPause") => types::ProposalType::EmergencyPause,
+        ("abort_reconfig", "AbortReconfig") => types::ProposalType::AbortReconfig,
         _ => types::ProposalType::Unknown(format!("{}::{}", inner_tag.module(), inner_tag.name())),
     }
 }

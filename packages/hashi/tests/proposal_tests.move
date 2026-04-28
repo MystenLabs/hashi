@@ -5,8 +5,14 @@
 #[allow(implicit_const_copy, deprecated_usage, unused_variable)]
 module hashi::proposal_tests;
 
-use hashi::{proposal, test_utils, update_config::UpdateConfig};
-use sui::clock;
+use hashi::{
+    abort_reconfig::AbortReconfig,
+    committee,
+    proposal,
+    test_utils,
+    update_config::UpdateConfig
+};
+use sui::{bls12381, clock};
 
 // ======== Test Addresses ========
 const VOTER1: address = @0x1;
@@ -16,6 +22,21 @@ const NON_VOTER: address = @0x999;
 
 // ======== Constants ========
 const MAX_PROPOSAL_DURATION_MS: u64 = 1000 * 60 * 60 * 24 * 7; // 7 days
+
+fun add_pending_committee_for_testing(hashi: &mut hashi::hashi::Hashi, epoch: u64) {
+    let sk = test_utils::bls_sk_for_testing();
+    let public_key = bls12381::g1_to_uncompressed_g1(
+        &bls12381::g1_from_bytes(&test_utils::bls_min_pk_from_sk(&sk)),
+    );
+    let encryption_key = sk;
+    let members = vector[
+        committee::new_committee_member(VOTER1, public_key, encryption_key, 1),
+        committee::new_committee_member(VOTER2, public_key, encryption_key, 1),
+        committee::new_committee_member(VOTER3, public_key, encryption_key, 1),
+    ];
+    let pending_committee = committee::new_committee(epoch, members, 3334, 800, 3333);
+    hashi.committee_set_mut().set_pending_reconfig_for_testing(pending_committee);
+}
 
 // ======== Proposal Creation Tests ========
 
@@ -319,6 +340,53 @@ fun test_execute_after_gathering_votes() {
     assert!(hashi::btc_config::bitcoin_deposit_minimum(hashi.config()) == 1000);
 
     // Clean up
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+/// Test executing an abort reconfig proposal rolls back pending reconfig state
+fun test_abort_reconfig_proposal() {
+    let ctx1 = &mut test_utils::new_tx_context(VOTER1, 0);
+
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx1);
+    let clock = clock::create_for_testing(ctx1);
+    add_pending_committee_for_testing(&mut hashi, 1);
+
+    assert!(hashi.committee_set().pending_epoch_change().destroy_some() == 1);
+    assert!(hashi.committee_set().has_committee(1));
+
+    let proposal_id = test_utils::create_abort_reconfig_proposal(&mut hashi, &clock, ctx1);
+
+    let ctx2 = &mut test_utils::new_tx_context(VOTER2, 0);
+    proposal::vote<AbortReconfig>(&mut hashi, proposal_id, &clock, ctx2);
+    let ctx3 = &mut test_utils::new_tx_context(VOTER3, 0);
+    proposal::vote<AbortReconfig>(&mut hashi, proposal_id, &clock, ctx3);
+
+    hashi::abort_reconfig::execute(&mut hashi, proposal_id, &clock, ctx1);
+
+    assert!(hashi.committee_set().pending_epoch_change().is_none());
+    assert!(!hashi.committee_set().has_committee(1));
+    assert!(hashi.committee_set().has_committee(0));
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::reconfig::ENotReconfiguring)]
+/// Test executing an abort reconfig proposal fails when no reconfig is pending
+fun test_abort_reconfig_proposal_fails_when_not_reconfiguring() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+
+    let voters = vector[VOTER1];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let proposal_id = test_utils::create_abort_reconfig_proposal(&mut hashi, &clock, ctx);
+    hashi::abort_reconfig::execute(&mut hashi, proposal_id, &clock, ctx);
+
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
 }

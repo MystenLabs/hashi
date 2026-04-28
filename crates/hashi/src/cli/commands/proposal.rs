@@ -585,6 +585,29 @@ pub async fn create_disable_version_proposal(
     Ok(())
 }
 
+/// Create an abort reconfig proposal
+pub async fn create_abort_reconfig_proposal(
+    config: &CliConfig,
+    metadata: Vec<(String, String)>,
+    tx_opts: &TxOptions,
+) -> Result<()> {
+    println!("\n{}", "Creating Abort Reconfig Proposal:".bold());
+    print_metadata(&metadata);
+
+    if !tx_opts.skip_confirm {
+        prompt_continue("create this abort reconfig proposal").await?;
+    }
+
+    let mut client = HashiClient::new(config).await?;
+    let tx =
+        client.build_create_proposal_transaction(CreateProposalParams::AbortReconfig { metadata });
+
+    print_info("Transaction: abort_reconfig::propose");
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    print_created_proposal_id(response.as_ref());
+    Ok(())
+}
+
 // ============ Helper Functions ============
 
 fn print_proposal_detailed(
