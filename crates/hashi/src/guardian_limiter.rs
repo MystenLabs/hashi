@@ -22,8 +22,8 @@ pub enum LocalLimiterError {
     #[error("insufficient capacity: needed {needed}, available {available}")]
     InsufficientCapacity { needed: u64, available: u64 },
 
-    #[error("seq mismatch: expected {expected}, applied {applied}")]
-    SeqMismatch { expected: u64, applied: u64 },
+    #[error("seq mismatch: local={local}, incoming={incoming}")]
+    SeqMismatch { local: u64, incoming: u64 },
 }
 
 impl fmt::Debug for LocalLimiter {
@@ -59,14 +59,20 @@ impl LocalLimiter {
         self.state.lock().await.next_seq
     }
 
-    /// Returns the `seq` the caller should submit to the guardian. Does
-    /// not mutate state — call `apply_consume` once the guardian accepts.
+    /// Validate a consume; does not mutate state.
     pub async fn validate_consume(
         &self,
+        expected_seq: u64,
         timestamp_secs: u64,
         amount_sats: u64,
-    ) -> Result<u64, LocalLimiterError> {
+    ) -> Result<(), LocalLimiterError> {
         let state = *self.state.lock().await;
+        if expected_seq != state.next_seq {
+            return Err(LocalLimiterError::SeqMismatch {
+                local: state.next_seq,
+                incoming: expected_seq,
+            });
+        }
         if timestamp_secs < state.last_updated_at {
             return Err(LocalLimiterError::StaleTimestamp {
                 local_last: state.last_updated_at,
@@ -80,7 +86,7 @@ impl LocalLimiter {
                 available: capacity,
             });
         }
-        Ok(state.next_seq)
+        Ok(())
     }
 
     /// Advance local state to match an accepted consume. State is left
@@ -94,8 +100,8 @@ impl LocalLimiter {
         let mut guard = self.state.lock().await;
         if applied_seq != guard.next_seq {
             return Err(LocalLimiterError::SeqMismatch {
-                expected: guard.next_seq,
-                applied: applied_seq,
+                local: guard.next_seq,
+                incoming: applied_seq,
             });
         }
         if timestamp_secs < guard.last_updated_at {
@@ -151,21 +157,33 @@ mod tests {
     #[tokio::test]
     async fn test_validate_consume_happy_path() {
         let limiter = make_limiter(0, 0, 7);
-        let seq = limiter.validate_consume(100, 80_000).await.unwrap();
-        assert_eq!(seq, 7);
+        limiter.validate_consume(7, 100, 80_000).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_validate_rejects_seq_mismatch() {
+        let limiter = make_limiter(100_000, 0, 5);
+        let err = limiter.validate_consume(7, 100, 1_000).await.unwrap_err();
+        match err {
+            LocalLimiterError::SeqMismatch { local, incoming } => {
+                assert_eq!(local, 5);
+                assert_eq!(incoming, 7);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[tokio::test]
     async fn test_validate_rejects_stale_timestamp() {
         let limiter = make_limiter(0, 100, 0);
-        let err = limiter.validate_consume(50, 0).await.unwrap_err();
+        let err = limiter.validate_consume(0, 50, 0).await.unwrap_err();
         assert!(matches!(err, LocalLimiterError::StaleTimestamp { .. }));
     }
 
     #[tokio::test]
     async fn test_validate_rejects_over_capacity() {
         let limiter = make_limiter(0, 0, 0);
-        let err = limiter.validate_consume(10, 50_000).await.unwrap_err();
+        let err = limiter.validate_consume(0, 10, 50_000).await.unwrap_err();
         match err {
             LocalLimiterError::InsufficientCapacity { needed, available } => {
                 assert_eq!(needed, 50_000);
@@ -178,8 +196,8 @@ mod tests {
     #[tokio::test]
     async fn test_apply_bumps_seq_and_updates_last_updated_at() {
         let limiter = make_limiter(0, 0, 42);
-        let seq = limiter.validate_consume(100, 80_000).await.unwrap();
-        limiter.apply_consume(seq, 100, 80_000).await.unwrap();
+        limiter.validate_consume(42, 100, 80_000).await.unwrap();
+        limiter.apply_consume(42, 100, 80_000).await.unwrap();
         let snap = limiter.snapshot().await;
         assert_eq!(snap.next_seq, 43);
         assert_eq!(snap.last_updated_at, 100);
