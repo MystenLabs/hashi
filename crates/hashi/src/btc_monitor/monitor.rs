@@ -63,6 +63,7 @@ pub enum DepositConfirmError {
 
 enum KyotoEventLoopExit {
     ConnectivityLost,
+    KyotoNodeExited,
     Shutdown,
 }
 
@@ -188,13 +189,28 @@ impl Monitor {
                 self.config.network
             );
 
-            // Spawn the Kyoto node as a background task. Node::run() takes
-            // ownership, so we move it in and get a JoinHandle back.
-            let kyoto_handle = tokio::spawn(async move { current_node.run().await });
+            let mut kyoto_handle = tokio::spawn(async move { current_node.run().await });
 
-            let result = self.run_event_loop(&mut current_client, client_rx).await;
+            // Race the event loop against the node task. In bip157 ≥ 0.5.0
+            // hostname peers are popped on use, so a single peer drop ends
+            // `Node::run()`; without this, the event loop would wait on
+            // silent channels forever.
+            let result = tokio::select! {
+                event_loop_exit = self.run_event_loop(&mut current_client, client_rx) => event_loop_exit,
+                join_result = &mut kyoto_handle => {
+                    match join_result {
+                        Ok(Ok(())) => warn!("Kyoto node exited cleanly; restarting"),
+                        Ok(Err(e)) => warn!("Kyoto node exited with error: {e}; restarting"),
+                        Err(e) if e.is_cancelled() => {
+                            info!("Bitcoin monitor stopped");
+                            return Ok(());
+                        }
+                        Err(e) => error!("Kyoto node task panicked: {e}; restarting"),
+                    }
+                    KyotoEventLoopExit::KyotoNodeExited
+                }
+            };
 
-            // Abort the Kyoto node task regardless of exit reason.
             kyoto_handle.abort();
 
             match result {
@@ -203,29 +219,27 @@ impl Monitor {
                         "Lost connectivity to Bitcoin peers after {KYOTO_MAX_CONSECUTIVE_FAILURES} \
                          consecutive failures. Restarting Kyoto node..."
                     );
-
-                    self.metrics.kyoto_restarts.inc();
-                    self.metrics.kyoto_connected_peers.set(0);
-                    self.metrics.kyoto_synced.set(0);
-                    self.metrics.kyoto_consecutive_failures.set(0);
-
-                    // Wait before restarting to avoid tight restart loops.
-                    tokio::time::sleep(KYOTO_RESTART_DELAY).await;
-
-                    // Build a fresh Kyoto node with the trusted peers re-added
-                    // to the whitelist.
-                    let (new_node, new_client) = Self::build_kyoto_node(&self.config);
-                    current_node = new_node;
-                    current_client = new_client;
-                    self.requester = current_client.requester.clone();
-
-                    info!("Kyoto node rebuilt, resuming monitor");
                 }
+                KyotoEventLoopExit::KyotoNodeExited => {}
                 KyotoEventLoopExit::Shutdown => {
                     info!("Bitcoin monitor stopped");
                     return Ok(());
                 }
             }
+
+            self.metrics.kyoto_restarts.inc();
+            self.metrics.kyoto_connected_peers.set(0);
+            self.metrics.kyoto_synced.set(0);
+            self.metrics.kyoto_consecutive_failures.set(0);
+
+            tokio::time::sleep(KYOTO_RESTART_DELAY).await;
+
+            let (new_node, new_client) = Self::build_kyoto_node(&self.config);
+            current_node = new_node;
+            current_client = new_client;
+            self.requester = current_client.requester.clone();
+
+            info!("Kyoto node rebuilt, resuming monitor");
         }
     }
 
