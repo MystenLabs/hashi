@@ -32,9 +32,9 @@ mod tests {
     use crate::test_helpers::lookup_vout;
     use crate::test_helpers::txid_to_address;
 
-    async fn setup_test_networks() -> Result<TestNetworks> {
+    async fn setup_test_networks(builder: TestNetworksBuilder) -> Result<TestNetworks> {
         info!("Setting up test networks...");
-        let networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+        let networks = builder.build().await?;
 
         info!("Test networks initialized");
         info!("  - Sui RPC: {}", networks.sui_network.rpc_url);
@@ -236,7 +236,7 @@ mod tests {
         init_test_logging();
         info!("=== Starting Bitcoin Deposit E2E Test ===");
 
-        let mut networks = setup_test_networks().await?;
+        let mut networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
         let amount_sats = 31337u64;
         let hbtc_recipient = create_deposit_and_wait(&mut networks, amount_sats).await?;
 
@@ -255,10 +255,40 @@ mod tests {
 
     #[tokio::test]
     async fn test_bitcoin_withdrawal_e2e_flow() -> Result<()> {
-        init_test_logging();
-        info!("=== Starting Bitcoin Withdrawal E2E Test ===");
+        run_bitcoin_withdrawal_e2e(false).await
+    }
 
-        let mut networks = setup_test_networks().await?;
+    #[tokio::test]
+    async fn test_bitcoin_withdrawal_with_guardian_e2e_flow() -> Result<()> {
+        run_bitcoin_withdrawal_e2e(true).await
+    }
+
+    async fn run_bitcoin_withdrawal_e2e(with_guardian: bool) -> Result<()> {
+        init_test_logging();
+        let label = if with_guardian {
+            " (with guardian)"
+        } else {
+            ""
+        };
+        info!("=== Starting Bitcoin Withdrawal E2E Test{label} ===");
+
+        let mut builder = TestNetworksBuilder::new().with_nodes(4);
+        if with_guardian {
+            builder = builder.with_guardian();
+        }
+        let mut networks = setup_test_networks(builder).await?;
+
+        if with_guardian {
+            for node in networks.hashi_network.nodes() {
+                assert!(node.hashi().config.guardian_endpoint().is_some());
+                assert!(node.hashi().guardian_client().is_some());
+            }
+            let harness = networks
+                .guardian_harness
+                .as_ref()
+                .expect("harness present when .with_guardian() is set");
+            assert!(harness.enclave().is_fully_initialized());
+        }
 
         let deposit_amount_sats = 100_000u64;
         let hbtc_recipient = create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
@@ -335,7 +365,7 @@ mod tests {
         )
         .await?;
 
-        info!("=== Bitcoin Withdrawal E2E Test Passed ===");
+        info!("=== Bitcoin Withdrawal E2E Test{label} Passed ===");
         Ok(())
     }
 
@@ -382,7 +412,7 @@ mod tests {
     #[tokio::test]
     async fn test_presigning_recovery_within_batch() -> Result<()> {
         init_test_logging();
-        let mut networks = setup_test_networks().await?;
+        let mut networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
         let deposit_amount_sats = 100_000u64;
         let withdrawal_amount_sats = 30_000u64;
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();
@@ -643,7 +673,7 @@ mod tests {
         init_test_logging();
         info!("=== Starting Unconfirmed Change UTXO Chaining Test ===");
 
-        let mut networks = setup_test_networks().await?;
+        let mut networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
 
         // Deposit enough that after withdrawal 1 there is substantial change.
         let deposit_amount_sats = 200_000u64;

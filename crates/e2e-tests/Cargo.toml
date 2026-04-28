@@ -5,6 +5,10 @@ edition = "2024"
 
 [dependencies]
 hashi = { path = "../hashi" }
+hashi-guardian = { path = "../hashi-guardian", features = [
+    "test-utils",
+    "non-enclave-dev",
+] }
 hashi-screener = { path = "../hashi-screener", features = ["test-utils"] }
 hashi-types = { path = "../hashi-types" }
 
@@ -32,6 +36,8 @@ clap.workspace = true
 colored.workspace = true
 rand.workspace = true
 nix = { version = "0.26.4", features = ["signal"] }
+tokio-stream.workspace = true
+tonic.workspace = true
 tracing-subscriber.workspace = true
 
 [[bin]]

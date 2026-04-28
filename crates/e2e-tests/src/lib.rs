@@ -21,6 +21,7 @@ use anyhow::Result;
 pub mod backup_restore;
 pub mod bitcoin_node;
 pub mod e2e_flow;
+pub mod guardian_harness;
 pub mod hashi_network;
 mod publish;
 pub mod sui_network;
@@ -45,6 +46,7 @@ pub struct TestNetworks {
     pub sui_network: SuiNetworkHandle,
     pub hashi_network: HashiNetwork,
     pub bitcoin_node: BitcoinNodeHandle,
+    pub guardian_harness: Option<guardian_harness::GuardianHarness>,
 }
 
 impl TestNetworks {
@@ -95,6 +97,7 @@ pub struct TestNetworksBuilder {
     /// On-chain config overrides applied after DKG completes, before `build()`
     /// returns. Each entry is run through the full propose/vote/execute flow.
     onchain_config_overrides: Vec<(String, hashi_types::move_types::ConfigValue)>,
+    with_guardian: bool,
 }
 
 impl TestNetworksBuilder {
@@ -104,7 +107,15 @@ impl TestNetworksBuilder {
             hashi_builder: HashiNetworkBuilder::new(),
             bitcoin_builder: BitcoinNodeBuilder::new(),
             onchain_config_overrides: Vec::new(),
+            with_guardian: false,
         }
+    }
+
+    /// Spin up an in-process guardian, wire its endpoint into every
+    /// hashi node, and finalize it once DKG completes.
+    pub fn with_guardian(mut self) -> Self {
+        self.with_guardian = true;
+        self
     }
 
     pub fn with_nodes(mut self, num_nodes: usize) -> Self {
@@ -221,8 +232,21 @@ impl TestNetworksBuilder {
         )
         .await?;
 
-        let hashi_network = self
-            .hashi_builder
+        let mut hashi_builder = self.hashi_builder;
+        let guardian_harness = if self.with_guardian {
+            let harness =
+                guardian_harness::GuardianHarness::start(bitcoin::Network::Regtest).await?;
+            hashi_builder = hashi_builder.with_guardian_endpoint(harness.endpoint().to_string());
+            tracing::info!(
+                endpoint = %harness.endpoint(),
+                "guardian harness started (operator-init)"
+            );
+            Some(harness)
+        } else {
+            None
+        };
+
+        let hashi_network = hashi_builder
             .build(
                 &dir.path().join("hashi"),
                 &sui_network,
@@ -236,6 +260,7 @@ impl TestNetworksBuilder {
             sui_network,
             hashi_network,
             bitcoin_node,
+            guardian_harness,
         };
 
         tracing::info!("rpc url: {}", test_networks.sui_network().rpc_url);
@@ -243,6 +268,10 @@ impl TestNetworksBuilder {
         if !self.onchain_config_overrides.is_empty() {
             apply_onchain_config_overrides(&mut test_networks, &self.onchain_config_overrides)
                 .await?;
+        }
+
+        if test_networks.guardian_harness.is_some() {
+            finalize_guardian_harness(&mut test_networks).await?;
         }
 
         Ok(test_networks)
@@ -263,6 +292,41 @@ impl TestNetworksBuilder {
 
         Ok(())
     }
+}
+
+async fn finalize_guardian_harness(networks: &mut TestNetworks) -> Result<()> {
+    use crate::guardian_harness::default_test_withdrawal_config;
+    use crate::guardian_harness::full_bucket;
+
+    let nodes = networks.hashi_network.nodes();
+    anyhow::ensure!(
+        !nodes.is_empty(),
+        "no hashi nodes to provision guardian from"
+    );
+
+    nodes[0]
+        .wait_for_mpc_key(std::time::Duration::from_secs(120))
+        .await?;
+
+    let hashi = nodes[0].hashi();
+    let committee = hashi
+        .onchain_state()
+        .current_committee()
+        .ok_or_else(|| anyhow::anyhow!("no current committee after DKG"))?;
+    let master_pubkey = hashi.get_onchain_mpc_pubkey()?;
+
+    let withdrawal_config = default_test_withdrawal_config(&committee);
+    let limiter_state = full_bucket(&withdrawal_config);
+
+    let harness = networks
+        .guardian_harness
+        .as_ref()
+        .expect("guardian_harness set when finalize_guardian_harness is called");
+    harness
+        .finalize(committee, master_pubkey, withdrawal_config, limiter_state)
+        .await?;
+    tracing::info!("guardian harness finalized");
+    Ok(())
 }
 
 /// Apply on-chain config overrides by running the full propose/vote/execute
