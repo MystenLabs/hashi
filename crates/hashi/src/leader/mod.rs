@@ -72,6 +72,9 @@ pub struct LeaderService {
     inflight_withdrawal_signings: HashSet<Address>,
     withdrawal_broadcast_tasks: JoinSet<(Address, anyhow::Result<()>)>,
     inflight_withdrawal_broadcasts: HashSet<Address>,
+    /// Withdrawal requests already warned about exceeding local limiter
+    /// capacity. Pruned each checkpoint to track only currently-pending ids.
+    stuck_withdrawal_warned: HashSet<Address>,
     deposit_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     proposal_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
 }
@@ -92,6 +95,7 @@ impl LeaderService {
             inflight_withdrawal_signings: HashSet::new(),
             withdrawal_broadcast_tasks: JoinSet::new(),
             inflight_withdrawal_broadcasts: HashSet::new(),
+            stuck_withdrawal_warned: HashSet::new(),
             deposit_gc_task: None,
             proposal_gc_task: None,
         }
@@ -141,7 +145,8 @@ impl LeaderService {
                     }
 
                     self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms);
-                    self.process_approved_withdrawal_requests(checkpoint_timestamp_ms);
+                    self.process_approved_withdrawal_requests(checkpoint_timestamp_ms)
+                        .await;
                     self.process_unsigned_withdrawal_txns();
                     self.process_signed_withdrawal_txns();
                     self.check_delete_proposals(checkpoint_timestamp_ms);
@@ -852,7 +857,7 @@ impl LeaderService {
     // Step 2: Construct withdrawal tx for approved requests
     // ========================================================================
 
-    fn process_approved_withdrawal_requests(&mut self, checkpoint_timestamp_ms: u64) {
+    async fn process_approved_withdrawal_requests(&mut self, checkpoint_timestamp_ms: u64) {
         debug!("Entering process_approved_withdrawal_requests");
         if self.is_reconfiguring() {
             debug!("Reconfig in progress, skipping withdrawal commitment processing");
@@ -873,6 +878,12 @@ impl LeaderService {
             .collect();
         approved.sort_by_key(|r| r.timestamp_ms);
 
+        // Drop stuck-warn entries for requests that are no longer pending,
+        // so a re-stuck request would warn again.
+        let pending_ids: HashSet<Address> = approved.iter().map(|r| r.id).collect();
+        self.stuck_withdrawal_warned
+            .retain(|id| pending_ids.contains(id));
+
         if self
             .withdrawal_commitment_retry_tracker
             .should_skip(checkpoint_timestamp_ms)
@@ -888,11 +899,6 @@ impl LeaderService {
             return;
         }
 
-        // Collect all approved requests and process them as a single batch.
-        // The coin selection algorithm picks up to
-        // max_withdrawal_requests oldest requests from the slice.
-        let batch: Vec<WithdrawalRequest> = approved.into_iter().collect();
-
         self.inner
             .metrics
             .leader_items_in_backoff
@@ -902,9 +908,49 @@ impl LeaderService {
                     .in_backoff_count(checkpoint_timestamp_ms) as i64,
             );
 
-        if batch.is_empty() {
+        if approved.is_empty() {
             return;
         }
+
+        // Capacity-aware batching: take the longest timestamp-sorted prefix
+        // whose cumulative `btc_amount` fits the local limiter's currently
+        // available capacity. Anything dropped fires `at_capacity` as a
+        // third "process now" trigger so the leader doesn't sit on excess
+        // demand for the full batching window.
+        let (batch, at_capacity) = if let Some(limiter) = self.inner.local_limiter() {
+            let timestamp_secs = checkpoint_timestamp_ms / 1000;
+            let capacity = limiter.capacity_at(timestamp_secs).await;
+            let mut cumulative = 0u64;
+            let mut filtered: Vec<WithdrawalRequest> = Vec::with_capacity(approved.len());
+            for req in &approved {
+                let candidate = cumulative.saturating_add(req.btc_amount);
+                if candidate > capacity {
+                    break;
+                }
+                cumulative = candidate;
+                filtered.push(req.clone());
+            }
+            if filtered.is_empty() {
+                // Single request larger than the currently-available capacity.
+                // It may fit after refill, or it may exceed `max_bucket_capacity`
+                // entirely — either way, leave it queued and warn once so the
+                // operator notices a stuck head.
+                let stuck = &approved[0];
+                if self.stuck_withdrawal_warned.insert(stuck.id) {
+                    warn!(
+                        request_id = %stuck.id,
+                        btc_amount = stuck.btc_amount,
+                        available = capacity,
+                        "Withdrawal request exceeds local limiter capacity; staying in queue"
+                    );
+                }
+                return;
+            }
+            let at_capacity = filtered.len() < approved.len();
+            (filtered, at_capacity)
+        } else {
+            (approved, false)
+        };
 
         let max_batch = self.inner.config.withdrawal_max_batch_size();
         let delay_ms = self.inner.config.withdrawal_batching_delay_ms();
@@ -914,7 +960,7 @@ impl LeaderService {
             .first()
             .is_some_and(|r| checkpoint_timestamp_ms >= r.timestamp_ms + delay_ms);
 
-        if !batch_is_full && !oldest_has_waited {
+        if !batch_is_full && !oldest_has_waited && !at_capacity {
             debug!(
                 "Holding {} approved request(s): oldest is {}ms old, \
                  waiting for {}ms delay or {} requests",
