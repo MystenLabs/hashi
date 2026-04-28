@@ -558,8 +558,7 @@ impl Hashi {
                 epoch,
             );
         }
-        let local_limiter = self.local_limiter();
-        let limiter_consume = match (local_limiter.as_ref(), expected_limiter_seq) {
+        let limiter_consume = match (self.local_limiter(), expected_limiter_seq) {
             (Some(limiter), Some(expected_seq)) => {
                 let amount_sats: u64 = txn.withdrawal_outputs.iter().map(|o| o.amount).sum();
                 let timestamp_secs = txn.timestamp_ms / 1000;
@@ -567,18 +566,17 @@ impl Hashi {
                     .validate_consume(expected_seq, timestamp_secs, amount_sats)
                     .await
                     .map_err(|e| anyhow!("Limiter rejected withdrawal {}: {e}", txn.id))?;
-                Some((expected_seq, timestamp_secs, amount_sats))
+                Some((limiter, expected_seq, timestamp_secs, amount_sats))
             }
             (None, None) => None,
-            (local, expected) => {
-                tracing::warn!(
-                    withdrawal_txn_id = %txn.id,
-                    local_configured = local.is_some(),
-                    expected_seq_provided = expected.is_some(),
-                    "Skipping local limiter validation due to configuration mismatch"
-                );
-                None
-            }
+            (Some(_), None) => anyhow::bail!(
+                "Local limiter is configured but request for withdrawal {} lacks expected_limiter_seq",
+                txn.id
+            ),
+            (None, Some(_)) => anyhow::bail!(
+                "Request for withdrawal {} carries expected_limiter_seq but local limiter is not configured",
+                txn.id
+            ),
         };
         let p2p_channel =
             RpcP2PChannel::new(onchain_state, epoch, crate::metrics::MPC_LABEL_SIGNING);
@@ -650,13 +648,13 @@ impl Hashi {
 
             signatures_by_input.push(signature);
         }
-        if let (Some(limiter), Some((seq, ts, amt))) = (local_limiter, limiter_consume)
-            && let Err(e) = limiter.apply_consume(seq, ts, amt).await
-        {
-            tracing::error!(
-                withdrawal_txn_id = %txn.id,
-                "Local limiter apply_consume failed after MPC: {e}"
-            );
+        if let Some((limiter, seq, ts, amt)) = limiter_consume {
+            limiter.apply_consume(seq, ts, amt).await.map_err(|e| {
+                anyhow!(
+                    "Local limiter apply_consume failed for withdrawal {}: {e}",
+                    txn.id
+                )
+            })?;
         }
         Ok(signatures_by_input)
     }
