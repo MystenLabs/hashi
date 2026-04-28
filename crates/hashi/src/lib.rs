@@ -434,12 +434,6 @@ impl Hashi {
             .set(guardian)
             .map_err(|_| anyhow!("Guardian client already initialized"))?;
 
-        // Seed guardian signing pubkey and local limiter before any other
-        // service starts. The background retry below covers the unhappy path.
-        if self.guardian_client().is_some() {
-            let _ = self.try_seed_guardian_state().await;
-        }
-
         // Verify Sui RPC is on the expected chain before loading any state.
         self.verify_sui_chain_id().await?;
 
@@ -489,7 +483,7 @@ impl Hashi {
         let (_http_addr, http_service) = grpc::HttpService::new(self.clone()).start().await;
         let leader_service = leader::LeaderService::new(self.clone()).start();
         let mpc_service = mpc_service.start();
-        let bootstrap_retry_service = self.clone().start_guardian_bootstrap_retry();
+        let guardian_bootstrap_service = self.clone().start_guardian_bootstrap();
 
         let service = Service::new()
             .merge(onchain_service)
@@ -497,7 +491,7 @@ impl Hashi {
             .merge(http_service)
             .merge(leader_service)
             .merge(mpc_service)
-            .merge(bootstrap_retry_service);
+            .merge(guardian_bootstrap_service);
 
         Ok(service)
     }
@@ -541,30 +535,27 @@ impl Hashi {
         true
     }
 
-    /// Retry `try_seed_guardian_state` with bounded exponential backoff
-    /// until the first success, then exit. No-op when state is already
-    /// seeded or no guardian is configured.
-    fn start_guardian_bootstrap_retry(self: Arc<Self>) -> Service {
+    /// Drive `try_seed_guardian_state` with bounded exponential backoff
+    /// until the first success, then exit. The first attempt fires
+    /// immediately (delay = 0). No-op when no guardian is configured.
+    fn start_guardian_bootstrap(self: Arc<Self>) -> Service {
         Service::new().spawn_aborting(async move {
             if self.guardian_client().is_none() {
                 return Ok(());
             }
-            if self.guardian_signing_pubkey().is_some() && self.local_limiter().is_some() {
-                return Ok(());
-            }
-            tracing::info!(
-                "Guardian not fully seeded at startup; retrying in background with \
-                 exponential backoff"
-            );
             const MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
-            let mut delay = std::time::Duration::from_secs(1);
+            let mut delay = std::time::Duration::ZERO;
             loop {
                 tokio::time::sleep(delay).await;
                 if self.try_seed_guardian_state().await {
-                    tracing::info!("Guardian bootstrap complete via retry task");
+                    tracing::info!("Guardian bootstrap complete");
                     return Ok(());
                 }
-                delay = (delay * 2).min(MAX_DELAY);
+                delay = if delay.is_zero() {
+                    std::time::Duration::from_secs(1)
+                } else {
+                    (delay * 2).min(MAX_DELAY)
+                };
             }
         })
     }
