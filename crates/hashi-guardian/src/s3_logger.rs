@@ -63,7 +63,14 @@ impl S3Logger {
             .retry_config(retry_config)
             .load()
             .await;
-        let client = S3Client::new(&aws_config);
+
+        // A custom endpoint implies an S3-compatible service (MinIO, LocalStack), which
+        // need path-style addressing.
+        let mut s3_builder = aws_sdk_s3::config::Builder::from(&aws_config);
+        if std::env::var_os("AWS_ENDPOINT_URL_S3").is_some() {
+            s3_builder = s3_builder.force_path_style(true);
+        }
+        let client = S3Client::from_conf(s3_builder.build());
 
         Self {
             client,
