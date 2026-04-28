@@ -91,7 +91,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = MonitorConfig::builder()
         .network(Network::Testnet4)
-        .confirmation_threshold(args.confirmations)
         .dns_peers(dns_peers)
         .start_height(args.start_height)
         .bitcoind_rpc_config(args.bitcoind_url.clone(), bitcoind_auth)
@@ -99,10 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Monitor configuration:");
     info!("  Network: {:?}", config.network);
-    info!(
-        "  Confirmations required: {}",
-        config.confirmation_threshold
-    );
+    info!("  Confirmations required: {}", args.confirmations);
     info!("  Starting height: {}", config.start_height);
     info!("  bitcoind RPC URL: {}", config.bitcoind_rpc_url);
     info!("  Initial peers: {}", config.dns_peers.len());
@@ -148,8 +144,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Spawn a task to confirm the deposit
                         let client = monitor_client.clone();
+                        let confirmations = args.confirmations;
                         tokio::spawn(async move {
-                            match client.confirm_deposit(outpoint).await {
+                            match client.confirm_deposit(outpoint, confirmations).await {
                                 Ok(txout) => {
                                     info!("✓ Deposit confirmed for {}", outpoint);
                                     info!("  Value: {} sats", txout.value.to_sat());

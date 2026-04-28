@@ -504,10 +504,11 @@ impl Monitor {
             return;
         }
 
+        let confirmation_threshold = pending_deposit.confirmation_threshold;
         self.pending_deposit_workers
             .spawn(Monitor::process_pending_deposit(
                 tip.to_owned(),
-                self.config.confirmation_threshold,
+                confirmation_threshold,
                 self.bitcoind_rpc.clone(),
                 self.requester.clone(),
                 self.client_tx.clone(),
@@ -649,10 +650,11 @@ impl Monitor {
             self.pending_deposits.len()
         );
         for pending_deposit in std::mem::take(&mut self.pending_deposits) {
+            let confirmation_threshold = pending_deposit.confirmation_threshold;
             self.pending_deposit_workers
                 .spawn(Monitor::process_pending_deposit(
                     tip.to_owned(),
-                    self.config.confirmation_threshold,
+                    confirmation_threshold,
                     self.bitcoind_rpc.clone(),
                     self.requester.clone(),
                     self.client_tx.clone(),
@@ -928,6 +930,11 @@ async fn send_forget(
 #[derive(Debug)]
 struct PendingDeposit {
     outpoint: bitcoin::OutPoint,
+    /// Number of confirmations required to consider this deposit
+    /// canonical. Captured at submit time from `OnchainState` so the
+    /// monitor stays Sui-unaware. Stays with the deposit through any
+    /// re-enqueues by `PendingDepositGuard`.
+    confirmation_threshold: u32,
     block_info: Option<kyoto::HeaderCheckpoint>,
     result_tx: oneshot::Sender<Result<bitcoin::TxOut, DepositConfirmError>>,
     checked_at_height: u32,
@@ -998,10 +1005,12 @@ impl MonitorClient {
     pub async fn confirm_deposit(
         &self,
         outpoint: bitcoin::OutPoint,
+        confirmation_threshold: u32,
     ) -> Result<bitcoin::TxOut, DepositConfirmError> {
         let (tx, rx) = oneshot::channel();
         let pending_deposit = PendingDeposit {
             outpoint,
+            confirmation_threshold,
             block_info: None,
             result_tx: tx,
             checked_at_height: 0,

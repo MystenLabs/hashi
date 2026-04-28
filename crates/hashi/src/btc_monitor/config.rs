@@ -16,9 +16,6 @@ pub struct MonitorConfig {
     /// Bitcoin network to connect to
     pub network: Network,
 
-    /// Number of confirmations required for a transaction to be considered canonical
-    pub confirmation_threshold: u32,
-
     /// Peers for P2P connections, identified by hostname (or IP) and port.
     /// Re-resolved via DNS on each connection attempt, so IP changes
     /// (e.g., Kubernetes pod rotation) are followed automatically.
@@ -41,7 +38,6 @@ impl Default for MonitorConfig {
     fn default() -> Self {
         Self {
             network: Network::Bitcoin,
-            confirmation_threshold: 6,
             dns_peers: Vec::new(),
             start_height: 800_000,
             bitcoind_rpc_url: "http://localhost:8332".to_string(),
@@ -62,7 +58,6 @@ impl MonitorConfig {
 #[derive(Debug, Default)]
 pub struct MonitorConfigBuilder {
     network: Option<Network>,
-    confirmation_threshold: Option<u32>,
     dns_peers: Vec<kyoto::DnsPeer>,
     start_height: u32,
     bitcoind_rpc_url: Option<String>,
@@ -74,12 +69,6 @@ impl MonitorConfigBuilder {
     /// Set the Bitcoin network.
     pub fn network(mut self, network: Network) -> Self {
         self.network = Some(network);
-        self
-    }
-
-    /// Set the confirmation threshold for deposits.
-    pub fn confirmation_threshold(mut self, confirmations: u32) -> Self {
-        self.confirmation_threshold = Some(confirmations);
         self
     }
 
@@ -118,9 +107,6 @@ impl MonitorConfigBuilder {
 
         MonitorConfig {
             network: self.network.unwrap_or(default.network),
-            confirmation_threshold: self
-                .confirmation_threshold
-                .unwrap_or(default.confirmation_threshold),
             dns_peers: self.dns_peers,
             start_height: self.start_height,
             bitcoind_rpc_url: self.bitcoind_rpc_url.unwrap_or(default.bitcoind_rpc_url),
