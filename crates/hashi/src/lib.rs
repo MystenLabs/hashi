@@ -507,7 +507,7 @@ impl Hashi {
         let info_pb = match client.get_guardian_info().await {
             Ok(info) => info,
             Err(e) => {
-                tracing::debug!("guardian bootstrap: GetGuardianInfo failed: {e}");
+                tracing::warn!("guardian bootstrap: GetGuardianInfo failed: {e}");
                 return false;
             }
         };
@@ -537,26 +537,28 @@ impl Hashi {
 
     /// Drive `try_seed_guardian_state` with bounded exponential backoff
     /// until the first success, then exit. The first attempt fires
-    /// immediately (delay = 0). No-op when no guardian is configured.
+    /// immediately. No-op when no guardian is configured.
     fn start_guardian_bootstrap(self: Arc<Self>) -> Service {
+        use backon::Retryable;
         Service::new().spawn_aborting(async move {
             if self.guardian_client().is_none() {
                 return Ok(());
             }
-            const MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
-            let mut delay = std::time::Duration::ZERO;
-            loop {
-                tokio::time::sleep(delay).await;
+            let policy = backon::ExponentialBuilder::default()
+                .with_min_delay(std::time::Duration::from_secs(1))
+                .with_max_delay(std::time::Duration::from_secs(30))
+                .without_max_times();
+            let _ = (|| async {
                 if self.try_seed_guardian_state().await {
-                    tracing::info!("Guardian bootstrap complete");
-                    return Ok(());
-                }
-                delay = if delay.is_zero() {
-                    std::time::Duration::from_secs(1)
+                    Ok::<(), ()>(())
                 } else {
-                    (delay * 2).min(MAX_DELAY)
-                };
-            }
+                    Err(())
+                }
+            })
+            .retry(policy)
+            .await;
+            tracing::info!("Guardian bootstrap complete");
+            Ok(())
         })
     }
 
