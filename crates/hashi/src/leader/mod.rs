@@ -1349,6 +1349,13 @@ impl LeaderService {
                 .inc();
         })?;
 
+        // Hold the txn in inflight_withdrawal_signings until the watcher
+        // sees the on-chain signatures; otherwise the next checkpoint may
+        // respawn this task and double-advance the guardian seq.
+        if inner.guardian_client().is_some() {
+            Self::wait_for_signed_withdrawal_visible(&inner, &txn.id).await;
+        }
+
         Ok(())
     }
 
@@ -1928,6 +1935,36 @@ impl LeaderService {
         executor
             .execute_sign_withdrawal(withdrawal_id, request_ids, signatures, cert)
             .await
+    }
+
+    async fn wait_for_signed_withdrawal_visible(inner: &Arc<Hashi>, txn_id: &Address) {
+        const VISIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
+        let mut checkpoint_rx = inner.onchain_state().subscribe_checkpoint();
+        let wait = async {
+            loop {
+                let visible = inner
+                    .onchain_state()
+                    .withdrawal_txns()
+                    .iter()
+                    .any(|p| p.id == *txn_id && p.signatures.is_some());
+                if visible {
+                    return;
+                }
+                if checkpoint_rx.changed().await.is_err() {
+                    return;
+                }
+            }
+        };
+        if tokio::time::timeout(VISIBILITY_TIMEOUT, wait)
+            .await
+            .is_err()
+        {
+            warn!(
+                withdrawal_txn_id = %txn_id,
+                "Timeout waiting for watcher to observe signed withdrawal; \
+                 a duplicate guardian RPC may follow on the next checkpoint"
+            );
+        }
     }
 
     async fn submit_confirm_withdrawal(
