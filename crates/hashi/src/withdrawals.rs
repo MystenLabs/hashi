@@ -393,6 +393,27 @@ impl Hashi {
         self.sign_message_proto(&confirmation)
     }
 
+    // --- Guardian: validate and BLS-sign a `StandardWithdrawalRequest` ---
+
+    #[tracing::instrument(level = "info", skip_all, fields(%withdrawal_txn_id, seq))]
+    pub fn validate_and_sign_guardian_withdrawal_request(
+        &self,
+        withdrawal_txn_id: &Address,
+        timestamp_secs: u64,
+        seq: u64,
+    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
+        let txn = self
+            .onchain_state()
+            .withdrawal_txn(withdrawal_txn_id)
+            .ok_or_else(|| {
+                anyhow!("WithdrawalTransaction {withdrawal_txn_id} not found on-chain")
+            })?;
+
+        let guardian_request = build_guardian_withdrawal_request(self, &txn, timestamp_secs, seq)?;
+
+        self.sign_message_proto(&guardian_request)
+    }
+
     // --- Step 3: Sign withdrawal (store witness signatures on-chain) ---
 
     #[tracing::instrument(level = "info", skip_all, fields(withdrawal_id = %message.withdrawal_id))]
@@ -1238,4 +1259,94 @@ fn script_pubkey_from_raw_address(address_bytes: &[u8]) -> anyhow::Result<bitcoi
     let program = WitnessProgram::new(version, address_bytes)
         .map_err(|e| anyhow!("Invalid witness program: {e}"))?;
     Ok(bitcoin::ScriptBuf::new_witness_program(&program))
+}
+
+/// Deterministic from on-chain state + leader-supplied `(timestamp_secs, seq)`,
+/// so every validator reconstructs the same request before BLS-signing it.
+pub fn build_guardian_withdrawal_request(
+    hashi: &Hashi,
+    txn: &WithdrawalTransaction,
+    timestamp_secs: u64,
+    seq: u64,
+) -> anyhow::Result<hashi_types::guardian::StandardWithdrawalRequest> {
+    use hashi_types::guardian::bitcoin_utils::InputUTXO;
+    use hashi_types::guardian::bitcoin_utils::OutputUTXO;
+    use hashi_types::guardian::bitcoin_utils::TxUTXOs;
+
+    let hashi_pubkey = hashi.get_hashi_pubkey()?;
+    let network = hashi.config.bitcoin_network();
+
+    // Inputs: per-UTXO taproot script-path artifacts, keyed by deposit pubkey.
+    let inputs = txn
+        .inputs
+        .iter()
+        .map(|utxo| {
+            let pubkey = hashi.deposit_pubkey(&hashi_pubkey, utxo.derivation_path.as_ref())?;
+            let (_, _, leaf_hash) =
+                bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
+            let address = hashi.bitcoin_address_from_pubkey(&pubkey);
+
+            let outpoint = bitcoin::OutPoint {
+                txid: utxo.id.txid.into(),
+                vout: utxo.id.vout,
+            };
+
+            InputUTXO::new(
+                outpoint,
+                Amount::from_sat(utxo.amount),
+                address.into_unchecked(),
+                leaf_hash,
+                network,
+            )
+            .map_err(|e| anyhow!("Failed to build guardian InputUTXO: {e}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    // First N outputs are `External` payouts; any trailing output is the
+    // `Internal` change back to the hashi root.
+    let all_outputs = txn.all_outputs();
+    let num_requests = txn.request_ids.len();
+    let outputs = all_outputs
+        .iter()
+        .enumerate()
+        .map(|(i, output)| {
+            if i < num_requests {
+                let script_pubkey = script_pubkey_from_raw_address(&output.bitcoin_address)?;
+                let address = BitcoinAddress::from_script(&script_pubkey, network)
+                    .map_err(|e| anyhow!("Cannot derive address from output script: {e}"))?;
+                OutputUTXO::new_external(
+                    address.into_unchecked(),
+                    Amount::from_sat(output.amount),
+                    network,
+                )
+                .map_err(|e| anyhow!("Failed to build guardian external OutputUTXO: {e}"))
+            } else {
+                let derivation_path = [0u8; 32];
+                Ok(OutputUTXO::new_internal(
+                    derivation_path,
+                    Amount::from_sat(output.amount),
+                ))
+            }
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let utxos = TxUTXOs::new(inputs, outputs)
+        .map_err(|e| anyhow!("Failed to build guardian TxUTXOs: {e}"))?;
+
+    let wid = compute_withdrawal_wid(&txn.request_ids);
+
+    Ok(hashi_types::guardian::StandardWithdrawalRequest::new(
+        wid,
+        utxos,
+        timestamp_secs,
+        seq,
+    ))
+}
+
+/// Deterministic 64-bit id for a withdrawal — leading bytes of Blake2b256 over
+/// the BCS-encoded request ids. Stable across restarts and leader rotations.
+pub fn compute_withdrawal_wid(request_ids: &[Address]) -> u64 {
+    let bytes = bcs::to_bytes(&request_ids).expect("serialization should succeed");
+    let hash = Blake2b256::digest(&bytes);
+    u64::from_le_bytes(hash.digest[..8].try_into().unwrap())
 }

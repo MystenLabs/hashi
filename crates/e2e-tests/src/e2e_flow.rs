@@ -288,6 +288,14 @@ mod tests {
                 .as_ref()
                 .expect("harness present when .with_guardian() is set");
             assert!(harness.enclave().is_fully_initialized());
+            futures::future::try_join_all(
+                networks
+                    .hashi_network
+                    .nodes()
+                    .iter()
+                    .map(|node| node.wait_for_local_limiter(Duration::from_secs(60))),
+            )
+            .await?;
         }
 
         let deposit_amount_sats = 100_000u64;
@@ -364,6 +372,25 @@ mod tests {
             Duration::from_secs(30),
         )
         .await?;
+
+        if with_guardian {
+            let guardian_state = networks
+                .guardian_harness
+                .as_ref()
+                .expect("harness present when .with_guardian() is set")
+                .enclave()
+                .state
+                .limiter_state()
+                .await
+                .expect("guardian limiter state present after a successful withdrawal");
+            assert_eq!(guardian_state.next_seq, 1);
+            let local_state = hashi
+                .local_limiter()
+                .expect("local limiter present after bootstrap")
+                .snapshot()
+                .await;
+            assert_eq!(local_state, guardian_state);
+        }
 
         info!("=== Bitcoin Withdrawal E2E Test{label} Passed ===");
         Ok(())
