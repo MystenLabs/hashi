@@ -192,6 +192,22 @@ pub enum CreateProposalCommands {
         metadata: MetadataArgs,
     },
 
+    /// Propose updating MPC parameters (`t`, `f`, `allowed_delta`) in one
+    /// transaction.
+    UpdateMpcConfig {
+        #[clap(long)]
+        threshold_bps: Option<u64>,
+
+        #[clap(long)]
+        max_faulty_bps: Option<u64>,
+
+        #[clap(long)]
+        weight_reduction_allowed_delta: Option<u64>,
+
+        #[clap(flatten)]
+        metadata: MetadataArgs,
+    },
+
     /// Propose enabling a package version
     EnableVersion {
         /// The version to enable
@@ -611,6 +627,22 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                         &config,
                         &key,
                         &value,
+                        parse_metadata(metadata.metadata),
+                        &tx_opts,
+                    )
+                    .await?;
+                }
+                CreateProposalCommands::UpdateMpcConfig {
+                    threshold_bps,
+                    max_faulty_bps,
+                    weight_reduction_allowed_delta,
+                    metadata,
+                } => {
+                    commands::proposal::create_update_mpc_config_proposal(
+                        &config,
+                        threshold_bps,
+                        max_faulty_bps,
+                        weight_reduction_allowed_delta,
                         parse_metadata(metadata.metadata),
                         &tx_opts,
                     )
