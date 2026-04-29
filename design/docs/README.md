@@ -1,3 +1,10 @@
+---
+slug: /
+title: Introduction
+sidebar_label: Introduction
+sidebar_position: 1
+---
+
 # Overview
 
 This is a high level overview and design doc for `hashi` the Sui native Bitcoin

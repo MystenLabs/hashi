@@ -16,6 +16,37 @@ controlled bitcoin address.
 ---
 title: Deposit Flow
 config:
+  theme: base
+  themeVariables:
+    primaryColor: '#000000'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#6C7584'
+    secondaryColor: '#6C7584'
+    secondaryTextColor: '#FFFFFF'
+    tertiaryColor: '#298DFF'
+    tertiaryTextColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    actorBkg: '#000000'
+    actorBorder: '#6C7584'
+    actorTextColor: '#FFFFFF'
+    actorLineColor: '#6C7584'
+    sequenceNumberColor: '#FFFFFF'
+    noteBkgColor: '#E6F1FB'
+    noteTextColor: '#000000'
+    noteBorderColor: '#298DFF'
+    activationBkgColor: '#298DFF'
+    activationBorderColor: '#185FA5'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+    signalColor: '#298DFF'
+    signalTextColor: '#298DFF'
+    labelBoxBkgColor: '#000000'
+    labelBoxBorderColor: '#6C7584'
+    labelTextColor: '#FFFFFF'
+    loopTextColor: '#FFFFFF'
   sequence:
     diagramMarginX: 0
 ---
@@ -71,6 +102,37 @@ off their loan) they can initiate a withdrawal.
 ---
 title: Withdraw Flow
 config:
+  theme: base
+  themeVariables:
+    primaryColor: '#000000'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#6C7584'
+    secondaryColor: '#6C7584'
+    secondaryTextColor: '#FFFFFF'
+    tertiaryColor: '#298DFF'
+    tertiaryTextColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    actorBkg: '#000000'
+    actorBorder: '#6C7584'
+    actorTextColor: '#FFFFFF'
+    actorLineColor: '#6C7584'
+    sequenceNumberColor: '#FFFFFF'
+    noteBkgColor: '#E6F1FB'
+    noteTextColor: '#000000'
+    noteBorderColor: '#298DFF'
+    activationBkgColor: '#298DFF'
+    activationBorderColor: '#185FA5'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+    signalColor: '#298DFF'
+    signalTextColor: '#298DFF'
+    labelBoxBkgColor: '#000000'
+    labelBoxBorderColor: '#6C7584'
+    labelTextColor: '#FFFFFF'
+    loopTextColor: '#FFFFFF'
   sequence:
     diagramMarginX: 0
 ---

@@ -11,6 +11,22 @@ be resumed and processed by the new committee upon the completion of
 reconfiguration.
 
 ```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+---
 graph LR
     A[Start Reconfig] --> B[DKG or Key Rotation] --> C[End Reconfig]
 ```
@@ -18,9 +34,25 @@ graph LR
 ### Start Reconfig
 
 ```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+---
 graph LR
     A[Start Reconfig]:::active --> B[DKG or Key Rotation] --> C[End Reconfig]
-    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
 ```
 
 Each hashi node monitors Sui for epoch changes. When a new Sui epoch is
@@ -47,9 +79,25 @@ Validator set stake-weights.
 ### DKG or Key Rotation
 
 ```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+---
 graph LR
     A[Start Reconfig] --> B[DKG or Key Rotation]:::active --> C[End Reconfig]
-    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
 ```
 
 The MPC key protocol runs among the new committee members. Which protocol is
@@ -77,9 +125,25 @@ output before the epoch transition is finalized on-chain.
 ### End Reconfig
 
 ```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+---
 graph LR
     A[Start Reconfig] --> B[DKG or Key Rotation] --> C[End Reconfig]:::active
-    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
 ```
 
 A committee member submits the aggregate signature certificate on-chain by

@@ -7,6 +7,20 @@ This document illustrates the lifecycle of key Move models in the deposit and wi
 ```mermaid
 ---
 title: Deposit Flow - Move Model Lifecycle
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
 ---
 flowchart TD
     subgraph Bitcoin["Bitcoin Network"]
@@ -74,6 +88,20 @@ flowchart TD
 ```mermaid
 ---
 title: Withdrawal Flow - Move Model Lifecycle
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
 ---
 flowchart TD
     subgraph Sui["Sui Chain"]

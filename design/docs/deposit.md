@@ -5,6 +5,22 @@ pool, minting a corresponding amount of `hBTC` into the user's account on Sui.
 The process has three phases:
 
 ```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+---
 graph LR
     A[Request] --> B[Confirm] --> C[Mint]
 ```
@@ -12,9 +28,25 @@ graph LR
 ## Request
 
 ```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+---
 graph LR
     A[Request]:::active --> B[Confirm] --> C[Mint]
-    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
 ```
 
 The user creates a Bitcoin transaction that sends BTC to a Hashi deposit
@@ -75,9 +107,25 @@ queue for committee members to begin monitoring for confirmation on Bitcoin.
 ## Confirm
 
 ```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+---
 graph LR
     A[Request] --> B[Confirm]:::active --> C[Mint]
-    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
 ```
 
 Committee members monitor the Bitcoin network for the deposit transaction. The
@@ -102,9 +150,25 @@ ignored if the request is invalid.
 ## Mint
 
 ```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+---
 graph LR
     A[Request] --> B[Confirm] --> C[Mint]:::active
-    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
 ```
 
 Once a quorum of validators have agreed that a deposit should be confirmed,

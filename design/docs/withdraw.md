@@ -4,6 +4,22 @@ A withdrawal allows a user to redeem their `hBTC` on Sui for native BTC,
 sent to a user-specified address on Bitcoin. The process has four phases:
 
 ```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+---
 graph LR
     A[Request] --> B[Approve] --> C[Build TX] --> D[Sign] --> E[Broadcast]
 ```
@@ -11,9 +27,25 @@ graph LR
 ## Request
 
 ```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+---
 graph LR
     A[Request]:::active --> B[Approve] --> C[Build TX] --> D[Sign] --> E[Broadcast]
-    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
 ```
 
 A user submits an on-chain Sui transaction to request a withdrawal by calling
@@ -30,7 +62,7 @@ public fun request_withdrawal(
 ```
 
 - `btc` -- the `hBTC` to withdraw. Must be at least the
-  [`withdrawal_minimum`](./config.md#withdrawal_minimum).
+  [`bitcoin_withdrawal_minimum`](./config.md#bitcoin_withdrawal_minimum).
 - `bitcoin_address` -- the destination witness program, either `P2WPKH` (20
   bytes) or `P2TR` (32 bytes).
 
@@ -49,9 +81,25 @@ approved, subject to a cooldown period
 ## Approve
 
 ```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+---
 graph LR
     A[Request] --> B[Approve]:::active --> C[Build TX] --> D[Sign] --> E[Broadcast]
-    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
 ```
 
 Before a queued request can advance, the Guardian's token-bucket rate limiter
@@ -86,9 +134,25 @@ approved, allowing it to be picked up for transaction construction.
 ## Build TX
 
 ```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+---
 graph LR
     A[Request] --> B[Approve] --> C[Build TX]:::active --> D[Sign] --> E[Broadcast]
-    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
 ```
 
 Multiple approved requests are batched into a single Bitcoin transaction to
@@ -137,9 +201,25 @@ withdrawal record that all validators can independently verify.
 ## Sign
 
 ```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+---
 graph LR
     A[Request] --> B[Approve] --> C[Build TX] --> D[Sign]:::active --> E[Broadcast]
-    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
 ```
 
 Signing is a two-step process matching the 2-of-2 Taproot script (see
@@ -180,9 +260,25 @@ signatures to the pending withdrawal.
 ## Broadcast
 
 ```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+---
 graph LR
     A[Request] --> B[Approve] --> C[Build TX] --> D[Sign] --> E[Broadcast]:::active
-    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
 ```
 
 The fully signed transaction is broadcast to the Bitcoin network. The
