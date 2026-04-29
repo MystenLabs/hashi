@@ -13,6 +13,8 @@ use sui::{
     group_ops::Element
 };
 
+const EStartReconfigBlockedAfterAbort: u64 = 0;
+
 //
 // CommitteeSet
 //
@@ -26,6 +28,9 @@ public struct CommitteeSet has store {
     pending_epoch_change: Option<u64>,
     /// The MPC committee's threshold public key.
     mpc_public_key: vector<u8>,
+    /// Used to prevent same-Sui-epoch re-pending of an aborted attempt.
+    /// `None` until the first abort.
+    last_aborted_at_sui_epoch: Option<u64>,
 }
 
 public(package) fun create(ctx: &mut TxContext): CommitteeSet {
@@ -35,6 +40,7 @@ public(package) fun create(ctx: &mut TxContext): CommitteeSet {
         committees: sui::bag::new(ctx),
         pending_epoch_change: option::none(),
         mpc_public_key: std::vector::empty(),
+        last_aborted_at_sui_epoch: option::none(),
     }
 }
 
@@ -369,6 +375,10 @@ public(package) fun start_reconfig(
     // We can only trigger reconfig if the current epoch is 0 (for genesis) or
     // our current epoch is not the same as Sui's epoch
     assert!(self.epoch == 0 || self.epoch != ctx.epoch());
+    assert!(
+        !self.last_aborted_at_sui_epoch.contains(&ctx.epoch()),
+        EStartReconfigBlockedAfterAbort,
+    );
 
     let committee = self.new_committee_from_validator_set(
         sui_system,
@@ -417,11 +427,11 @@ public(package) fun end_reconfig(
     next_epoch
 }
 
-// TODO include a cert from the current committee to abort a failed reconfig.
-public(package) fun abort_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u64 {
+public(package) fun abort_reconfig(self: &mut CommitteeSet, ctx: &TxContext): u64 {
     assert!(self.is_reconfiguring());
     let next_epoch = self.pending_epoch_change.extract();
     self.remove_committee(next_epoch);
+    self.last_aborted_at_sui_epoch = option::some(ctx.epoch());
     next_epoch
 }
 

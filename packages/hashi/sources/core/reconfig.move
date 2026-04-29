@@ -7,7 +7,6 @@ module hashi::reconfig;
 use hashi::{committee::CommitteeSignature, hashi::Hashi};
 
 const ENotReconfiguring: u64 = 0;
-const EAbortReconfigDisabled: u64 = 1;
 
 /// Message that committee members sign to confirm successful key rotation.
 public struct ReconfigCompletionMessage has copy, drop, store {
@@ -15,6 +14,11 @@ public struct ReconfigCompletionMessage has copy, drop, store {
     epoch: u64,
     /// The MPC committee's threshold public key.
     mpc_public_key: vector<u8>,
+}
+
+/// Message that the current committee signs to abort an in-flight reconfig.
+public struct ReconfigAbortMessage has copy, drop, store {
+    epoch: u64,
 }
 
 entry fun start_reconfig(
@@ -57,9 +61,17 @@ entry fun end_reconfig(
     sui::event::emit(EndReconfigEvent { epoch, mpc_public_key });
 }
 
-// TODO: Re-enable with committee certificate verification.
-entry fun abort_reconfig(_self: &mut Hashi, _ctx: &TxContext) {
-    abort EAbortReconfigDisabled
+entry fun abort_reconfig(self: &mut Hashi, cert: CommitteeSignature, ctx: &TxContext) {
+    self.config().assert_version_enabled();
+    assert!(self.committee_set().is_reconfiguring(), ENotReconfiguring);
+
+    let pending_epoch = self.committee_set().pending_epoch_change().destroy_some();
+    let current_committee = self.committee_set().current_committee();
+    let message = ReconfigAbortMessage { epoch: pending_epoch };
+    self.verify_with_committee(current_committee, message, cert);
+
+    let epoch = self.committee_set_mut().abort_reconfig(ctx);
+    sui::event::emit(AbortReconfigEvent { epoch });
 }
 
 public struct StartReconfigEvent has copy, drop {
@@ -72,7 +84,6 @@ public struct EndReconfigEvent has copy, drop {
     mpc_public_key: vector<u8>,
 }
 
-#[allow(unused_field)]
 public struct AbortReconfigEvent has copy, drop {
     epoch: u64,
 }

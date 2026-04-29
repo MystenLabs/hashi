@@ -72,9 +72,9 @@ pub struct CommitteeSet {
     pub epoch: u64,
     pub committees: Bag,
     pub pending_epoch_change: Option<u64>,
-
     /// The MPC committee's threshold public key.
     pub mpc_public_key: Vec<u8>,
+    pub last_aborted_at_sui_epoch: Option<u64>,
 }
 
 /// Rust version of the Move sui::bag::Bag type.
