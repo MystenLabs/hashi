@@ -3,14 +3,12 @@
 
 use std::path::Path;
 
-use anyhow::Context as _;
 use fastcrypto::groups::ristretto255::RistrettoScalar;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use fjall::Keyspace;
 use fjall::KeyspaceCreateOptions;
-use fjall::Readable;
 use fjall::Result;
 use sui_sdk_types::Address;
 
@@ -86,7 +84,7 @@ impl Database {
     /// to know the keyspace count, and so adding a new keyspace is a one-line
     /// change here. Only invoked on the snapshot path, so the per-call
     /// allocation is irrelevant.
-    fn backup_keyspaces(&self) -> Vec<(&str, &Keyspace)> {
+    pub(crate) fn backup_keyspaces(&self) -> Vec<(&'static str, &Keyspace)> {
         vec![
             (ENCRYPTION_KEYS_CF_NAME, &self.encryption_keys),
             (DEALER_MESSAGES_CF_NAME, &self.dealer_messages),
@@ -94,66 +92,16 @@ impl Database {
         ]
     }
 
-    /// Create a consistent snapshot of this database and write it as a new fjall
-    /// database at `dest`.
-    ///
-    /// Uses fjall's MVCC snapshot to get a point-in-time view of all keyspaces
-    /// while the source database remains open for writes. Rows are bulk-ingested
-    /// into the destination so the backup DB does not duplicate the copied data
-    /// into its journal. The destination is a fully self-contained fjall
-    /// database that can later be opened with [`Database::open`].
-    ///
-    /// `dest` must not already exist. The function refuses to write into an
-    /// existing directory because fjall would otherwise happily merge the
-    /// snapshot rows into whatever's already there, producing a hybrid DB that
-    /// looks valid but isn't a true point-in-time snapshot.
-    pub fn snapshot_to_path(&self, dest: &Path) -> anyhow::Result<()> {
-        if dest
-            .try_exists()
-            .with_context(|| format!("failed to stat snapshot destination {}", dest.display()))?
-        {
-            anyhow::bail!(
-                "snapshot destination {} already exists; refusing to merge into an existing directory",
-                dest.display()
-            );
-        }
+    pub(crate) fn backup_keyspace_names() -> [&'static str; 3] {
+        [
+            ENCRYPTION_KEYS_CF_NAME,
+            DEALER_MESSAGES_CF_NAME,
+            ROTATION_MESSAGES_CF_NAME,
+        ]
+    }
 
-        let snapshot = self.db.snapshot();
-
-        let dest_db = fjall::Database::builder(dest).open().map_err(|e| {
-            anyhow::Error::new(e).context(format!(
-                "failed to open destination database at {}",
-                dest.display()
-            ))
-        })?;
-
-        for (name, source_ks) in self.backup_keyspaces() {
-            let dest_ks = dest_db.keyspace(name, KeyspaceCreateOptions::default)?;
-            // fjall bulk ingestion is bounded internally: fjall::Ingestion
-            // delegates to lsm_tree::tree::ingest::Ingestion, whose
-            // MultiWriter spills Writer data blocks at the configured block
-            // size and rotates table files internally.
-            let mut ingestion = dest_ks.start_ingestion()?;
-
-            for guard in snapshot.iter(source_ks) {
-                let (key, value) = guard.into_inner()?;
-                ingestion.write(&*key, &*value)?;
-            }
-
-            ingestion.finish()?;
-        }
-
-        // The copied rows are bulk-ingested into SST files rather than written
-        // through the journal. `persist(SyncAll)` is still required to fsync
-        // fjall's manifest/SST metadata, making those bulk-ingested SSTs
-        // reachable when the destination DB is reopened. We do not fsync the
-        // dest directory entry here: this
-        // function's caller immediately tars the directory in the same process,
-        // so a crash before archival just discards an incomplete backup and
-        // loses no committed state.
-        dest_db.persist(fjall::PersistMode::SyncAll)?;
-
-        Ok(())
+    pub(crate) fn snapshot(&self) -> fjall::Snapshot {
+        self.db.snapshot()
     }
 
     /// Store encryption key for the given epoch.
@@ -425,7 +373,7 @@ fn prune_keyspace(keyspace: &Keyspace, cutoff_epoch: u64) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use crate::mpc::EncryptionGroupElement;
     use fastcrypto_tbls::nodes::Node;
     use fastcrypto_tbls::nodes::Nodes;
@@ -437,7 +385,7 @@ mod tests {
 
     use super::Database;
 
-    fn create_test_nodes(count: u16) -> Nodes<EncryptionGroupElement> {
+    pub(crate) fn create_test_nodes(count: u16) -> Nodes<EncryptionGroupElement> {
         let nodes: Vec<_> = (0..count)
             .map(|i| {
                 let private_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
@@ -452,7 +400,7 @@ mod tests {
         Nodes::new(nodes).unwrap()
     }
 
-    fn create_test_message() -> avss::Message {
+    pub(crate) fn create_test_message() -> avss::Message {
         // Need n >= 2*max_faulty + threshold, so 5 >= 2*1 + 3 = 5
         let nodes = create_test_nodes(5);
         let dealer = avss::Dealer::new(
@@ -465,7 +413,7 @@ mod tests {
         dealer.create_message(&mut rand::thread_rng())
     }
 
-    fn create_test_nonce_message() -> batch_avss::Message {
+    pub(crate) fn create_test_nonce_message() -> batch_avss::Message {
         let nodes = create_test_nodes(5);
         let dealer = batch_avss::Dealer::new(
             nodes,
@@ -1078,89 +1026,6 @@ mod tests {
         assert!(
             store.get_rotation_messages(87, &dealer).unwrap().is_none(),
             "rotation messages must not leak to the store's self.epoch=87"
-        );
-    }
-
-    #[test]
-    fn test_snapshot_to_path() {
-        use std::collections::BTreeMap;
-        use std::num::NonZeroU16;
-
-        let src_dir = tempfile::Builder::new().tempdir().unwrap();
-        let db = Database::open(src_dir.path()).unwrap();
-
-        let dealer1 = Address::new([1u8; 32]);
-        let dealer2 = Address::new([2u8; 32]);
-        let enc_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
-        let dealer_msg = create_test_message();
-        let nonce_msg = create_test_nonce_message();
-        let mut rotation_msgs: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();
-        rotation_msgs.insert(NonZeroU16::new(1).unwrap(), create_test_message());
-
-        db.store_encryption_key(10, &enc_key).unwrap();
-        db.store_dealer_message(10, &dealer1, &dealer_msg).unwrap();
-        db.store_rotation_messages(10, &dealer2, &rotation_msgs)
-            .unwrap();
-        db.store_nonce_message(10, 0, &dealer1, &nonce_msg).unwrap();
-
-        let dest_parent = tempfile::Builder::new().tempdir().unwrap();
-        let dest_path = dest_parent.path().join("snapshot");
-        db.snapshot_to_path(&dest_path).unwrap();
-
-        // Drop the source so we know we're reading from the destination
-        drop(db);
-
-        let restored = Database::open(&dest_path).unwrap();
-
-        // Verify encryption key
-        assert_eq!(restored.get_encryption_key(10).unwrap().unwrap(), enc_key);
-
-        // Verify dealer message
-        let restored_dealer = restored.get_dealer_message(10, &dealer1).unwrap().unwrap();
-        assert_eq!(
-            bcs::to_bytes(&restored_dealer).unwrap(),
-            bcs::to_bytes(&dealer_msg).unwrap()
-        );
-
-        // Verify rotation messages
-        let restored_rotation = restored.list_all_rotation_messages(10).unwrap();
-        assert_eq!(restored_rotation.len(), 1);
-        assert_eq!(restored_rotation[0].0, dealer2);
-
-        // Nonce messages are intentionally not included in backup snapshots.
-        let restored_nonces = restored.list_nonce_messages(10, 0).unwrap();
-        assert!(restored_nonces.is_empty());
-    }
-
-    #[test]
-    fn test_snapshot_to_path_empty_db() {
-        let src_dir = tempfile::Builder::new().tempdir().unwrap();
-        let db = Database::open(src_dir.path()).unwrap();
-
-        let dest_parent = tempfile::Builder::new().tempdir().unwrap();
-        let dest_path = dest_parent.path().join("snapshot");
-        db.snapshot_to_path(&dest_path).unwrap();
-        drop(db);
-
-        let restored = Database::open(&dest_path).unwrap();
-        assert!(restored.latest_encryption_key_epoch().unwrap().is_none());
-        assert!(restored.list_all_dealer_messages(0).unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_snapshot_to_path_rejects_existing_destination() {
-        // Refusing to merge into an existing dir is the snapshot API's
-        // contract — silently merging would produce a hybrid DB that's not a
-        // true point-in-time snapshot.
-        let src_dir = tempfile::Builder::new().tempdir().unwrap();
-        let db = Database::open(src_dir.path()).unwrap();
-
-        let dest_dir = tempfile::Builder::new().tempdir().unwrap();
-        let err = db.snapshot_to_path(dest_dir.path()).unwrap_err();
-        let chain = format!("{err:#}");
-        assert!(
-            chain.contains("already exists"),
-            "expected already-exists error, got: {chain}"
         );
     }
 }
