@@ -243,11 +243,11 @@ impl Hashi {
         epoch: u64,
     ) -> anyhow::Result<()> {
         let public_key = self.prepare_encryption_key(epoch)?;
-        let validator_address = self.config.validator_address()?;
         let mut executor = sui_tx_executor::SuiTxExecutor::from_hashi(self.clone())?;
         executor
-            .execute_update_next_epoch_encryption_key(validator_address, &public_key)
+            .execute_register_or_update_validator(&self.config, None, Some(&public_key))
             .await
+            .map(|_| ())
     }
 
     fn find_encryption_key_for_committee(
@@ -301,7 +301,7 @@ impl Hashi {
         let committee_set = &hashi.committees;
         let session_id = mpc::SessionId::new(self.config.sui_chain_id(), epoch, &protocol_type);
         let validator_address = self.config.validator_address()?;
-        // TODO: Once the per-epoch stake threshold is scoped to initial committee creation only
+        // TODO(IOP-194): Once the per-epoch stake threshold is scoped to initial committee creation only
         // and Move-side filtering rejects stale registrations, the committee's record will always equal the
         // current-epoch key and this lookup can revert to `get_encryption_key(epoch)`.
         let encryption_key = self.find_encryption_key_for_committee(
@@ -562,7 +562,7 @@ impl Hashi {
 
         // Register validator (if not already registered) and update any stale metadata.
         match sui_tx_executor::SuiTxExecutor::from_config(&self.config, self.onchain_state())?
-            .execute_register_or_update_validator(&self.config, None)
+            .execute_register_or_update_validator(&self.config, None, None)
             .await
         {
             Ok(true) => tracing::info!("Validator registered/updated on-chain"),
