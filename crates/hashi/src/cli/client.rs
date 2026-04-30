@@ -49,6 +49,7 @@ pub enum CreateProposalParams {
         metadata: Vec<(String, String)>,
     },
     AbortReconfig {
+        epoch: u64,
         metadata: Vec<(String, String)>,
     },
 }
@@ -528,7 +529,8 @@ pub fn build_create_proposal_transaction(
                 vec![hashi_arg, version_arg, metadata_arg, clock_arg],
             );
         }
-        CreateProposalParams::AbortReconfig { metadata } => {
+        CreateProposalParams::AbortReconfig { epoch, metadata } => {
+            let epoch_arg = builder.pure(&epoch);
             let metadata_arg = build_metadata(&mut builder, &metadata);
             builder.move_call(
                 Function::new(
@@ -536,7 +538,7 @@ pub fn build_create_proposal_transaction(
                     Identifier::from_static("abort_reconfig"),
                     Identifier::from_static("propose"),
                 ),
-                vec![hashi_arg, metadata_arg, clock_arg],
+                vec![hashi_arg, epoch_arg, metadata_arg, clock_arg],
             );
         }
     }

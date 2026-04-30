@@ -5,7 +5,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use futures::StreamExt;
+use hashi_types::move_types::AbortReconfig;
 use hashi_types::move_types::BurnEvent;
+use hashi_types::move_types::HashiEvent;
 use hashi_types::move_types::MintEvent;
 use sui_rpc::Client;
 use sui_rpc::field::FieldMask;
@@ -25,7 +27,6 @@ use crate::onchain::types::DepositRequest;
 use crate::onchain::types::Proposal;
 use crate::onchain::types::ProposalType;
 use crate::onchain::types::WithdrawalRequest;
-use hashi_types::move_types::HashiEvent;
 
 #[tracing::instrument(name = "watcher", skip_all)]
 pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Arc<Metrics>>) {
@@ -234,6 +235,26 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                             tracing::error!(
                                 "failed to refresh config after config-changing proposal: {e}"
                             );
+                        }
+                    }
+                }
+
+                if matches!(
+                    parse_proposal_type_from_type_tag(&proposal_executed_event.proposal_type),
+                    ProposalType::AbortReconfig
+                ) {
+                    match bcs::from_bytes::<AbortReconfig>(&proposal_executed_event.data_bcs) {
+                        Ok(abort_reconfig) => {
+                            let mut state = state.state_mut();
+                            state
+                                .hashi
+                                .committees
+                                .committees_mut()
+                                .remove(&abort_reconfig.epoch);
+                            state.hashi.committees.set_pending_epoch_change(None);
+                        }
+                        Err(e) => {
+                            tracing::error!("unable to decode AbortReconfig proposal data: {e}");
                         }
                     }
                 }
@@ -469,15 +490,6 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .set_epoch(end_reconfig_event.epoch)
                     .set_pending_epoch_change(None)
                     .set_mpc_public_key(end_reconfig_event.mpc_public_key.clone());
-            }
-            HashiEvent::AbortReconfigEvent(abort_reconfig_event) => {
-                let mut state = state.state_mut();
-                state
-                    .hashi
-                    .committees
-                    .committees_mut()
-                    .remove(&abort_reconfig_event.epoch);
-                state.hashi.committees.set_pending_epoch_change(None);
             }
         }
     }

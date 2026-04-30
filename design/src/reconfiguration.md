@@ -131,9 +131,11 @@ include:
   such as invalid endpoint, TLS, BLS, or encryption key updates.
 
 In these cases, governance can create and execute an
-`abort_reconfig::AbortReconfig` proposal. The proposal is voted on by the
-current committed committee. When quorum is reached, execution clears the
-pending epoch change, removes the pending committee, emits `AbortReconfigEvent`,
-and leaves the current Hashi epoch and MPC public key unchanged. Normal
-operations can then resume under the last committed committee, and a later Sui
-epoch notification can trigger a fresh `start_reconfig`.
+`abort_reconfig::AbortReconfig` proposal for the specific pending epoch being
+aborted. The proposal is voted on by the current committed committee. When
+quorum is reached, execution re-checks that the same epoch is still pending,
+clears the pending epoch change, removes the pending committee, and emits the
+standard `ProposalExecutedEvent<AbortReconfig>` with the aborted epoch in the
+proposal data. The current Hashi epoch and MPC public key remain unchanged.
+Normal operations can then resume under the last committed committee, and a
+later Sui epoch notification can trigger a fresh `start_reconfig`.

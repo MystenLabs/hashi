@@ -56,13 +56,6 @@ entry fun end_reconfig(
     sui::event::emit(EndReconfigEvent { epoch, mpc_public_key });
 }
 
-public(package) fun abort_reconfig(self: &mut Hashi, ctx: &TxContext) {
-    self.config().assert_version_enabled();
-    assert!(self.committee_set().is_reconfiguring(), ENotReconfiguring);
-    let epoch = self.committee_set_mut().abort_reconfig(ctx);
-    sui::event::emit(AbortReconfigEvent { epoch });
-}
-
 public struct StartReconfigEvent has copy, drop {
     epoch: u64,
 }
@@ -71,9 +64,4 @@ public struct EndReconfigEvent has copy, drop {
     epoch: u64,
     /// The MPC committee's threshold public key.
     mpc_public_key: vector<u8>,
-}
-
-#[allow(unused_field)]
-public struct AbortReconfigEvent has copy, drop {
-    epoch: u64,
 }

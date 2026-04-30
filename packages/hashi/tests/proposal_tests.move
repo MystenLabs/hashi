@@ -357,7 +357,7 @@ fun test_abort_reconfig_proposal() {
     assert!(hashi.committee_set().pending_epoch_change().destroy_some() == 1);
     assert!(hashi.committee_set().has_committee(1));
 
-    let proposal_id = test_utils::create_abort_reconfig_proposal(&mut hashi, &clock, ctx1);
+    let proposal_id = test_utils::create_abort_reconfig_proposal(&mut hashi, 1, &clock, ctx1);
 
     let ctx2 = &mut test_utils::new_tx_context(VOTER2, 0);
     proposal::vote<AbortReconfig>(&mut hashi, proposal_id, &clock, ctx2);
@@ -375,17 +375,60 @@ fun test_abort_reconfig_proposal() {
 }
 
 #[test]
-#[expected_failure(abort_code = hashi::reconfig::ENotReconfiguring)]
-/// Test executing an abort reconfig proposal fails when no reconfig is pending
-fun test_abort_reconfig_proposal_fails_when_not_reconfiguring() {
+#[expected_failure(abort_code = hashi::abort_reconfig::ENotReconfiguring)]
+/// Test creating an abort reconfig proposal fails when no reconfig is pending
+fun test_abort_reconfig_proposal_fails_when_not_reconfiguring_at_propose() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
 
     let voters = vector[VOTER1];
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let clock = clock::create_for_testing(ctx);
 
-    let proposal_id = test_utils::create_abort_reconfig_proposal(&mut hashi, &clock, ctx);
-    hashi::abort_reconfig::execute(&mut hashi, proposal_id, &clock, ctx);
+    let _ = test_utils::create_abort_reconfig_proposal(&mut hashi, 1, &clock, ctx);
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::abort_reconfig::EWrongReconfigEpoch)]
+/// Test creating an abort reconfig proposal fails if it names a different epoch
+fun test_abort_reconfig_proposal_fails_for_wrong_epoch_at_propose() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+
+    let voters = vector[VOTER1];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+    add_pending_committee_for_testing(&mut hashi, 1);
+
+    let _ = test_utils::create_abort_reconfig_proposal(&mut hashi, 2, &clock, ctx);
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::abort_reconfig::EWrongReconfigEpoch)]
+/// Test executing a stale abort reconfig proposal cannot abort a later pending epoch
+fun test_abort_reconfig_proposal_fails_for_stale_epoch_at_execute() {
+    let ctx1 = &mut test_utils::new_tx_context(VOTER1, 0);
+
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx1);
+    let clock = clock::create_for_testing(ctx1);
+    add_pending_committee_for_testing(&mut hashi, 1);
+
+    let proposal_id = test_utils::create_abort_reconfig_proposal(&mut hashi, 1, &clock, ctx1);
+
+    let ctx2 = &mut test_utils::new_tx_context(VOTER2, 0);
+    proposal::vote<AbortReconfig>(&mut hashi, proposal_id, &clock, ctx2);
+    let ctx3 = &mut test_utils::new_tx_context(VOTER3, 0);
+    proposal::vote<AbortReconfig>(&mut hashi, proposal_id, &clock, ctx3);
+
+    let _ = hashi.committee_set_mut().abort_reconfig(ctx1);
+    add_pending_committee_for_testing(&mut hashi, 2);
+
+    hashi::abort_reconfig::execute(&mut hashi, proposal_id, &clock, ctx1);
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);

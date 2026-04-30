@@ -259,8 +259,9 @@ public fun create_emergency_pause_proposal(
 /// Creates an abort reconfig proposal and returns its ID
 public fun create_abort_reconfig_proposal(
     hashi: &mut Hashi,
+    epoch: u64,
     clock: &Clock,
     ctx: &mut TxContext,
 ): ID {
-    abort_reconfig::propose(hashi, vec_map::empty(), clock, ctx)
+    abort_reconfig::propose(hashi, epoch, vec_map::empty(), clock, ctx)
 }

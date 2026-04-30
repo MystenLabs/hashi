@@ -212,6 +212,10 @@ pub enum CreateProposalCommands {
 
     /// Propose aborting a pending Hashi reconfiguration
     AbortReconfig {
+        /// Pending Hashi epoch to abort
+        #[clap(long)]
+        epoch: u64,
+
         #[clap(flatten)]
         metadata: MetadataArgs,
     },
@@ -640,9 +644,10 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     )
                     .await?;
                 }
-                CreateProposalCommands::AbortReconfig { metadata } => {
+                CreateProposalCommands::AbortReconfig { epoch, metadata } => {
                     commands::proposal::create_abort_reconfig_proposal(
                         &config,
+                        epoch,
                         parse_metadata(metadata.metadata),
                         &tx_opts,
                     )
