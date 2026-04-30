@@ -402,6 +402,10 @@ impl OnchainState {
         self.state().hashi().config.bitcoin_confirmation_threshold()
     }
 
+    pub fn bitcoin_deposit_time_delay_ms(&self) -> u64 {
+        self.state().hashi().config.bitcoin_deposit_time_delay_ms()
+    }
+
     pub fn mpc_threshold_in_basis_points(&self) -> u16 {
         self.state().hashi().config.mpc_threshold_in_basis_points()
     }

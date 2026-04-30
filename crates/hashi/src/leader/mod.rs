@@ -145,6 +145,10 @@ impl LeaderService {
                     self.process_signed_withdrawal_txns();
                     self.check_delete_proposals(checkpoint_timestamp_ms);
 
+                    // Reload from on-chain state so approved deposits are
+                    // picked up for the second-phase `confirm_deposit`
+                    // submission as soon as the time-delay window elapses.
+                    self.reload_pending_deposit_requests();
                     if !self.pending_deposit_requests.is_empty() {
                         self.process_deposit_requests();
                     }
@@ -387,7 +391,23 @@ impl LeaderService {
         inner: Arc<Hashi>,
         deposit_request: DepositRequest,
     ) -> Result<(), DepositError> {
-        info!("Processing deposit request");
+        if deposit_request.approval_cert.is_some() {
+            // Already approved on-chain — just need to wait for the
+            // time-delay window to elapse, then call `confirm_deposit`.
+            Self::process_approved_deposit(inner, deposit_request).await
+        } else {
+            // Not yet approved — gather a committee certificate and
+            // submit `approve_deposit`. A subsequent leader pass will
+            // pick the request up again and confirm it once approved.
+            Self::process_unapproved_deposit(inner, deposit_request).await
+        }
+    }
+
+    async fn process_unapproved_deposit(
+        inner: Arc<Hashi>,
+        deposit_request: DepositRequest,
+    ) -> Result<(), DepositError> {
+        info!("Approving deposit request");
 
         // Validate deposit_request before asking for signatures
         inner
@@ -452,7 +472,59 @@ impl LeaderService {
             Err(err) => return Err(DepositError::ExecutorInitFailed(err)),
         };
         executor
-            .execute_confirm_deposit(&deposit_request, signed_message)
+            .execute_approve_deposit(&deposit_request, signed_message)
+            .await
+            .inspect(|()| {
+                inner
+                    .metrics
+                    .sui_tx_submissions_total
+                    .with_label_values(&["approve_deposit", "success"])
+                    .inc();
+                info!("Successfully submitted deposit approval");
+            })
+            .inspect_err(|e| {
+                error!("Failed to submit deposit approval: {e}");
+                inner
+                    .metrics
+                    .sui_tx_submissions_total
+                    .with_label_values(&["approve_deposit", "failure"])
+                    .inc();
+            })
+            .map_err(DepositError::ApproveDepositFailed)?;
+        Ok(())
+    }
+
+    async fn process_approved_deposit(
+        inner: Arc<Hashi>,
+        deposit_request: DepositRequest,
+    ) -> Result<(), DepositError> {
+        info!("Confirming approved deposit request");
+
+        // The on-chain `confirm_deposit` enforces the time-delay assertion
+        // against the Sui clock. Mirror it locally so we don't waste a
+        // transaction submission while the window is still open.
+        let approved_ms = deposit_request
+            .approval_timestamp_ms
+            .expect("approval_cert is set, so approval_timestamp_ms must be set");
+        let delay_ms = inner.onchain_state().bitcoin_deposit_time_delay_ms();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        if approved_ms.saturating_add(delay_ms) > now_ms {
+            return Err(DepositError::DelayNotElapsed {
+                approved_ms,
+                delay_ms,
+                now_ms,
+            });
+        }
+
+        let mut executor = match SuiTxExecutor::from_hashi(inner.clone()) {
+            Ok(executor) => executor,
+            Err(err) => return Err(DepositError::ExecutorInitFailed(err)),
+        };
+        executor
+            .execute_confirm_deposit(deposit_request.id)
             .await
             .inspect(|()| {
                 inner

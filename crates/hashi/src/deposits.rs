@@ -118,7 +118,15 @@ impl Hashi {
                 )));
             }
             Some(onchain_request) => {
-                if onchain_request != deposit_request {
+                // Approval state lives on the on-chain request but is not
+                // carried by `DepositRequest` constructed from the proto, so
+                // compare the immutable core fields only.
+                let core_matches = onchain_request.id == deposit_request.id
+                    && onchain_request.sender == deposit_request.sender
+                    && onchain_request.timestamp_ms == deposit_request.timestamp_ms
+                    && onchain_request.sui_tx_digest == deposit_request.sui_tx_digest
+                    && onchain_request.utxo == deposit_request.utxo;
+                if !core_matches {
                     return Err(DepositError::InvalidOnchainRequest(anyhow!(
                         "Deposit request fields do not match on-chain state"
                     )));
@@ -369,8 +377,20 @@ pub enum DepositError {
     #[error("Failed to create Sui transaction executor: {0}")]
     ExecutorInitFailed(#[source] anyhow::Error),
 
+    #[error("Failed to approve deposit on Sui: {0}")]
+    ApproveDepositFailed(#[source] anyhow::Error),
+
     #[error("Failed to confirm deposit on Sui: {0}")]
     ConfirmDepositFailed(#[source] anyhow::Error),
+
+    #[error(
+        "Deposit time-delay has not elapsed (approved at {approved_ms} ms, delay {delay_ms} ms, now {now_ms} ms)"
+    )]
+    DelayNotElapsed {
+        approved_ms: u64,
+        delay_ms: u64,
+        now_ms: u64,
+    },
 
     #[error("Deposit processing timed out after {0:?}")]
     TimedOut(std::time::Duration),
@@ -385,7 +405,9 @@ impl DepositError {
             | Self::FailedQuorum { .. }
             | Self::CertificateBuildFailed(_)
             | Self::ExecutorInitFailed(_)
+            | Self::ApproveDepositFailed(_)
             | Self::ConfirmDepositFailed(_)
+            | Self::DelayNotElapsed { .. }
             | Self::TimedOut(_) => DepositErrorKind::RetryOnNextBlock,
             Self::InvalidOnchainRequest(_)
             | Self::DuplicateOrSpentOnSui(_)

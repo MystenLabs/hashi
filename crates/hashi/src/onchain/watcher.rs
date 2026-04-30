@@ -141,7 +141,7 @@ pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Ar
                 }
             }
 
-            handle_events(&mut client, &state, &events).await;
+            handle_events(&mut client, &state, &events, timestamp_ms).await;
 
             // Finally update the latest checkpoint info
             state.update_latest_checkpoint_info(CheckpointInfo {
@@ -157,7 +157,12 @@ pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Ar
     }
 }
 
-async fn handle_events(client: &mut Client, state: &OnchainState, events: &[HashiEvent]) {
+async fn handle_events(
+    client: &mut Client,
+    state: &OnchainState,
+    events: &[HashiEvent],
+    checkpoint_timestamp_ms: u64,
+) {
     if events.is_empty() {
         return;
     }
@@ -252,6 +257,8 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                         amount: deposit_requested_event.amount,
                         derivation_path: deposit_requested_event.derivation_path,
                     },
+                    approval_cert: None,
+                    approval_timestamp_ms: None,
                 };
                 state
                     .state_mut()
@@ -261,14 +268,36 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .insert(deposit_request.id, deposit_request);
                 // TODO notify
             }
+            HashiEvent::DepositApprovedEvent(deposit_approved_event) => {
+                tracing::info!(deposit_request_id = %deposit_approved_event.request_id, "Deposit approved");
+                let mut state = state.state_mut();
+                // Stamp the in-memory request so the leader's next pass
+                // knows it's already approved and only needs to call
+                // `confirm_deposit` once the time-delay elapses.
+                if let Some(request) = state
+                    .hashi
+                    .deposit_queue
+                    .requests
+                    .get_mut(&deposit_approved_event.request_id)
+                {
+                    request.approval_cert = Some(deposit_approved_event.cert.clone());
+                    // The on-chain timestamp comes from the Sui clock at
+                    // approval time; we use the checkpoint timestamp as
+                    // the closest available proxy here. The authoritative
+                    // value will come back when the request is re-scraped
+                    // from chain on subscription resume.
+                    request.approval_timestamp_ms = Some(checkpoint_timestamp_ms);
+                }
+                // TODO notify
+            }
             HashiEvent::DepositConfirmedEvent(deposit_confirmed_event) => {
                 tracing::info!(deposit_request_id = %deposit_confirmed_event.request_id, "Deposit confirmed");
                 let mut state = state.state_mut();
 
                 let utxo = super::types::Utxo {
-                    id: deposit_confirmed_event.utxo_id,
-                    amount: deposit_confirmed_event.amount,
-                    derivation_path: deposit_confirmed_event.derivation_path,
+                    id: deposit_confirmed_event.utxo.id,
+                    amount: deposit_confirmed_event.utxo.amount,
+                    derivation_path: deposit_confirmed_event.utxo.derivation_path,
                 };
 
                 state
