@@ -113,11 +113,16 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
         let mut manager = {
             let state = onchain_state.state();
             let hashi = state.hashi();
+            // The tool reconstructs the previous epoch's output from a DB
+            // backup, so `encryption_key` here is the key that decrypted that
+            // epoch's AVSS messages. Pass it as both `encryption_key` (unused)
+            // and `previous_encryption_key` (the one reconstruction uses).
             MpcManager::new(
                 validator_address,
                 &hashi.committees,
                 session_id,
-                encryption_key,
+                encryption_key.clone(),
+                Some(encryption_key),
                 dummy_signing_key.clone(),
                 Box::new(store),
                 chain_id,
