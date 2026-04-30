@@ -1,14 +1,17 @@
-# User Flows
+---
+title: User Flows
+description: End-to-end deposit and withdrawal flows for users moving BTC between Bitcoin and Sui through Hashi.
+keywords: [ user flow, deposit, withdraw, BTC, hBTC, Sui ]
+---
 
-There are two main user flows for interacting with `hashi`, deposits and
+There are two main user flows for interacting with `hashi`: deposits and
 withdrawals.
 
 
-## Deposit Flow
+## Deposit flow
 
-In order for a user to leverage their `BTC` on Sui (e.g. as collateral for a
-loan), they'll need to deposit the `BTC` they want to leverage to a hashi mpc
-controlled bitcoin address.
+To use `BTC` on Sui (for example, as collateral for a loan), you must
+deposit your `BTC` to a Hashi MPC-controlled Bitcoin address.
 
 <div style={{zoom: 1.5}}>
 
@@ -69,32 +72,33 @@ sequenceDiagram
 ### BTC deposit address
 
 Every Sui address has its own unique Hashi Bitcoin deposit address. See
-[address scheme](./address-scheme.mdx) for the full derivation details.
+[Bitcoin Address Scheme](./address-scheme.mdx) for the full derivation
+details.
 
 ### Deposit
 
-Once a user's deposit address has been determined, they can initiate a deposit to
-hashi.
+After your deposit address is determined, you can initiate a deposit to
+Hashi.
 
-1. Broadcast a Bitcoin transaction depositing `BTC` into the user's unique
-   deposit address.
-1. Notify hashi of the deposit by submitting a transaction to Sui including the
-   deposit transaction id.
-1. Hashi nodes will query Bitcoin and watch for confirmation of the deposit
+1. Broadcast a Bitcoin transaction depositing `BTC` into your unique deposit
+   address.
+1. Notify Hashi of the deposit by submitting a transaction to Sui that
+   includes the deposit transaction ID.
+1. Hashi nodes query Bitcoin and watch for confirmation of the deposit
    transaction.
-1. Hashi nodes communicate, waiting till a quorum has confirmed the deposit
+1. Hashi nodes communicate, waiting until a quorum has confirmed the deposit
    (after X block confirmations).
-1. Hashi confirms the deposit on chain, minting the equivalent amount of `hBTC`
-   and transferring it to the user's Sui address. The user can then immediately
-   use the `hBTC` to interact with a defi protocol to, for example, leverage the
-   `hBTC` as collateral for a loan in `USDC`.
+1. Hashi confirms the deposit onchain, minting the equivalent amount of
+   `hBTC` and transferring it to your Sui address. You can then immediately
+   use the `hBTC` to interact with a DeFi protocol. For example, you can use
+   the `hBTC` as collateral for a loan in `USDC`.
 
-For a detailed breakdown of each phase, see [deposit](./deposit.mdx).
+For a detailed breakdown of each phase, see [Deposit](./deposit.mdx).
 
-## Withdraw Flow
+## Withdraw flow
 
-Once a user has decided they want their `BTC` back on Bitcoin (e.g. they've paid
-off their loan) they can initiate a withdrawal.
+After you decide you want your `BTC` back on Bitcoin (for example, after you
+pay off your loan), you can initiate a withdrawal.
 
 <div style={{zoom: 1.5}}>
 
@@ -152,11 +156,11 @@ sequenceDiagram
 
 ### Withdraw
 
-1. User sends a transaction to Sui with the amount of `hBTC` they would like to
-   withdraw and the Bitcoin address they want to withdraw to.
-1. Hashi will pick up the withdrawal request and will craft a bitcoin
-   transaction that sends the requested `BTC` (minus fees) to the provided
-   Bitcoin address and uses MPC to sign the transaction.
+1. You send a transaction to Sui with the amount of `hBTC` you want to
+   withdraw and the Bitcoin address you want to withdraw to.
+1. Hashi picks up the withdrawal request and crafts a Bitcoin transaction
+   that sends the requested `BTC` (minus fees) to the provided Bitcoin
+   address, then uses MPC to sign the transaction.
 1. The transaction is broadcast to the Bitcoin network.
 
-For a detailed breakdown of each phase, see [withdraw](./withdraw.mdx).
+For a detailed breakdown of each phase, see [Withdraw](./withdraw.mdx).

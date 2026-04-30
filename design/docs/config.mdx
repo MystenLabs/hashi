@@ -1,12 +1,16 @@
-# Configuration
+---
+title: Configuration
+description: Onchain configuration parameters that control Hashi's deposit, withdrawal, fee, and operational behavior.
+keywords: [ configuration, governance, deposit minimum, withdrawal minimum, confirmation threshold, parameters ]
+---
 
-Hashi maintains a set of on-chain configuration parameters stored in the
+Hashi maintains a set of onchain configuration parameters stored in the
 `Config` object. These parameters control protocol behavior for deposits,
 withdrawals, fee estimation, and system operations.
 
-All configurable parameters can be updated via the `UpdateConfig` governance
-proposal, which requires 2/3 of committee weight (see
-[governance actions](./governance-actions.mdx)). Each key is validated against
+You can update all configurable parameters through the `UpdateConfig`
+governance proposal, which requires 2/3 of committee weight (see
+[Governance Actions](./governance-actions.mdx)). Each key is validated against
 its expected type on update.
 
 ## Parameters
@@ -21,7 +25,7 @@ its expected type on update.
 | **Floor** | `546` (dust relay minimum) |
 
 The minimum deposit amount in satoshis. Deposits below this value are rejected
-on-chain. The effective value is always at least `546 sats` to prevent creating
+onchain. The effective value is always at least `546 sats` to prevent creating
 unspendable UTXOs.
 
 ### `bitcoin_withdrawal_minimum`
@@ -49,6 +53,8 @@ fee deduction. The floor ensures the worst-case network fee is always at least
 The number of Bitcoin block confirmations required before a deposit is
 considered final. Guards against chain reorganizations.
 
+
+
 ### `paused`
 
 | | |
@@ -57,7 +63,7 @@ considered final. Guards against chain reorganizations.
 | **Default** | `false` |
 
 When `true`, the protocol pauses processing of deposits and withdrawals.
-Requests already in the queue remain queued and will resume processing when the
+Requests already in the queue remain queued and resume processing when the
 system is unpaused. Reconfiguration and governance actions are not affected.
 
 ### `withdrawal_cancellation_cooldown_ms`
@@ -69,10 +75,10 @@ system is unpaused. Reconfiguration and governance actions are not affected.
 | **Unit** | milliseconds |
 
 The minimum time a withdrawal request must remain in the queue before the user
-is allowed to cancel it. Prevents users from using rapid submit-cancel cycles
-to interfere with processing.
+can cancel it. Prevents users from using rapid submit-cancel cycles to
+interfere with processing.
 
-## Read-only / genesis-only parameters
+## Read-only or genesis-only parameters
 
 ### `bitcoin_chain_id`
 
@@ -82,7 +88,7 @@ to interfere with processing.
 
 The 32-byte Bitcoin chain identifier as defined by
 [BIP-122](https://github.com/bitcoin/bips/blob/master/bip-0122.mediawiki)
-(the genesis block hash). Set at genesis and not updatable via the
+(the genesis block hash). Set at genesis and not updatable through the
 `UpdateConfig` proposal.
 
 ## Derived values
@@ -104,6 +110,6 @@ The minimum deposit amount. With defaults: `30,000 sats`.
 worst_case_network_fee = bitcoin_withdrawal_minimum - 546
 ```
 
-The maximum miner fee the contract will accept for a withdrawal transaction,
+The maximum miner fee the contract accepts for a withdrawal transaction,
 derived from `bitcoin_withdrawal_minimum` minus the dust threshold. With
 defaults: `30,000 - 546 = 29,454 sats`.

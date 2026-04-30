@@ -1,8 +1,14 @@
-# Move Model Lifecycle
+---
+title: Move Model Lifecycle
+description: How Hashi's key Move data structures transform between onchain Sui state and offchain Bitcoin state during deposit and withdrawal flows.
+keywords: [ Move, lifecycle, data model, onchain, offchain, deposit flow, withdrawal flow ]
+---
 
-This document illustrates the lifecycle of key Move models in the deposit and withdrawal flows, showing how data structures transform between on-chain (Sui) and off-chain (Bitcoin) states.
+This document illustrates the lifecycle of key Move models in the deposit and
+withdrawal flows, showing how data structures transform between onchain (Sui)
+and offchain (Bitcoin) states.
 
-## Deposit Flow
+## Deposit flow
 
 ```mermaid
 ---
@@ -70,7 +76,7 @@ flowchart TD
     style CERTIFIED fill:#00d4aa,color:#000
 ```
 
-### Deposit Flow Summary
+### Deposit flow summary
 
 | Step | Action                                     | Model Transformation                                        |
 | ---- | ------------------------------------------ | ----------------------------------------------------------- |
@@ -83,7 +89,7 @@ flowchart TD
 
 ---
 
-## Withdrawal Flow
+## Withdrawal flow
 
 ```mermaid
 ---
@@ -173,9 +179,17 @@ flowchart TD
     style MOVE_CONFIRMED fill:#00d4aa,color:#000
 ```
 
-> **Note:** The Bitcoin confirmation threshold is stored on-chain in config key `bitcoin_confirmation_threshold` (default `6`). Witness signatures are stored on-chain so that any leader can reconstruct and re-broadcast the signed Bitcoin transaction without MPC re-signing (e.g., after leader rotation or mempool eviction).
+:::info
 
-### Withdrawal Flow Summary
+The Bitcoin confirmation threshold is stored onchain in the config key
+`bitcoin_confirmation_threshold` (default `6`). Witness signatures are stored
+onchain so that any leader can reconstruct and re-broadcast the signed
+Bitcoin transaction without MPC re-signing (for example, after leader
+rotation or mempool eviction).
+
+:::
+
+### Withdrawal flow summary
 
 | Step | Action                                       | Model Transformation                                                        |
 | ---- | -------------------------------------------- | --------------------------------------------------------------------------- |
@@ -190,13 +204,13 @@ flowchart TD
 
 ---
 
-## Key Models Reference
+## Key models reference
 
 | Model                    | Location                                 | Description                                                            |
 | ------------------------ | ---------------------------------------- | ---------------------------------------------------------------------- |
 | `Balance<BTC>`           | User wallet                              | Wrapped BTC token on Sui                                               |
 | `DepositRequest`         | `DepositRequestQueue`                    | Pending deposit awaiting committee confirmation                        |
-| `Utxo`                   | `UtxoPool`                               | On-chain representation of a Bitcoin UTXO                              |
+| `Utxo`                   | `UtxoPool`                               | Onchain representation of a Bitcoin UTXO                               |
 | `WithdrawalRequest`      | `WithdrawalRequestQueue.requests`        | User's withdrawal request with destination and lifecycle status        |
 | `WithdrawalTransaction`  | `WithdrawalRequestQueue.withdrawal_txns` | In-flight withdrawal tx, stores inputs, outputs, and witness signatures|
 | `WithdrawalTransaction`  | `WithdrawalRequestQueue.confirmed_txns`  | Confirmed withdrawal tx (historical record)                            |
@@ -204,4 +218,4 @@ flowchart TD
 | `Committee`              | `CommitteeSet`                           | BLS signing committee of Sui validators for an epoch                   |
 | `CommitteeMember`        | `Committee.members`                      | Validator with public_key and voting weight                            |
 | `CommitteeSignature`     | Transaction input                        | Aggregated BLS signature with signers bitmap                           |
-| `CertifiedMessage<T>`    | Verified on-chain                        | Message proven to have committee quorum support                        |
+| `CertifiedMessage<T>`    | Verified onchain                         | Message proven to have committee quorum support                        |

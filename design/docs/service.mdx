@@ -1,26 +1,29 @@
-# Service
+---
+title: Service
+description: The Hashi node service that committee members run, the gRPC interface it exposes, and the on-Sui state it relies on.
+keywords: [ service, node, gRPC, TLS, stateless, Move package ]
+---
 
-Every committee member will be responsible for running a hashi node service.
-Each hashi node will expose an http service, secured by TLS leveraging a
-self-signed cert (ed25519 public key can be found in the Hashi System State
-object) which will serve a gRPC `HashiService`.
+Every committee member is responsible for running a Hashi node service. Each
+Hashi node exposes an HTTP service, secured by Transport Layer Security (TLS)
+using a self-signed cert (the ed25519 public key is available in the Hashi
+System State object), and serves a gRPC `HashiService`.
 
-## Sui Contracts
+## Sui contracts
 
-- The hashi move package(s) will be published as normal packages. In other
-  words, the hashi packages will *not* be system packages and will *not* be a
-  part of sui's framework.
+- The Hashi Move packages are published as normal packages. The Hashi packages
+  are not system packages, and are not part of the Sui framework.
 
 ## Stateless
 
-A main goal of this design is to make the hashi service as stateless as
+A main goal of this design is to make the Hashi service as stateless as
 possible. Outside of any cryptographic material required for participating in
 the protocol, any state critical for the functioning of the service must be
-stored on Sui as a part of the live object set and knowledge of any historical
+stored on Sui as part of the live object set. Knowledge of any historical
 transactions or events previously emitted must not be needed for correct
-operations of the service.
+operation of the service.
 
-The set of data structures and state that are kept on chain are as follows:
+The set of data structures and state kept onchain is as follows:
 
 ```mermaid
 ---

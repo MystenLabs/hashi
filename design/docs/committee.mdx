@@ -1,17 +1,20 @@
-# Committee
+---
+title: Committee
+description: The Hashi committee is a subset of the Sui validator set that operates the protocol's MPC signing service.
+keywords: [ committee, validators, registration, BLS, MPC, hand-off ]
+---
 
-Hashi is intended to be "native", meaning the expectation is that the members
-of the hashi committee are a subset of the Sui validators. Being a member of
-the hashi committee is restricted to members of Sui's validator set but is
-essentially optional as it requires a separate on-chain registration and
-running extra services. In practice we expect the % of Sui validators who are
-members of the hashi committee to be >90%.
+Hashi is a native protocol, meaning the members of the Hashi committee are a
+subset of the Sui validators. Membership in the Hashi committee is restricted
+to members of the Sui validator set but is otherwise optional, because it
+requires a separate onchain registration and running extra services. In
+practice, more than 90% of Sui validators are expected to be members of the
+Hashi committee.
 
-## Registration Info
+## Registration information
 
-Each Sui validator will need to register themselves before they'll be able to
-join the hashi committee. Each committee member will need to provide the
-following additional information:
+Each Sui validator must register before joining the Hashi committee. Each
+committee member provides the following additional information:
 
 ```rust
 struct HashiNodeInfo {
@@ -42,39 +45,37 @@ struct HashiNodeInfo {
 }
 ```
 
-The voting weight each validator possesses will be mirrored from the
+The voting weight each validator possesses is mirrored from the
 `SuiSystemState`.
 
-## Why is the committee not exactly the set of Sui Validators?
+## Why the committee is not exactly the set of Sui validators
 
-Above it's mentioned that the hashi committee is a subset of the Sui Validators
-instead of being strictly the same set. There are a few challenges with forcing
-these sets to be identical:
+The Hashi committee is a subset of the Sui validators rather than strictly the
+same set. There are a few challenges with forcing these sets to be identical:
 
-- Being a member of the committee is strictly optional since hashi's system
-  state is separate from sui's system state. When someone registers to become a
-  Sui Validator the set of metadata (public keys, network addresses, etc) they
-  are required to submit only includes information necessary for running the
-  `sui-node` validator service. Without changes, there is no way of preventing
-  a new validator from becoming a validator without also registering to join
-  the hashi committee.
-- If we enforce tight coupling we'd likely need to change sui's epoch
-  change/reconfiguration process in a few ways:
-  - Given the mpc hand-off protocol takes non-trivial amount of time to
-    execute, the new set of validators would need to be locked-in some time
-    period before the closing of the epoch to give the mpc committee time to
-    reconfigure and
-  - We'd need to block Sui's epoch change and reconfiguration on successful
-    reconfiguration of the mpc committee.
+- Membership in the committee is strictly optional, because Hashi's system
+  state is separate from Sui's system state. When someone registers as a Sui
+  validator, the required metadata (public keys, network addresses, and so on)
+  only includes information necessary for running the `sui-node` validator
+  service. Without changes, there is no way to require a new Sui validator to
+  also register for the Hashi committee.
+- Enforcing tight coupling would require changes to Sui's epoch change and
+  reconfiguration process in a few ways:
+  - The MPC hand-off protocol takes a non-trivial amount of time to execute,
+    so the new set of validators would need to be locked in some time period
+    before the close of the epoch, giving the MPC committee time to
+    reconfigure.
+  - Sui's epoch change and reconfiguration would need to block on successful
+    reconfiguration of the MPC committee.
 
-Addressing any of the above would require deep changes to sui's reconfiguration
-process some of which would be directly opposed by the core team and regardless
-would take a significant amount of time itself to implement correctly.
+Addressing any of the above would require deep changes to Sui's
+reconfiguration process. Some of those changes are directly opposed by the
+core team, and any of them would take significant time to implement correctly.
 
-The one downside of not having tight coupling is needing to handle the hand-off
-from an old committee to a newer committee as it would require that 2f+1
-stake-weighted members of the old committee are alive and willing to
-participate in the hand-off protocol. This design makes this assumption given
-the challenges we'd need to overcome to enforce tight coupling and we can
-likely find some other economic mechanism for motivating older committee
-members in participating in the hand-off process.
+The one downside of not having tight coupling is the need to handle the
+hand-off from an old committee to a new committee. The hand-off requires that
+`2f+1` stake-weighted members of the old committee are alive and willing to
+participate in the hand-off protocol. This design makes that assumption,
+because of the challenges of enforcing tight coupling, and an economic
+mechanism can be added later to motivate older committee members to
+participate in the hand-off process.

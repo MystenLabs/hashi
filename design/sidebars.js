@@ -12,14 +12,14 @@ const sidebars = {
       items: [
         'committee',
         'governance-actions',
-        {type: 'doc', id: 'sanctions', label: 'Handling Sanctions'},
+        'sanctions',
         'service',
         'mpc-protocol',
         'guardian',
-        {type: 'doc', id: 'address-scheme', label: 'Address Scheme'},
-        {type: 'doc', id: 'limiter', label: 'Limiter'},
+        'address-scheme',
+        'limiter',
         'fees',
-        {type: 'doc', id: 'config', label: 'Configuration'},
+        'config',
       ],
     },
     {
