@@ -78,9 +78,10 @@ public fun deposit(
 ///
 /// The approval is not yet final — `confirm_deposit` must be called after
 /// the configured `bitcoin_deposit_time_delay_ms` has elapsed. The delay
-/// gives observers a window to detect a faulty or fraudulent committee
-/// signature and rotate the committee before funds are minted; if the
-/// committee rotates during the window, the deposit will need to be
+/// gives operators a window to detect a faulty or fraudulent committee
+/// signature and pause the service before funds are minted; while paused,
+/// `confirm_deposit` is rejected, leaving the approval parked. If the
+/// committee rotates during the window, the deposit will also need to be
 /// re-approved by the new epoch's committee.
 entry fun approve_deposit(
     hashi: &mut Hashi,

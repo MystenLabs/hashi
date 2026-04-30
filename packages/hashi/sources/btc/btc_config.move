@@ -77,7 +77,7 @@ public(package) fun set_bitcoin_deposit_minimum(self: &mut Config, min_deposit: 
 /// Minimum time (milliseconds) that must elapse between a deposit being
 /// approved by the committee and being confirmed. Provides a window in
 /// which a fraudulent or erroneous approval can be detected and the
-/// committee rotated before funds are minted.
+/// service paused before funds are minted.
 public(package) fun bitcoin_deposit_time_delay_ms(self: &Config): u64 {
     self.get(b"bitcoin_deposit_time_delay_ms").as_u64()
 }

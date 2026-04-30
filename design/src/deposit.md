@@ -2,18 +2,25 @@
 
 A deposit moves BTC from a user's Bitcoin wallet into the Hashi-managed UTXO
 pool, minting a corresponding amount of `hBTC` into the user's account on Sui.
-The process has three phases:
+The process has four phases:
 
 ```mermaid
 graph LR
-    A[Request] --> B[Confirm] --> C[Mint]
+    A[Request] --> B[Approve] --> C[Confirm] --> D[Mint]
 ```
+
+The split between **Approve** and **Confirm** introduces a configurable
+time-delay window (see
+[`bitcoin_deposit_time_delay_ms`](./config.md#bitcoin_deposit_time_delay_ms))
+between when the committee certifies a deposit and when funds are actually
+minted. This delay gives operators a chance to detect a faulty or fraudulent
+approval and pause the service before any `hBTC` is minted.
 
 ## Request
 
 ```mermaid
 graph LR
-    A[Request]:::active --> B[Confirm] --> C[Mint]
+    A[Request]:::active --> B[Approve] --> C[Confirm] --> D[Mint]
     classDef active fill:#f9a825,stroke:#f57f17,color:#000
 ```
 
@@ -72,11 +79,11 @@ has not been previously deposited. The request is then placed in the deposit
 queue for committee members to begin monitoring for confirmation on Bitcoin.
 
 
-## Confirm
+## Approve
 
 ```mermaid
 graph LR
-    A[Request] --> B[Confirm]:::active --> C[Mint]
+    A[Request] --> B[Approve]:::active --> C[Confirm] --> D[Mint]
     classDef active fill:#f9a825,stroke:#f57f17,color:#000
 ```
 
@@ -95,31 +102,76 @@ the address sanctioned will not vote to accept the deposit.
 Once a node has determined that a deposit request is both confirmed on bitcoin
 and passes its own screening checks, it will communicate with the other members
 of the hashi committee and collect signatures from validators who agree that
-the deposit should be confirmed. If a quorum of validators cannot agree that a
-deposit should be confirmed, it will either be retried at a later point or
+the deposit should be approved. If a quorum of validators cannot agree that a
+deposit should be approved, it will either be retried at a later point or
 ignored if the request is invalid.
+
+Once a quorum has been reached, one validator submits the certificate on-chain
+by calling `hashi::deposit::approve_deposit`:
+
+```move
+entry fun approve_deposit(
+    hashi: &mut Hashi,
+    request_id: address,
+    cert: CommitteeSignature,
+    clock: &Clock,
+    ctx: &mut TxContext,
+)
+```
+
+The function verifies the committee certificate against the current committee
+and records both the certificate and the current clock timestamp on the
+request. The request remains in the deposit queue — no `hBTC` is minted yet.
+
+## Confirm
+
+```mermaid
+graph LR
+    A[Request] --> B[Approve] --> C[Confirm]:::active --> D[Mint]
+    classDef active fill:#f9a825,stroke:#f57f17,color:#000
+```
+
+After approval, the deposit must wait through the configured time-delay window
+(see
+[`bitcoin_deposit_time_delay_ms`](./config.md#bitcoin_deposit_time_delay_ms))
+before it can be confirmed. The window gives operators a chance to detect a
+faulty or fraudulent approval and pause the service before funds are minted.
+While the service is paused, `confirm_deposit` is rejected, so any pending
+approvals stay parked in the queue until the system is unpaused or the
+committee rotates and the deposit is re-approved.
+
+If the committee is rotated during the delay window, the existing approval
+becomes invalid and the deposit must be re-approved by the new committee — the
+on-chain `confirm_deposit` re-verifies the stored certificate against the
+*current* committee, not the committee that originally approved it.
+
+Once the delay has elapsed, any caller may call `hashi::deposit::confirm_deposit`:
+
+```move
+entry fun confirm_deposit(
+    hashi: &mut Hashi,
+    request_id: address,
+    clock: &Clock,
+    ctx: &mut TxContext,
+)
+```
+
+The function:
+
+1. Re-verifies the stored committee certificate against the current committee.
+2. Asserts that `approval_timestamp_ms + bitcoin_deposit_time_delay_ms <= now`.
+3. Aborts if the request was never approved, the certificate no longer
+   verifies, or the delay has not elapsed.
 
 ## Mint
 
 ```mermaid
 graph LR
-    A[Request] --> B[Confirm] --> C[Mint]:::active
+    A[Request] --> B[Approve] --> C[Confirm] --> D[Mint]:::active
     classDef active fill:#f9a825,stroke:#f57f17,color:#000
 ```
 
-Once a quorum of validators have agreed that a deposit should be confirmed,
-one validator submits the certificate on-chain by calling `hashi::deposit::confirm_deposit`:
-
-```move
-public fun confirm_deposit(
-    hashi: &mut Hashi,
-    request_id: address,
-    signature: CommitteeSignature,
-    ctx: &mut TxContext,
-)
-```
-
-The function verifies the committee certificate, removes the request from the
-deposit queue, mints the corresponding amount of `hBTC`, and sends it to the
-user's Sui address. The deposited UTXO is added to the Hashi-managed UTXO
-pool, making it available for future withdrawal coin selection.
+After both checks in `confirm_deposit` pass, the function mints the
+corresponding amount of `hBTC` and sends it to the user's Sui address. The
+deposited UTXO is added to the Hashi-managed UTXO pool, making it available
+for future withdrawal coin selection.
