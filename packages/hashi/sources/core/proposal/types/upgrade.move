@@ -21,7 +21,7 @@ use sui::{clock::Clock, package::{UpgradeTicket, UpgradeReceipt}, vec_map::VecMa
 
 const THRESHOLD_BPS: u64 = 10000;
 
-public struct Upgrade has drop, store {
+public struct Upgrade has copy, drop, store {
     digest: vector<u8>,
 }
 

@@ -37,10 +37,10 @@ fun test_create_proposal() {
     );
 
     // Verify proposal exists
-    assert!(hashi.proposals().contains(proposal_id));
+    assert!(hashi.proposals().active().contains(proposal_id));
 
     // Verify the creator voted automatically
-    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().active().borrow(proposal_id);
     assert!(prop.votes().length() == 1);
     assert!(prop.votes().contains(&VOTER1));
 
@@ -96,7 +96,7 @@ fun test_vote_on_proposal() {
     proposal::vote<UpdateConfig>(&mut hashi, proposal_id, &clock, ctx2);
 
     // Verify vote count is now 2
-    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().active().borrow(proposal_id);
     assert!(prop.votes().length() == 2);
     assert!(prop.votes().contains(&VOTER1));
     assert!(prop.votes().contains(&VOTER2));
@@ -180,7 +180,10 @@ fun test_remove_vote() {
 
     // Verify vote exists
     {
-        let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
+        let prop: &proposal::Proposal<UpdateConfig> = hashi
+            .proposals()
+            .active()
+            .borrow(proposal_id);
         assert!(prop.votes().length() == 1);
     };
 
@@ -188,7 +191,7 @@ fun test_remove_vote() {
     proposal::remove_vote<UpdateConfig>(&mut hashi, proposal_id, ctx);
 
     // Verify vote was removed
-    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().active().borrow(proposal_id);
     assert!(prop.votes().length() == 0);
 
     // Clean up
@@ -353,6 +356,65 @@ fun test_vote_on_expired_proposal_fails() {
 }
 
 #[test]
+#[expected_failure(abort_code = proposal::EProposalAlreadyExecuted)]
+/// Test that re-executing an already-executed proposal fails
+fun test_re_execute_proposal_fails() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+
+    let voters = vector[VOTER1];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
+        &mut hashi,
+        1000,
+        &clock,
+        ctx,
+    );
+
+    // First execute succeeds.
+    hashi::update_config::execute(&mut hashi, proposal_id, &clock);
+
+    // Second execute on the same proposal must fail.
+    hashi::update_config::execute(&mut hashi, proposal_id, &clock);
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = proposal::EProposalAlreadyExecuted)]
+/// Test that delete_expired refuses to delete a proposal that was already executed
+fun test_delete_expired_executed_proposal_fails() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+
+    let voters = vector[VOTER1];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let mut clock = clock::create_for_testing(ctx);
+
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
+        &mut hashi,
+        1000,
+        &clock,
+        ctx,
+    );
+
+    // Execute, then advance past expiry.
+    hashi::update_config::execute(&mut hashi, proposal_id, &clock);
+    clock::increment_for_testing(&mut clock, MAX_PROPOSAL_DURATION_MS + 1);
+
+    // delete_expired must refuse — executed proposals are kept forever.
+    let _ = proposal::delete_expired<hashi::update_config::UpdateConfig>(
+        &mut hashi,
+        proposal_id,
+        &clock,
+    );
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
 #[expected_failure(abort_code = proposal::EProposalExpired)]
 /// Test that executing an expired proposal fails
 fun test_execute_expired_proposal_fails() {
@@ -406,7 +468,7 @@ fun test_delete_expired_proposal() {
     std::unit_test::destroy(data);
 
     // Verify proposal no longer exists
-    assert!(!hashi.proposals().contains(proposal_id));
+    assert!(!hashi.proposals().active().contains(proposal_id));
 
     // Clean up
     clock::destroy_for_testing(clock);
@@ -462,7 +524,7 @@ fun test_weighted_quorum() {
     );
 
     // 50% is not enough for 66.67% quorum - verify we need more votes
-    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().active().borrow(proposal_id);
     assert!(!proposal::quorum_reached(prop, &hashi));
 
     // VOTER2 votes (now 5/6 = 83% total weight, exceeds 66.67% threshold)
@@ -470,7 +532,7 @@ fun test_weighted_quorum() {
     proposal::vote<UpdateConfig>(&mut hashi, proposal_id, &clock, ctx2);
 
     // 83% exceeds the 66.67% quorum threshold
-    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().active().borrow(proposal_id);
     assert!(proposal::quorum_reached(prop, &hashi));
 
     // Execute should succeed
@@ -510,8 +572,8 @@ fun test_multiple_concurrent_proposals() {
     );
 
     // Both proposals should exist
-    assert!(hashi.proposals().contains(proposal_id_1));
-    assert!(hashi.proposals().contains(proposal_id_2));
+    assert!(hashi.proposals().active().contains(proposal_id_1));
+    assert!(hashi.proposals().active().contains(proposal_id_2));
 
     // Execute first proposal
     hashi::update_config::execute(&mut hashi, proposal_id_1, &clock);

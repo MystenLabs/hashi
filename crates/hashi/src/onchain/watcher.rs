@@ -186,7 +186,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .state_mut()
                     .hashi
                     .proposals
-                    .proposals
+                    .active
                     .insert(proposal.id, proposal);
             }
             HashiEvent::ProposalDeletedEvent(proposal_deleted_event) => {
@@ -194,21 +194,31 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .state_mut()
                     .hashi
                     .proposals
-                    .proposals
+                    .active
                     .remove(&proposal_deleted_event.proposal_id);
             }
             HashiEvent::ProposalExecutedEvent(proposal_executed_event) => {
-                state
-                    .state_mut()
-                    .hashi
-                    .proposals
-                    .proposals
-                    .remove(&proposal_executed_event.proposal_id);
+                // Move the entry from `active` to `executed` to mirror
+                // the on-chain dual-bag layout. Scope the write lock so
+                // it's released before the async config refetch below.
+                {
+                    let mut state_lock = state.state_mut();
+                    let proposals = &mut state_lock.hashi.proposals;
+                    if let Some(proposal) = proposals
+                        .active
+                        .remove(&proposal_executed_event.proposal_id)
+                    {
+                        proposals
+                            .executed
+                            .insert(proposal_executed_event.proposal_id, proposal);
+                    }
+                }
 
                 // When an UpdateConfig or EmergencyPause proposal executes,
-                // the Hashi object's config field changes on-chain. The event
-                // carries no key/value payload, so re-fetch the config from
-                // the Hashi object to keep the in-memory state current.
+                // the Hashi object's config field changes on-chain. Re-fetch
+                // the config from the Hashi object to keep the in-memory
+                // state current. (The event now carries the typed `data`,
+                // so this could be applied directly in the future.)
                 if matches!(
                     parse_proposal_type_from_type_tag(&proposal_executed_event.proposal_type),
                     ProposalType::UpdateConfig | ProposalType::EmergencyPause

@@ -42,7 +42,7 @@ pub struct Hashi {
     pub committees: CommitteeSet,
     pub config: Config,
     pub treasury: Treasury,
-    pub proposals: ObjectBag,
+    pub proposals: Proposals,
     /// TOB certificates by (epoch, batch_index) -> EpochCertsV1
     pub tob: Bag,
     /// Number of presignatures consumed in the current epoch.
@@ -222,6 +222,15 @@ pub struct MetadataCap {
 pub struct Coin {
     pub id: Address,
     pub balance: u64,
+}
+
+/// Rust version of the Move hashi::proposals::Proposals type.
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct Proposals {
+    /// Proposals that have been created but not yet executed.
+    pub active: ObjectBag,
+    /// Proposals that have executed successfully (kept indefinitely).
+    pub executed: ObjectBag,
 }
 
 /// Rust version of the Move hashi::deposit_queue::DepositRequestQueue type.
@@ -768,15 +777,29 @@ impl From<ProposalDeletedEvent> for HashiEvent {
 pub struct ProposalExecutedEvent {
     pub proposal_id: Address,
     pub proposal_type: TypeTag,
+    /// BCS-encoded bytes of the proposal `data` payload (`T` in the Move
+    /// `ProposalExecutedEvent<T>`). Decode using `proposal_type` to get the
+    /// typed value.
+    pub data_bcs: Vec<u8>,
 }
 
 impl ProposalExecutedEvent {
     fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
         let proposal_type = extract_type_param::<Self>(event_type)?;
-        let proposal_id: Address = bcs::from_bytes(bcs)?;
+        // Layout is `(proposal_id: Address, data: T)`; Address is a fixed
+        // 32-byte BCS encoding with no length prefix, so split there.
+        if bcs.len() < 32 {
+            anyhow::bail!(
+                "ProposalExecutedEvent payload too short: {} bytes",
+                bcs.len()
+            );
+        }
+        let proposal_id: Address = bcs::from_bytes(&bcs[..32])?;
+        let data_bcs = bcs[32..].to_vec();
         Ok(Self {
             proposal_id,
             proposal_type,
+            data_bcs,
         })
     }
 }

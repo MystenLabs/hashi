@@ -12,7 +12,7 @@ const EInvalidConfigEntry: vector<u8> = b"Unknown config key or wrong value type
 
 const THRESHOLD_BPS: u64 = 6667;
 
-public struct UpdateConfig has drop, store {
+public struct UpdateConfig has copy, drop, store {
     key: String,
     value: Value,
 }
