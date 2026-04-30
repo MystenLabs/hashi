@@ -501,16 +501,16 @@ impl LeaderService {
         info!("Confirming approved deposit request");
 
         // The on-chain `confirm_deposit` enforces the time-delay assertion
-        // against the Sui clock. Mirror it locally so we don't waste a
-        // transaction submission while the window is still open.
+        // against the Sui clock, which advances with each checkpoint.
+        // Mirror that here using the latest observed checkpoint timestamp
+        // (rather than the local system clock) so our pre-check matches
+        // what the on-chain check will see and isn't sensitive to local
+        // clock skew.
         let approved_ms = deposit_request
             .approval_timestamp_ms
             .expect("approval_cert is set, so approval_timestamp_ms must be set");
         let delay_ms = inner.onchain_state().bitcoin_deposit_time_delay_ms();
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
+        let now_ms = inner.onchain_state().latest_checkpoint_timestamp_ms();
         if approved_ms.saturating_add(delay_ms) > now_ms {
             return Err(DepositError::DelayNotElapsed {
                 approved_ms,
