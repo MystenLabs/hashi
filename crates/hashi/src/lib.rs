@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 use std::sync::RwLock;
 
 use anyhow::anyhow;
+use hashi_types::committee::Bls12381PrivateKey;
 use hashi_types::committee::EncryptionPrivateKey;
 use hashi_types::committee::EncryptionPublicKey;
 use sui_futures::service::Service;
@@ -34,6 +35,11 @@ pub mod withdrawals;
 
 // TODO: Tune based on production workload.
 const BATCH_SIZE_PER_WEIGHT: u16 = 10;
+
+pub(crate) struct NextEpochKeys {
+    pub encryption_public_key: EncryptionPublicKey,
+    pub signing_private_key: Bls12381PrivateKey,
+}
 
 pub(crate) fn init_crypto_provider() {
     rustls::crypto::ring::default_provider()
@@ -238,14 +244,25 @@ impl Hashi {
         Ok(public_key)
     }
 
-    pub async fn prepare_and_register_encryption_key(
-        self: &Arc<Self>,
-        epoch: u64,
-    ) -> anyhow::Result<()> {
-        let public_key = self.prepare_encryption_key(epoch)?;
+    pub(crate) fn prepare_next_epoch_keys(&self, epoch: u64) -> anyhow::Result<NextEpochKeys> {
+        let encryption_public_key = self.prepare_encryption_key(epoch)?;
+        let signing_private_key = self.prepare_signing_key(epoch)?;
+        Ok(NextEpochKeys {
+            encryption_public_key,
+            signing_private_key,
+        })
+    }
+
+    pub async fn prepare_and_register_keys(self: &Arc<Self>, epoch: u64) -> anyhow::Result<()> {
+        let keys = self.prepare_next_epoch_keys(epoch)?;
         let mut executor = sui_tx_executor::SuiTxExecutor::from_hashi(self.clone())?;
         executor
-            .execute_register_or_update_validator(&self.config, None, Some(&public_key))
+            .execute_register_or_update_validator(
+                &self.config,
+                None,
+                Some(&keys.encryption_public_key),
+                Some(&keys.signing_private_key),
+            )
             .await
             .map(|_| ())
     }
@@ -268,6 +285,40 @@ impl Hashi {
             .ok_or_else(|| {
                 anyhow!(
                     "no DB encryption key matches committee record for epoch {epoch}; \
+                     operator intervention needed (re-register, possibly DB recovery)"
+                )
+            })
+    }
+
+    pub fn prepare_signing_key(&self, epoch: u64) -> anyhow::Result<Bls12381PrivateKey> {
+        if let Some(existing) = self.db.get_signing_key(epoch)? {
+            return Ok(existing);
+        }
+        let private_key = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+        self.db
+            .store_signing_key(epoch, &private_key)
+            .map_err(|e| anyhow!("failed to store signing key for epoch {epoch}: {e}"))?;
+        Ok(private_key)
+    }
+
+    pub(crate) fn find_signing_key_for_committee(
+        &self,
+        committee: &hashi_types::committee::Committee,
+        validator_address: sui_sdk_types::Address,
+        epoch: u64,
+    ) -> anyhow::Result<Bls12381PrivateKey> {
+        let member = committee
+            .members()
+            .iter()
+            .find(|m| m.validator_address() == validator_address)
+            .ok_or_else(|| anyhow!("validator not in committee for epoch {epoch}"))?;
+        let pub_key = member.public_key();
+        self.db
+            .find_signing_key_matching(pub_key)
+            .map_err(|e| anyhow!("DB error looking up signing key for epoch {epoch}: {e}"))?
+            .ok_or_else(|| {
+                anyhow!(
+                    "no DB signing key matches committee record for epoch {epoch}; \
                      operator intervention needed (re-register, possibly DB recovery)"
                 )
             })
@@ -340,10 +391,14 @@ impl Hashi {
             })
             .transpose()?
             .flatten();
-        let signing_key = self
-            .config
-            .protocol_private_key()
-            .ok_or_else(|| anyhow!("no protocol_private_key configured"))?;
+        let signing_key = self.find_signing_key_for_committee(
+            committee_set
+                .committees()
+                .get(&epoch)
+                .ok_or_else(|| anyhow!("no committee for epoch {epoch}"))?,
+            validator_address,
+            epoch,
+        )?;
         let store = Box::new(storage::EpochPublicMessagesStore::new(
             self.db.clone(),
             epoch,
@@ -557,12 +612,12 @@ impl Hashi {
         sui_tx_executor::sweep_to_address_balance(&mut self.onchain_state().client(), &self.config)
             .await?;
 
-        let next_epoch_encryption_pub = match self.next_reconfig_epoch().await {
+        let next_epoch_keys = match self.next_reconfig_epoch().await {
             Ok(next_epoch) => self
-                .prepare_encryption_key(next_epoch)
+                .prepare_next_epoch_keys(next_epoch)
                 .inspect_err(|e| {
                     tracing::warn!(
-                        "Failed to prepare encryption key for epoch {next_epoch}: {e}; \
+                        "Failed to prepare encryption/signing keys for epoch {next_epoch}: {e}; \
                          will retry before next start_reconfig"
                     )
                 })
@@ -578,7 +633,8 @@ impl Hashi {
             .execute_register_or_update_validator(
                 &self.config,
                 None,
-                next_epoch_encryption_pub.as_ref(),
+                next_epoch_keys.as_ref().map(|k| &k.encryption_public_key),
+                next_epoch_keys.as_ref().map(|k| &k.signing_private_key),
             )
             .await
         {
@@ -728,7 +784,12 @@ fn assert_test_only_config(sui_chain_id: &str, bitcoin_chain_id: &str, field_nam
 #[cfg(test)]
 mod test {
     use fastcrypto::serde_helpers::ToFromByteArray;
+    use hashi_types::committee::Bls12381PrivateKey;
+    use hashi_types::committee::Committee;
+    use hashi_types::committee::CommitteeMember;
+    use hashi_types::committee::EncryptionPrivateKey;
     use hashi_types::committee::EncryptionPublicKey;
+    use sui_sdk_types::Address;
 
     use crate::Hashi;
     use crate::ServerVersion;
@@ -784,6 +845,105 @@ mod test {
             pk1.as_element().to_byte_array(),
             pk2.as_element().to_byte_array(),
             "different epochs should yield different keys"
+        );
+    }
+
+    #[test]
+    fn prepare_signing_key_is_idempotent() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let k1 = hashi.prepare_signing_key(1).unwrap();
+        let k2 = hashi.prepare_signing_key(1).unwrap();
+        assert_eq!(
+            k1.public_key().as_ref(),
+            k2.public_key().as_ref(),
+            "second call should return the same key"
+        );
+    }
+
+    #[test]
+    fn prepare_signing_key_persists_private_key() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let returned = hashi.prepare_signing_key(7).unwrap();
+        let stored = hashi
+            .db
+            .get_signing_key(7)
+            .unwrap()
+            .expect("private key should be in DB");
+        assert_eq!(
+            returned.public_key().as_ref(),
+            stored.public_key().as_ref(),
+            "returned key should match the stored private key"
+        );
+    }
+
+    #[test]
+    fn prepare_signing_key_generates_distinct_keys_per_epoch() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let k1 = hashi.prepare_signing_key(1).unwrap();
+        let k2 = hashi.prepare_signing_key(2).unwrap();
+        assert_ne!(
+            k1.public_key().as_ref(),
+            k2.public_key().as_ref(),
+            "different epochs should yield different keys"
+        );
+    }
+
+    fn one_member_committee(
+        epoch: u64,
+        address: Address,
+        bls_pub: hashi_types::committee::BLS12381PublicKey,
+        enc_pub: EncryptionPublicKey,
+    ) -> Committee {
+        Committee::new(
+            vec![CommitteeMember::new(address, bls_pub, enc_pub, 1)],
+            epoch,
+            10_000,
+            0,
+            5_000,
+        )
+    }
+
+    #[test]
+    fn find_signing_key_for_committee_errors_when_db_has_no_match() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let validator_address = Address::new([1u8; 32]);
+
+        // Committee records a BLS pub key the DB knows nothing about.
+        let unknown_bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
+        let enc_pub = EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(
+            &mut rand::thread_rng(),
+        ));
+        let committee = one_member_committee(5, validator_address, unknown_bls_pub, enc_pub);
+
+        let err = hashi
+            .find_signing_key_for_committee(&committee, validator_address, 5)
+            .expect_err("lookup must fail when DB has no matching signing key");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no DB signing key matches committee record for epoch 5"),
+            "expected operator-intervention error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn find_encryption_key_for_committee_errors_when_db_has_no_match() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let validator_address = Address::new([1u8; 32]);
+
+        // Committee records an encryption pub key the DB knows nothing about.
+        let bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
+        let unknown_enc_pub = EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(
+            &mut rand::thread_rng(),
+        ));
+        let committee = one_member_committee(5, validator_address, bls_pub, unknown_enc_pub);
+
+        let err = hashi
+            .find_encryption_key_for_committee(&committee, validator_address, 5)
+            .expect_err("lookup must fail when DB has no matching encryption key");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no DB encryption key matches committee record for epoch 5"),
+            "expected operator-intervention error, got: {msg}"
         );
     }
 
