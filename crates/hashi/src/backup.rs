@@ -383,6 +383,13 @@ pub fn restore_backup_entries<R: Read>(
         manifest.db.archive_entries.iter().cloned().collect();
     let mut restored_db_entries = HashSet::new();
     let mut restored_count: usize = 0;
+    let db_path = output_dir.join(DB_SNAPSHOT_TAR_PREFIX);
+    let db = fjall::Database::builder(&db_path).open().map_err(|e| {
+        anyhow::Error::new(e).context(format!(
+            "failed to open destination database at {}",
+            db_path.display()
+        ))
+    })?;
 
     for entry in entries {
         let mut entry = entry?;
@@ -402,7 +409,7 @@ pub fn restore_backup_entries<R: Read>(
                     archive_path.display()
                 );
             }
-            restore_db_entry(&mut entry, &archive_path, output_dir)?;
+            restore_db_entry(&mut entry, &archive_path, &db)?;
         } else {
             restore_config_entry(&mut entry, &archive_path, output_dir, &expected_files)?;
             restored_count += 1;
@@ -432,6 +439,8 @@ pub fn restore_backup_entries<R: Read>(
                 .join(", ")
         );
     }
+
+    db.persist(fjall::PersistMode::SyncAll)?;
 
     Ok(())
 }
@@ -471,7 +480,7 @@ fn validate_db_archive_path(archive_path: &Path) -> Result<()> {
 fn restore_db_entry<R: Read>(
     entry: &mut tar::Entry<'_, R>,
     archive_path: &Path,
-    output_dir: &Path,
+    db: &fjall::Database,
 ) -> Result<()> {
     let entry_type = entry.header().entry_type();
     if entry_type != tar::EntryType::Regular {
@@ -491,28 +500,20 @@ fn restore_db_entry<R: Read>(
             archive_path.display()
         )
     })?;
-    let db_path = output_dir.join(DB_SNAPSHOT_TAR_PREFIX);
-    restore_db_backup_keyspace(&db_path, keyspace_name, entry).with_context(|| {
+    restore_db_backup_keyspace(db, keyspace_name, entry).with_context(|| {
         format!(
-            "Failed to restore database entry {} into {}",
-            archive_path.display(),
-            db_path.display()
+            "Failed to restore database entry {}",
+            archive_path.display()
         )
     })?;
     Ok(())
 }
 
 fn restore_db_backup_keyspace<R: Read>(
-    dest: &Path,
+    db: &fjall::Database,
     keyspace_name: &str,
     mut reader: R,
 ) -> Result<()> {
-    let db = fjall::Database::builder(dest).open().map_err(|e| {
-        anyhow::Error::new(e).context(format!(
-            "failed to open destination database at {}",
-            dest.display()
-        ))
-    })?;
     let dest_ks = db.keyspace(keyspace_name, KeyspaceCreateOptions::default)?;
     let mut ingestion = dest_ks.start_ingestion()?;
 
@@ -527,7 +528,6 @@ fn restore_db_backup_keyspace<R: Read>(
     }
 
     ingestion.finish()?;
-    db.persist(fjall::PersistMode::SyncAll)?;
     Ok(())
 }
 
@@ -1064,9 +1064,10 @@ mod tests {
     fn restore_db_backup_keyspace_rejects_malformed_bcs() {
         let dest_dir = tempfile::Builder::new().tempdir().unwrap();
         let dest_path = dest_dir.path().join(DB_SNAPSHOT_TAR_PREFIX);
+        let db = fjall::Database::builder(&dest_path).open().unwrap();
 
         let bogus = b"not valid bcs bytes".as_slice();
-        let err = restore_db_backup_keyspace(&dest_path, "encryption_keys", bogus).unwrap_err();
+        let err = restore_db_backup_keyspace(&db, "encryption_keys", bogus).unwrap_err();
 
         assert!(
             format!("{err:#}").contains("failed to deserialize backup keyspace encryption_keys"),
@@ -1118,14 +1119,17 @@ mod tests {
 
         let dest_dir = tempfile::Builder::new().tempdir().unwrap();
         let dest_path = dest_dir.path().join(DB_SNAPSHOT_TAR_PREFIX);
+        let db = fjall::Database::builder(&dest_path).open().unwrap();
         let mut archive = tar::Archive::new(Cursor::new(tar_bytes));
         for entry in archive.entries().unwrap() {
             let mut entry = entry.unwrap();
             let path = entry.path().unwrap().into_owned();
             let file_name = path.file_name().unwrap().to_str().unwrap();
             let keyspace_name = backup_keyspace_name_from_file_name(file_name).unwrap();
-            restore_db_backup_keyspace(&dest_path, keyspace_name, &mut entry).unwrap();
+            restore_db_backup_keyspace(&db, keyspace_name, &mut entry).unwrap();
         }
+        db.persist(fjall::PersistMode::SyncAll).unwrap();
+        drop(db);
 
         let restored = Database::open(&dest_path).unwrap();
 
@@ -1167,14 +1171,17 @@ mod tests {
 
         let dest_dir = tempfile::Builder::new().tempdir().unwrap();
         let dest_path = dest_dir.path().join(DB_SNAPSHOT_TAR_PREFIX);
+        let db = fjall::Database::builder(&dest_path).open().unwrap();
         let mut archive = tar::Archive::new(Cursor::new(tar_bytes));
         for entry in archive.entries().unwrap() {
             let mut entry = entry.unwrap();
             let path = entry.path().unwrap().into_owned();
             let file_name = path.file_name().unwrap().to_str().unwrap();
             let keyspace_name = backup_keyspace_name_from_file_name(file_name).unwrap();
-            restore_db_backup_keyspace(&dest_path, keyspace_name, &mut entry).unwrap();
+            restore_db_backup_keyspace(&db, keyspace_name, &mut entry).unwrap();
         }
+        db.persist(fjall::PersistMode::SyncAll).unwrap();
+        drop(db);
 
         let restored = Database::open(&dest_path).unwrap();
         assert!(restored.latest_encryption_key_epoch().unwrap().is_none());

@@ -52,6 +52,38 @@ const DEALER_MESSAGES_CF_NAME: &str = "dealer_messages";
 const ROTATION_MESSAGES_CF_NAME: &str = "rotation_messages";
 const NONCE_MESSAGES_CF_NAME: &str = "nonce_messages";
 
+/// Keyspaces included in snapshot backups. Add new backup/restore keyspaces here.
+#[derive(Clone, Copy)]
+enum BackupKeyspace {
+    EncryptionKeys,
+    DealerMessages,
+    RotationMessages,
+}
+
+const BACKUP_KEYSPACES: [BackupKeyspace; 3] = [
+    BackupKeyspace::EncryptionKeys,
+    BackupKeyspace::DealerMessages,
+    BackupKeyspace::RotationMessages,
+];
+
+impl BackupKeyspace {
+    fn name(self) -> &'static str {
+        match self {
+            Self::EncryptionKeys => ENCRYPTION_KEYS_CF_NAME,
+            Self::DealerMessages => DEALER_MESSAGES_CF_NAME,
+            Self::RotationMessages => ROTATION_MESSAGES_CF_NAME,
+        }
+    }
+
+    fn keyspace(self, db: &Database) -> &Keyspace {
+        match self {
+            Self::EncryptionKeys => &db.encryption_keys,
+            Self::DealerMessages => &db.dealer_messages,
+            Self::RotationMessages => &db.rotation_messages,
+        }
+    }
+}
+
 impl Database {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         // Preserve the underlying `fjall::Error` as the source so callers can
@@ -77,27 +109,12 @@ impl Database {
         })
     }
 
-    /// Returns keyspaces paired with their names for snapshot backups. When
-    /// adding a keyspace that needs backup/restore, add it here.
-    ///
-    /// Returns a `Vec` rather than a fixed-size array so callers don't have
-    /// to know the keyspace count, and so adding a new keyspace is a one-line
-    /// change here. Only invoked on the snapshot path, so the per-call
-    /// allocation is irrelevant.
-    pub(crate) fn backup_keyspaces(&self) -> Vec<(&'static str, &Keyspace)> {
-        vec![
-            (ENCRYPTION_KEYS_CF_NAME, &self.encryption_keys),
-            (DEALER_MESSAGES_CF_NAME, &self.dealer_messages),
-            (ROTATION_MESSAGES_CF_NAME, &self.rotation_messages),
-        ]
+    pub(crate) fn backup_keyspaces(&self) -> [(&'static str, &Keyspace); 3] {
+        BACKUP_KEYSPACES.map(|keyspace| (keyspace.name(), keyspace.keyspace(self)))
     }
 
     pub(crate) fn backup_keyspace_names() -> [&'static str; 3] {
-        [
-            ENCRYPTION_KEYS_CF_NAME,
-            DEALER_MESSAGES_CF_NAME,
-            ROTATION_MESSAGES_CF_NAME,
-        ]
+        BACKUP_KEYSPACES.map(BackupKeyspace::name)
     }
 
     pub(crate) fn snapshot(&self) -> fjall::Snapshot {
