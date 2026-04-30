@@ -114,7 +114,7 @@ fun test_confirm_deposit_with_valid_certificate() {
     let ctx = &mut test_utils::new_tx_context(REQUESTER, epoch);
     let voters = vector[VOTER1, VOTER2, VOTER3];
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
-    let clock = clock::create_for_testing(ctx);
+    let mut clock = clock::create_for_testing(ctx);
 
     let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
     // Use derivation_path: None to skip BTC minting (no TreasuryCap in test setup)
@@ -127,7 +127,13 @@ fun test_confirm_deposit_with_valid_certificate() {
     let message_bytes = build_cert_message(epoch, &message);
     let cert = test_utils::sign_certificate(epoch, &message_bytes, 3);
 
-    deposit::confirm_deposit(&mut hashi, request_id, cert, ctx);
+    deposit::approve_deposit(&mut hashi, request_id, cert, &clock, ctx);
+
+    clock.increment_for_testing(hashi::btc_config::bitcoin_deposit_time_delay_ms(hashi.config()));
+
+    //TODO add test that checks that confirm fails if cert doesn't exist, is
+    //from the wrong epoch, or the time-delay hasn't passed yet.
+    deposit::confirm_deposit(&mut hashi, request_id, &clock, ctx);
 
     assert!(hashi.bitcoin().utxo_pool().is_spent_or_active(utxo_id));
 

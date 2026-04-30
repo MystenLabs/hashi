@@ -3,7 +3,7 @@
 
 module hashi::deposit_queue;
 
-use hashi::utxo::Utxo;
+use hashi::{committee::CommitteeSignature, utxo::Utxo};
 use sui::{clock::Clock, object_bag::ObjectBag};
 
 // const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 3; // 3 days
@@ -23,6 +23,8 @@ public struct DepositRequest has key, store {
     timestamp_ms: u64,
     sui_tx_digest: vector<u8>,
     utxo: Utxo,
+    approval_cert: Option<CommitteeSignature>,
+    approval_timestamp_ms: Option<u64>,
 }
 
 public struct DepositRequestQueue has store {
@@ -50,6 +52,8 @@ public(package) fun create_deposit(utxo: Utxo, clock: &Clock, ctx: &mut TxContex
         timestamp_ms: clock.timestamp_ms(),
         sui_tx_digest: *ctx.digest(),
         utxo,
+        approval_cert: option::none(),
+        approval_timestamp_ms: option::none(),
     }
 }
 
@@ -79,6 +83,19 @@ public(package) fun utxo(request: &DepositRequest): Utxo {
     request.utxo
 }
 
+public(package) fun approval_cert(request: &DepositRequest): Option<CommitteeSignature> {
+    request.approval_cert
+}
+
+public(package) fun approval_timestamp_ms(request: &DepositRequest): Option<u64> {
+    request.approval_timestamp_ms
+}
+
+public(package) fun approve(request: &mut DepositRequest, cert: CommitteeSignature, clock: &Clock) {
+    request.approval_cert = option::some(cert);
+    request.approval_timestamp_ms = option::some(clock.timestamp_ms());
+}
+
 /// Insert a completed deposit into the processed bag.
 /// Returns (request_id, recipient) so the caller can index by user.
 public(package) fun insert_processed(
@@ -102,7 +119,15 @@ public(package) fun delete_expired(
     let request: DepositRequest = self.requests.remove(request_id);
     assert!(is_expired(&request, clock), EDepositRequestNotExpired);
 
-    let DepositRequest { id, sender: _, timestamp_ms: _, sui_tx_digest: _, utxo } = request;
+    let DepositRequest {
+        id,
+        sender: _,
+        timestamp_ms: _,
+        sui_tx_digest: _,
+        utxo,
+        approval_cert: _,
+        approval_timestamp_ms: _,
+    } = request;
     id.delete();
     utxo.delete();
 }
