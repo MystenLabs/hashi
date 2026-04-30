@@ -383,15 +383,6 @@ pub enum DepositError {
     #[error("Failed to confirm deposit on Sui: {0}")]
     ConfirmDepositFailed(#[source] anyhow::Error),
 
-    #[error(
-        "Deposit time-delay has not elapsed (approved at {approved_ms} ms, delay {delay_ms} ms, now {now_ms} ms)"
-    )]
-    DelayNotElapsed {
-        approved_ms: u64,
-        delay_ms: u64,
-        now_ms: u64,
-    },
-
     #[error("Deposit processing timed out after {0:?}")]
     TimedOut(std::time::Duration),
 }
@@ -407,7 +398,6 @@ impl DepositError {
             | Self::ExecutorInitFailed(_)
             | Self::ApproveDepositFailed(_)
             | Self::ConfirmDepositFailed(_)
-            | Self::DelayNotElapsed { .. }
             | Self::TimedOut(_) => DepositErrorKind::RetryOnNextBlock,
             Self::InvalidOnchainRequest(_)
             | Self::DuplicateOrSpentOnSui(_)
