@@ -500,9 +500,11 @@ impl Hashi {
     pub async fn validate_and_sign_withdrawal_tx(
         &self,
         withdrawal_txn_id: &Address,
+        expected_limiter_seq: Option<u64>,
     ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let (txn, unsigned_tx) = self.validate_withdrawal_signing(withdrawal_txn_id).await?;
-        self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx).await
+        self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx, expected_limiter_seq)
+            .await
     }
 
     pub async fn validate_withdrawal_signing(
@@ -542,6 +544,7 @@ impl Hashi {
         &self,
         txn: &crate::onchain::types::WithdrawalTransaction,
         unsigned_tx: &bitcoin::Transaction,
+        expected_limiter_seq: Option<u64>,
     ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let onchain_state = self.onchain_state().clone();
         let epoch = onchain_state.epoch();
@@ -555,6 +558,26 @@ impl Hashi {
                 epoch,
             );
         }
+        let limiter_consume = match (self.local_limiter(), expected_limiter_seq) {
+            (Some(limiter), Some(expected_seq)) => {
+                let amount_sats: u64 = txn.withdrawal_outputs.iter().map(|o| o.amount).sum();
+                let timestamp_secs = txn.timestamp_ms / 1000;
+                limiter
+                    .validate_consume(expected_seq, timestamp_secs, amount_sats)
+                    .await
+                    .map_err(|e| anyhow!("Limiter rejected withdrawal {}: {e}", txn.id))?;
+                Some((limiter, expected_seq, timestamp_secs, amount_sats))
+            }
+            (None, None) => None,
+            (Some(_), None) => anyhow::bail!(
+                "Local limiter is configured but request for withdrawal {} lacks expected_limiter_seq",
+                txn.id
+            ),
+            (None, Some(_)) => anyhow::bail!(
+                "Request for withdrawal {} carries expected_limiter_seq but local limiter is not configured",
+                txn.id
+            ),
+        };
         let p2p_channel =
             RpcP2PChannel::new(onchain_state, epoch, crate::metrics::MPC_LABEL_SIGNING);
         let signing_manager = self.signing_manager_for(epoch).ok_or_else(|| {
@@ -624,6 +647,14 @@ impl Hashi {
             })?;
 
             signatures_by_input.push(signature);
+        }
+        if let Some((limiter, seq, ts, amt)) = limiter_consume {
+            limiter.apply_consume(seq, ts, amt).await.map_err(|e| {
+                anyhow!(
+                    "Local limiter apply_consume failed for withdrawal {}: {e}",
+                    txn.id
+                )
+            })?;
         }
         Ok(signatures_by_input)
     }
