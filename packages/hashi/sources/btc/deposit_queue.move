@@ -17,13 +17,22 @@ const EDepositAlreadyProcessed: vector<u8> = b"Deposit request has already been 
 // ======== Core Structs ========
 
 /// Deposit request object stored in the `requests` bag until confirmed or expired.
+///
+/// `approval_cert` and `approval_timestamp_ms` are populated by
+/// `approve_deposit` (the first phase of deposit confirmation) and read
+/// by `confirm_deposit` (the second phase) to re-verify against the
+/// current committee and to enforce the time-delay window.
 public struct DepositRequest has key, store {
     id: UID,
     sender: address,
     timestamp_ms: u64,
     sui_tx_digest: vector<u8>,
     utxo: Utxo,
+    /// Committee certificate recorded at approval time. `None` until
+    /// `approve_deposit` has been called.
     approval_cert: Option<CommitteeSignature>,
+    /// Clock timestamp at the moment of approval. `None` until
+    /// `approve_deposit` has been called.
     approval_timestamp_ms: Option<u64>,
 }
 
@@ -83,14 +92,22 @@ public(package) fun utxo(request: &DepositRequest): Utxo {
     request.utxo
 }
 
+/// The committee certificate recorded at approval time, if any. Returns
+/// `None` for requests that have not yet been through `approve_deposit`.
 public(package) fun approval_cert(request: &DepositRequest): Option<CommitteeSignature> {
     request.approval_cert
 }
 
+/// The clock timestamp at which the request was approved, if any.
+/// Returns `None` for requests that have not yet been through
+/// `approve_deposit`.
 public(package) fun approval_timestamp_ms(request: &DepositRequest): Option<u64> {
     request.approval_timestamp_ms
 }
 
+/// Record `cert` and the current clock timestamp on `request` to mark it
+/// as approved. Caller is responsible for verifying `cert` against the
+/// current committee before calling this.
 public(package) fun approve(request: &mut DepositRequest, cert: CommitteeSignature, clock: &Clock) {
     request.approval_cert = option::some(cert);
     request.approval_timestamp_ms = option::some(clock.timestamp_ms());
