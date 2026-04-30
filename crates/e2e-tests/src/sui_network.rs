@@ -67,7 +67,7 @@ async fn wait_for_ready(client: &mut Client) -> Result<()> {
             .ledger_client()
             .get_service_info(sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest::default())
             .await
-            && resp.into_inner().checkpoint_height() > 5
+            && resp.into_inner().checkpoint_height() > 1
         {
             return Ok(());
         }
