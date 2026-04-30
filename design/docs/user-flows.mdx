@@ -10,7 +10,7 @@ In order for a user to leverage their `BTC` on Sui (e.g. as collateral for a
 loan), they'll need to deposit the `BTC` they want to leverage to a hashi mpc
 controlled bitcoin address.
 
-<div style="zoom: 1.5;">
+<div style={{zoom: 1.5}}>
 
 ```mermaid
 ---
@@ -69,7 +69,7 @@ sequenceDiagram
 ### BTC deposit address
 
 Every Sui address has its own unique Hashi Bitcoin deposit address. See
-[address scheme](./address-scheme.md) for the full derivation details.
+[address scheme](./address-scheme.mdx) for the full derivation details.
 
 ### Deposit
 
@@ -89,14 +89,14 @@ hashi.
    use the `hBTC` to interact with a defi protocol to, for example, leverage the
    `hBTC` as collateral for a loan in `USDC`.
 
-For a detailed breakdown of each phase, see [deposit](./deposit.md).
+For a detailed breakdown of each phase, see [deposit](./deposit.mdx).
 
 ## Withdraw Flow
 
 Once a user has decided they want their `BTC` back on Bitcoin (e.g. they've paid
 off their loan) they can initiate a withdrawal.
 
-<div style="zoom: 1.5;">
+<div style={{zoom: 1.5}}>
 
 ```mermaid
 ---
@@ -159,4 +159,4 @@ sequenceDiagram
    Bitcoin address and uses MPC to sign the transaction.
 1. The transaction is broadcast to the Bitcoin network.
 
-For a detailed breakdown of each phase, see [withdraw](./withdraw.md).
+For a detailed breakdown of each phase, see [withdraw](./withdraw.mdx).

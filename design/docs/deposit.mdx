@@ -51,7 +51,7 @@ graph LR
 
 The user creates a Bitcoin transaction that sends BTC to a Hashi deposit
 address. Each deposit address is a unique Taproot address derived from the
-target destination address on Sui (see [address scheme](./address-scheme.md)).
+target destination address on Sui (see [address scheme](./address-scheme.mdx)).
 The deposit must meet the dust minimum (`546 sats`) to avoid creating
 unspendable UTXOs on Bitcoin.
 
@@ -130,14 +130,14 @@ graph LR
 
 Committee members monitor the Bitcoin network for the deposit transaction. The
 transaction must reach a sufficient number of block confirmations (see
-[`bitcoin_confirmation_threshold`](./config.md#bitcoin_confirmation_threshold))
+[`bitcoin_confirmation_threshold`](./config.mdx#bitcoin_confirmation_threshold))
 before it is considered final. This guards against chain reorganizations where
 a confirmed transaction could be reversed. If the transaction is never
 confirmed or is invalidated by a reorg, the deposit is ignored.
 
 Once confirmed, each committee member independently screens the deposit's
 source address by making a request to its configured sanctions-checking
-endpoint (see [handling sanctions](./sanctions.md)). A member that considers
+endpoint (see [handling sanctions](./sanctions.mdx)). A member that considers
 the address sanctioned will not vote to accept the deposit.
 
 Once a node has determined that a deposit request is both confirmed on bitcoin

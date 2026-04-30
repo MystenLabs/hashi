@@ -4,6 +4,10 @@
  * (Seal-style typography & layout, Sui-docs color palette) on top.
  */
 
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 /* ABCNormal — the MystenLabs display/body font. */
 @font-face {
   font-family: ABCNormal;

@@ -1,13 +1,25 @@
 // @ts-check
-// `@type` JSDoc annotations allow editor autocompletion and type checking
-// (when paired with `@ts-check`).
 // See: https://docusaurus.io/docs/api/docusaurus-config
 
-import {themes as prismThemes} from 'prism-react-renderer';
+import { themes as prismThemes } from 'prism-react-renderer';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const betaRemarkPlugin = require('./src/shared/plugins/betatag');
+const effortRemarkPlugin = require('./src/shared/plugins/effort');
+// remark-glossary uses ESM `export default`; pull the actual function out.
+const remarkGlossary =
+  require('./src/shared/plugins/remark-glossary.js').default ||
+  require('./src/shared/plugins/remark-glossary.js');
 
 /** @type {import('@docusaurus/types').Config} */
 const config = {
-  title: 'hashi',
+  title: 'Hashi',
   tagline: 'Sui native Bitcoin orchestrator',
   favicon: 'img/favicon.svg',
 
@@ -30,7 +42,7 @@ const config = {
   },
 
   markdown: {
-    format: 'detect',
+    format: 'mdx',
     mermaid: true,
     hooks: {
       onBrokenMarkdownLinks: 'warn',
@@ -44,11 +56,7 @@ const config = {
     [
       '@docusaurus/plugin-client-redirects',
       {
-        // mdbook served pages at `<slug>.html`; redirect those to the
-        // clean Docusaurus URLs so old links continue to work.
         createRedirects(existingPath) {
-          // Skip the docs root (GitHub Pages already serves index.html there)
-          // and any path that already ends in `.html` (e.g. /404.html).
           if (existingPath === '/' || existingPath.endsWith('.html')) {
             return undefined;
           }
@@ -56,6 +64,37 @@ const config = {
         },
       },
     ],
+    // Sui-style toolkit
+    require.resolve('./src/shared/plugins/inject-code'),
+    require.resolve('./src/shared/plugins/descriptions'),
+    // Tailwind via PostCSS
+    function tailwindPlugin() {
+      return {
+        name: 'hashi-tailwind',
+        configurePostCss(postcssOptions) {
+          postcssOptions.plugins.push(require('tailwindcss'));
+          postcssOptions.plugins.push(require('autoprefixer'));
+          return postcssOptions;
+        },
+      };
+    },
+    // Webpack aliases used by Sui-style components (@docs, @generated-imports)
+    function aliasPlugin() {
+      return {
+        name: 'hashi-webpack-aliases',
+        configureWebpack() {
+          return {
+            resolve: {
+              alias: {
+                '@docs': path.resolve(__dirname, 'docs'),
+                '@generated-imports': path.resolve(__dirname, '.generated'),
+                '@repo': path.resolve(__dirname, '..'),
+              },
+            },
+          };
+        },
+      };
+    },
   ],
 
   presets: [
@@ -68,10 +107,25 @@ const config = {
           routeBasePath: '/',
           sidebarPath: './sidebars.js',
           editUrl: 'https://github.com/MystenLabs/hashi/edit/main/design/',
+          exclude: ['**/snippets/**'],
+          admonitions: {
+            keywords: ['checkpoint'],
+            extendDefaults: true,
+          },
+          remarkPlugins: [
+            effortRemarkPlugin,
+            betaRemarkPlugin,
+            [
+              remarkGlossary,
+              {
+                glossaryFile: path.resolve(__dirname, 'static/glossary.json'),
+              },
+            ],
+          ],
         },
         blog: false,
         theme: {
-          customCss: './src/css/custom.css',
+          customCss: [require.resolve('./src/css/custom.css')],
         },
       }),
     ],

@@ -62,7 +62,7 @@ public fun request_withdrawal(
 ```
 
 - `btc` -- the `hBTC` to withdraw. Must be at least the
-  [`bitcoin_withdrawal_minimum`](./config.md#bitcoin_withdrawal_minimum).
+  [`bitcoin_withdrawal_minimum`](./config.mdx#bitcoin_withdrawal_minimum).
 - `bitcoin_address` -- the destination witness program, either `P2WPKH` (20
   bytes) or `P2TR` (32 bytes).
 
@@ -71,12 +71,12 @@ request can produce a valid Bitcoin transaction even under worst-case fee
 conditions. This minimum covers the flat protocol fee, the worst-case miner
 fee (which pays for both the user's transaction weight and opportunistic UTXO
 pool consolidation), and the dust threshold for the user's output. See
-[fees](./fees.md) for the full breakdown.
+[fees](./fees.mdx) for the full breakdown.
 
 The full `hBTC` amount is stored with the request and placed in a queue with a
 timestamp. The user can cancel their request at any point before it has been
 approved, subject to a cooldown period
-([`withdrawal_cancellation_cooldown_ms`](./config.md#withdrawal_cancellation_cooldown_ms)).
+([`withdrawal_cancellation_cooldown_ms`](./config.mdx#withdrawal_cancellation_cooldown_ms)).
 
 ## Approve
 
@@ -109,7 +109,7 @@ processed in FIFO order, but this is not a strict requirement.
 
 Each committee member independently screens the destination address against
 its configured sanctions-checking endpoint (see
-[handling sanctions](./sanctions.md)). A member that considers the address
+[handling sanctions](./sanctions.mdx)). A member that considers the address
 sanctioned will not vote to approve the request. If a quorum still approves,
 all members are required to assist in completing the withdrawal.
 
@@ -167,7 +167,7 @@ The leader then constructs an unsigned Bitcoin transaction:
 1. **Coin selection** -- select UTXOs from the pool to cover the total
    withdrawal amount (miner fees will be taken out of the user's withdrawn
    amount). The coin selector may include extra inputs to opportunistically
-   consolidate small UTXOs (see [fees](./fees.md)).
+   consolidate small UTXOs (see [fees](./fees.mdx)).
 2. **Outputs** -- one output per withdrawal request to each user's destination
    address, plus one change output back to a Hashi-controlled address.
 3. **Fee calculation** -- the miner fee is estimated via `estimatesmartfee`,
@@ -223,13 +223,13 @@ graph LR
 ```
 
 Signing is a two-step process matching the 2-of-2 Taproot script (see
-[address scheme](./address-scheme.md)):
+[address scheme](./address-scheme.mdx)):
 
 1. **Guardian signature** -- the unsigned transaction and metadata are sent to
    the Guardian enclave, which independently validates the request and produces
    a Schnorr signature for each input.
 2. **MPC signature** -- the committee runs the threshold Schnorr signing
-   protocol (see [MPC protocol](./mpc-protocol.md)) to produce the second
+   protocol (see [MPC protocol](./mpc-protocol.mdx)) to produce the second
    signature for each input.
 
 Both signatures are combined into the taproot script-path witness for each
@@ -284,7 +284,7 @@ graph LR
 The fully signed transaction is broadcast to the Bitcoin network. The
 committee monitors the transaction until it reaches the configured number of
 block confirmations (see
-[`bitcoin_confirmation_threshold`](./config.md#bitcoin_confirmation_threshold)).
+[`bitcoin_confirmation_threshold`](./config.mdx#bitcoin_confirmation_threshold)).
 Once confirmed, a committee member calls
 `hashi::withdraw::confirm_withdrawal`:
 
@@ -304,4 +304,4 @@ withdrawal, returning the spent UTXOs' change output to the pool.
 
 If a transaction gets stuck, fee bumping is handled via CPFP -- either the
 withdrawal recipient spends their output with a high-fee child, or Hashi
-spends the change UTXO (see [fees -- stuck transactions](./fees.md#stuck-transactions)).
+spends the change UTXO (see [fees -- stuck transactions](./fees.mdx#stuck-transactions)).

@@ -112,7 +112,7 @@ used depends on whether this is the first hashi epoch or a subsequent one:
   receivers.
 
 In both cases, the output is a `DkgOutput` containing the new committee's key
-shares and the MPC public key. See [MPC protocol](./mpc-protocol.md) for
+shares and the MPC public key. See [MPC protocol](./mpc-protocol.mdx) for
 details.
 
 Each committee member then signs a `ReconfigCompletionMessage` containing
@@ -167,5 +167,5 @@ flag.
 Once the new epoch begins the new committee then initializes the signing state
 for the epoch by running the presigning protocol to generate a batch of
 presignatures needed for the threshold Schnorr signing protocol (see [MPC
-protocol](./mpc-protocol.md)). Once presignatures are ready, normal operations
+protocol](./mpc-protocol.mdx)). Once presignatures are ready, normal operations
 resume for processing deposits and withdrawals.
