@@ -14,6 +14,8 @@ use fjall::Readable;
 use fjall::Result;
 use sui_sdk_types::Address;
 
+use hashi_types::committee::BLS12381PublicKey;
+use hashi_types::committee::Bls12381PrivateKey;
 use hashi_types::committee::EncryptionPrivateKey;
 use hashi_types::committee::EncryptionPublicKey;
 
@@ -30,6 +32,12 @@ pub struct Database {
     // key: big endian u64 for the epoch the key is used for
     // value: 32-byte RistrettoScalar
     encryption_keys: Keyspace,
+
+    // Column Family used to store BLS signing (protocol) keys.
+    //
+    // key: big endian u64 for the epoch the key is used for
+    // value: BCS-encoded `Bls12381PrivateKey`
+    signing_keys: Keyspace,
 
     // Column Family used to store dealer messages for DKG.
     //
@@ -51,6 +59,7 @@ pub struct Database {
 }
 
 const ENCRYPTION_KEYS_CF_NAME: &str = "encryption_keys";
+const SIGNING_KEYS_CF_NAME: &str = "signing_keys";
 const DEALER_MESSAGES_CF_NAME: &str = "dealer_messages";
 const ROTATION_MESSAGES_CF_NAME: &str = "rotation_messages";
 const NONCE_MESSAGES_CF_NAME: &str = "nonce_messages";
@@ -66,6 +75,7 @@ impl Database {
         })?;
         let encryption_keys =
             db.keyspace(ENCRYPTION_KEYS_CF_NAME, KeyspaceCreateOptions::default)?;
+        let signing_keys = db.keyspace(SIGNING_KEYS_CF_NAME, KeyspaceCreateOptions::default)?;
         let dealer_messages =
             db.keyspace(DEALER_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)?;
         let rotation_messages =
@@ -74,6 +84,7 @@ impl Database {
         Ok(Self {
             db,
             encryption_keys,
+            signing_keys,
             dealer_messages,
             rotation_messages,
             nonce_messages,
@@ -90,6 +101,7 @@ impl Database {
     fn backup_keyspaces(&self) -> Vec<(&str, &Keyspace)> {
         vec![
             (ENCRYPTION_KEYS_CF_NAME, &self.encryption_keys),
+            (SIGNING_KEYS_CF_NAME, &self.signing_keys),
             (DEALER_MESSAGES_CF_NAME, &self.dealer_messages),
             (ROTATION_MESSAGES_CF_NAME, &self.rotation_messages),
         ]
@@ -227,6 +239,61 @@ impl Database {
             let candidate = EncryptionPrivateKey::from(scalar);
             let candidate_pub = EncryptionPublicKey::from_private_key(&candidate);
             if candidate_pub.as_element().to_byte_array() == target_bytes {
+                return Ok(Some(candidate));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn store_signing_key(&self, epoch: u64, signing_key: &Bls12381PrivateKey) -> Result<()> {
+        let key = epoch.to_be_bytes();
+        if !self.signing_keys.contains_key(key)? {
+            let value = bcs::to_bytes(signing_key).unwrap();
+            self.signing_keys.insert(key, value)?;
+        }
+        Ok(())
+    }
+
+    pub fn get_signing_key(&self, epoch: u64) -> Result<Option<Bls12381PrivateKey>> {
+        let key = epoch.to_be_bytes();
+        let bytes = match self.signing_keys.get(key) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let signing_key: Bls12381PrivateKey = bcs::from_bytes(&bytes).map_err(|_| {
+            fjall::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid BLS signing key encoding",
+            ))
+        })?;
+        Ok(Some(signing_key))
+    }
+
+    pub fn latest_signing_key_epoch(&self) -> Result<Option<u64>> {
+        let mut latest: Option<u64> = None;
+        for guard in self.signing_keys.iter() {
+            let key = guard.key()?;
+            if let Ok(bytes) = <[u8; 8]>::try_from(key.as_ref()) {
+                let epoch = u64::from_be_bytes(bytes);
+                latest = Some(latest.map_or(epoch, |l: u64| l.max(epoch)));
+            }
+        }
+        Ok(latest)
+    }
+
+    pub fn find_signing_key_matching(
+        &self,
+        target: &BLS12381PublicKey,
+    ) -> Result<Option<Bls12381PrivateKey>> {
+        let target_bytes = target.as_ref();
+        for guard in self.signing_keys.iter() {
+            let value = guard.value()?;
+            let candidate: Bls12381PrivateKey = match bcs::from_bytes(&value) {
+                Ok(k) => k,
+                Err(_) => continue,
+            };
+            if candidate.public_key().as_ref() == target_bytes {
                 return Ok(Some(candidate));
             }
         }
@@ -392,10 +459,11 @@ impl Database {
 
     /// Prune all MPC keyspaces.
     pub fn prune_messages_below(&self, cutoff_epoch: u64) -> Result<()> {
-        // Encryption keys retain one extra epoch to support graceful rotation: the
-        // committee may capture a previous epoch's pub key, and the matching
-        // private key must still be in DB.
+        // Encryption and signing keys retain one extra epoch to support
+        // graceful rotation: the committee may capture a previous epoch's
+        // pub key, and the matching private key must still be in DB.
         prune_keyspace(&self.encryption_keys, cutoff_epoch.saturating_sub(1))?;
+        prune_keyspace(&self.signing_keys, cutoff_epoch.saturating_sub(1))?;
         prune_keyspace(&self.dealer_messages, cutoff_epoch)?;
         prune_keyspace(&self.rotation_messages, cutoff_epoch)?;
         prune_keyspace(&self.nonce_messages, cutoff_epoch)?;
@@ -461,6 +529,7 @@ mod tests {
     use fastcrypto_tbls::nodes::Nodes;
     use fastcrypto_tbls::threshold_schnorr::avss;
     use fastcrypto_tbls::threshold_schnorr::batch_avss;
+    use hashi_types::committee::Bls12381PrivateKey;
     use hashi_types::committee::EncryptionPrivateKey;
     use hashi_types::committee::EncryptionPublicKey;
     use sui_sdk_types::Address;
@@ -563,6 +632,88 @@ mod tests {
                 .is_none(),
             "no DB key should match an unrelated pub key"
         );
+    }
+
+    #[test]
+    fn test_signing_key_store_and_get() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let private_key = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+        db.store_signing_key(100, &private_key).unwrap();
+
+        let from_db = db.get_signing_key(100).unwrap().unwrap();
+        assert_eq!(
+            private_key.public_key().as_ref(),
+            from_db.public_key().as_ref(),
+            "round-tripped signing key should derive the same public key"
+        );
+
+        assert!(db.get_signing_key(101).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_signing_key_idempotent_store() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let key_a = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+        let key_b = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+        let pub_a = key_a.public_key().as_ref().to_vec();
+
+        db.store_signing_key(7, &key_a).unwrap();
+        // Second store at the same epoch is a no-op (idempotent for restart safety).
+        db.store_signing_key(7, &key_b).unwrap();
+
+        let from_db = db.get_signing_key(7).unwrap().unwrap();
+        assert_eq!(
+            from_db.public_key().as_ref(),
+            pub_a,
+            "store should be a no-op when an entry already exists at this epoch"
+        );
+    }
+
+    #[test]
+    fn test_find_signing_key_matching() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let key_a = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+        let key_b = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+        let key_c = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+        db.store_signing_key(10, &key_a).unwrap();
+        db.store_signing_key(11, &key_b).unwrap();
+        db.store_signing_key(12, &key_c).unwrap();
+
+        for key in [&key_a, &key_b, &key_c] {
+            let pub_key = key.public_key();
+            let found = db.find_signing_key_matching(&pub_key).unwrap().unwrap();
+            assert_eq!(found.public_key().as_ref(), pub_key.as_ref());
+        }
+
+        let unrelated = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
+        assert!(
+            db.find_signing_key_matching(&unrelated).unwrap().is_none(),
+            "no DB key should match an unrelated pub key"
+        );
+    }
+
+    #[test]
+    fn test_latest_signing_key_epoch() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        assert!(db.latest_signing_key_epoch().unwrap().is_none());
+
+        db.store_signing_key(5, &Bls12381PrivateKey::generate(&mut rand::thread_rng()))
+            .unwrap();
+        assert_eq!(db.latest_signing_key_epoch().unwrap(), Some(5));
+
+        db.store_signing_key(8, &Bls12381PrivateKey::generate(&mut rand::thread_rng()))
+            .unwrap();
+        db.store_signing_key(3, &Bls12381PrivateKey::generate(&mut rand::thread_rng()))
+            .unwrap();
+        assert_eq!(db.latest_signing_key_epoch().unwrap(), Some(8));
     }
 
     #[test]
@@ -1034,6 +1185,7 @@ mod tests {
         rotation_msgs.insert(NonZeroU16::new(1).unwrap(), create_test_message());
         let nonce_msg = create_test_nonce_message();
         let enc_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        let sig_key = Bls12381PrivateKey::generate(&mut rand::thread_rng());
 
         for epoch in 1..=10 {
             db.store_dealer_message(epoch, &dealer, &dealer_msg)
@@ -1043,6 +1195,7 @@ mod tests {
             db.store_nonce_message(epoch, 0, &dealer, &nonce_msg)
                 .unwrap();
             db.store_encryption_key(epoch, &enc_key).unwrap();
+            db.store_signing_key(epoch, &sig_key).unwrap();
         }
 
         db.prune_messages_below(8).unwrap();
@@ -1061,18 +1214,26 @@ mod tests {
                 "nonce message at epoch {epoch} should be pruned"
             );
         }
-        // Encryption keys keep one extra epoch of retention to absorb
-        // transient on-chain registration races; epochs 1..7 are pruned but
-        // epoch 7 is retained.
+        // Encryption and signing keys keep one extra epoch of retention to
+        // absorb transient on-chain registration races; epochs 1..7 are
+        // pruned but epoch 7 is retained.
         for epoch in 1..7 {
             assert!(
                 db.get_encryption_key(epoch).unwrap().is_none(),
                 "encryption key at epoch {epoch} should be pruned"
             );
+            assert!(
+                db.get_signing_key(epoch).unwrap().is_none(),
+                "signing key at epoch {epoch} should be pruned"
+            );
         }
         assert!(
             db.get_encryption_key(7).unwrap().is_some(),
             "encryption key at epoch 7 should be retained (cutoff - 1)"
+        );
+        assert!(
+            db.get_signing_key(7).unwrap().is_some(),
+            "signing key at epoch 7 should be retained (cutoff - 1)"
         );
         for epoch in 8..=10 {
             assert!(
@@ -1090,6 +1251,10 @@ mod tests {
             assert!(
                 db.get_encryption_key(epoch).unwrap().is_some(),
                 "encryption key at epoch {epoch} should be kept"
+            );
+            assert!(
+                db.get_signing_key(epoch).unwrap().is_some(),
+                "signing key at epoch {epoch} should be kept"
             );
         }
     }

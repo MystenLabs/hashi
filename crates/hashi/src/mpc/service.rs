@@ -222,9 +222,9 @@ impl MpcService {
             }
             match self.inner.next_reconfig_epoch().await {
                 Ok(target) => {
-                    if let Err(e) = self.inner.prepare_and_register_encryption_key(target).await {
+                    if let Err(e) = self.inner.prepare_and_register_keys(target).await {
                         debug!(
-                            "Encryption key registration for epoch {target} failed: {e}; \
+                            "Encryption/signing key registration for epoch {target} failed: {e}; \
                              will retry on next genesis_reconfig iteration"
                         );
                     }
@@ -577,13 +577,9 @@ impl MpcService {
         if hashi_epoch >= sui_epoch {
             return;
         }
-        if let Err(e) = self
-            .inner
-            .prepare_and_register_encryption_key(sui_epoch)
-            .await
-        {
+        if let Err(e) = self.inner.prepare_and_register_keys(sui_epoch).await {
             warn!(
-                "Failed to prepare/register encryption key for epoch {sui_epoch}: {e}; \
+                "Failed to prepare/register encryption+signing keys for epoch {sui_epoch}: {e}; \
                  will retry on next trigger"
             );
         }
@@ -712,13 +708,9 @@ impl MpcService {
         }
         drop(_end_reconfig_timer);
         let next_epoch = target_epoch + 1;
-        if let Err(e) = self
-            .inner
-            .prepare_and_register_encryption_key(next_epoch)
-            .await
-        {
+        if let Err(e) = self.inner.prepare_and_register_keys(next_epoch).await {
             warn!(
-                "Failed to prepare/register encryption key for epoch {next_epoch}: {e}; \
+                "Failed to prepare/register encryption+signing keys for epoch {next_epoch}: {e}; \
                  will retry at next trigger"
             );
         }
@@ -831,12 +823,10 @@ impl MpcService {
             epoch,
             mpc_public_key: mpc_public_key.clone(),
         };
-        let signing_key = self
-            .inner
-            .config
-            .protocol_private_key()
-            .ok_or_else(|| anyhow::anyhow!("no protocol_private_key configured"))?;
         let my_address = self.inner.config.validator_address()?;
+        let signing_key =
+            self.inner
+                .find_signing_key_for_committee(&target_committee, my_address, epoch)?;
         let my_sig = signing_key.sign(epoch, my_address, &message);
         self.inner
             .store_reconfig_signature(epoch, my_sig.signature().as_bytes().to_vec());

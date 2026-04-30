@@ -8,8 +8,6 @@ use std::path::PathBuf;
 use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_sdk_types::Address;
 
-use hashi_types::committee::Bls12381PrivateKey;
-
 use crate::constants::SUI_MAINNET_CHAIN_ID;
 
 /// Load an Ed25519 private key from a file path or inline PEM string.
@@ -53,9 +51,6 @@ pub fn load_ed25519_private_key_from_path(path: &Path) -> anyhow::Result<Ed25519
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub protocol_private_key: Option<Bls12381PrivateKey>,
-
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_private_key: Option<String>,
 
@@ -205,10 +200,6 @@ impl Config {
     pub fn save(&self, path: &std::path::Path) -> Result<(), anyhow::Error> {
         let toml = toml::to_string(self)?;
         std::fs::write(path, toml).map_err(Into::into)
-    }
-
-    pub fn protocol_private_key(&self) -> Option<Bls12381PrivateKey> {
-        self.protocol_private_key.clone()
     }
 
     pub fn tls_private_key(&self) -> Result<ed25519_dalek::SigningKey, anyhow::Error> {
@@ -388,8 +379,6 @@ impl Config {
                 .deref()
                 .to_owned(),
         );
-
-        config.protocol_private_key = Some(Bls12381PrivateKey::generate(&mut rand::thread_rng()));
 
         let listen_addr = SocketAddr::from(([127, 0, 0, 1], get_available_port()));
         config.listen_address = Some(listen_addr);
