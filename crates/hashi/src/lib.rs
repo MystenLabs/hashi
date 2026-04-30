@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 use std::sync::RwLock;
 
 use anyhow::anyhow;
+use hashi_types::committee::Bls12381PrivateKey;
 use hashi_types::committee::EncryptionPrivateKey;
 use hashi_types::committee::EncryptionPublicKey;
 use sui_futures::service::Service;
@@ -238,14 +239,24 @@ impl Hashi {
         Ok(public_key)
     }
 
-    pub async fn prepare_and_register_encryption_key(
-        self: &Arc<Self>,
-        epoch: u64,
-    ) -> anyhow::Result<()> {
-        let public_key = self.prepare_encryption_key(epoch)?;
+    pub async fn prepare_and_register_keys(self: &Arc<Self>, epoch: u64) -> anyhow::Result<()> {
+        let enc_pub = self.prepare_encryption_key(epoch)?;
+        let sig_priv = self.prepare_signing_key(epoch)?;
+        let sig_pub = sig_priv.public_key();
+        let sui_epoch = self.current_sui_epoch().await?;
+        let validator_address = self.config.validator_address()?;
+        let pop = sig_priv.proof_of_possession(sui_epoch, validator_address);
         let mut executor = sui_tx_executor::SuiTxExecutor::from_hashi(self.clone())?;
         executor
-            .execute_register_or_update_validator(&self.config, None, Some(&public_key))
+            .execute_register_or_update_validator(
+                &self.config,
+                None,
+                Some(&enc_pub),
+                Some(sui_tx_executor::SigningKeyUpdate {
+                    public_key: &sig_pub,
+                    pop: &pop,
+                }),
+            )
             .await
             .map(|_| ())
     }
@@ -271,6 +282,51 @@ impl Hashi {
                      operator intervention needed (re-register, possibly DB recovery)"
                 )
             })
+    }
+
+    pub fn prepare_signing_key(&self, epoch: u64) -> anyhow::Result<Bls12381PrivateKey> {
+        if let Some(existing) = self.db.get_signing_key(epoch)? {
+            return Ok(existing);
+        }
+        let private_key = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+        self.db
+            .store_signing_key(epoch, &private_key)
+            .map_err(|e| anyhow!("failed to store signing key for epoch {epoch}: {e}"))?;
+        Ok(private_key)
+    }
+
+    pub(crate) fn find_signing_key_for_committee(
+        &self,
+        committee: &hashi_types::committee::Committee,
+        validator_address: sui_sdk_types::Address,
+        epoch: u64,
+    ) -> anyhow::Result<Bls12381PrivateKey> {
+        let member = committee
+            .members()
+            .iter()
+            .find(|m| m.validator_address() == validator_address)
+            .ok_or_else(|| anyhow!("validator not in committee for epoch {epoch}"))?;
+        let pub_key = member.public_key();
+        self.db
+            .find_signing_key_matching(pub_key)
+            .map_err(|e| anyhow!("DB error looking up signing key for epoch {epoch}: {e}"))?
+            .ok_or_else(|| {
+                anyhow!(
+                    "no DB signing key matches committee record for epoch {epoch}; \
+                     operator intervention needed (re-register, possibly DB recovery)"
+                )
+            })
+    }
+
+    pub(crate) async fn current_sui_epoch(&self) -> anyhow::Result<u64> {
+        use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
+        let mut client = self.onchain_state().client();
+        let service_info = client
+            .ledger_client()
+            .get_service_info(GetServiceInfoRequest::default())
+            .await?
+            .into_inner();
+        Ok(service_info.epoch())
     }
 
     pub(crate) async fn next_reconfig_epoch(&self) -> anyhow::Result<u64> {
@@ -340,10 +396,14 @@ impl Hashi {
             })
             .transpose()?
             .flatten();
-        let signing_key = self
-            .config
-            .protocol_private_key()
-            .ok_or_else(|| anyhow!("no protocol_private_key configured"))?;
+        let signing_key = self.find_signing_key_for_committee(
+            committee_set
+                .committees()
+                .get(&epoch)
+                .ok_or_else(|| anyhow!("no committee for epoch {epoch}"))?,
+            validator_address,
+            epoch,
+        )?;
         let store = Box::new(storage::EpochPublicMessagesStore::new(
             self.db.clone(),
             epoch,
@@ -553,7 +613,7 @@ impl Hashi {
 
         // Register validator (if not already registered) and update any stale metadata.
         match sui_tx_executor::SuiTxExecutor::from_config(&self.config, self.onchain_state())?
-            .execute_register_or_update_validator(&self.config, None, None)
+            .execute_register_or_update_validator(&self.config, None, None, None)
             .await
         {
             Ok(true) => tracing::info!("Validator registered/updated on-chain"),
@@ -563,9 +623,9 @@ impl Hashi {
 
         match self.next_reconfig_epoch().await {
             Ok(next_epoch) => {
-                if let Err(e) = self.prepare_and_register_encryption_key(next_epoch).await {
+                if let Err(e) = self.prepare_and_register_keys(next_epoch).await {
                     tracing::warn!(
-                        "Initial encryption key registration for epoch {next_epoch} \
+                        "Initial encryption/signing key registration for epoch {next_epoch} \
                          failed: {e}; will retry before next start_reconfig"
                     );
                 }
@@ -771,6 +831,46 @@ mod test {
         assert_ne!(
             pk1.as_element().to_byte_array(),
             pk2.as_element().to_byte_array(),
+            "different epochs should yield different keys"
+        );
+    }
+
+    #[test]
+    fn prepare_signing_key_is_idempotent() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let k1 = hashi.prepare_signing_key(1).unwrap();
+        let k2 = hashi.prepare_signing_key(1).unwrap();
+        assert_eq!(
+            k1.public_key().as_ref(),
+            k2.public_key().as_ref(),
+            "second call should return the same key"
+        );
+    }
+
+    #[test]
+    fn prepare_signing_key_persists_private_key() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let returned = hashi.prepare_signing_key(7).unwrap();
+        let stored = hashi
+            .db
+            .get_signing_key(7)
+            .unwrap()
+            .expect("private key should be in DB");
+        assert_eq!(
+            returned.public_key().as_ref(),
+            stored.public_key().as_ref(),
+            "returned key should match the stored private key"
+        );
+    }
+
+    #[test]
+    fn prepare_signing_key_generates_distinct_keys_per_epoch() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let k1 = hashi.prepare_signing_key(1).unwrap();
+        let k2 = hashi.prepare_signing_key(2).unwrap();
+        assert_ne!(
+            k1.public_key().as_ref(),
+            k2.public_key().as_ref(),
             "different epochs should yield different keys"
         );
     }

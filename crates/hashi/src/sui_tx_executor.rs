@@ -33,8 +33,10 @@ use std::time::Duration;
 
 use fastcrypto::serde_helpers::ToFromByteArray;
 use futures::TryStreamExt;
+use hashi_types::committee::BLS12381PublicKey;
 use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::EncryptionPublicKey;
+use hashi_types::committee::MemberSignature;
 use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::DepositRequestedEvent;
 use hashi_types::move_types::WithdrawalRequestedEvent;
@@ -159,7 +161,6 @@ use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionRequest;
 use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionResponse;
 use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
-use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
 use sui_rpc::proto::sui::rpc::v2::Object;
 use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
@@ -189,6 +190,11 @@ const DEFAULT_TIMEOUT_SECS: u64 = 10;
 pub const SUI_CLOCK_OBJECT_ID: Address = Address::from_static("0x6");
 const SUI_SYSTEM_STATE_OBJECT_ID: Address = Address::from_static("0x5");
 const SUI_RANDOM_OBJECT_ID: Address = Address::from_static("0x8");
+
+pub struct SigningKeyUpdate<'a> {
+    pub public_key: &'a BLS12381PublicKey,
+    pub pop: &'a MemberSignature,
+}
 
 /// A reusable executor for submitting Sui transactions.
 ///
@@ -871,6 +877,7 @@ impl SuiTxExecutor {
         config: &Config,
         operator_address: Option<Address>,
         next_epoch_encryption_public_key: Option<&EncryptionPublicKey>,
+        next_epoch_signing_key: Option<SigningKeyUpdate<'_>>,
     ) -> anyhow::Result<bool> {
         let sender = self.signer.public_key().derive_address();
         let transaction = build_register_or_update_validator_tx(
@@ -880,6 +887,7 @@ impl SuiTxExecutor {
             operator_address,
             Some(sender),
             next_epoch_encryption_public_key,
+            next_epoch_signing_key,
         )
         .await?;
 
@@ -1316,6 +1324,7 @@ pub async fn build_register_or_update_validator_tx(
     operator_address: Option<Address>,
     sender: Option<Address>,
     next_epoch_encryption_public_key: Option<&EncryptionPublicKey>,
+    next_epoch_signing_key: Option<SigningKeyUpdate<'_>>,
 ) -> anyhow::Result<Option<Transaction>> {
     let validator_address = config.validator_address()?;
 
@@ -1382,38 +1391,30 @@ pub async fn build_register_or_update_validator_tx(
         has_calls = true;
     }
 
-    // 2. Update BLS public key if available and changed.
-    if let Some(protocol_key) = config.protocol_private_key()
-        && onchain_member
+    // 2. Update next-epoch BLS public key if provided and changed.
+    if let Some(update) = next_epoch_signing_key {
+        let changed = onchain_member
             .as_ref()
-            .map(|m| m.next_epoch_public_key().as_ref() != protocol_key.public_key().as_ref())
-            .unwrap_or(true)
-    {
-        let service_info = client
-            .clone()
-            .ledger_client()
-            .get_service_info(GetServiceInfoRequest::default())
-            .await?
-            .into_inner();
-        let current_epoch = service_info.epoch();
-        let pop = protocol_key.proof_of_possession(current_epoch, validator_address);
-
-        let public_key_arg = builder.pure(&protocol_key.public_key().as_ref().to_vec());
-        let pop_signature_arg = builder.pure(&pop.signature().as_ref().to_vec());
-        builder.move_call(
-            Function::new(
-                hashi_ids.package_id,
-                Identifier::from_static("validator"),
-                Identifier::from_static("update_next_epoch_public_key"),
-            ),
-            vec![
-                hashi_arg,
-                validator_address_arg,
-                public_key_arg,
-                pop_signature_arg,
-            ],
-        );
-        has_calls = true;
+            .map(|m| m.next_epoch_public_key().as_ref() != update.public_key.as_ref())
+            .unwrap_or(true);
+        if changed {
+            let public_key_arg = builder.pure(&update.public_key.as_ref().to_vec());
+            let pop_signature_arg = builder.pure(&update.pop.signature().as_ref().to_vec());
+            builder.move_call(
+                Function::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("validator"),
+                    Identifier::from_static("update_next_epoch_public_key"),
+                ),
+                vec![
+                    hashi_arg,
+                    validator_address_arg,
+                    public_key_arg,
+                    pop_signature_arg,
+                ],
+            );
+            has_calls = true;
+        }
     }
 
     // 3. Update next-epoch encryption public key if provided and changed.
