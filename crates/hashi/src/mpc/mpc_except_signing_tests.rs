@@ -22,6 +22,7 @@ use fastcrypto_tbls::random_oracle::RandomOracle;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use hashi_types::committee::Committee;
 use hashi_types::committee::CommitteeMember;
+use hashi_types::committee::EncryptionPrivateKey;
 use hashi_types::committee::EncryptionPublicKey;
 use hashi_types::committee::MemberSignature;
 use std::collections::BTreeMap;
@@ -256,6 +257,7 @@ impl TestSetup {
             &self.committee_set,
             session_id,
             self.encryption_keys[validator_index].clone(),
+            None,
             self.signing_keys[validator_index].clone(),
             store,
             TEST_CHAIN_ID,
@@ -868,6 +870,7 @@ fn test_mpc_manager_new_from_committee_set() {
         &setup.committee_set,
         session_id,
         encryption_key,
+        None,
         signing_key,
         Box::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
@@ -930,6 +933,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         &committee_set,
         session_id,
         encryption_keys[0].clone(),
+        None,
         signing_keys[0].clone(),
         Box::new(InMemoryPublicMessagesStore::new()),
         "test",
@@ -5133,9 +5137,6 @@ impl RotationTestSetup {
         result
     }
 
-    /// Sets previous_committee, previous_nodes, and previous_threshold on a
-    /// DKG manager so it can be used for rotation tests. In production, these
-    /// are set by MpcManager::new when pending_epoch_change is set.
     fn prepare_for_rotation(&self, manager: &mut MpcManager) {
         let previous_committee = self
             .setup
@@ -5158,6 +5159,8 @@ impl RotationTestSetup {
             manager.previous_threshold = Some(threshold);
         }
         manager.previous_committee = previous_committee;
+        // Tests reuse the same key across epochs.
+        manager.previous_encryption_key = Some(manager.encryption_key.clone());
     }
 
     /// Creates a manager that has completed DKG and is ready for rotation.
@@ -6309,6 +6312,7 @@ async fn test_prepare_previous_output_for_new_member() {
         &new_committee_set,
         session_id,
         new_member_encryption_key,
+        None,
         new_member_signing_key,
         Box::new(InMemoryPublicMessagesStore::new()),
         TEST_CHAIN_ID,
@@ -7469,6 +7473,7 @@ fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
         &committee_set,
         session_id,
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
+        Some(rotation_setup.setup.encryption_keys[shifted_member_index].clone()),
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
         Box::new(store),
         TEST_CHAIN_ID,
@@ -7642,6 +7647,7 @@ fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
         &committee_set,
         session_id,
         setup.encryption_keys[target_index].clone(),
+        Some(setup.encryption_keys[target_index].clone()),
         setup.signing_keys[target_index].clone(),
         Box::new(store),
         TEST_CHAIN_ID,
@@ -7667,6 +7673,166 @@ fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
     assert_ne!(
         reconstructed.public_key, key_all,
         "Reconstruction must NOT use extra dealers beyond threshold"
+    );
+}
+
+#[test]
+fn test_reconstruct_from_dkg_certificates_uses_previous_encryption_key() {
+    let mut rng = rand::thread_rng();
+
+    let weights = [3u16, 3, 3, 3, 3];
+    let setup = TestSetup::with_weights(&weights);
+    let epoch = setup.epoch();
+
+    // Run DKG at `epoch` with the original encryption keys.
+    let dealer_indices: Vec<usize> = vec![0, 1, 2, 3];
+    let mut dealer_managers: Vec<_> = dealer_indices
+        .iter()
+        .map(|&i| setup.create_manager(i))
+        .collect();
+    let dealer_messages: Vec<Messages> = dealer_managers
+        .iter()
+        .map(|dm| Messages::Dkg(dm.create_dealer_message(&mut rng)))
+        .collect();
+
+    let target_index = 4usize;
+    let mut target_manager = setup.create_manager(target_index);
+    for (i, msg) in dealer_messages.iter().enumerate() {
+        let dealer_addr = setup.address(dealer_indices[i]);
+        receive_dealer_messages(&mut target_manager, msg, dealer_addr).unwrap();
+        for dm in dealer_managers.iter_mut() {
+            let _ = receive_dealer_messages(dm, msg, dealer_addr);
+        }
+    }
+    let threshold_dealers: Vec<Address> = vec![setup.address(0), setup.address(1)];
+    let expected_public_key = target_manager
+        .complete_dkg(threshold_dealers.iter().copied())
+        .unwrap()
+        .public_key;
+
+    // Build certificates and committee_set for the rotation target epoch.
+    let committee = setup.committee();
+    let mut certificates = Vec::new();
+    for (i, msg) in dealer_messages.iter().enumerate() {
+        let dealer_addr = setup.address(dealer_indices[i]);
+        let sigs: Vec<MemberSignature> = [0usize, 1]
+            .iter()
+            .map(|&signer_idx| {
+                setup.signing_keys[signer_idx].sign(
+                    epoch,
+                    setup.address(signer_idx),
+                    &DealerMessagesHash {
+                        dealer_address: dealer_addr,
+                        messages_hash: compute_messages_hash(msg),
+                    },
+                )
+            })
+            .collect();
+        let cert = create_test_certificate(committee, msg, dealer_addr, sigs).unwrap();
+        certificates.push(CertificateV1::Dkg(cert));
+    }
+
+    let target_epoch = epoch + 1;
+    let members: Vec<_> = committee.members().to_vec();
+    let previous_committee = Committee::new(
+        members.clone(),
+        epoch,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
+    );
+    let target_committee = Committee::new(
+        members,
+        target_epoch,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
+    );
+    let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+    let mut committees = BTreeMap::new();
+    committees.insert(epoch, previous_committee);
+    committees.insert(target_epoch, target_committee);
+    committee_set
+        .set_epoch(epoch)
+        .set_pending_epoch_change(Some(target_epoch))
+        .set_committees(committees);
+
+    let build_store = || {
+        let mut s = InMemoryPublicMessagesStore::new();
+        for (i, msg) in dealer_messages.iter().enumerate() {
+            let dealer_addr = setup.address(dealer_indices[i]);
+            let Messages::Dkg(inner) = msg else {
+                unreachable!()
+            };
+            s.store_dealer_message(0, &dealer_addr, inner).unwrap();
+        }
+        s
+    };
+
+    // The previous epoch's encryption key (matches what dealers encrypted to).
+    let prev_key = setup.encryption_keys[target_index].clone();
+    // A fresh, independent key for the new epoch.
+    let new_key = EncryptionPrivateKey::new(&mut rng);
+    assert_ne!(
+        EncryptionPublicKey::from_private_key(&prev_key)
+            .as_element()
+            .to_byte_array(),
+        EncryptionPublicKey::from_private_key(&new_key)
+            .as_element()
+            .to_byte_array(),
+        "test setup precondition: new and previous keys must differ"
+    );
+
+    // With `previous_encryption_key = Some(prev_key)`: reconstruction succeeds.
+    let session_id = SessionId::new(TEST_CHAIN_ID, target_epoch, &ProtocolType::Dkg);
+    let manager_with_prev = MpcManager::new(
+        setup.address(target_index),
+        &committee_set,
+        session_id.clone(),
+        new_key.clone(),
+        Some(prev_key.clone()),
+        setup.signing_keys[target_index].clone(),
+        Box::new(build_store()),
+        TEST_CHAIN_ID,
+        None,
+        TEST_BATCH_SIZE_PER_WEIGHT,
+        None,
+    )
+    .unwrap();
+    let reconstructed = unwrap_reconstruction_success(
+        manager_with_prev
+            .reconstruct_from_dkg_certificates(&certificates, &HashMap::new())
+            .unwrap(),
+    );
+    assert_eq!(
+        reconstructed.public_key, expected_public_key,
+        "Reconstruction with previous_encryption_key should succeed and match the original DKG"
+    );
+
+    // With `previous_encryption_key = None`: reconstruction errors loudly
+    // rather than silently using the wrong key.
+    let manager_without_prev = MpcManager::new(
+        setup.address(target_index),
+        &committee_set,
+        session_id,
+        new_key,
+        None,
+        setup.signing_keys[target_index].clone(),
+        Box::new(build_store()),
+        TEST_CHAIN_ID,
+        None,
+        TEST_BATCH_SIZE_PER_WEIGHT,
+        None,
+    )
+    .unwrap();
+    let result =
+        manager_without_prev.reconstruct_from_dkg_certificates(&certificates, &HashMap::new());
+    let Err(err) = result else {
+        panic!("missing previous_encryption_key must error, got Ok");
+    };
+    assert!(
+        matches!(&err, MpcError::InvalidConfig(msg) if msg.contains("previous encryption key")),
+        "expected InvalidConfig about previous encryption key, got: {err:?}",
     );
 }
 
@@ -7733,6 +7899,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             &rotation_committee_set,
             rotation_session_id.clone(),
             rotation_setup.setup.encryption_keys[dealer_idx].clone(),
+            None,
             rotation_setup.setup.signing_keys[dealer_idx].clone(),
             Box::new(InMemoryPublicMessagesStore::new()),
             TEST_CHAIN_ID,
@@ -7763,6 +7930,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             &rotation_committee_set,
             other_rotation_session_id,
             rotation_setup.setup.encryption_keys[other_idx].clone(),
+            None,
             rotation_setup.setup.signing_keys[other_idx].clone(),
             Box::new(InMemoryPublicMessagesStore::new()),
             TEST_CHAIN_ID,
@@ -7861,6 +8029,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
         &committee_set,
         session_id,
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
+        Some(rotation_setup.setup.encryption_keys[shifted_member_index].clone()),
         rotation_setup.setup.signing_keys[shifted_member_index].clone(),
         Box::new(store),
         TEST_CHAIN_ID,

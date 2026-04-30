@@ -35,6 +35,7 @@ use std::time::Duration;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use futures::TryStreamExt;
 use hashi_types::committee::CommitteeSignature;
+use hashi_types::committee::EncryptionPublicKey;
 use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::DepositRequestedEvent;
 use hashi_types::move_types::WithdrawalRequestedEvent;
@@ -954,6 +955,78 @@ impl SuiTxExecutor {
         Ok(true)
     }
 
+    /// Update the validator's `next_epoch_encryption_public_key` on-chain.
+    ///
+    /// Skips the transaction if the on-chain key already matches `encryption_public_key`.
+    #[tracing::instrument(level = "info", skip_all)]
+    pub async fn execute_update_next_epoch_encryption_key(
+        &mut self,
+        validator_address: Address,
+        encryption_public_key: &EncryptionPublicKey,
+    ) -> anyhow::Result<()> {
+        let new_bytes = encryption_public_key.as_element().to_byte_array();
+        let hashi_object = self
+            .client
+            .ledger_client()
+            .get_object(
+                GetObjectRequest::new(&self.hashi_ids.hashi_object_id).with_read_mask(
+                    FieldMask::from_paths([
+                        Object::path_builder().contents().finish(),
+                        Object::path_builder().object_id(),
+                    ]),
+                ),
+            )
+            .await?
+            .into_inner();
+        let hashi_move: hashi_types::move_types::Hashi =
+            hashi_object.object().contents().deserialize()?;
+        let members_id = hashi_move.committees.members.id;
+        let onchain_member =
+            onchain::scrape_member_info(self.client.clone(), members_id, validator_address)
+                .await
+                .ok();
+        let already_matches = onchain_member
+            .as_ref()
+            .and_then(|m| m.next_epoch_encryption_public_key())
+            .map(|k| k.as_element().to_byte_array() == new_bytes)
+            .unwrap_or(false);
+        if already_matches {
+            tracing::debug!(
+                %validator_address,
+                "On-chain next_epoch_encryption_public_key already matches; skipping update"
+            );
+            return Ok(());
+        }
+        let mut builder = TransactionBuilder::new();
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let validator_address_arg = builder.pure(&validator_address);
+        let encryption_key_arg = builder.pure(&new_bytes.as_slice().to_vec());
+        builder.move_call(
+            Function::new(
+                self.hashi_ids.package_id,
+                Identifier::from_static("validator"),
+                Identifier::from_static("update_next_epoch_encryption_public_key"),
+            ),
+            vec![hashi_arg, validator_address_arg, encryption_key_arg],
+        );
+        let response = self.execute(builder).await?;
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "update_next_epoch_encryption_public_key transaction failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+        tracing::info!(
+            %validator_address,
+            "Registered next_epoch_encryption_public_key on-chain"
+        );
+        Ok(())
+    }
+
     /// Execute a certificate submission transaction.
     ///
     /// This submits a DKG, rotation, or nonce generation certificate to the on-chain
@@ -1461,35 +1534,7 @@ pub async fn build_register_or_update_validator_tx(
         has_calls = true;
     }
 
-    // 3. Update encryption key if available and changed.
-    if let Ok(encryption_public_key) = config.encryption_public_key()
-        && onchain_member
-            .as_ref()
-            .and_then(|m| m.next_epoch_encryption_public_key())
-            .map(|k| {
-                k.as_element().to_byte_array() != encryption_public_key.as_element().to_byte_array()
-            })
-            .unwrap_or(true)
-    {
-        let encryption_key_arg = builder.pure(
-            &encryption_public_key
-                .as_element()
-                .to_byte_array()
-                .as_slice()
-                .to_vec(),
-        );
-        builder.move_call(
-            Function::new(
-                hashi_ids.package_id,
-                Identifier::from_static("validator"),
-                Identifier::from_static("update_next_epoch_encryption_public_key"),
-            ),
-            vec![hashi_arg, validator_address_arg, encryption_key_arg],
-        );
-        has_calls = true;
-    }
-
-    // 4. Update endpoint URL if available and changed.
+    // 3. Update endpoint URL if available and changed.
     if let Some(config_url) = config.endpoint_url()
         && onchain_member
             .as_ref()
@@ -1509,7 +1554,7 @@ pub async fn build_register_or_update_validator_tx(
         has_calls = true;
     }
 
-    // 5. Update TLS key if available and changed.
+    // 4. Update TLS key if available and changed.
     if let Ok(tls_key) = config.tls_public_key()
         && onchain_member
             .as_ref()
@@ -1528,7 +1573,7 @@ pub async fn build_register_or_update_validator_tx(
         has_calls = true;
     }
 
-    // 6. Update operator address if provided and changed.
+    // 5. Update operator address if provided and changed.
     if let Some(operator) = operator_address
         && onchain_member
             .as_ref()
