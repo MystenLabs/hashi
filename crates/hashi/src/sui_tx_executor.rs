@@ -34,6 +34,7 @@ use std::time::Duration;
 
 use fastcrypto::serde_helpers::ToFromByteArray;
 use futures::TryStreamExt;
+use hashi_types::committee::Bls12381PrivateKey;
 use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::EncryptionPublicKey;
 use hashi_types::committee::SignedMessage;
@@ -920,6 +921,7 @@ impl SuiTxExecutor {
         config: &Config,
         operator_address: Option<Address>,
         next_epoch_encryption_public_key: Option<&EncryptionPublicKey>,
+        next_epoch_signing_key: Option<&Bls12381PrivateKey>,
     ) -> anyhow::Result<bool> {
         let sender = self.signer.public_key().derive_address();
         let transaction = build_register_or_update_validator_tx(
@@ -929,6 +931,7 @@ impl SuiTxExecutor {
             operator_address,
             Some(sender),
             next_epoch_encryption_public_key,
+            next_epoch_signing_key,
         )
         .await?;
 
@@ -1365,6 +1368,7 @@ pub async fn build_register_or_update_validator_tx(
     operator_address: Option<Address>,
     sender: Option<Address>,
     next_epoch_encryption_public_key: Option<&EncryptionPublicKey>,
+    next_epoch_signing_key: Option<&Bls12381PrivateKey>,
 ) -> anyhow::Result<Option<Transaction>> {
     let validator_address = config.validator_address()?;
 
@@ -1431,8 +1435,8 @@ pub async fn build_register_or_update_validator_tx(
         has_calls = true;
     }
 
-    // 2. Update BLS public key if available and changed.
-    if let Some(protocol_key) = config.protocol_private_key()
+    // 2. Update BLS public key if provided and changed.
+    if let Some(protocol_key) = next_epoch_signing_key
         && onchain_member
             .as_ref()
             .map(|m| m.next_epoch_public_key().as_ref() != protocol_key.public_key().as_ref())

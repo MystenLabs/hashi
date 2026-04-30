@@ -320,10 +320,17 @@ impl Hashi {
             .config
             .validator_address()
             .map_err(|e| anyhow!("No validator address configured: {}", e))?;
-        let private_key = self
-            .config
-            .protocol_private_key()
-            .ok_or_else(|| anyhow!("No protocol private key configured"))?;
+        let committee = self
+            .onchain_state()
+            .state()
+            .hashi()
+            .committees
+            .committees()
+            .get(&epoch)
+            .cloned()
+            .ok_or_else(|| anyhow!("no committee for epoch {epoch}"))?;
+        let private_key =
+            self.find_signing_key_for_committee(&committee, validator_address, epoch)?;
         let public_key_bytes = private_key.public_key().as_bytes().to_vec().into();
 
         let message = DepositConfirmationMessage {
