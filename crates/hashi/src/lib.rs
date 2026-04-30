@@ -301,9 +301,6 @@ impl Hashi {
         let committee_set = &hashi.committees;
         let session_id = mpc::SessionId::new(self.config.sui_chain_id(), epoch, &protocol_type);
         let validator_address = self.config.validator_address()?;
-        // TODO(IOP-194): Once the per-epoch stake threshold is scoped to initial committee creation only
-        // and Move-side filtering rejects stale registrations, the committee's record will always equal the
-        // current-epoch key and this lookup can revert to `get_encryption_key(epoch)`.
         let encryption_key = self.find_encryption_key_for_committee(
             committee_set
                 .committees()

@@ -392,10 +392,9 @@ impl Database {
 
     /// Prune all MPC keyspaces.
     pub fn prune_messages_below(&self, cutoff_epoch: u64) -> Result<()> {
-        // TODO(IOP-194): Drop this extra retention once `start_reconfig` rejects
-        // stale-tagged registrations and the per-epoch stake threshold is scoped
-        // to initial committee creation only. Until then, retention covers the
-        // race.
+        // Encryption keys retain one extra epoch to support graceful rotation: the
+        // committee may capture a previous epoch's pub key, and the matching
+        // private key must still be in DB.
         prune_keyspace(&self.encryption_keys, cutoff_epoch.saturating_sub(1))?;
         prune_keyspace(&self.dealer_messages, cutoff_epoch)?;
         prune_keyspace(&self.rotation_messages, cutoff_epoch)?;
