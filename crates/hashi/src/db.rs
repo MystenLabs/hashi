@@ -392,7 +392,7 @@ impl Database {
 
     /// Prune all MPC keyspaces.
     pub fn prune_messages_below(&self, cutoff_epoch: u64) -> Result<()> {
-        // TODO: Drop this extra retention once `start_reconfig` rejects
+        // TODO(IOP-194): Drop this extra retention once `start_reconfig` rejects
         // stale-tagged registrations and the per-epoch stake threshold is scoped
         // to initial committee creation only. Until then, retention covers the
         // race.

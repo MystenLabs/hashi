@@ -454,7 +454,7 @@ async fn register_onchain(client: sui_rpc::Client, config: &HashiConfig) -> Resu
     let hashi_ids = config.hashi_ids();
     let mut executor = hashi::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
     executor
-        .execute_register_or_update_validator(config, None)
+        .execute_register_or_update_validator(config, None, None)
         .await
         .map(|_| ())
 }
