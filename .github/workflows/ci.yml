@@ -126,11 +126,17 @@ jobs:
       - name: rustdoc
         run: make doc
 
-      - uses: taiki-e/install-action@mdbook
-      - uses: taiki-e/install-action@v2
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          tool: mdbook-mermaid
-      - name: build mdbook
-        run: cd design && mdbook build
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: design/package-lock.json
+
+      - name: Install Docusaurus dependencies
+        run: cd design && npm ci
+
+      - name: Build Docusaurus site
+        run: cd design && npm run build
 
       - run: make is-dirty

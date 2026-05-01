@@ -1,0 +1,193 @@
+---
+title: Deposit
+description: How Hashi turns BTC sent to a deposit address into hBTC on Sui through the request, confirm, and mint phases.
+keywords: [ deposit, hBTC, mint, UTXO, confirmation, Bitcoin, Sui ]
+---
+
+A deposit moves BTC from a user's Bitcoin wallet into the Hashi-managed UTXO
+pool, minting a corresponding amount of `hBTC` into the user's account on Sui.
+The process has three phases:
+
+```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+---
+graph LR
+    A[Request] --> B[Confirm] --> C[Mint]
+```
+
+## Request
+
+```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+---
+graph LR
+    A[Request]:::active --> B[Confirm] --> C[Mint]
+    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
+```
+
+The user creates a Bitcoin transaction that sends BTC to a Hashi deposit
+address. Each deposit address is a unique Taproot address derived from the
+target destination address on Sui (see [Bitcoin Address Scheme](./address-scheme.mdx)).
+The deposit must meet the dust minimum (`546 sats`) to avoid creating
+unspendable UTXOs on Bitcoin.
+
+After the Bitcoin transaction is broadcast, the user notifies Hashi by
+constructing a `DepositRequest` and calling `hashi::deposit::deposit` on Sui.
+
+First, the user creates the request by calling `hashi::deposit_queue::deposit_request`:
+
+```move
+public fun deposit_request(
+    utxo: Utxo,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): DepositRequest
+```
+
+The `Utxo` is constructed from the Bitcoin transaction details:
+
+```move
+public fun utxo(
+    utxo_id: UtxoId,
+    amount: u64,
+    derivation_path: Option<address>,
+): Utxo
+
+public fun utxo_id(
+    txid: address,
+    vout: u32,
+): UtxoId
+```
+
+- `txid`: the 32-byte Bitcoin transaction hash.
+- `vout`: the output index within that transaction.
+- `amount`: the deposit amount in satoshis.
+- `derivation_path`: the Sui address used to derive the deposit address.
+
+The user then submits the request:
+
+```move
+public fun deposit(
+    hashi: &mut Hashi,
+    utxo: Utxo,
+    clock: &Clock,
+    ctx: &mut TxContext,
+)
+```
+
+The function validates that the deposit meets the minimum amount and the UTXO
+has not been previously deposited. The request is then placed in the deposit
+queue, and committee members start monitoring Bitcoin for confirmation.
+
+
+## Confirm
+
+```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+---
+graph LR
+    A[Request] --> B[Confirm]:::active --> C[Mint]
+    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
+```
+
+Committee members monitor the Bitcoin network for the deposit transaction. The
+transaction must reach a sufficient number of block confirmations (see
+[`bitcoin_confirmation_threshold`](./config.mdx#bitcoin_confirmation_threshold))
+before it is considered final. This guards against chain reorganizations where
+a confirmed transaction could be reversed. If the transaction is never
+confirmed or is invalidated by a reorg, the deposit is ignored.
+
+After confirmation, each committee member independently screens the deposit's
+source address by making a request to its configured sanctions-checking
+endpoint (see [Handling Sanctioned Addresses](./sanctions.mdx)). A member
+that considers the address sanctioned does not vote to accept the deposit.
+
+After a node determines that a deposit request is both confirmed on Bitcoin
+and passes its own screening checks, it communicates with the other members
+of the Hashi committee and collects signatures from validators that agree the
+deposit should be confirmed. If a quorum of validators cannot agree that a
+deposit should be confirmed, the request is either retried later or ignored
+if invalid.
+
+## Mint
+
+```mermaid
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: '#298DFF'
+    primaryTextColor: '#FFFFFF'
+    primaryBorderColor: '#FFFFFF'
+    secondaryColor: '#6C7584'
+    tertiaryColor: '#FFFFFF'
+    lineColor: '#298DFF'
+    background: '#FFFFFF'
+    mainBkg: '#000000'
+    secondBkg: '#6C7584'
+    fontSize: '14px'
+    fontFamily: 'Inter, sans-serif'
+---
+graph LR
+    A[Request] --> B[Confirm] --> C[Mint]:::active
+    classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
+```
+
+After a quorum of validators agrees that a deposit should be confirmed, one
+validator submits the certificate onchain by calling `hashi::deposit::confirm_deposit`:
+
+```move
+public fun confirm_deposit(
+    hashi: &mut Hashi,
+    request_id: address,
+    signature: CommitteeSignature,
+    ctx: &mut TxContext,
+)
+```
+
+The function verifies the committee certificate, removes the request from the
+deposit queue, mints the corresponding amount of `hBTC`, and sends it to the
+user's Sui address. The deposited UTXO is added to the Hashi-managed UTXO
+pool, making it available for future withdrawal coin selection.
