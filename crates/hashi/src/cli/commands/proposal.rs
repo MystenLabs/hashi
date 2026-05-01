@@ -618,9 +618,8 @@ pub async fn create_update_guardian_proposal(
     metadata: Vec<(String, String)>,
     tx_opts: &TxOptions,
 ) -> Result<()> {
-    let public_key =
-        hex::decode(public_key_hex.strip_prefix("0x").unwrap_or(public_key_hex))
-            .context("Invalid hex for public key")?;
+    let public_key = hex::decode(public_key_hex.strip_prefix("0x").unwrap_or(public_key_hex))
+        .context("Invalid hex for public key")?;
 
     println!("\n{}", "Creating Update Guardian Proposal:".bold());
     println!("  URL:        {}", url);
