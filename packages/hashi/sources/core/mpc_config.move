@@ -7,28 +7,9 @@ use hashi::{config::Config, config_value};
 
 const DEFAULT_THRESHOLD_IN_BASIS_POINTS: u64 = 3334;
 
-const MAX_BPS: u64 = 10000;
-
 const DEFAULT_WEIGHT_REDUCTION_ALLOWED_DELTA: u64 = 800;
 
 const DEFAULT_MAX_FAULTY_IN_BASIS_POINTS: u64 = 3333;
-
-#[allow(implicit_const_copy)]
-public(package) fun is_valid_config_entry(
-    key: &std::string::String,
-    value: &config_value::Value,
-): bool {
-    let k = key.as_bytes();
-    if (k == &b"mpc_threshold_in_basis_points") {
-        value.is_u64() && (*value).as_u64() > 0 && (*value).as_u64() <= MAX_BPS
-    } else if (k == &b"mpc_weight_reduction_allowed_delta") {
-        value.is_u64() && (*value).as_u64() <= MAX_BPS
-    } else if (k == &b"mpc_max_faulty_in_basis_points") {
-        value.is_u64() && (*value).as_u64() <= MAX_BPS
-    } else {
-        false
-    }
-}
 
 public(package) fun threshold_in_basis_points(config: &Config): u64 {
     config
