@@ -12,14 +12,19 @@ use hashi::{
     hashi::Hashi,
     utxo::{Utxo, UtxoId}
 };
-use sui::coin::Coin;
 
-use fun btc_config::deposit_minimum as Config.deposit_minimum;
+use fun btc_config::bitcoin_deposit_minimum as Config.deposit_minimum;
+use fun btc_config::bitcoin_deposit_time_delay_ms as Config.deposit_time_delay_ms;
 
 #[error]
 const EBelowMinimumDeposit: vector<u8> = b"Deposit amount is below the minimum";
 #[error]
 const EUtxoAlreadyUsed: vector<u8> = b"UTXO has already been deposited or is currently active";
+#[error]
+const EDepositTimeDelayNotPassed: vector<u8> = b"Deposit time-delay has not passed";
+#[error]
+const EAlreadyApprovedThisEpoch: vector<u8> =
+    b"Deposit has already been approved by the current committee";
 
 /// Message signed by the committee to confirm a deposit.
 public struct DepositConfirmationMessage has copy, drop, store {
@@ -70,10 +75,77 @@ public fun deposit(
     hashi.bitcoin_mut().deposit_queue_mut().insert_deposit(request);
 }
 
-public fun confirm_deposit(
+/// First phase of deposit confirmation. Records a committee certificate
+/// over `(request_id, utxo)` on the request, alongside the approval
+/// timestamp, and re-inserts the request into the queue.
+///
+/// The approval is not yet final — `confirm_deposit` must be called after
+/// the configured `bitcoin_deposit_time_delay_ms` has elapsed. The delay
+/// gives operators a window to detect a faulty or fraudulent committee
+/// signature and pause the service before funds are minted; while paused,
+/// `confirm_deposit` is rejected, leaving the approval parked. If the
+/// committee rotates during the window, the deposit will also need to be
+/// re-approved by the new epoch's committee.
+entry fun approve_deposit(
     hashi: &mut Hashi,
     request_id: address,
     cert: CommitteeSignature,
+    clock: &sui::clock::Clock,
+    _ctx: &mut TxContext,
+) {
+    hashi.config().assert_version_enabled();
+    hashi.assert_unpaused();
+    // Do not allow approval of deposits during a reconfiguration, this
+    // delays the approval to be done by the next epoch's committee.
+    hashi.assert_not_reconfiguring();
+
+    // Remove from active requests and copy the UTXO.
+    let mut request = hashi.bitcoin_mut().deposit_queue_mut().remove_request(request_id);
+    let utxo = request.utxo();
+
+    // If the request already carries an approval from the current
+    // committee, refuse to re-approve. Re-approving by the same
+    // committee would just bump the approval timestamp, pushing the
+    // confirmation window further out for no reason. Re-approval is
+    // only meaningful after the committee has rotated.
+    let current_epoch = hashi.current_committee().epoch();
+    let existing = request.approval_cert();
+    assert!(
+        existing.is_none() || existing.borrow().signature_epoch() != current_epoch,
+        EAlreadyApprovedThisEpoch,
+    );
+
+    // Verify the committee certificate over the request ID + UTXO.
+    hashi.verify(DepositConfirmationMessage { request_id, utxo }, cert);
+
+    // Record the cert and the approval timestamp for the time-delay check
+    // in `confirm_deposit`.
+    request.approve(cert, clock);
+
+    hashi.bitcoin_mut().deposit_queue_mut().insert_deposit(request);
+
+    sui::event::emit(DepositApprovedEvent {
+        request_id,
+        utxo,
+        cert,
+        approval_timestamp_ms: clock.timestamp_ms(),
+    });
+}
+
+/// Second phase of deposit confirmation. Re-verifies the stored committee
+/// certificate against the current committee, enforces the time-delay
+/// since approval, then mints BTC to the recipient (if any) and moves
+/// the UTXO into the active pool.
+///
+/// Re-verifying against the current committee means an approval from a
+/// rotated-out committee will not confirm — it must be re-approved by
+/// the current committee. Aborts if the request was never approved
+/// (no stored cert), the cert no longer verifies (committee rotated),
+/// or the time-delay window has not yet elapsed.
+entry fun confirm_deposit(
+    hashi: &mut Hashi,
+    request_id: address,
+    clock: &sui::clock::Clock,
     ctx: &mut TxContext,
 ) {
     hashi.config().assert_version_enabled();
@@ -82,18 +154,27 @@ public fun confirm_deposit(
     // delays the confirmation to be done by the next epoch's committee.
     hashi.assert_not_reconfiguring();
 
-    // Remove from active requests and copy the UTXO
+    // Remove from active requests and copy the UTXO. Aborts if the request
+    // was never approved (no stored cert or timestamp).
     let request = hashi.bitcoin_mut().deposit_queue_mut().remove_request(request_id);
     let utxo = request.utxo();
+    let cert = request.approval_cert().destroy_some();
+    let approval_timestamp_ms = request.approval_timestamp_ms().destroy_some();
 
-    // Verify the committee certificate over the request ID + UTXO
+    // Verify the certificate over the request ID + UTXO against the current committee.
+    // If a deposit is approved by an older committee, it will need to be
+    // re-approved by the current committee.
     hashi.verify(DepositConfirmationMessage { request_id, utxo }, cert);
+
+    // Check that the deposit was approved long enough ago.
+    assert!(
+        approval_timestamp_ms + hashi.config().deposit_time_delay_ms() <= clock.timestamp_ms(),
+        EDepositTimeDelayNotPassed,
+    );
 
     sui::event::emit(DepositConfirmedEvent {
         request_id,
-        utxo_id: utxo.id(),
-        amount: utxo.amount(),
-        derivation_path: utxo.derivation_path(),
+        utxo,
     });
 
     let derivation_path = utxo.derivation_path();
@@ -140,11 +221,24 @@ public struct DepositRequestedEvent has copy, drop {
     sui_tx_digest: vector<u8>,
 }
 
+/// Emitted when a committee certificate has been recorded against a
+/// deposit request. The deposit is not yet final — see `confirm_deposit`.
+/// `approval_timestamp_ms` is the clock timestamp recorded on the
+/// request, against which `confirm_deposit` enforces the time-delay
+/// window.
+public struct DepositApprovedEvent has copy, drop {
+    request_id: address,
+    utxo: Utxo,
+    cert: CommitteeSignature,
+    approval_timestamp_ms: u64,
+}
+
+/// Emitted when an approved deposit has cleared the time-delay window
+/// and the corresponding BTC has been minted (when applicable) and the
+/// UTXO moved into the active pool.
 public struct DepositConfirmedEvent has copy, drop {
     request_id: address,
-    utxo_id: UtxoId,
-    amount: u64,
-    derivation_path: Option<address>,
+    utxo: Utxo,
 }
 
 public struct ExpiredDepositDeletedEvent has copy, drop {

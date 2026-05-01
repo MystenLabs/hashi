@@ -57,6 +57,12 @@ use x509_parser::nom::AsBytes;
 const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
 const LEADER_TASK_TIMEOUT: Duration = Duration::from_secs(60);
 
+#[derive(Clone, Copy, Debug)]
+enum DepositPhase {
+    Approve,
+    Confirm,
+}
+
 pub struct LeaderService {
     inner: Arc<Hashi>,
     withdrawal_approval_retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
@@ -160,6 +166,10 @@ impl LeaderService {
                         (checkpoint_info.height, checkpoint_info.timestamp_ms)
                     };
 
+                    // We want to unconditionally reload deposits, even if we aren't the leader to
+                    // avoid only the leader being able to reload the moment a block is seen.
+                    self.reload_pending_deposit_requests();
+
                     if !self.is_current_leader(checkpoint_height) {
                         continue;
                     }
@@ -167,7 +177,6 @@ impl LeaderService {
                     debug!("New Bitcoin block {block_height}: processing deposit requests");
 
                     self.check_delete_expired_deposit_requests(checkpoint_timestamp_ms);
-                    self.reload_pending_deposit_requests();
                     self.process_deposit_requests();
                 }
                 Some(result) = self.deposit_tasks.join_next() => {
@@ -353,7 +362,10 @@ impl LeaderService {
         }
 
         let max_concurrent = self.inner.config.max_concurrent_leader_job_tasks();
-        for deposit_request in self.pending_deposit_requests.clone() {
+        let now_ms = self.inner.onchain_state().latest_checkpoint_timestamp_ms();
+        let delay_ms = self.inner.onchain_state().bitcoin_deposit_time_delay_ms();
+        let current_epoch = self.inner.onchain_state().epoch();
+        for deposit_request in &self.pending_deposit_requests {
             if self.deposit_tasks.len() >= max_concurrent {
                 break;
             }
@@ -362,17 +374,54 @@ impl LeaderService {
                 continue;
             }
 
+            // Decide whether to approve or confirm based on the on-chain
+            // approval state.
+            //
+            // - No cert, or a cert from a rotated-out committee: approve.
+            //   The on-chain `approve_deposit` rejects re-approval by the
+            //   same committee but accepts a fresh cert from the current
+            //   one, which is what re-approval after rotation needs.
+            // - Cert from the current committee, delay still open: skip
+            //   here entirely so we don't burn a task slot on work that
+            //   would just bail; the next checkpoint will re-evaluate.
+            // - Cert from the current committee, delay elapsed: confirm.
+            let phase = if let Some(cert) = &deposit_request.approval_cert
+                && cert.epoch == current_epoch
+            {
+                let approved_ms = deposit_request
+                    .approval_timestamp_ms
+                    .expect("approval_cert is set, so approval_timestamp_ms must be set");
+                if approved_ms.saturating_add(delay_ms) > now_ms {
+                    trace!(
+                        deposit_id = %deposit_id,
+                        approved_ms,
+                        delay_ms,
+                        now_ms,
+                        "Skipping deposit confirmation: time-delay has not elapsed",
+                    );
+                    continue;
+                }
+                DepositPhase::Confirm
+            } else {
+                DepositPhase::Approve
+            };
+
             let inner = self.inner.clone();
+            let deposit_request = deposit_request.clone();
 
             self.inflight_deposits.insert(deposit_id);
             self.deposit_tasks.spawn(async move {
-                let result = tokio::time::timeout(
-                    LEADER_TASK_TIMEOUT,
-                    Self::process_deposit_request(inner, deposit_request),
-                )
-                .await;
-
-                let result = match result {
+                let task = async {
+                    match phase {
+                        DepositPhase::Approve => {
+                            Self::process_unapproved_deposit(inner, deposit_request).await
+                        }
+                        DepositPhase::Confirm => {
+                            Self::process_approved_deposit(inner, deposit_request).await
+                        }
+                    }
+                };
+                let result = match tokio::time::timeout(LEADER_TASK_TIMEOUT, task).await {
                     Ok(result) => result,
                     Err(_) => Err(DepositError::TimedOut(LEADER_TASK_TIMEOUT)),
                 };
@@ -382,12 +431,11 @@ impl LeaderService {
         }
     }
 
-    #[tracing::instrument(level = "info", skip_all, fields(deposit_id = %deposit_request.id))]
-    async fn process_deposit_request(
+    async fn process_unapproved_deposit(
         inner: Arc<Hashi>,
         deposit_request: DepositRequest,
     ) -> Result<(), DepositError> {
-        info!("Processing deposit request");
+        info!("Approving deposit request");
 
         // Validate deposit_request before asking for signatures
         inner
@@ -452,7 +500,44 @@ impl LeaderService {
             Err(err) => return Err(DepositError::ExecutorInitFailed(err)),
         };
         executor
-            .execute_confirm_deposit(&deposit_request, signed_message)
+            .execute_approve_deposit(&deposit_request, signed_message)
+            .await
+            .inspect(|()| {
+                inner
+                    .metrics
+                    .sui_tx_submissions_total
+                    .with_label_values(&["approve_deposit", "success"])
+                    .inc();
+                info!("Successfully submitted deposit approval");
+            })
+            .inspect_err(|e| {
+                error!("Failed to submit deposit approval: {e}");
+                inner
+                    .metrics
+                    .sui_tx_submissions_total
+                    .with_label_values(&["approve_deposit", "failure"])
+                    .inc();
+            })
+            .map_err(DepositError::ApproveDepositFailed)?;
+        Ok(())
+    }
+
+    /// Submit `confirm_deposit` for a deposit that has already been
+    /// approved on-chain and whose time-delay window has elapsed. The
+    /// caller (`process_deposit_requests`) checks the delay before
+    /// scheduling the task.
+    async fn process_approved_deposit(
+        inner: Arc<Hashi>,
+        deposit_request: DepositRequest,
+    ) -> Result<(), DepositError> {
+        info!("Confirming approved deposit request");
+
+        let mut executor = match SuiTxExecutor::from_hashi(inner.clone()) {
+            Ok(executor) => executor,
+            Err(err) => return Err(DepositError::ExecutorInitFailed(err)),
+        };
+        executor
+            .execute_confirm_deposit(deposit_request.id)
             .await
             .inspect(|()| {
                 inner

@@ -341,6 +341,10 @@ pub struct OutputUtxo {
 }
 
 /// Rust version of the Move hashi::deposit_queue::DepositRequest type.
+///
+/// `approval_cert` and `approval_timestamp_ms` are populated when the
+/// committee approves the deposit via `approve_deposit`. They remain
+/// `None` until then. `confirm_deposit` requires both to be set.
 #[derive(Clone, Debug, PartialEq, serde_derive::Deserialize)]
 pub struct DepositRequest {
     pub id: Address,
@@ -348,6 +352,8 @@ pub struct DepositRequest {
     pub timestamp_ms: u64,
     pub sui_tx_digest: Digest,
     pub utxo: Utxo,
+    pub approval_cert: Option<CommitteeSignature>,
+    pub approval_timestamp_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
@@ -507,7 +513,7 @@ pub struct DealerMessagesHashV1 {
 }
 
 /// Rust version of the Move hashi::committee::CommitteeSignature type.
-#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct CommitteeSignature {
     pub epoch: u64,
     pub signature: Vec<u8>,
@@ -543,6 +549,7 @@ pub enum HashiEvent {
     MintEvent(MintEvent),
     BurnEvent(BurnEvent),
     DepositRequestedEvent(DepositRequestedEvent),
+    DepositApprovedEvent(DepositApprovedEvent),
     DepositConfirmedEvent(DepositConfirmedEvent),
     ExpiredDepositDeletedEvent(ExpiredDepositDeletedEvent),
     WithdrawalRequestedEvent(WithdrawalRequestedEvent),
@@ -590,6 +597,9 @@ impl HashiEvent {
             BurnEvent::MODULE_NAME => BurnEvent::new(&event_type, bcs.value())?.into(),
             DepositRequestedEvent::MODULE_NAME => {
                 DepositRequestedEvent::from_bcs(bcs.value())?.into()
+            }
+            DepositApprovedEvent::MODULE_NAME => {
+                DepositApprovedEvent::from_bcs(bcs.value())?.into()
             }
             DepositConfirmedEvent::MODULE_NAME => {
                 DepositConfirmedEvent::from_bcs(bcs.value())?.into()
@@ -940,13 +950,36 @@ impl From<DepositRequestedEvent> for HashiEvent {
     }
 }
 
+/// Emitted by `approve_deposit` when the committee certifies a pending
+/// deposit. The corresponding `hBTC` is not yet minted — the deposit
+/// must still wait through the time-delay window and then be confirmed.
+/// `approval_timestamp_ms` is the on-chain clock timestamp recorded on
+/// the request, against which `confirm_deposit` enforces the delay.
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct DepositApprovedEvent {
+    pub request_id: Address,
+    pub utxo: Utxo,
+    pub cert: CommitteeSignature,
+    pub approval_timestamp_ms: u64,
+}
+
+impl MoveType for DepositApprovedEvent {
+    const MODULE: &'static str = "deposit";
+    const NAME: &'static str = "DepositApprovedEvent";
+}
+
+impl From<DepositApprovedEvent> for HashiEvent {
+    fn from(value: DepositApprovedEvent) -> Self {
+        Self::DepositApprovedEvent(value)
+    }
+}
+
+/// Emitted by `confirm_deposit` once an approved deposit clears the
+/// time-delay window and the corresponding `hBTC` is minted.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct DepositConfirmedEvent {
     pub request_id: Address,
-    pub utxo_id: UtxoId,
-    pub amount: u64,
-    pub derivation_path: Option<Address>,
-    // signature: XXX
+    pub utxo: Utxo,
 }
 
 impl MoveType for DepositConfirmedEvent {

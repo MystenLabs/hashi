@@ -543,6 +543,17 @@ impl Config {
         }
     }
 
+    /// Minimum time (milliseconds) between a deposit's `approve_deposit`
+    /// and its `confirm_deposit`. Mirrors `bitcoin_deposit_time_delay_ms`
+    /// in `btc_config.move`. Returns 0 if the key is missing, which
+    /// matches the move side defaulting to no delay.
+    pub fn bitcoin_deposit_time_delay_ms(&self) -> u64 {
+        match self.config.get("bitcoin_deposit_time_delay_ms") {
+            Some(ConfigValue::U64(v)) => *v,
+            _ => 0,
+        }
+    }
+
     pub fn mpc_threshold_in_basis_points(&self) -> u16 {
         match self.config.get("mpc_threshold_in_basis_points") {
             Some(ConfigValue::U64(v)) => {

@@ -265,7 +265,6 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     package_upgraded_event.version,
                     package_upgraded_event.package,
                 );
-                // TODO notify
             }
             HashiEvent::MintEvent(MintEvent { coin_type, .. })
             | HashiEvent::BurnEvent(BurnEvent { coin_type, .. }) => {
@@ -283,6 +282,8 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                         amount: deposit_requested_event.amount,
                         derivation_path: deposit_requested_event.derivation_path,
                     },
+                    approval_cert: None,
+                    approval_timestamp_ms: None,
                 };
                 state
                     .state_mut()
@@ -290,17 +291,32 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .deposit_queue
                     .requests
                     .insert(deposit_request.id, deposit_request);
-                // TODO notify
+            }
+            HashiEvent::DepositApprovedEvent(deposit_approved_event) => {
+                tracing::info!(deposit_request_id = %deposit_approved_event.request_id, "Deposit approved");
+                let mut state = state.state_mut();
+                // Stamp the in-memory request so the leader's next pass
+                // knows it's already approved and only needs to call
+                // `confirm_deposit` once the time-delay elapses. The
+                // event carries the same Sui-clock timestamp the
+                // on-chain request stores, so the local view matches
+                // the on-chain value exactly.
+                if let Some(request) = state
+                    .hashi
+                    .deposit_queue
+                    .requests
+                    .get_mut(&deposit_approved_event.request_id)
+                {
+                    request.approval_cert = Some(deposit_approved_event.cert.clone());
+                    request.approval_timestamp_ms =
+                        Some(deposit_approved_event.approval_timestamp_ms);
+                }
             }
             HashiEvent::DepositConfirmedEvent(deposit_confirmed_event) => {
                 tracing::info!(deposit_request_id = %deposit_confirmed_event.request_id, "Deposit confirmed");
                 let mut state = state.state_mut();
 
-                let utxo = super::types::Utxo {
-                    id: deposit_confirmed_event.utxo_id,
-                    amount: deposit_confirmed_event.amount,
-                    derivation_path: deposit_confirmed_event.derivation_path,
-                };
+                let utxo = deposit_confirmed_event.utxo.clone();
 
                 state
                     .hashi
@@ -315,7 +331,6 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                         locked_by: None,
                     },
                 );
-                // TODO notify
             }
             HashiEvent::ExpiredDepositDeletedEvent(expired_deposit_deleted_event) => {
                 tracing::info!(deposit_request_id = %expired_deposit_deleted_event.request_id, "Expired deposit deleted");

@@ -29,7 +29,7 @@ fun test_deposit_minimum_with_defaults() {
     let hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
 
     // Default config: bitcoin_deposit_minimum=30_000
-    assert!(btc_config::deposit_minimum(hashi.config()) == 30_000);
+    assert!(btc_config::bitcoin_deposit_minimum(hashi.config()) == 30_000);
 
     std::unit_test::destroy(hashi);
 }

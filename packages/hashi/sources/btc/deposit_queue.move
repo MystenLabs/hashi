@@ -3,7 +3,7 @@
 
 module hashi::deposit_queue;
 
-use hashi::utxo::Utxo;
+use hashi::{committee::CommitteeSignature, utxo::Utxo};
 use sui::{clock::Clock, object_bag::ObjectBag};
 
 // const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 3; // 3 days
@@ -17,12 +17,23 @@ const EDepositAlreadyProcessed: vector<u8> = b"Deposit request has already been 
 // ======== Core Structs ========
 
 /// Deposit request object stored in the `requests` bag until confirmed or expired.
+///
+/// `approval_cert` and `approval_timestamp_ms` are populated by
+/// `approve_deposit` (the first phase of deposit confirmation) and read
+/// by `confirm_deposit` (the second phase) to re-verify against the
+/// current committee and to enforce the time-delay window.
 public struct DepositRequest has key, store {
     id: UID,
     sender: address,
     timestamp_ms: u64,
     sui_tx_digest: vector<u8>,
     utxo: Utxo,
+    /// Committee certificate recorded at approval time. `None` until
+    /// `approve_deposit` has been called.
+    approval_cert: Option<CommitteeSignature>,
+    /// Clock timestamp at the moment of approval. `None` until
+    /// `approve_deposit` has been called.
+    approval_timestamp_ms: Option<u64>,
 }
 
 public struct DepositRequestQueue has store {
@@ -50,6 +61,8 @@ public(package) fun create_deposit(utxo: Utxo, clock: &Clock, ctx: &mut TxContex
         timestamp_ms: clock.timestamp_ms(),
         sui_tx_digest: *ctx.digest(),
         utxo,
+        approval_cert: option::none(),
+        approval_timestamp_ms: option::none(),
     }
 }
 
@@ -79,6 +92,27 @@ public(package) fun utxo(request: &DepositRequest): Utxo {
     request.utxo
 }
 
+/// The committee certificate recorded at approval time, if any. Returns
+/// `None` for requests that have not yet been through `approve_deposit`.
+public(package) fun approval_cert(request: &DepositRequest): Option<CommitteeSignature> {
+    request.approval_cert
+}
+
+/// The clock timestamp at which the request was approved, if any.
+/// Returns `None` for requests that have not yet been through
+/// `approve_deposit`.
+public(package) fun approval_timestamp_ms(request: &DepositRequest): Option<u64> {
+    request.approval_timestamp_ms
+}
+
+/// Record `cert` and the current clock timestamp on `request` to mark it
+/// as approved. Caller is responsible for verifying `cert` against the
+/// current committee before calling this.
+public(package) fun approve(request: &mut DepositRequest, cert: CommitteeSignature, clock: &Clock) {
+    request.approval_cert = option::some(cert);
+    request.approval_timestamp_ms = option::some(clock.timestamp_ms());
+}
+
 /// Insert a completed deposit into the processed bag.
 /// Returns (request_id, recipient) so the caller can index by user.
 public(package) fun insert_processed(
@@ -102,7 +136,15 @@ public(package) fun delete_expired(
     let request: DepositRequest = self.requests.remove(request_id);
     assert!(is_expired(&request, clock), EDepositRequestNotExpired);
 
-    let DepositRequest { id, sender: _, timestamp_ms: _, sui_tx_digest: _, utxo } = request;
+    let DepositRequest {
+        id,
+        sender: _,
+        timestamp_ms: _,
+        sui_tx_digest: _,
+        utxo,
+        approval_cert: _,
+        approval_timestamp_ms: _,
+    } = request;
     id.delete();
     utxo.delete();
 }

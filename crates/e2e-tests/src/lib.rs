@@ -102,11 +102,19 @@ pub struct TestNetworksBuilder {
 
 impl TestNetworksBuilder {
     pub fn new() -> Self {
+        // E2e tests skip the deposit-confirmation delay by default so they
+        // don't have to wait through the production-grade window. Tests that
+        // need a non-zero delay can override via `with_onchain_config`; later
+        // entries win because overrides are applied in insertion order.
+        let onchain_config_overrides = vec![(
+            "bitcoin_deposit_time_delay_ms".to_string(),
+            hashi_types::move_types::ConfigValue::U64(0),
+        )];
         Self {
             sui_builder: SuiNetworkBuilder::default(),
             hashi_builder: HashiNetworkBuilder::new(),
             bitcoin_builder: BitcoinNodeBuilder::new(),
-            onchain_config_overrides: Vec::new(),
+            onchain_config_overrides,
             with_guardian: false,
         }
     }
@@ -363,6 +371,7 @@ pub(crate) async fn apply_onchain_config_overrides(
     // Build one executor per node, reused across all overrides.
     let mut executors: Vec<SuiTxExecutor> = nodes
         .iter()
+        .filter(|node| node.is_running())
         .map(|node| {
             let hashi = node.hashi();
             SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())
@@ -440,14 +449,19 @@ pub(crate) async fn apply_onchain_config_overrides(
     // last execute transaction. The watcher re-fetches config on each
     // ProposalExecutedEvent<UpdateConfig>, so once a node reaches this
     // checkpoint its in-memory config will reflect the override.
-    let futs = networks.hashi_network().nodes().iter().map(|node| {
-        let mut subscription = node.hashi().onchain_state().subscribe_checkpoint();
-        async move {
-            while subscription.borrow().height < exec_checkpoint {
-                subscription.changed().await.unwrap();
+    let futs = networks
+        .hashi_network()
+        .nodes()
+        .iter()
+        .filter(|node| node.is_running())
+        .map(|node| {
+            let mut subscription = node.hashi().onchain_state().subscribe_checkpoint();
+            async move {
+                while subscription.borrow().height < exec_checkpoint {
+                    subscription.changed().await.unwrap();
+                }
             }
-        }
-    });
+        });
     tokio::time::timeout(
         std::time::Duration::from_secs(30),
         futures::future::join_all(futs),

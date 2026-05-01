@@ -116,7 +116,8 @@ async fn test_upgrade_v1_to_v2() -> Result<()> {
     // wait for the validators to auto-confirm it. The leader must:
     // - Observe the DepositRequestedEvent
     // - Build a BLS certificate
-    // - Call confirm_deposit on the correct (upgraded) package
+    // - Call approve_deposit on the correct (upgraded) package
+    // - After the time-delay window, call confirm_deposit
     //
     // If the watcher or leader has stale package routing, this will fail.
     info!("depositing 50k sats post-upgrade (full validator confirmation path)...");
