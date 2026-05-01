@@ -40,6 +40,12 @@ pub enum CreateProposalParams {
         value: hashi_types::move_types::ConfigValue,
         metadata: Vec<(String, String)>,
     },
+    UpdateMpcConfig {
+        threshold_bps: Option<u64>,
+        max_faulty_bps: Option<u64>,
+        weight_reduction_allowed_delta: Option<u64>,
+        metadata: Vec<(String, String)>,
+    },
     EnableVersion {
         version: u64,
         metadata: Vec<(String, String)>,
@@ -494,6 +500,38 @@ pub fn build_create_proposal_transaction(
                 ),
                 vec![hashi_arg, key_arg, value_arg, metadata_arg, clock_arg],
             );
+        }
+        CreateProposalParams::UpdateMpcConfig {
+            threshold_bps,
+            max_faulty_bps,
+            weight_reduction_allowed_delta,
+            metadata,
+        } => {
+            let metadata_arg = build_metadata(&mut builder, &metadata);
+            let entries = [
+                ("mpc_threshold_in_basis_points", threshold_bps),
+                ("mpc_max_faulty_in_basis_points", max_faulty_bps),
+                (
+                    "mpc_weight_reduction_allowed_delta",
+                    weight_reduction_allowed_delta,
+                ),
+            ];
+            for (key, value) in entries.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))) {
+                let value_arg = build_config_value(
+                    &mut builder,
+                    hashi_ids.package_id,
+                    &hashi_types::move_types::ConfigValue::U64(value),
+                );
+                let key_arg = builder.pure(&key);
+                builder.move_call(
+                    Function::new(
+                        hashi_ids.package_id,
+                        Identifier::from_static("update_config"),
+                        Identifier::from_static("propose"),
+                    ),
+                    vec![hashi_arg, key_arg, value_arg, metadata_arg, clock_arg],
+                );
+            }
         }
         CreateProposalParams::EnableVersion { version, metadata } => {
             let version_arg = builder.pure(&version);
