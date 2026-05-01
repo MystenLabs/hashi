@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["operator_init","provisioner_init"]};

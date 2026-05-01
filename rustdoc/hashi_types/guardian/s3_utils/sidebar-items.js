@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SECONDS_PER_HOUR"],"struct":["S3HourScopedDirectory"]};

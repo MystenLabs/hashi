@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["get_attestation","get_guardian_info"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["disable_version","execute_full_upgrade","prepare_upgrade_package"]};
