@@ -458,6 +458,7 @@ pub enum ProposalType {
     Upgrade,
     EmergencyPause,
     AbortReconfig,
+    UpdateGuardian,
     Unknown(String),
 }
 
@@ -470,6 +471,7 @@ impl ProposalType {
             ProposalType::Upgrade => "upgrade",
             ProposalType::EmergencyPause => "emergency_pause",
             ProposalType::AbortReconfig => "abort_reconfig",
+            ProposalType::UpdateGuardian => "update_guardian",
             ProposalType::Unknown(_) => "unknown",
         }
     }
@@ -482,6 +484,7 @@ impl ProposalType {
             "upgrade",
             "emergency_pause",
             "abort_reconfig",
+            "update_guardian",
             "unknown",
         ]
     }
@@ -578,6 +581,20 @@ impl Config {
                 u16::try_from(*v).expect("mpc_max_faulty_in_basis_points exceeds u16::MAX")
             }
             _ => DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
+        }
+    }
+
+    pub fn guardian_url(&self) -> Option<&str> {
+        match self.config.get("guardian_url") {
+            Some(ConfigValue::String(v)) => Some(v.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn guardian_public_key(&self) -> Option<&[u8]> {
+        match self.config.get("guardian_public_key") {
+            Some(ConfigValue::Bytes(v)) => Some(v.as_slice()),
+            _ => None,
         }
     }
 }

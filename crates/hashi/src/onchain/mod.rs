@@ -1352,6 +1352,11 @@ async fn scrape_proposal_bag(
                     .ok()
                     .map(|p| (p.id, p.timestamp_ms))
             }
+            types::ProposalType::UpdateGuardian => {
+                bcs::from_bytes::<move_types::Proposal<move_types::UpdateGuardian>>(contents)
+                    .ok()
+                    .map(|p| (p.id, p.timestamp_ms))
+            }
             types::ProposalType::Unknown(_) => None,
         };
 
@@ -1397,6 +1402,7 @@ pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
         ("upgrade", "Upgrade") => types::ProposalType::Upgrade,
         ("emergency_pause", "EmergencyPause") => types::ProposalType::EmergencyPause,
         ("abort_reconfig", "AbortReconfig") => types::ProposalType::AbortReconfig,
+        ("update_guardian", "UpdateGuardian") => types::ProposalType::UpdateGuardian,
         _ => types::ProposalType::Unknown(format!("{}::{}", inner_tag.module(), inner_tag.name())),
     }
 }

@@ -219,6 +219,20 @@ pub enum CreateProposalCommands {
         #[clap(flatten)]
         metadata: MetadataArgs,
     },
+
+    /// Propose updating the guardian URL and public key
+    UpdateGuardian {
+        /// The guardian gRPC endpoint URL
+        #[clap(long)]
+        url: String,
+
+        /// The guardian's signing public key (hex encoded)
+        #[clap(long)]
+        public_key: String,
+
+        #[clap(flatten)]
+        metadata: MetadataArgs,
+    },
 }
 
 /// Shared metadata arguments for proposal creation
@@ -648,6 +662,20 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     commands::proposal::create_abort_reconfig_proposal(
                         &config,
                         epoch,
+                        parse_metadata(metadata.metadata),
+                        &tx_opts,
+                    )
+                    .await?;
+                }
+                CreateProposalCommands::UpdateGuardian {
+                    url,
+                    public_key,
+                    metadata,
+                } => {
+                    commands::proposal::create_update_guardian_proposal(
+                        &config,
+                        &url,
+                        &public_key,
                         parse_metadata(metadata.metadata),
                         &tx_opts,
                     )
