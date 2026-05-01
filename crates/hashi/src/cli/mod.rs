@@ -209,6 +209,16 @@ pub enum CreateProposalCommands {
         #[clap(flatten)]
         metadata: MetadataArgs,
     },
+
+    /// Propose aborting a pending Hashi reconfiguration
+    AbortReconfig {
+        /// Pending Hashi epoch to abort
+        #[clap(long)]
+        epoch: u64,
+
+        #[clap(flatten)]
+        metadata: MetadataArgs,
+    },
 }
 
 /// Shared metadata arguments for proposal creation
@@ -629,6 +639,15 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     commands::proposal::create_disable_version_proposal(
                         &config,
                         version,
+                        parse_metadata(metadata.metadata),
+                        &tx_opts,
+                    )
+                    .await?;
+                }
+                CreateProposalCommands::AbortReconfig { epoch, metadata } => {
+                    commands::proposal::create_abort_reconfig_proposal(
+                        &config,
+                        epoch,
                         parse_metadata(metadata.metadata),
                         &tx_opts,
                     )

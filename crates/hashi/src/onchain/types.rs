@@ -457,6 +457,7 @@ pub enum ProposalType {
     DisableVersion,
     Upgrade,
     EmergencyPause,
+    AbortReconfig,
     Unknown(String),
 }
 
@@ -468,6 +469,7 @@ impl ProposalType {
             ProposalType::DisableVersion => "disable_version",
             ProposalType::Upgrade => "upgrade",
             ProposalType::EmergencyPause => "emergency_pause",
+            ProposalType::AbortReconfig => "abort_reconfig",
             ProposalType::Unknown(_) => "unknown",
         }
     }
@@ -479,6 +481,7 @@ impl ProposalType {
             "disable_version",
             "upgrade",
             "emergency_pause",
+            "abort_reconfig",
             "unknown",
         ]
     }

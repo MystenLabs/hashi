@@ -452,6 +452,12 @@ pub struct EmergencyPause {
     pub pause: bool,
 }
 
+/// Rust version of the Move hashi::abort_reconfig::AbortReconfig type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct AbortReconfig {
+    pub epoch: u64,
+}
+
 /// Rust version of the Move sui::vec_map::VecMap type.
 #[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct VecMap<K, V> {
@@ -547,7 +553,6 @@ pub enum HashiEvent {
     UtxoSpentEvent(UtxoSpentEvent),
     StartReconfigEvent(StartReconfigEvent),
     EndReconfigEvent(EndReconfigEvent),
-    AbortReconfigEvent(AbortReconfigEvent),
 }
 
 impl HashiEvent {
@@ -610,7 +615,6 @@ impl HashiEvent {
             UtxoSpentEvent::MODULE_NAME => UtxoSpentEvent::from_bcs(bcs.value())?.into(),
             StartReconfigEvent::MODULE_NAME => StartReconfigEvent::from_bcs(bcs.value())?.into(),
             EndReconfigEvent::MODULE_NAME => EndReconfigEvent::from_bcs(bcs.value())?.into(),
-            AbortReconfigEvent::MODULE_NAME => AbortReconfigEvent::from_bcs(bcs.value())?.into(),
             PackageUpgradedEvent::MODULE_NAME => {
                 PackageUpgradedEvent::from_bcs(bcs.value())?.into()
             }
@@ -1117,22 +1121,6 @@ impl MoveType for EndReconfigEvent {
 impl From<EndReconfigEvent> for HashiEvent {
     fn from(value: EndReconfigEvent) -> Self {
         Self::EndReconfigEvent(value)
-    }
-}
-
-#[derive(Debug, serde_derive::Deserialize)]
-pub struct AbortReconfigEvent {
-    pub epoch: u64,
-}
-
-impl MoveType for AbortReconfigEvent {
-    const MODULE: &'static str = "reconfig";
-    const NAME: &'static str = "AbortReconfigEvent";
-}
-
-impl From<AbortReconfigEvent> for HashiEvent {
-    fn from(value: AbortReconfigEvent) -> Self {
-        Self::AbortReconfigEvent(value)
     }
 }
 
