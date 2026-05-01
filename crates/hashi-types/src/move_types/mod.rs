@@ -347,7 +347,7 @@ pub struct DepositRequest {
     pub approval_timestamp_ms: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct Utxo {
     pub id: UtxoId,
     // In satoshis

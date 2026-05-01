@@ -22,6 +22,9 @@ const EBelowMinimumDeposit: vector<u8> = b"Deposit amount is below the minimum";
 const EUtxoAlreadyUsed: vector<u8> = b"UTXO has already been deposited or is currently active";
 #[error]
 const EDepositTimeDelayNotPassed: vector<u8> = b"Deposit time-delay has not passed";
+#[error]
+const EAlreadyApprovedThisEpoch: vector<u8> =
+    b"Deposit has already been approved by the current committee";
 
 /// Message signed by the committee to confirm a deposit.
 public struct DepositConfirmationMessage has copy, drop, store {
@@ -99,6 +102,18 @@ entry fun approve_deposit(
     // Remove from active requests and copy the UTXO.
     let mut request = hashi.bitcoin_mut().deposit_queue_mut().remove_request(request_id);
     let utxo = request.utxo();
+
+    // If the request already carries an approval from the current
+    // committee, refuse to re-approve. Re-approving by the same
+    // committee would just bump the approval timestamp, pushing the
+    // confirmation window further out for no reason. Re-approval is
+    // only meaningful after the committee has rotated.
+    let current_epoch = hashi.current_committee().epoch();
+    let existing = request.approval_cert();
+    assert!(
+        existing.is_none() || existing.borrow().signature_epoch() != current_epoch,
+        EAlreadyApprovedThisEpoch,
+    );
 
     // Verify the committee certificate over the request ID + UTXO.
     hashi.verify(DepositConfirmationMessage { request_id, utxo }, cert);

@@ -365,6 +365,7 @@ impl LeaderService {
         let max_concurrent = self.inner.config.max_concurrent_leader_job_tasks();
         let now_ms = self.inner.onchain_state().latest_checkpoint_timestamp_ms();
         let delay_ms = self.inner.onchain_state().bitcoin_deposit_time_delay_ms();
+        let current_epoch = self.inner.onchain_state().epoch();
         for deposit_request in &self.pending_deposit_requests {
             if self.deposit_tasks.len() >= max_concurrent {
                 break;
@@ -375,11 +376,19 @@ impl LeaderService {
             }
 
             // Decide whether to approve or confirm based on the on-chain
-            // approval state. Approved deposits whose time-delay window
-            // hasn't elapsed yet are skipped here entirely so we don't
-            // burn a task slot on work that would just bail; the next
-            // checkpoint will re-evaluate.
-            let phase = if deposit_request.approval_cert.is_some() {
+            // approval state.
+            //
+            // - No cert, or a cert from a rotated-out committee: approve.
+            //   The on-chain `approve_deposit` rejects re-approval by the
+            //   same committee but accepts a fresh cert from the current
+            //   one, which is what re-approval after rotation needs.
+            // - Cert from the current committee, delay still open: skip
+            //   here entirely so we don't burn a task slot on work that
+            //   would just bail; the next checkpoint will re-evaluate.
+            // - Cert from the current committee, delay elapsed: confirm.
+            let phase = if let Some(cert) = &deposit_request.approval_cert
+                && cert.epoch == current_epoch
+            {
                 let approved_ms = deposit_request
                     .approval_timestamp_ms
                     .expect("approval_cert is set, so approval_timestamp_ms must be set");

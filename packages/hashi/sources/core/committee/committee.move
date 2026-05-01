@@ -255,6 +255,11 @@ public fun new_committee_signature(
     }
 }
 
+/// The epoch in which the certificate was produced.
+public(package) fun signature_epoch(self: &CommitteeSignature): u64 {
+    self.epoch
+}
+
 public struct CertifiedMessage<T> has copy, drop, store {
     message: T,
     signature: CommitteeSignature,

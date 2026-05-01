@@ -131,6 +131,17 @@ impl Hashi {
                         "Deposit request fields do not match on-chain state"
                     )));
                 }
+
+                // Refuse to sign a re-approval if the on-chain request is
+                // already approved by the current committee. The on-chain
+                // `approve_deposit` would reject it anyway, so we don't
+                // want to waste a signature exchange or a transaction.
+                let current_epoch = self.onchain_state().epoch();
+                if let Some(cert) = &onchain_request.approval_cert
+                    && cert.epoch == current_epoch
+                {
+                    return Err(DepositError::AlreadyApprovedThisEpoch);
+                }
             }
         }
 
@@ -383,6 +394,9 @@ pub enum DepositError {
     #[error("Failed to confirm deposit on Sui: {0}")]
     ConfirmDepositFailed(#[source] anyhow::Error),
 
+    #[error("Deposit has already been approved by the current committee")]
+    AlreadyApprovedThisEpoch,
+
     #[error("Deposit processing timed out after {0:?}")]
     TimedOut(std::time::Duration),
 }
@@ -398,6 +412,7 @@ impl DepositError {
             | Self::ExecutorInitFailed(_)
             | Self::ApproveDepositFailed(_)
             | Self::ConfirmDepositFailed(_)
+            | Self::AlreadyApprovedThisEpoch
             | Self::TimedOut(_) => DepositErrorKind::RetryOnNextBlock,
             Self::InvalidOnchainRequest(_)
             | Self::DuplicateOrSpentOnSui(_)

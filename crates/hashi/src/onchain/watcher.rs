@@ -288,7 +288,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 tracing::info!(deposit_request_id = %deposit_confirmed_event.request_id, "Deposit confirmed");
                 let mut state = state.state_mut();
 
-                let utxo = deposit_confirmed_event.utxo;
+                let utxo = deposit_confirmed_event.utxo.clone();
 
                 state
                     .hashi

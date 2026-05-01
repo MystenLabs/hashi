@@ -139,6 +139,39 @@ fun test_confirm_deposit_with_valid_certificate() {
     std::unit_test::destroy(hashi);
 }
 
+/// `approve_deposit` must reject a re-approval by the same committee.
+/// Re-approving in-epoch would bump the approval timestamp and push out
+/// the confirmation window for no benefit. Re-approval is only valid
+/// after the committee has rotated.
+#[test]
+#[expected_failure(abort_code = deposit::EAlreadyApprovedThisEpoch)]
+fun test_approve_deposit_fails_when_already_approved_this_epoch() {
+    let epoch = 0;
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, epoch);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
+    let utxo = hashi::utxo::utxo(utxo_id, 10_000, option::none());
+    let request = deposit_queue::create_deposit(utxo, &clock, ctx);
+    let request_id = request.request_id().to_address();
+    hashi.bitcoin_mut().deposit_queue_mut().insert_deposit(request);
+
+    let message = deposit::new_deposit_confirmation_message(request_id, utxo);
+    let message_bytes = build_cert_message(epoch, &message);
+    let cert = test_utils::sign_certificate(epoch, &message_bytes, 3);
+
+    // First approval succeeds.
+    deposit::approve_deposit(&mut hashi, request_id, cert, &clock, ctx);
+
+    // Second approval by the same committee should abort.
+    deposit::approve_deposit(&mut hashi, request_id, cert, &clock, ctx);
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
 /// `confirm_deposit` must fail if the request was never approved, since
 /// there is no stored certificate to verify against the current committee.
 #[test]
