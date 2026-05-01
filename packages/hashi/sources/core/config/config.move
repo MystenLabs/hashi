@@ -25,7 +25,8 @@ const PAUSED_KEY: vector<u8> = b"paused";
 const GUARDIAN_URL_KEY: vector<u8> = b"guardian_url";
 const GUARDIAN_PUBLIC_KEY_KEY: vector<u8> = b"guardian_public_key";
 const EMERGENCY_PAUSE_THRESHOLD_BPS_KEY: vector<u8> = b"governance_emergency_pause_threshold_bps";
-const EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY: vector<u8> = b"governance_emergency_unpause_threshold_bps";
+const EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY: vector<u8> =
+    b"governance_emergency_unpause_threshold_bps";
 
 public struct Config has store {
     config: VecMap<String, Value>,
@@ -97,15 +98,11 @@ public(package) fun set_guardian(self: &mut Config, url: String, public_key: vec
 }
 
 public(package) fun emergency_pause_threshold_bps(self: &Config): u64 {
-    self.try_get(EMERGENCY_PAUSE_THRESHOLD_BPS_KEY)
-        .map!(|v| v.as_u64())
-        .destroy_or!(5100)
+    self.try_get(EMERGENCY_PAUSE_THRESHOLD_BPS_KEY).map!(|v| v.as_u64()).destroy_or!(5100)
 }
 
 public(package) fun emergency_unpause_threshold_bps(self: &Config): u64 {
-    self.try_get(EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY)
-        .map!(|v| v.as_u64())
-        .destroy_or!(6667)
+    self.try_get(EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY).map!(|v| v.as_u64()).destroy_or!(6667)
 }
 
 // ======== Version Management ========
