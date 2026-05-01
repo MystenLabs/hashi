@@ -3452,7 +3452,7 @@ async fn test_recover_shares_via_complaint_succeeds_with_exact_threshold() {
     // Recover with exactly threshold signers
     // Tests incremental recovery: receiver.recover() returns InputTooShort after first response,
     // continues to collect second response, then succeeds
-    let result = MpcManager::recover_shares_via_complaint(
+    let result = MpcManager::recover_dkg_shares_via_complaint(
         &party_manager,
         &dealer_addr,
         inner_msg,
@@ -3532,7 +3532,7 @@ async fn test_recover_shares_via_complaint_skips_failed_signers() {
     let party_manager = Arc::new(RwLock::new(party_manager));
 
     // Recovery should succeed despite first signer failing
-    let result = MpcManager::recover_shares_via_complaint(
+    let result = MpcManager::recover_dkg_shares_via_complaint(
         &party_manager,
         &dealer_addr,
         inner_msg,
@@ -3599,7 +3599,7 @@ async fn test_recover_shares_via_complaint_no_complaint_for_dealer() {
     let party_manager = Arc::new(RwLock::new(party_manager));
 
     // Call recover_shares_via_complaint - should fail because no complaint exists
-    let result = MpcManager::recover_shares_via_complaint(
+    let result = MpcManager::recover_dkg_shares_via_complaint(
         &party_manager,
         &dealer_addr,
         dealer_message_raw,
@@ -3647,7 +3647,7 @@ async fn test_recover_shares_via_complaint_p2p_failure() {
     let Messages::Dkg(inner_msg) = &dealer_message else {
         unreachable!()
     };
-    let result = MpcManager::recover_shares_via_complaint(
+    let result = MpcManager::recover_dkg_shares_via_complaint(
         &party_manager,
         &dealer_addr,
         inner_msg,
@@ -3712,7 +3712,7 @@ async fn test_recover_shares_via_complaint_insufficient_signers() {
     let party_manager = Arc::new(RwLock::new(party_manager));
 
     // Attempt recovery with insufficient signers
-    let result = MpcManager::recover_shares_via_complaint(
+    let result = MpcManager::recover_dkg_shares_via_complaint(
         &party_manager,
         &dealer_addr,
         inner_msg,
@@ -3812,7 +3812,7 @@ async fn test_recover_shares_via_complaint_crypto_error() {
     let party_manager = Arc::new(RwLock::new(party_manager));
 
     // Attempt recovery - parties 3 and 4 are not in the modified config
-    let result = MpcManager::recover_shares_via_complaint(
+    let result = MpcManager::recover_dkg_shares_via_complaint(
         &party_manager,
         &dealer_addr,
         inner_msg,
