@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::communication::ChannelResult;
 use crate::communication::OrderedBroadcastChannel;
 use crate::communication::P2PChannel;
 use crate::communication::send_to_many;
@@ -1048,7 +1049,7 @@ impl MpcManager {
                         .clone();
                     (signers, mgr.mpc_config.epoch, message)
                 };
-                let recovered = Self::recover_shares_via_complaint(
+                let recovered = Self::recover_dkg_shares_via_complaint(
                     mpc_manager,
                     &dealer,
                     &message,
@@ -2428,7 +2429,7 @@ impl MpcManager {
         ))
     }
 
-    async fn recover_shares_via_complaint(
+    async fn recover_dkg_shares_via_complaint(
         mpc_manager: &Arc<RwLock<Self>>,
         dealer: &Address,
         message: &avss::Message,
@@ -2466,17 +2467,15 @@ impl MpcManager {
         };
         let receiver = Arc::new(receiver);
         let mut responses = Vec::new();
-        for signer in signers {
-            let response =
-                match with_timeout_and_retry(|| p2p_channel.complain(&signer, &complaint_request))
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::info!("Complaint to {:?} failed: {}", signer, e);
-                        continue;
-                    }
-                };
+        let mut futures = fan_out_complaints(signers, p2p_channel, &complaint_request);
+        while let Some((signer, result)) = futures.next().await {
+            let response = match result {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::info!("Complaint to {:?} failed: {}", signer, e);
+                    continue;
+                }
+            };
             let complaint_response = match response {
                 ComplaintResponses::Dkg(resp) => resp,
                 ComplaintResponses::Rotation(_) | ComplaintResponses::NonceGeneration(_) => {
@@ -2565,17 +2564,15 @@ impl MpcManager {
         };
         let receiver = Arc::new(receiver);
         let mut responses = Vec::new();
-        for signer in signers {
-            let response =
-                match with_timeout_and_retry(|| p2p_channel.complain(&signer, &complaint_request))
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::info!("Nonce complaint to {:?} failed: {}", signer, e);
-                        continue;
-                    }
-                };
+        let mut futures = fan_out_complaints(signers, p2p_channel, &complaint_request);
+        while let Some((signer, result)) = futures.next().await {
+            let response = match result {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::info!("Nonce complaint to {:?} failed: {}", signer, e);
+                    continue;
+                }
+            };
             let complaint_response = match response {
                 ComplaintResponses::NonceGeneration(resp) => resp,
                 ComplaintResponses::Dkg(_) | ComplaintResponses::Rotation(_) => {
@@ -2658,11 +2655,12 @@ impl MpcManager {
             all_responses.insert(share_index, Vec::new());
             pending_shares.insert(share_index);
         }
-        for signer in &signers {
+        let mut futures = fan_out_complaints(signers, p2p_channel, &request);
+        while let Some((signer, result)) = futures.next().await {
             if pending_shares.is_empty() {
                 break;
             }
-            match p2p_channel.complain(signer, &request).await {
+            match result {
                 Ok(response) => {
                     let rotation_responses = match response {
                         ComplaintResponses::Rotation(resps) => resps,
@@ -3434,7 +3432,7 @@ impl MpcManager {
                         )
                     };
                     let previous_epoch = mpc_manager.read().unwrap().previous_epoch;
-                    let recovered = Self::recover_shares_via_complaint(
+                    let recovered = Self::recover_dkg_shares_via_complaint(
                         mpc_manager,
                         &dealer_address,
                         &message,
@@ -3909,6 +3907,20 @@ pub fn fallback_encryption_public_key() -> PublicKey<EncryptionGroupElement> {
     static FALLBACK_ENCRYPTION_PK: LazyLock<PublicKey<EncryptionGroupElement>> =
         LazyLock::new(|| PublicKey::from(EncryptionGroupElement::hash_to_group_element(b"hashi")));
     FALLBACK_ENCRYPTION_PK.clone()
+}
+
+fn fan_out_complaints<'a, P: P2PChannel + 'a>(
+    signers: Vec<Address>,
+    p2p_channel: &'a P,
+    request: &'a ComplainRequest,
+) -> FuturesUnordered<impl Future<Output = (Address, ChannelResult<ComplaintResponses>)> + 'a> {
+    signers
+        .into_iter()
+        .map(move |signer| async move {
+            let result = with_timeout_and_retry(|| p2p_channel.complain(&signer, request)).await;
+            (signer, result)
+        })
+        .collect()
 }
 
 fn process_avss_message(
