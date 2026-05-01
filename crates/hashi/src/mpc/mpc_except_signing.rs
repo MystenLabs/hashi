@@ -73,6 +73,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::RwLock;
+use std::time::Duration;
 use sui_sdk_types::Address;
 
 const ERR_PUBLISH_CERT_FAILED: &str = "Failed to publish certificate";
@@ -83,6 +84,9 @@ const EXPECT_SERIALIZATION_SUCCESS: &str = "Serialization should always succeed"
 const MAX_BASIS_POINTS: u32 = 10000;
 const MIN_TOTAL_WEIGHT_AFTER_REDUCTION: u16 = 100;
 const PRUNE_KEEP_RECENT_BATCHES: u32 = 2;
+const HEDGED_RETRIEVE_INITIAL_ROUND_SIZE: usize = 2;
+const HEDGED_RETRIEVE_ROUND_GROWTH_FACTOR: usize = 2;
+const HEDGED_RETRIEVE_ROUND_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub struct MpcManager {
     // Immutable during the epoch
@@ -2119,40 +2123,24 @@ impl MpcManager {
                 .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
             (request, signers)
         };
-        // TODO: Implement gradual escalation strategy for better network efficiency:
-        // - Round 1: Call 1-2 random signers, wait ~2s
-        // - Round 2: Call 2-3 more signers, wait ~2s
-        // - and so on
-        for signer in signers {
-            match p2p_channel.retrieve_messages(&signer, &request).await {
-                Ok(response) => {
-                    if compute_messages_hash(&response.messages) == message.messages_hash {
-                        let Messages::Dkg(msg) = &response.messages else {
-                            unreachable!(
-                                "Hash matched DKG certificate but got {:?}",
-                                std::mem::discriminant(&response.messages)
-                            );
-                        };
-                        let mut mgr = mpc_manager.write().unwrap();
-                        let epoch = mgr.mpc_config.epoch;
-                        mgr.cache_and_persist_dkg_message(epoch, message.dealer_address, msg)?;
-                        return Ok(());
-                    }
-                    tracing::info!(
-                        "Message hash mismatch from signer {:?} for dealer {:?}",
-                        signer,
-                        message.dealer_address
-                    );
-                }
-                Err(e) => {
-                    tracing::info!("Failed to retrieve message from signer {:?}: {}", signer, e);
-                }
-            }
-        }
-        Err(MpcError::PairwiseCommunicationError(format!(
-            "Could not retrieve message for dealer {:?} from any signer",
-            message.dealer_address
-        )))
+        let messages = hedged_retrieve(signers, p2p_channel, &request, message.messages_hash)
+            .await
+            .ok_or_else(|| {
+                MpcError::PairwiseCommunicationError(format!(
+                    "Could not retrieve message for dealer {:?} from any signer",
+                    message.dealer_address
+                ))
+            })?;
+        let Messages::Dkg(ref msg) = messages else {
+            unreachable!(
+                "Hash matched DKG certificate but got {:?}",
+                std::mem::discriminant(&messages)
+            );
+        };
+        let mut mgr = mpc_manager.write().unwrap();
+        let epoch = mgr.mpc_config.epoch;
+        mgr.cache_and_persist_dkg_message(epoch, message.dealer_address, msg)?;
+        Ok(())
     }
 
     async fn retrieve_nonce_message(
@@ -2185,40 +2173,24 @@ impl MpcManager {
                 .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
             (request, signers)
         };
-        for signer in signers {
-            match p2p_channel.retrieve_messages(&signer, &request).await {
-                Ok(response) => {
-                    if compute_messages_hash(&response.messages) == message.messages_hash {
-                        let Messages::NonceGeneration(ref nonce) = response.messages else {
-                            unreachable!(
-                                "Hash matched nonce certificate but got {:?}",
-                                std::mem::discriminant(&response.messages)
-                            );
-                        };
-                        let mut mgr = mpc_manager.write().unwrap();
-                        let epoch = mgr.mpc_config.epoch;
-                        mgr.cache_and_persist_nonce_message(epoch, message.dealer_address, nonce)?;
-                        return Ok(());
-                    }
-                    tracing::info!(
-                        "Message hash mismatch from signer {:?} for nonce dealer {:?}",
-                        signer,
-                        message.dealer_address
-                    );
-                }
-                Err(e) => {
-                    tracing::info!(
-                        "Failed to retrieve nonce message from signer {:?}: {}",
-                        signer,
-                        e
-                    );
-                }
-            }
-        }
-        Err(MpcError::PairwiseCommunicationError(format!(
-            "Could not retrieve nonce message for dealer {:?} from any signer",
-            message.dealer_address
-        )))
+        let messages = hedged_retrieve(signers, p2p_channel, &request, message.messages_hash)
+            .await
+            .ok_or_else(|| {
+                MpcError::PairwiseCommunicationError(format!(
+                    "Could not retrieve nonce message for dealer {:?} from any signer",
+                    message.dealer_address
+                ))
+            })?;
+        let Messages::NonceGeneration(ref nonce) = messages else {
+            unreachable!(
+                "Hash matched nonce certificate but got {:?}",
+                std::mem::discriminant(&messages)
+            );
+        };
+        let mut mgr = mpc_manager.write().unwrap();
+        let epoch = mgr.mpc_config.epoch;
+        mgr.cache_and_persist_nonce_message(epoch, message.dealer_address, nonce)?;
+        Ok(())
     }
 
     fn prepare_dkg_dealer_flow(
@@ -2388,44 +2360,23 @@ impl MpcManager {
             })?;
             (request, signers)
         };
-        for signer in signers {
-            match p2p_channel.retrieve_messages(&signer, &request).await {
-                Ok(response) => {
-                    if compute_messages_hash(&response.messages) == message.messages_hash {
-                        let Messages::Rotation(msgs) = &response.messages else {
-                            tracing::info!(
-                                "Hash matched rotation certificate but got DKG message from {:?}",
-                                signer
-                            );
-                            continue;
-                        };
-                        let mut mgr = mpc_manager.write().unwrap();
-                        let epoch = mgr.mpc_config.epoch;
-                        mgr.cache_and_persist_rotation_messages(
-                            epoch,
-                            message.dealer_address,
-                            msgs,
-                        )?;
-                        return Ok(());
-                    }
-                    tracing::info!(
-                        "Message hash mismatch from signer {:?} for dealer {:?}",
-                        signer,
-                        message.dealer_address
-                    );
-                }
-                Err(e) => {
-                    tracing::info!(
-                        "Failed to retrieve rotation messages from {:?}: {}",
-                        signer,
-                        e
-                    );
-                }
-            }
-        }
-        Err(MpcError::PairwiseCommunicationError(
-            "Failed to retrieve rotation messages from any signer".to_string(),
-        ))
+        let messages = hedged_retrieve(signers, p2p_channel, &request, message.messages_hash)
+            .await
+            .ok_or_else(|| {
+                MpcError::PairwiseCommunicationError(
+                    "Failed to retrieve rotation messages from any signer".to_string(),
+                )
+            })?;
+        let Messages::Rotation(ref msgs) = messages else {
+            unreachable!(
+                "Hash matched rotation certificate but got {:?}",
+                std::mem::discriminant(&messages)
+            );
+        };
+        let mut mgr = mpc_manager.write().unwrap();
+        let epoch = mgr.mpc_config.epoch;
+        mgr.cache_and_persist_rotation_messages(epoch, message.dealer_address, msgs)?;
+        Ok(())
     }
 
     async fn recover_shares_via_complaint(
@@ -3706,61 +3657,33 @@ impl MpcManager {
             })?;
             (request, signers)
         };
-        for signer in signers {
-            match p2p_channel.retrieve_messages(&signer, &request).await {
-                Ok(response) => {
-                    let actual_hash = compute_messages_hash(&response.messages);
-                    if actual_hash == message.messages_hash {
-                        let mut mgr = mpc_manager.write().unwrap();
-                        let previous_epoch = mgr.previous_epoch;
-                        match &response.messages {
-                            Messages::Dkg(msg) => {
-                                mgr.cache_and_persist_dkg_message(
-                                    previous_epoch,
-                                    message.dealer_address,
-                                    msg,
-                                )?;
-                            }
-                            Messages::Rotation(msgs) => {
-                                mgr.cache_and_persist_rotation_messages(
-                                    previous_epoch,
-                                    message.dealer_address,
-                                    msgs,
-                                )?;
-                            }
-                            _ => {
-                                tracing::warn!(
-                                    "Unexpected message type from signer {:?} for dealer {:?}",
-                                    signer,
-                                    message.dealer_address
-                                );
-                                continue;
-                            }
-                        }
-                        return Ok(());
-                    }
-                    tracing::info!(
-                        "Message hash mismatch from signer {:?} for dealer {:?}: \
-                         expected={:?}, got={:?}",
-                        signer,
-                        message.dealer_address,
-                        message.messages_hash,
-                        actual_hash,
-                    );
-                }
-                Err(e) => {
-                    tracing::info!(
-                        "Failed to retrieve previous epoch message from signer {:?}: {}",
-                        signer,
-                        e
-                    );
-                }
+        let messages = hedged_retrieve(signers, p2p_channel, &request, message.messages_hash)
+            .await
+            .ok_or_else(|| {
+                MpcError::PairwiseCommunicationError(format!(
+                    "Could not retrieve previous epoch message for dealer {:?} from any signer",
+                    message.dealer_address
+                ))
+            })?;
+        let mut mgr = mpc_manager.write().unwrap();
+        let previous_epoch = mgr.previous_epoch;
+        match messages {
+            Messages::Dkg(ref msg) => {
+                mgr.cache_and_persist_dkg_message(previous_epoch, message.dealer_address, msg)?;
             }
+            Messages::Rotation(ref msgs) => {
+                mgr.cache_and_persist_rotation_messages(
+                    previous_epoch,
+                    message.dealer_address,
+                    msgs,
+                )?;
+            }
+            Messages::NonceGeneration(_) => unreachable!(
+                "Hash matched previous-epoch certificate but got {:?}",
+                std::mem::discriminant(&messages)
+            ),
         }
-        Err(MpcError::PairwiseCommunicationError(format!(
-            "Could not retrieve previous epoch message for dealer {:?} from any signer",
-            message.dealer_address
-        )))
+        Ok(())
     }
 
     fn base_session_id_for_epoch(&self, epoch: u64, protocol_type: &ProtocolType) -> SessionId {
@@ -3909,6 +3832,60 @@ pub fn fallback_encryption_public_key() -> PublicKey<EncryptionGroupElement> {
     static FALLBACK_ENCRYPTION_PK: LazyLock<PublicKey<EncryptionGroupElement>> =
         LazyLock::new(|| PublicKey::from(EncryptionGroupElement::hash_to_group_element(b"hashi")));
     FALLBACK_ENCRYPTION_PK.clone()
+}
+
+async fn hedged_retrieve<'a, P: P2PChannel + 'a>(
+    signers: Vec<Address>,
+    p2p_channel: &'a P,
+    request: &'a RetrieveMessagesRequest,
+    expected_hash: MessageHash,
+) -> Option<Messages> {
+    let mut remaining = signers.into_iter();
+    let mut in_flight: FuturesUnordered<_> = FuturesUnordered::new();
+    let mut round_size = HEDGED_RETRIEVE_INITIAL_ROUND_SIZE;
+    loop {
+        for _ in 0..round_size {
+            if let Some(signer) = remaining.next() {
+                in_flight.push(async move {
+                    let result =
+                        with_timeout_and_retry(|| p2p_channel.retrieve_messages(&signer, request))
+                            .await;
+                    (signer, result)
+                });
+            }
+        }
+        if in_flight.is_empty() {
+            return None;
+        }
+        let timeout = tokio::time::sleep(HEDGED_RETRIEVE_ROUND_TIMEOUT);
+        tokio::pin!(timeout);
+        loop {
+            tokio::select! {
+                biased;
+                Some((signer, result)) = in_flight.next() => match result {
+                    Ok(response) => {
+                        if compute_messages_hash(&response.messages) == expected_hash {
+                            return Some(response.messages);
+                        }
+                        tracing::info!(
+                            "Hash mismatch from signer {:?} during retrieval",
+                            signer
+                        );
+                    }
+                    Err(e) => tracing::info!(
+                        "Retrieve from signer {:?} failed: {}",
+                        signer,
+                        e
+                    ),
+                },
+                _ = &mut timeout => break,
+            }
+            if in_flight.is_empty() {
+                break;
+            }
+        }
+        round_size = round_size.saturating_mul(HEDGED_RETRIEVE_ROUND_GROWTH_FACTOR);
+    }
 }
 
 fn process_avss_message(
