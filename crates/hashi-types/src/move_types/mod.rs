@@ -347,7 +347,7 @@ pub struct DepositRequest {
     pub approval_timestamp_ms: Option<u64>,
 }
 
-#[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct Utxo {
     pub id: UtxoId,
     // In satoshis
@@ -926,11 +926,14 @@ impl From<DepositRequestedEvent> for HashiEvent {
 /// Emitted by `approve_deposit` when the committee certifies a pending
 /// deposit. The corresponding `hBTC` is not yet minted — the deposit
 /// must still wait through the time-delay window and then be confirmed.
+/// `approval_timestamp_ms` is the on-chain clock timestamp recorded on
+/// the request, against which `confirm_deposit` enforces the delay.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct DepositApprovedEvent {
     pub request_id: Address,
     pub utxo: Utxo,
     pub cert: CommitteeSignature,
+    pub approval_timestamp_ms: u64,
 }
 
 impl MoveType for DepositApprovedEvent {

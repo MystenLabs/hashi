@@ -113,6 +113,7 @@ entry fun approve_deposit(
         request_id,
         utxo,
         cert,
+        approval_timestamp_ms: clock.timestamp_ms(),
     });
 }
 
@@ -207,10 +208,14 @@ public struct DepositRequestedEvent has copy, drop {
 
 /// Emitted when a committee certificate has been recorded against a
 /// deposit request. The deposit is not yet final — see `confirm_deposit`.
+/// `approval_timestamp_ms` is the clock timestamp recorded on the
+/// request, against which `confirm_deposit` enforces the time-delay
+/// window.
 public struct DepositApprovedEvent has copy, drop {
     request_id: address,
     utxo: Utxo,
     cert: CommitteeSignature,
+    approval_timestamp_ms: u64,
 }
 
 /// Emitted when an approved deposit has cleared the time-delay window
