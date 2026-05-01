@@ -22,6 +22,8 @@ const EVersionDisabled: vector<u8> = b"Version disabled";
 const EDisableCurrentVersion: vector<u8> = b"Cannot disable current version";
 
 const PAUSED_KEY: vector<u8> = b"paused";
+const GUARDIAN_URL_KEY: vector<u8> = b"guardian_url";
+const GUARDIAN_PUBLIC_KEY_KEY: vector<u8> = b"guardian_public_key";
 
 public struct Config has store {
     config: VecMap<String, Value>,
@@ -82,6 +84,19 @@ public(package) fun paused(self: &Config): bool {
 
 public(package) fun set_paused(self: &mut Config, paused: bool) {
     self.upsert(PAUSED_KEY, config_value::new_bool(paused))
+}
+
+public(package) fun guardian_url(self: &Config): Option<String> {
+    self.try_get(GUARDIAN_URL_KEY).map!(|v| v.as_string())
+}
+
+public(package) fun guardian_public_key(self: &Config): Option<vector<u8>> {
+    self.try_get(GUARDIAN_PUBLIC_KEY_KEY).map!(|v| v.as_bytes())
+}
+
+public(package) fun set_guardian(self: &mut Config, url: String, public_key: vector<u8>) {
+    self.upsert(GUARDIAN_URL_KEY, config_value::new_string(url));
+    self.upsert(GUARDIAN_PUBLIC_KEY_KEY, config_value::new_bytes(public_key));
 }
 
 // ======== Version Management ========

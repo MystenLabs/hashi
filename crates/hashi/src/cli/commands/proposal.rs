@@ -610,6 +610,40 @@ pub async fn create_abort_reconfig_proposal(
     Ok(())
 }
 
+/// Create an update guardian proposal
+pub async fn create_update_guardian_proposal(
+    config: &CliConfig,
+    url: &str,
+    public_key_hex: &str,
+    metadata: Vec<(String, String)>,
+    tx_opts: &TxOptions,
+) -> Result<()> {
+    let public_key =
+        hex::decode(public_key_hex.strip_prefix("0x").unwrap_or(public_key_hex))
+            .context("Invalid hex for public key")?;
+
+    println!("\n{}", "Creating Update Guardian Proposal:".bold());
+    println!("  URL:        {}", url);
+    println!("  Public Key: 0x{}", hex::encode(&public_key));
+    print_metadata(&metadata);
+
+    if !tx_opts.skip_confirm {
+        prompt_continue("create this update guardian proposal").await?;
+    }
+
+    let mut client = HashiClient::new(config).await?;
+    let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateGuardian {
+        url: url.to_string(),
+        public_key,
+        metadata,
+    });
+
+    print_info("Transaction: update_guardian::propose");
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    print_created_proposal_id(response.as_ref());
+    Ok(())
+}
+
 // ============ Helper Functions ============
 
 fn print_proposal_detailed(
