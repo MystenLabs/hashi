@@ -151,10 +151,6 @@ impl LeaderService {
                     self.process_signed_withdrawal_txns();
                     self.check_delete_proposals(checkpoint_timestamp_ms);
 
-                    // Reload from on-chain state so approved deposits are
-                    // picked up for the second-phase `confirm_deposit`
-                    // submission as soon as the time-delay window elapses.
-                    self.reload_pending_deposit_requests();
                     if !self.pending_deposit_requests.is_empty() {
                         self.process_deposit_requests();
                     }
@@ -170,6 +166,10 @@ impl LeaderService {
                         (checkpoint_info.height, checkpoint_info.timestamp_ms)
                     };
 
+                    // We want to unconditionally reload deposits, even if we aren't the leader to
+                    // avoid only the leader being able to reload the moment a block is seen.
+                    self.reload_pending_deposit_requests();
+
                     if !self.is_current_leader(checkpoint_height) {
                         continue;
                     }
@@ -177,7 +177,6 @@ impl LeaderService {
                     debug!("New Bitcoin block {block_height}: processing deposit requests");
 
                     self.check_delete_expired_deposit_requests(checkpoint_timestamp_ms);
-                    self.reload_pending_deposit_requests();
                     self.process_deposit_requests();
                 }
                 Some(result) = self.deposit_tasks.join_next() => {

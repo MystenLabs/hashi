@@ -102,11 +102,19 @@ pub struct TestNetworksBuilder {
 
 impl TestNetworksBuilder {
     pub fn new() -> Self {
+        // E2e tests skip the deposit-confirmation delay by default so they
+        // don't have to wait through the production-grade window. Tests that
+        // need a non-zero delay can override via `with_onchain_config`; later
+        // entries win because overrides are applied in insertion order.
+        let onchain_config_overrides = vec![(
+            "bitcoin_deposit_time_delay_ms".to_string(),
+            hashi_types::move_types::ConfigValue::U64(0),
+        )];
         Self {
             sui_builder: SuiNetworkBuilder::default(),
             hashi_builder: HashiNetworkBuilder::new(),
             bitcoin_builder: BitcoinNodeBuilder::new(),
-            onchain_config_overrides: Vec::new(),
+            onchain_config_overrides,
             with_guardian: false,
         }
     }
