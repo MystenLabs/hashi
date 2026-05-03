@@ -9,8 +9,6 @@ use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_sdk_types::Address;
 
 use hashi_types::committee::Bls12381PrivateKey;
-use hashi_types::committee::EncryptionPrivateKey;
-use hashi_types::committee::EncryptionPublicKey;
 
 use crate::constants::SUI_MAINNET_CHAIN_ID;
 
@@ -57,9 +55,6 @@ pub fn load_ed25519_private_key_from_path(path: &Path) -> anyhow::Result<Ed25519
 pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protocol_private_key: Option<Bls12381PrivateKey>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub encryption_private_key: Option<EncryptionPrivateKey>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_private_key: Option<String>,
@@ -242,20 +237,6 @@ impl Config {
         Ok(ed25519_dalek::VerifyingKey::from(&tls_private_key))
     }
 
-    pub fn encryption_private_key(&self) -> Result<EncryptionPrivateKey, anyhow::Error> {
-        self.encryption_private_key
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("no encryption_private_key configured"))
-    }
-
-    pub fn encryption_public_key(&self) -> Result<EncryptionPublicKey, anyhow::Error> {
-        let encryption_private_key = self.encryption_private_key()?;
-
-        Ok(EncryptionPublicKey::from_private_key(
-            &encryption_private_key,
-        ))
-    }
-
     //TODO support more than just Ed25519
     pub fn operator_private_key(&self) -> Result<Ed25519PrivateKey, anyhow::Error> {
         let raw = self
@@ -409,7 +390,6 @@ impl Config {
         );
 
         config.protocol_private_key = Some(Bls12381PrivateKey::generate(&mut rand::thread_rng()));
-        config.encryption_private_key = Some(EncryptionPrivateKey::new(&mut rand::thread_rng()));
 
         let listen_addr = SocketAddr::from(([127, 0, 0, 1], get_available_port()));
         config.listen_address = Some(listen_addr);

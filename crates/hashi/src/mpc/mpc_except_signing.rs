@@ -91,6 +91,7 @@ pub struct MpcManager {
     pub mpc_config: MpcConfig,
     pub session_id: SessionId,
     pub encryption_key: PrivateKey<EncryptionGroupElement>,
+    pub previous_encryption_key: Option<PrivateKey<EncryptionGroupElement>>,
     pub signing_key: Bls12381PrivateKey,
     pub committee: Committee,
     pub previous_committee: Option<Committee>,
@@ -128,6 +129,7 @@ impl MpcManager {
         committee_set: &CommitteeSet,
         session_id: SessionId,
         encryption_key: PrivateKey<EncryptionGroupElement>,
+        previous_encryption_key: Option<PrivateKey<EncryptionGroupElement>>,
         signing_key: Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
         chain_id: &str,
@@ -228,6 +230,7 @@ impl MpcManager {
             mpc_config,
             session_id,
             encryption_key,
+            previous_encryption_key,
             signing_key,
             committee,
             previous_committee,
@@ -3074,8 +3077,14 @@ impl MpcManager {
                 dealer_weight_sum += dealer_weight as u32;
                 continue;
             }
+            let previous_encryption_key =
+                self.previous_encryption_key.as_ref().ok_or_else(|| {
+                    MpcError::InvalidConfig(
+                        "DKG reconstruction requires previous encryption key".into(),
+                    )
+                })?;
             match process_avss_message(
-                &self.encryption_key,
+                previous_encryption_key,
                 previous_nodes.clone(),
                 previous_party_id,
                 previous_threshold,
@@ -3197,8 +3206,14 @@ impl MpcManager {
                 let session_id = source_session_id
                     .rotation_session_id(&dealer_address, share_index)
                     .to_vec();
+                let previous_encryption_key =
+                    self.previous_encryption_key.as_ref().ok_or_else(|| {
+                        MpcError::InvalidConfig(
+                            "Rotation reconstruction requires previous encryption key".into(),
+                        )
+                    })?;
                 match process_avss_message(
-                    &self.encryption_key,
+                    previous_encryption_key,
                     previous_nodes.clone(),
                     previous_party_id,
                     previous_threshold,
@@ -3795,6 +3810,26 @@ impl MpcManager {
         }
     }
 
+    fn encryption_key_for_epoch(
+        &self,
+        epoch: u64,
+    ) -> MpcResult<&PrivateKey<EncryptionGroupElement>> {
+        if epoch == self.mpc_config.epoch {
+            Ok(&self.encryption_key)
+        } else if epoch == self.previous_epoch {
+            self.previous_encryption_key.as_ref().ok_or_else(|| {
+                MpcError::InvalidConfig(
+                    "previous_encryption_key required for previous epoch".into(),
+                )
+            })
+        } else {
+            Err(MpcError::InvalidConfig(format!(
+                "encryption_key_for_epoch({epoch}): not current ({}) or previous ({})",
+                self.mpc_config.epoch, self.previous_epoch,
+            )))
+        }
+    }
+
     fn get_or_derive_dkg_output(
         &self,
         dealer: &Address,
@@ -3809,7 +3844,7 @@ impl MpcManager {
         let base_sid = self.base_session_id_for_epoch(epoch, &ProtocolType::Dkg);
         let session_id = base_sid.dealer_session_id(dealer);
         match process_avss_message(
-            &self.encryption_key,
+            self.encryption_key_for_epoch(epoch)?,
             nodes,
             party_id,
             threshold,
@@ -3842,7 +3877,7 @@ impl MpcManager {
         let base_sid = self.base_session_id_for_epoch(epoch, &ProtocolType::KeyRotation);
         let session_id = base_sid.rotation_session_id(dealer, share_index);
         match process_avss_message(
-            &self.encryption_key,
+            self.encryption_key_for_epoch(epoch)?,
             nodes,
             party_id,
             threshold,

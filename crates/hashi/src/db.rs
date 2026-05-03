@@ -13,6 +13,7 @@ use fjall::Result;
 use sui_sdk_types::Address;
 
 use hashi_types::committee::EncryptionPrivateKey;
+use hashi_types::committee::EncryptionPublicKey;
 
 use serde::de::DeserializeOwned;
 
@@ -169,6 +170,32 @@ impl Database {
             ))
         })?;
         Ok(Some(EncryptionPrivateKey::from(scalar)))
+    }
+
+    pub fn find_encryption_key_matching(
+        &self,
+        target: &EncryptionPublicKey,
+    ) -> Result<Option<EncryptionPrivateKey>> {
+        let target_bytes = target.as_element().to_byte_array();
+        for guard in self.encryption_keys.iter() {
+            let value = guard.value()?;
+            let byte_array: [u8; 32] = (&*value).try_into().map_err(|_| {
+                fjall::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid point",
+                ))
+            })?;
+            let scalar = match RistrettoScalar::from_byte_array(&byte_array) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let candidate = EncryptionPrivateKey::from(scalar);
+            let candidate_pub = EncryptionPublicKey::from_private_key(&candidate);
+            if candidate_pub.as_element().to_byte_array() == target_bytes {
+                return Ok(Some(candidate));
+            }
+        }
+        Ok(None)
     }
 
     pub fn store_dealer_message(
@@ -328,9 +355,12 @@ impl Database {
         self.nonce_messages.remove(key)
     }
 
-    /// Prune all MPC keyspaces, deleting entries with `epoch < cutoff_epoch`.
+    /// Prune all MPC keyspaces.
     pub fn prune_messages_below(&self, cutoff_epoch: u64) -> Result<()> {
-        prune_keyspace(&self.encryption_keys, cutoff_epoch)?;
+        // Encryption keys retain one extra epoch to support graceful rotation: the
+        // committee may capture a previous epoch's pub key, and the matching
+        // private key must still be in DB.
+        prune_keyspace(&self.encryption_keys, cutoff_epoch.saturating_sub(1))?;
         prune_keyspace(&self.dealer_messages, cutoff_epoch)?;
         prune_keyspace(&self.rotation_messages, cutoff_epoch)?;
         prune_keyspace(&self.nonce_messages, cutoff_epoch)?;
@@ -467,6 +497,37 @@ pub(crate) mod tests {
         let another_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
         db.store_encryption_key(100, &another_key).unwrap();
         assert_eq!(private_key, db.get_encryption_key(100).unwrap().unwrap());
+    }
+
+    #[test]
+    fn test_find_encryption_key_matching() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let key_a = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        let key_b = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        let key_c = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        db.store_encryption_key(10, &key_a).unwrap();
+        db.store_encryption_key(11, &key_b).unwrap();
+        db.store_encryption_key(12, &key_c).unwrap();
+
+        // Looking up by each pub key returns the matching private key.
+        for key in [&key_a, &key_b, &key_c] {
+            let pub_key = EncryptionPublicKey::from_private_key(key);
+            let found = db.find_encryption_key_matching(&pub_key).unwrap().unwrap();
+            assert_eq!(&found, key);
+        }
+
+        // An unrelated pub key has no match.
+        let unrelated = EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(
+            &mut rand::thread_rng(),
+        ));
+        assert!(
+            db.find_encryption_key_matching(&unrelated)
+                .unwrap()
+                .is_none(),
+            "no DB key should match an unrelated pub key"
+        );
     }
 
     #[test]
@@ -964,11 +1025,20 @@ pub(crate) mod tests {
                 db.get_nonce_message(epoch, 0, &dealer).unwrap().is_none(),
                 "nonce message at epoch {epoch} should be pruned"
             );
+        }
+        // Encryption keys keep one extra epoch of retention to absorb
+        // transient on-chain registration races; epochs 1..7 are pruned but
+        // epoch 7 is retained.
+        for epoch in 1..7 {
             assert!(
                 db.get_encryption_key(epoch).unwrap().is_none(),
                 "encryption key at epoch {epoch} should be pruned"
             );
         }
+        assert!(
+            db.get_encryption_key(7).unwrap().is_some(),
+            "encryption key at epoch 7 should be retained (cutoff - 1)"
+        );
         for epoch in 8..=10 {
             assert!(
                 db.get_dealer_message(epoch, &dealer).unwrap().is_some(),

@@ -220,6 +220,17 @@ impl MpcService {
             if self.get_pending_epoch_change().is_some() {
                 return;
             }
+            match self.inner.next_reconfig_epoch().await {
+                Ok(target) => {
+                    if let Err(e) = self.inner.prepare_and_register_encryption_key(target).await {
+                        debug!(
+                            "Encryption key registration for epoch {target} failed: {e}; \
+                             will retry on next genesis_reconfig iteration"
+                        );
+                    }
+                }
+                Err(e) => debug!("Failed to compute next_reconfig_epoch: {e}"),
+            }
             // Attempt to submit start_reconfig. This will fail on-chain if
             // not enough validators have registered (95% stake threshold).
             let result = async {
@@ -566,6 +577,16 @@ impl MpcService {
         if hashi_epoch >= sui_epoch {
             return;
         }
+        if let Err(e) = self
+            .inner
+            .prepare_and_register_encryption_key(sui_epoch)
+            .await
+        {
+            warn!(
+                "Failed to prepare/register encryption key for epoch {sui_epoch}: {e}; \
+                 will retry on next trigger"
+            );
+        }
         for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
             let result = async {
                 let mut executor =
@@ -690,6 +711,17 @@ impl MpcService {
             }
         }
         drop(_end_reconfig_timer);
+        let next_epoch = target_epoch + 1;
+        if let Err(e) = self
+            .inner
+            .prepare_and_register_encryption_key(next_epoch)
+            .await
+        {
+            warn!(
+                "Failed to prepare/register encryption key for epoch {next_epoch}: {e}; \
+                 will retry at next trigger"
+            );
+        }
         info!("end_reconfig complete for epoch {target_epoch}, running prepare_signing");
         if let Err(e) = self.inner.db.prune_messages_below(target_epoch) {
             error!("Failed to prune old MPC messages below epoch {target_epoch}: {e}");

@@ -7,6 +7,8 @@ use std::sync::OnceLock;
 use std::sync::RwLock;
 
 use anyhow::anyhow;
+use hashi_types::committee::EncryptionPrivateKey;
+use hashi_types::committee::EncryptionPublicKey;
 use sui_futures::service::Service;
 
 pub mod backup;
@@ -224,6 +226,71 @@ impl Hashi {
         Ok(service)
     }
 
+    pub fn prepare_encryption_key(&self, epoch: u64) -> anyhow::Result<EncryptionPublicKey> {
+        if let Some(existing) = self.db.get_encryption_key(epoch)? {
+            return Ok(EncryptionPublicKey::from_private_key(&existing));
+        }
+        let private_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        let public_key = EncryptionPublicKey::from_private_key(&private_key);
+        self.db
+            .store_encryption_key(epoch, &private_key)
+            .map_err(|e| anyhow!("failed to store encryption key for epoch {epoch}: {e}"))?;
+        Ok(public_key)
+    }
+
+    pub async fn prepare_and_register_encryption_key(
+        self: &Arc<Self>,
+        epoch: u64,
+    ) -> anyhow::Result<()> {
+        let public_key = self.prepare_encryption_key(epoch)?;
+        let mut executor = sui_tx_executor::SuiTxExecutor::from_hashi(self.clone())?;
+        executor
+            .execute_register_or_update_validator(&self.config, None, Some(&public_key))
+            .await
+            .map(|_| ())
+    }
+
+    fn find_encryption_key_for_committee(
+        &self,
+        committee: &hashi_types::committee::Committee,
+        validator_address: sui_sdk_types::Address,
+        epoch: u64,
+    ) -> anyhow::Result<EncryptionPrivateKey> {
+        let member = committee
+            .members()
+            .iter()
+            .find(|m| m.validator_address() == validator_address)
+            .ok_or_else(|| anyhow!("validator not in committee for epoch {epoch}"))?;
+        let pub_key = member.encryption_public_key();
+        self.db
+            .find_encryption_key_matching(pub_key)
+            .map_err(|e| anyhow!("DB error looking up encryption key for epoch {epoch}: {e}"))?
+            .ok_or_else(|| {
+                anyhow!(
+                    "no DB encryption key matches committee record for epoch {epoch}; \
+                     operator intervention needed (re-register, possibly DB recovery)"
+                )
+            })
+    }
+
+    pub(crate) async fn next_reconfig_epoch(&self) -> anyhow::Result<u64> {
+        use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
+        let mut client = self.onchain_state().client();
+        let service_info = client
+            .ledger_client()
+            .get_service_info(GetServiceInfoRequest::default())
+            .await?
+            .into_inner();
+        let sui_epoch = service_info.epoch();
+        let hashi_epoch = self.onchain_state().epoch();
+        let is_genesis = hashi_epoch == 0 && self.onchain_state().current_committee().is_none();
+        Ok(if is_genesis || hashi_epoch < sui_epoch {
+            sui_epoch
+        } else {
+            sui_epoch + 1
+        })
+    }
+
     pub fn create_mpc_manager(
         &self,
         epoch: u64,
@@ -233,10 +300,46 @@ impl Hashi {
         let hashi = state.hashi();
         let committee_set = &hashi.committees;
         let session_id = mpc::SessionId::new(self.config.sui_chain_id(), epoch, &protocol_type);
-        let encryption_key = self.config.encryption_private_key()?;
-        self.db
-            .store_encryption_key(epoch, &encryption_key)
-            .map_err(|e| anyhow!("failed to store encryption key: {e}"))?;
+        let validator_address = self.config.validator_address()?;
+        let encryption_key = self.find_encryption_key_for_committee(
+            committee_set
+                .committees()
+                .get(&epoch)
+                .ok_or_else(|| anyhow!("no committee for epoch {epoch}"))?,
+            validator_address,
+            epoch,
+        )?;
+        let previous_epoch = if committee_set.pending_epoch_change().is_some() {
+            Some(committee_set.epoch())
+        } else {
+            committee_set
+                .committees()
+                .range(..epoch)
+                .next_back()
+                .map(|(&k, _)| k)
+        };
+        let previous_encryption_key = previous_epoch
+            .map(|prev_ep| {
+                let prev_committee = committee_set
+                    .committees()
+                    .get(&prev_ep)
+                    .ok_or_else(|| anyhow!("no committee for previous epoch {prev_ep}"))?;
+                self.find_encryption_key_for_committee(prev_committee, validator_address, prev_ep)
+                    .map(Some)
+                    .or_else(|e| {
+                        if !prev_committee
+                            .members()
+                            .iter()
+                            .any(|m| m.validator_address() == validator_address)
+                        {
+                            Ok(None)
+                        } else {
+                            Err(e)
+                        }
+                    })
+            })
+            .transpose()?
+            .flatten();
         let signing_key = self
             .config
             .protocol_private_key()
@@ -270,6 +373,7 @@ impl Hashi {
             committee_set,
             session_id,
             encryption_key,
+            previous_encryption_key,
             signing_key,
             store,
             chain_id,
@@ -449,12 +553,26 @@ impl Hashi {
 
         // Register validator (if not already registered) and update any stale metadata.
         match sui_tx_executor::SuiTxExecutor::from_config(&self.config, self.onchain_state())?
-            .execute_register_or_update_validator(&self.config, None)
+            .execute_register_or_update_validator(&self.config, None, None)
             .await
         {
             Ok(true) => tracing::info!("Validator registered/updated on-chain"),
             Ok(false) => tracing::debug!("Validator metadata is already up-to-date"),
             Err(e) => tracing::warn!("Failed to register/update validator metadata: {e}"),
+        }
+
+        match self.next_reconfig_epoch().await {
+            Ok(next_epoch) => {
+                if let Err(e) = self.prepare_and_register_encryption_key(next_epoch).await {
+                    tracing::warn!(
+                        "Initial encryption key registration for epoch {next_epoch} \
+                         failed: {e}; will retry before next start_reconfig"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to compute next reconfig epoch: {e}");
+            }
         }
 
         if self.is_in_current_committee() {
@@ -597,10 +715,65 @@ fn assert_test_only_config(sui_chain_id: &str, bitcoin_chain_id: &str, field_nam
 
 #[cfg(test)]
 mod test {
+    use fastcrypto::serde_helpers::ToFromByteArray;
+    use hashi_types::committee::EncryptionPublicKey;
+
     use crate::Hashi;
     use crate::ServerVersion;
     use crate::config::Config;
     use crate::grpc::Client;
+
+    fn new_hashi_for_test() -> (std::sync::Arc<Hashi>, tempfile::TempDir) {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let mut config = Config::new_for_testing();
+        config.db = Some(tmpdir.path().into());
+        let server_version = ServerVersion::new("unknown", "unknown");
+        let registry = prometheus::Registry::new();
+        let hashi = Hashi::new_with_registry(server_version, config, &registry).unwrap();
+        (hashi, tmpdir)
+    }
+
+    #[test]
+    fn prepare_encryption_key_is_idempotent() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let pk1 = hashi.prepare_encryption_key(1).unwrap();
+        let pk2 = hashi.prepare_encryption_key(1).unwrap();
+        assert_eq!(
+            pk1.as_element().to_byte_array(),
+            pk2.as_element().to_byte_array(),
+            "second call should return the same public key"
+        );
+    }
+
+    #[test]
+    fn prepare_encryption_key_persists_private_key() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let pk = hashi.prepare_encryption_key(7).unwrap();
+        let stored = hashi
+            .db
+            .get_encryption_key(7)
+            .unwrap()
+            .expect("private key should be in DB");
+        assert_eq!(
+            pk.as_element().to_byte_array(),
+            EncryptionPublicKey::from_private_key(&stored)
+                .as_element()
+                .to_byte_array(),
+            "returned public key should match the public key derived from the stored private key"
+        );
+    }
+
+    #[test]
+    fn prepare_encryption_key_generates_distinct_keys_per_epoch() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let pk1 = hashi.prepare_encryption_key(1).unwrap();
+        let pk2 = hashi.prepare_encryption_key(2).unwrap();
+        assert_ne!(
+            pk1.as_element().to_byte_array(),
+            pk2.as_element().to_byte_array(),
+            "different epochs should yield different keys"
+        );
+    }
 
     #[allow(clippy::field_reassign_with_default)]
     #[tokio::test]

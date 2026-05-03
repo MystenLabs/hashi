@@ -881,6 +881,7 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
             &config,
             operator_address,
             None,
+            None,
         )
         .await?;
 
@@ -913,7 +914,7 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
 
     print_info("Registering validator ...");
     let updated = executor
-        .execute_register_or_update_validator(&config, operator_address)
+        .execute_register_or_update_validator(&config, operator_address, None)
         .await?;
 
     if updated {
