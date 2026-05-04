@@ -5,8 +5,14 @@
 #[allow(implicit_const_copy, deprecated_usage, unused_variable)]
 module hashi::proposal_tests;
 
-use hashi::{proposal, test_utils, update_config::UpdateConfig};
-use sui::clock;
+use hashi::{
+    abort_reconfig::AbortReconfig,
+    committee,
+    proposal,
+    test_utils,
+    update_config::UpdateConfig
+};
+use sui::{bls12381, clock};
 
 // ======== Test Addresses ========
 const VOTER1: address = @0x1;
@@ -16,6 +22,21 @@ const NON_VOTER: address = @0x999;
 
 // ======== Constants ========
 const MAX_PROPOSAL_DURATION_MS: u64 = 1000 * 60 * 60 * 24 * 7; // 7 days
+
+fun add_pending_committee_for_testing(hashi: &mut hashi::hashi::Hashi, epoch: u64) {
+    let sk = test_utils::bls_sk_for_testing();
+    let public_key = bls12381::g1_to_uncompressed_g1(
+        &bls12381::g1_from_bytes(&test_utils::bls_min_pk_from_sk(&sk)),
+    );
+    let encryption_key = sk;
+    let members = vector[
+        committee::new_committee_member(VOTER1, public_key, encryption_key, 1),
+        committee::new_committee_member(VOTER2, public_key, encryption_key, 1),
+        committee::new_committee_member(VOTER3, public_key, encryption_key, 1),
+    ];
+    let pending_committee = committee::new_committee(epoch, members, 3334, 800, 3333);
+    hashi.committee_set_mut().set_pending_reconfig_for_testing(pending_committee);
+}
 
 // ======== Proposal Creation Tests ========
 
@@ -37,10 +58,10 @@ fun test_create_proposal() {
     );
 
     // Verify proposal exists
-    assert!(hashi.proposals().contains(proposal_id));
+    assert!(hashi.proposals().active().contains(proposal_id));
 
     // Verify the creator voted automatically
-    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().active().borrow(proposal_id);
     assert!(prop.votes().length() == 1);
     assert!(prop.votes().contains(&VOTER1));
 
@@ -96,7 +117,7 @@ fun test_vote_on_proposal() {
     proposal::vote<UpdateConfig>(&mut hashi, proposal_id, &clock, ctx2);
 
     // Verify vote count is now 2
-    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().active().borrow(proposal_id);
     assert!(prop.votes().length() == 2);
     assert!(prop.votes().contains(&VOTER1));
     assert!(prop.votes().contains(&VOTER2));
@@ -180,7 +201,10 @@ fun test_remove_vote() {
 
     // Verify vote exists
     {
-        let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
+        let prop: &proposal::Proposal<UpdateConfig> = hashi
+            .proposals()
+            .active()
+            .borrow(proposal_id);
         assert!(prop.votes().length() == 1);
     };
 
@@ -188,7 +212,7 @@ fun test_remove_vote() {
     proposal::remove_vote<UpdateConfig>(&mut hashi, proposal_id, ctx);
 
     // Verify vote was removed
-    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().active().borrow(proposal_id);
     assert!(prop.votes().length() == 0);
 
     // Clean up
@@ -320,6 +344,96 @@ fun test_execute_after_gathering_votes() {
     std::unit_test::destroy(hashi);
 }
 
+#[test]
+/// Test executing an abort reconfig proposal rolls back pending reconfig state
+fun test_abort_reconfig_proposal() {
+    let ctx1 = &mut test_utils::new_tx_context(VOTER1, 0);
+
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx1);
+    let clock = clock::create_for_testing(ctx1);
+    add_pending_committee_for_testing(&mut hashi, 1);
+
+    assert!(hashi.committee_set().pending_epoch_change().destroy_some() == 1);
+    assert!(hashi.committee_set().has_committee(1));
+
+    let proposal_id = test_utils::create_abort_reconfig_proposal(&mut hashi, 1, &clock, ctx1);
+
+    let ctx2 = &mut test_utils::new_tx_context(VOTER2, 0);
+    proposal::vote<AbortReconfig>(&mut hashi, proposal_id, &clock, ctx2);
+    let ctx3 = &mut test_utils::new_tx_context(VOTER3, 0);
+    proposal::vote<AbortReconfig>(&mut hashi, proposal_id, &clock, ctx3);
+
+    hashi::abort_reconfig::execute(&mut hashi, proposal_id, &clock, ctx1);
+
+    assert!(hashi.committee_set().pending_epoch_change().is_none());
+    assert!(!hashi.committee_set().has_committee(1));
+    assert!(hashi.committee_set().has_committee(0));
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::abort_reconfig::ENotReconfiguring)]
+/// Test creating an abort reconfig proposal fails when no reconfig is pending
+fun test_abort_reconfig_proposal_fails_when_not_reconfiguring_at_propose() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+
+    let voters = vector[VOTER1];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let _ = test_utils::create_abort_reconfig_proposal(&mut hashi, 1, &clock, ctx);
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::abort_reconfig::EWrongReconfigEpoch)]
+/// Test creating an abort reconfig proposal fails if it names a different epoch
+fun test_abort_reconfig_proposal_fails_for_wrong_epoch_at_propose() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+
+    let voters = vector[VOTER1];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+    add_pending_committee_for_testing(&mut hashi, 1);
+
+    let _ = test_utils::create_abort_reconfig_proposal(&mut hashi, 2, &clock, ctx);
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = hashi::abort_reconfig::EWrongReconfigEpoch)]
+/// Test executing a stale abort reconfig proposal cannot abort a later pending epoch
+fun test_abort_reconfig_proposal_fails_for_stale_epoch_at_execute() {
+    let ctx1 = &mut test_utils::new_tx_context(VOTER1, 0);
+
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx1);
+    let clock = clock::create_for_testing(ctx1);
+    add_pending_committee_for_testing(&mut hashi, 1);
+
+    let proposal_id = test_utils::create_abort_reconfig_proposal(&mut hashi, 1, &clock, ctx1);
+
+    let ctx2 = &mut test_utils::new_tx_context(VOTER2, 0);
+    proposal::vote<AbortReconfig>(&mut hashi, proposal_id, &clock, ctx2);
+    let ctx3 = &mut test_utils::new_tx_context(VOTER3, 0);
+    proposal::vote<AbortReconfig>(&mut hashi, proposal_id, &clock, ctx3);
+
+    let _ = hashi.committee_set_mut().abort_reconfig(ctx1);
+    add_pending_committee_for_testing(&mut hashi, 2);
+
+    hashi::abort_reconfig::execute(&mut hashi, proposal_id, &clock, ctx1);
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
 // ======== Proposal Expiration Tests ========
 
 #[test]
@@ -348,6 +462,65 @@ fun test_vote_on_expired_proposal_fails() {
     proposal::vote<UpdateConfig>(&mut hashi, proposal_id, &clock, ctx2);
 
     // Won't reach here
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = proposal::EProposalAlreadyExecuted)]
+/// Test that re-executing an already-executed proposal fails
+fun test_re_execute_proposal_fails() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+
+    let voters = vector[VOTER1];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
+        &mut hashi,
+        1000,
+        &clock,
+        ctx,
+    );
+
+    // First execute succeeds.
+    hashi::update_config::execute(&mut hashi, proposal_id, &clock);
+
+    // Second execute on the same proposal must fail.
+    hashi::update_config::execute(&mut hashi, proposal_id, &clock);
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = proposal::EProposalAlreadyExecuted)]
+/// Test that delete_expired refuses to delete a proposal that was already executed
+fun test_delete_expired_executed_proposal_fails() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+
+    let voters = vector[VOTER1];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let mut clock = clock::create_for_testing(ctx);
+
+    let proposal_id = test_utils::create_deposit_minimum_proposal(
+        &mut hashi,
+        1000,
+        &clock,
+        ctx,
+    );
+
+    // Execute, then advance past expiry.
+    hashi::update_config::execute(&mut hashi, proposal_id, &clock);
+    clock::increment_for_testing(&mut clock, MAX_PROPOSAL_DURATION_MS + 1);
+
+    // delete_expired must refuse — executed proposals are kept forever.
+    let _ = proposal::delete_expired<hashi::update_config::UpdateConfig>(
+        &mut hashi,
+        proposal_id,
+        &clock,
+    );
+
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
 }
@@ -406,7 +579,7 @@ fun test_delete_expired_proposal() {
     std::unit_test::destroy(data);
 
     // Verify proposal no longer exists
-    assert!(!hashi.proposals().contains(proposal_id));
+    assert!(!hashi.proposals().active().contains(proposal_id));
 
     // Clean up
     clock::destroy_for_testing(clock);
@@ -462,7 +635,7 @@ fun test_weighted_quorum() {
     );
 
     // 50% is not enough for 66.67% quorum - verify we need more votes
-    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().active().borrow(proposal_id);
     assert!(!proposal::quorum_reached(prop, &hashi));
 
     // VOTER2 votes (now 5/6 = 83% total weight, exceeds 66.67% threshold)
@@ -470,7 +643,7 @@ fun test_weighted_quorum() {
     proposal::vote<UpdateConfig>(&mut hashi, proposal_id, &clock, ctx2);
 
     // 83% exceeds the 66.67% quorum threshold
-    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().borrow(proposal_id);
+    let prop: &proposal::Proposal<UpdateConfig> = hashi.proposals().active().borrow(proposal_id);
     assert!(proposal::quorum_reached(prop, &hashi));
 
     // Execute should succeed
@@ -510,8 +683,8 @@ fun test_multiple_concurrent_proposals() {
     );
 
     // Both proposals should exist
-    assert!(hashi.proposals().contains(proposal_id_1));
-    assert!(hashi.proposals().contains(proposal_id_2));
+    assert!(hashi.proposals().active().contains(proposal_id_1));
+    assert!(hashi.proposals().active().contains(proposal_id_2));
 
     // Execute first proposal
     hashi::update_config::execute(&mut hashi, proposal_id_1, &clock);

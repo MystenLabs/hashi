@@ -103,24 +103,10 @@ pub fn save(
         }
     })?;
 
-    // Snapshot the database into a subdirectory of a temp dir. `snapshot_to_path`
-    // requires a non-existent destination, so we create the parent tempdir and
-    // point at a yet-to-be-created child.
-    let tmp_parent = tempfile::Builder::new()
-        .prefix("hashi-db-snapshot-")
-        .tempdir()
-        .context("Failed to create temp directory for database snapshot")?;
-    let snapshot_path = tmp_parent.path().join("db");
-    db.snapshot_to_path(&snapshot_path)
-        .context("Failed to snapshot database")?;
-    drop(db);
-
-    info!(source = %db_path.display(), "Database snapshot created");
-
     fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create output directory {}", output_dir.display()))?;
 
-    let manifest = backup::build_backup_manifest(&files, db_path, &snapshot_path)?;
+    let manifest = backup::build_backup_manifest(&files, db_path)?;
 
     info!(
         file_count = files.len(),
@@ -133,11 +119,10 @@ pub fn save(
     let output_path = output_dir.join(backup::encrypted_backup_file_name());
     backup::encrypt_files_to_age_archive(
         &manifest,
-        &snapshot_path,
+        &db,
         encryptor_recipient.as_ref(),
         &output_path,
     )?;
-    drop(tmp_parent);
 
     print_success(&format!("Backup completed: {}", output_path.display()));
 
@@ -584,15 +569,27 @@ mod tests {
     #[test]
     fn round_trip_preserves_db_contents_after_extraction() {
         use hashi_types::committee::EncryptionPrivateKey;
+        use std::collections::BTreeMap;
+        use std::num::NonZeroU16;
 
         let fixture = TestFixture::new();
         let db_path = fixture.db_path();
 
-        // Write a known row to the source db before taking the backup.
+        // Write known rows to every backed-up keyspace before taking the backup.
+        let dealer = sui_sdk_types::Address::new([3u8; 32]);
         let enc_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        let dealer_msg = crate::db::tests::create_test_message();
+        let mut rotation_msgs = BTreeMap::new();
+        rotation_msgs.insert(
+            NonZeroU16::new(1).unwrap(),
+            crate::db::tests::create_test_message(),
+        );
         {
             let db = crate::db::Database::open(&db_path).unwrap();
             db.store_encryption_key(42, &enc_key).unwrap();
+            db.store_dealer_message(42, &dealer, &dealer_msg).unwrap();
+            db.store_rotation_messages(42, &dealer, &rotation_msgs)
+                .unwrap();
         }
 
         let backup = save_with_fresh_identity(&fixture);
@@ -609,6 +606,24 @@ mod tests {
 
         let restored_key = restored_db.get_encryption_key(42).unwrap().unwrap();
         assert_eq!(restored_key, enc_key);
+
+        let restored_dealer_msg = restored_db
+            .get_dealer_message(42, &dealer)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bcs::to_bytes(&restored_dealer_msg).unwrap(),
+            bcs::to_bytes(&dealer_msg).unwrap()
+        );
+
+        let restored_rotation_msgs = restored_db
+            .get_rotation_messages(42, &dealer)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bcs::to_bytes(&restored_rotation_msgs).unwrap(),
+            bcs::to_bytes(&rotation_msgs).unwrap()
+        );
     }
 
     #[test]

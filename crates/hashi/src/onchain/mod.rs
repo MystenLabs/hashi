@@ -257,20 +257,39 @@ impl OnchainState {
         self.state().hashi.committees.mpc_public_key().to_vec()
     }
 
-    /// Returns all active proposals.
+    /// Returns all active (not-yet-executed) proposals.
     pub fn proposals(&self) -> Vec<types::Proposal> {
         self.state()
             .hashi
             .proposals
-            .proposals()
+            .active()
             .values()
             .cloned()
             .collect()
     }
 
-    /// Returns a specific proposal by ID, if it exists.
+    /// Returns all executed proposals.
+    pub fn executed_proposals(&self) -> Vec<types::Proposal> {
+        self.state()
+            .hashi
+            .proposals
+            .executed()
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// Returns a specific proposal by ID, looking in active first then
+    /// executed.
     pub fn proposal(&self, id: &Address) -> Option<types::Proposal> {
-        self.state().hashi.proposals.proposals().get(id).cloned()
+        let state = self.state();
+        state
+            .hashi
+            .proposals
+            .active()
+            .get(id)
+            .or_else(|| state.hashi.proposals.executed().get(id))
+            .cloned()
     }
 
     /// Returns all committee members for the current epoch.
@@ -400,6 +419,10 @@ impl OnchainState {
 
     pub fn bitcoin_confirmation_threshold(&self) -> u32 {
         self.state().hashi().config.bitcoin_confirmation_threshold()
+    }
+
+    pub fn bitcoin_deposit_time_delay_ms(&self) -> u64 {
+        self.state().hashi().config.bitcoin_deposit_time_delay_ms()
     }
 
     pub fn mpc_threshold_in_basis_points(&self) -> u16 {
@@ -1238,8 +1261,26 @@ async fn scrape_spent_utxos(
 
 async fn scrape_proposals(
     client: Client,
-    proposals_bag: move_types::ObjectBag,
+    proposals: move_types::Proposals,
 ) -> Result<types::Proposals> {
+    let active_id = proposals.active.id;
+    let executed_id = proposals.executed.id;
+    let (active, executed) = tokio::try_join!(
+        scrape_proposal_bag(client.clone(), proposals.active),
+        scrape_proposal_bag(client, proposals.executed),
+    )?;
+    Ok(types::Proposals {
+        active_id,
+        executed_id,
+        active,
+        executed,
+    })
+}
+
+async fn scrape_proposal_bag(
+    client: Client,
+    bag: move_types::ObjectBag,
+) -> Result<BTreeMap<Address, types::Proposal>> {
     let mut proposals: BTreeMap<Address, types::Proposal> = BTreeMap::new();
 
     // Proposals live in a `0x2::object_bag::ObjectBag`, so each entry's
@@ -1249,7 +1290,7 @@ async fn scrape_proposals(
     let mut stream = client
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
-                .with_parent(proposals_bag.id)
+                .with_parent(bag.id)
                 .with_page_size(u32::MAX)
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
@@ -1306,6 +1347,11 @@ async fn scrape_proposals(
                     .ok()
                     .map(|p| (p.id, p.timestamp_ms))
             }
+            types::ProposalType::AbortReconfig => {
+                bcs::from_bytes::<move_types::Proposal<move_types::AbortReconfig>>(contents)
+                    .ok()
+                    .map(|p| (p.id, p.timestamp_ms))
+            }
             types::ProposalType::Unknown(_) => None,
         };
 
@@ -1323,11 +1369,7 @@ async fn scrape_proposals(
         }
     }
 
-    Ok(types::Proposals {
-        id: proposals_bag.id,
-        size: proposals_bag.size,
-        proposals,
-    })
+    Ok(proposals)
 }
 
 pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
@@ -1354,6 +1396,7 @@ pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
         ("disable_version", "DisableVersion") => types::ProposalType::DisableVersion,
         ("upgrade", "Upgrade") => types::ProposalType::Upgrade,
         ("emergency_pause", "EmergencyPause") => types::ProposalType::EmergencyPause,
+        ("abort_reconfig", "AbortReconfig") => types::ProposalType::AbortReconfig,
         _ => types::ProposalType::Unknown(format!("{}::{}", inner_tag.module(), inner_tag.name())),
     }
 }

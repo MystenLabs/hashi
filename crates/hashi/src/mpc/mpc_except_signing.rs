@@ -98,8 +98,7 @@ pub struct MpcManager {
     pub previous_threshold: Option<u16>,
     /// Used to reconstruct source session IDs during certificate reconstruction.
     chain_id: String,
-    /// The epoch from which to read previous messages during reconstruction.
-    pub source_epoch: u64,
+    pub previous_epoch: u64,
     previous_output: Option<MpcOutput>,
     current_output: Option<MpcOutput>,
     pub batch_size_per_weight: u16,
@@ -191,21 +190,21 @@ impl MpcManager {
                  from what is registered on-chain for this node."
             );
         }
-        let (source_epoch, previous_committee) = if committee_set.pending_epoch_change().is_some() {
+        let (previous_epoch, previous_committee) = if committee_set.pending_epoch_change().is_some()
+        {
             // Live reconfig
             let source = committee_set.epoch();
             (source, committee_set.committees().get(&source).cloned())
         } else {
-            match epoch.checked_sub(1).and_then(|prev| {
-                committee_set
-                    .committees()
-                    .get(&prev)
-                    .cloned()
-                    .map(|c| (prev, c))
-            }) {
+            match committee_set
+                .committees()
+                .range(..epoch)
+                .next_back()
+                .map(|(&k, c)| (k, c.clone()))
+            {
                 // Rotation recovery
                 Some((prev, committee)) => (prev, Some(committee)),
-                // Initial DKG
+                // Genesis or post-initial-DKG single-committee state
                 None => (committee_set.epoch(), None),
             }
         };
@@ -243,7 +242,7 @@ impl MpcManager {
             complaint_responses: HashMap::new(),
             public_messages_store: public_message_store,
             chain_id: chain_id.to_string(),
-            source_epoch,
+            previous_epoch,
             previous_output: None,
             current_output: None,
             batch_size_per_weight,
@@ -255,8 +254,8 @@ impl MpcManager {
     }
 
     // Only for devnet key recovery CLI tool
-    pub fn set_source_epoch(&mut self, epoch: u64) {
-        self.source_epoch = epoch;
+    pub fn set_previous_epoch(&mut self, epoch: u64) {
+        self.previous_epoch = epoch;
     }
 
     pub fn handle_send_messages_request(
@@ -554,7 +553,7 @@ impl MpcManager {
         let output = if request.epoch == self.mpc_config.epoch {
             // Reduce availability lag
             self.current_output.as_ref()
-        } else if Some(request.epoch) == self.mpc_config.epoch.checked_sub(1) {
+        } else if request.epoch == self.previous_epoch {
             self.previous_output.as_ref()
         } else {
             return Err(MpcError::NotFound(format!(
@@ -3025,7 +3024,7 @@ impl MpcManager {
             MpcError::InvalidConfig("This node is not in the previous committee".into())
         })? as u16;
         let source_session_id =
-            SessionId::new(&self.chain_id, self.source_epoch, &ProtocolType::Dkg);
+            SessionId::new(&self.chain_id, self.previous_epoch, &ProtocolType::Dkg);
         let mut outputs: HashMap<PartyId, avss::PartialOutput> = HashMap::new();
         let mut dealer_weight_sum = 0u32;
         for cert in certificates {
@@ -3041,10 +3040,10 @@ impl MpcManager {
             };
             let msg = dkg_cert.message();
             let dealer_address = msg.dealer_address;
-            let source_epoch = self.source_epoch;
+            let previous_epoch = self.previous_epoch;
             let message = self
                 .public_messages_store
-                .get_dealer_message(source_epoch, &dealer_address)
+                .get_dealer_message(previous_epoch, &dealer_address)
                 .map_err(|e| MpcError::StorageError(e.to_string()))?
                 .ok_or_else(|| {
                     MpcError::StorageError(format!(
@@ -3149,7 +3148,7 @@ impl MpcManager {
         })? as u16;
         let source_session_id = SessionId::new(
             &self.chain_id,
-            self.source_epoch,
+            self.previous_epoch,
             &ProtocolType::KeyRotation,
         );
         // Each dealer only rotates their own shares from the previous epoch, so share indices
@@ -3164,10 +3163,10 @@ impl MpcManager {
             };
             let msg = rotation_cert.message();
             let dealer_address = msg.dealer_address;
-            let source_epoch = self.source_epoch;
+            let previous_epoch = self.previous_epoch;
             let rotation_msgs = self
                 .public_messages_store
-                .get_rotation_messages(source_epoch, &dealer_address)
+                .get_rotation_messages(previous_epoch, &dealer_address)
                 .map_err(|e| MpcError::StorageError(e.to_string()))?
                 .ok_or_else(|| {
                     MpcError::StorageError(format!(
@@ -3287,12 +3286,7 @@ impl MpcManager {
                 .previous_committee
                 .clone()
                 .expect("key rotation requires previous committee");
-            let epoch = mgr
-                .mpc_config
-                .epoch
-                .checked_sub(1)
-                .expect("key rotation requires epoch > 0");
-            (previous_committee, epoch)
+            (previous_committee, mgr.previous_epoch)
         };
         let request = GetPublicMpcOutputRequest { epoch };
         let mut futures: FuturesUnordered<_> = previous_committee
@@ -3439,14 +3433,14 @@ impl MpcManager {
                             &dealer_address,
                         )
                     };
-                    let source_epoch = mpc_manager.read().unwrap().source_epoch;
+                    let previous_epoch = mpc_manager.read().unwrap().previous_epoch;
                     let recovered = Self::recover_shares_via_complaint(
                         mpc_manager,
                         &dealer_address,
                         &message,
                         signers,
                         p2p_channel,
-                        source_epoch,
+                        previous_epoch,
                     )
                     .await?;
                     complaint_cache.insert(DealerOutputsKey::Dkg(dealer_address), recovered);
@@ -3467,12 +3461,12 @@ impl MpcManager {
                         dealer_address,
                         complained_share_index,
                     );
-                    let (source_epoch, rotation_msgs) = {
+                    let (previous_epoch, rotation_msgs) = {
                         let mgr = mpc_manager.read().unwrap();
-                        let source_epoch = mgr.source_epoch;
+                        let previous_epoch = mgr.previous_epoch;
                         let msgs = mgr
                             .public_messages_store
-                            .get_rotation_messages(source_epoch, &dealer_address)
+                            .get_rotation_messages(previous_epoch, &dealer_address)
                             .map_err(|e| MpcError::StorageError(e.to_string()))?
                             .ok_or_else(|| {
                                 MpcError::NotFound(format!(
@@ -3480,7 +3474,7 @@ impl MpcManager {
                                     dealer_address
                                 ))
                             })?;
-                        (source_epoch, msgs)
+                        (previous_epoch, msgs)
                     };
                     let signers = {
                         let mut mgr = mpc_manager.write().unwrap();
@@ -3503,7 +3497,7 @@ impl MpcManager {
                         &rotation_msgs,
                         signers,
                         p2p_channel,
-                        source_epoch,
+                        previous_epoch,
                     )
                     .await?;
                     let mut mgr = mpc_manager.write().unwrap();
@@ -3639,7 +3633,7 @@ impl MpcManager {
                     let missing = {
                         let mgr = mpc_manager.read().unwrap();
                         mgr.public_messages_store
-                            .get_dealer_message(mgr.source_epoch, &msg.dealer_address)
+                            .get_dealer_message(mgr.previous_epoch, &msg.dealer_address)
                             .map_err(|e| MpcError::StorageError(e.to_string()))?
                             .is_none()
                     };
@@ -3655,7 +3649,7 @@ impl MpcManager {
                     let missing = {
                         let mgr = mpc_manager.read().unwrap();
                         mgr.public_messages_store
-                            .get_rotation_messages(mgr.source_epoch, &msg.dealer_address)
+                            .get_rotation_messages(mgr.previous_epoch, &msg.dealer_address)
                             .map_err(|e| MpcError::StorageError(e.to_string()))?
                             .is_none()
                     };
@@ -3702,7 +3696,7 @@ impl MpcManager {
             let request = RetrieveMessagesRequest {
                 dealer: message.dealer_address,
                 protocol_type,
-                epoch: mgr.source_epoch,
+                epoch: mgr.previous_epoch,
                 batch_index: None,
             };
             let signers = certificate.signers(previous_committee).map_err(|_| {
@@ -3718,18 +3712,18 @@ impl MpcManager {
                     let actual_hash = compute_messages_hash(&response.messages);
                     if actual_hash == message.messages_hash {
                         let mut mgr = mpc_manager.write().unwrap();
-                        let source_epoch = mgr.source_epoch;
+                        let previous_epoch = mgr.previous_epoch;
                         match &response.messages {
                             Messages::Dkg(msg) => {
                                 mgr.cache_and_persist_dkg_message(
-                                    source_epoch,
+                                    previous_epoch,
                                     message.dealer_address,
                                     msg,
                                 )?;
                             }
                             Messages::Rotation(msgs) => {
                                 mgr.cache_and_persist_rotation_messages(
-                                    source_epoch,
+                                    previous_epoch,
                                     message.dealer_address,
                                     msgs,
                                 )?;
@@ -3773,7 +3767,7 @@ impl MpcManager {
         if epoch == self.mpc_config.epoch {
             self.session_id.clone()
         } else {
-            SessionId::new(&self.chain_id, self.source_epoch, protocol_type)
+            SessionId::new(&self.chain_id, self.previous_epoch, protocol_type)
         }
     }
 

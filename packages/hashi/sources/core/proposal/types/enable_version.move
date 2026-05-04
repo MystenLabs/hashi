@@ -9,7 +9,7 @@ use sui::{clock::Clock, vec_map::VecMap};
 
 const THRESHOLD_BPS: u64 = 10000;
 
-public struct EnableVersion has drop, store {
+public struct EnableVersion has copy, drop, store {
     version: u64,
 }
 

@@ -262,6 +262,10 @@ fn parse_deposit_request(
             amount: request.amount,
             derivation_path,
         },
+        // Approval state isn't carried by the proto. Validators look up
+        // the on-chain version separately when verifying.
+        approval_cert: None,
+        approval_timestamp_ms: None,
     })
 }
 

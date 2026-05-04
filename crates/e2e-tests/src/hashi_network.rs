@@ -48,6 +48,10 @@ impl HashiNodeHandle {
         Ok(())
     }
 
+    pub fn is_running(&self) -> bool {
+        self.service.is_some()
+    }
+
     fn create_hashi(config: &HashiConfig) -> Result<Arc<Hashi>> {
         let server_version = ServerVersion::new("test-hashi", "0.1.0");
         let registry = prometheus::Registry::new();

@@ -42,11 +42,16 @@ flowchart TD
 
     subgraph Sui["Sui Chain"]
         subgraph DepositPhase["1. Request Phase"]
-            DR["DepositRequest<br/>{ id, utxo, timestamp_ms }"]
+            DR["DepositRequest<br/>{ id, utxo, timestamp_ms,<br/>approval_cert, approval_timestamp_ms }"]
             DRQ["DepositRequestQueue<br/>.requests"]
         end
 
-        subgraph ConfirmPhase["2. Confirmation Phase"]
+        subgraph ApprovePhase["2. Approval Phase"]
+            APPROVED["DepositRequest (approved)<br/>approval_cert: Some(cert)<br/>approval_timestamp_ms: Some(t)"]
+        end
+
+        subgraph ConfirmPhase["3. Confirmation Phase"]
+            DELAY["Time-delay window<br/>(bitcoin_deposit_time_delay_ms)"]
             CERTIFIED["CertifiedMessage&lt;DepositRequest&gt;<br/>{ message, signature, stake_support }"]
             UTXO["Utxo<br/>{ id, amount, derivation_path }"]
             POOL["UtxoPool<br/>.utxos"]
@@ -60,8 +65,10 @@ flowchart TD
     DRQ -.->|"Observe request"| MEMBERS
     MEMBERS -->|"Sign deposit request"| SIGN
     SIGN -->|"Quorum reached"| CERT
-    CERT -->|"confirm_deposit()"| VERIFY
-    VERIFY -->|"Valid certificate"| CERTIFIED
+    CERT -->|"approve_deposit()"| VERIFY
+    VERIFY -->|"Valid certificate"| APPROVED
+    APPROVED --> DELAY
+    DELAY -->|"confirm_deposit()<br/>(re-verifies cert)"| CERTIFIED
     CERTIFIED --> UTXO
     UTXO -->|"Insert"| POOL
     UTXO -->|"Extract amount"| MINT
@@ -78,14 +85,16 @@ flowchart TD
 
 ### Deposit flow summary
 
-| Step | Action                                     | Model Transformation                                        |
-| ---- | ------------------------------------------ | ----------------------------------------------------------- |
-| 1    | User sends BTC to bridge address           | Bitcoin UTXO created                                        |
-| 2    | User calls `deposit()`                     | `DepositRequest` → `DepositRequestQueue`                    |
-| 3    | Committee members observe and sign request | BLS signatures aggregated → `CommitteeSignature`            |
-| 4    | Leader calls `confirm_deposit()` with cert | `verify_certificate()` → `CertifiedMessage<DepositRequest>` |
-| 5    | Certified request processed                | `DepositRequest` → `Utxo` in `UtxoPool`                     |
-| 6    | Treasury mints tokens                      | `Utxo.amount` → `Balance<BTC>` to user                      |
+| Step | Action                                     | Model Transformation                                                                  |
+| ---- | ------------------------------------------ | ------------------------------------------------------------------------------------- |
+| 1    | User sends BTC to bridge address           | Bitcoin UTXO created                                                                  |
+| 2    | User calls `deposit()`                     | `DepositRequest` → `DepositRequestQueue`                                              |
+| 3    | Committee members observe and sign request | BLS signatures aggregated → `CommitteeSignature`                                      |
+| 4    | Leader calls `approve_deposit()` with cert | `verify_certificate()` → request stores `approval_cert` and `approval_timestamp_ms`   |
+| 5    | Time-delay window elapses                  | `bitcoin_deposit_time_delay_ms` (allows committee rotation if approval is fraudulent) |
+| 6    | Anyone calls `confirm_deposit()`           | Re-`verify_certificate()` → `CertifiedMessage<DepositRequest>`                        |
+| 7    | Certified request processed                | `DepositRequest` → `Utxo` in `UtxoPool`                                               |
+| 8    | Treasury mints tokens                      | `Utxo.amount` → `Balance<BTC>` to user                                                |
 
 ---
 

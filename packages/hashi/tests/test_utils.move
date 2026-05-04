@@ -7,6 +7,7 @@
 module hashi::test_utils;
 
 use hashi::{
+    abort_reconfig,
     committee::{Self, CommitteeMember, CommitteeSignature},
     config_value,
     disable_version,
@@ -15,7 +16,7 @@ use hashi::{
     hashi::Hashi,
     update_config
 };
-use sui::{bag, bls12381, clock::Clock, object_bag, vec_map};
+use sui::{bag, bls12381, clock::Clock, vec_map};
 
 // ======== Transaction Context Helpers ========
 
@@ -130,8 +131,8 @@ public fun create_hashi_with_weighted_committee(
     // Create treasury
     let treasury = hashi::treasury::create(ctx);
 
-    // Create proposals bag
-    let proposals = object_bag::new(ctx);
+    // Create proposals store
+    let proposals = hashi::proposals::create(ctx);
 
     // Create TOB bag
     let tob = bag::new(ctx);
@@ -253,4 +254,14 @@ public fun create_emergency_pause_proposal(
 ): ID {
     let metadata = vec_map::empty();
     emergency_pause::propose(hashi, pause, metadata, clock, ctx)
+}
+
+/// Creates an abort reconfig proposal and returns its ID
+public fun create_abort_reconfig_proposal(
+    hashi: &mut Hashi,
+    epoch: u64,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): ID {
+    abort_reconfig::propose(hashi, epoch, vec_map::empty(), clock, ctx)
 }

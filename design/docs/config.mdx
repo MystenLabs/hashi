@@ -28,6 +28,21 @@ The minimum deposit amount in satoshis. Deposits below this value are rejected
 onchain. The effective value is always at least `546 sats` to prevent creating
 unspendable UTXOs.
 
+### `bitcoin_deposit_time_delay_ms`
+
+| | |
+|---|---|
+| **Type** | `u64` |
+| **Default** | `1000` |
+| **Unit** | milliseconds |
+
+The minimum time that must elapse between a deposit being approved by the
+committee (`approve_deposit`) and being confirmed (`confirm_deposit`). Provides
+a window in which a fraudulent or erroneous approval can be detected and the
+service paused before any `hBTC` is minted. See the
+[deposit flow](./deposit.mdx#confirm) for how this delay fits into the overall
+process.
+
 ### `bitcoin_withdrawal_minimum`
 
 | | |

@@ -9,10 +9,11 @@ use hashi::{
     committee::{CertifiedMessage, Committee, CommitteeSignature},
     committee_set::CommitteeSet,
     config::Config,
+    proposals::{Self, Proposals},
     threshold,
     treasury::Treasury
 };
-use sui::{bag::{Self, Bag}, dynamic_field as df, object_bag::{Self, ObjectBag}};
+use sui::{bag::{Self, Bag}, dynamic_field as df};
 
 #[error]
 const ESystemPaused: vector<u8> = b"System is currently paused";
@@ -28,7 +29,7 @@ public struct Hashi has key {
     committee_set: CommitteeSet,
     config: Config,
     treasury: Treasury,
-    proposals: ObjectBag,
+    proposals: Proposals,
     /// TOB certificates by (epoch, batch_index) -> EpochCertsV1
     tob: Bag,
     /// Number of presignatures consumed in the current epoch.
@@ -48,7 +49,7 @@ fun init(ctx: &mut TxContext) {
             config
         },
         treasury: hashi::treasury::create(ctx),
-        proposals: object_bag::new(ctx),
+        proposals: proposals::create(ctx),
         tob: bag::new(ctx),
         num_consumed_presigs: 0,
     };
@@ -149,11 +150,11 @@ public(package) fun treasury_mut(self: &mut Hashi): &mut Treasury {
     &mut self.treasury
 }
 
-public(package) fun proposals(self: &Hashi): &ObjectBag {
+public(package) fun proposals(self: &Hashi): &Proposals {
     &self.proposals
 }
 
-public(package) fun proposals_mut(self: &mut Hashi): &mut ObjectBag {
+public(package) fun proposals_mut(self: &mut Hashi): &mut Proposals {
     &mut self.proposals
 }
 
@@ -204,7 +205,7 @@ public fun create_for_testing(
     committee_set: CommitteeSet,
     config: Config,
     treasury: Treasury,
-    proposals: ObjectBag,
+    proposals: Proposals,
     tob: Bag,
     ctx: &mut TxContext,
 ): Hashi {

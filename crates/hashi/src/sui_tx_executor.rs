@@ -20,7 +20,8 @@
 //! let mut executor = SuiTxExecutor::from_hashi(hashi.clone())?;
 //!
 //! // Execute domain-specific transactions
-//! executor.execute_confirm_deposit(&deposit_request, signed_message).await?;
+//! executor.execute_approve_deposit(&deposit_request, signed_message).await?;
+//! executor.execute_confirm_deposit(deposit_request.id).await?;
 //!
 //! // Or build custom transactions
 //! let mut builder = TransactionBuilder::new();
@@ -299,15 +300,17 @@ impl SuiTxExecutor {
     // Domain-specific execution methods
     // ========================================================================
 
-    /// Execute a deposit confirmation transaction.
-    ///
-    /// Passes a `Certificate` (BCS-encoded struct) to `deposit::confirm_deposit`.
+    /// Execute the first phase of deposit confirmation: record the
+    /// committee certificate against the deposit request via
+    /// `deposit::approve_deposit`. The deposit is not yet final — it
+    /// must still pass `confirm_deposit` after the configured time-delay
+    /// window has elapsed.
     #[tracing::instrument(
         level = "info",
         skip_all,
         fields(deposit_id = %deposit_request.id),
     )]
-    pub async fn execute_confirm_deposit(
+    pub async fn execute_approve_deposit(
         &mut self,
         deposit_request: &DepositRequest,
         signed_message: SignedMessage<DepositConfirmationMessage>,
@@ -325,6 +328,55 @@ impl SuiTxExecutor {
             self.hashi_ids.package_id,
             signed_message.committee_signature(),
         );
+        let clock_arg = builder.object(
+            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
+
+        builder.move_call(
+            Function::new(
+                self.hashi_ids.package_id,
+                Identifier::from_static("deposit"),
+                Identifier::from_static("approve_deposit"),
+            ),
+            vec![hashi_arg, request_id_arg, cert_arg, clock_arg],
+        );
+
+        let response = self.execute(builder).await?;
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "Transaction failed to approve deposit for request {:?}",
+                deposit_request.id
+            );
+        }
+        Ok(())
+    }
+
+    /// Execute the second phase of deposit confirmation: finalize a
+    /// previously-approved deposit via `deposit::confirm_deposit`. The
+    /// on-chain function re-verifies the stored committee certificate
+    /// against the current committee and asserts that the configured
+    /// time-delay since approval has elapsed.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(deposit_id = %request_id),
+    )]
+    pub async fn execute_confirm_deposit(&mut self, request_id: Address) -> anyhow::Result<()> {
+        let mut builder = TransactionBuilder::new();
+
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let request_id_arg = builder.pure(&request_id);
+        let clock_arg = builder.object(
+            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
 
         builder.move_call(
             Function::new(
@@ -332,15 +384,12 @@ impl SuiTxExecutor {
                 Identifier::from_static("deposit"),
                 Identifier::from_static("confirm_deposit"),
             ),
-            vec![hashi_arg, request_id_arg, cert_arg],
+            vec![hashi_arg, request_id_arg, clock_arg],
         );
 
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
-            anyhow::bail!(
-                "Transaction failed to confirm deposit for request {:?}",
-                deposit_request.id
-            );
+            anyhow::bail!("Transaction failed to confirm deposit for request {request_id:?}");
         }
         Ok(())
     }

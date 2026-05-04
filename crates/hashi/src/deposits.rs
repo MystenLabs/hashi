@@ -118,10 +118,29 @@ impl Hashi {
                 )));
             }
             Some(onchain_request) => {
-                if onchain_request != deposit_request {
+                // Approval state lives on the on-chain request but is not
+                // carried by `DepositRequest` constructed from the proto, so
+                // compare the immutable core fields only.
+                let core_matches = onchain_request.id == deposit_request.id
+                    && onchain_request.sender == deposit_request.sender
+                    && onchain_request.timestamp_ms == deposit_request.timestamp_ms
+                    && onchain_request.sui_tx_digest == deposit_request.sui_tx_digest
+                    && onchain_request.utxo == deposit_request.utxo;
+                if !core_matches {
                     return Err(DepositError::InvalidOnchainRequest(anyhow!(
                         "Deposit request fields do not match on-chain state"
                     )));
+                }
+
+                // Refuse to sign a re-approval if the on-chain request is
+                // already approved by the current committee. The on-chain
+                // `approve_deposit` would reject it anyway, so we don't
+                // want to waste a signature exchange or a transaction.
+                let current_epoch = self.onchain_state().epoch();
+                if let Some(cert) = &onchain_request.approval_cert
+                    && cert.epoch == current_epoch
+                {
+                    return Err(DepositError::AlreadyApprovedThisEpoch);
                 }
             }
         }
@@ -369,8 +388,14 @@ pub enum DepositError {
     #[error("Failed to create Sui transaction executor: {0}")]
     ExecutorInitFailed(#[source] anyhow::Error),
 
+    #[error("Failed to approve deposit on Sui: {0}")]
+    ApproveDepositFailed(#[source] anyhow::Error),
+
     #[error("Failed to confirm deposit on Sui: {0}")]
     ConfirmDepositFailed(#[source] anyhow::Error),
+
+    #[error("Deposit has already been approved by the current committee")]
+    AlreadyApprovedThisEpoch,
 
     #[error("Deposit processing timed out after {0:?}")]
     TimedOut(std::time::Duration),
@@ -385,7 +410,9 @@ impl DepositError {
             | Self::FailedQuorum { .. }
             | Self::CertificateBuildFailed(_)
             | Self::ExecutorInitFailed(_)
+            | Self::ApproveDepositFailed(_)
             | Self::ConfirmDepositFailed(_)
+            | Self::AlreadyApprovedThisEpoch
             | Self::TimedOut(_) => DepositErrorKind::RetryOnNextBlock,
             Self::InvalidOnchainRequest(_)
             | Self::DuplicateOrSpentOnSui(_)

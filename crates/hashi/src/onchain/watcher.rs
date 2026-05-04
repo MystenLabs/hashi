@@ -5,7 +5,9 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use futures::StreamExt;
+use hashi_types::move_types::AbortReconfig;
 use hashi_types::move_types::BurnEvent;
+use hashi_types::move_types::HashiEvent;
 use hashi_types::move_types::MintEvent;
 use sui_rpc::Client;
 use sui_rpc::field::FieldMask;
@@ -25,7 +27,6 @@ use crate::onchain::types::DepositRequest;
 use crate::onchain::types::Proposal;
 use crate::onchain::types::ProposalType;
 use crate::onchain::types::WithdrawalRequest;
-use hashi_types::move_types::HashiEvent;
 
 #[tracing::instrument(name = "watcher", skip_all)]
 pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Arc<Metrics>>) {
@@ -186,7 +187,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .state_mut()
                     .hashi
                     .proposals
-                    .proposals
+                    .active
                     .insert(proposal.id, proposal);
             }
             HashiEvent::ProposalDeletedEvent(proposal_deleted_event) => {
@@ -194,21 +195,31 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .state_mut()
                     .hashi
                     .proposals
-                    .proposals
+                    .active
                     .remove(&proposal_deleted_event.proposal_id);
             }
             HashiEvent::ProposalExecutedEvent(proposal_executed_event) => {
-                state
-                    .state_mut()
-                    .hashi
-                    .proposals
-                    .proposals
-                    .remove(&proposal_executed_event.proposal_id);
+                // Move the entry from `active` to `executed` to mirror
+                // the on-chain dual-bag layout. Scope the write lock so
+                // it's released before the async config refetch below.
+                {
+                    let mut state_lock = state.state_mut();
+                    let proposals = &mut state_lock.hashi.proposals;
+                    if let Some(proposal) = proposals
+                        .active
+                        .remove(&proposal_executed_event.proposal_id)
+                    {
+                        proposals
+                            .executed
+                            .insert(proposal_executed_event.proposal_id, proposal);
+                    }
+                }
 
                 // When an UpdateConfig or EmergencyPause proposal executes,
-                // the Hashi object's config field changes on-chain. The event
-                // carries no key/value payload, so re-fetch the config from
-                // the Hashi object to keep the in-memory state current.
+                // the Hashi object's config field changes on-chain. Re-fetch
+                // the config from the Hashi object to keep the in-memory
+                // state current. (The event now carries the typed `data`,
+                // so this could be applied directly in the future.)
                 if matches!(
                     parse_proposal_type_from_type_tag(&proposal_executed_event.proposal_type),
                     ProposalType::UpdateConfig | ProposalType::EmergencyPause
@@ -227,6 +238,26 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                         }
                     }
                 }
+
+                if matches!(
+                    parse_proposal_type_from_type_tag(&proposal_executed_event.proposal_type),
+                    ProposalType::AbortReconfig
+                ) {
+                    match bcs::from_bytes::<AbortReconfig>(&proposal_executed_event.data_bcs) {
+                        Ok(abort_reconfig) => {
+                            let mut state = state.state_mut();
+                            state
+                                .hashi
+                                .committees
+                                .committees_mut()
+                                .remove(&abort_reconfig.epoch);
+                            state.hashi.committees.set_pending_epoch_change(None);
+                        }
+                        Err(e) => {
+                            tracing::error!("unable to decode AbortReconfig proposal data: {e}");
+                        }
+                    }
+                }
             }
             HashiEvent::QuorumReachedEvent(_) => {}
             HashiEvent::PackageUpgradedEvent(package_upgraded_event) => {
@@ -234,7 +265,6 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     package_upgraded_event.version,
                     package_upgraded_event.package,
                 );
-                // TODO notify
             }
             HashiEvent::MintEvent(MintEvent { coin_type, .. })
             | HashiEvent::BurnEvent(BurnEvent { coin_type, .. }) => {
@@ -252,6 +282,8 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                         amount: deposit_requested_event.amount,
                         derivation_path: deposit_requested_event.derivation_path,
                     },
+                    approval_cert: None,
+                    approval_timestamp_ms: None,
                 };
                 state
                     .state_mut()
@@ -259,17 +291,32 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .deposit_queue
                     .requests
                     .insert(deposit_request.id, deposit_request);
-                // TODO notify
+            }
+            HashiEvent::DepositApprovedEvent(deposit_approved_event) => {
+                tracing::info!(deposit_request_id = %deposit_approved_event.request_id, "Deposit approved");
+                let mut state = state.state_mut();
+                // Stamp the in-memory request so the leader's next pass
+                // knows it's already approved and only needs to call
+                // `confirm_deposit` once the time-delay elapses. The
+                // event carries the same Sui-clock timestamp the
+                // on-chain request stores, so the local view matches
+                // the on-chain value exactly.
+                if let Some(request) = state
+                    .hashi
+                    .deposit_queue
+                    .requests
+                    .get_mut(&deposit_approved_event.request_id)
+                {
+                    request.approval_cert = Some(deposit_approved_event.cert.clone());
+                    request.approval_timestamp_ms =
+                        Some(deposit_approved_event.approval_timestamp_ms);
+                }
             }
             HashiEvent::DepositConfirmedEvent(deposit_confirmed_event) => {
                 tracing::info!(deposit_request_id = %deposit_confirmed_event.request_id, "Deposit confirmed");
                 let mut state = state.state_mut();
 
-                let utxo = super::types::Utxo {
-                    id: deposit_confirmed_event.utxo_id,
-                    amount: deposit_confirmed_event.amount,
-                    derivation_path: deposit_confirmed_event.derivation_path,
-                };
+                let utxo = deposit_confirmed_event.utxo.clone();
 
                 state
                     .hashi
@@ -284,7 +331,6 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                         locked_by: None,
                     },
                 );
-                // TODO notify
             }
             HashiEvent::ExpiredDepositDeletedEvent(expired_deposit_deleted_event) => {
                 tracing::info!(deposit_request_id = %expired_deposit_deleted_event.request_id, "Expired deposit deleted");
@@ -460,15 +506,6 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                     .set_pending_epoch_change(None)
                     .set_mpc_public_key(end_reconfig_event.mpc_public_key.clone());
             }
-            HashiEvent::AbortReconfigEvent(abort_reconfig_event) => {
-                let mut state = state.state_mut();
-                state
-                    .hashi
-                    .committees
-                    .committees_mut()
-                    .remove(&abort_reconfig_event.epoch);
-                state.hashi.committees.set_pending_epoch_change(None);
-            }
         }
     }
 
@@ -528,6 +565,7 @@ fn parse_proposal_type_from_type_tag(type_tag: &TypeTag) -> ProposalType {
         ("disable_version", "DisableVersion") => ProposalType::DisableVersion,
         ("upgrade", "Upgrade") => ProposalType::Upgrade,
         ("emergency_pause", "EmergencyPause") => ProposalType::EmergencyPause,
+        ("abort_reconfig", "AbortReconfig") => ProposalType::AbortReconfig,
         _ => ProposalType::Unknown(format!("{}::{}", struct_tag.module(), struct_tag.name())),
     }
 }

@@ -48,6 +48,10 @@ pub enum CreateProposalParams {
         version: u64,
         metadata: Vec<(String, String)>,
     },
+    AbortReconfig {
+        epoch: u64,
+        metadata: Vec<(String, String)>,
+    },
 }
 
 /// Live on-chain proposal detail fields not cached by `OnchainState`.
@@ -234,82 +238,93 @@ impl HashiClient {
         use sui_rpc::proto::sui::rpc::v2::DynamicField;
         use sui_rpc::proto::sui::rpc::v2::ListDynamicFieldsRequest;
 
-        let proposals_bag_id = self.onchain_state.state().hashi().proposals.id;
+        // The proposal could live in either the active or executed bag.
+        // Walk active first (the common case), then executed.
+        let (active_id, executed_id) = {
+            let state = self.onchain_state.state();
+            let proposals = &state.hashi().proposals;
+            (proposals.active_id(), proposals.executed_id())
+        };
         let client = self.onchain_state.client();
-        // Proposals are now stored in an `ObjectBag`, so each entry's payload
-        // lives on `child_object` (a standalone object), not inline on the
-        // `DynamicField` itself.
-        let mut stream = Box::pin(
-            client.list_dynamic_fields(
-                ListDynamicFieldsRequest::default()
-                    .with_parent(proposals_bag_id)
-                    .with_page_size(u32::MAX)
-                    .with_read_mask(FieldMask::from_paths([
-                        DynamicField::path_builder().name().finish(),
-                        DynamicField::path_builder().child_object().object_type(),
-                        DynamicField::path_builder()
-                            .child_object()
-                            .contents()
-                            .finish(),
-                    ])),
-            ),
-        );
 
-        while let Some(field) = stream.try_next().await? {
-            // The bag key is BCS-encoded `ID`, which is equivalent to `Address`.
-            let Ok(key) = bcs::from_bytes::<Address>(field.name().value()) else {
-                continue;
-            };
-            if key != proposal_id {
-                continue;
+        for bag_id in [active_id, executed_id] {
+            let mut stream = Box::pin(
+                client.list_dynamic_fields(
+                    ListDynamicFieldsRequest::default()
+                        .with_parent(bag_id)
+                        .with_page_size(u32::MAX)
+                        .with_read_mask(FieldMask::from_paths([
+                            DynamicField::path_builder().name().finish(),
+                            DynamicField::path_builder().child_object().object_type(),
+                            DynamicField::path_builder()
+                                .child_object()
+                                .contents()
+                                .finish(),
+                        ])),
+                ),
+            );
+
+            while let Some(field) = stream.try_next().await? {
+                // The bag key is BCS-encoded `ID`, which is equivalent to `Address`.
+                let Ok(key) = bcs::from_bytes::<Address>(field.name().value()) else {
+                    continue;
+                };
+                if key != proposal_id {
+                    continue;
+                }
+
+                let object_type_str = field.child_object().object_type();
+                let type_tag: TypeTag = object_type_str
+                    .parse()
+                    .with_context(|| format!("parse object_type {object_type_str:?}"))?;
+                let proposal_type = parse_proposal_type(&type_tag);
+
+                let value_bytes = field.child_object().contents().value();
+                let (creator, votes, quorum_threshold_bps, metadata) = match proposal_type {
+                    ProposalType::UpdateConfig => {
+                        let p: move_types::Proposal<move_types::UpdateConfig> =
+                            bcs::from_bytes(value_bytes).context("deserialize UpdateConfig")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
+                    ProposalType::EnableVersion => {
+                        let p: move_types::Proposal<move_types::EnableVersion> =
+                            bcs::from_bytes(value_bytes).context("deserialize EnableVersion")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
+                    ProposalType::DisableVersion => {
+                        let p: move_types::Proposal<move_types::DisableVersion> =
+                            bcs::from_bytes(value_bytes).context("deserialize DisableVersion")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
+                    ProposalType::Upgrade => {
+                        let p: move_types::Proposal<move_types::Upgrade> =
+                            bcs::from_bytes(value_bytes).context("deserialize Upgrade")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
+                    ProposalType::EmergencyPause => {
+                        let p: move_types::Proposal<move_types::EmergencyPause> =
+                            bcs::from_bytes(value_bytes).context("deserialize EmergencyPause")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
+                    ProposalType::AbortReconfig => {
+                        let p: move_types::Proposal<move_types::AbortReconfig> =
+                            bcs::from_bytes(value_bytes).context("deserialize AbortReconfig")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
+                    ProposalType::Unknown(s) => {
+                        anyhow::bail!("Cannot fetch details for unknown proposal type: {s}")
+                    }
+                };
+                return Ok(ProposalDetails {
+                    creator,
+                    votes,
+                    quorum_threshold_bps,
+                    metadata,
+                });
             }
-
-            let object_type_str = field.child_object().object_type();
-            let type_tag: TypeTag = object_type_str
-                .parse()
-                .with_context(|| format!("parse object_type {object_type_str:?}"))?;
-            let proposal_type = parse_proposal_type(&type_tag);
-
-            let value_bytes = field.child_object().contents().value();
-            let (creator, votes, quorum_threshold_bps, metadata) = match proposal_type {
-                ProposalType::UpdateConfig => {
-                    let p: move_types::Proposal<move_types::UpdateConfig> =
-                        bcs::from_bytes(value_bytes).context("deserialize UpdateConfig")?;
-                    (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
-                }
-                ProposalType::EnableVersion => {
-                    let p: move_types::Proposal<move_types::EnableVersion> =
-                        bcs::from_bytes(value_bytes).context("deserialize EnableVersion")?;
-                    (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
-                }
-                ProposalType::DisableVersion => {
-                    let p: move_types::Proposal<move_types::DisableVersion> =
-                        bcs::from_bytes(value_bytes).context("deserialize DisableVersion")?;
-                    (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
-                }
-                ProposalType::Upgrade => {
-                    let p: move_types::Proposal<move_types::Upgrade> =
-                        bcs::from_bytes(value_bytes).context("deserialize Upgrade")?;
-                    (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
-                }
-                ProposalType::EmergencyPause => {
-                    let p: move_types::Proposal<move_types::EmergencyPause> =
-                        bcs::from_bytes(value_bytes).context("deserialize EmergencyPause")?;
-                    (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
-                }
-                ProposalType::Unknown(s) => {
-                    anyhow::bail!("Cannot fetch details for unknown proposal type: {s}")
-                }
-            };
-            return Ok(ProposalDetails {
-                creator,
-                votes,
-                quorum_threshold_bps,
-                metadata,
-            });
         }
 
-        anyhow::bail!("Proposal {proposal_id} not found in proposals bag")
+        anyhow::bail!("Proposal {proposal_id} not found in proposals bags")
     }
 
     /// Fetch the MPC public key bytes from on-chain state
@@ -402,6 +417,7 @@ impl HashiClient {
             ProposalType::EnableVersion => "enable_version",
             ProposalType::DisableVersion => "disable_version",
             ProposalType::EmergencyPause => "emergency_pause",
+            ProposalType::AbortReconfig => "abort_reconfig",
             ProposalType::Upgrade => {
                 anyhow::bail!(
                     "Upgrade proposals require the full upgrade flow (execute + publish + finalize)"
@@ -511,6 +527,18 @@ pub fn build_create_proposal_transaction(
                     Identifier::from_static("propose"),
                 ),
                 vec![hashi_arg, version_arg, metadata_arg, clock_arg],
+            );
+        }
+        CreateProposalParams::AbortReconfig { epoch, metadata } => {
+            let epoch_arg = builder.pure(&epoch);
+            let metadata_arg = build_metadata(&mut builder, &metadata);
+            builder.move_call(
+                Function::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("abort_reconfig"),
+                    Identifier::from_static("propose"),
+                ),
+                vec![hashi_arg, epoch_arg, metadata_arg, clock_arg],
             );
         }
     }
@@ -641,6 +669,7 @@ pub fn get_proposal_type_arg(
         ProposalType::EnableVersion => ("enable_version", "EnableVersion"),
         ProposalType::DisableVersion => ("disable_version", "DisableVersion"),
         ProposalType::EmergencyPause => ("emergency_pause", "EmergencyPause"),
+        ProposalType::AbortReconfig => ("abort_reconfig", "AbortReconfig"),
         ProposalType::Unknown(s) => {
             anyhow::bail!(
                 "Cannot vote on unknown proposal type '{}'. \

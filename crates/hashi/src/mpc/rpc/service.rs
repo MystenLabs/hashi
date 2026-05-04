@@ -74,9 +74,9 @@ impl MpcService for HttpService {
         let response = {
             let mpc_manager = self.mpc_manager()?;
             let mgr = mpc_manager.read().unwrap();
-            validate_epoch_current_or_source(
+            validate_epoch_current_or_previous(
                 mgr.mpc_config.epoch,
-                mgr.source_epoch,
+                mgr.previous_epoch,
                 internal_request.epoch,
             )?;
             mgr.handle_retrieve_messages_request(&internal_request)
@@ -109,9 +109,9 @@ impl MpcService for HttpService {
         let mpc_manager = self.mpc_manager()?;
         let response = spawn_blocking(move || -> Result<_, Status> {
             let mut mgr = mpc_manager.write().unwrap();
-            validate_epoch_current_or_source(
+            validate_epoch_current_or_previous(
                 mgr.mpc_config.epoch,
-                mgr.source_epoch,
+                mgr.previous_epoch,
                 internal_request.epoch,
             )?;
             mgr.handle_complain_request(&internal_request).map_err(|e| {
@@ -215,14 +215,14 @@ fn validate_epoch(expected: u64, request_epoch: Option<u64>) -> Result<(), Statu
     Ok(())
 }
 
-fn validate_epoch_current_or_source(
+fn validate_epoch_current_or_previous(
     current_epoch: u64,
-    source_epoch: u64,
+    previous_epoch: u64,
     request_epoch: u64,
 ) -> Result<(), Status> {
-    if request_epoch != current_epoch && request_epoch != source_epoch {
+    if request_epoch != current_epoch && request_epoch != previous_epoch {
         return Err(Status::failed_precondition(format!(
-            "epoch mismatch: expected {current_epoch} or {source_epoch}, got {request_epoch}"
+            "epoch mismatch: expected {current_epoch} or {previous_epoch}, got {request_epoch}"
         )));
     }
     Ok(())

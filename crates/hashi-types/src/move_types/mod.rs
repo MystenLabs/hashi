@@ -42,7 +42,7 @@ pub struct Hashi {
     pub committees: CommitteeSet,
     pub config: Config,
     pub treasury: Treasury,
-    pub proposals: ObjectBag,
+    pub proposals: Proposals,
     /// TOB certificates by (epoch, batch_index) -> EpochCertsV1
     pub tob: Bag,
     /// Number of presignatures consumed in the current epoch.
@@ -224,6 +224,15 @@ pub struct Coin {
     pub balance: u64,
 }
 
+/// Rust version of the Move hashi::proposals::Proposals type.
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct Proposals {
+    /// Proposals that have been created but not yet executed.
+    pub active: ObjectBag,
+    /// Proposals that have executed successfully (kept indefinitely).
+    pub executed: ObjectBag,
+}
+
 /// Rust version of the Move hashi::deposit_queue::DepositRequestQueue type.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct DepositRequestQueue {
@@ -332,6 +341,10 @@ pub struct OutputUtxo {
 }
 
 /// Rust version of the Move hashi::deposit_queue::DepositRequest type.
+///
+/// `approval_cert` and `approval_timestamp_ms` are populated when the
+/// committee approves the deposit via `approve_deposit`. They remain
+/// `None` until then. `confirm_deposit` requires both to be set.
 #[derive(Clone, Debug, PartialEq, serde_derive::Deserialize)]
 pub struct DepositRequest {
     pub id: Address,
@@ -339,6 +352,8 @@ pub struct DepositRequest {
     pub timestamp_ms: u64,
     pub sui_tx_digest: Digest,
     pub utxo: Utxo,
+    pub approval_cert: Option<CommitteeSignature>,
+    pub approval_timestamp_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
@@ -443,6 +458,12 @@ pub struct EmergencyPause {
     pub pause: bool,
 }
 
+/// Rust version of the Move hashi::abort_reconfig::AbortReconfig type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct AbortReconfig {
+    pub epoch: u64,
+}
+
 /// Rust version of the Move sui::vec_map::VecMap type.
 #[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct VecMap<K, V> {
@@ -492,7 +513,7 @@ pub struct DealerMessagesHashV1 {
 }
 
 /// Rust version of the Move hashi::committee::CommitteeSignature type.
-#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct CommitteeSignature {
     pub epoch: u64,
     pub signature: Vec<u8>,
@@ -528,6 +549,7 @@ pub enum HashiEvent {
     MintEvent(MintEvent),
     BurnEvent(BurnEvent),
     DepositRequestedEvent(DepositRequestedEvent),
+    DepositApprovedEvent(DepositApprovedEvent),
     DepositConfirmedEvent(DepositConfirmedEvent),
     ExpiredDepositDeletedEvent(ExpiredDepositDeletedEvent),
     WithdrawalRequestedEvent(WithdrawalRequestedEvent),
@@ -538,7 +560,6 @@ pub enum HashiEvent {
     UtxoSpentEvent(UtxoSpentEvent),
     StartReconfigEvent(StartReconfigEvent),
     EndReconfigEvent(EndReconfigEvent),
-    AbortReconfigEvent(AbortReconfigEvent),
 }
 
 impl HashiEvent {
@@ -577,6 +598,9 @@ impl HashiEvent {
             DepositRequestedEvent::MODULE_NAME => {
                 DepositRequestedEvent::from_bcs(bcs.value())?.into()
             }
+            DepositApprovedEvent::MODULE_NAME => {
+                DepositApprovedEvent::from_bcs(bcs.value())?.into()
+            }
             DepositConfirmedEvent::MODULE_NAME => {
                 DepositConfirmedEvent::from_bcs(bcs.value())?.into()
             }
@@ -601,7 +625,6 @@ impl HashiEvent {
             UtxoSpentEvent::MODULE_NAME => UtxoSpentEvent::from_bcs(bcs.value())?.into(),
             StartReconfigEvent::MODULE_NAME => StartReconfigEvent::from_bcs(bcs.value())?.into(),
             EndReconfigEvent::MODULE_NAME => EndReconfigEvent::from_bcs(bcs.value())?.into(),
-            AbortReconfigEvent::MODULE_NAME => AbortReconfigEvent::from_bcs(bcs.value())?.into(),
             PackageUpgradedEvent::MODULE_NAME => {
                 PackageUpgradedEvent::from_bcs(bcs.value())?.into()
             }
@@ -768,15 +791,29 @@ impl From<ProposalDeletedEvent> for HashiEvent {
 pub struct ProposalExecutedEvent {
     pub proposal_id: Address,
     pub proposal_type: TypeTag,
+    /// BCS-encoded bytes of the proposal `data` payload (`T` in the Move
+    /// `ProposalExecutedEvent<T>`). Decode using `proposal_type` to get the
+    /// typed value.
+    pub data_bcs: Vec<u8>,
 }
 
 impl ProposalExecutedEvent {
     fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
         let proposal_type = extract_type_param::<Self>(event_type)?;
-        let proposal_id: Address = bcs::from_bytes(bcs)?;
+        // Layout is `(proposal_id: Address, data: T)`; Address is a fixed
+        // 32-byte BCS encoding with no length prefix, so split there.
+        if bcs.len() < 32 {
+            anyhow::bail!(
+                "ProposalExecutedEvent payload too short: {} bytes",
+                bcs.len()
+            );
+        }
+        let proposal_id: Address = bcs::from_bytes(&bcs[..32])?;
+        let data_bcs = bcs[32..].to_vec();
         Ok(Self {
             proposal_id,
             proposal_type,
+            data_bcs,
         })
     }
 }
@@ -913,13 +950,36 @@ impl From<DepositRequestedEvent> for HashiEvent {
     }
 }
 
+/// Emitted by `approve_deposit` when the committee certifies a pending
+/// deposit. The corresponding `hBTC` is not yet minted — the deposit
+/// must still wait through the time-delay window and then be confirmed.
+/// `approval_timestamp_ms` is the on-chain clock timestamp recorded on
+/// the request, against which `confirm_deposit` enforces the delay.
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct DepositApprovedEvent {
+    pub request_id: Address,
+    pub utxo: Utxo,
+    pub cert: CommitteeSignature,
+    pub approval_timestamp_ms: u64,
+}
+
+impl MoveType for DepositApprovedEvent {
+    const MODULE: &'static str = "deposit";
+    const NAME: &'static str = "DepositApprovedEvent";
+}
+
+impl From<DepositApprovedEvent> for HashiEvent {
+    fn from(value: DepositApprovedEvent) -> Self {
+        Self::DepositApprovedEvent(value)
+    }
+}
+
+/// Emitted by `confirm_deposit` once an approved deposit clears the
+/// time-delay window and the corresponding `hBTC` is minted.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct DepositConfirmedEvent {
     pub request_id: Address,
-    pub utxo_id: UtxoId,
-    pub amount: u64,
-    pub derivation_path: Option<Address>,
-    // signature: XXX
+    pub utxo: Utxo,
 }
 
 impl MoveType for DepositConfirmedEvent {
@@ -1094,22 +1154,6 @@ impl MoveType for EndReconfigEvent {
 impl From<EndReconfigEvent> for HashiEvent {
     fn from(value: EndReconfigEvent) -> Self {
         Self::EndReconfigEvent(value)
-    }
-}
-
-#[derive(Debug, serde_derive::Deserialize)]
-pub struct AbortReconfigEvent {
-    pub epoch: u64,
-}
-
-impl MoveType for AbortReconfigEvent {
-    const MODULE: &'static str = "reconfig";
-    const NAME: &'static str = "AbortReconfigEvent";
-}
-
-impl From<AbortReconfigEvent> for HashiEvent {
-    fn from(value: AbortReconfigEvent) -> Self {
-        Self::AbortReconfigEvent(value)
     }
 }
 

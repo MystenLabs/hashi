@@ -34,6 +34,8 @@ const ENoVoteFound: vector<u8> = b"Vote doesn't exist";
 const EProposalNotExpired: vector<u8> = b"Proposal not expired";
 #[error(code = 5)]
 const EProposalExpired: vector<u8> = b"Proposal expired";
+#[error(code = 6)]
+const EProposalAlreadyExecuted: vector<u8> = b"Proposal already executed";
 
 // ~~~~~~~ Public Functions ~~~~~~~
 
@@ -62,27 +64,44 @@ public(package) fun create<T: store>(
     };
 
     let proposal_id = object::id(&proposal);
-    hashi.proposals_mut().add(proposal_id, proposal);
+    hashi.proposals_mut().active_mut().add(proposal_id, proposal);
     proposal_events::emit_proposal_created_event<T>(proposal_id, timestamp_ms);
     proposal_id
 }
 
-public(package) fun execute<T: store>(hashi: &mut Hashi, proposal_id: ID, clock: &Clock): T {
-    let proposal: Proposal<T> = hashi.proposals_mut().remove(proposal_id);
-
-    assert!(proposal.quorum_reached(hashi), EQuorumNotReached);
-    assert!(!proposal.is_expired(clock), EProposalExpired);
-
+public(package) fun execute<T: copy + drop + store>(
+    hashi: &mut Hashi,
+    proposal_id: ID,
+    clock: &Clock,
+): T {
     hashi.config().assert_version_enabled();
 
-    proposal_events::emit_proposal_executed_event<T>(proposal.id.to_inner());
-    proposal.delete()
+    // Bag membership is the re-execution gate: an already-executed
+    // proposal lives only in the executed bag. Check that explicitly so
+    // the failure surface is `EProposalAlreadyExecuted` rather than the
+    // ObjectBag's generic missing-key abort.
+    assert!(
+        !hashi.proposals().executed().contains(proposal_id.to_address()),
+        EProposalAlreadyExecuted,
+    );
+    let proposal: Proposal<T> = hashi.proposals_mut().active_mut().remove(proposal_id);
+
+    assert!(!proposal.is_expired(clock), EProposalExpired);
+    assert!(proposal.quorum_reached(hashi), EQuorumNotReached);
+
+    let data = proposal.data;
+    let id = proposal.id.to_inner();
+
+    hashi.proposals_mut().executed_mut().add(id.to_address(), proposal);
+
+    proposal_events::emit_proposal_executed_event<T>(id, data);
+    data
 }
 
 public fun vote<T: store>(hashi: &mut Hashi, proposal_id: ID, clock: &Clock, ctx: &mut TxContext) {
     assert!(hashi.committee_set().has_member(ctx.sender()), EUnauthorizedCaller);
 
-    let proposal: &mut Proposal<T> = hashi.proposals_mut().borrow_mut(proposal_id);
+    let proposal: &mut Proposal<T> = hashi.proposals_mut().active_mut().borrow_mut(proposal_id);
 
     assert!(!proposal.votes.contains(&ctx.sender()), EVoteAlreadyCounted);
     assert!(!proposal.is_expired(clock), EProposalExpired);
@@ -98,7 +117,7 @@ public fun vote<T: store>(hashi: &mut Hashi, proposal_id: ID, clock: &Clock, ctx
 public fun remove_vote<T: store>(hashi: &mut Hashi, proposal_id: ID, ctx: &mut TxContext) {
     assert!(hashi.committee_set().has_member(ctx.sender()), EUnauthorizedCaller);
 
-    let proposal: &mut Proposal<T> = hashi.proposals_mut().borrow_mut(proposal_id);
+    let proposal: &mut Proposal<T> = hashi.proposals_mut().active_mut().borrow_mut(proposal_id);
     let index = proposal.votes.find_index!(|v| v == &ctx.sender()).destroy_or!(abort ENoVoteFound);
 
     proposal.votes.remove(index);
@@ -124,7 +143,15 @@ public fun is_expired<T>(proposal: &Proposal<T>, clock: &Clock): bool {
 }
 
 public fun delete_expired<T: store>(hashi: &mut Hashi, proposal_id: ID, clock: &Clock): T {
-    let proposal: Proposal<T> = hashi.proposals_mut().remove(proposal_id);
+    // Executed proposals are archived in the executed bag and must
+    // never be deletable, even after they expire. Refuse explicitly so
+    // the caller gets `EProposalAlreadyExecuted` instead of the bag's
+    // missing-key abort.
+    assert!(
+        !hashi.proposals().executed().contains(proposal_id.to_address()),
+        EProposalAlreadyExecuted,
+    );
+    let proposal: Proposal<T> = hashi.proposals_mut().active_mut().remove(proposal_id);
 
     assert!(proposal.is_expired(clock), EProposalNotExpired);
     proposal.delete()
