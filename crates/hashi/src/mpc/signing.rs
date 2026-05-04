@@ -5,7 +5,6 @@ use fastcrypto::error::FastCryptoError;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto_tbls::polynomial::Eval;
-use fastcrypto_tbls::polynomial::Poly;
 use fastcrypto_tbls::threshold_schnorr::Address as DerivationAddress;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::S;
@@ -13,6 +12,7 @@ use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
 use fastcrypto_tbls::threshold_schnorr::reed_solomon::RSDecoder;
 use fastcrypto_tbls::threshold_schnorr::signing::aggregate_signatures;
+use fastcrypto_tbls::threshold_schnorr::signing::finalize_schnorr_signature;
 use fastcrypto_tbls::threshold_schnorr::signing::generate_partial_signatures;
 use hashi_types::committee::Committee;
 use std::collections::HashMap;
@@ -519,22 +519,14 @@ fn aggregate_signatures_with_recovery(
 ) -> Result<SchnorrSignature, FastCryptoError> {
     let indices: Vec<_> = partial_signatures.iter().map(|e| e.index).collect();
     let values: Vec<_> = partial_signatures.iter().map(|e| e.value).collect();
-    let decoder = RSDecoder::new(indices.clone(), threshold as usize);
-    let coefficients = decoder.decode(&values)?;
-    // TODO: This re-interpolates a polynomial we have already decoded. Refactor `fastcrypto` to
-    // expose the constant term directly from the RS decoded message, avoiding redundant work.
-    let poly = Poly::from(coefficients);
-    let corrected_sigs: Vec<Eval<S>> = indices
-        .iter()
-        .take(threshold as usize)
-        .map(|&idx| poly.eval(idx))
-        .collect();
-    aggregate_signatures(
+    let s = RSDecoder::new(indices, threshold as usize)
+        .compute_message_polynomial(&values)?
+        .into_c0();
+    finalize_schnorr_signature(
         message,
         public_presig,
         beacon_value,
-        &corrected_sigs,
-        threshold,
+        s,
         verifying_key,
         derivation_address,
     )
@@ -583,6 +575,7 @@ mod tests {
     use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
     use fastcrypto::serde_helpers::ToFromByteArray;
     use fastcrypto::traits::AllowedRng;
+    use fastcrypto_tbls::polynomial::Poly;
     use fastcrypto_tbls::threshold_schnorr::batch_avss;
     use fastcrypto_tbls::types::ShareIndex;
     use hashi_types::committee::CommitteeMember;

@@ -2262,7 +2262,7 @@ dependencies = [
 [[package]]
 name = "fastcrypto"
 version = "0.1.9"
-source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=d6539fd65ce7f9a5a786af3340e511b7dae454c1#d6539fd65ce7f9a5a786af3340e511b7dae454c1"
+source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=b7c6bbef4ff289948de726b93efda77ac04f30cd#b7c6bbef4ff289948de726b93efda77ac04f30cd"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2323,7 +2323,7 @@ dependencies = [
 [[package]]
 name = "fastcrypto-derive"
 version = "0.1.3"
-source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=d6539fd65ce7f9a5a786af3340e511b7dae454c1#d6539fd65ce7f9a5a786af3340e511b7dae454c1"
+source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=b7c6bbef4ff289948de726b93efda77ac04f30cd#b7c6bbef4ff289948de726b93efda77ac04f30cd"
 dependencies = [
  "quote",
  "syn 1.0.109",
@@ -2332,7 +2332,7 @@ dependencies = [
 [[package]]
 name = "fastcrypto-tbls"
 version = "0.1.0"
-source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=d6539fd65ce7f9a5a786af3340e511b7dae454c1#d6539fd65ce7f9a5a786af3340e511b7dae454c1"
+source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=b7c6bbef4ff289948de726b93efda77ac04f30cd#b7c6bbef4ff289948de726b93efda77ac04f30cd"
 dependencies = [
  "bcs",
  "digest 0.10.7",
