@@ -17,7 +17,6 @@ FROM stagex/core-musl@sha256:89e2d41321862f61cad0165741fc04fc001bb8fc06702820d23
 FROM stagex/core-libunwind@sha256:b6915f100585cf071af2652843e23c7365be48043afc61d0154b6ef1eb626c0b AS core-libunwind
 FROM stagex/core-pkgconf@sha256:b40c471ca1046ce61904a2a8cf9480631b08a8733fdcd38d799b1633307c3dd6 AS core-pkgconf
 FROM stagex/core-busybox@sha256:d608daa946e4799cf28b105aba461db00187657bd55ea7c2935ff11dac237e27 AS core-busybox
-FROM stagex/core-python@sha256:2c04a2511b3307220fc9e1da9d3fa0820a9cb05e0d0235798ae9f874e2ca64a2 AS core-python
 FROM stagex/core-libzstd@sha256:dd234de20cd651715ffc67ced1bb06cc3ac3011d881055beda335869d7d4210f AS core-libzstd
 FROM stagex/user-eif_build@sha256:e2b942f290b74c9b1ac15d9abdb5f96451e3f8c659bd398d7d1f8c0d2a84562b AS user-eif_build
 FROM stagex/user-gen_initramfs@sha256:fcb68e3bea6e99b64087974a46f3e55bb216cf23f66efea2703835b9d784c19a AS user-gen_initramfs
@@ -65,7 +64,6 @@ WORKDIR /build_cpio
 ENV KBUILD_BUILD_TIMESTAMP=1
 RUN mkdir initramfs/
 COPY --from=core-busybox . initramfs
-COPY --from=core-python . initramfs
 COPY --from=core-musl . initramfs
 COPY --from=core-ca-certificates /etc/ssl/certs initramfs
 COPY --from=core-busybox /bin/sh initramfs/sh
@@ -73,10 +71,9 @@ COPY --from=user-jq /bin/jq initramfs
 COPY --from=user-socat /bin/socat . initramfs
 COPY --from=user-nit /bin/init initramfs
 RUN cp /target/${TARGET}/release/hashi-guardian initramfs/guardian
-COPY docker/hashi-guardian/traffic_forwarder.py initramfs/
 COPY docker/hashi-guardian/run.sh initramfs/
 RUN sed -i "s/\${BUCKET_NAME}/${BUCKET_NAME}/g; s/\${AWS_REGION}/${AWS_REGION}/g" initramfs/run.sh
-RUN chmod 755 initramfs/run.sh && chmod 644 initramfs/traffic_forwarder.py
+RUN chmod 755 initramfs/run.sh
 
 COPY <<-EOF initramfs/etc/environment
 SSL_CERT_FILE=/ca-certificates.crt
