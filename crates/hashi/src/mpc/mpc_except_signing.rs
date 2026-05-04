@@ -68,6 +68,7 @@ use hashi_types::committee::Bls12381PrivateKey;
 use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::Committee;
 use hashi_types::committee::MemberSignature;
+use rand::seq::SliceRandom;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -3847,11 +3848,12 @@ fn fan_out_complaints<'a, P: P2PChannel + 'a>(
 }
 
 async fn hedged_retrieve<'a, P: P2PChannel + 'a>(
-    signers: Vec<Address>,
+    mut signers: Vec<Address>,
     p2p_channel: &'a P,
     request: &'a RetrieveMessagesRequest,
     expected_hash: MessageHash,
 ) -> Option<Messages> {
+    signers.shuffle(&mut rand::thread_rng());
     let mut remaining = signers.into_iter();
     let mut in_flight: FuturesUnordered<_> = FuturesUnordered::new();
     let mut round_size = HEDGED_RETRIEVE_INITIAL_ROUND_SIZE;
