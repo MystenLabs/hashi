@@ -6334,8 +6334,9 @@ async fn test_prepare_previous_output_for_new_member() {
 
     // Call prepare_previous_output for new member
     let new_member_manager = Arc::new(RwLock::new(new_member_manager));
+    let metrics = test_metrics();
     let (previous_output, is_member_of_previous_committee) =
-        MpcManager::prepare_previous_output(&new_member_manager, &[], &mock_p2p)
+        MpcManager::prepare_previous_output(&new_member_manager, &[], &mock_p2p, &metrics)
             .await
             .unwrap();
 
@@ -6409,8 +6410,9 @@ async fn test_prepare_previous_output_retrieves_missing_dkg_messages() {
     let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
 
     let previous_certs = rotation_setup.certificates();
+    let metrics = test_metrics();
     let (previous_output, is_member) =
-        MpcManager::prepare_previous_output(&test_manager, &previous_certs, &mock_p2p)
+        MpcManager::prepare_previous_output(&test_manager, &previous_certs, &mock_p2p, &metrics)
             .await
             .expect("prepare_previous_output should succeed by retrieving missing DKG messages");
 
@@ -6516,8 +6518,9 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
 
     let mock_p2p = MockP2PChannel::new(other_managers_map, test_addr);
 
+    let metrics = test_metrics();
     let (previous_output, is_member) =
-        MpcManager::prepare_previous_output(&test_manager, &rotation_certs, &mock_p2p)
+        MpcManager::prepare_previous_output(&test_manager, &rotation_certs, &mock_p2p, &metrics)
             .await
             .expect(
                 "prepare_previous_output should succeed by retrieving missing rotation messages",
