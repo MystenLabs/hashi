@@ -131,9 +131,6 @@ pub const CONFIRMATION_STATUS_LABELS: &[&str] = &[
     "6_plus",
 ];
 
-// Body-size buckets spanning 256 B through 32 MiB. Powers of four keep
-// the bucket count modest while still resolving small and large
-// payloads.
 const MESSAGE_SIZE_BYTES_BUCKETS: &[f64] = &[
     256.,
     1_024.,
@@ -143,6 +140,7 @@ const MESSAGE_SIZE_BYTES_BUCKETS: &[f64] = &[
     262_144.,
     1_048_576.,
     4_194_304.,
+    8_388_608.,
     16_777_216.,
     33_554_432.,
 ];
