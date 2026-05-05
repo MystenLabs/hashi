@@ -3995,6 +3995,14 @@ fn build_reduced_nodes(
     } else {
         MIN_TOTAL_WEIGHT_AFTER_REDUCTION.min(total_weight)
     };
+    tracing::info!(
+        pre_reduction_total_weight = total_weight,
+        threshold,
+        max_faulty,
+        weight_reduction_allowed_delta,
+        lower_bound,
+        "build_reduced_nodes: pre-reduction parameters"
+    );
     Nodes::prop_reduce(
         nodes_vec,
         threshold,
