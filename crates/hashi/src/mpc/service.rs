@@ -611,6 +611,12 @@ impl MpcService {
         } else {
             MPC_LABEL_KEY_ROTATION
         };
+        if self.get_pending_epoch_change() != Some(target_epoch) {
+            info!(
+                "handle_reconfig: epoch {target_epoch} no longer pending at entry, aborting before start",
+            );
+            return;
+        }
         let metrics = &self.inner.metrics;
         let _reconfig_timer = metrics
             .mpc_reconfig_total_duration_seconds
