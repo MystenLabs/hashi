@@ -957,7 +957,7 @@ fn test_mpc_manager_new_with_weighted_committee() {
     // With total_weight=15:
     // threshold = ceil(15*3333/10000) = ceil(4.9995) = 5
     // max_faulty = ceil(15*2000/10000) = ceil(3.0) = 3
-    // (after new_reduced_with_f with allowed_delta=0, no reduction)
+    // (after prop_reduce with allowed_delta=0, no reduction)
     assert_eq!(manager.mpc_config.threshold, 5);
     assert_eq!(manager.mpc_config.max_faulty, 3);
 }
@@ -2498,7 +2498,7 @@ async fn test_run_as_party_with_reduced_weights() {
 
     assert_ne!(
         original_weight, reduced_weight,
-        "Test requires weights to be reduced by Nodes::new_reduced. \
+        "Test requires weights to be reduced by Nodes::prop_reduce. \
              Original: {}, Reduced: {}. If equal, this test won't catch the bug.",
         original_weight, reduced_weight
     );

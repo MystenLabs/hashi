@@ -1081,7 +1081,7 @@ impl MpcManager {
                     tracing::warn!("No dealer output for {:?} after processing", dealer);
                     continue;
                 }
-                // Use the reduced weights (after `Nodes::new_reduced`), not the original committee weights.
+                // Use the reduced weights, not the original committee weights.
                 let party_id = mgr
                     .committee
                     .index_of(&dealer)
@@ -3955,7 +3955,7 @@ fn build_reduced_nodes(
     } else {
         MIN_TOTAL_WEIGHT_AFTER_REDUCTION.min(total_weight)
     };
-    Nodes::new_reduced_with_f(
+    Nodes::prop_reduce(
         nodes_vec,
         threshold,
         max_faulty,
