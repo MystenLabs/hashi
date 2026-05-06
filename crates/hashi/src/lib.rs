@@ -557,28 +557,34 @@ impl Hashi {
         sui_tx_executor::sweep_to_address_balance(&mut self.onchain_state().client(), &self.config)
             .await?;
 
+        let next_epoch_encryption_pub = match self.next_reconfig_epoch().await {
+            Ok(next_epoch) => self
+                .prepare_encryption_key(next_epoch)
+                .inspect_err(|e| {
+                    tracing::warn!(
+                        "Failed to prepare encryption key for epoch {next_epoch}: {e}; \
+                         will retry before next start_reconfig"
+                    )
+                })
+                .ok(),
+            Err(e) => {
+                tracing::warn!("Failed to compute next reconfig epoch: {e}");
+                None
+            }
+        };
+
         // Register validator (if not already registered) and update any stale metadata.
         match sui_tx_executor::SuiTxExecutor::from_config(&self.config, self.onchain_state())?
-            .execute_register_or_update_validator(&self.config, None, None)
+            .execute_register_or_update_validator(
+                &self.config,
+                None,
+                next_epoch_encryption_pub.as_ref(),
+            )
             .await
         {
             Ok(true) => tracing::info!("Validator registered/updated on-chain"),
             Ok(false) => tracing::debug!("Validator metadata is already up-to-date"),
             Err(e) => tracing::warn!("Failed to register/update validator metadata: {e}"),
-        }
-
-        match self.next_reconfig_epoch().await {
-            Ok(next_epoch) => {
-                if let Err(e) = self.prepare_and_register_encryption_key(next_epoch).await {
-                    tracing::warn!(
-                        "Initial encryption key registration for epoch {next_epoch} \
-                         failed: {e}; will retry before next start_reconfig"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to compute next reconfig epoch: {e}");
-            }
         }
 
         if self.is_in_current_committee() {
