@@ -114,9 +114,17 @@ flowchart TD
     subgraph Committee["Hashi Protocol Committee"]
         MEMBERS2["Committee Members<br/>(Sui Validators)"]
         VOTE["Vote to process withdrawal<br/>& select UTXOs"]
+        VAL["validate_consume()<br/>per-node read-only<br/>seq + capacity check"]
         MPC["MPC Signing Protocol"]
+        BLS_GW["Aggregate BLS cert over<br/>StandardWithdrawalRequest<br/>(wid, seq, ts, utxos)"]
+        LL["LocalLimiter<br/>(per-node cache:<br/>next_seq, tokens)"]
         SIGN2["Aggregate BLS Signatures"]
         CERT2["CommitteeSignature"]
+    end
+
+    subgraph Guardian["Hashi Guardian (off-chain rate limiter)"]
+        GRL["RateLimiter<br/>{ next_seq,<br/>num_tokens, last_updated }"]
+        STD_RPC["StandardWithdrawal RPC<br/>verifies committee cert,<br/>consumes from limiter,<br/>returns enclave signature"]
     end
 
     subgraph Bitcoin["Bitcoin Network"]
@@ -132,9 +140,16 @@ flowchart TD
     VOTE --> BURN
     BURN -->|"Balance&lt;BTC&gt; burned"| PW
     PW --> PWQ
-    PWQ -.->|"Observe withdrawal<br/>transactions"| MPC
-    MPC -->|"Schnorr signatures<br/>per input"| SUBMIT_SIGS
+    PWQ -.->|"Observe withdrawal<br/>transactions"| VAL
+    LL -.->|"current next_seq,<br/>capacity"| VAL
+    VAL -->|"validation passes"| MPC
+    MPC -->|"Schnorr witness signatures<br/>per input"| BLS_GW
+    BLS_GW -->|"finalize_withdrawal_<br/>through_guardian"| STD_RPC
+    STD_RPC -->|"consume(wid, seq, ts, amt)"| GRL
+    GRL -.->|"GetGuardianInfo<br/>(bootstrap only)"| LL
+    BLS_GW -->|"witness signatures + cert"| SUBMIT_SIGS
     SUBMIT_SIGS -->|"signatures<br/>stored on-chain"| PW_SIGNED
+    PW_SIGNED -.->|"WithdrawalSignedEvent<br/>each node's observer:<br/>apply_consume(next_seq, ts, amt)"| LL
     PW_SIGNED -->|"Reconstruct & broadcast<br/>signed BTC tx"| BTC_TX
     BTC_TX --> BTC_UTXO
     BTC_UTXO -.->|"Observe confirmation<br/>(N confirmations)"| SIGN2
@@ -146,15 +161,20 @@ flowchart TD
     style Bitcoin fill:#f7931a,color:#fff
     style Committee fill:#E91E8A,color:#fff
     style Sui fill:#4da2ff,color:#fff
+    style Guardian fill:#7B1FA2,color:#fff
     style BAL fill:#00d4aa,color:#000
     style BTC_UTXO fill:#f7931a,color:#fff
     style CERT2 fill:#E91E8A,color:#fff
     style CERTIFIED2 fill:#00d4aa,color:#000
     style PW_SIGNED fill:#00d4aa,color:#000
     style MOVE_CONFIRMED fill:#00d4aa,color:#000
+    style GRL fill:#7B1FA2,color:#fff
+    style LL fill:#E91E8A,color:#fff
 ```
 
 > **Note:** The Bitcoin confirmation threshold is stored on-chain in config key `bitcoin_confirmation_threshold` (default `6`). Witness signatures are stored on-chain so that any leader can reconstruct and re-broadcast the signed Bitcoin transaction without MPC re-signing (e.g., after leader rotation or mempool eviction).
+>
+> **Limiter coordination.** The `LocalLimiter` on each committee node is a deterministic projection of the on-chain stream — its `next_seq` advances **only** when the node's watcher observes `WithdrawalSignedEvent` for a withdrawal. The MPC signing path uses `validate_consume` (read-only) to gate participation, never to mutate state. Because the leader's flow only reaches `sign_withdrawal()` after `finalize_withdrawal_through_guardian` returns Ok, observing the on-chain signed event is a sufficient proxy for "guardian acked" — so the local cache and the guardian stay in lockstep across leader rotation, MPC retries, and guardian-RPC failures. On startup each node bootstraps its `LocalLimiter` once via `GetGuardianInfo`.
 
 ### Withdrawal Flow Summary
 
@@ -163,11 +183,15 @@ flowchart TD
 | 1    | User requests withdrawal                     | `Balance<BTC>` → `WithdrawalRequest` → `WithdrawalRequestQueue.requests`    |
 | 2    | Committee approves request                   | `WithdrawalRequest` status → `Approved`                                     |
 | 3    | Leader commits withdrawal tx                 | `Balance<BTC>` burned, `WithdrawalTransaction` created in `.withdrawal_txns`|
-| 4    | MPC protocol signs Bitcoin transaction       | Committee collectively signs via MPC using selected UTXOs                   |
-| 5    | Leader stores witness signatures on-chain    | `sign_withdrawal()` → `WithdrawalTransaction` updated with signatures       |
-| 6    | BTC transaction broadcast (and re-broadcast) | Signed tx reconstructed from on-chain data, broadcast to Bitcoin            |
-| 7    | Committee signs confirmation certificate     | `CommitteeSignature` created after BTC tx confirmed                         |
-| 8    | Leader confirms withdrawal                   | `WithdrawalTransaction` moved to `.confirmed_txns`, UTXOs marked spent      |
+| 4    | Per-node limiter validation gates MPC        | Each node's `LocalLimiter::validate_consume(seq, ts, amt)` (read-only)      |
+| 5    | MPC protocol signs Bitcoin transaction       | Committee collectively signs via MPC using selected UTXOs                   |
+| 6    | Leader BLS-certs `StandardWithdrawalRequest` | Aggregated cert over `(wid, seq, ts, utxos)` — input to the guardian RPC    |
+| 7    | Guardian rate-limit check + enclave sig      | `StandardWithdrawal` RPC: verify cert → `consume(wid, seq)` → `EnclaveSig`  |
+| 8    | Leader stores witness signatures on-chain    | `sign_withdrawal()` → `WithdrawalTransaction` updated with signatures       |
+| 9    | Each node advances its `LocalLimiter`        | Watcher observes `WithdrawalSignedEvent` → `apply_consume(seq, ts, amt)`    |
+| 10   | BTC transaction broadcast (and re-broadcast) | Signed tx reconstructed from on-chain data, broadcast to Bitcoin            |
+| 11   | Committee signs confirmation certificate     | `CommitteeSignature` created after BTC tx confirmed                         |
+| 12   | Leader confirms withdrawal                   | `WithdrawalTransaction` moved to `.confirmed_txns`, UTXOs marked spent      |
 
 ---
 
