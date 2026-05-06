@@ -115,8 +115,7 @@ pub struct SignWithdrawalTransactionRequest {
     pub withdrawal_txn_id: ::prost::bytes::Bytes,
     /// Set when the leader's local guardian limiter is initialized. Each
     /// committee member validates this against its own limiter's `next_seq`
-    /// before participating in MPC signing, and uses it when advancing local
-    /// state after signing succeeds.
+    /// before participating in MPC signing.
     #[prost(uint64, optional, tag = "2")]
     pub expected_limiter_seq: ::core::option::Option<u64>,
 }

@@ -131,8 +131,7 @@ message SignWithdrawalTransactionRequest {
 
   // Set when the leader's local guardian limiter is initialized. Each
   // committee member validates this against its own limiter's `next_seq`
-  // before participating in MPC signing, and uses it when advancing local
-  // state after signing succeeds.
+  // before participating in MPC signing.
   optional uint64 expected_limiter_seq = 2;
 }
 
