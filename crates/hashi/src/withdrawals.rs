@@ -578,14 +578,14 @@ impl Hashi {
                     .map_err(|e| anyhow!("Limiter rejected withdrawal {}: {e}", txn.id))?;
             }
             (None, None) => {}
-            (local, expected) => {
-                tracing::warn!(
-                    withdrawal_txn_id = %txn.id,
-                    local_configured = local.is_some(),
-                    expected_seq_provided = expected.is_some(),
-                    "Skipping local limiter validation due to configuration mismatch"
-                );
-            }
+            (Some(_), None) => anyhow::bail!(
+                "Local limiter is configured but request for withdrawal {} lacks expected_limiter_seq",
+                txn.id
+            ),
+            (None, Some(_)) => anyhow::bail!(
+                "Request for withdrawal {} carries expected_limiter_seq but local limiter is not configured",
+                txn.id
+            ),
         }
         let p2p_channel =
             RpcP2PChannel::new(onchain_state, epoch, crate::metrics::MPC_LABEL_SIGNING);
