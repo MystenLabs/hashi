@@ -322,36 +322,6 @@ impl TryFrom<&proto::ComplainRequest> for types::ComplainRequest {
 // ComplainResponse
 //
 
-/// Parse rotation responses map from proto.
-#[allow(clippy::result_large_err)]
-fn parse_rotation_responses_map(
-    map: &std::collections::HashMap<u32, Bcs>,
-) -> Result<
-    BTreeMap<ShareIndex, complaint::ComplaintResponse<avss::SharesForNode>>,
-    TryFromProtoError,
-> {
-    let mut responses = BTreeMap::new();
-    for (&index, bcs) in map {
-        let share_index = ShareIndex::new(index as u16).ok_or_else(|| {
-            TryFromProtoError::invalid("rotation_responses.key", "index must be non-zero")
-        })?;
-        let response: complaint::ComplaintResponse<avss::SharesForNode> =
-            deserialize_bcs(bcs, "rotation_responses.value")?;
-        responses.insert(share_index, response);
-    }
-    Ok(responses)
-}
-
-/// Convert rotation responses map to proto format.
-fn rotation_responses_to_proto(
-    responses: &BTreeMap<ShareIndex, complaint::ComplaintResponse<avss::SharesForNode>>,
-) -> std::collections::HashMap<u32, Bcs> {
-    responses
-        .iter()
-        .map(|(idx, resp)| (idx.get() as u32, serialize_bcs(resp)))
-        .collect()
-}
-
 impl From<&types::ComplaintResponses> for proto::ComplainResponse {
     fn from(value: &types::ComplaintResponses) -> Self {
         use proto::complain_response::Responses;
@@ -359,10 +329,8 @@ impl From<&types::ComplaintResponses> for proto::ComplainResponse {
             types::ComplaintResponses::Dkg(response) => {
                 Responses::DkgResponse(serialize_bcs(response))
             }
-            types::ComplaintResponses::Rotation(responses) => {
-                Responses::RotationResponses(proto::RotationResponses {
-                    responses: rotation_responses_to_proto(responses),
-                })
+            types::ComplaintResponses::Rotation(response) => {
+                Responses::RotationResponse(serialize_bcs(response))
             }
             types::ComplaintResponses::NonceGeneration(response) => {
                 Responses::NonceResponse(serialize_bcs(response))
@@ -385,10 +353,10 @@ impl TryFrom<&proto::ComplainResponse> for types::ComplaintResponses {
                     deserialize_bcs(dkg_response, "dkg_response")?;
                 Ok(types::ComplaintResponses::Dkg(response))
             }
-            Some(Responses::RotationResponses(rotation)) => {
-                Ok(types::ComplaintResponses::Rotation(
-                    parse_rotation_responses_map(&rotation.responses)?,
-                ))
+            Some(Responses::RotationResponse(rotation_response)) => {
+                let response: complaint::ComplaintResponse<avss::SharesForNode> =
+                    deserialize_bcs(rotation_response, "rotation_response")?;
+                Ok(types::ComplaintResponses::Rotation(response))
             }
             Some(Responses::NonceResponse(nonce_response)) => {
                 let response: complaint::ComplaintResponse<batch_avss::SharesForNode> =

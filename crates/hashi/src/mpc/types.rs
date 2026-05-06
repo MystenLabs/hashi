@@ -232,7 +232,7 @@ pub struct ComplainRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ComplaintResponses {
     Dkg(complaint::ComplaintResponse<avss::SharesForNode>),
-    Rotation(BTreeMap<ShareIndex, complaint::ComplaintResponse<avss::SharesForNode>>),
+    Rotation(complaint::ComplaintResponse<avss::SharesForNode>),
     NonceGeneration(complaint::ComplaintResponse<batch_avss::SharesForNode>),
 }
 
@@ -452,7 +452,9 @@ pub struct DealerFlowData {
 
 pub(crate) struct RotationComplainContext {
     pub(crate) request: ComplainRequest,
-    pub(crate) recovery_contexts: HashMap<ShareIndex, (avss::Receiver, avss::Message)>,
+    pub(crate) receiver: avss::Receiver,
+    pub(crate) message: avss::Message,
+    pub(crate) share_index: ShareIndex,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -472,14 +474,22 @@ pub enum ComplaintsToProcessKey {
 pub enum MessageResponsesKey {
     Dkg { sender: Address },
     Rotation { sender: Address },
-    NonceGen { batch_index: u32, sender: Address },
+    NonceGeneration { batch_index: u32, sender: Address },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ComplaintResponsesKey {
-    Dkg { dealer: Address },
-    Rotation { dealer: Address },
-    NonceGen { batch_index: u32, dealer: Address },
+    Dkg {
+        dealer: Address,
+    },
+    Rotation {
+        dealer: Address,
+        share_index: ShareIndex,
+    },
+    NonceGeneration {
+        batch_index: u32,
+        dealer: Address,
+    },
 }
 
 #[derive(Clone, Debug)]

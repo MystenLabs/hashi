@@ -2016,27 +2016,22 @@ pub struct ComplainRequest {
     #[prost(uint32, optional, tag = "6")]
     pub batch_index: ::core::option::Option<u32>,
 }
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct RotationResponses {
-    #[prost(map = "uint32, message", tag = "1")]
-    pub responses: ::std::collections::HashMap<u32, ::sui_rpc::proto::sui::rpc::v2::Bcs>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ComplainResponse {
     #[prost(oneof = "complain_response::Responses", tags = "1, 2, 3")]
     pub responses: ::core::option::Option<complain_response::Responses>,
 }
 /// Nested message and enum types in `ComplainResponse`.
 pub mod complain_response {
-    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
     pub enum Responses {
-        /// For DKG: single response.
+        /// For DKG
         #[prost(message, tag = "1")]
         DkgResponse(::sui_rpc::proto::sui::rpc::v2::Bcs),
-        /// For key rotation: responses keyed by share index.
+        /// For key rotation
         #[prost(message, tag = "2")]
-        RotationResponses(super::RotationResponses),
-        /// For nonce generation: single response.
+        RotationResponse(::sui_rpc::proto::sui::rpc::v2::Bcs),
+        /// For nonce generation
         #[prost(message, tag = "3")]
         NonceResponse(::sui_rpc::proto::sui::rpc::v2::Bcs),
     }

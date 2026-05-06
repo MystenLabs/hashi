@@ -6966,8 +6966,7 @@ fn test_handle_complain_request_success() {
         .try_sign_rotation_messages(&responder_dkg_output, dealer_addr, &cheating_messages)
         .unwrap();
 
-    // Create the complaint request (response will contain ALL shares from dealer)
-    // For rotation, share_index specifies which share triggered the complaint
+    // Create the complaint request for a specific share index.
     let request = ComplainRequest {
         dealer: dealer_addr,
         share_index: Some(first_share_index),
@@ -6986,27 +6985,21 @@ fn test_handle_complain_request_success() {
         result.err()
     );
     let response = result.unwrap();
-    // Response contains ALL shares from this dealer (if dealer cheated on one, reveal all)
-    let rotation_responses = match &response {
-        ComplaintResponses::Rotation(map) => map,
+    // Response carries only the responder's shares for the complained share index.
+    match &response {
+        ComplaintResponses::Rotation(_) => {}
         ComplaintResponses::Dkg(_) | ComplaintResponses::NonceGeneration(_) => {
             panic!("Expected rotation complaint response")
         }
     };
-    // Dealer has weight=3, so 3 share indices, all should be in response
-    assert_eq!(rotation_responses.len(), 3);
-    // The complained share should be in the response
-    assert!(
-        rotation_responses.contains_key(&first_share_index),
-        "Response should include the complained share"
-    );
 
-    // Verify response is cached by dealer
+    // Verify response is cached keyed by (dealer, share_index)
     assert!(
         responder_manager
             .complaint_responses
             .contains_key(&ComplaintResponsesKey::Rotation {
-                dealer: dealer_addr
+                dealer: dealer_addr,
+                share_index: first_share_index,
             }),
         "Response should be cached"
     );
@@ -8789,7 +8782,7 @@ fn test_handle_send_messages_request_different_protocols_same_sender_coexist() {
     assert!(
         receiver
             .message_responses
-            .contains_key(&MessageResponsesKey::NonceGen {
+            .contains_key(&MessageResponsesKey::NonceGeneration {
                 batch_index: 0,
                 sender: sender_addr,
             }),
@@ -8956,7 +8949,7 @@ fn test_handle_complain_request_nonce_caches_response() {
     assert!(
         party2
             .complaint_responses
-            .contains_key(&ComplaintResponsesKey::NonceGen {
+            .contains_key(&ComplaintResponsesKey::NonceGeneration {
                 batch_index: 0,
                 dealer: dealer_addr,
             })
