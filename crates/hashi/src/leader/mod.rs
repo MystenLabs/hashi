@@ -1252,10 +1252,7 @@ impl LeaderService {
         }
         info!("MPC signing withdrawal transaction");
 
-        // Leader-side limiter check before broadcasting MPC: peek next_seq
-        // and validate locally so we don't waste an MPC round if our own
-        // limiter would reject the consume. The same expected_seq is
-        // forwarded to every committee member via the MPC request.
+        // Fail fast before MPC if our own limiter would reject.
         let expected_limiter_seq = if let Some(limiter) = inner.local_limiter() {
             let amount_sats: u64 = txn.withdrawal_outputs.iter().map(|o| o.amount).sum();
             let timestamp_secs = txn.timestamp_ms / 1000;

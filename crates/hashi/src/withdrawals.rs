@@ -565,9 +565,6 @@ impl Hashi {
                 epoch,
             );
         }
-        // Read-only seq + capacity check before MPC. Local state is mutated
-        // by a downstream observer in a later commit in this stack, never by
-        // this signing path.
         match (self.local_limiter(), expected_limiter_seq) {
             (Some(limiter), Some(expected_seq)) => {
                 let amount_sats: u64 = txn.withdrawal_outputs.iter().map(|o| o.amount).sum();
