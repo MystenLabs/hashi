@@ -96,6 +96,11 @@ pub struct Metrics {
     pub mpc_completion_duration_seconds: HistogramVec,
     pub mpc_presig_conversion_duration_seconds: HistogramVec,
     pub mpc_rotation_prepare_previous_duration_seconds: HistogramVec,
+    pub mpc_prepare_previous_retrieve_duration_seconds: HistogramVec,
+    pub mpc_prepare_previous_reconstruct_duration_seconds: HistogramVec,
+    pub mpc_prepare_previous_complaint_recovery_duration_seconds: HistogramVec,
+    pub mpc_prepare_previous_complaint_recovery_total: IntCounterVec,
+    pub mpc_prepare_previous_fetch_public_output_duration_seconds: HistogramVec,
     pub mpc_sign_partial_gen_duration_seconds: HistogramVec,
     pub mpc_sign_collection_duration_seconds: HistogramVec,
     pub mpc_sign_aggregation_duration_seconds: HistogramVec,
@@ -596,6 +601,46 @@ impl Metrics {
             mpc_rotation_prepare_previous_duration_seconds: register_histogram_vec_with_registry!(
                 "hashi_mpc_rotation_prepare_previous_duration_seconds",
                 "Duration of prepare_previous_output",
+                &["protocol"],
+                LATENCY_SEC_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_prepare_previous_retrieve_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_prepare_previous_retrieve_duration_seconds",
+                "Duration of retrieve_missing_previous_messages",
+                &["protocol"],
+                LATENCY_SEC_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_prepare_previous_reconstruct_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_prepare_previous_reconstruct_duration_seconds",
+                "Duration of one reconstruct_previous_output spawn_blocking call inside \
+                 the complaint-recovery loop.",
+                &["protocol"],
+                LATENCY_SEC_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_prepare_previous_complaint_recovery_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_prepare_previous_complaint_recovery_duration_seconds",
+                "Duration of one complaint recovery call inside prepare_previous_output.",
+                &["protocol"],
+                LATENCY_SEC_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_prepare_previous_complaint_recovery_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_prepare_previous_complaint_recovery_total",
+                "Total complaint recoveries performed inside prepare_previous_output.",
+                &["protocol"],
+                registry,
+            )
+            .unwrap(),
+            mpc_prepare_previous_fetch_public_output_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_mpc_prepare_previous_fetch_public_output_duration_seconds",
+                "Duration of fetch_and_build_public_output.",
                 &["protocol"],
                 LATENCY_SEC_BUCKETS.to_vec(),
                 registry,

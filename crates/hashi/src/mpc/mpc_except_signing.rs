@@ -625,7 +625,8 @@ impl MpcManager {
             .with_label_values(&[MPC_LABEL_KEY_ROTATION])
             .start_timer();
         let (previous, is_member_of_previous_committee) =
-            Self::prepare_previous_output(mpc_manager, previous_certificates, p2p_channel).await?;
+            Self::prepare_previous_output(mpc_manager, previous_certificates, p2p_channel, metrics)
+                .await?;
         drop(_timer);
         tracing::info!(
             "run_key_rotation: prepare_previous_output complete, \
@@ -3281,6 +3282,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         previous_certificates: &[CertificateV1],
         p2p_channel: &impl P2PChannel,
+        metrics: &Metrics,
     ) -> MpcResult<(MpcOutput, bool)> {
         let (is_member_of_previous_committee, threshold_opt) = {
             let mgr = mpc_manager.read().unwrap();
@@ -3293,16 +3295,22 @@ impl MpcManager {
         };
         let previous = if is_member_of_previous_committee {
             let reconstruction_result = async {
+                let _retrieve_timer = metrics
+                    .mpc_prepare_previous_retrieve_duration_seconds
+                    .with_label_values(&[MPC_LABEL_KEY_ROTATION])
+                    .start_timer();
                 Self::retrieve_missing_previous_messages(
                     mpc_manager,
                     previous_certificates,
                     p2p_channel,
                 )
                 .await?;
+                drop(_retrieve_timer);
                 Self::reconstruct_with_complaint_recovery(
                     mpc_manager,
                     previous_certificates,
                     p2p_channel,
+                    metrics,
                 )
                 .await
             }
@@ -3311,11 +3319,19 @@ impl MpcManager {
                 Ok(output) => output,
                 Err(e) => {
                     tracing::info!("Reconstruction failed ({e}), falling back to new-member path");
+                    let _fetch_timer = metrics
+                        .mpc_prepare_previous_fetch_public_output_duration_seconds
+                        .with_label_values(&[MPC_LABEL_KEY_ROTATION])
+                        .start_timer();
                     Self::fetch_and_build_public_output(mpc_manager, p2p_channel, threshold_opt)
                         .await?
                 }
             }
         } else {
+            let _fetch_timer = metrics
+                .mpc_prepare_previous_fetch_public_output_duration_seconds
+                .with_label_values(&[MPC_LABEL_KEY_ROTATION])
+                .start_timer();
             Self::fetch_and_build_public_output(mpc_manager, p2p_channel, threshold_opt).await?
         };
         tracing::info!(
@@ -3351,18 +3367,24 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         previous_certificates: &[CertificateV1],
         p2p_channel: &impl P2PChannel,
+        metrics: &Metrics,
     ) -> MpcResult<MpcOutput> {
         let mut complaint_cache: HashMap<DealerOutputsKey, avss::PartialOutput> = HashMap::new();
         loop {
             let mgr = Arc::clone(mpc_manager);
             let certs = previous_certificates.to_vec();
             let cache_snapshot = complaint_cache.clone();
-            match spawn_blocking(move || {
+            let _reconstruct_timer = metrics
+                .mpc_prepare_previous_reconstruct_duration_seconds
+                .with_label_values(&[MPC_LABEL_KEY_ROTATION])
+                .start_timer();
+            let outcome = spawn_blocking(move || {
                 let mgr = mgr.read().unwrap();
                 mgr.reconstruct_previous_output(&certs, &cache_snapshot)
             })
-            .await?
-            {
+            .await?;
+            drop(_reconstruct_timer);
+            match outcome {
                 ReconstructionOutcome::Success(output) => return Ok(output),
                 ReconstructionOutcome::NeedsDkgComplaintRecovery {
                     dealer_address,
@@ -3384,6 +3406,14 @@ impl MpcManager {
                         )
                     };
                     let previous_epoch = mpc_manager.read().unwrap().previous_epoch;
+                    metrics
+                        .mpc_prepare_previous_complaint_recovery_total
+                        .with_label_values(&[MPC_LABEL_KEY_ROTATION])
+                        .inc();
+                    let _recovery_timer = metrics
+                        .mpc_prepare_previous_complaint_recovery_duration_seconds
+                        .with_label_values(&[MPC_LABEL_KEY_ROTATION])
+                        .start_timer();
                     let recovered = Self::recover_dkg_shares_via_complaint(
                         mpc_manager,
                         &dealer_address,
@@ -3393,6 +3423,7 @@ impl MpcManager {
                         previous_epoch,
                     )
                     .await?;
+                    drop(_recovery_timer);
                     complaint_cache.insert(DealerOutputsKey::Dkg(dealer_address), recovered);
                     mpc_manager
                         .write()
@@ -3441,6 +3472,14 @@ impl MpcManager {
                             &dealer_address,
                         )
                     };
+                    metrics
+                        .mpc_prepare_previous_complaint_recovery_total
+                        .with_label_values(&[MPC_LABEL_KEY_ROTATION])
+                        .inc();
+                    let _recovery_timer = metrics
+                        .mpc_prepare_previous_complaint_recovery_duration_seconds
+                        .with_label_values(&[MPC_LABEL_KEY_ROTATION])
+                        .start_timer();
                     let recovered = Self::recover_rotation_shares_via_complaints(
                         mpc_manager,
                         &dealer_address,
@@ -3450,6 +3489,7 @@ impl MpcManager {
                         previous_epoch,
                     )
                     .await?;
+                    drop(_recovery_timer);
                     let mut mgr = mpc_manager.write().unwrap();
                     for (share_index, output) in recovered {
                         complaint_cache.insert(DealerOutputsKey::Rotation(share_index), output);
