@@ -622,18 +622,24 @@ impl MpcService {
                 info!("handle_reconfig: epoch {target_epoch} no longer pending, aborting",);
                 return;
             }
-            let setup_result = if run_dkg {
-                self.setup_initial_dkg(target_epoch)
-            } else {
-                self.setup_key_rotation(target_epoch)
+            let needs_fresh_manager = match self.inner.mpc_manager() {
+                None => true,
+                Some(mgr) => mgr.read().unwrap().mpc_config.epoch != target_epoch,
             };
-            if let Err(e) = setup_result {
-                error!(
-                    "Failed to set up MPC manager for epoch {}: {e}, retrying...",
-                    target_epoch
-                );
-                self.sleep_if_still_pending(target_epoch).await;
-                continue;
+            if needs_fresh_manager {
+                let setup_result = if run_dkg {
+                    self.setup_initial_dkg(target_epoch)
+                } else {
+                    self.setup_key_rotation(target_epoch)
+                };
+                if let Err(e) = setup_result {
+                    error!(
+                        "Failed to set up MPC manager for epoch {}: {e}, retrying...",
+                        target_epoch
+                    );
+                    self.sleep_if_still_pending(target_epoch).await;
+                    continue;
+                }
             }
             let _timer = metrics
                 .mpc_total_duration_seconds
