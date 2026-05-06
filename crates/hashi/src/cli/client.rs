@@ -52,6 +52,11 @@ pub enum CreateProposalParams {
         epoch: u64,
         metadata: Vec<(String, String)>,
     },
+    UpdateGuardian {
+        url: String,
+        public_key: Vec<u8>,
+        metadata: Vec<(String, String)>,
+    },
 }
 
 /// Live on-chain proposal detail fields not cached by `OnchainState`.
@@ -311,6 +316,11 @@ impl HashiClient {
                             bcs::from_bytes(value_bytes).context("deserialize AbortReconfig")?;
                         (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
                     }
+                    ProposalType::UpdateGuardian => {
+                        let p: move_types::Proposal<move_types::UpdateGuardian> =
+                            bcs::from_bytes(value_bytes).context("deserialize UpdateGuardian")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
                     ProposalType::Unknown(s) => {
                         anyhow::bail!("Cannot fetch details for unknown proposal type: {s}")
                     }
@@ -418,6 +428,7 @@ impl HashiClient {
             ProposalType::DisableVersion => "disable_version",
             ProposalType::EmergencyPause => "emergency_pause",
             ProposalType::AbortReconfig => "abort_reconfig",
+            ProposalType::UpdateGuardian => "update_guardian",
             ProposalType::Upgrade => {
                 anyhow::bail!(
                     "Upgrade proposals require the full upgrade flow (execute + publish + finalize)"
@@ -539,6 +550,23 @@ pub fn build_create_proposal_transaction(
                     Identifier::from_static("propose"),
                 ),
                 vec![hashi_arg, epoch_arg, metadata_arg, clock_arg],
+            );
+        }
+        CreateProposalParams::UpdateGuardian {
+            url,
+            public_key,
+            metadata,
+        } => {
+            let url_arg = builder.pure(&url);
+            let public_key_arg = builder.pure(&public_key);
+            let metadata_arg = build_metadata(&mut builder, &metadata);
+            builder.move_call(
+                Function::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("update_guardian"),
+                    Identifier::from_static("propose"),
+                ),
+                vec![hashi_arg, url_arg, public_key_arg, metadata_arg, clock_arg],
             );
         }
     }
@@ -670,6 +698,7 @@ pub fn get_proposal_type_arg(
         ProposalType::DisableVersion => ("disable_version", "DisableVersion"),
         ProposalType::EmergencyPause => ("emergency_pause", "EmergencyPause"),
         ProposalType::AbortReconfig => ("abort_reconfig", "AbortReconfig"),
+        ProposalType::UpdateGuardian => ("update_guardian", "UpdateGuardian"),
         ProposalType::Unknown(s) => {
             anyhow::bail!(
                 "Cannot vote on unknown proposal type '{}'. \

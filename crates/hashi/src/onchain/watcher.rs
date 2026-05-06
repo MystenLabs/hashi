@@ -222,7 +222,9 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 // so this could be applied directly in the future.)
                 if matches!(
                     parse_proposal_type_from_type_tag(&proposal_executed_event.proposal_type),
-                    ProposalType::UpdateConfig | ProposalType::EmergencyPause
+                    ProposalType::UpdateConfig
+                        | ProposalType::EmergencyPause
+                        | ProposalType::UpdateGuardian
                 ) {
                     match super::scrape_hashi_config(client.clone(), state.hashi_id()).await {
                         Ok(config) => {
@@ -566,6 +568,7 @@ fn parse_proposal_type_from_type_tag(type_tag: &TypeTag) -> ProposalType {
         ("upgrade", "Upgrade") => ProposalType::Upgrade,
         ("emergency_pause", "EmergencyPause") => ProposalType::EmergencyPause,
         ("abort_reconfig", "AbortReconfig") => ProposalType::AbortReconfig,
+        ("update_guardian", "UpdateGuardian") => ProposalType::UpdateGuardian,
         _ => ProposalType::Unknown(format!("{}::{}", struct_tag.module(), struct_tag.name())),
     }
 }

@@ -410,7 +410,19 @@ impl Hashi {
             .set(screener)
             .map_err(|_| anyhow!("Screener client already initialized"))?;
 
-        let guardian = if let Some(endpoint) = self.config.guardian_endpoint() {
+        // Verify Sui RPC is on the expected chain before loading any state.
+        self.verify_sui_chain_id().await?;
+
+        // Initialize on-chain state first so we can read guardian config from it.
+        let onchain_service = self.initialize_onchain_state().await?;
+
+        let guardian_endpoint = {
+            let state = self.onchain_state().state();
+            state.hashi().config.guardian_url().map(|s| s.to_string())
+        }
+        .or_else(|| self.config.guardian_endpoint().map(|s| s.to_string()));
+
+        let guardian = if let Some(endpoint) = guardian_endpoint.as_deref() {
             match grpc::guardian_client::GuardianClient::new(endpoint) {
                 Ok(client) => {
                     tracing::info!("Guardian client configured for {}", client.endpoint());
@@ -433,12 +445,6 @@ impl Hashi {
         self.guardian_client
             .set(guardian)
             .map_err(|_| anyhow!("Guardian client already initialized"))?;
-
-        // Verify Sui RPC is on the expected chain before loading any state.
-        self.verify_sui_chain_id().await?;
-
-        // Initialize
-        let onchain_service = self.initialize_onchain_state().await?;
 
         // Verify the local bitcoin_chain_id matches the on-chain value.
         self.verify_bitcoin_chain_id()?;

@@ -464,6 +464,13 @@ pub struct AbortReconfig {
     pub epoch: u64,
 }
 
+/// Rust version of the Move hashi::update_guardian::UpdateGuardian type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct UpdateGuardian {
+    pub url: String,
+    pub public_key: Vec<u8>,
+}
+
 /// Rust version of the Move sui::vec_map::VecMap type.
 #[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct VecMap<K, V> {
