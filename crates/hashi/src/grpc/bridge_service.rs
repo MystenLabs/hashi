@@ -19,6 +19,8 @@ use hashi_types::proto::GetServiceInfoRequest;
 use hashi_types::proto::GetServiceInfoResponse;
 use hashi_types::proto::SignDepositConfirmationRequest;
 use hashi_types::proto::SignDepositConfirmationResponse;
+use hashi_types::proto::SignGuardianWithdrawalRequestRequest;
+use hashi_types::proto::SignGuardianWithdrawalRequestResponse;
 use hashi_types::proto::SignWithdrawalConfirmationRequest;
 use hashi_types::proto::SignWithdrawalConfirmationResponse;
 use hashi_types::proto::SignWithdrawalRequestApprovalRequest;
@@ -127,6 +129,43 @@ impl BridgeService for HttpService {
             "Signed withdrawal tx construction",
         );
         Ok(Response::new(SignWithdrawalTxConstructionResponse {
+            member_signature: Some(member_signature),
+        }))
+    }
+
+    /// Validate and BLS-sign a `StandardWithdrawalRequest` for the guardian.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(withdrawal_txn_id = tracing::field::Empty, caller = tracing::field::Empty),
+    )]
+    async fn sign_guardian_withdrawal_request(
+        &self,
+        request: Request<SignGuardianWithdrawalRequestRequest>,
+    ) -> Result<Response<SignGuardianWithdrawalRequestResponse>, Status> {
+        let caller = authenticate_caller(&request)?;
+        tracing::Span::current().record("caller", tracing::field::display(&caller));
+        let req = request.get_ref();
+        let withdrawal_txn_id = Address::from_bytes(&req.withdrawal_txn_id)
+            .map_err(|e| Status::invalid_argument(format!("invalid withdrawal_txn_id: {e}")))?;
+        tracing::Span::current().record(
+            "withdrawal_txn_id",
+            tracing::field::display(&withdrawal_txn_id),
+        );
+        let member_signature = self
+            .inner
+            .validate_and_sign_guardian_withdrawal_request(
+                &withdrawal_txn_id,
+                req.timestamp_secs,
+                req.seq,
+            )
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        tracing::info!(
+            seq = req.seq,
+            timestamp_secs = req.timestamp_secs,
+            "Signed guardian withdrawal request",
+        );
+        Ok(Response::new(SignGuardianWithdrawalRequestResponse {
             member_signature: Some(member_signature),
         }))
     }
