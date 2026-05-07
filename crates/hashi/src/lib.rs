@@ -674,6 +674,7 @@ impl Hashi {
         let leader_service = leader::LeaderService::new(self.clone()).start();
         let mpc_service = mpc_service.start();
         let guardian_bootstrap_service = self.clone().start_guardian_bootstrap();
+        let guardian_reconciler_service = guardian_reconciler::start_reconciler(self.clone());
 
         let service = Service::new()
             .merge(onchain_service)
@@ -681,7 +682,8 @@ impl Hashi {
             .merge(http_service)
             .merge(leader_service)
             .merge(mpc_service)
-            .merge(guardian_bootstrap_service);
+            .merge(guardian_bootstrap_service)
+            .merge(guardian_reconciler_service);
 
         Ok(service)
     }

@@ -52,6 +52,22 @@ pub struct Metrics {
     pub guardian_rpc_total: IntCounterVec,
     pub guardian_rpc_duration_seconds: HistogramVec,
 
+    /// Reconciler view of the local limiter's `next_seq`. Refreshed
+    /// once per reconciliation tick; lags `guardian_limiter_next_seq`
+    /// by at most one tick interval. Useful to graph alongside
+    /// `guardian_reconciler_guardian_seq` for drift visualisation.
+    pub guardian_reconciler_local_seq: IntGauge,
+    /// Reconciler's most-recent observation of the guardian's
+    /// authoritative `next_seq` (from `GetGuardianInfo`).
+    pub guardian_reconciler_guardian_seq: IntGauge,
+    /// Signed (`guardian.next_seq - local.next_seq`). Positive means
+    /// the watcher is lagging; negative is impossible during normal
+    /// operation and indicates a bug or guardian rollback.
+    pub guardian_reconciler_seq_drift: IntGauge,
+    /// Reconciler tick outcomes by classification: healthy,
+    /// lagging_within_tolerance, lagging, ahead, rpc_failed.
+    pub guardian_reconciler_outcomes_total: IntCounterVec,
+
     /// Outcome of a gap-fill attempt run from the watcher when the
     /// subscription's first message lands on a checkpoint that's beyond
     /// the last one we processed (subscription drop, reconnect, or
@@ -387,6 +403,33 @@ impl Metrics {
                 "Latency of outbound RPC calls to the guardian by method and outcome",
                 &["method", "outcome"],
                 LATENCY_SEC_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            guardian_reconciler_local_seq: register_int_gauge_with_registry!(
+                "hashi_guardian_reconciler_local_seq",
+                "Reconciler's most-recent reading of the local limiter's next_seq",
+                registry,
+            )
+            .unwrap(),
+            guardian_reconciler_guardian_seq: register_int_gauge_with_registry!(
+                "hashi_guardian_reconciler_guardian_seq",
+                "Reconciler's most-recent reading of the guardian's authoritative next_seq",
+                registry,
+            )
+            .unwrap(),
+            guardian_reconciler_seq_drift: register_int_gauge_with_registry!(
+                "hashi_guardian_reconciler_seq_drift",
+                "guardian.next_seq - local.next_seq from the reconciler's most-recent tick \
+                 (positive = local is lagging, negative = local is ahead — never expected)",
+                registry,
+            )
+            .unwrap(),
+            guardian_reconciler_outcomes_total: register_int_counter_vec_with_registry!(
+                "hashi_guardian_reconciler_outcomes_total",
+                "Reconciler tick outcomes \
+                 (healthy, lagging_within_tolerance, lagging, ahead, rpc_failed)",
+                &["outcome"],
                 registry,
             )
             .unwrap(),
@@ -916,6 +959,34 @@ impl Metrics {
             .inc();
     }
 
+    /// Record a single reconciler tick: refresh the seq snapshots,
+    /// publish the signed drift gauge, and bump the outcome counter.
+    /// `outcome` MUST be one of the `GUARDIAN_RECONCILER_OUTCOME_*`
+    /// constants — passing anything else creates a label hole.
+    pub fn record_reconciliation_tick(
+        &self,
+        local_seq: u64,
+        guardian_seq: u64,
+        outcome: &str,
+    ) {
+        self.guardian_reconciler_local_seq.set(local_seq as i64);
+        self.guardian_reconciler_guardian_seq.set(guardian_seq as i64);
+        self.guardian_reconciler_seq_drift
+            .set(guardian_seq as i64 - local_seq as i64);
+        self.guardian_reconciler_outcomes_total
+            .with_label_values(&[outcome])
+            .inc();
+    }
+
+    /// Record a reconciler tick that never reached the comparison —
+    /// the `GetGuardianInfo` RPC failed. Drift gauges are not touched
+    /// (we don't know the guardian's seq); only the outcome counter.
+    pub fn record_reconciliation_rpc_failure(&self) {
+        self.guardian_reconciler_outcomes_total
+            .with_label_values(&[GUARDIAN_RECONCILER_OUTCOME_RPC_FAILED])
+            .inc();
+    }
+
     /// Record a watcher gap-fill attempt.
     ///
     /// `applied_checkpoints` is the number actually drained from the
@@ -1121,6 +1192,14 @@ pub const GUARDIAN_REPLAY_OUTCOME_SUCCESS: &str = "success";
 pub const GUARDIAN_REPLAY_OUTCOME_RPC_FAILURE: &str = "rpc_failure";
 pub const GUARDIAN_REPLAY_OUTCOME_GAP_TOO_LARGE: &str = "gap_too_large";
 
+// Reconciler tick outcome labels.
+pub const GUARDIAN_RECONCILER_OUTCOME_HEALTHY: &str = "healthy";
+pub const GUARDIAN_RECONCILER_OUTCOME_LAGGING_WITHIN_TOLERANCE: &str =
+    "lagging_within_tolerance";
+pub const GUARDIAN_RECONCILER_OUTCOME_LAGGING: &str = "lagging";
+pub const GUARDIAN_RECONCILER_OUTCOME_AHEAD: &str = "ahead";
+pub const GUARDIAN_RECONCILER_OUTCOME_RPC_FAILED: &str = "rpc_failed";
+
 fn limiter_outcome_label(
     result: &Result<(), crate::guardian_limiter::LocalLimiterError>,
 ) -> &'static str {
@@ -1318,5 +1397,25 @@ mod tests {
         }
         // applied_checkpoints accumulates across all four record calls (3 each).
         assert_eq!(metrics.guardian_replay_checkpoints_total.get(), 12);
+
+        // Reconciler outcomes round-trip the drift gauge correctly.
+        for outcome in [
+            GUARDIAN_RECONCILER_OUTCOME_HEALTHY,
+            GUARDIAN_RECONCILER_OUTCOME_LAGGING_WITHIN_TOLERANCE,
+            GUARDIAN_RECONCILER_OUTCOME_LAGGING,
+            GUARDIAN_RECONCILER_OUTCOME_AHEAD,
+        ] {
+            metrics.record_reconciliation_tick(10, 12, outcome);
+        }
+        assert_eq!(metrics.guardian_reconciler_local_seq.get(), 10);
+        assert_eq!(metrics.guardian_reconciler_guardian_seq.get(), 12);
+        assert_eq!(metrics.guardian_reconciler_seq_drift.get(), 2);
+        // Local-ahead is encoded as a negative drift gauge.
+        metrics.record_reconciliation_tick(15, 13, GUARDIAN_RECONCILER_OUTCOME_AHEAD);
+        assert_eq!(metrics.guardian_reconciler_seq_drift.get(), -2);
+        // RPC-failed path bumps the counter without touching seq gauges.
+        let drift_before = metrics.guardian_reconciler_seq_drift.get();
+        metrics.record_reconciliation_rpc_failure();
+        assert_eq!(metrics.guardian_reconciler_seq_drift.get(), drift_before);
     }
 }
