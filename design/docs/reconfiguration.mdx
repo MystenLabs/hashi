@@ -14,22 +14,6 @@ in-progress operations (for example, processing of withdrawals) are paused.
 The new committee resumes and processes them after reconfiguration completes.
 
 ```mermaid
----
-config:
-  theme: base
-  themeVariables:
-    primaryColor: '#298DFF'
-    primaryTextColor: '#FFFFFF'
-    primaryBorderColor: '#FFFFFF'
-    secondaryColor: '#6C7584'
-    tertiaryColor: '#FFFFFF'
-    lineColor: '#298DFF'
-    background: '#FFFFFF'
-    mainBkg: '#000000'
-    secondBkg: '#6C7584'
-    fontSize: '14px'
-    fontFamily: 'Inter, sans-serif'
----
 graph LR
     A[Start Reconfig] --> B[DKG or Key Rotation] --> C[End Reconfig]
 ```
@@ -37,22 +21,6 @@ graph LR
 ### Start Reconfig
 
 ```mermaid
----
-config:
-  theme: base
-  themeVariables:
-    primaryColor: '#298DFF'
-    primaryTextColor: '#FFFFFF'
-    primaryBorderColor: '#FFFFFF'
-    secondaryColor: '#6C7584'
-    tertiaryColor: '#FFFFFF'
-    lineColor: '#298DFF'
-    background: '#FFFFFF'
-    mainBkg: '#000000'
-    secondBkg: '#6C7584'
-    fontSize: '14px'
-    fontFamily: 'Inter, sans-serif'
----
 graph LR
     A[Start Reconfig]:::active --> B[DKG or Key Rotation] --> C[End Reconfig]
     classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
@@ -82,22 +50,6 @@ validator set.
 ### DKG or Key Rotation
 
 ```mermaid
----
-config:
-  theme: base
-  themeVariables:
-    primaryColor: '#298DFF'
-    primaryTextColor: '#FFFFFF'
-    primaryBorderColor: '#FFFFFF'
-    secondaryColor: '#6C7584'
-    tertiaryColor: '#FFFFFF'
-    lineColor: '#298DFF'
-    background: '#FFFFFF'
-    mainBkg: '#000000'
-    secondBkg: '#6C7584'
-    fontSize: '14px'
-    fontFamily: 'Inter, sans-serif'
----
 graph LR
     A[Start Reconfig] --> B[DKG or Key Rotation]:::active --> C[End Reconfig]
     classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
@@ -114,7 +66,7 @@ runs depends on whether this is the first Hashi epoch or a subsequent one:
   members act as dealers and the new committee members act as receivers.
 
 In both cases, the output is a `DkgOutput` containing the new committee's
-key shares and the MPC public key. See [MPC Protocol](./mpc-protocol.mdx)
+key shares and the MPC public key. See [MPC Protocol](/mpc-protocol)
 for details.
 
 Each committee member then signs a `ReconfigCompletionMessage` containing
@@ -127,22 +79,6 @@ protocol output before the epoch transition is finalized onchain.
 ### End Reconfig
 
 ```mermaid
----
-config:
-  theme: base
-  themeVariables:
-    primaryColor: '#298DFF'
-    primaryTextColor: '#FFFFFF'
-    primaryBorderColor: '#FFFFFF'
-    secondaryColor: '#6C7584'
-    tertiaryColor: '#FFFFFF'
-    lineColor: '#298DFF'
-    background: '#FFFFFF'
-    mainBkg: '#000000'
-    secondBkg: '#6C7584'
-    fontSize: '14px'
-    fontFamily: 'Inter, sans-serif'
----
 graph LR
     A[Start Reconfig] --> B[DKG or Key Rotation] --> C[End Reconfig]:::active
     classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
@@ -169,28 +105,12 @@ change flag.
 After the new epoch begins, the new committee initializes the signing state
 for the epoch by running the presigning protocol to generate a batch of
 presignatures needed for the threshold Schnorr signing protocol (see
-[MPC Protocol](./mpc-protocol.mdx)). After presignatures are ready, normal
+[MPC Protocol](/mpc-protocol)). After presignatures are ready, normal
 operations resume for processing deposits and withdrawals.
 
 ### Abort Reconfig
 
 ```mermaid
----
-config:
-  theme: base
-  themeVariables:
-    primaryColor: '#298DFF'
-    primaryTextColor: '#FFFFFF'
-    primaryBorderColor: '#FFFFFF'
-    secondaryColor: '#6C7584'
-    tertiaryColor: '#FFFFFF'
-    lineColor: '#298DFF'
-    background: '#FFFFFF'
-    mainBkg: '#000000'
-    secondBkg: '#6C7584'
-    fontSize: '14px'
-    fontFamily: 'Inter, sans-serif'
----
 graph LR
     A[Start Reconfig] --> B[DKG or Key Rotation] --> C[Abort Reconfig]:::active
     C --> A

@@ -9,29 +9,13 @@ pool, minting a corresponding amount of `hBTC` into the user's account on Sui.
 The process has four phases:
 
 ```mermaid
----
-config:
-  theme: base
-  themeVariables:
-    primaryColor: '#298DFF'
-    primaryTextColor: '#FFFFFF'
-    primaryBorderColor: '#FFFFFF'
-    secondaryColor: '#6C7584'
-    tertiaryColor: '#FFFFFF'
-    lineColor: '#298DFF'
-    background: '#FFFFFF'
-    mainBkg: '#000000'
-    secondBkg: '#6C7584'
-    fontSize: '14px'
-    fontFamily: 'Inter, sans-serif'
----
 graph LR
     A[Request] --> B[Approve] --> C[Confirm] --> D[Mint]
 ```
 
 The split between **Approve** and **Confirm** introduces a configurable
 time-delay window (see
-[`bitcoin_deposit_time_delay_ms`](./config.mdx#bitcoin_deposit_time_delay_ms))
+[`bitcoin_deposit_time_delay_ms`](/config#bitcoin_deposit_time_delay_ms))
 between the moment the committee certifies a deposit and the moment funds are
 minted. This delay gives operators a chance to detect a faulty or fraudulent
 approval and pause the service before any `hBTC` is minted.
@@ -39,22 +23,6 @@ approval and pause the service before any `hBTC` is minted.
 ## Request
 
 ```mermaid
----
-config:
-  theme: base
-  themeVariables:
-    primaryColor: '#298DFF'
-    primaryTextColor: '#FFFFFF'
-    primaryBorderColor: '#FFFFFF'
-    secondaryColor: '#6C7584'
-    tertiaryColor: '#FFFFFF'
-    lineColor: '#298DFF'
-    background: '#FFFFFF'
-    mainBkg: '#000000'
-    secondBkg: '#6C7584'
-    fontSize: '14px'
-    fontFamily: 'Inter, sans-serif'
----
 graph LR
     A[Request]:::active --> B[Approve] --> C[Confirm] --> D[Mint]
     classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
@@ -62,7 +30,7 @@ graph LR
 
 The user creates a Bitcoin transaction that sends BTC to a Hashi deposit
 address. Each deposit address is a unique Taproot address derived from the
-target destination address on Sui (see [Bitcoin Address Scheme](./address-scheme.mdx)).
+target destination address on Sui (see [Bitcoin Address Scheme](/address-scheme)).
 The deposit must meet the dust minimum (`546 sats`) to avoid creating
 unspendable UTXOs on Bitcoin.
 
@@ -118,22 +86,6 @@ queue, and committee members start monitoring Bitcoin for confirmation.
 ## Approve
 
 ```mermaid
----
-config:
-  theme: base
-  themeVariables:
-    primaryColor: '#298DFF'
-    primaryTextColor: '#FFFFFF'
-    primaryBorderColor: '#FFFFFF'
-    secondaryColor: '#6C7584'
-    tertiaryColor: '#FFFFFF'
-    lineColor: '#298DFF'
-    background: '#FFFFFF'
-    mainBkg: '#000000'
-    secondBkg: '#6C7584'
-    fontSize: '14px'
-    fontFamily: 'Inter, sans-serif'
----
 graph LR
     A[Request] --> B[Approve]:::active --> C[Confirm] --> D[Mint]
     classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
@@ -141,14 +93,14 @@ graph LR
 
 Committee members monitor the Bitcoin network for the deposit transaction. The
 transaction must reach a sufficient number of block confirmations (see
-[`bitcoin_confirmation_threshold`](./config.mdx#bitcoin_confirmation_threshold))
+[`bitcoin_confirmation_threshold`](/config#bitcoin_confirmation_threshold))
 before it is considered final. This guards against chain reorganizations where
 a confirmed transaction could be reversed. If the transaction is never
 confirmed or is invalidated by a reorg, the deposit is ignored.
 
 After confirmation, each committee member independently screens the deposit's
 source address by making a request to its configured sanctions-checking
-endpoint (see [Handling Sanctioned Addresses](./sanctions.mdx)). A member
+endpoint (see [Handling Sanctioned Addresses](/sanctions)). A member
 that considers the address sanctioned does not vote to approve the deposit.
 
 After a node determines that a deposit request is both confirmed on Bitcoin
@@ -178,22 +130,6 @@ request. The request remains in the deposit queue, and no `hBTC` is minted yet.
 ## Confirm
 
 ```mermaid
----
-config:
-  theme: base
-  themeVariables:
-    primaryColor: '#298DFF'
-    primaryTextColor: '#FFFFFF'
-    primaryBorderColor: '#FFFFFF'
-    secondaryColor: '#6C7584'
-    tertiaryColor: '#FFFFFF'
-    lineColor: '#298DFF'
-    background: '#FFFFFF'
-    mainBkg: '#000000'
-    secondBkg: '#6C7584'
-    fontSize: '14px'
-    fontFamily: 'Inter, sans-serif'
----
 graph LR
     A[Request] --> B[Approve] --> C[Confirm]:::active --> D[Mint]
     classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF
@@ -201,7 +137,7 @@ graph LR
 
 After approval, the deposit must wait through the configured time-delay
 window (see
-[`bitcoin_deposit_time_delay_ms`](./config.mdx#bitcoin_deposit_time_delay_ms))
+[`bitcoin_deposit_time_delay_ms`](/config#bitcoin_deposit_time_delay_ms))
 before it can be confirmed. The window gives operators a chance to detect a
 faulty or fraudulent approval and pause the service before funds are minted.
 While the service is paused, `confirm_deposit` is rejected, so any pending
@@ -234,22 +170,6 @@ The function:
 ## Mint
 
 ```mermaid
----
-config:
-  theme: base
-  themeVariables:
-    primaryColor: '#298DFF'
-    primaryTextColor: '#FFFFFF'
-    primaryBorderColor: '#FFFFFF'
-    secondaryColor: '#6C7584'
-    tertiaryColor: '#FFFFFF'
-    lineColor: '#298DFF'
-    background: '#FFFFFF'
-    mainBkg: '#000000'
-    secondBkg: '#6C7584'
-    fontSize: '14px'
-    fontFamily: 'Inter, sans-serif'
----
 graph LR
     A[Request] --> B[Approve] --> C[Confirm] --> D[Mint]:::active
     classDef active fill:#298DFF,stroke:#1759C4,color:#FFFFFF

@@ -19,37 +19,6 @@ deposit your `BTC` to a Hashi MPC-controlled Bitcoin address.
 ---
 title: Deposit Flow
 config:
-  theme: base
-  themeVariables:
-    primaryColor: '#000000'
-    primaryTextColor: '#FFFFFF'
-    primaryBorderColor: '#6C7584'
-    secondaryColor: '#6C7584'
-    secondaryTextColor: '#FFFFFF'
-    tertiaryColor: '#298DFF'
-    tertiaryTextColor: '#FFFFFF'
-    lineColor: '#298DFF'
-    background: '#FFFFFF'
-    mainBkg: '#000000'
-    secondBkg: '#6C7584'
-    actorBkg: '#000000'
-    actorBorder: '#6C7584'
-    actorTextColor: '#FFFFFF'
-    actorLineColor: '#6C7584'
-    sequenceNumberColor: '#FFFFFF'
-    noteBkgColor: '#E6F1FB'
-    noteTextColor: '#000000'
-    noteBorderColor: '#298DFF'
-    activationBkgColor: '#298DFF'
-    activationBorderColor: '#185FA5'
-    fontSize: '14px'
-    fontFamily: 'Inter, sans-serif'
-    signalColor: '#298DFF'
-    signalTextColor: '#298DFF'
-    labelBoxBkgColor: '#000000'
-    labelBoxBorderColor: '#6C7584'
-    labelTextColor: '#FFFFFF'
-    loopTextColor: '#FFFFFF'
   sequence:
     diagramMarginX: 0
 ---
@@ -72,7 +41,7 @@ sequenceDiagram
 ### BTC deposit address
 
 Every Sui address has its own unique Hashi Bitcoin deposit address. See
-[Bitcoin Address Scheme](./address-scheme.mdx) for the full derivation
+[Bitcoin Address Scheme](/address-scheme) for the full derivation
 details.
 
 ### Deposit
@@ -93,7 +62,7 @@ Hashi.
    use the `hBTC` to interact with a DeFi protocol. For example, you can use
    the `hBTC` as collateral for a loan in `USDC`.
 
-For a detailed breakdown of each phase, see [Deposit](./deposit.mdx).
+For a detailed breakdown of each phase, see [Deposit](/deposit).
 
 ## Withdraw flow
 
@@ -106,37 +75,6 @@ pay off your loan), you can initiate a withdrawal.
 ---
 title: Withdraw Flow
 config:
-  theme: base
-  themeVariables:
-    primaryColor: '#000000'
-    primaryTextColor: '#FFFFFF'
-    primaryBorderColor: '#6C7584'
-    secondaryColor: '#6C7584'
-    secondaryTextColor: '#FFFFFF'
-    tertiaryColor: '#298DFF'
-    tertiaryTextColor: '#FFFFFF'
-    lineColor: '#298DFF'
-    background: '#FFFFFF'
-    mainBkg: '#000000'
-    secondBkg: '#6C7584'
-    actorBkg: '#000000'
-    actorBorder: '#6C7584'
-    actorTextColor: '#FFFFFF'
-    actorLineColor: '#6C7584'
-    sequenceNumberColor: '#FFFFFF'
-    noteBkgColor: '#E6F1FB'
-    noteTextColor: '#000000'
-    noteBorderColor: '#298DFF'
-    activationBkgColor: '#298DFF'
-    activationBorderColor: '#185FA5'
-    fontSize: '14px'
-    fontFamily: 'Inter, sans-serif'
-    signalColor: '#298DFF'
-    signalTextColor: '#298DFF'
-    labelBoxBkgColor: '#000000'
-    labelBoxBorderColor: '#6C7584'
-    labelTextColor: '#FFFFFF'
-    loopTextColor: '#FFFFFF'
   sequence:
     diagramMarginX: 0
 ---
@@ -163,4 +101,4 @@ sequenceDiagram
    address, then uses MPC to sign the transaction.
 1. The transaction is broadcast to the Bitcoin network.
 
-For a detailed breakdown of each phase, see [Withdraw](./withdraw.mdx).
+For a detailed breakdown of each phase, see [Withdraw](/withdraw).

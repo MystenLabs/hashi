@@ -68,9 +68,13 @@ const config = {
     require.resolve('./src/shared/plugins/inject-code'),
     require.resolve('./src/shared/plugins/descriptions'),
     [
-      'docusaurus-plugin-plausible',
+      require.resolve('./src/shared/plugins/plausible'),
       {
-        domain: 'https://mystenlabs.github.io/hashi/design',
+        domain: 'mystenlabs.github.io/hashi/design',
+        enableInDev: false,
+        trackOutboundLinks: true,
+        hashMode: false,
+        trackLocalhost: false,
       },
     ],
     // Tailwind via PostCSS
@@ -158,6 +162,41 @@ const config = {
             position: 'right',
           },
         ],
+      },
+      // Mermaid diagrams follow the Sui Technical Diagram Standards:
+      // https://docs.sui.io/references/contribute/diagram-standards
+      // Per-diagram frontmatter is reserved for diagram-specific things
+      // (titles, layout knobs) — never for color overrides.
+      mermaid: {
+        theme: { light: 'base', dark: 'base' },
+        options: {
+          themeVariables: {
+            primaryColor: '#000000',
+            primaryTextColor: '#FFFFFF',
+            primaryBorderColor: '#6C7584',
+            secondaryColor: '#6C7584',
+            secondaryTextColor: '#FFFFFF',
+            tertiaryColor: '#298DFF',
+            tertiaryTextColor: '#FFFFFF',
+            lineColor: '#298DFF',
+            background: '#FFFFFF',
+            mainBkg: '#000000',
+            secondBkg: '#6C7584',
+            noteBkgColor: '#E6F1FB',
+            noteTextColor: '#000000',
+            noteBorderColor: '#298DFF',
+            activationBkgColor: '#298DFF',
+            activationBorderColor: '#185FA5',
+            fontSize: '14px',
+            fontFamily: 'Inter, sans-serif',
+            signalColor: '#298DFF',
+            signalTextColor: '#298DFF',
+            labelBoxBkgColor: '#000000',
+            labelBoxBorderColor: '#6C7584',
+            labelTextColor: '#FFFFFF',
+            loopTextColor: '#FFFFFF',
+          },
+        },
       },
       prism: {
         theme: prismThemes.github,
