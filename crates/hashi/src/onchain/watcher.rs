@@ -97,8 +97,8 @@ pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Ar
         }
 
         while let Some(item) = subscription.next().await {
-            let checkpoint = match item {
-                Ok(checkpoint) => checkpoint,
+            let response = match item {
+                Ok(response) => response,
                 Err(e) => {
                     tracing::warn!("error in checkpoint stream: {e}");
                     rescrape_state = true;
@@ -106,56 +106,67 @@ pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Ar
                 }
             };
 
-            let ckpt = checkpoint.cursor();
-            tracing::trace!("received checkpoint {ckpt}");
-            let timestamp_ms = checkpoint
-                .checkpoint()
-                .summary()
-                .timestamp
-                .and_then(|t| proto_to_timestamp_ms(t).ok())
-                .unwrap_or(0);
-            let epoch = checkpoint.checkpoint().summary().epoch();
-            let previous_epoch = state.latest_checkpoint_epoch();
-            if epoch != previous_epoch {
-                tracing::debug!("Sui epoch changed from {previous_epoch} to {epoch}");
-                state.notify(Notification::SuiEpochChanged(epoch));
+            process_checkpoint(&mut client, &state, &metrics, response.checkpoint()).await;
+        }
+    }
+}
+
+/// Apply one checkpoint's events to the in-memory mirror and advance the
+/// limiter cursor. Shared by the live subscription path and the gap-fill
+/// replay path so both share identical semantics.
+async fn process_checkpoint(
+    client: &mut Client,
+    state: &OnchainState,
+    metrics: &Option<Arc<Metrics>>,
+    checkpoint: &Checkpoint,
+) {
+    let height = checkpoint.sequence_number();
+    tracing::trace!("processing checkpoint {height}");
+    let timestamp_ms = checkpoint
+        .summary()
+        .timestamp
+        .and_then(|t| proto_to_timestamp_ms(t).ok())
+        .unwrap_or(0);
+    let epoch = checkpoint.summary().epoch();
+    let previous_epoch = state.latest_checkpoint_epoch();
+    if epoch != previous_epoch {
+        tracing::debug!("Sui epoch changed from {previous_epoch} to {epoch}");
+        state.notify(Notification::SuiEpochChanged(epoch));
+    }
+    let mut events = Vec::new();
+    {
+        let state = state.state();
+
+        for txn in checkpoint.transactions() {
+            // Skip txns that were not successful
+            if !txn.effects().status().success() {
+                continue;
             }
-            let mut events = Vec::new();
-            {
-                let state = state.state();
 
-                for txn in checkpoint.checkpoint().transactions() {
-                    // Skip txns that were not successful
-                    if !txn.effects().status().success() {
-                        continue;
+            for event in txn.events().events() {
+                match HashiEvent::try_parse(&state.package_ids, event.contents()) {
+                    Ok(Some(event)) => {
+                        tracing::debug!("found event {:?}", event);
+                        events.push(event);
                     }
-
-                    for event in txn.events().events() {
-                        match HashiEvent::try_parse(&state.package_ids, event.contents()) {
-                            Ok(Some(event)) => {
-                                tracing::debug!("found event {:?}", event);
-                                events.push(event);
-                            }
-                            Ok(None) => {}
-                            Err(e) => tracing::error!("unable to parse event: {e}"),
-                        }
-                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::error!("unable to parse event: {e}"),
                 }
             }
-
-            handle_events(&mut client, &state, &events).await;
-
-            // Finally update the latest checkpoint info
-            state.update_latest_checkpoint_info(CheckpointInfo {
-                height: ckpt,
-                timestamp_ms,
-                epoch,
-            });
-
-            if let Some(metrics) = &metrics {
-                metrics.update_onchain_state(&state);
-            }
         }
+    }
+
+    handle_events(client, state, &events).await;
+
+    // Finally update the latest checkpoint info
+    state.update_latest_checkpoint_info(CheckpointInfo {
+        height,
+        timestamp_ms,
+        epoch,
+    });
+
+    if let Some(metrics) = metrics {
+        metrics.update_onchain_state(state);
     }
 }
 
