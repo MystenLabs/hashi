@@ -51,6 +51,24 @@ const WITHDRAWAL_SIGNING_TIMEOUT: Duration = Duration::from_secs(5);
 /// Fee rate tolerance multiplier for validation.
 const FEE_RATE_TOLERANCE_MULTIPLIER: u64 = 5;
 
+/// BTC the pool actually pays out when this withdrawal txn is broadcast —
+/// the gross outflow that consumes the guardian's token-bucket limit.
+///
+/// Equivalent identities (held by coin-selection invariants):
+///   inputs - change                                      (used here)
+///   sum(withdrawal_outputs) + miner_fee                  (output-form)
+///   sum(req.btc_amount)  for the batch's WithdrawalRequests (pre-construction form)
+///
+/// Why it isn't `sum(withdrawal_outputs)`: that excludes the miner fee,
+/// which is BTC that leaves the pool just like a user-bound output.
+/// Why it isn't `sum(inputs)`: that double-counts the change UTXO that
+/// flows back into the pool.
+pub(crate) fn withdrawal_limiter_consumption_amount(txn: &WithdrawalTransaction) -> u64 {
+    let inputs: u64 = txn.inputs.iter().map(|u| u.amount).sum();
+    let change: u64 = txn.change_output.as_ref().map_or(0, |c| c.amount);
+    inputs.saturating_sub(change)
+}
+
 /// Full input weight (WU) for a 2-of-2 taproot script-path spend.
 /// TXIN_BASE_WEIGHT (164 WU) + satisfaction (234 WU) = 398 WU (100 vB).
 /// Used in fee validation where we calculate weight directly without
@@ -569,7 +587,7 @@ impl Hashi {
         // `WithdrawalSignedEvent`, never from this path.
         match (self.local_limiter(), expected_limiter_seq) {
             (Some(limiter), Some(expected_seq)) => {
-                let amount_sats: u64 = txn.withdrawal_outputs.iter().map(|o| o.amount).sum();
+                let amount_sats = withdrawal_limiter_consumption_amount(txn);
                 let timestamp_secs = txn.timestamp_ms / 1000;
                 limiter
                     .validate_consume(expected_seq, timestamp_secs, amount_sats)
@@ -1237,4 +1255,81 @@ fn script_pubkey_from_raw_address(address_bytes: &[u8]) -> anyhow::Result<bitcoi
     let program = WitnessProgram::new(version, address_bytes)
         .map_err(|e| anyhow!("Invalid witness program: {e}"))?;
     Ok(bitcoin::ScriptBuf::new_witness_program(&program))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::onchain::types::OutputUtxo;
+    use crate::onchain::types::Utxo;
+    use crate::onchain::types::UtxoId;
+    use hashi_types::bitcoin_txid::BitcoinTxid;
+
+    fn input(amount: u64) -> Utxo {
+        Utxo {
+            id: UtxoId {
+                txid: BitcoinTxid::ZERO,
+                vout: 0,
+            },
+            amount,
+            derivation_path: None,
+        }
+    }
+
+    fn output(amount: u64) -> OutputUtxo {
+        OutputUtxo {
+            amount,
+            bitcoin_address: vec![0; 32],
+        }
+    }
+
+    fn make_txn(
+        inputs: Vec<u64>,
+        withdrawal_outputs: Vec<u64>,
+        change: Option<u64>,
+    ) -> WithdrawalTransaction {
+        WithdrawalTransaction {
+            id: Address::ZERO,
+            txid: BitcoinTxid::ZERO,
+            request_ids: vec![],
+            inputs: inputs.into_iter().map(input).collect(),
+            withdrawal_outputs: withdrawal_outputs.into_iter().map(output).collect(),
+            change_output: change.map(output),
+            timestamp_ms: 0,
+            randomness: vec![],
+            signatures: None,
+            presig_start_index: 0,
+            epoch: 0,
+        }
+    }
+
+    #[test]
+    fn consumption_amount_no_change() {
+        // 1_000 input, 950 to user, 50 fee, no change.
+        let txn = make_txn(vec![1_000], vec![950], None);
+        assert_eq!(withdrawal_limiter_consumption_amount(&txn), 1_000);
+    }
+
+    #[test]
+    fn consumption_amount_with_change() {
+        // 10_000 input, 7_000 to user, 50 fee, 2_950 change.
+        let txn = make_txn(vec![10_000], vec![7_000], Some(2_950));
+        assert_eq!(withdrawal_limiter_consumption_amount(&txn), 7_050);
+    }
+
+    #[test]
+    fn consumption_amount_multi_input_multi_output() {
+        // Two inputs: 6_000 + 4_000. Three users: 2_000 + 1_500 + 5_500. Fee 100, change 900.
+        let txn = make_txn(vec![6_000, 4_000], vec![2_000, 1_500, 5_500], Some(900));
+        let expected = 10_000 - 900; // inputs - change
+        let by_outputs = 9_000 + 100; // user_outputs + fee
+        assert_eq!(expected, by_outputs);
+        assert_eq!(withdrawal_limiter_consumption_amount(&txn), expected);
+    }
+
+    #[test]
+    fn consumption_amount_no_inputs_returns_zero() {
+        let txn = make_txn(vec![], vec![], None);
+        assert_eq!(withdrawal_limiter_consumption_amount(&txn), 0);
+    }
 }
