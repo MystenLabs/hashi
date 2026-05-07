@@ -336,20 +336,15 @@ mod tests {
             for node in networks.hashi_network.nodes() {
                 assert!(node.hashi().config.guardian_endpoint().is_some());
                 assert!(node.hashi().guardian_client().is_some());
+                // The harness already waits for local-limiter bootstrap
+                // before `build()` returns, so we just sanity-check it.
+                assert!(node.hashi().local_limiter().is_some());
             }
             let harness = networks
                 .guardian_harness
                 .as_ref()
                 .expect("harness present when .with_guardian() is set");
             assert!(harness.enclave().is_fully_initialized());
-            futures::future::try_join_all(
-                networks
-                    .hashi_network
-                    .nodes()
-                    .iter()
-                    .map(|node| node.wait_for_local_limiter(Duration::from_secs(60))),
-            )
-            .await?;
         }
 
         let deposit_amount_sats = 100_000u64;

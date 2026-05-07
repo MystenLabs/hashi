@@ -334,6 +334,20 @@ async fn finalize_guardian_harness(networks: &mut TestNetworks) -> Result<()> {
         .finalize(committee, master_pubkey, withdrawal_config, limiter_state)
         .await?;
     tracing::info!("guardian harness finalized");
+
+    // Each hashi node bootstraps its local limiter from the guardian
+    // asynchronously. Wait for all nodes to seed before returning, so
+    // tests can immediately initiate withdrawals without racing the
+    // bootstrap.
+    futures::future::try_join_all(
+        networks
+            .hashi_network
+            .nodes()
+            .iter()
+            .map(|node| node.wait_for_local_limiter(std::time::Duration::from_secs(60))),
+    )
+    .await?;
+    tracing::info!("all hashi nodes have bootstrapped their local limiter");
     Ok(())
 }
 
