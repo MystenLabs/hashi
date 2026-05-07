@@ -1,14 +1,9 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Local emulator of the guardian's token-bucket limiter. Bootstrapped from
-//! the guardian at startup and advanced inline by the on-chain watcher on
-//! every observed `WithdrawalSignedEvent`. The MPC signing path uses
-//! `validate_consume` (read-only) — only the watcher calls `apply_consume`.
-//!
-//! State is held under `std::sync::RwLock` so the leader event loop can
-//! consult it without `.await` and the watcher can mutate it without
-//! handing off to a separate task.
+//! Local emulator of the guardian's token-bucket limiter. Bootstrapped
+//! from the guardian at startup and advanced by the watcher on every
+//! `WithdrawalSignedEvent`. MPC signing only `validate_consume`s.
 
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;

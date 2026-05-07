@@ -335,10 +335,8 @@ async fn finalize_guardian_harness(networks: &mut TestNetworks) -> Result<()> {
         .await?;
     tracing::info!("guardian harness finalized");
 
-    // Each hashi node bootstraps its local limiter from the guardian
-    // asynchronously. Wait for all nodes to seed before returning, so
-    // tests can immediately initiate withdrawals without racing the
-    // bootstrap.
+    // Wait for every node's async limiter bootstrap to complete so
+    // tests don't race it.
     futures::future::try_join_all(
         networks
             .hashi_network

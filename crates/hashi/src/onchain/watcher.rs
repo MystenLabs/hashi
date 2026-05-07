@@ -438,10 +438,8 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
             }
             HashiEvent::WithdrawalSignedEvent(event) => {
                 tracing::info!(withdrawal_txn_id = %event.withdrawal_txn_id, "Withdrawal signatures stored on-chain");
-                // Update the on-chain mirror, then advance the local
-                // limiter inline. The watcher is the sole mutator of the
-                // limiter post-bootstrap; leader and signing-path reads
-                // are uncontended.
+                // Watcher is the sole mutator of the local limiter
+                // post-bootstrap; advance it inline with the mirror update.
                 let limiter_inputs = {
                     let mut state = state.state_mut();
                     state

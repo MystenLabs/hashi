@@ -51,18 +51,10 @@ const WITHDRAWAL_SIGNING_TIMEOUT: Duration = Duration::from_secs(5);
 /// Fee rate tolerance multiplier for validation.
 const FEE_RATE_TOLERANCE_MULTIPLIER: u64 = 5;
 
-/// BTC the pool actually pays out when this withdrawal txn is broadcast —
-/// the gross outflow that consumes the guardian's token-bucket limit.
-///
-/// Equivalent identities (held by coin-selection invariants):
-///   inputs - change                                      (used here)
-///   sum(withdrawal_outputs) + miner_fee                  (output-form)
-///   sum(req.btc_amount)  for the batch's WithdrawalRequests (pre-construction form)
-///
-/// Why it isn't `sum(withdrawal_outputs)`: that excludes the miner fee,
-/// which is BTC that leaves the pool just like a user-bound output.
-/// Why it isn't `sum(inputs)`: that double-counts the change UTXO that
-/// flows back into the pool.
+/// BTC that leaves the pool when this txn broadcasts — the amount that
+/// consumes the guardian's limit. Equivalent to
+/// `sum(withdrawal_outputs) + miner_fee`; we use `inputs - change` to
+/// avoid relying on a separate fee field.
 pub(crate) fn withdrawal_limiter_consumption_amount(txn: &WithdrawalTransaction) -> u64 {
     let inputs: u64 = txn.inputs.iter().map(|u| u.amount).sum();
     let change: u64 = txn.change_output.as_ref().map_or(0, |c| c.amount);

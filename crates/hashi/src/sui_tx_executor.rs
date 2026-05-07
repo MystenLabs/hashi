@@ -1239,10 +1239,7 @@ impl SuiTxExecutor {
                 response.transaction().effects().status()
             );
         }
-        // The Sui executor waits for checkpoint inclusion, so this is set.
-        // Callers can wait for the local watcher to catch up to this seq
-        // and then read the on-chain mirror — uniform for guardian and
-        // no-guardian deployments.
+        // `execute_transaction_and_wait_for_checkpoint` guarantees this is set.
         let checkpoint = response
             .transaction()
             .checkpoint_opt()

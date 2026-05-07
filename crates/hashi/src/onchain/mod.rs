@@ -87,8 +87,7 @@ struct Inner {
     tls_private_key: Option<ed25519_dalek::SigningKey>,
     grpc_max_decoding_message_size: Option<usize>,
     metrics: Option<Arc<crate::metrics::Metrics>>,
-    /// Set once after guardian bootstrap. Read by the watcher to advance
-    /// the limiter inline on each `WithdrawalSignedEvent`.
+    /// Set once after guardian bootstrap; advanced by the watcher.
     local_limiter: RwLock<Option<Arc<crate::guardian_limiter::LocalLimiter>>>,
 }
 
@@ -183,10 +182,8 @@ impl OnchainState {
         self.0.checkpoint.borrow().height
     }
 
-    /// Block until the local watcher's view advances to `target_seq` or
-    /// later. Returns immediately if already past. The caller is
-    /// expected to wrap with `tokio::time::timeout` if a bound is
-    /// desired.
+    /// Wait until the watcher reaches `target_seq`. Caller wraps with
+    /// `tokio::time::timeout` for a bound.
     pub async fn wait_until_checkpoint(&self, target_seq: u64) {
         let mut rx = self.subscribe_checkpoint();
         while rx.borrow().height < target_seq {
@@ -395,9 +392,7 @@ impl OnchainState {
             .collect()
     }
 
-    /// True if any committed `WithdrawalTransaction` is still awaiting
-    /// witness signatures. Used by the leader to avoid building a
-    /// second commitment while a prior one is mid-MPC.
+    /// True if any `WithdrawalTransaction` is still awaiting witness signatures.
     pub fn has_unsigned_withdrawal_txn(&self) -> bool {
         self.state()
             .hashi()

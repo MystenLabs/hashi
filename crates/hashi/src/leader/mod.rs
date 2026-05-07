@@ -950,11 +950,8 @@ impl LeaderService {
             return;
         }
 
-        // Don't build a new commitment while a previous one is still
-        // awaiting witness signatures. This is defense-in-depth alongside
-        // the spawn-side `max_concurrent = 1` cap; here it ensures we
-        // also don't double-commit on consecutive checkpoints before the
-        // signing task has had a chance to spawn.
+        // Pairs with the spawn-side `max_concurrent = 1` cap: don't
+        // double-commit before the prior signing task has spawned.
         if self.inner.onchain_state().has_unsigned_withdrawal_txn() {
             debug!("Unsigned withdrawal txn already on-chain, skipping commitment");
             return;
@@ -1002,15 +999,10 @@ impl LeaderService {
             return;
         }
 
-        // Choose the timestamp-sorted prefix that fits the limiter:
-        //  - Skip past any oversize request whose amount > max_bucket_capacity:
-        //    it can never fit, so head-of-line blocks the rest forever
-        //    if we wait. Bump a metric and warn once; operator must raise
-        //    the cap or the user must cancel.
-        //  - Among the remaining (fits-eventually) requests, take the
-        //    longest prefix that fits the bucket's *current* capacity.
-        //  - The dropped fits-eventually tail flips `at_capacity` so we
-        //    don't sit on demand for the full batching window.
+        // Skip oversize requests (would HOL-block forever) and take the
+        // longest prefix of the rest that fits current capacity. The
+        // dropped tail flips `at_capacity` so we don't sit on demand for
+        // the full batching window.
         let (batch, at_capacity) = if let Some(limiter) = self.inner.local_limiter() {
             let timestamp_secs = checkpoint_timestamp_ms / 1000;
             let max_bucket = limiter.config().max_bucket_capacity;
@@ -1026,8 +1018,7 @@ impl LeaderService {
                             request_id = %req.id,
                             btc_amount = req.btc_amount,
                             max_bucket_capacity = max_bucket,
-                            "Withdrawal request exceeds limiter max_bucket_capacity; \
-                             skipping (operator must raise cap or user must cancel)"
+                            "Withdrawal exceeds limiter max bucket; skipping"
                         );
                         self.inner
                             .metrics
@@ -1049,10 +1040,7 @@ impl LeaderService {
             }
 
             if batch.is_empty() {
-                // Either every approved request is oversize (already
-                // warned + counted above) or the head fits the bucket
-                // but not the current capacity (refill-bound). Either
-                // way, nothing to do this round.
+                // All-oversize (already warned) or refill-bound head.
                 return;
             }
             (batch, at_capacity)
@@ -1266,9 +1254,9 @@ impl LeaderService {
         self.inflight_withdrawal_signings
             .retain(|id| pending_ids.contains(id));
 
-        // Cap to 1 when the limiter is in play: concurrent MPC tasks would
-        // race on `expected_limiter_seq` since the observer bumps it on every
-        // signed event.
+        // Cap to 1 when the limiter is in play: concurrent MPC tasks
+        // would race on `expected_limiter_seq` since the watcher bumps
+        // it on every signed event.
         let max_concurrent = if self.inner.guardian_client().is_some() {
             1
         } else {
@@ -1436,13 +1424,8 @@ impl LeaderService {
                 .inc();
         })?;
 
-        // Block before returning so the next checkpoint can't respawn this
-        // task with stale state. The Sui executor already waited for the
-        // sign_withdrawal txn to land in `signed_checkpoint`; we just
-        // need to wait for our local watcher to process that checkpoint
-        // — at which point the limiter has been advanced and
-        // `WithdrawalTransaction.signatures` is visible. Same code path
-        // with or without guardian.
+        // Wait for our watcher to catch up to `signed_checkpoint` before
+        // returning, so the next tick doesn't respawn with stale state.
         const VISIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
         if tokio::time::timeout(
             VISIBILITY_TIMEOUT,
@@ -1456,8 +1439,8 @@ impl LeaderService {
             warn!(
                 withdrawal_txn_id = %txn.id,
                 signed_checkpoint,
-                "Timeout waiting for local watcher to catch up to signed checkpoint; \
-                 a duplicate sign attempt may follow on the next checkpoint"
+                "Timeout waiting for watcher to reach signed checkpoint; \
+                 a duplicate sign attempt may follow"
             );
         }
 

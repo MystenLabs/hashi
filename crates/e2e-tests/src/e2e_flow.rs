@@ -336,8 +336,7 @@ mod tests {
             for node in networks.hashi_network.nodes() {
                 assert!(node.hashi().config.guardian_endpoint().is_some());
                 assert!(node.hashi().guardian_client().is_some());
-                // The harness already waits for local-limiter bootstrap
-                // before `build()` returns, so we just sanity-check it.
+                // Harness waits for limiter bootstrap before returning.
                 assert!(node.hashi().local_limiter().is_some());
             }
             let harness = networks
