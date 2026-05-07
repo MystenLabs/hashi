@@ -2892,7 +2892,6 @@ dependencies = [
  "aws-smithy-mocks",
  "bitcoin",
  "hashi-types",
- "hex",
  "hpke",
  "k256",
  "rand 0.8.5",

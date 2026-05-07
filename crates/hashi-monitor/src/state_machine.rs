@@ -404,7 +404,7 @@ mod tests {
     ) -> MonitorWithdrawalEvent {
         MonitorWithdrawalEvent {
             event_type: source,
-            wid: [wid_seed; 32],
+            wid: WithdrawalID::new([wid_seed; 32]),
             timestamp_secs: timestamp,
             btc_txid: txid(fill),
         }

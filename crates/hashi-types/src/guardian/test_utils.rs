@@ -310,7 +310,7 @@ impl StandardWithdrawalRequest {
     pub fn mock_signed_and_committee_for_testing(
         network: Network,
     ) -> (HashiSigned<StandardWithdrawalRequest>, HashiCommittee) {
-        Self::sign_for_wid(network, [0xab; 32])
+        Self::sign_for_wid(network, WithdrawalID::new([0xab; 32]))
     }
 
     pub fn mock_signed_for_testing(network: Network) -> HashiSigned<StandardWithdrawalRequest> {

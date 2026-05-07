@@ -225,9 +225,7 @@ pub fn pb_to_signed_standard_withdrawal_request_wire(
     let (epoch, signature, bitmap) = pb_to_committee_signature(committee_signature_pb)?;
 
     let wid_bytes = data.wid.ok_or_else(|| missing("wid"))?;
-    let wid: super::WithdrawalID = wid_bytes
-        .as_ref()
-        .try_into()
+    let wid = super::WithdrawalID::from_bytes(wid_bytes.as_ref())
         .map_err(|_| InvalidInputs(format!("wid must be 32 bytes, got {}", wid_bytes.len())))?;
     let utxos_pb = data.utxos.ok_or_else(|| missing("utxos"))?;
     let utxos_wire = pb_to_tx_utxos_wire(utxos_pb)?;
@@ -863,7 +861,7 @@ pub fn standard_withdrawal_request_wire_to_pb(
     req: StandardWithdrawalRequestWire,
 ) -> pb::StandardWithdrawalRequestData {
     pb::StandardWithdrawalRequestData {
-        wid: Some(req.wid.to_vec().into()),
+        wid: Some(Vec::from(req.wid).into()),
         utxos: Some(tx_utxos_wire_to_pb(req.utxos)),
         timestamp_secs: Some(req.timestamp_secs),
         seq: Some(req.seq),

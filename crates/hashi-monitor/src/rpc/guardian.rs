@@ -59,7 +59,7 @@ impl TryFrom<VerifiedLogRecord> for VerifiedWithdrawal {
                 txid, request_data, ..
             } => {
                 debug!(
-                    wid = %hex::encode(request_data.wid),
+                    wid = %request_data.wid,
                     txid = %txid,
                     "successful guardian withdrawal log"
                 );
