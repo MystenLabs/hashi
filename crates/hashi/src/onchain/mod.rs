@@ -395,6 +395,18 @@ impl OnchainState {
             .collect()
     }
 
+    /// True if any committed `WithdrawalTransaction` is still awaiting
+    /// witness signatures. Used by the leader to avoid building a
+    /// second commitment while a prior one is mid-MPC.
+    pub fn has_unsigned_withdrawal_txn(&self) -> bool {
+        self.state()
+            .hashi()
+            .withdrawal_queue
+            .withdrawal_txns()
+            .values()
+            .any(|t| t.signatures.is_none())
+    }
+
     pub fn spent_utxos_entries(&self) -> Vec<(types::UtxoId, u64)> {
         self.state()
             .hashi()

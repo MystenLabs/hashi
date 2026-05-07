@@ -148,8 +148,7 @@ impl LeaderService {
                     }
 
                     self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms);
-                    self.process_approved_withdrawal_requests(checkpoint_timestamp_ms)
-                        .await;
+                    self.process_approved_withdrawal_requests(checkpoint_timestamp_ms);
                     self.process_unsigned_withdrawal_txns();
                     self.process_signed_withdrawal_txns();
                     self.check_delete_proposals(checkpoint_timestamp_ms);
@@ -939,7 +938,7 @@ impl LeaderService {
     // Step 2: Construct withdrawal tx for approved requests
     // ========================================================================
 
-    async fn process_approved_withdrawal_requests(&mut self, checkpoint_timestamp_ms: u64) {
+    fn process_approved_withdrawal_requests(&mut self, checkpoint_timestamp_ms: u64) {
         debug!("Entering process_approved_withdrawal_requests");
         if self.is_reconfiguring() {
             debug!("Reconfig in progress, skipping withdrawal commitment processing");
@@ -948,6 +947,16 @@ impl LeaderService {
 
         if self.withdrawal_commitment_task.is_some() {
             debug!("Withdrawal commitment task already in-flight, skipping");
+            return;
+        }
+
+        // Don't build a new commitment while a previous one is still
+        // awaiting witness signatures. This is defense-in-depth alongside
+        // the spawn-side `max_concurrent = 1` cap; here it ensures we
+        // also don't double-commit on consecutive checkpoints before the
+        // signing task has had a chance to spawn.
+        if self.inner.onchain_state().has_unsigned_withdrawal_txn() {
+            debug!("Unsigned withdrawal txn already on-chain, skipping commitment");
             return;
         }
 
@@ -993,41 +1002,59 @@ impl LeaderService {
             return;
         }
 
-        // Truncate to the longest timestamp-sorted prefix that fits the local
-        // limiter's available capacity; the dropped tail flips `at_capacity`
-        // so we don't sit on excess demand for the full batching window.
+        // Choose the timestamp-sorted prefix that fits the limiter:
+        //  - Skip past any oversize request whose amount > max_bucket_capacity:
+        //    it can never fit, so head-of-line blocks the rest forever
+        //    if we wait. Bump a metric and warn once; operator must raise
+        //    the cap or the user must cancel.
+        //  - Among the remaining (fits-eventually) requests, take the
+        //    longest prefix that fits the bucket's *current* capacity.
+        //  - The dropped fits-eventually tail flips `at_capacity` so we
+        //    don't sit on demand for the full batching window.
         let (batch, at_capacity) = if let Some(limiter) = self.inner.local_limiter() {
             let timestamp_secs = checkpoint_timestamp_ms / 1000;
+            let max_bucket = limiter.config().max_bucket_capacity;
             let capacity = limiter.capacity_at(timestamp_secs);
+
+            let mut batch: Vec<WithdrawalRequest> = Vec::new();
             let mut cumulative = 0u64;
-            let mut take_count = 0;
-            for req in &approved {
+            let mut at_capacity = false;
+            for req in approved {
+                if req.btc_amount > max_bucket {
+                    if self.stuck_withdrawal_warned.insert(req.id) {
+                        warn!(
+                            request_id = %req.id,
+                            btc_amount = req.btc_amount,
+                            max_bucket_capacity = max_bucket,
+                            "Withdrawal request exceeds limiter max_bucket_capacity; \
+                             skipping (operator must raise cap or user must cancel)"
+                        );
+                        self.inner
+                            .metrics
+                            .guardian_limiter_stuck_oversize_skipped_total
+                            .inc();
+                    }
+                    continue;
+                }
                 let Some(next) = cumulative.checked_add(req.btc_amount) else {
+                    at_capacity = true;
                     break;
                 };
                 if next > capacity {
+                    at_capacity = true;
                     break;
                 }
                 cumulative = next;
-                take_count += 1;
+                batch.push(req);
             }
-            if take_count == 0 {
-                // Head won't fit even with the bucket fully available; warn
-                // once and leave it queued for the next refill.
-                let stuck = &approved[0];
-                if self.stuck_withdrawal_warned.insert(stuck.id) {
-                    warn!(
-                        request_id = %stuck.id,
-                        btc_amount = stuck.btc_amount,
-                        available = capacity,
-                        "Withdrawal request exceeds local limiter capacity; staying in queue"
-                    );
-                }
+
+            if batch.is_empty() {
+                // Either every approved request is oversize (already
+                // warned + counted above) or the head fits the bucket
+                // but not the current capacity (refill-bound). Either
+                // way, nothing to do this round.
                 return;
             }
-            let at_capacity = take_count < approved.len();
-            let mut batch = approved;
-            batch.truncate(take_count);
             (batch, at_capacity)
         } else {
             (approved, false)
