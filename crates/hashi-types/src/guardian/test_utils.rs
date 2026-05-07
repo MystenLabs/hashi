@@ -24,6 +24,7 @@ use super::ShareCommitments;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
 use super::WithdrawalConfig;
+use super::WithdrawalID;
 use super::bitcoin_utils::BTC_LIB;
 use super::bitcoin_utils::InputUTXO;
 use super::bitcoin_utils::OutputUTXO;
@@ -240,7 +241,7 @@ impl ProvisionerInitState {
 }
 
 impl StandardWithdrawalRequest {
-    fn mock_for_testing(network: Network, wid: u64) -> Self {
+    fn mock_for_testing(network: Network, wid: WithdrawalID) -> Self {
         let kp = create_btc_keypair(&[2u8; 32]);
         let (internal_key, _) = UntweakedPublicKey::from_keypair(&kp);
         let addr_unchecked =
@@ -273,7 +274,7 @@ impl StandardWithdrawalRequest {
 
     fn mock_for_testing_with_seq(
         network: Network,
-        wid: u64,
+        wid: WithdrawalID,
         timestamp_secs: u64,
         seq: u64,
     ) -> Self {
@@ -300,7 +301,7 @@ impl StandardWithdrawalRequest {
 
     fn sign_for_wid(
         network: Network,
-        wid: u64,
+        wid: WithdrawalID,
     ) -> (HashiSigned<StandardWithdrawalRequest>, HashiCommittee) {
         Self::sign_for_request(Self::mock_for_testing(network, wid))
     }
@@ -309,7 +310,7 @@ impl StandardWithdrawalRequest {
     pub fn mock_signed_and_committee_for_testing(
         network: Network,
     ) -> (HashiSigned<StandardWithdrawalRequest>, HashiCommittee) {
-        Self::sign_for_wid(network, 123)
+        Self::sign_for_wid(network, WithdrawalID::new([0xab; 32]))
     }
 
     pub fn mock_signed_for_testing(network: Network) -> HashiSigned<StandardWithdrawalRequest> {
@@ -318,14 +319,14 @@ impl StandardWithdrawalRequest {
 
     pub fn mock_signed_for_testing_with_wid(
         network: Network,
-        wid: u64,
+        wid: WithdrawalID,
     ) -> HashiSigned<StandardWithdrawalRequest> {
         Self::sign_for_wid(network, wid).0
     }
 
     pub fn mock_signed_and_committee_with_seq(
         network: Network,
-        wid: u64,
+        wid: WithdrawalID,
         timestamp_secs: u64,
         seq: u64,
     ) -> (HashiSigned<StandardWithdrawalRequest>, HashiCommittee) {

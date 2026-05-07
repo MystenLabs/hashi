@@ -95,7 +95,6 @@ impl RateLimiter {
             return Err(RateLimitExceeded);
         }
 
-        // Snapshot for revert, then mutate.
         self.prev_state = self.state;
         self.state.last_updated_at = timestamp;
         self.state.num_tokens_available = capacity - amount_sats;

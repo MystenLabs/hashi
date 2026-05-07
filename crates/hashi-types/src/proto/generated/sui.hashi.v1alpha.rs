@@ -1215,9 +1215,9 @@ pub struct SignedStandardWithdrawalRequest {
 /// Withdrawal request payload.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StandardWithdrawalRequestData {
-    /// Unique withdrawal ID assigned by Hashi.
-    #[prost(uint64, optional, tag = "1")]
-    pub wid: ::core::option::Option<u64>,
+    /// 32-byte UID of the on-chain `WithdrawalTransaction` Sui object.
+    #[prost(bytes = "bytes", optional, tag = "1")]
+    pub wid: ::core::option::Option<::prost::bytes::Bytes>,
     /// Transaction UTXOs (inputs and outputs).
     #[prost(message, optional, tag = "2")]
     pub utxos: ::core::option::Option<TxUtxos>,

@@ -280,9 +280,9 @@ pub enum WithdrawalLogMessage {
 //      Helper types & structs
 // ---------------------------------
 
-/// Unique identifier for a withdrawal request
-/// It is used to correlate events across sui & guardian.
-pub type WithdrawalID = u64;
+/// 32-byte UID of the on-chain `WithdrawalTransaction` Sui object.
+/// Used to correlate events across Sui, hashi nodes, and the guardian.
+pub type WithdrawalID = sui_sdk_types::Address;
 
 pub type Attestation = Vec<u8>;
 
@@ -882,8 +882,9 @@ mod tests {
         let session_id = "session-c".to_string();
         let signing_key = GuardianSignKeyPair::from([9u8; 32]);
         let timestamp_ms = 1_700_000_000_000;
+        let wid = WithdrawalID::new([0xcd; 32]);
         let signed_request =
-            StandardWithdrawalRequest::mock_signed_for_testing_with_wid(Network::Regtest, 999);
+            StandardWithdrawalRequest::mock_signed_for_testing_with_wid(Network::Regtest, wid);
         let (request_sign, request_data) = signed_request.into_parts();
 
         let mut log = LogRecord::new(
@@ -899,7 +900,7 @@ mod tests {
         set_timestamp(&mut log, timestamp_ms);
 
         let key = log.object_key();
-        assert!(key.starts_with("withdraw/2023/11/14/22/session-c-999-success-"));
+        assert!(key.starts_with(&format!("withdraw/2023/11/14/22/session-c-{wid}-success-")));
         assert!(key.ends_with(".json"));
     }
 }

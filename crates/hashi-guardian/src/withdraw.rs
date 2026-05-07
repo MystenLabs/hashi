@@ -16,6 +16,7 @@ use hashi_types::guardian::RateLimiter;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalResponse;
+use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::WithdrawalLogMessage;
 use serde::Serialize;
 use std::sync::Arc;
@@ -164,7 +165,7 @@ pub fn verify_hashi_cert<T: Serialize>(
 
 async fn log_withdrawal_success(
     enclave: &Enclave,
-    wid: u64,
+    wid: WithdrawalID,
     msg: WithdrawalLogMessage,
     limiter_guard: LimiterGuard,
 ) -> GuardianResult<()> {
@@ -186,7 +187,7 @@ async fn log_withdrawal_success(
 
 async fn log_withdrawal_failure(
     enclave: &Enclave,
-    wid: u64,
+    wid: WithdrawalID,
     msg: WithdrawalLogMessage,
     withdraw_err: &GuardianError,
 ) -> GuardianResult<()> {
@@ -297,7 +298,7 @@ mod tests {
     async fn test_standard_withdrawal_rate_limit_exceeded() {
         let (req1, committee) = StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
             Network::Regtest,
-            1,
+            WithdrawalID::new([0x01; 32]),
             100,
             0,
         );
@@ -312,7 +313,7 @@ mod tests {
         // Second withdrawal with seq=1 and later timestamp — bucket is empty, no refill (rate=0).
         let (req2, _) = StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
             Network::Regtest,
-            2,
+            WithdrawalID::new([0x02; 32]),
             200,
             1,
         );

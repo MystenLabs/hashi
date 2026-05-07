@@ -231,8 +231,8 @@ message SignedStandardWithdrawalRequest {
 
 // Withdrawal request payload.
 message StandardWithdrawalRequestData {
-  // Unique withdrawal ID assigned by Hashi.
-  optional uint64 wid = 1;
+  // 32-byte UID of the on-chain `WithdrawalTransaction` Sui object.
+  optional bytes wid = 1;
 
   // Transaction UTXOs (inputs and outputs).
   TxUtxos utxos = 2;
