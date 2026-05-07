@@ -443,6 +443,54 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_guardian_reconciler_reports_healthy_after_withdrawal() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting Guardian Reconciler Tick E2E Test ===");
+
+        let builder = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_guardian()
+            .with_guardian_reconciliation_interval_secs(1);
+        let mut networks = setup_test_networks(builder).await?;
+
+        create_deposit_and_wait(&mut networks, 100_000u64).await?;
+
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+        withdraw_and_confirm(&mut networks, &hashi, user_key, 30_000u64).await?;
+
+        // Reconciler skips the first tick, so wait for at least one
+        // tick after that.
+        tokio::time::sleep(Duration::from_secs(6)).await;
+
+        for node in networks.hashi_network.nodes() {
+            let metrics = node.hashi().metrics.clone();
+            let healthy = metrics
+                .guardian_reconciler_outcomes_total
+                .with_label_values(&[hashi::metrics::GUARDIAN_RECONCILER_OUTCOME_HEALTHY])
+                .get();
+            assert!(healthy >= 1, "no healthy reconciler tick");
+            assert_eq!(metrics.guardian_reconciler_seq_drift.get(), 0);
+            assert_eq!(metrics.guardian_limiter_drifted.get(), 0);
+            let empty = metrics
+                .guardian_replay_outcomes_total
+                .with_label_values(&[hashi::metrics::GUARDIAN_REPLAY_OUTCOME_EMPTY_GAP])
+                .get();
+            let success = metrics
+                .guardian_replay_outcomes_total
+                .with_label_values(&[hashi::metrics::GUARDIAN_REPLAY_OUTCOME_SUCCESS])
+                .get();
+            assert!(
+                empty + success >= 1,
+                "watcher never recorded a gap-fill outcome"
+            );
+        }
+
+        info!("=== Guardian Reconciler Tick E2E Test Passed ===");
+        Ok(())
+    }
+
     async fn withdraw_and_confirm(
         networks: &mut TestNetworks,
         hashi: &hashi::Hashi,

@@ -35,11 +35,8 @@ use crate::onchain::types::ProposalType;
 use crate::onchain::types::WithdrawalRequest;
 use crate::withdrawals::withdrawal_limiter_consumption_amount;
 
-/// Hard cap on the number of checkpoints we will paginate through during
-/// a single gap-fill attempt. ~10k checkpoints is roughly 40 minutes of
-/// chain at the current Sui cadence — long enough for any realistic
-/// network blip, short enough to stay bounded if a node was down for
-/// hours and the in-memory cursor is meaningless.
+// Bounded so a long downtime can't force the watcher to paginate
+// indefinitely; reconciler picks up any residual drift.
 const MAX_REPLAY_CHECKPOINTS: u64 = 10_000;
 
 #[tracing::instrument(name = "watcher", skip_all)]
@@ -79,11 +76,9 @@ pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Ar
             }
         };
 
-        // Pull the first response so we know exactly where the live
-        // stream is starting. Anything strictly between the cursor we
-        // last processed and `live_first_seq` is a gap that needs to
-        // be filled from chain — otherwise its WithdrawalSignedEvents
-        // would be silently dropped and the local limiter would drift.
+        // First message tells us where the live stream starts; anything
+        // strictly between `latest_checkpoint_height` and that cursor
+        // needs to be backfilled from chain.
         let first = match subscription.next().await {
             Some(Ok(resp)) => resp,
             Some(Err(e)) => {
@@ -101,30 +96,19 @@ pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Ar
         let last_processed = state.latest_checkpoint_height();
         let gap_first = last_processed.saturating_add(1);
 
-        // First-boot path: `last_processed` is whatever the initial
-        // scrape recorded; if the live stream starts there or earlier
-        // (e.g. fast subscribe) the gap is empty. Skip replay; skip
-        // rescrape — the initial scrape already seeded the mirror.
         let need_full_rescrape = if last_processed > 0 && gap_first < live_first_seq {
-            match replay_gap(
-                &mut client,
-                &state,
-                &metrics,
-                &subscription_read_mask,
-                gap_first,
-                live_first_seq - 1,
+            matches!(
+                replay_gap(
+                    &mut client,
+                    &state,
+                    &metrics,
+                    &subscription_read_mask,
+                    gap_first,
+                    live_first_seq - 1,
+                )
+                .await,
+                ReplayOutcome::RpcFailure | ReplayOutcome::GapTooLarge,
             )
-            .await
-            {
-                ReplayOutcome::Empty | ReplayOutcome::Success => false,
-                ReplayOutcome::RpcFailure | ReplayOutcome::GapTooLarge => {
-                    // The on-chain mirror is now stale (we dropped some
-                    // events) and the limiter is drifted. Pull a full
-                    // snapshot so the mirror is at least consistent;
-                    // the reconciler will surface the limiter drift.
-                    true
-                }
-            }
         } else {
             false
         };
@@ -152,10 +136,6 @@ pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Ar
             }
         }
 
-        // Process the first live message we already pulled, then drain
-        // the rest of the subscription. On stream error we just break
-        // back to the outer loop and re-subscribe — gap-fill on the
-        // next iteration will catch any events the interruption hid.
         process_checkpoint(&mut client, &state, &metrics, first.checkpoint()).await;
 
         while let Some(item) = subscription.next().await {
@@ -172,28 +152,14 @@ pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Ar
     }
 }
 
-/// Outcome of a single gap-fill attempt. Drives metric labels and the
-/// caller's decision to fall back to a full rescrape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReplayOutcome {
-    /// No checkpoints to replay (gap was empty by the time we computed it).
     Empty,
-    /// Every checkpoint in `[from, to]` was fetched and applied.
     Success,
-    /// `get_checkpoint` returned an error or an empty body partway through.
-    /// Mirror + limiter may be partially advanced; caller should rescrape.
     RpcFailure,
-    /// The gap exceeded `MAX_REPLAY_CHECKPOINTS`; we declined to replay.
-    /// Mirror + limiter are unchanged; caller should rescrape.
     GapTooLarge,
 }
 
-/// Replay missed checkpoints in `[from_seq, to_seq]` (inclusive) by
-/// fetching each via `LedgerService::get_checkpoint` and feeding it
-/// through the same `process_checkpoint` path the live subscription
-/// uses. Best-effort: any single failure aborts the replay and returns
-/// the partial-advance metric outcome — the watcher's reconciler is the
-/// final safety net for any lingering drift.
 async fn replay_gap(
     client: &mut Client,
     state: &OnchainState,
@@ -202,13 +168,17 @@ async fn replay_gap(
     from_seq: u64,
     to_seq: u64,
 ) -> ReplayOutcome {
-    if from_seq > to_seq {
+    let started = Instant::now();
+    let record = |outcome: &'static str, applied: u64| {
         if let Some(m) = metrics {
-            m.record_guardian_replay(GUARDIAN_REPLAY_OUTCOME_EMPTY_GAP, 0, 0.0);
+            m.record_guardian_replay(outcome, applied, started.elapsed().as_secs_f64());
         }
+    };
+
+    if from_seq > to_seq {
+        record(GUARDIAN_REPLAY_OUTCOME_EMPTY_GAP, 0);
         return ReplayOutcome::Empty;
     }
-    let started = Instant::now();
     let gap_size = to_seq - from_seq + 1;
     if gap_size > MAX_REPLAY_CHECKPOINTS {
         tracing::error!(
@@ -216,25 +186,16 @@ async fn replay_gap(
             to_seq,
             gap_size,
             max = MAX_REPLAY_CHECKPOINTS,
-            "checkpoint gap exceeds replay cap; declining to replay — local limiter is now drifted"
+            "checkpoint gap exceeds replay cap"
         );
         if let Some(m) = metrics {
             m.guardian_limiter_drifted.set(1);
-            m.record_guardian_replay(
-                GUARDIAN_REPLAY_OUTCOME_GAP_TOO_LARGE,
-                0,
-                started.elapsed().as_secs_f64(),
-            );
         }
+        record(GUARDIAN_REPLAY_OUTCOME_GAP_TOO_LARGE, 0);
         return ReplayOutcome::GapTooLarge;
     }
 
-    tracing::info!(
-        from_seq,
-        to_seq,
-        gap_size,
-        "replaying missed checkpoints to keep local limiter in lockstep",
-    );
+    tracing::info!(from_seq, to_seq, gap_size, "replaying missed checkpoints");
     let mut applied: u64 = 0;
     for seq in from_seq..=to_seq {
         let request = GetCheckpointRequest::default()
@@ -246,12 +207,8 @@ async fn replay_gap(
                 tracing::warn!(seq, applied, "get_checkpoint failed during replay: {e}");
                 if let Some(m) = metrics {
                     m.guardian_limiter_drifted.set(1);
-                    m.record_guardian_replay(
-                        GUARDIAN_REPLAY_OUTCOME_RPC_FAILURE,
-                        applied,
-                        started.elapsed().as_secs_f64(),
-                    );
                 }
+                record(GUARDIAN_REPLAY_OUTCOME_RPC_FAILURE, applied);
                 return ReplayOutcome::RpcFailure;
             }
         };
@@ -259,38 +216,19 @@ async fn replay_gap(
             tracing::warn!(seq, "get_checkpoint returned empty body during replay");
             if let Some(m) = metrics {
                 m.guardian_limiter_drifted.set(1);
-                m.record_guardian_replay(
-                    GUARDIAN_REPLAY_OUTCOME_RPC_FAILURE,
-                    applied,
-                    started.elapsed().as_secs_f64(),
-                );
             }
+            record(GUARDIAN_REPLAY_OUTCOME_RPC_FAILURE, applied);
             return ReplayOutcome::RpcFailure;
         };
         process_checkpoint(client, state, metrics, &checkpoint).await;
         applied += 1;
     }
 
-    if let Some(m) = metrics {
-        m.record_guardian_replay(
-            GUARDIAN_REPLAY_OUTCOME_SUCCESS,
-            applied,
-            started.elapsed().as_secs_f64(),
-        );
-    }
-    tracing::info!(
-        from_seq,
-        to_seq,
-        applied,
-        elapsed_secs = started.elapsed().as_secs_f64(),
-        "checkpoint gap replayed"
-    );
+    record(GUARDIAN_REPLAY_OUTCOME_SUCCESS, applied);
+    tracing::info!(from_seq, to_seq, applied, "checkpoint gap replayed");
     ReplayOutcome::Success
 }
 
-/// Apply one checkpoint's events to the in-memory mirror and advance the
-/// limiter cursor. Shared by the live subscription path and the gap-fill
-/// replay path so both share identical semantics.
 async fn process_checkpoint(
     client: &mut Client,
     state: &OnchainState,

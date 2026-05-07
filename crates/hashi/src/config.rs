@@ -129,25 +129,12 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guardian_endpoint: Option<String>,
 
-    /// How often the guardian reconciler polls `GetGuardianInfo` to
-    /// compare the local-limiter snapshot against the guardian's
-    /// authoritative state. Defaults to 30 s. Read-only check; does
-    /// not mutate state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guardian_reconciliation_interval_secs: Option<u64>,
 
-    /// How long the reconciler must keep observing drift outside the
-    /// in-flight tolerance before it escalates to ERROR + sticky
-    /// `guardian_limiter_drifted=1`. Defaults to 300 s — well past
-    /// any normal in-flight burst (which clears within seconds via
-    /// the watcher) but well below the operator response window.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guardian_reconciliation_drift_alert_secs: Option<u64>,
 
-    /// `next_seq` units the guardian is allowed to lead the local
-    /// limiter by before the reconciler counts it as drift (instead
-    /// of the normal in-flight window). Defaults to 2 — one for the
-    /// at-most-one in-flight withdrawal, one for slack.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guardian_reconciliation_tolerance_seq: Option<u64>,
 
@@ -357,11 +344,14 @@ impl Config {
     }
 
     pub fn guardian_reconciliation_interval(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(self.guardian_reconciliation_interval_secs.unwrap_or(30))
+        std::time::Duration::from_secs(self.guardian_reconciliation_interval_secs.unwrap_or(300))
     }
 
     pub fn guardian_reconciliation_drift_alert(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(self.guardian_reconciliation_drift_alert_secs.unwrap_or(300))
+        std::time::Duration::from_secs(
+            self.guardian_reconciliation_drift_alert_secs
+                .unwrap_or(1_800),
+        )
     }
 
     pub fn guardian_reconciliation_tolerance_seq(&self) -> u64 {

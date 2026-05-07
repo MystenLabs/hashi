@@ -52,34 +52,13 @@ pub struct Metrics {
     pub guardian_rpc_total: IntCounterVec,
     pub guardian_rpc_duration_seconds: HistogramVec,
 
-    /// Reconciler view of the local limiter's `next_seq`. Refreshed
-    /// once per reconciliation tick; lags `guardian_limiter_next_seq`
-    /// by at most one tick interval. Useful to graph alongside
-    /// `guardian_reconciler_guardian_seq` for drift visualisation.
     pub guardian_reconciler_local_seq: IntGauge,
-    /// Reconciler's most-recent observation of the guardian's
-    /// authoritative `next_seq` (from `GetGuardianInfo`).
     pub guardian_reconciler_guardian_seq: IntGauge,
-    /// Signed (`guardian.next_seq - local.next_seq`). Positive means
-    /// the watcher is lagging; negative is impossible during normal
-    /// operation and indicates a bug or guardian rollback.
     pub guardian_reconciler_seq_drift: IntGauge,
-    /// Reconciler tick outcomes by classification: healthy,
-    /// lagging_within_tolerance, lagging, ahead, rpc_failed.
     pub guardian_reconciler_outcomes_total: IntCounterVec,
 
-    /// Outcome of a gap-fill attempt run from the watcher when the
-    /// subscription's first message lands on a checkpoint that's beyond
-    /// the last one we processed (subscription drop, reconnect, or
-    /// initial subscribe race). One increment per attempt.
     pub guardian_replay_outcomes_total: IntCounterVec,
-    /// Cumulative checkpoints fetched + applied via gap-fill. Only counts
-    /// checkpoints actually drained from `get_checkpoint`; partial runs
-    /// before a failure still increment this.
     pub guardian_replay_checkpoints_total: IntCounter,
-    /// End-to-end duration of a gap-fill attempt (any outcome), labeled
-    /// by outcome so partial/RPC-failed calls can be split out from
-    /// healthy successes.
     pub guardian_replay_duration_seconds: HistogramVec,
 
     // Kyoto (Bitcoin light client) metrics
@@ -959,18 +938,10 @@ impl Metrics {
             .inc();
     }
 
-    /// Record a single reconciler tick: refresh the seq snapshots,
-    /// publish the signed drift gauge, and bump the outcome counter.
-    /// `outcome` MUST be one of the `GUARDIAN_RECONCILER_OUTCOME_*`
-    /// constants — passing anything else creates a label hole.
-    pub fn record_reconciliation_tick(
-        &self,
-        local_seq: u64,
-        guardian_seq: u64,
-        outcome: &str,
-    ) {
+    pub fn record_reconciliation_tick(&self, local_seq: u64, guardian_seq: u64, outcome: &str) {
         self.guardian_reconciler_local_seq.set(local_seq as i64);
-        self.guardian_reconciler_guardian_seq.set(guardian_seq as i64);
+        self.guardian_reconciler_guardian_seq
+            .set(guardian_seq as i64);
         self.guardian_reconciler_seq_drift
             .set(guardian_seq as i64 - local_seq as i64);
         self.guardian_reconciler_outcomes_total
@@ -978,21 +949,12 @@ impl Metrics {
             .inc();
     }
 
-    /// Record a reconciler tick that never reached the comparison —
-    /// the `GetGuardianInfo` RPC failed. Drift gauges are not touched
-    /// (we don't know the guardian's seq); only the outcome counter.
     pub fn record_reconciliation_rpc_failure(&self) {
         self.guardian_reconciler_outcomes_total
             .with_label_values(&[GUARDIAN_RECONCILER_OUTCOME_RPC_FAILED])
             .inc();
     }
 
-    /// Record a watcher gap-fill attempt.
-    ///
-    /// `applied_checkpoints` is the number actually drained from the
-    /// chain via `get_checkpoint` and applied to the in-memory mirror
-    /// (independent of whether the attempt ultimately succeeded), which
-    /// also feeds `guardian_replay_checkpoints_total`.
     pub fn record_guardian_replay(
         &self,
         outcome: &str,
@@ -1194,8 +1156,7 @@ pub const GUARDIAN_REPLAY_OUTCOME_GAP_TOO_LARGE: &str = "gap_too_large";
 
 // Reconciler tick outcome labels.
 pub const GUARDIAN_RECONCILER_OUTCOME_HEALTHY: &str = "healthy";
-pub const GUARDIAN_RECONCILER_OUTCOME_LAGGING_WITHIN_TOLERANCE: &str =
-    "lagging_within_tolerance";
+pub const GUARDIAN_RECONCILER_OUTCOME_LAGGING_WITHIN_TOLERANCE: &str = "lagging_within_tolerance";
 pub const GUARDIAN_RECONCILER_OUTCOME_LAGGING: &str = "lagging";
 pub const GUARDIAN_RECONCILER_OUTCOME_AHEAD: &str = "ahead";
 pub const GUARDIAN_RECONCILER_OUTCOME_RPC_FAILED: &str = "rpc_failed";
