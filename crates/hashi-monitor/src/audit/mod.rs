@@ -197,7 +197,7 @@ impl AuditorCore {
                 continue;
             }
             if sm.is_valid() {
-                tracing::info!("withdrawal {} is valid", wid);
+                tracing::info!(wid = %hex::encode(wid), "withdrawal is valid");
                 completed_withdrawals.push(*wid);
             }
         }
@@ -230,7 +230,7 @@ impl AuditorCore {
                 verified_up_to_withdrawals = verified_up_to_withdrawals.min(e2.timestamp_secs);
             } else {
                 tracing::warn!(
-                    wid = sm.wid(),
+                    wid = %hex::encode(sm.wid()),
                     "in-window withdrawal missing guardian anchor; skipping in verified_up_to computation"
                 );
             }

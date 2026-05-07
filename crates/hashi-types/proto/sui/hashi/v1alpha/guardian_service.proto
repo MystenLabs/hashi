@@ -231,13 +231,16 @@ message SignedStandardWithdrawalRequest {
 
 // Withdrawal request payload.
 message StandardWithdrawalRequestData {
-  // Unique withdrawal ID assigned by Hashi.
-  optional uint64 wid = 1;
+  // Stable withdrawal id — the 32-byte UID of the on-chain
+  // `WithdrawalTransaction` Sui object.
+  optional bytes wid = 1;
 
   // Transaction UTXOs (inputs and outputs).
   TxUtxos utxos = 2;
 
-  // Timestamp in unix seconds (signed by committee, used for rate limiting).
+  // Sui checkpoint timestamp in unix seconds (signed by committee, used
+  // for guardian rate limiting). Followers validate this against their
+  // own latest known checkpoint timestamp before BLS-signing.
   optional uint64 timestamp_secs = 3;
 
   // Monotonic sequence number for ordering withdrawals.

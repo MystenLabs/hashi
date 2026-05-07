@@ -30,28 +30,31 @@ pub async fn standard_withdrawal(
 
     let unsigned_request = StandardWithdrawalRequestWire::from(signed_request.message().clone()); // for logging
     let request_signature = signed_request.committee_signature().clone(); // for logging
-    let wid = unsigned_request.wid;
+    let wid_hex = hex::encode(unsigned_request.wid);
 
     match normal_withdrawal_inner(enclave.clone(), signed_request).await {
         Ok((txid, response, limiter_guard)) => {
-            info!("Withdrawal {} processed successfully. Logging to S3.", wid);
+            info!(
+                "Withdrawal {} processed successfully. Logging to S3.",
+                wid_hex
+            );
             let msg = WithdrawalLogMessage::Success {
                 txid,
                 request_data: unsigned_request,
                 request_sign: request_signature,
                 response: response.clone(),
             };
-            log_withdrawal_success(enclave.as_ref(), wid, msg, limiter_guard).await?;
+            log_withdrawal_success(enclave.as_ref(), &wid_hex, msg, limiter_guard).await?;
             Ok(enclave.sign(response))
         }
         Err(withdraw_err) => {
-            error!("Withdrawal {} failed: {:?}", wid, withdraw_err);
+            error!("Withdrawal {} failed: {:?}", wid_hex, withdraw_err);
             let msg = WithdrawalLogMessage::Failure {
                 request_data: unsigned_request,
                 request_sign: request_signature,
                 error: withdraw_err.clone(),
             };
-            log_withdrawal_failure(enclave.as_ref(), wid, msg, &withdraw_err).await?;
+            log_withdrawal_failure(enclave.as_ref(), &wid_hex, msg, &withdraw_err).await?;
             Err(withdraw_err)
         }
     }
@@ -99,9 +102,11 @@ async fn normal_withdrawal_inner(
 
     info!("Checking rate limits.");
     let consumed_amount_sats = request.utxos().external_out_amount().to_sat();
+    let wid = *request.wid();
     let limiter_guard = enclave
         .state
         .consume_from_limiter(
+            wid,
             request.seq(),
             request.timestamp_secs(),
             consumed_amount_sats,
@@ -164,13 +169,13 @@ pub fn verify_hashi_cert<T: Serialize>(
 
 async fn log_withdrawal_success(
     enclave: &Enclave,
-    wid: u64,
+    wid_hex: &str,
     msg: WithdrawalLogMessage,
     limiter_guard: LimiterGuard,
 ) -> GuardianResult<()> {
     match enclave.log_withdraw(msg).await {
         Ok(_) => {
-            info!("Withdrawal {} logged.", wid);
+            info!("Withdrawal {} logged.", wid_hex);
             // Commit limiter consumption only after we've successfully logged.
             limiter_guard.commit();
             Ok(())
@@ -178,7 +183,7 @@ async fn log_withdrawal_success(
         Err(e) => {
             // Logging failed => return Err (do not return signatures).
             // Note that LimiterGuard::Drop will revert the limiter
-            error!("Logging withdrawal {} to S3 failed: {:?}", wid, e);
+            error!("Logging withdrawal {} to S3 failed: {:?}", wid_hex, e);
             Err(e)
         }
     }
@@ -186,15 +191,15 @@ async fn log_withdrawal_success(
 
 async fn log_withdrawal_failure(
     enclave: &Enclave,
-    wid: u64,
+    wid_hex: &str,
     msg: WithdrawalLogMessage,
     withdraw_err: &GuardianError,
 ) -> GuardianResult<()> {
     if let Err(log_err) = enclave.log_withdraw(msg).await {
-        error!("Logging withdrawal {} to S3 failed: {:?}", wid, log_err);
+        error!("Logging withdrawal {} to S3 failed: {:?}", wid_hex, log_err);
         return Err(InternalError(format!(
             "Failed to log withdrawal {} error {} due to S3 logging error {}",
-            wid, withdraw_err, log_err
+            wid_hex, withdraw_err, log_err
         )));
     }
 
@@ -297,7 +302,7 @@ mod tests {
     async fn test_standard_withdrawal_rate_limit_exceeded() {
         let (req1, committee) = StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
             Network::Regtest,
-            1,
+            [0x01; 32],
             100,
             0,
         );
@@ -312,7 +317,7 @@ mod tests {
         // Second withdrawal with seq=1 and later timestamp — bucket is empty, no refill (rate=0).
         let (req2, _) = StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
             Network::Regtest,
-            2,
+            [0x02; 32],
             200,
             1,
         );

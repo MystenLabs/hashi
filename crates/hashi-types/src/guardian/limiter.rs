@@ -4,6 +4,7 @@
 use super::GuardianError::InvalidInputs;
 use super::GuardianError::RateLimitExceeded;
 use super::GuardianResult;
+use super::WithdrawalID;
 use serde::Serialize;
 
 /// Immutable configuration for the token bucket rate limiter.
@@ -66,7 +67,17 @@ impl RateLimiter {
 
     /// Consume tokens from the bucket. Validates seq and timestamp ordering,
     /// refills based on elapsed time, then debits the requested amount.
-    pub fn consume(&mut self, seq: u64, timestamp: u64, amount_sats: u64) -> GuardianResult<()> {
+    ///
+    /// `_wid` is unused inside the limiter today; it becomes the idempotency
+    /// key in the upcoming soft-reserve path. Kept in the signature now to
+    /// avoid churning every call site later.
+    pub fn consume(
+        &mut self,
+        _wid: WithdrawalID,
+        seq: u64,
+        timestamp: u64,
+        amount_sats: u64,
+    ) -> GuardianResult<()> {
         if seq != self.state.next_seq {
             return Err(InvalidInputs(format!(
                 "seq mismatch: expected {}, got {}",
@@ -95,7 +106,6 @@ impl RateLimiter {
             return Err(RateLimitExceeded);
         }
 
-        // Snapshot for revert, then mutate.
         self.prev_state = self.state;
         self.state.last_updated_at = timestamp;
         self.state.num_tokens_available = capacity - amount_sats;
@@ -127,22 +137,26 @@ mod test {
         (config, state)
     }
 
+    fn wid(fill: u8) -> WithdrawalID {
+        [fill; 32]
+    }
+
     #[test]
     fn test_basic() {
         let (config, state) = make_limiter();
         let mut limiter = RateLimiter::new(config, state).unwrap();
-        assert!(limiter.consume(0, 1, config.refill_rate).is_ok());
+        assert!(limiter.consume(wid(1), 0, 1, config.refill_rate).is_ok());
 
         let target_amount = 1_000_000u64;
         let num_secs_required = target_amount.div_ceil(config.refill_rate);
         assert!(
             limiter
-                .consume(1, num_secs_required, target_amount)
+                .consume(wid(2), 1, num_secs_required, target_amount)
                 .is_err()
         );
         assert!(
             limiter
-                .consume(1, 1 + num_secs_required, target_amount)
+                .consume(wid(2), 1, 1 + num_secs_required, target_amount)
                 .is_ok()
         );
     }
@@ -153,12 +167,12 @@ mod test {
         let mut limiter = RateLimiter::new(config, state).unwrap();
         assert!(
             limiter
-                .consume(0, u64::MAX, config.max_bucket_capacity + 1)
+                .consume(wid(1), 0, u64::MAX, config.max_bucket_capacity + 1)
                 .is_err()
         );
         assert!(
             limiter
-                .consume(0, u64::MAX, config.max_bucket_capacity)
+                .consume(wid(1), 0, u64::MAX, config.max_bucket_capacity)
                 .is_ok()
         );
     }
@@ -168,7 +182,7 @@ mod test {
         let (config, state) = make_limiter();
         let mut limiter = RateLimiter::new(config, state).unwrap();
         // Consume after refill, then revert — should restore original state.
-        limiter.consume(0, 100, 50_000).unwrap();
+        limiter.consume(wid(1), 0, 100, 50_000).unwrap();
         assert_eq!(limiter.state().num_tokens_available, 50_000); // 100*1000 - 50_000
         limiter.revert();
         assert_eq!(limiter.state().num_tokens_available, 0);
@@ -181,10 +195,10 @@ mod test {
         let (config, state) = make_limiter();
         let mut limiter = RateLimiter::new(config, state).unwrap();
         // Wrong seq.
-        assert!(limiter.consume(1, 0, 0).is_err());
+        assert!(limiter.consume(wid(1), 1, 0, 0).is_err());
         // Advance state.
-        limiter.consume(0, 100, 1_000).unwrap();
+        limiter.consume(wid(1), 0, 100, 1_000).unwrap();
         // Old timestamp.
-        assert!(limiter.consume(1, 50, 1_000).is_err());
+        assert!(limiter.consume(wid(2), 1, 50, 1_000).is_err());
     }
 }
