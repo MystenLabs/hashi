@@ -2,19 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Client module — fires a Plausible pageview on every SPA route change with
-// a `visitor_type` custom prop ("human" | "agent") derived from the user
-// agent string, mirroring the detection added in
-// https://github.com/MystenLabs/seal/pull/545.
+// a `visitor_type` custom prop ("human" | "agent" | "bot") derived from the
+// user agent string. Mirrors detection logic from
+// https://github.com/MystenLabs/seal/pull/546:
+//   - `agent`: an AI tool (Claude Code, Cursor, ChatGPT, etc.)
+//   - `bot`:   a traditional crawler/scraper (Googlebot, headless Chrome,
+//              Selenium/Puppeteer/Playwright, generic spiders)
+//   - `human`: everyone else
+// Server-side detection for AI agents that never run JS (curl-style fetches)
+// lives in middleware.js at the docs root.
 
 import ExecutionEnvironment from "@docusaurus/ExecutionEnvironment";
 
+const AI_AGENT_PATTERNS =
+  /claude[-_]?code|anthropic|cursor|copilot|chatgpt|openai|gptbot|perplexity|cohere|codeium|windsurf|tabnine|sourcegraph|cody/i;
 const BOT_PATTERNS =
   /bot|crawler|spider|crawling|headless|puppet|phantom|selenium|playwright|archiver|fetcher|slurp|mediapartners/i;
 
 function detectVisitorType() {
   const ua = (typeof navigator !== "undefined" && navigator.userAgent) || "";
-  if (BOT_PATTERNS.test(ua)) return "agent";
-  if (typeof navigator !== "undefined" && navigator.webdriver) return "agent";
+  if (AI_AGENT_PATTERNS.test(ua)) return "agent";
+  if (BOT_PATTERNS.test(ua)) return "bot";
+  if (typeof navigator !== "undefined" && navigator.webdriver) return "bot";
   return "human";
 }
 
