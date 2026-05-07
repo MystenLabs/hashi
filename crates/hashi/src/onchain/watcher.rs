@@ -437,9 +437,8 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
             }
             HashiEvent::WithdrawalSignedEvent(event) => {
                 tracing::info!(withdrawal_txn_id = %event.withdrawal_txn_id, "Withdrawal signatures stored on-chain");
-                // Capture the limiter inputs while we hold the state guard so
-                // subscribers don't have to re-read the mirror. `signed` is
-                // None if the txn has already been confirmed and removed.
+                // Capture the limiter inputs alongside the signature update so
+                // subscribers don't re-read the mirror.
                 let signed = {
                     let mut state = state.state_mut();
                     state

@@ -743,12 +743,9 @@ impl Hashi {
         })
     }
 
-    /// Sole mutator of `LocalLimiter` after bootstrap: advances the limiter
-    /// on every observed `WithdrawalSignedEvent`. Symmetric across leader
-    /// and follower (every node sees the same Sui checkpoint stream).
-    /// `signatures.is_some()` implies the guardian acked, because
-    /// `submit_sign_withdrawal` only runs after
-    /// `finalize_withdrawal_through_guardian` returns Ok.
+    /// Sole mutator of `LocalLimiter` after bootstrap: advances on every
+    /// observed `WithdrawalSignedEvent`. Symmetric across leader and
+    /// follower since every node consumes the same Sui checkpoint stream.
     fn start_guardian_limiter_observer(self: Arc<Self>) -> Service {
         use tokio::sync::broadcast::error::RecvError;
         Service::new().spawn_aborting(async move {
@@ -780,8 +777,7 @@ impl Hashi {
                 let Some(limiter) = self.local_limiter() else {
                     tracing::warn!(
                         %withdrawal_txn_id,
-                        "Local limiter not yet bootstrapped; dropping observation. \
-                         Bootstrap must complete before the first withdrawal."
+                        "Local limiter not yet bootstrapped; dropping observation"
                     );
                     continue;
                 };

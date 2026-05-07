@@ -77,8 +77,6 @@ pub struct LeaderService {
     inflight_withdrawal_signings: HashSet<Address>,
     withdrawal_broadcast_tasks: JoinSet<(Address, anyhow::Result<()>)>,
     inflight_withdrawal_broadcasts: HashSet<Address>,
-    /// Withdrawal requests already warned about exceeding local limiter
-    /// capacity. Pruned each checkpoint to track only currently-pending ids.
     stuck_withdrawal_warned: HashSet<Address>,
     deposit_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     proposal_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
@@ -962,8 +960,7 @@ impl LeaderService {
             .collect();
         approved.sort_by_key(|r| r.timestamp_ms);
 
-        // Drop stuck-warn entries for requests that are no longer pending,
-        // so a re-stuck request would warn again.
+        // Prune stuck-warn entries so a re-stuck request warns again.
         let pending_ids: HashSet<Address> = approved.iter().map(|r| r.id).collect();
         self.stuck_withdrawal_warned
             .retain(|id| pending_ids.contains(id));
@@ -996,25 +993,27 @@ impl LeaderService {
             return;
         }
 
-        // Capacity-aware batching: longest timestamp-sorted prefix that fits the
-        // local limiter's available capacity. Dropped tail bumps `at_capacity` so
-        // we don't sit on excess demand for the full batching window.
+        // Truncate to the longest timestamp-sorted prefix that fits the local
+        // limiter's available capacity; the dropped tail flips `at_capacity`
+        // so we don't sit on excess demand for the full batching window.
         let (batch, at_capacity) = if let Some(limiter) = self.inner.local_limiter() {
             let timestamp_secs = checkpoint_timestamp_ms / 1000;
             let capacity = limiter.capacity_at(timestamp_secs).await;
             let mut cumulative = 0u64;
-            let mut filtered: Vec<WithdrawalRequest> = Vec::with_capacity(approved.len());
+            let mut take_count = 0;
             for req in &approved {
-                let candidate = cumulative.saturating_add(req.btc_amount);
-                if candidate > capacity {
+                let Some(next) = cumulative.checked_add(req.btc_amount) else {
+                    break;
+                };
+                if next > capacity {
                     break;
                 }
-                cumulative = candidate;
-                filtered.push(req.clone());
+                cumulative = next;
+                take_count += 1;
             }
-            if filtered.is_empty() {
-                // Head exceeds available capacity (may fit after refill, or be
-                // permanently stuck). Leave it queued and warn once.
+            if take_count == 0 {
+                // Head won't fit even with the bucket fully available; warn
+                // once and leave it queued for the next refill.
                 let stuck = &approved[0];
                 if self.stuck_withdrawal_warned.insert(stuck.id) {
                     warn!(
@@ -1026,8 +1025,10 @@ impl LeaderService {
                 }
                 return;
             }
-            let at_capacity = filtered.len() < approved.len();
-            (filtered, at_capacity)
+            let at_capacity = take_count < approved.len();
+            let mut batch = approved;
+            batch.truncate(take_count);
+            (batch, at_capacity)
         } else {
             (approved, false)
         };
@@ -1238,11 +1239,9 @@ impl LeaderService {
         self.inflight_withdrawal_signings
             .retain(|id| pending_ids.contains(id));
 
-        // The observer advances `LocalLimiter::next_seq` sequentially on every
-        // `WithdrawalSignedEvent`, so concurrent MPC tasks would race against
-        // a stale `expected_limiter_seq` and fail per-node validation. Cap
-        // in-flight to 1 whenever the guardian (and therefore the limiter) is
-        // configured.
+        // Cap to 1 when the limiter is in play: concurrent MPC tasks would
+        // race on `expected_limiter_seq` since the observer bumps it on every
+        // signed event.
         let max_concurrent = if self.inner.guardian_client().is_some() {
             1
         } else {
@@ -1413,9 +1412,9 @@ impl LeaderService {
                 .inc();
         })?;
 
-        // Serialize against ourselves so the next checkpoint doesn't respawn
-        // and either double-submit sign_withdrawal (no-guardian) or hand the
-        // followers a stale `next_seq` (guardian).
+        // Block before returning so the next checkpoint can't respawn this
+        // task with a stale `next_seq` (guardian) or double-submit
+        // `sign_withdrawal` (no-guardian).
         Self::wait_until_signed_committed(&inner, &txn.id, expected_limiter_seq).await;
 
         Ok(())
@@ -1999,11 +1998,8 @@ impl LeaderService {
             .await
     }
 
-    /// Block until the local limiter has advanced past `leader_seq_used`
-    /// (guardian path) or until the on-chain signatures are visible
-    /// (no-guardian). The limiter advance is the strictly stronger condition,
-    /// since the observer fires on the same `WithdrawalSignedEvent` that
-    /// drives visibility.
+    /// Block until the local limiter advances past `leader_seq_used`
+    /// (guardian) or the on-chain signatures become visible (no-guardian).
     async fn wait_until_signed_committed(
         inner: &Hashi,
         txn_id: &Address,

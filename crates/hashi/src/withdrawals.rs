@@ -565,9 +565,8 @@ impl Hashi {
                 epoch,
             );
         }
-        // Validate-only: the limiter advance happens in
-        // `start_guardian_limiter_observer` on `WithdrawalSignedEvent`,
-        // never on this signing path.
+        // Validate-only: the observer advances the limiter on
+        // `WithdrawalSignedEvent`, never from this path.
         match (self.local_limiter(), expected_limiter_seq) {
             (Some(limiter), Some(expected_seq)) => {
                 let amount_sats: u64 = txn.withdrawal_outputs.iter().map(|o| o.amount).sum();

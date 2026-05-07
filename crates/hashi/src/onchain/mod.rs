@@ -63,9 +63,7 @@ pub enum Notification {
     /// Reconfig started, transitioning to the given epoch.
     StartReconfig(u64),
     SuiEpochChanged(u64),
-    /// A `WithdrawalTransaction` had its witness signatures stored on-chain.
-    /// Carries the per-withdrawal limiter inputs so subscribers don't have to
-    /// re-read the on-chain mirror.
+    /// Witness signatures for a `WithdrawalTransaction` were stored on-chain.
     WithdrawalSigned {
         withdrawal_txn_id: Address,
         amount_sats: u64,
