@@ -1203,7 +1203,7 @@ impl SuiTxExecutor {
         request_ids: &[Address],
         signatures: &[Vec<u8>],
         cert: &CommitteeSignature,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
 
         let hashi_arg = builder.object(
@@ -1239,7 +1239,15 @@ impl SuiTxExecutor {
                 response.transaction().effects().status()
             );
         }
-        Ok(())
+        // The Sui executor waits for checkpoint inclusion, so this is set.
+        // Callers can wait for the local watcher to catch up to this seq
+        // and then read the on-chain mirror — uniform for guardian and
+        // no-guardian deployments.
+        let checkpoint = response
+            .transaction()
+            .checkpoint_opt()
+            .ok_or_else(|| anyhow::anyhow!("sign_withdrawal response missing checkpoint"))?;
+        Ok(checkpoint)
     }
 
     /// Execute `withdraw::cancel_withdrawal` to cancel a pending withdrawal request.

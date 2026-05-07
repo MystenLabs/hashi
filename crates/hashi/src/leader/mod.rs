@@ -1413,7 +1413,7 @@ impl LeaderService {
 
         // 4. Submit sign_withdrawal to Sui (writes signatures on-chain).
         // Broadcast + confirm happens via process_signed_withdrawal_txns on the next tick.
-        Self::submit_sign_withdrawal(
+        let signed_checkpoint = Self::submit_sign_withdrawal(
             &inner,
             &txn.id,
             &txn.request_ids.clone(),
@@ -1421,7 +1421,7 @@ impl LeaderService {
             signed.committee_signature(),
         )
         .await
-        .inspect(|()| {
+        .inspect(|_| {
             inner
                 .metrics
                 .sui_tx_submissions_total
@@ -1437,9 +1437,27 @@ impl LeaderService {
         })?;
 
         // Block before returning so the next checkpoint can't respawn this
-        // task with a stale `next_seq` (guardian) or double-submit
-        // `sign_withdrawal` (no-guardian).
-        Self::wait_until_signed_committed(&inner, &txn.id, expected_limiter_seq).await;
+        // task with stale state. The Sui executor already waited for the
+        // sign_withdrawal txn to land in `signed_checkpoint`; we just
+        // need to wait for our local watcher to process that checkpoint
+        // — at which point the limiter has been advanced and
+        // `WithdrawalTransaction.signatures` is visible. Same code path
+        // with or without guardian.
+        const VISIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
+        if tokio::time::timeout(
+            VISIBILITY_TIMEOUT,
+            inner.onchain_state().wait_until_checkpoint(signed_checkpoint),
+        )
+        .await
+        .is_err()
+        {
+            warn!(
+                withdrawal_txn_id = %txn.id,
+                signed_checkpoint,
+                "Timeout waiting for local watcher to catch up to signed checkpoint; \
+                 a duplicate sign attempt may follow on the next checkpoint"
+            );
+        }
 
         Ok(())
     }
@@ -2013,50 +2031,13 @@ impl LeaderService {
         request_ids: &[Address],
         signatures: &[Vec<u8>],
         cert: &CommitteeSignature,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         info!("Submitting sign_withdrawal for {:?}", withdrawal_id);
 
         let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
         executor
             .execute_sign_withdrawal(withdrawal_id, request_ids, signatures, cert)
             .await
-    }
-
-    /// Block until the local limiter advances past `leader_seq_used`
-    /// (guardian) or the on-chain signatures become visible (no-guardian).
-    async fn wait_until_signed_committed(
-        inner: &Hashi,
-        txn_id: &Address,
-        leader_seq_used: Option<u64>,
-    ) {
-        const VISIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
-        let mut checkpoint_rx = inner.onchain_state().subscribe_checkpoint();
-        let wait = async {
-            loop {
-                let committed = match (inner.local_limiter(), leader_seq_used) {
-                    (Some(limiter), Some(seq)) => limiter.next_seq() > seq,
-                    _ => inner
-                        .onchain_state()
-                        .withdrawal_txn(txn_id)
-                        .is_some_and(|t| t.signatures.is_some()),
-                };
-                if committed {
-                    return;
-                }
-                let _ = checkpoint_rx.changed().await;
-            }
-        };
-        if tokio::time::timeout(VISIBILITY_TIMEOUT, wait)
-            .await
-            .is_err()
-        {
-            warn!(
-                withdrawal_txn_id = %txn_id,
-                ?leader_seq_used,
-                "Timeout waiting for local limiter advance / signed-visible; \
-                 a duplicate sign attempt may follow on the next checkpoint"
-            );
-        }
     }
 
     async fn submit_confirm_withdrawal(
