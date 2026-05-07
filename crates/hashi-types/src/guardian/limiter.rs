@@ -67,10 +67,7 @@ impl RateLimiter {
 
     /// Consume tokens from the bucket. Validates seq and timestamp ordering,
     /// refills based on elapsed time, then debits the requested amount.
-    ///
-    /// `_wid` is unused inside the limiter today; it becomes the idempotency
-    /// key in the upcoming soft-reserve path. Kept in the signature now to
-    /// avoid churning every call site later.
+    /// `_wid` is reserved for the soft-reserve idempotency key.
     pub fn consume(
         &mut self,
         _wid: WithdrawalID,

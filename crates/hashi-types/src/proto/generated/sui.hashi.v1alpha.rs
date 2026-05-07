@@ -1215,16 +1215,13 @@ pub struct SignedStandardWithdrawalRequest {
 /// Withdrawal request payload.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StandardWithdrawalRequestData {
-    /// Stable withdrawal id — the 32-byte UID of the on-chain
-    /// `WithdrawalTransaction` Sui object.
+    /// 32-byte UID of the on-chain `WithdrawalTransaction` Sui object.
     #[prost(bytes = "bytes", optional, tag = "1")]
     pub wid: ::core::option::Option<::prost::bytes::Bytes>,
     /// Transaction UTXOs (inputs and outputs).
     #[prost(message, optional, tag = "2")]
     pub utxos: ::core::option::Option<TxUtxos>,
-    /// Sui checkpoint timestamp in unix seconds (signed by committee, used
-    /// for guardian rate limiting). Followers validate this against their
-    /// own latest known checkpoint timestamp before BLS-signing.
+    /// Timestamp in unix seconds (signed by committee, used for rate limiting).
     #[prost(uint64, optional, tag = "3")]
     pub timestamp_secs: ::core::option::Option<u64>,
     /// Monotonic sequence number for ordering withdrawals.

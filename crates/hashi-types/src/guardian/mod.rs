@@ -280,9 +280,8 @@ pub enum WithdrawalLogMessage {
 //      Helper types & structs
 // ---------------------------------
 
-/// Stable identifier for a withdrawal request — the 32-byte UID of the
-/// `WithdrawalTransaction` Sui object, threaded through the guardian for
-/// audit logging and (in the upcoming soft-reserve PR) idempotency.
+/// 32-byte UID of the on-chain `WithdrawalTransaction` Sui object.
+/// Used to correlate events across Sui, hashi nodes, and the guardian.
 pub type WithdrawalID = [u8; 32];
 
 pub type Attestation = Vec<u8>;
