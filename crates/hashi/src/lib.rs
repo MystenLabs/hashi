@@ -781,11 +781,8 @@ impl Hashi {
                     );
                     continue;
                 };
-                let seq = limiter.next_seq().await;
-                match limiter
-                    .apply_consume(seq, timestamp_secs, amount_sats)
-                    .await
-                {
+                let seq = limiter.next_seq();
+                match limiter.apply_consume(seq, timestamp_secs, amount_sats) {
                     Ok(()) => tracing::info!(
                         seq,
                         amount_sats,

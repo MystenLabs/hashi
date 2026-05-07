@@ -2,18 +2,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Local emulator of the guardian's token-bucket limiter. Bootstrapped from
-//! the guardian at startup and advanced on every observed
-//! `WithdrawalSignedEvent`. The MPC signing path uses `validate_consume`
-//! (read-only) — only the observer calls `apply_consume`.
+//! the guardian at startup and advanced inline by the on-chain watcher on
+//! every observed `WithdrawalSignedEvent`. The MPC signing path uses
+//! `validate_consume` (read-only) — only the watcher calls `apply_consume`.
+//!
+//! State is held under `std::sync::RwLock` so the leader event loop can
+//! consult it without `.await` and the watcher can mutate it without
+//! handing off to a separate task.
 
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
 use std::fmt;
-use tokio::sync::Mutex;
+use std::sync::RwLock;
 
 pub struct LocalLimiter {
     config: LimiterConfig,
-    state: Mutex<LimiterState>,
+    state: RwLock<LimiterState>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -40,7 +44,7 @@ impl LocalLimiter {
     pub fn new(config: LimiterConfig, state: LimiterState) -> Self {
         Self {
             config,
-            state: Mutex::new(state),
+            state: RwLock::new(state),
         }
     }
 
@@ -48,27 +52,27 @@ impl LocalLimiter {
         &self.config
     }
 
-    pub async fn snapshot(&self) -> LimiterState {
-        *self.state.lock().await
+    pub fn snapshot(&self) -> LimiterState {
+        *self.state.read().unwrap()
     }
 
-    pub async fn capacity_at(&self, timestamp_secs: u64) -> u64 {
-        let state = *self.state.lock().await;
+    pub fn capacity_at(&self, timestamp_secs: u64) -> u64 {
+        let state = *self.state.read().unwrap();
         project_capacity(&self.config, &state, timestamp_secs)
     }
 
-    pub async fn next_seq(&self) -> u64 {
-        self.state.lock().await.next_seq
+    pub fn next_seq(&self) -> u64 {
+        self.state.read().unwrap().next_seq
     }
 
     /// Validate a consume; does not mutate state.
-    pub async fn validate_consume(
+    pub fn validate_consume(
         &self,
         expected_seq: u64,
         timestamp_secs: u64,
         amount_sats: u64,
     ) -> Result<(), LocalLimiterError> {
-        let state = *self.state.lock().await;
+        let state = *self.state.read().unwrap();
         if expected_seq != state.next_seq {
             return Err(LocalLimiterError::SeqMismatch {
                 local: state.next_seq,
@@ -93,13 +97,13 @@ impl LocalLimiter {
 
     /// Advance local state to match an accepted consume. State is left
     /// untouched on error.
-    pub async fn apply_consume(
+    pub fn apply_consume(
         &self,
         applied_seq: u64,
         timestamp_secs: u64,
         amount_sats: u64,
     ) -> Result<(), LocalLimiterError> {
-        let mut guard = self.state.lock().await;
+        let mut guard = self.state.write().unwrap();
         if applied_seq != guard.next_seq {
             return Err(LocalLimiterError::SeqMismatch {
                 local: guard.next_seq,
@@ -156,16 +160,16 @@ mod tests {
         LocalLimiter::new(config, state)
     }
 
-    #[tokio::test]
-    async fn test_validate_consume_happy_path() {
+    #[test]
+    fn test_validate_consume_happy_path() {
         let limiter = make_limiter(0, 0, 7);
-        limiter.validate_consume(7, 100, 80_000).await.unwrap();
+        limiter.validate_consume(7, 100, 80_000).unwrap();
     }
 
-    #[tokio::test]
-    async fn test_validate_rejects_seq_mismatch() {
+    #[test]
+    fn test_validate_rejects_seq_mismatch() {
         let limiter = make_limiter(100_000, 0, 5);
-        let err = limiter.validate_consume(7, 100, 1_000).await.unwrap_err();
+        let err = limiter.validate_consume(7, 100, 1_000).unwrap_err();
         match err {
             LocalLimiterError::SeqMismatch { local, incoming } => {
                 assert_eq!(local, 5);
@@ -175,17 +179,17 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_validate_rejects_stale_timestamp() {
+    #[test]
+    fn test_validate_rejects_stale_timestamp() {
         let limiter = make_limiter(0, 100, 0);
-        let err = limiter.validate_consume(0, 50, 0).await.unwrap_err();
+        let err = limiter.validate_consume(0, 50, 0).unwrap_err();
         assert!(matches!(err, LocalLimiterError::StaleTimestamp { .. }));
     }
 
-    #[tokio::test]
-    async fn test_validate_rejects_over_capacity() {
+    #[test]
+    fn test_validate_rejects_over_capacity() {
         let limiter = make_limiter(0, 0, 0);
-        let err = limiter.validate_consume(0, 10, 50_000).await.unwrap_err();
+        let err = limiter.validate_consume(0, 10, 50_000).unwrap_err();
         match err {
             LocalLimiterError::InsufficientCapacity { needed, available } => {
                 assert_eq!(needed, 50_000);
@@ -195,34 +199,34 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_apply_bumps_seq_and_updates_last_updated_at() {
+    #[test]
+    fn test_apply_bumps_seq_and_updates_last_updated_at() {
         let limiter = make_limiter(0, 0, 42);
-        limiter.validate_consume(42, 100, 80_000).await.unwrap();
-        limiter.apply_consume(42, 100, 80_000).await.unwrap();
-        let snap = limiter.snapshot().await;
+        limiter.validate_consume(42, 100, 80_000).unwrap();
+        limiter.apply_consume(42, 100, 80_000).unwrap();
+        let snap = limiter.snapshot();
         assert_eq!(snap.next_seq, 43);
         assert_eq!(snap.last_updated_at, 100);
         assert_eq!(snap.num_tokens_available, 20_000);
     }
 
-    #[tokio::test]
-    async fn test_apply_rejects_seq_mismatch() {
+    #[test]
+    fn test_apply_rejects_seq_mismatch() {
         let limiter = make_limiter(0, 0, 0);
-        let err = limiter.apply_consume(5, 100, 1_000).await.unwrap_err();
+        let err = limiter.apply_consume(5, 100, 1_000).unwrap_err();
         assert!(matches!(err, LocalLimiterError::SeqMismatch { .. }));
     }
 
-    #[tokio::test]
-    async fn test_capacity_at_refills_linearly_and_clamps_to_ceiling() {
+    #[test]
+    fn test_capacity_at_refills_linearly_and_clamps_to_ceiling() {
         let limiter = make_limiter(100_000, 10, 0);
-        assert_eq!(limiter.capacity_at(15).await, 105_000);
-        assert_eq!(limiter.capacity_at(u64::MAX).await, 2_000_000);
+        assert_eq!(limiter.capacity_at(15), 105_000);
+        assert_eq!(limiter.capacity_at(u64::MAX), 2_000_000);
     }
 
-    #[tokio::test]
-    async fn test_next_seq_matches_snapshot() {
+    #[test]
+    fn test_next_seq_matches_snapshot() {
         let limiter = make_limiter(0, 0, 11);
-        assert_eq!(limiter.next_seq().await, 11);
+        assert_eq!(limiter.next_seq(), 11);
     }
 }

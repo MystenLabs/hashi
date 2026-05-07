@@ -565,7 +565,7 @@ impl Hashi {
                 epoch,
             );
         }
-        // Validate-only: the observer advances the limiter on
+        // Validate-only: the watcher advances the limiter on
         // `WithdrawalSignedEvent`, never from this path.
         match (self.local_limiter(), expected_limiter_seq) {
             (Some(limiter), Some(expected_seq)) => {
@@ -573,7 +573,6 @@ impl Hashi {
                 let timestamp_secs = txn.timestamp_ms / 1000;
                 limiter
                     .validate_consume(expected_seq, timestamp_secs, amount_sats)
-                    .await
                     .map_err(|e| anyhow!("Limiter rejected withdrawal {}: {e}", txn.id))?;
             }
             (None, None) => {}

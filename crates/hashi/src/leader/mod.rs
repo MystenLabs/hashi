@@ -998,7 +998,7 @@ impl LeaderService {
         // so we don't sit on excess demand for the full batching window.
         let (batch, at_capacity) = if let Some(limiter) = self.inner.local_limiter() {
             let timestamp_secs = checkpoint_timestamp_ms / 1000;
-            let capacity = limiter.capacity_at(timestamp_secs).await;
+            let capacity = limiter.capacity_at(timestamp_secs);
             let mut cumulative = 0u64;
             let mut take_count = 0;
             for req in &approved {
@@ -1306,11 +1306,8 @@ impl LeaderService {
         let expected_limiter_seq = if let Some(limiter) = inner.local_limiter() {
             let amount_sats: u64 = txn.withdrawal_outputs.iter().map(|o| o.amount).sum();
             let timestamp_secs = txn.timestamp_ms / 1000;
-            let next_seq = limiter.next_seq().await;
-            if let Err(e) = limiter
-                .validate_consume(next_seq, timestamp_secs, amount_sats)
-                .await
-            {
+            let next_seq = limiter.next_seq();
+            if let Err(e) = limiter.validate_consume(next_seq, timestamp_secs, amount_sats) {
                 warn!(
                     withdrawal_txn_id = %txn.id,
                     "Leader local limiter rejected withdrawal; will retry on next checkpoint: {e}"
@@ -2010,7 +2007,7 @@ impl LeaderService {
         let wait = async {
             loop {
                 let committed = match (inner.local_limiter(), leader_seq_used) {
-                    (Some(limiter), Some(seq)) => limiter.next_seq().await > seq,
+                    (Some(limiter), Some(seq)) => limiter.next_seq() > seq,
                     _ => inner
                         .onchain_state()
                         .withdrawal_txn(txn_id)
