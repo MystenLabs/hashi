@@ -67,6 +67,12 @@ const config = {
     // Sui-style toolkit
     require.resolve('./src/shared/plugins/inject-code'),
     require.resolve('./src/shared/plugins/descriptions'),
+    [
+      'docusaurus-plugin-plausible',
+      {
+        domain: 'https://mystenlabs.github.io/hashi/design',
+      },
+    ],
     // Tailwind via PostCSS
     function tailwindPlugin() {
       return {
