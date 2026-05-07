@@ -7,7 +7,7 @@ use crate::communication::P2PChannel;
 use crate::grpc::Client;
 use crate::grpc::MPC_PROTOCOL_METADATA_KEY;
 use crate::mpc::types::ComplainRequest;
-use crate::mpc::types::ComplaintResponses;
+use crate::mpc::types::ComplaintResponse;
 use crate::mpc::types::GetPartialSignaturesRequest;
 use crate::mpc::types::GetPartialSignaturesResponse;
 use crate::mpc::types::GetPublicMpcOutputRequest;
@@ -96,7 +96,7 @@ impl P2PChannel for RpcP2PChannel {
         &self,
         party: &Address,
         request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponses> {
+    ) -> ChannelResult<ComplaintResponse> {
         let client = self.get_client(party)?;
         let proto_request = self.build_request(request.to_proto());
         let response = client
@@ -104,7 +104,7 @@ impl P2PChannel for RpcP2PChannel {
             .complain(proto_request)
             .await
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))?;
-        ComplaintResponses::try_from(response.get_ref())
+        ComplaintResponse::try_from(response.get_ref())
             .map_err(|e| ChannelError::RequestFailed(e.to_string()))
     }
 

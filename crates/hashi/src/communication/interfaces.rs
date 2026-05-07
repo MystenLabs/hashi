@@ -4,7 +4,7 @@
 //! Communication channel interfaces
 
 use crate::mpc::ComplainRequest;
-use crate::mpc::ComplaintResponses;
+use crate::mpc::ComplaintResponse;
 use crate::mpc::GetPublicMpcOutputRequest;
 use crate::mpc::GetPublicMpcOutputResponse;
 use crate::mpc::RetrieveMessagesRequest;
@@ -58,7 +58,7 @@ pub trait P2PChannel: Send + Sync {
         &self,
         party: &Address,
         request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponses>;
+    ) -> ChannelResult<ComplaintResponse>;
 
     async fn get_public_mpc_output(
         &self,

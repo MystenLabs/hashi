@@ -414,7 +414,7 @@ impl P2PChannel for MockP2PChannel {
         &self,
         party: &Address,
         request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponses> {
+    ) -> ChannelResult<ComplaintResponse> {
         let mut managers = self.managers.lock().unwrap();
         let manager = managers.get_mut(party).ok_or_else(|| {
             crate::communication::ChannelError::RequestFailed(format!(
@@ -574,7 +574,7 @@ impl P2PChannel for FailingP2PChannel {
         &self,
         _party: &Address,
         _request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponses> {
+    ) -> ChannelResult<ComplaintResponse> {
         Err(crate::communication::ChannelError::RequestFailed(
             self.error_message.clone(),
         ))
@@ -647,7 +647,7 @@ impl P2PChannel for SucceedingP2PChannel {
         &self,
         _party: &Address,
         _request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponses> {
+    ) -> ChannelResult<ComplaintResponse> {
         unimplemented!("SucceedingP2PChannel does not implement complain")
     }
 
@@ -740,7 +740,7 @@ impl P2PChannel for PartiallyFailingP2PChannel {
         &self,
         _party: &Address,
         _request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponses> {
+    ) -> ChannelResult<ComplaintResponse> {
         unimplemented!("PartiallyFailingP2PChannel does not implement complain")
     }
 
@@ -764,11 +764,11 @@ impl P2PChannel for PartiallyFailingP2PChannel {
 /// P2P channel that returns pre-collected complaint responses.
 /// Useful for testing scenarios where responses are prepared ahead of time.
 struct PreCollectedP2PChannel {
-    responses: std::sync::Mutex<HashMap<Address, ComplaintResponses>>,
+    responses: std::sync::Mutex<HashMap<Address, ComplaintResponse>>,
 }
 
 impl PreCollectedP2PChannel {
-    fn new(responses: HashMap<Address, ComplaintResponses>) -> Self {
+    fn new(responses: HashMap<Address, ComplaintResponse>) -> Self {
         Self {
             responses: std::sync::Mutex::new(responses),
         }
@@ -797,7 +797,7 @@ impl P2PChannel for PreCollectedP2PChannel {
         &self,
         party: &Address,
         _request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponses> {
+    ) -> ChannelResult<ComplaintResponse> {
         self.responses
             .lock()
             .unwrap()
@@ -4835,7 +4835,7 @@ impl P2PChannel for TrackingP2PChannel {
         &self,
         party: &Address,
         request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponses> {
+    ) -> ChannelResult<ComplaintResponse> {
         self.inner.complain(party, request).await
     }
 
@@ -6966,8 +6966,7 @@ fn test_handle_complain_request_success() {
         .try_sign_rotation_messages(&responder_dkg_output, dealer_addr, &cheating_messages)
         .unwrap();
 
-    // Create the complaint request (response will contain ALL shares from dealer)
-    // For rotation, share_index specifies which share triggered the complaint
+    // Create the complaint request for a specific share index.
     let request = ComplainRequest {
         dealer: dealer_addr,
         share_index: Some(first_share_index),
@@ -6986,30 +6985,39 @@ fn test_handle_complain_request_success() {
         result.err()
     );
     let response = result.unwrap();
-    // Response contains ALL shares from this dealer (if dealer cheated on one, reveal all)
-    let rotation_responses = match &response {
-        ComplaintResponses::Rotation(map) => map,
-        ComplaintResponses::Dkg(_) | ComplaintResponses::NonceGeneration(_) => {
+    // Response carries only the responder's shares for the complained share index.
+    match &response {
+        ComplaintResponse::Rotation(_) => {}
+        ComplaintResponse::Dkg(_) | ComplaintResponse::NonceGeneration(_) => {
             panic!("Expected rotation complaint response")
         }
     };
-    // Dealer has weight=3, so 3 share indices, all should be in response
-    assert_eq!(rotation_responses.len(), 3);
-    // The complained share should be in the response
-    assert!(
-        rotation_responses.contains_key(&first_share_index),
-        "Response should include the complained share"
-    );
 
-    // Verify response is cached by dealer
+    // Verify response is cached keyed by (dealer, share_index)
     assert!(
         responder_manager
             .complaint_responses
             .contains_key(&ComplaintResponsesKey::Rotation {
-                dealer: dealer_addr
+                dealer: dealer_addr,
+                share_index: first_share_index,
             }),
         "Response should be cached"
     );
+
+    // Share-index discrimination: the same complaint must NOT validate against
+    // a different share_index's AVSS instance.
+    if let Some(&other_share_index) = valid_rotation_map.keys().find(|&&k| k != first_share_index) {
+        let mismatched_request = ComplainRequest {
+            share_index: Some(other_share_index),
+            ..request.clone()
+        };
+        let mismatched_result = responder_manager.handle_complain_request(&mismatched_request);
+        assert!(
+            mismatched_result.is_err(),
+            "Complaint authored against share_index {first_share_index} must not validate \
+             against share_index {other_share_index}"
+        );
+    }
 }
 
 /// Shared store that can be cloned and reused across manager restarts.
@@ -8789,7 +8797,7 @@ fn test_handle_send_messages_request_different_protocols_same_sender_coexist() {
     assert!(
         receiver
             .message_responses
-            .contains_key(&MessageResponsesKey::NonceGen {
+            .contains_key(&MessageResponsesKey::NonceGeneration {
                 batch_index: 0,
                 sender: sender_addr,
             }),
@@ -8956,7 +8964,7 @@ fn test_handle_complain_request_nonce_caches_response() {
     assert!(
         party2
             .complaint_responses
-            .contains_key(&ComplaintResponsesKey::NonceGen {
+            .contains_key(&ComplaintResponsesKey::NonceGeneration {
                 batch_index: 0,
                 dealer: dealer_addr,
             })
@@ -10095,7 +10103,7 @@ async fn test_fetch_public_mpc_output_uses_previous_epoch() {
             &self,
             _party: &Address,
             _request: &ComplainRequest,
-        ) -> ChannelResult<ComplaintResponses> {
+        ) -> ChannelResult<ComplaintResponse> {
             unimplemented!()
         }
         async fn get_public_mpc_output(

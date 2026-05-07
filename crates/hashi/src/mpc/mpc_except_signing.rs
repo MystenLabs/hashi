@@ -13,7 +13,7 @@ use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::metrics::Metrics;
 use crate::mpc::types::CertificateV1;
 pub use crate::mpc::types::ComplainRequest;
-pub use crate::mpc::types::ComplaintResponses;
+pub use crate::mpc::types::ComplaintResponse;
 pub use crate::mpc::types::ComplaintResponsesKey;
 pub use crate::mpc::types::ComplaintsToProcessKey;
 use crate::mpc::types::DealerCertificate;
@@ -103,7 +103,6 @@ pub struct MpcManager {
     pub previous_committee: Option<Committee>,
     pub previous_nodes: Option<Nodes<EncryptionGroupElement>>,
     pub previous_threshold: Option<u16>,
-    /// Used to reconstruct source session IDs during certificate reconstruction.
     chain_id: String,
     pub previous_epoch: u64,
     previous_output: Option<MpcOutput>,
@@ -111,15 +110,13 @@ pub struct MpcManager {
     pub batch_size_per_weight: u16,
 
     // Mutable during the epoch
-    // TODO: Rename these fields so it is clear at the call site which are
-    // backed by persistent store and which live only in memory.
     pub dealer_outputs: HashMap<DealerOutputsKey, avss::PartialOutput>,
     pub dkg_messages: HashMap<Address, avss::Message>,
     pub rotation_messages: HashMap<Address, RotationMessages>,
     pub nonce_messages: HashMap<(u32, Address), NonceMessage>,
     pub message_responses: HashMap<MessageResponsesKey, MpcResult<SendMessagesResponse>>,
     pub complaints_to_process: HashMap<ComplaintsToProcessKey, complaint::Complaint>,
-    pub complaint_responses: HashMap<ComplaintResponsesKey, ComplaintResponses>,
+    pub complaint_responses: HashMap<ComplaintResponsesKey, ComplaintResponse>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
     /// Must be `BTreeMap` so that all nodes iterate outputs in
     /// the same deterministic order when constructing `Presignatures`.
@@ -275,7 +272,7 @@ impl MpcManager {
         let cache_key = match &request.messages {
             Messages::Dkg(_) => MessageResponsesKey::Dkg { sender },
             Messages::Rotation(_) => MessageResponsesKey::Rotation { sender },
-            Messages::NonceGeneration(nonce) => MessageResponsesKey::NonceGen {
+            Messages::NonceGeneration(nonce) => MessageResponsesKey::NonceGeneration {
                 batch_index: nonce.batch_index,
                 sender,
             },
@@ -373,14 +370,23 @@ impl MpcManager {
     pub fn handle_complain_request(
         &mut self,
         request: &ComplainRequest,
-    ) -> MpcResult<ComplaintResponses> {
+    ) -> MpcResult<ComplaintResponse> {
         let cache_key = match request.protocol_type {
             ProtocolTypeIndicator::Dkg => ComplaintResponsesKey::Dkg {
                 dealer: request.dealer,
             },
-            ProtocolTypeIndicator::KeyRotation => ComplaintResponsesKey::Rotation {
-                dealer: request.dealer,
-            },
+            ProtocolTypeIndicator::KeyRotation => {
+                let share_index = request
+                    .share_index
+                    .ok_or_else(|| MpcError::InvalidMessage {
+                        sender: request.dealer,
+                        reason: "Rotation complaint requires share_index".into(),
+                    })?;
+                ComplaintResponsesKey::Rotation {
+                    dealer: request.dealer,
+                    share_index,
+                }
+            }
             ProtocolTypeIndicator::NonceGeneration => {
                 let batch_index = request
                     .batch_index
@@ -388,7 +394,7 @@ impl MpcManager {
                         sender: request.dealer,
                         reason: "batch_index required for nonce complaint".into(),
                     })?;
-                ComplaintResponsesKey::NonceGen {
+                ComplaintResponsesKey::NonceGeneration {
                     batch_index,
                     dealer: request.dealer,
                 }
@@ -460,7 +466,7 @@ impl MpcManager {
                 );
                 let complaint_response =
                     receiver.handle_complaint(&message, &request.complaint, &partial_output)?;
-                ComplaintResponses::Dkg(complaint_response)
+                ComplaintResponse::Dkg(complaint_response)
             }
             Messages::Rotation(rotation_messages) => {
                 let complained_share_index =
@@ -470,19 +476,6 @@ impl MpcManager {
                             sender: request.dealer,
                             reason: "Rotation complaint requires share_index".into(),
                         })?;
-                let (nodes, party_id, threshold) = self.config_for_epoch(request.epoch)?;
-                let mut all_outputs: BTreeMap<ShareIndex, avss::PartialOutput> = BTreeMap::new();
-                for (&share_index, message) in &rotation_messages {
-                    all_outputs.insert(
-                        share_index,
-                        self.get_or_derive_rotation_output(
-                            &request.dealer,
-                            share_index,
-                            message,
-                            request.epoch,
-                        )?,
-                    );
-                }
                 let complained_message = rotation_messages
                     .get(&complained_share_index)
                     .ok_or_else(|| {
@@ -491,10 +484,13 @@ impl MpcManager {
                             complained_share_index
                         ))
                     })?;
-                let complained_output =
-                    all_outputs.get(&complained_share_index).ok_or_else(|| {
-                        MpcError::ProtocolFailed("No output for complained share".into())
-                    })?;
+                let (nodes, party_id, threshold) = self.config_for_epoch(request.epoch)?;
+                let complained_output = self.get_or_derive_rotation_output(
+                    &request.dealer,
+                    complained_share_index,
+                    complained_message,
+                    request.epoch,
+                )?;
                 let session_id = self
                     .base_session_id_for_epoch(request.epoch, &ProtocolType::KeyRotation)
                     .rotation_session_id(&request.dealer, complained_share_index);
@@ -506,21 +502,12 @@ impl MpcManager {
                     None,
                     self.encryption_key.clone(),
                 );
-                let complained_response = receiver.handle_complaint(
+                let response = receiver.handle_complaint(
                     complained_message,
                     &request.complaint,
-                    complained_output,
+                    &complained_output,
                 )?;
-                let mut responses = BTreeMap::new();
-                for (&share_index, output) in &all_outputs {
-                    let response = if share_index == complained_share_index {
-                        complained_response.clone()
-                    } else {
-                        complaint::ComplaintResponse::new(self.party_id, output.my_shares.clone())
-                    };
-                    responses.insert(share_index, response);
-                }
-                ComplaintResponses::Rotation(responses)
+                ComplaintResponse::Rotation(response)
             }
             Messages::NonceGeneration(NonceMessage {
                 batch_index,
@@ -545,7 +532,7 @@ impl MpcManager {
                 let receiver = self.create_nonce_receiver(request.dealer, batch_index)?;
                 let complaint_response =
                     receiver.handle_complaint(&message, &request.complaint, &nonce_output)?;
-                ComplaintResponses::NonceGeneration(complaint_response)
+                ComplaintResponse::NonceGeneration(complaint_response)
             }
         };
         if cache_is_current {
@@ -1894,11 +1881,11 @@ impl MpcManager {
             _ => true,
         });
         mgr.message_responses.retain(|k, _| match k {
-            MessageResponsesKey::NonceGen { batch_index: b, .. } => *b >= cutoff,
+            MessageResponsesKey::NonceGeneration { batch_index: b, .. } => *b >= cutoff,
             _ => true,
         });
         mgr.complaint_responses.retain(|k, _| match k {
-            ComplaintResponsesKey::NonceGen { batch_index: b, .. } => *b >= cutoff,
+            ComplaintResponsesKey::NonceGeneration { batch_index: b, .. } => *b >= cutoff,
             _ => true,
         });
     }
@@ -2433,8 +2420,8 @@ impl MpcManager {
                 }
             };
             let complaint_response = match response {
-                ComplaintResponses::Dkg(resp) => resp,
-                ComplaintResponses::Rotation(_) | ComplaintResponses::NonceGeneration(_) => {
+                ComplaintResponse::Dkg(resp) => resp,
+                ComplaintResponse::Rotation(_) | ComplaintResponse::NonceGeneration(_) => {
                     tracing::info!("Unexpected non-DKG response in DKG complaint recovery");
                     continue;
                 }
@@ -2530,8 +2517,8 @@ impl MpcManager {
                 }
             };
             let complaint_response = match response {
-                ComplaintResponses::NonceGeneration(resp) => resp,
-                ComplaintResponses::Dkg(_) | ComplaintResponses::Rotation(_) => {
+                ComplaintResponse::NonceGeneration(resp) => resp,
+                ComplaintResponse::Dkg(_) | ComplaintResponse::Rotation(_) => {
                     tracing::info!("Unexpected non-nonce response in nonce complaint recovery");
                     continue;
                 }
@@ -2580,102 +2567,74 @@ impl MpcManager {
         p2p_channel: &impl P2PChannel,
         epoch: u64,
     ) -> MpcResult<HashMap<ShareIndex, avss::PartialOutput>> {
-        let (request, recovery_contexts) = {
+        let recovery_contexts = {
             let mgr = mpc_manager.read().unwrap();
-            let Some(RotationComplainContext {
-                request,
-                recovery_contexts,
-            }) = mgr.prepare_rotation_complain_request(dealer, rotation_messages, epoch)?
-            else {
-                return Ok(HashMap::new());
-            };
-            tracing::info!(
-                "Rotation complaint detected for dealer {:?}, recovering via Complain RPC",
-                dealer
-            );
-            (request, recovery_contexts)
+            mgr.prepare_rotation_complain_requests(dealer, rotation_messages, epoch)?
         };
-        // Wrap receivers in Arc for use in `spawn_blocking` across loop iterations.
-        let recovery_contexts: HashMap<ShareIndex, (Arc<avss::Receiver>, avss::Message)> =
-            recovery_contexts
-                .into_iter()
-                .map(|(idx, (r, m))| (idx, (Arc::new(r), m)))
-                .collect();
-        let mut all_responses: HashMap<
-            ShareIndex,
-            Vec<complaint::ComplaintResponse<avss::SharesForNode>>,
-        > = HashMap::new();
-        let mut pending_shares: HashSet<ShareIndex> = HashSet::new();
-        let mut recovered_outputs: HashMap<ShareIndex, avss::PartialOutput> = HashMap::new();
-        for &share_index in recovery_contexts.keys() {
-            all_responses.insert(share_index, Vec::new());
-            pending_shares.insert(share_index);
+        if recovery_contexts.is_empty() {
+            return Ok(HashMap::new());
         }
-        let mut futures = fan_out_complaints(signers, p2p_channel, &request);
-        while let Some((signer, result)) = futures.next().await {
-            if pending_shares.is_empty() {
-                break;
-            }
-            match result {
-                Ok(response) => {
-                    let rotation_responses = match response {
-                        ComplaintResponses::Rotation(resps) => resps,
-                        ComplaintResponses::Dkg(_) | ComplaintResponses::NonceGeneration(_) => {
+        tracing::info!(
+            "Rotation complaint detected for dealer {:?} ({} share(s)), recovering via Complain RPC",
+            dealer,
+            recovery_contexts.len()
+        );
+        let per_share = recovery_contexts.into_iter().map(|ctx| {
+            let signers = signers.clone();
+            async move {
+                let share_index = ctx.share_index();
+                let receiver = Arc::new(ctx.receiver);
+                let message = ctx.message;
+                let mut responses: Vec<complaint::ComplaintResponse<avss::SharesForNode>> =
+                    Vec::new();
+                let mut futures = fan_out_complaints(signers, p2p_channel, &ctx.request);
+                while let Some((signer, result)) = futures.next().await {
+                    match result {
+                        Ok(ComplaintResponse::Rotation(resp)) => responses.push(resp),
+                        Ok(_) => {
                             tracing::info!(
-                                "Unexpected non-rotation response in rotation complaint recovery"
+                                "Unexpected non-rotation response from {} in rotation complaint recovery",
+                                signer
                             );
                             continue;
                         }
+                        Err(e) => {
+                            tracing::info!(
+                                "Failed to get rotation complaint response from {}: {}",
+                                signer,
+                                e
+                            );
+                            continue;
+                        }
+                    }
+                    let try_recover = {
+                        let receiver = Arc::clone(&receiver);
+                        let message = message.clone();
+                        let responses = responses.clone();
+                        spawn_blocking(move || receiver.recover(&message, responses)).await
                     };
-                    for (share_index, share_response) in rotation_responses {
-                        if let Some(responses) = all_responses.get_mut(&share_index) {
-                            responses.push(share_response);
-                        }
-                    }
-                    for share_index in pending_shares.clone() {
-                        let responses = all_responses.get(&share_index).unwrap();
-                        let (receiver, message) = recovery_contexts.get(&share_index).unwrap();
-                        let result = {
-                            let receiver = Arc::clone(receiver);
-                            let message = message.clone();
-                            let responses = responses.clone();
-                            spawn_blocking(move || receiver.recover(&message, responses)).await
-                        };
-                        match result {
-                            Ok(partial_output) => {
-                                recovered_outputs.insert(share_index, partial_output);
-                                pending_shares.remove(&share_index);
-                            }
-                            Err(FastCryptoError::InputTooShort(_)) => {
-                                continue;
-                            }
-                            Err(e) => {
-                                let error_msg = format!(
-                                    "Share recovery failed for dealer {:?} with share {}: {}",
-                                    dealer, share_index, e
-                                );
-                                tracing::error!("{}", error_msg);
-                                return Err(MpcError::CryptoError(error_msg));
-                            }
+                    match try_recover {
+                        Ok(output) => return Ok((share_index, output)),
+                        Err(FastCryptoError::InputTooShort(_)) => continue,
+                        Err(e) => {
+                            let error_msg = format!(
+                                "Share recovery failed for dealer {:?} with share {}: {}",
+                                dealer, share_index, e
+                            );
+                            tracing::error!("{}", error_msg);
+                            return Err(MpcError::CryptoError(error_msg));
                         }
                     }
                 }
-                Err(e) => {
-                    tracing::info!(
-                        "Failed to get rotation complaint response from {}: {}",
-                        signer,
-                        e
-                    );
-                }
+                Err(MpcError::ProtocolFailed(format!(
+                    "Not enough valid complaint responses for dealer {:?} share {}",
+                    dealer, share_index
+                )))
             }
-        }
-        if !pending_shares.is_empty() {
-            return Err(MpcError::ProtocolFailed(format!(
-                "Not enough valid complaint responses for dealer {:?}: missing shares {:?}",
-                dealer, pending_shares
-            )));
-        }
-        Ok(recovered_outputs)
+        });
+        let results: Vec<(ShareIndex, avss::PartialOutput)> =
+            futures::future::try_join_all(per_share).await?;
+        Ok(results.into_iter().collect())
     }
 
     fn load_stored_messages(&mut self) -> MpcResult<()> {
@@ -2700,12 +2659,12 @@ impl MpcManager {
         Ok(())
     }
 
-    fn prepare_rotation_complain_request(
+    fn prepare_rotation_complain_requests(
         &self,
         dealer: &Address,
         rotation_messages: &RotationMessages,
         epoch: u64,
-    ) -> MpcResult<Option<RotationComplainContext>> {
+    ) -> MpcResult<Vec<RotationComplainContext>> {
         let complained_shares: Vec<(ShareIndex, complaint::Complaint)> = self
             .complaints_to_process
             .iter()
@@ -2717,46 +2676,45 @@ impl MpcManager {
             })
             .collect();
         if complained_shares.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let (nodes, party_id, threshold) = self.config_for_epoch(epoch)?;
         let base_sid = self.base_session_id_for_epoch(epoch, &ProtocolType::KeyRotation);
-        let mut recovery_contexts: HashMap<ShareIndex, (avss::Receiver, avss::Message)> =
-            HashMap::new();
-        for (share_index, _complaint) in &complained_shares {
-            let session_id = base_sid.rotation_session_id(dealer, *share_index);
-            let receiver = avss::Receiver::new(
-                nodes.clone(),
-                party_id,
-                threshold,
-                session_id.to_vec(),
-                None,
-                self.encryption_key.clone(),
-            );
-            let message = rotation_messages
-                .get(share_index)
-                .ok_or_else(|| {
-                    MpcError::ProtocolFailed(format!(
-                        "No rotation message for share index {}",
-                        share_index
-                    ))
-                })?
-                .clone();
-            recovery_contexts.insert(*share_index, (receiver, message));
-        }
-        let (first_share_index, first_complaint) = complained_shares.first().unwrap();
-        let request = ComplainRequest {
-            dealer: *dealer,
-            share_index: Some(*first_share_index),
-            batch_index: None,
-            complaint: first_complaint.clone(),
-            protocol_type: ProtocolTypeIndicator::KeyRotation,
-            epoch,
-        };
-        Ok(Some(RotationComplainContext {
-            request,
-            recovery_contexts,
-        }))
+        complained_shares
+            .into_iter()
+            .map(|(share_index, complaint)| {
+                let message = rotation_messages
+                    .get(&share_index)
+                    .ok_or_else(|| {
+                        MpcError::ProtocolFailed(format!(
+                            "No rotation message for share index {}",
+                            share_index
+                        ))
+                    })?
+                    .clone();
+                let session_id = base_sid.rotation_session_id(dealer, share_index);
+                let receiver = avss::Receiver::new(
+                    nodes.clone(),
+                    party_id,
+                    threshold,
+                    session_id.to_vec(),
+                    None,
+                    self.encryption_key.clone(),
+                );
+                Ok(RotationComplainContext {
+                    request: ComplainRequest {
+                        dealer: *dealer,
+                        share_index: Some(share_index),
+                        batch_index: None,
+                        complaint,
+                        protocol_type: ProtocolTypeIndicator::KeyRotation,
+                        epoch,
+                    },
+                    receiver,
+                    message,
+                })
+            })
+            .collect()
     }
 
     fn create_rotation_messages(
@@ -3912,7 +3870,7 @@ fn fan_out_complaints<'a, P: P2PChannel + 'a>(
     signers: Vec<Address>,
     p2p_channel: &'a P,
     request: &'a ComplainRequest,
-) -> FuturesUnordered<impl Future<Output = (Address, ChannelResult<ComplaintResponses>)> + 'a> {
+) -> FuturesUnordered<impl Future<Output = (Address, ChannelResult<ComplaintResponse>)> + 'a> {
     signers
         .into_iter()
         .map(move |signer| async move {

@@ -78,7 +78,6 @@ struct SigningPoolState {
     /// out-of-order signing (e.g., withdrawal A allocated from batch 0 signs
     /// after withdrawal B advanced to batch 1) still works.
     batches: Vec<PresigBatch>,
-    /// Key: Sui address identifying the signing request.
     partial_signing_outputs: HashMap<Address, PartialSigningOutput>,
     next_batch: Option<Presignatures>,
 }
@@ -563,7 +562,7 @@ mod tests {
     use crate::communication::ChannelError;
     use crate::communication::ChannelResult;
     use crate::mpc::types::ComplainRequest;
-    use crate::mpc::types::ComplaintResponses;
+    use crate::mpc::types::ComplaintResponse;
     use crate::mpc::types::GetPublicMpcOutputRequest;
     use crate::mpc::types::GetPublicMpcOutputResponse;
     use crate::mpc::types::RetrieveMessagesRequest;
@@ -635,7 +634,7 @@ mod tests {
             &self,
             _: &Address,
             _: &ComplainRequest,
-        ) -> ChannelResult<ComplaintResponses> {
+        ) -> ChannelResult<ComplaintResponse> {
             unimplemented!()
         }
         async fn get_public_mpc_output(
@@ -684,7 +683,7 @@ mod tests {
             &self,
             _: &Address,
             _: &ComplainRequest,
-        ) -> ChannelResult<ComplaintResponses> {
+        ) -> ChannelResult<ComplaintResponse> {
             unimplemented!()
         }
         async fn get_public_mpc_output(

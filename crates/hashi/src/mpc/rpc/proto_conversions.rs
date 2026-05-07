@@ -322,49 +322,17 @@ impl TryFrom<&proto::ComplainRequest> for types::ComplainRequest {
 // ComplainResponse
 //
 
-/// Parse rotation responses map from proto.
-#[allow(clippy::result_large_err)]
-fn parse_rotation_responses_map(
-    map: &std::collections::HashMap<u32, Bcs>,
-) -> Result<
-    BTreeMap<ShareIndex, complaint::ComplaintResponse<avss::SharesForNode>>,
-    TryFromProtoError,
-> {
-    let mut responses = BTreeMap::new();
-    for (&index, bcs) in map {
-        let share_index = ShareIndex::new(index as u16).ok_or_else(|| {
-            TryFromProtoError::invalid("rotation_responses.key", "index must be non-zero")
-        })?;
-        let response: complaint::ComplaintResponse<avss::SharesForNode> =
-            deserialize_bcs(bcs, "rotation_responses.value")?;
-        responses.insert(share_index, response);
-    }
-    Ok(responses)
-}
-
-/// Convert rotation responses map to proto format.
-fn rotation_responses_to_proto(
-    responses: &BTreeMap<ShareIndex, complaint::ComplaintResponse<avss::SharesForNode>>,
-) -> std::collections::HashMap<u32, Bcs> {
-    responses
-        .iter()
-        .map(|(idx, resp)| (idx.get() as u32, serialize_bcs(resp)))
-        .collect()
-}
-
-impl From<&types::ComplaintResponses> for proto::ComplainResponse {
-    fn from(value: &types::ComplaintResponses) -> Self {
+impl From<&types::ComplaintResponse> for proto::ComplainResponse {
+    fn from(value: &types::ComplaintResponse) -> Self {
         use proto::complain_response::Responses;
         let responses = match value {
-            types::ComplaintResponses::Dkg(response) => {
+            types::ComplaintResponse::Dkg(response) => {
                 Responses::DkgResponse(serialize_bcs(response))
             }
-            types::ComplaintResponses::Rotation(responses) => {
-                Responses::RotationResponses(proto::RotationResponses {
-                    responses: rotation_responses_to_proto(responses),
-                })
+            types::ComplaintResponse::Rotation(response) => {
+                Responses::RotationResponse(serialize_bcs(response))
             }
-            types::ComplaintResponses::NonceGeneration(response) => {
+            types::ComplaintResponse::NonceGeneration(response) => {
                 Responses::NonceResponse(serialize_bcs(response))
             }
         };
@@ -374,7 +342,7 @@ impl From<&types::ComplaintResponses> for proto::ComplainResponse {
     }
 }
 
-impl TryFrom<&proto::ComplainResponse> for types::ComplaintResponses {
+impl TryFrom<&proto::ComplainResponse> for types::ComplaintResponse {
     type Error = TryFromProtoError;
 
     fn try_from(value: &proto::ComplainResponse) -> Result<Self, Self::Error> {
@@ -383,17 +351,17 @@ impl TryFrom<&proto::ComplainResponse> for types::ComplaintResponses {
             Some(Responses::DkgResponse(dkg_response)) => {
                 let response: complaint::ComplaintResponse<avss::SharesForNode> =
                     deserialize_bcs(dkg_response, "dkg_response")?;
-                Ok(types::ComplaintResponses::Dkg(response))
+                Ok(types::ComplaintResponse::Dkg(response))
             }
-            Some(Responses::RotationResponses(rotation)) => {
-                Ok(types::ComplaintResponses::Rotation(
-                    parse_rotation_responses_map(&rotation.responses)?,
-                ))
+            Some(Responses::RotationResponse(rotation_response)) => {
+                let response: complaint::ComplaintResponse<avss::SharesForNode> =
+                    deserialize_bcs(rotation_response, "rotation_response")?;
+                Ok(types::ComplaintResponse::Rotation(response))
             }
             Some(Responses::NonceResponse(nonce_response)) => {
                 let response: complaint::ComplaintResponse<batch_avss::SharesForNode> =
                     deserialize_bcs(nonce_response, "nonce_response")?;
-                Ok(types::ComplaintResponses::NonceGeneration(response))
+                Ok(types::ComplaintResponse::NonceGeneration(response))
             }
             None => Err(TryFromProtoError::missing("responses")),
         }
