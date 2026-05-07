@@ -342,6 +342,14 @@ mod tests {
                 .as_ref()
                 .expect("harness present when .with_guardian() is set");
             assert!(harness.enclave().is_fully_initialized());
+            futures::future::try_join_all(
+                networks
+                    .hashi_network
+                    .nodes()
+                    .iter()
+                    .map(|node| node.wait_for_local_limiter(Duration::from_secs(60))),
+            )
+            .await?;
         }
 
         let deposit_amount_sats = 100_000u64;

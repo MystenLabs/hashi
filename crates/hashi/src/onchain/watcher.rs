@@ -437,14 +437,30 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
             }
             HashiEvent::WithdrawalSignedEvent(event) => {
                 tracing::info!(withdrawal_txn_id = %event.withdrawal_txn_id, "Withdrawal signatures stored on-chain");
-                let mut state = state.state_mut();
-                if let Some(txn) = state
-                    .hashi
-                    .withdrawal_queue
-                    .withdrawal_txns
-                    .get_mut(&event.withdrawal_txn_id)
-                {
-                    txn.signatures = Some(event.signatures.clone());
+                // Capture the limiter inputs while we hold the state guard so
+                // subscribers don't have to re-read the mirror. `signed` is
+                // None if the txn has already been confirmed and removed.
+                let signed = {
+                    let mut state = state.state_mut();
+                    state
+                        .hashi
+                        .withdrawal_queue
+                        .withdrawal_txns
+                        .get_mut(&event.withdrawal_txn_id)
+                        .map(|txn| {
+                            txn.signatures = Some(event.signatures.clone());
+                            let amount_sats: u64 =
+                                txn.withdrawal_outputs.iter().map(|o| o.amount).sum();
+                            let timestamp_secs = txn.timestamp_ms / 1000;
+                            (amount_sats, timestamp_secs)
+                        })
+                };
+                if let Some((amount_sats, timestamp_secs)) = signed {
+                    state.notify(Notification::WithdrawalSigned {
+                        withdrawal_txn_id: event.withdrawal_txn_id,
+                        amount_sats,
+                        timestamp_secs,
+                    });
                 }
             }
             HashiEvent::WithdrawalConfirmedEvent(event) => {

@@ -77,6 +77,9 @@ pub struct LeaderService {
     inflight_withdrawal_signings: HashSet<Address>,
     withdrawal_broadcast_tasks: JoinSet<(Address, anyhow::Result<()>)>,
     inflight_withdrawal_broadcasts: HashSet<Address>,
+    /// Withdrawal requests already warned about exceeding local limiter
+    /// capacity. Pruned each checkpoint to track only currently-pending ids.
+    stuck_withdrawal_warned: HashSet<Address>,
     deposit_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     proposal_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
 }
@@ -97,6 +100,7 @@ impl LeaderService {
             inflight_withdrawal_signings: HashSet::new(),
             withdrawal_broadcast_tasks: JoinSet::new(),
             inflight_withdrawal_broadcasts: HashSet::new(),
+            stuck_withdrawal_warned: HashSet::new(),
             deposit_gc_task: None,
             proposal_gc_task: None,
         }
@@ -146,7 +150,8 @@ impl LeaderService {
                     }
 
                     self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms);
-                    self.process_approved_withdrawal_requests(checkpoint_timestamp_ms);
+                    self.process_approved_withdrawal_requests(checkpoint_timestamp_ms)
+                        .await;
                     self.process_unsigned_withdrawal_txns();
                     self.process_signed_withdrawal_txns();
                     self.check_delete_proposals(checkpoint_timestamp_ms);
@@ -936,7 +941,7 @@ impl LeaderService {
     // Step 2: Construct withdrawal tx for approved requests
     // ========================================================================
 
-    fn process_approved_withdrawal_requests(&mut self, checkpoint_timestamp_ms: u64) {
+    async fn process_approved_withdrawal_requests(&mut self, checkpoint_timestamp_ms: u64) {
         debug!("Entering process_approved_withdrawal_requests");
         if self.is_reconfiguring() {
             debug!("Reconfig in progress, skipping withdrawal commitment processing");
@@ -957,6 +962,12 @@ impl LeaderService {
             .collect();
         approved.sort_by_key(|r| r.timestamp_ms);
 
+        // Drop stuck-warn entries for requests that are no longer pending,
+        // so a re-stuck request would warn again.
+        let pending_ids: HashSet<Address> = approved.iter().map(|r| r.id).collect();
+        self.stuck_withdrawal_warned
+            .retain(|id| pending_ids.contains(id));
+
         if self
             .withdrawal_commitment_retry_tracker
             .should_skip(checkpoint_timestamp_ms)
@@ -972,11 +983,6 @@ impl LeaderService {
             return;
         }
 
-        // Collect all approved requests and process them as a single batch.
-        // The coin selection algorithm picks up to
-        // max_withdrawal_requests oldest requests from the slice.
-        let batch: Vec<WithdrawalRequest> = approved.into_iter().collect();
-
         self.inner
             .metrics
             .leader_items_in_backoff
@@ -986,9 +992,45 @@ impl LeaderService {
                     .in_backoff_count(checkpoint_timestamp_ms) as i64,
             );
 
-        if batch.is_empty() {
+        if approved.is_empty() {
             return;
         }
+
+        // Capacity-aware batching: longest timestamp-sorted prefix that fits the
+        // local limiter's available capacity. Dropped tail bumps `at_capacity` so
+        // we don't sit on excess demand for the full batching window.
+        let (batch, at_capacity) = if let Some(limiter) = self.inner.local_limiter() {
+            let timestamp_secs = checkpoint_timestamp_ms / 1000;
+            let capacity = limiter.capacity_at(timestamp_secs).await;
+            let mut cumulative = 0u64;
+            let mut filtered: Vec<WithdrawalRequest> = Vec::with_capacity(approved.len());
+            for req in &approved {
+                let candidate = cumulative.saturating_add(req.btc_amount);
+                if candidate > capacity {
+                    break;
+                }
+                cumulative = candidate;
+                filtered.push(req.clone());
+            }
+            if filtered.is_empty() {
+                // Head exceeds available capacity (may fit after refill, or be
+                // permanently stuck). Leave it queued and warn once.
+                let stuck = &approved[0];
+                if self.stuck_withdrawal_warned.insert(stuck.id) {
+                    warn!(
+                        request_id = %stuck.id,
+                        btc_amount = stuck.btc_amount,
+                        available = capacity,
+                        "Withdrawal request exceeds local limiter capacity; staying in queue"
+                    );
+                }
+                return;
+            }
+            let at_capacity = filtered.len() < approved.len();
+            (filtered, at_capacity)
+        } else {
+            (approved, false)
+        };
 
         let max_batch = self.inner.config.withdrawal_max_batch_size();
         let delay_ms = self.inner.config.withdrawal_batching_delay_ms();
@@ -998,7 +1040,7 @@ impl LeaderService {
             .first()
             .is_some_and(|r| checkpoint_timestamp_ms >= r.timestamp_ms + delay_ms);
 
-        if !batch_is_full && !oldest_has_waited {
+        if !batch_is_full && !oldest_has_waited && !at_capacity {
             debug!(
                 "Holding {} approved request(s): oldest is {}ms old, \
                  waiting for {}ms delay or {} requests",
@@ -1196,7 +1238,16 @@ impl LeaderService {
         self.inflight_withdrawal_signings
             .retain(|id| pending_ids.contains(id));
 
-        let max_concurrent = self.inner.config.max_concurrent_leader_job_tasks();
+        // The observer advances `LocalLimiter::next_seq` sequentially on every
+        // `WithdrawalSignedEvent`, so concurrent MPC tasks would race against
+        // a stale `expected_limiter_seq` and fail per-node validation. Cap
+        // in-flight to 1 whenever the guardian (and therefore the limiter) is
+        // configured.
+        let max_concurrent = if self.inner.guardian_client().is_some() {
+            1
+        } else {
+            self.inner.config.max_concurrent_leader_job_tasks()
+        };
         for txn in withdrawal_txns {
             if self.withdrawal_signing_tasks.len() >= max_concurrent {
                 break;
@@ -1361,6 +1412,11 @@ impl LeaderService {
                 .with_label_values(&["sign_withdrawal", "failure"])
                 .inc();
         })?;
+
+        // Serialize against ourselves so the next checkpoint doesn't respawn
+        // and either double-submit sign_withdrawal (no-guardian) or hand the
+        // followers a stale `next_seq` (guardian).
+        Self::wait_until_signed_committed(&inner, &txn.id, expected_limiter_seq).await;
 
         Ok(())
     }
@@ -1941,6 +1997,46 @@ impl LeaderService {
         executor
             .execute_sign_withdrawal(withdrawal_id, request_ids, signatures, cert)
             .await
+    }
+
+    /// Block until the local limiter has advanced past `leader_seq_used`
+    /// (guardian path) or until the on-chain signatures are visible
+    /// (no-guardian). The limiter advance is the strictly stronger condition,
+    /// since the observer fires on the same `WithdrawalSignedEvent` that
+    /// drives visibility.
+    async fn wait_until_signed_committed(
+        inner: &Hashi,
+        txn_id: &Address,
+        leader_seq_used: Option<u64>,
+    ) {
+        const VISIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
+        let mut checkpoint_rx = inner.onchain_state().subscribe_checkpoint();
+        let wait = async {
+            loop {
+                let committed = match (inner.local_limiter(), leader_seq_used) {
+                    (Some(limiter), Some(seq)) => limiter.next_seq().await > seq,
+                    _ => inner
+                        .onchain_state()
+                        .withdrawal_txn(txn_id)
+                        .is_some_and(|t| t.signatures.is_some()),
+                };
+                if committed {
+                    return;
+                }
+                let _ = checkpoint_rx.changed().await;
+            }
+        };
+        if tokio::time::timeout(VISIBILITY_TIMEOUT, wait)
+            .await
+            .is_err()
+        {
+            warn!(
+                withdrawal_txn_id = %txn_id,
+                ?leader_seq_used,
+                "Timeout waiting for local limiter advance / signed-visible; \
+                 a duplicate sign attempt may follow on the next checkpoint"
+            );
+        }
     }
 
     async fn submit_confirm_withdrawal(

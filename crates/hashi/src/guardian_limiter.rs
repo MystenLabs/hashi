@@ -1,8 +1,12 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Local emulator of the guardian's token-bucket limiter. Bootstrapped
-//! from the guardian at startup and advanced on every accepted consume.
+//! Local emulator of the guardian's token-bucket limiter. Bootstrapped from
+//! the guardian at startup and advanced exclusively by
+//! `Hashi::start_guardian_limiter_observer` on each `WithdrawalSignedEvent`.
+//! The MPC signing path uses `validate_consume` (read-only) — it never calls
+//! `apply_consume`. This keeps every node in lockstep with the guardian via
+//! Sui's deterministic checkpoint stream.
 
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
