@@ -33,6 +33,25 @@ pub struct Metrics {
 
     pub screener_enabled: IntGauge,
 
+    // Guardian / local-limiter metrics
+    pub guardian_enabled: IntGauge,
+    pub guardian_limiter_initialized: IntGauge,
+    pub guardian_limiter_drifted: IntGauge,
+    pub guardian_limiter_tokens_available: IntGauge,
+    pub guardian_limiter_max_capacity: IntGauge,
+    pub guardian_limiter_refill_rate_sats_per_sec: IntGauge,
+    pub guardian_limiter_next_seq: IntGauge,
+    pub guardian_limiter_last_updated_at_seconds: IntGauge,
+    pub guardian_bootstrap_attempts_total: IntCounter,
+    pub guardian_bootstrap_outcomes_total: IntCounterVec,
+    pub guardian_limiter_validate_total: IntCounterVec,
+    pub guardian_limiter_apply_total: IntCounterVec,
+    pub guardian_limiter_anchor_events_total: IntCounter,
+    pub guardian_limiter_batch_truncated_total: IntCounter,
+    pub guardian_limiter_batch_stuck_head_total: IntCounter,
+    pub guardian_rpc_total: IntCounterVec,
+    pub guardian_rpc_duration_seconds: HistogramVec,
+
     // Kyoto (Bitcoin light client) metrics
     pub kyoto_connected_peers: IntGauge,
     pub kyoto_synced: IntGauge,
@@ -243,6 +262,119 @@ impl Metrics {
             screener_enabled: register_int_gauge_with_registry!(
                 "hashi_screener_enabled",
                 "Whether AML screening is enabled (1) or disabled (0)",
+                registry,
+            )
+            .unwrap(),
+
+            // Guardian / local-limiter metrics
+            guardian_enabled: register_int_gauge_with_registry!(
+                "hashi_guardian_enabled",
+                "Whether the guardian endpoint is configured for this node (1) or not (0)",
+                registry,
+            )
+            .unwrap(),
+            guardian_limiter_initialized: register_int_gauge_with_registry!(
+                "hashi_guardian_limiter_initialized",
+                "Whether the local guardian-limiter emulator has been seeded from the guardian (1) or not (0)",
+                registry,
+            )
+            .unwrap(),
+            guardian_limiter_drifted: register_int_gauge_with_registry!(
+                "hashi_guardian_limiter_drifted",
+                "Sticky bit set to 1 when the local limiter has lost lockstep with the guardian \
+                 (broadcast lag or apply_consume failure); cleared only by process restart",
+                registry,
+            )
+            .unwrap(),
+            guardian_limiter_tokens_available: register_int_gauge_with_registry!(
+                "hashi_guardian_limiter_tokens_available",
+                "Tokens currently available in the local guardian-limiter bucket (sats)",
+                registry,
+            )
+            .unwrap(),
+            guardian_limiter_max_capacity: register_int_gauge_with_registry!(
+                "hashi_guardian_limiter_max_capacity",
+                "Maximum bucket capacity of the local guardian-limiter (sats), as configured by the guardian",
+                registry,
+            )
+            .unwrap(),
+            guardian_limiter_refill_rate_sats_per_sec: register_int_gauge_with_registry!(
+                "hashi_guardian_limiter_refill_rate_sats_per_sec",
+                "Refill rate of the local guardian-limiter (sats per second), as configured by the guardian",
+                registry,
+            )
+            .unwrap(),
+            guardian_limiter_next_seq: register_int_gauge_with_registry!(
+                "hashi_guardian_limiter_next_seq",
+                "Next withdrawal sequence number expected by the local guardian-limiter",
+                registry,
+            )
+            .unwrap(),
+            guardian_limiter_last_updated_at_seconds: register_int_gauge_with_registry!(
+                "hashi_guardian_limiter_last_updated_at_seconds",
+                "Unix timestamp (seconds) of the last apply_consume on the local guardian-limiter",
+                registry,
+            )
+            .unwrap(),
+            guardian_bootstrap_attempts_total: register_int_counter_with_registry!(
+                "hashi_guardian_bootstrap_attempts_total",
+                "Total GetGuardianInfo bootstrap attempts (one per retry)",
+                registry,
+            )
+            .unwrap(),
+            guardian_bootstrap_outcomes_total: register_int_counter_vec_with_registry!(
+                "hashi_guardian_bootstrap_outcomes_total",
+                "Bootstrap outcomes by reason: success, rpc_failure, parse_failure, no_limiter_yet",
+                &["outcome"],
+                registry,
+            )
+            .unwrap(),
+            guardian_limiter_validate_total: register_int_counter_vec_with_registry!(
+                "hashi_guardian_limiter_validate_total",
+                "Local-limiter validate_consume calls by outcome and call site",
+                &["outcome", "callsite"],
+                registry,
+            )
+            .unwrap(),
+            guardian_limiter_apply_total: register_int_counter_vec_with_registry!(
+                "hashi_guardian_limiter_apply_total",
+                "Local-limiter apply_consume calls by outcome (also covers no_limiter and broadcast_lagged \
+                 observer events that prevent an apply)",
+                &["outcome"],
+                registry,
+            )
+            .unwrap(),
+            guardian_limiter_anchor_events_total: register_int_counter_with_registry!(
+                "hashi_guardian_limiter_anchor_events_total",
+                "Total on-chain WithdrawalSignedEvent observations applied to the local guardian-limiter",
+                registry,
+            )
+            .unwrap(),
+            guardian_limiter_batch_truncated_total: register_int_counter_with_registry!(
+                "hashi_guardian_limiter_batch_truncated_total",
+                "Times the leader's approved batch was truncated by local-limiter capacity (the head fits, the tail does not)",
+                registry,
+            )
+            .unwrap(),
+            guardian_limiter_batch_stuck_head_total: register_int_counter_with_registry!(
+                "hashi_guardian_limiter_batch_stuck_head_total",
+                "Times the head of the leader's approved batch already exceeded local-limiter capacity",
+                registry,
+            )
+            .unwrap(),
+            guardian_rpc_total: register_int_counter_vec_with_registry!(
+                "hashi_guardian_rpc_total",
+                "Outbound RPC calls to the guardian by method and outcome \
+                 (outcomes: ok, seq_mismatch, rate_limited, unavailable, parse_error, signature_error)",
+                &["method", "outcome"],
+                registry,
+            )
+            .unwrap(),
+            guardian_rpc_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_guardian_rpc_duration_seconds",
+                "Latency of outbound RPC calls to the guardian by method and outcome",
+                &["method", "outcome"],
+                LATENCY_SEC_BUCKETS.to_vec(),
                 registry,
             )
             .unwrap(),
@@ -696,6 +828,60 @@ impl Metrics {
         }
     }
 
+    pub fn record_limiter_state(
+        &self,
+        state: &hashi_types::guardian::LimiterState,
+        config: &hashi_types::guardian::LimiterConfig,
+    ) {
+        self.guardian_limiter_tokens_available
+            .set(state.num_tokens_available as i64);
+        self.guardian_limiter_next_seq.set(state.next_seq as i64);
+        self.guardian_limiter_last_updated_at_seconds
+            .set(state.last_updated_at as i64);
+        self.guardian_limiter_max_capacity
+            .set(config.max_bucket_capacity as i64);
+        self.guardian_limiter_refill_rate_sats_per_sec
+            .set(config.refill_rate as i64);
+    }
+
+    pub fn record_limiter_validate(
+        &self,
+        result: &Result<(), crate::guardian_limiter::LocalLimiterError>,
+        callsite: &str,
+    ) {
+        let outcome = limiter_outcome_label(result);
+        self.guardian_limiter_validate_total
+            .with_label_values(&[outcome, callsite])
+            .inc();
+    }
+
+    /// `no_limiter` and `broadcast_lagged` paths don't have a `Result` and
+    /// must be recorded by the caller.
+    pub fn record_limiter_apply(
+        &self,
+        result: &Result<(), crate::guardian_limiter::LocalLimiterError>,
+    ) {
+        let outcome = limiter_outcome_label(result);
+        self.guardian_limiter_apply_total
+            .with_label_values(&[outcome])
+            .inc();
+    }
+
+    pub fn record_guardian_rpc(&self, method: &str, outcome: &str, elapsed_secs: f64) {
+        self.guardian_rpc_total
+            .with_label_values(&[method, outcome])
+            .inc();
+        self.guardian_rpc_duration_seconds
+            .with_label_values(&[method, outcome])
+            .observe(elapsed_secs);
+    }
+
+    pub fn record_guardian_bootstrap_outcome(&self, outcome: &str) {
+        self.guardian_bootstrap_outcomes_total
+            .with_label_values(&[outcome])
+            .inc();
+    }
+
     pub fn update_onchain_state(&self, state: &crate::onchain::OnchainState) {
         self.latest_checkpoint_height
             .set(state.latest_checkpoint_height() as i64);
@@ -844,6 +1030,47 @@ impl Metrics {
     }
 }
 
+// Guardian limiter validate/apply outcome labels.
+pub const GUARDIAN_LIMITER_OUTCOME_SUCCESS: &str = "success";
+pub const GUARDIAN_LIMITER_OUTCOME_SEQ_MISMATCH: &str = "seq_mismatch";
+pub const GUARDIAN_LIMITER_OUTCOME_STALE_TIMESTAMP: &str = "stale_timestamp";
+pub const GUARDIAN_LIMITER_OUTCOME_INSUFFICIENT_CAPACITY: &str = "insufficient_capacity";
+// Apply-only labels (no analogue on validate).
+pub const GUARDIAN_LIMITER_OUTCOME_NO_LIMITER: &str = "no_limiter";
+pub const GUARDIAN_LIMITER_OUTCOME_BROADCAST_LAGGED: &str = "broadcast_lagged";
+
+pub const GUARDIAN_LIMITER_CALLSITE_LEADER_PRE_MPC: &str = "leader_pre_mpc";
+pub const GUARDIAN_LIMITER_CALLSITE_MPC_SIGNING: &str = "mpc_signing";
+
+pub const GUARDIAN_BOOTSTRAP_OUTCOME_SUCCESS: &str = "success";
+pub const GUARDIAN_BOOTSTRAP_OUTCOME_RPC_FAILURE: &str = "rpc_failure";
+pub const GUARDIAN_BOOTSTRAP_OUTCOME_PARSE_FAILURE: &str = "parse_failure";
+pub const GUARDIAN_BOOTSTRAP_OUTCOME_NO_LIMITER_YET: &str = "no_limiter_yet";
+
+pub const GUARDIAN_RPC_METHOD_GET_GUARDIAN_INFO: &str = "get_guardian_info";
+pub const GUARDIAN_RPC_METHOD_STANDARD_WITHDRAWAL: &str = "standard_withdrawal";
+
+pub const GUARDIAN_RPC_OUTCOME_OK: &str = "ok";
+pub const GUARDIAN_RPC_OUTCOME_SEQ_MISMATCH: &str = "seq_mismatch";
+pub const GUARDIAN_RPC_OUTCOME_RATE_LIMITED: &str = "rate_limited";
+pub const GUARDIAN_RPC_OUTCOME_UNAVAILABLE: &str = "unavailable";
+pub const GUARDIAN_RPC_OUTCOME_PARSE_ERROR: &str = "parse_error";
+pub const GUARDIAN_RPC_OUTCOME_SIGNATURE_ERROR: &str = "signature_error";
+
+fn limiter_outcome_label(
+    result: &Result<(), crate::guardian_limiter::LocalLimiterError>,
+) -> &'static str {
+    use crate::guardian_limiter::LocalLimiterError;
+    match result {
+        Ok(()) => GUARDIAN_LIMITER_OUTCOME_SUCCESS,
+        Err(LocalLimiterError::SeqMismatch { .. }) => GUARDIAN_LIMITER_OUTCOME_SEQ_MISMATCH,
+        Err(LocalLimiterError::StaleTimestamp { .. }) => GUARDIAN_LIMITER_OUTCOME_STALE_TIMESTAMP,
+        Err(LocalLimiterError::InsufficientCapacity { .. }) => {
+            GUARDIAN_LIMITER_OUTCOME_INSUFFICIENT_CAPACITY
+        }
+    }
+}
+
 /// Create a metric that measures the uptime from when this metric was constructed.
 /// The metric is labeled with:
 /// - 'version': binary version, generally be of the format: 'semver-gitrevision'
@@ -906,5 +1133,119 @@ async fn metrics(
             http::StatusCode::INTERNAL_SERVER_ERROR,
             format!("unable to encode metrics: {error}"),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::guardian_limiter::LocalLimiterError;
+    use hashi_types::guardian::LimiterConfig;
+    use hashi_types::guardian::LimiterState;
+
+    #[test]
+    fn guardian_metric_helpers_cover_every_label() {
+        let registry = Registry::new();
+        let metrics = Metrics::new(&registry);
+
+        // Snapshot gauges.
+        metrics.record_limiter_state(
+            &LimiterState {
+                num_tokens_available: 1_234,
+                last_updated_at: 9_999,
+                next_seq: 17,
+            },
+            &LimiterConfig {
+                refill_rate: 50,
+                max_bucket_capacity: 100_000_000,
+            },
+        );
+        assert_eq!(metrics.guardian_limiter_tokens_available.get(), 1_234);
+        assert_eq!(metrics.guardian_limiter_next_seq.get(), 17);
+        assert_eq!(
+            metrics.guardian_limiter_last_updated_at_seconds.get(),
+            9_999
+        );
+        assert_eq!(metrics.guardian_limiter_max_capacity.get(), 100_000_000);
+        assert_eq!(metrics.guardian_limiter_refill_rate_sats_per_sec.get(), 50);
+
+        // Validate helper covers every error variant + Ok.
+        for callsite in [
+            GUARDIAN_LIMITER_CALLSITE_LEADER_PRE_MPC,
+            GUARDIAN_LIMITER_CALLSITE_MPC_SIGNING,
+        ] {
+            metrics.record_limiter_validate(&Ok(()), callsite);
+            metrics.record_limiter_validate(
+                &Err(LocalLimiterError::SeqMismatch {
+                    local: 0,
+                    incoming: 1,
+                }),
+                callsite,
+            );
+            metrics.record_limiter_validate(
+                &Err(LocalLimiterError::StaleTimestamp {
+                    local_last: 10,
+                    incoming: 5,
+                }),
+                callsite,
+            );
+            metrics.record_limiter_validate(
+                &Err(LocalLimiterError::InsufficientCapacity {
+                    needed: 100,
+                    available: 50,
+                }),
+                callsite,
+            );
+        }
+
+        // Apply helper covers every error variant + Ok.
+        metrics.record_limiter_apply(&Ok(()));
+        metrics.record_limiter_apply(&Err(LocalLimiterError::SeqMismatch {
+            local: 0,
+            incoming: 1,
+        }));
+        metrics.record_limiter_apply(&Err(LocalLimiterError::StaleTimestamp {
+            local_last: 10,
+            incoming: 5,
+        }));
+        metrics.record_limiter_apply(&Err(LocalLimiterError::InsufficientCapacity {
+            needed: 100,
+            available: 50,
+        }));
+
+        // Apply-only outcome labels need to be valid label values for this CounterVec.
+        metrics
+            .guardian_limiter_apply_total
+            .with_label_values(&[GUARDIAN_LIMITER_OUTCOME_NO_LIMITER])
+            .inc();
+        metrics
+            .guardian_limiter_apply_total
+            .with_label_values(&[GUARDIAN_LIMITER_OUTCOME_BROADCAST_LAGGED])
+            .inc();
+
+        for outcome in [
+            GUARDIAN_BOOTSTRAP_OUTCOME_SUCCESS,
+            GUARDIAN_BOOTSTRAP_OUTCOME_RPC_FAILURE,
+            GUARDIAN_BOOTSTRAP_OUTCOME_PARSE_FAILURE,
+            GUARDIAN_BOOTSTRAP_OUTCOME_NO_LIMITER_YET,
+        ] {
+            metrics.record_guardian_bootstrap_outcome(outcome);
+        }
+
+        for method in [
+            GUARDIAN_RPC_METHOD_GET_GUARDIAN_INFO,
+            GUARDIAN_RPC_METHOD_STANDARD_WITHDRAWAL,
+        ] {
+            for outcome in [
+                GUARDIAN_RPC_OUTCOME_OK,
+                GUARDIAN_RPC_OUTCOME_SEQ_MISMATCH,
+                GUARDIAN_RPC_OUTCOME_RATE_LIMITED,
+                GUARDIAN_RPC_OUTCOME_UNAVAILABLE,
+                GUARDIAN_RPC_OUTCOME_PARSE_ERROR,
+                GUARDIAN_RPC_OUTCOME_SIGNATURE_ERROR,
+            ] {
+                metrics.record_guardian_rpc(method, outcome, 0.1);
+            }
+        }
     }
 }
