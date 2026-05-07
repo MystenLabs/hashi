@@ -28,6 +28,7 @@ public struct UtxoRecord has store {
     utxo: Utxo,
     produced_by: Option<address>,
     locked_by: Option<address>,
+    spent_epoch: Option<u64>,
 }
 
 public struct UtxoPool has store {
@@ -58,6 +59,7 @@ public(package) fun insert_active(self: &mut UtxoPool, utxo: Utxo) {
                 utxo,
                 produced_by: option::none(),
                 locked_by: option::none(),
+                spent_epoch: option::none(),
             },
         )
 }
@@ -77,6 +79,7 @@ public(package) fun insert_pending(self: &mut UtxoPool, utxo: Utxo, withdrawal_i
                 utxo,
                 produced_by: option::some(withdrawal_id),
                 locked_by: option::none(),
+                spent_epoch: option::none(),
             },
         )
 }
@@ -94,13 +97,24 @@ public(package) fun get_utxo(self: &UtxoPool, utxo_id: UtxoId): hashi::utxo::Utx
     record.utxo
 }
 
-/// Mark a UTXO as confirmed-spent once its spending withdrawal is confirmed
-/// on Bitcoin. Removes the record from the pool and records the spent epoch.
-public(package) fun confirm_spent(self: &mut UtxoPool, utxo_id: UtxoId, epoch: u64) {
-    let UtxoRecord { utxo, produced_by: _, locked_by: _ } = self.utxo_records.remove(utxo_id);
-    utxo.delete();
-    self.spent_utxos.add(utxo_id, epoch);
+public(package) fun mark_spent(self: &mut UtxoPool, utxo_id: UtxoId, epoch: u64) {
+    let record: &mut UtxoRecord = self.utxo_records.borrow_mut(utxo_id);
+    record.spent_epoch = option::some(epoch);
     sui::event::emit(UtxoSpentEvent { utxo_id, spent_epoch: epoch });
+}
+
+/// Deferred bookkeeping for a spent UTXO: remove from `utxo_records` and
+/// record in `spent_utxos`. Aborts if the UTXO has not been marked spent.
+/// No-ops if the record has already been cleaned up.
+public(package) fun cleanup_spent(self: &mut UtxoPool, utxo_id: UtxoId) {
+    if (self.utxo_records.contains(utxo_id)) {
+        let UtxoRecord { utxo, produced_by: _, locked_by: _, spent_epoch } = self
+            .utxo_records
+            .remove(utxo_id);
+        let epoch = spent_epoch.destroy_some();
+        utxo.delete();
+        self.spent_utxos.add(utxo_id, epoch);
+    };
 }
 
 /// Promote a pending change UTXO to confirmed once its producing withdrawal
@@ -117,4 +131,14 @@ public(package) fun confirm_pending(self: &mut UtxoPool, utxo_id: UtxoId) {
 public struct UtxoSpentEvent has copy, drop {
     utxo_id: UtxoId,
     spent_epoch: u64,
+}
+
+#[test_only]
+public(package) fun has_active_record(self: &UtxoPool, utxo_id: UtxoId): bool {
+    self.utxo_records.contains(utxo_id)
+}
+
+#[test_only]
+public(package) fun has_spent_record(self: &UtxoPool, utxo_id: UtxoId): bool {
+    self.spent_utxos.contains(utxo_id)
 }

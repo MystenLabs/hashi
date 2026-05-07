@@ -283,10 +283,11 @@ entry fun confirm_withdrawal(hashi: &mut Hashi, withdrawal_id: address, cert: Co
 
     let epoch = hashi.committee_set().epoch();
 
-    // Move each locked input to the spent set now that the Bitcoin transaction
-    // has been confirmed on-chain.
+    // Mark each input UTXO as spent and emit spent events. The actual record
+    // removal from utxo_records is deferred to `cleanup_spent_utxos` so this
+    // transaction stays well under Sui's 1000-object runtime cache limit.
     txn.withdrawal_txn_inputs().do_ref!(|utxo| {
-        hashi.bitcoin_mut().utxo_pool_mut().confirm_spent(utxo.id(), epoch);
+        hashi.bitcoin_mut().utxo_pool_mut().mark_spent(utxo.id(), epoch);
     });
 
     // Promote the change UTXO from unconfirmed to confirmed. If the change was
@@ -300,6 +301,17 @@ entry fun confirm_withdrawal(hashi: &mut Hashi, withdrawal_id: address, cert: Co
 
     // Move the txn to the cold (historical) bag.
     hashi.bitcoin_mut().withdrawal_queue_mut().insert_confirmed_txn(txn);
+}
+
+/// Finalize the on-chain bookkeeping for spent UTXOs. Moves each UTXO's
+/// record from `utxo_records` to `spent_utxos`, reading the spent epoch
+/// from the record's `spent_epoch` field (set by `mark_spent` during
+/// `confirm_withdrawal`). Callers pass the individual UTXO IDs to clean up.
+entry fun cleanup_spent_utxos(hashi: &mut Hashi, utxo_ids: vector<UtxoId>) {
+    hashi.config().assert_version_enabled();
+    utxo_ids.do!(|utxo_id| {
+        hashi.bitcoin_mut().utxo_pool_mut().cleanup_spent(utxo_id);
+    });
 }
 
 /// Cancel a pending withdrawal request and return the stored BTC to the requester.

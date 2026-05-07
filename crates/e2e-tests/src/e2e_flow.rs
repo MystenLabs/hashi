@@ -35,11 +35,14 @@ mod tests {
 
     const MAX_TX_SIZE_BYTES: usize = 131_072;
     const MAX_SERIALIZED_TX_EFFECTS_SIZE_BYTES: usize = 524_288;
+    const MAX_NUM_CACHED_OBJECTS: usize = 1_000;
 
     struct EventWithEffects<T> {
         event: T,
         tx_size_bytes: usize,
         effects_size_bytes: usize,
+        changed_objects: usize,
+        unchanged_loaded_runtime_objects: usize,
     }
 
     fn assert_tx_size_under_sui_limit(stage: &str, tx_size_bytes: usize) {
@@ -68,6 +71,45 @@ mod tests {
             "{stage} effects size ({effects_size_bytes} bytes) exceeded Sui's \
              max_serialized_tx_effects_size_bytes ({MAX_SERIALIZED_TX_EFFECTS_SIZE_BYTES} bytes)"
         );
+    }
+
+    fn assert_changed_objects_under_sui_limit(stage: &str, changed_objects: usize) {
+        info!(
+            stage,
+            changed_objects,
+            limit = MAX_NUM_CACHED_OBJECTS,
+            "Observed changed objects in Sui transaction effects"
+        );
+        assert!(
+            changed_objects <= MAX_NUM_CACHED_OBJECTS,
+            "{stage} changed objects ({changed_objects}) exceeded Sui's \
+             max_num_cached_objects ({MAX_NUM_CACHED_OBJECTS})"
+        );
+    }
+
+    fn assert_runtime_object_count_under_sui_limit(
+        stage: &str,
+        changed_objects: usize,
+        unchanged_loaded_runtime_objects: usize,
+    ) {
+        let runtime_objects = changed_objects + unchanged_loaded_runtime_objects;
+        info!(
+            stage,
+            runtime_objects,
+            changed_objects,
+            unchanged_loaded_runtime_objects,
+            limit = MAX_NUM_CACHED_OBJECTS,
+            "Observed runtime object count from Sui transaction effects"
+        );
+        assert!(
+            runtime_objects <= MAX_NUM_CACHED_OBJECTS,
+            "{stage} runtime object count ({runtime_objects}) exceeded Sui's \
+             max_num_cached_objects ({MAX_NUM_CACHED_OBJECTS})"
+        );
+    }
+
+    fn runtime_object_count(event: &EventWithEffects<impl Sized>) -> usize {
+        event.changed_objects + event.unchanged_loaded_runtime_objects
     }
 
     fn tx_bcs_size(txn: &sui_rpc::proto::sui::rpc::v2::ExecutedTransaction) -> Result<usize> {
@@ -928,6 +970,16 @@ mod tests {
                 .effects()
                 .bcs()
                 .value(),
+            Checkpoint::path_builder()
+                .transactions()
+                .effects()
+                .changed_objects()
+                .object_id(),
+            Checkpoint::path_builder()
+                .transactions()
+                .effects()
+                .unchanged_loaded_runtime_objects()
+                .object_id(),
         ]);
         let mut subscription = sui_client
             .subscription_client()
@@ -960,6 +1012,11 @@ mod tests {
                                     event: data,
                                     tx_size_bytes: tx_bcs_size(txn)?,
                                     effects_size_bytes: effects_bcs_size(txn)?,
+                                    changed_objects: txn.effects().changed_objects().len(),
+                                    unchanged_loaded_runtime_objects: txn
+                                        .effects()
+                                        .unchanged_loaded_runtime_objects()
+                                        .len(),
                                 });
                             }
                             Ok(None) => {}
@@ -1696,40 +1753,39 @@ mod tests {
         Ok(())
     }
 
-    /// Verify that the large withdrawal path stays within Sui transaction-size
-    /// and effects-size limits, and that signature-commit chunking works when a
-    /// withdrawal transaction has enough inputs to push the BCS-encoded
-    /// `signatures` vector past the 16 KiB pure-argument limit.
+    /// Stress-test withdrawal at the production default batch size (50
+    /// requests / 500 inputs). Verifies that commit, sign, confirm, and
+    /// cleanup all stay within Sui's runtime-object and effects-size limits.
+    ///
+    /// Before the two-phase spent optimization, confirm at 50 req / 500 inputs
+    /// would exceed Sui's 1000-object limit (~1053 objects). After the
+    /// optimization, confirm emits events only (0 objects per input) and a
+    /// separate `cleanup_spent_utxos` transaction does the bookkeeping.
     ///
     /// Test outline:
-    /// 1. Create 500 deposits (one UTXO each) so the pool has 500 UTXOs.
-    /// 2. Submit 50 withdrawal requests that together require spending UTXOs;
-    ///    consolidation at low fee rates pulls in all remaining UTXOs up to the
+    /// 1. Create 500 deposits (one UTXO each).
+    /// 2. Submit 50 withdrawal requests; low-fee consolidation fills the
     ///    500-input cap.
-    /// 3. Wait for a single `WithdrawalPickedForProcessingEvent` with all 50
-    ///    requests batched and a large number of inputs selected.
-    /// 4. Assert the actual committed Sui transaction payload is below
-    ///    `max_tx_size_bytes` and commit/sign/confirm effects are below
-    ///    `max_serialized_tx_effects_size_bytes`.
-    /// 5. Mine blocks and wait for `WithdrawalConfirmedEvent`, which implies the
-    ///    signature-commit transaction succeeded (previously it would fail with
-    ///    "maximum pure argument size is 16384").
+    /// 3. Assert commit, sign, and confirm transactions are under all Sui
+    ///    limits (tx size, effects size, runtime objects).
+    /// 4. Mine blocks and wait for confirmation.
+    /// 5. Run `cleanup_spent_utxos` and verify it succeeds.
     #[tokio::test]
     async fn test_large_withdrawal_signature_chunking() -> Result<()> {
         init_test_logging();
-        info!("=== Starting Large Withdrawal Signature Chunking Test ===");
+        info!("=== Starting Large Withdrawal Stress Test ===");
+
+        let num_withdrawals: usize = 50;
+        let num_deposits: usize = 500;
 
         // 24-hour batching delay: the batch fires only at capacity (50), not
         // on a timer. This ensures all 50 requests end up in one Bitcoin tx.
         // With 4 nodes at weight 25 each (total_weight=100), the presig pool
-        // is batch_size_per_weight * total_weight. We need at least 500
-        // presignatures for 500 inputs, so set batch_size_per_weight to 10
-        // which gives 10 * 100 = 1000 presigs. However the pool is consumed
-        // per-batch (20 at a time), so we need a larger pool to avoid
-        // exhaustion during signing of 500 inputs.
+        // is batch_size_per_weight * total_weight. We need enough
+        // presignatures for 500 inputs.
         let mut networks = TestNetworksBuilder::new()
             .with_nodes(4)
-            .with_withdrawal_max_batch_size(50)
+            .with_withdrawal_max_batch_size(num_withdrawals)
             .with_withdrawal_batching_delay_ms(86_400_000)
             .with_batch_size_per_weight(100)
             .build()
@@ -1749,7 +1805,6 @@ mod tests {
         // for value and consolidation at low fee rates pulls in the rest up
         // to the 500-input cap.
         let deposit_amount_sats = 40_000u64;
-        let num_deposits: usize = 500;
         // With 500 inputs and 64-byte Schnorr signatures, the BCS-encoded
         // signatures vector is ~32.5 KiB -- well above the 16 KiB per-pure-arg
         // limit that the chunking fix addresses.
@@ -1808,9 +1863,9 @@ mod tests {
         }
         info!("All {} deposit requests submitted on Sui", num_deposits);
 
-        // Poll the on-chain deposit queue until all deposits are confirmed.
-        // The hashi node's watcher keeps OnchainState up-to-date; confirmed
-        // deposits leave the queue automatically.
+        // Poll the on-chain deposit queue until all deposits are confirmed
+        // and visible in the UTXO pool. The stress measurement below assumes
+        // coin selection has all UTXOs available.
         // Mine blocks in the background so the leader's BTC-block-driven
         // deposit processing loop keeps firing.
         let _deposit_miner = BackgroundMiner::start(&networks.bitcoin_node);
@@ -1827,28 +1882,37 @@ mod tests {
                     deposit_timeout,
                 ));
             }
-            let remaining = hashi.onchain_state().deposit_requests().len();
-            if remaining == 0 {
+            let state = hashi.onchain_state();
+            let remaining = state.deposit_requests().len();
+            let active_utxos = state.active_utxos().len();
+            if remaining == 0 && active_utxos >= num_deposits {
                 break;
             }
             let confirmed = num_deposits - remaining;
             if confirmed / 50 > last_logged / 50 {
-                info!("Deposit confirmations: {}/{}", confirmed, num_deposits);
+                info!(
+                    active_utxos,
+                    "Deposit confirmations: {}/{}", confirmed, num_deposits
+                );
                 last_logged = confirmed;
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
         info!("All deposits confirmed");
+        drop(_deposit_miner);
 
         // --- Submit 50 withdrawal requests ---
         let withdrawal_amount_sats = 30_000u64;
-        let num_withdrawals: usize = 50;
         info!(
             "Submitting {} withdrawal requests of {} sats each...",
             num_withdrawals, withdrawal_amount_sats
         );
 
-        for i in 0..num_withdrawals {
+        // Submit all but the last request first. With a 24-hour delay and max
+        // batch size, the leader cannot pick the batch yet, which lets this
+        // test subscribe for the picked event before the final request makes
+        // the batch full.
+        for i in 0..(num_withdrawals - 1) {
             let btc_destination = networks.bitcoin_node.get_new_address()?;
             let destination_bytes = extract_witness_program(&btc_destination)?;
             executor
@@ -1862,22 +1926,47 @@ mod tests {
                 );
             }
         }
-        info!("All withdrawal requests submitted");
 
         // Wait for the batched withdrawal to be picked for processing. The
-        // 24-hour delay means it fires only at capacity (50 requests).
+        // 24-hour delay means it fires only at the configured capacity.
         info!("Waiting for batched withdrawal to be picked...");
-        let picked_with_effects = wait_for_batched_withdrawal_picked_with_effects(
-            &mut networks.sui_network.client,
-            num_withdrawals,
-            Duration::from_secs(300),
-        )
-        .await?;
+        let mut picked_client = networks.sui_network.client.clone();
+        let picked_task = tokio::spawn(async move {
+            wait_for_batched_withdrawal_picked_with_effects(
+                &mut picked_client,
+                num_withdrawals,
+                Duration::from_secs(300),
+            )
+            .await
+        });
+
+        let btc_destination = networks.bitcoin_node.get_new_address()?;
+        let destination_bytes = extract_witness_program(&btc_destination)?;
+        executor
+            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes)
+            .await?;
+        info!(
+            "  Withdrawal requests submitted: {}/{}",
+            num_withdrawals, num_withdrawals
+        );
+        info!("All withdrawal requests submitted");
+
+        let picked_with_effects = picked_task.await??;
         assert_tx_size_under_sui_limit("commit_withdrawal_tx", picked_with_effects.tx_size_bytes);
         assert_effects_size_under_sui_limit(
             "commit_withdrawal_tx",
             picked_with_effects.effects_size_bytes,
         );
+        assert_changed_objects_under_sui_limit(
+            "commit_withdrawal_tx",
+            picked_with_effects.changed_objects,
+        );
+        assert_runtime_object_count_under_sui_limit(
+            "commit_withdrawal_tx",
+            picked_with_effects.changed_objects,
+            picked_with_effects.unchanged_loaded_runtime_objects,
+        );
+        let commit_runtime_objects = runtime_object_count(&picked_with_effects);
         let picked = picked_with_effects.event;
 
         info!(
@@ -1894,7 +1983,7 @@ mod tests {
             num_withdrawals,
         );
 
-        // With 500 UTXOs at 4,000 sats and 1,500,000 sats of withdrawals,
+        // With 500 UTXOs at 40,000 sats and 1,500,000 sats of withdrawals,
         // coin selection should pick most UTXOs for value and consolidate the
         // rest. Verify that enough inputs were selected to exceed the old
         // 16 KiB per-pure-arg limit (~252 signatures at 65 BCS bytes each).
@@ -1920,6 +2009,15 @@ mod tests {
             "sign_withdrawal",
             signed_with_effects.effects_size_bytes,
         );
+        assert_changed_objects_under_sui_limit(
+            "sign_withdrawal",
+            signed_with_effects.changed_objects,
+        );
+        assert_runtime_object_count_under_sui_limit(
+            "sign_withdrawal",
+            signed_with_effects.changed_objects,
+            signed_with_effects.unchanged_loaded_runtime_objects,
+        );
 
         // Mine blocks and wait for the withdrawal to be confirmed. This also
         // records the confirmation transaction's serialized effects size.
@@ -1934,9 +2032,29 @@ mod tests {
             "confirm_withdrawal",
             confirmed_with_effects.effects_size_bytes,
         );
+        assert_changed_objects_under_sui_limit(
+            "confirm_withdrawal",
+            confirmed_with_effects.changed_objects,
+        );
+        assert_runtime_object_count_under_sui_limit(
+            "confirm_withdrawal",
+            confirmed_with_effects.changed_objects,
+            confirmed_with_effects.unchanged_loaded_runtime_objects,
+        );
+        let confirm_runtime_objects = runtime_object_count(&confirmed_with_effects);
+        info!(
+            confirm_runtime_objects,
+            commit_runtime_objects, "Compared withdrawal commit and confirm runtime object counts"
+        );
         drop(miner);
 
-        info!("=== Large Withdrawal Signature Chunking Test Passed ===");
+        // --- Run cleanup_spent_utxos to finalize on-chain bookkeeping ---
+        info!("Running cleanup_spent_utxos...");
+        let utxo_ids: Vec<_> = picked.inputs.iter().map(|u| u.id).collect();
+        executor.execute_cleanup_spent_utxos(&utxo_ids).await?;
+        info!("cleanup_spent_utxos succeeded");
+
+        info!("=== Large Withdrawal Stress Test Passed ===");
         Ok(())
     }
 }

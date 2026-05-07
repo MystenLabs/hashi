@@ -41,6 +41,18 @@ fn confirmed_utxo(n: u8, amount: u64) -> UtxoCandidate {
     }
 }
 
+fn confirmed_utxo_with_vout(vout: u32, amount: u64) -> UtxoCandidate {
+    UtxoCandidate {
+        id: UtxoId {
+            txid: Address::new([0xAA; 32]).into(),
+            vout,
+        },
+        amount,
+        spend_path: SpendPath::TaprootScriptPath2of2,
+        status: UtxoStatus::Confirmed,
+    }
+}
+
 /// Creates a pending UTXO with one 0-confirmation ancestor (mempool
 /// depth 1). The ancestor has weight 1000 WU and fee 500 sat.
 fn pending_utxo(n: u8, amount: u64) -> UtxoCandidate {
@@ -486,6 +498,36 @@ fn test_low_fee_consolidation_active_smallest_first() {
             "second-smallest should be consolidated: {extra_amounts:?}"
         );
     }
+    assert_conservation(&result);
+}
+
+#[test]
+fn test_low_fee_absolute_request_cap_can_use_default_input_cap() {
+    let utxos: Vec<UtxoCandidate> = (0..CoinSelectionParams::DEFAULT_MAX_INPUTS as u32)
+        .map(|i| confirmed_utxo_with_vout(i, 40_000))
+        .collect();
+    let requests: Vec<WithdrawalRequest> = (0..CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS)
+        .map(|i| make_request(i as u8, 100_001, i as u64))
+        .collect();
+    let params = CoinSelectionParams {
+        max_inputs: CoinSelectionParams::DEFAULT_MAX_INPUTS,
+        max_withdrawal_requests: CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS,
+        ..default_params()
+    };
+
+    let result = select_coins(
+        &utxos,
+        &requests,
+        &params,
+        FeeRate::from_sat_per_vb_unchecked(1),
+    )
+    .expect("should select the absolute request / default input envelope at low fee");
+
+    assert_eq!(
+        result.selected_requests.len(),
+        CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
+    );
+    assert_eq!(result.inputs.len(), CoinSelectionParams::DEFAULT_MAX_INPUTS);
     assert_conservation(&result);
 }
 
