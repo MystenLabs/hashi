@@ -454,24 +454,49 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                             (amount_sats, timestamp_secs)
                         })
                 };
-                if let Some((amount_sats, timestamp_secs)) = limiter_inputs
-                    && let Some(limiter) = state.local_limiter()
-                {
-                    let seq = limiter.next_seq();
-                    match limiter.apply_consume(seq, timestamp_secs, amount_sats) {
-                        Ok(()) => tracing::info!(
-                            seq,
-                            amount_sats,
-                            timestamp_secs,
-                            withdrawal_txn_id = %event.withdrawal_txn_id,
-                            "Local limiter advanced from on-chain WithdrawalSignedEvent",
-                        ),
-                        Err(e) => tracing::error!(
-                            ?e,
-                            seq,
-                            withdrawal_txn_id = %event.withdrawal_txn_id,
-                            "Local limiter apply_consume failed; node is now drifted from guardian"
-                        ),
+                if let Some((amount_sats, timestamp_secs)) = limiter_inputs {
+                    if let Some(limiter) = state.local_limiter() {
+                        let seq = limiter.next_seq();
+                        let result = limiter.apply_consume(seq, timestamp_secs, amount_sats);
+                        if let Some(metrics) = state.metrics() {
+                            metrics.record_limiter_apply(&result);
+                        }
+                        match &result {
+                            Ok(()) => {
+                                if let Some(metrics) = state.metrics() {
+                                    metrics.guardian_limiter_anchor_events_total.inc();
+                                    metrics.record_limiter_state(
+                                        &limiter.snapshot(),
+                                        limiter.config(),
+                                    );
+                                }
+                                tracing::info!(
+                                    seq,
+                                    amount_sats,
+                                    timestamp_secs,
+                                    withdrawal_txn_id = %event.withdrawal_txn_id,
+                                    "Local limiter advanced from on-chain WithdrawalSignedEvent",
+                                );
+                            }
+                            Err(e) => {
+                                if let Some(metrics) = state.metrics() {
+                                    metrics.guardian_limiter_drifted.set(1);
+                                }
+                                tracing::error!(
+                                    ?e,
+                                    seq,
+                                    withdrawal_txn_id = %event.withdrawal_txn_id,
+                                    "Local limiter apply_consume failed; node is now drifted from guardian"
+                                );
+                            }
+                        }
+                    } else if let Some(metrics) = state.metrics() {
+                        metrics
+                            .guardian_limiter_apply_total
+                            .with_label_values(&[
+                                crate::metrics::GUARDIAN_LIMITER_OUTCOME_NO_LIMITER,
+                            ])
+                            .inc();
                     }
                 }
             }

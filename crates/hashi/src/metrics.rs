@@ -281,8 +281,7 @@ impl Metrics {
             .unwrap(),
             guardian_limiter_drifted: register_int_gauge_with_registry!(
                 "hashi_guardian_limiter_drifted",
-                "Sticky bit set to 1 when the local limiter has lost lockstep with the guardian \
-                 (broadcast lag or apply_consume failure); cleared only by process restart",
+                "Sticky bit set to 1 when the watcher's apply_consume fails — local limiter has lost lockstep with the guardian; cleared only by process restart",
                 registry,
             )
             .unwrap(),
@@ -338,8 +337,7 @@ impl Metrics {
             .unwrap(),
             guardian_limiter_apply_total: register_int_counter_vec_with_registry!(
                 "hashi_guardian_limiter_apply_total",
-                "Local-limiter apply_consume calls by outcome (also covers no_limiter and broadcast_lagged \
-                 observer events that prevent an apply)",
+                "Local-limiter apply_consume calls by outcome (also covers `no_limiter` watcher events that prevent an apply)",
                 &["outcome"],
                 registry,
             )
@@ -1035,9 +1033,9 @@ pub const GUARDIAN_LIMITER_OUTCOME_SUCCESS: &str = "success";
 pub const GUARDIAN_LIMITER_OUTCOME_SEQ_MISMATCH: &str = "seq_mismatch";
 pub const GUARDIAN_LIMITER_OUTCOME_STALE_TIMESTAMP: &str = "stale_timestamp";
 pub const GUARDIAN_LIMITER_OUTCOME_INSUFFICIENT_CAPACITY: &str = "insufficient_capacity";
-// Apply-only labels (no analogue on validate).
+// Apply-only label (no analogue on validate): watcher saw a
+// WithdrawalSignedEvent before the local limiter was bootstrapped.
 pub const GUARDIAN_LIMITER_OUTCOME_NO_LIMITER: &str = "no_limiter";
-pub const GUARDIAN_LIMITER_OUTCOME_BROADCAST_LAGGED: &str = "broadcast_lagged";
 
 pub const GUARDIAN_LIMITER_CALLSITE_LEADER_PRE_MPC: &str = "leader_pre_mpc";
 pub const GUARDIAN_LIMITER_CALLSITE_MPC_SIGNING: &str = "mpc_signing";
@@ -1213,14 +1211,10 @@ mod tests {
             available: 50,
         }));
 
-        // Apply-only outcome labels need to be valid label values for this CounterVec.
+        // Apply-only outcome label needs to be a valid label value for this CounterVec.
         metrics
             .guardian_limiter_apply_total
             .with_label_values(&[GUARDIAN_LIMITER_OUTCOME_NO_LIMITER])
-            .inc();
-        metrics
-            .guardian_limiter_apply_total
-            .with_label_values(&[GUARDIAN_LIMITER_OUTCOME_BROADCAST_LAGGED])
             .inc();
 
         for outcome in [

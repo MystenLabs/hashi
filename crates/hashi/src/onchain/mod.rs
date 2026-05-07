@@ -200,6 +200,10 @@ impl OnchainState {
         self.0.local_limiter.get().cloned()
     }
 
+    pub(crate) fn metrics(&self) -> Option<&Arc<crate::metrics::Metrics>> {
+        self.0.metrics.as_ref()
+    }
+
     /// Called once after guardian bootstrap.
     pub fn set_local_limiter(&self, limiter: Arc<crate::guardian_limiter::LocalLimiter>) {
         if self.0.local_limiter.set(limiter).is_err() {
