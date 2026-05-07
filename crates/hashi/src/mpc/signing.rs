@@ -78,7 +78,6 @@ struct SigningPoolState {
     /// out-of-order signing (e.g., withdrawal A allocated from batch 0 signs
     /// after withdrawal B advanced to batch 1) still works.
     batches: Vec<PresigBatch>,
-    /// Key: Sui address identifying the signing request.
     partial_signing_outputs: HashMap<Address, PartialSigningOutput>,
     next_batch: Option<Presignatures>,
 }

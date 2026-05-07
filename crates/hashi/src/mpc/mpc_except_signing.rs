@@ -103,7 +103,6 @@ pub struct MpcManager {
     pub previous_committee: Option<Committee>,
     pub previous_nodes: Option<Nodes<EncryptionGroupElement>>,
     pub previous_threshold: Option<u16>,
-    /// Used to reconstruct source session IDs during certificate reconstruction.
     chain_id: String,
     pub previous_epoch: u64,
     previous_output: Option<MpcOutput>,
@@ -111,8 +110,6 @@ pub struct MpcManager {
     pub batch_size_per_weight: u16,
 
     // Mutable during the epoch
-    // TODO: Rename these fields so it is clear at the call site which are
-    // backed by persistent store and which live only in memory.
     pub dealer_outputs: HashMap<DealerOutputsKey, avss::PartialOutput>,
     pub dkg_messages: HashMap<Address, avss::Message>,
     pub rotation_messages: HashMap<Address, RotationMessages>,
