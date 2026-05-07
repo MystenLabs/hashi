@@ -1446,7 +1446,9 @@ impl LeaderService {
         const VISIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
         if tokio::time::timeout(
             VISIBILITY_TIMEOUT,
-            inner.onchain_state().wait_until_checkpoint(signed_checkpoint),
+            inner
+                .onchain_state()
+                .wait_until_checkpoint(signed_checkpoint),
         )
         .await
         .is_err()
