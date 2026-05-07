@@ -414,7 +414,7 @@ impl P2PChannel for MockP2PChannel {
         &self,
         party: &Address,
         request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponses> {
+    ) -> ChannelResult<ComplaintResponse> {
         let mut managers = self.managers.lock().unwrap();
         let manager = managers.get_mut(party).ok_or_else(|| {
             crate::communication::ChannelError::RequestFailed(format!(
@@ -574,7 +574,7 @@ impl P2PChannel for FailingP2PChannel {
         &self,
         _party: &Address,
         _request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponses> {
+    ) -> ChannelResult<ComplaintResponse> {
         Err(crate::communication::ChannelError::RequestFailed(
             self.error_message.clone(),
         ))
@@ -647,7 +647,7 @@ impl P2PChannel for SucceedingP2PChannel {
         &self,
         _party: &Address,
         _request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponses> {
+    ) -> ChannelResult<ComplaintResponse> {
         unimplemented!("SucceedingP2PChannel does not implement complain")
     }
 
@@ -740,7 +740,7 @@ impl P2PChannel for PartiallyFailingP2PChannel {
         &self,
         _party: &Address,
         _request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponses> {
+    ) -> ChannelResult<ComplaintResponse> {
         unimplemented!("PartiallyFailingP2PChannel does not implement complain")
     }
 
@@ -764,11 +764,11 @@ impl P2PChannel for PartiallyFailingP2PChannel {
 /// P2P channel that returns pre-collected complaint responses.
 /// Useful for testing scenarios where responses are prepared ahead of time.
 struct PreCollectedP2PChannel {
-    responses: std::sync::Mutex<HashMap<Address, ComplaintResponses>>,
+    responses: std::sync::Mutex<HashMap<Address, ComplaintResponse>>,
 }
 
 impl PreCollectedP2PChannel {
-    fn new(responses: HashMap<Address, ComplaintResponses>) -> Self {
+    fn new(responses: HashMap<Address, ComplaintResponse>) -> Self {
         Self {
             responses: std::sync::Mutex::new(responses),
         }
@@ -797,7 +797,7 @@ impl P2PChannel for PreCollectedP2PChannel {
         &self,
         party: &Address,
         _request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponses> {
+    ) -> ChannelResult<ComplaintResponse> {
         self.responses
             .lock()
             .unwrap()
@@ -4835,7 +4835,7 @@ impl P2PChannel for TrackingP2PChannel {
         &self,
         party: &Address,
         request: &ComplainRequest,
-    ) -> ChannelResult<ComplaintResponses> {
+    ) -> ChannelResult<ComplaintResponse> {
         self.inner.complain(party, request).await
     }
 
@@ -6987,8 +6987,8 @@ fn test_handle_complain_request_success() {
     let response = result.unwrap();
     // Response carries only the responder's shares for the complained share index.
     match &response {
-        ComplaintResponses::Rotation(_) => {}
-        ComplaintResponses::Dkg(_) | ComplaintResponses::NonceGeneration(_) => {
+        ComplaintResponse::Rotation(_) => {}
+        ComplaintResponse::Dkg(_) | ComplaintResponse::NonceGeneration(_) => {
             panic!("Expected rotation complaint response")
         }
     };
@@ -7003,6 +7003,21 @@ fn test_handle_complain_request_success() {
             }),
         "Response should be cached"
     );
+
+    // Share-index discrimination: the same complaint must NOT validate against
+    // a different share_index's AVSS instance.
+    if let Some(&other_share_index) = valid_rotation_map.keys().find(|&&k| k != first_share_index) {
+        let mismatched_request = ComplainRequest {
+            share_index: Some(other_share_index),
+            ..request.clone()
+        };
+        let mismatched_result = responder_manager.handle_complain_request(&mismatched_request);
+        assert!(
+            mismatched_result.is_err(),
+            "Complaint authored against share_index {first_share_index} must not validate \
+             against share_index {other_share_index}"
+        );
+    }
 }
 
 /// Shared store that can be cloned and reused across manager restarts.
@@ -10088,7 +10103,7 @@ async fn test_fetch_public_mpc_output_uses_previous_epoch() {
             &self,
             _party: &Address,
             _request: &ComplainRequest,
-        ) -> ChannelResult<ComplaintResponses> {
+        ) -> ChannelResult<ComplaintResponse> {
             unimplemented!()
         }
         async fn get_public_mpc_output(

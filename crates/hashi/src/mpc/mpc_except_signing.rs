@@ -13,7 +13,7 @@ use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::metrics::Metrics;
 use crate::mpc::types::CertificateV1;
 pub use crate::mpc::types::ComplainRequest;
-pub use crate::mpc::types::ComplaintResponses;
+pub use crate::mpc::types::ComplaintResponse;
 pub use crate::mpc::types::ComplaintResponsesKey;
 pub use crate::mpc::types::ComplaintsToProcessKey;
 use crate::mpc::types::DealerCertificate;
@@ -119,7 +119,7 @@ pub struct MpcManager {
     pub nonce_messages: HashMap<(u32, Address), NonceMessage>,
     pub message_responses: HashMap<MessageResponsesKey, MpcResult<SendMessagesResponse>>,
     pub complaints_to_process: HashMap<ComplaintsToProcessKey, complaint::Complaint>,
-    pub complaint_responses: HashMap<ComplaintResponsesKey, ComplaintResponses>,
+    pub complaint_responses: HashMap<ComplaintResponsesKey, ComplaintResponse>,
     pub public_messages_store: Box<dyn PublicMessagesStore>,
     /// Must be `BTreeMap` so that all nodes iterate outputs in
     /// the same deterministic order when constructing `Presignatures`.
@@ -373,7 +373,7 @@ impl MpcManager {
     pub fn handle_complain_request(
         &mut self,
         request: &ComplainRequest,
-    ) -> MpcResult<ComplaintResponses> {
+    ) -> MpcResult<ComplaintResponse> {
         let cache_key = match request.protocol_type {
             ProtocolTypeIndicator::Dkg => ComplaintResponsesKey::Dkg {
                 dealer: request.dealer,
@@ -469,7 +469,7 @@ impl MpcManager {
                 );
                 let complaint_response =
                     receiver.handle_complaint(&message, &request.complaint, &partial_output)?;
-                ComplaintResponses::Dkg(complaint_response)
+                ComplaintResponse::Dkg(complaint_response)
             }
             Messages::Rotation(rotation_messages) => {
                 let complained_share_index =
@@ -487,13 +487,13 @@ impl MpcManager {
                             complained_share_index
                         ))
                     })?;
+                let (nodes, party_id, threshold) = self.config_for_epoch(request.epoch)?;
                 let complained_output = self.get_or_derive_rotation_output(
                     &request.dealer,
                     complained_share_index,
                     complained_message,
                     request.epoch,
                 )?;
-                let (nodes, party_id, threshold) = self.config_for_epoch(request.epoch)?;
                 let session_id = self
                     .base_session_id_for_epoch(request.epoch, &ProtocolType::KeyRotation)
                     .rotation_session_id(&request.dealer, complained_share_index);
@@ -510,7 +510,7 @@ impl MpcManager {
                     &request.complaint,
                     &complained_output,
                 )?;
-                ComplaintResponses::Rotation(response)
+                ComplaintResponse::Rotation(response)
             }
             Messages::NonceGeneration(NonceMessage {
                 batch_index,
@@ -535,7 +535,7 @@ impl MpcManager {
                 let receiver = self.create_nonce_receiver(request.dealer, batch_index)?;
                 let complaint_response =
                     receiver.handle_complaint(&message, &request.complaint, &nonce_output)?;
-                ComplaintResponses::NonceGeneration(complaint_response)
+                ComplaintResponse::NonceGeneration(complaint_response)
             }
         };
         if cache_is_current {
@@ -2423,8 +2423,8 @@ impl MpcManager {
                 }
             };
             let complaint_response = match response {
-                ComplaintResponses::Dkg(resp) => resp,
-                ComplaintResponses::Rotation(_) | ComplaintResponses::NonceGeneration(_) => {
+                ComplaintResponse::Dkg(resp) => resp,
+                ComplaintResponse::Rotation(_) | ComplaintResponse::NonceGeneration(_) => {
                     tracing::info!("Unexpected non-DKG response in DKG complaint recovery");
                     continue;
                 }
@@ -2520,8 +2520,8 @@ impl MpcManager {
                 }
             };
             let complaint_response = match response {
-                ComplaintResponses::NonceGeneration(resp) => resp,
-                ComplaintResponses::Dkg(_) | ComplaintResponses::Rotation(_) => {
+                ComplaintResponse::NonceGeneration(resp) => resp,
+                ComplaintResponse::Dkg(_) | ComplaintResponse::Rotation(_) => {
                     tracing::info!("Unexpected non-nonce response in nonce complaint recovery");
                     continue;
                 }
@@ -2585,6 +2585,7 @@ impl MpcManager {
         let per_share = recovery_contexts.into_iter().map(|ctx| {
             let signers = signers.clone();
             async move {
+                let share_index = ctx.share_index();
                 let receiver = Arc::new(ctx.receiver);
                 let message = ctx.message;
                 let mut responses: Vec<complaint::ComplaintResponse<avss::SharesForNode>> =
@@ -2592,7 +2593,7 @@ impl MpcManager {
                 let mut futures = fan_out_complaints(signers, p2p_channel, &ctx.request);
                 while let Some((signer, result)) = futures.next().await {
                     match result {
-                        Ok(ComplaintResponses::Rotation(resp)) => responses.push(resp),
+                        Ok(ComplaintResponse::Rotation(resp)) => responses.push(resp),
                         Ok(_) => {
                             tracing::info!(
                                 "Unexpected non-rotation response from {} in rotation complaint recovery",
@@ -2616,12 +2617,12 @@ impl MpcManager {
                         spawn_blocking(move || receiver.recover(&message, responses)).await
                     };
                     match try_recover {
-                        Ok(output) => return Ok((ctx.share_index, output)),
+                        Ok(output) => return Ok((share_index, output)),
                         Err(FastCryptoError::InputTooShort(_)) => continue,
                         Err(e) => {
                             let error_msg = format!(
                                 "Share recovery failed for dealer {:?} with share {}: {}",
-                                dealer, ctx.share_index, e
+                                dealer, share_index, e
                             );
                             tracing::error!("{}", error_msg);
                             return Err(MpcError::CryptoError(error_msg));
@@ -2630,7 +2631,7 @@ impl MpcManager {
                 }
                 Err(MpcError::ProtocolFailed(format!(
                     "Not enough valid complaint responses for dealer {:?} share {}",
-                    dealer, ctx.share_index
+                    dealer, share_index
                 )))
             }
         });
@@ -2714,7 +2715,6 @@ impl MpcManager {
                     },
                     receiver,
                     message,
-                    share_index,
                 })
             })
             .collect()
@@ -3873,7 +3873,7 @@ fn fan_out_complaints<'a, P: P2PChannel + 'a>(
     signers: Vec<Address>,
     p2p_channel: &'a P,
     request: &'a ComplainRequest,
-) -> FuturesUnordered<impl Future<Output = (Address, ChannelResult<ComplaintResponses>)> + 'a> {
+) -> FuturesUnordered<impl Future<Output = (Address, ChannelResult<ComplaintResponse>)> + 'a> {
     signers
         .into_iter()
         .map(move |signer| async move {

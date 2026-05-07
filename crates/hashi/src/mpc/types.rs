@@ -230,7 +230,7 @@ pub struct ComplainRequest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum ComplaintResponses {
+pub enum ComplaintResponse {
     Dkg(complaint::ComplaintResponse<avss::SharesForNode>),
     Rotation(complaint::ComplaintResponse<avss::SharesForNode>),
     NonceGeneration(complaint::ComplaintResponse<batch_avss::SharesForNode>),
@@ -454,7 +454,14 @@ pub(crate) struct RotationComplainContext {
     pub(crate) request: ComplainRequest,
     pub(crate) receiver: avss::Receiver,
     pub(crate) message: avss::Message,
-    pub(crate) share_index: ShareIndex,
+}
+
+impl RotationComplainContext {
+    pub(crate) fn share_index(&self) -> ShareIndex {
+        self.request
+            .share_index
+            .expect("rotation complaint context always carries share_index")
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

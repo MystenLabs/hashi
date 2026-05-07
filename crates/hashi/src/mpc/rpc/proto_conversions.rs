@@ -322,17 +322,17 @@ impl TryFrom<&proto::ComplainRequest> for types::ComplainRequest {
 // ComplainResponse
 //
 
-impl From<&types::ComplaintResponses> for proto::ComplainResponse {
-    fn from(value: &types::ComplaintResponses) -> Self {
+impl From<&types::ComplaintResponse> for proto::ComplainResponse {
+    fn from(value: &types::ComplaintResponse) -> Self {
         use proto::complain_response::Responses;
         let responses = match value {
-            types::ComplaintResponses::Dkg(response) => {
+            types::ComplaintResponse::Dkg(response) => {
                 Responses::DkgResponse(serialize_bcs(response))
             }
-            types::ComplaintResponses::Rotation(response) => {
+            types::ComplaintResponse::Rotation(response) => {
                 Responses::RotationResponse(serialize_bcs(response))
             }
-            types::ComplaintResponses::NonceGeneration(response) => {
+            types::ComplaintResponse::NonceGeneration(response) => {
                 Responses::NonceResponse(serialize_bcs(response))
             }
         };
@@ -342,7 +342,7 @@ impl From<&types::ComplaintResponses> for proto::ComplainResponse {
     }
 }
 
-impl TryFrom<&proto::ComplainResponse> for types::ComplaintResponses {
+impl TryFrom<&proto::ComplainResponse> for types::ComplaintResponse {
     type Error = TryFromProtoError;
 
     fn try_from(value: &proto::ComplainResponse) -> Result<Self, Self::Error> {
@@ -351,17 +351,17 @@ impl TryFrom<&proto::ComplainResponse> for types::ComplaintResponses {
             Some(Responses::DkgResponse(dkg_response)) => {
                 let response: complaint::ComplaintResponse<avss::SharesForNode> =
                     deserialize_bcs(dkg_response, "dkg_response")?;
-                Ok(types::ComplaintResponses::Dkg(response))
+                Ok(types::ComplaintResponse::Dkg(response))
             }
             Some(Responses::RotationResponse(rotation_response)) => {
                 let response: complaint::ComplaintResponse<avss::SharesForNode> =
                     deserialize_bcs(rotation_response, "rotation_response")?;
-                Ok(types::ComplaintResponses::Rotation(response))
+                Ok(types::ComplaintResponse::Rotation(response))
             }
             Some(Responses::NonceResponse(nonce_response)) => {
                 let response: complaint::ComplaintResponse<batch_avss::SharesForNode> =
                     deserialize_bcs(nonce_response, "nonce_response")?;
-                Ok(types::ComplaintResponses::NonceGeneration(response))
+                Ok(types::ComplaintResponse::NonceGeneration(response))
             }
             None => Err(TryFromProtoError::missing("responses")),
         }
