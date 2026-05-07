@@ -9,6 +9,7 @@ use futures::TryStreamExt;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
 use std::sync::RwLockWriteGuard;
@@ -88,7 +89,9 @@ struct Inner {
     grpc_max_decoding_message_size: Option<usize>,
     metrics: Option<Arc<crate::metrics::Metrics>>,
     /// Set once after guardian bootstrap; advanced by the watcher.
-    local_limiter: RwLock<Option<Arc<crate::guardian_limiter::LocalLimiter>>>,
+    /// `LocalLimiter` carries its own `RwLock<LimiterState>`, so we just
+    /// need set-once semantics for the slot itself.
+    local_limiter: OnceLock<Arc<crate::guardian_limiter::LocalLimiter>>,
 }
 
 #[derive(Debug)]
@@ -142,7 +145,7 @@ impl OnchainState {
             tls_private_key,
             grpc_max_decoding_message_size,
             metrics: metrics.clone(),
-            local_limiter: RwLock::new(None),
+            local_limiter: OnceLock::new(),
         }
         .pipe(Arc::new)
         .pipe(Self);
@@ -194,17 +197,14 @@ impl OnchainState {
     }
 
     pub fn local_limiter(&self) -> Option<Arc<crate::guardian_limiter::LocalLimiter>> {
-        self.0.local_limiter.read().unwrap().clone()
+        self.0.local_limiter.get().cloned()
     }
 
     /// Called once after guardian bootstrap.
     pub fn set_local_limiter(&self, limiter: Arc<crate::guardian_limiter::LocalLimiter>) {
-        let mut slot = self.0.local_limiter.write().unwrap();
-        if slot.is_some() {
+        if self.0.local_limiter.set(limiter).is_err() {
             tracing::warn!("OnchainState::set_local_limiter called twice; ignoring");
-            return;
         }
-        *slot = Some(limiter);
     }
 
     pub fn latest_checkpoint_timestamp_ms(&self) -> u64 {

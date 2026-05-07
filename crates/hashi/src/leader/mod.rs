@@ -1401,7 +1401,7 @@ impl LeaderService {
 
         // 4. Submit sign_withdrawal to Sui (writes signatures on-chain).
         // Broadcast + confirm happens via process_signed_withdrawal_txns on the next tick.
-        let signed_checkpoint = Self::submit_sign_withdrawal(
+        let included_checkpoint_seq = Self::submit_sign_withdrawal(
             &inner,
             &txn.id,
             &txn.request_ids.clone(),
@@ -1424,22 +1424,23 @@ impl LeaderService {
                 .inc();
         })?;
 
-        // Wait for our watcher to catch up to `signed_checkpoint` before
-        // returning, so the next tick doesn't respawn with stale state.
+        // Wait for our watcher to catch up to the checkpoint that included
+        // the sign_withdrawal txn before returning, so the next tick
+        // doesn't respawn with stale state.
         const VISIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
         if tokio::time::timeout(
             VISIBILITY_TIMEOUT,
             inner
                 .onchain_state()
-                .wait_until_checkpoint(signed_checkpoint),
+                .wait_until_checkpoint(included_checkpoint_seq),
         )
         .await
         .is_err()
         {
             warn!(
                 withdrawal_txn_id = %txn.id,
-                signed_checkpoint,
-                "Timeout waiting for watcher to reach signed checkpoint; \
+                included_checkpoint_seq,
+                "Timeout waiting for watcher to reach the included checkpoint; \
                  a duplicate sign attempt may follow"
             );
         }
