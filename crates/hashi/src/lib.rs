@@ -670,7 +670,6 @@ impl Hashi {
         let leader_service = leader::LeaderService::new(self.clone()).start();
         let mpc_service = mpc_service.start();
         let guardian_bootstrap_service = self.clone().start_guardian_bootstrap();
-        let guardian_limiter_observer_service = self.clone().start_guardian_limiter_observer();
 
         let service = Service::new()
             .merge(onchain_service)
@@ -678,8 +677,7 @@ impl Hashi {
             .merge(http_service)
             .merge(leader_service)
             .merge(mpc_service)
-            .merge(guardian_bootstrap_service)
-            .merge(guardian_limiter_observer_service);
+            .merge(guardian_bootstrap_service);
 
         Ok(service)
     }
@@ -714,7 +712,11 @@ impl Hashi {
                 ?config,
                 "Local guardian limiter seeded from GetGuardianInfo",
             );
-            *slot = Some(Arc::new(guardian_limiter::LocalLimiter::new(config, state)));
+            let limiter = Arc::new(guardian_limiter::LocalLimiter::new(config, state));
+            // Hand the same Arc to OnchainState so the watcher can advance
+            // it inline when WithdrawalSignedEvent fires.
+            self.onchain_state().set_local_limiter(limiter.clone());
+            *slot = Some(limiter);
         }
         true
     }
@@ -740,64 +742,6 @@ impl Hashi {
             .await;
             tracing::info!("Guardian bootstrap complete");
             Ok(())
-        })
-    }
-
-    /// Sole mutator of `LocalLimiter` after bootstrap: advances on every
-    /// observed `WithdrawalSignedEvent`. Symmetric across leader and
-    /// follower since every node consumes the same Sui checkpoint stream.
-    fn start_guardian_limiter_observer(self: Arc<Self>) -> Service {
-        use tokio::sync::broadcast::error::RecvError;
-        Service::new().spawn_aborting(async move {
-            if self.guardian_client().is_none() {
-                return Ok(());
-            }
-            let mut rx = self.onchain_state().subscribe();
-            loop {
-                let notification = match rx.recv().await {
-                    Ok(n) => n,
-                    Err(RecvError::Closed) => return Ok(()),
-                    Err(RecvError::Lagged(n)) => {
-                        tracing::error!(
-                            skipped = n,
-                            "Limiter observer lagged on broadcast channel; \
-                             local limiter state is now drifted from guardian"
-                        );
-                        continue;
-                    }
-                };
-                let onchain::Notification::WithdrawalSigned {
-                    withdrawal_txn_id,
-                    amount_sats,
-                    timestamp_secs,
-                } = notification
-                else {
-                    continue;
-                };
-                let Some(limiter) = self.local_limiter() else {
-                    tracing::warn!(
-                        %withdrawal_txn_id,
-                        "Local limiter not yet bootstrapped; dropping observation"
-                    );
-                    continue;
-                };
-                let seq = limiter.next_seq();
-                match limiter.apply_consume(seq, timestamp_secs, amount_sats) {
-                    Ok(()) => tracing::info!(
-                        seq,
-                        amount_sats,
-                        timestamp_secs,
-                        %withdrawal_txn_id,
-                        "Local limiter advanced from on-chain WithdrawalSignedEvent",
-                    ),
-                    Err(e) => tracing::error!(
-                        ?e,
-                        seq,
-                        %withdrawal_txn_id,
-                        "Local limiter apply_consume failed; node is now drifted from guardian"
-                    ),
-                }
-            }
         })
     }
 

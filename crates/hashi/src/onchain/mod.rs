@@ -63,12 +63,6 @@ pub enum Notification {
     /// Reconfig started, transitioning to the given epoch.
     StartReconfig(u64),
     SuiEpochChanged(u64),
-    /// Witness signatures for a `WithdrawalTransaction` were stored on-chain.
-    WithdrawalSigned {
-        withdrawal_txn_id: Address,
-        amount_sats: u64,
-        timestamp_secs: u64,
-    },
 }
 
 /// Information about the latest processed checkpoint
@@ -93,6 +87,9 @@ struct Inner {
     tls_private_key: Option<ed25519_dalek::SigningKey>,
     grpc_max_decoding_message_size: Option<usize>,
     metrics: Option<Arc<crate::metrics::Metrics>>,
+    /// Set once after guardian bootstrap. Read by the watcher to advance
+    /// the limiter inline on each `WithdrawalSignedEvent`.
+    local_limiter: RwLock<Option<Arc<crate::guardian_limiter::LocalLimiter>>>,
 }
 
 #[derive(Debug)]
@@ -146,6 +143,7 @@ impl OnchainState {
             tls_private_key,
             grpc_max_decoding_message_size,
             metrics: metrics.clone(),
+            local_limiter: RwLock::new(None),
         }
         .pipe(Arc::new)
         .pipe(Self);
@@ -183,6 +181,33 @@ impl OnchainState {
 
     pub fn latest_checkpoint_height(&self) -> u64 {
         self.0.checkpoint.borrow().height
+    }
+
+    /// Block until the local watcher's view advances to `target_seq` or
+    /// later. Returns immediately if already past. The caller is
+    /// expected to wrap with `tokio::time::timeout` if a bound is
+    /// desired.
+    pub async fn wait_until_checkpoint(&self, target_seq: u64) {
+        let mut rx = self.subscribe_checkpoint();
+        while rx.borrow().height < target_seq {
+            if rx.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    pub fn local_limiter(&self) -> Option<Arc<crate::guardian_limiter::LocalLimiter>> {
+        self.0.local_limiter.read().unwrap().clone()
+    }
+
+    /// Called once after guardian bootstrap.
+    pub fn set_local_limiter(&self, limiter: Arc<crate::guardian_limiter::LocalLimiter>) {
+        let mut slot = self.0.local_limiter.write().unwrap();
+        if slot.is_some() {
+            tracing::warn!("OnchainState::set_local_limiter called twice; ignoring");
+            return;
+        }
+        *slot = Some(limiter);
     }
 
     pub fn latest_checkpoint_timestamp_ms(&self) -> u64 {
