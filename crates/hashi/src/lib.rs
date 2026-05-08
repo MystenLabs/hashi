@@ -601,6 +601,9 @@ impl Hashi {
             None
         };
 
+        self.metrics
+            .guardian_enabled
+            .set(if guardian.is_some() { 1 } else { 0 });
         self.guardian_client
             .set(guardian)
             .map_err(|_| anyhow!("Guardian client already initialized"))?;
@@ -686,9 +689,28 @@ impl Hashi {
         let Some(client) = self.guardian_client() else {
             return false;
         };
-        let info_pb = match client.get_guardian_info().await {
-            Ok(info) => info,
+        self.metrics.guardian_bootstrap_attempts_total.inc();
+        let rpc_start = std::time::Instant::now();
+        let rpc_result = client.get_guardian_info().await;
+        let rpc_elapsed = rpc_start.elapsed().as_secs_f64();
+        let info_pb = match rpc_result {
+            Ok(info) => {
+                self.metrics.record_guardian_rpc(
+                    metrics::GUARDIAN_RPC_METHOD_GET_GUARDIAN_INFO,
+                    metrics::GUARDIAN_RPC_OUTCOME_OK,
+                    rpc_elapsed,
+                );
+                info
+            }
             Err(e) => {
+                self.metrics.record_guardian_rpc(
+                    metrics::GUARDIAN_RPC_METHOD_GET_GUARDIAN_INFO,
+                    metrics::GUARDIAN_RPC_OUTCOME_UNAVAILABLE,
+                    rpc_elapsed,
+                );
+                self.metrics.record_guardian_bootstrap_outcome(
+                    metrics::GUARDIAN_BOOTSTRAP_OUTCOME_RPC_FAILURE,
+                );
                 tracing::warn!("guardian bootstrap: GetGuardianInfo failed: {e}");
                 return false;
             }
@@ -696,12 +718,18 @@ impl Hashi {
         let info = match hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb) {
             Ok(info) => info,
             Err(e) => {
+                self.metrics.record_guardian_bootstrap_outcome(
+                    metrics::GUARDIAN_BOOTSTRAP_OUTCOME_PARSE_FAILURE,
+                );
                 tracing::warn!("guardian bootstrap: parse failed: {e:?}");
                 return false;
             }
         };
         let _ = self.guardian_signing_pubkey.set(Some(info.signing_pub_key));
         let (Some(state), Some(config)) = (info.limiter_state, info.limiter_config) else {
+            self.metrics.record_guardian_bootstrap_outcome(
+                metrics::GUARDIAN_BOOTSTRAP_OUTCOME_NO_LIMITER_YET,
+            );
             tracing::debug!("guardian bootstrap: guardian has no limiter yet");
             return false;
         };
@@ -712,10 +740,14 @@ impl Hashi {
                 ?config,
                 "Local guardian limiter seeded from GetGuardianInfo",
             );
+            self.metrics.record_limiter_state(&state, &config);
+            self.metrics.guardian_limiter_initialized.set(1);
             // Hand the same Arc to OnchainState so the watcher can advance
             // it inline when WithdrawalSignedEvent fires.
             self.onchain_state().set_local_limiter(limiter);
         }
+        self.metrics
+            .record_guardian_bootstrap_outcome(metrics::GUARDIAN_BOOTSTRAP_OUTCOME_SUCCESS);
         true
     }
 

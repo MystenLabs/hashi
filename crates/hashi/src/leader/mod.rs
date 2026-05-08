@@ -1047,7 +1047,17 @@ impl LeaderService {
 
             if batch.is_empty() {
                 // All-oversize (already warned) or refill-bound head.
+                self.inner
+                    .metrics
+                    .guardian_limiter_batch_stuck_head_total
+                    .inc();
                 return;
+            }
+            if at_capacity {
+                self.inner
+                    .metrics
+                    .guardian_limiter_batch_truncated_total
+                    .inc();
             }
             (batch, at_capacity)
         } else {
@@ -1328,7 +1338,12 @@ impl LeaderService {
             let amount_sats = crate::withdrawals::withdrawal_limiter_consumption_amount(&txn);
             let timestamp_secs = txn.timestamp_ms / 1000;
             let next_seq = limiter.next_seq();
-            if let Err(e) = limiter.validate_consume(next_seq, timestamp_secs, amount_sats) {
+            let result = limiter.validate_consume(next_seq, timestamp_secs, amount_sats);
+            inner.metrics.record_limiter_validate(
+                &result,
+                crate::metrics::GUARDIAN_LIMITER_CALLSITE_LEADER_PRE_MPC,
+            );
+            if let Err(e) = result {
                 warn!(
                     withdrawal_txn_id = %txn.id,
                     "Leader local limiter rejected withdrawal; will retry on next checkpoint: {e}"
@@ -2080,39 +2095,79 @@ impl LeaderService {
                 .await?;
         let proto_request = signed_standard_withdrawal_request_to_pb(&signed_request);
 
-        let response_pb = guardian
-            .standard_withdrawal(proto_request)
-            .await
-            .map_err(|status| {
-                let label = if status.message().contains("seq mismatch") {
-                    "GuardianSeqMismatch"
-                } else if status.message().contains("Rate limit exceeded") {
-                    warn!("Guardian rate-limited withdrawal, will retry later");
-                    "GuardianRateLimited"
-                } else {
-                    error!("Guardian call failed: {}", status.message());
-                    "GuardianUnavailable"
-                };
-                inner
-                    .metrics
-                    .leader_retries_total
-                    .with_label_values(&["withdrawal_signing", label])
-                    .inc();
-                anyhow::anyhow!("Guardian rejected withdrawal: {}", status.message())
-            })?;
+        let rpc_start = std::time::Instant::now();
+        let rpc_result = guardian.standard_withdrawal(proto_request).await;
+        let rpc_elapsed = rpc_start.elapsed().as_secs_f64();
+
+        let response_pb = rpc_result.map_err(|status| {
+            let (rpc_outcome, retry_label) = if status.message().contains("seq mismatch") {
+                (
+                    crate::metrics::GUARDIAN_RPC_OUTCOME_SEQ_MISMATCH,
+                    "GuardianSeqMismatch",
+                )
+            } else if status.message().contains("Rate limit exceeded") {
+                warn!("Guardian rate-limited withdrawal, will retry later");
+                (
+                    crate::metrics::GUARDIAN_RPC_OUTCOME_RATE_LIMITED,
+                    "GuardianRateLimited",
+                )
+            } else {
+                error!("Guardian call failed: {}", status.message());
+                (
+                    crate::metrics::GUARDIAN_RPC_OUTCOME_UNAVAILABLE,
+                    "GuardianUnavailable",
+                )
+            };
+            Self::record_guardian_rpc_outcome(inner, rpc_outcome, rpc_elapsed);
+            inner
+                .metrics
+                .leader_retries_total
+                .with_label_values(&["withdrawal_signing", retry_label])
+                .inc();
+            anyhow::anyhow!("Guardian rejected withdrawal: {}", status.message())
+        })?;
 
         let pubkey = inner
             .guardian_signing_pubkey()
             .expect("guardian signing pubkey set during bootstrap");
         let signed_response: GuardianSigned<StandardWithdrawalResponse> = response_pb
             .try_into()
+            .inspect_err(|_| {
+                Self::record_guardian_rpc_outcome(
+                    inner,
+                    crate::metrics::GUARDIAN_RPC_OUTCOME_PARSE_ERROR,
+                    rpc_elapsed,
+                );
+            })
             .map_err(|e| anyhow::anyhow!("Failed to parse guardian withdrawal response: {e}"))?;
-        signed_response.verify(pubkey).map_err(|e| {
-            anyhow::anyhow!("Guardian response signature verification failed: {e:?}")
-        })?;
+        signed_response
+            .verify(pubkey)
+            .inspect_err(|_| {
+                Self::record_guardian_rpc_outcome(
+                    inner,
+                    crate::metrics::GUARDIAN_RPC_OUTCOME_SIGNATURE_ERROR,
+                    rpc_elapsed,
+                );
+            })
+            .map_err(|e| {
+                anyhow::anyhow!("Guardian response signature verification failed: {e:?}")
+            })?;
 
+        Self::record_guardian_rpc_outcome(
+            inner,
+            crate::metrics::GUARDIAN_RPC_OUTCOME_OK,
+            rpc_elapsed,
+        );
         info!(seq, "Guardian approved withdrawal");
         Ok(())
+    }
+
+    fn record_guardian_rpc_outcome(inner: &Arc<Hashi>, outcome: &str, elapsed_secs: f64) {
+        inner.metrics.record_guardian_rpc(
+            crate::metrics::GUARDIAN_RPC_METHOD_STANDARD_WITHDRAWAL,
+            outcome,
+            elapsed_secs,
+        );
     }
 
     async fn collect_guardian_withdrawal_signatures(

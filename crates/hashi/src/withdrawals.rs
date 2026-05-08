@@ -616,9 +616,12 @@ impl Hashi {
             (Some(limiter), Some(expected_seq)) => {
                 let amount_sats = withdrawal_limiter_consumption_amount(txn);
                 let timestamp_secs = txn.timestamp_ms / 1000;
-                limiter
-                    .validate_consume(expected_seq, timestamp_secs, amount_sats)
-                    .map_err(|e| anyhow!("Limiter rejected withdrawal {}: {e}", txn.id))?;
+                let result = limiter.validate_consume(expected_seq, timestamp_secs, amount_sats);
+                self.metrics.record_limiter_validate(
+                    &result,
+                    crate::metrics::GUARDIAN_LIMITER_CALLSITE_MPC_SIGNING,
+                );
+                result.map_err(|e| anyhow!("Limiter rejected withdrawal {}: {e}", txn.id))?;
             }
             (None, None) => {}
             (Some(_), None) => anyhow::bail!(
