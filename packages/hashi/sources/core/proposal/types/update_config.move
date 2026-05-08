@@ -3,7 +3,7 @@
 
 module hashi::update_config;
 
-use hashi::{config, config_value::Value, hashi::Hashi, proposal};
+use hashi::{config_value::Value, hashi::Hashi, proposal};
 use std::string::String;
 use sui::{clock::Clock, vec_map::VecMap};
 
@@ -31,12 +31,7 @@ public fun propose(
 
 public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
     let UpdateConfig { key, value } = proposal::execute(hashi, proposal_id, clock);
-    assert!(
-        config::is_valid_core_config_entry(&key, &value)
-            || hashi::btc_config::is_valid_config_entry(&key, &value)
-            || hashi::mpc_config::is_valid_config_entry(&key, &value),
-        EInvalidConfigEntry,
-    );
+    assert!(hashi.config().is_valid_config_update(&key, &value), EInvalidConfigEntry);
     let bytes = *key.as_bytes();
     hashi.config_mut().upsert(bytes, value);
 }

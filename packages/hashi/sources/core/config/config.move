@@ -24,6 +24,9 @@ const EDisableCurrentVersion: vector<u8> = b"Cannot disable current version";
 const PAUSED_KEY: vector<u8> = b"paused";
 const GUARDIAN_URL_KEY: vector<u8> = b"guardian_url";
 const GUARDIAN_PUBLIC_KEY_KEY: vector<u8> = b"guardian_public_key";
+const EMERGENCY_PAUSE_THRESHOLD_BPS_KEY: vector<u8> = b"governance_emergency_pause_threshold_bps";
+const EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY: vector<u8> =
+    b"governance_emergency_unpause_threshold_bps";
 
 public struct Config has store {
     config: VecMap<String, Value>,
@@ -58,16 +61,11 @@ public(package) fun upsert(self: &mut Config, key: vector<u8>, value: Value) {
     self.config.insert(key, value);
 }
 
-/// Returns true when `key` is a recognised core config key and `value`
-/// carries the type that key expects.
-#[allow(implicit_const_copy)]
-public(package) fun is_valid_core_config_entry(key: &String, value: &Value): bool {
-    let k = key.as_bytes();
-    if (k == &PAUSED_KEY) {
-        value.is_bool()
-    } else {
-        false
-    }
+/// Returns true when `key` exists in the config and `value` has the
+/// same type as the existing entry.
+public(package) fun is_valid_config_update(self: &Config, key: &String, value: &Value): bool {
+    if (!self.config.contains(key)) return false;
+    self.config.get(key).same_variant(value)
 }
 
 // ======== Core Accessors ========
@@ -97,6 +95,14 @@ public(package) fun guardian_public_key(self: &Config): Option<vector<u8>> {
 public(package) fun set_guardian(self: &mut Config, url: String, public_key: vector<u8>) {
     self.upsert(GUARDIAN_URL_KEY, config_value::new_string(url));
     self.upsert(GUARDIAN_PUBLIC_KEY_KEY, config_value::new_bytes(public_key));
+}
+
+public(package) fun emergency_pause_threshold_bps(self: &Config): u64 {
+    self.try_get(EMERGENCY_PAUSE_THRESHOLD_BPS_KEY).map!(|v| v.as_u64()).destroy_or!(5100)
+}
+
+public(package) fun emergency_unpause_threshold_bps(self: &Config): u64 {
+    self.try_get(EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY).map!(|v| v.as_u64()).destroy_or!(6667)
 }
 
 // ======== Version Management ========
@@ -148,6 +154,8 @@ public(package) fun create(): Config {
 
     // Core defaults
     config.upsert(PAUSED_KEY, config_value::new_bool(false));
+    config.upsert(EMERGENCY_PAUSE_THRESHOLD_BPS_KEY, config_value::new_u64(5100));
+    config.upsert(EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY, config_value::new_u64(6667));
 
     config
 }

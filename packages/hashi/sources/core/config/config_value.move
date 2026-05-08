@@ -35,6 +35,16 @@ public fun new_bytes(value: vector<u8>): Value {
     Value::Bytes(value)
 }
 
+public(package) fun same_variant(self: &Value, other: &Value): bool {
+    match (self) {
+        Value::U64(_) => other.is_u64(),
+        Value::Address(_) => other.is_address(),
+        Value::String(_) => other.is_string(),
+        Value::Bool(_) => other.is_bool(),
+        Value::Bytes(_) => other.is_bytes(),
+    }
+}
+
 public(package) fun is_u64(value: &Value): bool {
     match (value) {
         Value::U64(_) => true,
@@ -42,9 +52,30 @@ public(package) fun is_u64(value: &Value): bool {
     }
 }
 
+public(package) fun is_address(value: &Value): bool {
+    match (value) {
+        Value::Address(_) => true,
+        _ => false,
+    }
+}
+
+public(package) fun is_string(value: &Value): bool {
+    match (value) {
+        Value::String(_) => true,
+        _ => false,
+    }
+}
+
 public(package) fun is_bool(value: &Value): bool {
     match (value) {
         Value::Bool(_) => true,
+        _ => false,
+    }
+}
+
+public(package) fun is_bytes(value: &Value): bool {
+    match (value) {
+        Value::Bytes(_) => true,
         _ => false,
     }
 }
