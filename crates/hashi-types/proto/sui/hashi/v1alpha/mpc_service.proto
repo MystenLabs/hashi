@@ -113,19 +113,15 @@ message ComplainRequest {
   optional uint32 batch_index = 6;
 }
 
-message RotationResponses {
-  map<uint32, sui.rpc.v2.Bcs> responses = 1;
-}
-
 message ComplainResponse {
   oneof responses {
-    // For DKG: single response.
+    // For DKG
     sui.rpc.v2.Bcs dkg_response = 1;
 
-    // For key rotation: responses keyed by share index.
-    RotationResponses rotation_responses = 2;
+    // For key rotation
+    sui.rpc.v2.Bcs rotation_response = 2;
 
-    // For nonce generation: single response.
+    // For nonce generation
     sui.rpc.v2.Bcs nonce_response = 3;
   }
 }

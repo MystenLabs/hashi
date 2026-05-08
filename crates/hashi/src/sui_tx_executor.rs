@@ -34,7 +34,9 @@ use std::time::Duration;
 
 use fastcrypto::serde_helpers::ToFromByteArray;
 use futures::TryStreamExt;
+use hashi_types::committee::Bls12381PrivateKey;
 use hashi_types::committee::CommitteeSignature;
+use hashi_types::committee::EncryptionPublicKey;
 use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::DepositRequestedEvent;
 use hashi_types::move_types::WithdrawalRequestedEvent;
@@ -918,6 +920,8 @@ impl SuiTxExecutor {
         &mut self,
         config: &Config,
         operator_address: Option<Address>,
+        next_epoch_encryption_public_key: Option<&EncryptionPublicKey>,
+        next_epoch_signing_key: Option<&Bls12381PrivateKey>,
     ) -> anyhow::Result<bool> {
         let sender = self.signer.public_key().derive_address();
         let transaction = build_register_or_update_validator_tx(
@@ -926,6 +930,8 @@ impl SuiTxExecutor {
             config,
             operator_address,
             Some(sender),
+            next_epoch_encryption_public_key,
+            next_epoch_signing_key,
         )
         .await?;
 
@@ -1197,7 +1203,7 @@ impl SuiTxExecutor {
         request_ids: &[Address],
         signatures: &[Vec<u8>],
         cert: &CommitteeSignature,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
 
         let hashi_arg = builder.object(
@@ -1233,7 +1239,12 @@ impl SuiTxExecutor {
                 response.transaction().effects().status()
             );
         }
-        Ok(())
+        // `execute_transaction_and_wait_for_checkpoint` guarantees this is set.
+        let checkpoint = response
+            .transaction()
+            .checkpoint_opt()
+            .ok_or_else(|| anyhow::anyhow!("sign_withdrawal response missing checkpoint"))?;
+        Ok(checkpoint)
     }
 
     /// Execute `withdraw::cancel_withdrawal` to cancel a pending withdrawal request.
@@ -1361,6 +1372,8 @@ pub async fn build_register_or_update_validator_tx(
     config: &Config,
     operator_address: Option<Address>,
     sender: Option<Address>,
+    next_epoch_encryption_public_key: Option<&EncryptionPublicKey>,
+    next_epoch_signing_key: Option<&Bls12381PrivateKey>,
 ) -> anyhow::Result<Option<Transaction>> {
     let validator_address = config.validator_address()?;
 
@@ -1427,8 +1440,8 @@ pub async fn build_register_or_update_validator_tx(
         has_calls = true;
     }
 
-    // 2. Update BLS public key if available and changed.
-    if let Some(protocol_key) = config.protocol_private_key()
+    // 2. Update BLS public key if provided and changed.
+    if let Some(protocol_key) = next_epoch_signing_key
         && onchain_member
             .as_ref()
             .map(|m| m.next_epoch_public_key().as_ref() != protocol_key.public_key().as_ref())
@@ -1461,32 +1474,26 @@ pub async fn build_register_or_update_validator_tx(
         has_calls = true;
     }
 
-    // 3. Update encryption key if available and changed.
-    if let Ok(encryption_public_key) = config.encryption_public_key()
-        && onchain_member
+    // 3. Update next-epoch encryption public key if provided and changed.
+    if let Some(encryption_public_key) = next_epoch_encryption_public_key {
+        let new_bytes = encryption_public_key.as_element().to_byte_array();
+        let changed = onchain_member
             .as_ref()
             .and_then(|m| m.next_epoch_encryption_public_key())
-            .map(|k| {
-                k.as_element().to_byte_array() != encryption_public_key.as_element().to_byte_array()
-            })
-            .unwrap_or(true)
-    {
-        let encryption_key_arg = builder.pure(
-            &encryption_public_key
-                .as_element()
-                .to_byte_array()
-                .as_slice()
-                .to_vec(),
-        );
-        builder.move_call(
-            Function::new(
-                hashi_ids.package_id,
-                Identifier::from_static("validator"),
-                Identifier::from_static("update_next_epoch_encryption_public_key"),
-            ),
-            vec![hashi_arg, validator_address_arg, encryption_key_arg],
-        );
-        has_calls = true;
+            .map(|k| k.as_element().to_byte_array() != new_bytes)
+            .unwrap_or(true);
+        if changed {
+            let encryption_key_arg = builder.pure(&new_bytes.as_slice().to_vec());
+            builder.move_call(
+                Function::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("validator"),
+                    Identifier::from_static("update_next_epoch_encryption_public_key"),
+                ),
+                vec![hashi_arg, validator_address_arg, encryption_key_arg],
+            );
+            has_calls = true;
+        }
     }
 
     // 4. Update endpoint URL if available and changed.

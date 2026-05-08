@@ -113,6 +113,11 @@ pub struct SignWithdrawalTransactionRequest {
     /// The id of the WithdrawalTransaction on Sui (32 bytes).
     #[prost(bytes = "bytes", tag = "1")]
     pub withdrawal_txn_id: ::prost::bytes::Bytes,
+    /// Set when the leader's local guardian limiter is initialized. Each
+    /// committee member validates this against its own limiter's `next_seq`
+    /// before participating in MPC signing.
+    #[prost(uint64, optional, tag = "2")]
+    pub expected_limiter_seq: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignWithdrawalTransactionResponse {
@@ -146,6 +151,27 @@ pub struct SignWithdrawalConfirmationRequest {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignWithdrawalConfirmationResponse {
+    #[prost(message, optional, tag = "1")]
+    pub member_signature: ::core::option::Option<MemberSignature>,
+}
+/// Each field is leader-supplied; followers reconstruct the same
+/// `StandardWithdrawalRequest` from on-chain state and BLS-sign it.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignGuardianWithdrawalRequestRequest {
+    /// The id of the WithdrawalTransaction on Sui (32 bytes). Doubles as the
+    /// guardian-side `wid`.
+    #[prost(bytes = "bytes", tag = "1")]
+    pub withdrawal_txn_id: ::prost::bytes::Bytes,
+    /// Sui checkpoint timestamp in unix seconds, bounded by followers against
+    /// their own latest checkpoint.
+    #[prost(uint64, tag = "2")]
+    pub timestamp_secs: u64,
+    /// Monotonic sequence number for guardian replay prevention.
+    #[prost(uint64, tag = "3")]
+    pub seq: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignGuardianWithdrawalRequestResponse {
     #[prost(message, optional, tag = "1")]
     pub member_signature: ::core::option::Option<MemberSignature>,
 }
@@ -388,6 +414,37 @@ pub mod bridge_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Sign a guardian rate-limiting request; the leader aggregates the
+        /// certificate and forwards it to the guardian after MPC quorum.
+        pub async fn sign_guardian_withdrawal_request(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SignGuardianWithdrawalRequestRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignGuardianWithdrawalRequestResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.BridgeService/SignGuardianWithdrawalRequest",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.BridgeService",
+                        "SignGuardianWithdrawalRequest",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         /// Step 3: Sign the BLS certificate over the witness signatures for on-chain storage.
         pub async fn sign_withdrawal_tx_signing(
             &mut self,
@@ -502,6 +559,15 @@ pub mod bridge_service_server {
             request: tonic::Request<super::SignWithdrawalTransactionRequest>,
         ) -> std::result::Result<
             tonic::Response<super::SignWithdrawalTransactionResponse>,
+            tonic::Status,
+        >;
+        /// Sign a guardian rate-limiting request; the leader aggregates the
+        /// certificate and forwards it to the guardian after MPC quorum.
+        async fn sign_guardian_withdrawal_request(
+            &self,
+            request: tonic::Request<super::SignGuardianWithdrawalRequestRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignGuardianWithdrawalRequestResponse>,
             tonic::Status,
         >;
         /// Step 3: Sign the BLS certificate over the witness signatures for on-chain storage.
@@ -837,6 +903,60 @@ pub mod bridge_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = SignWithdrawalTransactionSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.BridgeService/SignGuardianWithdrawalRequest" => {
+                    #[allow(non_camel_case_types)]
+                    struct SignGuardianWithdrawalRequestSvc<T: BridgeService>(
+                        pub Arc<T>,
+                    );
+                    impl<
+                        T: BridgeService,
+                    > tonic::server::UnaryService<
+                        super::SignGuardianWithdrawalRequestRequest,
+                    > for SignGuardianWithdrawalRequestSvc<T> {
+                        type Response = super::SignGuardianWithdrawalRequestResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::SignGuardianWithdrawalRequestRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BridgeService>::sign_guardian_withdrawal_request(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SignGuardianWithdrawalRequestSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -1210,9 +1330,9 @@ pub struct SignedStandardWithdrawalRequest {
 /// Withdrawal request payload.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StandardWithdrawalRequestData {
-    /// Unique withdrawal ID assigned by Hashi.
-    #[prost(uint64, optional, tag = "1")]
-    pub wid: ::core::option::Option<u64>,
+    /// 32-byte UID of the on-chain `WithdrawalTransaction` Sui object.
+    #[prost(bytes = "bytes", optional, tag = "1")]
+    pub wid: ::core::option::Option<::prost::bytes::Bytes>,
     /// Transaction UTXOs (inputs and outputs).
     #[prost(message, optional, tag = "2")]
     pub utxos: ::core::option::Option<TxUtxos>,
@@ -2011,27 +2131,22 @@ pub struct ComplainRequest {
     #[prost(uint32, optional, tag = "6")]
     pub batch_index: ::core::option::Option<u32>,
 }
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct RotationResponses {
-    #[prost(map = "uint32, message", tag = "1")]
-    pub responses: ::std::collections::HashMap<u32, ::sui_rpc::proto::sui::rpc::v2::Bcs>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ComplainResponse {
     #[prost(oneof = "complain_response::Responses", tags = "1, 2, 3")]
     pub responses: ::core::option::Option<complain_response::Responses>,
 }
 /// Nested message and enum types in `ComplainResponse`.
 pub mod complain_response {
-    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
     pub enum Responses {
-        /// For DKG: single response.
+        /// For DKG
         #[prost(message, tag = "1")]
         DkgResponse(::sui_rpc::proto::sui::rpc::v2::Bcs),
-        /// For key rotation: responses keyed by share index.
+        /// For key rotation
         #[prost(message, tag = "2")]
-        RotationResponses(super::RotationResponses),
-        /// For nonce generation: single response.
+        RotationResponse(::sui_rpc::proto::sui::rpc::v2::Bcs),
+        /// For nonce generation
         #[prost(message, tag = "3")]
         NonceResponse(::sui_rpc::proto::sui::rpc::v2::Bcs),
     }

@@ -109,7 +109,10 @@ pub fn build_upgrade_package(
         .arg("build")
         .arg("-e")
         .arg("testnet")
-        .arg("--dump-bytecode-as-base64");
+        // --no-tree-shaking: avoid the RPC call newer sui CLI makes during
+        // --dump-bytecode-as-base64; required for offline builds (CI, e2e).
+        .arg("--dump-bytecode-as-base64")
+        .arg("--no-tree-shaking");
 
     let output = cmd.output()?;
     anyhow::ensure!(
@@ -267,6 +270,28 @@ pub fn extract_proposal_id_from_response(response: &ExecuteTransactionResponse) 
     let (id, _ts): (Address, u64) = bcs::from_bytes(event.contents().value())
         .map_err(|e| anyhow!("failed to deserialize ProposalCreatedEvent payload: {e}"))?;
     Ok(id)
+}
+
+pub fn extract_proposal_ids_from_response(
+    response: &ExecuteTransactionResponse,
+) -> Result<Vec<Address>> {
+    let ids: Vec<Address> = response
+        .transaction()
+        .events()
+        .events()
+        .iter()
+        .filter(|e| e.contents().name().contains("ProposalCreatedEvent"))
+        .map(|e| {
+            let (id, _ts): (Address, u64) = bcs::from_bytes(e.contents().value())
+                .map_err(|e| anyhow!("failed to deserialize ProposalCreatedEvent payload: {e}"))?;
+            Ok(id)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        !ids.is_empty(),
+        "ProposalCreatedEvent not found in transaction effects"
+    );
+    Ok(ids)
 }
 
 /// Extract the new package ID from the effects of a successful upgrade

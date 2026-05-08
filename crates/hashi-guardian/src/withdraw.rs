@@ -16,6 +16,7 @@ use hashi_types::guardian::RateLimiter;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalResponse;
+use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::WithdrawalLogMessage;
 use serde::Serialize;
 use std::sync::Arc;
@@ -98,7 +99,10 @@ async fn normal_withdrawal_inner(
     }
 
     info!("Checking rate limits.");
-    let consumed_amount_sats = request.utxos().external_out_amount().to_sat();
+    // Gross outflow (= inputs - change = external_out + miner_fee).
+    // Miner fee leaves the pool too, so it must consume the limit;
+    // change flows back, so it must not.
+    let consumed_amount_sats = request.utxos().gross_outflow_amount().to_sat();
     let limiter_guard = enclave
         .state
         .consume_from_limiter(
@@ -164,7 +168,7 @@ pub fn verify_hashi_cert<T: Serialize>(
 
 async fn log_withdrawal_success(
     enclave: &Enclave,
-    wid: u64,
+    wid: WithdrawalID,
     msg: WithdrawalLogMessage,
     limiter_guard: LimiterGuard,
 ) -> GuardianResult<()> {
@@ -186,7 +190,7 @@ async fn log_withdrawal_success(
 
 async fn log_withdrawal_failure(
     enclave: &Enclave,
-    wid: u64,
+    wid: WithdrawalID,
     msg: WithdrawalLogMessage,
     withdraw_err: &GuardianError,
 ) -> GuardianResult<()> {
@@ -283,7 +287,7 @@ mod tests {
         let amount_sats = signed_request
             .message()
             .utxos()
-            .external_out_amount()
+            .gross_outflow_amount()
             .to_sat();
         // Set request amount as the max bucket capacity
         let enclave =
@@ -297,11 +301,11 @@ mod tests {
     async fn test_standard_withdrawal_rate_limit_exceeded() {
         let (req1, committee) = StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
             Network::Regtest,
-            1,
+            WithdrawalID::new([0x01; 32]),
             100,
             0,
         );
-        let amount_sats = req1.message().utxos().external_out_amount().to_sat();
+        let amount_sats = req1.message().utxos().gross_outflow_amount().to_sat();
         // Bucket capacity == one withdrawal, so second will be rejected.
         let enclave =
             setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
@@ -312,7 +316,7 @@ mod tests {
         // Second withdrawal with seq=1 and later timestamp — bucket is empty, no refill (rate=0).
         let (req2, _) = StandardWithdrawalRequest::mock_signed_and_committee_with_seq(
             Network::Regtest,
-            2,
+            WithdrawalID::new([0x02; 32]),
             200,
             1,
         );

@@ -192,6 +192,22 @@ pub enum CreateProposalCommands {
         metadata: MetadataArgs,
     },
 
+    /// Propose updating MPC parameters (`t`, `f`, `allowed_delta`) in one
+    /// transaction.
+    UpdateMpcConfig {
+        #[clap(long)]
+        threshold_bps: Option<u64>,
+
+        #[clap(long)]
+        max_faulty_bps: Option<u64>,
+
+        #[clap(long)]
+        weight_reduction_allowed_delta: Option<u64>,
+
+        #[clap(flatten)]
+        metadata: MetadataArgs,
+    },
+
     /// Propose enabling a package version
     EnableVersion {
         /// The version to enable
@@ -215,6 +231,20 @@ pub enum CreateProposalCommands {
         /// Pending Hashi epoch to abort
         #[clap(long)]
         epoch: u64,
+
+        #[clap(flatten)]
+        metadata: MetadataArgs,
+    },
+
+    /// Propose updating the guardian URL and public key
+    UpdateGuardian {
+        /// The guardian gRPC endpoint URL
+        #[clap(long)]
+        url: String,
+
+        /// The guardian's signing public key (hex encoded)
+        #[clap(long)]
+        public_key: String,
 
         #[clap(flatten)]
         metadata: MetadataArgs,
@@ -626,6 +656,22 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     )
                     .await?;
                 }
+                CreateProposalCommands::UpdateMpcConfig {
+                    threshold_bps,
+                    max_faulty_bps,
+                    weight_reduction_allowed_delta,
+                    metadata,
+                } => {
+                    commands::proposal::create_update_mpc_config_proposal(
+                        &config,
+                        threshold_bps,
+                        max_faulty_bps,
+                        weight_reduction_allowed_delta,
+                        parse_metadata(metadata.metadata),
+                        &tx_opts,
+                    )
+                    .await?;
+                }
                 CreateProposalCommands::EnableVersion { version, metadata } => {
                     commands::proposal::create_enable_version_proposal(
                         &config,
@@ -648,6 +694,20 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     commands::proposal::create_abort_reconfig_proposal(
                         &config,
                         epoch,
+                        parse_metadata(metadata.metadata),
+                        &tx_opts,
+                    )
+                    .await?;
+                }
+                CreateProposalCommands::UpdateGuardian {
+                    url,
+                    public_key,
+                    metadata,
+                } => {
+                    commands::proposal::create_update_guardian_proposal(
+                        &config,
+                        &url,
+                        &public_key,
                         parse_metadata(metadata.metadata),
                         &tx_opts,
                     )
@@ -881,6 +941,8 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
             &config,
             operator_address,
             None,
+            None,
+            None,
         )
         .await?;
 
@@ -913,7 +975,7 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
 
     print_info("Registering validator ...");
     let updated = executor
-        .execute_register_or_update_validator(&config, operator_address)
+        .execute_register_or_update_validator(&config, operator_address, None, None)
         .await?;
 
     if updated {

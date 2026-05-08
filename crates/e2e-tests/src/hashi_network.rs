@@ -162,6 +162,21 @@ impl HashiNodeHandle {
         }
     }
 
+    pub(crate) async fn wait_for_local_limiter(&self, timeout: std::time::Duration) -> Result<()> {
+        tokio::time::timeout(timeout, self.wait_for_local_limiter_inner())
+            .await
+            .map_err(|_| anyhow::anyhow!("local limiter bootstrap timed out after {:?}", timeout))
+    }
+
+    async fn wait_for_local_limiter_inner(&self) {
+        loop {
+            if self.hashi().local_limiter().is_some() {
+                return;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
     pub fn current_epoch(&self) -> Option<u64> {
         self.hashi()
             .onchain_state_opt()
@@ -458,7 +473,7 @@ async fn register_onchain(client: sui_rpc::Client, config: &HashiConfig) -> Resu
     let hashi_ids = config.hashi_ids();
     let mut executor = hashi::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
     executor
-        .execute_register_or_update_validator(config, None)
+        .execute_register_or_update_validator(config, None, None, None)
         .await
         .map(|_| ())
 }

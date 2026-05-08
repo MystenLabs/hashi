@@ -509,6 +509,79 @@ pub async fn create_update_config_proposal(
     Ok(())
 }
 
+pub async fn create_update_mpc_config_proposal(
+    config: &CliConfig,
+    threshold_bps: Option<u64>,
+    max_faulty_bps: Option<u64>,
+    weight_reduction_allowed_delta: Option<u64>,
+    metadata: Vec<(String, String)>,
+    tx_opts: &TxOptions,
+) -> Result<()> {
+    const MAX_BPS: u64 = 10_000;
+    if let Some(t) = threshold_bps {
+        anyhow::ensure!(
+            (1..=MAX_BPS).contains(&t),
+            "--threshold-bps must be in 1..={MAX_BPS}, got {t}"
+        );
+    }
+    if let Some(f) = max_faulty_bps {
+        anyhow::ensure!(
+            f <= MAX_BPS,
+            "--max-faulty-bps must be in 0..={MAX_BPS}, got {f}"
+        );
+    }
+    if let Some(d) = weight_reduction_allowed_delta {
+        anyhow::ensure!(
+            d <= MAX_BPS,
+            "--weight-reduction-allowed-delta must be in 0..={MAX_BPS}, got {d}"
+        );
+    }
+
+    let count = [
+        threshold_bps,
+        max_faulty_bps,
+        weight_reduction_allowed_delta,
+    ]
+    .iter()
+    .filter(|v| v.is_some())
+    .count();
+    if count == 0 {
+        anyhow::bail!(
+            "must provide at least one of --threshold-bps, --max-faulty-bps, --weight-reduction-allowed-delta"
+        );
+    }
+
+    if !tx_opts.skip_confirm {
+        let prompt = if count == 1 {
+            "create this MPC config update proposal"
+        } else {
+            "create these MPC config update proposals"
+        };
+        prompt_continue(prompt).await?;
+    }
+
+    let mut client = HashiClient::new(config).await?;
+    let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateMpcConfig {
+        threshold_bps,
+        max_faulty_bps,
+        weight_reduction_allowed_delta,
+        metadata,
+    });
+
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    if let Some(response) = response.as_ref() {
+        match crate::cli::upgrade::extract_proposal_ids_from_response(response) {
+            Ok(ids) => {
+                for id in ids {
+                    println!("  {} {}", "Proposal ID:".bold(), id.to_hex().cyan());
+                }
+            }
+            Err(e) => print_warning(&format!("could not extract proposal IDs: {e}")),
+        }
+    }
+    Ok(())
+}
+
 /// Parse a CLI config value string like "u64:1000" or "bool:true" into a ConfigValueParam.
 fn parse_config_value(s: &str) -> Result<hashi_types::move_types::ConfigValue> {
     use hashi_types::move_types::ConfigValue;
@@ -605,6 +678,39 @@ pub async fn create_abort_reconfig_proposal(
         .build_create_proposal_transaction(CreateProposalParams::AbortReconfig { epoch, metadata });
 
     print_info("Transaction: abort_reconfig::propose");
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    print_created_proposal_id(response.as_ref());
+    Ok(())
+}
+
+/// Create an update guardian proposal
+pub async fn create_update_guardian_proposal(
+    config: &CliConfig,
+    url: &str,
+    public_key_hex: &str,
+    metadata: Vec<(String, String)>,
+    tx_opts: &TxOptions,
+) -> Result<()> {
+    let public_key = hex::decode(public_key_hex.strip_prefix("0x").unwrap_or(public_key_hex))
+        .context("Invalid hex for public key")?;
+
+    println!("\n{}", "Creating Update Guardian Proposal:".bold());
+    println!("  URL:        {}", url);
+    println!("  Public Key: 0x{}", hex::encode(&public_key));
+    print_metadata(&metadata);
+
+    if !tx_opts.skip_confirm {
+        prompt_continue("create this update guardian proposal").await?;
+    }
+
+    let mut client = HashiClient::new(config).await?;
+    let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateGuardian {
+        url: url.to_string(),
+        public_key,
+        metadata,
+    });
+
+    print_info("Transaction: update_guardian::propose");
     let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
     print_created_proposal_id(response.as_ref());
     Ok(())

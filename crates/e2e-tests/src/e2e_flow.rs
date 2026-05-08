@@ -12,6 +12,7 @@ mod tests {
     use hashi::sui_tx_executor::SuiTxExecutor;
     use hashi_types::move_types::WithdrawalConfirmedEvent;
     use hashi_types::move_types::WithdrawalPickedForProcessingEvent;
+    use hashi_types::move_types::WithdrawalSignedEvent;
     use std::time::Duration;
     use sui_rpc::field::FieldMask;
     use sui_rpc::field::FieldMaskUtil;
@@ -31,6 +32,59 @@ mod tests {
     use crate::test_helpers::init_test_logging;
     use crate::test_helpers::lookup_vout;
     use crate::test_helpers::txid_to_address;
+
+    const MAX_TX_SIZE_BYTES: usize = 131_072;
+    const MAX_SERIALIZED_TX_EFFECTS_SIZE_BYTES: usize = 524_288;
+
+    struct EventWithEffects<T> {
+        event: T,
+        tx_size_bytes: usize,
+        effects_size_bytes: usize,
+    }
+
+    fn assert_tx_size_under_sui_limit(stage: &str, tx_size_bytes: usize) {
+        info!(
+            stage,
+            tx_size_bytes,
+            limit = MAX_TX_SIZE_BYTES,
+            "Observed serialized Sui transaction size"
+        );
+        assert!(
+            tx_size_bytes <= MAX_TX_SIZE_BYTES,
+            "{stage} transaction size ({tx_size_bytes} bytes) exceeded Sui's \
+             max_tx_size_bytes ({MAX_TX_SIZE_BYTES} bytes)"
+        );
+    }
+
+    fn assert_effects_size_under_sui_limit(stage: &str, effects_size_bytes: usize) {
+        info!(
+            stage,
+            effects_size_bytes,
+            limit = MAX_SERIALIZED_TX_EFFECTS_SIZE_BYTES,
+            "Observed serialized Sui transaction effects size"
+        );
+        assert!(
+            effects_size_bytes <= MAX_SERIALIZED_TX_EFFECTS_SIZE_BYTES,
+            "{stage} effects size ({effects_size_bytes} bytes) exceeded Sui's \
+             max_serialized_tx_effects_size_bytes ({MAX_SERIALIZED_TX_EFFECTS_SIZE_BYTES} bytes)"
+        );
+    }
+
+    fn tx_bcs_size(txn: &sui_rpc::proto::sui::rpc::v2::ExecutedTransaction) -> Result<usize> {
+        txn.transaction()
+            .bcs()
+            .value_opt()
+            .map(|bytes| bytes.len())
+            .ok_or_else(|| anyhow!("transaction BCS bytes were not returned"))
+    }
+
+    fn effects_bcs_size(txn: &sui_rpc::proto::sui::rpc::v2::ExecutedTransaction) -> Result<usize> {
+        txn.effects()
+            .bcs()
+            .value_opt()
+            .map(|bytes| bytes.len())
+            .ok_or_else(|| anyhow!("transaction effects BCS bytes were not returned"))
+    }
 
     async fn setup_test_networks(builder: TestNetworksBuilder) -> Result<TestNetworks> {
         info!("Setting up test networks...");
@@ -282,6 +336,8 @@ mod tests {
             for node in networks.hashi_network.nodes() {
                 assert!(node.hashi().config.guardian_endpoint().is_some());
                 assert!(node.hashi().guardian_client().is_some());
+                // Harness waits for limiter bootstrap before returning.
+                assert!(node.hashi().local_limiter().is_some());
             }
             let harness = networks
                 .guardian_harness
@@ -364,6 +420,24 @@ mod tests {
             Duration::from_secs(30),
         )
         .await?;
+
+        if with_guardian {
+            let guardian_state = networks
+                .guardian_harness
+                .as_ref()
+                .expect("harness present when .with_guardian() is set")
+                .enclave()
+                .state
+                .limiter_state()
+                .await
+                .expect("guardian limiter state present after a successful withdrawal");
+            assert_eq!(guardian_state.next_seq, 1);
+            let local_state = hashi
+                .local_limiter()
+                .expect("local limiter present after bootstrap")
+                .snapshot();
+            assert_eq!(local_state, guardian_state);
+        }
 
         info!("=== Bitcoin Withdrawal E2E Test{label} Passed ===");
         Ok(())
@@ -848,6 +922,125 @@ mod tests {
         Err(anyhow!("Checkpoint subscription ended unexpectedly"))
     }
 
+    async fn wait_for_event_with_effects<T>(
+        sui_client: &mut sui_rpc::Client,
+        event_name: &'static str,
+        timeout: Duration,
+        mut parse: impl FnMut(&[u8]) -> Result<Option<T>>,
+    ) -> Result<EventWithEffects<T>> {
+        let start = std::time::Instant::now();
+        let subscription_read_mask = FieldMask::from_paths([
+            Checkpoint::path_builder()
+                .transactions()
+                .events()
+                .events()
+                .contents()
+                .finish(),
+            Checkpoint::path_builder()
+                .transactions()
+                .transaction()
+                .bcs()
+                .value(),
+            Checkpoint::path_builder()
+                .transactions()
+                .effects()
+                .bcs()
+                .value(),
+        ]);
+        let mut subscription = sui_client
+            .subscription_client()
+            .subscribe_checkpoints(
+                SubscribeCheckpointsRequest::default().with_read_mask(subscription_read_mask),
+            )
+            .await?
+            .into_inner();
+
+        while let Some(item) = subscription.next().await {
+            if start.elapsed() > timeout {
+                return Err(anyhow!(
+                    "Timeout waiting for {event_name} with effects after {:?}",
+                    timeout,
+                ));
+            }
+            let checkpoint = match item {
+                Ok(checkpoint) => checkpoint,
+                Err(e) => {
+                    debug!("Error in checkpoint stream: {}", e);
+                    continue;
+                }
+            };
+            for txn in checkpoint.checkpoint().transactions() {
+                for event in txn.events().events() {
+                    if event.contents().name().contains(event_name) {
+                        match parse(event.contents().value()) {
+                            Ok(Some(data)) => {
+                                return Ok(EventWithEffects {
+                                    event: data,
+                                    tx_size_bytes: tx_bcs_size(txn)?,
+                                    effects_size_bytes: effects_bcs_size(txn)?,
+                                });
+                            }
+                            Ok(None) => {}
+                            Err(e) => debug!("Failed to parse {event_name}: {}", e),
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Err(anyhow!("Checkpoint subscription ended unexpectedly"))
+    }
+
+    async fn wait_for_batched_withdrawal_picked_with_effects(
+        sui_client: &mut sui_rpc::Client,
+        min_requests: usize,
+        timeout: Duration,
+    ) -> Result<EventWithEffects<WithdrawalPickedForProcessingEvent>> {
+        wait_for_event_with_effects(
+            sui_client,
+            "WithdrawalPickedForProcessingEvent",
+            timeout,
+            |bytes| {
+                let data = WithdrawalPickedForProcessingEvent::from_bcs(bytes)?;
+                if data.request_ids.len() >= min_requests {
+                    Ok(Some(data))
+                } else {
+                    info!(
+                        "WithdrawalPickedForProcessingEvent with {} request(s) \
+                         (waiting for batch of ≥{})",
+                        data.request_ids.len(),
+                        min_requests,
+                    );
+                    Ok(None)
+                }
+            },
+        )
+        .await
+    }
+
+    async fn wait_for_withdrawal_signed_with_effects(
+        sui_client: &mut sui_rpc::Client,
+        withdrawal_id: Address,
+        timeout: Duration,
+    ) -> Result<EventWithEffects<WithdrawalSignedEvent>> {
+        wait_for_event_with_effects(sui_client, "WithdrawalSignedEvent", timeout, |bytes| {
+            let data = WithdrawalSignedEvent::from_bcs(bytes)?;
+            Ok((data.withdrawal_txn_id == withdrawal_id).then_some(data))
+        })
+        .await
+    }
+
+    async fn wait_for_withdrawal_confirmed_with_effects(
+        sui_client: &mut sui_rpc::Client,
+        withdrawal_id: Address,
+        timeout: Duration,
+    ) -> Result<EventWithEffects<WithdrawalConfirmedEvent>> {
+        wait_for_event_with_effects(sui_client, "WithdrawalConfirmedEvent", timeout, |bytes| {
+            let data = WithdrawalConfirmedEvent::from_bcs(bytes)?;
+            Ok((data.withdrawal_txn_id == withdrawal_id).then_some(data))
+        })
+        .await
+    }
     /// Verifies that the new multi-request coin selection algorithm batches
     /// multiple approved withdrawal requests into a single Bitcoin transaction.
     ///
@@ -1521,7 +1714,8 @@ mod tests {
         Ok(())
     }
 
-    /// Verify that the signature-commit chunking logic works correctly when a
+    /// Verify that the large withdrawal path stays within Sui transaction-size
+    /// and effects-size limits, and that signature-commit chunking works when a
     /// withdrawal transaction has enough inputs to push the BCS-encoded
     /// `signatures` vector past the 16 KiB pure-argument limit.
     ///
@@ -1532,7 +1726,10 @@ mod tests {
     ///    500-input cap.
     /// 3. Wait for a single `WithdrawalPickedForProcessingEvent` with all 50
     ///    requests batched and a large number of inputs selected.
-    /// 4. Mine blocks and wait for `WithdrawalConfirmedEvent`, which implies the
+    /// 4. Assert the actual committed Sui transaction payload is below
+    ///    `max_tx_size_bytes` and commit/sign/confirm effects are below
+    ///    `max_serialized_tx_effects_size_bytes`.
+    /// 5. Mine blocks and wait for `WithdrawalConfirmedEvent`, which implies the
     ///    signature-commit transaction succeeded (previously it would fail with
     ///    "maximum pure argument size is 16384").
     #[tokio::test]
@@ -1688,12 +1885,18 @@ mod tests {
         // Wait for the batched withdrawal to be picked for processing. The
         // 24-hour delay means it fires only at capacity (50 requests).
         info!("Waiting for batched withdrawal to be picked...");
-        let picked = wait_for_batched_withdrawal_picked(
+        let picked_with_effects = wait_for_batched_withdrawal_picked_with_effects(
             &mut networks.sui_network.client,
             num_withdrawals,
             Duration::from_secs(300),
         )
         .await?;
+        assert_tx_size_under_sui_limit("commit_withdrawal_tx", picked_with_effects.tx_size_bytes);
+        assert_effects_size_under_sui_limit(
+            "commit_withdrawal_tx",
+            picked_with_effects.effects_size_bytes,
+        );
+        let picked = picked_with_effects.event;
 
         info!(
             withdrawal_txn_id = %picked.withdrawal_txn_id,
@@ -1720,17 +1923,35 @@ mod tests {
             picked.inputs.len(),
         );
 
-        // Mine blocks and wait for the withdrawal to be confirmed. This
-        // implicitly validates that the signature-commit transaction succeeded
-        // -- previously it would fail with "maximum pure argument size is
-        // 16384".
-        let miner = BackgroundMiner::start(&networks.bitcoin_node);
-        wait_for_n_withdrawal_confirmations(
+        let signed_with_effects = wait_for_withdrawal_signed_with_effects(
             &mut networks.sui_network.client,
-            1,
+            picked.withdrawal_txn_id,
+            Duration::from_secs(300),
+        )
+        .await?;
+        assert_eq!(
+            signed_with_effects.event.signatures.len(),
+            picked.inputs.len(),
+            "Expected one signature per selected input"
+        );
+        assert_effects_size_under_sui_limit(
+            "sign_withdrawal",
+            signed_with_effects.effects_size_bytes,
+        );
+
+        // Mine blocks and wait for the withdrawal to be confirmed. This also
+        // records the confirmation transaction's serialized effects size.
+        let miner = BackgroundMiner::start(&networks.bitcoin_node);
+        let confirmed_with_effects = wait_for_withdrawal_confirmed_with_effects(
+            &mut networks.sui_network.client,
+            picked.withdrawal_txn_id,
             Duration::from_secs(600),
         )
         .await?;
+        assert_effects_size_under_sui_limit(
+            "confirm_withdrawal",
+            confirmed_with_effects.effects_size_bytes,
+        );
         drop(miner);
 
         info!("=== Large Withdrawal Signature Chunking Test Passed ===");

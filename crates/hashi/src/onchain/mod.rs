@@ -9,6 +9,7 @@ use futures::TryStreamExt;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
 use std::sync::RwLockWriteGuard;
@@ -87,6 +88,10 @@ struct Inner {
     tls_private_key: Option<ed25519_dalek::SigningKey>,
     grpc_max_decoding_message_size: Option<usize>,
     metrics: Option<Arc<crate::metrics::Metrics>>,
+    /// Set once after guardian bootstrap; advanced by the watcher.
+    /// `LocalLimiter` carries its own `RwLock<LimiterState>`, so we just
+    /// need set-once semantics for the slot itself.
+    local_limiter: OnceLock<Arc<crate::guardian_limiter::LocalLimiter>>,
 }
 
 #[derive(Debug)]
@@ -140,6 +145,7 @@ impl OnchainState {
             tls_private_key,
             grpc_max_decoding_message_size,
             metrics: metrics.clone(),
+            local_limiter: OnceLock::new(),
         }
         .pipe(Arc::new)
         .pipe(Self);
@@ -177,6 +183,32 @@ impl OnchainState {
 
     pub fn latest_checkpoint_height(&self) -> u64 {
         self.0.checkpoint.borrow().height
+    }
+
+    /// Wait until the watcher reaches `target_seq`. Caller wraps with
+    /// `tokio::time::timeout` for a bound.
+    pub async fn wait_until_checkpoint(&self, target_seq: u64) {
+        let mut rx = self.subscribe_checkpoint();
+        while rx.borrow().height < target_seq {
+            if rx.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    pub fn local_limiter(&self) -> Option<Arc<crate::guardian_limiter::LocalLimiter>> {
+        self.0.local_limiter.get().cloned()
+    }
+
+    pub(crate) fn metrics(&self) -> Option<&Arc<crate::metrics::Metrics>> {
+        self.0.metrics.as_ref()
+    }
+
+    /// Called once after guardian bootstrap.
+    pub fn set_local_limiter(&self, limiter: Arc<crate::guardian_limiter::LocalLimiter>) {
+        if self.0.local_limiter.set(limiter).is_err() {
+            tracing::warn!("OnchainState::set_local_limiter called twice; ignoring");
+        }
     }
 
     pub fn latest_checkpoint_timestamp_ms(&self) -> u64 {
@@ -362,6 +394,16 @@ impl OnchainState {
             .values()
             .cloned()
             .collect()
+    }
+
+    /// True if any `WithdrawalTransaction` is still awaiting witness signatures.
+    pub fn has_unsigned_withdrawal_txn(&self) -> bool {
+        self.state()
+            .hashi()
+            .withdrawal_queue
+            .withdrawal_txns()
+            .values()
+            .any(|t| t.signatures.is_none())
     }
 
     pub fn spent_utxos_entries(&self) -> Vec<(types::UtxoId, u64)> {
@@ -1352,6 +1394,11 @@ async fn scrape_proposal_bag(
                     .ok()
                     .map(|p| (p.id, p.timestamp_ms))
             }
+            types::ProposalType::UpdateGuardian => {
+                bcs::from_bytes::<move_types::Proposal<move_types::UpdateGuardian>>(contents)
+                    .ok()
+                    .map(|p| (p.id, p.timestamp_ms))
+            }
             types::ProposalType::Unknown(_) => None,
         };
 
@@ -1397,6 +1444,7 @@ pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
         ("upgrade", "Upgrade") => types::ProposalType::Upgrade,
         ("emergency_pause", "EmergencyPause") => types::ProposalType::EmergencyPause,
         ("abort_reconfig", "AbortReconfig") => types::ProposalType::AbortReconfig,
+        ("update_guardian", "UpdateGuardian") => types::ProposalType::UpdateGuardian,
         _ => types::ProposalType::Unknown(format!("{}::{}", inner_tag.module(), inner_tag.name())),
     }
 }

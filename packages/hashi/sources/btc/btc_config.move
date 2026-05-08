@@ -7,36 +7,9 @@ module hashi::btc_config;
 
 use hashi::{config::Config, config_value};
 
-// ======== Bitcoin Network Constants ========
-
 /// Minimum value (satoshis) for a Bitcoin output to be relayed (dust threshold).
 /// Uses the highest threshold (P2PKH 546 sats) as a conservative floor.
 const DUST_RELAY_MIN_VALUE: u64 = 546;
-
-// ======== Config Validation ========
-
-/// Returns true when `key` is a recognised BTC config key and `value`
-/// carries the type that key expects.
-#[allow(implicit_const_copy)]
-public(package) fun is_valid_config_entry(
-    key: &std::string::String,
-    value: &config_value::Value,
-): bool {
-    let k = key.as_bytes();
-    if (k == &b"bitcoin_deposit_minimum") {
-        value.is_u64()
-    } else if (k == &b"bitcoin_deposit_time_delay_ms") {
-        value.is_u64()
-    } else if (k == &b"bitcoin_withdrawal_minimum") {
-        value.is_u64()
-    } else if (k == &b"bitcoin_confirmation_threshold") {
-        value.is_u64()
-    } else if (k == &b"withdrawal_cancellation_cooldown_ms") {
-        value.is_u64()
-    } else {
-        false
-    }
-}
 
 // ======== Accessors ========
 

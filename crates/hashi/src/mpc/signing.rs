@@ -5,7 +5,6 @@ use fastcrypto::error::FastCryptoError;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto_tbls::polynomial::Eval;
-use fastcrypto_tbls::polynomial::Poly;
 use fastcrypto_tbls::threshold_schnorr::Address as DerivationAddress;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::S;
@@ -13,6 +12,7 @@ use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
 use fastcrypto_tbls::threshold_schnorr::reed_solomon::RSDecoder;
 use fastcrypto_tbls::threshold_schnorr::signing::aggregate_signatures;
+use fastcrypto_tbls::threshold_schnorr::signing::finalize_schnorr_signature;
 use fastcrypto_tbls::threshold_schnorr::signing::generate_partial_signatures;
 use hashi_types::committee::Committee;
 use std::collections::HashMap;
@@ -78,7 +78,6 @@ struct SigningPoolState {
     /// out-of-order signing (e.g., withdrawal A allocated from batch 0 signs
     /// after withdrawal B advanced to batch 1) still works.
     batches: Vec<PresigBatch>,
-    /// Key: Sui address identifying the signing request.
     partial_signing_outputs: HashMap<Address, PartialSigningOutput>,
     next_batch: Option<Presignatures>,
 }
@@ -519,22 +518,14 @@ fn aggregate_signatures_with_recovery(
 ) -> Result<SchnorrSignature, FastCryptoError> {
     let indices: Vec<_> = partial_signatures.iter().map(|e| e.index).collect();
     let values: Vec<_> = partial_signatures.iter().map(|e| e.value).collect();
-    let decoder = RSDecoder::new(indices.clone(), threshold as usize);
-    let coefficients = decoder.decode(&values)?;
-    // TODO: This re-interpolates a polynomial we have already decoded. Refactor `fastcrypto` to
-    // expose the constant term directly from the RS decoded message, avoiding redundant work.
-    let poly = Poly::from(coefficients);
-    let corrected_sigs: Vec<Eval<S>> = indices
-        .iter()
-        .take(threshold as usize)
-        .map(|&idx| poly.eval(idx))
-        .collect();
-    aggregate_signatures(
+    let s = RSDecoder::new(indices, threshold as usize)
+        .compute_message_polynomial(&values)?
+        .into_c0();
+    finalize_schnorr_signature(
         message,
         public_presig,
         beacon_value,
-        &corrected_sigs,
-        threshold,
+        s,
         verifying_key,
         derivation_address,
     )
@@ -571,7 +562,7 @@ mod tests {
     use crate::communication::ChannelError;
     use crate::communication::ChannelResult;
     use crate::mpc::types::ComplainRequest;
-    use crate::mpc::types::ComplaintResponses;
+    use crate::mpc::types::ComplaintResponse;
     use crate::mpc::types::GetPublicMpcOutputRequest;
     use crate::mpc::types::GetPublicMpcOutputResponse;
     use crate::mpc::types::RetrieveMessagesRequest;
@@ -583,6 +574,7 @@ mod tests {
     use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
     use fastcrypto::serde_helpers::ToFromByteArray;
     use fastcrypto::traits::AllowedRng;
+    use fastcrypto_tbls::polynomial::Poly;
     use fastcrypto_tbls::threshold_schnorr::batch_avss;
     use fastcrypto_tbls::types::ShareIndex;
     use hashi_types::committee::CommitteeMember;
@@ -642,7 +634,7 @@ mod tests {
             &self,
             _: &Address,
             _: &ComplainRequest,
-        ) -> ChannelResult<ComplaintResponses> {
+        ) -> ChannelResult<ComplaintResponse> {
             unimplemented!()
         }
         async fn get_public_mpc_output(
@@ -691,7 +683,7 @@ mod tests {
             &self,
             _: &Address,
             _: &ComplainRequest,
-        ) -> ChannelResult<ComplaintResponses> {
+        ) -> ChannelResult<ComplaintResponse> {
             unimplemented!()
         }
         async fn get_public_mpc_output(

@@ -220,6 +220,17 @@ impl MpcService {
             if self.get_pending_epoch_change().is_some() {
                 return;
             }
+            match self.inner.next_reconfig_epoch().await {
+                Ok(target) => {
+                    if let Err(e) = self.inner.prepare_and_register_keys(target).await {
+                        debug!(
+                            "Encryption/signing key registration for epoch {target} failed: {e}; \
+                             will retry on next genesis_reconfig iteration"
+                        );
+                    }
+                }
+                Err(e) => debug!("Failed to compute next_reconfig_epoch: {e}"),
+            }
             // Attempt to submit start_reconfig. This will fail on-chain if
             // not enough validators have registered (95% stake threshold).
             let result = async {
@@ -566,6 +577,12 @@ impl MpcService {
         if hashi_epoch >= sui_epoch {
             return;
         }
+        if let Err(e) = self.inner.prepare_and_register_keys(sui_epoch).await {
+            warn!(
+                "Failed to prepare/register encryption+signing keys for epoch {sui_epoch}: {e}; \
+                 will retry on next trigger"
+            );
+        }
         for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
             let result = async {
                 let mut executor =
@@ -611,6 +628,12 @@ impl MpcService {
         } else {
             MPC_LABEL_KEY_ROTATION
         };
+        if self.get_pending_epoch_change() != Some(target_epoch) {
+            info!(
+                "handle_reconfig: epoch {target_epoch} no longer pending at entry, aborting before start",
+            );
+            return;
+        }
         let metrics = &self.inner.metrics;
         let _reconfig_timer = metrics
             .mpc_reconfig_total_duration_seconds
@@ -622,18 +645,24 @@ impl MpcService {
                 info!("handle_reconfig: epoch {target_epoch} no longer pending, aborting",);
                 return;
             }
-            let setup_result = if run_dkg {
-                self.setup_initial_dkg(target_epoch)
-            } else {
-                self.setup_key_rotation(target_epoch)
+            let needs_fresh_manager = match self.inner.mpc_manager() {
+                None => true,
+                Some(mgr) => mgr.read().unwrap().mpc_config.epoch != target_epoch,
             };
-            if let Err(e) = setup_result {
-                error!(
-                    "Failed to set up MPC manager for epoch {}: {e}, retrying...",
-                    target_epoch
-                );
-                self.sleep_if_still_pending(target_epoch).await;
-                continue;
+            if needs_fresh_manager {
+                let setup_result = if run_dkg {
+                    self.setup_initial_dkg(target_epoch)
+                } else {
+                    self.setup_key_rotation(target_epoch)
+                };
+                if let Err(e) = setup_result {
+                    error!(
+                        "Failed to set up MPC manager for epoch {}: {e}, retrying...",
+                        target_epoch
+                    );
+                    self.sleep_if_still_pending(target_epoch).await;
+                    continue;
+                }
             }
             let _timer = metrics
                 .mpc_total_duration_seconds
@@ -690,6 +719,13 @@ impl MpcService {
             }
         }
         drop(_end_reconfig_timer);
+        let next_epoch = target_epoch + 1;
+        if let Err(e) = self.inner.prepare_and_register_keys(next_epoch).await {
+            warn!(
+                "Failed to prepare/register encryption+signing keys for epoch {next_epoch}: {e}; \
+                 will retry at next trigger"
+            );
+        }
         info!("end_reconfig complete for epoch {target_epoch}, running prepare_signing");
         if let Err(e) = self.inner.db.prune_messages_below(target_epoch) {
             error!("Failed to prune old MPC messages below epoch {target_epoch}: {e}");
@@ -799,12 +835,10 @@ impl MpcService {
             epoch,
             mpc_public_key: mpc_public_key.clone(),
         };
-        let signing_key = self
-            .inner
-            .config
-            .protocol_private_key()
-            .ok_or_else(|| anyhow::anyhow!("no protocol_private_key configured"))?;
         let my_address = self.inner.config.validator_address()?;
+        let signing_key =
+            self.inner
+                .find_signing_key_for_committee(&target_committee, my_address, epoch)?;
         let my_sig = signing_key.sign(epoch, my_address, &message);
         self.inner
             .store_reconfig_signature(epoch, my_sig.signature().as_bytes().to_vec());

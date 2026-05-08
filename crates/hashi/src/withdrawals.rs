@@ -51,6 +51,20 @@ const WITHDRAWAL_SIGNING_TIMEOUT: Duration = Duration::from_secs(5);
 /// Fee rate tolerance multiplier for validation.
 const FEE_RATE_TOLERANCE_MULTIPLIER: u64 = 5;
 
+/// Max drift between the leader-supplied `timestamp_secs` and the follower's
+/// own latest checkpoint timestamp before signing a guardian request.
+const GUARDIAN_TIMESTAMP_TOLERANCE_SECS: u64 = 600;
+
+/// BTC that leaves the pool when this txn broadcasts — the amount that
+/// consumes the guardian's limit. Equivalent to
+/// `sum(withdrawal_outputs) + miner_fee`; we use `inputs - change` to
+/// avoid relying on a separate fee field.
+pub(crate) fn withdrawal_limiter_consumption_amount(txn: &WithdrawalTransaction) -> u64 {
+    let inputs: u64 = txn.inputs.iter().map(|u| u.amount).sum();
+    let change: u64 = txn.change_output.as_ref().map_or(0, |c| c.amount);
+    inputs.saturating_sub(change)
+}
+
 /// Full input weight (WU) for a 2-of-2 taproot script-path spend.
 /// TXIN_BASE_WEIGHT (164 WU) + satisfaction (234 WU) = 398 WU (100 vB).
 /// Used in fee validation where we calculate weight directly without
@@ -393,6 +407,37 @@ impl Hashi {
         self.sign_message_proto(&confirmation)
     }
 
+    // --- Guardian: validate and BLS-sign a `StandardWithdrawalRequest` ---
+
+    #[tracing::instrument(level = "info", skip_all, fields(%withdrawal_txn_id, seq))]
+    pub fn validate_and_sign_guardian_withdrawal_request(
+        &self,
+        withdrawal_txn_id: &Address,
+        timestamp_secs: u64,
+        seq: u64,
+    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
+        // Bound against the follower's own checkpoint clock to avoid wall-clock skew.
+        let latest_checkpoint_secs = self.onchain_state().latest_checkpoint_timestamp_ms() / 1000;
+        let drift = timestamp_secs.abs_diff(latest_checkpoint_secs);
+        if drift > GUARDIAN_TIMESTAMP_TOLERANCE_SECS {
+            anyhow::bail!(
+                "Guardian withdrawal timestamp {timestamp_secs} is {drift}s away from \
+                 local checkpoint {latest_checkpoint_secs} (tolerance: {GUARDIAN_TIMESTAMP_TOLERANCE_SECS}s)"
+            );
+        }
+
+        let txn = self
+            .onchain_state()
+            .withdrawal_txn(withdrawal_txn_id)
+            .ok_or_else(|| {
+                anyhow!("WithdrawalTransaction {withdrawal_txn_id} not found on-chain")
+            })?;
+
+        let guardian_request = build_guardian_withdrawal_request(self, &txn, timestamp_secs, seq)?;
+
+        self.sign_message_proto(&guardian_request)
+    }
+
     // --- Step 3: Sign withdrawal (store witness signatures on-chain) ---
 
     #[tracing::instrument(level = "info", skip_all, fields(withdrawal_id = %message.withdrawal_id))]
@@ -474,10 +519,17 @@ impl Hashi {
             .config
             .validator_address()
             .map_err(|e| anyhow!("No validator address configured: {e}"))?;
-        let private_key = self
-            .config
-            .protocol_private_key()
-            .ok_or_else(|| anyhow!("No protocol private key configured"))?;
+        let committee = self
+            .onchain_state()
+            .state()
+            .hashi()
+            .committees
+            .committees()
+            .get(&epoch)
+            .cloned()
+            .ok_or_else(|| anyhow!("no committee for epoch {epoch}"))?;
+        let private_key =
+            self.find_signing_key_for_committee(&committee, validator_address, epoch)?;
         let public_key_bytes = private_key.public_key().as_bytes().to_vec().into();
         let signature_bytes = private_key
             .sign(epoch, validator_address, message)
@@ -500,9 +552,11 @@ impl Hashi {
     pub async fn validate_and_sign_withdrawal_tx(
         &self,
         withdrawal_txn_id: &Address,
+        expected_limiter_seq: Option<u64>,
     ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let (txn, unsigned_tx) = self.validate_withdrawal_signing(withdrawal_txn_id).await?;
-        self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx).await
+        self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx, expected_limiter_seq)
+            .await
     }
 
     pub async fn validate_withdrawal_signing(
@@ -542,6 +596,7 @@ impl Hashi {
         &self,
         txn: &crate::onchain::types::WithdrawalTransaction,
         unsigned_tx: &bitcoin::Transaction,
+        expected_limiter_seq: Option<u64>,
     ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let onchain_state = self.onchain_state().clone();
         let epoch = onchain_state.epoch();
@@ -554,6 +609,29 @@ impl Hashi {
                 txn.epoch,
                 epoch,
             );
+        }
+        // Validate-only: the watcher advances the limiter on
+        // `WithdrawalSignedEvent`, never from this path.
+        match (self.local_limiter(), expected_limiter_seq) {
+            (Some(limiter), Some(expected_seq)) => {
+                let amount_sats = withdrawal_limiter_consumption_amount(txn);
+                let timestamp_secs = txn.timestamp_ms / 1000;
+                let result = limiter.validate_consume(expected_seq, timestamp_secs, amount_sats);
+                self.metrics.record_limiter_validate(
+                    &result,
+                    crate::metrics::GUARDIAN_LIMITER_CALLSITE_MPC_SIGNING,
+                );
+                result.map_err(|e| anyhow!("Limiter rejected withdrawal {}: {e}", txn.id))?;
+            }
+            (None, None) => {}
+            (Some(_), None) => anyhow::bail!(
+                "Local limiter is configured but request for withdrawal {} lacks expected_limiter_seq",
+                txn.id
+            ),
+            (None, Some(_)) => anyhow::bail!(
+                "Request for withdrawal {} carries expected_limiter_seq but local limiter is not configured",
+                txn.id
+            ),
         }
         let p2p_channel =
             RpcP2PChannel::new(onchain_state, epoch, crate::metrics::MPC_LABEL_SIGNING);
@@ -1207,4 +1285,162 @@ fn script_pubkey_from_raw_address(address_bytes: &[u8]) -> anyhow::Result<bitcoi
     let program = WitnessProgram::new(version, address_bytes)
         .map_err(|e| anyhow!("Invalid witness program: {e}"))?;
     Ok(bitcoin::ScriptBuf::new_witness_program(&program))
+}
+
+/// Deterministic from on-chain state and the leader-supplied
+/// `(timestamp_secs, seq)`, so every validator reconstructs the same request.
+pub fn build_guardian_withdrawal_request(
+    hashi: &Hashi,
+    txn: &WithdrawalTransaction,
+    timestamp_secs: u64,
+    seq: u64,
+) -> anyhow::Result<hashi_types::guardian::StandardWithdrawalRequest> {
+    use hashi_types::guardian::bitcoin_utils::InputUTXO;
+    use hashi_types::guardian::bitcoin_utils::OutputUTXO;
+    use hashi_types::guardian::bitcoin_utils::TxUTXOs;
+
+    let hashi_pubkey = hashi.get_hashi_pubkey()?;
+    let network = hashi.config.bitcoin_network();
+
+    let inputs = txn
+        .inputs
+        .iter()
+        .map(|utxo| {
+            let pubkey = hashi.deposit_pubkey(&hashi_pubkey, utxo.derivation_path.as_ref())?;
+            let (_, _, leaf_hash) =
+                bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
+            let address = hashi.bitcoin_address_from_pubkey(&pubkey);
+
+            let outpoint = bitcoin::OutPoint {
+                txid: utxo.id.txid.into(),
+                vout: utxo.id.vout,
+            };
+
+            InputUTXO::new(
+                outpoint,
+                Amount::from_sat(utxo.amount),
+                address.into_unchecked(),
+                leaf_hash,
+                network,
+            )
+            .map_err(|e| anyhow!("Failed to build guardian InputUTXO: {e}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    // First N outputs are external payouts; any trailing output is internal change.
+    let all_outputs = txn.all_outputs();
+    let num_requests = txn.request_ids.len();
+    let outputs = all_outputs
+        .iter()
+        .enumerate()
+        .map(|(i, output)| {
+            if i < num_requests {
+                let script_pubkey = script_pubkey_from_raw_address(&output.bitcoin_address)?;
+                let address = BitcoinAddress::from_script(&script_pubkey, network)
+                    .map_err(|e| anyhow!("Cannot derive address from output script: {e}"))?;
+                OutputUTXO::new_external(
+                    address.into_unchecked(),
+                    Amount::from_sat(output.amount),
+                    network,
+                )
+                .map_err(|e| anyhow!("Failed to build guardian external OutputUTXO: {e}"))
+            } else {
+                let derivation_path = [0u8; 32];
+                Ok(OutputUTXO::new_internal(
+                    derivation_path,
+                    Amount::from_sat(output.amount),
+                ))
+            }
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let utxos = TxUTXOs::new(inputs, outputs)
+        .map_err(|e| anyhow!("Failed to build guardian TxUTXOs: {e}"))?;
+
+    // The on-chain `WithdrawalTransaction` UID doubles as the guardian-side `wid`.
+    let wid: hashi_types::guardian::WithdrawalID = txn.id;
+
+    Ok(hashi_types::guardian::StandardWithdrawalRequest::new(
+        wid,
+        utxos,
+        timestamp_secs,
+        seq,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::onchain::types::OutputUtxo;
+    use crate::onchain::types::Utxo;
+    use crate::onchain::types::UtxoId;
+    use hashi_types::bitcoin_txid::BitcoinTxid;
+
+    fn input(amount: u64) -> Utxo {
+        Utxo {
+            id: UtxoId {
+                txid: BitcoinTxid::ZERO,
+                vout: 0,
+            },
+            amount,
+            derivation_path: None,
+        }
+    }
+
+    fn output(amount: u64) -> OutputUtxo {
+        OutputUtxo {
+            amount,
+            bitcoin_address: vec![0; 32],
+        }
+    }
+
+    fn make_txn(
+        inputs: Vec<u64>,
+        withdrawal_outputs: Vec<u64>,
+        change: Option<u64>,
+    ) -> WithdrawalTransaction {
+        WithdrawalTransaction {
+            id: Address::ZERO,
+            txid: BitcoinTxid::ZERO,
+            request_ids: vec![],
+            inputs: inputs.into_iter().map(input).collect(),
+            withdrawal_outputs: withdrawal_outputs.into_iter().map(output).collect(),
+            change_output: change.map(output),
+            timestamp_ms: 0,
+            randomness: vec![],
+            signatures: None,
+            presig_start_index: 0,
+            epoch: 0,
+        }
+    }
+
+    #[test]
+    fn consumption_amount_no_change() {
+        // 1_000 input, 950 to user, 50 fee, no change.
+        let txn = make_txn(vec![1_000], vec![950], None);
+        assert_eq!(withdrawal_limiter_consumption_amount(&txn), 1_000);
+    }
+
+    #[test]
+    fn consumption_amount_with_change() {
+        // 10_000 input, 7_000 to user, 50 fee, 2_950 change.
+        let txn = make_txn(vec![10_000], vec![7_000], Some(2_950));
+        assert_eq!(withdrawal_limiter_consumption_amount(&txn), 7_050);
+    }
+
+    #[test]
+    fn consumption_amount_multi_input_multi_output() {
+        // Two inputs: 6_000 + 4_000. Three users: 2_000 + 1_500 + 5_500. Fee 100, change 900.
+        let txn = make_txn(vec![6_000, 4_000], vec![2_000, 1_500, 5_500], Some(900));
+        let expected = 10_000 - 900; // inputs - change
+        let by_outputs = 9_000 + 100; // user_outputs + fee
+        assert_eq!(expected, by_outputs);
+        assert_eq!(withdrawal_limiter_consumption_amount(&txn), expected);
+    }
+
+    #[test]
+    fn consumption_amount_no_inputs_returns_zero() {
+        let txn = make_txn(vec![], vec![], None);
+        assert_eq!(withdrawal_limiter_consumption_amount(&txn), 0);
+    }
 }

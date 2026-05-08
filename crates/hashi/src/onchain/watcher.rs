@@ -27,6 +27,7 @@ use crate::onchain::types::DepositRequest;
 use crate::onchain::types::Proposal;
 use crate::onchain::types::ProposalType;
 use crate::onchain::types::WithdrawalRequest;
+use crate::withdrawals::withdrawal_limiter_consumption_amount;
 
 #[tracing::instrument(name = "watcher", skip_all)]
 pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Arc<Metrics>>) {
@@ -222,7 +223,9 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 // so this could be applied directly in the future.)
                 if matches!(
                     parse_proposal_type_from_type_tag(&proposal_executed_event.proposal_type),
-                    ProposalType::UpdateConfig | ProposalType::EmergencyPause
+                    ProposalType::UpdateConfig
+                        | ProposalType::EmergencyPause
+                        | ProposalType::UpdateGuardian
                 ) {
                     match super::scrape_hashi_config(client.clone(), state.hashi_id()).await {
                         Ok(config) => {
@@ -435,14 +438,66 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
             }
             HashiEvent::WithdrawalSignedEvent(event) => {
                 tracing::info!(withdrawal_txn_id = %event.withdrawal_txn_id, "Withdrawal signatures stored on-chain");
-                let mut state = state.state_mut();
-                if let Some(txn) = state
-                    .hashi
-                    .withdrawal_queue
-                    .withdrawal_txns
-                    .get_mut(&event.withdrawal_txn_id)
-                {
-                    txn.signatures = Some(event.signatures.clone());
+                // Watcher is the sole mutator of the local limiter
+                // post-bootstrap; advance it inline with the mirror update.
+                let limiter_inputs = {
+                    let mut state = state.state_mut();
+                    state
+                        .hashi
+                        .withdrawal_queue
+                        .withdrawal_txns
+                        .get_mut(&event.withdrawal_txn_id)
+                        .map(|txn| {
+                            txn.signatures = Some(event.signatures.clone());
+                            let amount_sats = withdrawal_limiter_consumption_amount(txn);
+                            let timestamp_secs = txn.timestamp_ms / 1000;
+                            (amount_sats, timestamp_secs)
+                        })
+                };
+                if let Some((amount_sats, timestamp_secs)) = limiter_inputs {
+                    if let Some(limiter) = state.local_limiter() {
+                        let seq = limiter.next_seq();
+                        let result = limiter.apply_consume(seq, timestamp_secs, amount_sats);
+                        if let Some(metrics) = state.metrics() {
+                            metrics.record_limiter_apply(&result);
+                        }
+                        match &result {
+                            Ok(()) => {
+                                if let Some(metrics) = state.metrics() {
+                                    metrics.guardian_limiter_anchor_events_total.inc();
+                                    metrics.record_limiter_state(
+                                        &limiter.snapshot(),
+                                        limiter.config(),
+                                    );
+                                }
+                                tracing::info!(
+                                    seq,
+                                    amount_sats,
+                                    timestamp_secs,
+                                    withdrawal_txn_id = %event.withdrawal_txn_id,
+                                    "Local limiter advanced from on-chain WithdrawalSignedEvent",
+                                );
+                            }
+                            Err(e) => {
+                                if let Some(metrics) = state.metrics() {
+                                    metrics.guardian_limiter_drifted.set(1);
+                                }
+                                tracing::error!(
+                                    ?e,
+                                    seq,
+                                    withdrawal_txn_id = %event.withdrawal_txn_id,
+                                    "Local limiter apply_consume failed; node is now drifted from guardian"
+                                );
+                            }
+                        }
+                    } else if let Some(metrics) = state.metrics() {
+                        metrics
+                            .guardian_limiter_apply_total
+                            .with_label_values(&[
+                                crate::metrics::GUARDIAN_LIMITER_OUTCOME_NO_LIMITER,
+                            ])
+                            .inc();
+                    }
                 }
             }
             HashiEvent::WithdrawalConfirmedEvent(event) => {
@@ -566,6 +621,7 @@ fn parse_proposal_type_from_type_tag(type_tag: &TypeTag) -> ProposalType {
         ("upgrade", "Upgrade") => ProposalType::Upgrade,
         ("emergency_pause", "EmergencyPause") => ProposalType::EmergencyPause,
         ("abort_reconfig", "AbortReconfig") => ProposalType::AbortReconfig,
+        ("update_guardian", "UpdateGuardian") => ProposalType::UpdateGuardian,
         _ => ProposalType::Unknown(format!("{}::{}", struct_tag.module(), struct_tag.name())),
     }
 }

@@ -11,9 +11,6 @@ use hashi::{hashi::Hashi, proposal};
 use std::string::String;
 use sui::{clock::Clock, vec_map::VecMap};
 
-const PAUSE_THRESHOLD_BPS: u64 = 5100; // 51% - low quorum for emergencies
-const UNPAUSE_THRESHOLD_BPS: u64 = 6667; // ~2/3 - higher bar for resuming
-
 public struct EmergencyPause has copy, drop, store {
     pause: bool,
 }
@@ -27,9 +24,9 @@ public fun propose(
 ): ID {
     hashi.config().assert_version_enabled();
     let threshold = if (pause) {
-        PAUSE_THRESHOLD_BPS
+        hashi.config().emergency_pause_threshold_bps()
     } else {
-        UNPAUSE_THRESHOLD_BPS
+        hashi.config().emergency_unpause_threshold_bps()
     };
     proposal::create(hashi, EmergencyPause { pause }, threshold, metadata, clock, ctx)
 }

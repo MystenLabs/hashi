@@ -398,13 +398,13 @@ mod tests {
 
     fn event(
         source: WithdrawalEventType,
-        wid: WithdrawalID,
+        wid_seed: u8,
         timestamp: UnixSeconds,
         fill: u8,
     ) -> MonitorWithdrawalEvent {
         MonitorWithdrawalEvent {
             event_type: source,
-            wid,
+            wid: WithdrawalID::new([wid_seed; 32]),
             timestamp_secs: timestamp,
             btc_txid: txid(fill),
         }

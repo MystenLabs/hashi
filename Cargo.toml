@@ -81,8 +81,8 @@ jiff = "0.2"
 tar = "0.4"
 
 # fastcrypto
-fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "d6539fd65ce7f9a5a786af3340e511b7dae454c1" }
-fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "d6539fd65ce7f9a5a786af3340e511b7dae454c1" }
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "52a012c7ebd5844f212cedcd26d64d6e1392cf95" }
+fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "52a012c7ebd5844f212cedcd26d64d6e1392cf95" }
 
 # Sui monorepo deps
 bin-version = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
