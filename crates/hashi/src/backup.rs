@@ -728,7 +728,9 @@ pub fn copy_restored_files_to_original_paths(
 /// the same filesystem as `dest`; that same-filesystem placement is
 /// required because `rename` does not work across mount points.
 ///
-/// Fails if `dest` already exists.
+/// If `dest` already exists, it must be an empty directory. This supports
+/// restoring into mounted volume roots that cannot be deleted, while still
+/// refusing to merge restored database state with existing files.
 pub fn copy_db_snapshot_to_original_path(
     extract_dir: &Path,
     manifest: &BackupManifest,
@@ -736,17 +738,43 @@ pub fn copy_db_snapshot_to_original_path(
     let source = extract_dir.join(DB_SNAPSHOT_TAR_PREFIX);
     let dest = &manifest.db.original_path;
 
-    // Pre-flight: refuse early if the destination already exists. This is
-    // checked again implicitly by the final rename, but failing here gives a
-    // clear error before doing all the copy work.
     if dest
         .try_exists()
         .with_context(|| format!("Failed to stat database destination {}", dest.display()))?
     {
-        anyhow::bail!(
-            "Refusing to overwrite existing database directory: {}",
-            dest.display()
+        if !dest.is_dir() {
+            anyhow::bail!(
+                "Refusing to overwrite existing database path: {}",
+                dest.display()
+            );
+        }
+        if fs::read_dir(dest)
+            .with_context(|| format!("Failed to read database directory {}", dest.display()))?
+            .next()
+            .transpose()?
+            .is_some()
+        {
+            anyhow::bail!(
+                "Refusing to restore database into non-empty directory: {}",
+                dest.display()
+            );
+        }
+
+        copy_dir_recursive_strict(&source, dest).with_context(|| {
+            format!(
+                "Failed to copy database snapshot from {} to empty destination {}",
+                source.display(),
+                dest.display()
+            )
+        })?;
+
+        info!(
+            from = %source.display(),
+            to = %dest.display(),
+            "Copied database snapshot to empty original path",
         );
+
+        return Ok(());
     }
 
     let parent = dest.parent().ok_or_else(|| {

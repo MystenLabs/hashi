@@ -821,7 +821,28 @@ mod tests {
     }
 
     #[test]
-    fn restore_copy_to_original_paths_refuses_to_overwrite_existing_db_dir() {
+    fn restore_copy_to_original_paths_restores_into_existing_empty_db_dir() {
+        let fixture = TestFixture::new();
+        let backup = save_with_fresh_identity(&fixture);
+
+        let db_path = fixture.db_path();
+
+        fs::remove_file(&fixture.config_path).unwrap();
+        fs::remove_file(&fixture.node_config_path).unwrap();
+        fs::remove_file(&fixture.keypair_path).unwrap();
+        fs::remove_file(&fixture.btc_key_path).unwrap();
+        fs::remove_dir_all(&db_path).unwrap();
+        fs::create_dir(&db_path).unwrap();
+
+        let out = tempfile::Builder::new().tempdir().unwrap();
+        restore(&backup.tarball, &backup.identity_file, out.path(), true).unwrap();
+
+        assert!(fixture.node_config_path.is_file());
+        let _db = crate::db::Database::open(&db_path).unwrap();
+    }
+
+    #[test]
+    fn restore_copy_to_original_paths_refuses_non_empty_db_dir() {
         let fixture = TestFixture::new();
         let backup = save_with_fresh_identity(&fixture);
 
@@ -839,7 +860,7 @@ mod tests {
         let err = restore(&backup.tarball, &backup.identity_file, out.path(), true).unwrap_err();
         let chain = format!("{err:#}");
         assert!(
-            chain.contains("Refusing to overwrite existing database directory"),
+            chain.contains("Refusing to restore database into non-empty directory"),
             "error chain did not mention db overwrite refusal: {chain}"
         );
         assert!(
