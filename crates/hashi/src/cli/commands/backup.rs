@@ -20,30 +20,33 @@ use std::str::FromStr;
 use tracing::info;
 
 use crate::backup;
-use crate::cli::config::BackupRecipient;
-use crate::cli::config::CliConfig;
+use crate::backup::BackupRecipient;
 use crate::cli::print_success;
 
-/// Save an encrypted backup of the current config, referenced files, and database
+/// Save an encrypted backup of the node config, referenced files, and database
 pub fn save(
-    config: &CliConfig,
+    node_config_path: &Path,
     backup_age_pubkey_override: Option<String>,
     output_dir: &Path,
 ) -> Result<()> {
+    let node_config = crate::config::Config::load(node_config_path).with_context(|| {
+        format!(
+            "Failed to load node config from {}",
+            node_config_path.display()
+        )
+    })?;
+
     let recipient = backup_age_pubkey_override
         .map(|value| BackupRecipient::from_str(&value))
         .transpose()?
-        .or_else(|| config.backup_age_pubkey.clone())
+        .or_else(|| node_config.backup_age_pubkey.clone())
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "No age public key configured. Pass --backup-age-pubkey or set backup_age_pubkey in the config file."
+                "No age public key configured. Pass --backup-age-pubkey or set backup-age-pubkey in the node config."
             )
         })?;
 
-    // `backup_file_paths` enforces all the structural invariants we need
-    // (CLI config in use, node config path set, node config loadable, key
-    // file paths actually exist).
-    let files = config.backup_file_paths()?;
+    let files = backup_file_paths(node_config_path, &node_config)?;
 
     for file in &files {
         if !file.exists() {
@@ -51,20 +54,6 @@ pub fn save(
         }
     }
 
-    // The DB path lives in the node config and isn't part of `files`, so we
-    // load the node config a second time here. `backup_file_paths` already
-    // proved this load succeeds, so an error here would have to be a TOCTOU
-    // — fine to surface as-is.
-    let node_config_path = config
-        .node_config_path
-        .as_ref()
-        .expect("backup_file_paths verified node_config_path is set");
-    let node_config = crate::config::Config::load(node_config_path).with_context(|| {
-        format!(
-            "Failed to load node config from {}",
-            node_config_path.display()
-        )
-    })?;
     let db_path = node_config.db.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
             "Node config at {} does not specify a database path",
@@ -127,6 +116,65 @@ pub fn save(
     print_success(&format!("Backup completed: {}", output_path.display()));
 
     Ok(())
+}
+
+/// All file paths which must be backed up to enable full node recovery
+/// (other than the db, which is backed up separately).
+fn backup_file_paths(
+    node_config_path: &Path,
+    node_config: &crate::config::Config,
+) -> Result<Vec<std::path::PathBuf>> {
+    let mut paths = vec![node_config_path.to_path_buf()];
+    paths.extend(node_config_referenced_files(node_config)?);
+    Ok(paths)
+}
+
+/// Return the set of external files referenced by path-style node config
+/// fields.
+///
+/// Both `tls_private_key` and `operator_private_key` are `Option<String>`
+/// interpreted as path-first, inline-PEM-fallback by the node. We classify
+/// the value here so the backup either includes the referenced file or, when
+/// the value is inline PEM, relies on the node config file itself to capture
+/// the key material. A path-shaped value that doesn't resolve to a file is
+/// an error: it would mean the node config points at a missing key, and
+/// silently skipping it would produce a backup that can't actually restore
+/// the node.
+fn node_config_referenced_files(
+    node_config: &crate::config::Config,
+) -> Result<Vec<std::path::PathBuf>> {
+    let mut paths = Vec::new();
+
+    for (field_name, raw) in [
+        ("tls_private_key", node_config.tls_private_key.as_deref()),
+        (
+            "operator_private_key",
+            node_config.operator_private_key.as_deref(),
+        ),
+    ] {
+        let Some(raw) = raw else { continue };
+
+        if is_inline_pem(raw) {
+            continue;
+        }
+
+        let candidate = Path::new(raw);
+        if !candidate.is_file() {
+            anyhow::bail!(
+                "node config field `{field_name}` is set to {raw:?} which is neither inline PEM nor an existing file. \
+                 Fix the value or remove it before running backup."
+            );
+        }
+        paths.push(candidate.to_path_buf());
+    }
+
+    Ok(paths)
+}
+
+/// Heuristic: PEM blobs start with the armor header `-----BEGIN`, optionally
+/// after some leading whitespace. A real path on any sane filesystem won't.
+fn is_inline_pem(value: &str) -> bool {
+    value.trim_start().starts_with("-----BEGIN")
 }
 
 /// Materialize a `BackupRecipient` into a concrete `age::Recipient` trait object
@@ -256,36 +304,33 @@ fn load_backup_identities(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::config::BitcoinConfig;
     use age::secrecy::ExposeSecret;
     use age::x25519;
     use std::path::Path;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    const CONFIG_CONTENTS: &[u8] = b"sui_rpc_url = \"https://fullnode.mainnet.sui.io:443\"\n";
+    const CLI_CONFIG_CONTENTS: &[u8] = b"sui_rpc_url = \"https://fullnode.mainnet.sui.io:443\"\n";
     const KEYPAIR_CONTENTS: &[u8] = b"test-ed25519-keypair-bytes";
     const BTC_KEY_CONTENTS: &[u8] = b"test-bitcoin-wif-bytes";
 
-    /// Fixture holding a populated source directory and a matching CliConfig.
+    /// Fixture holding a populated source directory and node config.
     struct TestFixture {
         _src: TempDir,
-        config: CliConfig,
         config_path: PathBuf,
+        node_config_path: PathBuf,
         keypair_path: PathBuf,
         btc_key_path: PathBuf,
     }
 
     impl TestFixture {
         fn db_path(&self) -> PathBuf {
-            let node_config =
-                crate::config::Config::load(self.config.node_config_path.as_ref().unwrap())
-                    .unwrap();
+            let node_config = crate::config::Config::load(&self.node_config_path).unwrap();
             node_config.db.unwrap()
         }
 
-        /// Create a new fixture with a config file, two referenced key files,
-        /// a node config pointing to a database, and an empty database on disk.
+        /// Create a new fixture with CLI-only files, a node config pointing to
+        /// a database, and an empty database on disk.
         fn new() -> Self {
             let src = tempfile::Builder::new().tempdir().unwrap();
             let config_path = src.path().join("hashi-cli.toml");
@@ -293,7 +338,7 @@ mod tests {
             let btc_key_path = src.path().join("btc.wif");
             let db_path = src.path().join("db");
 
-            fs::write(&config_path, CONFIG_CONTENTS).unwrap();
+            fs::write(&config_path, CLI_CONFIG_CONTENTS).unwrap();
             fs::write(&keypair_path, KEYPAIR_CONTENTS).unwrap();
             fs::write(&btc_key_path, BTC_KEY_CONTENTS).unwrap();
 
@@ -307,21 +352,10 @@ mod tests {
             node_config.save(&node_config_path).unwrap();
             drop(crate::db::Database::open(&db_path).unwrap());
 
-            let config = CliConfig {
-                loaded_from_path: Some(config_path.clone()),
-                keypair_path: Some(keypair_path.clone()),
-                node_config_path: Some(node_config_path),
-                bitcoin: Some(BitcoinConfig {
-                    private_key_path: Some(btc_key_path.clone()),
-                    ..BitcoinConfig::default()
-                }),
-                ..CliConfig::default()
-            };
-
             Self {
                 _src: src,
-                config,
                 config_path,
+                node_config_path,
                 keypair_path,
                 btc_key_path,
             }
@@ -342,7 +376,12 @@ mod tests {
         let identity = x25519::Identity::generate();
         let recipient = identity.to_public();
 
-        save(&fixture.config, Some(recipient.to_string()), dir.path()).unwrap();
+        save(
+            &fixture.node_config_path,
+            Some(recipient.to_string()),
+            dir.path(),
+        )
+        .unwrap();
 
         let tarball = fs::read_dir(dir.path())
             .unwrap()
@@ -406,14 +445,13 @@ mod tests {
         restore(&backup.tarball, &backup.identity_file, out.path(), false).unwrap();
 
         let extract_dir = expected_extract_dir(&backup.tarball, out.path());
-        assert_file_eq(&extract_dir.join("hashi-cli.toml"), CONFIG_CONTENTS);
-        assert_file_eq(&extract_dir.join("keypair.pem"), KEYPAIR_CONTENTS);
-        assert_file_eq(&extract_dir.join("btc.wif"), BTC_KEY_CONTENTS);
+        assert!(extract_dir.join("config.toml").is_file());
+        assert!(!extract_dir.join("hashi-cli.toml").exists());
+        assert!(!extract_dir.join("keypair.pem").exists());
+        assert!(!extract_dir.join("btc.wif").exists());
 
         // All restored files should be owner-only read/write.
-        assert_mode_0600(&extract_dir.join("hashi-cli.toml"));
-        assert_mode_0600(&extract_dir.join("keypair.pem"));
-        assert_mode_0600(&extract_dir.join("btc.wif"));
+        assert_mode_0600(&extract_dir.join("config.toml"));
 
         // The manifest should also be extracted alongside the restored files.
         let manifest_path = extract_dir.join(backup::BACKUP_MANIFEST_FILE_NAME);
@@ -425,8 +463,12 @@ mod tests {
         assert_mode_0600(&manifest_path);
         let manifest_toml = fs::read_to_string(&manifest_path).unwrap();
         assert!(
-            manifest_toml.contains("hashi-cli.toml"),
+            manifest_toml.contains("config.toml"),
             "extracted manifest missing expected entries: {manifest_toml}"
+        );
+        assert!(
+            !manifest_toml.contains("hashi-cli.toml"),
+            "manifest should not include CLI config: {manifest_toml}"
         );
     }
 
@@ -439,7 +481,7 @@ mod tests {
 
         // Delete the originals so copy_to_original_paths can recreate them.
         fs::remove_file(&fixture.config_path).unwrap();
-        fs::remove_file(fixture.config.node_config_path.as_ref().unwrap()).unwrap();
+        fs::remove_file(&fixture.node_config_path).unwrap();
         fs::remove_file(&fixture.keypair_path).unwrap();
         fs::remove_file(&fixture.btc_key_path).unwrap();
         fs::remove_dir_all(&db_path).unwrap();
@@ -447,19 +489,20 @@ mod tests {
         let out = tempfile::Builder::new().tempdir().unwrap();
         restore(&backup.tarball, &backup.identity_file, out.path(), true).unwrap();
 
-        // Both the nested extraction dir and the originals should now hold the right bytes.
+        // Only node config files are backed up; CLI config and its referenced
+        // files are intentionally ignored.
         let extract_dir = expected_extract_dir(&backup.tarball, out.path());
-        assert_file_eq(&extract_dir.join("hashi-cli.toml"), CONFIG_CONTENTS);
-        assert_file_eq(&extract_dir.join("keypair.pem"), KEYPAIR_CONTENTS);
-        assert_file_eq(&extract_dir.join("btc.wif"), BTC_KEY_CONTENTS);
+        assert!(extract_dir.join("config.toml").is_file());
+        assert!(!extract_dir.join("hashi-cli.toml").exists());
+        assert!(!extract_dir.join("keypair.pem").exists());
+        assert!(!extract_dir.join("btc.wif").exists());
 
-        assert_file_eq(&fixture.config_path, CONFIG_CONTENTS);
-        assert_file_eq(&fixture.keypair_path, KEYPAIR_CONTENTS);
-        assert_file_eq(&fixture.btc_key_path, BTC_KEY_CONTENTS);
+        assert!(fixture.node_config_path.is_file());
+        assert!(!fixture.config_path.exists());
+        assert!(!fixture.keypair_path.exists());
+        assert!(!fixture.btc_key_path.exists());
 
-        assert_mode_0600(&fixture.config_path);
-        assert_mode_0600(&fixture.keypair_path);
-        assert_mode_0600(&fixture.btc_key_path);
+        assert_mode_0600(&fixture.node_config_path);
 
         // The restored database should be openable.
         let _db = crate::db::Database::open(&db_path).unwrap();
@@ -470,11 +513,8 @@ mod tests {
         let fixture = TestFixture::new();
         let backup = save_with_fresh_identity(&fixture);
 
-        // Delete keypair and btc key but leave the config in place. The config file is
-        // the first entry in `backup_file_paths()`, so the copy-back loop will bail on
-        // its very first iteration without touching any other files.
-        fs::remove_file(&fixture.keypair_path).unwrap();
-        fs::remove_file(&fixture.btc_key_path).unwrap();
+        // Leave the node config in place. The copy-back loop should refuse to
+        // overwrite it before touching the database.
 
         let out = tempfile::Builder::new().tempdir().unwrap();
         let err = restore(&backup.tarball, &backup.identity_file, out.path(), true).unwrap_err();
@@ -484,60 +524,45 @@ mod tests {
             "error chain did not mention overwrite refusal: {chain}"
         );
         assert!(
-            chain.contains("hashi-cli.toml"),
+            chain.contains("config.toml"),
             "error chain did not mention the colliding file: {chain}"
         );
 
-        // The pre-existing config must be untouched, and the deleted originals must
-        // still be absent.
-        assert_file_eq(&fixture.config_path, CONFIG_CONTENTS);
-        assert!(!fixture.keypair_path.exists());
-        assert!(!fixture.btc_key_path.exists());
+        assert!(fixture.node_config_path.is_file());
     }
 
     #[test]
     fn basename_collision_disambiguates_and_copy_to_original_paths_restores_correctly() {
         // Set up two key files with the same basename in different directories.
         let src = tempfile::Builder::new().tempdir().unwrap();
-        let config_path = src.path().join("hashi-cli.toml");
-        let sui_dir = src.path().join("sui");
-        let btc_dir = src.path().join("btc");
-        fs::create_dir_all(&sui_dir).unwrap();
-        fs::create_dir_all(&btc_dir).unwrap();
+        let tls_dir = src.path().join("tls");
+        let op_dir = src.path().join("operator");
+        fs::create_dir_all(&tls_dir).unwrap();
+        fs::create_dir_all(&op_dir).unwrap();
 
-        let keypair_path = sui_dir.join("key.pem");
-        let btc_key_path = btc_dir.join("key.pem");
+        let tls_key_path = tls_dir.join("key.pem");
+        let op_key_path = op_dir.join("key.pem");
         let db_path = src.path().join("db");
 
-        fs::write(&config_path, CONFIG_CONTENTS).unwrap();
-        fs::write(&keypair_path, KEYPAIR_CONTENTS).unwrap();
-        fs::write(&btc_key_path, BTC_KEY_CONTENTS).unwrap();
+        fs::write(&tls_key_path, b"tls-key-bytes").unwrap();
+        fs::write(&op_key_path, b"operator-key-bytes").unwrap();
 
         let node_config_path = src.path().join("config.toml");
         let node_config = crate::config::Config {
             db: Some(db_path.clone()),
+            tls_private_key: Some(tls_key_path.to_string_lossy().into_owned()),
+            operator_private_key: Some(op_key_path.to_string_lossy().into_owned()),
             ..Default::default()
         };
         node_config.save(&node_config_path).unwrap();
         drop(crate::db::Database::open(&db_path).unwrap());
 
-        let config = CliConfig {
-            loaded_from_path: Some(config_path.clone()),
-            keypair_path: Some(keypair_path.clone()),
-            node_config_path: Some(node_config_path),
-            bitcoin: Some(BitcoinConfig {
-                private_key_path: Some(btc_key_path.clone()),
-                ..BitcoinConfig::default()
-            }),
-            ..CliConfig::default()
-        };
-
         let fixture = TestFixture {
             _src: src,
-            config,
-            config_path: config_path.clone(),
-            keypair_path: keypair_path.clone(),
-            btc_key_path: btc_key_path.clone(),
+            config_path: PathBuf::new(),
+            node_config_path: node_config_path.clone(),
+            keypair_path: PathBuf::new(),
+            btc_key_path: PathBuf::new(),
         };
 
         let backup = save_with_fresh_identity(&fixture);
@@ -547,23 +572,22 @@ mod tests {
         restore(&backup.tarball, &backup.identity_file, out.path(), false).unwrap();
 
         let extract_dir = expected_extract_dir(&backup.tarball, out.path());
-        assert_file_eq(&extract_dir.join("key.pem"), KEYPAIR_CONTENTS);
-        assert_file_eq(&extract_dir.join("key-2.pem"), BTC_KEY_CONTENTS);
+        assert_file_eq(&extract_dir.join("key.pem"), b"tls-key-bytes");
+        assert_file_eq(&extract_dir.join("key-2.pem"), b"operator-key-bytes");
 
         // Now test that --copy-to-original-paths uses the real paths, not the
         // disambiguated archive names.
         let db_path = fixture.db_path();
-        fs::remove_file(&config_path).unwrap();
-        fs::remove_file(fixture.config.node_config_path.as_ref().unwrap()).unwrap();
-        fs::remove_file(&keypair_path).unwrap();
-        fs::remove_file(&btc_key_path).unwrap();
+        fs::remove_file(&node_config_path).unwrap();
+        fs::remove_file(&tls_key_path).unwrap();
+        fs::remove_file(&op_key_path).unwrap();
         fs::remove_dir_all(&db_path).unwrap();
 
         let out2 = tempfile::Builder::new().tempdir().unwrap();
         restore(&backup.tarball, &backup.identity_file, out2.path(), true).unwrap();
 
-        assert_file_eq(&keypair_path, KEYPAIR_CONTENTS);
-        assert_file_eq(&btc_key_path, BTC_KEY_CONTENTS);
+        assert_file_eq(&tls_key_path, b"tls-key-bytes");
+        assert_file_eq(&op_key_path, b"operator-key-bytes");
     }
 
     #[test]
@@ -627,22 +651,17 @@ mod tests {
     }
 
     #[test]
-    fn save_errors_when_node_config_path_unset() {
-        // If the CLI config doesn't declare `node_config_path`, save must
-        // refuse — otherwise we'd silently back up without the DB.
+    fn save_uses_node_config_backup_age_pubkey() {
         let fixture = TestFixture::new();
-        let mut config = fixture.config.clone();
-        config.node_config_path = None;
-
-        let out = tempfile::Builder::new().tempdir().unwrap();
         let identity = x25519::Identity::generate();
-        let err = save(&config, Some(identity.to_public().to_string()), out.path()).unwrap_err();
+        let recipient = identity.to_public();
 
-        let chain = format!("{err:#}");
-        assert!(
-            chain.contains("node_config_path is not set"),
-            "expected node_config_path error, got: {chain}"
-        );
+        let mut node_config = crate::config::Config::load(&fixture.node_config_path).unwrap();
+        node_config.backup_age_pubkey = Some(recipient.to_string().parse().unwrap());
+        node_config.save(&fixture.node_config_path).unwrap();
+
+        let dir = tempfile::Builder::new().tempdir().unwrap();
+        save(&fixture.node_config_path, None, dir.path()).unwrap();
     }
 
     #[test]
@@ -656,7 +675,7 @@ mod tests {
         let out = tempfile::Builder::new().tempdir().unwrap();
         let identity = x25519::Identity::generate();
         let err = save(
-            &fixture.config,
+            &fixture.node_config_path,
             Some(identity.to_public().to_string()),
             out.path(),
         )
@@ -691,7 +710,7 @@ mod tests {
         let out = tempfile::Builder::new().tempdir().unwrap();
         let identity = x25519::Identity::generate();
         let err = save(
-            &fixture.config,
+            &fixture.node_config_path,
             Some(identity.to_public().to_string()),
             out.path(),
         )
@@ -717,13 +736,10 @@ mod tests {
         fs::write(&tls_key_path, b"tls-key-bytes").unwrap();
         fs::write(&op_key_path, b"operator-key-bytes").unwrap();
 
-        let mut node_config =
-            crate::config::Config::load(fixture.config.node_config_path.as_ref().unwrap()).unwrap();
+        let mut node_config = crate::config::Config::load(&fixture.node_config_path).unwrap();
         node_config.tls_private_key = Some(tls_key_path.to_string_lossy().into_owned());
         node_config.operator_private_key = Some(op_key_path.to_string_lossy().into_owned());
-        node_config
-            .save(fixture.config.node_config_path.as_ref().unwrap())
-            .unwrap();
+        node_config.save(&fixture.node_config_path).unwrap();
 
         let backup = save_with_fresh_identity(&fixture);
 
@@ -742,17 +758,14 @@ mod tests {
         // the node, so we bail instead.
         let fixture = TestFixture::new();
 
-        let mut node_config =
-            crate::config::Config::load(fixture.config.node_config_path.as_ref().unwrap()).unwrap();
+        let mut node_config = crate::config::Config::load(&fixture.node_config_path).unwrap();
         node_config.tls_private_key = Some("/this/path/definitely/does/not/exist.pem".to_string());
-        node_config
-            .save(fixture.config.node_config_path.as_ref().unwrap())
-            .unwrap();
+        node_config.save(&fixture.node_config_path).unwrap();
 
         let out = tempfile::Builder::new().tempdir().unwrap();
         let identity = x25519::Identity::generate();
         let err = save(
-            &fixture.config,
+            &fixture.node_config_path,
             Some(identity.to_public().to_string()),
             out.path(),
         )
@@ -776,15 +789,12 @@ mod tests {
         // itself already captures inline values.
         let fixture = TestFixture::new();
 
-        let mut node_config =
-            crate::config::Config::load(fixture.config.node_config_path.as_ref().unwrap()).unwrap();
+        let mut node_config = crate::config::Config::load(&fixture.node_config_path).unwrap();
         node_config.tls_private_key = Some(
             "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIA==\n-----END PRIVATE KEY-----\n"
                 .to_string(),
         );
-        node_config
-            .save(fixture.config.node_config_path.as_ref().unwrap())
-            .unwrap();
+        node_config.save(&fixture.node_config_path).unwrap();
 
         // Just running save without error is the assertion: if the inline
         // PEM were treated as a path, the pre-flight `file.exists()` check
@@ -817,10 +827,10 @@ mod tests {
 
         let db_path = fixture.db_path();
 
-        // Delete the config-file originals so the config-copy loop succeeds and we
+        // Delete the file originals so the config-copy loop succeeds and we
         // reach the db-copy step, but leave the db dir in place.
         fs::remove_file(&fixture.config_path).unwrap();
-        fs::remove_file(fixture.config.node_config_path.as_ref().unwrap()).unwrap();
+        fs::remove_file(&fixture.node_config_path).unwrap();
         fs::remove_file(&fixture.keypair_path).unwrap();
         fs::remove_file(&fixture.btc_key_path).unwrap();
         assert!(db_path.exists(), "db dir should still exist for this test");

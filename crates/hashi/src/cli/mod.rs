@@ -303,8 +303,11 @@ pub enum ConfigCommands {
 
 #[derive(Subcommand)]
 pub enum BackupCommands {
-    /// Save an encrypted backup of the current config and referenced files
+    /// Save an encrypted backup of the node config and referenced files
     Save {
+        /// Path to the validator node config file
+        node_config_path: std::path::PathBuf,
+
         /// Age recipient public key used to encrypt the backup
         #[clap(long)]
         backup_age_pubkey: Option<String>,
@@ -739,10 +742,11 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
         },
         CliCommand::Backup { action } => match action {
             BackupCommands::Save {
+                node_config_path,
                 backup_age_pubkey,
                 output_dir,
             } => {
-                commands::backup::save(&config, backup_age_pubkey, &output_dir)?;
+                commands::backup::save(&node_config_path, backup_age_pubkey, &output_dir)?;
             }
             BackupCommands::Restore {
                 backup_tarball,

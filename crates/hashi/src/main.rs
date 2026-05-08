@@ -55,7 +55,7 @@ enum Commands {
         action: hashi::cli::ConfigCommands,
     },
 
-    /// Encrypted backup and restore of CLI config and referenced files
+    /// Encrypted backup and restore of node config and referenced files
     Backup {
         #[clap(flatten)]
         cli_opts: hashi::cli::CliGlobalOpts,
