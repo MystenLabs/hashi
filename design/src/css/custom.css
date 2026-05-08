@@ -124,6 +124,51 @@ code {
   letter-spacing: -0.02em;
 }
 
+/* "Ask Hashi AI" launcher button in the navbar (mirrors the Sui-docs and
+   Walrus-docs kapa.ai trigger). */
+.kapa-trigger-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.95rem;
+  margin-left: 0.5rem;
+  background: #ffffff;
+  color: #0f0f0f;
+  font-family: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1;
+  border: 1px solid #E0E2E6;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+  white-space: nowrap;
+}
+
+.kapa-trigger-btn:hover,
+.kapa-trigger-btn:focus-visible {
+  background: #F4F5F7;
+  border-color: #C2C6CD;
+  outline: none;
+}
+
+.kapa-trigger-btn img {
+  display: block;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+/* Hide the label on smaller viewports — keeps just the logo as a tappable icon. */
+@media (max-width: 996px) {
+  .kapa-trigger-btn__label {
+    display: none;
+  }
+  .kapa-trigger-btn {
+    padding: 0.4rem 0.55rem;
+  }
+}
+
 /* Sidebar */
 .theme-doc-sidebar-container {
   border-right: 1px solid rgba(15, 15, 15, 0.16);

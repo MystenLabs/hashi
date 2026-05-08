@@ -13,7 +13,8 @@
     "write-translations": "docusaurus write-translations",
     "write-heading-ids": "docusaurus write-heading-ids",
     "prebuild": "node scripts/generate-import-context.js",
-    "prestart": "node scripts/generate-import-context.js"
+    "prestart": "node scripts/generate-import-context.js",
+    "postbuild": "node scripts/copy-markdown-files.js && node scripts/generate-llmstxt.js"
   },
   "dependencies": {
     "@docusaurus/core": "3.9.2",

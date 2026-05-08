@@ -51,7 +51,79 @@ const config = {
 
   themes: ['@docusaurus/theme-mermaid'],
 
+  scripts: [
+    {
+      src: 'https://widget.kapa.ai/kapa-widget.bundle.js',
+      'data-website-id': '8bd95839-754a-4bef-8ea5-4e0a0617227a',
+      'data-project-name': 'Hashi Knowledge',
+      'data-project-color': '#298DFF',
+      // The default kapa floating button is hidden — the trigger lives in the
+      // navbar (top-right), wired up below as an `html` navbar item.
+      'data-button-hide': 'true',
+      'data-modal-title': 'Ask Hashi AI',
+      'data-modal-ask-ai-input-placeholder': 'Ask me anything about Hashi!',
+      'data-modal-example-questions':
+        'How does the deposit flow work?,What does the Guardian do?,How does Hashi handle Bitcoin reorganizations?,What are the MPC committee thresholds?',
+      'data-modal-image': '/hashi/design/img/logo.svg',
+      async: true,
+    },
+  ],
+
   plugins: [
+    // Inject <link rel="alternate" type="text/plain" href="/llms.txt"> into
+    // every page so agents following the agentdocsspec.com convention can
+    // discover the LLM-optimized index.
+    function llmsTxtDirectivePlugin() {
+      return {
+        name: 'llms-txt-directive-plugin',
+        injectHtmlTags() {
+          return {
+            preBodyTags: [
+              {
+                tagName: 'link',
+                attributes: {
+                  rel: 'alternate',
+                  type: 'text/plain',
+                  href: '/hashi/design/llms.txt',
+                  title: 'LLMs.txt',
+                },
+              },
+            ],
+          };
+        },
+      };
+    },
+    // Serve `Content-Type: text/markdown` for `.md` URLs in dev (`npm run start`)
+    // so content-negotiation works locally. On GitHub Pages, `.md` files are
+    // already served with `text/markdown; charset=UTF-8` because we ship a
+    // `.nojekyll` and the content-type is mapped from the file extension.
+    function markdownHeadersPlugin() {
+      return {
+        name: 'markdown-headers-plugin',
+        configureWebpack() {
+          return {
+            devServer: {
+              setupMiddlewares(middlewares) {
+                middlewares.unshift({
+                  name: 'markdown-content-type',
+                  middleware: (req, res, next) => {
+                    if (req.url.endsWith('.md')) {
+                      res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+                      res.setHeader('Content-Disposition', 'inline');
+                    } else if (req.url.endsWith('.txt')) {
+                      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+                      res.setHeader('Content-Disposition', 'inline');
+                    }
+                    next();
+                  },
+                });
+                return middlewares;
+              },
+            },
+          };
+        },
+      };
+    },
     'docusaurus-plugin-copy-page-button',
     [
       '@docusaurus/plugin-client-redirects',
@@ -156,6 +228,15 @@ const config = {
           href: '/',
         },
         items: [
+          {
+            type: 'html',
+            position: 'right',
+            value:
+              '<button type="button" class="kapa-trigger-btn" onclick="window.Kapa && window.Kapa.open()" aria-label="Ask Hashi AI">' +
+              '<img src="/hashi/design/img/logo.svg" alt="" width="20" height="20" />' +
+              '<span class="kapa-trigger-btn__label">Ask Hashi AI</span>' +
+              '</button>',
+          },
           {
             href: 'https://github.com/MystenLabs/hashi',
             label: 'GitHub',
