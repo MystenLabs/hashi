@@ -42,9 +42,15 @@ function cleanForMarkdown(raw, frontMatter) {
   let header = "";
   if (frontMatter?.title) {
     header = `# ${frontMatter.title}\n\n`;
-    if (frontMatter.description) {
-      header += `> ${frontMatter.description}\n\n`;
-    }
+  }
+  // Markdown llms.txt directive — agents fetching `.md` URLs discover the
+  // index from this line. Mirrors the Sui docs convention:
+  // https://agentdocsspec.com/spec/#llms-txt-directive-md
+  header +=
+    "*[Documentation index](/hashi/design/llms.txt) · " +
+    "[Full index](/hashi/design/llms-full.txt)*\n\n";
+  if (frontMatter?.description) {
+    header += `> ${frontMatter.description}\n\n`;
   }
 
   return header + body.trim() + "\n";
