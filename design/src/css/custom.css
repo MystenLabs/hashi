@@ -1,0 +1,153 @@
+/**
+ * Any CSS included here will be global. The classic template
+ * bundles Infima by default — this file layers MystenLabs house style
+ * (Seal-style typography & layout, Sui-docs color palette) on top.
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ABCNormal — the MystenLabs display/body font. */
+@font-face {
+  font-family: ABCNormal;
+  src: url("https://cdn.prod.website-files.com/687615731a76518b8c27cf39/68762aa8e70ed720e995231b_ABCNormal-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: ABCNormal;
+  src: url("https://cdn.prod.website-files.com/687615731a76518b8c27cf39/68762b01623f1b898c85e3e8_ABCNormal-Medium.ttf") format("truetype");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Sui-docs color palette tokens. */
+:root {
+  --hashi-black: #000000;
+  --hashi-dark-bg: #00060F;
+  --hashi-blue: #298DFF;
+  --hashi-blue-bright: #5CA9FF;
+  --hashi-blue-light: #DDF2FF;
+  --hashi-blue-lighter: #8FCBFF;
+  --hashi-blue-dark: #1759C4;
+  --hashi-blue-darker: #002E6A;
+
+  /* Light mode primary — Sui blue. */
+  --ifm-color-primary: #298DFF;
+  --ifm-color-primary-dark: #1759C4;
+  --ifm-color-primary-darker: #1759C4;
+  --ifm-color-primary-darkest: #002E6A;
+  --ifm-color-primary-light: #5CA9FF;
+  --ifm-color-primary-lighter: #8FCBFF;
+  --ifm-color-primary-lightest: #BCE2FF;
+
+  --ifm-background-color: #ffffff;
+  --ifm-font-color-base: #0f0f0f;
+  --ifm-font-family-base: ABCNormal, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  --ifm-heading-font-family: ABCNormal, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  --ifm-code-font-size: 95%;
+  --ifm-heading-font-weight: 500;
+  --ifm-font-weight-semibold: 500;
+  --ifm-font-weight-bold: 500;
+
+  --docusaurus-highlighted-code-line-bg: rgba(41, 141, 255, 0.1);
+}
+
+/* Dark mode — Sui keeps the same primary blue (no shift like Seal's blue→green). */
+html[data-theme='dark'] {
+  --ifm-color-primary: #298DFF;
+  --ifm-color-primary-dark: #1759C4;
+  --ifm-color-primary-darker: #1759C4;
+  --ifm-color-primary-darkest: #002E6A;
+  --ifm-color-primary-light: #5CA9FF;
+  --ifm-color-primary-lighter: #8FCBFF;
+  --ifm-color-primary-lightest: #BCE2FF;
+
+  --ifm-background-color: #00060F;
+  --ifm-background-surface-color: #131518;
+  --ifm-font-color-base: #ffffff;
+  --ifm-heading-color: #ffffff;
+  --ifm-navbar-background-color: #131518;
+  --ifm-footer-background-color: #00060F;
+  --ifm-menu-color: #ffffff;
+  --ifm-toc-link-color: #ffffff;
+
+  --docusaurus-highlighted-code-line-bg: rgba(41, 141, 255, 0.15);
+}
+
+html[data-theme='dark'] body {
+  --ifm-background-color: #00060F;
+  --ifm-font-color-base: #ffffff;
+}
+
+/* Global typography */
+body {
+  font-family: var(--ifm-font-family-base);
+  letter-spacing: -0.01em;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--ifm-heading-font-family);
+  font-weight: var(--ifm-heading-font-weight);
+  letter-spacing: -0.02em;
+}
+
+a {
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+code {
+  border-radius: 5px;
+}
+
+/* Navbar */
+.navbar {
+  padding-top: 0.6em;
+  padding-bottom: 0.6em;
+}
+
+.navbar__logo {
+  height: 2.5rem;
+}
+
+.navbar__title {
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+/* Sidebar */
+.theme-doc-sidebar-container {
+  border-right: 1px solid rgba(15, 15, 15, 0.16);
+}
+
+[data-theme='dark'] .theme-doc-sidebar-container {
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Buttons */
+.button {
+  border-radius: 200px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  transition: all 0.2s;
+}
+
+/* Admonitions / callouts */
+.admonition {
+  border-radius: 10px;
+}
+
+/* Tables left-align (preserved from the original mdbook custom.css). */
+table {
+  margin-left: 0;
+  margin-right: auto;
+}

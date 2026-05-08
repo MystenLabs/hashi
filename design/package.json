@@ -1,0 +1,61 @@
+{
+  "name": "hashi-design-docs",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "docusaurus": "docusaurus",
+    "start": "docusaurus start",
+    "build": "docusaurus build",
+    "swizzle": "docusaurus swizzle",
+    "deploy": "docusaurus deploy",
+    "clear": "docusaurus clear",
+    "serve": "docusaurus serve",
+    "write-translations": "docusaurus write-translations",
+    "write-heading-ids": "docusaurus write-heading-ids",
+    "prebuild": "node scripts/generate-import-context.js",
+    "prestart": "node scripts/generate-import-context.js"
+  },
+  "dependencies": {
+    "@docusaurus/core": "3.9.2",
+    "@docusaurus/plugin-client-redirects": "3.9.2",
+    "@docusaurus/preset-classic": "3.9.2",
+    "@docusaurus/theme-mermaid": "3.9.2",
+    "@mdx-js/react": "^3.0.0",
+    "@plausible-analytics/tracker": "^0.4.3",
+    "autoprefixer": "^10.4.20",
+    "clsx": "^2.0.0",
+    "docusaurus-plugin-copy-page-button": "^0.3.5",
+    "glob": "^10.3.10",
+    "gray-matter": "^4.0.3",
+    "markdown-it": "^14.1.0",
+    "postcss": "^8.4.47",
+    "prism-react-renderer": "^2.3.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwindcss": "^3.4.14",
+    "turndown": "^7.2.0",
+    "unist-util-visit": "^5.0.0"
+  },
+  "browserslist": {
+    "production": [
+      ">0.5%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "engines": {
+    "node": ">=20.0"
+  },
+  "overrides": {
+    "@docusaurus/core": "3.9.2",
+    "@docusaurus/plugin-client-redirects": "3.9.2",
+    "@docusaurus/preset-classic": "3.9.2",
+    "@docusaurus/theme-mermaid": "3.9.2",
+    "webpack": "5.97.1"
+  }
+}
