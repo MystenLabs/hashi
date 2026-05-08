@@ -99,7 +99,10 @@ async fn normal_withdrawal_inner(
     }
 
     info!("Checking rate limits.");
-    let consumed_amount_sats = request.utxos().external_out_amount().to_sat();
+    // Gross outflow (= inputs - change = external_out + miner_fee).
+    // Miner fee leaves the pool too, so it must consume the limit;
+    // change flows back, so it must not.
+    let consumed_amount_sats = request.utxos().gross_outflow_amount().to_sat();
     let limiter_guard = enclave
         .state
         .consume_from_limiter(
@@ -284,7 +287,7 @@ mod tests {
         let amount_sats = signed_request
             .message()
             .utxos()
-            .external_out_amount()
+            .gross_outflow_amount()
             .to_sat();
         // Set request amount as the max bucket capacity
         let enclave =
@@ -302,7 +305,7 @@ mod tests {
             100,
             0,
         );
-        let amount_sats = req1.message().utxos().external_out_amount().to_sat();
+        let amount_sats = req1.message().utxos().gross_outflow_amount().to_sat();
         // Bucket capacity == one withdrawal, so second will be rejected.
         let enclave =
             setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;

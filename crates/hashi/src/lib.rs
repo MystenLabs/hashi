@@ -60,7 +60,7 @@ pub struct Hashi {
     screener_client: OnceLock<Option<grpc::screener_client::ScreenerClient>>,
     guardian_client: OnceLock<Option<grpc::guardian_client::GuardianClient>>,
     guardian_signing_pubkey: OnceLock<Option<hashi_types::guardian::GuardianPubKey>>,
-    local_limiter: RwLock<Option<Arc<guardian_limiter::LocalLimiter>>>,
+    local_limiter: OnceLock<Arc<guardian_limiter::LocalLimiter>>,
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
 }
@@ -84,7 +84,7 @@ impl Hashi {
             screener_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
             guardian_signing_pubkey: OnceLock::new(),
-            local_limiter: RwLock::new(None),
+            local_limiter: OnceLock::new(),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
@@ -111,7 +111,7 @@ impl Hashi {
             screener_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
             guardian_signing_pubkey: OnceLock::new(),
-            local_limiter: RwLock::new(None),
+            local_limiter: OnceLock::new(),
             reconfig_signatures: RwLock::new(HashMap::new()),
         }))
     }
@@ -214,7 +214,7 @@ impl Hashi {
     }
 
     pub fn local_limiter(&self) -> Option<Arc<guardian_limiter::LocalLimiter>> {
-        self.local_limiter.read().unwrap().clone()
+        self.local_limiter.get().cloned()
     }
 
     async fn initialize_onchain_state(&self) -> anyhow::Result<Service> {
@@ -705,14 +705,16 @@ impl Hashi {
             tracing::debug!("guardian bootstrap: guardian has no limiter yet");
             return false;
         };
-        let mut slot = self.local_limiter.write().unwrap();
-        if slot.is_none() {
+        let limiter = Arc::new(guardian_limiter::LocalLimiter::new(config, state));
+        if self.local_limiter.set(limiter.clone()).is_ok() {
             tracing::info!(
                 ?state,
                 ?config,
                 "Local guardian limiter seeded from GetGuardianInfo",
             );
-            *slot = Some(Arc::new(guardian_limiter::LocalLimiter::new(config, state)));
+            // Hand the same Arc to OnchainState so the watcher can advance
+            // it inline when WithdrawalSignedEvent fires.
+            self.onchain_state().set_local_limiter(limiter);
         }
         true
     }

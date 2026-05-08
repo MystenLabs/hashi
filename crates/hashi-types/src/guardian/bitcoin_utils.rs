@@ -344,6 +344,23 @@ impl TxUTXOs {
             .sum()
     }
 
+    /// BTC that leaves the pool when this txn broadcasts: `inputs - change`,
+    /// equivalent to `external_out_amount + miner_fee`. The amount that
+    /// consumes the rate-limiter (miner fee leaves the pool too; change
+    /// flows back).
+    pub fn gross_outflow_amount(&self) -> Amount {
+        let inputs: Amount = self.inputs.iter().map(|i| i.amount).sum();
+        let internal: Amount = self
+            .outputs
+            .iter()
+            .filter_map(|utxo| match utxo {
+                OutputUTXO::Internal(x) => Some(x.amount),
+                OutputUTXO::External(_) => None,
+            })
+            .sum();
+        inputs - internal
+    }
+
     /// Constructs an unsigned Bitcoin transaction for these UTXOs.
     fn unsigned_tx(
         &self,

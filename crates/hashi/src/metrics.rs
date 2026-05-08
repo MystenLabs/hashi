@@ -75,6 +75,12 @@ pub struct Metrics {
     pub leader_retries_total: IntCounterVec,
     pub leader_items_in_backoff: IntGaugeVec,
 
+    /// Withdrawals skipped because their gross amount exceeds the
+    /// guardian's `max_bucket_capacity`. The request stays approved
+    /// on-chain (we never auto-reject); operator intervention is
+    /// required (raise the cap or have the user cancel).
+    pub guardian_limiter_stuck_oversize_skipped_total: IntCounter,
+
     pub btc_fee_rate_sat_per_kvb: IntGauge,
 
     pub mpc_sign_duration_seconds: HistogramVec,
@@ -457,6 +463,12 @@ impl Metrics {
                 "hashi_leader_items_in_backoff",
                 "Number of requests currently in retry backoff by operation",
                 &["operation"],
+                registry,
+            )
+            .unwrap(),
+            guardian_limiter_stuck_oversize_skipped_total: register_int_counter_with_registry!(
+                "hashi_guardian_limiter_stuck_oversize_skipped_total",
+                "Withdrawal requests skipped because their amount exceeds the limiter's max bucket capacity",
                 registry,
             )
             .unwrap(),

@@ -27,6 +27,7 @@ use crate::onchain::types::DepositRequest;
 use crate::onchain::types::Proposal;
 use crate::onchain::types::ProposalType;
 use crate::onchain::types::WithdrawalRequest;
+use crate::withdrawals::withdrawal_limiter_consumption_amount;
 
 #[tracing::instrument(name = "watcher", skip_all)]
 pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Arc<Metrics>>) {
@@ -437,14 +438,41 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
             }
             HashiEvent::WithdrawalSignedEvent(event) => {
                 tracing::info!(withdrawal_txn_id = %event.withdrawal_txn_id, "Withdrawal signatures stored on-chain");
-                let mut state = state.state_mut();
-                if let Some(txn) = state
-                    .hashi
-                    .withdrawal_queue
-                    .withdrawal_txns
-                    .get_mut(&event.withdrawal_txn_id)
+                // Watcher is the sole mutator of the local limiter
+                // post-bootstrap; advance it inline with the mirror update.
+                let limiter_inputs = {
+                    let mut state = state.state_mut();
+                    state
+                        .hashi
+                        .withdrawal_queue
+                        .withdrawal_txns
+                        .get_mut(&event.withdrawal_txn_id)
+                        .map(|txn| {
+                            txn.signatures = Some(event.signatures.clone());
+                            let amount_sats = withdrawal_limiter_consumption_amount(txn);
+                            let timestamp_secs = txn.timestamp_ms / 1000;
+                            (amount_sats, timestamp_secs)
+                        })
+                };
+                if let Some((amount_sats, timestamp_secs)) = limiter_inputs
+                    && let Some(limiter) = state.local_limiter()
                 {
-                    txn.signatures = Some(event.signatures.clone());
+                    let seq = limiter.next_seq();
+                    match limiter.apply_consume(seq, timestamp_secs, amount_sats) {
+                        Ok(()) => tracing::info!(
+                            seq,
+                            amount_sats,
+                            timestamp_secs,
+                            withdrawal_txn_id = %event.withdrawal_txn_id,
+                            "Local limiter advanced from on-chain WithdrawalSignedEvent",
+                        ),
+                        Err(e) => tracing::error!(
+                            ?e,
+                            seq,
+                            withdrawal_txn_id = %event.withdrawal_txn_id,
+                            "Local limiter apply_consume failed; node is now drifted from guardian"
+                        ),
+                    }
                 }
             }
             HashiEvent::WithdrawalConfirmedEvent(event) => {

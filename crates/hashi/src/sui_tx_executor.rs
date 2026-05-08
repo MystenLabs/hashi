@@ -1203,7 +1203,7 @@ impl SuiTxExecutor {
         request_ids: &[Address],
         signatures: &[Vec<u8>],
         cert: &CommitteeSignature,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
 
         let hashi_arg = builder.object(
@@ -1239,7 +1239,12 @@ impl SuiTxExecutor {
                 response.transaction().effects().status()
             );
         }
-        Ok(())
+        // `execute_transaction_and_wait_for_checkpoint` guarantees this is set.
+        let checkpoint = response
+            .transaction()
+            .checkpoint_opt()
+            .ok_or_else(|| anyhow::anyhow!("sign_withdrawal response missing checkpoint"))?;
+        Ok(checkpoint)
     }
 
     /// Execute `withdraw::cancel_withdrawal` to cancel a pending withdrawal request.

@@ -336,6 +336,8 @@ mod tests {
             for node in networks.hashi_network.nodes() {
                 assert!(node.hashi().config.guardian_endpoint().is_some());
                 assert!(node.hashi().guardian_client().is_some());
+                // Harness waits for limiter bootstrap before returning.
+                assert!(node.hashi().local_limiter().is_some());
             }
             let harness = networks
                 .guardian_harness
