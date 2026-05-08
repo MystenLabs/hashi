@@ -276,6 +276,15 @@ const config = {
             labelBoxBorderColor: '#6C7584',
             labelTextColor: '#FFFFFF',
             loopTextColor: '#FFFFFF',
+            // Below variables are not in the Sui diagram-standards palette,
+            // but mermaid's "base" theme defaults render these elements in
+            // a yellow/orange tone that clashes with the standards. Pinning
+            // them keeps autonumber circles + actor styling on-palette.
+            actorBkg: '#000000',
+            actorBorder: '#6C7584',
+            actorTextColor: '#FFFFFF',
+            actorLineColor: '#6C7584',
+            sequenceNumberColor: '#FFFFFF',
           },
         },
       },
