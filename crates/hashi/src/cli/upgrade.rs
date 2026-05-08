@@ -109,7 +109,10 @@ pub fn build_upgrade_package(
         .arg("build")
         .arg("-e")
         .arg("testnet")
-        .arg("--dump-bytecode-as-base64");
+        // --no-tree-shaking: avoid the RPC call newer sui CLI makes during
+        // --dump-bytecode-as-base64; required for offline builds (CI, e2e).
+        .arg("--dump-bytecode-as-base64")
+        .arg("--no-tree-shaking");
 
     let output = cmd.output()?;
     anyhow::ensure!(
