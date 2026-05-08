@@ -421,6 +421,24 @@ mod tests {
         )
         .await?;
 
+        if with_guardian {
+            let guardian_state = networks
+                .guardian_harness
+                .as_ref()
+                .expect("harness present when .with_guardian() is set")
+                .enclave()
+                .state
+                .limiter_state()
+                .await
+                .expect("guardian limiter state present after a successful withdrawal");
+            assert_eq!(guardian_state.next_seq, 1);
+            let local_state = hashi
+                .local_limiter()
+                .expect("local limiter present after bootstrap")
+                .snapshot();
+            assert_eq!(local_state, guardian_state);
+        }
+
         info!("=== Bitcoin Withdrawal E2E Test{label} Passed ===");
         Ok(())
     }

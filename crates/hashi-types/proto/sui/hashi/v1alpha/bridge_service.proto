@@ -18,6 +18,9 @@ service BridgeService {
   rpc SignWithdrawalTxConstruction(SignWithdrawalTxConstructionRequest) returns (SignWithdrawalTxConstructionResponse);
   // Step 2b: Sign a bitcoin withdrawal transaction (MPC Schnorr).
   rpc SignWithdrawalTransaction(SignWithdrawalTransactionRequest) returns (SignWithdrawalTransactionResponse);
+  // Sign a guardian rate-limiting request; the leader aggregates the
+  // certificate and forwards it to the guardian after MPC quorum.
+  rpc SignGuardianWithdrawalRequest(SignGuardianWithdrawalRequestRequest) returns (SignGuardianWithdrawalRequestResponse);
   // Step 3: Sign the BLS certificate over the witness signatures for on-chain storage.
   rpc SignWithdrawalTxSigning(SignWithdrawalTxSigningRequest) returns (SignWithdrawalTxSigningResponse);
   // Step 4: Sign committee approval to confirm a processed withdrawal on-chain.
@@ -162,5 +165,24 @@ message SignWithdrawalConfirmationRequest {
 }
 
 message SignWithdrawalConfirmationResponse {
+  MemberSignature member_signature = 1;
+}
+
+// Each field is leader-supplied; followers reconstruct the same
+// `StandardWithdrawalRequest` from on-chain state and BLS-sign it.
+message SignGuardianWithdrawalRequestRequest {
+  // The id of the WithdrawalTransaction on Sui (32 bytes). Doubles as the
+  // guardian-side `wid`.
+  bytes withdrawal_txn_id = 1;
+
+  // Sui checkpoint timestamp in unix seconds, bounded by followers against
+  // their own latest checkpoint.
+  uint64 timestamp_secs = 2;
+
+  // Monotonic sequence number for guardian replay prevention.
+  uint64 seq = 3;
+}
+
+message SignGuardianWithdrawalRequestResponse {
   MemberSignature member_signature = 1;
 }
