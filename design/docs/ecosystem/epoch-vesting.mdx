@@ -1,0 +1,121 @@
+---
+sidebar_label: Epoch — BTC Vesting
+description: How Epoch uses hBTC from Hashi to enable trustless, on-chain Bitcoin vesting schedules on Sui.
+keywords: [hBTC, vesting, Epoch, Sui, Bitcoin, DeFi, token vesting, BTC]
+---
+
+# Epoch — Trustless BTC Vesting with hBTC
+
+[Epoch](https://github.com/epochprotocol) is an on-chain vesting protocol on Sui that lets teams and individuals lock tokens inside smart-contract vaults and release them to beneficiaries over a configurable schedule. Because Epoch vaults are generic (`Vault<phantom T>`) they accept any `Coin<T>` — including `Coin<hBTC>` minted by Hashi.
+
+This page shows how hBTC unlocks a use case that was previously impossible without a trusted custodian: **Bitcoin vesting schedules enforced entirely by Sui smart contracts**.
+
+---
+
+## The problem: BTC has no native programmability
+
+BTC holders who want to vest tokens to employees, investors, or grant recipients today face an unpleasant choice:
+
+- **Custodied wrappers** (WBTC, etc.) — trust a centralised issuer to hold the underlying BTC.
+- **Off-chain agreements** — rely on legal contracts with no on-chain enforcement.
+- **Native Bitcoin scripts** — limited time-lock primitives, no rich vesting logic (cliff, linear, partial claims).
+
+Hashi solves the custody problem. Epoch solves the programmability problem. Together they close the gap.
+
+---
+
+## How it works
+
+### 1. Deposit BTC → receive hBTC
+
+The user sends BTC to their unique Hashi deposit address on Bitcoin (see [User Flows](./user-flows) and [Deposit](./deposit) for the full flow). After the Hashi committee reaches quorum and the time-delay window elapses, an equivalent amount of `hBTC` is minted into the user's Sui wallet:
+
+```
+BTC (Bitcoin L1) ──Hashi──► Coin<hBTC> (Sui)
+```
+
+`hBTC` is a standard Sui fungible token. It can be transferred, held in wallets, and passed into any Move function that accepts a `Coin<T>`.
+
+### 2. Create a vesting vault on Epoch
+
+With `hBTC` in hand, the grantor calls Epoch's `create_vault` entry function, specifying the beneficiary address, vesting schedule, and cliff period:
+
+```move
+public entry fun create_vault<T>(
+    coin: Coin<T>,          // Coin<hBTC> from Hashi
+    beneficiary: address,
+    start_timestamp_ms: u64,
+    cliff_duration_ms: u64,
+    vesting_duration_ms: u64,
+    ctx: &mut TxContext,
+)
+```
+
+Because `T` is phantom, the vault contract requires zero changes to support `hBTC` — it already works.
+
+### 3. Beneficiary claims over time
+
+As time passes, the vested portion of `hBTC` becomes claimable. The beneficiary calls `claim` and receives `Coin<hBTC>` proportional to how much of the schedule has elapsed:
+
+```move
+public entry fun claim<T>(
+    vault: &mut Vault<T>,
+    clock: &Clock,
+    ctx: &mut TxContext,
+)
+```
+
+### 4. Withdraw hBTC → redeem BTC
+
+When the beneficiary wants native BTC back, they initiate a Hashi withdrawal (see [Withdraw](./withdraw)). `hBTC` is burned and the corresponding BTC is sent to their Bitcoin address.
+
+```
+Coin<hBTC> (Sui) ──Hashi──► BTC (Bitcoin L1)
+```
+
+---
+
+## End-to-end flow
+
+```
+Grantor                  Hashi                   Epoch Vault              Beneficiary
+  │                        │                          │                        │
+  │── Send BTC ───────────►│                          │                        │
+  │                        │── mint hBTC ────────────►│                        │
+  │── create_vault(hBTC) ──────────────────────────► │                        │
+  │                        │                          │                        │
+  │                        │              (time passes — cliff + linear)       │
+  │                        │                          │                        │
+  │                        │                          │◄─── claim() ──────────│
+  │                        │                          │                        │
+  │                        │◄─── withdraw(hBTC) ──────────────────────────────│
+  │                        │── send BTC ──────────────────────────────────────►│
+```
+
+---
+
+## Why this matters
+
+| Property | Custodied WBTC vesting | Epoch + hBTC |
+|---|---|---|
+| BTC custody | Centralised issuer | Hashi MPC committee |
+| Vesting logic enforcement | Off-chain / legal | Sui smart contract |
+| Cliff & linear schedule | Manual, trust-based | Enforced on-chain |
+| Early termination | Requires issuer cooperation | Grantor can cancel vault |
+| Beneficiary claim | Requires issuer cooperation | Permissionless |
+| Auditability | Issuer transparency reports | Fully on-chain |
+
+---
+
+## Relevant links
+
+- **Epoch repository**: [github.com/epochprotocol](https://github.com/epochprotocol)
+- **Hashi deposit flow**: [Deposit](./deposit)
+- **Hashi withdraw flow**: [Withdraw](./withdraw)
+- **hBTC on Sui**: see [Introduction](./README.mdx) for the `Coin<BTC>` type details
+
+---
+
+:::info Community contribution
+This page was contributed by the Epoch team. If you are building on hBTC and would like to document your integration, open a pull request against the [Hashi repository](https://github.com/MystenLabs/hashi).
+:::

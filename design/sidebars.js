@@ -32,6 +32,14 @@ const sidebars = {
         'withdraw',
       ],
     },
+    {
+      type: 'category',
+      label: 'Ecosystem',
+      collapsed: false,
+      items: [
+        'ecosystem/epoch-vesting',
+      ],
+    },
   ],
 };
 
