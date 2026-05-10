@@ -1,14 +1,12 @@
 ---
-sidebar_label: Epoch — BTC Vesting
-description: How Epoch uses hBTC from Hashi to enable trustless, on-chain Bitcoin vesting schedules on Sui.
+sidebar_label: Epoch - BTC Vesting
+description: How Epoch uses hBTC from Hashi to enable trustless, onchain Bitcoin vesting schedules on Sui.
 keywords: [hBTC, vesting, Epoch, Sui, Bitcoin, DeFi, token vesting, BTC]
 ---
 
-# Epoch — Trustless BTC Vesting with hBTC
+[Epoch](https://epochsui.com) is an onchain vesting protocol on Sui that lets teams and individuals lock tokens inside smart-contract vaults and release them to beneficiaries over a configurable schedule. Because Epoch vaults are generic (`Vault<phantom T>`), they accept any `Coin<T>`, including `Coin<hBTC>` minted by Hashi.
 
-[Epoch](https://epochsui.com) is an on-chain vesting protocol on Sui that lets teams and individuals lock tokens inside smart-contract vaults and release them to beneficiaries over a configurable schedule. Because Epoch vaults are generic (`Vault<phantom T>`) they accept any `Coin<T>` — including `Coin<hBTC>` minted by Hashi.
-
-This page shows how hBTC unlocks a use case that was previously impossible without a trusted custodian: **Bitcoin vesting schedules enforced entirely by Sui smart contracts**.
+This page shows how hBTC unlocks a use case that was previously impossible without a trusted custodian: Bitcoin vesting schedules enforced entirely by Sui smart contracts.
 
 ---
 
@@ -16,9 +14,9 @@ This page shows how hBTC unlocks a use case that was previously impossible witho
 
 BTC holders who want to vest tokens to employees, investors, or grant recipients today face an unpleasant choice:
 
-- **Custodied wrappers** (WBTC, etc.) — trust a centralised issuer to hold the underlying BTC.
-- **Off-chain agreements** — rely on legal contracts with no on-chain enforcement.
-- **Native Bitcoin scripts** — limited time-lock primitives, no rich vesting logic (cliff, linear, partial claims).
+- **Custodied wrappers** (WBTC and so on): trust a centralised issuer to hold the underlying BTC.
+- **Offchain agreements**: rely on legal contracts with no onchain enforcement.
+- **Native Bitcoin scripts**: limited time-lock primitives, no rich vesting logic (cliff, linear, partial claims).
 
 Hashi solves the custody problem. Epoch solves the programmability problem. Together they close the gap.
 
@@ -26,7 +24,7 @@ Hashi solves the custody problem. Epoch solves the programmability problem. Toge
 
 ## How it works
 
-### 1. Deposit BTC → receive hBTC
+### 1. Deposit BTC and receive hBTC
 
 The user sends BTC to their unique Hashi deposit address on Bitcoin (see [User Flows](./user-flows) and [Deposit](./deposit) for the full flow). After the Hashi committee reaches quorum and the time-delay window elapses, an equivalent amount of `hBTC` is minted into the user's Sui wallet:
 
@@ -51,7 +49,7 @@ public entry fun create_vault<T>(
 )
 ```
 
-Because `T` is phantom, the vault contract requires zero changes to support `hBTC` — it already works.
+Because `T` is phantom, the vault contract requires zero changes to support `hBTC`. It already works.
 
 ### 3. Beneficiary claims over time
 
@@ -65,7 +63,7 @@ public entry fun claim<T>(
 )
 ```
 
-### 4. Withdraw hBTC → redeem BTC
+### 4. Withdraw hBTC and redeem BTC
 
 When the beneficiary wants native BTC back, they initiate a Hashi withdrawal (see [Withdraw](./withdraw)). `hBTC` is burned and the corresponding BTC is sent to their Bitcoin address.
 
@@ -84,7 +82,7 @@ Grantor                  Hashi                   Epoch Vault              Benefi
   │                        │── mint hBTC ────────────►│                        │
   │── create_vault(hBTC) ──────────────────────────► │                        │
   │                        │                          │                        │
-  │                        │              (time passes — cliff + linear)       │
+  │                        │         (time passes, cliff and linear schedule)  │
   │                        │                          │                        │
   │                        │                          │◄─── claim() ──────────│
   │                        │                          │                        │
@@ -96,14 +94,14 @@ Grantor                  Hashi                   Epoch Vault              Benefi
 
 ## Why this matters
 
-| Property | Custodied WBTC vesting | Epoch + hBTC |
+| Property | Custodied WBTC vesting | Epoch and hBTC |
 |---|---|---|
 | BTC custody | Centralised issuer | Hashi MPC committee |
-| Vesting logic enforcement | Off-chain / legal | Sui smart contract |
-| Cliff & linear schedule | Manual, trust-based | Enforced on-chain |
+| Vesting logic enforcement | Offchain / legal | Sui smart contract |
+| Cliff and linear schedule | Manual, trust-based | Enforced onchain |
 | Early termination | Requires issuer cooperation | Grantor can cancel vault |
 | Beneficiary claim | Requires issuer cooperation | Permissionless |
-| Auditability | Issuer transparency reports | Fully on-chain |
+| Auditability | Issuer transparency reports | Fully onchain |
 
 ---
 
