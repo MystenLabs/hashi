@@ -164,6 +164,18 @@ impl CommitteeSet {
         self.pending_epoch_change
     }
 
+    pub fn previous_committee_for_target(&self, target: u64) -> Option<(u64, &Committee)> {
+        if self.pending_epoch_change().is_some() {
+            let prev_ep = self.epoch();
+            self.committees().get(&prev_ep).map(|c| (prev_ep, c))
+        } else {
+            self.committees()
+                .range(..target)
+                .next_back()
+                .map(|(&k, c)| (k, c))
+        }
+    }
+
     pub fn client(&self, validator: &Address) -> Option<Client> {
         self.clients.get(validator).cloned()
     }
@@ -797,5 +809,56 @@ impl Coin {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_committee(epoch: u64) -> Committee {
+        Committee::new(vec![], epoch, 10_000, 0, 5_000)
+    }
+
+    fn set_with(epoch: u64, pending: Option<u64>, committee_epochs: &[u64]) -> CommitteeSet {
+        let mut set = CommitteeSet::new(Address::new([0u8; 32]), Address::new([0u8; 32]));
+        set.set_epoch(epoch).set_pending_epoch_change(pending);
+        let committees: BTreeMap<u64, Committee> = committee_epochs
+            .iter()
+            .copied()
+            .map(|e| (e, empty_committee(e)))
+            .collect();
+        set.set_committees(committees);
+        set
+    }
+
+    #[test]
+    fn previous_committee_for_target_is_none_at_genesis() {
+        let set = set_with(0, Some(3), &[3]);
+        assert_eq!(set.previous_committee_for_target(3).map(|(e, _)| e), None);
+    }
+
+    #[test]
+    fn previous_committee_for_target_during_pending_rotation() {
+        let set = set_with(1, Some(2), &[1, 2]);
+        assert_eq!(
+            set.previous_committee_for_target(2).map(|(e, _)| e),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn previous_committee_for_target_recovery_with_no_pending_change() {
+        let set = set_with(5, None, &[3, 5]);
+        assert_eq!(
+            set.previous_committee_for_target(6).map(|(e, _)| e),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn previous_committee_for_target_returns_none_when_no_earlier_committee() {
+        let set = set_with(3, None, &[3]);
+        assert_eq!(set.previous_committee_for_target(3).map(|(e, _)| e), None);
     }
 }
