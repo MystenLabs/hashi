@@ -342,6 +342,44 @@ impl Hashi {
         })
     }
 
+    fn resolve_previous_encryption_key(
+        &self,
+        committee_set: &onchain::types::CommitteeSet,
+        target_epoch: u64,
+        validator_address: sui_sdk_types::Address,
+    ) -> anyhow::Result<Option<EncryptionPrivateKey>> {
+        let previous_committee_info = committee_set.previous_committee_for_target(target_epoch);
+        if previous_committee_info.is_none() && target_epoch > 0 {
+            let sui_epoch = self.onchain_state_opt().map(|s| s.epoch());
+            tracing::info!(
+                target_epoch,
+                committee_set_epoch = committee_set.epoch(),
+                pending_epoch_change = ?committee_set.pending_epoch_change(),
+                sui_epoch = ?sui_epoch,
+                "create_mpc_manager: target_epoch>0 with no previous committee recorded; \
+                 previous_encryption_key=None (genesis bootstrap onto chain at sui_epoch>0)"
+            );
+        }
+        previous_committee_info
+            .map(|(prev_ep, prev_committee)| {
+                self.find_encryption_key_for_committee(prev_committee, validator_address, prev_ep)
+                    .map(Some)
+                    .or_else(|e| {
+                        if !prev_committee
+                            .members()
+                            .iter()
+                            .any(|m| m.validator_address() == validator_address)
+                        {
+                            Ok(None)
+                        } else {
+                            Err(e)
+                        }
+                    })
+            })
+            .transpose()
+            .map(|opt| opt.flatten())
+    }
+
     pub fn create_mpc_manager(
         &self,
         epoch: u64,
@@ -360,37 +398,8 @@ impl Hashi {
             validator_address,
             epoch,
         )?;
-        let previous_epoch = if committee_set.pending_epoch_change().is_some() {
-            Some(committee_set.epoch())
-        } else {
-            committee_set
-                .committees()
-                .range(..epoch)
-                .next_back()
-                .map(|(&k, _)| k)
-        };
-        let previous_encryption_key = previous_epoch
-            .map(|prev_ep| {
-                let prev_committee = committee_set
-                    .committees()
-                    .get(&prev_ep)
-                    .ok_or_else(|| anyhow!("no committee for previous epoch {prev_ep}"))?;
-                self.find_encryption_key_for_committee(prev_committee, validator_address, prev_ep)
-                    .map(Some)
-                    .or_else(|e| {
-                        if !prev_committee
-                            .members()
-                            .iter()
-                            .any(|m| m.validator_address() == validator_address)
-                        {
-                            Ok(None)
-                        } else {
-                            Err(e)
-                        }
-                    })
-            })
-            .transpose()?
-            .flatten();
+        let previous_encryption_key =
+            self.resolve_previous_encryption_key(committee_set, epoch, validator_address)?;
         let signing_key = self.find_signing_key_for_committee(
             committee_set
                 .committees()
@@ -978,6 +987,33 @@ mod test {
         assert!(
             msg.contains("no DB encryption key matches committee record for epoch 5"),
             "expected operator-intervention error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_previous_encryption_key_at_late_genesis_returns_none() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let validator_address = Address::new([1u8; 32]);
+        let bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
+        let enc_pub = EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(
+            &mut rand::thread_rng(),
+        ));
+        let target_epoch = 3;
+        let new_committee = one_member_committee(target_epoch, validator_address, bls_pub, enc_pub);
+
+        let mut committee_set =
+            crate::onchain::types::CommitteeSet::new(Address::ZERO, Address::ZERO);
+        committee_set
+            .set_epoch(0)
+            .set_pending_epoch_change(Some(target_epoch));
+        committee_set.set_committees(std::iter::once((target_epoch, new_committee)).collect());
+
+        let result = hashi
+            .resolve_previous_encryption_key(&committee_set, target_epoch, validator_address)
+            .expect("late-genesis lookup must not error; previous_encryption_key is None");
+        assert!(
+            result.is_none(),
+            "previous_encryption_key must be None at late genesis (no prior epoch exists)"
         );
     }
 
