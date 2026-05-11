@@ -24,7 +24,7 @@ Hashi solves the custody problem. Epoch solves the programmability problem. Toge
 
 ## How it works
 
-### 1. Deposit BTC
+### 1. Deposit
 
 The user sends BTC to their unique Hashi deposit address on Bitcoin (see [User Flows](./user-flows) and [Deposit](./deposit) for the full flow). After the Hashi committee reaches quorum and the time-delay window elapses, an equivalent amount of `hBTC` is minted into the user's Sui wallet:
 
@@ -63,7 +63,7 @@ public entry fun claim<T>(
 )
 ```
 
-### 4. Redeem BTC
+### 4. Redeem
 
 When the beneficiary wants native BTC back, they initiate a Hashi withdrawal (see [Withdraw](./withdraw)). `hBTC` is burned and the corresponding BTC is sent to their Bitcoin address.
 
