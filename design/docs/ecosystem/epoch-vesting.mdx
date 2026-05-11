@@ -24,7 +24,7 @@ Hashi solves the custody problem. Epoch solves the programmability problem. Toge
 
 ## How it works
 
-### 1. Deposit BTC and receive hBTC
+### 1. Deposit BTC
 
 The user sends BTC to their unique Hashi deposit address on Bitcoin (see [User Flows](./user-flows) and [Deposit](./deposit) for the full flow). After the Hashi committee reaches quorum and the time-delay window elapses, an equivalent amount of `hBTC` is minted into the user's Sui wallet:
 
@@ -34,7 +34,7 @@ BTC (Bitcoin L1) ──Hashi──► Coin<hBTC> (Sui)
 
 `hBTC` is a standard Sui fungible token. It can be transferred, held in wallets, and passed into any Move function that accepts a `Coin<T>`.
 
-### 2. Create a vesting vault on Epoch
+### 2. Create a vesting vault
 
 With `hBTC` in hand, the grantor calls Epoch's `create_vault` entry function, specifying the beneficiary address, vesting schedule, and cliff period:
 
@@ -63,7 +63,7 @@ public entry fun claim<T>(
 )
 ```
 
-### 4. Withdraw hBTC and redeem BTC
+### 4. Redeem BTC
 
 When the beneficiary wants native BTC back, they initiate a Hashi withdrawal (see [Withdraw](./withdraw)). `hBTC` is burned and the corresponding BTC is sent to their Bitcoin address.
 
