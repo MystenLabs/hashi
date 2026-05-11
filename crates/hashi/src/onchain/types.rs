@@ -152,6 +152,22 @@ impl CommitteeSet {
         self.committees().get(&self.epoch())
     }
 
+    /// Identify the committee that "re-shares" keys to the one for `target`:
+    /// during a pending epoch change, the current on-chain committee (may be
+    /// absent at genesis); otherwise the greatest committee strictly less than
+    /// `target`. Returns `None` when no such committee exists.
+    pub fn previous_committee_for_target(&self, target: u64) -> Option<(u64, &Committee)> {
+        if self.pending_epoch_change().is_some() {
+            let prev_ep = self.epoch();
+            self.committees().get(&prev_ep).map(|c| (prev_ep, c))
+        } else {
+            self.committees()
+                .range(..target)
+                .next_back()
+                .map(|(&k, c)| (k, c))
+        }
+    }
+
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
@@ -797,5 +813,64 @@ impl Coin {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_committee(epoch: u64) -> Committee {
+        Committee::new(vec![], epoch, 10_000, 0, 5_000)
+    }
+
+    fn set_with(epoch: u64, pending: Option<u64>, committee_epochs: &[u64]) -> CommitteeSet {
+        let mut set = CommitteeSet::new(Address::new([0u8; 32]), Address::new([0u8; 32]));
+        set.set_epoch(epoch).set_pending_epoch_change(pending);
+        let committees: BTreeMap<u64, Committee> = committee_epochs
+            .iter()
+            .copied()
+            .map(|e| (e, empty_committee(e)))
+            .collect();
+        set.set_committees(committees);
+        set
+    }
+
+    #[test]
+    fn previous_committee_for_target_is_none_at_genesis() {
+        // Initial DKG: pending change to 1, on-chain epoch still 0,
+        // only the bootstrap committee at key 1 exists. There is no
+        // previous committee to re-share from.
+        let set = set_with(0, Some(1), &[1]);
+        assert_eq!(set.previous_committee_for_target(1).map(|(e, _)| e), None);
+    }
+
+    #[test]
+    fn previous_committee_for_target_during_pending_rotation() {
+        // Mid-rotation from epoch 1 → 2: previous is the current on-chain
+        // committee (epoch 1).
+        let set = set_with(1, Some(2), &[1, 2]);
+        assert_eq!(
+            set.previous_committee_for_target(2).map(|(e, _)| e),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn previous_committee_for_target_recovery_with_no_pending_change() {
+        // Recovery / late-join: no pending change, the greatest committee
+        // strictly less than target is selected.
+        let set = set_with(5, None, &[3, 5]);
+        assert_eq!(
+            set.previous_committee_for_target(6).map(|(e, _)| e),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn previous_committee_for_target_returns_none_when_no_earlier_committee() {
+        // No pending change and committees() has nothing strictly less than target.
+        let set = set_with(3, None, &[3]);
+        assert_eq!(set.previous_committee_for_target(3).map(|(e, _)| e), None);
     }
 }
