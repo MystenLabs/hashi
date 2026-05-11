@@ -360,8 +360,6 @@ impl Hashi {
             validator_address,
             epoch,
         )?;
-        // Absent at genesis: pending_epoch_change=Some(target) but committees()
-        // has no entry for the current on-chain epoch yet.
         let previous_encryption_key = committee_set
             .previous_committee_for_target(epoch)
             .map(|(prev_ep, prev_committee)| {
