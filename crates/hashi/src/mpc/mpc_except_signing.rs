@@ -703,7 +703,13 @@ impl MpcManager {
                 e
             );
         }
-        tracing::info!("run_key_rotation: entering party phase");
+        tracing::info!(
+            "run_key_rotation: entering party phase, previous_vk={}, \
+             previous_threshold={}, previous_commitments_len={}",
+            hex::encode(previous.public_key.to_byte_array()),
+            previous.threshold,
+            previous.commitments.len(),
+        );
         let output = Self::run_key_rotation_as_party(
             mpc_manager,
             &previous,
@@ -2015,7 +2021,14 @@ impl MpcManager {
                 commitment,
                 output_key,
                 complaint_key,
-            )?;
+            )
+            .map_err(|e| {
+                tracing::error!(
+                    "process_certified_rotation_message failed: dealer={dealer}, \
+                     share_index={share_index}, err={e}"
+                );
+                e
+            })?;
         }
         Ok(())
     }
@@ -3968,6 +3981,14 @@ fn process_avss_message(
     message: &avss::Message,
     commitment: Option<G>,
 ) -> MpcResult<avss::ProcessedMessage> {
+    let commitment_hex = commitment
+        .as_ref()
+        .map(|c| hex::encode(c.to_byte_array()))
+        .unwrap_or_else(|| "None".to_string());
+    let session_id_hex = hex::encode(&session_id);
+    let total_weight = nodes.total_weight();
+    let num_nodes = nodes.num_nodes();
+    let message_bytes_len = bcs::to_bytes(message).map(|b| b.len()).unwrap_or(0);
     let receiver = avss::Receiver::new(
         nodes,
         party_id,
@@ -3976,7 +3997,18 @@ fn process_avss_message(
         commitment,
         encryption_key.clone(),
     );
-    receiver.process_message(message).map_err(MpcError::from)
+    match receiver.process_message(message) {
+        Ok(pm) => Ok(pm),
+        Err(e) => {
+            tracing::error!(
+                "process_avss_message failed: err={e}, party_id={party_id}, \
+                 threshold={threshold}, total_weight={total_weight}, num_nodes={num_nodes}, \
+                 message_bytes_len={message_bytes_len}, commitment={commitment_hex}, \
+                 session_id={session_id_hex}"
+            );
+            Err(MpcError::from(e))
+        }
+    }
 }
 
 fn compute_messages_hash(messages: &Messages) -> MessageHash {
