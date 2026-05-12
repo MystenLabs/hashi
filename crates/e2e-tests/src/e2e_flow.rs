@@ -1486,6 +1486,85 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_rotation_reconstruction_with_threshold_decrease() -> Result<()> {
+        init_test_logging();
+
+        let mut networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+
+        let nodes = networks.hashi_network.nodes();
+        let futs: Vec<_> = nodes
+            .iter()
+            .map(|n| n.wait_for_mpc_key(Duration::from_secs(120)))
+            .collect();
+        for (i, r) in futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .enumerate()
+        {
+            r.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+        let initial_epoch = nodes[0].current_epoch().unwrap();
+        let pk_before = nodes[0].hashi().mpc_handle().unwrap().public_key().unwrap();
+
+        let low_threshold_bps: u64 = 2500;
+        let low_max_faulty_bps: u64 = 2000;
+        let low_delta: u64 = 800;
+        crate::apply_onchain_config_overrides(
+            &mut networks,
+            &[
+                (
+                    "mpc_threshold_in_basis_points".into(),
+                    hashi_types::move_types::ConfigValue::U64(low_threshold_bps),
+                ),
+                (
+                    "mpc_max_faulty_in_basis_points".into(),
+                    hashi_types::move_types::ConfigValue::U64(low_max_faulty_bps),
+                ),
+                (
+                    "mpc_weight_reduction_allowed_delta".into(),
+                    hashi_types::move_types::ConfigValue::U64(low_delta),
+                ),
+            ],
+        )
+        .await?;
+
+        for offset in 1..=2 {
+            let target = initial_epoch + offset;
+            networks.sui_network.force_close_epoch().await?;
+            let futs: Vec<_> = networks
+                .hashi_network()
+                .nodes()
+                .iter()
+                .map(|n| n.wait_for_epoch(target, Duration::from_secs(480)))
+                .collect();
+            for (i, r) in futures::future::join_all(futs)
+                .await
+                .into_iter()
+                .enumerate()
+            {
+                r.unwrap_or_else(|e| panic!("Node {i} failed to reach epoch {target}: {e}"));
+            }
+        }
+
+        let nodes = networks.hashi_network().nodes();
+        let pk_after = nodes[0].hashi().mpc_handle().unwrap().public_key().unwrap();
+        assert_eq!(
+            pk_before, pk_after,
+            "MPC public key changed across rotations — \
+             rotation reconstruction recovered a wrong master vk"
+        );
+        for (i, node) in nodes.iter().enumerate().skip(1) {
+            let pk = node.hashi().mpc_handle().unwrap().public_key().unwrap();
+            assert_eq!(
+                pk, pk_after,
+                "Node {i} MPC key differs from node 0 after rotations"
+            );
+        }
+
+        Ok(())
+    }
+
     /// Verify that a withdrawal can spend a change output whose producing
     /// transaction is mined on Bitcoin but not yet confirmed on Sui. The
     /// actual Bitcoin confirmation count must be queried from the node
