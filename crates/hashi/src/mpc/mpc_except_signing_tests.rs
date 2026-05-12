@@ -5156,7 +5156,8 @@ impl RotationTestSetup {
             )
             .unwrap();
             manager.previous_nodes = Some(nodes);
-            manager.previous_threshold = Some(threshold);
+            manager.previous_reconfig_output_threshold = Some(threshold);
+            manager.previous_reconfig_input_threshold = Some(threshold);
         }
         manager.previous_committee = previous_committee;
         // Tests reuse the same key across epochs.
@@ -7990,6 +7991,13 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
     );
 
     let target_epoch = dkg_epoch + 2;
+    let dkg_epoch_committee = Committee::new(
+        members.clone(),
+        dkg_epoch,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
+    );
     let previous_committee = Committee::new(
         members,
         rotation_epoch,
@@ -8007,6 +8015,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
 
     let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
     let mut committees = BTreeMap::new();
+    committees.insert(dkg_epoch, dkg_epoch_committee);
     committees.insert(rotation_epoch, previous_committee);
     committees.insert(target_epoch, target_committee);
     committee_set
@@ -8059,16 +8068,10 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
         "Previous party_id should be 4"
     );
 
-    let previous_threshold = manager.previous_threshold.unwrap();
-
     // This would panic with index-out-of-bounds if previous committee parameters were not used for decryption.
     let reconstructed = unwrap_reconstruction_success(
         manager
-            .reconstruct_from_rotation_certificates(
-                &rotation_certificates,
-                previous_threshold,
-                &HashMap::new(),
-            )
+            .reconstruct_from_rotation_certificates(&rotation_certificates, &HashMap::new())
             .unwrap(),
     );
 

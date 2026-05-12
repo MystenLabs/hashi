@@ -102,7 +102,8 @@ pub struct MpcManager {
     pub committee: Committee,
     pub previous_committee: Option<Committee>,
     pub previous_nodes: Option<Nodes<EncryptionGroupElement>>,
-    pub previous_threshold: Option<u16>,
+    pub previous_reconfig_output_threshold: Option<u16>,
+    pub previous_reconfig_input_threshold: Option<u16>,
     chain_id: String,
     pub previous_epoch: u64,
     previous_output: Option<MpcOutput>,
@@ -213,7 +214,8 @@ impl MpcManager {
                 None => (committee_set.epoch(), None),
             }
         };
-        let (previous_nodes, previous_threshold) = match previous_committee.as_ref() {
+        let (previous_nodes, previous_reconfig_output_threshold) = match previous_committee.as_ref()
+        {
             Some(prev_committee) => {
                 let (nodes, threshold, _prev_max_faulty) = build_reduced_nodes(
                     prev_committee,
@@ -227,6 +229,21 @@ impl MpcManager {
             }
             None => (None, None),
         };
+        let previous_reconfig_input_threshold = previous_epoch
+            .checked_sub(1)
+            .and_then(|input_epoch| committee_set.committees().get(&input_epoch))
+            .map(|input_committee| -> MpcResult<u16> {
+                let (_, threshold, _) = build_reduced_nodes(
+                    input_committee,
+                    input_committee.mpc_threshold_in_basis_points(),
+                    input_committee.mpc_max_faulty_in_basis_points(),
+                    input_committee.mpc_weight_reduction_allowed_delta(),
+                    weight_divisor,
+                    chain_id,
+                )?;
+                Ok(threshold)
+            })
+            .transpose()?;
         let mut manager = Self {
             party_id,
             address,
@@ -238,7 +255,8 @@ impl MpcManager {
             committee,
             previous_committee,
             previous_nodes,
-            previous_threshold,
+            previous_reconfig_output_threshold,
+            previous_reconfig_input_threshold,
             dealer_outputs: HashMap::new(),
             dkg_messages: HashMap::new(),
             rotation_messages: HashMap::new(),
@@ -2901,14 +2919,7 @@ impl MpcManager {
                 self.reconstruct_from_dkg_certificates(certificates, complaint_cache)
             }
             Some(CertificateV1::Rotation(_)) => {
-                let previous_threshold = self.previous_threshold.ok_or_else(|| {
-                    MpcError::InvalidConfig("Key rotation requires previous threshold".into())
-                })?;
-                self.reconstruct_from_rotation_certificates(
-                    certificates,
-                    previous_threshold,
-                    complaint_cache,
-                )
+                self.reconstruct_from_rotation_certificates(certificates, complaint_cache)
             }
             Some(CertificateV1::NonceGeneration { .. }) => {
                 unreachable!(
@@ -2929,8 +2940,10 @@ impl MpcManager {
         let previous_nodes = self.previous_nodes.clone().ok_or_else(|| {
             MpcError::InvalidConfig("DKG reconstruction requires previous nodes".into())
         })?;
-        let previous_threshold = self.previous_threshold.ok_or_else(|| {
-            MpcError::InvalidConfig("DKG reconstruction requires previous threshold".into())
+        let output_threshold = self.previous_reconfig_output_threshold.ok_or_else(|| {
+            MpcError::InvalidConfig(
+                "DKG reconstruction requires previous reconfig's output threshold".into(),
+            )
         })?;
         let previous_party_id = previous_committee.index_of(&self.address).ok_or_else(|| {
             MpcError::InvalidConfig("This node is not in the previous committee".into())
@@ -2942,7 +2955,7 @@ impl MpcManager {
         for cert in certificates {
             // This matches the behavior of `run_as_party` during DKG, which also
             // stops at threshold.
-            if dealer_weight_sum >= previous_threshold as u32 {
+            if dealer_weight_sum >= output_threshold as u32 {
                 break;
             }
             let CertificateV1::Dkg(dkg_cert) = cert else {
@@ -2996,7 +3009,7 @@ impl MpcManager {
                 previous_encryption_key,
                 previous_nodes.clone(),
                 previous_party_id,
-                previous_threshold,
+                output_threshold,
                 session_id,
                 &message,
                 None,
@@ -3017,21 +3030,21 @@ impl MpcManager {
                 .expect("party_id must be valid");
             dealer_weight_sum += dealer_weight as u32;
         }
-        if dealer_weight_sum < previous_threshold as u32 {
+        if dealer_weight_sum < output_threshold as u32 {
             return Err(MpcError::NotEnoughApprovals {
-                needed: previous_threshold as usize,
+                needed: output_threshold as usize,
                 got: dealer_weight_sum as usize,
             });
         }
         let dealer_ids: Vec<_> = outputs.keys().copied().collect();
         tracing::info!(
             "reconstruct_from_dkg_certificates: {} dealers (party_ids={:?}), \
-             dealer_weight_sum={dealer_weight_sum}, threshold={previous_threshold}",
+             dealer_weight_sum={dealer_weight_sum}, threshold={output_threshold}",
             dealer_ids.len(),
             dealer_ids,
         );
         let combined_output =
-            avss::ReceiverOutput::complete_dkg(previous_threshold, &previous_nodes, outputs)
+            avss::ReceiverOutput::complete_dkg(output_threshold, &previous_nodes, outputs)
                 .expect(EXPECT_THRESHOLD_MET);
         tracing::info!(
             "reconstruct_from_dkg_certificates: result vk={}",
@@ -3045,14 +3058,13 @@ impl MpcManager {
                 .into_iter()
                 .map(|c| (c.index, c.value))
                 .collect(),
-            threshold: previous_threshold,
+            threshold: output_threshold,
         }))
     }
 
     fn reconstruct_from_rotation_certificates(
         &self,
         certificates: &[CertificateV1],
-        previous_threshold: u16,
         complaint_cache: &HashMap<DealerOutputsKey, avss::PartialOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
         let previous_nodes = self.previous_nodes.clone().ok_or_else(|| {
@@ -3064,6 +3076,18 @@ impl MpcManager {
         let previous_party_id = previous_committee.index_of(&self.address).ok_or_else(|| {
             MpcError::InvalidConfig("This node is not in the previous committee".into())
         })? as u16;
+        let output_threshold = self.previous_reconfig_output_threshold.ok_or_else(|| {
+            MpcError::InvalidConfig(
+                "Rotation reconstruction requires previous reconfig's output threshold".into(),
+            )
+        })?;
+        let input_threshold = self.previous_reconfig_input_threshold.ok_or_else(|| {
+            MpcError::InvalidConfig(
+                "Rotation reconstruction requires previous reconfig's input threshold \
+                 (no committee found at previous_epoch - 1)"
+                    .into(),
+            )
+        })?;
         let source_session_id = SessionId::new(
             &self.chain_id,
             self.previous_epoch,
@@ -3125,7 +3149,7 @@ impl MpcManager {
                     previous_encryption_key,
                     previous_nodes.clone(),
                     previous_party_id,
-                    previous_threshold,
+                    output_threshold,
                     session_id,
                     &message,
                     None,
@@ -3147,15 +3171,15 @@ impl MpcManager {
         }
         // Unlike normal flow which accumulates until threshold in a loop, reconstruction
         // receives all certificates at once. Check threshold for better error handling.
-        if certified_share_indices.len() < previous_threshold as usize {
+        if certified_share_indices.len() < input_threshold as usize {
             return Err(MpcError::NotEnoughApprovals {
-                needed: previous_threshold as usize,
+                needed: input_threshold as usize,
                 got: certified_share_indices.len(),
             });
         }
         let indexed_outputs: Vec<IndexedValue<avss::PartialOutput>> = certified_share_indices
             .iter()
-            .take(previous_threshold as usize)
+            .take(input_threshold as usize)
             .map(|&share_index| {
                 let output = local_outputs.get(&share_index).ok_or_else(|| {
                     MpcError::ProtocolFailed(format!(
@@ -3172,12 +3196,12 @@ impl MpcManager {
         let used_indices: Vec<_> = indexed_outputs.iter().map(|o| o.index).collect();
         tracing::info!(
             "reconstruct_from_rotation_certificates: {} share_indices={:?}, \
-             threshold={previous_threshold}",
+             output_threshold={output_threshold}, input_threshold={input_threshold}",
             used_indices.len(),
             used_indices,
         );
         let combined = avss::ReceiverOutput::complete_key_rotation(
-            previous_threshold,
+            input_threshold,
             previous_party_id,
             &previous_nodes,
             &indexed_outputs,
@@ -3195,7 +3219,7 @@ impl MpcManager {
                 .into_iter()
                 .map(|c| (c.index, c.value))
                 .collect(),
-            threshold: previous_threshold,
+            threshold: output_threshold,
         }))
     }
 
@@ -3264,7 +3288,7 @@ impl MpcManager {
                 .as_ref()
                 .and_then(|c| c.index_of(&mgr.address))
                 .is_some();
-            (is_member, mgr.previous_threshold)
+            (is_member, mgr.previous_reconfig_output_threshold)
         };
         let previous = if is_member_of_previous_committee {
             let reconstruction_result = async {
@@ -3720,7 +3744,7 @@ impl MpcManager {
             let nodes = self.previous_nodes.as_ref().ok_or_else(|| {
                 MpcError::InvalidConfig("No previous nodes for cross-epoch complaint".into())
             })?;
-            let threshold = self.previous_threshold.ok_or_else(|| {
+            let threshold = self.previous_reconfig_output_threshold.ok_or_else(|| {
                 MpcError::InvalidConfig("No previous threshold for cross-epoch complaint".into())
             })?;
             let party_id = committee.index_of(&self.address).ok_or_else(|| {
