@@ -11,6 +11,7 @@ use age::IdentityFile;
 use age::cli_common::UiCallbacks;
 use anyhow::Context;
 use anyhow::Result;
+use flate2::read::GzDecoder;
 use std::fs;
 use std::fs::File;
 use std::path::Path;
@@ -136,7 +137,7 @@ pub fn restore(
         .with_context(|| format!("Failed to open backup tarball {}", backup_tarball.display()))?;
     let decryptor = Decryptor::new(input)
         .with_context(|| format!("Failed to parse age header of {}", backup_tarball.display()))?;
-    let mut decrypted = decryptor
+    let decrypted = decryptor
         .decrypt(identities.iter().map(|i| i.as_ref() as &dyn age::Identity))
         .with_context(|| {
             format!(
@@ -145,7 +146,8 @@ pub fn restore(
                 backup_age_identity.display()
             )
         })?;
-    let mut archive = tar::Archive::new(&mut decrypted);
+    let decompressed = GzDecoder::new(decrypted);
+    let mut archive = tar::Archive::new(decompressed);
     let mut entries = archive.entries()?;
     let manifest_entry = entries
         .next()
@@ -286,12 +288,12 @@ mod tests {
             .filter_map(Result::ok)
             .map(|entry| entry.path())
             .find(|path| {
-                path.extension().and_then(|ext| ext.to_str()) == Some("age")
-                    && path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .map(|name| name.starts_with("hashi-config-backup-"))
-                        .unwrap_or(false)
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| {
+                        name.starts_with("hashi-config-backup-") && name.ends_with(".tar.gz.age")
+                    })
+                    .unwrap_or(false)
             })
             .expect("save() did not produce a tarball");
 
@@ -713,7 +715,7 @@ mod tests {
         let err = restore(&bad, &backup.identity_file, out.path(), false).unwrap_err();
         let chain = format!("{err:#}");
         assert!(
-            chain.contains(".tar.age or .age suffix"),
+            chain.contains(".tar.gz.age suffix"),
             "expected suffix-required error, got: {chain}"
         );
     }

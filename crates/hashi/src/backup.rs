@@ -4,7 +4,7 @@
 //! Core backup logic for creating and restoring encrypted backup archives.
 //!
 //! This module handles the mechanics of building backup manifests, encrypting
-//! files into age-wrapped tar archives, and extracting them. CLI-specific
+//! files into age-wrapped gzip-compressed tar archives, and extracting them. CLI-specific
 //! orchestration (config loading, DB-open locking policy, and user output)
 //! lives in [`crate::cli::commands::backup`].
 
@@ -40,6 +40,8 @@ use age::plugin;
 use age::x25519;
 use fjall::KeyspaceCreateOptions;
 use fjall::Readable;
+use flate2::Compression;
+use flate2::write::GzEncoder;
 
 pub const BACKUP_MANIFEST_FILE_NAME: &str = "hashi-config-backup-manifest.toml";
 pub const DB_SNAPSHOT_TAR_PREFIX: &str = "hashi-db-snapshot";
@@ -318,9 +320,10 @@ pub fn encrypt_files_to_age_archive(
 ) -> Result<()> {
     let output = create_file_strict(output_path)?;
     let encryptor = Encryptor::with_recipients(std::iter::once(recipient))?;
-    let mut encrypted = encryptor.wrap_output(output)?;
+    let encrypted = encryptor.wrap_output(output)?;
+    let mut compressed = GzEncoder::new(encrypted, Compression::default());
     {
-        let mut archive = tar::Builder::new(&mut encrypted);
+        let mut archive = tar::Builder::new(&mut compressed);
         append_backup_manifest(&mut archive, manifest)?;
 
         for entry in &manifest.paths {
@@ -337,6 +340,7 @@ pub fn encrypt_files_to_age_archive(
 
         archive.finish()?;
     }
+    let encrypted = compressed.finish()?;
     encrypted.finish()?;
 
     Ok(())
@@ -474,7 +478,7 @@ pub fn encrypted_backup_file_name() -> PathBuf {
         .to_zoned(jiff::tz::TimeZone::UTC)
         .strftime("%Y%m%dT%H%M%SZ")
         .to_string();
-    PathBuf::from(format!("hashi-config-backup-{timestamp}.tar.age"))
+    PathBuf::from(format!("hashi-config-backup-{timestamp}.tar.gz.age"))
 }
 
 fn append_backup_manifest<W: std::io::Write>(
@@ -568,8 +572,8 @@ fn append_db_backup_to_tar<W: Write>(
 
 /// Determine the directory name to extract a backup tarball into.
 ///
-/// Strips the `.tar.age` or `.age` suffix from the tarball's file name, so
-/// `hashi-config-backup-20260409T230419Z.tar.age` becomes
+/// Strips the `.tar.gz.age` suffix from the tarball's file name, so
+/// `hashi-config-backup-20260409T230419Z.tar.gz.age` becomes
 /// `hashi-config-backup-20260409T230419Z`. An input without one of those
 /// suffixes is rejected rather than silently used verbatim, to avoid
 /// surprising extraction directory names when users point at the wrong file.
@@ -584,19 +588,16 @@ pub fn extract_dir_name(backup_tarball: &Path) -> Result<PathBuf> {
             )
         })?;
 
-    let stem = file_name
-        .strip_suffix(".tar.age")
-        .or_else(|| file_name.strip_suffix(".age"))
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Backup tarball must have a .tar.age or .age suffix: {}",
-                backup_tarball.display()
-            )
-        })?;
+    let stem = file_name.strip_suffix(".tar.gz.age").ok_or_else(|| {
+        anyhow::anyhow!(
+            "Backup tarball must have a .tar.gz.age suffix: {}",
+            backup_tarball.display()
+        )
+    })?;
 
     // Require the stem to be exactly one plain directory component when
     // joined under the user's output dir. Catches both the empty case (zero
-    // components) and traversal attempts like `../../tmp/pwn.tar.age` (a
+    // components) and traversal attempts like `../../tmp/pwn.tar.gz.age` (a
     // `ParentDir` component, not `Normal`).
     let stem_path = Path::new(stem);
     let mut components = stem_path.components();
