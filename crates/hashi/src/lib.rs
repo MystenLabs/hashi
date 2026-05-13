@@ -390,7 +390,9 @@ impl Hashi {
     ) -> anyhow::Result<Option<EncryptionPrivateKey>> {
         let previous_committee_info = committee_set.previous_committee_for_target(target_epoch);
         if previous_committee_info.is_none() && target_epoch > 0 {
-            let sui_epoch = self.onchain_state_opt().map(|s| s.epoch());
+            let sui_epoch = self
+                .onchain_state_opt()
+                .map(|s| s.latest_checkpoint_epoch());
             tracing::info!(
                 target_epoch,
                 committee_set_epoch = committee_set.epoch(),
