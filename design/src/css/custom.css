@@ -196,3 +196,168 @@ table {
   margin-left: 0;
   margin-right: auto;
 }
+
+/* ----------------------------------------------------------------
+   DocSearch (Algolia) — visual treatment mirroring the post-PR-26617
+   look used by Sui docs:
+   https://github.com/MystenLabs/sui/pull/26617
+   ---------------------------------------------------------------- */
+
+/* Navbar trigger pill — matches the Ask Hashi AI button next to it. */
+.DocSearch-Button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  height: auto;
+  padding: 0.4rem 0.95rem;
+  margin: 0 0.25rem;
+  background: #ffffff;
+  color: #0f0f0f;
+  font-family: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
+  border: 1px solid #E0E2E6;
+  border-radius: 999px;
+  box-shadow: none;
+}
+
+.DocSearch-Button:hover,
+.DocSearch-Button:focus {
+  background: #F4F5F7;
+  border-color: #C2C6CD;
+  box-shadow: none;
+}
+
+.DocSearch-Button-Keys {
+  background: transparent;
+  border: 1px solid #E0E2E6;
+  border-radius: 4px;
+  padding: 0.05rem 0.4rem;
+  min-width: auto;
+  margin: 0;
+}
+
+.DocSearch-Button-Key {
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+  color: #6C7584;
+  font-family: inherit;
+  font-size: 0.75rem;
+}
+
+/* Modal layout — pinned to top-10vh with rounded corners + max-width 4xl. */
+.DocSearch-Container {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.DocSearch-Modal {
+  max-width: 56rem;
+  max-height: min(600px, 80vh);
+  margin: 10vh auto auto;
+  border-radius: 0.75rem;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.25);
+  background: #ffffff;
+}
+
+[data-theme='dark'] .DocSearch-Modal {
+  background: #131518;
+}
+
+.DocSearch-SearchBar {
+  padding: 1rem 1.5rem 0.5rem;
+}
+
+.DocSearch-Input {
+  font-family: inherit;
+  font-size: 1rem;
+}
+
+/* Hit cards — rounded background, breadcrumb subtitle, semibold title. */
+.DocSearch-Dropdown {
+  padding: 0 0.5rem 0.5rem;
+}
+
+.DocSearch-Hit-source {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #6C7584;
+  background: transparent;
+  margin: 0.75rem 0 0.25rem;
+  padding: 0 1rem;
+}
+
+.DocSearch-Hit a {
+  background: transparent;
+  border-radius: 0.5rem;
+  padding: 0.5rem 1rem;
+  box-shadow: none;
+  transition: background-color 0.15s ease;
+}
+
+.DocSearch-Hit a:hover,
+.DocSearch-Hit[aria-selected='true'] a {
+  background: #F4F5F7;
+}
+
+[data-theme='dark'] .DocSearch-Hit a:hover,
+[data-theme='dark'] .DocSearch-Hit[aria-selected='true'] a {
+  background: #222529;
+}
+
+.DocSearch-Hit-content-wrapper {
+  gap: 0.125rem;
+}
+
+.DocSearch-Hit-path {
+  font-size: 0.75rem;
+  color: #89919F;
+  margin-bottom: 0.125rem;
+}
+
+.DocSearch-Hit-title {
+  font-size: 0.9375rem;
+  font-weight: 500;
+  color: #0f0f0f;
+  line-height: 1.4;
+}
+
+[data-theme='dark'] .DocSearch-Hit-title {
+  color: #ffffff;
+}
+
+/* Highlighted query matches — Sui Blue tint with rounded corners
+   (mirrors the PR's `bg-sui-blue-bright/30 text-inherit rounded-sm` change). */
+.DocSearch-Hit-content-wrapper mark,
+.DocSearch-Hit mark,
+.DocSearch-Hit-Tree mark {
+  background-color: rgba(143, 203, 255, 0.3);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+  font-weight: inherit;
+}
+
+/* Footer ESC label, View all link. */
+.DocSearch-Footer {
+  border-top: 1px solid #E0E2E6;
+  box-shadow: none;
+  padding: 0.5rem 1.5rem;
+  background: #ffffff;
+}
+
+[data-theme='dark'] .DocSearch-Footer {
+  border-top-color: #343940;
+  background: #131518;
+}
+
+.DocSearch-Commands-Key {
+  background: transparent;
+  box-shadow: none;
+  color: #89919F;
+  font-family: inherit;
+}
+
+.DocSearch-NoResults {
+  padding: 1.5rem;
+}
