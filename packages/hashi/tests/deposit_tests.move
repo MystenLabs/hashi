@@ -72,8 +72,9 @@ fun test_spent_utxo_cannot_be_redeposited() {
     // Simulate: deposit confirmed (UTXO inserted into active pool)
     hashi.bitcoin_mut().utxo_pool_mut().insert_active(utxo);
 
-    // Simulate: UTXO spent in a withdrawal (moved to spent_utxos)
-    hashi.bitcoin_mut().utxo_pool_mut().confirm_spent(utxo_id, 0);
+    // Simulate: UTXO spent in a withdrawal (mark then cleanup to spent_utxos)
+    hashi.bitcoin_mut().utxo_pool_mut().mark_spent(utxo_id, 0);
+    hashi.bitcoin_mut().utxo_pool_mut().cleanup_spent(utxo_id);
 
     // Attempt to deposit the same UTXO again — should abort because
     // is_spent_or_active() returns true.

@@ -65,6 +65,17 @@ pub(crate) fn withdrawal_limiter_consumption_amount(txn: &WithdrawalTransaction)
     inputs.saturating_sub(change)
 }
 
+/// Conservative runtime-object budget for withdrawal commit transactions.
+///
+/// Sui's hard object-runtime cache limit is 1000 objects. Empirical
+/// measurements put withdrawal commit transactions at roughly
+/// `selected_utxos + 3 * requests + fixed_overhead` runtime objects. Target
+/// 922 to leave 7.8% headroom below the hard 1000 cap.
+const WITHDRAWAL_COMMIT_RUNTIME_OBJECT_BUDGET: usize = 922;
+const WITHDRAWAL_COMMIT_FIXED_RUNTIME_OBJECTS: usize = 12;
+const WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_REQUEST: usize = 3;
+const WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_INPUT: usize = 1;
+
 /// Full input weight (WU) for a 2-of-2 taproot script-path spend.
 /// TXIN_BASE_WEIGHT (164 WU) + satisfaction (234 WU) = 398 WU (100 vB).
 /// Used in fee validation where we calculate weight directly without
@@ -80,6 +91,32 @@ const P2TR_OUTPUT_WEIGHT_WU: u64 = 172;
 
 /// P2WPKH output weight: TXOUT_BASE(36) + OP_0 OP_PUSHBYTES_20 <20 bytes>(88) = 124 WU.
 const P2WPKH_OUTPUT_WEIGHT_WU: u64 = 124;
+
+fn safe_withdrawal_commit_max_inputs(request_count: usize, configured_max_inputs: usize) -> usize {
+    let request_objects =
+        request_count.saturating_mul(WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_REQUEST);
+    let runtime_input_budget = WITHDRAWAL_COMMIT_RUNTIME_OBJECT_BUDGET
+        .saturating_sub(WITHDRAWAL_COMMIT_FIXED_RUNTIME_OBJECTS)
+        .saturating_sub(request_objects);
+    let input_budget = runtime_input_budget / WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_INPUT;
+    configured_max_inputs.min(input_budget)
+}
+
+/// Confirm is no longer input-bound: spent UTXOs emit events only (0
+/// objects per input). The confirm transaction's object count is
+/// `requests + ~43` fixed overhead — well within the 1000-object limit
+/// for any practical request count. The commit path is the binding
+/// constraint.
+fn safe_withdrawal_flow_max_inputs(request_count: usize, configured_max_inputs: usize) -> usize {
+    let request_input_budget =
+        request_count.saturating_mul(CoinSelectionParams::DEFAULT_INPUT_BUDGET);
+    configured_max_inputs
+        .min(request_input_budget)
+        .min(safe_withdrawal_commit_max_inputs(
+            request_count,
+            configured_max_inputs,
+        ))
+}
 
 /// The data that validators BLS-sign over to approve a single withdrawal request.
 #[derive(Clone, Debug, serde_derive::Serialize)]
@@ -820,16 +857,9 @@ impl Hashi {
             .get_deposit_address(&hashi_pubkey, None)
             .map_err(WithdrawalCommitmentError::BtcTxBuildFailed)?;
 
-        // Build coin selection parameters from on-chain config. Override
-        // max_fee_per_request to match the Move contract's worst-case cap,
-        // and max_withdrawal_requests to honour the leader's configured
-        // batch cap.
-        let params = CoinSelectionParams {
-            max_fee_per_request: self.onchain_state().worst_case_network_fee(),
-            max_withdrawal_requests: self.config.withdrawal_max_batch_size(),
-            max_mempool_chain_depth: self.config.max_mempool_chain_depth(),
-            ..CoinSelectionParams::new(change_address.clone())
-        };
+        let configured_max_inputs = CoinSelectionParams::DEFAULT_MAX_INPUTS;
+        let configured_long_term_fee_rate = CoinSelectionParams::DEFAULT_LONG_TERM_FEE_RATE;
+        let configured_max_requests = self.config.withdrawal_max_batch_size().min(requests.len());
 
         // Snapshot both maps under a single read-lock so they are always
         // mutually consistent (e.g., a WithdrawalConfirmedEvent cannot update
@@ -875,8 +905,49 @@ impl Hashi {
             })
             .collect();
 
-        let result = utxo_pool::select_coins(&candidates, &mapped_requests, &params, fee_rate)
-            .map_err(|e| WithdrawalCommitmentError::UtxoSelectionFailed(anyhow!(e)))?;
+        let mut last_selection_error = None;
+        let mut result = None;
+        for request_count in (1..=configured_max_requests).rev() {
+            let max_inputs = safe_withdrawal_flow_max_inputs(request_count, configured_max_inputs);
+            if max_inputs == 0 {
+                continue;
+            }
+
+            let params = CoinSelectionParams {
+                max_inputs,
+                long_term_fee_rate: configured_long_term_fee_rate,
+                max_fee_per_request: self.onchain_state().worst_case_network_fee(),
+                max_withdrawal_requests: request_count,
+                max_mempool_chain_depth: self.config.max_mempool_chain_depth(),
+                ..CoinSelectionParams::new(change_address.clone())
+            };
+
+            match utxo_pool::select_coins(&candidates, &mapped_requests, &params, fee_rate) {
+                Ok(selection) => {
+                    if request_count < configured_max_requests {
+                        tracing::info!(
+                            selected_requests = selection.selected_requests.len(),
+                            selected_inputs = selection.inputs.len(),
+                            configured_max_requests,
+                            configured_max_inputs,
+                            max_inputs,
+                            "Reduced withdrawal batch to stay within Sui commit limits",
+                        );
+                    }
+                    result = Some(selection);
+                    break;
+                }
+                Err(e) => last_selection_error = Some(e),
+            }
+        }
+
+        let result = result.ok_or_else(|| {
+            WithdrawalCommitmentError::UtxoSelectionFailed(anyhow!(
+                last_selection_error
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "no withdrawal request count fits Sui commit limits".into())
+            ))
+        })?;
 
         // Build outputs: one per selected request (net amount already deducted),
         // plus an optional change output.
@@ -1374,6 +1445,7 @@ mod tests {
     use crate::onchain::types::OutputUtxo;
     use crate::onchain::types::Utxo;
     use crate::onchain::types::UtxoId;
+    use crate::utxo_pool::CoinSelectionParams;
     use hashi_types::bitcoin_txid::BitcoinTxid;
 
     fn input(amount: u64) -> Utxo {
@@ -1442,5 +1514,38 @@ mod tests {
     fn consumption_amount_no_inputs_returns_zero() {
         let txn = make_txn(vec![], vec![], None);
         assert_eq!(withdrawal_limiter_consumption_amount(&txn), 0);
+    }
+
+    #[test]
+    fn withdrawal_flow_budget_at_absolute_cap() {
+        assert_eq!(CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS, 70);
+        assert_eq!(
+            safe_withdrawal_commit_max_inputs(70, 700),
+            700,
+            "70 requests × 10 inputs = 700, exactly fits the 922 commit budget",
+        );
+        assert_eq!(
+            safe_withdrawal_flow_max_inputs(70, 700),
+            700,
+            "commit and per-request budgets align at 70 requests / 700 inputs",
+        );
+    }
+
+    #[test]
+    fn withdrawal_flow_budget_scales_inputs_with_request_count() {
+        assert_eq!(
+            safe_withdrawal_flow_max_inputs(10, CoinSelectionParams::DEFAULT_MAX_INPUTS),
+            10 * CoinSelectionParams::DEFAULT_INPUT_BUDGET,
+            "at low request counts, the per-request input budget is binding",
+        );
+    }
+
+    #[test]
+    fn withdrawal_flow_budget_at_default_batch_size() {
+        assert_eq!(
+            safe_withdrawal_flow_max_inputs(50, CoinSelectionParams::DEFAULT_MAX_INPUTS),
+            500,
+            "50 requests × 10 inputs/request = 500, per-request budget is binding",
+        );
     }
 }

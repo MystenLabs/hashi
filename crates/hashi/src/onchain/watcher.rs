@@ -332,6 +332,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                         utxo,
                         produced_by: None,
                         locked_by: None,
+                        spent_epoch: None,
                     },
                 );
             }
@@ -431,6 +432,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                                 utxo: change_utxo,
                                 produced_by: Some(event.withdrawal_txn_id),
                                 locked_by: None,
+                                spent_epoch: None,
                             },
                         );
                     }
@@ -522,11 +524,15 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
             }
             HashiEvent::UtxoSpentEvent(utxo_spent_event) => {
                 let mut state = state.state_mut();
-                state
+                // Mark the local record as spent so the orphan scanner can discover it.
+                if let Some(record) = state
                     .hashi
                     .utxo_pool
                     .utxo_records
-                    .remove(&utxo_spent_event.utxo_id);
+                    .get_mut(&utxo_spent_event.utxo_id)
+                {
+                    record.spent_epoch = Some(utxo_spent_event.spent_epoch);
+                }
                 state
                     .hashi
                     .utxo_pool

@@ -14,6 +14,7 @@ use crate::leader::retry::GlobalRetryTracker;
 use crate::leader::retry::RetryTracker;
 use crate::onchain::types::DepositConfirmationMessage;
 use crate::onchain::types::DepositRequest;
+use crate::onchain::types::UtxoId;
 use crate::onchain::types::WithdrawalRequest;
 use crate::onchain::types::WithdrawalTransaction;
 use crate::sui_tx_executor::SuiTxExecutor;
@@ -47,6 +48,7 @@ use hashi_types::proto::SignWithdrawalTransactionRequest;
 use hashi_types::proto::SignWithdrawalTxConstructionRequest;
 use hashi_types::proto::SignWithdrawalTxSigningRequest;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 use sui_futures::service::Service;
@@ -62,6 +64,14 @@ use x509_parser::nom::AsBytes;
 
 const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
 const LEADER_TASK_TIMEOUT: Duration = Duration::from_secs(60);
+
+pub(crate) struct PendingUtxoCleanup {
+    pub utxo_ids: Vec<UtxoId>,
+}
+
+/// Result of a withdrawal broadcast task: `Some(spent_utxo_ids)` when the
+/// withdrawal was confirmed on Sui, `None` when it was not yet ready.
+type WithdrawalBroadcastResult = anyhow::Result<Option<Vec<UtxoId>>>;
 
 #[derive(Clone, Copy, Debug)]
 enum DepositPhase {
@@ -81,11 +91,14 @@ pub struct LeaderService {
     withdrawal_commitment_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     withdrawal_signing_tasks: JoinSet<(Address, anyhow::Result<()>)>,
     inflight_withdrawal_signings: HashSet<Address>,
-    withdrawal_broadcast_tasks: JoinSet<(Address, anyhow::Result<()>)>,
+    withdrawal_broadcast_tasks: JoinSet<(Address, WithdrawalBroadcastResult)>,
     inflight_withdrawal_broadcasts: HashSet<Address>,
     stuck_withdrawal_warned: HashSet<Address>,
     deposit_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     proposal_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
+    pending_utxo_cleanups: VecDeque<PendingUtxoCleanup>,
+    utxo_cleanup_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
+    utxo_cleanup_scan_needed: bool,
 }
 
 impl LeaderService {
@@ -107,6 +120,9 @@ impl LeaderService {
             stuck_withdrawal_warned: HashSet::new(),
             deposit_gc_task: None,
             proposal_gc_task: None,
+            pending_utxo_cleanups: VecDeque::new(),
+            utxo_cleanup_gc_task: None,
+            utxo_cleanup_scan_needed: true,
         }
     }
 
@@ -158,6 +174,7 @@ impl LeaderService {
                     self.process_unsigned_withdrawal_txns();
                     self.process_signed_withdrawal_txns();
                     self.check_delete_proposals(checkpoint_timestamp_ms);
+                    self.check_cleanup_spent_utxos();
 
                     if !self.pending_deposit_requests.is_empty() {
                         self.process_deposit_requests();
@@ -215,6 +232,12 @@ impl LeaderService {
                     self.proposal_gc_task = None;
                     Self::log_task_result("proposal_gc", result);
                 }
+                Some(result) = OptionFuture::from(self.utxo_cleanup_gc_task.as_mut()) => {
+                    self.utxo_cleanup_gc_task = None;
+                    Self::log_task_result("utxo_cleanup_gc", result);
+                    self.utxo_cleanup_scan_needed = true;
+                    self.check_cleanup_spent_utxos();
+                }
 
             }
         }
@@ -269,12 +292,17 @@ impl LeaderService {
 
     fn handle_completed_withdrawal_broadcast_task(
         &mut self,
-        result: Result<(Address, anyhow::Result<()>), tokio::task::JoinError>,
+        result: Result<(Address, WithdrawalBroadcastResult), tokio::task::JoinError>,
     ) {
         let mapped = match result {
             Ok((withdrawal_id, inner)) => {
                 self.inflight_withdrawal_broadcasts.remove(&withdrawal_id);
-                Ok(inner)
+                if let Ok(Some(utxo_ids)) = &inner {
+                    self.pending_utxo_cleanups.push_back(PendingUtxoCleanup {
+                        utxo_ids: utxo_ids.clone(),
+                    });
+                }
+                Ok(inner.map(|_| ()))
             }
             Err(e) => Err(e),
         };
@@ -1531,11 +1559,14 @@ impl LeaderService {
 
     /// Check BTC tx status, broadcast/re-broadcast if needed, confirm when
     /// enough BTC confirmations are reached.
+    ///
+    /// Returns `Some(utxo_ids)` when the withdrawal was confirmed on Sui,
+    /// signalling that UTXO cleanup should be scheduled.
     #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id, bitcoin_txid))]
     async fn handle_signed_withdrawal(
         inner: Arc<Hashi>,
         txn: WithdrawalTransaction,
-    ) -> anyhow::Result<()> {
+    ) -> WithdrawalBroadcastResult {
         let confirmation_threshold = inner.onchain_state().bitcoin_confirmation_threshold();
         let txid: bitcoin::Txid = txn.txid.into();
         tracing::Span::current().record("bitcoin_txid", tracing::field::display(&txid));
@@ -1548,7 +1579,9 @@ impl LeaderService {
                     confirmations,
                     "Withdrawal tx confirmed, proceeding to on-chain confirmation"
                 );
+                let utxo_ids: Vec<UtxoId> = txn.inputs.iter().map(|u| u.id).collect();
                 Self::confirm_withdrawal_on_sui(&inner, &txn).await?;
+                return Ok(Some(utxo_ids));
             }
             Ok(TxStatus::Confirmed { confirmations }) => {
                 debug!(
@@ -1569,7 +1602,7 @@ impl LeaderService {
                 );
             }
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Rebuild a fully signed Bitcoin transaction from on-chain WithdrawalTransaction
@@ -2074,6 +2107,7 @@ impl LeaderService {
             .await?;
 
         info!("Successfully confirmed withdrawal {:?}", withdrawal_txn_id);
+
         Ok(())
     }
 

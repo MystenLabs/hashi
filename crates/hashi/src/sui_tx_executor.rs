@@ -92,14 +92,46 @@ fn build_chunked_vec_vec_u8_arg(
         let chunk_arg = builder.pure(&chunk);
         builder.move_call(
             Function::new(
-                Address::new([
-                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                    0, 0, 0, 0, 0, 1,
-                ]),
+                MOVE_STDLIB_ADDRESS,
                 Identifier::from_static("vector"),
                 Identifier::from_static("append"),
             )
             .with_type_args(vec![vec_u8_type.clone()]),
+            vec![combined, chunk_arg],
+        );
+    }
+
+    combined
+}
+
+/// Maximum number of arguments to pass to a single `make_move_vec` command.
+///
+/// Sui enforces a 512-argument limit per PTB command. Keep this well below the
+/// ceiling so large withdrawal commits can assemble vectors of custom Move
+/// structs without making one command consume hundreds of arguments.
+const MAX_MOVE_VEC_ARGS_PER_CHUNK: usize = 250;
+
+/// Build a `vector<T>` PTB argument from existing element arguments, chunking
+/// the `make_move_vec` calls so no command gets close to Sui's 512-argument
+/// ceiling. Later chunks are appended into the first one with
+/// `0x1::vector::append<T>`.
+fn build_chunked_move_vec_arg(
+    builder: &mut TransactionBuilder,
+    elements: Vec<sui_transaction_builder::Argument>,
+    element_type: TypeTag,
+) -> sui_transaction_builder::Argument {
+    let mut iter = elements.chunks(MAX_MOVE_VEC_ARGS_PER_CHUNK);
+    let first_chunk = iter.next().unwrap_or_default().to_vec();
+    let combined = builder.make_move_vec(Some(element_type.clone()), first_chunk);
+    for chunk in iter {
+        let chunk_arg = builder.make_move_vec(Some(element_type.clone()), chunk.to_vec());
+        builder.move_call(
+            Function::new(
+                MOVE_STDLIB_ADDRESS,
+                Identifier::from_static("vector"),
+                Identifier::from_static("append"),
+            )
+            .with_type_args(vec![element_type.clone()]),
             vec![combined, chunk_arg],
         );
     }
@@ -183,9 +215,13 @@ use crate::onchain;
 use crate::onchain::OnchainState;
 use crate::onchain::types::DepositConfirmationMessage;
 use crate::onchain::types::DepositRequest;
+use crate::onchain::types::UtxoId;
 use crate::withdrawals::WithdrawalTxCommitment;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
+
+/// Well-known Move stdlib package address (0x1)
+const MOVE_STDLIB_ADDRESS: Address = Address::from_static("0x1");
 
 /// Well-known Sui Clock object address (0x6)
 pub const SUI_CLOCK_OBJECT_ID: Address = Address::from_static("0x6");
@@ -1113,7 +1149,8 @@ impl SuiTxExecutor {
                 )
             })
             .collect();
-        let selected_utxos_arg = builder.make_move_vec(Some(utxo_id_type.into()), utxo_elements);
+        let selected_utxos_arg =
+            build_chunked_move_vec_arg(&mut builder, utxo_elements, utxo_id_type.into());
 
         let output_utxo_type = StructTag::new(
             self.hashi_ids.package_id,
@@ -1137,7 +1174,8 @@ impl SuiTxExecutor {
                 )
             })
             .collect();
-        let outputs_arg = builder.make_move_vec(Some(output_utxo_type.into()), output_elements);
+        let outputs_arg =
+            build_chunked_move_vec_arg(&mut builder, output_elements, output_utxo_type.into());
 
         let txid_arg = builder.pure(&approval.txid);
         let cert_arg = build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, cert);
@@ -1352,6 +1390,72 @@ impl SuiTxExecutor {
                 "confirm_withdrawal failed: {:?}",
                 response.transaction().effects().status()
             );
+        }
+        Ok(())
+    }
+
+    /// Execute `withdraw::cleanup_spent_utxos` to finalize spent-UTXO
+    /// bookkeeping after a withdrawal has been confirmed.
+    ///
+    /// Large input sets are chunked across multiple transactions to stay
+    /// under the Sui object limit.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(utxo_count = utxo_ids.len()),
+    )]
+    pub async fn execute_cleanup_spent_utxos(&mut self, utxo_ids: &[UtxoId]) -> anyhow::Result<()> {
+        const MAX_PER_TX: usize = 400;
+
+        for chunk in utxo_ids.chunks(MAX_PER_TX) {
+            let mut builder = TransactionBuilder::new();
+            let hashi_arg = builder.object(
+                ObjectInput::new(self.hashi_ids.hashi_object_id)
+                    .as_shared()
+                    .with_mutable(true),
+            );
+
+            // Build the vector<UtxoId> argument
+            let utxo_id_type = StructTag::new(
+                self.hashi_ids.package_id,
+                Identifier::from_static("utxo"),
+                Identifier::from_static("UtxoId"),
+                vec![],
+            );
+            let utxo_elements: Vec<_> = chunk
+                .iter()
+                .map(|id| {
+                    let txid_arg = builder.pure(&id.txid);
+                    let vout_arg = builder.pure(&id.vout);
+                    builder.move_call(
+                        Function::new(
+                            self.hashi_ids.package_id,
+                            Identifier::from_static("utxo"),
+                            Identifier::from_static("utxo_id"),
+                        ),
+                        vec![txid_arg, vout_arg],
+                    )
+                })
+                .collect();
+            let utxo_ids_arg =
+                build_chunked_move_vec_arg(&mut builder, utxo_elements, utxo_id_type.into());
+
+            builder.move_call(
+                Function::new(
+                    self.hashi_ids.package_id,
+                    Identifier::from_static("withdraw"),
+                    Identifier::from_static("cleanup_spent_utxos"),
+                ),
+                vec![hashi_arg, utxo_ids_arg],
+            );
+
+            let response = self.execute(builder).await?;
+            if !response.transaction().effects().status().success() {
+                anyhow::bail!(
+                    "cleanup_spent_utxos failed: {:?}",
+                    response.transaction().effects().status()
+                );
+            }
         }
         Ok(())
     }

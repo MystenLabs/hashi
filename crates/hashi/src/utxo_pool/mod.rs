@@ -339,16 +339,15 @@ impl CoinSelectionParams {
     /// will not propagate through the standard P2P network.
     pub const DEFAULT_MAX_TX_WEIGHT: Weight = Weight::from_wu(400_000);
 
-    /// Default maximum consolidation inputs beyond the minimum
-    /// required to fund withdrawals.
-    pub const DEFAULT_MAX_INPUTS: usize = 500;
+    /// Default maximum total inputs selected for a withdrawal transaction,
+    /// including both funding inputs and consolidation inputs.
+    pub const DEFAULT_MAX_INPUTS: usize = 700;
 
-    /// Default maximum number of withdrawal requests per batch. A
-    /// batch of 50 P2TR outputs is ~9.2 kWU (~2.3% of the 400 kWU
-    /// policy limit), so the weight limit is never the binding
-    /// constraint. Larger batches amortize the fixed transaction
-    /// overhead across more requests, reducing per-request fees.
-    pub const DEFAULT_MAX_WITHDRAWAL_REQUESTS: usize = 50;
+    /// Maximum number of withdrawal requests per batch. Larger
+    /// configured values are clamped to this because Sui runtime object
+    /// limits constrain the commit transaction to roughly
+    /// `inputs + 3 * requests + 12` runtime objects (budget: 922).
+    pub const MAX_WITHDRAWAL_REQUESTS: usize = 70;
 
     /// Default minimum fee rate floor (1 sat/vB), matching Bitcoin
     /// Core's minimum relay fee.
@@ -418,7 +417,7 @@ impl CoinSelectionParams {
         Self {
             max_tx_weight: Self::DEFAULT_MAX_TX_WEIGHT,
             max_inputs: Self::DEFAULT_MAX_INPUTS,
-            max_withdrawal_requests: Self::DEFAULT_MAX_WITHDRAWAL_REQUESTS,
+            max_withdrawal_requests: Self::MAX_WITHDRAWAL_REQUESTS,
             max_fee_per_request,
             min_fee_rate: Self::DEFAULT_MIN_FEE_RATE,
             long_term_fee_rate: Self::DEFAULT_LONG_TERM_FEE_RATE,

@@ -169,7 +169,7 @@ pub struct Config {
     /// transaction. The batch commits immediately once this many requests are
     /// ready, without waiting for `withdrawal_batching_delay_ms` to elapse.
     ///
-    /// Defaults to 50 (the algorithm's hard upper bound).
+    /// Defaults to 70 (the algorithm's hard upper bound).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdrawal_max_batch_size: Option<usize>,
 
@@ -370,7 +370,8 @@ impl Config {
 
     pub fn withdrawal_max_batch_size(&self) -> usize {
         self.withdrawal_max_batch_size
-            .unwrap_or(crate::utxo_pool::CoinSelectionParams::DEFAULT_MAX_WITHDRAWAL_REQUESTS)
+            .unwrap_or(crate::utxo_pool::CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS)
+            .min(crate::utxo_pool::CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS)
     }
 
     pub fn max_mempool_chain_depth(&self) -> usize {
@@ -496,5 +497,26 @@ mod tests {
         let port1 = get_available_port();
         let port2 = get_available_port();
         assert_ne!(port1, port2, "Should return different ports");
+    }
+
+    #[test]
+    fn test_withdrawal_max_batch_size_defaults_to_absolute_cap() {
+        let config = Config::default();
+        assert_eq!(
+            config.withdrawal_max_batch_size(),
+            crate::utxo_pool::CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
+        );
+    }
+
+    #[test]
+    fn test_withdrawal_max_batch_size_clamps_to_absolute_cap() {
+        let config = Config {
+            withdrawal_max_batch_size: Some(200),
+            ..Config::default()
+        };
+        assert_eq!(
+            config.withdrawal_max_batch_size(),
+            crate::utxo_pool::CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
+        );
     }
 }

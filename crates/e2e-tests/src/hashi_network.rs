@@ -259,7 +259,7 @@ pub struct HashiNetworkBuilder {
     /// Defaults to `Some(0)` (no delay) for tests.
     pub withdrawal_batching_delay_ms: Option<u64>,
     /// Overrides `withdrawal_max_batch_size` in each node's config.
-    /// `None` uses the production default (50).
+    /// `None` uses the production default (70).
     pub withdrawal_max_batch_size: Option<usize>,
     /// Overrides `max_mempool_chain_depth` in each node's config.
     /// `None` uses the production default (5).
