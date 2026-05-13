@@ -5,9 +5,10 @@
 //!
 //! This module handles the mechanics of building backup manifests, encrypting
 //! files into age-wrapped tar archives, and extracting them. CLI-specific
-//! orchestration (config loading, recipient resolution, user output) lives in
-//! [`crate::cli::commands::backup`].
+//! orchestration (config loading, DB-open locking policy, and user output)
+//! lives in [`crate::cli::commands::backup`].
 
+use age::cli_common::UiCallbacks;
 use anyhow::Context;
 use anyhow::Result;
 use std::collections::HashSet;
@@ -261,6 +262,130 @@ pub fn encrypt_files_to_age_archive(
     encrypted.finish()?;
 
     Ok(())
+}
+
+pub fn save(
+    node_config_path: &Path,
+    node_config: &crate::config::Config,
+    db: &Database,
+    recipient: &BackupRecipient,
+    output_dir: &Path,
+) -> Result<PathBuf> {
+    let files = backup_file_paths(node_config_path, node_config)?;
+
+    for file in &files {
+        if !file.exists() {
+            anyhow::bail!("Backup input does not exist: {}", file.display());
+        }
+    }
+
+    let db_path = node_config.db.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Node config at {} does not specify a database path",
+            node_config_path.display()
+        )
+    })?;
+
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("Failed to create output directory {}", output_dir.display()))?;
+
+    let manifest = build_backup_manifest(&files, db_path)?;
+
+    info!(
+        file_count = files.len(),
+        %recipient,
+        "Backing up files + database",
+    );
+
+    let encryptor_recipient = build_encryptor_recipient(recipient)?;
+
+    let output_path = output_dir.join(encrypted_backup_file_name());
+    encrypt_files_to_age_archive(&manifest, db, encryptor_recipient.as_ref(), &output_path)?;
+
+    Ok(output_path)
+}
+
+/// All file paths which must be backed up to enable full node recovery
+/// (other than the db, which is backed up separately).
+fn backup_file_paths(
+    node_config_path: &Path,
+    node_config: &crate::config::Config,
+) -> Result<Vec<PathBuf>> {
+    let mut paths = vec![node_config_path.to_path_buf()];
+    paths.extend(node_config_referenced_files(node_config)?);
+    Ok(paths)
+}
+
+/// Return the set of external files referenced by path-style node config
+/// fields.
+///
+/// Both `tls_private_key` and `operator_private_key` are `Option<String>`
+/// interpreted as path-first, inline-PEM-fallback by the node. We classify
+/// the value here so the backup either includes the referenced file or, when
+/// the value is inline PEM, relies on the node config file itself to capture
+/// the key material. A path-shaped value that doesn't resolve to a file is
+/// an error: it would mean the node config points at a missing key, and
+/// silently skipping it would produce a backup that can't actually restore
+/// the node.
+fn node_config_referenced_files(node_config: &crate::config::Config) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+
+    for (field_name, raw) in [
+        ("tls_private_key", node_config.tls_private_key.as_deref()),
+        (
+            "operator_private_key",
+            node_config.operator_private_key.as_deref(),
+        ),
+    ] {
+        let Some(raw) = raw else { continue };
+
+        if is_inline_pem(raw) {
+            continue;
+        }
+
+        let candidate = Path::new(raw);
+        if !candidate.is_file() {
+            anyhow::bail!(
+                "node config field `{field_name}` is set to {raw:?} which is neither inline PEM nor an existing file. \
+                 Fix the value or remove it before running backup."
+            );
+        }
+        paths.push(candidate.to_path_buf());
+    }
+
+    Ok(paths)
+}
+
+/// Heuristic: PEM blobs start with the armor header `-----BEGIN`, optionally
+/// after some leading whitespace. A real path on any sane filesystem won't.
+fn is_inline_pem(value: &str) -> bool {
+    value.trim_start().starts_with("-----BEGIN")
+}
+
+/// Materialize a `BackupRecipient` into a concrete `age::Recipient` trait object
+/// suitable for passing to `Encryptor::with_recipients`.
+///
+/// For plugin recipients, this is where `age-plugin-<name>` is looked up on
+/// `$PATH`, so this call will fail if the plugin binary is not installed.
+fn build_encryptor_recipient(recipient: &BackupRecipient) -> Result<Box<dyn age::Recipient>> {
+    match recipient {
+        BackupRecipient::Native(r) => Ok(Box::new(r.clone())),
+        BackupRecipient::Plugin(r) => {
+            let plugin_name = r.plugin().to_string();
+            let recipient_plugin = plugin::RecipientPluginV1::new(
+                &plugin_name,
+                std::slice::from_ref(r),
+                &[],
+                UiCallbacks,
+            )
+            .with_context(|| {
+                format!(
+                    "Failed to initialize age plugin '{plugin_name}'. Is `age-plugin-{plugin_name}` installed and on $PATH?"
+                )
+            })?;
+            Ok(Box::new(recipient_plugin))
+        }
+    }
 }
 
 pub fn encrypted_backup_file_name() -> PathBuf {
@@ -1176,6 +1301,28 @@ mod tests {
             format!("{err:#}").contains("failed to deserialize backup keyspace encryption_keys"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    fn save_works_while_db_is_open() {
+        let src = tempfile::Builder::new().tempdir().unwrap();
+        let db_path = src.path().join("db");
+        let node_config_path = src.path().join("config.toml");
+        let node_config = crate::config::Config {
+            db: Some(db_path.clone()),
+            ..Default::default()
+        };
+        node_config.save(&node_config_path).unwrap();
+
+        let db = Database::open(&db_path).unwrap();
+        let identity = age::x25519::Identity::generate();
+        let recipient = identity.to_public().to_string().parse().unwrap();
+        let out = tempfile::Builder::new().tempdir().unwrap();
+
+        let output_path =
+            save(&node_config_path, &node_config, &db, &recipient, out.path()).unwrap();
+
+        assert!(output_path.is_file());
     }
 
     #[test]

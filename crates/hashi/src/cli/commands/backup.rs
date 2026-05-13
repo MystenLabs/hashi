@@ -9,7 +9,6 @@
 use age::Decryptor;
 use age::IdentityFile;
 use age::cli_common::UiCallbacks;
-use age::plugin;
 use anyhow::Context;
 use anyhow::Result;
 use std::fs;
@@ -17,11 +16,11 @@ use std::fs::File;
 use std::path::Path;
 use std::str::FromStr;
 
-use tracing::info;
-
 use crate::backup;
 use crate::backup::BackupRecipient;
 use crate::cli::print_success;
+use crate::config::Config;
+use crate::db::Database;
 
 /// Save an encrypted backup of the node config, referenced files, and database
 pub fn save(
@@ -36,23 +35,7 @@ pub fn save(
         )
     })?;
 
-    let recipient = backup_age_pubkey_override
-        .map(|value| BackupRecipient::from_str(&value))
-        .transpose()?
-        .or_else(|| node_config.backup_age_pubkey.clone())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "No age public key configured. Pass --backup-age-pubkey or set backup-age-pubkey in the node config."
-            )
-        })?;
-
-    let files = backup_file_paths(node_config_path, &node_config)?;
-
-    for file in &files {
-        if !file.exists() {
-            anyhow::bail!("Backup input does not exist: {}", file.display());
-        }
-    }
+    let recipient = resolve_backup_recipient(&node_config, backup_age_pubkey_override)?;
 
     let db_path = node_config.db.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
@@ -78,7 +61,7 @@ pub fn save(
     // Open the database — fails with a clear message if the node is running.
     // `Database::open` preserves `fjall::Error` as the source, so the
     // downcast below matches on the underlying variant.
-    let db = crate::db::Database::open(db_path).map_err(|e| {
+    let db = Database::open(db_path).map_err(|e| {
         if e.downcast_ref::<fjall::Error>()
             .is_some_and(|fe| matches!(fe, fjall::Error::Locked))
         {
@@ -92,111 +75,26 @@ pub fn save(
         }
     })?;
 
-    fs::create_dir_all(output_dir)
-        .with_context(|| format!("Failed to create output directory {}", output_dir.display()))?;
-
-    let manifest = backup::build_backup_manifest(&files, db_path)?;
-
-    info!(
-        file_count = files.len(),
-        %recipient,
-        "Backing up files + database",
-    );
-
-    let encryptor_recipient = build_encryptor_recipient(&recipient)?;
-
-    let output_path = output_dir.join(backup::encrypted_backup_file_name());
-    backup::encrypt_files_to_age_archive(
-        &manifest,
-        &db,
-        encryptor_recipient.as_ref(),
-        &output_path,
-    )?;
+    let output_path = backup::save(node_config_path, &node_config, &db, &recipient, output_dir)?;
 
     print_success(&format!("Backup completed: {}", output_path.display()));
 
     Ok(())
 }
 
-/// All file paths which must be backed up to enable full node recovery
-/// (other than the db, which is backed up separately).
-fn backup_file_paths(
-    node_config_path: &Path,
-    node_config: &crate::config::Config,
-) -> Result<Vec<std::path::PathBuf>> {
-    let mut paths = vec![node_config_path.to_path_buf()];
-    paths.extend(node_config_referenced_files(node_config)?);
-    Ok(paths)
-}
-
-/// Return the set of external files referenced by path-style node config
-/// fields.
-///
-/// Both `tls_private_key` and `operator_private_key` are `Option<String>`
-/// interpreted as path-first, inline-PEM-fallback by the node. We classify
-/// the value here so the backup either includes the referenced file or, when
-/// the value is inline PEM, relies on the node config file itself to capture
-/// the key material. A path-shaped value that doesn't resolve to a file is
-/// an error: it would mean the node config points at a missing key, and
-/// silently skipping it would produce a backup that can't actually restore
-/// the node.
-fn node_config_referenced_files(
-    node_config: &crate::config::Config,
-) -> Result<Vec<std::path::PathBuf>> {
-    let mut paths = Vec::new();
-
-    for (field_name, raw) in [
-        ("tls_private_key", node_config.tls_private_key.as_deref()),
-        (
-            "operator_private_key",
-            node_config.operator_private_key.as_deref(),
-        ),
-    ] {
-        let Some(raw) = raw else { continue };
-
-        if is_inline_pem(raw) {
-            continue;
-        }
-
-        let candidate = Path::new(raw);
-        if !candidate.is_file() {
-            anyhow::bail!(
-                "node config field `{field_name}` is set to {raw:?} which is neither inline PEM nor an existing file. \
-                 Fix the value or remove it before running backup."
-            );
-        }
-        paths.push(candidate.to_path_buf());
-    }
-
-    Ok(paths)
-}
-
-/// Heuristic: PEM blobs start with the armor header `-----BEGIN`, optionally
-/// after some leading whitespace. A real path on any sane filesystem won't.
-fn is_inline_pem(value: &str) -> bool {
-    value.trim_start().starts_with("-----BEGIN")
-}
-
-/// Materialize a `BackupRecipient` into a concrete `age::Recipient` trait object
-/// suitable for passing to `Encryptor::with_recipients`.
-///
-/// For plugin recipients, this is where `age-plugin-<name>` is looked up on
-/// `$PATH`, so this call will fail if the plugin binary is not installed.
-fn build_encryptor_recipient(recipient: &BackupRecipient) -> Result<Box<dyn age::Recipient>> {
-    match recipient {
-        BackupRecipient::Native(r) => Ok(Box::new(r.clone())),
-        BackupRecipient::Plugin(r) => {
-            let plugin_name = r.plugin().to_string();
-            let recipient_plugin =
-                plugin::RecipientPluginV1::new(&plugin_name, std::slice::from_ref(r), &[], UiCallbacks)
-                    .with_context(|| {
-                        format!(
-                            "Failed to initialize age plugin '{plugin_name}'. Is `age-plugin-{plugin_name}` installed and on $PATH?"
-                        )
-                    })?;
-            Ok(Box::new(recipient_plugin))
-        }
-    }
+pub(crate) fn resolve_backup_recipient(
+    node_config: &Config,
+    backup_age_pubkey_override: Option<String>,
+) -> Result<BackupRecipient> {
+    backup_age_pubkey_override
+        .map(|value| BackupRecipient::from_str(&value))
+        .transpose()?
+        .or_else(|| node_config.backup_age_pubkey.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No age public key configured. Pass --backup-age-pubkey or set backup-age-pubkey in the node config."
+            )
+        })
 }
 
 pub fn restore(

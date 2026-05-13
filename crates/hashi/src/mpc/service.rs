@@ -723,9 +723,15 @@ impl MpcService {
         if let Err(e) = self.inner.prepare_and_register_keys(next_epoch).await {
             warn!(
                 "Failed to prepare/register encryption+signing keys for epoch {next_epoch}: {e}; \
-                 will retry at next trigger"
+                  will retry at next trigger"
             );
         }
+        let hashi = self.inner.clone();
+        let _backup_task = tokio::task::spawn_blocking(move || {
+            if let Err(e) = hashi.backup_after_epoch_change(target_epoch) {
+                error!("Automatic backup after epoch {target_epoch} failed: {e:#}");
+            }
+        });
         info!("end_reconfig complete for epoch {target_epoch}, running prepare_signing");
         if let Err(e) = self.inner.db.prune_messages_below(target_epoch) {
             error!("Failed to prune old MPC messages below epoch {target_epoch}: {e}");

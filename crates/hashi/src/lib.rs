@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
@@ -49,6 +50,7 @@ pub(crate) fn init_crypto_provider() {
 
 pub struct Hashi {
     pub server_version: ServerVersion,
+    pub config_path: Option<PathBuf>,
     pub config: config::Config,
     pub metrics: Arc<metrics::Metrics>,
     pub db: Arc<db::Database>,
@@ -66,13 +68,18 @@ pub struct Hashi {
 }
 
 impl Hashi {
-    pub fn new(server_version: ServerVersion, config: config::Config) -> anyhow::Result<Arc<Self>> {
+    pub fn new(
+        server_version: ServerVersion,
+        config_path: Option<PathBuf>,
+        config: config::Config,
+    ) -> anyhow::Result<Arc<Self>> {
         init_crypto_provider();
         let db_path = config.db.as_deref().unwrap();
         let db = db::Database::open(db_path)?;
         let metrics = Arc::new(metrics::Metrics::new_default());
         Ok(Arc::new(Self {
             server_version,
+            config_path,
             config,
             metrics,
             db: Arc::new(db),
@@ -91,6 +98,7 @@ impl Hashi {
 
     pub fn new_with_registry(
         server_version: ServerVersion,
+        config_path: Option<PathBuf>,
         config: config::Config,
         registry: &prometheus::Registry,
     ) -> anyhow::Result<Arc<Self>> {
@@ -100,6 +108,7 @@ impl Hashi {
         let metrics = Arc::new(metrics::Metrics::new(registry));
         Ok(Arc::new(Self {
             server_version,
+            config_path,
             config,
             metrics,
             db: Arc::new(db),
@@ -265,6 +274,37 @@ impl Hashi {
             )
             .await
             .map(|_| ())
+    }
+
+    pub(crate) fn backup_after_epoch_change(&self, epoch: u64) -> anyhow::Result<Option<PathBuf>> {
+        let Some(config_path) = self.config_path.as_deref() else {
+            tracing::warn!(
+                epoch,
+                "Skipping automatic backup: server config path is not set"
+            );
+            return Ok(None);
+        };
+        let Some(recipient) = self.config.backup_age_pubkey.as_ref() else {
+            tracing::warn!(
+                epoch,
+                "Skipping automatic backup: backup_age_pubkey is not configured"
+            );
+            return Ok(None);
+        };
+
+        let output_path = crate::backup::save(
+            config_path,
+            &self.config,
+            self.db.as_ref(),
+            recipient,
+            self.config.backup_dir(),
+        )?;
+        tracing::info!(
+            epoch,
+            output = %output_path.display(),
+            "Automatic backup completed after epoch change",
+        );
+        Ok(Some(output_path))
     }
 
     fn find_encryption_key_for_committee(
@@ -827,6 +867,7 @@ fn assert_test_only_config(sui_chain_id: &str, bitcoin_chain_id: &str, field_nam
 
 #[cfg(test)]
 mod test {
+    use age::x25519;
     use fastcrypto::serde_helpers::ToFromByteArray;
     use hashi_types::committee::Bls12381PrivateKey;
     use hashi_types::committee::Committee;
@@ -846,7 +887,7 @@ mod test {
         config.db = Some(tmpdir.path().into());
         let server_version = ServerVersion::new("unknown", "unknown");
         let registry = prometheus::Registry::new();
-        let hashi = Hashi::new_with_registry(server_version, config, &registry).unwrap();
+        let hashi = Hashi::new_with_registry(server_version, None, config, &registry).unwrap();
         (hashi, tmpdir)
     }
 
@@ -890,6 +931,34 @@ mod test {
             pk2.as_element().to_byte_array(),
             "different epochs should yield different keys"
         );
+    }
+
+    #[test]
+    fn automatic_backup_after_epoch_change_uses_configured_backup_dir() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db_path = tmpdir.path().join("db");
+        let backup_dir = tmpdir.path().join("backups");
+        let config_path = tmpdir.path().join("config.toml");
+        let recipient = x25519::Identity::generate().to_public();
+
+        let config = Config {
+            db: Some(db_path),
+            backup_age_pubkey: Some(recipient.to_string().parse().unwrap()),
+            backup_dir: Some(backup_dir.clone()),
+            ..Default::default()
+        };
+        config.save(&config_path).unwrap();
+
+        let server_version = ServerVersion::new("unknown", "unknown");
+        let hashi = Hashi::new(server_version, Some(config_path), config).unwrap();
+
+        let output = hashi
+            .backup_after_epoch_change(7)
+            .unwrap()
+            .expect("backup should run");
+
+        assert!(output.is_file());
+        assert_eq!(output.parent(), Some(backup_dir.as_path()));
     }
 
     #[test]
@@ -1027,7 +1096,7 @@ mod test {
         config.db = Some(tmpdir.path().into());
         let tls_public_key = config.tls_public_key().unwrap();
 
-        let hashi = Hashi::new(server_version, config).unwrap();
+        let hashi = Hashi::new(server_version, None, config).unwrap();
 
         let (local_addr, _http_service) = crate::grpc::HttpService::new(hashi).start().await;
 
