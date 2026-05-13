@@ -120,6 +120,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
             MpcManager::new(
                 validator_address,
                 &hashi.committees,
+                reconstruction_epoch,
                 session_id,
                 encryption_key.clone(),
                 Some(encryption_key),

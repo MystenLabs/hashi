@@ -255,6 +255,7 @@ impl TestSetup {
         MpcManager::new(
             address,
             &self.committee_set,
+            self.committee_set.epoch(),
             session_id,
             self.encryption_keys[validator_index].clone(),
             None,
@@ -868,6 +869,7 @@ fn test_mpc_manager_new_from_committee_set() {
     let manager = MpcManager::new(
         address,
         &setup.committee_set,
+        setup.epoch(),
         session_id,
         encryption_key,
         None,
@@ -931,6 +933,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
     let result = MpcManager::new(
         Address::new([0; 32]),
         &committee_set,
+        epoch,
         session_id,
         encryption_keys[0].clone(),
         None,
@@ -1016,6 +1019,7 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
     let manager = MpcManager::new(
         Address::new([0u8; 32]),
         &committee_set,
+        33,
         session_id,
         encryption_keys[0].clone(),
         Some(encryption_keys[0].clone()),
@@ -1033,6 +1037,95 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
         "previous_reconfig_input_threshold must resolve to the most recent \
          committee below previous_epoch (committee[9]), not require an entry \
          at previous_epoch - 1 (= committee[31], which does not exist)"
+    );
+}
+
+#[test]
+fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
+    let mut rng = rand::thread_rng();
+    let num_validators = 4usize;
+    let encryption_keys: Vec<_> = (0..num_validators)
+        .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+        .collect();
+    let signing_keys: Vec<_> = (0..num_validators)
+        .map(|_| Bls12381PrivateKey::generate(&mut rng))
+        .collect();
+
+    let member_infos: BTreeMap<Address, MemberInfo> = (0..num_validators)
+        .map(|i| {
+            let addr = Address::new([i as u8; 32]);
+            let info = MemberInfo {
+                validator_address: addr,
+                operator_address: addr,
+                next_epoch_public_key: signing_keys[i].public_key(),
+                endpoint_url: None,
+                tls_public_key: None,
+                next_epoch_encryption_public_key: Some(PublicKey::from_private_key(
+                    &encryption_keys[i],
+                )),
+            };
+            (addr, info)
+        })
+        .collect();
+
+    let members: Vec<_> = (0..num_validators)
+        .map(|i| {
+            CommitteeMember::new(
+                Address::new([i as u8; 32]),
+                signing_keys[i].public_key(),
+                EncryptionPublicKey::from_private_key(&encryption_keys[i]),
+                1,
+            )
+        })
+        .collect();
+
+    let make_committee = |epoch: u64| {
+        Committee::new(
+            members.clone(),
+            epoch,
+            TEST_THRESHOLD_IN_BASIS_POINTS,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            TEST_MAX_FAULTY_IN_BASIS_POINTS,
+        )
+    };
+    let mut committees = BTreeMap::new();
+    committees.insert(5u64, make_committee(5));
+    committees.insert(10u64, make_committee(10));
+
+    let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+    committee_set
+        .set_epoch(5)
+        .set_pending_epoch_change(Some(10))
+        .set_members(member_infos)
+        .set_committees(committees);
+
+    let session_id = SessionId::new(TEST_CHAIN_ID, 5, &ProtocolType::KeyRotation);
+    let manager = MpcManager::new(
+        Address::new([0u8; 32]),
+        &committee_set,
+        5, // <-- explicit caller epoch; old recompute would have used 10
+        session_id,
+        encryption_keys[0].clone(),
+        Some(encryption_keys[0].clone()),
+        signing_keys[0].clone(),
+        Box::new(InMemoryPublicMessagesStore::new()),
+        TEST_CHAIN_ID,
+        None,
+        TEST_BATCH_SIZE_PER_WEIGHT,
+        None,
+    )
+    .expect(
+        "MpcManager::new must respect caller's epoch even when committee_set has a pending change",
+    );
+
+    assert_eq!(
+        manager.mpc_config.epoch, 5,
+        "mpc_config.epoch must reflect the caller-supplied epoch, not the recompute"
+    );
+    assert_eq!(
+        manager.committee.epoch(),
+        5,
+        "stored committee must be the caller's epoch, not the pending epoch"
     );
 }
 
@@ -6395,6 +6488,7 @@ async fn test_prepare_previous_output_for_new_member() {
     let new_member_manager = MpcManager::new(
         new_member_addr,
         &new_committee_set,
+        epoch,
         session_id,
         new_member_encryption_key,
         None,
@@ -7564,6 +7658,7 @@ fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
     let manager = MpcManager::new(
         shifted_addr,
         &committee_set,
+        target_epoch,
         session_id,
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         Some(rotation_setup.setup.encryption_keys[shifted_member_index].clone()),
@@ -7738,6 +7833,7 @@ fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
     let manager = MpcManager::new(
         setup.address(target_index),
         &committee_set,
+        target_epoch,
         session_id,
         setup.encryption_keys[target_index].clone(),
         Some(setup.encryption_keys[target_index].clone()),
@@ -7881,6 +7977,7 @@ fn test_reconstruct_from_dkg_certificates_uses_previous_encryption_key() {
     let manager_with_prev = MpcManager::new(
         setup.address(target_index),
         &committee_set,
+        target_epoch,
         session_id.clone(),
         new_key.clone(),
         Some(prev_key.clone()),
@@ -7907,6 +8004,7 @@ fn test_reconstruct_from_dkg_certificates_uses_previous_encryption_key() {
     let manager_without_prev = MpcManager::new(
         setup.address(target_index),
         &committee_set,
+        target_epoch,
         session_id,
         new_key,
         None,
@@ -7990,6 +8088,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
         let mut dealer_manager = MpcManager::new(
             dealer_addr,
             &rotation_committee_set,
+            rotation_epoch,
             rotation_session_id.clone(),
             rotation_setup.setup.encryption_keys[dealer_idx].clone(),
             None,
@@ -8021,6 +8120,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
         let mut other_manager = MpcManager::new(
             other_addr,
             &rotation_committee_set,
+            rotation_epoch,
             other_rotation_session_id,
             rotation_setup.setup.encryption_keys[other_idx].clone(),
             None,
@@ -8128,6 +8228,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
     let manager = MpcManager::new(
         shifted_addr,
         &committee_set,
+        target_epoch,
         session_id,
         rotation_setup.setup.encryption_keys[shifted_member_index].clone(),
         Some(rotation_setup.setup.encryption_keys[shifted_member_index].clone()),
