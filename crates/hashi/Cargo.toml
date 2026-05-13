@@ -74,6 +74,7 @@ tap.workspace = true
 backon.workspace = true
 jiff.workspace = true
 tar.workspace = true
+flate2.workspace = true
 tempfile.workspace = true
 walkdir.workspace = true
 

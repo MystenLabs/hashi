@@ -79,6 +79,7 @@ proptest = { version = "1.6.0", default-features = false, features = ["std"] }
 tempfile = "3.23.0"
 jiff = "0.2"
 tar = "0.4"
+flate2 = "1.1"
 
 # fastcrypto
 fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "52a012c7ebd5844f212cedcd26d64d6e1392cf95" }
