@@ -1,0 +1,67 @@
+name: Build and deploy GitHub Pages preview for PRs
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - closed
+    paths:
+      - "design/**"
+      - ".github/workflows/pages-preview.yaml"
+
+concurrency: preview-${{ github.ref }}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # Validates that the docs build on every PR (link checks, MDX syntax,
+  # broken-anchor checks). Runs on all PR events except `closed`.
+  build-with-linkcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: design/package-lock.json
+        if: github.event.action != 'closed'
+      - name: Install dependencies
+        run: cd design && npm ci
+        if: github.event.action != 'closed'
+      - name: Build site
+        run: cd design && npm run build
+        if: github.event.action != 'closed'
+
+  # Publishes the built site to gh-pages under /hashi/pr-preview/pr-<N>/
+  # using rossjrw/pr-preview-action. On `closed`, the action removes the
+  # preview directory and updates the PR comment.
+  preview:
+    runs-on: ubuntu-latest
+    if: github.repository_owner == 'MystenLabs'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: design/package-lock.json
+        if: github.event.action != 'closed'
+      - name: Install dependencies
+        run: cd design && npm ci
+        if: github.event.action != 'closed'
+      - name: Build site
+        run: cd design && DOCUSAURUS_BASE_URL="/hashi/pr-preview/pr-${{ github.event.number }}/" npm run build
+        if: github.event.action != 'closed'
+      - name: Deploy preview
+        uses: rossjrw/pr-preview-action@v1.8.1
+        with:
+          source-dir: design/build
+          preview-branch: gh-pages
+          umbrella-dir: pr-preview

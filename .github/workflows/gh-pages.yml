@@ -34,11 +34,36 @@ jobs:
       - name: Build Docusaurus site
         run: cd design && npm run build
 
-      - name: stage build artifacts
+      - name: Stage build artifacts
         run: |
-          mkdir site
+          mkdir -p site
           mv ./target/doc site/rustdoc
           mv design/build site/design
+
+      # We deploy with `force_orphan: true` so the gh-pages branch stays a
+      # single orphan commit (no history accumulation), but that wipes the
+      # branch contents — which would blow away the `pr-preview/` directory
+      # the .github/workflows/pages-preview.yaml workflow writes there.
+      #
+      # To keep both properties (single-commit history + live PR previews),
+      # we explicitly fetch any existing `pr-preview/` from gh-pages and
+      # carry it into the deploy folder so it round-trips through the
+      # orphan rewrite.
+      - name: Preserve pr-preview directories from prior gh-pages
+        run: |
+          set -euo pipefail
+          if git fetch origin gh-pages --depth=1 2>/dev/null; then
+            git worktree add /tmp/gh-pages-prev origin/gh-pages
+            if [ -d /tmp/gh-pages-prev/pr-preview ]; then
+              cp -R /tmp/gh-pages-prev/pr-preview site/pr-preview
+              echo "Preserved $(ls /tmp/gh-pages-prev/pr-preview | wc -l | tr -d ' ') PR preview directory(ies)"
+            else
+              echo "No pr-preview/ directory on gh-pages — nothing to preserve"
+            fi
+            git worktree remove --force /tmp/gh-pages-prev
+          else
+            echo "gh-pages branch does not exist yet — fresh deploy"
+          fi
 
       - name: Deploy Docs
         uses: peaceiris/actions-gh-pages@v3
