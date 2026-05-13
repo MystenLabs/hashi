@@ -19,6 +19,12 @@ export default function CustomHitsContent({ name }) {
   let siteToVisit = "Try your search again with different keywords";
   if (name === "Hashi Docs") {
     siteToVisit = `${siteToVisit}, or open an issue on <a href="https://github.com/MystenLabs/hashi/issues/new/choose" target="_blank">GitHub</a>.`;
+  } else if (name === "sui_docs") {
+    siteToVisit = `${siteToVisit}, or visit the official <a href="https://docs.sui.io" target="_blank">Sui Docs</a> site.`;
+  } else if (name === "move_book") {
+    siteToVisit = `${siteToVisit}, or visit <a href="https://move-book.com/" target="_blank">The Move Book</a> dedicated site.`;
+  } else if (name === "sui_sdks") {
+    siteToVisit = `${siteToVisit}, or visit the official <a href="https://sdk.mystenlabs.com" target="_blank">Sui SDKs</a> site.`;
   } else {
     siteToVisit = `${siteToVisit}.`;
   }

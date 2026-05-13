@@ -30,14 +30,22 @@ export default function Search() {
 
   const queryParam = getQueryParam("q");
 
-  // Single-index for Hashi. Add entries here to search additional Mysten
-  // doc sites (sui_docs, suins_docs, move_book, sui_sdks, walrus_docs,
-  // seal_docs) — they live in the same Algolia app.
-  const tabs = [{ label: "Hashi", indexName: "Hashi Docs" }];
+  // Multi-index search across the MystenLabs docs hosted on the shared
+  // Algolia app. Available indices not currently surfaced: suins_docs,
+  // walrus_docs, seal_docs — add entries here to extend.
+  const tabs = [
+    { label: "Hashi", indexName: "Hashi Docs" },
+    { label: "Sui", indexName: "sui_docs" },
+    { label: "The Move Book", indexName: "move_book" },
+    { label: "SDKs", indexName: "sui_sdks" },
+  ];
 
   const [activeTab, setActiveTab] = React.useState(tabs[0].indexName);
   const [tabCounts, setTabCounts] = React.useState<Record<string, number>>({
     "Hashi Docs": 0,
+    sui_docs: 0,
+    move_book: 0,
+    sui_sdks: 0,
   });
   const [query, setQuery] = React.useState(queryParam);
 

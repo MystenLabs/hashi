@@ -44,10 +44,14 @@ const searchClient = {
 };
 
 const indices = [
-  // Single-index for Hashi. The shared MystenLabs Algolia app also hosts
-  // sui_docs, suins_docs, move_book, sui_sdks, walrus_docs, seal_docs — add
-  // entries here to extend the tabbed search across other Mysten doc sites.
+  // Multi-index search across MystenLabs docs hosted on the shared Algolia
+  // app. The first entry is the default tab.
+  // Available indices on app M9JD2UP87M not currently surfaced:
+  // suins_docs, walrus_docs, seal_docs — add entries here to extend.
   { label: "Hashi", indexName: "Hashi Docs" },
+  { label: "Sui", indexName: "sui_docs" },
+  { label: "The Move Book", indexName: "move_book" },
+  { label: "SDKs", indexName: "sui_sdks" },
 ];
 
 function HitItem({ hit }: { hit: any }) {
@@ -151,6 +155,9 @@ export default function MultiIndexSearchModal({
   const [activeIndex, setActiveIndex] = useState(indices[0].indexName);
   const [tabCounts, setTabCounts] = React.useState<Record<string, number>>({
     "Hashi Docs": 0,
+    sui_docs: 0,
+    move_book: 0,
+    sui_sdks: 0,
   });
   const [query, setQuery] = React.useState("");
   const scrollContainerRef = React.useRef<HTMLDivElement>(null);
@@ -178,10 +185,13 @@ export default function MultiIndexSearchModal({
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [isOpen, onClose]);
 
-  // Per-index "Visit the full site →" footer link. Currently only Hashi
-  // Docs is searched, so no external link is shown (null = footer hides).
+  // Per-index "Visit the full site →" footer link. `null` hides the link
+  // for index tabs whose content already lives on this site (Hashi, Sui).
   const activeMeta: { label: string; url: string } | null = {
     "Hashi Docs": null,
+    sui_docs: null,
+    move_book: { label: "The Move Book", url: "https://move-book.com/" },
+    sui_sdks: { label: "SDK Docs", url: "https://sdk.mystenlabs.com" },
   }[activeIndex];
 
   if (!isOpen) return null;
