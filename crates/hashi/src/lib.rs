@@ -708,7 +708,8 @@ impl Hashi {
             );
         }
 
-        let (mpc_service, mpc_handle) = mpc::MpcService::new(self.clone());
+        let (backup_service, backup_handle) = backup::BackupService::new(self.clone());
+        let (mpc_service, mpc_handle) = mpc::MpcService::new(self.clone(), backup_handle);
         self.mpc_handle
             .set(mpc_handle)
             .expect("MpcHandle already set");
@@ -721,6 +722,7 @@ impl Hashi {
         // Start services
         let (_http_addr, http_service) = grpc::HttpService::new(self.clone()).start().await;
         let leader_service = leader::LeaderService::new(self.clone()).start();
+        let backup_service = backup_service.start();
         let mpc_service = mpc_service.start();
         let guardian_bootstrap_service = self.clone().start_guardian_bootstrap();
 
@@ -729,6 +731,7 @@ impl Hashi {
             .merge(btc_monitor_service)
             .merge(http_service)
             .merge(leader_service)
+            .merge(backup_service)
             .merge(mpc_service)
             .merge(guardian_bootstrap_service);
 

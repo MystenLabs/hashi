@@ -25,8 +25,14 @@ use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
+use sui_futures::service::Service;
+use tokio::sync::mpsc;
+use tracing::error;
 use tracing::info;
+use tracing::warn;
 
+use crate::Hashi;
 use crate::db::Database;
 
 use age::Encryptor;
@@ -106,6 +112,78 @@ pub mod optional_age_recipient {
         value
             .map(|value| BackupRecipient::from_str(&value).map_err(serde::de::Error::custom))
             .transpose()
+    }
+}
+
+enum BackupRequest {
+    EpochChanged(u64),
+}
+
+#[derive(Clone, Debug)]
+pub struct BackupHandle {
+    sender: mpsc::UnboundedSender<BackupRequest>,
+}
+
+impl BackupHandle {
+    pub fn backup_after_epoch_change(&self, epoch: u64) {
+        if self
+            .sender
+            .send(BackupRequest::EpochChanged(epoch))
+            .is_err()
+        {
+            warn!(
+                epoch,
+                "Skipping automatic backup: backup service is stopped"
+            );
+        }
+    }
+}
+
+pub struct BackupService {
+    inner: Arc<Hashi>,
+    receiver: mpsc::UnboundedReceiver<BackupRequest>,
+}
+
+impl BackupService {
+    pub fn new(hashi: Arc<Hashi>) -> (Self, BackupHandle) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let service = Self {
+            inner: hashi,
+            receiver,
+        };
+        let handle = BackupHandle { sender };
+        (service, handle)
+    }
+
+    pub fn start(self) -> Service {
+        Service::new().spawn_aborting(async move {
+            self.run().await;
+            Ok(())
+        })
+    }
+
+    async fn run(mut self) {
+        while let Some(request) = self.receiver.recv().await {
+            match request {
+                BackupRequest::EpochChanged(epoch) => {
+                    let hashi = self.inner.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        hashi.backup_after_epoch_change(epoch)
+                    })
+                    .await
+                    {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => {
+                            error!("Automatic backup after epoch {epoch} failed: {e:#}");
+                        }
+                        Err(e) => {
+                            error!("Automatic backup after epoch {epoch} failed to join: {e}");
+                        }
+                    }
+                }
+            }
+        }
+        info!("Backup service stopped");
     }
 }
 
