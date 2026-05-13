@@ -131,6 +131,7 @@ impl MpcManager {
     pub fn new(
         address: Address,
         committee_set: &CommitteeSet,
+        epoch: u64,
         session_id: SessionId,
         encryption_key: PrivateKey<EncryptionGroupElement>,
         previous_encryption_key: Option<PrivateKey<EncryptionGroupElement>>,
@@ -148,9 +149,6 @@ impl MpcManager {
             );
         }
         let weight_divisor = weight_divisor.unwrap_or(1);
-        let epoch = committee_set
-            .pending_epoch_change()
-            .unwrap_or_else(|| committee_set.epoch());
         let committee = committee_set
             .committees()
             .get(&epoch)

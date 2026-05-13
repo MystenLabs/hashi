@@ -435,6 +435,7 @@ impl Hashi {
         Ok(mpc::MpcManager::new(
             address,
             committee_set,
+            epoch,
             session_id,
             encryption_key,
             previous_encryption_key,
