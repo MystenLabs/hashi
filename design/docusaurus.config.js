@@ -17,6 +17,12 @@ const remarkGlossary =
   require('./src/shared/plugins/remark-glossary.js').default ||
   require('./src/shared/plugins/remark-glossary.js');
 
+// Base URL for the site. Production deploys (gh-pages.yml) leave this at the
+// default. PR-preview deploys (pages-preview.yaml) override it to
+// `/hashi/pr-preview/pr-<N>/` so static assets and routes resolve correctly
+// against the preview path.
+const baseUrl = process.env.DOCUSAURUS_BASE_URL || '/hashi/design/';
+
 /** @type {import('@docusaurus/types').Config} */
 const config = {
   title: 'Hashi',
@@ -28,7 +34,7 @@ const config = {
   },
 
   url: 'https://mystenlabs.github.io',
-  baseUrl: '/hashi/design/',
+  baseUrl,
 
   organizationName: 'MystenLabs',
   projectName: 'hashi',
@@ -64,7 +70,7 @@ const config = {
       'data-modal-ask-ai-input-placeholder': 'Ask me anything about Hashi!',
       'data-modal-example-questions':
         'How does the deposit flow work?,What does the Guardian do?,How does Hashi handle Bitcoin reorganizations?,What are the MPC committee thresholds?',
-      'data-modal-image': '/hashi/design/img/logo.svg',
+      'data-modal-image': `${baseUrl}img/logo.svg`,
       async: true,
     },
   ],
@@ -84,7 +90,7 @@ const config = {
                 attributes: {
                   rel: 'alternate',
                   type: 'text/plain',
-                  href: '/hashi/design/llms.txt',
+                  href: `${baseUrl}llms.txt`,
                   title: 'LLMs.txt',
                 },
               },
@@ -142,7 +148,12 @@ const config = {
     [
       require.resolve('./src/shared/plugins/plausible'),
       {
-        domain: 'mystenlabs.github.io/hashi/design',
+        // Tracking is suppressed on PR previews so they don't pollute the
+        // production Plausible domain. The plugin's client bails out when
+        // `domain` is empty.
+        domain: process.env.DOCUSAURUS_BASE_URL
+          ? ''
+          : 'mystenlabs.github.io/hashi/design',
         enableInDev: false,
         trackOutboundLinks: true,
         hashMode: false,
@@ -233,7 +244,7 @@ const config = {
             position: 'right',
             value:
               '<button type="button" class="kapa-trigger-btn" onclick="window.Kapa && window.Kapa.open()" aria-label="Ask Hashi AI">' +
-              '<img src="/hashi/design/img/logo.svg" alt="" width="20" height="20" />' +
+              `<img src="${baseUrl}img/logo.svg" alt="" width="20" height="20" />` +
               '<span class="kapa-trigger-btn__label">Ask Hashi AI</span>' +
               '</button>',
           },
