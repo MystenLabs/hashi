@@ -5,6 +5,7 @@ use std::path::Path;
 
 use fastcrypto::groups::ristretto255::RistrettoScalar;
 use fastcrypto::serde_helpers::ToFromByteArray;
+use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use fjall::Keyspace;
@@ -428,22 +429,53 @@ impl Database {
     }
 
     /// Prune all MPC keyspaces.
-    pub fn prune_messages_below(&self, cutoff_epoch: u64) -> Result<()> {
-        // Encryption and signing keys retain ~1 week of extra epochs to support
-        // graceful rotation: the committee may capture a previous epoch's
-        // pub key, and the matching private key must still be in DB.
-        prune_keyspace(
-            &self.encryption_keys,
-            cutoff_epoch.saturating_sub(KEY_RETENTION_EXTRA_EPOCHS),
-        )?;
-        prune_keyspace(
-            &self.signing_keys,
-            cutoff_epoch.saturating_sub(KEY_RETENTION_EXTRA_EPOCHS),
-        )?;
+    pub(crate) fn prune_messages_below(
+        &self,
+        cutoff_epoch: u64,
+        referenced_public_keys: &ReferencedPublicKeysForPruning,
+    ) -> Result<()> {
+        let key_cutoff = cutoff_epoch.saturating_sub(KEY_RETENTION_EXTRA_EPOCHS);
+        prune_keyspace_keys(&self.encryption_keys, key_cutoff, |value| {
+            let Ok(key) = bcs::from_bytes::<EncryptionPrivateKey>(value) else {
+                return false;
+            };
+            let pub_bytes = EncryptionPublicKey::from_private_key(&key)
+                .as_element()
+                .to_byte_array()
+                .to_vec();
+            referenced_public_keys.encryption_keys.contains(&pub_bytes)
+        })?;
+        prune_keyspace_keys(&self.signing_keys, key_cutoff, |value| {
+            let Ok(key) = bcs::from_bytes::<Bls12381PrivateKey>(value) else {
+                return false;
+            };
+            referenced_public_keys
+                .signing_keys
+                .contains(key.public_key().as_bytes())
+        })?;
         prune_keyspace(&self.dealer_messages, cutoff_epoch)?;
         prune_keyspace(&self.rotation_messages, cutoff_epoch)?;
         prune_keyspace(&self.nonce_messages, cutoff_epoch)?;
         Ok(())
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ReferencedPublicKeysForPruning {
+    encryption_keys: std::collections::HashSet<Vec<u8>>,
+    signing_keys: std::collections::HashSet<Vec<u8>>,
+}
+
+impl ReferencedPublicKeysForPruning {
+    pub(crate) fn add_member_pubkeys(
+        &mut self,
+        encryption_public_key: &EncryptionPublicKey,
+        signing_public_key: &BLS12381PublicKey,
+    ) {
+        self.encryption_keys
+            .insert(encryption_public_key.as_element().to_byte_array().to_vec());
+        self.signing_keys
+            .insert(signing_public_key.as_bytes().to_vec());
     }
 }
 
@@ -498,6 +530,30 @@ fn prune_keyspace(keyspace: &Keyspace, cutoff_epoch: u64) -> Result<()> {
     Ok(())
 }
 
+/// Delete entries from `keyspace` whose leading big-endian u64 epoch is
+/// `< cutoff_epoch`, unless `is_referenced(value)` returns `true`.
+fn prune_keyspace_keys<F>(keyspace: &Keyspace, cutoff_epoch: u64, is_referenced: F) -> Result<()>
+where
+    F: Fn(&[u8]) -> bool,
+{
+    let keys_to_delete: Vec<_> = keyspace
+        .iter()
+        .filter_map(|guard| {
+            let (key, value) = guard.into_inner().ok()?;
+            let epoch_bytes: [u8; 8] = key.as_ref().get(..8)?.try_into().ok()?;
+            let epoch = u64::from_be_bytes(epoch_bytes);
+            if epoch >= cutoff_epoch {
+                return None;
+            }
+            (!is_referenced(&value)).then(|| key.to_vec())
+        })
+        .collect();
+    for key in keys_to_delete {
+        keyspace.remove(key)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use crate::mpc::EncryptionGroupElement;
@@ -512,6 +568,7 @@ pub(crate) mod tests {
 
     use super::Database;
     use super::KEY_RETENTION_EXTRA_EPOCHS;
+    use super::ReferencedPublicKeysForPruning;
 
     pub(crate) fn create_test_nodes(count: u16) -> Nodes<EncryptionGroupElement> {
         let nodes: Vec<_> = (0..count)
@@ -1181,7 +1238,8 @@ pub(crate) mod tests {
             db.store_signing_key(epoch, &sig_key).unwrap();
         }
 
-        db.prune_messages_below(cutoff).unwrap();
+        db.prune_messages_below(cutoff, &ReferencedPublicKeysForPruning::default())
+            .unwrap();
 
         for epoch in 1..cutoff {
             assert!(
@@ -1258,7 +1316,8 @@ pub(crate) mod tests {
 
         // Cutoff = 0 saturates the key-retention subtraction; nothing should
         // be pruned in any keyspace.
-        db.prune_messages_below(0).unwrap();
+        db.prune_messages_below(0, &ReferencedPublicKeysForPruning::default())
+            .unwrap();
 
         for epoch in 5..=10 {
             assert!(db.get_dealer_message(epoch, &dealer).unwrap().is_some());
@@ -1272,7 +1331,193 @@ pub(crate) mod tests {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let db = Database::open(tmpdir.path()).unwrap();
         // Should be a no-op, not an error.
-        db.prune_messages_below(100).unwrap();
+        db.prune_messages_below(100, &ReferencedPublicKeysForPruning::default())
+            .unwrap();
+    }
+
+    fn referenced_pubkeys_from(
+        keys: &[(&EncryptionPrivateKey, &Bls12381PrivateKey)],
+    ) -> ReferencedPublicKeysForPruning {
+        let mut result = ReferencedPublicKeysForPruning::default();
+        for (enc, sig) in keys {
+            result.add_member_pubkeys(
+                &EncryptionPublicKey::from_private_key(enc),
+                &sig.public_key(),
+            );
+        }
+        result
+    }
+
+    #[test]
+    fn test_prune_messages_below_handles_non_contiguous_committees() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        // Committees 5 and 33 are well below the flat cutoff
+        // (`51 - KEY_RETENTION_EXTRA_EPOCHS = 44`); only the committee-
+        // reference protection should retain them.
+        struct ValidatorKeys {
+            encryption: EncryptionPrivateKey,
+            signing: Bls12381PrivateKey,
+        }
+        let make_keys = || ValidatorKeys {
+            encryption: EncryptionPrivateKey::new(&mut rand::thread_rng()),
+            signing: Bls12381PrivateKey::generate(&mut rand::thread_rng()),
+        };
+        let keys_for_committee_5 = make_keys();
+        let keys_for_committee_33 = make_keys();
+        let keys_for_committee_51 = make_keys();
+
+        for (epoch, keys) in [
+            (5u64, &keys_for_committee_5),
+            (33, &keys_for_committee_33),
+            (51, &keys_for_committee_51),
+        ] {
+            db.store_encryption_key(epoch, &keys.encryption).unwrap();
+            db.store_signing_key(epoch, &keys.signing).unwrap();
+        }
+
+        let referenced = referenced_pubkeys_from(&[
+            (
+                &keys_for_committee_5.encryption,
+                &keys_for_committee_5.signing,
+            ),
+            (
+                &keys_for_committee_33.encryption,
+                &keys_for_committee_33.signing,
+            ),
+            (
+                &keys_for_committee_51.encryption,
+                &keys_for_committee_51.signing,
+            ),
+        ]);
+
+        // Prune at cutoff 51. Flat key-retention cutoff is 44. The keys for
+        // committees 5 and 33 are below that — without committee-aware
+        // protection they would be deleted, even though their pubkeys are
+        // still referenced by committees still held on-chain.
+        db.prune_messages_below(51, &referenced).unwrap();
+
+        for committee_epoch in [5u64, 33, 51] {
+            assert!(
+                db.get_encryption_key(committee_epoch).unwrap().is_some(),
+                "encryption key for committee[{committee_epoch}] must be retained \
+                 (committee record still references its pubkey)"
+            );
+            assert!(
+                db.get_signing_key(committee_epoch).unwrap().is_some(),
+                "signing key for committee[{committee_epoch}] must be retained \
+                 (committee record still references its pubkey)"
+            );
+        }
+    }
+
+    #[test]
+    fn test_prune_messages_below_deletes_unreferenced_keys_below_cutoff() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        // Store a keypair tagged at storage epoch 10, but build a protected
+        // pubkey set that references a different pubkey — so the stored
+        // keypair is not protected by reference.
+        let stored_encryption = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        let stored_signing = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+        db.store_encryption_key(10, &stored_encryption).unwrap();
+        db.store_signing_key(10, &stored_signing).unwrap();
+
+        let committee_member_encryption = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        let committee_member_signing = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+        let referenced =
+            referenced_pubkeys_from(&[(&committee_member_encryption, &committee_member_signing)]);
+
+        // Cutoff 20 → flat key cutoff 13; stored keys at epoch 10 are below
+        // and not referenced, so should be deleted.
+        db.prune_messages_below(20, &referenced).unwrap();
+
+        assert!(
+            db.get_encryption_key(10).unwrap().is_none(),
+            "unreferenced encryption key at storage epoch 10 should be pruned"
+        );
+        assert!(
+            db.get_signing_key(10).unwrap().is_none(),
+            "unreferenced signing key at storage epoch 10 should be pruned"
+        );
+    }
+
+    #[test]
+    fn test_prune_messages_below_retains_in_flight_key_within_cutoff_window() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        // Simulates the state right after `prepare_and_register_keys(N+1)`
+        // has stored next-epoch keys but `start_reconfig(N+1)` has not
+        // captured them. Storage epoch (N+1) is above the flat cutoff
+        // (N - KEY_RETENTION_EXTRA_EPOCHS) but no committee references it.
+        let target_epoch = 20u64;
+        let in_flight_epoch = target_epoch + 1;
+        let in_flight_encryption = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        let in_flight_signing = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+        db.store_encryption_key(in_flight_epoch, &in_flight_encryption)
+            .unwrap();
+        db.store_signing_key(in_flight_epoch, &in_flight_signing)
+            .unwrap();
+
+        // No committee references the in-flight key.
+        db.prune_messages_below(target_epoch, &ReferencedPublicKeysForPruning::default())
+            .unwrap();
+
+        assert!(
+            db.get_encryption_key(in_flight_epoch).unwrap().is_some(),
+            "in-flight encryption key (stored before start_reconfig captures it) must be retained by the flat cutoff"
+        );
+        assert!(
+            db.get_signing_key(in_flight_epoch).unwrap().is_some(),
+            "in-flight signing key (stored before start_reconfig captures it) must be retained by the flat cutoff"
+        );
+    }
+
+    #[test]
+    fn test_prune_messages_below_still_prunes_other_keyspaces_with_references() {
+        use std::collections::BTreeMap;
+        use std::num::NonZeroU16;
+
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let dealer = Address::new([1u8; 32]);
+        let dealer_msg = create_test_message();
+        let mut rotation_msgs: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();
+        rotation_msgs.insert(NonZeroU16::new(1).unwrap(), create_test_message());
+        let nonce_msg = create_test_nonce_message();
+
+        // Write at storage epoch 5 (well below any plausible cutoff).
+        db.store_dealer_message(5, &dealer, &dealer_msg).unwrap();
+        db.store_rotation_messages(5, &dealer, &rotation_msgs)
+            .unwrap();
+        db.store_nonce_message(5, 0, &dealer, &nonce_msg).unwrap();
+
+        // A non-empty protected pubkey set — irrelevant to
+        // dealer/rotation/nonce keyspaces, just exercises the path where
+        // committee-aware retention is in play yet must not bleed over into
+        // these keyspaces.
+        let enc = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        let sig = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+        let referenced = referenced_pubkeys_from(&[(&enc, &sig)]);
+
+        db.prune_messages_below(20, &referenced).unwrap();
+
+        assert!(
+            db.get_dealer_message(5, &dealer).unwrap().is_none(),
+            "dealer message at storage epoch 5 should be pruned (committee-awareness does not protect this keyspace)"
+        );
+        assert!(
+            db.get_rotation_messages(5, &dealer).unwrap().is_none(),
+            "rotation messages at storage epoch 5 should be pruned"
+        );
+        assert!(
+            db.get_nonce_message(5, 0, &dealer).unwrap().is_none(),
+            "nonce message at storage epoch 5 should be pruned"
+        );
     }
 
     #[test]

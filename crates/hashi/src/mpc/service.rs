@@ -730,7 +730,23 @@ impl MpcService {
         }
         self.backup_handle.backup_after_epoch_change(target_epoch);
         info!("end_reconfig complete for epoch {target_epoch}, running prepare_signing");
-        if let Err(e) = self.inner.db.prune_messages_below(target_epoch) {
+        let referenced_public_keys = {
+            let state = self.inner.onchain_state().state();
+            let committee_set = &state.hashi().committees;
+            let mut referenced = crate::db::ReferencedPublicKeysForPruning::default();
+            for committee in committee_set.committees().values() {
+                for member in committee.members() {
+                    referenced
+                        .add_member_pubkeys(member.encryption_public_key(), member.public_key());
+                }
+            }
+            referenced
+        };
+        if let Err(e) = self
+            .inner
+            .db
+            .prune_messages_below(target_epoch, &referenced_public_keys)
+        {
             error!("Failed to prune old MPC messages below epoch {target_epoch}: {e}");
         }
         let _prepare_signing_timer = metrics
