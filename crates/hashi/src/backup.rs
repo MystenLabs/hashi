@@ -11,6 +11,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use std::collections::HashSet;
+use std::fmt;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -22,16 +23,90 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
+use std::str::FromStr;
 use tracing::info;
 
 use crate::db::Database;
 
 use age::Encryptor;
+use age::plugin;
+use age::x25519;
 use fjall::KeyspaceCreateOptions;
 use fjall::Readable;
 
 pub const BACKUP_MANIFEST_FILE_NAME: &str = "hashi-config-backup-manifest.toml";
 pub const DB_SNAPSHOT_TAR_PREFIX: &str = "hashi-db-snapshot";
+
+/// An age recipient that can be used as the target of a backup.
+///
+/// Supports both native x25519 recipients (`age1...`) and plugin recipients
+/// (`age1<plugin-name>1...`, e.g. `age1yubikey1...`). Plugin recipients are only
+/// resolved against a plugin binary at encryption time, so storing one in the
+/// config does not require the plugin to be installed.
+#[derive(Clone)]
+pub enum BackupRecipient {
+    Native(x25519::Recipient),
+    Plugin(plugin::Recipient),
+}
+
+impl FromStr for BackupRecipient {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(recipient) = x25519::Recipient::from_str(s) {
+            return Ok(Self::Native(recipient));
+        }
+        match plugin::Recipient::from_str(s) {
+            Ok(recipient) => Ok(Self::Plugin(recipient)),
+            Err(plugin_err) => anyhow::bail!(
+                "failed to parse age recipient '{s}': not a valid x25519 recipient, and not a valid plugin recipient ({plugin_err})"
+            ),
+        }
+    }
+}
+
+impl fmt::Display for BackupRecipient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Native(r) => write!(f, "{r}"),
+            Self::Plugin(r) => write!(f, "{r}"),
+        }
+    }
+}
+
+impl fmt::Debug for BackupRecipient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "BackupRecipient({self})")
+    }
+}
+
+pub mod optional_age_recipient {
+    use super::BackupRecipient;
+    use serde::Deserialize;
+    use serde::Deserializer;
+    use serde::Serializer;
+    use std::str::FromStr;
+
+    pub fn serialize<S>(value: &Option<BackupRecipient>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(recipient) => serializer.serialize_some(&recipient.to_string()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<BackupRecipient>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Option::<String>::deserialize(deserializer)?;
+        value
+            .map(|value| BackupRecipient::from_str(&value).map_err(serde::de::Error::custom))
+            .transpose()
+    }
+}
 
 /// Open `path` for writing with mode `0o600`, failing if anything already
 /// exists there. The `AlreadyExists` case is mapped to a clear "refusing to
@@ -653,7 +728,9 @@ pub fn copy_restored_files_to_original_paths(
 /// the same filesystem as `dest`; that same-filesystem placement is
 /// required because `rename` does not work across mount points.
 ///
-/// Fails if `dest` already exists.
+/// If `dest` already exists, it must be an empty directory. This supports
+/// restoring into mounted volume roots that cannot be deleted, while still
+/// refusing to merge restored database state with existing files.
 pub fn copy_db_snapshot_to_original_path(
     extract_dir: &Path,
     manifest: &BackupManifest,
@@ -661,17 +738,43 @@ pub fn copy_db_snapshot_to_original_path(
     let source = extract_dir.join(DB_SNAPSHOT_TAR_PREFIX);
     let dest = &manifest.db.original_path;
 
-    // Pre-flight: refuse early if the destination already exists. This is
-    // checked again implicitly by the final rename, but failing here gives a
-    // clear error before doing all the copy work.
     if dest
         .try_exists()
         .with_context(|| format!("Failed to stat database destination {}", dest.display()))?
     {
-        anyhow::bail!(
-            "Refusing to overwrite existing database directory: {}",
-            dest.display()
+        if !dest.is_dir() {
+            anyhow::bail!(
+                "Refusing to overwrite existing database path: {}",
+                dest.display()
+            );
+        }
+        if fs::read_dir(dest)
+            .with_context(|| format!("Failed to read database directory {}", dest.display()))?
+            .next()
+            .transpose()?
+            .is_some()
+        {
+            anyhow::bail!(
+                "Refusing to restore database into non-empty directory: {}",
+                dest.display()
+            );
+        }
+
+        copy_dir_recursive_strict(&source, dest).with_context(|| {
+            format!(
+                "Failed to copy database snapshot from {} to empty destination {}",
+                source.display(),
+                dest.display()
+            )
+        })?;
+
+        info!(
+            from = %source.display(),
+            to = %dest.display(),
+            "Copied database snapshot to empty original path",
         );
+
+        return Ok(());
     }
 
     let parent = dest.parent().ok_or_else(|| {

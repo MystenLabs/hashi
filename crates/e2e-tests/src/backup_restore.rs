@@ -23,7 +23,6 @@ mod tests {
     use age::x25519;
     use anyhow::Result;
     use hashi::cli::commands;
-    use hashi::cli::config::CliConfig;
     use hashi::config::Config as HashiConfig;
     use tempfile::TempDir;
 
@@ -67,37 +66,11 @@ mod tests {
     }
 
     /// Materialise an in-memory `HashiConfig` (the node's runtime config) to
-    /// a TOML file on disk so the `hashi backup` CLI machinery can pick it
-    /// up via `CliConfig::node_config_path`. Returns the written path.
+    /// a TOML file on disk. Returns the written path.
     fn write_node_config_to_disk(config: &HashiConfig, dir: &Path) -> PathBuf {
         let path = dir.join("node-config.toml");
         config.save(&path).unwrap();
         path
-    }
-
-    /// Build a minimal on-disk CLI config file suitable for driving
-    /// `backup::save`. Returns the written path.
-    ///
-    /// The CLI config needs `loaded_from_path` set (enforced by
-    /// `backup_file_paths`), so we write the file first, then reload it
-    /// through the normal loader so the path field is populated.
-    fn write_cli_config_to_disk(node_config_path: &Path, dir: &Path) -> (CliConfig, PathBuf) {
-        let path = dir.join("hashi-cli.toml");
-        let on_disk = CliConfig {
-            node_config_path: Some(node_config_path.to_path_buf()),
-            ..CliConfig::default()
-        };
-        on_disk.save_to_file(&path).unwrap();
-
-        // Mirror the struct with `loaded_from_path` populated so the backup
-        // logic knows which file to archive. Calling `CliConfig::load` here
-        // would also work but this avoids depending on its implementation.
-        let in_memory = CliConfig {
-            loaded_from_path: Some(path.clone()),
-            node_config_path: Some(node_config_path.to_path_buf()),
-            ..CliConfig::default()
-        };
-        (in_memory, path)
     }
 
     /// Find the single `hashi-config-backup-*.tar.age` produced under
@@ -194,29 +167,25 @@ mod tests {
             .expect("node 0 must have a db path")
             .clone();
 
-        // 3. Serialise config + cli config, generate age identity, save backup.
+        // 3. Serialise config, generate age identity, save backup.
         let backup_dir = tempfile::Builder::new()
             .prefix("hashi-backup-e2e-")
             .tempdir()?;
         let node_config_path = write_node_config_to_disk(&node0_config, backup_dir.path());
-        let (cli_config, cli_config_path) =
-            write_cli_config_to_disk(&node_config_path, backup_dir.path());
         let (recipient, identity_path) = generate_age_identity_pair(backup_dir.path());
 
         let save_out_dir: TempDir = tempfile::Builder::new()
             .prefix("hashi-backup-out-")
             .tempdir()?;
-        commands::backup::save(&cli_config, Some(recipient), save_out_dir.path())?;
+        commands::backup::save(&node_config_path, Some(recipient), save_out_dir.path())?;
         let tarball = find_backup_tarball(save_out_dir.path());
 
         // 4. Destroy node 0's on-disk state so `restore --copy-to-original-paths`
-        //    actually has to put things back. The node config and CLI config
-        //    file both live under `backup_dir`; the DB lives under the
-        //    TestNetworks tempdir, which stays alive because the handle
-        //    still owns it.
+        //    actually has to put things back. The node config lives under
+        //    `backup_dir`; the DB lives under the TestNetworks tempdir, which
+        //    stays alive because the handle still owns it.
         std::fs::remove_dir_all(&original_db_path)?;
         std::fs::remove_file(&node_config_path)?;
-        std::fs::remove_file(&cli_config_path)?;
 
         // 5. Two more rotations without node 0. The surviving nodes advance
         //    the Hashi epoch; node 0's backed-up DB is now several epochs

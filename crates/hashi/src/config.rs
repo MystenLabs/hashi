@@ -105,6 +105,16 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub db: Option<PathBuf>,
 
+    /// Age recipient public key used for node backups.
+    ///
+    /// Accepts both native x25519 recipients and plugin recipients (e.g. YubiKey).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::backup::optional_age_recipient"
+    )]
+    pub backup_age_pubkey: Option<crate::backup::BackupRecipient>,
+
     /// Force validator to run as leader, or never run as leader
     #[serde(skip_serializing_if = "Option::is_none")]
     pub force_run_as_leader: Option<ForceRunAsLeader>,
