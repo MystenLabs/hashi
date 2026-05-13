@@ -953,6 +953,90 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
 }
 
 #[test]
+fn test_mpc_manager_new_finds_input_committee_across_gap() {
+    let mut rng = rand::thread_rng();
+    let num_validators = 4usize;
+    let encryption_keys: Vec<_> = (0..num_validators)
+        .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+        .collect();
+    let signing_keys: Vec<_> = (0..num_validators)
+        .map(|_| Bls12381PrivateKey::generate(&mut rng))
+        .collect();
+
+    let member_infos: BTreeMap<Address, MemberInfo> = (0..num_validators)
+        .map(|i| {
+            let addr = Address::new([i as u8; 32]);
+            let info = MemberInfo {
+                validator_address: addr,
+                operator_address: addr,
+                next_epoch_public_key: signing_keys[i].public_key(),
+                endpoint_url: None,
+                tls_public_key: None,
+                next_epoch_encryption_public_key: Some(PublicKey::from_private_key(
+                    &encryption_keys[i],
+                )),
+            };
+            (addr, info)
+        })
+        .collect();
+
+    let members: Vec<_> = (0..num_validators)
+        .map(|i| {
+            CommitteeMember::new(
+                Address::new([i as u8; 32]),
+                signing_keys[i].public_key(),
+                EncryptionPublicKey::from_private_key(&encryption_keys[i]),
+                1,
+            )
+        })
+        .collect();
+
+    let make_committee = |epoch: u64| {
+        Committee::new(
+            members.clone(),
+            epoch,
+            TEST_THRESHOLD_IN_BASIS_POINTS,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            TEST_MAX_FAULTY_IN_BASIS_POINTS,
+        )
+    };
+    let mut committees = BTreeMap::new();
+    committees.insert(9u64, make_committee(9));
+    committees.insert(32u64, make_committee(32));
+    committees.insert(33u64, make_committee(33));
+
+    let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+    committee_set
+        .set_epoch(32)
+        .set_pending_epoch_change(Some(33))
+        .set_members(member_infos)
+        .set_committees(committees);
+
+    let session_id = SessionId::new(TEST_CHAIN_ID, 33, &ProtocolType::KeyRotation);
+    let manager = MpcManager::new(
+        Address::new([0u8; 32]),
+        &committee_set,
+        session_id,
+        encryption_keys[0].clone(),
+        Some(encryption_keys[0].clone()),
+        signing_keys[0].clone(),
+        Box::new(InMemoryPublicMessagesStore::new()),
+        TEST_CHAIN_ID,
+        None,
+        TEST_BATCH_SIZE_PER_WEIGHT,
+        None,
+    )
+    .expect("MpcManager::new should succeed across a committee gap");
+
+    assert!(
+        manager.previous_reconfig_input_threshold.is_some(),
+        "previous_reconfig_input_threshold must resolve to the most recent \
+         committee below previous_epoch (committee[9]), not require an entry \
+         at previous_epoch - 1 (= committee[31], which does not exist)"
+    );
+}
+
+#[test]
 fn test_mpc_manager_new_with_weighted_committee() {
     let setup = TestSetup::with_weights(&[1, 2, 3, 4, 5]); // total = 15
 

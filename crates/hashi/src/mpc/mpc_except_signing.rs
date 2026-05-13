@@ -229,10 +229,11 @@ impl MpcManager {
             }
             None => (None, None),
         };
-        let previous_reconfig_input_threshold = previous_epoch
-            .checked_sub(1)
-            .and_then(|input_epoch| committee_set.committees().get(&input_epoch))
-            .map(|input_committee| -> MpcResult<u16> {
+        let previous_reconfig_input_threshold = committee_set
+            .committees()
+            .range(..previous_epoch)
+            .next_back()
+            .map(|(_, input_committee)| -> MpcResult<u16> {
                 let (_, threshold, _) = build_reduced_nodes(
                     input_committee,
                     input_committee.mpc_threshold_in_basis_points(),
