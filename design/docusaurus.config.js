@@ -33,6 +33,18 @@ const config = {
   organizationName: 'MystenLabs',
   projectName: 'hashi',
 
+  headTags: [
+    // Algolia domain verification — shared MystenLabs org token,
+    // same value used by docs.sui.io and seal-docs.wal.app.
+    {
+      tagName: 'meta',
+      attributes: {
+        name: 'algolia-site-verification',
+        content: 'BCA21DA2879818D2',
+      },
+    },
+  ],
+
   onBrokenLinks: 'throw',
   onBrokenAnchors: 'warn',
 
@@ -292,6 +304,17 @@ const config = {
         theme: prismThemes.github,
         darkTheme: prismThemes.dracula,
         additionalLanguages: ['rust', 'toml', 'bash'],
+      },
+      // DocSearch (Algolia) — requires real credentials to function.
+      // Apply at https://docsearch.algolia.com/apply/ to crawl
+      // https://mystenlabs.github.io/hashi/design/ and replace these
+      // placeholders (or set them via env vars and read them in build).
+      algolia: {
+        appId: process.env.ALGOLIA_APP_ID || 'TBD_APP_ID',
+        apiKey: process.env.ALGOLIA_SEARCH_API_KEY || 'TBD_SEARCH_API_KEY',
+        indexName: process.env.ALGOLIA_INDEX_NAME || 'hashi-docs',
+        contextualSearch: true,
+        searchPagePath: 'search',
       },
     }),
 };
