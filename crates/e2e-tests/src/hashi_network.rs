@@ -55,7 +55,7 @@ impl HashiNodeHandle {
     fn create_hashi(config: &HashiConfig) -> Result<Arc<Hashi>> {
         let server_version = ServerVersion::new("test-hashi", "0.1.0");
         let registry = prometheus::Registry::new();
-        Hashi::new_with_registry(server_version, config.clone(), &registry)
+        Hashi::new_with_registry(server_version, None, config.clone(), &registry)
     }
 
     /// Create a Hashi instance with retry logic for database lock contention.

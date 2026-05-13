@@ -166,7 +166,8 @@ async fn run_server(config_path: Option<std::path::PathBuf>) -> anyhow::Result<(
     tracing::info!("welcome to hashi");
 
     let config = config_path
-        .map(|path| Config::load(&path))
+        .as_deref()
+        .map(Config::load)
         .transpose()
         .unwrap()
         .unwrap_or_default();
@@ -189,7 +190,7 @@ async fn run_server(config_path: Option<std::path::PathBuf>) -> anyhow::Result<(
 
     let server_version = ServerVersion::new(env!("CARGO_BIN_NAME"), VERSION);
 
-    let hashi = Hashi::new(server_version, config)?;
+    let hashi = Hashi::new(server_version, config_path, config)?;
     let hashi_service = hashi.start().await?;
     hashi_service.main().await?;
 

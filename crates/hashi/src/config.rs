@@ -115,6 +115,13 @@ pub struct Config {
     )]
     pub backup_age_pubkey: Option<crate::backup::BackupRecipient>,
 
+    /// Directory to write automatic encrypted backups into.
+    ///
+    /// Defaults to `/tmp` if not specified.
+    // TODO: eventually we should probably make this field mandatory
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_dir: Option<PathBuf>,
+
     /// Force validator to run as leader, or never run as leader
     #[serde(skip_serializing_if = "Option::is_none")]
     pub force_run_as_leader: Option<ForceRunAsLeader>,
@@ -332,6 +339,10 @@ impl Config {
         self.force_run_as_leader.clone().unwrap_or_default()
     }
 
+    pub fn backup_dir(&self) -> &Path {
+        self.backup_dir.as_deref().unwrap_or(Path::new("/tmp"))
+    }
+
     pub fn test_weight_divisor(&self) -> u16 {
         self.test_weight_divisor.unwrap_or(1)
     }
@@ -469,6 +480,15 @@ mod tests {
         let tls_key = config.tls_private_key.as_ref().unwrap();
         assert!(tls_key.starts_with("-----BEGIN PRIVATE KEY-----"));
         assert!(tls_key.ends_with("-----END PRIVATE KEY-----\n"));
+    }
+
+    #[test]
+    fn backup_dir_uses_configured_path() {
+        let config = Config {
+            backup_dir: Some(PathBuf::from("/var/lib/hashi/backups")),
+            ..Default::default()
+        };
+        assert_eq!(config.backup_dir(), Path::new("/var/lib/hashi/backups"));
     }
 
     #[test]
