@@ -254,6 +254,10 @@ impl Committee {
         &self,
         signed_message: &SignedMessage<T>,
     ) -> Result<(), SignatureError> {
+        // Validate that the bitmap matches this committee before indexing
+        // into `members`; otherwise a peer-supplied bitmap with bits set
+        // beyond the committee size would panic on out-of-bounds access.
+        signed_message.signature.verify_committee(self)?;
         let pks = signed_message
             .signature
             .signers_bitmap
@@ -1085,5 +1089,60 @@ mod test {
         assert!(reconstructed.is_signer(&addresses[1], &committee).unwrap());
         assert!(reconstructed.is_signer(&addresses[2], &committee).unwrap());
         assert!(!reconstructed.is_signer(&addresses[3], &committee).unwrap());
+    }
+
+    /// Regression test: a peer-supplied bitmap whose set bits exceed the
+    /// committee size must not cause an out-of-bounds panic.  Prior to the
+    /// fix, `verify_signature` indexed `committee.members[index]` directly
+    /// without first validating the bitmap, allowing a malicious peer to
+    /// crash the MPC supervisor task by sending a forged certificate.
+    #[test]
+    fn verify_signature_rejects_oversize_bitmap_without_panic() {
+        let mut rng = rand::thread_rng();
+        let epoch = 7u64;
+
+        let private_keys: Vec<_> = (0..4)
+            .map(|_| Bls12381PrivateKey::generate(&mut rng))
+            .collect();
+        let addresses: Vec<_> = (0..4).map(|i| Address::new([i as u8; 32])).collect();
+        let encryption_keys: Vec<EncryptionPublicKey> = (0..4)
+            .map(|_| EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(&mut rng)))
+            .collect();
+
+        let members: Vec<_> = (0..4)
+            .map(|i| CommitteeMember {
+                address: addresses[i],
+                public_key: private_keys[i].public_key(),
+                encryption_public_key: encryption_keys[i].clone(),
+                weight: 1,
+            })
+            .collect();
+        let committee = Committee::new(
+            members,
+            epoch,
+            TEST_THRESHOLD_IN_BASIS_POINTS,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            TEST_MAX_FAULTY_IN_BASIS_POINTS,
+        );
+
+        let message = b"regression".to_vec();
+        let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
+        for i in 0..3 {
+            aggregator
+                .add_signature(private_keys[i].sign(epoch, addresses[i], &message))
+                .unwrap();
+        }
+        let valid_cert = aggregator.finish().unwrap();
+
+        // Append a byte whose bits would index past the 4-member committee.
+        let mut forged_bitmap = valid_cert.signers_bitmap_bytes().to_vec();
+        forged_bitmap.push(0xff);
+
+        let forged =
+            SignedMessage::new(epoch, message, valid_cert.signature_bytes(), &forged_bitmap)
+                .unwrap();
+
+        assert!(committee.verify_signature(&forged).is_err());
+        assert!(committee.verify_signature_and_weight(&forged, 3).is_err());
     }
 }
