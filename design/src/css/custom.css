@@ -169,6 +169,67 @@ code {
   }
 }
 
+/* Search launcher pill — mirrors the kapa-trigger-btn shape; opens the
+   react-instantsearch modal (theme/Navbar/Content/index.tsx). */
+.search-launcher-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.95rem;
+  margin: 0 0.25rem;
+  background: #ffffff;
+  color: #0f0f0f;
+  font-family: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1;
+  border: 1px solid #E0E2E6;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+  white-space: nowrap;
+}
+
+.search-launcher-btn:hover,
+.search-launcher-btn:focus-visible {
+  background: #F4F5F7;
+  border-color: #C2C6CD;
+  outline: none;
+}
+
+.search-launcher-btn__icon {
+  flex-shrink: 0;
+  color: #6C7584;
+}
+
+.search-launcher-btn__kbd {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 0.25rem;
+  color: #89919F;
+  font-size: 0.75rem;
+}
+
+.search-launcher-btn__kbd kbd {
+  background: transparent;
+  border: 1px solid #E0E2E6;
+  border-radius: 4px;
+  padding: 0 4px;
+  font-family: inherit;
+  font-size: 0.7rem;
+  line-height: 1.2;
+}
+
+@media (max-width: 996px) {
+  .search-launcher-btn__label,
+  .search-launcher-btn__kbd {
+    display: none;
+  }
+  .search-launcher-btn {
+    padding: 0.4rem 0.55rem;
+  }
+}
+
 /* Sidebar */
 .theme-doc-sidebar-container {
   border-right: 1px solid rgba(15, 15, 15, 0.16);

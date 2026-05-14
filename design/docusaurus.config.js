@@ -316,17 +316,10 @@ const config = {
         darkTheme: prismThemes.dracula,
         additionalLanguages: ['rust', 'toml', 'bash'],
       },
-      // DocSearch (Algolia) — requires real credentials to function.
-      // Apply at https://docsearch.algolia.com/apply/ to crawl
-      // https://mystenlabs.github.io/hashi/design/ and replace these
-      // placeholders (or set them via env vars and read them in build).
-      algolia: {
-        appId: process.env.ALGOLIA_APP_ID || 'TBD_APP_ID',
-        apiKey: process.env.ALGOLIA_SEARCH_API_KEY || 'TBD_SEARCH_API_KEY',
-        indexName: process.env.ALGOLIA_INDEX_NAME || 'hashi-docs',
-        contextualSearch: true,
-        searchPagePath: 'search',
-      },
+      // Note: search is implemented via a custom react-instantsearch modal
+      // at src/components/Search/SearchModal.tsx (mirrors the Sui docs
+      // pattern). No themeConfig.algolia block — that would activate the
+      // default DocSearch widget, which we don't use.
     }),
 };
 

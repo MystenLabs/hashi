@@ -56,6 +56,13 @@ module.exports = {
         },
         "sui-ghost-white": "#ffffff",
         "sui-ghost-dark": "#131518",
+        // Tokens used by the search components (mirror Sui's Tailwind config
+        // so the search modal looks identical to docs.sui.io's).
+        "sui-primary": "var(--hashi-blue)",
+        "sui-steel": "#89919F",
+        "sui-steel-dark": "#6C7584",
+        "sui-steel-darker": "#4B515B",
+        "sui-disabled": "#343940",
         "sui-line": "rgba(255,255,255,0.1)",
       },
       backgroundImage: {
