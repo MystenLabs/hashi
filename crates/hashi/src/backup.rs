@@ -43,7 +43,8 @@ use fjall::Readable;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 
-pub const BACKUP_MANIFEST_FILE_NAME: &str = "hashi-config-backup-manifest.toml";
+pub const BACKUP_FILE_NAME_PREFIX: &str = "hashi-backup";
+pub const BACKUP_MANIFEST_FILE_NAME: &str = "hashi-backup-manifest.toml";
 pub const DB_SNAPSHOT_TAR_PREFIX: &str = "hashi-db-snapshot";
 
 /// An age recipient that can be used as the target of a backup.
@@ -478,7 +479,7 @@ pub fn encrypted_backup_file_name() -> PathBuf {
         .to_zoned(jiff::tz::TimeZone::UTC)
         .strftime("%Y%m%dT%H%M%SZ")
         .to_string();
-    PathBuf::from(format!("hashi-config-backup-{timestamp}.tar.gz.age"))
+    PathBuf::from(format!("{BACKUP_FILE_NAME_PREFIX}-{timestamp}.tar.gz.age"))
 }
 
 fn append_backup_manifest<W: std::io::Write>(
@@ -573,8 +574,8 @@ fn append_db_backup_to_tar<W: Write>(
 /// Determine the directory name to extract a backup tarball into.
 ///
 /// Strips the `.tar.gz.age` suffix from the tarball's file name, so
-/// `hashi-config-backup-20260409T230419Z.tar.gz.age` becomes
-/// `hashi-config-backup-20260409T230419Z`. An input without one of those
+/// `<backup-prefix>-20260409T230419Z.tar.gz.age` becomes
+/// `<backup-prefix>-20260409T230419Z`. An input without one of those
 /// suffixes is rejected rather than silently used verbatim, to avoid
 /// surprising extraction directory names when users point at the wrong file.
 pub fn extract_dir_name(backup_tarball: &Path) -> Result<PathBuf> {

@@ -22,6 +22,7 @@ mod tests {
     use age::secrecy::ExposeSecret;
     use age::x25519;
     use anyhow::Result;
+    use hashi::backup::BACKUP_FILE_NAME_PREFIX;
     use hashi::cli::commands;
     use hashi::config::Config as HashiConfig;
     use tempfile::TempDir;
@@ -73,7 +74,7 @@ mod tests {
         path
     }
 
-    /// Find the single `hashi-config-backup-*.tar.age` produced under
+    /// Find the single backup tarball produced under
     /// `dir` by `backup::save`.
     fn find_backup_tarball(dir: &Path) -> PathBuf {
         std::fs::read_dir(dir)
@@ -82,9 +83,9 @@ mod tests {
             .map(|e| e.path())
             .find(|p| {
                 p.extension().and_then(|e| e.to_str()) == Some("age")
-                    && p.file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|name| name.starts_with("hashi-config-backup-"))
+                    && p.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
+                        name.starts_with(&format!("{BACKUP_FILE_NAME_PREFIX}-"))
+                    })
             })
             .expect("backup::save did not produce a tarball")
     }
