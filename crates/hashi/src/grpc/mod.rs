@@ -109,7 +109,10 @@ impl HttpService {
                 metrics_layer::RpcMetricsMakeCallbackHandler::server(self.inner.metrics.clone()),
             ));
 
-        let router = router.merge(health_endpoint).layer(layers);
+        // /health must be merged AFTER the metrics layer so it bypasses RPC
+        // metrics — otherwise its raw HTTP status="200" trips `status!="ok"`
+        // dashboards.
+        let router = router.layer(layers).merge(health_endpoint);
 
         let tls_config =
             crate::tls::make_server_config(self.inner.config.tls_private_key().unwrap());
