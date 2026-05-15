@@ -177,6 +177,12 @@ impl OnchainState {
         self.0.state.write().unwrap()
     }
 
+    /// Recovery-only mutable access. Used by `internal-tools key-recovery`.
+    #[doc(hidden)]
+    pub fn state_mut_for_recovery(&self) -> RwLockWriteGuard<'_, State> {
+        self.0.state.write().unwrap()
+    }
+
     pub fn subscribe_checkpoint(&self) -> watch::Receiver<CheckpointInfo> {
         self.0.checkpoint.subscribe()
     }
@@ -604,6 +610,12 @@ impl State {
 
     pub fn hashi(&self) -> &types::Hashi {
         &self.hashi
+    }
+
+    /// Recovery-only. Pairs with [`OnchainState::state_mut_for_recovery`].
+    #[doc(hidden)]
+    pub fn hashi_mut(&mut self) -> &mut types::Hashi {
+        &mut self.hashi
     }
 
     async fn scrape(client: Client, ids: HashiIds) -> Result<(Self, CheckpointInfo)> {

@@ -37,6 +37,12 @@ pub struct Args {
     /// Expected public key in hex (for verification).
     #[arg(long)]
     expected_pubkey: Option<String>,
+
+    /// Override the source epoch (the one whose KeyRotation output we want
+    /// to reconstruct). Defaults to the latest encryption-key epoch found
+    /// in the first DB.
+    #[arg(long)]
+    epoch: Option<u64>,
 }
 
 pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> anyhow::Result<()> {
@@ -44,20 +50,95 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
         bail!("--db-paths is required");
     }
 
-    let previous_epoch = detect_epoch(&args.db_paths[0])?;
+    let onchain_committee_epochs: Vec<u64> = {
+        let state = onchain_state.state();
+        state
+            .hashi()
+            .committees
+            .committees()
+            .keys()
+            .copied()
+            .collect()
+    };
+    println!("On-chain committee epochs: {onchain_committee_epochs:?}");
+    for db_path in &args.db_paths {
+        let db = Database::open(db_path).with_context(|| {
+            format!("failed to open DB for epoch listing: {}", db_path.display())
+        })?;
+        let latest = db
+            .latest_encryption_key_epoch()
+            .map_err(|e| anyhow!("failed to scan encryption keys: {e}"))?;
+        let mut present = Vec::new();
+        let mut rot_present = Vec::new();
+        let mut dkg_present = Vec::new();
+        if let Some(top) = latest {
+            for e in top.saturating_sub(15)..=top {
+                if db
+                    .get_encryption_key(e)
+                    .map_err(|err| anyhow!("get_encryption_key({e}): {err}"))?
+                    .is_some()
+                {
+                    present.push(e);
+                }
+                if !db
+                    .list_all_rotation_messages(e)
+                    .map_err(|err| anyhow!("list_all_rotation_messages({e}): {err}"))?
+                    .is_empty()
+                {
+                    rot_present.push(e);
+                }
+                if !db
+                    .list_all_dealer_messages(e)
+                    .map_err(|err| anyhow!("list_all_dealer_messages({e}): {err}"))?
+                    .is_empty()
+                {
+                    dkg_present.push(e);
+                }
+            }
+        }
+        println!(
+            "  {} enc_keys = {present:?} rot_msgs = {rot_present:?} dkg_msgs = {dkg_present:?} (latest enc = {latest:?})",
+            db_path.display()
+        );
+    }
+
+    let previous_epoch = match args.epoch {
+        Some(e) => {
+            println!("Using --epoch override: {e}");
+            e
+        }
+        None => detect_epoch(&args.db_paths[0])?,
+    };
     let reconstruction_epoch = previous_epoch + 1;
 
+    // Encryption keys rotate per epoch (#502) — match on `previous_epoch`'s
+    // committee, not the reconstruction epoch's.
     let committee = {
         let state = onchain_state.state();
         let committees = state.hashi().committees.committees();
         committees
-            .get(&reconstruction_epoch)
-            .or_else(|| committees.get(&previous_epoch))
+            .get(&previous_epoch)
+            .or_else(|| committees.get(&reconstruction_epoch))
             .ok_or_else(|| {
-                anyhow!("no committee found for epoch {reconstruction_epoch} or {previous_epoch}")
+                anyhow!("no committee found for epoch {previous_epoch} or {reconstruction_epoch}")
             })?
             .clone()
     };
+
+    // `MpcManager::new` requires a committee for `reconstruction_epoch`;
+    // graft `previous_epoch`'s in if the cluster hasn't published it yet.
+    {
+        let mut state = onchain_state.state_mut_for_recovery();
+        let committees = state.hashi_mut().committees.committees_mut();
+        if !committees.contains_key(&reconstruction_epoch)
+            && let Some(prev) = committees.get(&previous_epoch).cloned()
+        {
+            println!(
+                "Grafting committee for epoch {reconstruction_epoch} = committee[{previous_epoch}] (recovery shim)"
+            );
+            committees.insert(reconstruction_epoch, prev);
+        }
+    }
 
     println!(
         "Previous epoch {previous_epoch}: {} validators, fetching certificates...",
@@ -89,23 +170,22 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
             Database::open(db_path)
                 .with_context(|| format!("failed to open DB: {}", db_path.display()))?,
         );
-        let encryption_key = db
+        let Some(encryption_key) = db
             .get_encryption_key(previous_epoch)
             .map_err(|e| anyhow!("failed to read encryption key: {e}"))?
-            .ok_or_else(|| {
-                anyhow!(
-                    "no encryption key found for epoch {previous_epoch} in {}",
-                    db_path.display()
-                )
-            })?;
+        else {
+            println!("  Skipping: no encryption key for epoch {previous_epoch}");
+            continue;
+        };
 
         let my_enc_pk = EncryptionPublicKey::from_private_key(&encryption_key);
-        let validator_address = find_validator_by_encryption_key(&committee, &my_enc_pk)
-            .ok_or_else(|| {
-                anyhow!(
-                    "DB encryption key doesn't match any committee member (epoch {previous_epoch})"
-                )
-            })?;
+        let Some(validator_address) = find_validator_by_encryption_key(&committee, &my_enc_pk)
+        else {
+            println!(
+                "  Skipping: DB encryption key for epoch {previous_epoch} doesn't match any committee member"
+            );
+            continue;
+        };
         println!("  Validator address: {validator_address}");
 
         let store = EpochPublicMessagesStore::new(db.clone(), previous_epoch);
