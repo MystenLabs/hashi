@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["format_address","format_address_full","format_proposal_type","format_timestamp"]};

@@ -1,0 +1,30 @@
+# Hashi Documentation for LLMs
+
+> Design specification for Hashi, the Sui native Bitcoin orchestrator.
+> Hashi secures and manages BTC for use on Sui through threshold cryptography,
+> minting `hBTC` against committee-approved Bitcoin deposits.
+
+> For the complete, unabridged content of every page see [llms-full.txt](https://mystenlabs.github.io/hashi/design/llms-full.txt).
+
+- [Introduction](https://mystenlabs.github.io/hashi/design/index.md): High-level overview of Hashi, the Sui native Bitcoin orchestrator that secures and manages BTC for use on Sui through threshold cryptography.
+- [User Flows](https://mystenlabs.github.io/hashi/design/user-flows.md): End-to-end deposit and withdrawal flows for users moving BTC between Bitcoin and Sui through Hashi.
+
+## Design
+
+- [Committee](https://mystenlabs.github.io/hashi/design/committee.md): The Hashi committee is a subset of the Sui validator set that operates the protocol's MPC signing service.
+- [Governance Actions](https://mystenlabs.github.io/hashi/design/governance-actions.md): Proposal types that the Hashi committee uses to upgrade packages, enable or disable versions, and update onchain configuration.
+- [Handling Sanctioned Addresses](https://mystenlabs.github.io/hashi/design/sanctions.md): How Hashi committee members independently apply sanctions checks to deposits and withdrawals using a configurable screening endpoint.
+- [Service](https://mystenlabs.github.io/hashi/design/service.md): The Hashi node service that committee members run, the gRPC interface it exposes, and the on-Sui state it relies on.
+- [MPC Protocol](https://mystenlabs.github.io/hashi/design/mpc-protocol.md): The Multi-Party Computation protocols that Hashi uses for distributed key generation, key rotation, and threshold Schnorr signing.
+- [Guardian](https://mystenlabs.github.io/hashi/design/guardian.md): The withdrawal Guardian is a second signatory on managed Bitcoin deposits, providing defense in depth against committee compromise.
+- [Bitcoin Address Scheme](https://mystenlabs.github.io/hashi/design/address-scheme.md): Hashi derives a unique Bitcoin Taproot deposit address for every Sui address using a 2-of-2 multisig between the MPC committee and the Guardian.
+- [Rate Limiting Withdrawals](https://mystenlabs.github.io/hashi/design/limiter.md): Hashi enforces a token-bucket rate limit on withdrawal outflows through the Guardian to protect against vulnerabilities.
+- [Fees](https://mystenlabs.github.io/hashi/design/fees.md): How Hashi charges miner fees on withdrawals, enforces fee bounds, and handles stuck transactions.
+- [Configuration](https://mystenlabs.github.io/hashi/design/config.md): Onchain configuration parameters that control Hashi's deposit, withdrawal, fee, and operational behavior.
+
+## Flows
+
+- [Reconfiguration](https://mystenlabs.github.io/hashi/design/reconfiguration.md): How the Hashi committee transfers MPC key shares between epochs through DKG or key rotation as Sui validators change.
+- [Deposit](https://mystenlabs.github.io/hashi/design/deposit.md): How Hashi turns BTC sent to a deposit address into hBTC on Sui through the request, approve, confirm, and mint phases.
+- [Withdraw](https://mystenlabs.github.io/hashi/design/withdraw.md): How Hashi turns hBTC on Sui back into native BTC through the request, approve, build, sign, and broadcast phases.
+

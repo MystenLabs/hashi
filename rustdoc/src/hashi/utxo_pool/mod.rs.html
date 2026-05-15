@@ -1,0 +1,1128 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/hashi/src/utxo_pool/mod.rs`."><title>mod.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-e56847b5.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="hashi" data-themes="" data-resource-suffix="" data-rustdoc-version="1.91.1 (ed61e7d7e 2025-11-07)" data-channel="1.91.1" data-search-js="search-e256b49e.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-6dc2a7f3.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">hashi/utxo_pool/</div>mod.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-4"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Copyright (c) Mysten Labs, Inc.
+<a href=#2 id=2 data-nosnippet>2</a>// SPDX-License-Identifier: Apache-2.0
+<a href=#3 id=3 data-nosnippet>3</a>
+<a href=#4 id=4 data-nosnippet>4</a></span><span class="doccomment">//! UTXO pool management and coin selection for Bitcoin withdrawal transactions.
+<a href=#5 id=5 data-nosnippet>5</a>//!
+<a href=#6 id=6 data-nosnippet>6</a>//! This module provides a coin selection algorithm that simultaneously:
+<a href=#7 id=7 data-nosnippet>7</a>//! - Selects UTXOs to fund one or more withdrawal requests in a single transaction.
+<a href=#8 id=8 data-nosnippet>8</a>//! - Amortises UTXO pool maintenance by aggressively consolidating inputs back
+<a href=#9 id=9 data-nosnippet>9</a>//!   into a small target number of UTXOs via a change output.
+<a href=#10 id=10 data-nosnippet>10</a>//!
+<a href=#11 id=11 data-nosnippet>11</a>//! The miner fee is split equally among the selected withdrawal requests and
+<a href=#12 id=12 data-nosnippet>12</a>//! deducted from each request's output amount. The fee must not exceed a
+<a href=#13 id=13 data-nosnippet>13</a>//! configurable per-request cap (`CoinSelectionParams::max_fee_per_request`),
+<a href=#14 id=14 data-nosnippet>14</a>//! and is sourced entirely from the request amounts. When spending
+<a href=#15 id=15 data-nosnippet>15</a>//! unconfirmed change (CPFP), the per-request deduction also includes any
+<a href=#16 id=16 data-nosnippet>16</a>//! deficit needed to bring the ancestor package fee rate up to the target.
+<a href=#17 id=17 data-nosnippet>17</a>//! The fund balance decreases by `sum(request.amounts)` for confirmed inputs
+<a href=#18 id=18 data-nosnippet>18</a>//! and by `sum(request.amounts) + cpfp_deficit` when ancestor boosting is
+<a href=#19 id=19 data-nosnippet>19</a>//! needed.
+<a href=#20 id=20 data-nosnippet>20</a>
+<a href=#21 id=21 data-nosnippet>21</a></span><span class="kw">use </span>bitcoin::Address <span class="kw">as </span>BitcoinAddress;
+<a href=#22 id=22 data-nosnippet>22</a><span class="kw">use </span>bitcoin::FeeRate;
+<a href=#23 id=23 data-nosnippet>23</a><span class="kw">use </span>bitcoin::Weight;
+<a href=#24 id=24 data-nosnippet>24</a><span class="kw">use </span>sui_sdk_types::Address;
+<a href=#25 id=25 data-nosnippet>25</a><span class="kw">use </span>thiserror::Error;
+<a href=#26 id=26 data-nosnippet>26</a>
+<a href=#27 id=27 data-nosnippet>27</a><span class="kw">use </span><a href="../../../hashi/onchain/types/struct.UtxoId.html"><span class="kw">crate</span>::onchain::types::UtxoId</a>;
+<a href=#28 id=28 data-nosnippet>28</a><span class="kw">use </span><a href="../withdrawals.rs.html#1245"><span class="kw">crate</span>::withdrawals::MAX_ANCESTOR_DEPTH</a>;
+<a href=#29 id=29 data-nosnippet>29</a>
+<a href=#30 id=30 data-nosnippet>30</a><span class="attr">#[cfg(test)]
+<a href=#31 id=31 data-nosnippet>31</a></span><span class="kw">mod </span>tests;
+<a href=#32 id=32 data-nosnippet>32</a>
+<a href=#33 id=33 data-nosnippet>33</a><span class="attr">#[cfg(test)]
+<a href=#34 id=34 data-nosnippet>34</a></span><span class="kw">mod </span>sim;
+<a href=#35 id=35 data-nosnippet>35</a>
+<a href=#36 id=36 data-nosnippet>36</a><span class="comment">// ── Constants ────────────────────────────────────────────────────────────────
+<a href=#37 id=37 data-nosnippet>37</a>
+<a href=#38 id=38 data-nosnippet>38</a></span><span class="doccomment">/// Base weight of a segwit transaction input (non-witness portion).
+<a href=#39 id=39 data-nosnippet>39</a>///
+<a href=#40 id=40 data-nosnippet>40</a>/// nSequence(4) + prevout_txid(32) + prevout_vout(4) + script_sig_len(1)
+<a href=#41 id=41 data-nosnippet>41</a>///   = 41 bytes × 4 = 164 WU
+<a href=#42 id=42 data-nosnippet>42</a></span><span class="kw">const </span>TXIN_BASE_WEIGHT: Weight = Weight::from_wu(<span class="number">164</span>);
+<a href=#43 id=43 data-nosnippet>43</a>
+<a href=#44 id=44 data-nosnippet>44</a><span class="doccomment">/// Base weight of a transaction output (amount + script-length varint).
+<a href=#45 id=45 data-nosnippet>45</a>///
+<a href=#46 id=46 data-nosnippet>46</a>/// amount(8) + script_len_varint(1) = 9 bytes × 4 = 36 WU.
+<a href=#47 id=47 data-nosnippet>47</a>/// The scriptPubKey weight is added separately.
+<a href=#48 id=48 data-nosnippet>48</a></span><span class="kw">const </span>TXOUT_BASE_WEIGHT: Weight = Weight::from_wu(<span class="number">36</span>);
+<a href=#49 id=49 data-nosnippet>49</a>
+<a href=#50 id=50 data-nosnippet>50</a><span class="doccomment">/// Minimum value (sat) for a P2PKH or P2SH output to be above the dust
+<a href=#51 id=51 data-nosnippet>51</a>/// relay threshold at Bitcoin's default dust relay fee of 3 sat/vByte.
+<a href=#52 id=52 data-nosnippet>52</a>/// This is the legacy dust limit and the highest of the three thresholds.
+<a href=#53 id=53 data-nosnippet>53</a></span><span class="attr">#[allow(dead_code)]
+<a href=#54 id=54 data-nosnippet>54</a></span><span class="kw">const </span>DUST_RELAY_MIN_VALUE: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> = <span class="number">546</span>;
+<a href=#55 id=55 data-nosnippet>55</a>
+<a href=#56 id=56 data-nosnippet>56</a><span class="doccomment">/// Minimum value (sat) for a P2TR (or P2WSH) output to be above the dust
+<a href=#57 id=57 data-nosnippet>57</a>/// relay threshold at Bitcoin's default dust relay fee of 3 sat/vByte.
+<a href=#58 id=58 data-nosnippet>58</a>/// Outputs below this value will not be relayed by default Bitcoin nodes.
+<a href=#59 id=59 data-nosnippet>59</a></span><span class="kw">pub const </span><a href="../../../hashi/utxo_pool/constant.TR_DUST_RELAY_MIN_VALUE.html">TR_DUST_RELAY_MIN_VALUE</a>: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> = <span class="number">330</span>;
+<a href=#60 id=60 data-nosnippet>60</a>
+<a href=#61 id=61 data-nosnippet>61</a><span class="doccomment">/// Minimum value (sat) for a P2WPKH output to be above the dust relay
+<a href=#62 id=62 data-nosnippet>62</a>/// threshold at Bitcoin's default dust relay fee of 3 sat/vByte.
+<a href=#63 id=63 data-nosnippet>63</a></span><span class="kw">const </span>WPKH_DUST_RELAY_MIN_VALUE: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> = <span class="number">294</span>;
+<a href=#64 id=64 data-nosnippet>64</a>
+<a href=#65 id=65 data-nosnippet>65</a><span class="comment">// ── Spend Path ───────────────────────────────────────────────────────────────
+<a href=#66 id=66 data-nosnippet>66</a>
+<a href=#67 id=67 data-nosnippet>67</a></span><span class="doccomment">/// Describes the spend path for a UTXO, used to calculate the witness
+<a href=#68 id=68 data-nosnippet>68</a>/// satisfaction weight and thus the full input weight contribution to a
+<a href=#69 id=69 data-nosnippet>69</a>/// transaction.
+<a href=#70 id=70 data-nosnippet>70</a></span><span class="attr">#[derive(Clone, Debug)]
+<a href=#71 id=71 data-nosnippet>71</a></span><span class="kw">pub enum </span><a href="../../../hashi/utxo_pool/enum.SpendPath.html">SpendPath</a> {
+<a href=#72 id=72 data-nosnippet>72</a>    <span class="doccomment">/// Taproot script-path 2-of-2 multisig spend.
+<a href=#73 id=73 data-nosnippet>73</a>    ///
+<a href=#74 id=74 data-nosnippet>74</a>    /// Witness items:
+<a href=#75 id=75 data-nosnippet>75</a>    ///   items_count(1) + sig1_len(1) + sig1(64) + sig2_len(1) + sig2(64)
+<a href=#76 id=76 data-nosnippet>76</a>    ///     + script_len(1) + script(68) + control_block_len(1) + control_block(33)
+<a href=#77 id=77 data-nosnippet>77</a>    ///   = 234 WU
+<a href=#78 id=78 data-nosnippet>78</a>    </span>TaprootScriptPath2of2,
+<a href=#79 id=79 data-nosnippet>79</a>
+<a href=#80 id=80 data-nosnippet>80</a>    <span class="doccomment">/// Taproot key-path spend (single x-only Schnorr signature).
+<a href=#81 id=81 data-nosnippet>81</a>    ///
+<a href=#82 id=82 data-nosnippet>82</a>    /// Witness items:
+<a href=#83 id=83 data-nosnippet>83</a>    ///   items_count(1) + sig_len(1) + sig(64) = 66 WU
+<a href=#84 id=84 data-nosnippet>84</a>    </span>TaprootKeyPath,
+<a href=#85 id=85 data-nosnippet>85</a>
+<a href=#86 id=86 data-nosnippet>86</a>    <span class="doccomment">/// Custom witness satisfaction weight, for non-standard spend paths.
+<a href=#87 id=87 data-nosnippet>87</a>    </span>Custom(Weight),
+<a href=#88 id=88 data-nosnippet>88</a>}
+<a href=#89 id=89 data-nosnippet>89</a>
+<a href=#90 id=90 data-nosnippet>90</a><span class="kw">impl </span><a href="#71-88">SpendPath</a> {
+<a href=#91 id=91 data-nosnippet>91</a>    <span class="doccomment">/// Returns the witness-only satisfaction weight.
+<a href=#92 id=92 data-nosnippet>92</a>    </span><span class="kw">pub fn </span>satisfaction_weight(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Weight {
+<a href=#93 id=93 data-nosnippet>93</a>        <span class="kw">match </span><span class="self"><a href="#92">self</a> </span>{
+<a href=#94 id=94 data-nosnippet>94</a>            <a href="#78">SpendPath::TaprootScriptPath2of2</a> =&gt; Weight::from_wu(<span class="number">234</span>),
+<a href=#95 id=95 data-nosnippet>95</a>            <a href="#84">SpendPath::TaprootKeyPath</a> =&gt; Weight::from_wu(<span class="number">66</span>),
+<a href=#96 id=96 data-nosnippet>96</a>            <a href="#87">SpendPath::Custom</a>(w) =&gt; <span class="kw-2">*</span><a href="#96">w</a>,
+<a href=#97 id=97 data-nosnippet>97</a>        }
+<a href=#98 id=98 data-nosnippet>98</a>    }
+<a href=#99 id=99 data-nosnippet>99</a>
+<a href=#100 id=100 data-nosnippet>100</a>    <span class="doccomment">/// Returns the total input weight: `TXIN_BASE_WEIGHT` (164 WU) + satisfaction weight.
+<a href=#101 id=101 data-nosnippet>101</a>    </span><span class="kw">pub fn </span>input_weight(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Weight {
+<a href=#102 id=102 data-nosnippet>102</a>        <a href="#42">TXIN_BASE_WEIGHT</a>
+<a href=#103 id=103 data-nosnippet>103</a>            .checked_add(<a class="self" href="#101">self</a>.<a href="#92-98">satisfaction_weight</a>())
+<a href=#104 id=104 data-nosnippet>104</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/option/enum.Option.html#method.expect">expect</a>(<span class="string">"input weight overflow"</span>)
+<a href=#105 id=105 data-nosnippet>105</a>    }
+<a href=#106 id=106 data-nosnippet>106</a>}
+<a href=#107 id=107 data-nosnippet>107</a>
+<a href=#108 id=108 data-nosnippet>108</a><span class="comment">// ── UTXO Status ──────────────────────────────────────────────────────────────
+<a href=#109 id=109 data-nosnippet>109</a>
+<a href=#110 id=110 data-nosnippet>110</a></span><span class="doccomment">/// An ancestor transaction in an unconfirmed UTXO's chain.
+<a href=#111 id=111 data-nosnippet>111</a>///
+<a href=#112 id=112 data-nosnippet>112</a>/// Each entry represents a transaction that must confirm before the
+<a href=#113 id=113 data-nosnippet>113</a>/// UTXO is fully settled. The chain is ordered from the UTXO's
+<a href=#114 id=114 data-nosnippet>114</a>/// creating transaction (index 0) back to the oldest unconfirmed
+<a href=#115 id=115 data-nosnippet>115</a>/// ancestor.
+<a href=#116 id=116 data-nosnippet>116</a></span><span class="attr">#[derive(Clone, Debug)]
+<a href=#117 id=117 data-nosnippet>117</a></span><span class="kw">pub struct </span><a href="../../../hashi/utxo_pool/struct.AncestorTx.html">AncestorTx</a> {
+<a href=#118 id=118 data-nosnippet>118</a>    <span class="doccomment">/// Number of confirmations. `0` means the transaction is in the
+<a href=#119 id=119 data-nosnippet>119</a>    /// mempool only (not yet included in a block). Values `1..N`
+<a href=#120 id=120 data-nosnippet>120</a>    /// mean it has been included but has not yet reached the
+<a href=#121 id=121 data-nosnippet>121</a>    /// finality threshold.
+<a href=#122 id=122 data-nosnippet>122</a>    </span><span class="kw">pub </span>confirmations: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u32.html">u32</a>,
+<a href=#123 id=123 data-nosnippet>123</a>    <span class="doccomment">/// The total weight of this transaction.
+<a href=#124 id=124 data-nosnippet>124</a>    </span><span class="kw">pub </span>tx_weight: Weight,
+<a href=#125 id=125 data-nosnippet>125</a>    <span class="doccomment">/// The total fee paid by this transaction in satoshis.
+<a href=#126 id=126 data-nosnippet>126</a>    </span><span class="kw">pub </span>tx_fee: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>,
+<a href=#127 id=127 data-nosnippet>127</a>}
+<a href=#128 id=128 data-nosnippet>128</a>
+<a href=#129 id=129 data-nosnippet>129</a><span class="doccomment">/// The confirmation status of a UTXO.
+<a href=#130 id=130 data-nosnippet>130</a></span><span class="attr">#[derive(Clone, Debug)]
+<a href=#131 id=131 data-nosnippet>131</a></span><span class="kw">pub enum </span><a href="../../../hashi/utxo_pool/enum.UtxoStatus.html">UtxoStatus</a> {
+<a href=#132 id=132 data-nosnippet>132</a>    <span class="doccomment">/// The UTXO and all of its ancestors have reached the finality
+<a href=#133 id=133 data-nosnippet>133</a>    /// threshold (e.g., 6 confirmations). Safe to spend without any
+<a href=#134 id=134 data-nosnippet>134</a>    /// concern for reorgs or rebroadcasting.
+<a href=#135 id=135 data-nosnippet>135</a>    </span>Confirmed,
+<a href=#136 id=136 data-nosnippet>136</a>
+<a href=#137 id=137 data-nosnippet>137</a>    <span class="doccomment">/// The UTXO has an unconfirmed or insufficiently confirmed
+<a href=#138 id=138 data-nosnippet>138</a>    /// ancestor chain.
+<a href=#139 id=139 data-nosnippet>139</a>    ///
+<a href=#140 id=140 data-nosnippet>140</a>    /// `chain[0]` is the transaction that created this UTXO.
+<a href=#141 id=141 data-nosnippet>141</a>    /// `chain[1]` is its parent (if unconfirmed), and so on back to
+<a href=#142 id=142 data-nosnippet>142</a>    /// the oldest unconfirmed ancestor. The chain is empty only for
+<a href=#143 id=143 data-nosnippet>143</a>    /// `Confirmed` UTXOs (which use the `Confirmed` variant instead).
+<a href=#144 id=144 data-nosnippet>144</a>    ///
+<a href=#145 id=145 data-nosnippet>145</a>    /// This information is used to:
+<a href=#146 id=146 data-nosnippet>146</a>    /// - Compute the **package fee rate** for CPFP: the effective
+<a href=#147 id=147 data-nosnippet>147</a>    ///   rate of a new transaction spending this UTXO is
+<a href=#148 id=148 data-nosnippet>148</a>    ///   `(sum(chain.tx_fee) + new_fee) / (sum(chain.tx_weight) + new_weight)`.
+<a href=#149 id=149 data-nosnippet>149</a>    /// - Enforce a **maximum chain depth** policy (e.g., never chain
+<a href=#150 id=150 data-nosnippet>150</a>    ///   deeper than 3 unconfirmed transactions).
+<a href=#151 id=151 data-nosnippet>151</a>    /// - Determine how much extra fee a child transaction must pay
+<a href=#152 id=152 data-nosnippet>152</a>    ///   to boost underpaying ancestors.
+<a href=#153 id=153 data-nosnippet>153</a>    </span>Pending {
+<a href=#154 id=154 data-nosnippet>154</a>        <span class="doccomment">/// The ancestor chain, from this UTXO's creating transaction
+<a href=#155 id=155 data-nosnippet>155</a>        /// back to the oldest unconfirmed ancestor.
+<a href=#156 id=156 data-nosnippet>156</a>        </span>chain: <a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html">Vec</a>&lt;<a href="#117-127">AncestorTx</a>&gt;,
+<a href=#157 id=157 data-nosnippet>157</a>    },
+<a href=#158 id=158 data-nosnippet>158</a>}
+<a href=#159 id=159 data-nosnippet>159</a>
+<a href=#160 id=160 data-nosnippet>160</a><span class="kw">impl </span><a href="#131-158">UtxoStatus</a> {
+<a href=#161 id=161 data-nosnippet>161</a>    <span class="doccomment">/// Returns the full depth of the ancestor chain (both mempool and
+<a href=#162 id=162 data-nosnippet>162</a>    /// insufficiently confirmed). `0` for confirmed UTXOs,
+<a href=#163 id=163 data-nosnippet>163</a>    /// `chain.len()` for pending ones.
+<a href=#164 id=164 data-nosnippet>164</a>    </span><span class="kw">pub fn </span>chain_depth(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/1.91.1/std/primitive.usize.html">usize</a> {
+<a href=#165 id=165 data-nosnippet>165</a>        <span class="kw">match </span><span class="self"><a href="#164">self</a> </span>{
+<a href=#166 id=166 data-nosnippet>166</a>            <a href="#135">UtxoStatus::Confirmed</a> =&gt; <span class="number">0</span>,
+<a href=#167 id=167 data-nosnippet>167</a>            <a href="#153-157">UtxoStatus::Pending</a> { chain } =&gt; <a href="#167">chain</a>.<a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html#method.len">len</a>(),
+<a href=#168 id=168 data-nosnippet>168</a>        }
+<a href=#169 id=169 data-nosnippet>169</a>    }
+<a href=#170 id=170 data-nosnippet>170</a>
+<a href=#171 id=171 data-nosnippet>171</a>    <span class="doccomment">/// Returns the number of ancestors still in the mempool (0
+<a href=#172 id=172 data-nosnippet>172</a>    /// confirmations). This is the depth that matters for Bitcoin
+<a href=#173 id=173 data-nosnippet>173</a>    /// relay policy limits. Ancestors with 1+ confirmations are
+<a href=#174 id=174 data-nosnippet>174</a>    /// already in blocks and don't count toward the mempool chain
+<a href=#175 id=175 data-nosnippet>175</a>    /// limit.
+<a href=#176 id=176 data-nosnippet>176</a>    </span><span class="kw">pub fn </span>mempool_chain_depth(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/1.91.1/std/primitive.usize.html">usize</a> {
+<a href=#177 id=177 data-nosnippet>177</a>        <span class="kw">match </span><span class="self"><a href="#176">self</a> </span>{
+<a href=#178 id=178 data-nosnippet>178</a>            <a href="#135">UtxoStatus::Confirmed</a> =&gt; <span class="number">0</span>,
+<a href=#179 id=179 data-nosnippet>179</a>            <a href="#153-157">UtxoStatus::Pending</a> { chain } =&gt; <a href="#179">chain</a>.<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.filter">filter</a>(|a| <a href="#179">a</a>.confirmations == <span class="number">0</span>).<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.count">count</a>(),
+<a href=#180 id=180 data-nosnippet>180</a>        }
+<a href=#181 id=181 data-nosnippet>181</a>    }
+<a href=#182 id=182 data-nosnippet>182</a>
+<a href=#183 id=183 data-nosnippet>183</a>    <span class="doccomment">/// Returns the total weight of all unconfirmed ancestors
+<a href=#184 id=184 data-nosnippet>184</a>    /// (transactions with 0 confirmations).
+<a href=#185 id=185 data-nosnippet>185</a>    </span><span class="kw">pub fn </span>unconfirmed_ancestor_weight(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Weight {
+<a href=#186 id=186 data-nosnippet>186</a>        <span class="kw">match </span><span class="self"><a href="#185">self</a> </span>{
+<a href=#187 id=187 data-nosnippet>187</a>            <a href="#135">UtxoStatus::Confirmed</a> =&gt; Weight::ZERO,
+<a href=#188 id=188 data-nosnippet>188</a>            <a href="#153-157">UtxoStatus::Pending</a> { chain } =&gt; <a href="#188">chain</a>
+<a href=#189 id=189 data-nosnippet>189</a>                .<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>()
+<a href=#190 id=190 data-nosnippet>190</a>                .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.filter">filter</a>(|a| <a href="#190">a</a>.confirmations == <span class="number">0</span>)
+<a href=#191 id=191 data-nosnippet>191</a>                .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|a| <a href="#191">a</a>.tx_weight)
+<a href=#192 id=192 data-nosnippet>192</a>                .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>(),
+<a href=#193 id=193 data-nosnippet>193</a>        }
+<a href=#194 id=194 data-nosnippet>194</a>    }
+<a href=#195 id=195 data-nosnippet>195</a>
+<a href=#196 id=196 data-nosnippet>196</a>    <span class="doccomment">/// Returns the total fee paid by all unconfirmed ancestors
+<a href=#197 id=197 data-nosnippet>197</a>    /// (transactions with 0 confirmations).
+<a href=#198 id=198 data-nosnippet>198</a>    </span><span class="kw">pub fn </span>unconfirmed_ancestor_fee(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> {
+<a href=#199 id=199 data-nosnippet>199</a>        <span class="kw">match </span><span class="self"><a href="#198">self</a> </span>{
+<a href=#200 id=200 data-nosnippet>200</a>            <a href="#135">UtxoStatus::Confirmed</a> =&gt; <span class="number">0</span>,
+<a href=#201 id=201 data-nosnippet>201</a>            <a href="#153-157">UtxoStatus::Pending</a> { chain } =&gt; <a href="#201">chain</a>
+<a href=#202 id=202 data-nosnippet>202</a>                .<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>()
+<a href=#203 id=203 data-nosnippet>203</a>                .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.filter">filter</a>(|a| <a href="#203">a</a>.confirmations == <span class="number">0</span>)
+<a href=#204 id=204 data-nosnippet>204</a>                .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|a| <a href="#204">a</a>.tx_fee)
+<a href=#205 id=205 data-nosnippet>205</a>                .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>(),
+<a href=#206 id=206 data-nosnippet>206</a>        }
+<a href=#207 id=207 data-nosnippet>207</a>    }
+<a href=#208 id=208 data-nosnippet>208</a>}
+<a href=#209 id=209 data-nosnippet>209</a>
+<a href=#210 id=210 data-nosnippet>210</a><span class="comment">// ── UTXO Candidate ───────────────────────────────────────────────────────────
+<a href=#211 id=211 data-nosnippet>211</a>
+<a href=#212 id=212 data-nosnippet>212</a></span><span class="doccomment">/// A UTXO available for selection as a transaction input.
+<a href=#213 id=213 data-nosnippet>213</a></span><span class="attr">#[derive(Clone, Debug)]
+<a href=#214 id=214 data-nosnippet>214</a></span><span class="kw">pub struct </span><a href="../../../hashi/utxo_pool/struct.UtxoCandidate.html">UtxoCandidate</a> {
+<a href=#215 id=215 data-nosnippet>215</a>    <span class="doccomment">/// The on-chain identifier for this UTXO (txid + vout).
+<a href=#216 id=216 data-nosnippet>216</a>    </span><span class="kw">pub </span>id: <a href="../../../hashi/onchain/types/struct.UtxoId.html">UtxoId</a>,
+<a href=#217 id=217 data-nosnippet>217</a>    <span class="doccomment">/// The value of this UTXO in satoshis.
+<a href=#218 id=218 data-nosnippet>218</a>    </span><span class="kw">pub </span>amount: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>,
+<a href=#219 id=219 data-nosnippet>219</a>    <span class="doccomment">/// The spend path for this UTXO, used to compute the weight contribution
+<a href=#220 id=220 data-nosnippet>220</a>    /// of this input to the transaction.
+<a href=#221 id=221 data-nosnippet>221</a>    </span><span class="kw">pub </span>spend_path: <a href="#71-88">SpendPath</a>,
+<a href=#222 id=222 data-nosnippet>222</a>    <span class="doccomment">/// Whether this UTXO is confirmed on-chain or still pending/unconfirmed.
+<a href=#223 id=223 data-nosnippet>223</a>    </span><span class="kw">pub </span>status: <a href="#131-158">UtxoStatus</a>,
+<a href=#224 id=224 data-nosnippet>224</a>}
+<a href=#225 id=225 data-nosnippet>225</a>
+<a href=#226 id=226 data-nosnippet>226</a><span class="comment">// ── Withdrawal Request ───────────────────────────────────────────────────────
+<a href=#227 id=227 data-nosnippet>227</a>
+<a href=#228 id=228 data-nosnippet>228</a></span><span class="doccomment">/// A withdrawal request candidate for inclusion in a Bitcoin transaction.
+<a href=#229 id=229 data-nosnippet>229</a>///
+<a href=#230 id=230 data-nosnippet>230</a>/// This is the coin-selection view of a withdrawal; it contains only the
+<a href=#231 id=231 data-nosnippet>231</a>/// fields needed by the algorithm. Callers should construct this from the
+<a href=#232 id=232 data-nosnippet>232</a>/// on-chain [`crate::onchain::types::WithdrawalRequest`].
+<a href=#233 id=233 data-nosnippet>233</a></span><span class="attr">#[derive(Clone, Debug)]
+<a href=#234 id=234 data-nosnippet>234</a></span><span class="kw">pub struct </span><a href="../../../hashi/utxo_pool/struct.WithdrawalRequest.html">WithdrawalRequest</a> {
+<a href=#235 id=235 data-nosnippet>235</a>    <span class="doccomment">/// Unique identifier for this withdrawal (Sui object ID / request ID).
+<a href=#236 id=236 data-nosnippet>236</a>    </span><span class="kw">pub </span>id: Address,
+<a href=#237 id=237 data-nosnippet>237</a>    <span class="doccomment">/// Raw witness-program bytes of the recipient Bitcoin address.
+<a href=#238 id=238 data-nosnippet>238</a>    ///
+<a href=#239 id=239 data-nosnippet>239</a>    /// Used to build the output scriptPubKey and to compute the output weight
+<a href=#240 id=240 data-nosnippet>240</a>    /// contribution to the transaction.
+<a href=#241 id=241 data-nosnippet>241</a>    </span><span class="kw">pub </span>recipient: <a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html">Vec</a>&lt;<a href="https://doc.rust-lang.org/1.91.1/std/primitive.u8.html">u8</a>&gt;,
+<a href=#242 id=242 data-nosnippet>242</a>    <span class="doccomment">/// Withdrawal amount in satoshis. This is the exact amount the fund
+<a href=#243 id=243 data-nosnippet>243</a>    /// releases; the miner fee is deducted from it before the remainder is
+<a href=#244 id=244 data-nosnippet>244</a>    /// sent to `recipient`.  The fund balance decreases by exactly this value
+<a href=#245 id=245 data-nosnippet>245</a>    /// regardless of the fee rate.
+<a href=#246 id=246 data-nosnippet>246</a>    </span><span class="kw">pub </span>amount: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>,
+<a href=#247 id=247 data-nosnippet>247</a>    <span class="doccomment">/// Unix timestamp in milliseconds when the withdrawal was submitted.
+<a href=#248 id=248 data-nosnippet>248</a>    /// Used to prioritise older requests over newer ones.
+<a href=#249 id=249 data-nosnippet>249</a>    </span><span class="kw">pub </span>timestamp_ms: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>,
+<a href=#250 id=250 data-nosnippet>250</a>}
+<a href=#251 id=251 data-nosnippet>251</a>
+<a href=#252 id=252 data-nosnippet>252</a><span class="comment">// ── Algorithm Parameters ─────────────────────────────────────────────────────
+<a href=#253 id=253 data-nosnippet>253</a>
+<a href=#254 id=254 data-nosnippet>254</a></span><span class="doccomment">/// Tuning parameters for the coin selection algorithm.
+<a href=#255 id=255 data-nosnippet>255</a></span><span class="attr">#[derive(Clone, Debug)]
+<a href=#256 id=256 data-nosnippet>256</a></span><span class="kw">pub struct </span><a href="../../../hashi/utxo_pool/struct.CoinSelectionParams.html">CoinSelectionParams</a> {
+<a href=#257 id=257 data-nosnippet>257</a>    <span class="doccomment">/// Upper bound on transaction weight. The algorithm will not propose a
+<a href=#258 id=258 data-nosnippet>258</a>    /// transaction that exceeds this limit.
+<a href=#259 id=259 data-nosnippet>259</a>    </span><span class="kw">pub </span>max_tx_weight: Weight,
+<a href=#260 id=260 data-nosnippet>260</a>
+<a href=#261 id=261 data-nosnippet>261</a>    <span class="doccomment">/// Hard cap on the total number of transaction inputs, covering both the
+<a href=#262 id=262 data-nosnippet>262</a>    /// primary inputs selected in Step 2 and any consolidation inputs added in
+<a href=#263 id=263 data-nosnippet>263</a>    /// Step 3.
+<a href=#264 id=264 data-nosnippet>264</a>    </span><span class="kw">pub </span>max_inputs: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.usize.html">usize</a>,
+<a href=#265 id=265 data-nosnippet>265</a>
+<a href=#266 id=266 data-nosnippet>266</a>    <span class="doccomment">/// Maximum number of withdrawal requests that may be batched into a single
+<a href=#267 id=267 data-nosnippet>267</a>    /// transaction.
+<a href=#268 id=268 data-nosnippet>268</a>    </span><span class="kw">pub </span>max_withdrawal_requests: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.usize.html">usize</a>,
+<a href=#269 id=269 data-nosnippet>269</a>
+<a href=#270 id=270 data-nosnippet>270</a>    <span class="doccomment">/// Maximum miner fee in satoshis that may be deducted from any single
+<a href=#271 id=271 data-nosnippet>271</a>    /// request's amount. The batch is rejected if `total_fee / N` would exceed
+<a href=#272 id=272 data-nosnippet>272</a>    /// this value for the selected set of N requests. Sourced from
+<a href=#273 id=273 data-nosnippet>273</a>    /// [`crate::onchain::types::Config::worst_case_network_fee`], which is
+<a href=#274 id=274 data-nosnippet>274</a>    /// derived from `high_fee_rate_threshold` and the worst-case transaction
+<a href=#275 id=275 data-nosnippet>275</a>    /// shape.
+<a href=#276 id=276 data-nosnippet>276</a>    </span><span class="kw">pub </span>max_fee_per_request: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>,
+<a href=#277 id=277 data-nosnippet>277</a>
+<a href=#278 id=278 data-nosnippet>278</a>    <span class="doccomment">/// Absolute minimum fee rate (floor). The actual fee rate passed to
+<a href=#279 id=279 data-nosnippet>279</a>    /// [`select_coins`] should be clamped to at least this value before the
+<a href=#280 id=280 data-nosnippet>280</a>    /// call; it is also used as the lower bound when computing the available
+<a href=#281 id=281 data-nosnippet>281</a>    /// consolidation budget.
+<a href=#282 id=282 data-nosnippet>282</a>    </span><span class="kw">pub </span>min_fee_rate: FeeRate,
+<a href=#283 id=283 data-nosnippet>283</a>
+<a href=#284 id=284 data-nosnippet>284</a>    <span class="doccomment">/// Expected long-term average fee rate (e.g., 10 sat/vB, matching
+<a href=#285 id=285 data-nosnippet>285</a>    /// Bitcoin Core's `-consolidatefeerate` default). Divides the fee
+<a href=#286 id=286 data-nosnippet>286</a>    /// environment into two regimes:
+<a href=#287 id=287 data-nosnippet>287</a>    ///
+<a href=#288 id=288 data-nosnippet>288</a>    /// - **Below this rate:** consolidation is cheap. The algorithm
+<a href=#289 id=289 data-nosnippet>289</a>    ///   aggressively pulls in extra inputs (up to `max_inputs`) to
+<a href=#290 id=290 data-nosnippet>290</a>    ///   reduce the UTXO set while fees are favourable.
+<a href=#291 id=291 data-nosnippet>291</a>    /// - **At or above this rate:** input selection is aggressively
+<a href=#292 id=292 data-nosnippet>292</a>    ///   minimized. Consolidation is capped at `input_budget` extra
+<a href=#293 id=293 data-nosnippet>293</a>    ///   inputs per request, and no pool consolidation is performed
+<a href=#294 id=294 data-nosnippet>294</a>    ///   beyond what is strictly required to fund the withdrawals.
+<a href=#295 id=295 data-nosnippet>295</a>    </span><span class="kw">pub </span>long_term_fee_rate: FeeRate,
+<a href=#296 id=296 data-nosnippet>296</a>
+<a href=#297 id=297 data-nosnippet>297</a>    <span class="doccomment">/// The fee rate threshold at which the algorithm aggressively
+<a href=#298 id=298 data-nosnippet>298</a>    /// minimizes inputs and performs no pool consolidation.
+<a href=#299 id=299 data-nosnippet>299</a>    /// `max_fee_per_request` is derived from this rate applied to the
+<a href=#300 id=300 data-nosnippet>300</a>    /// worst-case transaction shape. Also used as the reference point
+<a href=#301 id=301 data-nosnippet>301</a>    /// for scaling the consolidation budget: `max_fee_per_request` is
+<a href=#302 id=302 data-nosnippet>302</a>    /// proportionally scaled from this rate to `long_term_fee_rate`
+<a href=#303 id=303 data-nosnippet>303</a>    /// when computing the low-fee consolidation budget.
+<a href=#304 id=304 data-nosnippet>304</a>    </span><span class="kw">pub </span>high_fee_rate_threshold: FeeRate,
+<a href=#305 id=305 data-nosnippet>305</a>
+<a href=#306 id=306 data-nosnippet>306</a>    <span class="doccomment">/// Maximum number of extra consolidation inputs per request when the
+<a href=#307 id=307 data-nosnippet>307</a>    /// fee rate is at or above `long_term_fee_rate`. At high fee rates,
+<a href=#308 id=308 data-nosnippet>308</a>    /// consolidation is capped at `input_budget × N` extra inputs; below
+<a href=#309 id=309 data-nosnippet>309</a>    /// the long-term rate the cap is lifted (bounded only by `max_inputs`).
+<a href=#310 id=310 data-nosnippet>310</a>    /// Matches the on-chain `input_budget` config parameter.
+<a href=#311 id=311 data-nosnippet>311</a>    </span><span class="kw">pub </span>input_budget: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.usize.html">usize</a>,
+<a href=#312 id=312 data-nosnippet>312</a>
+<a href=#313 id=313 data-nosnippet>313</a>    <span class="doccomment">/// Maximum number of mempool-only (0-confirmation) ancestors a
+<a href=#314 id=314 data-nosnippet>314</a>    /// UTXO may have and still be eligible as an input. This
+<a href=#315 id=315 data-nosnippet>315</a>    /// constrains how deep the chain of unconfirmed transactions can
+<a href=#316 id=316 data-nosnippet>316</a>    /// grow, staying within Bitcoin's relay policy limits.
+<a href=#317 id=317 data-nosnippet>317</a>    ///
+<a href=#318 id=318 data-nosnippet>318</a>    /// Only ancestors with 0 confirmations count toward this limit.
+<a href=#319 id=319 data-nosnippet>319</a>    /// Ancestors already included in a block (1+ confirmations, even
+<a href=#320 id=320 data-nosnippet>320</a>    /// if below the 6-confirmation finality threshold) do not count
+<a href=#321 id=321 data-nosnippet>321</a>    /// — they are settled from a mempool policy perspective.
+<a href=#322 id=322 data-nosnippet>322</a>    ///
+<a href=#323 id=323 data-nosnippet>323</a>    /// A value of 0 means only confirmed UTXOs (or those whose
+<a href=#324 id=324 data-nosnippet>324</a>    /// entire ancestor chain has at least 1 confirmation) are
+<a href=#325 id=325 data-nosnippet>325</a>    /// eligible. A value of 3 allows spending UTXOs with up to 3
+<a href=#326 id=326 data-nosnippet>326</a>    /// mempool-only ancestors.
+<a href=#327 id=327 data-nosnippet>327</a>    </span><span class="kw">pub </span>max_mempool_chain_depth: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.usize.html">usize</a>,
+<a href=#328 id=328 data-nosnippet>328</a>
+<a href=#329 id=329 data-nosnippet>329</a>    <span class="doccomment">/// Bitcoin address to receive the consolidation/change output.
+<a href=#330 id=330 data-nosnippet>330</a>    </span><span class="kw">pub </span>change_address: BitcoinAddress,
+<a href=#331 id=331 data-nosnippet>331</a>}
+<a href=#332 id=332 data-nosnippet>332</a>
+<a href=#333 id=333 data-nosnippet>333</a><span class="kw">impl </span><a href="#256-331">CoinSelectionParams</a> {
+<a href=#334 id=334 data-nosnippet>334</a>    <span class="doccomment">/// Default maximum transaction weight (400 kWU). This matches
+<a href=#335 id=335 data-nosnippet>335</a>    /// Bitcoin Core's `MAX_STANDARD_TX_WEIGHT` policy limit — the
+<a href=#336 id=336 data-nosnippet>336</a>    /// maximum weight a transaction can have and still be relayed by
+<a href=#337 id=337 data-nosnippet>337</a>    /// default nodes. It is 10% of the 4 MWU block weight consensus
+<a href=#338 id=338 data-nosnippet>338</a>    /// limit. Transactions exceeding this are valid per consensus but
+<a href=#339 id=339 data-nosnippet>339</a>    /// will not propagate through the standard P2P network.
+<a href=#340 id=340 data-nosnippet>340</a>    </span><span class="kw">pub const </span>DEFAULT_MAX_TX_WEIGHT: Weight = Weight::from_wu(<span class="number">400_000</span>);
+<a href=#341 id=341 data-nosnippet>341</a>
+<a href=#342 id=342 data-nosnippet>342</a>    <span class="doccomment">/// Default maximum total inputs selected for a withdrawal transaction,
+<a href=#343 id=343 data-nosnippet>343</a>    /// including both funding inputs and consolidation inputs.
+<a href=#344 id=344 data-nosnippet>344</a>    </span><span class="kw">pub const </span>DEFAULT_MAX_INPUTS: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.usize.html">usize</a> = <span class="number">700</span>;
+<a href=#345 id=345 data-nosnippet>345</a>
+<a href=#346 id=346 data-nosnippet>346</a>    <span class="doccomment">/// Maximum number of withdrawal requests per batch. Larger
+<a href=#347 id=347 data-nosnippet>347</a>    /// configured values are clamped to this because Sui runtime object
+<a href=#348 id=348 data-nosnippet>348</a>    /// limits constrain the commit transaction to roughly
+<a href=#349 id=349 data-nosnippet>349</a>    /// `inputs + 3 * requests + 12` runtime objects (budget: 922).
+<a href=#350 id=350 data-nosnippet>350</a>    </span><span class="kw">pub const </span>MAX_WITHDRAWAL_REQUESTS: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.usize.html">usize</a> = <span class="number">70</span>;
+<a href=#351 id=351 data-nosnippet>351</a>
+<a href=#352 id=352 data-nosnippet>352</a>    <span class="doccomment">/// Default minimum fee rate floor (1 sat/vB), matching Bitcoin
+<a href=#353 id=353 data-nosnippet>353</a>    /// Core's minimum relay fee.
+<a href=#354 id=354 data-nosnippet>354</a>    </span><span class="kw">pub const </span>DEFAULT_MIN_FEE_RATE: FeeRate = FeeRate::from_sat_per_vb_unchecked(<span class="number">1</span>);
+<a href=#355 id=355 data-nosnippet>355</a>
+<a href=#356 id=356 data-nosnippet>356</a>    <span class="doccomment">/// Default long-term average fee rate (10 sat/vB), matching
+<a href=#357 id=357 data-nosnippet>357</a>    /// Bitcoin Core's `-consolidatefeerate` default. Below this rate,
+<a href=#358 id=358 data-nosnippet>358</a>    /// the algorithm aggressively consolidates; at or above, it
+<a href=#359 id=359 data-nosnippet>359</a>    /// minimizes inputs.
+<a href=#360 id=360 data-nosnippet>360</a>    </span><span class="kw">pub const </span>DEFAULT_LONG_TERM_FEE_RATE: FeeRate = FeeRate::from_sat_per_vb_unchecked(<span class="number">10</span>);
+<a href=#361 id=361 data-nosnippet>361</a>
+<a href=#362 id=362 data-nosnippet>362</a>    <span class="doccomment">/// Default high fee rate threshold (30 sat/vB). Matches Bitcoin
+<a href=#363 id=363 data-nosnippet>363</a>    /// Core's CoinGrinder activation threshold (3× the long-term
+<a href=#364 id=364 data-nosnippet>364</a>    /// consolidation fee rate). At or above this rate, the algorithm
+<a href=#365 id=365 data-nosnippet>365</a>    /// aggressively minimizes inputs and performs no pool
+<a href=#366 id=366 data-nosnippet>366</a>    /// consolidation.
+<a href=#367 id=367 data-nosnippet>367</a>    </span><span class="kw">pub const </span>DEFAULT_HIGH_FEE_RATE_THRESHOLD: FeeRate = FeeRate::from_sat_per_vb_unchecked(<span class="number">30</span>);
+<a href=#368 id=368 data-nosnippet>368</a>
+<a href=#369 id=369 data-nosnippet>369</a>    <span class="doccomment">/// Default input budget per request at or above the long-term fee
+<a href=#370 id=370 data-nosnippet>370</a>    /// rate (10 extra inputs per request). Matches the on-chain
+<a href=#371 id=371 data-nosnippet>371</a>    /// `input_budget` config parameter.
+<a href=#372 id=372 data-nosnippet>372</a>    </span><span class="kw">pub const </span>DEFAULT_INPUT_BUDGET: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.usize.html">usize</a> = <span class="number">10</span>;
+<a href=#373 id=373 data-nosnippet>373</a>
+<a href=#374 id=374 data-nosnippet>374</a>    <span class="doccomment">/// Default maximum mempool chain depth (5). Allows spending
+<a href=#375 id=375 data-nosnippet>375</a>    /// change from up to 5 levels of mempool-only ancestors. At
+<a href=#376 id=376 data-nosnippet>376</a>    /// 5-minute batching intervals this covers ~25 minutes of
+<a href=#377 id=377 data-nosnippet>377</a>    /// batches before a confirmation is needed, well within
+<a href=#378 id=378 data-nosnippet>378</a>    /// Bitcoin's cluster mempool limit of 64 and the pre-cluster
+<a href=#379 id=379 data-nosnippet>379</a>    /// limit of 25.
+<a href=#380 id=380 data-nosnippet>380</a>    </span><span class="kw">pub const </span>DEFAULT_MAX_MEMPOOL_CHAIN_DEPTH: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.usize.html">usize</a> = <span class="number">5</span>;
+<a href=#381 id=381 data-nosnippet>381</a>
+<a href=#382 id=382 data-nosnippet>382</a>    <span class="doccomment">/// Creates a new `CoinSelectionParams` with sensible defaults.
+<a href=#383 id=383 data-nosnippet>383</a>    ///
+<a href=#384 id=384 data-nosnippet>384</a>    /// The `change_address` must be provided; all other parameters
+<a href=#385 id=385 data-nosnippet>385</a>    /// use their `DEFAULT_*` values and can be overridden via struct
+<a href=#386 id=386 data-nosnippet>386</a>    /// update syntax:
+<a href=#387 id=387 data-nosnippet>387</a>    ///
+<a href=#388 id=388 data-nosnippet>388</a>    /// ```ignore
+<a href=#389 id=389 data-nosnippet>389</a>    /// let params = CoinSelectionParams {
+<a href=#390 id=390 data-nosnippet>390</a>    ///     max_withdrawal_requests: 20,
+<a href=#391 id=391 data-nosnippet>391</a>    ///     ..CoinSelectionParams::new(change_addr)
+<a href=#392 id=392 data-nosnippet>392</a>    /// };
+<a href=#393 id=393 data-nosnippet>393</a>    /// ```
+<a href=#394 id=394 data-nosnippet>394</a>    ///
+<a href=#395 id=395 data-nosnippet>395</a>    /// `max_fee_per_request` is derived from
+<a href=#396 id=396 data-nosnippet>396</a>    /// `DEFAULT_HIGH_FEE_RATE_THRESHOLD` and a worst-case transaction
+<a href=#397 id=397 data-nosnippet>397</a>    /// shape of `DEFAULT_INPUT_BUDGET` inputs, mirroring the on-chain
+<a href=#398 id=398 data-nosnippet>398</a>    /// `worst_case_network_fee` formula.
+<a href=#399 id=399 data-nosnippet>399</a>    </span><span class="kw">pub fn </span>new(change_address: BitcoinAddress) -&gt; <span class="self">Self </span>{
+<a href=#400 id=400 data-nosnippet>400</a>        <span class="comment">// Mirror the on-chain worst_case_network_fee formula:
+<a href=#401 id=401 data-nosnippet>401</a>        //   tx_vbytes = TX_FIXED_VB + (input_budget * INPUT_VB) + (OUTPUT_BUDGET * OUTPUT_VB)
+<a href=#402 id=402 data-nosnippet>402</a>        //   max_fee_per_request = high_fee_rate_threshold * tx_vbytes
+<a href=#403 id=403 data-nosnippet>403</a>        //
+<a href=#404 id=404 data-nosnippet>404</a>        // Using the on-chain constants: TX_FIXED_VB=11, INPUT_VB=100,
+<a href=#405 id=405 data-nosnippet>405</a>        // OUTPUT_BUDGET=2, OUTPUT_VB=43.
+<a href=#406 id=406 data-nosnippet>406</a>        </span><span class="kw">const </span>TX_FIXED_VB: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> = <span class="number">11</span>;
+<a href=#407 id=407 data-nosnippet>407</a>        <span class="kw">const </span>INPUT_VB: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> = <span class="number">100</span>;
+<a href=#408 id=408 data-nosnippet>408</a>        <span class="kw">const </span>OUTPUT_BUDGET: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> = <span class="number">2</span>;
+<a href=#409 id=409 data-nosnippet>409</a>        <span class="kw">const </span>OUTPUT_VB: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> = <span class="number">43</span>;
+<a href=#410 id=410 data-nosnippet>410</a>
+<a href=#411 id=411 data-nosnippet>411</a>        <span class="kw">let </span>tx_vbytes = <a href="#406">TX_FIXED_VB</a>
+<a href=#412 id=412 data-nosnippet>412</a>            + (<span class="self">Self</span>::DEFAULT_INPUT_BUDGET <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> * <a href="#407">INPUT_VB</a>)
+<a href=#413 id=413 data-nosnippet>413</a>            + (<a href="#408">OUTPUT_BUDGET</a> * <a href="#409">OUTPUT_VB</a>);
+<a href=#414 id=414 data-nosnippet>414</a>        <span class="kw">let </span>max_fee_per_request =
+<a href=#415 id=415 data-nosnippet>415</a>            <span class="self">Self</span>::DEFAULT_HIGH_FEE_RATE_THRESHOLD.to_sat_per_vb_floor() * <a href="#411">tx_vbytes</a>;
+<a href=#416 id=416 data-nosnippet>416</a>
+<a href=#417 id=417 data-nosnippet>417</a>        <span class="self">Self </span>{
+<a href=#418 id=418 data-nosnippet>418</a>            max_tx_weight: <span class="self">Self</span>::DEFAULT_MAX_TX_WEIGHT,
+<a href=#419 id=419 data-nosnippet>419</a>            max_inputs: <span class="self">Self</span>::DEFAULT_MAX_INPUTS,
+<a href=#420 id=420 data-nosnippet>420</a>            max_withdrawal_requests: <span class="self">Self</span>::MAX_WITHDRAWAL_REQUESTS,
+<a href=#421 id=421 data-nosnippet>421</a>            <a href="#414">max_fee_per_request</a>,
+<a href=#422 id=422 data-nosnippet>422</a>            min_fee_rate: <span class="self">Self</span>::DEFAULT_MIN_FEE_RATE,
+<a href=#423 id=423 data-nosnippet>423</a>            long_term_fee_rate: <span class="self">Self</span>::DEFAULT_LONG_TERM_FEE_RATE,
+<a href=#424 id=424 data-nosnippet>424</a>            high_fee_rate_threshold: <span class="self">Self</span>::DEFAULT_HIGH_FEE_RATE_THRESHOLD,
+<a href=#425 id=425 data-nosnippet>425</a>            input_budget: <span class="self">Self</span>::DEFAULT_INPUT_BUDGET,
+<a href=#426 id=426 data-nosnippet>426</a>            max_mempool_chain_depth: <span class="self">Self</span>::DEFAULT_MAX_MEMPOOL_CHAIN_DEPTH,
+<a href=#427 id=427 data-nosnippet>427</a>            <a href="#399">change_address</a>,
+<a href=#428 id=428 data-nosnippet>428</a>        }
+<a href=#429 id=429 data-nosnippet>429</a>    }
+<a href=#430 id=430 data-nosnippet>430</a>}
+<a href=#431 id=431 data-nosnippet>431</a>
+<a href=#432 id=432 data-nosnippet>432</a><span class="comment">// ── Output Types ─────────────────────────────────────────────────────────────
+<a href=#433 id=433 data-nosnippet>433</a>
+<a href=#434 id=434 data-nosnippet>434</a></span><span class="doccomment">/// A single withdrawal output in the proposed transaction.
+<a href=#435 id=435 data-nosnippet>435</a></span><span class="attr">#[derive(Clone, Debug)]
+<a href=#436 id=436 data-nosnippet>436</a></span><span class="kw">pub struct </span><a href="../../../hashi/utxo_pool/struct.WithdrawalOutput.html">WithdrawalOutput</a> {
+<a href=#437 id=437 data-nosnippet>437</a>    <span class="doccomment">/// The ID of the withdrawal request this output satisfies.
+<a href=#438 id=438 data-nosnippet>438</a>    </span><span class="kw">pub </span>request_id: Address,
+<a href=#439 id=439 data-nosnippet>439</a>    <span class="doccomment">/// Raw witness-program bytes of the recipient Bitcoin address.
+<a href=#440 id=440 data-nosnippet>440</a>    </span><span class="kw">pub </span>recipient: <a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html">Vec</a>&lt;<a href="https://doc.rust-lang.org/1.91.1/std/primitive.u8.html">u8</a>&gt;,
+<a href=#441 id=441 data-nosnippet>441</a>    <span class="doccomment">/// Net amount in satoshis delivered to `recipient`: the request amount
+<a href=#442 id=442 data-nosnippet>442</a>    /// minus this request's equal share of the total miner fee.
+<a href=#443 id=443 data-nosnippet>443</a>    </span><span class="kw">pub </span>amount: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>,
+<a href=#444 id=444 data-nosnippet>444</a>}
+<a href=#445 id=445 data-nosnippet>445</a>
+<a href=#446 id=446 data-nosnippet>446</a><span class="doccomment">/// The result produced by a successful call to [`select_coins`].
+<a href=#447 id=447 data-nosnippet>447</a></span><span class="attr">#[derive(Debug)]
+<a href=#448 id=448 data-nosnippet>448</a></span><span class="kw">pub struct </span><a href="../../../hashi/utxo_pool/struct.CoinSelectionResult.html">CoinSelectionResult</a> {
+<a href=#449 id=449 data-nosnippet>449</a>    <span class="doccomment">/// UTXOs selected as transaction inputs.
+<a href=#450 id=450 data-nosnippet>450</a>    ///
+<a href=#451 id=451 data-nosnippet>451</a>    /// Includes both the minimum inputs required to fund the selected
+<a href=#452 id=452 data-nosnippet>452</a>    /// withdrawal requests and any additional consolidation inputs pulled in
+<a href=#453 id=453 data-nosnippet>453</a>    /// for pool maintenance.
+<a href=#454 id=454 data-nosnippet>454</a>    </span><span class="kw">pub </span>inputs: <a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html">Vec</a>&lt;<a href="#214-224">UtxoCandidate</a>&gt;,
+<a href=#455 id=455 data-nosnippet>455</a>
+<a href=#456 id=456 data-nosnippet>456</a>    <span class="doccomment">/// Withdrawal outputs, one per selected request, in the same order as
+<a href=#457 id=457 data-nosnippet>457</a>    /// `selected_requests`.
+<a href=#458 id=458 data-nosnippet>458</a>    </span><span class="kw">pub </span>withdrawal_outputs: <a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html">Vec</a>&lt;<a href="#436-444">WithdrawalOutput</a>&gt;,
+<a href=#459 id=459 data-nosnippet>459</a>
+<a href=#460 id=460 data-nosnippet>460</a>    <span class="doccomment">/// Change output amount in satoshis, or `None` if the residual value
+<a href=#461 id=461 data-nosnippet>461</a>    /// after outputs and fees falls below the dust threshold. When `Some`,
+<a href=#462 id=462 data-nosnippet>462</a>    /// the change is sent to the `change_address` passed to [`select_coins`].
+<a href=#463 id=463 data-nosnippet>463</a>    </span><span class="kw">pub </span>change: <a class="prelude-ty" href="https://doc.rust-lang.org/1.91.1/core/option/enum.Option.html">Option</a>&lt;<a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>&gt;,
+<a href=#464 id=464 data-nosnippet>464</a>
+<a href=#465 id=465 data-nosnippet>465</a>    <span class="doccomment">/// Total miner fee in satoshis:
+<a href=#466 id=466 data-nosnippet>466</a>    /// `sum(inputs.amount) − sum(withdrawal_outputs.amount) − change.unwrap_or(0)`.
+<a href=#467 id=467 data-nosnippet>467</a>    ///
+<a href=#468 id=468 data-nosnippet>468</a>    /// Computed as `floor(total_weight_fee / N) × N`, where `total_weight_fee`
+<a href=#469 id=469 data-nosnippet>469</a>    /// is the fee at `fee_rate` for the final transaction weight and N is the
+<a href=#470 id=470 data-nosnippet>470</a>    /// number of selected requests. The `total_weight_fee % N` remainder is
+<a href=#471 id=471 data-nosnippet>471</a>    /// implicitly donated to the miner and is included here (it is captured in
+<a href=#472 id=472 data-nosnippet>472</a>    /// the conservation identity but not charged to any individual request).
+<a href=#473 id=473 data-nosnippet>473</a>    </span><span class="kw">pub </span>fee: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>,
+<a href=#474 id=474 data-nosnippet>474</a>
+<a href=#475 id=475 data-nosnippet>475</a>    <span class="doccomment">/// The withdrawal requests included in this transaction, in the same
+<a href=#476 id=476 data-nosnippet>476</a>    /// order as `withdrawal_outputs`.
+<a href=#477 id=477 data-nosnippet>477</a>    </span><span class="kw">pub </span>selected_requests: <a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html">Vec</a>&lt;<a href="#234-250">WithdrawalRequest</a>&gt;,
+<a href=#478 id=478 data-nosnippet>478</a>}
+<a href=#479 id=479 data-nosnippet>479</a>
+<a href=#480 id=480 data-nosnippet>480</a><span class="comment">// ── Error Types ──────────────────────────────────────────────────────────────
+<a href=#481 id=481 data-nosnippet>481</a>
+<a href=#482 id=482 data-nosnippet>482</a></span><span class="doccomment">/// Errors that can be returned by [`select_coins`].
+<a href=#483 id=483 data-nosnippet>483</a></span><span class="attr">#[derive(Debug, Error)]
+<a href=#484 id=484 data-nosnippet>484</a></span><span class="kw">pub enum </span><a href="#484-566">CoinSelectionError</a> {
+<a href=#485 id=485 data-nosnippet>485</a>    <span class="doccomment">/// The UTXO pool is empty; there are no inputs available to fund any
+<a href=#486 id=486 data-nosnippet>486</a>    /// transaction.
+<a href=#487 id=487 data-nosnippet>487</a>    </span><span class="attr">#[error(<span class="string">"UTXO pool is empty"</span>)]
+<a href=#488 id=488 data-nosnippet>488</a>    </span>EmptyPool,
+<a href=#489 id=489 data-nosnippet>489</a>
+<a href=#490 id=490 data-nosnippet>490</a>    <span class="doccomment">/// No withdrawal requests were provided to the algorithm.
+<a href=#491 id=491 data-nosnippet>491</a>    </span><span class="attr">#[error(<span class="string">"no withdrawal requests provided"</span>)]
+<a href=#492 id=492 data-nosnippet>492</a>    </span>NoRequests,
+<a href=#493 id=493 data-nosnippet>493</a>
+<a href=#494 id=494 data-nosnippet>494</a>    <span class="doccomment">/// The final per-request fee share exceeds `params.max_fee_per_request`.
+<a href=#495 id=495 data-nosnippet>495</a>    ///
+<a href=#496 id=496 data-nosnippet>496</a>    /// This is a safety check performed after all inputs and outputs are
+<a href=#497 id=497 data-nosnippet>497</a>    /// finalised (step 5). It should not occur when parameters are
+<a href=#498 id=498 data-nosnippet>498</a>    /// well-formed (i.e. `fee_rate` has been clamped to `params.high_fee_rate_threshold`
+<a href=#499 id=499 data-nosnippet>499</a>    /// before calling [`select_coins`] and `params.max_fee_per_request` was
+<a href=#500 id=500 data-nosnippet>500</a>    /// derived from `params.high_fee_rate_threshold`).
+<a href=#501 id=501 data-nosnippet>501</a>    </span><span class="attr">#[error(
+<a href=#502 id=502 data-nosnippet>502</a>        <span class="string">"per-request deduction {fee_per_request} sat exceeds the configured cap \
+<a href=#503 id=503 data-nosnippet>503</a>         {max_fee_per_request} sat (total deduction {total_deduction} sat across \
+<a href=#504 id=504 data-nosnippet>504</a>         {n_requests} requests)"
+<a href=#505 id=505 data-nosnippet>505</a>    </span>)]
+<a href=#506 id=506 data-nosnippet>506</a>    </span>FeeExceedsCap {
+<a href=#507 id=507 data-nosnippet>507</a>        <span class="doccomment">/// `ceil(total_deduction / N)` — the equal share charged to each
+<a href=#508 id=508 data-nosnippet>508</a>        /// request.
+<a href=#509 id=509 data-nosnippet>509</a>        </span>fee_per_request: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>,
+<a href=#510 id=510 data-nosnippet>510</a>        <span class="doccomment">/// The configured per-request fee cap (`params.max_fee_per_request`).
+<a href=#511 id=511 data-nosnippet>511</a>        </span>max_fee_per_request: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>,
+<a href=#512 id=512 data-nosnippet>512</a>        <span class="doccomment">/// Total deduction in satoshis (miner fee + CPFP deficit + dust
+<a href=#513 id=513 data-nosnippet>513</a>        /// padding).
+<a href=#514 id=514 data-nosnippet>514</a>        </span>total_deduction: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>,
+<a href=#515 id=515 data-nosnippet>515</a>        <span class="doccomment">/// Number of selected requests (N).
+<a href=#516 id=516 data-nosnippet>516</a>        </span>n_requests: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.usize.html">usize</a>,
+<a href=#517 id=517 data-nosnippet>517</a>    },
+<a href=#518 id=518 data-nosnippet>518</a>
+<a href=#519 id=519 data-nosnippet>519</a>    <span class="doccomment">/// The total available UTXO value is insufficient to cover the total
+<a href=#520 id=520 data-nosnippet>520</a>    /// requested withdrawal amounts. All fees come from request amounts, so
+<a href=#521 id=521 data-nosnippet>521</a>    /// inputs only need to cover `sum(request.amount)`; no extra for fees.
+<a href=#522 id=522 data-nosnippet>522</a>    </span><span class="attr">#[error(
+<a href=#523 id=523 data-nosnippet>523</a>        <span class="string">"insufficient funds: {available} sat available across confirmed and \
+<a href=#524 id=524 data-nosnippet>524</a>         pending UTXOs, {required} sat required to cover selected withdrawal \
+<a href=#525 id=525 data-nosnippet>525</a>         amounts"
+<a href=#526 id=526 data-nosnippet>526</a>    </span>)]
+<a href=#527 id=527 data-nosnippet>527</a>    </span>InsufficientFunds {
+<a href=#528 id=528 data-nosnippet>528</a>        <span class="doccomment">/// Total satoshis available across confirmed and pending UTXOs.
+<a href=#529 id=529 data-nosnippet>529</a>        </span>available: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>,
+<a href=#530 id=530 data-nosnippet>530</a>        <span class="doccomment">/// Sum of the selected withdrawal request amounts.
+<a href=#531 id=531 data-nosnippet>531</a>        </span>required: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>,
+<a href=#532 id=532 data-nosnippet>532</a>    },
+<a href=#533 id=533 data-nosnippet>533</a>
+<a href=#534 id=534 data-nosnippet>534</a>    <span class="doccomment">/// The transaction weight exceeds `params.max_tx_weight`. Step 1 takes
+<a href=#535 id=535 data-nosnippet>535</a>    /// `min(requests.len(), max_withdrawal_requests)` oldest requests; Step 2
+<a href=#536 id=536 data-nosnippet>536</a>    /// checks the resulting weight and returns this error if it is too high.
+<a href=#537 id=537 data-nosnippet>537</a>    </span><span class="attr">#[error(
+<a href=#538 id=538 data-nosnippet>538</a>        <span class="string">"single-request transaction weight {weight:#} exceeds the configured \
+<a href=#539 id=539 data-nosnippet>539</a>         maximum {max_weight:#}"
+<a href=#540 id=540 data-nosnippet>540</a>    </span>)]
+<a href=#541 id=541 data-nosnippet>541</a>    </span>ExceedsMaxWeight {
+<a href=#542 id=542 data-nosnippet>542</a>        <span class="doccomment">/// Estimated weight of a single-request transaction.
+<a href=#543 id=543 data-nosnippet>543</a>        </span>weight: Weight,
+<a href=#544 id=544 data-nosnippet>544</a>        <span class="doccomment">/// Configured maximum (`params.max_tx_weight`).
+<a href=#545 id=545 data-nosnippet>545</a>        </span>max_weight: Weight,
+<a href=#546 id=546 data-nosnippet>546</a>    },
+<a href=#547 id=547 data-nosnippet>547</a>
+<a href=#548 id=548 data-nosnippet>548</a>    <span class="doccomment">/// A selected request's amount is smaller than the per-request fee share,
+<a href=#549 id=549 data-nosnippet>549</a>    /// which would produce a zero-value or negative output.
+<a href=#550 id=550 data-nosnippet>550</a>    ///
+<a href=#551 id=551 data-nosnippet>551</a>    /// This can occur when a request amount is less than
+<a href=#552 id=552 data-nosnippet>552</a>    /// `ceil(total_fee / N)`. Callers should ensure request amounts exceed
+<a href=#553 id=553 data-nosnippet>553</a>    /// `params.max_fee_per_request` before submitting them.
+<a href=#554 id=554 data-nosnippet>554</a>    </span><span class="attr">#[error(
+<a href=#555 id=555 data-nosnippet>555</a>        <span class="string">"withdrawal request {request_id} amount {amount} sat is less than the \
+<a href=#556 id=556 data-nosnippet>556</a>         per-request fee share {fee_per_request} sat"
+<a href=#557 id=557 data-nosnippet>557</a>    </span>)]
+<a href=#558 id=558 data-nosnippet>558</a>    </span>RequestAmountTooSmall {
+<a href=#559 id=559 data-nosnippet>559</a>        <span class="doccomment">/// ID of the offending withdrawal request.
+<a href=#560 id=560 data-nosnippet>560</a>        </span>request_id: Address,
+<a href=#561 id=561 data-nosnippet>561</a>        <span class="doccomment">/// The request's withdrawal amount.
+<a href=#562 id=562 data-nosnippet>562</a>        </span>amount: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>,
+<a href=#563 id=563 data-nosnippet>563</a>        <span class="doccomment">/// The fee share that would be deducted.
+<a href=#564 id=564 data-nosnippet>564</a>        </span>fee_per_request: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>,
+<a href=#565 id=565 data-nosnippet>565</a>    },
+<a href=#566 id=566 data-nosnippet>566</a>}
+<a href=#567 id=567 data-nosnippet>567</a>
+<a href=#568 id=568 data-nosnippet>568</a><span class="comment">// ── Private helpers ───────────────────────────────────────────────────────────
+<a href=#569 id=569 data-nosnippet>569</a>
+<a href=#570 id=570 data-nosnippet>570</a></span><span class="doccomment">/// Output weight for a withdrawal request's recipient.
+<a href=#571 id=571 data-nosnippet>571</a>///
+<a href=#572 id=572 data-nosnippet>572</a>/// Assumes recipient addresses have been validated upstream. Uses the
+<a href=#573 id=573 data-nosnippet>573</a>/// cheaper P2WPKH weight for 20-byte witness programs and the P2TR
+<a href=#574 id=574 data-nosnippet>574</a>/// weight for 32-byte programs. Any other length conservatively uses
+<a href=#575 id=575 data-nosnippet>575</a>/// the P2TR weight (the more expensive of the two).
+<a href=#576 id=576 data-nosnippet>576</a></span><span class="kw">fn </span>output_weight_for_recipient(request: <span class="kw-2">&amp;</span><a href="#234-250">WithdrawalRequest</a>) -&gt; Weight {
+<a href=#577 id=577 data-nosnippet>577</a>    <span class="kw">match </span><a href="#576">request</a>.recipient.<a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html#method.len">len</a>() {
+<a href=#578 id=578 data-nosnippet>578</a>        <span class="comment">// P2WPKH: OP_0 OP_PUSHBYTES_20 &lt;20 bytes&gt; → 22-byte scriptPubKey → 124 WU
+<a href=#579 id=579 data-nosnippet>579</a>        </span><span class="number">20 </span>=&gt; <a href="#48">TXOUT_BASE_WEIGHT</a> + Weight::from_wu(<span class="number">22 </span>* <span class="number">4</span>),
+<a href=#580 id=580 data-nosnippet>580</a>        <span class="comment">// P2TR (or unknown): OP_1 OP_PUSHBYTES_32 &lt;32 bytes&gt; → 34-byte scriptPubKey → 172 WU
+<a href=#581 id=581 data-nosnippet>581</a>        </span><span class="kw">_ </span>=&gt; <a href="#48">TXOUT_BASE_WEIGHT</a> + Weight::from_wu(<span class="number">34 </span>* <span class="number">4</span>),
+<a href=#582 id=582 data-nosnippet>582</a>    }
+<a href=#583 id=583 data-nosnippet>583</a>}
+<a href=#584 id=584 data-nosnippet>584</a>
+<a href=#585 id=585 data-nosnippet>585</a><span class="doccomment">/// Output weight for an arbitrary scriptPubKey.
+<a href=#586 id=586 data-nosnippet>586</a>///
+<a href=#587 id=587 data-nosnippet>587</a>/// Assumes the script-length varint fits in one byte, which holds for all
+<a href=#588 id=588 data-nosnippet>588</a>/// standard scripts (length &lt; 252).
+<a href=#589 id=589 data-nosnippet>589</a></span><span class="kw">fn </span>output_weight_for_script(script: <span class="kw-2">&amp;</span>bitcoin::Script) -&gt; Weight {
+<a href=#590 id=590 data-nosnippet>590</a>    Weight::from_wu((<span class="number">8u64 </span>+ <span class="number">1 </span>+ <a href="#589">script</a>.len() <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>) * <span class="number">4</span>)
+<a href=#591 id=591 data-nosnippet>591</a>}
+<a href=#592 id=592 data-nosnippet>592</a>
+<a href=#593 id=593 data-nosnippet>593</a><span class="doccomment">/// Minimum change output value (sat) above Bitcoin's dust relay threshold for
+<a href=#594 id=594 data-nosnippet>594</a>/// the given change scriptPubKey.
+<a href=#595 id=595 data-nosnippet>595</a>///
+<a href=#596 id=596 data-nosnippet>596</a>/// Uses the standard script lengths to identify the output type:
+<a href=#597 id=597 data-nosnippet>597</a>/// - 22 bytes → P2WPKH (294 sat at 3 sat/vByte min relay fee)
+<a href=#598 id=598 data-nosnippet>598</a>/// - 34 bytes → P2TR / P2WSH (330 sat)
+<a href=#599 id=599 data-nosnippet>599</a>/// - anything else → conservative P2TR value (330 sat)
+<a href=#600 id=600 data-nosnippet>600</a></span><span class="kw">fn </span>dust_threshold_for_change(script: <span class="kw-2">&amp;</span>bitcoin::Script) -&gt; <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> {
+<a href=#601 id=601 data-nosnippet>601</a>    <span class="kw">match </span><a href="#600">script</a>.len() {
+<a href=#602 id=602 data-nosnippet>602</a>        <span class="number">22 </span>=&gt; <a href="#63">WPKH_DUST_RELAY_MIN_VALUE</a>,
+<a href=#603 id=603 data-nosnippet>603</a>        <span class="kw">_ </span>=&gt; <a href="#59">TR_DUST_RELAY_MIN_VALUE</a>,
+<a href=#604 id=604 data-nosnippet>604</a>    }
+<a href=#605 id=605 data-nosnippet>605</a>}
+<a href=#606 id=606 data-nosnippet>606</a>
+<a href=#607 id=607 data-nosnippet>607</a><span class="doccomment">/// Fee in satoshis for a given weight at the given fee rate.
+<a href=#608 id=608 data-nosnippet>608</a>///
+<a href=#609 id=609 data-nosnippet>609</a>/// Uses `FeeRate::fee_wu` which rounds up to the next whole satoshi to
+<a href=#610 id=610 data-nosnippet>610</a>/// avoid underpaying relay fees.
+<a href=#611 id=611 data-nosnippet>611</a></span><span class="kw">fn </span>fee_for_weight(fee_rate: FeeRate, weight: Weight) -&gt; <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> {
+<a href=#612 id=612 data-nosnippet>612</a>    <a href="#611">fee_rate</a>
+<a href=#613 id=613 data-nosnippet>613</a>        .fee_wu(<a href="#611">weight</a>)
+<a href=#614 id=614 data-nosnippet>614</a>        .<a href="https://doc.rust-lang.org/1.91.1/core/option/enum.Option.html#method.map">map</a>(|a| <a href="#614">a</a>.to_sat())
+<a href=#615 id=615 data-nosnippet>615</a>        .<a href="https://doc.rust-lang.org/1.91.1/core/option/enum.Option.html#method.expect">expect</a>(<span class="string">"fee computation overflow: fee rate or weight is unreasonably large"</span>)
+<a href=#616 id=616 data-nosnippet>616</a>}
+<a href=#617 id=617 data-nosnippet>617</a>
+<a href=#618 id=618 data-nosnippet>618</a><span class="doccomment">/// Select UTXOs and plan a batched withdrawal transaction.
+<a href=#619 id=619 data-nosnippet>619</a>///
+<a href=#620 id=620 data-nosnippet>620</a>/// Uses a `TransactionBuilder` to construct the transaction
+<a href=#621 id=621 data-nosnippet>621</a>/// incrementally, with CPFP-aware fee management for spending
+<a href=#622 id=622 data-nosnippet>622</a>/// unconfirmed change outputs.
+<a href=#623 id=623 data-nosnippet>623</a>///
+<a href=#624 id=624 data-nosnippet>624</a>/// # Algorithm
+<a href=#625 id=625 data-nosnippet>625</a>///
+<a href=#626 id=626 data-nosnippet>626</a>/// 1. **Request selection** — up to `max_withdrawal_requests` requests
+<a href=#627 id=627 data-nosnippet>627</a>///    are taken oldest-first by timestamp.
+<a href=#628 id=628 data-nosnippet>628</a>///
+<a href=#629 id=629 data-nosnippet>629</a>/// 2. **Input selection** — UTXOs are sorted largest-first and selected
+<a href=#630 id=630 data-nosnippet>630</a>///    greedily until `input_total &gt;= total_requested`. Both confirmed
+<a href=#631 id=631 data-nosnippet>631</a>///    and pending UTXOs are eligible, subject to the
+<a href=#632 id=632 data-nosnippet>632</a>///    `max_mempool_chain_depth` filter.
+<a href=#633 id=633 data-nosnippet>633</a>///
+<a href=#634 id=634 data-nosnippet>634</a>/// 3. **Consolidation** — if there is change (excess input value) and
+<a href=#635 id=635 data-nosnippet>635</a>///    the fee rate is favourable, extra *confirmed* UTXOs are pulled in
+<a href=#636 id=636 data-nosnippet>636</a>///    smallest-first to reduce the UTXO set. Aggressiveness depends on
+<a href=#637 id=637 data-nosnippet>637</a>///    the fee environment:
+<a href=#638 id=638 data-nosnippet>638</a>///    - Below `long_term_fee_rate`: up to `input_budget × N` extras.
+<a href=#639 id=639 data-nosnippet>639</a>///    - Between long-term and `high_fee_rate_threshold`: up to
+<a href=#640 id=640 data-nosnippet>640</a>///      `input_budget × N / 2` extras.
+<a href=#641 id=641 data-nosnippet>641</a>///    - At or above high threshold: no consolidation.
+<a href=#642 id=642 data-nosnippet>642</a>///
+<a href=#643 id=643 data-nosnippet>643</a>/// 4. **Fee allocation** — `finalize_fees` computes the total deduction
+<a href=#644 id=644 data-nosnippet>644</a>///    (own fee + CPFP deficit + dust padding), checks it against the
+<a href=#645 id=645 data-nosnippet>645</a>///    per-request cap, verifies each output stays above dust, assigns
+<a href=#646 id=646 data-nosnippet>646</a>///    net amounts, and derives the actual miner fee from conservation.
+<a href=#647 id=647 data-nosnippet>647</a>///
+<a href=#648 id=648 data-nosnippet>648</a>/// # Preconditions
+<a href=#649 id=649 data-nosnippet>649</a>///
+<a href=#650 id=650 data-nosnippet>650</a>/// The caller must provide a **consistent, non-overlapping UTXO set**.
+<a href=#651 id=651 data-nosnippet>651</a>/// See the module-level documentation for details.
+<a href=#652 id=652 data-nosnippet>652</a></span><span class="kw">pub fn </span><a href="../../../hashi/utxo_pool/fn.select_coins.html">select_coins</a>(
+<a href=#653 id=653 data-nosnippet>653</a>    utxos: <span class="kw-2">&amp;</span>[<a href="#214-224">UtxoCandidate</a>],
+<a href=#654 id=654 data-nosnippet>654</a>    requests: <span class="kw-2">&amp;</span>[<a href="#234-250">WithdrawalRequest</a>],
+<a href=#655 id=655 data-nosnippet>655</a>    params: <span class="kw-2">&amp;</span><a href="#256-331">CoinSelectionParams</a>,
+<a href=#656 id=656 data-nosnippet>656</a>    fee_rate: FeeRate,
+<a href=#657 id=657 data-nosnippet>657</a>) -&gt; <a class="prelude-ty" href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html">Result</a>&lt;<a href="#448-478">CoinSelectionResult</a>, <a href="#484-566">CoinSelectionError</a>&gt; {
+<a href=#658 id=658 data-nosnippet>658</a>    <span class="comment">// ── Early validation ────────────────────────────────────────────────────
+<a href=#659 id=659 data-nosnippet>659</a>    </span><span class="kw">if </span><a href="#653">utxos</a>.<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.is_empty">is_empty</a>() {
+<a href=#660 id=660 data-nosnippet>660</a>        <span class="kw">return </span><a class="prelude-val" href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#variant.Err">Err</a>(<a href="#488">CoinSelectionError::EmptyPool</a>);
+<a href=#661 id=661 data-nosnippet>661</a>    }
+<a href=#662 id=662 data-nosnippet>662</a>    <span class="kw">if </span><a href="#654">requests</a>.<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.is_empty">is_empty</a>() {
+<a href=#663 id=663 data-nosnippet>663</a>        <span class="kw">return </span><a class="prelude-val" href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#variant.Err">Err</a>(<a href="#492">CoinSelectionError::NoRequests</a>);
+<a href=#664 id=664 data-nosnippet>664</a>    }
+<a href=#665 id=665 data-nosnippet>665</a>    <span class="kw">if </span><a href="#655">params</a>.max_withdrawal_requests == <span class="number">0 </span>{
+<a href=#666 id=666 data-nosnippet>666</a>        <span class="kw">return </span><a class="prelude-val" href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#variant.Err">Err</a>(<a href="#492">CoinSelectionError::NoRequests</a>);
+<a href=#667 id=667 data-nosnippet>667</a>    }
+<a href=#668 id=668 data-nosnippet>668</a>
+<a href=#669 id=669 data-nosnippet>669</a>    <span class="comment">// clamp fee rate floor
+<a href=#670 id=670 data-nosnippet>670</a>    </span><span class="kw">let </span>fee_rate = <a href="#656">fee_rate</a>.<a href="https://doc.rust-lang.org/1.91.1/core/cmp/trait.Ord.html#tymethod.max">max</a>(<a href="#655">params</a>.min_fee_rate);
+<a href=#671 id=671 data-nosnippet>671</a>
+<a href=#672 id=672 data-nosnippet>672</a>    <span class="kw">let </span><span class="kw-2">mut </span>builder = <a href="#824-838">TransactionBuilder</a> {
+<a href=#673 id=673 data-nosnippet>673</a>        <a href="#670">fee_rate</a>,
+<a href=#674 id=674 data-nosnippet>674</a>        <a href="#655">params</a>,
+<a href=#675 id=675 data-nosnippet>675</a>        inputs: <a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html#method.new">Vec::new</a>(),
+<a href=#676 id=676 data-nosnippet>676</a>        outputs: <a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html#method.new">Vec::new</a>(),
+<a href=#677 id=677 data-nosnippet>677</a>        raw_change: <a class="prelude-val" href="https://doc.rust-lang.org/1.91.1/core/option/enum.Option.html#variant.None">None</a>,
+<a href=#678 id=678 data-nosnippet>678</a>        final_change: <a class="prelude-val" href="https://doc.rust-lang.org/1.91.1/core/option/enum.Option.html#variant.None">None</a>,
+<a href=#679 id=679 data-nosnippet>679</a>    };
+<a href=#680 id=680 data-nosnippet>680</a>
+<a href=#681 id=681 data-nosnippet>681</a>    <span class="comment">// ── Step 1: Request selection ───────────────────────────────────────────
+<a href=#682 id=682 data-nosnippet>682</a>    // Take up to max_withdrawal_requests oldest requests.
+<a href=#683 id=683 data-nosnippet>683</a>
+<a href=#684 id=684 data-nosnippet>684</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>requests: <a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html">Vec</a>&lt;<span class="kw-2">&amp;</span><a href="#234-250">WithdrawalRequest</a>&gt; = <a href="#654">requests</a>.<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
+<a href=#685 id=685 data-nosnippet>685</a>    <a href="#684">requests</a>.<a href="https://doc.rust-lang.org/1.91.1/alloc/foreigntype.slice.html#method.sort_by_key">sort_by_key</a>(|r| <a href="#685">r</a>.timestamp_ms);
+<a href=#686 id=686 data-nosnippet>686</a>
+<a href=#687 id=687 data-nosnippet>687</a>    <span class="kw">for </span>r <span class="kw">in </span>requests.iter().take(params.max_withdrawal_requests) {
+<a href=#688 id=688 data-nosnippet>688</a>        builder.outputs.push(PendingOutput {
+<a href=#689 id=689 data-nosnippet>689</a>            request: r,
+<a href=#690 id=690 data-nosnippet>690</a>            net_amount: <span class="number">0</span>,
+<a href=#691 id=691 data-nosnippet>691</a>        });
+<a href=#692 id=692 data-nosnippet>692</a>    }
+<a href=#693 id=693 data-nosnippet>693</a>
+<a href=#694 id=694 data-nosnippet>694</a>    <span class="comment">// ── Step 2: Input selection (largest-first) ────────────────────────────
+<a href=#695 id=695 data-nosnippet>695</a>    //
+<a href=#696 id=696 data-nosnippet>696</a>    // Sort all UTXOs by descending value, then by id for determinism.
+<a href=#697 id=697 data-nosnippet>697</a>    // Both confirmed and pending UTXOs are eligible — pending ones may
+<a href=#698 id=698 data-nosnippet>698</a>    // require CPFP fee boosting, accounted for in Step 4. UTXOs with
+<a href=#699 id=699 data-nosnippet>699</a>    // too many mempool-only (0-confirmation) ancestors are excluded to
+<a href=#700 id=700 data-nosnippet>700</a>    // stay within Bitcoin's relay policy limits.
+<a href=#701 id=701 data-nosnippet>701</a>    </span><span class="kw">let </span><span class="kw-2">mut </span>pool: <a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html">Vec</a>&lt;<span class="kw-2">&amp;</span><a href="#214-224">UtxoCandidate</a>&gt; = <a href="#653">utxos</a>
+<a href=#702 id=702 data-nosnippet>702</a>        .<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>()
+<a href=#703 id=703 data-nosnippet>703</a>        .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.filter">filter</a>(|u| {
+<a href=#704 id=704 data-nosnippet>704</a>            <a href="#703">u</a>.status.<a href="#176-181">mempool_chain_depth</a>() &lt;= <a href="#655">params</a>.max_mempool_chain_depth
+<a href=#705 id=705 data-nosnippet>705</a>                <span class="comment">// Also ensure that if this UTXO were to be selected, the resulting unconfirmed
+<a href=#706 id=706 data-nosnippet>706</a>                // chain depth would be less than the max relay limit
+<a href=#707 id=707 data-nosnippet>707</a>                </span>&amp;&amp; <a href="#703">u</a>.status.<a href="#176-181">mempool_chain_depth</a>() &lt; <a href="../withdrawals.rs.html#1245">MAX_ANCESTOR_DEPTH</a>
+<a href=#708 id=708 data-nosnippet>708</a>        })
+<a href=#709 id=709 data-nosnippet>709</a>        .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
+<a href=#710 id=710 data-nosnippet>710</a>    <a href="#701">pool</a>.<a href="https://doc.rust-lang.org/1.91.1/alloc/foreigntype.slice.html#method.sort_by">sort_by</a>(|a, b| <a href="#710">b</a>.amount.<a href="https://doc.rust-lang.org/1.91.1/core/cmp/trait.Ord.html#tymethod.cmp">cmp</a>(<span class="kw-2">&amp;</span><a href="#710">a</a>.amount).<a href="https://doc.rust-lang.org/1.91.1/core/cmp/enum.Ordering.html#method.then_with">then_with</a>(|| <a href="#710">a</a>.id.<a href="https://doc.rust-lang.org/1.91.1/core/cmp/trait.Ord.html#tymethod.cmp">cmp</a>(<span class="kw-2">&amp;</span><a href="#710">b</a>.id)));
+<a href=#711 id=711 data-nosnippet>711</a>
+<a href=#712 id=712 data-nosnippet>712</a>    <span class="kw">let </span>total_requested = <a href="#672">builder</a>.<a href="#1010-1012">total_requested</a>();
+<a href=#713 id=713 data-nosnippet>713</a>    <span class="kw">let </span><span class="kw-2">mut </span>input_total = <span class="number">0u64</span>;
+<a href=#714 id=714 data-nosnippet>714</a>
+<a href=#715 id=715 data-nosnippet>715</a>    <span class="kw">for </span>utxo <span class="kw">in </span><span class="kw-2">&amp;</span>pool {
+<a href=#716 id=716 data-nosnippet>716</a>        <span class="kw">if </span>builder.inputs.len() &gt;= params.max_inputs {
+<a href=#717 id=717 data-nosnippet>717</a>            <span class="kw">break</span>;
+<a href=#718 id=718 data-nosnippet>718</a>        }
+<a href=#719 id=719 data-nosnippet>719</a>        <span class="kw">if </span>input_total &gt;= total_requested {
+<a href=#720 id=720 data-nosnippet>720</a>            <span class="kw">break</span>;
+<a href=#721 id=721 data-nosnippet>721</a>        }
+<a href=#722 id=722 data-nosnippet>722</a>
+<a href=#723 id=723 data-nosnippet>723</a>        builder.inputs.push(utxo);
+<a href=#724 id=724 data-nosnippet>724</a>        input_total += utxo.amount;
+<a href=#725 id=725 data-nosnippet>725</a>    }
+<a href=#726 id=726 data-nosnippet>726</a>
+<a href=#727 id=727 data-nosnippet>727</a>    <span class="kw">if </span><a href="#713">input_total</a> &lt; <a href="#712">total_requested</a> {
+<a href=#728 id=728 data-nosnippet>728</a>        <span class="kw">return </span><a class="prelude-val" href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#variant.Err">Err</a>(<a href="#527-532">CoinSelectionError::InsufficientFunds</a> {
+<a href=#729 id=729 data-nosnippet>729</a>            available: <a href="#701">pool</a>.<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|u| <a href="#729">u</a>.amount).<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>(),
+<a href=#730 id=730 data-nosnippet>730</a>            required: <a href="#712">total_requested</a>,
+<a href=#731 id=731 data-nosnippet>731</a>        });
+<a href=#732 id=732 data-nosnippet>732</a>    }
+<a href=#733 id=733 data-nosnippet>733</a>
+<a href=#734 id=734 data-nosnippet>734</a>    <span class="kw">let </span>raw_change = <a href="#672">builder</a>.<a href="#917-927">compute_raw_change</a>();
+<a href=#735 id=735 data-nosnippet>735</a>
+<a href=#736 id=736 data-nosnippet>736</a>    <span class="comment">// Verify the base transaction (before consolidation) is within fee
+<a href=#737 id=737 data-nosnippet>737</a>    // and weight limits. Bail out early if even the minimum inputs
+<a href=#738 id=738 data-nosnippet>738</a>    // exceed limits.
+<a href=#739 id=739 data-nosnippet>739</a>    </span><a href="#672">builder</a>.<a href="#1033-1062">check_fees</a>()<span class="question-mark">?</span>;
+<a href=#740 id=740 data-nosnippet>740</a>    <a href="#672">builder</a>.<a href="#936-945">check_weight</a>()<span class="question-mark">?</span>;
+<a href=#741 id=741 data-nosnippet>741</a>
+<a href=#742 id=742 data-nosnippet>742</a>    <span class="comment">// ── Step 3: Consolidation ──────────────────────────────────────────
+<a href=#743 id=743 data-nosnippet>743</a>    //
+<a href=#744 id=744 data-nosnippet>744</a>    // Pull in extra *confirmed* inputs (smallest-first) to reduce the
+<a href=#745 id=745 data-nosnippet>745</a>    // UTXO set toward a single output. Only confirmed UTXOs are
+<a href=#746 id=746 data-nosnippet>746</a>    // eligible — pending UTXOs would add unaccounted ancestors to the
+<a href=#747 id=747 data-nosnippet>747</a>    // CPFP calculation. Consolidation only runs when there is already
+<a href=#748 id=748 data-nosnippet>748</a>    // a change output (raw_change &gt; 0).
+<a href=#749 id=749 data-nosnippet>749</a>    //
+<a href=#750 id=750 data-nosnippet>750</a>    // The aggressiveness depends on the fee environment:
+<a href=#751 id=751 data-nosnippet>751</a>    // - Below long-term rate: up to `input_budget × N` extras.
+<a href=#752 id=752 data-nosnippet>752</a>    // - Between long-term and high threshold: up to
+<a href=#753 id=753 data-nosnippet>753</a>    //   `input_budget × N / 2` extras.
+<a href=#754 id=754 data-nosnippet>754</a>    // - At or above high threshold: no consolidation.
+<a href=#755 id=755 data-nosnippet>755</a>    </span><span class="kw">let </span>max_consolidation = <span class="kw">if </span><a href="#670">fee_rate</a> &lt; <a href="#655">params</a>.long_term_fee_rate {
+<a href=#756 id=756 data-nosnippet>756</a>        (<a href="#655">params</a>.max_inputs.<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.num.html#method.saturating_sub">saturating_sub</a>(<a href="#672">builder</a>.inputs.<a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html#method.len">len</a>()))
+<a href=#757 id=757 data-nosnippet>757</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/cmp/trait.Ord.html#tymethod.min">min</a>(<a href="#672">builder</a>.outputs.<a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html#method.len">len</a>() * <a href="#655">params</a>.input_budget)
+<a href=#758 id=758 data-nosnippet>758</a>    } <span class="kw">else if </span><a href="#670">fee_rate</a> &lt; <a href="#655">params</a>.high_fee_rate_threshold {
+<a href=#759 id=759 data-nosnippet>759</a>        (<a href="#655">params</a>.max_inputs.<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.num.html#method.saturating_sub">saturating_sub</a>(<a href="#672">builder</a>.inputs.<a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html#method.len">len</a>()))
+<a href=#760 id=760 data-nosnippet>760</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/cmp/trait.Ord.html#tymethod.min">min</a>(<a href="#672">builder</a>.outputs.<a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html#method.len">len</a>() * <a href="#655">params</a>.input_budget / <span class="number">2</span>)
+<a href=#761 id=761 data-nosnippet>761</a>    } <span class="kw">else </span>{
+<a href=#762 id=762 data-nosnippet>762</a>        <span class="number">0
+<a href=#763 id=763 data-nosnippet>763</a>    </span>};
+<a href=#764 id=764 data-nosnippet>764</a>
+<a href=#765 id=765 data-nosnippet>765</a>    <span class="kw">if </span><a href="#755">max_consolidation</a> &gt; <span class="number">0 </span>&amp;&amp; <a href="#734">raw_change</a> &gt; <span class="number">0 </span>{
+<a href=#766 id=766 data-nosnippet>766</a>        <span class="kw">let </span><span class="kw-2">mut </span>remaining: <a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html">Vec</a>&lt;<span class="kw-2">&amp;</span><a href="#214-224">UtxoCandidate</a>&gt; = <a href="#701">pool</a>
+<a href=#767 id=767 data-nosnippet>767</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>()
+<a href=#768 id=768 data-nosnippet>768</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.filter">filter</a>(|u| {
+<a href=#769 id=769 data-nosnippet>769</a>                <a class="macro" href="https://doc.rust-lang.org/1.91.1/core/macro.matches.html">matches!</a>(u.status, UtxoStatus::Confirmed)
+<a href=#770 id=770 data-nosnippet>770</a>                    &amp;&amp; !<a href="#672">builder</a>.inputs.<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.any">any</a>(|s| <a href="#770">s</a>.id == <a href="#768">u</a>.id)
+<a href=#771 id=771 data-nosnippet>771</a>            })
+<a href=#772 id=772 data-nosnippet>772</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.copied">copied</a>()
+<a href=#773 id=773 data-nosnippet>773</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>();
+<a href=#774 id=774 data-nosnippet>774</a>        <a href="#766">remaining</a>.<a href="https://doc.rust-lang.org/1.91.1/alloc/foreigntype.slice.html#method.sort_by_key">sort_by_key</a>(|u| <a href="#774">u</a>.amount);
+<a href=#775 id=775 data-nosnippet>775</a>
+<a href=#776 id=776 data-nosnippet>776</a>        <span class="kw">for </span>utxo <span class="kw">in </span>remaining.into_iter().take(max_consolidation) {
+<a href=#777 id=777 data-nosnippet>777</a>            <span class="kw">if </span>builder.inputs.len() &gt;= params.max_inputs {
+<a href=#778 id=778 data-nosnippet>778</a>                <span class="kw">break</span>;
+<a href=#779 id=779 data-nosnippet>779</a>            }
+<a href=#780 id=780 data-nosnippet>780</a>            builder.inputs.push(utxo);
+<a href=#781 id=781 data-nosnippet>781</a>            builder.compute_raw_change();
+<a href=#782 id=782 data-nosnippet>782</a>
+<a href=#783 id=783 data-nosnippet>783</a>            <span class="comment">// If adding this input pushed fees or weight over the
+<a href=#784 id=784 data-nosnippet>784</a>            // limit, undo it and stop consolidating. This is a
+<a href=#785 id=785 data-nosnippet>785</a>            // greedy heuristic: inputs are sorted smallest-first so
+<a href=#786 id=786 data-nosnippet>786</a>            // weight increases monotonically, but a larger input
+<a href=#787 id=787 data-nosnippet>787</a>            // could theoretically eliminate dust padding and lower
+<a href=#788 id=788 data-nosnippet>788</a>            // total_deduction enough to pass. We accept this
+<a href=#789 id=789 data-nosnippet>789</a>            // approximation for simplicity.
+<a href=#790 id=790 data-nosnippet>790</a>            </span><span class="kw">if </span>builder.check_fees().is_err() || builder.exceeds_max_weight() {
+<a href=#791 id=791 data-nosnippet>791</a>                builder.inputs.pop();
+<a href=#792 id=792 data-nosnippet>792</a>                builder.compute_raw_change();
+<a href=#793 id=793 data-nosnippet>793</a>                <span class="kw">break</span>;
+<a href=#794 id=794 data-nosnippet>794</a>            }
+<a href=#795 id=795 data-nosnippet>795</a>        }
+<a href=#796 id=796 data-nosnippet>796</a>    }
+<a href=#797 id=797 data-nosnippet>797</a>
+<a href=#798 id=798 data-nosnippet>798</a>    <span class="comment">// ── Step 4: Fee allocation ──────────────────────────────────────────
+<a href=#799 id=799 data-nosnippet>799</a>    //
+<a href=#800 id=800 data-nosnippet>800</a>    // Recompute raw_change (consolidation may have added inputs),
+<a href=#801 id=801 data-nosnippet>801</a>    // then finalize: check fee caps, assign net output amounts,
+<a href=#802 id=802 data-nosnippet>802</a>    // compute final change (with dust padding), and derive the
+<a href=#803 id=803 data-nosnippet>803</a>    // actual miner fee from conservation.
+<a href=#804 id=804 data-nosnippet>804</a>    </span><a href="#672">builder</a>.<a href="#917-927">compute_raw_change</a>();
+<a href=#805 id=805 data-nosnippet>805</a>    <span class="kw">let </span>miner_fee = <a href="#672">builder</a>.<a href="#1071-1109">finalize_fees</a>()<span class="question-mark">?</span>;
+<a href=#806 id=806 data-nosnippet>806</a>
+<a href=#807 id=807 data-nosnippet>807</a>    <a class="prelude-val" href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#variant.Ok">Ok</a>(<a href="#448-478">CoinSelectionResult</a> {
+<a href=#808 id=808 data-nosnippet>808</a>        inputs: <a href="#672">builder</a>.inputs.<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|u| (<span class="kw-2">*</span><a href="#808">u</a>).<a href="https://doc.rust-lang.org/1.91.1/core/clone/trait.Clone.html#tymethod.clone">clone</a>()).<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>(),
+<a href=#809 id=809 data-nosnippet>809</a>        withdrawal_outputs: <a href="#672">builder</a>
+<a href=#810 id=810 data-nosnippet>810</a>            .outputs
+<a href=#811 id=811 data-nosnippet>811</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>()
+<a href=#812 id=812 data-nosnippet>812</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|o| <a href="#436-444">WithdrawalOutput</a> {
+<a href=#813 id=813 data-nosnippet>813</a>                request_id: <a href="#812">o</a>.request.id,
+<a href=#814 id=814 data-nosnippet>814</a>                recipient: <a href="#812">o</a>.request.recipient.<a href="https://doc.rust-lang.org/1.91.1/core/clone/trait.Clone.html#tymethod.clone">clone</a>(),
+<a href=#815 id=815 data-nosnippet>815</a>                amount: <a href="#812">o</a>.net_amount,
+<a href=#816 id=816 data-nosnippet>816</a>            })
+<a href=#817 id=817 data-nosnippet>817</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>(),
+<a href=#818 id=818 data-nosnippet>818</a>        change: <a href="#672">builder</a>.final_change,
+<a href=#819 id=819 data-nosnippet>819</a>        fee: <a href="#805">miner_fee</a>,
+<a href=#820 id=820 data-nosnippet>820</a>        selected_requests: <a href="#672">builder</a>.outputs.<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|o| <a href="#820">o</a>.request.<a href="https://doc.rust-lang.org/1.91.1/core/clone/trait.Clone.html#tymethod.clone">clone</a>()).<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.collect">collect</a>(),
+<a href=#821 id=821 data-nosnippet>821</a>    })
+<a href=#822 id=822 data-nosnippet>822</a>}
+<a href=#823 id=823 data-nosnippet>823</a>
+<a href=#824 id=824 data-nosnippet>824</a><span class="kw">struct </span>TransactionBuilder&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#825 id=825 data-nosnippet>825</a>    <span class="comment">// Fixed from the Params
+<a href=#826 id=826 data-nosnippet>826</a>    </span>fee_rate: FeeRate,
+<a href=#827 id=827 data-nosnippet>827</a>    params: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><a href="#256-331">CoinSelectionParams</a>,
+<a href=#828 id=828 data-nosnippet>828</a>
+<a href=#829 id=829 data-nosnippet>829</a>    <span class="comment">// Values that are built up
+<a href=#830 id=830 data-nosnippet>830</a>    </span>inputs: <a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html">Vec</a>&lt;<span class="kw-2">&amp;</span><span class="lifetime">'a </span><a href="#214-224">UtxoCandidate</a>&gt;,
+<a href=#831 id=831 data-nosnippet>831</a>    outputs: <a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html">Vec</a>&lt;<a href="#840-843">PendingOutput</a>&lt;<span class="lifetime">'a</span>&gt;&gt;,
+<a href=#832 id=832 data-nosnippet>832</a>    <span class="doccomment">/// The raw excess of input value over requested value, before any
+<a href=#833 id=833 data-nosnippet>833</a>    /// dust padding. `None` means not yet computed; `Some(0)` means
+<a href=#834 id=834 data-nosnippet>834</a>    /// exact match (no change output); `Some(n)` means `n` sats of
+<a href=#835 id=835 data-nosnippet>835</a>    /// change.
+<a href=#836 id=836 data-nosnippet>836</a>    </span>raw_change: <a class="prelude-ty" href="https://doc.rust-lang.org/1.91.1/core/option/enum.Option.html">Option</a>&lt;<a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>&gt;,
+<a href=#837 id=837 data-nosnippet>837</a>    final_change: <a class="prelude-ty" href="https://doc.rust-lang.org/1.91.1/core/option/enum.Option.html">Option</a>&lt;<a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>&gt;,
+<a href=#838 id=838 data-nosnippet>838</a>}
+<a href=#839 id=839 data-nosnippet>839</a>
+<a href=#840 id=840 data-nosnippet>840</a><span class="kw">struct </span>PendingOutput&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#841 id=841 data-nosnippet>841</a>    request: <span class="kw-2">&amp;</span><span class="lifetime">'a </span><a href="#234-250">WithdrawalRequest</a>,
+<a href=#842 id=842 data-nosnippet>842</a>    net_amount: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>,
+<a href=#843 id=843 data-nosnippet>843</a>}
+<a href=#844 id=844 data-nosnippet>844</a>
+<a href=#845 id=845 data-nosnippet>845</a><span class="kw">impl</span>&lt;<span class="lifetime">'a</span>&gt; <a href="#840-843">PendingOutput</a>&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#846 id=846 data-nosnippet>846</a>    <span class="doccomment">/// The dust relay threshold for this output's recipient address type.
+<a href=#847 id=847 data-nosnippet>847</a>    </span><span class="kw">fn </span>dust_threshold(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> {
+<a href=#848 id=848 data-nosnippet>848</a>        <span class="kw">match </span><a class="self" href="#847">self</a>.request.recipient.<a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html#method.len">len</a>() {
+<a href=#849 id=849 data-nosnippet>849</a>            <span class="number">20 </span>=&gt; <a href="#63">WPKH_DUST_RELAY_MIN_VALUE</a>,
+<a href=#850 id=850 data-nosnippet>850</a>            <span class="kw">_ </span>=&gt; <a href="#59">TR_DUST_RELAY_MIN_VALUE</a>,
+<a href=#851 id=851 data-nosnippet>851</a>        }
+<a href=#852 id=852 data-nosnippet>852</a>    }
+<a href=#853 id=853 data-nosnippet>853</a>}
+<a href=#854 id=854 data-nosnippet>854</a>
+<a href=#855 id=855 data-nosnippet>855</a><span class="kw">impl</span>&lt;<span class="lifetime">'a</span>&gt; <a href="#824-838">TransactionBuilder</a>&lt;<span class="lifetime">'a</span>&gt; {
+<a href=#856 id=856 data-nosnippet>856</a>    <span class="doccomment">/// Compute the total transaction weight based on the current inputs,
+<a href=#857 id=857 data-nosnippet>857</a>    /// outputs, and change state.
+<a href=#858 id=858 data-nosnippet>858</a>    ///
+<a href=#859 id=859 data-nosnippet>859</a>    /// When `raw_change` is `None` (not yet computed), the change output is
+<a href=#860 id=860 data-nosnippet>860</a>    /// conservatively assumed to be present. This overestimates weight
+<a href=#861 id=861 data-nosnippet>861</a>    /// slightly, which is the safe direction: a weight check that passes
+<a href=#862 id=862 data-nosnippet>862</a>    /// with a change output included will still pass if no change output
+<a href=#863 id=863 data-nosnippet>863</a>    /// ends up being emitted.
+<a href=#864 id=864 data-nosnippet>864</a>    </span><span class="kw">fn </span>weight(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; Weight {
+<a href=#865 id=865 data-nosnippet>865</a>        <span class="kw">let </span>input_count = <a class="self" href="#864">self</a>.inputs.<a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html#method.len">len</a>();
+<a href=#866 id=866 data-nosnippet>866</a>        <span class="kw">let </span>has_change = <a class="self" href="#864">self</a>.raw_change.<a href="https://doc.rust-lang.org/1.91.1/core/option/enum.Option.html#method.is_none_or">is_none_or</a>(|v| <a href="#866">v</a> &gt; <span class="number">0</span>);
+<a href=#867 id=867 data-nosnippet>867</a>        <span class="kw">let </span>output_count = <a class="self" href="#864">self</a>.outputs.<a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html#method.len">len</a>() + <span class="kw">if </span><a href="#866">has_change</a> { <span class="number">1 </span>} <span class="kw">else </span>{ <span class="number">0 </span>};
+<a href=#868 id=868 data-nosnippet>868</a>
+<a href=#869 id=869 data-nosnippet>869</a>        <span class="comment">// Non-witness fixed fields (scaled ×4):
+<a href=#870 id=870 data-nosnippet>870</a>        //   nVersion(4) + nLockTime(4) = 8 bytes × 4 = 32 WU
+<a href=#871 id=871 data-nosnippet>871</a>        //   vin_count varint + vout_count varint (scaled ×4)
+<a href=#872 id=872 data-nosnippet>872</a>        //
+<a href=#873 id=873 data-nosnippet>873</a>        // Witness fixed fields (scaled ×1):
+<a href=#874 id=874 data-nosnippet>874</a>        //   segwit_marker(1) + segwit_flag(1) = 2 WU
+<a href=#875 id=875 data-nosnippet>875</a>        </span><span class="kw">let </span>fixed = Weight::from_wu(<span class="number">32 </span>+ <span class="number">2</span>)
+<a href=#876 id=876 data-nosnippet>876</a>            + <a href="#1120-1128">varint_weight</a>(<a href="#865">input_count</a> <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>)
+<a href=#877 id=877 data-nosnippet>877</a>            + <a href="#1120-1128">varint_weight</a>(<a href="#867">output_count</a> <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>);
+<a href=#878 id=878 data-nosnippet>878</a>
+<a href=#879 id=879 data-nosnippet>879</a>        <span class="comment">// Sum of all input weights (base + witness satisfaction).
+<a href=#880 id=880 data-nosnippet>880</a>        </span><span class="kw">let </span>inputs: Weight = <span class="self"><a href="#864">self</a>
+<a href=#881 id=881 data-nosnippet>881</a>            </span>.inputs
+<a href=#882 id=882 data-nosnippet>882</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>()
+<a href=#883 id=883 data-nosnippet>883</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|u| <a href="#883">u</a>.spend_path.<a href="#101-105">input_weight</a>())
+<a href=#884 id=884 data-nosnippet>884</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>();
+<a href=#885 id=885 data-nosnippet>885</a>
+<a href=#886 id=886 data-nosnippet>886</a>        <span class="comment">// Sum of all withdrawal output weights.
+<a href=#887 id=887 data-nosnippet>887</a>        </span><span class="kw">let </span>outputs: Weight = <span class="self"><a href="#864">self</a>
+<a href=#888 id=888 data-nosnippet>888</a>            </span>.outputs
+<a href=#889 id=889 data-nosnippet>889</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>()
+<a href=#890 id=890 data-nosnippet>890</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|o| <a href="#576-583">output_weight_for_recipient</a>(<a href="#890">o</a>.request))
+<a href=#891 id=891 data-nosnippet>891</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>();
+<a href=#892 id=892 data-nosnippet>892</a>
+<a href=#893 id=893 data-nosnippet>893</a>        <span class="comment">// Change output weight (if present).
+<a href=#894 id=894 data-nosnippet>894</a>        </span><span class="kw">let </span>change = <span class="kw">if </span><a href="#866">has_change</a> {
+<a href=#895 id=895 data-nosnippet>895</a>            <a href="#589-591">output_weight_for_script</a>(<span class="kw-2">&amp;</span><a class="self" href="#864">self</a>.<a href="#1015-1017">change_script</a>())
+<a href=#896 id=896 data-nosnippet>896</a>        } <span class="kw">else </span>{
+<a href=#897 id=897 data-nosnippet>897</a>            Weight::ZERO
+<a href=#898 id=898 data-nosnippet>898</a>        };
+<a href=#899 id=899 data-nosnippet>899</a>
+<a href=#900 id=900 data-nosnippet>900</a>        <a href="#875">fixed</a> + <a href="#880">inputs</a> + <a href="#887">outputs</a> + <a href="#894">change</a>
+<a href=#901 id=901 data-nosnippet>901</a>    }
+<a href=#902 id=902 data-nosnippet>902</a>
+<a href=#903 id=903 data-nosnippet>903</a>    <span class="doccomment">/// The total value of all selected inputs.
+<a href=#904 id=904 data-nosnippet>904</a>    </span><span class="kw">fn </span>input_total(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> {
+<a href=#905 id=905 data-nosnippet>905</a>        <a class="self" href="#904">self</a>.inputs.<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|u| <a href="#905">u</a>.amount).<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>()
+<a href=#906 id=906 data-nosnippet>906</a>    }
+<a href=#907 id=907 data-nosnippet>907</a>
+<a href=#908 id=908 data-nosnippet>908</a>    <span class="doccomment">/// Compute and set the raw change amount based on the current
+<a href=#909 id=909 data-nosnippet>909</a>    /// inputs and requested outputs. Raw change is the excess of input
+<a href=#910 id=910 data-nosnippet>910</a>    /// value over the total requested amount, before any dust padding.
+<a href=#911 id=911 data-nosnippet>911</a>    ///
+<a href=#912 id=912 data-nosnippet>912</a>    /// - `Some(0)` means exact match (no change output).
+<a href=#913 id=913 data-nosnippet>913</a>    /// - `Some(n)` where `n &gt; 0` means `n` sats of raw change.
+<a href=#914 id=914 data-nosnippet>914</a>    ///
+<a href=#915 id=915 data-nosnippet>915</a>    /// Panics if `input_total &lt; total_requested` — the caller must
+<a href=#916 id=916 data-nosnippet>916</a>    /// ensure sufficient inputs have been selected before calling.
+<a href=#917 id=917 data-nosnippet>917</a>    </span><span class="kw">fn </span>compute_raw_change(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> {
+<a href=#918 id=918 data-nosnippet>918</a>        <span class="kw">let </span>input_total = <a class="self" href="#917">self</a>.<a href="#904-906">input_total</a>();
+<a href=#919 id=919 data-nosnippet>919</a>        <span class="kw">let </span>total_requested = <a class="self" href="#917">self</a>.<a href="#1010-1012">total_requested</a>();
+<a href=#920 id=920 data-nosnippet>920</a>        <a class="macro" href="https://doc.rust-lang.org/1.91.1/core/macro.assert.html">assert!</a>(
+<a href=#921 id=921 data-nosnippet>921</a>            input_total &gt;= total_requested,
+<a href=#922 id=922 data-nosnippet>922</a>            <span class="string">"input_total ({input_total}) &lt; total_requested ({total_requested})"
+<a href=#923 id=923 data-nosnippet>923</a>        </span>);
+<a href=#924 id=924 data-nosnippet>924</a>        <span class="kw">let </span>raw_change = <a href="#918">input_total</a> - <a href="#919">total_requested</a>;
+<a href=#925 id=925 data-nosnippet>925</a>        <a class="self" href="#917">self</a>.raw_change = <a class="prelude-val" href="https://doc.rust-lang.org/1.91.1/core/option/enum.Option.html#variant.Some">Some</a>(<a href="#924">raw_change</a>);
+<a href=#926 id=926 data-nosnippet>926</a>        <a href="#924">raw_change</a>
+<a href=#927 id=927 data-nosnippet>927</a>    }
+<a href=#928 id=928 data-nosnippet>928</a>
+<a href=#929 id=929 data-nosnippet>929</a>    <span class="doccomment">/// Whether the transaction weight exceeds the configured maximum.
+<a href=#930 id=930 data-nosnippet>930</a>    </span><span class="kw">fn </span>exceeds_max_weight(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/1.91.1/std/primitive.bool.html">bool</a> {
+<a href=#931 id=931 data-nosnippet>931</a>        <a class="self" href="#930">self</a>.<a href="#864-901">weight</a>() &gt; <a class="self" href="#930">self</a>.params.max_tx_weight
+<a href=#932 id=932 data-nosnippet>932</a>    }
+<a href=#933 id=933 data-nosnippet>933</a>
+<a href=#934 id=934 data-nosnippet>934</a>    <span class="doccomment">/// Check that the transaction weight is within the configured
+<a href=#935 id=935 data-nosnippet>935</a>    /// maximum. Returns an error if exceeded.
+<a href=#936 id=936 data-nosnippet>936</a>    </span><span class="kw">fn </span>check_weight(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a class="prelude-ty" href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html">Result</a>&lt;(), <a href="#484-566">CoinSelectionError</a>&gt; {
+<a href=#937 id=937 data-nosnippet>937</a>        <span class="kw">if </span><a class="self" href="#936">self</a>.<a href="#930-932">exceeds_max_weight</a>() {
+<a href=#938 id=938 data-nosnippet>938</a>            <a class="prelude-val" href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#variant.Err">Err</a>(<a href="#541-546">CoinSelectionError::ExceedsMaxWeight</a> {
+<a href=#939 id=939 data-nosnippet>939</a>                weight: <a class="self" href="#936">self</a>.<a href="#864-901">weight</a>(),
+<a href=#940 id=940 data-nosnippet>940</a>                max_weight: <a class="self" href="#936">self</a>.params.max_tx_weight,
+<a href=#941 id=941 data-nosnippet>941</a>            })
+<a href=#942 id=942 data-nosnippet>942</a>        } <span class="kw">else </span>{
+<a href=#943 id=943 data-nosnippet>943</a>            <a class="prelude-val" href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#variant.Ok">Ok</a>(())
+<a href=#944 id=944 data-nosnippet>944</a>        }
+<a href=#945 id=945 data-nosnippet>945</a>    }
+<a href=#946 id=946 data-nosnippet>946</a>
+<a href=#947 id=947 data-nosnippet>947</a>    <span class="doccomment">/// The total amount deducted from requests: the transaction's own
+<a href=#948 id=948 data-nosnippet>948</a>    /// fee, any CPFP deficit for underpaying ancestors, and any dust
+<a href=#949 id=949 data-nosnippet>949</a>    /// padding needed to bring a sub-dust change output up to the
+<a href=#950 id=950 data-nosnippet>950</a>    /// relay threshold.
+<a href=#951 id=951 data-nosnippet>951</a>    </span><span class="kw">fn </span>total_deduction(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> {
+<a href=#952 id=952 data-nosnippet>952</a>        <a class="self" href="#951">self</a>.<a href="#1004-1007">required_fee</a>() + <a class="self" href="#951">self</a>.<a href="#960-967">dust_padding</a>()
+<a href=#953 id=953 data-nosnippet>953</a>    }
+<a href=#954 id=954 data-nosnippet>954</a>
+<a href=#955 id=955 data-nosnippet>955</a>    <span class="doccomment">/// The amount of dust padding needed for the change output. If
+<a href=#956 id=956 data-nosnippet>956</a>    /// the raw change is positive but below the dust threshold, it
+<a href=#957 id=957 data-nosnippet>957</a>    /// must be padded up — and that padding cost comes from the
+<a href=#958 id=958 data-nosnippet>958</a>    /// requests. Returns 0 if there is no change or the change is
+<a href=#959 id=959 data-nosnippet>959</a>    /// already above dust.
+<a href=#960 id=960 data-nosnippet>960</a>    </span><span class="kw">fn </span>dust_padding(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> {
+<a href=#961 id=961 data-nosnippet>961</a>        <span class="kw">match </span><a class="self" href="#960">self</a>.raw_change {
+<a href=#962 id=962 data-nosnippet>962</a>            <a class="prelude-val" href="https://doc.rust-lang.org/1.91.1/core/option/enum.Option.html#variant.Some">Some</a>(v) <span class="kw">if </span><a href="#962">v</a> &gt; <span class="number">0 </span>&amp;&amp; <a href="#962">v</a> &lt; <a class="self" href="#960">self</a>.<a href="#1021-1023">change_dust_threshold</a>() =&gt; {
+<a href=#963 id=963 data-nosnippet>963</a>                <a class="self" href="#960">self</a>.<a href="#1021-1023">change_dust_threshold</a>() - <a href="#962">v</a>
+<a href=#964 id=964 data-nosnippet>964</a>            }
+<a href=#965 id=965 data-nosnippet>965</a>            <span class="kw">_ </span>=&gt; <span class="number">0</span>,
+<a href=#966 id=966 data-nosnippet>966</a>        }
+<a href=#967 id=967 data-nosnippet>967</a>    }
+<a href=#968 id=968 data-nosnippet>968</a>
+<a href=#969 id=969 data-nosnippet>969</a>    <span class="doccomment">/// Compute the CPFP deficit: the extra fee this transaction must
+<a href=#970 id=970 data-nosnippet>970</a>    /// pay to ensure that the unconfirmed ancestor transactions
+<a href=#971 id=971 data-nosnippet>971</a>    /// effectively pay the target `fee_rate`.
+<a href=#972 id=972 data-nosnippet>972</a>    ///
+<a href=#973 id=973 data-nosnippet>973</a>    /// ```text
+<a href=#974 id=974 data-nosnippet>974</a>    /// needed_ancestor_fee = fee_rate × ancestor_weight
+<a href=#975 id=975 data-nosnippet>975</a>    /// deficit = needed_ancestor_fee - ancestor_fee
+<a href=#976 id=976 data-nosnippet>976</a>    /// ```
+<a href=#977 id=977 data-nosnippet>977</a>    ///
+<a href=#978 id=978 data-nosnippet>978</a>    /// This transaction's own fee (for its own weight) is handled
+<a href=#979 id=979 data-nosnippet>979</a>    /// separately by the normal fee calculation. The deficit is purely
+<a href=#980 id=980 data-nosnippet>980</a>    /// the shortfall in what the ancestors should have paid.
+<a href=#981 id=981 data-nosnippet>981</a>    ///
+<a href=#982 id=982 data-nosnippet>982</a>    /// Only mempool-only ancestors (0 confirmations) are included —
+<a href=#983 id=983 data-nosnippet>983</a>    /// ancestors already in a block don't need boosting.
+<a href=#984 id=984 data-nosnippet>984</a>    ///
+<a href=#985 id=985 data-nosnippet>985</a>    /// Returns 0 if the ancestors already pay enough.
+<a href=#986 id=986 data-nosnippet>986</a>    </span><span class="kw">fn </span>cpfp_deficit(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> {
+<a href=#987 id=987 data-nosnippet>987</a>        <span class="kw">let </span>ancestor_weight: Weight = <span class="self"><a href="#986">self</a>
+<a href=#988 id=988 data-nosnippet>988</a>            </span>.inputs
+<a href=#989 id=989 data-nosnippet>989</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>()
+<a href=#990 id=990 data-nosnippet>990</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|u| <a href="#990">u</a>.status.<a href="#185-194">unconfirmed_ancestor_weight</a>())
+<a href=#991 id=991 data-nosnippet>991</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>();
+<a href=#992 id=992 data-nosnippet>992</a>        <span class="kw">let </span>ancestor_fee: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> = <span class="self"><a href="#986">self</a>
+<a href=#993 id=993 data-nosnippet>993</a>            </span>.inputs
+<a href=#994 id=994 data-nosnippet>994</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>()
+<a href=#995 id=995 data-nosnippet>995</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|u| <a href="#995">u</a>.status.<a href="#198-207">unconfirmed_ancestor_fee</a>())
+<a href=#996 id=996 data-nosnippet>996</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>();
+<a href=#997 id=997 data-nosnippet>997</a>
+<a href=#998 id=998 data-nosnippet>998</a>        <span class="kw">let </span>needed_ancestor_fee = <a href="#611-616">fee_for_weight</a>(<a class="self" href="#986">self</a>.fee_rate, <a href="#987">ancestor_weight</a>);
+<a href=#999 id=999 data-nosnippet>999</a>        <a href="#998">needed_ancestor_fee</a>.<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.num.html#method.saturating_sub">saturating_sub</a>(<a href="#992">ancestor_fee</a>)
+<a href=#1000 id=1000 data-nosnippet>1000</a>    }
+<a href=#1001 id=1001 data-nosnippet>1001</a>
+<a href=#1002 id=1002 data-nosnippet>1002</a>    <span class="doccomment">/// The total fee this transaction must pay: its own weight-based
+<a href=#1003 id=1003 data-nosnippet>1003</a>    /// fee plus any CPFP deficit to boost underpaying ancestors.
+<a href=#1004 id=1004 data-nosnippet>1004</a>    </span><span class="kw">fn </span>required_fee(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> {
+<a href=#1005 id=1005 data-nosnippet>1005</a>        <span class="kw">let </span>own_fee = <a href="#611-616">fee_for_weight</a>(<a class="self" href="#1004">self</a>.fee_rate, <a class="self" href="#1004">self</a>.<a href="#864-901">weight</a>());
+<a href=#1006 id=1006 data-nosnippet>1006</a>        <a href="#1005">own_fee</a> + <a class="self" href="#1004">self</a>.<a href="#986-1000">cpfp_deficit</a>()
+<a href=#1007 id=1007 data-nosnippet>1007</a>    }
+<a href=#1008 id=1008 data-nosnippet>1008</a>
+<a href=#1009 id=1009 data-nosnippet>1009</a>    <span class="doccomment">/// The sum of all withdrawal request amounts.
+<a href=#1010 id=1010 data-nosnippet>1010</a>    </span><span class="kw">fn </span>total_requested(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> {
+<a href=#1011 id=1011 data-nosnippet>1011</a>        <a class="self" href="#1010">self</a>.outputs.<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|o| <a href="#1011">o</a>.request.amount).<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>()
+<a href=#1012 id=1012 data-nosnippet>1012</a>    }
+<a href=#1013 id=1013 data-nosnippet>1013</a>
+<a href=#1014 id=1014 data-nosnippet>1014</a>    <span class="doccomment">/// The change script for the pool's change address.
+<a href=#1015 id=1015 data-nosnippet>1015</a>    </span><span class="kw">fn </span>change_script(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; bitcoin::ScriptBuf {
+<a href=#1016 id=1016 data-nosnippet>1016</a>        <a class="self" href="#1015">self</a>.params.change_address.script_pubkey()
+<a href=#1017 id=1017 data-nosnippet>1017</a>    }
+<a href=#1018 id=1018 data-nosnippet>1018</a>
+<a href=#1019 id=1019 data-nosnippet>1019</a>    <span class="doccomment">/// The dust threshold for change outputs based on the change
+<a href=#1020 id=1020 data-nosnippet>1020</a>    /// address script type.
+<a href=#1021 id=1021 data-nosnippet>1021</a>    </span><span class="kw">fn </span>change_dust_threshold(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> {
+<a href=#1022 id=1022 data-nosnippet>1022</a>        <a href="#600-605">dust_threshold_for_change</a>(<span class="kw-2">&amp;</span><a class="self" href="#1021">self</a>.<a href="#1015-1017">change_script</a>())
+<a href=#1023 id=1023 data-nosnippet>1023</a>    }
+<a href=#1024 id=1024 data-nosnippet>1024</a>
+<a href=#1025 id=1025 data-nosnippet>1025</a>    <span class="doccomment">/// Check that the current fee deductions are within bounds:
+<a href=#1026 id=1026 data-nosnippet>1026</a>    /// the per-request cap isn't exceeded, and every request can
+<a href=#1027 id=1027 data-nosnippet>1027</a>    /// absorb its share and still produce a non-dust output.
+<a href=#1028 id=1028 data-nosnippet>1028</a>    ///
+<a href=#1029 id=1029 data-nosnippet>1029</a>    /// This is a read-only check — it does not mutate the builder.
+<a href=#1030 id=1030 data-nosnippet>1030</a>    /// Call it early to bail out before consolidation if the base
+<a href=#1031 id=1031 data-nosnippet>1031</a>    /// transaction already exceeds limits, and again during
+<a href=#1032 id=1032 data-nosnippet>1032</a>    /// consolidation to detect when adding inputs pushes fees over.
+<a href=#1033 id=1033 data-nosnippet>1033</a>    </span><span class="kw">fn </span>check_fees(<span class="kw-2">&amp;</span><span class="self">self</span>) -&gt; <a class="prelude-ty" href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html">Result</a>&lt;(), <a href="#484-566">CoinSelectionError</a>&gt; {
+<a href=#1034 id=1034 data-nosnippet>1034</a>        <span class="kw">let </span>n = <a class="self" href="#1033">self</a>.outputs.<a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html#method.len">len</a>() <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>;
+<a href=#1035 id=1035 data-nosnippet>1035</a>        <span class="kw">if </span><a href="#1034">n</a> == <span class="number">0 </span>{
+<a href=#1036 id=1036 data-nosnippet>1036</a>            <span class="kw">return </span><a class="prelude-val" href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#variant.Ok">Ok</a>(());
+<a href=#1037 id=1037 data-nosnippet>1037</a>        }
+<a href=#1038 id=1038 data-nosnippet>1038</a>
+<a href=#1039 id=1039 data-nosnippet>1039</a>        <span class="kw">let </span>total_deduction = <a class="self" href="#1033">self</a>.<a href="#951-953">total_deduction</a>();
+<a href=#1040 id=1040 data-nosnippet>1040</a>        <span class="kw">let </span>deduction_per_request = <a href="#1039">total_deduction</a>.<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.num.html#method.div_ceil">div_ceil</a>(<a href="#1034">n</a>);
+<a href=#1041 id=1041 data-nosnippet>1041</a>
+<a href=#1042 id=1042 data-nosnippet>1042</a>        <span class="kw">if </span><a href="#1040">deduction_per_request</a> &gt; <a class="self" href="#1033">self</a>.params.max_fee_per_request {
+<a href=#1043 id=1043 data-nosnippet>1043</a>            <span class="kw">return </span><a class="prelude-val" href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#variant.Err">Err</a>(<a href="#506-517">CoinSelectionError::FeeExceedsCap</a> {
+<a href=#1044 id=1044 data-nosnippet>1044</a>                fee_per_request: <a href="#1040">deduction_per_request</a>,
+<a href=#1045 id=1045 data-nosnippet>1045</a>                max_fee_per_request: <a class="self" href="#1033">self</a>.params.max_fee_per_request,
+<a href=#1046 id=1046 data-nosnippet>1046</a>                <a href="#1039">total_deduction</a>,
+<a href=#1047 id=1047 data-nosnippet>1047</a>                n_requests: <a href="#1034">n</a> <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.usize.html">usize</a>,
+<a href=#1048 id=1048 data-nosnippet>1048</a>            });
+<a href=#1049 id=1049 data-nosnippet>1049</a>        }
+<a href=#1050 id=1050 data-nosnippet>1050</a>
+<a href=#1051 id=1051 data-nosnippet>1051</a>        <span class="kw">for </span>output <span class="kw">in </span><span class="self">self</span>.outputs.iter() {
+<a href=#1052 id=1052 data-nosnippet>1052</a>            <span class="kw">if </span>output.request.amount &lt; deduction_per_request + output.dust_threshold() {
+<a href=#1053 id=1053 data-nosnippet>1053</a>                <span class="kw">return </span><span class="prelude-val">Err</span>(CoinSelectionError::RequestAmountTooSmall {
+<a href=#1054 id=1054 data-nosnippet>1054</a>                    request_id: output.request.id,
+<a href=#1055 id=1055 data-nosnippet>1055</a>                    amount: output.request.amount,
+<a href=#1056 id=1056 data-nosnippet>1056</a>                    fee_per_request: deduction_per_request,
+<a href=#1057 id=1057 data-nosnippet>1057</a>                });
+<a href=#1058 id=1058 data-nosnippet>1058</a>            }
+<a href=#1059 id=1059 data-nosnippet>1059</a>        }
+<a href=#1060 id=1060 data-nosnippet>1060</a>
+<a href=#1061 id=1061 data-nosnippet>1061</a>        <a class="prelude-val" href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#variant.Ok">Ok</a>(())
+<a href=#1062 id=1062 data-nosnippet>1062</a>    }
+<a href=#1063 id=1063 data-nosnippet>1063</a>
+<a href=#1064 id=1064 data-nosnippet>1064</a>    <span class="doccomment">/// Perform final fee checks, assign net output amounts, compute
+<a href=#1065 id=1065 data-nosnippet>1065</a>    /// final change (with dust padding), and return the actual miner
+<a href=#1066 id=1066 data-nosnippet>1066</a>    /// fee.
+<a href=#1067 id=1067 data-nosnippet>1067</a>    ///
+<a href=#1068 id=1068 data-nosnippet>1068</a>    /// Requires `compute_raw_change` to have been called first.
+<a href=#1069 id=1069 data-nosnippet>1069</a>    /// Returns the miner fee derived from the conservation identity:
+<a href=#1070 id=1070 data-nosnippet>1070</a>    /// `input_total - sum(net_amounts) - final_change`.
+<a href=#1071 id=1071 data-nosnippet>1071</a>    </span><span class="kw">fn </span>finalize_fees(<span class="kw-2">&amp;mut </span><span class="self">self</span>) -&gt; <a class="prelude-ty" href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html">Result</a>&lt;<a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>, <a href="#484-566">CoinSelectionError</a>&gt; {
+<a href=#1072 id=1072 data-nosnippet>1072</a>        <span class="kw">let </span>raw_change = <span class="self"><a href="#1071">self</a>
+<a href=#1073 id=1073 data-nosnippet>1073</a>            </span>.raw_change
+<a href=#1074 id=1074 data-nosnippet>1074</a>            .<a href="https://doc.rust-lang.org/1.91.1/core/option/enum.Option.html#method.expect">expect</a>(<span class="string">"finalize_fees called before compute_raw_change"</span>);
+<a href=#1075 id=1075 data-nosnippet>1075</a>
+<a href=#1076 id=1076 data-nosnippet>1076</a>        <span class="comment">// Run the fee checks.
+<a href=#1077 id=1077 data-nosnippet>1077</a>        </span><a class="self" href="#1071">self</a>.<a href="#1033-1062">check_fees</a>()<span class="question-mark">?</span>;
+<a href=#1078 id=1078 data-nosnippet>1078</a>
+<a href=#1079 id=1079 data-nosnippet>1079</a>        <span class="comment">// Assign net amounts using ceiling division so the miner
+<a href=#1080 id=1080 data-nosnippet>1080</a>        // always receives at least the required fee.
+<a href=#1081 id=1081 data-nosnippet>1081</a>        </span><span class="kw">let </span>n = <a class="self" href="#1071">self</a>.outputs.<a href="https://doc.rust-lang.org/1.91.1/alloc/vec/struct.Vec.html#method.len">len</a>() <span class="kw">as </span><a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>;
+<a href=#1082 id=1082 data-nosnippet>1082</a>        <span class="kw">let </span>deduction_per_request = <a class="self" href="#1071">self</a>.<a href="#951-953">total_deduction</a>().<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.num.html#method.div_ceil">div_ceil</a>(<a href="#1081">n</a>);
+<a href=#1083 id=1083 data-nosnippet>1083</a>        <span class="kw">for </span>output <span class="kw">in </span><span class="kw-2">&amp;mut </span><span class="self">self</span>.outputs {
+<a href=#1084 id=1084 data-nosnippet>1084</a>            output.net_amount = output.request.amount - deduction_per_request;
+<a href=#1085 id=1085 data-nosnippet>1085</a>        }
+<a href=#1086 id=1086 data-nosnippet>1086</a>
+<a href=#1087 id=1087 data-nosnippet>1087</a>        <span class="comment">// Compute final change (padded to dust threshold if needed).
+<a href=#1088 id=1088 data-nosnippet>1088</a>        </span><a class="self" href="#1071">self</a>.final_change = <span class="kw">if </span><a href="#1072">raw_change</a> &gt; <span class="number">0 </span>{
+<a href=#1089 id=1089 data-nosnippet>1089</a>            <a class="prelude-val" href="https://doc.rust-lang.org/1.91.1/core/option/enum.Option.html#variant.Some">Some</a>(<a href="#1072">raw_change</a>.<a href="https://doc.rust-lang.org/1.91.1/core/cmp/trait.Ord.html#tymethod.max">max</a>(<a class="self" href="#1071">self</a>.<a href="#1021-1023">change_dust_threshold</a>()))
+<a href=#1090 id=1090 data-nosnippet>1090</a>        } <span class="kw">else </span>{
+<a href=#1091 id=1091 data-nosnippet>1091</a>            <a class="prelude-val" href="https://doc.rust-lang.org/1.91.1/core/option/enum.Option.html#variant.None"><a href="https://doc.rust-lang.org/1.91.1/core/option/enum.Option.html#variant.None">None</a>
+<a href=#1092 id=1092 data-nosnippet>1092</a>        </a>};
+<a href=#1093 id=1093 data-nosnippet>1093</a>
+<a href=#1094 id=1094 data-nosnippet>1094</a>        <span class="comment">// Derive the actual miner fee from the conservation identity:
+<a href=#1095 id=1095 data-nosnippet>1095</a>        //   input_total = sum(net_amounts) + final_change + miner_fee
+<a href=#1096 id=1096 data-nosnippet>1096</a>        </span><span class="kw">let </span>output_total: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a> = <a class="self" href="#1071">self</a>.outputs.<a href="https://doc.rust-lang.org/1.91.1/core/foreigntype.slice.html#method.iter">iter</a>().<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.map">map</a>(|o| <a href="#1096">o</a>.net_amount).<a href="https://doc.rust-lang.org/1.91.1/core/iter/traits/iterator/trait.Iterator.html#tymethod.sum">sum</a>();
+<a href=#1097 id=1097 data-nosnippet>1097</a>        <span class="kw">let </span>change = <a class="self" href="#1071">self</a>.final_change.<a href="https://doc.rust-lang.org/1.91.1/core/option/enum.Option.html#method.unwrap_or">unwrap_or</a>(<span class="number">0</span>);
+<a href=#1098 id=1098 data-nosnippet>1098</a>        <span class="kw">let </span>miner_fee = <a class="self" href="#1071">self</a>.<a href="#904-906">input_total</a>() - <a href="#1096">output_total</a> - <a href="#1097">change</a>;
+<a href=#1099 id=1099 data-nosnippet>1099</a>
+<a href=#1100 id=1100 data-nosnippet>1100</a>        <span class="comment">// With ceiling division, the miner always gets at least the
+<a href=#1101 id=1101 data-nosnippet>1101</a>        // required fee.
+<a href=#1102 id=1102 data-nosnippet>1102</a>        </span><a class="macro" href="https://doc.rust-lang.org/1.91.1/core/macro.assert.html">assert!</a>(
+<a href=#1103 id=1103 data-nosnippet>1103</a>            miner_fee &gt;= <span class="self">self</span>.required_fee(),
+<a href=#1104 id=1104 data-nosnippet>1104</a>            <span class="string">"miner_fee ({miner_fee}) &lt; required_fee ({})"</span>,
+<a href=#1105 id=1105 data-nosnippet>1105</a>            <span class="self">self</span>.required_fee()
+<a href=#1106 id=1106 data-nosnippet>1106</a>        );
+<a href=#1107 id=1107 data-nosnippet>1107</a>
+<a href=#1108 id=1108 data-nosnippet>1108</a>        <a class="prelude-val" href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#variant.Ok">Ok</a>(<a href="#1098">miner_fee</a>)
+<a href=#1109 id=1109 data-nosnippet>1109</a>    }
+<a href=#1110 id=1110 data-nosnippet>1110</a>}
+<a href=#1111 id=1111 data-nosnippet>1111</a>
+<a href=#1112 id=1112 data-nosnippet>1112</a><span class="doccomment">/// Weight of a Bitcoin varint encoding for `n`, counted as non-witness
+<a href=#1113 id=1113 data-nosnippet>1113</a>/// data (scaled ×4).
+<a href=#1114 id=1114 data-nosnippet>1114</a>///
+<a href=#1115 id=1115 data-nosnippet>1115</a>/// Varint encoding sizes:
+<a href=#1116 id=1116 data-nosnippet>1116</a>/// - 0–252: 1 byte
+<a href=#1117 id=1117 data-nosnippet>1117</a>/// - 253–0xFFFF: 3 bytes
+<a href=#1118 id=1118 data-nosnippet>1118</a>/// - 0x10000–0xFFFFFFFF: 5 bytes
+<a href=#1119 id=1119 data-nosnippet>1119</a>/// - 0x100000000–: 9 bytes
+<a href=#1120 id=1120 data-nosnippet>1120</a></span><span class="kw">fn </span>varint_weight(n: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>) -&gt; Weight {
+<a href=#1121 id=1121 data-nosnippet>1121</a>    <span class="kw">let </span>bytes = <span class="kw">match </span><a href="#1120">n</a> {
+<a href=#1122 id=1122 data-nosnippet>1122</a>        <span class="number">0</span>..=<span class="number">252 </span>=&gt; <span class="number">1u64</span>,
+<a href=#1123 id=1123 data-nosnippet>1123</a>        <span class="number">253</span>..=<span class="number">0xFFFF </span>=&gt; <span class="number">3</span>,
+<a href=#1124 id=1124 data-nosnippet>1124</a>        <span class="number">0x10000</span>..=<span class="number">0xFFFFFFFF </span>=&gt; <span class="number">5</span>,
+<a href=#1125 id=1125 data-nosnippet>1125</a>        <span class="kw">_ </span>=&gt; <span class="number">9</span>,
+<a href=#1126 id=1126 data-nosnippet>1126</a>    };
+<a href=#1127 id=1127 data-nosnippet>1127</a>    Weight::from_wu(<a href="#1121">bytes</a> * <span class="number">4</span>)
+<a href=#1128 id=1128 data-nosnippet>1128</a>}</code></pre></div></section></main></body></html>
