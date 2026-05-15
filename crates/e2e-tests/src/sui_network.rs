@@ -11,6 +11,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use sui_crypto::SuiSigner;
 use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_rpc::Client;
@@ -39,6 +40,51 @@ const DEFAULT_NUM_VALIDATORS: usize = 4;
 const DEFAULT_EPOCH_DURATION_MS: u64 = 86_400_000; // 24 hours; tests that need epoch changes should set a shorter duration
 const NETWORK_STARTUP_TIMEOUT_SECS: u64 = 60;
 const NETWORK_STARTUP_POLL_INTERVAL_SECS: u64 = 1;
+
+// Track child process group IDs so a SIGINT handler can clean them up even when
+// Drop doesn't run (e.g. raw `cargo test` Ctrl+C). All operations in the signal
+// handler are async-signal-safe: atomic loads, kill(2), raise(2).
+const MAX_TRACKED_GROUPS: usize = 64;
+static CHILD_PGROUPS: [AtomicI32; MAX_TRACKED_GROUPS] =
+    [const { AtomicI32::new(0) }; MAX_TRACKED_GROUPS];
+static SIGINT_HANDLER_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+fn track_child_pgroup(pgid: i32) {
+    if !SIGINT_HANDLER_INSTALLED.swap(true, Ordering::SeqCst) {
+        unsafe {
+            nix::libc::signal(nix::libc::SIGINT, sigint_handler as nix::libc::sighandler_t);
+        }
+    }
+    for slot in &CHILD_PGROUPS {
+        if slot
+            .compare_exchange(0, pgid, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return;
+        }
+    }
+}
+
+fn untrack_child_pgroup(pgid: i32) {
+    for slot in &CHILD_PGROUPS {
+        let _ = slot.compare_exchange(pgid, 0, Ordering::Relaxed, Ordering::Relaxed);
+    }
+}
+
+extern "C" fn sigint_handler(_sig: nix::libc::c_int) {
+    for slot in &CHILD_PGROUPS {
+        let pgid = slot.load(Ordering::Relaxed);
+        if pgid != 0 {
+            unsafe {
+                nix::libc::kill(-pgid, nix::libc::SIGKILL);
+            }
+        }
+    }
+    unsafe {
+        nix::libc::signal(nix::libc::SIGINT, nix::libc::SIG_DFL);
+        nix::libc::raise(nix::libc::SIGINT);
+    }
+}
 
 pub fn sui_binary() -> &'static Path {
     static SUI_BINARY: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
@@ -105,8 +151,12 @@ pub struct SuiNetworkHandle {
 
 impl Drop for SuiNetworkHandle {
     fn drop(&mut self) {
-        let pid = nix::unistd::Pid::from_raw(self.process.id() as i32);
-        let _ = nix::sys::signal::killpg(pid, nix::sys::signal::Signal::SIGKILL);
+        let pgid = self.process.id() as i32;
+        untrack_child_pgroup(pgid);
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pgid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
         let _ = self.process.wait();
     }
 }
@@ -238,8 +288,11 @@ impl SuiNetworkBuilder {
             .stderr(stderr)
             .process_group(0);
 
-        cmd.spawn()
-            .map_err(|e| anyhow!("Failed to run `sui start`: {e}"))
+        let child = cmd
+            .spawn()
+            .map_err(|e| anyhow!("Failed to run `sui start`: {e}"))?;
+        track_child_pgroup(child.id() as i32);
+        Ok(child)
     }
 }
 
