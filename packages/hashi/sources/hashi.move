@@ -13,6 +13,7 @@ use hashi::{
     threshold,
     treasury::Treasury
 };
+use std::string::String;
 use sui::{bag::{Self, Bag}, dynamic_field as df};
 
 #[error]
@@ -101,6 +102,8 @@ entry fun finish_publish(
     self: &mut Hashi,
     upgrade_cap: sui::package::UpgradeCap,
     bitcoin_chain_id: address,
+    guardian_url: Option<String>,
+    guardian_public_key: Option<vector<u8>>,
     coin_registry: &mut sui::coin_registry::CoinRegistry,
     ctx: &mut TxContext,
 ) {
@@ -112,6 +115,18 @@ entry fun finish_publish(
 
     self.config_mut().set_upgrade_cap(upgrade_cap);
     hashi::btc_config::set_bitcoin_chain_id(self.config_mut(), bitcoin_chain_id);
+
+    if (guardian_url.is_some() && guardian_public_key.is_some()) {
+        self
+            .config_mut()
+            .set_guardian(
+                guardian_url.destroy_some(),
+                guardian_public_key.destroy_some(),
+            );
+    } else {
+        guardian_url.destroy_none();
+        guardian_public_key.destroy_none();
+    };
 
     let (treasury_cap, metadata_cap) = hashi::btc::create(coin_registry, ctx);
     self.treasury.register_treasury_cap(treasury_cap);
