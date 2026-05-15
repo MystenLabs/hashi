@@ -5,6 +5,7 @@
 //!
 //! Provides governance, committee, and configuration management commands.
 
+use anyhow::Context;
 use clap::Args;
 use clap::Subcommand;
 use clap::ValueEnum;
@@ -508,6 +509,14 @@ pub struct PublishOpts {
     #[clap(long)]
     pub bitcoin_chain_id: String,
 
+    /// Guardian gRPC endpoint URL (optional)
+    #[clap(long)]
+    pub guardian_url: Option<String>,
+
+    /// Guardian signing public key, hex-encoded (optional, requires --guardian-url)
+    #[clap(long)]
+    pub guardian_public_key: Option<String>,
+
     /// Enable verbose output
     #[clap(long, short)]
     pub verbose: bool,
@@ -888,11 +897,27 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
     // Connect to RPC
     let mut client = sui_rpc::Client::new(&opts.sui_rpc_url)?;
 
+    // Build optional guardian config
+    let guardian = match (opts.guardian_url, opts.guardian_public_key) {
+        (Some(url), Some(pk_hex)) => {
+            let public_key = hex::decode(pk_hex.strip_prefix("0x").unwrap_or(&pk_hex))
+                .context("Invalid hex for --guardian-public-key")?;
+            Some(crate::publish::GuardianConfig { url, public_key })
+        }
+        (None, None) => None,
+        _ => anyhow::bail!("--guardian-url and --guardian-public-key must both be provided or both omitted"),
+    };
+
     // Publish + init
     print_info("Publishing and initializing ...");
-    let ids =
-        crate::publish::publish_and_init(&mut client, &signer, compiled, &opts.bitcoin_chain_id)
-            .await?;
+    let ids = crate::publish::publish_and_init(
+        &mut client,
+        &signer,
+        compiled,
+        &opts.bitcoin_chain_id,
+        guardian.as_ref(),
+    )
+    .await?;
     print_success(&format!("package_id:      {}", ids.package_id));
     print_success(&format!("hashi_object_id: {}", ids.hashi_object_id));
 

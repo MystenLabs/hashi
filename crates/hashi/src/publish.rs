@@ -101,13 +101,19 @@ stderr: {}",
     })
 }
 
+/// Optional guardian configuration for post-publish initialization.
+pub struct GuardianConfig {
+    pub url: String,
+    pub public_key: Vec<u8>,
+}
+
 /// Publish the compiled package and run post-publish initialization.
 ///
 /// Executes two transactions:
 ///
 /// 1. **Publish** – publishes the modules, transfers the `UpgradeCap` to the sender.
 /// 2. **Init** – calls `hashi::finish_publish` to register BTC, the upgrade cap,
-///    and set the bitcoin chain ID.
+///    set the bitcoin chain ID, and optionally configure the guardian.
 ///
 /// Returns the [`HashiIds`] (package ID + Hashi shared-object ID) on success.
 pub async fn publish_and_init(
@@ -115,6 +121,7 @@ pub async fn publish_and_init(
     signer: &Ed25519PrivateKey,
     publish: sui_sdk_types::Publish,
     bitcoin_chain_id: &str,
+    guardian: Option<&GuardianConfig>,
 ) -> Result<HashiIds> {
     let sender = signer.public_key().derive_address();
 
@@ -204,6 +211,8 @@ pub async fn publish_and_init(
     );
     let upgrade_cap_arg = builder.object(ObjectInput::new(upgrade_cap_id).as_owned());
     let bitcoin_chain_id_arg = builder.pure(&bitcoin_chain_id_addr);
+    let guardian_url_arg = builder.pure(&guardian.map(|g| g.url.as_str()));
+    let guardian_public_key_arg = builder.pure(&guardian.map(|g| g.public_key.as_slice()));
     let coin_registry_arg = builder.object(
         ObjectInput::new(COIN_REGISTRY_OBJECT_ID)
             .as_shared()
@@ -220,6 +229,8 @@ pub async fn publish_and_init(
             hashi_arg,
             upgrade_cap_arg,
             bitcoin_chain_id_arg,
+            guardian_url_arg,
+            guardian_public_key_arg,
             coin_registry_arg,
         ],
     );
