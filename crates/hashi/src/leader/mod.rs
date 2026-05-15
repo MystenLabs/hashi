@@ -64,6 +64,7 @@ use x509_parser::nom::AsBytes;
 
 const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
 const LEADER_TASK_TIMEOUT: Duration = Duration::from_secs(60);
+const DEPOSIT_WORKLIST_REFRESH_INTERVAL_MS: u64 = 30_000;
 
 pub(crate) struct PendingUtxoCleanup {
     pub utxo_ids: Vec<UtxoId>,
@@ -85,6 +86,7 @@ pub struct LeaderService {
     withdrawal_commitment_retry_tracker: GlobalRetryTracker<WithdrawalCommitmentErrorKind>,
     deposit_tasks: JoinSet<(Address, Result<(), DepositError>)>,
     pending_deposit_requests: Vec<DepositRequest>,
+    last_deposit_worklist_reload_ts_ms: u64,
     never_retry_deposit_ids: HashSet<Address>,
     inflight_deposits: HashSet<Address>,
     withdrawal_approval_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
@@ -109,6 +111,7 @@ impl LeaderService {
             withdrawal_commitment_retry_tracker: GlobalRetryTracker::new(),
             deposit_tasks: JoinSet::new(),
             pending_deposit_requests: Vec::new(),
+            last_deposit_worklist_reload_ts_ms: 0,
             never_retry_deposit_ids: HashSet::new(),
             inflight_deposits: HashSet::new(),
             withdrawal_approval_task: None,
@@ -176,6 +179,7 @@ impl LeaderService {
                     self.check_delete_proposals(checkpoint_timestamp_ms);
                     self.check_cleanup_spent_utxos();
 
+                    self.maybe_reload_pending_deposit_requests(checkpoint_timestamp_ms);
                     if !self.pending_deposit_requests.is_empty() {
                         self.process_deposit_requests();
                     }
@@ -193,7 +197,7 @@ impl LeaderService {
 
                     // We want to unconditionally reload deposits, even if we aren't the leader to
                     // avoid only the leader being able to reload the moment a block is seen.
-                    self.reload_pending_deposit_requests();
+                    self.reload_pending_deposit_requests(checkpoint_timestamp_ms);
 
                     if !self.is_current_leader(checkpoint_height) {
                         continue;
@@ -355,7 +359,7 @@ impl LeaderService {
         is_leader
     }
 
-    fn reload_pending_deposit_requests(&mut self) {
+    fn reload_pending_deposit_requests(&mut self, checkpoint_timestamp_ms: u64) {
         let mut deposit_requests = self.inner.onchain_state().deposit_requests();
         deposit_requests.sort_by_key(|r| r.timestamp_ms);
         let deposit_ids: HashSet<Address> =
@@ -372,11 +376,23 @@ impl LeaderService {
             .into_iter()
             .filter(|request| !self.never_retry_deposit_ids.contains(&request.id))
             .collect();
+        self.last_deposit_worklist_reload_ts_ms = checkpoint_timestamp_ms;
         debug!(
             pending_deposits = self.pending_deposit_requests.len(),
             never_retry_deposits = self.never_retry_deposit_ids.len(),
             "Reloaded pending deposit worklist"
         );
+    }
+
+    // Time-based reload bound so Confirm-phase transitions still fire when
+    // BTC blocks are sparse, while keeping retry pressure rate-limited.
+    fn maybe_reload_pending_deposit_requests(&mut self, checkpoint_timestamp_ms: u64) {
+        if checkpoint_timestamp_ms.saturating_sub(self.last_deposit_worklist_reload_ts_ms)
+            < DEPOSIT_WORKLIST_REFRESH_INTERVAL_MS
+        {
+            return;
+        }
+        self.reload_pending_deposit_requests(checkpoint_timestamp_ms);
     }
 
     fn is_reconfiguring(&self) -> bool {
