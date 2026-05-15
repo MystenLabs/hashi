@@ -17,6 +17,9 @@ pub mod s3_logger; // used by the monitor
 pub mod setup;
 pub mod withdraw;
 
+#[cfg(feature = "non-enclave-dev")]
+pub mod dev_bootstrap;
+
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
