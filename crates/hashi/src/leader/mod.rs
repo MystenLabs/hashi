@@ -284,7 +284,7 @@ impl LeaderService {
     fn log_task_result(label: &str, result: Result<anyhow::Result<()>, tokio::task::JoinError>) {
         match result {
             Ok(Ok(())) => {}
-            Ok(Err(err)) => error!("{label} task failed: {err:#}"),
+            Ok(Err(err)) => error!("{label} task failed: {err:#?}"),
             Err(err) if err.is_panic() => error!("{label} task panicked: {err}"),
             Err(err) => error!("{label} task failed to join: {err}"),
         }
