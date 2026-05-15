@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Instant;
 
 use futures::StreamExt;
 use hashi_types::move_types::AbortReconfig;
@@ -14,10 +15,15 @@ use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::proto_to_timestamp_ms;
 use sui_rpc::proto::sui::rpc::v2::Checkpoint;
+use sui_rpc::proto::sui::rpc::v2::GetCheckpointRequest;
 use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
 
 use sui_sdk_types::TypeTag;
 
+use crate::metrics::GUARDIAN_REPLAY_OUTCOME_EMPTY_GAP;
+use crate::metrics::GUARDIAN_REPLAY_OUTCOME_GAP_TOO_LARGE;
+use crate::metrics::GUARDIAN_REPLAY_OUTCOME_RPC_FAILURE;
+use crate::metrics::GUARDIAN_REPLAY_OUTCOME_SUCCESS;
 use crate::metrics::Metrics;
 use crate::onchain::CheckpointInfo;
 use crate::onchain::Notification;
@@ -28,6 +34,10 @@ use crate::onchain::types::Proposal;
 use crate::onchain::types::ProposalType;
 use crate::onchain::types::WithdrawalRequest;
 use crate::withdrawals::withdrawal_limiter_consumption_amount;
+
+// Bounded so a long downtime can't force the watcher to paginate
+// indefinitely; reconciler picks up any residual drift.
+const MAX_REPLAY_CHECKPOINTS: u64 = 10_000;
 
 #[tracing::instrument(name = "watcher", skip_all)]
 pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Arc<Metrics>>) {
@@ -49,8 +59,6 @@ pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Ar
             .finish(),
     ]);
 
-    let mut rescrape_state = false;
-
     loop {
         let mut subscription = match client
             .subscription_client()
@@ -60,18 +68,52 @@ pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Ar
             )
             .await
         {
-            Ok(subscription) => subscription,
+            Ok(subscription) => subscription.into_inner(),
             Err(e) => {
                 tracing::warn!("error trying to subscribe to checkpoints: {e}");
-                rescrape_state = true;
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 continue;
             }
-        }
-        .into_inner();
+        };
 
-        // Rescrape the chain state in the event our subscription broke
-        if rescrape_state {
+        // First message tells us where the live stream starts; anything
+        // strictly between `latest_checkpoint_height` and that cursor
+        // needs to be backfilled from chain.
+        let first = match subscription.next().await {
+            Some(Ok(resp)) => resp,
+            Some(Err(e)) => {
+                tracing::warn!("error reading first checkpoint after subscribe: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                continue;
+            }
+            None => {
+                tracing::warn!("checkpoint subscription closed before first message");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+        let live_first_seq = first.cursor();
+        let last_processed = state.latest_checkpoint_height();
+        let gap_first = last_processed.saturating_add(1);
+
+        let need_full_rescrape = if last_processed > 0 && gap_first < live_first_seq {
+            matches!(
+                replay_gap(
+                    &mut client,
+                    &state,
+                    &metrics,
+                    &subscription_read_mask,
+                    gap_first,
+                    live_first_seq - 1,
+                )
+                .await,
+                ReplayOutcome::RpcFailure | ReplayOutcome::GapTooLarge,
+            )
+        } else {
+            false
+        };
+
+        if need_full_rescrape {
             match super::scrape_hashi(
                 client.clone(),
                 state.hashi_id(),
@@ -87,75 +129,159 @@ pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Ar
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("error trying to rescrape hashi's state: {e}");
+                    tracing::warn!("error rescraping hashi state after replay failure: {e}");
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     continue;
                 }
             }
-
-            rescrape_state = false;
         }
 
+        process_checkpoint(&mut client, &state, &metrics, first.checkpoint()).await;
+
         while let Some(item) = subscription.next().await {
-            let checkpoint = match item {
-                Ok(checkpoint) => checkpoint,
+            let response = match item {
+                Ok(response) => response,
                 Err(e) => {
                     tracing::warn!("error in checkpoint stream: {e}");
-                    rescrape_state = true;
                     break;
                 }
             };
 
-            let ckpt = checkpoint.cursor();
-            tracing::trace!("received checkpoint {ckpt}");
-            let timestamp_ms = checkpoint
-                .checkpoint()
-                .summary()
-                .timestamp
-                .and_then(|t| proto_to_timestamp_ms(t).ok())
-                .unwrap_or(0);
-            let epoch = checkpoint.checkpoint().summary().epoch();
-            let previous_epoch = state.latest_checkpoint_epoch();
-            if epoch != previous_epoch {
-                tracing::debug!("Sui epoch changed from {previous_epoch} to {epoch}");
-                state.notify(Notification::SuiEpochChanged(epoch));
+            process_checkpoint(&mut client, &state, &metrics, response.checkpoint()).await;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayOutcome {
+    Empty,
+    Success,
+    RpcFailure,
+    GapTooLarge,
+}
+
+async fn replay_gap(
+    client: &mut Client,
+    state: &OnchainState,
+    metrics: &Option<Arc<Metrics>>,
+    read_mask: &FieldMask,
+    from_seq: u64,
+    to_seq: u64,
+) -> ReplayOutcome {
+    let started = Instant::now();
+    let record = |outcome: &'static str, applied: u64| {
+        if let Some(m) = metrics {
+            m.record_guardian_replay(outcome, applied, started.elapsed().as_secs_f64());
+        }
+    };
+
+    if from_seq > to_seq {
+        record(GUARDIAN_REPLAY_OUTCOME_EMPTY_GAP, 0);
+        return ReplayOutcome::Empty;
+    }
+    let gap_size = to_seq - from_seq + 1;
+    if gap_size > MAX_REPLAY_CHECKPOINTS {
+        tracing::error!(
+            from_seq,
+            to_seq,
+            gap_size,
+            max = MAX_REPLAY_CHECKPOINTS,
+            "checkpoint gap exceeds replay cap"
+        );
+        if let Some(m) = metrics {
+            m.guardian_limiter_drifted.set(1);
+        }
+        record(GUARDIAN_REPLAY_OUTCOME_GAP_TOO_LARGE, 0);
+        return ReplayOutcome::GapTooLarge;
+    }
+
+    tracing::info!(from_seq, to_seq, gap_size, "replaying missed checkpoints");
+    let mut applied: u64 = 0;
+    for seq in from_seq..=to_seq {
+        let request = GetCheckpointRequest::default()
+            .with_sequence_number(seq)
+            .with_read_mask(read_mask.clone());
+        let response = match client.ledger_client().get_checkpoint(request).await {
+            Ok(r) => r.into_inner(),
+            Err(e) => {
+                tracing::warn!(seq, applied, "get_checkpoint failed during replay: {e}");
+                if let Some(m) = metrics {
+                    m.guardian_limiter_drifted.set(1);
+                }
+                record(GUARDIAN_REPLAY_OUTCOME_RPC_FAILURE, applied);
+                return ReplayOutcome::RpcFailure;
             }
-            let mut events = Vec::new();
-            {
-                let state = state.state();
+        };
+        let Some(checkpoint) = response.checkpoint else {
+            tracing::warn!(seq, "get_checkpoint returned empty body during replay");
+            if let Some(m) = metrics {
+                m.guardian_limiter_drifted.set(1);
+            }
+            record(GUARDIAN_REPLAY_OUTCOME_RPC_FAILURE, applied);
+            return ReplayOutcome::RpcFailure;
+        };
+        process_checkpoint(client, state, metrics, &checkpoint).await;
+        applied += 1;
+    }
 
-                for txn in checkpoint.checkpoint().transactions() {
-                    // Skip txns that were not successful
-                    if !txn.effects().status().success() {
-                        continue;
-                    }
+    record(GUARDIAN_REPLAY_OUTCOME_SUCCESS, applied);
+    tracing::info!(from_seq, to_seq, applied, "checkpoint gap replayed");
+    ReplayOutcome::Success
+}
 
-                    for event in txn.events().events() {
-                        match HashiEvent::try_parse(&state.package_ids, event.contents()) {
-                            Ok(Some(event)) => {
-                                tracing::debug!("found event {:?}", event);
-                                events.push(event);
-                            }
-                            Ok(None) => {}
-                            Err(e) => tracing::error!("unable to parse event: {e}"),
-                        }
+async fn process_checkpoint(
+    client: &mut Client,
+    state: &OnchainState,
+    metrics: &Option<Arc<Metrics>>,
+    checkpoint: &Checkpoint,
+) {
+    let height = checkpoint.sequence_number();
+    tracing::trace!("processing checkpoint {height}");
+    let timestamp_ms = checkpoint
+        .summary()
+        .timestamp
+        .and_then(|t| proto_to_timestamp_ms(t).ok())
+        .unwrap_or(0);
+    let epoch = checkpoint.summary().epoch();
+    let previous_epoch = state.latest_checkpoint_epoch();
+    if epoch != previous_epoch {
+        tracing::debug!("Sui epoch changed from {previous_epoch} to {epoch}");
+        state.notify(Notification::SuiEpochChanged(epoch));
+    }
+    let mut events = Vec::new();
+    {
+        let state = state.state();
+
+        for txn in checkpoint.transactions() {
+            // Skip txns that were not successful
+            if !txn.effects().status().success() {
+                continue;
+            }
+
+            for event in txn.events().events() {
+                match HashiEvent::try_parse(&state.package_ids, event.contents()) {
+                    Ok(Some(event)) => {
+                        tracing::debug!("found event {:?}", event);
+                        events.push(event);
                     }
+                    Ok(None) => {}
+                    Err(e) => tracing::error!("unable to parse event: {e}"),
                 }
             }
-
-            handle_events(&mut client, &state, &events).await;
-
-            // Finally update the latest checkpoint info
-            state.update_latest_checkpoint_info(CheckpointInfo {
-                height: ckpt,
-                timestamp_ms,
-                epoch,
-            });
-
-            if let Some(metrics) = &metrics {
-                metrics.update_onchain_state(&state);
-            }
         }
+    }
+
+    handle_events(client, state, &events).await;
+
+    // Finally update the latest checkpoint info
+    state.update_latest_checkpoint_info(CheckpointInfo {
+        height,
+        timestamp_ms,
+        epoch,
+    });
+
+    if let Some(metrics) = metrics {
+        metrics.update_onchain_state(state);
     }
 }
 

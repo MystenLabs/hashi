@@ -23,6 +23,7 @@ pub mod db;
 pub mod deposits;
 pub mod grpc;
 pub mod guardian_limiter;
+pub mod guardian_reconciler;
 pub mod leader;
 pub mod metrics;
 pub mod mpc;
@@ -727,6 +728,7 @@ impl Hashi {
         let backup_service = backup_service.start();
         let mpc_service = mpc_service.start();
         let guardian_bootstrap_service = self.clone().start_guardian_bootstrap();
+        let guardian_reconciler_service = guardian_reconciler::start_reconciler(self.clone());
 
         let service = Service::new()
             .merge(onchain_service)
@@ -735,7 +737,8 @@ impl Hashi {
             .merge(leader_service)
             .merge(backup_service)
             .merge(mpc_service)
-            .merge(guardian_bootstrap_service);
+            .merge(guardian_bootstrap_service)
+            .merge(guardian_reconciler_service);
 
         Ok(service)
     }

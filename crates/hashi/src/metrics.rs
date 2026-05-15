@@ -52,6 +52,15 @@ pub struct Metrics {
     pub guardian_rpc_total: IntCounterVec,
     pub guardian_rpc_duration_seconds: HistogramVec,
 
+    pub guardian_reconciler_local_seq: IntGauge,
+    pub guardian_reconciler_guardian_seq: IntGauge,
+    pub guardian_reconciler_seq_drift: IntGauge,
+    pub guardian_reconciler_outcomes_total: IntCounterVec,
+
+    pub guardian_replay_outcomes_total: IntCounterVec,
+    pub guardian_replay_checkpoints_total: IntCounter,
+    pub guardian_replay_duration_seconds: HistogramVec,
+
     // Kyoto (Bitcoin light client) metrics
     pub kyoto_connected_peers: IntGauge,
     pub kyoto_synced: IntGauge,
@@ -372,6 +381,55 @@ impl Metrics {
                 "hashi_guardian_rpc_duration_seconds",
                 "Latency of outbound RPC calls to the guardian by method and outcome",
                 &["method", "outcome"],
+                LATENCY_SEC_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            guardian_reconciler_local_seq: register_int_gauge_with_registry!(
+                "hashi_guardian_reconciler_local_seq",
+                "Reconciler's most-recent reading of the local limiter's next_seq",
+                registry,
+            )
+            .unwrap(),
+            guardian_reconciler_guardian_seq: register_int_gauge_with_registry!(
+                "hashi_guardian_reconciler_guardian_seq",
+                "Reconciler's most-recent reading of the guardian's authoritative next_seq",
+                registry,
+            )
+            .unwrap(),
+            guardian_reconciler_seq_drift: register_int_gauge_with_registry!(
+                "hashi_guardian_reconciler_seq_drift",
+                "guardian.next_seq - local.next_seq from the reconciler's most-recent tick \
+                 (positive = local is lagging, negative = local is ahead — never expected)",
+                registry,
+            )
+            .unwrap(),
+            guardian_reconciler_outcomes_total: register_int_counter_vec_with_registry!(
+                "hashi_guardian_reconciler_outcomes_total",
+                "Reconciler tick outcomes \
+                 (healthy, lagging_within_tolerance, lagging, ahead, rpc_failed)",
+                &["outcome"],
+                registry,
+            )
+            .unwrap(),
+            guardian_replay_outcomes_total: register_int_counter_vec_with_registry!(
+                "hashi_guardian_replay_outcomes_total",
+                "Watcher gap-fill replay attempts by outcome \
+                 (empty_gap, success, rpc_failure, gap_too_large)",
+                &["outcome"],
+                registry,
+            )
+            .unwrap(),
+            guardian_replay_checkpoints_total: register_int_counter_with_registry!(
+                "hashi_guardian_replay_checkpoints_total",
+                "Total checkpoints applied via watcher gap-fill (cumulative across attempts)",
+                registry,
+            )
+            .unwrap(),
+            guardian_replay_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_guardian_replay_duration_seconds",
+                "Duration of a watcher gap-fill attempt by outcome",
+                &["outcome"],
                 LATENCY_SEC_BUCKETS.to_vec(),
                 registry,
             )
@@ -880,6 +938,41 @@ impl Metrics {
             .inc();
     }
 
+    pub fn record_reconciliation_tick(&self, local_seq: u64, guardian_seq: u64, outcome: &str) {
+        self.guardian_reconciler_local_seq.set(local_seq as i64);
+        self.guardian_reconciler_guardian_seq
+            .set(guardian_seq as i64);
+        self.guardian_reconciler_seq_drift
+            .set(guardian_seq as i64 - local_seq as i64);
+        self.guardian_reconciler_outcomes_total
+            .with_label_values(&[outcome])
+            .inc();
+    }
+
+    pub fn record_reconciliation_rpc_failure(&self) {
+        self.guardian_reconciler_outcomes_total
+            .with_label_values(&[GUARDIAN_RECONCILER_OUTCOME_RPC_FAILED])
+            .inc();
+    }
+
+    pub fn record_guardian_replay(
+        &self,
+        outcome: &str,
+        applied_checkpoints: u64,
+        elapsed_secs: f64,
+    ) {
+        self.guardian_replay_outcomes_total
+            .with_label_values(&[outcome])
+            .inc();
+        self.guardian_replay_duration_seconds
+            .with_label_values(&[outcome])
+            .observe(elapsed_secs);
+        if applied_checkpoints > 0 {
+            self.guardian_replay_checkpoints_total
+                .inc_by(applied_checkpoints);
+        }
+    }
+
     pub fn update_onchain_state(&self, state: &crate::onchain::OnchainState) {
         self.latest_checkpoint_height
             .set(state.latest_checkpoint_height() as i64);
@@ -1054,6 +1147,19 @@ pub const GUARDIAN_RPC_OUTCOME_RATE_LIMITED: &str = "rate_limited";
 pub const GUARDIAN_RPC_OUTCOME_UNAVAILABLE: &str = "unavailable";
 pub const GUARDIAN_RPC_OUTCOME_PARSE_ERROR: &str = "parse_error";
 pub const GUARDIAN_RPC_OUTCOME_SIGNATURE_ERROR: &str = "signature_error";
+
+// Watcher gap-fill replay outcome labels.
+pub const GUARDIAN_REPLAY_OUTCOME_EMPTY_GAP: &str = "empty_gap";
+pub const GUARDIAN_REPLAY_OUTCOME_SUCCESS: &str = "success";
+pub const GUARDIAN_REPLAY_OUTCOME_RPC_FAILURE: &str = "rpc_failure";
+pub const GUARDIAN_REPLAY_OUTCOME_GAP_TOO_LARGE: &str = "gap_too_large";
+
+// Reconciler tick outcome labels.
+pub const GUARDIAN_RECONCILER_OUTCOME_HEALTHY: &str = "healthy";
+pub const GUARDIAN_RECONCILER_OUTCOME_LAGGING_WITHIN_TOLERANCE: &str = "lagging_within_tolerance";
+pub const GUARDIAN_RECONCILER_OUTCOME_LAGGING: &str = "lagging";
+pub const GUARDIAN_RECONCILER_OUTCOME_AHEAD: &str = "ahead";
+pub const GUARDIAN_RECONCILER_OUTCOME_RPC_FAILED: &str = "rpc_failed";
 
 fn limiter_outcome_label(
     result: &Result<(), crate::guardian_limiter::LocalLimiterError>,
@@ -1241,5 +1347,36 @@ mod tests {
                 metrics.record_guardian_rpc(method, outcome, 0.1);
             }
         }
+
+        for outcome in [
+            GUARDIAN_REPLAY_OUTCOME_EMPTY_GAP,
+            GUARDIAN_REPLAY_OUTCOME_SUCCESS,
+            GUARDIAN_REPLAY_OUTCOME_RPC_FAILURE,
+            GUARDIAN_REPLAY_OUTCOME_GAP_TOO_LARGE,
+        ] {
+            metrics.record_guardian_replay(outcome, 3, 0.05);
+        }
+        // applied_checkpoints accumulates across all four record calls (3 each).
+        assert_eq!(metrics.guardian_replay_checkpoints_total.get(), 12);
+
+        // Reconciler outcomes round-trip the drift gauge correctly.
+        for outcome in [
+            GUARDIAN_RECONCILER_OUTCOME_HEALTHY,
+            GUARDIAN_RECONCILER_OUTCOME_LAGGING_WITHIN_TOLERANCE,
+            GUARDIAN_RECONCILER_OUTCOME_LAGGING,
+            GUARDIAN_RECONCILER_OUTCOME_AHEAD,
+        ] {
+            metrics.record_reconciliation_tick(10, 12, outcome);
+        }
+        assert_eq!(metrics.guardian_reconciler_local_seq.get(), 10);
+        assert_eq!(metrics.guardian_reconciler_guardian_seq.get(), 12);
+        assert_eq!(metrics.guardian_reconciler_seq_drift.get(), 2);
+        // Local-ahead is encoded as a negative drift gauge.
+        metrics.record_reconciliation_tick(15, 13, GUARDIAN_RECONCILER_OUTCOME_AHEAD);
+        assert_eq!(metrics.guardian_reconciler_seq_drift.get(), -2);
+        // RPC-failed path bumps the counter without touching seq gauges.
+        let drift_before = metrics.guardian_reconciler_seq_drift.get();
+        metrics.record_reconciliation_rpc_failure();
+        assert_eq!(metrics.guardian_reconciler_seq_drift.get(), drift_before);
     }
 }

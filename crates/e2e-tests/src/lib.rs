@@ -126,6 +126,13 @@ impl TestNetworksBuilder {
         self
     }
 
+    pub fn with_guardian_reconciliation_interval_secs(mut self, secs: u64) -> Self {
+        self.hashi_builder = self
+            .hashi_builder
+            .with_guardian_reconciliation_interval_secs(secs);
+        self
+    }
+
     pub fn with_nodes(mut self, num_nodes: usize) -> Self {
         self = self.with_hashi_nodes(num_nodes);
         self = self.with_sui_validators(num_nodes);

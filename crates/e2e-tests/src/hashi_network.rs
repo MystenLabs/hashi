@@ -268,6 +268,7 @@ pub struct HashiNetworkBuilder {
     /// triggering the complaint recovery flow.
     pub test_corrupt_shares_target: Option<usize>,
     pub guardian_endpoint: Option<String>,
+    pub guardian_reconciliation_interval_secs: Option<u64>,
 }
 
 impl HashiNetworkBuilder {
@@ -282,7 +283,13 @@ impl HashiNetworkBuilder {
             max_mempool_chain_depth: None,
             test_corrupt_shares_target: None,
             guardian_endpoint: None,
+            guardian_reconciliation_interval_secs: None,
         }
+    }
+
+    pub fn with_guardian_reconciliation_interval_secs(mut self, secs: u64) -> Self {
+        self.guardian_reconciliation_interval_secs = Some(secs);
+        self
     }
 
     pub fn with_guardian_endpoint(mut self, endpoint: impl Into<String>) -> Self {
@@ -392,6 +399,8 @@ impl HashiNetworkBuilder {
             if let Some(ref guardian_endpoint) = self.guardian_endpoint {
                 config.guardian_endpoint = Some(guardian_endpoint.clone());
             }
+            config.guardian_reconciliation_interval_secs =
+                self.guardian_reconciliation_interval_secs;
             config.db = Some(dir.join(validator_address.to_string()));
             configs.push(config);
         }

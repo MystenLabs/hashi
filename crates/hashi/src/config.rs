@@ -146,6 +146,15 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guardian_endpoint: Option<String>,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guardian_reconciliation_interval_secs: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guardian_reconciliation_drift_alert_secs: Option<u64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guardian_reconciliation_tolerance_seq: Option<u64>,
+
     /// Maximum gRPC decoding message size in bytes.
     ///
     /// Defaults to 16 MiB if not specified. Tonic's built-in default is 4 MiB,
@@ -353,6 +362,21 @@ impl Config {
 
     pub fn guardian_endpoint(&self) -> Option<&str> {
         self.guardian_endpoint.as_deref()
+    }
+
+    pub fn guardian_reconciliation_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.guardian_reconciliation_interval_secs.unwrap_or(300))
+    }
+
+    pub fn guardian_reconciliation_drift_alert(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.guardian_reconciliation_drift_alert_secs
+                .unwrap_or(1_800),
+        )
+    }
+
+    pub fn guardian_reconciliation_tolerance_seq(&self) -> u64 {
+        self.guardian_reconciliation_tolerance_seq.unwrap_or(2)
     }
 
     pub fn grpc_max_decoding_message_size(&self) -> usize {
