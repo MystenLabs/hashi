@@ -29,6 +29,10 @@ aws-credential-types = "1"
 
 aws-smithy-mocks = { version = "0.1", optional = true }
 
+# dev-only — used by the `dev_bootstrap` module behind `non-enclave-dev`.
+sui-sdk-types = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+
 [dev-dependencies]
 aws-sdk-s3 = { version = "1.12.0", features = ["test-util"] }
 aws-smithy-mocks = "0.1"
@@ -36,6 +40,6 @@ aws-smithy-mocks = "0.1"
 [features]
 # Stubs out the AWS Nitro NSM attestation call so the guardian can run
 # outside a Nitro enclave. Do not enable for prod builds.
-non-enclave-dev = []
+non-enclave-dev = ["dep:sui-sdk-types", "dep:hex"]
 # Exposes `test_utils` to external crates.
 test-utils = ["dep:aws-smithy-mocks", "aws-sdk-s3/test-util"]
