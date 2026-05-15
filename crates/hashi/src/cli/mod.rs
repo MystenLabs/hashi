@@ -905,7 +905,9 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
             Some(crate::publish::GuardianConfig { url, public_key })
         }
         (None, None) => None,
-        _ => anyhow::bail!("--guardian-url and --guardian-public-key must both be provided or both omitted"),
+        _ => anyhow::bail!(
+            "--guardian-url and --guardian-public-key must both be provided or both omitted"
+        ),
     };
 
     // Publish + init

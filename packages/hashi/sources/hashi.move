@@ -117,10 +117,12 @@ entry fun finish_publish(
     hashi::btc_config::set_bitcoin_chain_id(self.config_mut(), bitcoin_chain_id);
 
     if (guardian_url.is_some() && guardian_public_key.is_some()) {
-        self.config_mut().set_guardian(
-            guardian_url.destroy_some(),
-            guardian_public_key.destroy_some(),
-        );
+        self
+            .config_mut()
+            .set_guardian(
+                guardian_url.destroy_some(),
+                guardian_public_key.destroy_some(),
+            );
     } else {
         guardian_url.destroy_none();
         guardian_public_key.destroy_none();
