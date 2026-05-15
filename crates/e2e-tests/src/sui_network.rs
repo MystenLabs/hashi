@@ -8,6 +8,7 @@ use hashi::config::get_available_port;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
+use std::os::unix::process::CommandExt;
 use std::process::Child;
 use std::process::Command;
 use sui_crypto::SuiSigner;
@@ -104,7 +105,9 @@ pub struct SuiNetworkHandle {
 
 impl Drop for SuiNetworkHandle {
     fn drop(&mut self) {
-        let _ = self.process.kill();
+        let pid = nix::unistd::Pid::from_raw(self.process.id() as i32);
+        let _ = nix::sys::signal::killpg(pid, nix::sys::signal::Signal::SIGKILL);
+        let _ = self.process.wait();
     }
 }
 
@@ -233,7 +236,9 @@ impl SuiNetworkBuilder {
             .arg(rpc_port.to_string())
             .stdout(stdout)
             .stderr(stderr)
-            .spawn()
+            .process_group(0);
+
+        cmd.spawn()
             .map_err(|e| anyhow!("Failed to run `sui start`: {e}"))
     }
 }
