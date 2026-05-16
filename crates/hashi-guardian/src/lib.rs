@@ -8,6 +8,7 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_mins(1);
 pub const HEARTBEAT_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 pub const MAX_HEARTBEAT_FAILURES_INTERVAL: Duration = Duration::from_mins(5);
 
+pub mod cache;
 pub mod enclave;
 pub mod getters;
 pub mod heartbeat;
