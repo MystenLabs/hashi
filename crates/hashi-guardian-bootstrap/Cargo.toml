@@ -1,0 +1,31 @@
+[package]
+name = "hashi-guardian-bootstrap"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# CLI that drives a freshly-deployed hashi-guardian from heartbeating-only
+# to fully-initialized by submitting the on-chain HashiCommittee, the rate
+# limit policy, and the encrypted operator shares. Not part of any prod
+# Docker build — runs from a developer laptop or CI runner.
+
+[[bin]]
+name = "hashi-guardian-bootstrap"
+path = "src/main.rs"
+
+[dependencies]
+hashi = { path = "../hashi" }
+hashi-guardian = { path = "../hashi-guardian", features = ["non-enclave-dev"] }
+hashi-types = { path = "../hashi-types" }
+
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rand.workspace = true
+hex.workspace = true
+hpke = "0.12.0"
+sui-sdk-types.workspace = true
+# Mirror the bridge node's choice — install a process-wide rustls
+# CryptoProvider before OnchainState opens its TLS connection to Sui RPC.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }

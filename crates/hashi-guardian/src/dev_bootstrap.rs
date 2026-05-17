@@ -84,10 +84,11 @@ pub fn full_bucket_state(config: &WithdrawalConfig) -> LimiterState {
     }
 }
 
-/// Single-member mock committee for dev. Lets the guardian reach fully-
-/// initialized state so hashi-server can seed its local limiter. Signature
-/// verification against on-chain withdrawals will fail until this is
-/// replaced with a real committee (separate problem).
+/// Single-member mock committee for dev tests. Kept available for unit tests
+/// and harness setups that don't have a real chain to query. The
+/// `bootstrap_guardian_init` example scrapes the real on-chain committee
+/// inline (see that file) — it can't live here because the Dockerfile
+/// for the guardian image doesn't ship the `hashi` crate's source.
 pub fn mock_dev_committee(epoch: u64) -> HashiCommittee {
     let bls_sk =
         Bls12381PrivateKey::from_bytes([9u8; Bls12381PrivateKey::LENGTH]).expect("valid bls sk");

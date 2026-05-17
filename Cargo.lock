@@ -2925,6 +2925,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashi-guardian-bootstrap"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "hashi",
+ "hashi-guardian",
+ "hashi-types",
+ "hex",
+ "hpke",
+ "rand 0.8.5",
+ "rustls 0.23.37",
+ "sui-sdk-types",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "hashi-monitor"
 version = "0.1.0"
 dependencies = [

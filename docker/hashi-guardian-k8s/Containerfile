@@ -59,5 +59,10 @@ RUN --network=none cargo build --release --frozen --target "$TARGET" -p hashi-gu
 # Package stage: minimal runtime image
 #
 FROM core-filesystem
+# CA bundle so the AWS SDK's rustls-native-certs verifier can validate
+# the S3 endpoint cert chain (stagex/core-filesystem is too minimal to
+# include one). Lifted from the build image, which already pulled it in
+# to talk to crates.io etc.
+COPY --from=build /etc/ssl/cert.pem /etc/ssl/cert.pem
 COPY --from=build /src/target/x86_64-unknown-linux-musl/release/hashi-guardian /usr/bin/hashi-guardian
 ENTRYPOINT ["/usr/bin/hashi-guardian"]
