@@ -2921,6 +2921,159 @@ impl MpcManager {
         })
     }
 
+    /// Reconstruct **this node's** `MpcOutput` for `self.mpc_config.epoch` from
+    /// the rotation messages on disk under that same epoch.
+    ///
+    /// `reconstruct_from_rotation_certificates` reconstructs the *previous*
+    /// epoch's output (the input to a not-yet-completed rotation). That path
+    /// can't be taken after a coordinated restart: `prune_messages_below(N)`
+    /// runs at the end of epoch `N`'s reconfig and wipes the previous epoch's
+    /// rotation messages, while `previous_output`/`current_output` are
+    /// in-memory only. There is no source of truth left to redo the
+    /// `N-1 -> N` rotation from.
+    ///
+    /// What *is* still on disk is each peer's rotation messages from the
+    /// just-completed `N-1 -> N` run, stored under epoch `N`. This method
+    /// uses those, decrypted with the current epoch's encryption key, to
+    /// re-derive this node's key shares for epoch `N` directly — the same
+    /// computation that `run_key_rotation_as_party` performs at the end of
+    /// the live protocol.
+    pub fn reconstruct_current_from_stored_rotation(
+        &mut self,
+        certificates: &[CertificateV1],
+    ) -> MpcResult<MpcOutput> {
+        let current_epoch = self.mpc_config.epoch;
+        let nodes = self.mpc_config.nodes.clone();
+        let my_party_id = self.party_id;
+        let output_threshold = self.mpc_config.threshold;
+        // Combining partial outputs needs the threshold of the source
+        // polynomial — i.e. the previous committee's threshold, which is the
+        // output threshold of the rotation that produced the shares we're
+        // decrypting.
+        let input_threshold = self.previous_reconfig_output_threshold.ok_or_else(|| {
+            MpcError::InvalidConfig(
+                "current-output reconstruction requires previous reconfig's output threshold"
+                    .into(),
+            )
+        })?;
+        // Dealers used `SessionId::new(chain_id, mpc_config.epoch, KeyRotation)`
+        // when generating these messages (that's what `setup_key_rotation`
+        // sets `session_id` to before `create_rotation_messages` runs).
+        let source_session_id =
+            SessionId::new(&self.chain_id, current_epoch, &ProtocolType::KeyRotation);
+        let mut local_outputs: HashMap<ShareIndex, avss::PartialOutput> = HashMap::new();
+        let mut certified_share_indices: Vec<ShareIndex> = Vec::new();
+        for cert in certificates {
+            let CertificateV1::Rotation(rotation_cert) = cert else {
+                return Err(MpcError::InvalidCertificate(
+                    "current-output reconstruction expects all Rotation certificates".into(),
+                ));
+            };
+            let cert_msg = rotation_cert.message();
+            let dealer_address = cert_msg.dealer_address;
+            let rotation_msgs = self
+                .public_messages_store
+                .get_rotation_messages(current_epoch, &dealer_address)
+                .map_err(|e| MpcError::StorageError(e.to_string()))?
+                .ok_or_else(|| {
+                    MpcError::StorageError(format!(
+                        "Rotation messages not found for dealer: {:?}",
+                        dealer_address
+                    ))
+                })?;
+            let actual_hash = compute_messages_hash(&Messages::Rotation(rotation_msgs.clone()));
+            if actual_hash != cert_msg.messages_hash {
+                return Err(MpcError::ProtocolFailed(format!(
+                    "Message hash mismatch for dealer {:?}: stored message does not match certificate",
+                    dealer_address
+                )));
+            }
+            for (share_index, message) in rotation_msgs {
+                let session_id = source_session_id
+                    .rotation_session_id(&dealer_address, share_index)
+                    .to_vec();
+                match process_avss_message(
+                    &self.encryption_key,
+                    nodes.clone(),
+                    my_party_id,
+                    output_threshold,
+                    session_id,
+                    &message,
+                    None,
+                )? {
+                    avss::ProcessedMessage::Valid(output) => {
+                        local_outputs.insert(share_index, output);
+                    }
+                    avss::ProcessedMessage::Complaint(_) => {
+                        // A complaint here means *this* node received an
+                        // invalid share from a certified dealer, which can't
+                        // happen in a quorum that already produced a valid
+                        // on-chain certificate. Bail loudly rather than
+                        // pretending to recover.
+                        return Err(MpcError::ProtocolFailed(format!(
+                            "Stored rotation message from dealer {:?} share {} is invalid \
+                             despite being certified on-chain; cluster needs manual recovery",
+                            dealer_address, share_index
+                        )));
+                    }
+                }
+                certified_share_indices.push(share_index);
+            }
+        }
+        if certified_share_indices.len() < input_threshold as usize {
+            return Err(MpcError::NotEnoughApprovals {
+                needed: input_threshold as usize,
+                got: certified_share_indices.len(),
+            });
+        }
+        let indexed_outputs: Vec<IndexedValue<avss::PartialOutput>> = certified_share_indices
+            .iter()
+            .take(input_threshold as usize)
+            .map(|&share_index| {
+                let output = local_outputs.get(&share_index).ok_or_else(|| {
+                    MpcError::ProtocolFailed(format!(
+                        "No rotation output found for share index: {}",
+                        share_index
+                    ))
+                })?;
+                Ok(IndexedValue {
+                    index: share_index,
+                    value: output.clone(),
+                })
+            })
+            .collect::<Result<_, MpcError>>()?;
+        let used_indices: Vec<_> = indexed_outputs.iter().map(|o| o.index).collect();
+        tracing::info!(
+            "reconstruct_current_from_stored_rotation: {} share_indices={:?}, \
+             output_threshold={output_threshold}, input_threshold={input_threshold}",
+            used_indices.len(),
+            used_indices,
+        );
+        let combined = avss::ReceiverOutput::complete_key_rotation(
+            input_threshold,
+            my_party_id,
+            &nodes,
+            &indexed_outputs,
+        )
+        .expect(EXPECT_THRESHOLD_MET);
+        tracing::info!(
+            "reconstruct_current_from_stored_rotation: result vk={}",
+            hex::encode(combined.vk.to_byte_array()),
+        );
+        let output = MpcOutput {
+            public_key: combined.vk,
+            key_shares: combined.my_shares,
+            commitments: combined
+                .commitments
+                .into_iter()
+                .map(|c| (c.index, c.value))
+                .collect(),
+            threshold: output_threshold,
+        };
+        self.current_output = Some(output.clone());
+        Ok(output)
+    }
+
     pub fn reconstruct_previous_output(
         &self,
         certificates: &[CertificateV1],
