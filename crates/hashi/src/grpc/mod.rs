@@ -175,8 +175,6 @@ async fn health() -> impl axum::response::IntoResponse {
     (axum::http::StatusCode::OK, "up")
 }
 
-/// 200 once the SigningManager for the current on-chain epoch is built —
-/// i.e. MPC recovery (or rotation) has finished and the node can sign.
 async fn ready(hashi: Arc<Hashi>) -> impl axum::response::IntoResponse {
     let epoch = hashi.onchain_state().epoch();
     if hashi.signing_manager_for(epoch).is_some() {
