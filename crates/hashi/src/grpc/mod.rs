@@ -100,7 +100,13 @@ impl HttpService {
                 .add_grpc_service(health_service)
         };
 
-        let health_endpoint = axum::Router::new().route("/health", axum::routing::get(health));
+        let hashi_for_ready = self.inner.clone();
+        let health_endpoint = axum::Router::new()
+            .route("/health", axum::routing::get(health))
+            .route(
+                "/ready",
+                axum::routing::get(move || ready(hashi_for_ready.clone())),
+            );
 
         let layers = ServiceBuilder::new()
             // Add middleware for mapping a request to a known validator
@@ -167,6 +173,20 @@ impl HttpService {
 
 async fn health() -> impl axum::response::IntoResponse {
     (axum::http::StatusCode::OK, "up")
+}
+
+/// 200 once the SigningManager for the current on-chain epoch is built —
+/// i.e. MPC recovery (or rotation) has finished and the node can sign.
+async fn ready(hashi: Arc<Hashi>) -> impl axum::response::IntoResponse {
+    let epoch = hashi.onchain_state().epoch();
+    if hashi.signing_manager_for(epoch).is_some() {
+        (axum::http::StatusCode::OK, "ready")
+    } else {
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "SigningManager not yet initialized",
+        )
+    }
 }
 
 trait RouterExt {
