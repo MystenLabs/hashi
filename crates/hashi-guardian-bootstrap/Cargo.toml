@@ -26,3 +26,6 @@ rand.workspace = true
 hex.workspace = true
 hpke = "0.12.0"
 sui-sdk-types.workspace = true
+# Mirror the bridge node's choice — install a process-wide rustls
+# CryptoProvider before OnchainState opens its TLS connection to Sui RPC.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }

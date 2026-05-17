@@ -95,6 +95,10 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    // OnchainState's HTTPS connection to Sui RPC needs a default rustls
+    // provider — same choice the bridge node makes in `hashi/src/lib.rs`.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let endpoint =
         env::var("GUARDIAN_ENDPOINT").unwrap_or_else(|_| "http://localhost:3000".to_string());
     let bucket = required_env("AWS_S3_BUCKET")?;
