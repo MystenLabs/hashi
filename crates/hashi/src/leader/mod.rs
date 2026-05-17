@@ -1361,10 +1361,14 @@ impl LeaderService {
         }
         info!("MPC signing withdrawal transaction");
 
+        // Fresh per-attempt timestamp from the leader's current checkpoint;
+        // using `txn.timestamp_ms` lets stuck batches age past the per-node
+        // `GUARDIAN_TIMESTAMP_TOLERANCE_SECS` check on retries.
+        let timestamp_secs = inner.onchain_state().latest_checkpoint_timestamp_ms() / 1000;
+
         // Fail fast before MPC if our own limiter would reject.
         let expected_limiter_seq = if let Some(limiter) = inner.local_limiter() {
             let amount_sats = crate::withdrawals::withdrawal_limiter_consumption_amount(&txn);
-            let timestamp_secs = txn.timestamp_ms / 1000;
             let next_seq = limiter.next_seq();
             let result = limiter.validate_consume(next_seq, timestamp_secs, amount_sats);
             inner.metrics.record_limiter_validate(
@@ -1404,9 +1408,10 @@ impl LeaderService {
             .map(|s| s.to_byte_array().to_vec())
             .collect();
 
-        // 3. Post-MPC: forward to guardian for the enclave signature.
+        // 3. Post-MPC: forward to guardian for the enclave signature. Reuses
+        // the `timestamp_secs` from the pre-MPC validate so the BLS-signed
+        // certificate covers a consistent `(timestamp, seq, amount)` triple.
         if let (Some(guardian), Some(seq)) = (inner.guardian_client(), expected_limiter_seq) {
-            let timestamp_secs = txn.timestamp_ms / 1000;
             Self::finalize_withdrawal_through_guardian(
                 &inner,
                 &txn,

@@ -143,7 +143,7 @@ pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Ar
                 }
             }
 
-            handle_events(&mut client, &state, &events).await;
+            handle_events(&mut client, &state, timestamp_ms, &events).await;
 
             // Finally update the latest checkpoint info
             state.update_latest_checkpoint_info(CheckpointInfo {
@@ -159,7 +159,12 @@ pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Ar
     }
 }
 
-async fn handle_events(client: &mut Client, state: &OnchainState, events: &[HashiEvent]) {
+async fn handle_events(
+    client: &mut Client,
+    state: &OnchainState,
+    checkpoint_timestamp_ms: u64,
+    events: &[HashiEvent],
+) {
     if events.is_empty() {
         return;
     }
@@ -442,6 +447,9 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                 tracing::info!(withdrawal_txn_id = %event.withdrawal_txn_id, "Withdrawal signatures stored on-chain");
                 // Watcher is the sole mutator of the local limiter
                 // post-bootstrap; advance it inline with the mirror update.
+                // Advance uses the event's checkpoint timestamp (~sign-time)
+                // rather than `txn.timestamp_ms` (creation time) to stay in
+                // lockstep with the guardian's `last_updated_at`.
                 let limiter_inputs = {
                     let mut state = state.state_mut();
                     state
@@ -452,7 +460,7 @@ async fn handle_events(client: &mut Client, state: &OnchainState, events: &[Hash
                         .map(|txn| {
                             txn.signatures = Some(event.signatures.clone());
                             let amount_sats = withdrawal_limiter_consumption_amount(txn);
-                            let timestamp_secs = txn.timestamp_ms / 1000;
+                            let timestamp_secs = checkpoint_timestamp_ms / 1000;
                             (amount_sats, timestamp_secs)
                         })
                 };
