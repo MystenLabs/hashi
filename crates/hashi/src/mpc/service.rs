@@ -279,7 +279,14 @@ impl MpcService {
         let output = match protocol_type {
             Some(hashi_types::move_types::ProtocolType::KeyRotation) => {
                 self.setup_key_rotation(epoch)?;
-                self.run_key_rotation(epoch).await
+                if let Some(out) = self.try_recover_from_stored_rotation(epoch).await? {
+                    info!(
+                        "recover_mpc_state: recovered epoch {epoch} from stored rotation messages"
+                    );
+                    Ok(out)
+                } else {
+                    self.run_key_rotation(epoch).await
+                }
             }
             _ => {
                 self.setup_initial_dkg(epoch)?;
@@ -291,6 +298,59 @@ impl MpcService {
             hex::encode(output.public_key.to_byte_array())
         );
         Ok(output)
+    }
+
+    /// Returns `Ok(Some)` only when the current epoch's rotation messages are
+    /// on disk and reconstruct cleanly; otherwise `Ok(None)` so the caller
+    /// runs the live protocol.
+    async fn try_recover_from_stored_rotation(
+        &self,
+        epoch: u64,
+    ) -> anyhow::Result<Option<MpcOutput>> {
+        let onchain_state = self.inner.onchain_state().clone();
+        let certificates: Vec<CertificateV1> = fetch_certificates(&onchain_state, epoch, None)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch certificates for epoch {epoch}: {e}"))?
+            .into_iter()
+            .map(|(_, cert)| cert)
+            .collect();
+        if !matches!(certificates.first(), Some(CertificateV1::Rotation(_))) {
+            return Ok(None);
+        }
+        for cert in &certificates {
+            let CertificateV1::Rotation(rotation_cert) = cert else {
+                return Ok(None);
+            };
+            let dealer = rotation_cert.message().dealer_address;
+            if self
+                .inner
+                .db
+                .get_rotation_messages(epoch, &dealer)?
+                .is_none()
+            {
+                debug!(
+                    "try_recover_from_stored_rotation: missing rotation messages for dealer {dealer} at epoch {epoch}"
+                );
+                return Ok(None);
+            }
+        }
+        let mpc_manager = self
+            .inner
+            .mpc_manager()
+            .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized for fast-path recovery"))?;
+        let result = {
+            let mut mgr = mpc_manager.write().unwrap();
+            mgr.reconstruct_current_from_stored_rotation(&certificates)
+        };
+        match result {
+            Ok(output) => Ok(Some(output)),
+            Err(e) => {
+                warn!(
+                    "try_recover_from_stored_rotation: reconstruction failed ({e}); falling back to live protocol"
+                );
+                Ok(None)
+            }
+        }
     }
 
     #[tracing::instrument(level = "info", skip_all, fields(target_epoch))]
