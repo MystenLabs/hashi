@@ -279,16 +279,9 @@ impl MpcService {
         let output = match protocol_type {
             Some(hashi_types::move_types::ProtocolType::KeyRotation) => {
                 self.setup_key_rotation(epoch)?;
-                // Fast path: the just-completed rotation N-1 -> N left its
-                // messages on disk under epoch N. If they're still here, we
-                // can re-derive this node's shares for epoch N directly,
-                // without redoing the live protocol — which would otherwise
-                // be impossible after end_reconfig pruned the (N-1)-keyed
-                // dealer/rotation messages.
                 if let Some(out) = self.try_recover_from_stored_rotation(epoch).await? {
                     info!(
-                        "recover_mpc_state: recovered epoch {epoch} from stored rotation \
-                         messages (fast path)"
+                        "recover_mpc_state: recovered epoch {epoch} from stored rotation messages"
                     );
                     Ok(out)
                 } else {
@@ -307,13 +300,9 @@ impl MpcService {
         Ok(output)
     }
 
-    /// Restart-recovery fast path for `recover_mpc_state`. Returns `Ok(Some)`
-    /// only when the local DB has rotation messages for the current epoch
-    /// (the just-completed `N-1 -> N` rotation) and reconstruction from them
-    /// succeeds. Any other case — including reconstruction errors that would
-    /// indicate genuine cluster damage — surfaces via `Ok(None)` so the
-    /// caller falls back to the live protocol path and logs the original
-    /// errors there.
+    /// Returns `Ok(Some)` only when the current epoch's rotation messages are
+    /// on disk and reconstruct cleanly; otherwise `Ok(None)` so the caller
+    /// runs the live protocol.
     async fn try_recover_from_stored_rotation(
         &self,
         epoch: u64,
@@ -325,14 +314,9 @@ impl MpcService {
             .into_iter()
             .map(|(_, cert)| cert)
             .collect();
-        if certificates.is_empty() {
-            return Ok(None);
-        }
         if !matches!(certificates.first(), Some(CertificateV1::Rotation(_))) {
             return Ok(None);
         }
-        // Cheap pre-check: if even one expected dealer's rotation messages
-        // aren't on disk, this path can't work — defer to the live protocol.
         for cert in &certificates {
             let CertificateV1::Rotation(rotation_cert) = cert else {
                 return Ok(None);
@@ -345,8 +329,7 @@ impl MpcService {
                 .is_none()
             {
                 debug!(
-                    "try_recover_from_stored_rotation: missing rotation messages for dealer \
-                     {dealer} at epoch {epoch}; deferring to live protocol",
+                    "try_recover_from_stored_rotation: missing rotation messages for dealer {dealer} at epoch {epoch}"
                 );
                 return Ok(None);
             }
@@ -363,8 +346,7 @@ impl MpcService {
             Ok(output) => Ok(Some(output)),
             Err(e) => {
                 warn!(
-                    "try_recover_from_stored_rotation: reconstruction failed ({e}); \
-                     falling back to live protocol"
+                    "try_recover_from_stored_rotation: reconstruction failed ({e}); falling back to live protocol"
                 );
                 Ok(None)
             }

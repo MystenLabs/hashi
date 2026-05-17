@@ -2921,23 +2921,9 @@ impl MpcManager {
         })
     }
 
-    /// Reconstruct **this node's** `MpcOutput` for `self.mpc_config.epoch` from
-    /// the rotation messages on disk under that same epoch.
-    ///
-    /// `reconstruct_from_rotation_certificates` reconstructs the *previous*
-    /// epoch's output (the input to a not-yet-completed rotation). That path
-    /// can't be taken after a coordinated restart: `prune_messages_below(N)`
-    /// runs at the end of epoch `N`'s reconfig and wipes the previous epoch's
-    /// rotation messages, while `previous_output`/`current_output` are
-    /// in-memory only. There is no source of truth left to redo the
-    /// `N-1 -> N` rotation from.
-    ///
-    /// What *is* still on disk is each peer's rotation messages from the
-    /// just-completed `N-1 -> N` run, stored under epoch `N`. This method
-    /// uses those, decrypted with the current epoch's encryption key, to
-    /// re-derive this node's key shares for epoch `N` directly — the same
-    /// computation that `run_key_rotation_as_party` performs at the end of
-    /// the live protocol.
+    /// Re-derive this node's `MpcOutput` for `self.mpc_config.epoch` from the
+    /// rotation messages on disk under that same epoch — the data is exactly
+    /// what `run_key_rotation_as_party` would have produced live.
     pub fn reconstruct_current_from_stored_rotation(
         &mut self,
         certificates: &[CertificateV1],
@@ -2946,19 +2932,12 @@ impl MpcManager {
         let nodes = self.mpc_config.nodes.clone();
         let my_party_id = self.party_id;
         let output_threshold = self.mpc_config.threshold;
-        // Combining partial outputs needs the threshold of the source
-        // polynomial — i.e. the previous committee's threshold, which is the
-        // output threshold of the rotation that produced the shares we're
-        // decrypting.
         let input_threshold = self.previous_reconfig_output_threshold.ok_or_else(|| {
             MpcError::InvalidConfig(
                 "current-output reconstruction requires previous reconfig's output threshold"
                     .into(),
             )
         })?;
-        // Dealers used `SessionId::new(chain_id, mpc_config.epoch, KeyRotation)`
-        // when generating these messages (that's what `setup_key_rotation`
-        // sets `session_id` to before `create_rotation_messages` runs).
         let source_session_id =
             SessionId::new(&self.chain_id, current_epoch, &ProtocolType::KeyRotation);
         let mut local_outputs: HashMap<ShareIndex, avss::PartialOutput> = HashMap::new();
@@ -3005,11 +2984,7 @@ impl MpcManager {
                         local_outputs.insert(share_index, output);
                     }
                     avss::ProcessedMessage::Complaint(_) => {
-                        // A complaint here means *this* node received an
-                        // invalid share from a certified dealer, which can't
-                        // happen in a quorum that already produced a valid
-                        // on-chain certificate. Bail loudly rather than
-                        // pretending to recover.
+                        // Invalid share from an on-chain-certified dealer: bail rather than mask.
                         return Err(MpcError::ProtocolFailed(format!(
                             "Stored rotation message from dealer {:?} share {} is invalid \
                              despite being certified on-chain; cluster needs manual recovery",
