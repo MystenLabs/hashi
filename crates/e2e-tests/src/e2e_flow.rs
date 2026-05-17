@@ -478,7 +478,22 @@ mod tests {
                 .local_limiter()
                 .expect("local limiter present after bootstrap")
                 .snapshot();
-            assert_eq!(local_state, guardian_state);
+            // `last_updated_at` can drift a few seconds — watcher uses the
+            // event-carrying checkpoint, guardian the leader's signing one.
+            assert_eq!(local_state.next_seq, guardian_state.next_seq);
+            assert_eq!(
+                local_state.num_tokens_available,
+                guardian_state.num_tokens_available,
+            );
+            let drift = local_state
+                .last_updated_at
+                .checked_sub(guardian_state.last_updated_at);
+            assert!(
+                matches!(drift, Some(0..=60)),
+                "local last_updated_at ({}) must be 0–60s after guardian's ({})",
+                local_state.last_updated_at,
+                guardian_state.last_updated_at,
+            );
         }
 
         info!("=== Bitcoin Withdrawal E2E Test{label} Passed ===");
