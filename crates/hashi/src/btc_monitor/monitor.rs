@@ -31,7 +31,7 @@ const KYOTO_MAX_CONSECUTIVE_FAILURES: u32 = 15;
 const KYOTO_RESTART_DELAY_BASE: Duration = Duration::from_secs(5);
 
 /// Random additional delay to spread reconnects across pods.
-const KYOTO_RESTART_DELAY_JITTER: Duration = Duration::from_secs(30);
+const KYOTO_MAX_RESTART_DELAY_JITTER: Duration = Duration::from_secs(30);
 
 /// How many Bitcoin blocks a deposit observation can go without being
 /// refreshed before it's dropped from the confirmation-metrics cache.
@@ -39,7 +39,7 @@ const STALE_OBSERVATION_BLOCKS: u32 = 10;
 
 fn next_restart_delay() -> Duration {
     let jitter = Duration::from_millis(
-        rand::thread_rng().gen_range(0..=KYOTO_RESTART_DELAY_JITTER.as_millis() as u64),
+        rand::thread_rng().gen_range(0..=KYOTO_MAX_RESTART_DELAY_JITTER.as_millis() as u64),
     );
     KYOTO_RESTART_DELAY_BASE + jitter
 }
@@ -1251,7 +1251,7 @@ mod tests {
 
     #[test]
     fn next_restart_delay_stays_in_range() {
-        let max = KYOTO_RESTART_DELAY_BASE + KYOTO_RESTART_DELAY_JITTER;
+        let max = KYOTO_RESTART_DELAY_BASE + KYOTO_MAX_RESTART_DELAY_JITTER;
         for _ in 0..1000 {
             let d = next_restart_delay();
             assert!(d >= KYOTO_RESTART_DELAY_BASE, "{d:?} < base");
