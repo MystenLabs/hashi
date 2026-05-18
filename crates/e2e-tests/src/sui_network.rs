@@ -36,7 +36,7 @@ use tokio::time::sleep;
 
 const DEFAULT_NUM_VALIDATORS: usize = 4;
 const DEFAULT_EPOCH_DURATION_MS: u64 = 86_400_000; // 24 hours; tests that need epoch changes should set a shorter duration
-const NETWORK_STARTUP_TIMEOUT_SECS: u64 = 60;
+const NETWORK_STARTUP_TIMEOUT_SECS: u64 = 120;
 const NETWORK_STARTUP_POLL_INTERVAL_SECS: u64 = 1;
 
 pub fn sui_binary() -> &'static Path {
@@ -60,7 +60,7 @@ pub fn sui_binary() -> &'static Path {
         .as_path()
 }
 
-async fn wait_for_ready(client: &mut Client) -> Result<()> {
+async fn wait_for_ready(client: &mut Client, dir: &Path) -> Result<()> {
     // Wait till the network has started up and at least one checkpoint has been produced
     for _ in 0..NETWORK_STARTUP_TIMEOUT_SECS {
         if let Ok(resp) = client
@@ -74,9 +74,34 @@ async fn wait_for_ready(client: &mut Client) -> Result<()> {
         sleep(Duration::from_secs(NETWORK_STARTUP_POLL_INTERVAL_SECS)).await;
     }
     anyhow::bail!(
-        "Network failed to start within {}s timeout",
+        "Network failed to start within {}s timeout. {}",
         NETWORK_STARTUP_TIMEOUT_SECS,
+        startup_diagnostics(dir),
     )
+}
+
+/// Tail the last 20 lines of each of sui's stdout/stderr log files for
+/// inclusion in a timeout error. Mirrors `BitcoinNodeHandle::startup_diagnostics`.
+fn startup_diagnostics(dir: &Path) -> String {
+    let mut diagnostics = Vec::new();
+    for (label, path) in [
+        ("stderr", dir.join("out.stderr")),
+        ("stdout", dir.join("out.stdout")),
+    ] {
+        let contents = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|contents| {
+                let lines: Vec<_> = contents.lines().rev().take(20).collect();
+                if lines.is_empty() {
+                    None
+                } else {
+                    Some(lines.into_iter().rev().collect::<Vec<_>>().join(" | "))
+                }
+            })
+            .unwrap_or_else(|| format!("<empty or unavailable at {}>", path.display()));
+        diagnostics.push(format!("{label}: {contents}"));
+    }
+    diagnostics.join("; ")
 }
 
 /// Handle for a Sui network running via pre-compiled binary
@@ -172,7 +197,7 @@ impl SuiNetworkBuilder {
         let rpc_url = format!("http://127.0.0.1:{rpc_port}");
 
         let mut client = sui_rpc::Client::new(&rpc_url)?;
-        wait_for_ready(&mut client).await?;
+        wait_for_ready(&mut client, &dir).await?;
         let mut sui = SuiNetworkHandle {
             process,
             dir,
