@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use anyhow::Result;
 use kyoto::FeeRate;
 use kyoto::HeaderCheckpoint;
@@ -88,6 +89,7 @@ pub struct Monitor {
     bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
     client_tx: tokio::sync::mpsc::Sender<MonitorMessage>,
     requester: kyoto::Requester,
+    chain_checkpoint: HeaderCheckpoint,
     tip: Option<HeaderCheckpoint>,
     block_height_tx: tokio::sync::watch::Sender<u32>,
     pending_deposits: Vec<PendingDeposit>,
@@ -109,17 +111,10 @@ where
 }
 
 impl Monitor {
-    fn build_kyoto_node(config: &MonitorConfig) -> (kyoto::Node, kyoto::Client) {
-        let checkpoint = match config.network {
-            bitcoin::Network::Bitcoin if config.start_height > 709_631 => {
-                kyoto::HeaderCheckpoint::taproot_activation()
-            }
-            bitcoin::Network::Bitcoin if config.start_height > 481_823 => {
-                kyoto::HeaderCheckpoint::segwit_activation()
-            }
-            network => kyoto::HeaderCheckpoint::from_genesis(network),
-        };
-
+    fn build_kyoto_node(
+        config: &MonitorConfig,
+        checkpoint: HeaderCheckpoint,
+    ) -> (kyoto::Node, kyoto::Client) {
         let mut builder = kyoto::Builder::new(config.network)
             .add_peers(config.trusted_peers.iter().cloned())
             // Only connect to the configured trusted peers. Prevents Kyoto from
@@ -134,6 +129,53 @@ impl Monitor {
         }
 
         builder.build()
+    }
+
+    /// Returns a checkpoint that doesn't require an RPC lookup, or `None`
+    /// if the caller must query bitcoind for the block hash at `start_height`.
+    fn builtin_checkpoint(
+        network: bitcoin::Network,
+        start_height: u32,
+    ) -> Option<HeaderCheckpoint> {
+        if network == bitcoin::Network::Bitcoin {
+            if start_height > 709_631 {
+                return Some(HeaderCheckpoint::taproot_activation());
+            }
+            if start_height > 481_823 {
+                return Some(HeaderCheckpoint::segwit_activation());
+            }
+        }
+        if start_height == 0 {
+            return Some(HeaderCheckpoint::from_genesis(network));
+        }
+        None
+    }
+
+    /// Resolve the Kyoto chain-state checkpoint, falling back to
+    /// `bitcoind.getblockhash(start_height)` when no built-in applies.
+    async fn resolve_chain_checkpoint(
+        bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
+        network: bitcoin::Network,
+        start_height: u32,
+    ) -> Result<HeaderCheckpoint> {
+        if let Some(checkpoint) = Self::builtin_checkpoint(network, start_height) {
+            return Ok(checkpoint);
+        }
+
+        let block_hash = btc_rpc_call(bitcoind_rpc, move |rpc| {
+            rpc.get_block_hash(start_height as u64)
+        })
+        .await
+        .with_context(|| format!("bitcoind getblockhash({start_height}) failed"))?
+        .block_hash()
+        .with_context(|| format!("parsing block hash at height {start_height}"))?;
+
+        info!(
+            height = start_height,
+            hash = %block_hash,
+            "Resolved Kyoto chain-state checkpoint from bitcoind",
+        );
+        Ok(HeaderCheckpoint::new(start_height, block_hash))
     }
 
     /// Run a BTC monitor with the given configuration.
@@ -152,14 +194,21 @@ impl Monitor {
             async move {
                 let bitcoind_rpc = Arc::new(bitcoind_rpc);
 
-                // Build initial Kyoto node.
-                let (kyoto_node, kyoto_client) = Self::build_kyoto_node(&config);
+                let chain_checkpoint = Self::resolve_chain_checkpoint(
+                    &bitcoind_rpc,
+                    config.network,
+                    config.start_height,
+                )
+                .await?;
+
+                let (kyoto_node, kyoto_client) = Self::build_kyoto_node(&config, chain_checkpoint);
 
                 let mut monitor = Monitor {
                     config,
                     metrics,
                     bitcoind_rpc,
                     requester: kyoto_client.requester.clone(),
+                    chain_checkpoint,
                     client_tx,
                     tip: None,
                     block_height_tx,
@@ -245,7 +294,8 @@ impl Monitor {
 
             tokio::time::sleep(next_restart_delay()).await;
 
-            let (new_node, new_client) = Self::build_kyoto_node(&self.config);
+            let (new_node, new_client) =
+                Self::build_kyoto_node(&self.config, self.chain_checkpoint);
             current_node = new_node;
             current_client = new_client;
             self.requester = current_client.requester.clone();
@@ -1257,5 +1307,54 @@ mod tests {
             assert!(d >= KYOTO_RESTART_DELAY_BASE, "{d:?} < base");
             assert!(d <= max, "{d:?} > base + jitter");
         }
+    }
+
+    #[test]
+    fn mainnet_above_taproot_uses_taproot_activation() {
+        let cp = Monitor::builtin_checkpoint(bitcoin::Network::Bitcoin, 800_000).unwrap();
+        assert_eq!(cp, HeaderCheckpoint::taproot_activation());
+    }
+
+    #[test]
+    fn mainnet_above_segwit_below_taproot_uses_segwit_activation() {
+        let cp = Monitor::builtin_checkpoint(bitcoin::Network::Bitcoin, 600_000).unwrap();
+        assert_eq!(cp, HeaderCheckpoint::segwit_activation());
+    }
+
+    #[test]
+    fn zero_height_uses_genesis_for_any_network() {
+        for net in [
+            bitcoin::Network::Bitcoin,
+            bitcoin::Network::Signet,
+            bitcoin::Network::Testnet4,
+            bitcoin::Network::Regtest,
+        ] {
+            let cp = Monitor::builtin_checkpoint(net, 0).unwrap();
+            assert_eq!(cp, HeaderCheckpoint::from_genesis(net));
+        }
+    }
+
+    #[test]
+    fn non_mainnet_nonzero_height_requires_rpc() {
+        for net in [
+            bitcoin::Network::Signet,
+            bitcoin::Network::Testnet4,
+            bitcoin::Network::Regtest,
+        ] {
+            assert_eq!(Monitor::builtin_checkpoint(net, 297_756), None);
+        }
+    }
+
+    #[test]
+    fn mainnet_below_segwit_uses_genesis_when_zero_otherwise_rpc() {
+        let cp = Monitor::builtin_checkpoint(bitcoin::Network::Bitcoin, 0).unwrap();
+        assert_eq!(
+            cp,
+            HeaderCheckpoint::from_genesis(bitcoin::Network::Bitcoin)
+        );
+        assert_eq!(
+            Monitor::builtin_checkpoint(bitcoin::Network::Bitcoin, 400_000),
+            None
+        );
     }
 }
