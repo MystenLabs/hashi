@@ -9,6 +9,7 @@ use anyhow::Result;
 use kyoto::FeeRate;
 use kyoto::HeaderCheckpoint;
 use kyoto::Warning;
+use rand::Rng;
 use sui_futures::service::Service;
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
@@ -26,12 +27,22 @@ const FALLBACK_FEE_RATE_SAT_PER_KWU: u64 = 250;
 /// Number of consecutive connection failures before restarting Kyoto.
 const KYOTO_MAX_CONSECUTIVE_FAILURES: u32 = 15;
 
-/// Delay before restarting Kyoto after connectivity loss.
-const KYOTO_RESTART_DELAY: Duration = Duration::from_secs(5);
+/// Base delay before restarting Kyoto after connectivity loss.
+const KYOTO_RESTART_DELAY_BASE: Duration = Duration::from_secs(5);
+
+/// Random additional delay to spread reconnects across pods.
+const KYOTO_RESTART_DELAY_JITTER: Duration = Duration::from_secs(30);
 
 /// How many Bitcoin blocks a deposit observation can go without being
 /// refreshed before it's dropped from the confirmation-metrics cache.
 const STALE_OBSERVATION_BLOCKS: u32 = 10;
+
+fn next_restart_delay() -> Duration {
+    let jitter = Duration::from_millis(
+        rand::thread_rng().gen_range(0..=KYOTO_RESTART_DELAY_JITTER.as_millis() as u64),
+    );
+    KYOTO_RESTART_DELAY_BASE + jitter
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TxStatus {
@@ -232,7 +243,7 @@ impl Monitor {
             self.metrics.kyoto_synced.set(0);
             self.metrics.kyoto_consecutive_failures.set(0);
 
-            tokio::time::sleep(KYOTO_RESTART_DELAY).await;
+            tokio::time::sleep(next_restart_delay()).await;
 
             let (new_node, new_client) = Self::build_kyoto_node(&self.config);
             current_node = new_node;
@@ -1236,5 +1247,15 @@ mod tests {
 
         assert_eq!(cache.len(), 1);
         assert_eq!(bucket(&metrics, "mempool"), 1);
+    }
+
+    #[test]
+    fn next_restart_delay_stays_in_range() {
+        let max = KYOTO_RESTART_DELAY_BASE + KYOTO_RESTART_DELAY_JITTER;
+        for _ in 0..1000 {
+            let d = next_restart_delay();
+            assert!(d >= KYOTO_RESTART_DELAY_BASE, "{d:?} < base");
+            assert!(d <= max, "{d:?} > base + jitter");
+        }
     }
 }
