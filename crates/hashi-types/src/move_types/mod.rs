@@ -564,6 +564,7 @@ pub enum HashiEvent {
     WithdrawalApprovedEvent(WithdrawalApprovedEvent),
     WithdrawalPickedForProcessingEvent(WithdrawalPickedForProcessingEvent),
     WithdrawalSignedEvent(WithdrawalSignedEvent),
+    WithdrawalPresigsReassignedEvent(WithdrawalPresigsReassignedEvent),
     WithdrawalConfirmedEvent(WithdrawalConfirmedEvent),
     UtxoSpentEvent(UtxoSpentEvent),
     StartReconfigEvent(StartReconfigEvent),
@@ -626,6 +627,9 @@ impl HashiEvent {
             }
             WithdrawalSignedEvent::MODULE_NAME => {
                 WithdrawalSignedEvent::from_bcs(bcs.value())?.into()
+            }
+            WithdrawalPresigsReassignedEvent::MODULE_NAME => {
+                WithdrawalPresigsReassignedEvent::from_bcs(bcs.value())?.into()
             }
             WithdrawalConfirmedEvent::MODULE_NAME => {
                 WithdrawalConfirmedEvent::from_bcs(bcs.value())?.into()
@@ -1092,6 +1096,24 @@ impl MoveType for WithdrawalSignedEvent {
 impl From<WithdrawalSignedEvent> for HashiEvent {
     fn from(value: WithdrawalSignedEvent) -> Self {
         Self::WithdrawalSignedEvent(value)
+    }
+}
+
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct WithdrawalPresigsReassignedEvent {
+    pub withdrawal_txn_id: Address,
+    pub epoch: u64,
+    pub presig_start_index: u64,
+}
+
+impl MoveType for WithdrawalPresigsReassignedEvent {
+    const MODULE: &'static str = "withdrawal_queue";
+    const NAME: &'static str = "WithdrawalPresigsReassignedEvent";
+}
+
+impl From<WithdrawalPresigsReassignedEvent> for HashiEvent {
+    fn from(value: WithdrawalPresigsReassignedEvent) -> Self {
+        Self::WithdrawalPresigsReassignedEvent(value)
     }
 }
 

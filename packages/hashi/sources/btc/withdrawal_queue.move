@@ -401,6 +401,11 @@ public(package) fun reassign_presigs_for_withdrawal_txn(
     assert!(txn.epoch != current_epoch);
     txn.presig_start_index = presig_start_index;
     txn.epoch = current_epoch;
+    sui::event::emit(WithdrawalPresigsReassignedEvent {
+        withdrawal_txn_id: withdrawal_id,
+        epoch: current_epoch,
+        presig_start_index,
+    });
 }
 
 public(package) fun withdrawal_txn_num_inputs(
@@ -583,6 +588,12 @@ public struct WithdrawalSignedEvent has copy, drop {
     withdrawal_txn_id: address,
     request_ids: vector<address>,
     signatures: vector<vector<u8>>,
+}
+
+public struct WithdrawalPresigsReassignedEvent has copy, drop {
+    withdrawal_txn_id: address,
+    epoch: u64,
+    presig_start_index: u64,
 }
 
 public struct WithdrawalConfirmedEvent has copy, drop {

@@ -904,6 +904,61 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_withdrawal_signs_across_epoch_boundary() -> Result<()> {
+        init_test_logging();
+
+        let mut networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
+
+        let deposit_amount_sats = 100_000u64;
+        create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
+
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+        let withdrawal_amount_sats = 30_000u64;
+        let btc_destination = networks.bitcoin_node.get_new_address()?;
+        let destination_bytes = extract_witness_program(&btc_destination)?;
+
+        let initial_epoch = networks.hashi_network.nodes()[0]
+            .current_epoch()
+            .ok_or_else(|| anyhow!("no current Hashi epoch"))?;
+
+        let mut withdrawal_executor =
+            SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?.with_signer(user_key);
+        withdrawal_executor
+            .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes)
+            .await?;
+
+        wait_for_withdrawal_picked(&mut networks.sui_network.client, Duration::from_secs(30))
+            .await?;
+
+        networks.sui_network.force_close_epoch().await?;
+        let target_epoch = initial_epoch + 1;
+        let futs: Vec<_> = networks
+            .hashi_network()
+            .nodes()
+            .iter()
+            .map(|n| n.wait_for_epoch(target_epoch, Duration::from_secs(120)))
+            .collect();
+        for (i, r) in futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .enumerate()
+        {
+            r.unwrap_or_else(|e| panic!("Node {i} failed to reach epoch {target_epoch}: {e}"));
+        }
+
+        let miner = BackgroundMiner::start(&networks.bitcoin_node);
+        wait_for_withdrawal_confirmation(
+            &mut networks.sui_network.client,
+            Duration::from_secs(180),
+        )
+        .await?;
+        drop(miner);
+
+        Ok(())
+    }
+
     /// Waits for a `WithdrawalPickedForProcessingEvent` that contains at least
     /// `min_requests` request IDs in a single batch, indicating that the new
     /// multi-request coin selection algorithm batched them together.

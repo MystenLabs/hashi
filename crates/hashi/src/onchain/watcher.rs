@@ -510,6 +510,24 @@ async fn handle_events(
                     }
                 }
             }
+            HashiEvent::WithdrawalPresigsReassignedEvent(event) => {
+                tracing::info!(
+                    withdrawal_txn_id = %event.withdrawal_txn_id,
+                    epoch = event.epoch,
+                    presig_start_index = event.presig_start_index,
+                    "Withdrawal presigs reassigned on-chain",
+                );
+                let mut state = state.state_mut();
+                if let Some(txn) = state
+                    .hashi
+                    .withdrawal_queue
+                    .withdrawal_txns
+                    .get_mut(&event.withdrawal_txn_id)
+                {
+                    txn.epoch = event.epoch;
+                    txn.presig_start_index = event.presig_start_index;
+                }
+            }
             HashiEvent::WithdrawalConfirmedEvent(event) => {
                 tracing::info!(withdrawal_txn_id = %event.withdrawal_txn_id, "Withdrawal confirmed on-chain");
                 let mut state = state.state_mut();
