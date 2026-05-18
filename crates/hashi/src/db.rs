@@ -63,7 +63,7 @@ const DEALER_MESSAGES_CF_NAME: &str = "dealer_messages";
 const ROTATION_MESSAGES_CF_NAME: &str = "rotation_messages";
 const NONCE_MESSAGES_CF_NAME: &str = "nonce_messages";
 
-const KEY_RETENTION_EXTRA_EPOCHS: u64 = 7;
+const RETENTION_EXTRA_EPOCHS: u64 = 7;
 
 /// Keyspaces included in snapshot backups. Add new backup/restore keyspaces here.
 #[derive(Clone, Copy)]
@@ -432,10 +432,10 @@ impl Database {
     pub(crate) fn prune_messages_below(
         &self,
         cutoff_epoch: u64,
-        referenced_public_keys: &ReferencedPublicKeysForPruning,
+        pruning_references: &PruningReferences,
     ) -> Result<()> {
-        let key_cutoff = cutoff_epoch.saturating_sub(KEY_RETENTION_EXTRA_EPOCHS);
-        prune_keyspace_keys(&self.encryption_keys, key_cutoff, |value| {
+        let retention_cutoff = cutoff_epoch.saturating_sub(RETENTION_EXTRA_EPOCHS);
+        prune_keyspace_with(&self.encryption_keys, retention_cutoff, |_epoch, value| {
             let Ok(key) = bcs::from_bytes::<EncryptionPrivateKey>(value) else {
                 return false;
             };
@@ -443,30 +443,37 @@ impl Database {
                 .as_element()
                 .to_byte_array()
                 .to_vec();
-            referenced_public_keys.encryption_keys.contains(&pub_bytes)
+            pruning_references.encryption_keys.contains(&pub_bytes)
         })?;
-        prune_keyspace_keys(&self.signing_keys, key_cutoff, |value| {
+        prune_keyspace_with(&self.signing_keys, retention_cutoff, |_epoch, value| {
             let Ok(key) = bcs::from_bytes::<Bls12381PrivateKey>(value) else {
                 return false;
             };
-            referenced_public_keys
+            pruning_references
                 .signing_keys
                 .contains(key.public_key().as_bytes())
         })?;
-        prune_keyspace(&self.dealer_messages, cutoff_epoch)?;
-        prune_keyspace(&self.rotation_messages, cutoff_epoch)?;
+        let is_referenced_epoch =
+            |epoch: u64, _value: &[u8]| pruning_references.committee_epochs.contains(&epoch);
+        prune_keyspace_with(&self.dealer_messages, retention_cutoff, is_referenced_epoch)?;
+        prune_keyspace_with(
+            &self.rotation_messages,
+            retention_cutoff,
+            is_referenced_epoch,
+        )?;
         prune_keyspace(&self.nonce_messages, cutoff_epoch)?;
         Ok(())
     }
 }
 
 #[derive(Default)]
-pub(crate) struct ReferencedPublicKeysForPruning {
+pub(crate) struct PruningReferences {
     encryption_keys: std::collections::HashSet<Vec<u8>>,
     signing_keys: std::collections::HashSet<Vec<u8>>,
+    committee_epochs: std::collections::HashSet<u64>,
 }
 
-impl ReferencedPublicKeysForPruning {
+impl PruningReferences {
     pub(crate) fn add_member_pubkeys(
         &mut self,
         encryption_public_key: &EncryptionPublicKey,
@@ -476,6 +483,10 @@ impl ReferencedPublicKeysForPruning {
             .insert(encryption_public_key.as_element().to_byte_array().to_vec());
         self.signing_keys
             .insert(signing_public_key.as_bytes().to_vec());
+    }
+
+    pub(crate) fn add_committee_epoch(&mut self, epoch: u64) {
+        self.committee_epochs.insert(epoch);
     }
 }
 
@@ -531,10 +542,10 @@ fn prune_keyspace(keyspace: &Keyspace, cutoff_epoch: u64) -> Result<()> {
 }
 
 /// Delete entries from `keyspace` whose leading big-endian u64 epoch is
-/// `< cutoff_epoch`, unless `is_referenced(value)` returns `true`.
-fn prune_keyspace_keys<F>(keyspace: &Keyspace, cutoff_epoch: u64, is_referenced: F) -> Result<()>
+/// `< cutoff_epoch`, unless `is_referenced(epoch, value)` returns `true`.
+fn prune_keyspace_with<F>(keyspace: &Keyspace, cutoff_epoch: u64, is_referenced: F) -> Result<()>
 where
-    F: Fn(&[u8]) -> bool,
+    F: Fn(u64, &[u8]) -> bool,
 {
     let keys_to_delete: Vec<_> = keyspace
         .iter()
@@ -545,7 +556,7 @@ where
             if epoch >= cutoff_epoch {
                 return None;
             }
-            (!is_referenced(&value)).then(|| key.to_vec())
+            (!is_referenced(epoch, &value)).then(|| key.to_vec())
         })
         .collect();
     for key in keys_to_delete {
@@ -567,8 +578,8 @@ pub(crate) mod tests {
     use sui_sdk_types::Address;
 
     use super::Database;
-    use super::KEY_RETENTION_EXTRA_EPOCHS;
-    use super::ReferencedPublicKeysForPruning;
+    use super::PruningReferences;
+    use super::RETENTION_EXTRA_EPOCHS;
 
     pub(crate) fn create_test_nodes(count: u16) -> Nodes<EncryptionGroupElement> {
         let nodes: Vec<_> = (0..count)
@@ -1222,10 +1233,10 @@ pub(crate) mod tests {
         let sig_key = Bls12381PrivateKey::generate(&mut rand::thread_rng());
 
         // Cutoff far enough above the retention window that key keyspaces
-        // also see prunes (i.e., `cutoff - KEY_RETENTION_EXTRA_EPOCHS > 1`).
-        let cutoff = KEY_RETENTION_EXTRA_EPOCHS + 8;
+        // also see prunes (i.e., `cutoff - RETENTION_EXTRA_EPOCHS > 1`).
+        let cutoff = RETENTION_EXTRA_EPOCHS + 8;
         let last_epoch = cutoff + 5;
-        let key_retain_floor = cutoff - KEY_RETENTION_EXTRA_EPOCHS;
+        let key_retain_floor = cutoff - RETENTION_EXTRA_EPOCHS;
 
         for epoch in 1..=last_epoch {
             db.store_dealer_message(epoch, &dealer, &dealer_msg)
@@ -1238,41 +1249,55 @@ pub(crate) mod tests {
             db.store_signing_key(epoch, &sig_key).unwrap();
         }
 
-        db.prune_messages_below(cutoff, &ReferencedPublicKeysForPruning::default())
+        db.prune_messages_below(cutoff, &PruningReferences::default())
             .unwrap();
 
-        for epoch in 1..cutoff {
+        let message_retain_floor = key_retain_floor;
+
+        for epoch in 1..message_retain_floor {
             assert!(
                 db.get_dealer_message(epoch, &dealer).unwrap().is_none(),
-                "dealer message at epoch {epoch} should be pruned"
+                "dealer message at epoch {epoch} should be pruned (< cutoff - {RETENTION_EXTRA_EPOCHS}, no committee reference)"
             );
             assert!(
                 db.get_rotation_messages(epoch, &dealer).unwrap().is_none(),
-                "rotation messages at epoch {epoch} should be pruned"
+                "rotation messages at epoch {epoch} should be pruned (< cutoff - {RETENTION_EXTRA_EPOCHS}, no committee reference)"
+            );
+        }
+        for epoch in message_retain_floor..cutoff {
+            assert!(
+                db.get_dealer_message(epoch, &dealer).unwrap().is_some(),
+                "dealer message at epoch {epoch} should be retained (>= cutoff - {RETENTION_EXTRA_EPOCHS})"
             );
             assert!(
+                db.get_rotation_messages(epoch, &dealer).unwrap().is_some(),
+                "rotation messages at epoch {epoch} should be retained (>= cutoff - {RETENTION_EXTRA_EPOCHS})"
+            );
+        }
+        for epoch in 1..cutoff {
+            assert!(
                 db.get_nonce_message(epoch, 0, &dealer).unwrap().is_none(),
-                "nonce message at epoch {epoch} should be pruned"
+                "nonce message at epoch {epoch} should be pruned (flat cutoff)"
             );
         }
         for epoch in 1..key_retain_floor {
             assert!(
                 db.get_encryption_key(epoch).unwrap().is_none(),
-                "encryption key at epoch {epoch} should be pruned (< cutoff - {KEY_RETENTION_EXTRA_EPOCHS})"
+                "encryption key at epoch {epoch} should be pruned (< cutoff - {RETENTION_EXTRA_EPOCHS})"
             );
             assert!(
                 db.get_signing_key(epoch).unwrap().is_none(),
-                "signing key at epoch {epoch} should be pruned (< cutoff - {KEY_RETENTION_EXTRA_EPOCHS})"
+                "signing key at epoch {epoch} should be pruned (< cutoff - {RETENTION_EXTRA_EPOCHS})"
             );
         }
         for epoch in key_retain_floor..cutoff {
             assert!(
                 db.get_encryption_key(epoch).unwrap().is_some(),
-                "encryption key at epoch {epoch} should be retained (>= cutoff - {KEY_RETENTION_EXTRA_EPOCHS})"
+                "encryption key at epoch {epoch} should be retained (>= cutoff - {RETENTION_EXTRA_EPOCHS})"
             );
             assert!(
                 db.get_signing_key(epoch).unwrap().is_some(),
-                "signing key at epoch {epoch} should be retained (>= cutoff - {KEY_RETENTION_EXTRA_EPOCHS})"
+                "signing key at epoch {epoch} should be retained (>= cutoff - {RETENTION_EXTRA_EPOCHS})"
             );
         }
         for epoch in cutoff..=last_epoch {
@@ -1316,7 +1341,7 @@ pub(crate) mod tests {
 
         // Cutoff = 0 saturates the key-retention subtraction; nothing should
         // be pruned in any keyspace.
-        db.prune_messages_below(0, &ReferencedPublicKeysForPruning::default())
+        db.prune_messages_below(0, &PruningReferences::default())
             .unwrap();
 
         for epoch in 5..=10 {
@@ -1331,14 +1356,14 @@ pub(crate) mod tests {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let db = Database::open(tmpdir.path()).unwrap();
         // Should be a no-op, not an error.
-        db.prune_messages_below(100, &ReferencedPublicKeysForPruning::default())
+        db.prune_messages_below(100, &PruningReferences::default())
             .unwrap();
     }
 
     fn referenced_pubkeys_from(
         keys: &[(&EncryptionPrivateKey, &Bls12381PrivateKey)],
-    ) -> ReferencedPublicKeysForPruning {
-        let mut result = ReferencedPublicKeysForPruning::default();
+    ) -> PruningReferences {
+        let mut result = PruningReferences::default();
         for (enc, sig) in keys {
             result.add_member_pubkeys(
                 &EncryptionPublicKey::from_private_key(enc),
@@ -1354,7 +1379,7 @@ pub(crate) mod tests {
         let db = Database::open(tmpdir.path()).unwrap();
 
         // Committees 5 and 33 are well below the flat cutoff
-        // (`51 - KEY_RETENTION_EXTRA_EPOCHS = 44`); only the committee-
+        // (`51 - RETENTION_EXTRA_EPOCHS = 44`); only the committee-
         // reference protection should retain them.
         struct ValidatorKeys {
             encryption: EncryptionPrivateKey,
@@ -1452,7 +1477,7 @@ pub(crate) mod tests {
         // Simulates the state right after `prepare_and_register_keys(N+1)`
         // has stored next-epoch keys but `start_reconfig(N+1)` has not
         // captured them. Storage epoch (N+1) is above the flat cutoff
-        // (N - KEY_RETENTION_EXTRA_EPOCHS) but no committee references it.
+        // (N - RETENTION_EXTRA_EPOCHS) but no committee references it.
         let target_epoch = 20u64;
         let in_flight_epoch = target_epoch + 1;
         let in_flight_encryption = EncryptionPrivateKey::new(&mut rand::thread_rng());
@@ -1463,7 +1488,7 @@ pub(crate) mod tests {
             .unwrap();
 
         // No committee references the in-flight key.
-        db.prune_messages_below(target_epoch, &ReferencedPublicKeysForPruning::default())
+        db.prune_messages_below(target_epoch, &PruningReferences::default())
             .unwrap();
 
         assert!(
@@ -1474,6 +1499,100 @@ pub(crate) mod tests {
             db.get_signing_key(in_flight_epoch).unwrap().is_some(),
             "in-flight signing key (stored before start_reconfig captures it) must be retained by the flat cutoff"
         );
+    }
+
+    #[test]
+    fn test_prune_messages_below_committee_epoch_retains_dealer_and_rotation_messages_below_buffer()
+    {
+        use std::collections::BTreeMap;
+        use std::num::NonZeroU16;
+
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let dealer = Address::new([1u8; 32]);
+        let dealer_msg = create_test_message();
+        let mut rotation_msgs: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();
+        rotation_msgs.insert(NonZeroU16::new(1).unwrap(), create_test_message());
+
+        // Storage epoch 5 sits well below the flat retention floor at
+        // cutoff=20 (floor = 20 - 7 = 13). Only committee-epoch protection
+        // can rescue it. Storage epoch 3 stays unreferenced.
+        db.store_dealer_message(5, &dealer, &dealer_msg).unwrap();
+        db.store_rotation_messages(5, &dealer, &rotation_msgs)
+            .unwrap();
+        db.store_dealer_message(3, &dealer, &dealer_msg).unwrap();
+        db.store_rotation_messages(3, &dealer, &rotation_msgs)
+            .unwrap();
+
+        // Models the abort_reconfig + multi-epoch jump scenario where
+        // committee[5] is the previous-finalized bridge to committee[20].
+        let mut referenced = PruningReferences::default();
+        referenced.add_committee_epoch(5);
+
+        db.prune_messages_below(20, &referenced).unwrap();
+
+        assert!(
+            db.get_dealer_message(5, &dealer).unwrap().is_some(),
+            "dealer message at storage_epoch=5 must be retained (committee_epochs={{5}})"
+        );
+        assert!(
+            db.get_rotation_messages(5, &dealer).unwrap().is_some(),
+            "rotation messages at storage_epoch=5 must be retained (committee_epochs={{5}})"
+        );
+        assert!(
+            db.get_dealer_message(3, &dealer).unwrap().is_none(),
+            "dealer message at storage_epoch=3 must be pruned (not referenced, below buffer)"
+        );
+        assert!(
+            db.get_rotation_messages(3, &dealer).unwrap().is_none(),
+            "rotation messages at storage_epoch=3 must be pruned (not referenced, below buffer)"
+        );
+    }
+
+    #[test]
+    fn test_prune_messages_below_buffer_retains_recent_dealer_and_rotation_messages() {
+        use std::collections::BTreeMap;
+        use std::num::NonZeroU16;
+
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let dealer = Address::new([1u8; 32]);
+        let dealer_msg = create_test_message();
+        let mut rotation_msgs: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();
+        rotation_msgs.insert(NonZeroU16::new(1).unwrap(), create_test_message());
+
+        // Storage epochs 8 and 14 are within the 7-epoch buffer at cutoff=15
+        // (floor = 15 - 7 = 8). Empty references — only the buffer protects.
+        for epoch in [5u64, 8, 14] {
+            db.store_dealer_message(epoch, &dealer, &dealer_msg)
+                .unwrap();
+            db.store_rotation_messages(epoch, &dealer, &rotation_msgs)
+                .unwrap();
+        }
+
+        db.prune_messages_below(15, &PruningReferences::default())
+            .unwrap();
+
+        assert!(
+            db.get_dealer_message(5, &dealer).unwrap().is_none(),
+            "dealer message at storage_epoch=5 must be pruned (below buffer floor 8)"
+        );
+        assert!(
+            db.get_rotation_messages(5, &dealer).unwrap().is_none(),
+            "rotation messages at storage_epoch=5 must be pruned (below buffer floor 8)"
+        );
+        for epoch in [8u64, 14] {
+            assert!(
+                db.get_dealer_message(epoch, &dealer).unwrap().is_some(),
+                "dealer message at storage_epoch={epoch} must be retained (buffer)"
+            );
+            assert!(
+                db.get_rotation_messages(epoch, &dealer).unwrap().is_some(),
+                "rotation messages at storage_epoch={epoch} must be retained (buffer)"
+            );
+        }
     }
 
     #[test]
