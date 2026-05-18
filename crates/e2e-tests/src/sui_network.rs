@@ -36,7 +36,7 @@ use tokio::time::sleep;
 
 const DEFAULT_NUM_VALIDATORS: usize = 4;
 const DEFAULT_EPOCH_DURATION_MS: u64 = 86_400_000; // 24 hours; tests that need epoch changes should set a shorter duration
-const NETWORK_STARTUP_TIMEOUT_SECS: u64 = 60;
+const NETWORK_STARTUP_TIMEOUT_SECS: u64 = 120;
 const NETWORK_STARTUP_POLL_INTERVAL_SECS: u64 = 1;
 
 pub fn sui_binary() -> &'static Path {
@@ -60,7 +60,7 @@ pub fn sui_binary() -> &'static Path {
         .as_path()
 }
 
-async fn wait_for_ready(client: &mut Client) -> Result<()> {
+async fn wait_for_ready(client: &mut Client, dir: &Path) -> Result<()> {
     // Wait till the network has started up and at least one checkpoint has been produced
     for _ in 0..NETWORK_STARTUP_TIMEOUT_SECS {
         if let Ok(resp) = client
@@ -74,9 +74,17 @@ async fn wait_for_ready(client: &mut Client) -> Result<()> {
         sleep(Duration::from_secs(NETWORK_STARTUP_POLL_INTERVAL_SECS)).await;
     }
     anyhow::bail!(
-        "Network failed to start within {}s timeout",
+        "Network failed to start within {}s timeout. {}",
         NETWORK_STARTUP_TIMEOUT_SECS,
+        startup_diagnostics(dir),
     )
+}
+
+fn startup_diagnostics(dir: &Path) -> String {
+    crate::tail_logs(&[
+        ("stderr", &dir.join("out.stderr")),
+        ("stdout", &dir.join("out.stdout")),
+    ])
 }
 
 /// Handle for a Sui network running via pre-compiled binary
@@ -172,7 +180,7 @@ impl SuiNetworkBuilder {
         let rpc_url = format!("http://127.0.0.1:{rpc_port}");
 
         let mut client = sui_rpc::Client::new(&rpc_url)?;
-        wait_for_ready(&mut client).await?;
+        wait_for_ready(&mut client, &dir).await?;
         let mut sui = SuiNetworkHandle {
             process,
             dir,

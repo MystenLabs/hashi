@@ -145,28 +145,11 @@ impl BitcoinNodeHandle {
     }
 
     fn startup_diagnostics(&self) -> String {
-        let mut diagnostics = Vec::new();
-
-        for (label, path) in [
+        crate::tail_logs(&[
             ("stderr", &self.stderr_path),
             ("stdout", &self.stdout_path),
             ("debug.log", &self.data_dir.join("regtest/debug.log")),
-        ] {
-            let contents = std::fs::read_to_string(path)
-                .ok()
-                .and_then(|contents| {
-                    let lines: Vec<_> = contents.lines().rev().take(20).collect();
-                    if lines.is_empty() {
-                        None
-                    } else {
-                        Some(lines.into_iter().rev().collect::<Vec<_>>().join(" | "))
-                    }
-                })
-                .unwrap_or_else(|| format!("<empty or unavailable at {}>", path.display()));
-            diagnostics.push(format!("{label}: {contents}"));
-        }
-
-        diagnostics.join("; ")
+        ])
     }
 
     pub fn generate_blocks(&self, count: u64) -> Result<Vec<BlockHash>> {
