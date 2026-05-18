@@ -40,6 +40,26 @@ use tempfile::TempDir;
 use crate::publish::publish;
 use crate::sui_network::sui_binary;
 
+/// Tail the last 20 lines of each named log file, joined into a one-line diagnostic.
+pub(crate) fn tail_logs(files: &[(&str, &Path)]) -> String {
+    let mut diagnostics = Vec::new();
+    for (label, path) in files {
+        let contents = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|contents| {
+                let lines: Vec<_> = contents.lines().rev().take(20).collect();
+                if lines.is_empty() {
+                    None
+                } else {
+                    Some(lines.into_iter().rev().collect::<Vec<_>>().join(" | "))
+                }
+            })
+            .unwrap_or_else(|| format!("<empty or unavailable at {}>", path.display()));
+        diagnostics.push(format!("{label}: {contents}"));
+    }
+    diagnostics.join("; ")
+}
+
 pub struct TestNetworks {
     #[allow(unused)]
     dir: TempDir,
