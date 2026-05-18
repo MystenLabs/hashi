@@ -176,8 +176,14 @@ async fn health() -> impl axum::response::IntoResponse {
 }
 
 async fn ready(hashi: Arc<Hashi>) -> impl axum::response::IntoResponse {
-    let epoch = hashi.onchain_state().epoch();
-    if hashi.signing_manager_for(epoch).is_some() {
+    let onchain_state = hashi.onchain_state();
+    let epoch = onchain_state.epoch();
+    // Treat genesis (no committee formed yet) as ready so OrderedReady can bring
+    // up the rest of the StatefulSet to register keys and run the initial DKG.
+    let awaiting_genesis = epoch == 0 && onchain_state.current_committee().is_none();
+    if awaiting_genesis {
+        (axum::http::StatusCode::OK, "ready (awaiting genesis)")
+    } else if hashi.signing_manager_for(epoch).is_some() {
         (axum::http::StatusCode::OK, "ready")
     } else {
         (
