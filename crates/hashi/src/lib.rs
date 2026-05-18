@@ -42,7 +42,7 @@ pub(crate) struct NextEpochKeys {
     pub signing_private_key: Bls12381PrivateKey,
 }
 
-pub(crate) fn init_crypto_provider() {
+pub fn init_crypto_provider() {
     rustls::crypto::ring::default_provider()
         .install_default()
         .ok();

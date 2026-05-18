@@ -22,6 +22,7 @@ use hashi::mpc::types::ProtocolType;
 use hashi::mpc::types::ReconstructionOutcome;
 use hashi::mpc::types::SessionId;
 use hashi::onchain::OnchainState;
+use hashi::onchain::types::CommitteeSet;
 use hashi::storage::EpochPublicMessagesStore;
 use hashi_types::committee::Bls12381PrivateKey;
 use hashi_types::committee::Committee;
@@ -37,6 +38,12 @@ pub struct Args {
     /// Expected public key in hex (for verification).
     #[arg(long)]
     expected_pubkey: Option<String>,
+
+    /// Override the source epoch (the one whose KeyRotation output we want
+    /// to reconstruct). Defaults to the latest encryption-key epoch found
+    /// in the first DB.
+    #[arg(long)]
+    epoch: Option<u64>,
 }
 
 pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> anyhow::Result<()> {
@@ -44,24 +51,84 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
         bail!("--db-paths is required");
     }
 
-    let previous_epoch = detect_epoch(&args.db_paths[0])?;
+    let onchain_committee_epochs: Vec<u64> = {
+        let state = onchain_state.state();
+        state
+            .hashi()
+            .committees
+            .committees()
+            .keys()
+            .copied()
+            .collect()
+    };
+    println!("On-chain committee epochs: {onchain_committee_epochs:?}");
+    for db_path in &args.db_paths {
+        let db = Database::open(db_path).with_context(|| {
+            format!("failed to open DB for epoch listing: {}", db_path.display())
+        })?;
+        let latest = db
+            .latest_encryption_key_epoch()
+            .map_err(|e| anyhow!("failed to scan encryption keys: {e}"))?;
+        let mut present = Vec::new();
+        let mut rot_present = Vec::new();
+        let mut dkg_present = Vec::new();
+        if let Some(top) = latest {
+            for e in top.saturating_sub(15)..=top {
+                if db
+                    .get_encryption_key(e)
+                    .map_err(|err| anyhow!("get_encryption_key({e}): {err}"))?
+                    .is_some()
+                {
+                    present.push(e);
+                }
+                if !db
+                    .list_all_rotation_messages(e)
+                    .map_err(|err| anyhow!("list_all_rotation_messages({e}): {err}"))?
+                    .is_empty()
+                {
+                    rot_present.push(e);
+                }
+                if !db
+                    .list_all_dealer_messages(e)
+                    .map_err(|err| anyhow!("list_all_dealer_messages({e}): {err}"))?
+                    .is_empty()
+                {
+                    dkg_present.push(e);
+                }
+            }
+        }
+        println!(
+            "  {} enc_keys = {present:?} rot_msgs = {rot_present:?} dkg_msgs = {dkg_present:?} (latest enc = {latest:?})",
+            db_path.display()
+        );
+    }
+
+    let previous_epoch = match args.epoch {
+        Some(e) => {
+            println!("Using --epoch override: {e}");
+            e
+        }
+        None => detect_epoch(&args.db_paths[0])?,
+    };
     let reconstruction_epoch = previous_epoch + 1;
 
-    let committee = {
-        let state = onchain_state.state();
-        let committees = state.hashi().committees.committees();
-        committees
-            .get(&reconstruction_epoch)
-            .or_else(|| committees.get(&previous_epoch))
-            .ok_or_else(|| {
-                anyhow!("no committee found for epoch {reconstruction_epoch} or {previous_epoch}")
-            })?
-            .clone()
-    };
+    // Build a recovery-local `CommitteeSet` that mirrors the on-chain
+    // committees but pins `committees[reconstruction_epoch]` to
+    // `previous_epoch`'s committee. `MpcManager::new` requires a committee at
+    // `reconstruction_epoch`, and reconstruction decrypts AVSS messages with
+    // `previous_epoch`'s encryption keys (per #502). Cloning instead of
+    // mutating `onchain_state` keeps the watcher free to rescrape without
+    // racing this tool.
+    let recovery_committee_set =
+        build_recovery_committee_set(onchain_state, previous_epoch, reconstruction_epoch)?;
+    let previous_committee = recovery_committee_set
+        .committees()
+        .get(&previous_epoch)
+        .expect("previous_epoch was just inserted by build_recovery_committee_set");
 
     println!(
         "Previous epoch {previous_epoch}: {} validators, fetching certificates...",
-        committee.members().len()
+        previous_committee.members().len()
     );
 
     let raw_certs = fetch_certificates(onchain_state, previous_epoch, None)
@@ -89,50 +156,45 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
             Database::open(db_path)
                 .with_context(|| format!("failed to open DB: {}", db_path.display()))?,
         );
-        let encryption_key = db
+        let Some(encryption_key) = db
             .get_encryption_key(previous_epoch)
             .map_err(|e| anyhow!("failed to read encryption key: {e}"))?
-            .ok_or_else(|| {
-                anyhow!(
-                    "no encryption key found for epoch {previous_epoch} in {}",
-                    db_path.display()
-                )
-            })?;
+        else {
+            println!("  Skipping: no encryption key for epoch {previous_epoch}");
+            continue;
+        };
 
         let my_enc_pk = EncryptionPublicKey::from_private_key(&encryption_key);
-        let validator_address = find_validator_by_encryption_key(&committee, &my_enc_pk)
-            .ok_or_else(|| {
-                anyhow!(
-                    "DB encryption key doesn't match any committee member (epoch {previous_epoch})"
-                )
-            })?;
+        let Some(validator_address) =
+            find_validator_by_encryption_key(previous_committee, &my_enc_pk)
+        else {
+            println!(
+                "  Skipping: DB encryption key for epoch {previous_epoch} doesn't match any committee member"
+            );
+            continue;
+        };
         println!("  Validator address: {validator_address}");
 
         let store = EpochPublicMessagesStore::new(db.clone(), previous_epoch);
         let session_id = SessionId::new(chain_id, reconstruction_epoch, &ProtocolType::KeyRotation);
-        let mut manager = {
-            let state = onchain_state.state();
-            let hashi = state.hashi();
-            // The tool reconstructs the previous epoch's output from a DB
-            // backup, so `encryption_key` here is the key that decrypted that
-            // epoch's AVSS messages. Pass it as both `encryption_key` (unused)
-            // and `previous_encryption_key` (the one reconstruction uses).
-            MpcManager::new(
-                validator_address,
-                &hashi.committees,
-                reconstruction_epoch,
-                session_id,
-                encryption_key.clone(),
-                Some(encryption_key),
-                dummy_signing_key.clone(),
-                Box::new(store),
-                chain_id,
-                None, // weight_divisor
-                0,    // batch_size_per_weight (unused for reconstruction)
-                None, // test_corrupt_shares_for
-            )
-            .map_err(|e| anyhow!("failed to create MpcManager: {e}"))?
-        };
+        // `encryption_key` decrypted `previous_epoch`'s AVSS messages, which is
+        // what reconstruction reads. Pass it as both `encryption_key` (unused
+        // here) and `previous_encryption_key`.
+        let mut manager = MpcManager::new(
+            validator_address,
+            &recovery_committee_set,
+            reconstruction_epoch,
+            session_id,
+            encryption_key.clone(),
+            Some(encryption_key),
+            dummy_signing_key.clone(),
+            Box::new(store),
+            chain_id,
+            None, // weight_divisor
+            0,    // batch_size_per_weight (unused for reconstruction)
+            None, // test_corrupt_shares_for
+        )
+        .map_err(|e| anyhow!("failed to create MpcManager: {e}"))?;
 
         // Override previous_epoch to match the backed-up DB's epoch, since
         // the on-chain epoch may have advanced past the backup.
@@ -223,6 +285,40 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
     );
 
     Ok(())
+}
+
+/// Clone the on-chain `CommitteeSet`'s committees and pin
+/// `committees[reconstruction_epoch]` to `previous_epoch`'s committee.
+///
+/// `MpcManager::new` requires `committees[reconstruction_epoch]` to exist and
+/// to be the committee whose encryption keys decrypt the AVSS messages we're
+/// reconstructing — which, per #502, is `previous_epoch`'s committee. This is
+/// true regardless of whether the cluster has published its real next-epoch
+/// committee yet, so we unconditionally overwrite; a warning is printed if an
+/// existing on-chain entry differs.
+fn build_recovery_committee_set(
+    onchain_state: &OnchainState,
+    previous_epoch: u64,
+    reconstruction_epoch: u64,
+) -> anyhow::Result<CommitteeSet> {
+    let state = onchain_state.state();
+    let mut committees = state.hashi().committees.committees().clone();
+    let previous_committee = committees
+        .get(&previous_epoch)
+        .cloned()
+        .ok_or_else(|| anyhow!("no on-chain committee for epoch {previous_epoch}"))?;
+    if let Some(existing) = committees.get(&reconstruction_epoch)
+        && existing != &previous_committee
+    {
+        println!(
+            "Warning: on-chain committee[{reconstruction_epoch}] differs from \
+             committee[{previous_epoch}]; recovery uses committee[{previous_epoch}]"
+        );
+    }
+    committees.insert(reconstruction_epoch, previous_committee);
+    let mut set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+    set.set_committees(committees);
+    Ok(set)
 }
 
 fn detect_epoch(db_path: &std::path::Path) -> anyhow::Result<u64> {
