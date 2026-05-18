@@ -27,10 +27,10 @@ anyhow.workspace = true
 base64ct.workspace = true
 
 # Guardian crypto dependencies
-hpke = "0.12.0"
+hpke.workspace = true
 rand.workspace = true
 rand_core.workspace = true
-k256 = "0.13"
+k256.workspace = true
 bitcoin.workspace = true
 blake2 = "0.10"
 ed25519-consensus = "2.1"

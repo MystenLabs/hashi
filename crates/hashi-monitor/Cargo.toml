@@ -13,8 +13,8 @@ hashi-types = { path = "../hashi-types" }
 # guardian imported for s3 logger
 hashi-guardian = { path = "../hashi-guardian" }
 hex.workspace = true
-hpke = "0.12.0"
-k256 = "0.13"
+hpke.workspace = true
+k256.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true

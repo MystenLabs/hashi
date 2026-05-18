@@ -61,6 +61,8 @@ ed25519-dalek = { version = "2.2.0", features = ["pem", "pkcs8", "rand_core"] }
 x509-parser = { version = "0.17.0", features = ["verify"] }
 rcgen = "0.13"
 blst = { version = "0.3.13" }
+hpke = "0.12.0"
+k256 = "0.13"
 
 rand_core = { version = "0.6.4" }
 base64ct = { version = "1.6.0", features = ["alloc"] }

@@ -30,5 +30,5 @@ csv = "1"
 url = "2"
 
 # bootstrap-guardian only
-hpke = "0.12.0"
-k256 = "0.13"
+hpke.workspace = true
+k256.workspace = true
