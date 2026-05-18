@@ -126,6 +126,16 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
     // `encryption_pubkey` below would be unauthenticated and a buggy or
     // hostile endpoint could trick us into encrypting shares to a key it
     // controls.
+    //
+    // TODO: also authenticate `signing_pub_key` against the AWS Nitro
+    // attestation once the guardian runs in an enclave. Today
+    // `hashi_types::guardian::verify_enclave_attestation` is a no-op, so a
+    // malicious operator with their own signing key can pass all the
+    // checks below (sign their own GuardianInfo, echo the bucket and
+    // commitments we just submitted, return their own encryption key) and
+    // capture THRESHOLD encrypted shares. The current deployment runs the
+    // guardian in a k8s cluster — the attestation gate lands when we move
+    // to Nitro.
     let info = resp
         .signed_info
         .verify(&resp.signing_pub_key)
