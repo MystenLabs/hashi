@@ -126,6 +126,28 @@ pub struct MpcManager {
     test_corrupt_shares_for: Option<Address>,
 }
 
+/// The "view" of a key rotation from one committee's perspective: which
+/// committee's nodes/encryption key to use to decrypt shares and what
+/// thresholds apply. The same on-disk rotation messages can be reconstructed
+/// from two views — the new committee's view (to rebuild the current epoch's
+/// shares) or the old committee's view (to rebuild the previous epoch's
+/// shares as input to a fresh rotation).
+struct RotationReconstructionView<'a> {
+    /// Epoch under which the rotation messages were stored on disk.
+    epoch: u64,
+    /// Receiver committee for this view.
+    nodes: &'a Nodes<EncryptionGroupElement>,
+    /// This node's party index within `nodes`.
+    party_id: PartyId,
+    /// Output threshold of `nodes`.
+    output_threshold: u16,
+    /// Threshold of the committee whose shares were rotated (the rotation's
+    /// "input" committee).
+    input_threshold: u16,
+    /// Decryption key for shares destined for `party_id` in `nodes`.
+    encryption_key: &'a PrivateKey<EncryptionGroupElement>,
+}
+
 impl MpcManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -2921,6 +2943,41 @@ impl MpcManager {
         })
     }
 
+    /// Re-derive this node's `MpcOutput` for `self.mpc_config.epoch` from the
+    /// rotation messages on disk under that same epoch — the data is exactly
+    /// what `run_key_rotation_as_party` would have produced live.
+    pub fn reconstruct_current_from_stored_rotation(
+        &mut self,
+        certificates: &[CertificateV1],
+    ) -> MpcResult<MpcOutput> {
+        let input_threshold = self.previous_reconfig_output_threshold.ok_or_else(|| {
+            MpcError::InvalidConfig(
+                "current-output reconstruction requires previous reconfig's output threshold"
+                    .into(),
+            )
+        })?;
+        let view = RotationReconstructionView {
+            epoch: self.mpc_config.epoch,
+            nodes: &self.mpc_config.nodes,
+            party_id: self.party_id,
+            output_threshold: self.mpc_config.threshold,
+            input_threshold,
+            encryption_key: &self.encryption_key,
+        };
+        match self.reconstruct_rotation_in_view(&view, certificates, None)? {
+            ReconstructionOutcome::Success(output) => {
+                self.current_output = Some(output.clone());
+                Ok(output)
+            }
+            // `complaint_cache: None` turns any complaint into ProtocolFailed,
+            // so no NeedsComplaintRecovery outcome can reach this point.
+            ReconstructionOutcome::NeedsDkgComplaintRecovery { .. }
+            | ReconstructionOutcome::NeedsRotationComplaintRecovery { .. } => unreachable!(
+                "reconstruct_rotation_in_view without a complaint cache returns only Success or an error"
+            ),
+        }
+    }
+
     pub fn reconstruct_previous_output(
         &self,
         certificates: &[CertificateV1],
@@ -3079,10 +3136,10 @@ impl MpcManager {
         certificates: &[CertificateV1],
         complaint_cache: &HashMap<DealerOutputsKey, avss::PartialOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
-        let previous_nodes = self.previous_nodes.clone().ok_or_else(|| {
+        let previous_nodes = self.previous_nodes.as_ref().ok_or_else(|| {
             MpcError::InvalidConfig("Rotation reconstruction requires previous nodes".into())
         })?;
-        let previous_committee = self.previous_committee.clone().ok_or_else(|| {
+        let previous_committee = self.previous_committee.as_ref().ok_or_else(|| {
             MpcError::InvalidConfig("Rotation reconstruction requires previous committee".into())
         })?;
         let previous_party_id = previous_committee.index_of(&self.address).ok_or_else(|| {
@@ -3100,27 +3157,57 @@ impl MpcManager {
                     .into(),
             )
         })?;
-        let source_session_id = SessionId::new(
-            &self.chain_id,
-            self.previous_epoch,
-            &ProtocolType::KeyRotation,
-        );
-        // Each dealer only rotates their own shares from the previous epoch, so share indices
-        // are unique across dealers (no duplicates in `certified_share_indices`).
+        let previous_encryption_key = self.previous_encryption_key.as_ref().ok_or_else(|| {
+            MpcError::InvalidConfig(
+                "Rotation reconstruction requires previous encryption key".into(),
+            )
+        })?;
+        let view = RotationReconstructionView {
+            epoch: self.previous_epoch,
+            nodes: previous_nodes,
+            party_id: previous_party_id,
+            output_threshold,
+            input_threshold,
+            encryption_key: previous_encryption_key,
+        };
+        self.reconstruct_rotation_in_view(&view, certificates, Some(complaint_cache))
+    }
+
+    /// Walks the rotation `certificates`, decrypts the on-disk rotation
+    /// messages they cover for the receiver described by `view`, and combines
+    /// the resulting shares into an `MpcOutput`.
+    ///
+    /// `complaint_cache` controls how invalid-share complaints are handled:
+    /// - `None` — the caller has no recovery loop (e.g. post-`end_reconfig`
+    ///   recovery, where the stored data is by construction valid). Any
+    ///   complaint becomes `ProtocolFailed`.
+    /// - `Some(cache)` — the caller is iterating with complaint recovery. The
+    ///   cache is consulted before processing each share, and a complaint is
+    ///   surfaced as `NeedsRotationComplaintRecovery` for the caller to drive.
+    ///
+    /// Each dealer only rotates their own shares, so share indices are unique
+    /// across dealers (no duplicates in `certified_share_indices`).
+    fn reconstruct_rotation_in_view(
+        &self,
+        view: &RotationReconstructionView<'_>,
+        certificates: &[CertificateV1],
+        complaint_cache: Option<&HashMap<DealerOutputsKey, avss::PartialOutput>>,
+    ) -> MpcResult<ReconstructionOutcome> {
+        let source_session_id =
+            SessionId::new(&self.chain_id, view.epoch, &ProtocolType::KeyRotation);
         let mut local_outputs: HashMap<ShareIndex, avss::PartialOutput> = HashMap::new();
-        let mut certified_share_indices = Vec::new();
+        let mut certified_share_indices: Vec<ShareIndex> = Vec::new();
         for cert in certificates {
             let CertificateV1::Rotation(rotation_cert) = cert else {
                 return Err(MpcError::InvalidCertificate(
                     "Mixed certificate types: expected all Rotation certificates".into(),
                 ));
             };
-            let msg = rotation_cert.message();
-            let dealer_address = msg.dealer_address;
-            let previous_epoch = self.previous_epoch;
+            let cert_msg = rotation_cert.message();
+            let dealer_address = cert_msg.dealer_address;
             let rotation_msgs = self
                 .public_messages_store
-                .get_rotation_messages(previous_epoch, &dealer_address)
+                .get_rotation_messages(view.epoch, &dealer_address)
                 .map_err(|e| MpcError::StorageError(e.to_string()))?
                 .ok_or_else(|| {
                     MpcError::StorageError(format!(
@@ -3128,19 +3215,19 @@ impl MpcManager {
                         dealer_address
                     ))
                 })?;
-            let messages = Messages::Rotation(rotation_msgs.clone());
-            let actual_hash = compute_messages_hash(&messages);
-            if actual_hash != msg.messages_hash {
+            let actual_hash = compute_messages_hash(&Messages::Rotation(rotation_msgs.clone()));
+            if actual_hash != cert_msg.messages_hash {
                 return Err(MpcError::ProtocolFailed(format!(
                     "Message hash mismatch for dealer {:?}: stored message does not match certificate",
                     dealer_address
                 )));
             }
             for (share_index, message) in rotation_msgs {
-                if let Some(output) = complaint_cache.get(&DealerOutputsKey::Rotation(share_index))
+                if let Some(cache) = complaint_cache
+                    && let Some(output) = cache.get(&DealerOutputsKey::Rotation(share_index))
                 {
                     tracing::info!(
-                        "reconstruct_from_rotation_certificates: complaint cache hit for \
+                        "reconstruct_rotation_in_view: complaint cache hit for \
                          dealer {:?} share_index={share_index}",
                         dealer_address,
                     );
@@ -3151,17 +3238,11 @@ impl MpcManager {
                 let session_id = source_session_id
                     .rotation_session_id(&dealer_address, share_index)
                     .to_vec();
-                let previous_encryption_key =
-                    self.previous_encryption_key.as_ref().ok_or_else(|| {
-                        MpcError::InvalidConfig(
-                            "Rotation reconstruction requires previous encryption key".into(),
-                        )
-                    })?;
                 match process_avss_message(
-                    previous_encryption_key,
-                    previous_nodes.clone(),
-                    previous_party_id,
-                    output_threshold,
+                    view.encryption_key,
+                    view.nodes.clone(),
+                    view.party_id,
+                    view.output_threshold,
                     session_id,
                     &message,
                     None,
@@ -3170,28 +3251,38 @@ impl MpcManager {
                         local_outputs.insert(share_index, output);
                     }
                     avss::ProcessedMessage::Complaint(complaint) => {
-                        return Ok(ReconstructionOutcome::NeedsRotationComplaintRecovery {
-                            dealer_address,
-                            share_index,
-                            complaint,
-                            message,
-                        });
+                        return match complaint_cache {
+                            // Invalid share from an on-chain-certified dealer:
+                            // bail rather than mask.
+                            None => Err(MpcError::ProtocolFailed(format!(
+                                "Stored rotation message from dealer {:?} share {} is invalid \
+                                 despite being certified on-chain; cluster needs manual recovery",
+                                dealer_address, share_index
+                            ))),
+                            Some(_) => Ok(ReconstructionOutcome::NeedsRotationComplaintRecovery {
+                                dealer_address,
+                                share_index,
+                                complaint,
+                                message,
+                            }),
+                        };
                     }
                 }
                 certified_share_indices.push(share_index);
             }
         }
-        // Unlike normal flow which accumulates until threshold in a loop, reconstruction
-        // receives all certificates at once. Check threshold for better error handling.
-        if certified_share_indices.len() < input_threshold as usize {
+        // Unlike normal flow which accumulates until threshold in a loop,
+        // reconstruction receives all certificates at once. Check threshold for
+        // better error handling.
+        if certified_share_indices.len() < view.input_threshold as usize {
             return Err(MpcError::NotEnoughApprovals {
-                needed: input_threshold as usize,
+                needed: view.input_threshold as usize,
                 got: certified_share_indices.len(),
             });
         }
         let indexed_outputs: Vec<IndexedValue<avss::PartialOutput>> = certified_share_indices
             .iter()
-            .take(input_threshold as usize)
+            .take(view.input_threshold as usize)
             .map(|&share_index| {
                 let output = local_outputs.get(&share_index).ok_or_else(|| {
                     MpcError::ProtocolFailed(format!(
@@ -3207,20 +3298,24 @@ impl MpcManager {
             .collect::<Result<_, MpcError>>()?;
         let used_indices: Vec<_> = indexed_outputs.iter().map(|o| o.index).collect();
         tracing::info!(
-            "reconstruct_from_rotation_certificates: {} share_indices={:?}, \
-             output_threshold={output_threshold}, input_threshold={input_threshold}",
+            "reconstruct_rotation_in_view: epoch={} {} share_indices={:?}, \
+             output_threshold={}, input_threshold={}",
+            view.epoch,
             used_indices.len(),
             used_indices,
+            view.output_threshold,
+            view.input_threshold,
         );
         let combined = avss::ReceiverOutput::complete_key_rotation(
-            input_threshold,
-            previous_party_id,
-            &previous_nodes,
+            view.input_threshold,
+            view.party_id,
+            view.nodes,
             &indexed_outputs,
         )
         .expect(EXPECT_THRESHOLD_MET);
         tracing::info!(
-            "reconstruct_from_rotation_certificates: result vk={}",
+            "reconstruct_rotation_in_view: epoch={} result vk={}",
+            view.epoch,
             hex::encode(combined.vk.to_byte_array()),
         );
         Ok(ReconstructionOutcome::Success(MpcOutput {
@@ -3231,7 +3326,7 @@ impl MpcManager {
                 .into_iter()
                 .map(|c| (c.index, c.value))
                 .collect(),
-            threshold: output_threshold,
+            threshold: view.output_threshold,
         }))
     }
 

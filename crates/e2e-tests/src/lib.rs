@@ -1279,6 +1279,73 @@ mod tests {
         Ok(())
     }
 
+    /// All nodes restart simultaneously after `end_reconfig` for an epoch
+    /// completed. `current_output` is wiped on every node and the previous
+    /// epoch's rotation messages have been pruned, so neither of
+    /// `run_key_rotation`'s recovery sources is available. Nodes must
+    /// reconstruct `current_output` from the just-completed rotation's stored
+    /// messages and resume signing without waiting for a fresh rotation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_coordinated_restart_after_rotation_recovers_without_new_rotation() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+
+        crate::test_helpers::init_test_logging();
+
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+
+        // Wait for initial DKG completion on all nodes.
+        assert_nodes_agree_on_mpc_key(test_networks.hashi_network().nodes()).await;
+        let initial_epoch = test_networks.hashi_network().nodes()[0]
+            .current_epoch()
+            .unwrap();
+
+        // Rotate once so the cluster reaches a state where the on-chain
+        // protocol_type is KeyRotation for the current epoch.
+        let rotation_epoch =
+            force_rotate_and_assert_key_agreement(&mut test_networks, initial_epoch + 1).await;
+        let key_after_rotation = get_mpc_key(test_networks.hashi_network().nodes());
+
+        // Coordinated restart of every node — this is the failure mode that
+        // `reconstruct_current_from_stored_rotation` exists to recover from.
+        test_networks.hashi_network_mut().restart().await?;
+
+        // Each node must come back with the same key at the same epoch,
+        // without an externally driven rotation.
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| {
+                panic!("Node {i} failed to recover MPC key after coordinated restart: {e}")
+            });
+        }
+        let key_after_restart = get_mpc_key(nodes);
+        assert_eq!(
+            key_after_rotation, key_after_restart,
+            "Recovered MPC key must match the pre-restart key",
+        );
+        for (i, node) in nodes.iter().enumerate().skip(1) {
+            let node_pk = node.hashi().mpc_handle().unwrap().public_key().unwrap();
+            assert_eq!(
+                key_after_restart, node_pk,
+                "Node {i} disagrees on the recovered MPC key",
+            );
+        }
+        assert_eq!(
+            nodes[0].current_epoch().unwrap(),
+            rotation_epoch,
+            "Recovery should not advance the epoch",
+        );
+
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_new_member_joins_key_rotation_after_dkg() -> Result<()> {
         const TOTAL_VALIDATORS: usize = 20;
