@@ -47,6 +47,7 @@ pub struct Metrics {
     pub guardian_limiter_validate_total: IntCounterVec,
     pub guardian_limiter_apply_total: IntCounterVec,
     pub guardian_limiter_anchor_events_total: IntCounter,
+    pub guardian_limiter_anchor_events_skipped_total: IntCounter,
     pub guardian_limiter_batch_truncated_total: IntCounter,
     pub guardian_limiter_batch_stuck_head_total: IntCounter,
     pub guardian_rpc_total: IntCounterVec,
@@ -349,6 +350,12 @@ impl Metrics {
             guardian_limiter_anchor_events_total: register_int_counter_with_registry!(
                 "hashi_guardian_limiter_anchor_events_total",
                 "Total on-chain WithdrawalSignedEvent observations applied to the local guardian-limiter",
+                registry,
+            )
+            .unwrap(),
+            guardian_limiter_anchor_events_skipped_total: register_int_counter_with_registry!(
+                "hashi_guardian_limiter_anchor_events_skipped_total",
+                "WithdrawalSignedEvent observations skipped because signatures were already recorded — covers checkpoint-stream redelivery and bootstrap-replay events",
                 registry,
             )
             .unwrap(),
