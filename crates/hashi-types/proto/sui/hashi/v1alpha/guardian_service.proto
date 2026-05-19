@@ -20,6 +20,12 @@ service GuardianService {
 
   // Standard withdrawal: request immediate withdrawal signature.
   rpc StandardWithdrawal(SignedStandardWithdrawalRequest) returns (SignedStandardWithdrawalResponse);
+
+  // Advance the guardian's committee from epoch N to N+1. The transition
+  // message carries the new committee and a threshold signature from the
+  // outgoing committee N. Idempotent: a transition whose new epoch is at or
+  // below the guardian's current epoch is a no-op.
+  rpc UpdateCommittee(SignedCommitteeTransition) returns (UpdateCommitteeResponse);
 }
 
 message GetGuardianInfoRequest {}
@@ -39,6 +45,11 @@ message GetGuardianInfoResponse {
 
   // Immutable limiter configuration (if initialized).
   LimiterConfig limiter_config = 5;
+
+  // Current committee epoch (if committee is initialized). Hashi nodes use
+  // this to detect whether the guardian needs catch-up `UpdateCommittee`
+  // calls to advance to the on-chain epoch.
+  optional uint64 current_committee_epoch = 6;
 }
 
 // Guardian-signed wrapper around `GuardianInfoData`.
@@ -277,4 +288,29 @@ message SignedStandardWithdrawalResponse {
 message StandardWithdrawalResponseData {
   // Bitcoin signatures for each input (64 bytes each, Schnorr signatures).
   repeated bytes enclave_signatures = 1;
+}
+
+// ============================
+//      UpdateCommittee
+// ============================
+
+// The new committee for epoch (current_epoch + 1). The outgoing committee
+// signs `(current_epoch, CommitteeTransition)` to authorize the handoff.
+message CommitteeTransition {
+  Committee new_committee = 1;
+}
+
+message SignedCommitteeTransition {
+  CommitteeTransition data = 1;
+
+  // Committee signature by the OUTGOING committee. `epoch` inside is the
+  // outgoing committee's epoch (one less than `data.new_committee.epoch`).
+  CommitteeSignature committee_signature = 2;
+}
+
+message UpdateCommitteeResponse {
+  // Guardian's current committee epoch after applying (or no-oping on)
+  // the transition. For idempotent calls — proposed epoch already current
+  // or older — this echoes the unchanged current epoch.
+  optional uint64 current_committee_epoch = 1;
 }

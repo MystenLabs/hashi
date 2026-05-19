@@ -139,7 +139,7 @@ impl MoveType for MemberInfo {
 }
 
 /// Rust version of the Move hashi::committee::CommitteeMember type.
-#[derive(Debug, serde_derive::Serialize, serde_derive::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct CommitteeMember {
     pub validator_address: Address,
     pub public_key: Vec<u8>, //Element<UncompressedG1>,
@@ -151,7 +151,7 @@ pub struct CommitteeMember {
 ///
 /// Rust version of the Move hashi::committee::Committee type.
 /// Also used in the guardian to serialize Committee.
-#[derive(Debug, serde_derive::Serialize, serde_derive::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct Committee {
     /// The epoch in which the committee is active.
     pub epoch: u64,

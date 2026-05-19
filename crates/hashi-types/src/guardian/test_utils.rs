@@ -95,6 +95,7 @@ impl GetGuardianInfoResponse {
             signed_info: GuardianSigned::new(info, &signing_key, 1234),
             limiter_state: None,
             limiter_config: None,
+            current_committee_epoch: None,
         }
     }
 }

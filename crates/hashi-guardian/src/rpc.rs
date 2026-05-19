@@ -1,12 +1,14 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::committee_update;
 use crate::getters;
 use crate::init;
 use crate::setup;
 use crate::withdraw;
 use crate::Enclave;
 use hashi_types::guardian::proto_conversions;
+use hashi_types::guardian::proto_conversions::pb_to_signed_committee_transition;
 use hashi_types::guardian::proto_conversions::pb_to_signed_standard_withdrawal_request_wire;
 use hashi_types::guardian::AddressValidation;
 use hashi_types::guardian::GuardianError;
@@ -142,5 +144,26 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         // domain to proto
         let resp_pb = proto_conversions::standard_withdrawal_response_signed_to_pb(response);
         Ok(Response::new(resp_pb))
+    }
+
+    async fn update_committee(
+        &self,
+        request: Request<proto::SignedCommitteeTransition>,
+    ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
+        if self.setup_mode {
+            return Err(Status::failed_precondition(
+                "update_committee is disabled when SETUP_MODE=true",
+            ));
+        }
+
+        let signed = pb_to_signed_committee_transition(request.into_inner()).map_err(to_status)?;
+        let current_committee_epoch =
+            committee_update::update_committee(self.enclave.clone(), signed)
+                .await
+                .map_err(to_status)?;
+
+        Ok(Response::new(proto::UpdateCommitteeResponse {
+            current_committee_epoch: Some(current_committee_epoch),
+        }))
     }
 }

@@ -8,6 +8,7 @@
 use super::BitcoinSignature;
 use super::Ciphertext;
 use super::CommitteeSignatureWire;
+use super::CommitteeTransition;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianError;
@@ -244,6 +245,7 @@ impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
             signed_info,
             limiter_state,
             limiter_config,
+            current_committee_epoch: resp.current_committee_epoch,
         })
     }
 }
@@ -378,6 +380,7 @@ pub fn get_guardian_info_response_to_pb(r: GetGuardianInfoResponse) -> pb::GetGu
         signed_info: Some(signed_guardian_info_to_pb(r.signed_info)),
         limiter_state: r.limiter_state.map(limiter_state_to_pb),
         limiter_config: r.limiter_config.map(limiter_config_to_pb),
+        current_committee_epoch: r.current_committee_epoch,
     }
 }
 
@@ -955,6 +958,81 @@ fn output_utxo_wire_to_pb(output: OutputUTXOWire) -> pb::OutputUtxo {
     }
 }
 
+// ----------------------------------
+//   Committee Transition
+// ----------------------------------
+
+/// Convert a `pb::Committee` (wire) into the BCS-stable `move_types::Committee`
+/// form used inside `CommitteeTransition`. Validates the proto into a
+/// `HashiCommittee` first (so member keys round-trip and total_weight
+/// matches), then projects back to the move-typed shape.
+fn pb_to_move_committee(c: pb::Committee) -> GuardianResult<crate::move_types::Committee> {
+    let hashi_committee = pb_to_hashi_committee(c)?;
+    Ok(crate::move_types::Committee::from(&hashi_committee))
+}
+
+fn move_committee_to_pb(c: &crate::move_types::Committee) -> pb::Committee {
+    pb::Committee {
+        epoch: Some(c.epoch),
+        members: c
+            .members
+            .iter()
+            .map(|m| pb::CommitteeMember {
+                address: Some(m.validator_address.to_string()),
+                public_key: Some(m.public_key.clone().into()),
+                encryption_public_key: Some(m.encryption_public_key.clone().into()),
+                weight: Some(m.weight),
+            })
+            .collect(),
+        total_weight: Some(c.total_weight),
+        mpc_threshold_in_basis_points: Some(c.mpc_threshold_in_basis_points),
+        mpc_weight_reduction_allowed_delta: Some(c.mpc_weight_reduction_allowed_delta),
+        mpc_max_faulty_in_basis_points: Some(c.mpc_max_faulty_in_basis_points),
+    }
+}
+
+pub fn committee_transition_to_pb(t: &CommitteeTransition) -> pb::CommitteeTransition {
+    pb::CommitteeTransition {
+        new_committee: Some(move_committee_to_pb(&t.new_committee)),
+    }
+}
+
+pub fn pb_to_committee_transition(
+    t: pb::CommitteeTransition,
+) -> GuardianResult<CommitteeTransition> {
+    let new_committee_pb = t.new_committee.ok_or_else(|| missing("new_committee"))?;
+    let new_committee = pb_to_move_committee(new_committee_pb)?;
+    Ok(CommitteeTransition { new_committee })
+}
+
+pub fn signed_committee_transition_to_pb(
+    signed: &HashiSigned<CommitteeTransition>,
+) -> pb::SignedCommitteeTransition {
+    pb::SignedCommitteeTransition {
+        data: Some(committee_transition_to_pb(signed.message())),
+        committee_signature: Some(pb::CommitteeSignature {
+            epoch: Some(signed.epoch()),
+            signature: Some(signed.signature_bytes().to_vec().into()),
+            bitmap: Some(signed.signers_bitmap_bytes().to_vec().into()),
+        }),
+    }
+}
+
+pub fn pb_to_signed_committee_transition(
+    req: pb::SignedCommitteeTransition,
+) -> GuardianResult<HashiSigned<CommitteeTransition>> {
+    let data_pb = req.data.ok_or_else(|| missing("data"))?;
+    let transition = pb_to_committee_transition(data_pb)?;
+
+    let committee_signature_pb = req
+        .committee_signature
+        .ok_or_else(|| missing("committee_signature"))?;
+    let (epoch, signature, bitmap) = pb_to_committee_signature(committee_signature_pb)?;
+
+    HashiSigned::<CommitteeTransition>::new(epoch, transition, &signature, &bitmap)
+        .map_err(|e| InvalidInputs(format!("invalid signed committee transition: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::AddressValidation;
@@ -1037,5 +1115,51 @@ mod tests {
         let pb = standard_withdrawal_response_signed_to_pb(resp.clone());
         let back = GuardianSigned::<StandardWithdrawalResponse>::try_from(pb).unwrap();
         assert_eq!(resp, back);
+    }
+
+    #[test]
+    fn signed_committee_transition_round_trip() {
+        use crate::committee::Bls12381PrivateKey;
+        use crate::committee::BlsSignatureAggregator;
+        use crate::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
+        use crate::committee::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
+        use crate::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
+        use crate::committee::EncryptionPublicKey;
+        use rand::SeedableRng;
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0xCAFE);
+        let sk = Bls12381PrivateKey::generate(&mut rng);
+        let enc_sk = crate::committee::EncryptionPrivateKey::new(&mut rng);
+        let enc_pk = EncryptionPublicKey::from_private_key(&enc_sk);
+        let addr = sui_sdk_types::Address::new([7u8; 32]);
+        let member = HashiCommitteeMember::new(addr, sk.public_key(), enc_pk, 10);
+        let outgoing = HashiCommittee::new(
+            vec![member.clone()],
+            5,
+            DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
+            DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
+        );
+        let new_committee = HashiCommittee::new(
+            vec![member],
+            6,
+            DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
+            DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
+        );
+        let transition = CommitteeTransition {
+            new_committee: crate::move_types::Committee::from(&new_committee),
+        };
+        let sig = sk.sign(5, addr, &transition);
+        let mut agg = BlsSignatureAggregator::new(&outgoing, transition.clone());
+        agg.add_signature(sig).expect("member sig should verify");
+        let signed = agg.finish().expect("threshold met");
+
+        let pb = signed_committee_transition_to_pb(&signed);
+        let back = pb_to_signed_committee_transition(pb).expect("round-trip");
+        assert_eq!(signed.epoch(), back.epoch());
+        assert_eq!(signed.signature_bytes(), back.signature_bytes());
+        assert_eq!(signed.signers_bitmap_bytes(), back.signers_bitmap_bytes());
+        assert_eq!(signed.message().new_committee, back.message().new_committee);
     }
 }

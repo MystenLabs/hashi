@@ -63,6 +63,7 @@ pub const S3_OBJECT_LOCK_DURATION_INIT: Duration = ONE_WEEK;
 pub const S3_OBJECT_LOCK_DURATION_WITHDRAW: Duration = ONE_WEEK;
 pub const S3_OBJECT_LOCK_DURATION_HEARTBEAT: Duration = ONE_WEEK;
 pub const S3_OBJECT_LOCK_DURATION_SECRET_SHARING: Duration = ONE_WEEK;
+pub const S3_OBJECT_LOCK_DURATION_COMMITTEE_UPDATE: Duration = ONE_WEEK;
 
 /// S3 sub-prefixes used for guardian log streams.
 /// See `crates/hashi-guardian/README.md` for canonical key layout.
@@ -70,6 +71,7 @@ pub const S3_DIR_INIT: &str = "init";
 pub const S3_DIR_WITHDRAW: &str = "withdraw";
 pub const S3_DIR_HEARTBEAT: &str = "heartbeat";
 pub const S3_DIR_SECRET_SHARING: &str = "secret_sharing";
+pub const S3_DIR_COMMITTEE_UPDATE: &str = "committee-update";
 
 /// Length of the session ID prefix (hex chars) used in S3 keys. 16 hex =
 /// 64 bits of the signing pubkey, comfortably below any collision risk for
@@ -199,6 +201,9 @@ pub struct GetGuardianInfoResponse {
     pub limiter_state: Option<LimiterState>,
     /// Immutable limiter configuration (if initialized).
     pub limiter_config: Option<LimiterConfig>,
+    /// Current committee epoch (if committee initialized). Used by hashi
+    /// nodes to drive `UpdateCommittee` catch-up.
+    pub current_committee_epoch: Option<u64>,
 }
 
 /// TODO: Add network?
@@ -238,6 +243,19 @@ pub struct StandardWithdrawalResponse {
     pub enclave_signatures: Vec<BitcoinSignature>,
 }
 
+/// Committee handoff message. Wrapped in `HashiSigned<CommitteeTransition>`
+/// — the outgoing committee N signs `(N, CommitteeTransition)`, authorizing
+/// the guardian to advance to `new_committee` (whose epoch must be N + 1).
+///
+/// `new_committee` is stored in the wire-compatible `move_types::Committee`
+/// form. Hashi and the guardian convert to/from `HashiCommittee` at the
+/// boundary; the BCS serialization matches the Move on-chain layout exactly,
+/// so signatures verify across the boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CommitteeTransition {
+    pub new_committee: crate::move_types::Committee,
+}
+
 // ---------------------------------
 //          Log Messages
 // ---------------------------------
@@ -250,6 +268,7 @@ pub enum LogMessage {
     Init(Box<InitLogMessage>),
     Withdrawal(Box<WithdrawalLogMessage>),
     SecretSharing(Box<SecretSharingLogMessage>),
+    CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
 }
 
 /// Written by `setup_new_key` (genesis, `sharing_seq=0`) to advertise the
@@ -299,6 +318,24 @@ pub enum WithdrawalLogMessage {
     /// Immediate withdraw failure
     Failure {
         request_data: StandardWithdrawalRequestWire,
+        request_sign: CommitteeSignature,
+        error: GuardianError,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum CommitteeUpdateLogMessage {
+    /// Committee was advanced from `from_epoch` to `to_epoch`.
+    Success {
+        from_epoch: u64,
+        to_epoch: u64,
+        new_committee: crate::move_types::Committee,
+        request_sign: CommitteeSignature,
+    },
+    /// Update was rejected. Logged for forensic trail.
+    Failure {
+        from_epoch: u64,
+        proposed_epoch: u64,
         request_sign: CommitteeSignature,
         error: GuardianError,
     },
@@ -625,6 +662,28 @@ impl WithdrawalLogMessage {
     }
 }
 
+impl CommitteeUpdateLogMessage {
+    pub fn log_name(&self, prefix: &str) -> String {
+        let random_suffix = rand::random::<u32>();
+        let (status, from_epoch, to_epoch) = match self {
+            CommitteeUpdateLogMessage::Success {
+                from_epoch,
+                to_epoch,
+                ..
+            } => ("success", *from_epoch, *to_epoch),
+            CommitteeUpdateLogMessage::Failure {
+                from_epoch,
+                proposed_epoch,
+                ..
+            } => ("failure", *from_epoch, *proposed_epoch),
+        };
+        format!(
+            "{}-{:020}-{:020}-{}-{:08x}.json",
+            prefix, from_epoch, to_epoch, status, random_suffix
+        )
+    }
+}
+
 impl LogMessage {
     pub fn is_allowed_unsigned(&self) -> bool {
         if let LogMessage::Init(init_message) = self {
@@ -651,6 +710,11 @@ impl LogMessage {
                     .to_string()
             }
             LogMessage::SecretSharing(..) => format!("{}/", S3_DIR_SECRET_SHARING),
+            LogMessage::CommitteeUpdate(..) => S3HourScopedDirectory::new(
+                S3_DIR_COMMITTEE_UPDATE,
+                unix_millis_to_seconds(timestamp_ms),
+            )
+            .to_string(),
         }
     }
 
@@ -665,6 +729,7 @@ impl LogMessage {
                 ss.secret_sharing_instance.sharing_seq(),
                 prefix
             ),
+            LogMessage::CommitteeUpdate(committee_message) => committee_message.log_name(prefix),
         }
     }
 
@@ -700,6 +765,7 @@ impl LogRecord {
             LogMessage::Heartbeat { .. } => S3_OBJECT_LOCK_DURATION_HEARTBEAT,
             LogMessage::Withdrawal(..) => S3_OBJECT_LOCK_DURATION_WITHDRAW,
             LogMessage::SecretSharing(..) => S3_OBJECT_LOCK_DURATION_SECRET_SHARING,
+            LogMessage::CommitteeUpdate(..) => S3_OBJECT_LOCK_DURATION_COMMITTEE_UPDATE,
         }
     }
 

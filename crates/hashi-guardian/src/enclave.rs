@@ -293,6 +293,27 @@ impl EnclaveState {
         Ok(())
     }
 
+    /// Atomically replace the committee with a new one. Used by the
+    /// `UpdateCommittee` handler after verifying the outgoing committee's
+    /// threshold signature on the transition. Fails if the committee has
+    /// never been initialized (use `set_committee` from `init` for that).
+    pub fn replace_committee(&self, committee: HashiCommittee) -> GuardianResult<()> {
+        info!(
+            "Replacing committee with new committee for epoch {}.",
+            committee.epoch()
+        );
+
+        let mut guard = self
+            .committee
+            .write()
+            .expect("rwlock should never throw an error");
+        if guard.is_none() {
+            return Err(InvalidInputs("committee not initialized".into()));
+        }
+        *guard = Some(Arc::new(committee));
+        Ok(())
+    }
+
     // ========================================================================
     // Rate Limiter Management
     // ========================================================================
@@ -461,6 +482,11 @@ impl Enclave {
 
     pub async fn log_withdraw(&self, msg: WithdrawalLogMessage) -> GuardianResult<()> {
         self.write_log(LogMessage::Withdrawal(Box::new(msg))).await
+    }
+
+    pub async fn log_committee_update(&self, msg: CommitteeUpdateLogMessage) -> GuardianResult<()> {
+        self.write_log(LogMessage::CommitteeUpdate(Box::new(msg)))
+            .await
     }
 
     pub async fn log_heartbeat(&self, seq: u64) -> GuardianResult<()> {
