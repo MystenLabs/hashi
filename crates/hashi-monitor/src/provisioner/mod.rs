@@ -23,8 +23,8 @@ use hashi_types::proto as pb;
 use rand::thread_rng;
 use tracing::info;
 
-pub use config::ProvisionerConfig;
 use crate::domain::now_unix_seconds;
+pub use config::ProvisionerConfig;
 
 pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
     let s3_client = S3Logger::new_checked(&cfg.s3)
