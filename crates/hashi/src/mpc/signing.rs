@@ -349,13 +349,19 @@ impl SigningManager {
                 result
             }
         }; // state write lock released
+        let first_sig_label = match partial_sigs.first() {
+            Some(first) => format!(
+                "first_partial_sig_index={}, first_partial_sig_value={:?}",
+                first.index, first.value,
+            ),
+            None => "no local partial sigs (w'=0)".to_string(),
+        };
         tracing::info!(
             "sign({sui_request_id}): public_nonce={public_nonce:?}, message_hash={}, \
-             verifying_key={}, first_partial_sig_index={}, first_partial_sig_value={:?}",
+             verifying_key={}, {}",
             hex::encode(message),
             hex::encode(verifying_key.to_byte_array()),
-            partial_sigs[0].index,
-            partial_sigs[0].value,
+            first_sig_label,
         );
         let mut all_partial_sigs = partial_sigs;
         let mut remaining_peers: HashSet<Address> = committee
@@ -1120,6 +1126,54 @@ mod tests {
 
         // All peers (except caller) prepare their partial sigs first.
         setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+
+        let p2p = setup.mock_p2p_for(0);
+        let sig = SigningManager::sign(
+            &setup.managers[0],
+            &p2p,
+            req_id,
+            message,
+            0,
+            &beacon,
+            None,
+            Duration::from_secs(30),
+            &test_metrics(),
+        )
+        .await
+        .unwrap();
+
+        verify_schnorr(&setup.verifying_key, message, &sig);
+    }
+
+    #[tokio::test]
+    async fn test_sign_with_empty_local_partial_sigs() {
+        use tracing_subscriber::util::SubscriberInitExt;
+        let _guard = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_test_writer()
+            .set_default();
+
+        let setup = SigningTestSetup::new(7); // n=7, t=3, f=2
+        let message = b"empty local sigs";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+
+        let (public_nonce, _) = setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+
+        // Pre-populate manager[0]'s cache with empty `partial_sigs` to simulate a
+        // `w' = 0` party that produced no local sigs from `generate_partial_signatures`.
+        setup.managers[0]
+            .state
+            .write()
+            .unwrap()
+            .partial_signing_outputs
+            .insert(
+                req_id,
+                PartialSigningOutput {
+                    public_nonce,
+                    partial_sigs: vec![],
+                },
+            );
 
         let p2p = setup.mock_p2p_for(0);
         let sig = SigningManager::sign(
