@@ -89,9 +89,18 @@ pub struct ShareInput {
 impl ProvisionerConfig {
     pub fn load_yaml(path: &Path) -> anyhow::Result<Self> {
         let bytes = std::fs::read(path)
-            .with_context(|| format!("failed to read kp-init config at {}", path.display()))?;
-        serde_yaml::from_slice(&bytes)
-            .with_context(|| format!("failed to parse kp-init yaml at {}", path.display()))
+            .with_context(|| {
+                format!(
+                    "failed to read provisioner-init config at {}",
+                    path.display()
+                )
+            })?;
+        serde_yaml::from_slice(&bytes).with_context(|| {
+            format!(
+                "failed to parse provisioner-init yaml at {}",
+                path.display()
+            )
+        })
     }
 
     pub fn expected_guardian_config(&self) -> anyhow::Result<GuardianConfig> {

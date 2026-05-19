@@ -2,23 +2,31 @@
 Hashi monitoring library and CLI tool.
 
 ## What it does?
-Audits the cross-system withdrawal flow:
-- **E1**: Hashi approval event on Sui (WithdrawalTransaction creation)
-- **E2**: Guardian approval event (logged to S3)
-- **E3**: BTC transaction confirmed on Bitcoin
+Audits the cross-system bridge flow on two parallel tracks.
+
+### Withdrawals (Sui → BTC)
+- **E1**: Hashi approval event on Sui (`WithdrawalPickedForProcessingEvent`).
+- **E2**: Guardian approval event (success record logged to S3).
+- **E3**: BTC transaction confirmed on Bitcoin.
+
+### Deposits (BTC → Sui)
+- **E1**: Deposit confirmed on Bitcoin.
+- **E2**: `DepositConfirmedEvent` on Sui.
 
 ### Checks
-- **Predecessor existence**: For every E2, there exists a corresponding E1. For every E3, there exists a corresponding E2 with matching txid.
-- **Successor existence**: For every source event, the configured successor delay bound must hold.
+- **Predecessor existence**: every successor event has a matching predecessor with consistent txid / wid.
+- **Successor existence**: for each non-terminal event, the configured next-event delay bound must hold.
 
-### Two modes
-1. **Batch**: One-time audit over a guardian time range `[start, end]`.
-2. **Continuous**: Intended long-running monitor over guardian timeline.
+### Modes
+1. **Batch**: one-time audit over a guardian time range `[start, end]`.
+2. **Continuous**: long-running monitor that polls Sui, Guardian S3, and BTC RPC on fixed intervals and reports findings as they appear.
+3. **Provisioner-init**: one-shot provisioner-init flow run by the key provisioner — audits heartbeats for the latest enclave session, verifies attestation and expected config, builds a `ProvisionerInitRequest`, and optionally submits it to a guardian endpoint.
 
-### Timeline semantics
+### Timeline semantics (withdrawals)
 - User-provided `start` / `end` are interpreted on the **guardian (E2)** timeline.
-- Sui events are still polled in a relaxed range to validate E2 predecessor constraints.
+- Sui events are polled in a relaxed range to validate E2 predecessor constraints.
 - Orphan E1 findings are currently still reported when E1 falls in the user window.
+- Deposits are not gated by the audit window — there is no false-positive risk.
 
 ## Usage
 
@@ -26,17 +34,23 @@ Audits the cross-system withdrawal flow:
 ```bash
 cargo run -p hashi-monitor -- batch --config config.sample.yaml --start 1700000000 --end 1700003600
 ```
+`--end` defaults to the current time if omitted.
 
 ### Continuous monitoring
 ```bash
 cargo run -p hashi-monitor -- continuous --config config.sample.yaml --start 1700000000
 ```
 
+### Provisioner-init
+```bash
+cargo run -p hashi-monitor -- provisioner-init --config provisioner-init.yaml
+```
+
 ## Config
-See `config.sample.yaml` for a complete example:
+See `config.sample.yaml` for a complete batch/continuous example:
 
 ```yaml
-# Next event delay bounds (seconds)
+# Liveness delay bounds (seconds)
 next_event_delays:
   - [E1HashiApproved, 300] # E1 (Hashi approval) -> E2 (Guardian signing)
   - [E2GuardianApproved, 300] # E2 (Guardian signing) -> E3 (BTC confirmed)
@@ -56,14 +70,15 @@ btc:
     type: none
 ```
 
-## Status
-This crate is currently a scaffold for a future full audit implementation.
+The `provisioner-init` subcommand takes a separate YAML (`ProvisionerConfig`) with the key-provisioner share, expected share commitments, S3 config, Hashi committee, withdrawal config, and Hashi BTC master pubkey; if `guardian_endpoint` is set, the request is submitted after local checks pass.
 
-- Implemented now:
-  - Domain model and withdrawal state-machine checks.
-  - Batch/continuous auditor structure and CLI wiring.
-- Deferred to a follow-up PR:
-  - Sui event download/polling.
-  - Guardian S3 event download/polling.
-  - BTC confirmation lookup.
-  - `batch` and `continuous` are wired through the CLI but currently stop at deferred `todo!` implementation points.
+## Status
+- Implemented:
+  - Domain model and withdrawal / deposit state-machine checks.
+  - Batch and continuous auditor loops (cursor advancement, BTC fetch, violation detection, GC, progress watermarks).
+  - Guardian S3 withdrawal log polling with attestation and signature verification.
+  - BTC confirmation lookup via Bitcoin Core RPC.
+  - Provisioner-init flow (heartbeat audit, attestation/config check, optional submission).
+- Not yet implemented:
+  - Sui event polling — `AuditorCore::poll_sui` is a stub that returns `CursorUnmoved`, so E1 (withdrawal) and the deposit pipeline currently see no Sui input.
+  - Limiter state recovery from S3 logs in `provisioner-init` (currently uses a mock).

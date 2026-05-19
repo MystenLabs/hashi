@@ -5,7 +5,7 @@ use hpke::Deserializable;
 mod config;
 mod heartbeat_checks;
 
-use crate::kp::config::GuardianConfig;
+use crate::provisioner::config::GuardianConfig;
 use anyhow::Context;
 use hashi_guardian::s3_logger::S3Logger;
 use hashi_types::guardian::EncPubKey;
@@ -29,7 +29,7 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!(e))?;
 
     // 1. Check no past enclave's heartbeats remain & gather the latest enclave's session id.
-    let session_id = heartbeat_checks::kp_heartbeat_audit(&s3_client).await?;
+    let session_id = heartbeat_checks::heartbeat_audit(&s3_client).await?;
     info!(session_id, "heartbeat checks passed for selected session");
 
     // 2. Check that enclave's config is as expected (valid attestation, expected s3 bucket & share commitments)

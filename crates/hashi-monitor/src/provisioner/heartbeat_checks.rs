@@ -40,7 +40,7 @@ pub struct GuardianSessionInfo {
 /// Implements check A of IOP-225.
 ///
 /// Returns the selected live session id if all invariants pass.
-pub async fn kp_heartbeat_audit(s3_client: &S3Logger) -> anyhow::Result<String> {
+pub async fn heartbeat_audit(s3_client: &S3Logger) -> anyhow::Result<String> {
     let recent_heartbeats = read_recent_heartbeats(s3_client).await?;
     let summary = summarize_heartbeats_by_session(recent_heartbeats)?;
     let now = now_unix_seconds();

@@ -19,7 +19,7 @@ pub mod config;
 /// Error types
 pub mod errors;
 
-/// Key-provisioner init checks.
-pub mod kp;
+/// Provisioner-init flow run by the key provisioner.
+pub mod provisioner;
 
 pub use hashi_types::guardian::bitcoin_utils::ExternalOutputUTXOWire as OutputUTXO;

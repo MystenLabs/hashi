@@ -41,9 +41,9 @@ enum Command {
         #[arg(long)]
         start: u64,
     },
-    /// Run key-provisioner init checks against guardian S3 logs.
-    KpInit {
-        /// Path to kp-init YAML config file.
+    /// Run provisioner-init checks against guardian S3 logs and optionally submit ProvisionerInit.
+    ProvisionerInit {
+        /// Path to provisioner-init YAML config file.
         #[arg(long)]
         config: PathBuf,
     },
@@ -73,9 +73,9 @@ async fn main() -> anyhow::Result<()> {
             let mut auditor = hashi_monitor::audit::ContinuousAuditor::new(&cfg, start).await?;
             auditor.run().await?;
         }
-        Command::KpInit { config } => {
-            let cfg = hashi_monitor::kp::ProvisionerConfig::load_yaml(&config)?;
-            hashi_monitor::kp::run(cfg).await?;
+        Command::ProvisionerInit { config } => {
+            let cfg = hashi_monitor::provisioner::ProvisionerConfig::load_yaml(&config)?;
+            hashi_monitor::provisioner::run(cfg).await?;
         }
     }
 
