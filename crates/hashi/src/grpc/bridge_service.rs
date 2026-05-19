@@ -17,6 +17,8 @@ use crate::withdrawals::WithdrawalTxSigning;
 use hashi_types::bitcoin_txid::BitcoinTxid;
 use hashi_types::proto::GetServiceInfoRequest;
 use hashi_types::proto::GetServiceInfoResponse;
+use hashi_types::proto::SignCommitteeTransitionRequest;
+use hashi_types::proto::SignCommitteeTransitionResponse;
 use hashi_types::proto::SignDepositConfirmationRequest;
 use hashi_types::proto::SignDepositConfirmationResponse;
 use hashi_types::proto::SignGuardianWithdrawalRequestRequest;
@@ -129,6 +131,33 @@ impl BridgeService for HttpService {
             "Signed withdrawal tx construction",
         );
         Ok(Response::new(SignWithdrawalTxConstructionResponse {
+            member_signature: Some(member_signature),
+        }))
+    }
+
+    /// Validate and BLS-sign a `CommitteeTransition` from `from_epoch` to
+    /// `from_epoch + 1` for the guardian. The transition's `new_committee`
+    /// is reconstructed deterministically from on-chain state — clients
+    /// cannot supply it on the wire.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(from_epoch = tracing::field::Empty, caller = tracing::field::Empty),
+    )]
+    async fn sign_committee_transition(
+        &self,
+        request: Request<SignCommitteeTransitionRequest>,
+    ) -> Result<Response<SignCommitteeTransitionResponse>, Status> {
+        let caller = authenticate_caller(&request)?;
+        tracing::Span::current().record("caller", tracing::field::display(&caller));
+        let from_epoch = request.get_ref().from_epoch;
+        tracing::Span::current().record("from_epoch", from_epoch);
+        let member_signature = self
+            .inner
+            .validate_and_sign_committee_transition(from_epoch)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        tracing::info!(from_epoch, "Signed committee transition");
+        Ok(Response::new(SignCommitteeTransitionResponse {
             member_signature: Some(member_signature),
         }))
     }

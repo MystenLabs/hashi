@@ -25,6 +25,9 @@ service BridgeService {
   rpc SignWithdrawalTxSigning(SignWithdrawalTxSigningRequest) returns (SignWithdrawalTxSigningResponse);
   // Step 4: Sign committee approval to confirm a processed withdrawal on-chain.
   rpc SignWithdrawalConfirmation(SignWithdrawalConfirmationRequest) returns (SignWithdrawalConfirmationResponse);
+  // Sign a committee transition from `from_epoch` to `from_epoch + 1` so the
+  // leader can aggregate a certificate to advance the guardian's committee.
+  rpc SignCommitteeTransition(SignCommitteeTransitionRequest) returns (SignCommitteeTransitionResponse);
 }
 
 message GetServiceInfoRequest {}
@@ -184,5 +187,18 @@ message SignGuardianWithdrawalRequestRequest {
 }
 
 message SignGuardianWithdrawalRequestResponse {
+  MemberSignature member_signature = 1;
+}
+
+// Peers reconstruct the same `CommitteeTransition` from on-chain state at
+// `from_epoch + 1` and BLS-sign it with their historical epoch-`from_epoch`
+// signing key. No new committee bytes on the wire — peers can't be tricked
+// into signing an attacker-crafted committee.
+message SignCommitteeTransitionRequest {
+  // The outgoing committee's epoch. Implies new_epoch = from_epoch + 1.
+  uint64 from_epoch = 1;
+}
+
+message SignCommitteeTransitionResponse {
   MemberSignature member_signature = 1;
 }

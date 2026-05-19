@@ -35,11 +35,14 @@ use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::SignedMessage;
 use hashi_types::committee::certificate_threshold;
+use hashi_types::guardian::CommitteeTransition;
 use hashi_types::guardian::GuardianSigned;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalResponse;
 use hashi_types::guardian::bitcoin_utils;
+use hashi_types::guardian::proto_conversions::signed_committee_transition_to_pb;
 use hashi_types::guardian::proto_conversions::signed_standard_withdrawal_request_to_pb;
+use hashi_types::proto::SignCommitteeTransitionRequest;
 use hashi_types::proto::SignDepositConfirmationRequest;
 use hashi_types::proto::SignGuardianWithdrawalRequestRequest;
 use hashi_types::proto::SignWithdrawalConfirmationRequest;
@@ -99,6 +102,7 @@ pub struct LeaderService {
     pending_utxo_cleanups: VecDeque<PendingUtxoCleanup>,
     utxo_cleanup_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     utxo_cleanup_scan_needed: bool,
+    guardian_committee_reconcile_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
 }
 
 impl LeaderService {
@@ -123,6 +127,7 @@ impl LeaderService {
             pending_utxo_cleanups: VecDeque::new(),
             utxo_cleanup_gc_task: None,
             utxo_cleanup_scan_needed: true,
+            guardian_committee_reconcile_task: None,
         }
     }
 
@@ -169,6 +174,7 @@ impl LeaderService {
                         continue;
                     }
 
+                    self.maybe_reconcile_guardian_committee();
                     self.process_unapproved_withdrawal_requests(checkpoint_timestamp_ms);
                     self.process_approved_withdrawal_requests(checkpoint_timestamp_ms);
                     self.process_unsigned_withdrawal_txns();
@@ -238,9 +244,33 @@ impl LeaderService {
                     self.utxo_cleanup_scan_needed = true;
                     self.check_cleanup_spent_utxos();
                 }
+                Some(result) = OptionFuture::from(self.guardian_committee_reconcile_task.as_mut()) => {
+                    self.guardian_committee_reconcile_task = None;
+                    Self::log_task_result("guardian_committee_reconcile", result);
+                }
 
             }
         }
+    }
+
+    /// Spawn a one-shot background task that walks the guardian forward
+    /// through any missing committee transitions. Idempotent: if one is
+    /// already running, this is a no-op. The guardian's own idempotency
+    /// makes duplicate transitions across leadership churn safe.
+    fn maybe_reconcile_guardian_committee(&mut self) {
+        if self.inner.guardian_client().is_none() {
+            return;
+        }
+        if self
+            .guardian_committee_reconcile_task
+            .as_ref()
+            .is_some_and(|t| !t.is_finished())
+        {
+            return;
+        }
+        let inner = self.inner.clone();
+        let handle = tokio::spawn(async move { Self::reconcile_guardian_committee(&inner).await });
+        self.guardian_committee_reconcile_task = Some(AbortOnDropHandle::new(handle));
     }
 
     fn handle_completed_deposit_task(
@@ -2301,6 +2331,216 @@ impl LeaderService {
             .inspect_err(|e| {
                 error!(
                     "Failed to parse guardian withdrawal member signature from {validator_address}: {e}"
+                );
+            })
+            .ok()
+    }
+
+    // ========================================================================
+    // Guardian: committee handoff (post-rotation)
+    // ========================================================================
+
+    /// Walk the guardian forward one epoch at a time until its committee
+    /// matches the on-chain epoch. Each step collects a threshold of
+    /// signatures from the OUTGOING committee (using their historical
+    /// per-epoch BLS keys retained in our DB).
+    async fn reconcile_guardian_committee(inner: &Arc<Hashi>) -> anyhow::Result<()> {
+        let Some(guardian) = inner.guardian_client() else {
+            return Ok(());
+        };
+
+        // Bound the catch-up to keep a single iteration well-behaved. A real
+        // catch-up should be at most a couple of epochs.
+        const MAX_TRANSITIONS_PER_RECONCILE: usize = 8;
+
+        for _ in 0..MAX_TRANSITIONS_PER_RECONCILE {
+            let rpc_start = std::time::Instant::now();
+            let info_pb = match guardian.get_guardian_info().await {
+                Ok(info) => {
+                    inner.metrics.record_guardian_rpc(
+                        crate::metrics::GUARDIAN_RPC_METHOD_GET_GUARDIAN_INFO,
+                        crate::metrics::GUARDIAN_RPC_OUTCOME_OK,
+                        rpc_start.elapsed().as_secs_f64(),
+                    );
+                    info
+                }
+                Err(e) => {
+                    inner.metrics.record_guardian_rpc(
+                        crate::metrics::GUARDIAN_RPC_METHOD_GET_GUARDIAN_INFO,
+                        crate::metrics::GUARDIAN_RPC_OUTCOME_UNAVAILABLE,
+                        rpc_start.elapsed().as_secs_f64(),
+                    );
+                    anyhow::bail!("GetGuardianInfo failed: {e}");
+                }
+            };
+            let info: hashi_types::guardian::GetGuardianInfoResponse = info_pb
+                .try_into()
+                .map_err(|e| anyhow::anyhow!("parse GetGuardianInfoResponse: {e:?}"))?;
+            let Some(guardian_epoch) = info.current_committee_epoch else {
+                // Guardian hasn't completed ProvisionerInit yet; nothing to
+                // reconcile until the bootstrap CLI seeds it.
+                return Ok(());
+            };
+            inner
+                .metrics
+                .guardian_current_committee_epoch
+                .set(guardian_epoch as i64);
+
+            let hashi_epoch = inner.onchain_state().epoch();
+            if guardian_epoch >= hashi_epoch {
+                return Ok(());
+            }
+
+            let from_epoch = guardian_epoch;
+            info!(
+                from_epoch,
+                hashi_epoch, "Driving guardian committee handoff"
+            );
+            let signed = Self::collect_committee_transition_signatures(inner, from_epoch).await?;
+            let proto = signed_committee_transition_to_pb(&signed);
+
+            let rpc_start = std::time::Instant::now();
+            let resp = match guardian.update_committee(proto).await {
+                Ok(resp) => {
+                    inner.metrics.record_guardian_rpc(
+                        crate::metrics::GUARDIAN_RPC_METHOD_UPDATE_COMMITTEE,
+                        crate::metrics::GUARDIAN_RPC_OUTCOME_OK,
+                        rpc_start.elapsed().as_secs_f64(),
+                    );
+                    resp
+                }
+                Err(status) => {
+                    inner.metrics.record_guardian_rpc(
+                        crate::metrics::GUARDIAN_RPC_METHOD_UPDATE_COMMITTEE,
+                        crate::metrics::GUARDIAN_RPC_OUTCOME_UNAVAILABLE,
+                        rpc_start.elapsed().as_secs_f64(),
+                    );
+                    anyhow::bail!("UpdateCommittee failed: {}", status.message());
+                }
+            };
+            let new_guardian_epoch = resp.current_committee_epoch.unwrap_or(from_epoch);
+            inner
+                .metrics
+                .guardian_current_committee_epoch
+                .set(new_guardian_epoch as i64);
+            info!(
+                from_epoch,
+                to_epoch = new_guardian_epoch,
+                "Advanced guardian committee"
+            );
+
+            // Defensive: if the guardian didn't advance (e.g., it rejected
+            // silently into a no-op), stop instead of looping.
+            if new_guardian_epoch <= from_epoch {
+                anyhow::bail!(
+                    "guardian failed to advance: still at {new_guardian_epoch} after sending {}->{}",
+                    from_epoch,
+                    from_epoch + 1
+                );
+            }
+        }
+        warn!(
+            "reconcile_guardian_committee hit MAX_TRANSITIONS_PER_RECONCILE; \
+             next leader tick will continue"
+        );
+        Ok(())
+    }
+
+    async fn collect_committee_transition_signatures(
+        inner: &Arc<Hashi>,
+        from_epoch: u64,
+    ) -> anyhow::Result<SignedMessage<CommitteeTransition>> {
+        let to_epoch = from_epoch + 1;
+        let (from_committee, new_committee) = {
+            let onchain = inner.onchain_state();
+            let state = onchain.state();
+            let committees_map = state.hashi().committees.committees();
+            let from = committees_map
+                .get(&from_epoch)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no on-chain committee for epoch {from_epoch}"))?;
+            let to = committees_map
+                .get(&to_epoch)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("no on-chain committee for epoch {to_epoch}"))?;
+            (from, to)
+        };
+
+        let transition = CommitteeTransition {
+            new_committee: hashi_types::move_types::Committee::from(&new_committee),
+        };
+        let required_weight = certificate_threshold(from_committee.total_weight());
+
+        let proto_request = SignCommitteeTransitionRequest { from_epoch };
+        let mut sig_tasks = JoinSet::new();
+        for member in from_committee.members() {
+            let inner = inner.clone();
+            let member = member.clone();
+            sig_tasks.spawn(async move {
+                Self::request_committee_transition_signature(&inner, proto_request, &member).await
+            });
+        }
+
+        let mut aggregator = BlsSignatureAggregator::new(&from_committee, transition);
+        while let Some(result) = sig_tasks.join_next().await {
+            let Ok(Some(sig)) = result else { continue };
+            if let Err(e) = aggregator.add_signature(sig) {
+                error!(
+                    from_epoch,
+                    "Failed to add committee transition signature: {e}"
+                );
+            }
+            if aggregator.weight() >= required_weight {
+                break;
+            }
+        }
+        let weight = aggregator.weight();
+        if weight < required_weight {
+            anyhow::bail!(
+                "insufficient committee transition signatures for {from_epoch}->{to_epoch}: weight {weight} < {required_weight}"
+            );
+        }
+        Ok(aggregator.finish()?)
+    }
+
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(validator = %member.validator_address())
+    )]
+    async fn request_committee_transition_signature(
+        inner: &Arc<Hashi>,
+        proto_request: SignCommitteeTransitionRequest,
+        member: &CommitteeMember,
+    ) -> Option<MemberSignature> {
+        let validator_address = member.validator_address();
+        let mut rpc_client = inner
+            .onchain_state()
+            .bridge_service_client(&validator_address)
+            .or_else(|| {
+                error!(
+                    "Cannot find client for validator address: {:?}",
+                    validator_address
+                );
+                None
+            })?;
+        let response = rpc_client
+            .sign_committee_transition(proto_request)
+            .await
+            .inspect_err(|e| {
+                error!(
+                    "Failed to get committee transition signature from {validator_address}: {e}"
+                );
+            })
+            .ok()?;
+        response
+            .into_inner()
+            .member_signature
+            .ok_or_else(|| anyhow::anyhow!("No member_signature in response"))
+            .and_then(parse_member_signature)
+            .inspect_err(|e| {
+                error!(
+                    "Failed to parse committee transition signature from {validator_address}: {e}"
                 );
             })
             .ok()

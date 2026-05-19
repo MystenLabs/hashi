@@ -52,6 +52,10 @@ pub struct Metrics {
     pub guardian_rpc_total: IntCounterVec,
     pub guardian_rpc_duration_seconds: HistogramVec,
 
+    /// Last-observed committee epoch reported by the guardian's
+    /// `GetGuardianInfo`. Updated by the leader's reconcile task.
+    pub guardian_current_committee_epoch: IntGauge,
+
     // Kyoto (Bitcoin light client) metrics
     pub kyoto_connected_peers: IntGauge,
     pub kyoto_synced: IntGauge,
@@ -374,6 +378,12 @@ impl Metrics {
                 "Latency of outbound RPC calls to the guardian by method and outcome",
                 &["method", "outcome"],
                 LATENCY_SEC_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            guardian_current_committee_epoch: register_int_gauge_with_registry!(
+                "hashi_guardian_current_committee_epoch",
+                "Committee epoch reported by the guardian as of the last reconcile RPC",
                 registry,
             )
             .unwrap(),
@@ -1069,6 +1079,7 @@ pub const GUARDIAN_BOOTSTRAP_OUTCOME_NO_LIMITER_YET: &str = "no_limiter_yet";
 
 pub const GUARDIAN_RPC_METHOD_GET_GUARDIAN_INFO: &str = "get_guardian_info";
 pub const GUARDIAN_RPC_METHOD_STANDARD_WITHDRAWAL: &str = "standard_withdrawal";
+pub const GUARDIAN_RPC_METHOD_UPDATE_COMMITTEE: &str = "update_committee";
 
 pub const GUARDIAN_RPC_OUTCOME_OK: &str = "ok";
 pub const GUARDIAN_RPC_OUTCOME_SEQ_MISMATCH: &str = "seq_mismatch";

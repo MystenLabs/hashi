@@ -58,4 +58,15 @@ impl GuardianClient {
             .await?;
         Ok(response.into_inner())
     }
+
+    pub async fn update_committee(
+        &self,
+        request: hashi_types::proto::SignedCommitteeTransition,
+    ) -> Result<hashi_types::proto::UpdateCommitteeResponse, tonic::Status> {
+        let response = self
+            .guardian_service_client()
+            .update_committee(request)
+            .await?;
+        Ok(response.into_inner())
+    }
 }
