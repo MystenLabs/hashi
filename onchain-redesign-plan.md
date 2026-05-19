@@ -10,63 +10,68 @@ and never falls through to MPC signing.
 
 This is a class of bug, not a one-off. The watcher's correctness depends on
 every Move state mutation either (a) emitting an event with enough payload
-to reconstruct the new state or (b) being followed up by code that re-reads
-chain state. Any future Move code path that mutates an object without an
-event re-introduces the bug.
+to reconstruct the new state or (b) being followed up by bespoke code that
+re-reads chain state. Any future Move code path that mutates an object
+without an event re-introduces the bug.
 
 The redesign shifts the canonical signal of "state changed" from events to
 `TransactionEffects.changed_objects` and `Checkpoint.objects`. Events stay,
-but only as hints driving notifications and routing — not as the source of
-truth for state.
+but only as hints driving notifications — not as the source of truth for
+mirrored state.
 
 ## Current architecture (what we're replacing)
 
 Three layers exist today:
 
-1. **`hashi-types/src/move_types/mod.rs`** — BCS-shaped Rust mirrors of Move
-   structs. `serde_derive::Deserialize` for each struct in BCS field order.
-   `MoveType` trait carries `MODULE` and `NAME`, used only by events. No
-   object metadata (version, digest, owner) is captured.
+1. **`hashi-types/src/move_types/mod.rs`** — BCS-shaped Rust mirrors of
+   Move structs. `serde_derive::Deserialize` for each struct in BCS field
+   order. A `MoveType` trait carries `MODULE` and `NAME`, used only by
+   events. No object metadata (version, owner) is captured. Generic
+   containers (`Bag`, `Field<N,V>`, `LinkedTable<K>`) are modeled only as
+   their on-chain headers — `Bag { id, size }` says "go look up dynamic
+   fields under `id` yourself."
 
 2. **`hashi/src/onchain/types.rs`** — enriched mirror with mixed
-   responsibilities. Some types are pure re-exports of layer 1. Others wrap
-   layer 1 with semantic enrichment (BLS key parsing, encryption key
+   responsibilities. Some types are pure re-exports of layer 1. Others
+   wrap layer 1 with semantic enrichment (BLS key parsing, encryption-key
    parsing, `TypeTag` dispatch for treasury entries / proposals, `Config`
-   flattening). Bag/Table-backed maps are flattened into Rust `BTreeMap`s
-   with no record of the underlying field IDs or versions.
+   flattening). Bag-backed maps are flattened into Rust `BTreeMap`s with
+   no record of the underlying field IDs or versions. A second `MoveType`
+   trait is defined in this crate, duplicating the one in `hashi-types`.
 
 3. **`hashi/src/onchain/mod.rs` + `watcher.rs`** — scrape and event-driven
-   mirror. `scrape_hashi` does one `get_object` on the root, then fans out
-   `list_dynamic_fields` per Bag/Table to pre-warm every container. The
-   watcher reads only events and applies per-event mutations directly to
-   the layer-2 maps. Whenever an event can't reconstruct state on its own
+   mirror. `scrape_hashi` does one `get_object` on the root, then fans
+   out `list_dynamic_fields` per Bag to pre-warm every container. The
+   watcher subscribes to checkpoints, reads only events, and applies
+   per-event mutations directly to the layer-2 maps. Whenever an event
+   can't reconstruct state on its own
    (`WithdrawalPickedForProcessingEvent`, `StartReconfigEvent`, mint/burn,
    etc.) it does a bespoke one-off RPC: `fetch_withdrawal_txn`,
    `scrape_committee`, `fetch_treasury_cap`, `scrape_member_info`,
    `scrape_hashi_config`.
 
-The duplicated `MoveType` trait (one in each crate) is a smaller symptom of
-the same problem: the type system doesn't know what an object is, only
-what its BCS payload looks like.
+The duplicated `MoveType` trait is a smaller symptom of the same problem:
+the type system knows what a BCS payload looks like but not what an
+object *is*.
 
 ## Key facts that inform the redesign
 
 ### DOF (dynamic object field) memory layout
 
 From `sui-framework/sources/dynamic_object_field.move:257-306` a DOF is
-*two* objects:
+*two* on-chain objects:
 
 1. A wrapper `Field<Wrapper<Name>, ID>` parented to the outer UID. Its
-   address is `derive_dynamic_child_id(parent_uid,
-   type_tag_of(Wrapper<Name>), bcs(name))`.
+   address is
+   `derive_dynamic_child_id(parent_uid, type_tag_of(Wrapper<Name>), bcs(name))`.
 
-2. The actual `Value` object, parented to the wrapper field's address via
-   `add_child_object(field.to_address(), value)`.
+2. The actual `Value` object, parented to the wrapper field's address
+   via `add_child_object(field.to_address(), value)`.
 
-When the `Value` mutates, only the `Value` appears in `changed_objects`
-with `output_owner = Object(wrapper_id)`. The wrapper itself is unchanged.
-The wrapper *does* appear in `changed_objects` (with `id_operation =
-CREATED` or `DELETED`) on add or remove.
+When the Value mutates, only the Value appears in `changed_objects`
+with `output_owner = Object(wrapper_id)`. The wrapper itself is
+unchanged. The wrapper *does* appear in `changed_objects` (with
+`id_operation = CREATED` or `DELETED`) on add or remove.
 
 ### Regular DF (no DOF)
 
@@ -76,115 +81,95 @@ the Field object, so a value mutation rewrites the Field object itself —
 
 ### `Checkpoint.objects` includes unchanged loaded runtime objects
 
-From `sui-types/storage/read_store.rs:233-256`, `Checkpoint.object_set` is
-built from `get_transaction_object_set(transaction, effects,
-unchanged_loaded_runtime_objects)`. This means the deduped object set in
-`Checkpoint.objects` always contains the DOF wrapper Field even when only
-the Value was mutated, because the wrapper was loaded as a runtime input
-to access the Value.
+From `sui-types/storage/read_store.rs:233-256`, `Checkpoint.object_set`
+is built from
+`get_transaction_object_set(transaction, effects, unchanged_loaded_runtime_objects)`.
+So the deduped object set in `Checkpoint.objects` always contains the
+DOF wrapper Field even when only the Value was mutated, because the
+wrapper was loaded as a runtime input to access the Value.
 
-The consequence: **routing for DOF Value mutations can be resolved from
-`Checkpoint.objects` alone**, with no persistent wrapper map required.
+The consequence: routing for DOF Value mutations can be resolved from
+`Checkpoint.objects` alone, with no persistent wrapper cache required.
 For a Value with `output_owner = Object(addr)`, look `addr` up in
-`Checkpoint.objects`, decode it as `Field<Wrapper<…>, ID>`, and check the
-wrapper's own owner against our known ObjectBag/ObjectTable parent IDs.
-
-We still maintain a persistent wrapper map as a cache (and as a backstop
-for the unlikely case where the wrapper is not in the object set) but it
-is no longer load-bearing for the data flow.
+`Checkpoint.objects`, decode it as `Field<Wrapper<…>, ID>`, and walk
+up from there to confirm it belongs to a container we track.
 
 ### `Checkpoint.objects` and `subscribe_checkpoints`
 
-`Checkpoint.objects` is a deduped `ObjectSet` mask-selectable in
+`Checkpoint.objects` is a deduped `ObjectSet` (proto field 7 of
+`Checkpoint`) and is mask-selectable in
 `SubscribeCheckpointsRequest.read_mask`. When populated,
-`transactions[].objects` is omitted, per the proto comment. One read mask
-covers it; no follow-up `BatchGetObjects` is needed per checkpoint.
+`transactions[].objects` is omitted per the proto comment. One read
+mask covers it; no follow-up `BatchGetObjects` is needed per checkpoint.
+
+### Inner UIDs
+
+A Move object's identity is not just its `ObjectId`. An object's
+contents may hold container fields — `Bag`, `Table`, `ObjectBag`,
+`LinkedTable`, etc. — each of which carries its own UID. Children of
+those inner UIDs are logically descendants of the outer object. The
+mirror must track these to walk ownership transitively.
+
+Example: `Hashi` (one object) holds `Bag` members, committees, tob, and
+ObjectBag treasury/proposals — six inner UIDs. `BitcoinState` (one DF
+object) holds nine inner UIDs across deposit/withdrawal/UTXO queues.
+`EpochCertsV1` holds a `LinkedTable.id`, whose children are dealer
+submission nodes.
 
 ### Heterogeneous bags
 
-`bag.move` and `object_bag.move` allow different K/V types per entry.
-Hashi's bags happen to be homogeneous today but the design must keep raw
-storage tolerant of unknown types so an unrecognized entry doesn't drop
-mirror coverage. Tables and ObjectTables are homogeneous by construction.
+`bag.move` and `object_bag.move` make no requirement that all entries
+share a K/V type. Hashi's bags happen to be homogeneous today but the
+design keeps raw storage tolerant of unknown types so an unrecognized
+entry doesn't drop mirror coverage. Tables and ObjectTables are
+homogeneous by construction.
 
 ### `Owner` in proto
 
 From `sui/rpc/v2/owner.proto`, `Owner` has a `kind` enum
 (`ADDRESS`/`OBJECT`/`SHARED`/`IMMUTABLE`/`CONSENSUS_ADDRESS`), an
-`address` string, and a `version` for shared objects. `output_owner` and
-`input_owner` carry it inside `ChangedObject`.
+`address` string, and a `version` for shared objects. `output_owner`
+and `input_owner` carry it inside `ChangedObject`.
 
 ## Design
 
-### Top-level data model
+The new mirror is an ECS-style object pool: every Move object we
+recognize is stored by id, with secondary indices for owner and type.
+Each stored value advertises the inner UIDs it contains. The unit of
+update is a per-transaction tree assembled from `Checkpoint.objects`;
+applying it is a structural walk where each tree position has a
+statically known type.
 
-```rust
-pub struct OnchainMirror {
-    state: HashiState,
-    routing: Routing,
-}
+### Layers
 
-pub struct HashiState {
-    pub root: Option<MoveObject<move_types::Hashi>>,
-    pub bitcoin_state: Option<MoveObject<BitcoinStateField>>,
-    pub config: ConfigProjection,
+The framework piece is project-agnostic. To start it lives as a new
+module under `hashi-types` (`hashi-types::mirror`) — same crate, but
+walled off from anything domain-specific so it can be lifted into its
+own crate later without changes. It contains:
 
-    pub members: BagSlot<Address, MemberInfoProjection>,
-    pub committees: BagSlot<u64, CommitteeProjection>,
-    pub deposit_requests: ObjectBagSlot<Address, DepositRequestProjection>,
-    pub withdrawal_requests: ObjectBagSlot<Address, WithdrawalRequestProjection>,
-    pub withdrawal_txns: ObjectBagSlot<Address, WithdrawalTransactionProjection>,
-    pub utxo_records: BagSlot<UtxoId, UtxoRecordProjection>,
-    pub spent_utxos: BagSlot<UtxoId, u64>,
-    pub treasury: ObjectBagSlot<TreasuryKey, TreasuryEntryProjection>,
-    pub proposals_active: ObjectBagSlot<Address, ProposalProjection>,
-    pub proposals_executed: ObjectBagSlot<Address, ProposalProjection>,
-    pub tob: BagSlot<TobKey, EpochCertsProjection>,
-}
-```
+- `MoveStruct` trait and `MoveObject<T>` envelope.
+- Raw container types: `Bag`, `ObjectBag`, `Table`, `ObjectTable`,
+  `LinkedTable`, plus their scrape helpers.
+- `MoveObjectKind` trait (with `inner_uids`).
+- `ObjectPool` with the entity map and indices (`by_owner`, `by_type`,
+  `inner_uid_owner`).
+- `TxTree` and `SubtreeView`.
+- A small set of pool helpers (`apply_typed`, `containing_object`,
+  `uid_set_for`) that handlers compose into typed apply steps.
 
-`BagSlot` carries the parent UID, last-seen Bag header, projected entries,
-and a reverse index for deletes:
+Hashi's binding (in the `hashi` crate) is thin:
 
-```rust
-pub struct BagSlot<K, V> {
-    pub parent_id: Address,
-    pub size: u64,
-    pub entries: BTreeMap<K, BagEntry<V>>,
-    pub by_field_id: BTreeMap<Address, K>,
-}
+- `MoveObjectKind` impls (including `inner_uids`) for the Move structs
+  Hashi mirrors.
+- A `HashiMirror` that owns the pool and a `apply_tx` method which is
+  Hashi's structural walk.
+- Typed accessors (`withdrawal_txn`, `member_info`, ...) replacing the
+  current `types::*` containers.
 
-pub struct BagEntry<V> {
-    pub field_id: Address,
-    pub field_version: u64,
-    pub value: V,
-}
-
-pub struct ObjectBagSlot<K, V> {
-    pub parent_id: Address,
-    pub size: u64,
-    pub entries: BTreeMap<K, ObjectBagEntry<V>>,
-    pub by_wrapper_id: BTreeMap<Address, K>,
-    pub by_value_id: BTreeMap<Address, K>,
-}
-
-pub struct ObjectBagEntry<V> {
-    pub wrapper_id: Address,
-    pub wrapper_version: u64,
-    pub value_id: Address,
-    pub value_version: u64,
-    pub value: V,
-}
-```
-
-The container header (size, parent_id) is updated when the *enclosing*
-object is rewritten — Hashi root for bags inside it, BitcoinState DF for
-bags inside that. There is no separate "container header apply" branch.
-
-### `MoveStruct` trait and `MoveObject<T>` envelope
+### `MoveStruct` and `MoveObject<T>`
 
 Replace both `MoveType` traits (one in `hashi-types`, one in
-`hashi/src/onchain/mod.rs`) with one trait in `hashi-types`:
+`hashi/src/onchain/mod.rs`) with one trait in the framework:
 
 ```rust
 pub trait MoveStruct: serde::de::DeserializeOwned {
@@ -220,12 +205,12 @@ impl<T: MoveStruct> MoveObject<T> {
 }
 ```
 
-Package version gating lives in `Routing`, not on the envelope.
+Package-version gating is a caller concern, not part of the envelope.
 
 ### Raw container types
 
-`Bag` and `ObjectBag` differ; same for `Table` vs `ObjectTable`. Each
-raw representation matches the on-chain layout.
+`Bag` and `ObjectBag` differ in on-chain layout; same for `Table` vs
+`ObjectTable`. Each raw type matches its Move shape exactly.
 
 ```rust
 pub struct RawDynamicField {
@@ -246,6 +231,7 @@ pub struct RawObject {
     pub id: Address,
     pub version: u64,
     pub type_: StructTag,
+    pub owner: Owner,
     pub contents: Vec<u8>,
 }
 
@@ -290,203 +276,263 @@ pub struct ObjectTableEntry<K, T: MoveStruct> {
 pub struct LinkedTable<K, V> { /* head, tail, plus DF entries */ }
 ```
 
-`Bag` and `ObjectBag` keep entries in raw form so unknown types don't get
-dropped. A typed projection over a `Bag`/`ObjectBag` is a separate
-operation that may partially fail.
+`Bag` and `ObjectBag` keep entries in raw form so unknown types don't
+get dropped. The typed variants are useful for the initial scrape of
+known-shape containers.
 
-### Routing
-
-```rust
-pub struct Routing {
-    pub hashi_id: Address,
-    pub bitcoin_state_field_id: Address,
-    pub package_ids: BTreeSet<Address>,
-
-    /// Regular DF parents. Used when an object's owner is
-    /// Object(parent_uid) and the object's type is Field<Name, Value>.
-    pub df_parents: BTreeMap<Address, ContainerSlotKind>,
-
-    /// DOF parents. Used to interpret newly CREATED Field<Wrapper, ID>
-    /// objects (whose owner is Object(parent_uid)).
-    pub dof_parents: BTreeMap<Address, ContainerSlotKind>,
-
-    /// DOF wrapper cache. Optional but maintained as fast-path: the
-    /// authoritative source is the wrapper itself, which is always in
-    /// Checkpoint.objects when its Value is touched (because the wrapper
-    /// is a loaded runtime object even when unchanged).
-    pub dof_wrappers: BTreeMap<Address, ContainerSlotKind>,
-}
-
-#[derive(Clone, Copy)]
-pub enum ContainerSlotKind {
-    Members, Committees,
-    DepositRequests, WithdrawalRequests, WithdrawalTxns,
-    UtxoRecords, SpentUtxos,
-    Treasury, ProposalsActive, ProposalsExecuted, Tob,
-}
-```
-
-### Object-centric apply
+### `MoveObjectKind` and the object pool
 
 ```rust
-pub enum ObjectUpdate {
-    Written  { id: Address, version: u64, type_: StructTag, owner: Owner, contents: Vec<u8> },
-    Deleted  { id: Address, type_: StructTag, prior_owner: Owner },
+/// Anything that can live in the pool. Blanket-implemented over any
+/// 'static type, so concrete domain types implement it for free.
+pub trait MoveObjectKind: std::any::Any + Send + Sync + std::fmt::Debug + 'static {
+    fn as_any(&self) -> &dyn std::any::Any;
+
+    /// UIDs this object holds inside its contents — Bag.id, Table.id,
+    /// ObjectBag.id, LinkedTable.id, anything that owns children.
+    /// Default: empty (a leaf with no inner storage).
+    fn inner_uids(&self) -> Vec<Address> { Vec::new() }
 }
 
-pub enum Classification {
-    HashiRoot,
-    BitcoinState,
-    DfWrite          { slot: ContainerSlotKind, field: RawDynamicField },
-    DfDelete         { slot: ContainerSlotKind, field_id: Address },
-    DofWrapperWrite  { slot: ContainerSlotKind, wrapper: WrapperField, child: Option<RawObject> },
-    DofWrapperDelete { slot: ContainerSlotKind, wrapper_id: Address },
-    DofValueWrite    { slot: ContainerSlotKind, value: RawObject },
-    DofValueDelete   { slot: ContainerSlotKind, value_id: Address },
-    Ignored,
+pub struct ObjectMeta {
+    pub id: Address,
+    pub version: u64,
+    pub type_: StructTag,
+    pub owner: Owner,
 }
-```
 
-`Classification` is the output of a pure function that takes one
-`ObjectUpdate`, the per-checkpoint `ObjectIndex` (lookup by id into
-`Checkpoint.objects`), and `&Routing`. It does not mutate.
+pub struct PooledObject {
+    pub meta: ObjectMeta,
+    pub value: Box<dyn MoveObjectKind>,
+}
 
-`apply` dispatches on `Classification`:
+pub struct ObjectPool {
+    objects: BTreeMap<Address, PooledObject>,
+    by_owner: BTreeMap<Address, BTreeSet<Address>>,
+    by_type: BTreeMap<StructTag, BTreeSet<Address>>,
+    /// Reverse map: inner UID -> the object id whose contents hold it.
+    /// Maintained on every upsert / remove. This is what makes
+    /// "transitively part of my tree" answerable without a project-side
+    /// parent cache.
+    inner_uid_owner: BTreeMap<Address, Address>,
+}
 
-```rust
-fn apply(state: &mut HashiState, routing: &mut Routing, class: Classification) -> Result<()> {
-    match class {
-        Classification::HashiRoot => apply_hashi_root(state, routing, ...),
-        Classification::BitcoinState => apply_bitcoin_state(state, routing, ...),
-        Classification::DfWrite { slot, field } => apply_df_entry(state, slot, field),
-        Classification::DfDelete { slot, field_id } => apply_df_delete(state, slot, field_id),
-        Classification::DofWrapperWrite { slot, wrapper, child } => {
-            routing.dof_wrappers.insert(wrapper.id, slot);
-            apply_dof_wrapper_write(state, slot, wrapper, child)
-        }
-        Classification::DofWrapperDelete { slot, wrapper_id } => {
-            routing.dof_wrappers.remove(&wrapper_id);
-            apply_dof_wrapper_delete(state, slot, wrapper_id)
-        }
-        Classification::DofValueWrite { slot, value } => apply_dof_value(state, slot, value),
-        Classification::DofValueDelete { slot, value_id } => apply_dof_value_delete(state, slot, value_id),
-        Classification::Ignored => Ok(()),
+impl ObjectPool {
+    pub fn get<T: MoveObjectKind>(&self, id: &Address) -> Option<&T>;
+    pub fn meta(&self, id: &Address) -> Option<&ObjectMeta>;
+    pub fn iter_owned_by<T: MoveObjectKind>(&self, parent: &Address) -> impl Iterator<Item = (&Address, &T)>;
+    pub fn iter_by_type<T: MoveObjectKind>(&self) -> impl Iterator<Item = (&Address, &T)>;
+
+    pub fn upsert<T: MoveObjectKind>(&mut self, meta: ObjectMeta, value: T);
+    pub fn remove(&mut self, id: &Address) -> Option<PooledObject>;
+
+    /// Generic helper: decode `obj.after` as MoveObject<T>, upsert into
+    /// the pool; or remove on delete. Handlers call this directly.
+    pub fn apply_typed<T>(&mut self, obj: &TxObject) -> Result<()>
+    where T: MoveStruct + 'static;
+
+    /// Walk up the ownership chain: given a UID an Owner::Object(...)
+    /// might point at, return the pooled object id that contains it.
+    /// Handles "owner is a Bag's UID" and arbitrary nesting depth.
+    pub fn containing_object(&self, uid: &Address) -> Option<Address> {
+        if self.objects.contains_key(uid) { return Some(*uid); }
+        self.inner_uid_owner.get(uid).copied()
     }
+
+    /// All UIDs that belong to this object: its own id plus inner UIDs.
+    pub fn uid_set_for(&self, id: &Address) -> impl Iterator<Item = Address> + '_;
 }
 ```
 
-When `apply_hashi_root` runs, it deserializes `move_types::Hashi` and
-copies `committees.members.size` into `state.members.size`,
-`committees.committees.size` into `state.committees.size`, etc. Same for
-`apply_bitcoin_state` and its four nested bag headers. Container header
-updates fall out for free.
+`upsert` maintains the four indices; in particular, when replacing an
+existing entry it retires the old object's inner UIDs from
+`inner_uid_owner` before registering the new ones. The pool asserts
+that a newly-registered inner UID isn't already mapped to a different
+owner — that would indicate a Move-level invariant violation worth
+surfacing loudly.
 
-### Classification rules
+### Per-tx tree
 
-Given one `ObjectUpdate`, the per-checkpoint `ObjectIndex`, and `&Routing`:
+```rust
+pub enum TxObject {
+    Written  { before: Option<RawObject>, after: RawObject },
+    Deleted  { before: RawObject },
+    Loaded   { object: RawObject },   // unchanged loaded runtime input
+}
 
-| Update                                                                                                                                       | Match against              | Becomes                               |
-| -------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- | ------------------------------------- |
-| Written, `id == routing.hashi_id`                                                                                                            | direct id match            | `HashiRoot`                           |
-| Written, `id == routing.bitcoin_state_field_id`                                                                                              | direct id match            | `BitcoinState`                        |
-| Written, type is `Field<Wrapper<…>, ID>`, owner is `Object(p)`, `p` in `dof_parents`                                                         | direct owner match         | `DofWrapperWrite`                     |
-| Written, type is `Field<…, …>`, owner is `Object(p)`, `p` in `df_parents`                                                                    | direct owner match         | `DfWrite`                             |
-| Written, owner is `Object(w)`, `w` in `dof_wrappers` OR `ObjectIndex[w]` decodes as `Field<Wrapper<…>, ID>` whose owner is in `dof_parents`  | cache or lookup            | `DofValueWrite`                       |
-| Deleted, `id == hashi_id` or `bitcoin_state_field_id`                                                                                        | direct id match            | catastrophic — surface a hard error   |
-| Deleted, type is `Field<Wrapper<…>, ID>`, `prior_owner = Object(p)`, `p` in `dof_parents`                                                    | direct owner               | `DofWrapperDelete`                    |
-| Deleted, type is `Field<…, …>`, `prior_owner = Object(p)`, `p` in `df_parents`                                                               | direct owner               | `DfDelete`                            |
-| Deleted, `prior_owner = Object(w)`, `w` in `dof_wrappers` OR input-version `ObjectIndex[w]` decodes as a wrapper whose owner is in `dof_parents` | cache or lookup        | `DofValueDelete`                      |
-| Anything else                                                                                                                                | —                          | `Ignored`                             |
+pub struct TxTree {
+    objects: BTreeMap<Address, TxObject>,
+    /// Owner index: parent_addr -> direct children ids. Built from
+    /// the union of pre-owner and post-owner (so a move from parent A
+    /// to parent B shows the value under both, with the slot's apply
+    /// disambiguating via `(was_mine, is_mine)`).
+    children_before: BTreeMap<Address, BTreeSet<Address>>,
+    children_after:  BTreeMap<Address, BTreeSet<Address>>,
+}
 
-The `ObjectIndex` is `BTreeMap<Address, &Object>` built once per
-checkpoint from `Checkpoint.objects.objects`. Because `Checkpoint.objects`
-includes input objects (including unchanged loaded runtime objects), the
-wrapper is always available even for pure Value mutations.
+impl TxTree {
+    pub fn build(tx: &ExecutedTransaction, idx: &CheckpointObjectIndex) -> Self;
+    pub fn at(&self, root: Address) -> SubtreeView<'_>;
+    pub fn object(&self, id: &Address) -> Option<&TxObject>;
+}
 
-The `dof_wrappers` cache is checked first for speed; the `ObjectIndex`
-lookup is the authoritative fallback. On every wrapper write/delete the
-cache is updated, so subsequent checkpoints can hit the fast path.
+pub struct SubtreeView<'a> {
+    tree: &'a TxTree,
+    root: Address,
+}
 
-### Per-checkpoint algorithm
-
-```text
-build object_index: BTreeMap<Address, &Object> from Checkpoint.objects.objects
-
-for each tx in checkpoint.transactions:
-    if not tx.effects.status.success: continue
-
-    for each co in tx.effects.changed_objects:
-        let update = ObjectUpdate::from(co, &object_index);
-        let class = classify(&update, &object_index, &routing);
-        apply(&mut state, &mut routing, class)?;
-
-    for each event in tx.events.events:
-        // Notifications only. Not state mutation.
-        emit_notification(event);
-
-update latest_checkpoint_info(seq, timestamp, epoch).
-update metrics.
+impl<'a> SubtreeView<'a> {
+    pub fn root(&self) -> Option<&'a TxObject>;
+    /// Union of children-before and children-after. The caller
+    /// distinguishes via the contained TxObject.
+    pub fn direct_children(&self) -> impl Iterator<Item = (Address, &'a TxObject)>;
+    pub fn descendants(&self) -> impl Iterator<Item = (Address, &'a TxObject)>;
+}
 ```
 
-Single pass — wrappers and values within one tx no longer need ordered
-processing because routing for DOF values comes from `object_index`, not
-from the persistent cache.
+Build is pure data assembly: union the input/output versions of every
+`changed_object` plus every `unchanged_loaded_runtime_object`, look each
+up in `Checkpoint.objects.objects` by `(id, version)`, attach. No
+classification logic in the tree.
+
+### Apply: project-specific structural walk
+
+The framework does *not* dispatch types. Each tree position has a
+statically known expected type, and the project's handler decodes
+inline. For Hashi:
+
+```rust
+impl HashiMirror {
+    fn apply_tx(&mut self, tree: &TxTree) -> Result<()> {
+        // Roots: known ids, known types.
+        if let Some(obj) = tree.object(&self.hashi_id) {
+            self.pool.apply_typed::<move_types::Hashi>(obj)?;
+        }
+        // The BitcoinState DF id is derivable from hashi_id at startup.
+        if let Some(obj) = tree.object(&self.bitcoin_state_field_id) {
+            self.pool.apply_typed::<BitcoinStateField>(obj)?;
+        }
+
+        // Bag children: each parent's children are Field<K, V> objects
+        // with K and V known by position.
+        if let Some(p) = self.members_bag_id() {
+            for (_, obj) in tree.direct_children_of(p) {
+                self.pool.apply_typed::<move_types::Field<Address, move_types::MemberInfo>>(obj)?;
+            }
+        }
+        if let Some(p) = self.committees_bag_id() {
+            for (_, obj) in tree.direct_children_of(p) {
+                self.pool.apply_typed::<move_types::Field<u64, move_types::Committee>>(obj)?;
+            }
+        }
+        if let Some(p) = self.utxo_records_bag_id() {
+            for (_, obj) in tree.direct_children_of(p) {
+                self.pool.apply_typed::<move_types::Field<UtxoId, move_types::UtxoRecord>>(obj)?;
+            }
+        }
+        // ... spent_utxos, tob, etc.
+
+        // ObjectBag children: direct children are DOF wrappers, the
+        // actual values live one level deeper.
+        if let Some(p) = self.withdrawal_txns_bag_id() {
+            for (wrapper_id, wrapper_obj) in tree.direct_children_of(p) {
+                self.pool.apply_typed::<DofWrapper<Address>>(wrapper_obj)?;
+                let value_id = wrapper_value_id(wrapper_obj);
+                if let Some(value_obj) = tree.object(&value_id) {
+                    self.pool.apply_typed::<move_types::WithdrawalTransaction>(value_obj)?;
+                }
+            }
+        }
+        // ... deposit_requests, withdrawal_requests, treasury, proposals.
+
+        Ok(())
+    }
+
+    /// Bag IDs are inner UIDs of the Hashi root and BitcoinState DF.
+    /// Recompute on demand from current pool state — cheap, no cache.
+    fn members_bag_id(&self) -> Option<Address> {
+        Some(self.pool.get::<MoveObject<move_types::Hashi>>(&self.hashi_id)?
+            .value.committees.members.id)
+    }
+    // ... committees_bag_id, withdrawal_txns_bag_id, etc.
+}
+```
+
+Each handler statically knows the type. Compile-time errors if a Move
+struct's BCS layout drifts. No registry, no first-match-wins ordering
+hazard, no per-position `Option<Box<dyn …>>` cascade.
+
+Relevance falls out of the walk: the handler only visits positions it
+cares about, so anything else in the tx tree (gas coins, system objects,
+unrelated packages) is invisible to the mirror.
 
 ### Why this fixes the bug class
 
-Walk the scenarios:
-
 - **`reassign_presigs_for_withdrawal_txn` (the active bug).** The
-  `WithdrawalTransaction` Value object is rewritten with no event.
-  - `changed_objects` includes the Value with `owner = Object(wrapper_id)`.
-  - Classifier hits `dof_wrappers[wrapper_id] -> WithdrawalTxns` (or
-    falls back to the `ObjectIndex` wrapper lookup).
-  - `apply_dof_value` replaces the entry from fresh contents. Bug fixed.
+  `WithdrawalTransaction` Value is rewritten with no event.
+  `changed_objects` carries the Value with
+  `output_owner = Object(wrapper_id)`. The walk visits the
+  withdrawal_txns bag, iterates its direct children, decodes the wrapper
+  (which is in the tree as either changed or unchanged-loaded), and
+  finds the Value object id from the wrapper's contents. The Value is
+  upserted from fresh BCS. Bug fixed.
 
-- **`committee::add_committee` (Bag.size 17 -> 18).** Hashi root is
+- **`committee::add_committee` (Bag.size 17 → 18).** Hashi root is
   rewritten because `committees.committees.size` is a field of `Hashi`.
-  A new `Field<u64, Committee>` is also written.
-  - Hashi root -> `apply_hashi_root` refreshes
-    `state.committees.size = 18`.
-  - Field -> `apply_df_entry` inserts the new committee.
+  A new `Field<u64, Committee>` is also written. The root's
+  `apply_typed::<move_types::Hashi>` refreshes the root entry; the new
+  Field's `apply_typed::<…>` inserts the committee. `members_bag_id()`
+  and friends remain valid because they're computed from the pool's
+  current root contents.
 
 - **`withdraw::pick_for_processing` (new DOF entry).** Both wrapper and
-  Value are CREATED in the same tx. BitcoinState is rewritten.
-  - BitcoinState -> `apply_bitcoin_state` refreshes
-    `state.withdrawal_requests.size` and `state.withdrawal_txns.size`.
-  - Wrapper CREATED -> `apply_dof_wrapper_write`, updates routing cache.
-  - Value CREATED -> `apply_dof_value`. Routes via the wrapper (either
-    cache or `ObjectIndex`) regardless of intra-tx ordering.
+  Value are CREATED in the same tx; BitcoinState is rewritten. The walk
+  applies BitcoinState (updates the Hashi descendant), iterates the
+  withdrawal_txns bag's direct children (the new wrapper), decodes the
+  wrapper, looks up and decodes the value. The events emitted by this
+  tx still drive notifications, but no longer drive state.
 
 - **`update_config` proposal executes.** Hashi root is rewritten with a
-  new `config` field.
-  - Hashi root -> `apply_hashi_root` re-projects `state.config`. No more
-    bespoke `scrape_hashi_config` follow-up.
+  new `config` field. Root apply refreshes the entry. No bespoke
+  `scrape_hashi_config` follow-up.
 
-- **`withdraw::confirm_withdrawal` (DOF delete).** Wrapper and Value are
-  both DELETED.
-  - Wrapper DELETED -> `apply_dof_wrapper_delete`. Removes the entry
-    from the slot and clears the routing cache.
-  - Value DELETED -> classification routes through the prior_owner; if
-    the cache was already cleared, `ObjectIndex` (which carries the
-    input version of the wrapper) still resolves it.
+- **`withdraw::confirm_withdrawal` (DOF delete).** Wrapper and Value
+  are both DELETED. The walk sees both, removes both. The wrapper's
+  prior contents (`before`) is still in the tx tree because
+  `Checkpoint.objects` carries pre-deletion input state.
 
-In every case the unit of work is "object update" and dispatch is uniform.
+In every case, the unit of work is "object update at known tree
+position" and dispatch is by walk structure, not by event payload.
 
-### Where enrichment happens
+### Move semantics (object changes owner)
 
-Each `apply_*` function deserializes raw BCS into `MoveObject<RawT>` and
-projects into the slot's enriched type. Projection lives in free
-functions per slot, not in a trait:
+If an object V moves from owner A to owner B (e.g., a DOF transferred
+between two ObjectBags), the tx looks like:
 
-```rust
-fn project_member_info(raw: &MoveObject<move_types::MemberInfo>) -> Result<MemberInfoProjection> { ... }
-```
+- Wrapper W1 deleted under A.
+- Wrapper W2 created under B.
+- V: `before.owner = Object(W1)`, `after.owner = Object(W2)`. Contents
+  may or may not change.
 
-Some slots project at apply time (small per-row work — `MemberInfo`,
-`Committee`). Some keep raw and project lazily on read
-(`WithdrawalTransaction` is useful as-is). The choice is per-slot and
-can be tuned without touching the apply framework.
+The tx tree's owner index is the **union** of before-owner and
+after-owner edges. The walk visits A's subtree (sees W1 deleted, finds
+V via W1, removes the V entry from the pool — actually, more precisely:
+removes W1, and the V removal arrives via the W2-path delete-rewrite
+distinction); visits B's subtree (sees W2 created, finds V via W2,
+upserts V). Since `ObjectPool` is keyed by id and not by slot, V's pool
+entry simply gets its `owner` field updated.
+
+This handles the simple move case for free. For the harder case — a
+moved object that has child objects via inner UIDs — the children's
+owners point at V's id (or V's inner UIDs), which are stable, so the
+children stay in place in the pool and are still reachable from B's
+subtree through the same `containing_object` lookups. The pool doesn't
+need to rewrite anything for the children.
+
+We add a move-detection metric for observability: if a single tx
+removes and adds entries with the same value id across different
+parent subtrees, increment `hashi_object_relocated_total{from, to}`.
+For hashi today this should be 0; any non-zero is a real signal.
 
 ### Subscription read mask
 
@@ -500,8 +546,10 @@ Checkpoint.transactions.effects.changed_objects.object_id
 Checkpoint.transactions.effects.changed_objects.object_type
 Checkpoint.transactions.effects.changed_objects.input_owner
 Checkpoint.transactions.effects.changed_objects.output_owner
+Checkpoint.transactions.effects.changed_objects.input_version
 Checkpoint.transactions.effects.changed_objects.output_version
 Checkpoint.transactions.effects.changed_objects.id_operation
+Checkpoint.transactions.effects.unchanged_loaded_runtime_objects
 Checkpoint.transactions.events.events.contents
 Checkpoint.objects.objects.object_id
 Checkpoint.objects.objects.version
@@ -512,69 +560,145 @@ Checkpoint.objects.objects.contents
 
 ### Scrape and bootstrap
 
-Initial scrape stays similar to today's `scrape_hashi`:
+Initial scrape stays similar in shape to today's `scrape_hashi`, but
+populates the pool directly:
 
-1. `get_object(hashi_id)` for the root.
-2. Derive the `BitcoinStateField` id via `derive_dynamic_child_id` and
-   `get_object` it.
-3. For each Bag/ObjectBag parent uncovered in the root contents, run
-   `Bag::scrape` / `ObjectBag::scrape` (one helper per kind, parameterized
-   on the parent id and entry projection).
-4. Populate `Routing` with `df_parents`, `dof_parents`, and a fully
-   populated `dof_wrappers` cache.
+1. `get_object(hashi_id)`. Construct `MoveObject<move_types::Hashi>`,
+   `pool.upsert`. Its inner UIDs are now in `inner_uid_owner`.
+2. Derive the BitcoinState DF id via `derive_dynamic_child_id` and
+   `get_object` it. Upsert as `MoveObject<BitcoinStateField>`.
+3. For each Bag/ObjectBag inner UID in the now-pooled root and
+   BitcoinState, run `Bag::scrape` or `ObjectBag::scrape` and upsert
+   each child entry. For ObjectBags, the scrape produces both the
+   wrapper and the value object per entry; both get upserted.
+4. For nested LinkedTables (e.g., `tob`'s `EpochCertsV1.certs`), repeat
+   per entry as needed.
 
-On subscription drop the existing rescrape-on-resubscribe behavior stays
-as a backstop.
+After scrape the pool contains every hashi-relevant object indexed by
+id, owner, type, and inner-UID containment. Reads work immediately.
+
+On subscription drop the existing rescrape-on-resubscribe behavior
+stays as a backstop.
 
 ## Commit plan
 
 Each step is one PR; each PR builds and passes tests on its own.
 
-### Step 1 — `MoveStruct` trait and `MoveObject<T>` envelope
+### Step 1 — Land the framework as a `hashi-types::mirror` module
 
-- Land `MoveStruct` and `MoveObject<T>` in `hashi-types`.
-- Implement `try_from_object` and `from_object`.
-- Delete the two duplicated `MoveType` traits, migrate event impls to
+The foundation the rest of the plan builds on. Lands the entire
+project-agnostic framework in one new module under `hashi-types`,
+plus replaces the two duplicate `MoveType` traits and migrates event
+impls. No call-site changes to scrape or watcher.
+
+Module layout:
+
+```
+hashi-types/src/mirror/
+  mod.rs            -- pub use's and module docs
+  move_struct.rs    -- MoveStruct trait, MoveObject<T>
+  raw.rs            -- RawObject, RawValue, RawDynamicField,
+                       RawDynamicObjectField
+  containers.rs     -- Bag, ObjectBag, Table, ObjectTable,
+                       LinkedTable, with scrape helpers
+  pool.rs           -- MoveObjectKind trait, ObjectMeta,
+                       PooledObject, ObjectPool
+  tx_tree.rs        -- TxObject, TxTree, SubtreeView,
+                       CheckpointObjectIndex
+```
+
+Contents:
+
+- `MoveStruct` trait with `try_from_object` / `from_object`.
+  `MoveObject<T>` envelope.
+- Raw container types and typed `Bag::scrape` / `ObjectBag::scrape` /
+  `Table::scrape` / `ObjectTable::scrape` / `LinkedTable::scrape`.
+- `MoveObjectKind` trait with `as_any` and `inner_uids`. Blanket impl
+  over any `'static + Send + Sync + Debug`.
+- `ObjectMeta`, `PooledObject`, and `ObjectPool` with the four
+  indices (`objects`, `by_owner`, `by_type`, `inner_uid_owner`).
+  Methods: `get<T>`, `meta`, `iter_owned_by<T>`, `iter_by_type<T>`,
+  `upsert<T>`, `remove`, `containing_object`, `uid_set_for`,
+  `apply_typed<T>`.
+- `TxObject`, `TxTree` with `build`, `at`, `object`. `SubtreeView`
+  with `direct_children`, `descendants`. `CheckpointObjectIndex` for
+  the `(id, version) -> Object` lookup.
+- Delete `hashi_types::move_types::MoveType` and
+  `hashi::onchain::MoveType`; migrate all event impls to
   `MoveStruct`.
-- No behavior change.
 
-### Step 2 — Raw container types
+Acceptance: the module is fully exercised by unit tests — pool index
+invariants (especially inner-UID upsert/remove and conflict assert),
+move-edge `containing_object` lookup, scrape against a synthesized
+object set, BCS roundtrip of `MoveObject<T>` for each container kind.
+The framework module references no Hashi domain types.
 
-- Land `RawDynamicField`, `RawDynamicObjectField`, `RawObject`, `RawValue`.
-- Land `Bag`, `ObjectBag`, `Table<K, V>`, `ObjectTable<K, T>`,
-  `LinkedTable<K, V>`.
-- Add `Bag::scrape` and `ObjectBag::scrape` helpers (heterogeneous-first).
-- No call-site changes.
+Sub-PRs are fine if a single PR is too large; the natural split is
+(a) `MoveStruct` + `MoveObject<T>` + duplicate-trait removal, then
+(b) raw containers + scrape, then (c) `MoveObjectKind` + `ObjectPool`
++ `TxTree`. The plan tracks them as one step because they form one
+coherent foundation.
 
-### Step 3 — Migrate one scrape helper
+### Step 2 — Migrate one scrape helper
 
 - Replace `scrape_all_member_info` with `Bag::scrape` + typed projection.
-- Members is the smallest, simplest Bag — safe first migration.
+- Smallest, simplest container — first end-to-end exercise of the
+  typed scrape API against real data.
 - No watcher change.
 
-### Step 4 — Introduce `OnchainMirror`, `HashiState` skeleton, `Routing`
+### Step 3 — Hashi binding on top of the framework
 
-- Land the new mirror skeleton next to the existing
-  `crate::onchain::types::Hashi`.
-- Populate it from a parallel scrape (running alongside the existing
-  scrape) and compare results in tests / staging.
-- Routing is populated, including `dof_wrappers`, but unused.
+- Add a `HashiMirror` struct in `hashi/src/onchain/`: owns an
+  `ObjectPool` (from `hashi_types::mirror`), the well-known
+  `hashi_id`, and the derived `bitcoin_state_field_id`.
+- Implement `MoveObjectKind` for every Hashi Move type the mirror
+  stores (`MoveObject<move_types::Hashi>`, `MoveObject<BitcoinStateField>`,
+  `MoveObject<move_types::Field<Address, move_types::MemberInfo>>`,
+  `MoveObject<DofWrapper<Address>>`,
+  `MoveObject<move_types::WithdrawalTransaction>`, etc.). Provide
+  `inner_uids` for the types that contain inner UIDs (Hashi root,
+  BitcoinState DF, `EpochCertsV1`).
+- Replace the existing `scrape_hashi` body with a version that
+  populates `HashiMirror` via `Bag::scrape` / `ObjectBag::scrape` and
+  `pool.upsert`. Old `crate::onchain::types::*` containers stay
+  untouched alongside.
+- Land typed accessor methods on `HashiMirror`
+  (`withdrawal_txn(id)`, `member_info(validator)`, etc.) that return
+  the same shapes consumers expect today.
+- Watcher is unchanged; the new mirror is parallel state, not yet
+  load-bearing.
 
-### Step 5 — `ObjectUpdate`, `Classification`, `apply` framework + shadow path
+Acceptance: scraping a fixture environment yields identical results
+between the new pool-backed accessors and the existing `types::*`
+view. No production read path uses the pool yet.
 
-- Land the classifier and apply functions.
-- Widen the watcher's `read_mask` to include `changed_objects` and
-  `Checkpoint.objects`.
-- Process every checkpoint twice — events-driven (existing) into the
-  live state, and object-driven into a *shadow* `HashiState`. Emit
-  metrics on divergence between the two.
-- Production state stays on the event-driven path.
+### Step 4 — Shadow apply path
 
-### Step 6 — Per-slot cutover
+- Widen the watcher's `SubscribeCheckpointsRequest.read_mask` to the
+  fields listed in "Subscription read mask" above.
+- Per tx, build a `TxTree` from `changed_objects +
+  unchanged_loaded_runtime_objects + Checkpoint.objects`.
+- Call `HashiMirror::apply_tx(&tree)` against a *shadow* mirror that
+  exists alongside the live event-driven state.
+- Emit metrics on divergence between the shadow pool's view and the
+  live state for each key bag (member count, committee map, withdrawal
+  txns, deposit/withdrawal requests, utxo records, treasury, proposals,
+  config, num_consumed_presigs). Add the
+  `hashi_object_relocated_total{from, to}` move-detection metric here
+  too.
+- Production state still goes through `handle_events`.
 
-Switch slots from event-driven to object-driven one at a time. Each
-cutover deletes one branch of `handle_events` and one bespoke `fetch_*`
-helper.
+Acceptance: running locally and in staging shows zero divergence
+across a representative workload. Any divergence is investigated
+before the cutover step.
+
+### Step 5 — Per-slot cutover
+
+Switch read paths from the old `types::*` containers to
+`HashiMirror`'s accessors one slot at a time. Each cutover deletes the
+matching event-driven mutation branch in `handle_events` and any
+bespoke `fetch_*` / `scrape_*` helper it relied on. The shadow path
+becomes the live path slot-by-slot.
 
 Order (active bug first, then by surface area):
 
@@ -583,16 +707,20 @@ Order (active bug first, then by surface area):
 3. `utxo_records`, `spent_utxos`.
 4. `committees`, `members`.
 5. `treasury`, `proposals_active`, `proposals_executed`, `tob`.
-6. Hashi root (`config`, `num_consumed_presigs`), `BitcoinState`.
+6. Hashi root fields (`config`, `num_consumed_presigs`),
+   `BitcoinState` DF.
 
-### Step 7 — Cleanup
+### Step 6 — Cleanup
 
-- Delete the layer-2 re-exports in `hashi/src/onchain/types.rs` that
-  were pure renames.
-- Delete the shadow path.
-- Drop dead bespoke helpers (`fetch_withdrawal_txn`,
-  `fetch_treasury_cap`, `scrape_member_info`, `scrape_committee`,
-  `scrape_hashi_config`).
+- Delete `crate::onchain::types::{Hashi, CommitteeSet, Config,
+  DepositRequestQueue, WithdrawalRequestQueue, UtxoPool, Proposals,
+  Treasury, MemberInfo}` and their helpers.
+- Delete the now-dead `fetch_withdrawal_txn`, `fetch_treasury_cap`,
+  `scrape_member_info`, `scrape_committee`, `scrape_hashi_config`,
+  `scrape_proposals`, `scrape_treasury`, `scrape_utxo_pool`, etc.
+- Delete the shadow-comparison code.
+- Final tightening: remove `OnchainState::rescrape` if no longer
+  needed (the subscription-drop path may still want it as a backstop).
 
 ## Tradeoffs
 
@@ -601,31 +729,38 @@ Order (active bug first, then by surface area):
   volume, not hashi-package activity. Acceptable until the filtered
   subscription API exists. The `bcs` representation is more compact
   than JSON.
-- **Routing memory.** O(total DOF entries) for `dof_wrappers`. Hashi's
-  hot bags currently sit in the low thousands. Negligible.
-- **Subscription gap robustness.** Because routing for DOF values can
-  be rebuilt from `Checkpoint.objects` alone, the persistent
-  `dof_wrappers` cache being stale doesn't cause incorrect
-  classification — only a slow path lookup. Periodic reconciliation
-  (list DF children of known parents) is no longer strictly required
-  for correctness.
-- **Storage cost of raw heterogeneous entries.** `Bag`/`ObjectBag` carry
-  every entry as raw BCS plus type tags. For Hashi's current sizes this
-  is fine; if it ever becomes a concern, the typed projection layer
-  can cache projections alongside the raw entries.
-- **Generics density.** `MoveObject<T>` + the typed container generics
-  produce a few generic-heavy signatures. Worth it to delete the per-bag
-  scrape/fetch dance.
+- **Pool memory.** Each pooled object is the BCS-decoded value plus an
+  `ObjectMeta`. For hashi's hot bags (low thousands of entries) this
+  is bounded; well under a few MB total.
+- **Downcast cost on reads.** One `TypeId` compare per typed lookup.
+  Negligible at our access rates.
+- **No exhaustive type match.** Trade-off for the open-set ECS shape.
+  Mitigated by: (a) the structural walk uses concrete types at every
+  position so compile-time errors catch missed BCS-layout updates;
+  (b) a pool audit method that reports pooled objects of types no
+  handler reads — easy to wire into a CI test.
+- **Subscription gap robustness.** The structural walk is stateless
+  per checkpoint (no persistent routing cache), so a missed event no
+  longer poisons future state. Subscription-drop rescrape remains as
+  a backstop.
 
 ## Open questions deferred
 
-- **Raw vs projected per slot.** Some slots want both (committees need
-  raw `move_types::Committee` for BCS-signed messages plus enriched
-  parsed BLS keys for runtime); others only enriched; a few only raw.
-  Decide per slot during step 6.
-- **Failure modes.** Whether to hard-fail on classifier "ignored but
-  should-have-routed" or just log + metric. Start with log + metric
-  during the shadow phase; escalate after confidence.
+- **Raw vs projected per type.** Some Hashi types want both forms
+  (committees need raw `move_types::Committee` for BCS-signed messages
+  plus enriched parsed BLS keys for runtime); others only enriched
+  (`MemberInfo`); a few only raw (`WithdrawalTransaction`). Decide per
+  type during step 5. The pool accepts either: store the projection
+  directly, or store the raw `MoveObject<RawT>` and project at the
+  accessor.
+- **Failure modes for divergence.** Whether to hard-fail on a shadow-
+  vs-live mismatch during step 4 or just log + metric. Start with
+  log + metric; escalate after a clean staging burn-in window.
 - **Future filtered subscription.** When the Sui side ships a filtered
   `subscribe_changed_objects(filter)`, only the subscription wrapper
-  changes; downstream code already works in terms of `ObjectUpdate`.
+  changes; downstream code already works in terms of `TxTree` /
+  `MoveObjectKind`.
+- **Mirroring `tob`'s LinkedTable.** Today the dealer submissions are
+  fetched on demand. With `inner_uids()` declaring the LinkedTable id
+  on `EpochCertsV1`, mirroring is a one-handler addition in step 5 if
+  we decide to. Defer the decision.
