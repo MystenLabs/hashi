@@ -32,22 +32,22 @@ Audits the cross-system bridge flow on two parallel tracks.
 
 ### Batch audit
 ```bash
-cargo run -p hashi-monitor -- batch --config config.sample.yaml --start 1700000000 --end 1700003600
+cargo run -p hashi-monitor -- batch --config audit.sample.yaml --start 1700000000 --end 1700003600
 ```
 `--end` defaults to the current time if omitted.
 
 ### Continuous monitoring
 ```bash
-cargo run -p hashi-monitor -- continuous --config config.sample.yaml --start 1700000000
+cargo run -p hashi-monitor -- continuous --config audit.sample.yaml --start 1700000000
 ```
 
 ### Provisioner-init
 ```bash
-cargo run -p hashi-monitor -- provisioner-init --config provisioner-init.yaml
+cargo run -p hashi-monitor -- provisioner-init --config provisioner-init.sample.yaml
 ```
 
 ## Config
-See `config.sample.yaml` for a complete batch/continuous example:
+See `audit.sample.yaml` for a complete batch/continuous example:
 
 ```yaml
 # Liveness delay bounds (seconds)
@@ -70,7 +70,7 @@ btc:
     type: none
 ```
 
-The `provisioner-init` subcommand takes a separate YAML (`ProvisionerConfig`) with the key-provisioner share, expected share commitments, S3 config, Hashi committee, withdrawal config, and Hashi BTC master pubkey; if `guardian_endpoint` is set, the request is submitted after local checks pass.
+The `provisioner-init` subcommand takes a separate YAML (`ProvisionerConfig`, see `provisioner-init.sample.yaml`) with the key-provisioner share, expected share commitments, S3 config, Hashi committee, withdrawal config, and Hashi BTC master pubkey; if `guardian_endpoint` is set, the request is submitted after local checks pass.
 
 ## Status
 - Implemented:

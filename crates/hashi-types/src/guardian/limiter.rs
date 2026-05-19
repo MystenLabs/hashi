@@ -4,6 +4,7 @@
 use super::GuardianError::InvalidInputs;
 use super::GuardianError::RateLimitExceeded;
 use super::GuardianResult;
+use serde::Deserialize;
 use serde::Serialize;
 
 /// Immutable configuration for the token bucket rate limiter.
@@ -16,8 +17,9 @@ pub struct LimiterConfig {
 }
 
 /// Serializable state for the token bucket rate limiter.
-/// Provisioners provide this when initializing the enclave.
-#[derive(Debug, Copy, Clone, PartialEq, Serialize)]
+/// Provisioners provide this when initializing the enclave; it is also embedded
+/// in each successful withdrawal log so the next KP can recover it.
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LimiterState {
     /// Available tokens in sats.
     pub num_tokens_available: u64,
@@ -25,6 +27,19 @@ pub struct LimiterState {
     pub last_updated_at: u64,
     /// Next expected withdrawal sequence number.
     pub next_seq: u64,
+}
+
+impl LimiterState {
+    /// Genesis state for a freshly bootstrapped enclave: a full bucket, no
+    /// consumes yet, no refill timestamp. Used when no prior enclave's logs
+    /// exist to recover from.
+    pub fn genesis(config: &super::WithdrawalConfig) -> Self {
+        Self {
+            num_tokens_available: config.max_bucket_capacity_sats,
+            last_updated_at: 0,
+            next_seq: 0,
+        }
+    }
 }
 
 /// Token bucket rate limiter. Tokens refill linearly over time.

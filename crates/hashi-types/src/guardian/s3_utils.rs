@@ -50,6 +50,14 @@ impl S3HourScopedDirectory {
         )
     }
 
+    /// Returns the directory for the previous hour. Saturates at the Unix epoch.
+    pub fn prev_dir(&self) -> Self {
+        Self::new(
+            &self.prefix,
+            self.to_unix_seconds().saturating_sub(SECONDS_PER_HOUR),
+        )
+    }
+
     /// The time at which writes to current S3 directory finish.
     /// DIR_WRITES_COMPLETION_DELAY accounts for any in-flight retries and clock skew.
     pub fn write_completion_time(&self) -> UnixSeconds {
@@ -101,6 +109,20 @@ mod tests {
 
         let next_day = S3HourScopedDirectory::new("withdraw", 86_400);
         assert_eq!(next_day.to_string(), "withdraw/1970/01/02/00/");
+    }
+
+    #[test]
+    fn test_prev_dir_walks_back_and_saturates_at_epoch() {
+        let mut dir = S3HourScopedDirectory::new("withdraw", 86_400 + 3_600);
+        assert_eq!(dir.to_string(), "withdraw/1970/01/02/01/");
+        dir = dir.prev_dir();
+        assert_eq!(dir.to_string(), "withdraw/1970/01/02/00/");
+        dir = dir.prev_dir();
+        assert_eq!(dir.to_string(), "withdraw/1970/01/01/23/");
+
+        // Saturates at epoch.
+        let epoch = S3HourScopedDirectory::new("withdraw", 0);
+        assert_eq!(epoch.prev_dir(), epoch);
     }
 
     #[test]

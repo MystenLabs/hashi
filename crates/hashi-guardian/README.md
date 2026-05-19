@@ -8,21 +8,22 @@ Canonical key layout:
 
 - `init/{session_id}-{init_suffix}.json`
 - `heartbeat/{yyyy}/{mm}/{dd}/{hh}/{session_id}-{counter:020}.json`
-- `withdraw/{yyyy}/{mm}/{dd}/{hh}/{session_id}-wid{wid}-{status}-{rand8}.json`
+- `withdraw/{yyyy}/{mm}/{dd}/{hh}/success-{seq:020}-{session_id}-wid{wid}.json`
+- `withdraw/{yyyy}/{mm}/{dd}/{hh}/failure-{session_id}-wid{wid}-{rand8}.json`
 
 Where:
 
 - `session_id` is the enclave ephemeral signing pubkey bytes encoded as lowercase hex.
 - `init_suffix` is a semantic label (`oi-attestation-unsigned`, `oi-guardian-info`, `setup-new-key-success`, `pi-success-share-{share_id}`, `pi-enclave-fully-initialized`).
 - `counter` is a zero-padded decimal sequence number (used in heartbeats only).
-- `status` is `success` or `failure`.
-- `rand8` is a random 8-hex suffix to avoid key collisions.
+- `seq` is the limiter sequence number consumed by this withdrawal; zero-padded so lexicographic order within an hour bucket equals seq order.
+- `rand8` is a random 8-hex suffix to avoid key collisions (failures only — successes are uniquely keyed by seq).
 
 ## Stream semantics
 
 - `init` logs are per-session and deterministic by semantic message kind.
 - `heartbeat` logs are hour-partitioned and strictly ordered per session.
-- `withdraw` logs are hour-partitioned and keyed by wid+status with random de-dup suffix.
+- `withdraw` logs are hour-partitioned. Successes are seq-sorted within a bucket so the KP rotating in the next enclave can recover limiter state by reading the lexicographically last success key.
 
 ## Why this layout
 

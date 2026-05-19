@@ -124,6 +124,10 @@ impl GuardianPollerCore {
         self.cursor = self.cursor.next_dir();
     }
 
+    pub fn retreat_cursor(&mut self) {
+        self.cursor = self.cursor.prev_dir();
+    }
+
     /// Read and verify the signatures on all the records in the current directory.
     pub async fn read_cur_dir(&mut self) -> anyhow::Result<Vec<VerifiedLogRecord>> {
         let all_logs = self

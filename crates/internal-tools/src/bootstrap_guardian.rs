@@ -170,11 +170,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         refill_rate_sats_per_sec: args.refill_rate_sats_per_sec,
         max_bucket_capacity_sats: args.max_bucket_capacity_sats,
     };
-    let limiter_state = LimiterState {
-        num_tokens_available: withdrawal_config.max_bucket_capacity_sats,
-        last_updated_at: 0,
-        next_seq: 0,
-    };
+    let limiter_state = LimiterState::genesis(&withdrawal_config);
     let state = ProvisionerInitState::new(
         committee,
         withdrawal_config,

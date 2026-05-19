@@ -269,6 +269,16 @@ impl S3Logger {
     // S3 Reads
     // ========================================================================
 
+    /// Lists every key under `prefix`, refusing to proceed if the bucket has any
+    /// delete markers or non-latest versions in scope (which would indicate
+    /// tampering / lock-expiry beyond what the immutable-log model allows).
+    /// Returned keys are unique and sorted lexicographically.
+    ///
+    /// Keys-only counterpart to [`Self::list_all_objects_in_dir`].
+    pub async fn list_all_keys_in_dir(&self, prefix: &str) -> GuardianResult<Vec<String>> {
+        self.ensure_no_duplicates_or_deletions(prefix).await
+    }
+
     /// Checks that all matching object keys do not have either deletions or overwrites.
     /// The prefix can either correspond to a directory or a complete object key.
     ///

@@ -267,6 +267,10 @@ pub enum WithdrawalLogMessage {
         request_data: StandardWithdrawalRequestWire,
         request_sign: CommitteeSignature,
         response: StandardWithdrawalResponse,
+        /// Limiter state after this withdrawal was consumed. The KP rotating in
+        /// the next enclave reads the max-seq Success log and uses its
+        /// `post_state` as the new enclave's initial limiter state.
+        post_state: LimiterState,
     },
     /// Immediate withdraw failure
     Failure {
@@ -551,19 +555,29 @@ impl InitLogMessage {
 }
 
 impl WithdrawalLogMessage {
+    /// Success keys lead with `success-{seq:020}` so that lexicographic listing
+    /// within an hour bucket is also seq-sorted — the last key is the max-seq
+    /// log, which the KP reads to recover limiter state. Failures don't have a
+    /// meaningful seq (the request's seq may be stale), so they use a random
+    /// suffix for dedup.
     pub fn log_name(&self, prefix: &str) -> String {
-        let random_suffix = rand::random::<u32>();
-        let status = match self {
-            WithdrawalLogMessage::Success { .. } => "success",
-            WithdrawalLogMessage::Failure { .. } => "failure",
-        };
-        format!(
-            "{}-{}-{}-{:08x}.json",
-            prefix,
-            self.wid(),
-            status,
-            random_suffix
-        )
+        match self {
+            WithdrawalLogMessage::Success { request_data, .. } => format!(
+                "success-{:020}-{}-wid{}.json",
+                request_data.seq,
+                prefix,
+                self.wid()
+            ),
+            WithdrawalLogMessage::Failure { .. } => {
+                let random_suffix = rand::random::<u32>();
+                format!(
+                    "failure-{}-wid{}-{:08x}.json",
+                    prefix,
+                    self.wid(),
+                    random_suffix
+                )
+            }
+        }
     }
 }
 
@@ -886,21 +900,29 @@ mod tests {
         let signed_request =
             StandardWithdrawalRequest::mock_signed_for_testing_with_wid(Network::Regtest, wid);
         let (request_sign, request_data) = signed_request.into_parts();
+        let request_data: StandardWithdrawalRequestWire = request_data.into();
+        let seq = request_data.seq;
 
         let mut log = LogRecord::new(
             session_id.clone(),
             LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Success {
                 txid: Txid::from_slice(&[3u8; 32]).expect("valid txid"),
-                request_data: request_data.into(),
+                request_data,
                 request_sign,
                 response: GuardianSigned::<StandardWithdrawalResponse>::mock_for_testing().data,
+                post_state: LimiterState {
+                    num_tokens_available: 0,
+                    last_updated_at: 0,
+                    next_seq: seq + 1,
+                },
             })),
             &signing_key,
         );
         set_timestamp(&mut log, timestamp_ms);
 
-        let key = log.object_key();
-        assert!(key.starts_with(&format!("withdraw/2023/11/14/22/session-c-{wid}-success-")));
-        assert!(key.ends_with(".json"));
+        assert_eq!(
+            log.object_key(),
+            format!("withdraw/2023/11/14/22/success-{seq:020}-session-c-wid{wid}.json"),
+        );
     }
 }

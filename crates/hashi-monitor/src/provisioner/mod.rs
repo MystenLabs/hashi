@@ -4,6 +4,7 @@
 use hpke::Deserializable;
 mod config;
 mod heartbeat_checks;
+mod limiter_recovery;
 
 use crate::provisioner::config::GuardianConfig;
 use anyhow::Context;
@@ -14,6 +15,7 @@ use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::ProvisionerInitState;
+use hashi_types::guardian::S3_DIR_INIT;
 use hashi_types::guardian::proto_conversions::provisioner_init_request_to_pb;
 use hashi_types::guardian::session_id_from_signing_pubkey;
 use hashi_types::guardian::verify_enclave_attestation;
@@ -22,6 +24,7 @@ use rand::thread_rng;
 use tracing::info;
 
 pub use config::ProvisionerConfig;
+use crate::domain::now_unix_seconds;
 
 pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
     let s3_client = S3Logger::new_checked(&cfg.s3)
@@ -38,17 +41,30 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
     expected_guardian_config.ensure_matches_info(&guardian_info)?;
     info!(session_id, "init checks passed for selected session");
 
-    // TODO: replace mock limiter state with actual state from S3 logs.
-    let committee = cfg.hashi_committee.try_into()?;
-    let mock_limiter_state = LimiterState {
-        num_tokens_available: cfg.withdrawal_config.max_bucket_capacity_sats,
-        last_updated_at: 0,
-        next_seq: 0,
+    // 3. Detect whether this is a first deployment or a rotation, and source
+    // the initial limiter state accordingly.
+    let mode = detect_deployment_mode(&s3_client, &session_id).await?;
+    info!(?mode, "detected deployment mode");
+    let limiter_state = match mode {
+        DeploymentMode::Rotation => {
+            let mut recovered = limiter_recovery::recover_limiter_state(s3_client.clone()).await?;
+            // Cap to the current config's bucket capacity in case max capacity
+            // was lowered across the rotation. (Raising is fine — refill will
+            // fill it.)
+            recovered.num_tokens_available = recovered
+                .num_tokens_available
+                .min(cfg.withdrawal_config.max_bucket_capacity_sats);
+            assert!(recovered.last_updated_at < now_unix_seconds()); // sanity check
+            recovered
+        }
+        DeploymentMode::Genesis => LimiterState::genesis(&cfg.withdrawal_config),
     };
+
+    let committee = cfg.hashi_committee.try_into()?;
     let state = ProvisionerInitState::new(
         committee,
         cfg.withdrawal_config,
-        mock_limiter_state,
+        limiter_state,
         cfg.hashi_btc_master_pubkey,
     )
     .map_err(|e| anyhow::anyhow!(e))?;
@@ -79,6 +95,46 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
         .await?;
     }
     Ok(())
+}
+
+/// Whether this provisioner-init is for the very first enclave in this S3
+/// bucket or a rotation onto a successor enclave. Determined from S3 init logs
+/// — see [`detect_deployment_mode`] — and used to switch between sourcing
+/// initial state from config (genesis) vs. recovering it from the prior
+/// enclave's logs (rotation). Future genesis/rotation-aware behaviors (e.g.,
+/// committee fetch) can match on the same enum.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum DeploymentMode {
+    Genesis,
+    Rotation,
+}
+
+/// Inspects S3 init logs for any session other than `current_session_id`.
+/// Presence of one or more such session ⇒ Rotation; otherwise Genesis.
+async fn detect_deployment_mode(
+    s3_client: &S3Logger,
+    current_session_id: &str,
+) -> anyhow::Result<DeploymentMode> {
+    let prefix = format!("{}/", S3_DIR_INIT);
+    let keys = s3_client
+        .list_all_keys_in_dir(&prefix)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    for key in keys {
+        // Key format: `init/{session_id}-{init_suffix}.json`. session_id is
+        // 64-char lowercase hex (no dashes), so the first '-' after the prefix
+        // delimits it from the suffix.
+        let Some(after_prefix) = key.strip_prefix(&prefix) else {
+            continue;
+        };
+        let Some((session_id, _)) = after_prefix.split_once('-') else {
+            continue;
+        };
+        if session_id != current_session_id {
+            return Ok(DeploymentMode::Rotation);
+        }
+    }
+    Ok(DeploymentMode::Genesis)
 }
 
 /// Implements check B of IOP-225.

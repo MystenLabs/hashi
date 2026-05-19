@@ -1,4 +1,4 @@
-# Sample configuration for hashi-monitor
+# Sample configuration for `hashi-monitor batch` and `hashi-monitor continuous`.
 
 # Liveness delay bounds (seconds)
 next_event_delays:

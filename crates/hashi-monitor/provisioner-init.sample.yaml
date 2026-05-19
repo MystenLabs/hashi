@@ -1,0 +1,52 @@
+# Sample configuration for `hashi-monitor provisioner-init`.
+#
+# Run with:
+#   cargo run -p hashi-monitor -- provisioner-init --config provisioner-init.sample.yaml
+
+# Key Provisioner's secret share (32-byte k256 scalar, hex-encoded).
+share:
+  id: 1
+  value_hex: "0000000000000000000000000000000000000000000000000000000000000001"
+
+# If set, the built ProvisionerInitRequest is submitted to this guardian gRPC
+# endpoint after local checks pass. Omit (or comment out) for a dry run.
+# guardian_endpoint: "http://localhost:50051"
+
+# S3 credentials and bucket the guardian writes its logs to.
+s3:
+  access_key: "AKIA..."
+  secret_key: "..."
+  bucket_info:
+    bucket: "hashi-guardian-logs"
+    region: "us-east-1"
+
+# Expected share commitments for the guardian set, as published during
+# OperatorInit. digest_hex is the 32-byte commitment digest in hex.
+share_commitments:
+  - id: 1
+    digest_hex: "0000000000000000000000000000000000000000000000000000000000000000"
+  - id: 2
+    digest_hex: "0000000000000000000000000000000000000000000000000000000000000000"
+
+# Current on-chain Hashi committee snapshot. public_key / encryption_public_key
+# are raw byte sequences (BLS pubkey and HPKE pubkey respectively).
+hashi_committee:
+  epoch: 0
+  members:
+    - validator_address: "0x0000000000000000000000000000000000000000000000000000000000000000"
+      public_key: []           # BLS G1 pubkey bytes
+      encryption_public_key: [] # HPKE pubkey bytes
+      weight: 1
+  total_weight: 1
+  mpc_threshold_in_basis_points: 6700
+  mpc_weight_reduction_allowed_delta: 0
+  mpc_max_faulty_in_basis_points: 3300
+
+# Withdrawal/limiter parameters the enclave will be initialized with.
+withdrawal_config:
+  committee_threshold: 1
+  refill_rate_sats_per_sec: 1000
+  max_bucket_capacity_sats: 100000000
+
+# Hashi BTC master x-only pubkey (32-byte hex).
+hashi_btc_master_pubkey: "0000000000000000000000000000000000000000000000000000000000000001"
