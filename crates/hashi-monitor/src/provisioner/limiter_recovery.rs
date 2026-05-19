@@ -17,8 +17,8 @@
 //! here, an enclave that died late in an hour would have its final-hour bucket
 //! treated as not-yet-readable, and the recovery would skip past the most
 //! recent log. We instead rely on the caller invoking us only after
-//! `heartbeat_audit` has confirmed the prior session has been silent for
-//! >= OTHER_SESSION_QUIET_PERIOD (10 min), which combined with S3
+//! `heartbeat_audit` has confirmed the prior session has been silent for at
+//! least `OTHER_SESSION_QUIET_PERIOD` (10 min), which combined with S3
 //! read-after-write consistency guarantees all of its writes are visible.
 
 use crate::domain::now_unix_seconds;
