@@ -265,6 +265,7 @@ impl TestSetup {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
+            &test_metrics(),
         )
         .unwrap()
     }
@@ -879,6 +880,7 @@ fn test_mpc_manager_new_from_committee_set() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        &test_metrics(),
     )
     .expect("Should create manager from CommitteeSet");
 
@@ -943,6 +945,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        &test_metrics(),
     );
 
     let err = match result {
@@ -1029,6 +1032,7 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        &test_metrics(),
     )
     .expect("MpcManager::new should succeed across a committee gap");
 
@@ -1113,6 +1117,7 @@ fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        &test_metrics(),
     )
     .expect(
         "MpcManager::new must respect caller's epoch even when committee_set has a pending change",
@@ -6498,6 +6503,7 @@ async fn test_prepare_previous_output_for_new_member() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        &test_metrics(),
     )
     .unwrap();
 
@@ -7668,6 +7674,7 @@ fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        &test_metrics(),
     )
     .unwrap();
 
@@ -7843,6 +7850,7 @@ fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        &test_metrics(),
     )
     .unwrap();
 
@@ -7987,6 +7995,7 @@ fn test_reconstruct_from_dkg_certificates_uses_previous_encryption_key() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        &test_metrics(),
     )
     .unwrap();
     let reconstructed = unwrap_reconstruction_success(
@@ -8014,6 +8023,7 @@ fn test_reconstruct_from_dkg_certificates_uses_previous_encryption_key() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        &test_metrics(),
     )
     .unwrap();
     let result =
@@ -8098,6 +8108,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
+            &test_metrics(),
         )
         .unwrap();
         dealer_manager.previous_output = Some(dkg_outputs[dealer_idx].clone());
@@ -8130,6 +8141,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
+            &test_metrics(),
         )
         .unwrap();
         other_manager.previous_output = Some(dkg_outputs[other_idx].clone());
@@ -8238,6 +8250,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        &test_metrics(),
     )
     .unwrap();
 

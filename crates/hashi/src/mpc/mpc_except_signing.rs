@@ -141,6 +141,7 @@ impl MpcManager {
         weight_divisor: Option<u16>,
         batch_size_per_weight: u16,
         test_corrupt_shares_for: Option<Address>,
+        metrics: &Metrics,
     ) -> MpcResult<Self> {
         if weight_divisor.is_some() {
             assert!(
@@ -187,6 +188,12 @@ impl MpcManager {
             my_encryption_pk = hex::encode(my_pk.as_element().to_byte_array()),
             committee_encryption_pk = hex::encode(committee_pk.as_element().to_byte_array()),
             "MpcManager initialized"
+        );
+        metrics.mpc_party_reduced_weight.set(
+            mpc_config
+                .nodes
+                .weight_of(party_id)
+                .expect("party_id was just derived from this committee") as i64,
         );
         if !keys_match {
             tracing::error!(
