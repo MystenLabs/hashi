@@ -45,6 +45,7 @@ pub async fn standard_withdrawal(
                 post_state,
             };
             log_withdrawal_success(enclave.as_ref(), wid, msg, limiter_guard).await?;
+            // <-- Limiter guard drops upon log_withdrawal_success return. Next withdrawal can begin.
             Ok(enclave.sign(response))
         }
         Err(withdraw_err) => {
@@ -60,7 +61,6 @@ pub async fn standard_withdrawal(
     }
 }
 
-// TODO: Support batched withdrawals (multiple wids per transaction).
 async fn normal_withdrawal_inner(
     enclave: Arc<Enclave>,
     signed_request: HashiSigned<StandardWithdrawalRequest>,
