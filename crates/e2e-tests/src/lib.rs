@@ -324,7 +324,7 @@ impl TestNetworksBuilder {
 
 async fn finalize_guardian_harness(networks: &mut TestNetworks) -> Result<()> {
     use crate::guardian_harness::default_test_withdrawal_config;
-    use crate::guardian_harness::full_bucket;
+    use hashi_types::guardian::LimiterState;
 
     let nodes = networks.hashi_network.nodes();
     anyhow::ensure!(
@@ -344,7 +344,7 @@ async fn finalize_guardian_harness(networks: &mut TestNetworks) -> Result<()> {
     let master_pubkey = hashi.get_onchain_mpc_pubkey()?;
 
     let withdrawal_config = default_test_withdrawal_config(&committee);
-    let limiter_state = full_bucket(&withdrawal_config);
+    let limiter_state = LimiterState::genesis(&withdrawal_config);
 
     let harness = networks
         .guardian_harness

@@ -1,12 +1,10 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use hpke::Deserializable;
 mod config;
 mod heartbeat_checks;
 mod limiter_recovery;
 
-use crate::provisioner::config::GuardianConfig;
 use anyhow::Context;
 use hashi_guardian::s3_logger::S3Logger;
 use hashi_types::guardian::EncPubKey;
@@ -20,8 +18,11 @@ use hashi_types::guardian::proto_conversions::provisioner_init_request_to_pb;
 use hashi_types::guardian::session_id_from_signing_pubkey;
 use hashi_types::guardian::verify_enclave_attestation;
 use hashi_types::proto as pb;
+use hpke::Deserializable;
 use rand::thread_rng;
 use tracing::info;
+
+use crate::provisioner::config::GuardianConfig;
 
 pub use config::ProvisionerConfig;
 
@@ -118,6 +119,10 @@ enum DeploymentMode {
 
 /// Inspects S3 init logs for any session other than `current_session_id`.
 /// Presence of one or more such session ⇒ Rotation; otherwise Genesis.
+///
+/// Bails on any key under `init/` that doesn't match the expected
+/// `{session_id}-{suffix}` layout — unexpected keys shouldn't exist there
+/// and silently ignoring them could mask a real prior session.
 async fn detect_deployment_mode(
     s3_client: &S3Logger,
     current_session_id: &str,
@@ -128,20 +133,25 @@ async fn detect_deployment_mode(
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     for key in keys {
-        // Key format: `init/{session_id}-{init_suffix}.json`. session_id is
-        // 64-char lowercase hex (no dashes), so the first '-' after the prefix
-        // delimits it from the suffix.
-        let Some(after_prefix) = key.strip_prefix(&prefix) else {
-            continue;
-        };
-        let Some((session_id, _)) = after_prefix.split_once('-') else {
-            continue;
-        };
+        let session_id = extract_session_id_from_init_key(&key, &prefix)?;
         if session_id != current_session_id {
             return Ok(DeploymentMode::Rotation);
         }
     }
     Ok(DeploymentMode::Genesis)
+}
+
+/// Extracts the session_id from an `init/{session_id}-{suffix}.json` key.
+/// session_id is the lowercase hex of the enclave signing pubkey, so it
+/// contains no dashes — the first '-' after the prefix delimits it.
+fn extract_session_id_from_init_key<'a>(key: &'a str, prefix: &str) -> anyhow::Result<&'a str> {
+    let after_prefix = key
+        .strip_prefix(prefix)
+        .ok_or_else(|| anyhow::anyhow!("unexpected init log key (missing prefix): {key}"))?;
+    let (session_id, _suffix) = after_prefix
+        .split_once('-')
+        .ok_or_else(|| anyhow::anyhow!("unexpected init log key (no suffix delimiter): {key}"))?;
+    Ok(session_id)
 }
 
 /// Implements check B of IOP-225.
@@ -218,4 +228,33 @@ async fn prechecks(
     expected_guardian_config.ensure_matches_info(&info)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_session_id_strips_prefix_and_takes_up_to_first_dash() {
+        let session = "abcdef1234567890";
+        let key = format!("init/{session}-oi-attestation-unsigned.json");
+        assert_eq!(
+            extract_session_id_from_init_key(&key, "init/").unwrap(),
+            session
+        );
+    }
+
+    #[test]
+    fn extract_session_id_rejects_missing_prefix() {
+        let err = extract_session_id_from_init_key("withdraw/abc-suffix.json", "init/")
+            .expect_err("must fail on wrong prefix");
+        assert!(err.to_string().contains("missing prefix"));
+    }
+
+    #[test]
+    fn extract_session_id_rejects_missing_suffix_delimiter() {
+        let err = extract_session_id_from_init_key("init/abcdef.json", "init/")
+            .expect_err("must fail on no dash after prefix");
+        assert!(err.to_string().contains("no suffix delimiter"));
+    }
 }

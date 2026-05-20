@@ -13,7 +13,6 @@ pub mod s3_utils;
 
 pub use limiter::LimiterConfig;
 pub use limiter::LimiterState;
-pub use limiter::MAX_REQUEST_FUTURE_SKEW_SECS;
 pub use limiter::RateLimiter;
 pub use time_utils::UnixMillis;
 pub use time_utils::now_timestamp_ms;

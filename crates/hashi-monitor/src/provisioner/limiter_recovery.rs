@@ -91,3 +91,80 @@ fn bucket_max_post_state(logs: Vec<VerifiedLogRecord>) -> Option<LimiterState> {
         })
         .max_by_key(|s| s.next_seq)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::Network;
+    use bitcoin::Txid;
+    use bitcoin::hashes::Hash;
+    use hashi_types::guardian::GuardianError;
+    use hashi_types::guardian::GuardianSigned;
+    use hashi_types::guardian::StandardWithdrawalRequest;
+    use hashi_types::guardian::StandardWithdrawalRequestWire;
+    use hashi_types::guardian::StandardWithdrawalResponse;
+
+    fn state_with_seq(next_seq: u64) -> LimiterState {
+        LimiterState {
+            num_tokens_available: 1_000,
+            last_updated_at: 100,
+            next_seq,
+        }
+    }
+
+    fn success_log(next_seq: u64) -> VerifiedLogRecord {
+        let signed = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
+        let (request_sign, request_data) = signed.into_parts();
+        let msg = WithdrawalLogMessage::Success {
+            txid: Txid::from_slice(&[3u8; 32]).expect("valid txid"),
+            request_data: StandardWithdrawalRequestWire::from(request_data),
+            request_sign,
+            response: GuardianSigned::<StandardWithdrawalResponse>::mock_for_testing().data,
+            post_state: state_with_seq(next_seq),
+        };
+        VerifiedLogRecord {
+            session_id: "test-session".to_string(),
+            timestamp_ms: 0,
+            message: LogMessage::Withdrawal(Box::new(msg)),
+        }
+    }
+
+    fn failure_log() -> VerifiedLogRecord {
+        let signed = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
+        let (request_sign, request_data) = signed.into_parts();
+        let msg = WithdrawalLogMessage::Failure {
+            request_data: StandardWithdrawalRequestWire::from(request_data),
+            request_sign,
+            error: GuardianError::RateLimitExceeded,
+        };
+        VerifiedLogRecord {
+            session_id: "test-session".to_string(),
+            timestamp_ms: 0,
+            message: LogMessage::Withdrawal(Box::new(msg)),
+        }
+    }
+
+    #[test]
+    fn bucket_max_empty_is_none() {
+        assert!(bucket_max_post_state(vec![]).is_none());
+    }
+
+    #[test]
+    fn bucket_max_only_failures_is_none() {
+        assert!(bucket_max_post_state(vec![failure_log(), failure_log()]).is_none());
+    }
+
+    #[test]
+    fn bucket_max_picks_highest_seq_success() {
+        let logs = vec![success_log(3), success_log(7), success_log(5)];
+        let got = bucket_max_post_state(logs).expect("non-empty success set");
+        assert_eq!(got.next_seq, 7);
+    }
+
+    #[test]
+    fn bucket_max_ignores_failures_when_picking_success() {
+        let logs = vec![failure_log(), success_log(2), failure_log(), success_log(9)];
+        let got = bucket_max_post_state(logs).expect("non-empty success set");
+        assert_eq!(got.next_seq, 9);
+    }
+}

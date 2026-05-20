@@ -126,11 +126,3 @@ pub fn default_test_withdrawal_config(committee: &HashiCommittee) -> WithdrawalC
         max_bucket_capacity_sats: 100_000_000,
     }
 }
-
-pub fn full_bucket(config: &WithdrawalConfig) -> LimiterState {
-    LimiterState {
-        num_tokens_available: config.max_bucket_capacity_sats,
-        last_updated_at: 0,
-        next_seq: 0,
-    }
-}
