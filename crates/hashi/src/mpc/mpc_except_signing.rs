@@ -201,24 +201,11 @@ impl MpcManager {
                  from what is registered on-chain for this node."
             );
         }
-        let (previous_epoch, previous_committee) = if committee_set.pending_epoch_change().is_some()
-        {
-            // Live reconfig
-            let source = committee_set.epoch();
-            (source, committee_set.committees().get(&source).cloned())
-        } else {
-            match committee_set
-                .committees()
-                .range(..epoch)
-                .next_back()
-                .map(|(&k, c)| (k, c.clone()))
-            {
-                // Rotation recovery
-                Some((prev, committee)) => (prev, Some(committee)),
-                // Genesis or post-initial-DKG single-committee state
+        let (previous_epoch, previous_committee) =
+            match committee_set.previous_committee_for_target(epoch) {
+                Some((prev, committee)) => (prev, Some(committee.clone())),
                 None => (committee_set.epoch(), None),
-            }
-        };
+            };
         let (previous_nodes, previous_reconfig_output_threshold) = match previous_committee.as_ref()
         {
             Some(prev_committee) => {
