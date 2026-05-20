@@ -1,18 +1,18 @@
 ---
-title: Hashi Key Share Backups
-description: How node operators encrypt and back up their MPC key shares using age, with optional YubiKey-based key generation.
-keywords: [ key share, backup, age, YubiKey, encryption ]
+title: Hashi Node Backups
+description: How node operators encrypt and back up their essential data with age, with optional YubiKey-based key generation.
+keywords: [ operator, backup, age, YubiKey, encryption ]
 ---
 
-TODO: explain rationale for backups.
-
-To prevent this scenario, each Hashi node operator must provide encrypted
-backups of their key shares to a common S3 bucket.
+To prevent a node from being unable to rejoin the Hashi committee in the event
+of data loss, Hashi implements an automatic backup system. Every epoch, the key
+information needed to restore a node, including db data and config files, is
+saved to a compressed and encrypted file. You can restore a backup file through
+the hashi cli.
 
 ## Creating an `age` private key
 
-For security reasons, plaintext key shares must never leave your local
-storage. Backups must be encrypted. The procedures in this page use
+For security reasons, we must encrypt the backups. Our backup procedure uses
 [`age`](https://github.com/FiloSottile/age).
 
 ### Option 1: Create a private key on a YubiKey (recommended)
@@ -126,10 +126,15 @@ of the private key. Store the file carefully.
    password manager or a USB drive in a safe. Do not store the private key
    file in the same location as the encrypted key share backup.
 
-## Back up the key share
+## Configuring hashi
 
-1. On the machine that contains the key share, run this command to encrypt
-   it:
-   `age --recipient <recipient> --armor --output hashi-key-share.age <key share file path>`.
-2. Store the encrypted backup, `hashi-key-share.age`, in a secure location
-   such as a company password manager or a USB drive in a safe.
+To enable automatic backups using the new age keypair, add the age recipient
+to the node config file under the field `backup-age-pubkey`.
+
+You can also configure the location where Hashi saves backups with the field
+`backup-dir`.
+
+## Cloud backup
+
+In the future, we will likely add support for automatically uploading backups
+to cloud storage such as s3.
