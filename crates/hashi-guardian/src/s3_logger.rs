@@ -279,6 +279,44 @@ impl S3Logger {
         self.ensure_no_duplicates_or_deletions(prefix).await
     }
 
+    /// Lists immediate subdirectories under `prefix` (S3 `CommonPrefixes`,
+    /// returned by `list_objects_v2` with `delimiter='/'`). Used to tree-walk
+    /// the hour-partitioned withdraw layout (`withdraw/YYYY/MM/DD/HH/`)
+    /// without paginating every object key. Returned prefixes are unique and
+    /// sorted lexicographically.
+    pub async fn list_common_prefixes(&self, prefix: &str) -> GuardianResult<Vec<String>> {
+        let mut continuation_token: Option<String> = None;
+        let mut out: BTreeSet<String> = BTreeSet::new();
+        loop {
+            let mut req = self
+                .client
+                .list_objects_v2()
+                .bucket(self.config.bucket_name())
+                .prefix(prefix)
+                .delimiter("/");
+            if let Some(ref token) = continuation_token {
+                req = req.continuation_token(token);
+            }
+            let response = req.send().await.map_err(|e| {
+                S3Error(format!(
+                    "Failed to list common prefixes under {}: {}",
+                    prefix,
+                    DisplayErrorContext(&e)
+                ))
+            })?;
+            for cp in response.common_prefixes() {
+                if let Some(p) = cp.prefix() {
+                    out.insert(p.to_string());
+                }
+            }
+            match response.next_continuation_token() {
+                Some(token) => continuation_token = Some(token.to_string()),
+                None => break,
+            }
+        }
+        Ok(out.into_iter().collect())
+    }
+
     /// Checks that all matching object keys do not have either deletions or overwrites.
     /// The prefix can either correspond to a directory or a complete object key.
     ///

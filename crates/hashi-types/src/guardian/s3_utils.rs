@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::guardian::time_utils::UnixSeconds;
+use anyhow::Context;
 use std::convert::TryFrom;
 use std::fmt;
 use std::time::Duration;
@@ -67,15 +68,60 @@ impl S3HourScopedDirectory {
     }
 
     pub fn to_unix_seconds(&self) -> UnixSeconds {
-        let month = time::Month::try_from(self.month).expect("month should be valid");
-        let date =
-            Date::from_calendar_date(self.year, month, self.day).expect("date should be valid");
-        let time = Time::from_hms(self.hour, 0, 0).expect("hour should be valid");
+        let (date, time) = parse_calendar(self.year, self.month, self.day, self.hour)
+            .expect("invariants validated at construction");
         let ts = PrimitiveDateTime::new(date, time)
             .assume_utc()
             .unix_timestamp();
         UnixSeconds::try_from(ts).expect("timestamp should be non-negative")
     }
+
+    /// Parses a directory path of the form `{prefix}/{yyyy}/{mm}/{dd}/{hh}/`
+    /// (with or without the trailing slash) back into a directory value.
+    /// Inverse of [`Self::fmt`].
+    pub fn from_path(path: &str) -> anyhow::Result<Self> {
+        let parts: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+        anyhow::ensure!(
+            parts.len() == 5,
+            "expected `{{prefix}}/YYYY/MM/DD/HH/` in {path}"
+        );
+        let prefix = parts[0];
+        let year: Year = parts[1]
+            .parse()
+            .with_context(|| format!("invalid year in {path}"))?;
+        let month: Month = parts[2]
+            .parse()
+            .with_context(|| format!("invalid month in {path}"))?;
+        let day: Day = parts[3]
+            .parse()
+            .with_context(|| format!("invalid day in {path}"))?;
+        let hour: Hour = parts[4]
+            .parse()
+            .with_context(|| format!("invalid hour in {path}"))?;
+        parse_calendar(year, month, day, hour).with_context(|| format!("invalid path {path}"))?;
+        Ok(Self {
+            prefix: prefix.to_string(),
+            year,
+            month,
+            day,
+            hour,
+        })
+    }
+}
+
+/// Validates the (year, month, day, hour) tuple and returns the corresponding
+/// `(Date, Time)` if every component is in range. Shared by [`S3HourScopedDirectory::from_path`]
+/// (which uses it to validate before construction) and
+/// [`S3HourScopedDirectory::to_unix_seconds`] (which is infallible because the
+/// struct invariant guarantees validity).
+fn parse_calendar(year: Year, month: Month, day: Day, hour: Hour) -> anyhow::Result<(Date, Time)> {
+    let month_enum =
+        time::Month::try_from(month).map_err(|e| anyhow::anyhow!("invalid month {month}: {e}"))?;
+    let date = Date::from_calendar_date(year, month_enum, day)
+        .map_err(|e| anyhow::anyhow!("invalid date {year}-{month:02}-{day:02}: {e}"))?;
+    let time =
+        Time::from_hms(hour, 0, 0).map_err(|e| anyhow::anyhow!("invalid hour {hour}: {e}"))?;
+    Ok((date, time))
 }
 
 impl fmt::Display for S3HourScopedDirectory {
@@ -123,6 +169,28 @@ mod tests {
         // Saturates at epoch.
         let epoch = S3HourScopedDirectory::new("withdraw", 0);
         assert_eq!(epoch.prev_dir(), epoch);
+    }
+
+    #[test]
+    fn test_from_path_roundtrips_with_display() {
+        let dir = S3HourScopedDirectory::new("withdraw", 1_700_000_000);
+        let displayed = dir.to_string();
+        let parsed = S3HourScopedDirectory::from_path(&displayed).expect("roundtrip");
+        assert_eq!(parsed, dir);
+        // Also accept the trailing-slash-stripped form.
+        let parsed_nopfx = S3HourScopedDirectory::from_path(displayed.trim_end_matches('/'))
+            .expect("roundtrip without trailing slash");
+        assert_eq!(parsed_nopfx, dir);
+    }
+
+    #[test]
+    fn test_from_path_rejects_wrong_shape() {
+        assert!(S3HourScopedDirectory::from_path("withdraw/2024/03/15/").is_err()); // missing hour
+        assert!(S3HourScopedDirectory::from_path("withdraw/2024/03/15/14/extra/").is_err()); // too many parts
+        assert!(S3HourScopedDirectory::from_path("withdraw/2024/13/15/14/").is_err()); // invalid month
+        assert!(S3HourScopedDirectory::from_path("withdraw/2024/02/30/14/").is_err()); // invalid day
+        assert!(S3HourScopedDirectory::from_path("withdraw/2024/02/15/24/").is_err()); // invalid hour
+        assert!(S3HourScopedDirectory::from_path("withdraw/notayear/03/15/14/").is_err()); // non-numeric
     }
 
     #[test]

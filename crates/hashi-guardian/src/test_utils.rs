@@ -27,6 +27,97 @@ pub fn mock_logger() -> S3Logger {
     S3Logger::from_client_for_tests(S3Config::mock_for_testing(), client)
 }
 
+/// Mock S3 logger whose `list_objects_v2(delimiter='/')` and
+/// `list_object_versions` responses are computed from an in-memory key set —
+/// useful for testing layered prefix tree-walks. PutObject also succeeds.
+///
+/// The dynamic responses depend on inspecting the request `prefix`; we capture
+/// it in a Mutex from `match_requests` and read it in `then_output` (the
+/// smithy-mocks API doesn't surface the request inside `then_output`). This
+/// is sound under a single-threaded async runtime — each S3 call's predicate
+/// runs immediately before its output factory.
+pub fn mock_logger_with_layout(keys: impl IntoIterator<Item = String>) -> S3Logger {
+    use aws_sdk_s3::operation::list_object_versions::ListObjectVersionsOutput;
+    use aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output;
+    use aws_sdk_s3::operation::put_object::PutObjectOutput;
+    use aws_sdk_s3::types::CommonPrefix;
+    use aws_sdk_s3::types::ObjectVersion;
+    use aws_sdk_s3::Client;
+    use aws_smithy_mocks::mock;
+    use aws_smithy_mocks::mock_client;
+    use aws_smithy_mocks::RuleMode;
+    use hashi_types::guardian::S3Config;
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    let keys: Arc<BTreeSet<String>> = Arc::new(keys.into_iter().collect());
+
+    let v2_prefix: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let v2_prefix_w = v2_prefix.clone();
+    let v2_prefix_r = v2_prefix.clone();
+    let v2_keys = keys.clone();
+    let list_v2 = mock!(Client::list_objects_v2)
+        .match_requests(move |req| {
+            if req.delimiter() != Some("/") {
+                return false;
+            }
+            *v2_prefix_w.lock().unwrap() = req.prefix().map(|s| s.to_string());
+            true
+        })
+        .then_output(move || {
+            let prefix = v2_prefix_r.lock().unwrap().clone().unwrap_or_default();
+            let mut children: BTreeSet<String> = BTreeSet::new();
+            for key in v2_keys.iter() {
+                let Some(rest) = key.strip_prefix(&prefix) else {
+                    continue;
+                };
+                if let Some(slash) = rest.find('/') {
+                    let mut child = prefix.clone();
+                    child.push_str(&rest[..=slash]);
+                    children.insert(child);
+                }
+            }
+            let common_prefixes: Vec<CommonPrefix> = children
+                .into_iter()
+                .map(|c| CommonPrefix::builder().prefix(c).build())
+                .collect();
+            ListObjectsV2Output::builder()
+                .set_common_prefixes(Some(common_prefixes))
+                .build()
+        });
+
+    let lv_prefix: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let lv_prefix_w = lv_prefix.clone();
+    let lv_prefix_r = lv_prefix.clone();
+    let lv_keys = keys.clone();
+    let list_versions = mock!(Client::list_object_versions)
+        .match_requests(move |req| {
+            *lv_prefix_w.lock().unwrap() = req.prefix().map(|s| s.to_string());
+            true
+        })
+        .then_output(move || {
+            let prefix = lv_prefix_r.lock().unwrap().clone().unwrap_or_default();
+            let versions: Vec<ObjectVersion> = lv_keys
+                .iter()
+                .filter(|k| k.starts_with(&prefix))
+                .map(|k| ObjectVersion::builder().key(k).is_latest(true).build())
+                .collect();
+            ListObjectVersionsOutput::builder()
+                .set_versions(Some(versions))
+                .build()
+        });
+
+    let put_ok = mock!(Client::put_object).then_output(|| PutObjectOutput::builder().build());
+
+    let client = mock_client!(
+        aws_sdk_s3,
+        RuleMode::MatchAny,
+        &[&list_v2, &list_versions, &put_ok]
+    );
+    S3Logger::from_client_for_tests(S3Config::mock_for_testing(), client)
+}
+
 pub struct OperatorInitTestArgs {
     pub network: Network,
     pub commitments: ShareCommitments,
