@@ -78,7 +78,7 @@ impl S3HourScopedDirectory {
 
     /// Parses a directory path of the form `{prefix}/{yyyy}/{mm}/{dd}/{hh}/`
     /// (with or without the trailing slash) back into a directory value.
-    /// Inverse of [`Self::fmt`].
+    /// Inverse of the `Display` impl.
     pub fn from_path(path: &str) -> anyhow::Result<Self> {
         let parts: Vec<&str> = path.trim_end_matches('/').split('/').collect();
         anyhow::ensure!(
