@@ -134,6 +134,22 @@ fn project_capacity(config: &LimiterConfig, state: &LimiterState, timestamp_secs
         .min(config.max_bucket_capacity)
 }
 
+/// Whether a guardian finalize for `wid` at `next_seq` must be deferred: the
+/// guardian already consumed this seq for a *different* withdrawal and the local
+/// limiter — which advances only when the on-chain `WithdrawalSignedEvent` is
+/// observed — has not yet caught up, so sending `next_seq` now would draw a
+/// guardian `seq mismatch`. A same-wid retry at the same seq is *not* deferred:
+/// deferring it would stall its own recovery, since replaying that withdrawal is
+/// what lets the limiter advance. (When the guardian response cache is present it
+/// additionally serves such a retry idempotently.)
+pub(crate) fn should_defer_guardian_finalize(
+    next_seq: u64,
+    last_finalized: Option<(u64, sui_sdk_types::Address)>,
+    wid: sui_sdk_types::Address,
+) -> bool {
+    last_finalized.is_some_and(|(last_seq, last_wid)| next_seq <= last_seq && wid != last_wid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +239,21 @@ mod tests {
     fn test_next_seq_matches_snapshot() {
         let limiter = make_limiter(0, 0, 11);
         assert_eq!(limiter.next_seq(), 11);
+    }
+
+    #[test]
+    fn defer_only_for_a_different_wid_at_an_already_consumed_seq() {
+        let a = sui_sdk_types::Address::new([1u8; 32]);
+        let b = sui_sdk_types::Address::new([2u8; 32]);
+        // Nothing finalized yet -> never defer.
+        assert!(!should_defer_guardian_finalize(0, None, a));
+        // Different wid reusing a consumed seq (local limiter behind) -> defer.
+        assert!(should_defer_guardian_finalize(5, Some((5, a)), b));
+        // A stale (lower) seq for a different wid -> defer.
+        assert!(should_defer_guardian_finalize(4, Some((5, a)), b));
+        // Same wid retrying its own seq -> allowed (response cache serves it).
+        assert!(!should_defer_guardian_finalize(5, Some((5, a)), a));
+        // Local limiter caught up (next_seq advanced) -> allowed.
+        assert!(!should_defer_guardian_finalize(6, Some((5, a)), b));
     }
 }
