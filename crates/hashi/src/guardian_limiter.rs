@@ -123,6 +123,16 @@ impl LocalLimiter {
         guard.next_seq += 1;
         Ok(())
     }
+
+    /// Overwrite local state with the guardian's authoritative `state`. The
+    /// guardian is the source of truth; this is the recovery path for a mirror
+    /// that has drifted and that the watcher's event stream cannot re-sync on
+    /// its own — e.g. a `WithdrawalSignedEvent` dropped across a
+    /// checkpoint-subscription reconnect, then skipped on redelivery via
+    /// `signatures.is_some()`. Config is immutable and left unchanged.
+    pub fn reconcile_to(&self, state: LimiterState) {
+        *self.state.write().unwrap() = state;
+    }
 }
 
 fn project_capacity(config: &LimiterConfig, state: &LimiterState, timestamp_secs: u64) -> u64 {
@@ -142,6 +152,52 @@ pub(crate) fn should_defer_guardian_finalize(
     wid: sui_sdk_types::Address,
 ) -> bool {
     last_finalized.is_some_and(|(last_seq, last_wid)| next_seq <= last_seq && wid != last_wid)
+}
+
+/// Consecutive reconcile ticks the local limiter must stay drifted from the
+/// guardian *at the same local seq* before we treat it as a genuine stall. This
+/// rules out normal in-flight lag, where the mirror trails the guardian by a
+/// little but keeps advancing as `WithdrawalSignedEvent`s arrive (so the local
+/// seq changes between ticks and the streak resets).
+pub(crate) const STALL_RECONCILE_TICKS: u32 = 4;
+
+/// Detects a local limiter that has drifted from the guardian and stayed frozen
+/// long enough to be a genuine stall rather than transient lag. Fed one
+/// observation per reconcile tick; a positive result means the caller should
+/// [`LocalLimiter::reconcile_to`] the guardian's authoritative state.
+#[derive(Default)]
+pub(crate) struct LimiterStallTracker {
+    frozen_at_seq: Option<u64>,
+    frozen_ticks: u32,
+}
+
+impl LimiterStallTracker {
+    /// Record the latest local/guardian seqs; returns true once the mirror has
+    /// been stalled long enough that it should be reconciled. Resets after
+    /// signalling, so the caller reconciles at most once per detected stall.
+    pub(crate) fn observe(&mut self, local_seq: u64, guardian_seq: u64) -> bool {
+        if local_seq == guardian_seq {
+            self.reset();
+            return false;
+        }
+        if self.frozen_at_seq == Some(local_seq) {
+            self.frozen_ticks += 1;
+        } else {
+            self.frozen_at_seq = Some(local_seq);
+            self.frozen_ticks = 1;
+        }
+        if self.frozen_ticks >= STALL_RECONCILE_TICKS {
+            self.reset();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn reset(&mut self) {
+        self.frozen_at_seq = None;
+        self.frozen_ticks = 0;
+    }
 }
 
 #[cfg(test)]
@@ -244,5 +300,63 @@ mod tests {
         assert!(should_defer_guardian_finalize(4, Some((5, a)), b));
         assert!(!should_defer_guardian_finalize(5, Some((5, a)), a));
         assert!(!should_defer_guardian_finalize(6, Some((5, a)), b));
+    }
+
+    #[test]
+    fn reconcile_to_overwrites_state_in_either_direction() {
+        let limiter = make_limiter(0, 0, 21);
+        // Forward: recover a mirror stuck behind the guardian.
+        limiter.reconcile_to(LimiterState {
+            num_tokens_available: 500,
+            last_updated_at: 100,
+            next_seq: 30,
+        });
+        let s = limiter.snapshot();
+        assert_eq!(s.next_seq, 30);
+        assert_eq!(s.num_tokens_available, 500);
+        assert_eq!(s.last_updated_at, 100);
+        // Backward: correct an overshoot back to the source of truth.
+        limiter.reconcile_to(LimiterState {
+            num_tokens_available: 1,
+            last_updated_at: 200,
+            next_seq: 25,
+        });
+        assert_eq!(limiter.snapshot().next_seq, 25);
+    }
+
+    #[test]
+    fn stall_tracker_ignores_normal_advancing_lag() {
+        let mut tracker = LimiterStallTracker::default();
+        // Mirror trails the guardian by one but keeps advancing -> never a stall.
+        for seq in 5..5 + 3 * u64::from(STALL_RECONCILE_TICKS) {
+            assert!(!tracker.observe(seq, seq + 1));
+        }
+    }
+
+    #[test]
+    fn stall_tracker_resets_when_caught_up() {
+        let mut tracker = LimiterStallTracker::default();
+        assert!(!tracker.observe(21, 22));
+        assert!(!tracker.observe(22, 22)); // caught up -> reset
+        assert!(!tracker.observe(22, 23)); // streak starts over
+    }
+
+    #[test]
+    fn stall_tracker_fires_after_persistent_freeze_then_resets() {
+        let mut tracker = LimiterStallTracker::default();
+        for _ in 0..STALL_RECONCILE_TICKS - 1 {
+            assert!(!tracker.observe(21, 22));
+        }
+        assert!(tracker.observe(21, 22)); // genuine stall
+        assert!(!tracker.observe(21, 22)); // reset after firing
+    }
+
+    #[test]
+    fn stall_tracker_fires_for_overshoot_too() {
+        let mut tracker = LimiterStallTracker::default();
+        for _ in 0..STALL_RECONCILE_TICKS - 1 {
+            assert!(!tracker.observe(24, 22)); // local ahead of the guardian
+        }
+        assert!(tracker.observe(24, 22));
     }
 }
