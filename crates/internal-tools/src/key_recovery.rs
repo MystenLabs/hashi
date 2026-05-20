@@ -180,6 +180,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
         // `encryption_key` decrypted `previous_epoch`'s AVSS messages, which is
         // what reconstruction reads. Pass it as both `encryption_key` (unused
         // here) and `previous_encryption_key`.
+        let metrics = hashi::metrics::Metrics::new_default();
         let mut manager = MpcManager::new(
             validator_address,
             &recovery_committee_set,
@@ -193,6 +194,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
             None, // weight_divisor
             0,    // batch_size_per_weight (unused for reconstruction)
             None, // test_corrupt_shares_for
+            &metrics,
         )
         .map_err(|e| anyhow!("failed to create MpcManager: {e}"))?;
 

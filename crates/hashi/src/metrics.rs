@@ -130,6 +130,7 @@ pub struct Metrics {
     pub mpc_sign_collection_duration_seconds: HistogramVec,
     pub mpc_sign_aggregation_duration_seconds: HistogramVec,
     pub mpc_rpc_handler_process_duration_seconds: HistogramVec,
+    pub mpc_party_reduced_weight: IntGauge,
 }
 
 const LATENCY_SEC_BUCKETS: &[f64] = &[
@@ -814,12 +815,18 @@ impl Metrics {
             )
             .unwrap(),
 
-            // MPC profiling: RPC handler
             mpc_rpc_handler_process_duration_seconds: register_histogram_vec_with_registry!(
                 "hashi_mpc_rpc_handler_process_duration_seconds",
                 "Duration of process_message in RPC handler",
                 &["protocol"],
                 LATENCY_SEC_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            mpc_party_reduced_weight: register_int_gauge_with_registry!(
+                "hashi_mpc_party_reduced_weight",
+                "This party's post-reduction weight in the current MPC \
+                 committee.",
                 registry,
             )
             .unwrap(),
