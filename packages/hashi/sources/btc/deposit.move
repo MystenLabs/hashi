@@ -172,6 +172,8 @@ entry fun confirm_deposit(
         EDepositTimeDelayNotPassed,
     );
 
+    assert!(!hashi.bitcoin().utxo_pool().is_spent_or_active(utxo.id()), EUtxoAlreadyUsed);
+
     sui::event::emit(DepositConfirmedEvent {
         request_id,
         utxo,

@@ -140,6 +140,55 @@ fun test_confirm_deposit_with_valid_certificate() {
     std::unit_test::destroy(hashi);
 }
 
+#[test, expected_failure(abort_code = deposit::EUtxoAlreadyUsed)]
+fun duplicate_approved_deposit_cannot_reactivate_cleaned_up_spent_utxo() {
+    let epoch = 0;
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, epoch);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let mut clock = clock::create_for_testing(ctx);
+
+    let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
+
+    let utxo1 = hashi::utxo::utxo(utxo_id, 30_000, option::none());
+    let utxo2 = hashi::utxo::utxo(utxo_id, 30_000, option::none());
+    assert!(utxo1.id() == utxo2.id());
+
+    deposit::deposit(&mut hashi, utxo1, &clock, ctx);
+    let request_id1 = tx_context::last_created_object_id(ctx);
+
+    deposit::deposit(&mut hashi, utxo2, &clock, ctx);
+    let request_id2 = tx_context::last_created_object_id(ctx);
+
+    let message1 = deposit::new_deposit_confirmation_message(request_id1, utxo1);
+    let message_bytes1 = build_cert_message(epoch, &message1);
+    let cert1 = test_utils::sign_certificate(epoch, &message_bytes1, 3);
+    deposit::approve_deposit(&mut hashi, request_id1, cert1, &clock, ctx);
+
+    let message2 = deposit::new_deposit_confirmation_message(request_id2, utxo2);
+    let message_bytes2 = build_cert_message(epoch, &message2);
+    let cert2 = test_utils::sign_certificate(epoch, &message_bytes2, 3);
+    deposit::approve_deposit(&mut hashi, request_id2, cert2, &clock, ctx);
+
+    clock.increment_for_testing(hashi::btc_config::bitcoin_deposit_time_delay_ms(hashi.config()));
+
+    deposit::confirm_deposit(&mut hashi, request_id1, &clock, ctx);
+
+    // Latest main marks spent UTXOs first, then moves them to spent_utxos
+    // during cleanup. The replay remains possible after cleanup removes the
+    // active record.
+    hashi.bitcoin_mut().utxo_pool_mut().mark_spent(utxo_id, epoch);
+    hashi.bitcoin_mut().utxo_pool_mut().cleanup_spent(utxo_id);
+    assert!(hashi.bitcoin().utxo_pool().has_spent_record(utxo_id));
+
+    // This must be rejected before minting or re-adding the same spent UTXO
+    // to the active pool.
+    deposit::confirm_deposit(&mut hashi, request_id2, &clock, ctx);
+
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
 /// `approve_deposit` must reject a re-approval by the same committee.
 /// Re-approving in-epoch would bump the approval timestamp and push out
 /// the confirmation window for no benefit. Re-approval is only valid
