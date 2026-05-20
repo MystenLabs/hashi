@@ -8,30 +8,34 @@ use std::string::String;
 use sui::{clock::Clock, vec_map::VecMap};
 
 #[error]
-const EInvalidConfigEntry: vector<u8> = b"Unknown config key or wrong value type";
+const EInvalidConfigEntry: vector<u8> = b"Unknown config key or wrong value type in proposed entry";
+
+#[error]
+const ENoEntriesProvided: vector<u8> = b"UpdateConfig proposal must contain at least one entry";
 
 const THRESHOLD_BPS: u64 = 6667;
 
 public struct UpdateConfig has copy, drop, store {
-    key: String,
-    value: Value,
+    entries: VecMap<String, Value>,
 }
 
 public fun propose(
     hashi: &mut Hashi,
-    key: String,
-    value: Value,
+    entries: VecMap<String, Value>,
     metadata: VecMap<String, String>,
     clock: &Clock,
     ctx: &mut TxContext,
 ): ID {
     hashi.config().assert_version_enabled();
-    proposal::create(hashi, UpdateConfig { key, value }, THRESHOLD_BPS, metadata, clock, ctx)
+    assert!(!entries.is_empty(), ENoEntriesProvided);
+    proposal::create(hashi, UpdateConfig { entries }, THRESHOLD_BPS, metadata, clock, ctx)
 }
 
 public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
-    let UpdateConfig { key, value } = proposal::execute(hashi, proposal_id, clock);
-    assert!(hashi.config().is_valid_config_update(&key, &value), EInvalidConfigEntry);
-    let bytes = *key.as_bytes();
-    hashi.config_mut().upsert(bytes, value);
+    let UpdateConfig { entries } = proposal::execute(hashi, proposal_id, clock);
+    let (keys, values) = entries.into_keys_values();
+    keys.zip_do!(values, |key, value| {
+        assert!(hashi.config().is_valid_config_update(&key, &value), EInvalidConfigEntry);
+        hashi.config_mut().upsert(*key.as_bytes(), value);
+    });
 }

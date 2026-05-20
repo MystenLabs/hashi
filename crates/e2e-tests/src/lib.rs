@@ -381,14 +381,33 @@ pub(crate) async fn apply_onchain_config_overrides(
     overrides: &[(String, hashi_types::move_types::ConfigValue)],
 ) -> Result<()> {
     use hashi::cli::client::CreateProposalParams;
-    use hashi::cli::client::build_create_proposal_transaction;
-    use hashi::cli::client::build_vote_transaction;
-    use hashi::cli::upgrade::build_execute_proposal_transaction;
-    use hashi::cli::upgrade::extract_proposal_id_from_response;
     use hashi::sui_tx_executor::SuiTxExecutor;
+    use hashi_types::move_types::ConfigValue;
     use sui_sdk_types::Identifier;
     use sui_sdk_types::StructTag;
     use sui_sdk_types::TypeTag;
+
+    let mut mpc_threshold_bps: Option<u64> = None;
+    let mut mpc_max_faulty_bps: Option<u64> = None;
+    let mut mpc_weight_reduction_allowed_delta: Option<u64> = None;
+    let mut other_overrides: Vec<(String, ConfigValue)> = Vec::new();
+    for (key, value) in overrides {
+        match (key.as_str(), value) {
+            ("mpc_threshold_in_basis_points", ConfigValue::U64(v)) => {
+                mpc_threshold_bps = Some(*v);
+            }
+            ("mpc_max_faulty_in_basis_points", ConfigValue::U64(v)) => {
+                mpc_max_faulty_bps = Some(*v);
+            }
+            ("mpc_weight_reduction_allowed_delta", ConfigValue::U64(v)) => {
+                mpc_weight_reduction_allowed_delta = Some(*v);
+            }
+            _ => other_overrides.push((key.clone(), value.clone())),
+        }
+    }
+    let has_mpc_overrides = mpc_threshold_bps.is_some()
+        || mpc_max_faulty_bps.is_some()
+        || mpc_weight_reduction_allowed_delta.is_some();
 
     let nodes = networks.hashi_network.nodes();
 
@@ -421,60 +440,46 @@ pub(crate) async fn apply_onchain_config_overrides(
         vec![],
     )));
 
+    if has_mpc_overrides {
+        tracing::info!(
+            "applying MPC config overrides atomically: \
+             threshold_bps={mpc_threshold_bps:?}, \
+             max_faulty_bps={mpc_max_faulty_bps:?}, \
+             weight_reduction_allowed_delta={mpc_weight_reduction_allowed_delta:?}"
+        );
+        exec_checkpoint = submit_proposal_through_quorum(
+            hashi_ids,
+            &mut executors,
+            CreateProposalParams::UpdateMpcConfig {
+                threshold_bps: mpc_threshold_bps,
+                max_faulty_bps: mpc_max_faulty_bps,
+                weight_reduction_allowed_delta: mpc_weight_reduction_allowed_delta,
+                metadata: vec![],
+            },
+            update_config_type_tag.clone(),
+            "update_config",
+            "UpdateMpcConfig",
+        )
+        .await?;
+    }
+
     //TODO could we build the proposals and vote/execute on them all at the same time vs doing them
     //one at a time?
-    for (key, value) in overrides {
+    for (key, value) in &other_overrides {
         tracing::info!("applying on-chain config override: {key} = {value:?}");
-
-        // 1. Node 0 creates the proposal (and automatically casts its own vote).
-        let create_tx = build_create_proposal_transaction(
+        exec_checkpoint = submit_proposal_through_quorum(
             hashi_ids,
+            &mut executors,
             CreateProposalParams::UpdateConfig {
                 key: key.clone(),
                 value: value.clone(),
                 metadata: vec![],
             },
-        );
-        let response = executors[0].execute(create_tx).await?;
-        anyhow::ensure!(
-            response.transaction().effects().status().success(),
-            "create UpdateConfig proposal for '{key}' failed"
-        );
-
-        let proposal_id = extract_proposal_id_from_response(&response)?;
-        tracing::info!("proposal {proposal_id} created for '{key}'; collecting votes");
-
-        // 2. All remaining nodes vote. This gives 100% of total weight,
-        //    guaranteeing the 66.67% quorum threshold is met.
-        for executor in &mut executors[1..] {
-            let vote_tx =
-                build_vote_transaction(hashi_ids, proposal_id, update_config_type_tag.clone());
-            let vote_resp = executor.execute(vote_tx).await?;
-            anyhow::ensure!(
-                vote_resp.transaction().effects().status().success(),
-                "vote on UpdateConfig proposal {proposal_id} for '{key}' failed"
-            );
-        }
-
-        // 3. Node 0 executes the proposal now that quorum is reached.
-        let execute_tx = build_execute_proposal_transaction(
-            hashi_ids,
-            proposal_id,
-            hashi_ids.package_id,
+            update_config_type_tag.clone(),
             "update_config",
-        )?;
-        let exec_resp = executors[0].execute(execute_tx).await?;
-        anyhow::ensure!(
-            exec_resp.transaction().effects().status().success(),
-            "execute UpdateConfig proposal {proposal_id} for '{key}' failed"
-        );
-
-        exec_checkpoint = exec_resp
-            .transaction()
-            .checkpoint_opt()
-            .ok_or_else(|| anyhow::anyhow!("execute transaction response missing checkpoint"))?;
-
-        tracing::info!("on-chain config override applied: {key} (checkpoint {exec_checkpoint})");
+            &format!("UpdateConfig({key})"),
+        )
+        .await?;
     }
 
     // Wait for all nodes' watchers to process the checkpoint that contains the
@@ -501,6 +506,54 @@ pub(crate) async fn apply_onchain_config_overrides(
     .await?;
 
     Ok(())
+}
+
+async fn submit_proposal_through_quorum(
+    hashi_ids: hashi::config::HashiIds,
+    executors: &mut [hashi::sui_tx_executor::SuiTxExecutor],
+    create_params: hashi::cli::client::CreateProposalParams,
+    proposal_type_tag: sui_sdk_types::TypeTag,
+    module_name: &str,
+    label: &str,
+) -> Result<u64> {
+    use hashi::cli::client::build_create_proposal_transaction;
+    use hashi::cli::client::build_vote_transaction;
+    use hashi::cli::upgrade::build_execute_proposal_transaction;
+    use hashi::cli::upgrade::extract_proposal_id_from_response;
+
+    let create_tx = build_create_proposal_transaction(hashi_ids, create_params);
+    let response = executors[0].execute(create_tx).await?;
+    anyhow::ensure!(
+        response.transaction().effects().status().success(),
+        "create {label} proposal failed"
+    );
+    let proposal_id = extract_proposal_id_from_response(&response)?;
+    tracing::info!("{label} proposal {proposal_id} created; collecting votes");
+    for executor in &mut executors[1..] {
+        let vote_tx = build_vote_transaction(hashi_ids, proposal_id, proposal_type_tag.clone());
+        let vote_resp = executor.execute(vote_tx).await?;
+        anyhow::ensure!(
+            vote_resp.transaction().effects().status().success(),
+            "vote on {label} proposal {proposal_id} failed"
+        );
+    }
+    let execute_tx = build_execute_proposal_transaction(
+        hashi_ids,
+        proposal_id,
+        hashi_ids.package_id,
+        module_name,
+    )?;
+    let exec_resp = executors[0].execute(execute_tx).await?;
+    anyhow::ensure!(
+        exec_resp.transaction().effects().status().success(),
+        "execute {label} proposal {proposal_id} failed"
+    );
+    let checkpoint = exec_resp
+        .transaction()
+        .checkpoint_opt()
+        .ok_or_else(|| anyhow::anyhow!("execute transaction response missing checkpoint"))?;
+    tracing::info!("{label} proposal applied (checkpoint {checkpoint})");
+    Ok(checkpoint)
 }
 
 impl Default for TestNetworksBuilder {
