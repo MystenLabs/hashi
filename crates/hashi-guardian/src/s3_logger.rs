@@ -309,10 +309,16 @@ impl S3Logger {
                     out.insert(p.to_string());
                 }
             }
-            match response.next_continuation_token() {
-                Some(token) => continuation_token = Some(token.to_string()),
-                None => break,
+            if response.is_truncated() != Some(true) {
+                break;
             }
+            let Some(token) = response.next_continuation_token() else {
+                return Err(S3Error(format!(
+                    "Truncated response but no next_continuation_token for prefix {}",
+                    prefix
+                )));
+            };
+            continuation_token = Some(token.to_string());
         }
         Ok(out.into_iter().collect())
     }
