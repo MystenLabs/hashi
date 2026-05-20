@@ -13,7 +13,6 @@ use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::LimiterState;
-use hashi_types::guardian::MAX_REQUEST_FUTURE_SKEW_SECS;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::ProvisionerInitState;
 use hashi_types::guardian::S3_DIR_INIT;
@@ -24,7 +23,6 @@ use hashi_types::proto as pb;
 use rand::thread_rng;
 use tracing::info;
 
-use crate::domain::now_unix_seconds;
 pub use config::ProvisionerConfig;
 
 pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
@@ -56,13 +54,6 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
                     recovered.num_tokens_available = recovered
                         .num_tokens_available
                         .min(cfg.withdrawal_config.max_bucket_capacity_sats);
-                    // Logged timestamp can be up to MAX_REQUEST_FUTURE_SKEW_SECS
-                    // ahead of "now" because the guardian accepts withdraw
-                    // requests with timestamps that far in the future.
-                    assert!(
-                        recovered.last_updated_at
-                            <= now_unix_seconds().saturating_add(MAX_REQUEST_FUTURE_SKEW_SECS)
-                    );
                     recovered
                 }
                 None => {
