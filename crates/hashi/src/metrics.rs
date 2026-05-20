@@ -131,6 +131,7 @@ pub struct Metrics {
     pub mpc_sign_aggregation_duration_seconds: HistogramVec,
     pub mpc_rpc_handler_process_duration_seconds: HistogramVec,
     pub mpc_party_reduced_weight: IntGauge,
+    pub withdrawal_duration_seconds: HistogramVec,
 }
 
 const LATENCY_SEC_BUCKETS: &[f64] = &[
@@ -825,6 +826,14 @@ impl Metrics {
                 "hashi_mpc_party_reduced_weight",
                 "This party's post-reduction weight in the current MPC \
                  committee.",
+                registry,
+            )
+            .unwrap(),
+            withdrawal_duration_seconds: register_histogram_vec_with_registry!(
+                "hashi_withdrawal_duration_seconds",
+                "Duration of withdrawal lifecycle phases.",
+                &["phase"],
+                LATENCY_SEC_BUCKETS.to_vec(),
                 registry,
             )
             .unwrap(),

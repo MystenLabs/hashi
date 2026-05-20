@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
 use hashi_types::move_types::AbortReconfig;
@@ -450,20 +451,36 @@ async fn handle_events(
                 // Advance uses the event's checkpoint timestamp (~sign-time)
                 // rather than `txn.timestamp_ms` (creation time) to stay in
                 // lockstep with the guardian's `last_updated_at`.
-                let limiter_inputs = {
+                let (limiter_inputs, pick_to_sign_ms) = {
                     let mut state = state.state_mut();
                     state
+                        .withdrawal_signed_at_ms
+                        .insert(event.withdrawal_txn_id, checkpoint_timestamp_ms);
+                    match state
                         .hashi
                         .withdrawal_queue
                         .withdrawal_txns
                         .get_mut(&event.withdrawal_txn_id)
-                        .map(|txn| {
+                    {
+                        Some(txn) => {
                             txn.signatures = Some(event.signatures.clone());
                             let amount_sats = withdrawal_limiter_consumption_amount(txn);
                             let timestamp_secs = checkpoint_timestamp_ms / 1000;
-                            (amount_sats, timestamp_secs)
-                        })
+                            let pick_to_sign =
+                                checkpoint_timestamp_ms.saturating_sub(txn.timestamp_ms);
+                            (Some((amount_sats, timestamp_secs)), Some(pick_to_sign))
+                        }
+                        None => (None, None),
+                    }
                 };
+                if let Some(d) = pick_to_sign_ms
+                    && let Some(metrics) = state.metrics()
+                {
+                    metrics
+                        .withdrawal_duration_seconds
+                        .with_label_values(&["pick_to_sign"])
+                        .observe(Duration::from_millis(d).as_secs_f64());
+                }
                 if let Some((amount_sats, timestamp_secs)) = limiter_inputs {
                     if let Some(limiter) = state.local_limiter() {
                         let seq = limiter.next_seq();
@@ -530,23 +547,47 @@ async fn handle_events(
             }
             HashiEvent::WithdrawalConfirmedEvent(event) => {
                 tracing::info!(withdrawal_txn_id = %event.withdrawal_txn_id, "Withdrawal confirmed on-chain");
-                let mut state = state.state_mut();
+                let (sign_to_confirm_ms, total_ms) = {
+                    let mut state = state.state_mut();
 
-                // Promote the change UTXO from pending to confirmed by
-                // clearing `produced_by`. The UTXO was already inserted at
-                // commit time; input UTXOs are removed via UtxoSpentEvent.
-                if let Some(change_utxo_id) = event.change_utxo_id
-                    && let Some(record) =
-                        state.hashi.utxo_pool.utxo_records.get_mut(&change_utxo_id)
-                {
-                    record.produced_by = None;
+                    // Promote the change UTXO from pending to confirmed by
+                    // clearing `produced_by`. The UTXO was already inserted at
+                    // commit time; input UTXOs are removed via UtxoSpentEvent.
+                    if let Some(change_utxo_id) = event.change_utxo_id
+                        && let Some(record) =
+                            state.hashi.utxo_pool.utxo_records.get_mut(&change_utxo_id)
+                    {
+                        record.produced_by = None;
+                    }
+
+                    let signed_at = state
+                        .withdrawal_signed_at_ms
+                        .remove(&event.withdrawal_txn_id);
+                    let pick_at = state
+                        .hashi
+                        .withdrawal_queue
+                        .withdrawal_txns
+                        .remove(&event.withdrawal_txn_id)
+                        .map(|txn| txn.timestamp_ms);
+                    (
+                        signed_at.map(|s| checkpoint_timestamp_ms.saturating_sub(s)),
+                        pick_at.map(|p| checkpoint_timestamp_ms.saturating_sub(p)),
+                    )
+                };
+                if let Some(metrics) = state.metrics() {
+                    if let Some(d) = sign_to_confirm_ms {
+                        metrics
+                            .withdrawal_duration_seconds
+                            .with_label_values(&["sign_to_confirm"])
+                            .observe(Duration::from_millis(d).as_secs_f64());
+                    }
+                    if let Some(d) = total_ms {
+                        metrics
+                            .withdrawal_duration_seconds
+                            .with_label_values(&["total"])
+                            .observe(Duration::from_millis(d).as_secs_f64());
+                    }
                 }
-
-                state
-                    .hashi
-                    .withdrawal_queue
-                    .withdrawal_txns
-                    .remove(&event.withdrawal_txn_id);
             }
             HashiEvent::UtxoSpentEvent(utxo_spent_event) => {
                 let mut state = state.state_mut();

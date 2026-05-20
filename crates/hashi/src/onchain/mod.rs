@@ -99,6 +99,7 @@ pub struct State {
     package_versions: BTreeMap<u64, Address>,
     package_ids: BTreeSet<Address>,
     hashi: types::Hashi,
+    withdrawal_signed_at_ms: BTreeMap<Address, u64>,
 }
 
 #[derive(serde_derive::Serialize)]
@@ -619,6 +620,7 @@ impl State {
                 package_versions,
                 package_ids,
                 hashi,
+                withdrawal_signed_at_ms: BTreeMap::new(),
             },
             checkpoint_info,
         ))
