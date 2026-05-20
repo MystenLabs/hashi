@@ -764,34 +764,11 @@ impl Hashi {
     }
 
     async fn try_seed_guardian_state(&self) -> bool {
-        let Some(client) = self.guardian_client() else {
-            return false;
-        };
         self.metrics.guardian_bootstrap_attempts_total.inc();
-        let rpc_start = std::time::Instant::now();
-        let rpc_result = client.get_guardian_info().await;
-        let rpc_elapsed = rpc_start.elapsed().as_secs_f64();
-        let info_pb = match rpc_result {
-            Ok(info) => {
-                self.metrics.record_guardian_rpc(
-                    metrics::GUARDIAN_RPC_METHOD_GET_GUARDIAN_INFO,
-                    metrics::GUARDIAN_RPC_OUTCOME_OK,
-                    rpc_elapsed,
-                );
-                info
-            }
-            Err(e) => {
-                self.metrics.record_guardian_rpc(
-                    metrics::GUARDIAN_RPC_METHOD_GET_GUARDIAN_INFO,
-                    metrics::GUARDIAN_RPC_OUTCOME_UNAVAILABLE,
-                    rpc_elapsed,
-                );
-                self.metrics.record_guardian_bootstrap_outcome(
-                    metrics::GUARDIAN_BOOTSTRAP_OUTCOME_RPC_FAILURE,
-                );
-                tracing::warn!("guardian bootstrap: GetGuardianInfo failed: {e}");
-                return false;
-            }
+        let Some(info_pb) = self.fetch_guardian_info().await else {
+            self.metrics
+                .record_guardian_bootstrap_outcome(metrics::GUARDIAN_BOOTSTRAP_OUTCOME_RPC_FAILURE);
+            return false;
         };
         let info = match hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb) {
             Ok(info) => info,
@@ -829,8 +806,76 @@ impl Hashi {
         true
     }
 
+    /// GetGuardianInfo RPC, recording the outbound RPC metric. Shared by the
+    /// initial seed and the periodic limiter reconcile. `None` on RPC failure.
+    async fn fetch_guardian_info(&self) -> Option<hashi_types::proto::GetGuardianInfoResponse> {
+        let client = self.guardian_client()?;
+        let rpc_start = std::time::Instant::now();
+        let rpc_result = client.get_guardian_info().await;
+        let rpc_elapsed = rpc_start.elapsed().as_secs_f64();
+        match rpc_result {
+            Ok(info) => {
+                self.metrics.record_guardian_rpc(
+                    metrics::GUARDIAN_RPC_METHOD_GET_GUARDIAN_INFO,
+                    metrics::GUARDIAN_RPC_OUTCOME_OK,
+                    rpc_elapsed,
+                );
+                Some(info)
+            }
+            Err(e) => {
+                self.metrics.record_guardian_rpc(
+                    metrics::GUARDIAN_RPC_METHOD_GET_GUARDIAN_INFO,
+                    metrics::GUARDIAN_RPC_OUTCOME_UNAVAILABLE,
+                    rpc_elapsed,
+                );
+                tracing::warn!("GetGuardianInfo RPC failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// Re-align the local limiter to the guardian when it has stalled. The
+    /// watcher advances the limiter from the on-chain `WithdrawalSignedEvent`
+    /// stream (the fast path), but that stream can gap across a
+    /// checkpoint-subscription reconnect — `scrape_hashi` re-marks the in-flight
+    /// txn signed, so the redelivered event is skipped via `signatures.is_some()`
+    /// and the mirror is left stuck behind the guardian. The guardian is
+    /// authoritative, so snap to it, but only once `tracker` confirms the drift
+    /// has persisted long enough to not be ordinary in-flight lag.
+    async fn reconcile_guardian_limiter(
+        &self,
+        tracker: &mut guardian_limiter::LimiterStallTracker,
+    ) {
+        let Some(limiter) = self.local_limiter() else {
+            return;
+        };
+        let local_seq = limiter.next_seq();
+        let Some(info_pb) = self.fetch_guardian_info().await else {
+            return;
+        };
+        let Ok(info) = hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb) else {
+            return;
+        };
+        let Some(state) = info.limiter_state else {
+            return;
+        };
+        if !tracker.observe(local_seq, state.next_seq) {
+            return;
+        }
+        limiter.reconcile_to(state);
+        self.metrics.guardian_limiter_reconciled_total.inc();
+        self.metrics.record_limiter_state(&state, limiter.config());
+        tracing::warn!(
+            local_seq,
+            guardian_seq = state.next_seq,
+            "Local guardian limiter stalled away from the guardian; reconciled to authoritative state",
+        );
+    }
+
     fn start_guardian_bootstrap(self: Arc<Self>) -> Service {
         use backon::Retryable;
+        // Cadence for the limiter reconciliation safety net below.
+        const RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
         Service::new().spawn_aborting(async move {
             if self.guardian_client().is_none() {
                 return Ok(());
@@ -849,7 +894,17 @@ impl Hashi {
             .retry(policy)
             .await;
             tracing::info!("Guardian bootstrap complete");
-            Ok(())
+
+            // Reconciliation safety net: re-align the local mirror to the
+            // authoritative guardian whenever the event-driven fast path has
+            // demonstrably stalled (see `reconcile_guardian_limiter`).
+            let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut tracker = guardian_limiter::LimiterStallTracker::default();
+            loop {
+                interval.tick().await;
+                self.reconcile_guardian_limiter(&mut tracker).await;
+            }
         })
     }
 
