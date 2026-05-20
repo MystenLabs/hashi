@@ -137,8 +137,6 @@ const LATENCY_SEC_BUCKETS: &[f64] = &[
     300., 600., 1200.,
 ];
 
-const MPC_SIGN_DURATION_BUCKETS: &[f64] = &[0.1, 0.25, 0.5, 1., 1.5, 2., 2.5, 3., 4., 5., 7.5, 10.];
-
 pub const MPC_LABEL_DKG: &str = "dkg";
 pub const MPC_LABEL_KEY_ROTATION: &str = "key_rotation";
 pub const MPC_LABEL_NONCE_GENERATION: &str = "nonce_generation";
@@ -612,7 +610,7 @@ impl Metrics {
                 "hashi_mpc_sign_duration_seconds",
                 "Duration of MPC signing operations",
                 &["outcome"],
-                MPC_SIGN_DURATION_BUCKETS.to_vec(),
+                LATENCY_SEC_BUCKETS.to_vec(),
                 registry,
             )
             .unwrap(),
