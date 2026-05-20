@@ -37,11 +37,10 @@ use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use tracing::info;
 
-/// Returns `Some(post_state)` from the global max-seq Success log if one
-/// exists in the bucket; returns `None` if no Success log exists anywhere
-/// under `withdraw/`. Caller decides what to do with `None` (typically: fall
-/// back to genesis, since combined with the rotation-mode check it
-/// unambiguously means the prior enclave processed no withdrawals).
+/// Returns `Some(post_state)` from the global max-seq Success log under
+/// `withdraw/` if one exists; returns `None` if no Success log exists
+/// anywhere — either a first deployment or a rotation where the prior
+/// enclave processed no withdrawals. Caller falls back to genesis on `None`.
 pub async fn recover_limiter_state(s3_client: S3Logger) -> anyhow::Result<Option<LimiterState>> {
     let Some(bucket) = find_latest_success_bucket(&s3_client).await? else {
         return Ok(None);
