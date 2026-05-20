@@ -13,6 +13,7 @@ pub mod s3_utils;
 
 pub use limiter::LimiterConfig;
 pub use limiter::LimiterState;
+pub use limiter::MAX_REQUEST_FUTURE_SKEW_SECS;
 pub use limiter::RateLimiter;
 pub use time_utils::UnixMillis;
 pub use time_utils::now_timestamp_ms;
@@ -636,9 +637,8 @@ impl LogRecord {
         }
     }
 
-    /// Object key format:
-    /// - Init: `init/{session_id}-{suffix}.json`
-    /// - Heartbeats & Withdrawals: `{prefix}/{yyyy}/{mm}/{dd}/{hh}/{session_id}-{suffix}.json`.
+    /// Full S3 object key for this log record (directory + file name). See the
+    /// `hashi-guardian` README for the canonical per-log-type key layout.
     pub fn object_key(&self) -> String {
         let dir = self.message.log_dir(self.timestamp_ms);
         let log_name = self.message.log_name(&self.session_id);

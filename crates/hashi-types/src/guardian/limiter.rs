@@ -7,6 +7,13 @@ use super::GuardianResult;
 use serde::Deserialize;
 use serde::Serialize;
 
+/// Maximum amount of time a withdrawal request's `timestamp_secs` may exceed
+/// the guardian's wall clock at consume time. The guardian rejects requests
+/// further in the future than this; downstream readers (e.g., the KP's
+/// limiter state recovery) use it to bound how far ahead of `now` a logged
+/// `post_state.last_updated_at` may legitimately appear.
+pub const MAX_REQUEST_FUTURE_SKEW_SECS: u64 = 5 * 60;
+
 /// Immutable configuration for the token bucket rate limiter.
 #[derive(Debug, Copy, Clone, PartialEq, Serialize)]
 pub struct LimiterConfig {

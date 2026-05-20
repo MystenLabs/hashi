@@ -13,6 +13,7 @@ use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::LimiterState;
+use hashi_types::guardian::MAX_REQUEST_FUTURE_SKEW_SECS;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::ProvisionerInitState;
 use hashi_types::guardian::S3_DIR_INIT;
@@ -47,15 +48,30 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
     info!(?mode, "detected deployment mode");
     let limiter_state = match mode {
         DeploymentMode::Rotation => {
-            let mut recovered = limiter_recovery::recover_limiter_state(s3_client.clone()).await?;
-            // Cap to the current config's bucket capacity in case max capacity
-            // was lowered across the rotation. (Raising is fine — refill will
-            // fill it.)
-            recovered.num_tokens_available = recovered
-                .num_tokens_available
-                .min(cfg.withdrawal_config.max_bucket_capacity_sats);
-            assert!(recovered.last_updated_at < now_unix_seconds()); // sanity check
-            recovered
+            match limiter_recovery::recover_limiter_state(s3_client.clone()).await? {
+                Some(mut recovered) => {
+                    // Cap to the current config's bucket capacity in case max capacity
+                    // was lowered across the rotation. (Raising is fine — refill will
+                    // fill it.)
+                    recovered.num_tokens_available = recovered
+                        .num_tokens_available
+                        .min(cfg.withdrawal_config.max_bucket_capacity_sats);
+                    // Logged timestamp can be up to MAX_REQUEST_FUTURE_SKEW_SECS
+                    // ahead of "now" because the guardian accepts withdraw
+                    // requests with timestamps that far in the future.
+                    assert!(
+                        recovered.last_updated_at
+                            <= now_unix_seconds().saturating_add(MAX_REQUEST_FUTURE_SKEW_SECS)
+                    );
+                    recovered
+                }
+                None => {
+                    tracing::warn!(
+                        "rotation detected but prior enclave has no Success logs within walk-back window; falling back to genesis limiter state"
+                    );
+                    LimiterState::genesis(&cfg.withdrawal_config)
+                }
+            }
         }
         DeploymentMode::Genesis => LimiterState::genesis(&cfg.withdrawal_config),
     };

@@ -32,11 +32,17 @@ use hashi_types::guardian::WithdrawalLogMessage;
 use tracing::info;
 
 /// Max hour buckets to walk back when searching for the most recent Success log.
-/// One week covers any realistic idleness; beyond this we bail rather than
-/// silently treat a missing-log situation as genesis.
+/// One week covers any realistic idleness; if no Success is found within this
+/// window the prior enclave is treated as having consumed nothing, and the
+/// caller falls back to a genesis limiter state.
 const MAX_WALK_BACK_HOURS: u64 = 7 * 24;
 
-pub async fn recover_limiter_state(s3_client: S3Logger) -> anyhow::Result<LimiterState> {
+/// Returns `Some(post_state)` from the global max-seq Success log if one is
+/// found within `MAX_WALK_BACK_HOURS`. Returns `None` if no Success log exists
+/// in that window — caller decides what to do (typically: fall back to
+/// genesis, since combined with the rotation-mode check this unambiguously
+/// means the prior enclave processed no withdrawals).
+pub async fn recover_limiter_state(s3_client: S3Logger) -> anyhow::Result<Option<LimiterState>> {
     let now = now_unix_seconds();
     let mut poller = GuardianPollerCore::from_s3_client(s3_client, now, GuardianLogDir::Withdraw);
 
@@ -61,20 +67,15 @@ pub async fn recover_limiter_state(s3_client: S3Logger) -> anyhow::Result<Limite
         poller.retreat_cursor();
     }
 
-    let state = best.ok_or_else(|| {
-        anyhow::anyhow!(
-            "no successful withdrawal logs found within last {} hours; \
-             cannot recover limiter state",
-            MAX_WALK_BACK_HOURS
-        )
-    })?;
-    info!(
-        next_seq = state.next_seq,
-        num_tokens_available = state.num_tokens_available,
-        last_updated_at = state.last_updated_at,
-        "recovered limiter state from prior enclave's withdraw logs"
-    );
-    Ok(state)
+    if let Some(state) = best {
+        info!(
+            next_seq = state.next_seq,
+            num_tokens_available = state.num_tokens_available,
+            last_updated_at = state.last_updated_at,
+            "recovered limiter state from prior enclave's withdraw logs"
+        );
+    }
+    Ok(best)
 }
 
 fn bucket_max_post_state(logs: Vec<VerifiedLogRecord>) -> Option<LimiterState> {
