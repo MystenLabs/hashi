@@ -20,7 +20,7 @@ Audits the cross-system bridge flow on two parallel tracks.
 ### Modes
 1. **Batch**: one-time audit over a guardian time range `[start, end]`.
 2. **Continuous**: long-running monitor that polls Sui, Guardian S3, and BTC RPC on fixed intervals and reports findings as they appear.
-3. **Provisioner-init**: one-shot provisioner-init flow run by the key provisioner — audits heartbeats for the latest enclave session, verifies attestation and expected config, builds a `ProvisionerInitRequest`, and optionally submits it to a guardian endpoint.
+3. **Provisioner-init**: one-shot provisioner-init flow run by the key provisioner — audits heartbeats for the latest enclave session, verifies attestation and expected config, auto-detects whether this is a fresh deployment or a rotation (based on whether any prior session's init logs exist in S3) and sources the initial `LimiterState` accordingly (genesis defaults vs. recovered from the prior enclave's withdrawal logs), then builds a `ProvisionerInitRequest` and optionally submits it to a guardian endpoint.
 
 ### Timeline semantics (withdrawals)
 - User-provided `start` / `end` are interpreted on the **guardian (E2)** timeline.
@@ -79,6 +79,6 @@ The `provisioner-init` subcommand takes a separate YAML (`ProvisionerConfig`, se
   - Guardian S3 withdrawal log polling with attestation and signature verification.
   - BTC confirmation lookup via Bitcoin Core RPC.
   - Provisioner-init flow (heartbeat audit, attestation/config check, optional submission).
+  - Limiter state recovery: each successful withdrawal log embeds the post-consume `LimiterState`; on rotation, provisioner-init walks back hour buckets to find the max-seq Success log and uses its embedded state as the new enclave's initial state. Genesis path (no prior session in S3) seeds the limiter from `WithdrawalConfig` instead.
 - Not yet implemented:
   - Sui event polling — `AuditorCore::poll_sui` is a stub that returns `CursorUnmoved`, so E1 (withdrawal) and the deposit pipeline currently see no Sui input.
-  - Limiter state recovery from S3 logs in `provisioner-init` (currently uses a mock).
