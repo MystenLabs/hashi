@@ -112,7 +112,7 @@ impl GuardianPollerCore {
         }
     }
 
-    pub fn is_readable(&self) -> bool {
+    pub fn writes_completed(&self) -> bool {
         now_unix_seconds() >= self.cursor.write_completion_time()
     }
 
@@ -188,7 +188,7 @@ impl GuardianWithdrawalsPoller {
     /// Polls the Guardian S3 bucket for one hour worth of events.
     /// A more aggressive fetch, e.g., one day at a time, can also be done if needed.
     pub async fn poll_one_hour(&mut self) -> anyhow::Result<PollOutcome> {
-        if !self.0.is_readable() {
+        if !self.0.writes_completed() {
             return Ok(PollOutcome::CursorUnmoved);
         }
 

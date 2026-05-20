@@ -13,18 +13,18 @@
 //! `list_objects_v2` call), pick the lex-greatest, and descend. The first
 //! hour bucket containing any `success-*` key is the latest non-empty bucket
 //! — we read it and one bucket back (sub-hour clock-skew defense across hour
-//! boundaries) and take the max-seq Success across both. No arbitrary
-//! walk-back time limit — the search is bounded by actual data on disk.
+//! boundaries) and take the max-seq Success across both.
 //!
-//! Note we deliberately don't apply `GuardianPollerCore::is_readable`'s
+//! Note we deliberately don't apply `GuardianPollerCore::writes_completed`'s
 //! `DIR_WRITES_COMPLETION_DELAY` gate when reading the found bucket. That
 //! gate exists for the polling/auditor case where the source might still be
 //! writing; if we used it here, an enclave that died late in an hour would
-//! have its final-hour bucket treated as not-yet-readable, and recovery would
+//! have its final-hour bucket treated as not-yet-complete, and recovery would
 //! miss the most recent log. We instead rely on the caller invoking us only
 //! after `heartbeat_audit` has confirmed the prior session has been silent
 //! for at least `OTHER_SESSION_QUIET_PERIOD` (10 min), which combined with
-//! S3 read-after-write consistency guarantees its writes are visible.
+//! S3 read-after-write consistency guarantees that all writes of the old session
+//! are completed.
 
 use crate::rpc::guardian::GuardianLogDir;
 use crate::rpc::guardian::GuardianPollerCore;
