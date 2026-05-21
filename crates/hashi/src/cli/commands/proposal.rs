@@ -552,12 +552,7 @@ pub async fn create_update_mpc_config_proposal(
     }
 
     if !tx_opts.skip_confirm {
-        let prompt = if count == 1 {
-            "create this MPC config update proposal"
-        } else {
-            "create these MPC config update proposals"
-        };
-        prompt_continue(prompt).await?;
+        prompt_continue("create this MPC config update proposal").await?;
     }
 
     let mut client = HashiClient::new(config).await?;
@@ -569,16 +564,7 @@ pub async fn create_update_mpc_config_proposal(
     });
 
     let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
-    if let Some(response) = response.as_ref() {
-        match crate::cli::upgrade::extract_proposal_ids_from_response(response) {
-            Ok(ids) => {
-                for id in ids {
-                    println!("  {} {}", "Proposal ID:".bold(), id.to_hex().cyan());
-                }
-            }
-            Err(e) => print_warning(&format!("could not extract proposal IDs: {e}")),
-        }
-    }
+    print_created_proposal_id(response.as_ref());
     Ok(())
 }
 

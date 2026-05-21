@@ -431,8 +431,7 @@ pub struct Proposal<T> {
 /// Rust version of the Move hashi::update_config::UpdateConfig type.
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct UpdateConfig {
-    pub key: String,
-    pub value: ConfigValue,
+    pub entries: VecMap<String, ConfigValue>,
 }
 
 /// Rust version of the Move hashi::enable_version::EnableVersion type.
@@ -473,13 +472,13 @@ pub struct UpdateGuardian {
 }
 
 /// Rust version of the Move sui::vec_map::VecMap type.
-#[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct VecMap<K, V> {
     pub contents: Vec<Entry<K, V>>,
 }
 
 /// Rust version of the Move sui::vec_map::Entry type.
-#[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct Entry<K, V> {
     pub key: K,
     pub value: V,

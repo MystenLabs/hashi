@@ -124,9 +124,10 @@ public fun create_hashi_with_weighted_committee(
         ctx,
     );
 
-    // Create config with version enabled + BTC defaults
+    // Create config with version enabled + BTC defaults + MPC defaults
     let mut config = hashi::config::create();
     hashi::btc_config::init_defaults(&mut config);
+    hashi::mpc_config::init_defaults(&mut config);
 
     // Create treasury
     let treasury = hashi::treasury::create(ctx);
@@ -215,14 +216,12 @@ public fun create_deposit_minimum_proposal(
     clock: &Clock,
     ctx: &mut TxContext,
 ): ID {
-    update_config::propose(
-        hashi,
+    let mut entries = vec_map::empty();
+    entries.insert(
         b"bitcoin_deposit_minimum".to_string(),
         config_value::new_u64(minimum),
-        vec_map::empty(),
-        clock,
-        ctx,
-    )
+    );
+    update_config::propose(hashi, entries, vec_map::empty(), clock, ctx)
 }
 
 /// Creates an enable version proposal and returns its ID

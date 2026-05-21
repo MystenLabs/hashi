@@ -17,6 +17,7 @@ use crate::sui_tx_executor::SUI_CLOCK_OBJECT_ID;
 use crate::sui_tx_executor::SuiTxExecutor;
 use anyhow::Context;
 use anyhow::Result;
+use hashi_types::move_types::ConfigValue;
 use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionResponse;
 use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
@@ -509,9 +510,8 @@ pub fn build_create_proposal_transaction(
             value,
             metadata,
         } => {
-            let value_arg = build_config_value(&mut builder, hashi_ids.package_id, &value);
-
-            let key_arg = builder.pure(&key);
+            let entries_arg =
+                build_config_entries(&mut builder, hashi_ids.package_id, &[(key, value)]);
             let metadata_arg = build_metadata(&mut builder, &metadata);
             builder.move_call(
                 Function::new(
@@ -519,7 +519,7 @@ pub fn build_create_proposal_transaction(
                     Identifier::from_static("update_config"),
                     Identifier::from_static("propose"),
                 ),
-                vec![hashi_arg, key_arg, value_arg, metadata_arg, clock_arg],
+                vec![hashi_arg, entries_arg, metadata_arg, clock_arg],
             );
         }
         CreateProposalParams::UpdateMpcConfig {
@@ -528,31 +528,27 @@ pub fn build_create_proposal_transaction(
             weight_reduction_allowed_delta,
             metadata,
         } => {
-            let metadata_arg = build_metadata(&mut builder, &metadata);
-            let entries = [
+            let entries: Vec<(String, ConfigValue)> = [
                 ("mpc_threshold_in_basis_points", threshold_bps),
                 ("mpc_max_faulty_in_basis_points", max_faulty_bps),
                 (
                     "mpc_weight_reduction_allowed_delta",
                     weight_reduction_allowed_delta,
                 ),
-            ];
-            for (key, value) in entries.into_iter().filter_map(|(k, v)| v.map(|v| (k, v))) {
-                let value_arg = build_config_value(
-                    &mut builder,
+            ]
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|v| (k.to_string(), ConfigValue::U64(v))))
+            .collect();
+            let entries_arg = build_config_entries(&mut builder, hashi_ids.package_id, &entries);
+            let metadata_arg = build_metadata(&mut builder, &metadata);
+            builder.move_call(
+                Function::new(
                     hashi_ids.package_id,
-                    &hashi_types::move_types::ConfigValue::U64(value),
-                );
-                let key_arg = builder.pure(&key);
-                builder.move_call(
-                    Function::new(
-                        hashi_ids.package_id,
-                        Identifier::from_static("update_config"),
-                        Identifier::from_static("propose"),
-                    ),
-                    vec![hashi_arg, key_arg, value_arg, metadata_arg, clock_arg],
-                );
-            }
+                    Identifier::from_static("update_config"),
+                    Identifier::from_static("propose"),
+                ),
+                vec![hashi_arg, entries_arg, metadata_arg, clock_arg],
+            );
         }
         CreateProposalParams::EnableVersion { version, metadata } => {
             let version_arg = builder.pure(&version);
@@ -637,6 +633,50 @@ fn build_config_value(
         ),
         vec![arg],
     )
+}
+
+fn build_config_entries(
+    builder: &mut TransactionBuilder,
+    package_id: Address,
+    entries: &[(String, ConfigValue)],
+) -> sui_transaction_builder::Argument {
+    let sui_framework = Address::from_static("0x2");
+    let move_stdlib = Address::from_static("0x1");
+    let string_type = TypeTag::Struct(Box::new(StructTag::new(
+        move_stdlib,
+        Identifier::from_static("string"),
+        Identifier::from_static("String"),
+        vec![],
+    )));
+    let value_type = TypeTag::Struct(Box::new(StructTag::new(
+        package_id,
+        Identifier::from_static("config_value"),
+        Identifier::from_static("Value"),
+        vec![],
+    )));
+    let map = builder.move_call(
+        Function::new(
+            sui_framework,
+            Identifier::from_static("vec_map"),
+            Identifier::from_static("empty"),
+        )
+        .with_type_args(vec![string_type.clone(), value_type.clone()]),
+        vec![],
+    );
+    for (key, value) in entries {
+        let key_arg = builder.pure(key);
+        let value_arg = build_config_value(builder, package_id, value);
+        builder.move_call(
+            Function::new(
+                sui_framework,
+                Identifier::from_static("vec_map"),
+                Identifier::from_static("insert"),
+            )
+            .with_type_args(vec![string_type.clone(), value_type.clone()]),
+            vec![map, key_arg, value_arg],
+        );
+    }
+    map
 }
 
 /// Build a `VecMap<String, String>` for proposal metadata via move calls.
