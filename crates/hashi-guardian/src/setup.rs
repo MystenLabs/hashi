@@ -49,6 +49,7 @@ pub async fn setup_new_key(
             seq: 0,
             encrypted_shares: encrypted_shares.clone(),
             share_commitments: share_commitments.clone(),
+            num_shares: n,
             threshold: t,
         })
         .await?;

@@ -55,13 +55,14 @@ use std::time::Duration;
 ///
 /// These are public so that external verifiers/monitors can apply the same expectations.
 ///
-/// TODO: Uniform 24h is a coarse placeholder. Revisit per-log-type against
-/// the SLO we actually want to defend — heartbeats could be shorter, key_state/withdraws
-/// likely wants years.
-pub const S3_OBJECT_LOCK_DURATION_INIT: Duration = Duration::from_secs(24 * 60 * 60);
-pub const S3_OBJECT_LOCK_DURATION_WITHDRAW: Duration = Duration::from_secs(24 * 60 * 60);
-pub const S3_OBJECT_LOCK_DURATION_HEARTBEAT: Duration = Duration::from_secs(24 * 60 * 60);
-pub const S3_OBJECT_LOCK_DURATION_KEY_STATE: Duration = Duration::from_secs(24 * 60 * 60);
+/// TODO: Uniform 7 days is a coarse placeholder. Revisit per-log-type
+/// against the SLO we actually want to defend — heartbeats could be shorter,
+/// key_state/withdraws likely want years.
+const ONE_WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+pub const S3_OBJECT_LOCK_DURATION_INIT: Duration = ONE_WEEK;
+pub const S3_OBJECT_LOCK_DURATION_WITHDRAW: Duration = ONE_WEEK;
+pub const S3_OBJECT_LOCK_DURATION_HEARTBEAT: Duration = ONE_WEEK;
+pub const S3_OBJECT_LOCK_DURATION_KEY_STATE: Duration = ONE_WEEK;
 
 /// S3 sub-prefixes used for guardian log streams.
 /// See `crates/hashi-guardian/README.md` for canonical key layout.
@@ -70,13 +71,18 @@ pub const S3_DIR_WITHDRAW: &str = "withdraw";
 pub const S3_DIR_HEARTBEAT: &str = "heartbeat";
 pub const S3_DIR_KEY_STATE: &str = "key_state";
 
-/// Canonical guardian session ID derived from the enclave signing public key.
-///
-/// TODO: 64-hex chars in every S3 key is wasteful. Truncate to a short prefix
-/// (e.g., 16 hex chars) — collisions are still cryptographically infeasible
-/// for our session counts.
+/// Length of the session ID prefix (hex chars) used in S3 keys. 16 hex =
+/// 64 bits of the signing pubkey, comfortably below any collision risk for
+/// realistic session counts.
+pub const SESSION_ID_HEX_LEN: usize = 16;
+
+/// Canonical guardian session ID — a short prefix of the hex-encoded signing
+/// public key. Used as a per-session tag in S3 object keys; full pubkey
+/// verification still happens via the signed log payload.
 pub fn session_id_from_signing_pubkey(signing_pub_key: &GuardianPubKey) -> String {
-    ::hex::encode(signing_pub_key.as_bytes())
+    let mut s = ::hex::encode(signing_pub_key.as_bytes());
+    s.truncate(SESSION_ID_HEX_LEN);
+    s
 }
 
 // ---------------------------------
@@ -257,8 +263,11 @@ pub struct CurrentKeyState {
     pub seq: u64,
     pub encrypted_shares: Vec<EncryptedShare>,
     pub share_commitments: ShareCommitments,
-    /// Reconstruction threshold (`t`) used when the shares were created. `n`
-    /// is implicit in `encrypted_shares.len()` / `share_commitments.len()`.
+    /// Total number of shares. Redundant with `encrypted_shares.len()` /
+    /// `share_commitments.len()` — recorded explicitly so the log is
+    /// self-describing and readers can sanity-check.
+    pub num_shares: usize,
+    /// Reconstruction threshold used when the shares were created.
     pub threshold: usize,
 }
 

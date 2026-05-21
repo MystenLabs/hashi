@@ -72,6 +72,8 @@ pub struct ProvisionerConfig {
     pub withdrawal_config: WithdrawalConfig,
     // Hashi BTC pubkey
     pub hashi_btc_master_pubkey: BitcoinPubkey,
+    // Reconstruction threshold for the BTC key's secret sharing.
+    pub threshold: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
