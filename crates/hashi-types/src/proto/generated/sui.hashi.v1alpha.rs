@@ -1150,8 +1150,7 @@ pub struct SignedGuardianInfo {
 /// Information about the guardian enclave.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GuardianInfoData {
-    /// Secret-sharing config (if set). Echoed from operator_init so KP tooling
-    /// can cross-check against signed S3 records (IOP-225).
+    /// Secret-sharing config (if set).
     #[prost(message, optional, tag = "1")]
     pub secret_sharing_config: ::core::option::Option<SecretSharingConfig>,
     /// S3 bucket info (if set). Used by key provisioners to check S3 bucket info.
@@ -1251,9 +1250,7 @@ pub struct OperatorInitRequest {
     /// S3 access keys
     #[prost(message, optional, tag = "1")]
     pub s3_config: ::core::option::Option<S3Config>,
-    /// Secret-sharing scheme for the current BTC key (commitments + N + T),
-    /// operator-supplied and cross-checked off-enclave by KP tooling against
-    /// signed S3 records.
+    /// Secret-sharing scheme for the current BTC key.
     #[prost(message, optional, tag = "2")]
     pub secret_sharing_config: ::core::option::Option<SecretSharingConfig>,
     /// Network the guardian is operating on.

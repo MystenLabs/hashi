@@ -205,9 +205,7 @@ pub struct GetGuardianInfoResponse {
 /// TODO: Add network?
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct GuardianInfo {
-    /// Secret-sharing config (if set). Operator-supplied at `operator_init`;
-    /// echoed here so KP tooling can cross-check against signed S3 records
-    /// (see IOP-225). TODO: KP-side N/T verification still pending.
+    /// Secret-sharing config (if set).
     pub secret_sharing_config: Option<SecretSharingConfig>,
     /// S3 bucket name (if set). Used by KPs to check S3 bucket info.
     pub bucket_info: Option<S3BucketInfo>,

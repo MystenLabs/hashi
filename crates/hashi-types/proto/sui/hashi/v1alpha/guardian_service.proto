@@ -54,8 +54,7 @@ message SignedGuardianInfo {
 
 // Information about the guardian enclave.
 message GuardianInfoData {
-  // Secret-sharing config (if set). Echoed from operator_init so KP tooling
-  // can cross-check against signed S3 records (IOP-225).
+  // Secret-sharing config (if set).
   optional SecretSharingConfig secret_sharing_config = 1;
 
   // S3 bucket info (if set). Used by key provisioners to check S3 bucket info.
@@ -146,9 +145,7 @@ message OperatorInitRequest {
   // S3 access keys
   S3Config s3_config = 1;
 
-  // Secret-sharing scheme for the current BTC key (commitments + N + T),
-  // operator-supplied and cross-checked off-enclave by KP tooling against
-  // signed S3 records.
+  // Secret-sharing scheme for the current BTC key.
   SecretSharingConfig secret_sharing_config = 2;
 
   // Network the guardian is operating on.

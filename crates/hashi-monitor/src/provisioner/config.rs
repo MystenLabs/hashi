@@ -31,8 +31,7 @@ impl GuardianConfig {
         let bucket_info = info.bucket_info.clone().ok_or_else(|| {
             anyhow::anyhow!("guardian info missing bucket_info; operator_init may be incomplete")
         })?;
-        // TODO(IOP-225): also verify SSC.num_shares / .threshold against KP-side
-        // expected values (sourced from signed S3 records, not YAML).
+        // TODO: also verify num_shares and threshold against KP-side expected values.
         let share_commitments = info
             .secret_sharing_config
             .as_ref()
