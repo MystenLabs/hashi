@@ -315,6 +315,32 @@ pub fn encrypt_share<R: CryptoRng + RngCore>(
     }
 }
 
+/// Split `sk` into NUM_OF_SHARES shares (THRESHOLD reconstruction), encrypt
+/// each to the matching KP pubkey, and compute the corresponding commitments.
+/// `kp_pubkeys` must have exactly NUM_OF_SHARES entries; share ID `i` (1..=N)
+/// is paired with `kp_pubkeys[i-1]`.
+pub fn split_and_encrypt_for_kps<R: CryptoRng + RngCore>(
+    sk: &k256::SecretKey,
+    kp_pubkeys: &[EncPubKey],
+    rng: &mut R,
+) -> GuardianResult<(Vec<EncryptedShare>, ShareCommitments)> {
+    if kp_pubkeys.len() != NUM_OF_SHARES {
+        return Err(InvalidInputs(format!(
+            "expected {} KP pubkeys, got {}",
+            NUM_OF_SHARES,
+            kp_pubkeys.len()
+        )));
+    }
+    let shares = split_secret(sk, rng);
+    let mut encrypted_shares = Vec::with_capacity(NUM_OF_SHARES);
+    let mut commitments = Vec::with_capacity(NUM_OF_SHARES);
+    for (share, pk) in shares.iter().zip(kp_pubkeys.iter()) {
+        encrypted_shares.push(encrypt_share(share, pk, None, rng));
+        commitments.push(commit_share(share));
+    }
+    Ok((encrypted_shares, ShareCommitments::new(commitments)?))
+}
+
 /// Decrypt an encrypted share with optional AAD
 pub fn decrypt_share(
     encrypted_share: &EncryptedShare,

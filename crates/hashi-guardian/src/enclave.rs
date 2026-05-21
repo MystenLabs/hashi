@@ -463,6 +463,10 @@ impl Enclave {
         self.write_log(LogMessage::Heartbeat { seq }).await
     }
 
+    pub async fn log_key_state(&self, state: CurrentKeyState) -> GuardianResult<()> {
+        self.write_log(LogMessage::KeyState(Box::new(state))).await
+    }
+
     // ========================================================================
     // Scratchpad (Initialization-only data)
     // ========================================================================

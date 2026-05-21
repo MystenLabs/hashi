@@ -54,17 +54,27 @@ use std::time::Duration;
 /// Object lock durations used for S3 log objects.
 ///
 /// These are public so that external verifiers/monitors can apply the same expectations.
-pub const S3_OBJECT_LOCK_DURATION_INIT: Duration = Duration::from_secs(5 * 60);
-pub const S3_OBJECT_LOCK_DURATION_WITHDRAW: Duration = Duration::from_secs(5 * 60);
-pub const S3_OBJECT_LOCK_DURATION_HEARTBEAT: Duration = Duration::from_secs(5 * 60);
+///
+/// TODO: Uniform 24h is a coarse placeholder. Revisit per-log-type against
+/// the SLO we actually want to defend — heartbeats could be shorter, key_state/withdraws
+/// likely wants years.
+pub const S3_OBJECT_LOCK_DURATION_INIT: Duration = Duration::from_secs(24 * 60 * 60);
+pub const S3_OBJECT_LOCK_DURATION_WITHDRAW: Duration = Duration::from_secs(24 * 60 * 60);
+pub const S3_OBJECT_LOCK_DURATION_HEARTBEAT: Duration = Duration::from_secs(24 * 60 * 60);
+pub const S3_OBJECT_LOCK_DURATION_KEY_STATE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// S3 sub-prefixes used for guardian log streams.
 /// See `crates/hashi-guardian/README.md` for canonical key layout.
 pub const S3_DIR_INIT: &str = "init";
 pub const S3_DIR_WITHDRAW: &str = "withdraw";
 pub const S3_DIR_HEARTBEAT: &str = "heartbeat";
+pub const S3_DIR_KEY_STATE: &str = "key_state";
 
 /// Canonical guardian session ID derived from the enclave signing public key.
+///
+/// TODO: 64-hex chars in every S3 key is wasteful. Truncate to a short prefix
+/// (e.g., 16 hex chars) — collisions are still cryptographically infeasible
+/// for our session counts.
 pub fn session_id_from_signing_pubkey(signing_pub_key: &GuardianPubKey) -> String {
     ::hex::encode(signing_pub_key.as_bytes())
 }
@@ -230,12 +240,26 @@ pub enum LogMessage {
     Heartbeat { seq: u64 },
     Init(Box<InitLogMessage>),
     Withdrawal(Box<WithdrawalLogMessage>),
+    KeyState(Box<CurrentKeyState>),
+}
+
+/// Written by `setup_new_key` (genesis, `seq=0`) to advertise the current
+/// authoritative share state to KPs. See `crates/hashi-guardian/README.md`
+/// for the canonical S3 key layout and seq semantics.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct CurrentKeyState {
+    pub seq: u64,
+    pub encrypted_shares: Vec<EncryptedShare>,
+    pub share_commitments: ShareCommitments,
 }
 
 /// OI: operator_init
 /// PI: provisioner_init
 /// Init messages are expected to be logged in the following order:
 /// OIAttestationUnsigned -> OIGuardianInfo -> PISuccess (T times) -> PIEnclaveFullyInitialized.
+///
+/// Note: `setup_new_key` emits `LogMessage::KeyState` to the `key_state/`
+/// directory rather than to `init/`.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum InitLogMessage {
     /// Attestation and signing public key posted in /operator_init
@@ -245,11 +269,6 @@ pub enum InitLogMessage {
     },
     /// Share commitments given in /operator_init
     OIGuardianInfo(GuardianInfo),
-    /// A successful /setup_new_key call
-    SetupNewKeySuccess {
-        encrypted_shares: Vec<EncryptedShare>,
-        share_commitments: Vec<ShareCommitment>,
-    },
     /// A single successful /provisioner_init call (happens N times)
     PISuccess {
         share_id: ShareID,
@@ -517,7 +536,6 @@ impl StandardWithdrawalRequest {
 impl InitLogMessage {
     pub const OI_ATTEST_UNSIGNED: &'static str = "oi-attestation-unsigned";
     pub const OI_GUARDIAN_INFO: &'static str = "oi-guardian-info";
-    pub const SETUP_NEW_KEY_SUCCESS: &'static str = "setup-new-key-success";
     pub const PI_SUCCESS: &'static str = "pi-success-share";
     pub const PI_FULLY_INITIALIZED: &'static str = "pi-enclave-fully-initialized";
 
@@ -525,7 +543,6 @@ impl InitLogMessage {
         let suffix = match self {
             InitLogMessage::OIAttestationUnsigned { .. } => Self::OI_ATTEST_UNSIGNED.to_string(),
             InitLogMessage::OIGuardianInfo(_) => Self::OI_GUARDIAN_INFO.to_string(),
-            InitLogMessage::SetupNewKeySuccess { .. } => Self::SETUP_NEW_KEY_SUCCESS.to_string(),
             InitLogMessage::PISuccess { share_id, .. } => {
                 format!("{}-{}", Self::PI_SUCCESS, share_id.get())
             }
@@ -606,6 +623,7 @@ impl LogMessage {
                 S3HourScopedDirectory::new(S3_DIR_WITHDRAW, unix_millis_to_seconds(timestamp_ms))
                     .to_string()
             }
+            LogMessage::KeyState(..) => format!("{}/", S3_DIR_KEY_STATE),
         }
     }
 
@@ -615,6 +633,7 @@ impl LogMessage {
             LogMessage::Init(init_message) => init_message.log_name(prefix),
             LogMessage::Heartbeat { seq } => format!("{}-{:020}.json", prefix, seq),
             LogMessage::Withdrawal(withdrawal_message) => withdrawal_message.log_name(prefix),
+            LogMessage::KeyState(key_state) => format!("{:020}-{}.json", key_state.seq, prefix),
         }
     }
 
@@ -649,6 +668,7 @@ impl LogRecord {
             LogMessage::Init(..) => S3_OBJECT_LOCK_DURATION_INIT,
             LogMessage::Heartbeat { .. } => S3_OBJECT_LOCK_DURATION_HEARTBEAT,
             LogMessage::Withdrawal(..) => S3_OBJECT_LOCK_DURATION_WITHDRAW,
+            LogMessage::KeyState(..) => S3_OBJECT_LOCK_DURATION_KEY_STATE,
         }
     }
 
