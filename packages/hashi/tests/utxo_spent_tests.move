@@ -4,7 +4,7 @@
 #[test_only]
 module hashi::utxo_spent_tests;
 
-use hashi::test_utils;
+use hashi::{test_utils, utxo_pool};
 
 const REQUESTER: address = @0x100;
 const VOTER1: address = @0x1;
@@ -55,6 +55,46 @@ fun test_cleanup_spent_moves_record() {
     let pool = hashi.bitcoin().utxo_pool();
     assert!(!pool.has_active_record(utxo_id));
     assert!(pool.has_spent_record(utxo_id));
+
+    std::unit_test::destroy(hashi);
+}
+
+// ======== insert_active rejects duplicate active UTXO ========
+
+#[test]
+#[expected_failure(abort_code = utxo_pool::EUtxoAlreadyUsed)]
+fun test_insert_active_rejects_existing_active_utxo() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+
+    let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
+    let utxo1 = hashi::utxo::utxo(utxo_id, 50_000, option::none());
+    let utxo2 = hashi::utxo::utxo(utxo_id, 50_000, option::none());
+
+    hashi.bitcoin_mut().utxo_pool_mut().insert_active(utxo1);
+    hashi.bitcoin_mut().utxo_pool_mut().insert_active(utxo2);
+
+    std::unit_test::destroy(hashi);
+}
+
+// ======== insert_active rejects spent UTXO ========
+
+#[test]
+#[expected_failure(abort_code = utxo_pool::EUtxoAlreadyUsed)]
+fun test_insert_active_rejects_spent_utxo() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+
+    let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
+    let utxo1 = hashi::utxo::utxo(utxo_id, 50_000, option::none());
+    let utxo2 = hashi::utxo::utxo(utxo_id, 50_000, option::none());
+
+    hashi.bitcoin_mut().utxo_pool_mut().insert_active(utxo1);
+    hashi.bitcoin_mut().utxo_pool_mut().mark_spent(utxo_id, 0);
+    hashi.bitcoin_mut().utxo_pool_mut().cleanup_spent(utxo_id);
+    hashi.bitcoin_mut().utxo_pool_mut().insert_active(utxo2);
 
     std::unit_test::destroy(hashi);
 }
