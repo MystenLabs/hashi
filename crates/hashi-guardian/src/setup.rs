@@ -44,13 +44,13 @@ pub async fn setup_new_key(
         fingerprint_hex, n
     );
 
+    let secret_sharing_config = SecretSharingConfig::new(share_commitments.clone(), n, t)?;
+
     enclave
         .log_key_state(CurrentKeyState {
             seq: 0,
             encrypted_shares: encrypted_shares.clone(),
-            share_commitments: share_commitments.clone(),
-            num_shares: n,
-            threshold: t,
+            secret_sharing_config,
         })
         .await?;
 

@@ -54,8 +54,9 @@ message SignedGuardianInfo {
 
 // Information about the guardian enclave.
 message GuardianInfoData {
-  // Share commitments (if set). Used by key provisioners to check that right key will be used.
-  optional GuardianShareCommitments share_commitments = 1;
+  // Secret-sharing config (if set). Echoed from operator_init so KP tooling
+  // can cross-check against signed S3 records (IOP-225).
+  optional SecretSharingConfig secret_sharing_config = 1;
 
   // S3 bucket info (if set). Used by key provisioners to check S3 bucket info.
   optional S3BucketInfo bucket_info = 2;
@@ -67,9 +68,12 @@ message GuardianInfoData {
   optional string server_version = 4;
 }
 
-// Wrapper to allow presence for a repeated field.
-message GuardianShareCommitments {
-  repeated GuardianShareCommitment share_commitments = 1;
+// Public description of the current BTC key's secret-sharing scheme.
+// `commitments.len() == num_shares` and `2 <= threshold <= num_shares`.
+message SecretSharingConfig {
+  repeated GuardianShareCommitment commitments = 1;
+  optional uint32 num_shares = 2;
+  optional uint32 threshold = 3;
 }
 
 message S3BucketInfo {
@@ -142,8 +146,10 @@ message OperatorInitRequest {
   // S3 access keys
   S3Config s3_config = 1;
 
-  // Commitments published by the operator for the shares generated during setup.
-  repeated GuardianShareCommitment share_commitments = 2;
+  // Secret-sharing scheme for the current BTC key (commitments + N + T),
+  // operator-supplied and cross-checked off-enclave by KP tooling against
+  // signed S3 records.
+  SecretSharingConfig secret_sharing_config = 2;
 
   // Network the guardian is operating on.
   optional Network network = 3;
@@ -189,11 +195,6 @@ message ProvisionerInitState {
 
   // Rate limiter state.
   LimiterState limiter_state = 6;
-
-  // Reconstruction threshold for the current BTC key's secret sharing. Must
-  // be >= MIN_THRESHOLD (= 2). Digest-matched across the T submissions, like
-  // the rest of this state.
-  optional uint32 threshold = 7;
 }
 
 message WithdrawalConfig {

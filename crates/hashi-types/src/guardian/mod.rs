@@ -159,12 +159,12 @@ pub struct SetupNewKeyResponse {
     pub share_commitments: ShareCommitments,
 }
 
-/// Provides S3 API keys, share commitments and the BTC network to the enclave.
+/// Provides S3 API keys, share-sharing config and the BTC network to the enclave.
 /// To be called by the operator.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OperatorInitRequest {
     s3_config: S3Config,
-    share_commitments: ShareCommitments,
+    secret_sharing_config: SecretSharingConfig,
     network: Network,
 }
 
@@ -186,10 +186,6 @@ pub struct ProvisionerInitState {
     limiter_state: LimiterState,
     /// Hashi BTC master key used to derive child keys for diff inputs
     hashi_btc_master_pubkey: BitcoinPubkey,
-    /// Reconstruction threshold for the current BTC key's secret sharing.
-    /// Set at genesis by `setup_new_key`; carried across enclave restarts by
-    /// each KP and digest-matched across the T submissions.
-    threshold: usize,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -209,8 +205,10 @@ pub struct GetGuardianInfoResponse {
 /// TODO: Add network?
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct GuardianInfo {
-    /// Share commitments (if set). Used by KPs to check that right key will be used.
-    pub share_commitments: Option<ShareCommitments>,
+    /// Secret-sharing config (if set). Operator-supplied at `operator_init`;
+    /// echoed here so KP tooling can cross-check against signed S3 records
+    /// (see IOP-225). TODO: KP-side N/T verification still pending.
+    pub secret_sharing_config: Option<SecretSharingConfig>,
     /// S3 bucket name (if set). Used by KPs to check S3 bucket info.
     pub bucket_info: Option<S3BucketInfo>,
     /// Encryption key. Used by KPs to encrypt their shares.
@@ -262,13 +260,7 @@ pub enum LogMessage {
 pub struct CurrentKeyState {
     pub seq: u64,
     pub encrypted_shares: Vec<EncryptedShare>,
-    pub share_commitments: ShareCommitments,
-    /// Total number of shares. Redundant with `encrypted_shares.len()` /
-    /// `share_commitments.len()` — recorded explicitly so the log is
-    /// self-describing and readers can sanity-check.
-    pub num_shares: usize,
-    /// Reconstruction threshold used when the shares were created.
-    pub threshold: usize,
+    pub secret_sharing_config: SecretSharingConfig,
 }
 
 /// OI: operator_init
@@ -416,12 +408,12 @@ impl SetupNewKeyRequest {
 impl OperatorInitRequest {
     pub fn new(
         s3_config: S3Config,
-        share_commitments: ShareCommitments,
+        secret_sharing_config: SecretSharingConfig,
         network: Network,
     ) -> GuardianResult<Self> {
         Ok(Self {
             s3_config,
-            share_commitments,
+            secret_sharing_config,
             network,
         })
     }
@@ -430,16 +422,16 @@ impl OperatorInitRequest {
         &self.s3_config
     }
 
-    pub fn share_commitments(&self) -> &ShareCommitments {
-        &self.share_commitments
+    pub fn secret_sharing_config(&self) -> &SecretSharingConfig {
+        &self.secret_sharing_config
     }
 
     pub fn network(&self) -> Network {
         self.network
     }
 
-    pub fn into_parts(self) -> (S3Config, ShareCommitments, Network) {
-        (self.s3_config, self.share_commitments, self.network)
+    pub fn into_parts(self) -> (S3Config, SecretSharingConfig, Network) {
+        (self.s3_config, self.secret_sharing_config, self.network)
     }
 }
 
@@ -449,7 +441,6 @@ impl ProvisionerInitState {
         withdrawal_config: WithdrawalConfig,
         limiter_state: LimiterState,
         hashi_btc_master_pubkey: BitcoinPubkey,
-        threshold: usize,
     ) -> GuardianResult<Self> {
         // Validate that limiter state is consistent with config.
         if limiter_state.num_tokens_available > withdrawal_config.max_bucket_capacity_sats {
@@ -457,18 +448,11 @@ impl ProvisionerInitState {
                 "limiter num_tokens_available exceeds max_bucket_capacity".into(),
             ));
         }
-        if threshold < crypto::MIN_THRESHOLD {
-            return Err(InvalidInputs(format!(
-                "threshold {threshold} below minimum {}",
-                crypto::MIN_THRESHOLD
-            )));
-        }
         Ok(Self {
             committee,
             withdrawal_config,
             limiter_state,
             hashi_btc_master_pubkey,
-            threshold,
         })
     }
 
@@ -491,14 +475,12 @@ impl ProvisionerInitState {
         WithdrawalConfig,
         LimiterState,
         BitcoinPubkey,
-        usize,
     ) {
         (
             self.committee,
             self.withdrawal_config,
             self.limiter_state,
             self.hashi_btc_master_pubkey,
-            self.threshold,
         )
     }
 
@@ -508,10 +490,6 @@ impl ProvisionerInitState {
 
     pub fn hashi_btc_master_pubkey(&self) -> BitcoinPubkey {
         self.hashi_btc_master_pubkey
-    }
-
-    pub fn threshold(&self) -> usize {
-        self.threshold
     }
 
     pub fn digest(&self) -> [u8; 32] {
@@ -837,7 +815,6 @@ struct ProvisionerInitStateRepr {
     pub withdrawal_config: WithdrawalConfig,
     pub limiter_state: LimiterState,
     pub hashi_btc_master_pubkey: BitcoinPubkey,
-    pub threshold: usize,
 }
 
 /// Converter from T -> Self that internally validates addresses
@@ -902,13 +879,12 @@ impl From<StandardWithdrawalRequest> for StandardWithdrawalRequestWire {
 
 impl From<&ProvisionerInitState> for ProvisionerInitStateRepr {
     fn from(state: &ProvisionerInitState) -> Self {
-        let (committee, config, limiter_state, pubkey, threshold) = state.clone().into_parts();
+        let (committee, config, limiter_state, pubkey) = state.clone().into_parts();
         Self {
             committee: (&committee).into(),
             withdrawal_config: config,
             limiter_state,
             hashi_btc_master_pubkey: pubkey,
-            threshold,
         }
     }
 }

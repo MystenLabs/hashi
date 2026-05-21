@@ -35,7 +35,7 @@ pub async fn operator_init(
     }
     info!("Enclave state validated.");
 
-    let (config, commitments, network) = request.into_parts();
+    let (config, secret_sharing_config, network) = request.into_parts();
     let logger = S3Logger::new_checked(&config).await?;
     info!("S3 connectivity check complete.");
 
@@ -51,16 +51,21 @@ pub async fn operator_init(
         .set_bitcoin_network(network)
         .expect("Unable to set network");
 
-    info!("Storing {} share commitments.", commitments.len());
-    for (i, share_commitment) in commitments.iter().enumerate() {
+    info!(
+        "Storing secret-sharing config: n={}, t={}, {} commitments.",
+        secret_sharing_config.num_shares(),
+        secret_sharing_config.threshold(),
+        secret_sharing_config.commitments().len()
+    );
+    for (i, share_commitment) in secret_sharing_config.commitments().iter().enumerate() {
         info!(
             "Share {}: ID {} Digest {:x?}.",
             i, share_commitment.id, share_commitment.digest
         );
     }
     enclave
-        .set_share_commitments(commitments)
-        .expect("Unable to set share commitments");
+        .set_secret_sharing_config(secret_sharing_config)
+        .expect("Unable to set secret sharing config");
 
     // Log to S3!
     // 1) Attestation and pub key help authenticate all subsequent enclave-signed messages.
@@ -130,10 +135,10 @@ pub async fn provisioner_init(
 
     // 2) Verify the share against the commitment
     info!("Verifying share against commitment.");
-    let share_commitments = enclave
-        .share_commitments()
-        .expect("share commitments should be set after operator_init");
-    verify_share(&share, share_commitments)?;
+    let ssc = enclave
+        .secret_sharing_config()
+        .expect("secret sharing config should be set after operator_init");
+    verify_share(&share, ssc.commitments())?;
     info!("Share verified.");
 
     // 3) Set state_hash OR make sure whatever was previously set matches. Panics upon mismatch.
@@ -160,7 +165,7 @@ pub async fn provisioner_init(
     }
     received_shares.push(share);
     let current_share_count = received_shares.len();
-    let threshold = request.state().threshold();
+    let threshold = ssc.threshold();
     info!("Total shares received: {current_share_count}/{threshold}.");
 
     // Note: This S3 log does not serve any security purpose.
@@ -200,8 +205,11 @@ async fn finalize_init(
     incoming_state: ProvisionerInitState,
 ) {
     info!("Threshold reached, combining shares.");
-    let enclave_btc_keypair =
-        combine_shares(shares, incoming_state.threshold()).expect("Unable to combine shares");
+    let threshold = enclave
+        .secret_sharing_config()
+        .expect("secret sharing config set during operator_init")
+        .threshold();
+    let enclave_btc_keypair = combine_shares(shares, threshold).expect("Unable to combine shares");
 
     info!("Setting enclave keypair.");
     enclave

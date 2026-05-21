@@ -16,6 +16,7 @@ use super::ProvisionerInitRequest;
 use super::ProvisionerInitState;
 use super::S3BucketInfo;
 use super::S3Config;
+use super::SecretSharingConfig;
 use super::SetupNewKeyRequest;
 use super::SetupNewKeyResponse;
 use super::ShareCommitment;
@@ -76,7 +77,7 @@ impl GetGuardianInfoResponse {
         let signing_pub_key = signing_key.verification_key();
 
         let info = GuardianInfo {
-            share_commitments: None,
+            secret_sharing_config: None,
             bucket_info: Some(super::S3BucketInfo {
                 bucket: "bucket".to_string(),
                 region: "us-east-1".to_string(),
@@ -154,10 +155,16 @@ impl OperatorInitRequest {
                 digest: vec![0u8; 32],
             })
         }
+        let secret_sharing_config = SecretSharingConfig::new(
+            ShareCommitments::new(share_commitments).unwrap(),
+            TEST_N,
+            TEST_T,
+        )
+        .unwrap();
 
         OperatorInitRequest {
             s3_config,
-            share_commitments: ShareCommitments::new(share_commitments).unwrap(),
+            secret_sharing_config,
             network: super::Network::Regtest,
         }
     }
@@ -217,7 +224,6 @@ impl ProvisionerInitState {
             withdrawal_config,
             limiter_state,
             hashi_btc_master_pubkey,
-            TEST_T,
         )
         .expect("valid ProvisionerInitState")
     }
@@ -239,7 +245,6 @@ impl ProvisionerInitState {
                 next_seq: 0,
             },
             kp.x_only_public_key().0,
-            TEST_T,
         )
         .expect("valid ProvisionerInitState")
     }

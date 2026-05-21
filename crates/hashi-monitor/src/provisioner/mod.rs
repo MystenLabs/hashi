@@ -66,7 +66,6 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
         cfg.withdrawal_config,
         limiter_state,
         cfg.hashi_btc_master_pubkey,
-        cfg.threshold,
     )
     .map_err(|e| anyhow::anyhow!(e))?;
 

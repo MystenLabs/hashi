@@ -70,8 +70,8 @@ pub struct Scratchpad {
     /// The received shares
     /// TODO: Investigate if it can be moved to std::sync::Mutex
     pub shares: tokio::sync::Mutex<Vec<Share>>,
-    /// The share commitments
-    pub share_commitments: OnceLock<ShareCommitments>,
+    /// Secret-sharing scheme (commitments + N + T) set by operator_init.
+    pub secret_sharing_config: OnceLock<SecretSharingConfig>,
     /// Hash of the state in ProvisionerInitRequest
     pub state_hash: OnceLock<[u8; 32]>,
     /// Set once operator_init has successfully written all logs to S3.
@@ -223,7 +223,7 @@ impl EnclaveConfig {
 impl EnclaveState {
     pub fn init(&self, incoming_state: ProvisionerInitState) -> GuardianResult<()> {
         let rate_limiter = incoming_state.build_rate_limiter()?;
-        let (committee, _, _, _, _) = incoming_state.into_parts();
+        let (committee, _, _, _) = incoming_state.into_parts();
 
         self.set_committee(committee)?;
         self.set_rate_limiter(rate_limiter)?;
@@ -372,7 +372,7 @@ impl Enclave {
 
     pub fn is_operator_init_complete(&self) -> bool {
         self.config.is_operator_init_complete()
-            && self.scratchpad.share_commitments.get().is_some()
+            && self.scratchpad.secret_sharing_config.get().is_some()
             && self
                 .scratchpad
                 .operator_init_logging_complete
@@ -382,7 +382,7 @@ impl Enclave {
 
     pub fn is_operator_init_partially_complete(&self) -> bool {
         self.config.is_operator_init_partially_complete()
-            || self.scratchpad.share_commitments.get().is_some()
+            || self.scratchpad.secret_sharing_config.get().is_some()
     }
 
     pub fn is_fully_initialized(&self) -> bool {
@@ -420,7 +420,7 @@ impl Enclave {
 
     pub fn info(&self) -> GuardianInfo {
         GuardianInfo {
-            share_commitments: self.share_commitments().ok().cloned(),
+            secret_sharing_config: self.secret_sharing_config().ok().cloned(),
             bucket_info: self
                 .config
                 .s3_logger()
@@ -475,18 +475,18 @@ impl Enclave {
         &self.scratchpad.shares
     }
 
-    pub fn share_commitments(&self) -> GuardianResult<&ShareCommitments> {
+    pub fn secret_sharing_config(&self) -> GuardianResult<&SecretSharingConfig> {
         self.scratchpad
-            .share_commitments
+            .secret_sharing_config
             .get()
-            .ok_or(InvalidInputs("Share commitments not set".into()))
+            .ok_or(InvalidInputs("Secret sharing config not set".into()))
     }
 
-    pub fn set_share_commitments(&self, commitments: ShareCommitments) -> GuardianResult<()> {
+    pub fn set_secret_sharing_config(&self, cfg: SecretSharingConfig) -> GuardianResult<()> {
         self.scratchpad
-            .share_commitments
-            .set(commitments)
-            .map_err(|_| InvalidInputs("Share commitments already set".into()))
+            .secret_sharing_config
+            .set(cfg)
+            .map_err(|_| InvalidInputs("Secret sharing config already set".into()))
     }
 
     pub fn state_hash(&self) -> Option<&[u8; 32]> {

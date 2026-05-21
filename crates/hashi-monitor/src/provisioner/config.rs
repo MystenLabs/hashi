@@ -31,11 +31,18 @@ impl GuardianConfig {
         let bucket_info = info.bucket_info.clone().ok_or_else(|| {
             anyhow::anyhow!("guardian info missing bucket_info; operator_init may be incomplete")
         })?;
-        let share_commitments = info.share_commitments.clone().ok_or_else(|| {
-            anyhow::anyhow!(
-                "guardian info missing share_commitments; operator_init may be incomplete"
-            )
-        })?;
+        // TODO(IOP-225): also verify SSC.num_shares / .threshold against KP-side
+        // expected values (sourced from signed S3 records, not YAML).
+        let share_commitments = info
+            .secret_sharing_config
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "guardian info missing secret_sharing_config; operator_init may be incomplete"
+                )
+            })?
+            .commitments()
+            .clone();
         Ok(Self {
             bucket_info,
             share_commitments,
@@ -72,8 +79,6 @@ pub struct ProvisionerConfig {
     pub withdrawal_config: WithdrawalConfig,
     // Hashi BTC pubkey
     pub hashi_btc_master_pubkey: BitcoinPubkey,
-    // Reconstruction threshold for the BTC key's secret sharing.
-    pub threshold: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]

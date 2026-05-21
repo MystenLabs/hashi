@@ -83,6 +83,50 @@ pub struct ShareCommitment {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ShareCommitments(BTreeMap<ShareID, DigestBytes>);
 
+/// Public description of the current BTC key's secret-sharing scheme. Set by
+/// the operator at `operator_init` (sourced from `key_state/{max-seq}` in S3
+/// — KP tooling verifies the operator's claim off-enclave). See IOP-225 for
+/// the broader operator-supplies / KP-verifies design.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct SecretSharingConfig {
+    commitments: ShareCommitments,
+    num_shares: usize,
+    threshold: usize,
+}
+
+impl SecretSharingConfig {
+    pub fn new(
+        commitments: ShareCommitments,
+        num_shares: usize,
+        threshold: usize,
+    ) -> GuardianResult<Self> {
+        if commitments.len() != num_shares {
+            return Err(InvalidInputs(format!(
+                "expected {num_shares} commitments, got {}",
+                commitments.len()
+            )));
+        }
+        validate_share_params(num_shares, threshold)?;
+        Ok(Self {
+            commitments,
+            num_shares,
+            threshold,
+        })
+    }
+
+    pub fn commitments(&self) -> &ShareCommitments {
+        &self.commitments
+    }
+
+    pub fn num_shares(&self) -> usize {
+        self.num_shares
+    }
+
+    pub fn threshold(&self) -> usize {
+        self.threshold
+    }
+}
+
 pub type DigestBytes = Vec<u8>;
 
 impl ShareCommitments {

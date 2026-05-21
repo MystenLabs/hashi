@@ -23,6 +23,7 @@ use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::ProvisionerInitState;
+use hashi_types::guardian::SecretSharingConfig;
 use hashi_types::guardian::Share;
 use hashi_types::guardian::ShareCommitment;
 use hashi_types::guardian::ShareCommitments;
@@ -30,7 +31,7 @@ use hashi_types::guardian::WithdrawalConfig;
 use hashi_types::guardian::crypto::commit_share;
 use hashi_types::guardian::crypto::split_secret;
 use hashi_types::guardian::proto_conversions::provisioner_init_request_to_pb;
-use hashi_types::guardian::proto_conversions::share_commitment_to_pb;
+use hashi_types::guardian::proto_conversions::secret_sharing_config_to_pb;
 use hashi_types::guardian::session_id_from_signing_pubkey;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
@@ -102,6 +103,8 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .await
         .with_context(|| format!("connect to guardian at {}", args.guardian_endpoint))?;
 
+    let secret_sharing_config = SecretSharingConfig::new(material.commitments.clone(), n, t)
+        .map_err(|e| anyhow!("build SecretSharingConfig: {e:?}"))?;
     let operator_init_req = pb::OperatorInitRequest {
         s3_config: Some(pb::S3Config {
             access_key: Some(access_key),
@@ -109,11 +112,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
             bucket_name: Some(bucket.clone()),
             region: Some(region.clone()),
         }),
-        share_commitments: material
-            .commitments
-            .iter()
-            .map(share_commitment_to_pb)
-            .collect(),
+        secret_sharing_config: Some(secret_sharing_config_to_pb(&secret_sharing_config)),
         network: Some(network as i32),
     };
     tracing::info!("calling OperatorInit");
@@ -161,13 +160,15 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         returned_bucket.region,
         returned_bucket.bucket,
     );
-    let returned_commitments = info
-        .share_commitments
+    let returned_ssc = info
+        .secret_sharing_config
         .as_ref()
-        .ok_or_else(|| anyhow!("guardian info missing share_commitments"))?;
+        .ok_or_else(|| anyhow!("guardian info missing secret_sharing_config"))?;
     anyhow::ensure!(
-        *returned_commitments == material.commitments,
-        "share commitment mismatch: guardian echoed different commitments than were submitted"
+        *returned_ssc.commitments() == material.commitments
+            && returned_ssc.num_shares() == n
+            && returned_ssc.threshold() == t,
+        "secret-sharing config mismatch: guardian echoed different scheme than was submitted"
     );
 
     let enc_pubkey = EncPubKey::from_bytes(&info.encryption_pubkey)
@@ -185,7 +186,6 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         withdrawal_config,
         limiter_state,
         material.master_pubkey,
-        t,
     )
     .map_err(|e| anyhow!("build ProvisionerInitState: {e:?}"))?;
 
