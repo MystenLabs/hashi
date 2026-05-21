@@ -8,6 +8,8 @@
 FROM stagex/pallet-rust@sha256:84621c4c29330c8a969489671d46227a0a43f52cdae243f5b91e95781dbfe5ed AS pallet-rust
 FROM stagex/busybox@sha256:3d128909dbc8e7b6c4b8c3c31f4583f01a307907ea179934bb42c4ef056c7efd AS busybox
 FROM stagex/core-filesystem@sha256:da28831927652291b0fa573092fd41c8c96ca181ea224df7bff40e1833c3db13 AS core-filesystem
+FROM stagex/user-libusb@sha256:124d40d88738c4ee9fb6078155761e391cb2f4375cab775df5c85a961caaf59c AS user-libusb
+FROM stagex/user-pcsc-lite@sha256:2e0bb1cbeb9dd97be4e0594bd712dc138ee2710668281d3faa1a18d99a50979d AS user-pcsc-lite
 
 #
 # Deps stage: fetch and compile external dependencies (cached until Cargo.toml/Cargo.lock change)
@@ -16,6 +18,8 @@ FROM pallet-rust AS deps
 
 # Shell needed by cc-based build scripts (blst, ring, etc.)
 COPY --from=busybox . /
+COPY --from=user-libusb . /
+COPY --from=user-pcsc-lite . /
 
 # Copy only manifests
 COPY Cargo.toml Cargo.lock /src/
@@ -33,11 +37,18 @@ RUN mkdir -p crates/hashi-guardian/src \
 
 ENV TARGET=x86_64-unknown-linux-musl
 ENV OPENSSL_STATIC=true
+ENV LIBPCSCLITE_STATIC=true
+ENV PKG_CONFIG_ALLOW_CROSS=1
+ENV PKG_CONFIG_ALL_STATIC=1
 ENV CARGO_INCREMENTAL=0
+ENV SOURCE_DATE_EPOCH=0
 ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static -C target-cpu=x86-64"
 
 RUN cargo fetch
 RUN --network=none cargo build --release --frozen --target "$TARGET" -p hashi-guardian --features non-enclave-dev --bin hashi-guardian
+
+FROM deps AS age-plugin-yubikey
+RUN cargo install age-plugin-yubikey --version 0.5.1 --locked --target "$TARGET" --root /age-plugin-yubikey --target-dir /tmp/age-plugin-yubikey-target
 
 #
 # Build stage: compile with real source (only local crates recompile)
@@ -61,5 +72,6 @@ RUN --network=none cargo build --release --frozen --target "$TARGET" -p hashi-gu
 FROM core-filesystem
 # CA bundle for AWS SDK's S3 TLS verification; core-filesystem ships none.
 COPY --from=build /etc/ssl/cert.pem /etc/ssl/cert.pem
+COPY --from=age-plugin-yubikey /age-plugin-yubikey/bin/age-plugin-yubikey /usr/bin/age-plugin-yubikey
 COPY --from=build /src/target/x86_64-unknown-linux-musl/release/hashi-guardian /usr/bin/hashi-guardian
 ENTRYPOINT ["/usr/bin/hashi-guardian"]

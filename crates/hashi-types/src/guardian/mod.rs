@@ -147,7 +147,7 @@ pub struct VerifiedLogRecord {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetupNewKeyRequest {
-    key_provisioner_public_keys: Vec<EncPubKey>,
+    key_provisioner_recipients: Vec<AgeRecipient>,
     num_shares: usize,
     threshold: usize,
 }
@@ -155,7 +155,7 @@ pub struct SetupNewKeyRequest {
 /// `EnclaveSigned<T>`
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SetupNewKeyResponse {
-    pub encrypted_shares: Vec<EncryptedShare>,
+    pub encrypted_shares: Vec<AgeEncryptedShare>,
     pub share_commitments: ShareCommitments,
 }
 
@@ -172,7 +172,7 @@ pub struct OperatorInitRequest {
 /// To be called by Key Provisioners (who may be outside entities).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProvisionerInitRequest {
-    encrypted_share: EncryptedShare,
+    encrypted_share: HpkeEncryptedShare,
     state: ProvisionerInitState,
 }
 
@@ -209,7 +209,7 @@ pub struct GuardianInfo {
     pub secret_sharing_config: Option<SecretSharingConfig>,
     /// S3 bucket name (if set). Used by KPs to check S3 bucket info.
     pub bucket_info: Option<S3BucketInfo>,
-    /// Encryption key. Used by KPs to encrypt their shares.
+    /// Guardian HPKE encryption key. Used by KPs to encrypt ProvisionerInit shares to the guardian.
     pub encryption_pubkey: EncPubKeyBytes,
     /// Server version
     /// TODO: Replace with hashi ServerVersion to include crate SHA and version
@@ -258,7 +258,7 @@ pub enum LogMessage {
 /// for the canonical S3 key layout and sharing_seq semantics.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct SecretSharingLogMessage {
-    pub encrypted_shares: Vec<EncryptedShare>,
+    pub encrypted_shares: Vec<AgeEncryptedShare>,
     pub secret_sharing_config: SecretSharingConfig,
 }
 
@@ -370,26 +370,26 @@ impl S3Config {
 
 impl SetupNewKeyRequest {
     pub fn new(
-        public_keys: Vec<EncPubKey>,
+        recipients: Vec<AgeRecipient>,
         num_shares: usize,
         threshold: usize,
     ) -> GuardianResult<Self> {
-        if public_keys.len() != num_shares {
+        if recipients.len() != num_shares {
             return Err(InvalidInputs(format!(
-                "expected {num_shares} public keys, got {}",
-                public_keys.len()
+                "expected {num_shares} age recipients, got {}",
+                recipients.len()
             )));
         }
         validate_share_params(num_shares, threshold)?;
         Ok(Self {
-            key_provisioner_public_keys: public_keys,
+            key_provisioner_recipients: recipients,
             num_shares,
             threshold,
         })
     }
 
-    pub fn public_keys(&self) -> &[EncPubKey] {
-        &self.key_provisioner_public_keys
+    pub fn recipients(&self) -> &[AgeRecipient] {
+        &self.key_provisioner_recipients
     }
 
     pub fn num_shares(&self) -> usize {
@@ -496,7 +496,7 @@ impl ProvisionerInitState {
 }
 
 impl ProvisionerInitRequest {
-    pub fn new(encrypted_share: EncryptedShare, state: ProvisionerInitState) -> Self {
+    pub fn new(encrypted_share: HpkeEncryptedShare, state: ProvisionerInitState) -> Self {
         Self {
             encrypted_share,
             state,
@@ -513,11 +513,12 @@ impl ProvisionerInitRequest {
         rng: &mut R,
     ) -> Self {
         let state_hash = state.digest();
-        let encrypted_share = encrypt_share(share, enclave_pub_key, Some(&state_hash), rng);
+        let encrypted_share =
+            encrypt_share_for_guardian(share, enclave_pub_key, Some(&state_hash), rng);
         ProvisionerInitRequest::new(encrypted_share, state)
     }
 
-    pub fn encrypted_share(&self) -> &EncryptedShare {
+    pub fn encrypted_share(&self) -> &HpkeEncryptedShare {
         &self.encrypted_share
     }
 

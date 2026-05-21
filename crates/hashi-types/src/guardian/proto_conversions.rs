@@ -5,11 +5,10 @@
 //    Protobuf RPC conversions
 // ---------------------------------
 
+use super::AgeEncryptedShare;
 use super::BitcoinSignature;
 use super::Ciphertext;
 use super::CommitteeSignatureWire;
-use super::EncPubKey;
-use super::EncryptedShare;
 use super::GetGuardianInfoResponse;
 use super::GuardianError;
 use super::GuardianError::InvalidInputs;
@@ -21,6 +20,7 @@ use super::GuardianSigned;
 use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
+use super::HpkeEncryptedShare;
 use super::LimiterConfig;
 use super::LimiterState;
 use super::OperatorInitRequest;
@@ -51,8 +51,6 @@ use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::Hash as _;
-use hpke::Deserializable;
-use hpke::Serializable;
 use std::num::NonZeroU16;
 use std::str::FromStr;
 
@@ -68,17 +66,16 @@ impl TryFrom<pb::SetupNewKeyRequest> for SetupNewKeyRequest {
     type Error = GuardianError;
 
     fn try_from(req: pb::SetupNewKeyRequest) -> Result<Self, Self::Error> {
-        let pks = req
-            .key_provisioner_public_keys
+        let recipients = req
+            .key_provisioner_recipients
             .iter()
-            .map(|b| EncPubKey::from_bytes(b))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| InvalidInputs(format!("invalid key_provisioner_public_key: {e}")))?;
+            .map(|s| super::AgeRecipient::from_str(s))
+            .collect::<GuardianResult<Vec<_>>>()?;
 
         let num_shares = req.num_shares.ok_or_else(|| missing("num_shares"))? as usize;
         let threshold = req.threshold.ok_or_else(|| missing("threshold"))? as usize;
 
-        SetupNewKeyRequest::new(pks, num_shares, threshold)
+        SetupNewKeyRequest::new(recipients, num_shares, threshold)
     }
 }
 
@@ -93,15 +90,10 @@ impl TryFrom<pb::SignedSetupNewKeyResponse> for GuardianSigned<SetupNewKeyRespon
 
         let data = resp.data.ok_or_else(|| missing("data"))?;
 
-        let encrypted_shares: Vec<EncryptedShare> = data
+        let encrypted_shares: Vec<AgeEncryptedShare> = data
             .encrypted_shares
             .iter()
-            .map(|b| {
-                Ok(EncryptedShare {
-                    id: pb_to_share_id(b.id)?,
-                    ciphertext: pb_to_ciphertext(b.ciphertext.clone())?,
-                })
-            })
+            .map(pb_to_age_encrypted_share)
             .collect::<GuardianResult<Vec<_>>>()?;
 
         let share_commitments = pb_share_commitments_to_domain(&data.share_commitments)?;
@@ -169,7 +161,7 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
             .encrypted_share
             .ok_or_else(|| missing("encrypted_share"))?;
 
-        let encrypted_share = EncryptedShare {
+        let encrypted_share = HpkeEncryptedShare {
             id: pb_to_share_id(encrypted_share_pb.id)?,
             ciphertext: pb_to_ciphertext(encrypted_share_pb.ciphertext)?,
         };
@@ -325,11 +317,7 @@ pub fn setup_new_key_response_signed_to_pb(
 
 pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequest {
     pb::SetupNewKeyRequest {
-        key_provisioner_public_keys: s
-            .public_keys()
-            .iter()
-            .map(|pk| pk.to_bytes().to_vec().into())
-            .collect(),
+        key_provisioner_recipients: s.recipients().iter().map(ToString::to_string).collect(),
         num_shares: Some(s.num_shares() as u32),
         threshold: Some(s.threshold() as u32),
     }
@@ -351,7 +339,7 @@ pub fn provisioner_init_request_to_pb(
     r: ProvisionerInitRequest,
 ) -> GuardianResult<pb::ProvisionerInitRequest> {
     Ok(pb::ProvisionerInitRequest {
-        encrypted_share: Some(encrypted_share_to_pb(r.encrypted_share)),
+        encrypted_share: Some(hpke_encrypted_share_to_pb(r.encrypted_share)),
         state: Some(provisioner_init_state_to_pb(r.state)),
     })
 }
@@ -594,7 +582,9 @@ fn network_to_pb(n: super::Network) -> GuardianResult<i32> {
     }
 }
 
-fn pb_to_ciphertext(ciphertext_pb_opt: Option<pb::HpkeCiphertext>) -> GuardianResult<Ciphertext> {
+fn pb_to_ciphertext(
+    ciphertext_pb_opt: Option<pb::GuardianHpkeCiphertext>,
+) -> GuardianResult<Ciphertext> {
     let ciphertext_pb = ciphertext_pb_opt.ok_or_else(|| missing("ciphertext"))?;
 
     let encapsulated_key = ciphertext_pb
@@ -611,15 +601,34 @@ fn pb_to_ciphertext(ciphertext_pb_opt: Option<pb::HpkeCiphertext>) -> GuardianRe
     })
 }
 
-fn ciphertext_to_pb(c: Ciphertext) -> pb::HpkeCiphertext {
-    pb::HpkeCiphertext {
+fn ciphertext_to_pb(c: Ciphertext) -> pb::GuardianHpkeCiphertext {
+    pb::GuardianHpkeCiphertext {
         encapsulated_key: Some(c.encapsulated_key.to_vec().into()),
         aes_ciphertext: Some(c.aes_ciphertext.to_vec().into()),
     }
 }
 
-pub fn encrypted_share_to_pb(s: EncryptedShare) -> pb::GuardianShareEncrypted {
-    pb::GuardianShareEncrypted {
+fn pb_to_age_encrypted_share(
+    s: &pb::GuardianAgeEncryptedShare,
+) -> GuardianResult<AgeEncryptedShare> {
+    Ok(AgeEncryptedShare {
+        id: pb_to_share_id(s.id)?,
+        armored_ciphertext: s
+            .armored_ciphertext
+            .clone()
+            .ok_or_else(|| missing("armored_ciphertext"))?,
+    })
+}
+
+fn age_encrypted_share_to_pb(s: AgeEncryptedShare) -> pb::GuardianAgeEncryptedShare {
+    pb::GuardianAgeEncryptedShare {
+        id: Some(share_id_to_pb(s.id)),
+        armored_ciphertext: Some(s.armored_ciphertext),
+    }
+}
+
+pub fn hpke_encrypted_share_to_pb(s: HpkeEncryptedShare) -> pb::GuardianHpkeEncryptedShare {
+    pb::GuardianHpkeEncryptedShare {
         id: Some(share_id_to_pb(s.id)),
         ciphertext: Some(ciphertext_to_pb(s.ciphertext)),
     }
@@ -637,7 +646,7 @@ pub fn setup_new_key_response_to_pb(r: SetupNewKeyResponse) -> pb::SetupNewKeyRe
         encrypted_shares: r
             .encrypted_shares
             .into_iter()
-            .map(encrypted_share_to_pb)
+            .map(age_encrypted_share_to_pb)
             .collect(),
         share_commitments: r
             .share_commitments

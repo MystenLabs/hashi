@@ -28,6 +28,7 @@ base64ct.workspace = true
 
 # Guardian crypto dependencies
 hpke.workspace = true
+age.workspace = true
 rand.workspace = true
 rand_core.workspace = true
 k256.workspace = true

@@ -25,6 +25,8 @@ FROM stagex/user-cpio@sha256:6e11cb71e8466c5673de5da6259d2c0e4b316a0f74e6a9fc31d
 FROM stagex/user-socat@sha256:7f859e5b7a605488e70939068f7ded36d35c249e33343d703f7ca26763ce5b85 AS user-socat
 FROM stagex/user-jq@sha256:1b551175e7507d1a5d3564c01d6d0c458aa2be0172e03ccec8d2263e217c4c78 AS user-jq
 FROM stagex/user-nit@sha256:58c6df1887e5a46c14283b7faa29fadb1bf6b7dbc04027f09050726926280cd9 AS user-nit
+FROM stagex/user-libusb@sha256:124d40d88738c4ee9fb6078155761e391cb2f4375cab775df5c85a961caaf59c AS user-libusb
+FROM stagex/user-pcsc-lite@sha256:2e0bb1cbeb9dd97be4e0594bd712dc138ee2710668281d3faa1a18d99a50979d AS user-pcsc-lite
 
 FROM scratch AS base
 COPY --from=core-busybox . /
@@ -43,6 +45,8 @@ COPY --from=user-eif_build . /
 COPY --from=core-llvm . /
 COPY --from=core-libffi . /
 COPY --from=core-gcc . /
+COPY --from=user-libusb . /
+COPY --from=user-pcsc-lite . /
 COPY --from=user-cpio . /
 COPY --from=user-linux-nitro /bzImage .
 COPY --from=user-linux-nitro /linux.config .
@@ -57,8 +61,12 @@ COPY Cargo.lock /Cargo.lock
 WORKDIR /
 ENV OPENSSL_STATIC=true
 ENV TARGET=x86_64-unknown-linux-musl
+ENV LIBPCSCLITE_STATIC=true
+ENV PKG_CONFIG_ALLOW_CROSS=1
+ENV PKG_CONFIG_ALL_STATIC=1
 ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static -C target-cpu=x86-64"
 RUN cargo build --locked --no-default-features --release --target "$TARGET" -p hashi-guardian
+RUN cargo install age-plugin-yubikey --version 0.5.1 --locked --target "$TARGET" --root /age-plugin-yubikey
 
 WORKDIR /build_cpio
 ENV KBUILD_BUILD_TIMESTAMP=1
@@ -71,6 +79,7 @@ COPY --from=user-jq /bin/jq initramfs
 COPY --from=user-socat /bin/socat . initramfs
 COPY --from=user-nit /bin/init initramfs
 RUN cp /target/${TARGET}/release/hashi-guardian initramfs/guardian
+RUN cp /age-plugin-yubikey/bin/age-plugin-yubikey initramfs/bin/age-plugin-yubikey
 COPY docker/hashi-guardian/run.sh initramfs/
 RUN sed -i "s/\${BUCKET_NAME}/${BUCKET_NAME}/g; s/\${AWS_REGION}/${AWS_REGION}/g" initramfs/run.sh
 RUN chmod 755 initramfs/run.sh

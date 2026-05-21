@@ -31,7 +31,7 @@ message GetGuardianInfoResponse {
   // Guardian signing public key (Ed25519, 32 bytes).
   optional bytes signing_pub_key = 2;
 
-  // Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
+  // Signed guardian info (includes server version, guardian HPKE encryption pubkey, and optional S3/bucket info).
   SignedGuardianInfo signed_info = 3;
 
   // Current rate limiter state (if initialized).
@@ -60,7 +60,7 @@ message GuardianInfoData {
   // S3 bucket info (if set). Used by key provisioners to check S3 bucket info.
   optional S3BucketInfo bucket_info = 2;
 
-  // Guardian encryption public key (32 bytes).
+  // Guardian HPKE encryption public key (32 bytes). Used for ProvisionerInit only.
   optional bytes encryption_pubkey = 3;
 
   // Server version.
@@ -88,19 +88,19 @@ message S3BucketInfo {
 
 // Untrusted wire DTO. Converted to a validated domain request in the server.
 message SetupNewKeyRequest {
-  // HPKE public keys for key provisioners. Length must equal `num_shares`.
-  repeated bytes key_provisioner_public_keys = 1;
+  // age recipients for key provisioners. Length must equal `num_shares`.
+  repeated string key_provisioner_recipients = 1;
 
   // Total number of shares to split the new BTC key into. Must match
-  // `key_provisioner_public_keys.len()`.
+  // `key_provisioner_recipients.len()`.
   optional uint32 num_shares = 2;
 
   // Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
   optional uint32 threshold = 3;
 }
 
-// Ciphertext produced by HPKE encryption.
-message HPKECiphertext {
+// Ciphertext produced by guardian HPKE encryption for ProvisionerInit.
+message GuardianHPKECiphertext {
   optional bytes encapsulated_key = 1;
   optional bytes aes_ciphertext = 2;
 }
@@ -110,10 +110,16 @@ message GuardianShareID {
   optional uint32 id = 1;
 }
 
-// Encrypted secret share sent to a key provisioner.
-message GuardianShareEncrypted {
+// HPKE encrypted secret share sent to the guardian during ProvisionerInit.
+message GuardianHPKEEncryptedShare {
   GuardianShareID id = 1;
-  HPKECiphertext ciphertext = 2;
+  GuardianHPKECiphertext ciphertext = 2;
+}
+
+// age ASCII-armored encrypted secret share sent to a key provisioner.
+message GuardianAgeEncryptedShare {
+  GuardianShareID id = 1;
+  optional string armored_ciphertext = 2;
 }
 
 // Commitment to a secret share.
@@ -124,7 +130,7 @@ message GuardianShareCommitment {
 
 // Unsigned response payload.
 message SetupNewKeyResponseData {
-  repeated GuardianShareEncrypted encrypted_shares = 1;
+  repeated GuardianAgeEncryptedShare encrypted_shares = 1;
   repeated GuardianShareCommitment share_commitments = 2;
 }
 
@@ -175,8 +181,8 @@ enum Network {
 // ==========================
 
 message ProvisionerInitRequest {
-  // Encrypted share destined for this provisioner.
-  GuardianShareEncrypted encrypted_share = 1;
+  // HPKE encrypted share destined for the guardian.
+  GuardianHPKEEncryptedShare encrypted_share = 1;
 
   // State used to initialize/restore the enclave. The share encryption binds to its digest as AAD.
   ProvisionerInitState state = 2;

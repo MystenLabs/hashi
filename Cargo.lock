@@ -2902,6 +2902,7 @@ dependencies = [
 name = "hashi-guardian"
 version = "0.1.0"
 dependencies = [
+ "age",
  "anyhow",
  "aws-config",
  "aws-credential-types",
@@ -2978,6 +2979,7 @@ dependencies = [
 name = "hashi-types"
 version = "0.0.0"
 dependencies = [
+ "age",
  "anyhow",
  "base64ct",
  "bcs",

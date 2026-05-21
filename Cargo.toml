@@ -55,7 +55,7 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
 # (from rage PR #584) is the first to pull it in via i18n-embed 0.16.
 # Upstream issues: https://github.com/str4d/rage/issues/568
 #                  https://github.com/kellpossible/cargo-i18n/issues/150
-age = { git = "https://github.com/str4d/rage.git", rev = "92f437bc2a061312fa6633bb70c91eef91142fd4", features = ["cli-common", "plugin"] }
+age = { git = "https://github.com/str4d/rage.git", rev = "92f437bc2a061312fa6633bb70c91eef91142fd4", features = ["armor", "cli-common", "plugin"] }
 rust-embed = { version = "8", features = ["deterministic-timestamps"] }
 rustls = { version = "0.23.29", default-features = false, features = ["ring"] }
 ed25519-dalek = { version = "2.2.0", features = ["pem", "pkcs8", "rand_core"] }

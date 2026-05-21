@@ -4,6 +4,7 @@
 use anyhow::Result;
 use hashi_guardian::heartbeat::HeartbeatWriter;
 use hashi_guardian::rpc::GuardianGrpc;
+use hashi_guardian::setup::check_yubikey_age_plugin;
 use hashi_guardian::Enclave;
 use hashi_guardian::HEARTBEAT_INTERVAL;
 use hashi_guardian::HEARTBEAT_RETRY_INTERVAL;
@@ -27,6 +28,8 @@ async fn main() -> Result<()> {
         .with_file_line(true)
         .with_env()
         .init();
+
+    check_yubikey_age_plugin()?;
 
     // Check if SETUP_MODE is enabled (defaults to false)
     let setup_mode = std::env::var("SETUP_MODE")

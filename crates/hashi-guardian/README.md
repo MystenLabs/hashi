@@ -2,6 +2,10 @@
 
 Guardian enclave service that emits immutable S3 logs for audit/state-restart workflows.
 
+## Runtime dependencies
+
+`setup_new_key` encrypts key-provisioner shares to age recipients. YubiKey age recipients require `age-plugin-yubikey` to be installed and available on the guardian environment's `PATH`; the service checks this at startup and exits if the plugin is missing.
+
 ## S3 log key format
 
 Canonical key layout:

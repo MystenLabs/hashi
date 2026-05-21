@@ -1,15 +1,16 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::AgeEncryptedShare;
+use super::AgeRecipient;
 use super::Ciphertext;
-use super::EncPubKey;
-use super::EncryptedShare;
 use super::GetGuardianInfoResponse;
 use super::GuardianInfo;
 use super::GuardianSigned;
 use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
+use super::HpkeEncryptedShare;
 use super::LimiterState;
 use super::OperatorInitRequest;
 use super::ProvisionerInitRequest;
@@ -44,8 +45,8 @@ use bitcoin::secp256k1::Message;
 use bitcoin::secp256k1::SecretKey;
 use bitcoin::taproot::TapLeafHash;
 use ed25519_consensus::SigningKey;
-use hpke::Deserializable;
 use std::num::NonZeroU16;
+use std::str::FromStr;
 use sui_sdk_types::Address as SuiAddress;
 use sui_sdk_types::bcs::FromBcs;
 
@@ -99,8 +100,9 @@ impl GetGuardianInfoResponse {
 
 impl SetupNewKeyRequest {
     pub fn mock_for_testing() -> Self {
-        let pk = EncPubKey::from_bytes(&[0u8; 32]).unwrap();
-        SetupNewKeyRequest::new(vec![pk; TEST_N], TEST_N, TEST_T).unwrap()
+        let identity = age::x25519::Identity::generate();
+        let recipient = AgeRecipient::from_str(&identity.to_public().to_string()).unwrap();
+        SetupNewKeyRequest::new(vec![recipient; TEST_N], TEST_N, TEST_T).unwrap()
     }
 }
 
@@ -114,14 +116,12 @@ fn dummy_commitments() -> ShareCommitments {
     ShareCommitments::new(commitments).unwrap()
 }
 
-fn dummy_encrypted_shares() -> Vec<EncryptedShare> {
+fn dummy_encrypted_shares() -> Vec<AgeEncryptedShare> {
     (0..TEST_N)
-        .map(|i| EncryptedShare {
+        .map(|i| AgeEncryptedShare {
             id: NonZeroU16::new((i + 1) as u16).unwrap(),
-            ciphertext: Ciphertext {
-                encapsulated_key: vec![0u8; 32],
-                aes_ciphertext: vec![0u8; 32],
-            },
+            armored_ciphertext: "-----BEGIN AGE ENCRYPTED FILE-----\n-----END AGE ENCRYPTED FILE-----\n"
+                .to_string(),
         })
         .collect()
 }
@@ -176,7 +176,7 @@ impl ProvisionerInitRequest {
     // NOTE: Incorrect encryption is used. Fix later if needed.
     pub fn mock_for_testing() -> Self {
         ProvisionerInitRequest {
-            encrypted_share: EncryptedShare {
+            encrypted_share: HpkeEncryptedShare {
                 id: NonZeroU16::new(1).unwrap(),
                 ciphertext: Ciphertext {
                     encapsulated_key: vec![0u8; 32],

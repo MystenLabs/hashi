@@ -6,7 +6,7 @@ use crate::Enclave;
 use crate::S3Logger;
 use hashi_types::guardian::crypto::combine_shares;
 use hashi_types::guardian::crypto::commit_share;
-use hashi_types::guardian::crypto::decrypt_share;
+use hashi_types::guardian::crypto::decrypt_guardian_share;
 use hashi_types::guardian::crypto::Share;
 use hashi_types::guardian::InitLogMessage::OIAttestationUnsigned;
 use hashi_types::guardian::InitLogMessage::OIGuardianInfo;
@@ -130,7 +130,7 @@ pub async fn provisioner_init(
 
     // 1) Decrypt the share
     info!("Decrypting share.");
-    let share = decrypt_share(request.encrypted_share(), sk, Some(&state_hash))?;
+    let share = decrypt_guardian_share(request.encrypted_share(), sk, Some(&state_hash))?;
     info!("Share decrypted.");
 
     // 2) Verify the share against the commitment

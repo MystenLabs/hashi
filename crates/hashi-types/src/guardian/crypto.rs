@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::GuardianError;
 use super::GuardianError::InvalidInputs;
 use super::GuardianResult;
 use super::GuardianSigned;
@@ -27,7 +28,10 @@ use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::fmt;
+use std::io::Write;
 use std::num::NonZeroU16;
+use std::str::FromStr;
 use tracing::info;
 // ---------------------------------
 //      Crypto Structs & Types
@@ -72,12 +76,24 @@ pub fn validate_share_params(n: usize, t: usize) -> GuardianResult<()> {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct EncryptedShare {
+pub struct HpkeEncryptedShare {
     pub id: ShareID,
     pub ciphertext: Ciphertext,
 }
 
 pub type DigestBytes = Vec<u8>;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct AgeEncryptedShare {
+    pub id: ShareID,
+    pub armored_ciphertext: String,
+}
+
+#[derive(Clone)]
+pub enum AgeRecipient {
+    Native(age::x25519::Recipient),
+    Plugin(age::plugin::Recipient),
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ShareCommitment {
@@ -194,6 +210,43 @@ pub struct Ciphertext {
     pub aes_ciphertext: Vec<u8>,
 }
 
+impl FromStr for AgeRecipient {
+    type Err = GuardianError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(recipient) = age::x25519::Recipient::from_str(s) {
+            return Ok(Self::Native(recipient));
+        }
+
+        age::plugin::Recipient::from_str(s)
+            .map(Self::Plugin)
+            .map_err(|e| InvalidInputs(format!("invalid age recipient: {e}")))
+    }
+}
+
+impl fmt::Display for AgeRecipient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Native(r) => write!(f, "{r}"),
+            Self::Plugin(r) => write!(f, "{r}"),
+        }
+    }
+}
+
+impl fmt::Debug for AgeRecipient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "AgeRecipient({self})")
+    }
+}
+
+impl PartialEq for AgeRecipient {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_string() == other.to_string()
+    }
+}
+
+impl Eq for AgeRecipient {}
+
 // ---------------------------------
 //          Helper impl's
 // ---------------------------------
@@ -261,6 +314,48 @@ pub fn decrypt(
         aad.unwrap_or(&[0; 32]),
     )
     .map_err(|e| InvalidInputs(format!("Decryption failed: {}", e)))
+}
+
+fn build_age_recipient(recipient: &AgeRecipient) -> GuardianResult<Box<dyn age::Recipient>> {
+    match recipient {
+        AgeRecipient::Native(r) => Ok(Box::new(r.clone())),
+        AgeRecipient::Plugin(r) => {
+            let plugin_name = r.plugin().to_string();
+            let recipient_plugin = age::plugin::RecipientPluginV1::new(
+                &plugin_name,
+                std::slice::from_ref(r),
+                &[],
+                age::cli_common::UiCallbacks,
+            )
+            .map_err(|e| {
+                InvalidInputs(format!(
+                    "failed to initialize age plugin '{plugin_name}'; install age-plugin-{plugin_name} and ensure it is on PATH in the guardian setup environment: {e}"
+                ))
+            })?;
+            Ok(Box::new(recipient_plugin))
+        }
+    }
+}
+
+fn age_encrypt_armored(plaintext: &[u8], recipient: &AgeRecipient) -> GuardianResult<String> {
+    let recipient = build_age_recipient(recipient)?;
+    let encryptor = age::Encryptor::with_recipients(std::iter::once(recipient.as_ref()))
+        .map_err(|e| InvalidInputs(format!("age encryption setup failed: {e}")))?;
+    let mut ciphertext = Vec::with_capacity(plaintext.len());
+    let armored =
+        age::armor::ArmoredWriter::wrap_output(&mut ciphertext, age::armor::Format::AsciiArmor)
+            .map_err(|e| InvalidInputs(format!("age armor setup failed: {e}")))?;
+    let mut writer = encryptor
+        .wrap_output(armored)
+        .map_err(|e| InvalidInputs(format!("age encryption failed: {e}")))?;
+    writer
+        .write_all(plaintext)
+        .map_err(|e| InvalidInputs(format!("age encryption failed: {e}")))?;
+    writer
+        .finish()
+        .and_then(|armored| armored.finish())
+        .map_err(|e| InvalidInputs(format!("age encryption failed: {e}")))?;
+    String::from_utf8(ciphertext).map_err(|e| InvalidInputs(format!("invalid age armor: {e}")))
 }
 
 // ---------------------------------
@@ -367,43 +462,75 @@ pub fn commit_share(share: &Share) -> ShareCommitment {
     }
 }
 
-/// Encrypt a share with optional AAD
-pub fn encrypt_share<R: CryptoRng + RngCore>(
+/// HPKE-encrypt a share for submission to the guardian, with optional AAD.
+pub fn encrypt_share_for_guardian<R: CryptoRng + RngCore>(
     share: &Share,
     pk: &EncPubKey,
     aad: Option<&[u8; 32]>,
     rng: &mut R,
-) -> EncryptedShare {
-    EncryptedShare {
+) -> HpkeEncryptedShare {
+    HpkeEncryptedShare {
         id: share.id,
         ciphertext: encrypt(&share.value.to_bytes(), pk, aad, rng)
             .expect("neither plaintext nor aad are long"),
     }
 }
 
-/// Split `sk` into `kp_pubkeys.len()` shares with reconstruction threshold
-/// `t`, encrypt each to the matching KP pubkey, and compute the corresponding
-/// commitments. Share ID `i` (1..=N) is paired with `kp_pubkeys[i-1]`.
+/// Split `sk` into `kp_recipients.len()` shares with reconstruction threshold
+/// `t`, encrypt each to the matching KP age recipient, and compute the
+/// corresponding commitments. Share ID `i` (1..=N) is paired with
+/// `kp_recipients[i-1]`.
 pub fn split_and_encrypt_for_kps<R: CryptoRng + RngCore>(
     sk: &k256::SecretKey,
-    kp_pubkeys: &[EncPubKey],
+    kp_recipients: &[AgeRecipient],
     t: usize,
     rng: &mut R,
-) -> GuardianResult<(Vec<EncryptedShare>, ShareCommitments)> {
-    let n = kp_pubkeys.len();
+) -> GuardianResult<(Vec<AgeEncryptedShare>, ShareCommitments)> {
+    let n = kp_recipients.len();
     let shares = split_secret(sk, n, t, rng)?;
     let mut encrypted_shares = Vec::with_capacity(n);
     let mut commitments = Vec::with_capacity(n);
-    for (share, pk) in shares.iter().zip(kp_pubkeys.iter()) {
-        encrypted_shares.push(encrypt_share(share, pk, None, rng));
+    for (share, recipient) in shares.iter().zip(kp_recipients.iter()) {
+        encrypted_shares.push(encrypt_share_for_provisioner(share, recipient)?);
         commitments.push(commit_share(share));
     }
     Ok((encrypted_shares, ShareCommitments::new(commitments)?))
 }
 
-/// Decrypt an encrypted share with optional AAD
-pub fn decrypt_share(
-    encrypted_share: &EncryptedShare,
+/// Encrypt a share for delivery to a key provisioner using age ASCII armor.
+pub fn encrypt_share_for_provisioner(
+    share: &Share,
+    recipient: &AgeRecipient,
+) -> GuardianResult<AgeEncryptedShare> {
+    Ok(AgeEncryptedShare {
+        id: share.id,
+        armored_ciphertext: age_encrypt_armored(&share.value.to_bytes(), recipient)?,
+    })
+}
+
+pub fn decrypt_age_share(
+    encrypted_share: &AgeEncryptedShare,
+    identity: &impl age::Identity,
+) -> GuardianResult<Share> {
+    let serialized_share = age::decrypt(identity, encrypted_share.armored_ciphertext.as_bytes())
+        .map_err(|e| InvalidInputs(format!("age decryption failed: {e}")))?;
+    let serialized_share: [u8; 32] = serialized_share
+        .as_slice()
+        .try_into()
+        .map_err(|_| InvalidInputs("decrypted age share must be 32 bytes".into()))?;
+    let result: Option<Scalar> = Scalar::from_repr(FieldBytes::from(serialized_share)).into();
+    match result {
+        Some(x) => Ok(Share {
+            id: encrypted_share.id,
+            value: x,
+        }),
+        None => Err(InvalidInputs("Failed to deserialize share".into())),
+    }
+}
+
+/// Decrypt an HPKE-encrypted share submitted to the guardian, with optional AAD.
+pub fn decrypt_guardian_share(
+    encrypted_share: &HpkeEncryptedShare,
     sk: &EncSecKey,
     aad: Option<&[u8; 32]>,
 ) -> GuardianResult<Share> {
