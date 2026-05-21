@@ -9,6 +9,8 @@ use sui::bag::Bag;
 
 #[error]
 const EUtxoAlreadyLocked: vector<u8> = b"UTXO is already locked in a pending withdrawal";
+#[error]
+const EUtxoAlreadyUsed: vector<u8> = b"UTXO is already active or spent";
 
 /// Tracks a UTXO through its full lifecycle in the pool.
 ///
@@ -48,9 +50,14 @@ public(package) fun is_spent_or_active(self: &UtxoPool, utxo_id: UtxoId): bool {
     self.utxo_records.contains(utxo_id) || self.spent_utxos.contains(utxo_id)
 }
 
+public(package) fun assert_not_spent_or_active(self: &UtxoPool, utxo_id: UtxoId) {
+    assert!(!self.is_spent_or_active(utxo_id), EUtxoAlreadyUsed);
+}
+
 /// Insert a confirmed UTXO (from a deposit) into the pool.
 public(package) fun insert_active(self: &mut UtxoPool, utxo: Utxo) {
     let utxo_id = utxo.id();
+    self.assert_not_spent_or_active(utxo_id);
     self
         .utxo_records
         .add(

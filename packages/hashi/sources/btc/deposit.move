@@ -19,8 +19,6 @@ use fun btc_config::bitcoin_deposit_time_delay_ms as Config.deposit_time_delay_m
 #[error]
 const EBelowMinimumDeposit: vector<u8> = b"Deposit amount is below the minimum";
 #[error]
-const EUtxoAlreadyUsed: vector<u8> = b"UTXO has already been deposited or is currently active";
-#[error]
 const EDepositTimeDelayNotPassed: vector<u8> = b"Deposit time-delay has not passed";
 #[error]
 const EAlreadyApprovedThisEpoch: vector<u8> =
@@ -55,7 +53,7 @@ public fun deposit(
     assert!(utxo.amount() >= hashi.config().deposit_minimum(), EBelowMinimumDeposit);
 
     // Check that the UTXO isn't already active or previously spent (replay protection)
-    assert!(!hashi.bitcoin().utxo_pool().is_spent_or_active(utxo.id()), EUtxoAlreadyUsed);
+    hashi.bitcoin().utxo_pool().assert_not_spent_or_active(utxo.id());
 
     let request = deposit_queue::create_deposit(utxo, clock, ctx);
     let request_id = request.request_id().to_address();
@@ -102,6 +100,8 @@ entry fun approve_deposit(
     // Remove from active requests and copy the UTXO.
     let mut request = hashi.bitcoin_mut().deposit_queue_mut().remove_request(request_id);
     let utxo = request.utxo();
+
+    hashi.bitcoin().utxo_pool().assert_not_spent_or_active(utxo.id());
 
     // If the request already carries an approval from the current
     // committee, refuse to re-approve. Re-approving by the same
