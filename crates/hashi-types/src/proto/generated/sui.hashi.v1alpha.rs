@@ -1179,9 +1179,16 @@ pub struct S3BucketInfo {
 /// Untrusted wire DTO. Converted to a validated domain request in the server.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SetupNewKeyRequest {
-    /// HPKE public keys for key provisioners (NUM_OF_SHARES entries expected).
+    /// HPKE public keys for key provisioners. Length must equal `num_shares`.
     #[prost(bytes = "bytes", repeated, tag = "1")]
     pub key_provisioner_public_keys: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
+    /// Total number of shares to split the new BTC key into. Must match
+    /// `key_provisioner_public_keys.len()`.
+    #[prost(uint32, optional, tag = "2")]
+    pub num_shares: ::core::option::Option<u32>,
+    /// Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
+    #[prost(uint32, optional, tag = "3")]
+    pub threshold: ::core::option::Option<u32>,
 }
 /// Ciphertext produced by HPKE encryption.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1281,6 +1288,11 @@ pub struct ProvisionerInitState {
     /// Rate limiter state.
     #[prost(message, optional, tag = "6")]
     pub limiter_state: ::core::option::Option<LimiterState>,
+    /// Reconstruction threshold for the current BTC key's secret sharing. Must
+    /// be >= MIN_THRESHOLD (= 2). Digest-matched across the T submissions, like
+    /// the rest of this state.
+    #[prost(uint32, optional, tag = "7")]
+    pub threshold: ::core::option::Option<u32>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WithdrawalConfig {

@@ -74,7 +74,10 @@ impl TryFrom<pb::SetupNewKeyRequest> for SetupNewKeyRequest {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| InvalidInputs(format!("invalid key_provisioner_public_key: {e}")))?;
 
-        SetupNewKeyRequest::new(pks)
+        let num_shares = req.num_shares.ok_or_else(|| missing("num_shares"))? as usize;
+        let threshold = req.threshold.ok_or_else(|| missing("threshold"))? as usize;
+
+        SetupNewKeyRequest::new(pks, num_shares, threshold)
     }
 }
 
@@ -177,11 +180,14 @@ impl TryFrom<pb::ProvisionerInitState> for ProvisionerInitState {
         let hashi_btc_master_pubkey = XOnlyPublicKey::from_slice(master_pk_bytes.as_ref())
             .map_err(|e| InvalidInputs(format!("invalid hashi_btc_master_pubkey: {e}")))?;
 
+        let threshold = state_pb.threshold.ok_or_else(|| missing("threshold"))? as usize;
+
         ProvisionerInitState::new(
             committee,
             withdrawal_config,
             limiter_state,
             hashi_btc_master_pubkey,
+            threshold,
         )
     }
 }
@@ -300,6 +306,8 @@ pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequ
             .iter()
             .map(|pk| pk.to_bytes().to_vec().into())
             .collect(),
+        num_shares: Some(s.num_shares() as u32),
+        threshold: Some(s.threshold() as u32),
     }
 }
 
@@ -328,13 +336,15 @@ pub fn provisioner_init_request_to_pb(
 }
 
 pub fn provisioner_init_state_to_pb(s: ProvisionerInitState) -> pb::ProvisionerInitState {
-    let (committee, withdrawal_config, limiter_state, hashi_btc_master_pubkey) = s.into_parts();
+    let (committee, withdrawal_config, limiter_state, hashi_btc_master_pubkey, threshold) =
+        s.into_parts();
 
     pb::ProvisionerInitState {
         committee: Some(hashi_committee_to_pb(committee)),
         withdrawal_config: Some(withdrawal_config_to_pb(withdrawal_config)),
         hashi_btc_master_pubkey: Some(hashi_btc_master_pubkey.serialize().to_vec().into()),
         limiter_state: Some(limiter_state_to_pb(limiter_state)),
+        threshold: Some(threshold as u32),
     }
 }
 

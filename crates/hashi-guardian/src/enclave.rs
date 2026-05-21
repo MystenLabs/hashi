@@ -223,7 +223,7 @@ impl EnclaveConfig {
 impl EnclaveState {
     pub fn init(&self, incoming_state: ProvisionerInitState) -> GuardianResult<()> {
         let rate_limiter = incoming_state.build_rate_limiter()?;
-        let (committee, _, _, _) = incoming_state.into_parts();
+        let (committee, _, _, _, _) = incoming_state.into_parts();
 
         self.set_committee(committee)?;
         self.set_rate_limiter(rate_limiter)?;

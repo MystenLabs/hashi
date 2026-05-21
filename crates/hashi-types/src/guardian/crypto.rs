@@ -50,10 +50,23 @@ pub struct Share {
     pub value: Scalar,
 }
 
-// Secret sharing constants: threshold and total number of key provisioners
-// TODO: How to rotate committee / change the below config?
-pub const THRESHOLD: usize = 3;
-pub const NUM_OF_SHARES: usize = 5;
+/// Minimum reconstruction threshold (`t > 1`). A `t == 1` setup gives any
+/// single KP unilateral control of the secret, defeating the point of secret
+/// sharing.
+pub const MIN_THRESHOLD: usize = 2;
+
+/// Validate a `(n, t)` secret-sharing parameter pair.
+pub fn validate_share_params(n: usize, t: usize) -> GuardianResult<()> {
+    if t < MIN_THRESHOLD {
+        return Err(InvalidInputs(format!(
+            "threshold {t} below minimum {MIN_THRESHOLD}"
+        )));
+    }
+    if n < t {
+        return Err(InvalidInputs(format!("num_shares {n} below threshold {t}")));
+    }
+    Ok(())
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct EncryptedShare {
@@ -74,13 +87,6 @@ pub type DigestBytes = Vec<u8>;
 
 impl ShareCommitments {
     pub fn new(commitments: Vec<ShareCommitment>) -> GuardianResult<Self> {
-        if commitments.len() != NUM_OF_SHARES {
-            return Err(InvalidInputs(format!(
-                "expected {} share commitments, got {}",
-                NUM_OF_SHARES,
-                commitments.len()
-            )));
-        }
         let mut map = BTreeMap::new();
         for commitment in commitments {
             if map.insert(commitment.id, commitment.digest).is_some() {
@@ -208,22 +214,29 @@ pub fn decrypt(
 //    Secret Sharing utilities
 // ---------------------------------
 
-/// Split a k256 SecretKey into shares using Shamir's secret sharing
-pub fn split_secret<R: CryptoRng + RngCore>(sk: &k256::SecretKey, rng: &mut R) -> Vec<Share> {
+/// Split a k256 SecretKey into `n` shares using Shamir's secret sharing with
+/// reconstruction threshold `t`.
+pub fn split_secret<R: CryptoRng + RngCore>(
+    sk: &k256::SecretKey,
+    n: usize,
+    t: usize,
+    rng: &mut R,
+) -> GuardianResult<Vec<Share>> {
+    validate_share_params(n, t)?;
     let secret = *sk.to_nonzero_scalar().as_ref();
     let mut coefficients = vec![secret];
-    for _ in 0..(THRESHOLD - 1) {
+    for _ in 0..(t - 1) {
         coefficients.push(Scalar::random(&mut *rng))
     }
 
     // Evaluate
-    (1..=NUM_OF_SHARES)
+    Ok((1..=n)
         .map(|i| NonZeroU16::new(i as u16).expect("Not zeroes!"))
         .map(|i| Share {
             id: i,
             value: eval_poly(i, &coefficients),
         })
-        .collect()
+        .collect())
 }
 
 // Coefficients: [c0, c1, c2, c3]
@@ -239,9 +252,9 @@ pub fn eval_poly(pos: ShareID, coefficients: &[Scalar]) -> Scalar {
     out
 }
 
-/// Combine secret shares to a secp256k1 secret key
-/// Throws an error if duplicate share IDs exist or <t shares are input
-pub fn combine_shares(shares: &[Share]) -> GuardianResult<bitcoin::secp256k1::Keypair> {
+/// Combine secret shares to a secp256k1 secret key with reconstruction
+/// threshold `t`. Errors on duplicate share IDs or fewer than `t` shares.
+pub fn combine_shares(shares: &[Share], t: usize) -> GuardianResult<bitcoin::secp256k1::Keypair> {
     // Validation: ensure no duplicates
     let mut seen_ids = std::collections::HashSet::new();
     for share in shares {
@@ -249,11 +262,11 @@ pub fn combine_shares(shares: &[Share]) -> GuardianResult<bitcoin::secp256k1::Ke
             return Err(InvalidInputs("Duplicate share ID".into()));
         }
     }
-    if seen_ids.len() < THRESHOLD {
+    if seen_ids.len() < t {
         return Err(InvalidInputs(format!(
             "Received only {} out of {} shares",
             seen_ids.len(),
-            THRESHOLD
+            t
         )));
     }
 
@@ -315,25 +328,19 @@ pub fn encrypt_share<R: CryptoRng + RngCore>(
     }
 }
 
-/// Split `sk` into NUM_OF_SHARES shares (THRESHOLD reconstruction), encrypt
-/// each to the matching KP pubkey, and compute the corresponding commitments.
-/// `kp_pubkeys` must have exactly NUM_OF_SHARES entries; share ID `i` (1..=N)
-/// is paired with `kp_pubkeys[i-1]`.
+/// Split `sk` into `kp_pubkeys.len()` shares with reconstruction threshold
+/// `t`, encrypt each to the matching KP pubkey, and compute the corresponding
+/// commitments. Share ID `i` (1..=N) is paired with `kp_pubkeys[i-1]`.
 pub fn split_and_encrypt_for_kps<R: CryptoRng + RngCore>(
     sk: &k256::SecretKey,
     kp_pubkeys: &[EncPubKey],
+    t: usize,
     rng: &mut R,
 ) -> GuardianResult<(Vec<EncryptedShare>, ShareCommitments)> {
-    if kp_pubkeys.len() != NUM_OF_SHARES {
-        return Err(InvalidInputs(format!(
-            "expected {} KP pubkeys, got {}",
-            NUM_OF_SHARES,
-            kp_pubkeys.len()
-        )));
-    }
-    let shares = split_secret(sk, rng);
-    let mut encrypted_shares = Vec::with_capacity(NUM_OF_SHARES);
-    let mut commitments = Vec::with_capacity(NUM_OF_SHARES);
+    let n = kp_pubkeys.len();
+    let shares = split_secret(sk, n, t, rng)?;
+    let mut encrypted_shares = Vec::with_capacity(n);
+    let mut commitments = Vec::with_capacity(n);
     for (share, pk) in shares.iter().zip(kp_pubkeys.iter()) {
         encrypted_shares.push(encrypt_share(share, pk, None, rng));
         commitments.push(commit_share(share));
@@ -419,6 +426,9 @@ mod tests {
         );
     }
 
+    const TEST_N: usize = 5;
+    const TEST_T: usize = 3;
+
     // Verify secret reconstruction with varying number of shares (0 to limit)
     // Tests that:
     // - With insufficient shares (< threshold): either error or wrong reconstruction
@@ -427,19 +437,17 @@ mod tests {
     // - Full round-trip produces equivalent keys
     #[test]
     fn test_varying_share_count() {
-        // Start with a k256::SecretKey
         let original_k256_sk = SecretKey::random(&mut rand::thread_rng());
         let original_bytes = original_k256_sk.to_bytes();
 
-        // Split the secret into shares
-        let shares = split_secret(&original_k256_sk, &mut rand::thread_rng());
+        let shares =
+            split_secret(&original_k256_sk, TEST_N, TEST_T, &mut rand::thread_rng()).unwrap();
 
-        // Test reconstruction with varying numbers of shares from 0 to LIMIT
-        for num_shares in 0..=NUM_OF_SHARES {
+        for num_shares in 0..=TEST_N {
             let shares_subset = &shares[0..num_shares];
-            let result = combine_shares(shares_subset);
+            let result = combine_shares(shares_subset, TEST_T);
 
-            if num_shares < THRESHOLD {
+            if num_shares < TEST_T {
                 // With insufficient shares, either:
                 // 1. The combine operation fails (returns error), OR
                 // 2. The combine operation succeeds but produces wrong secret
@@ -448,54 +456,42 @@ mod tests {
                         // Good: operation failed as expected
                     }
                     Ok(reconstructed) => {
-                        // Operation succeeded but should produce wrong secret
                         let reconstructed_bytes = reconstructed.secret_bytes();
                         assert_ne!(
                             original_bytes.as_slice(),
                             &reconstructed_bytes,
-                            "With {} shares (less than threshold {}), should not reconstruct correct secret",
-                            num_shares,
-                            THRESHOLD
+                            "With {num_shares} shares (less than threshold {TEST_T}), should not reconstruct correct secret",
                         );
                     }
                 }
             } else {
-                // With threshold or more shares, reconstruction should succeed and match original
                 let reconstructed_secp_sk = result.unwrap();
                 let reconstructed_bytes = reconstructed_secp_sk.secret_bytes();
-
-                // Verify the reconstructed secret matches the original
                 assert_eq!(
                     original_bytes.as_slice(),
                     &reconstructed_bytes,
-                    "Reconstructed secret should match original (using {} shares)",
-                    num_shares
+                    "Reconstructed secret should match original (using {num_shares} shares)",
                 );
             }
         }
     }
 
-    // Verify any subset of THRESHOLD shares works
+    // Verify any subset of t shares works
     #[test]
     fn test_varying_subsets() {
         let original_sk = SecretKey::random(&mut rand::thread_rng());
         let original_bytes = original_sk.to_bytes();
 
-        // Generate all shares
-        let shares = split_secret(&original_sk, &mut rand::thread_rng());
+        let shares = split_secret(&original_sk, TEST_N, TEST_T, &mut rand::thread_rng()).unwrap();
 
-        // Test different combinations of THRESHOLD shares
-        // Try shares [0,1,2], [1,2,3], [2,3,4], etc.
-        for start_idx in 0..=(NUM_OF_SHARES - THRESHOLD) {
-            let subset = &shares[start_idx..(start_idx + THRESHOLD)];
-            let reconstructed = combine_shares(subset).unwrap();
+        for start_idx in 0..=(TEST_N - TEST_T) {
+            let subset = &shares[start_idx..(start_idx + TEST_T)];
+            let reconstructed = combine_shares(subset, TEST_T).unwrap();
 
             assert_eq!(
                 original_bytes.as_slice(),
                 &reconstructed.secret_bytes(),
-                "Any subset of {} shares should reconstruct the original secret (testing subset starting at index {})",
-                THRESHOLD,
-                start_idx
+                "Any subset of {TEST_T} shares should reconstruct the original secret (subset starting at {start_idx})",
             );
         }
     }
@@ -519,12 +515,12 @@ mod tests {
     #[test]
     fn test_combine_shares_rejects_duplicate_ids() {
         let sk = SecretKey::random(&mut rand::thread_rng());
-        let shares = split_secret(&sk, &mut rand::thread_rng());
+        let shares = split_secret(&sk, TEST_N, TEST_T, &mut rand::thread_rng()).unwrap();
 
         // Create a list with duplicate share IDs: [shares[0], shares[1], shares[0]]
         let duplicate_shares = vec![shares[0], shares[1], shares[0]];
 
-        let result = combine_shares(&duplicate_shares);
+        let result = combine_shares(&duplicate_shares, TEST_T);
         assert!(
             result.is_err(),
             "combine_shares should reject shares with duplicate IDs"

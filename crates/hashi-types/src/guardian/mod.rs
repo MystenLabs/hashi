@@ -142,6 +142,8 @@ pub struct VerifiedLogRecord {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetupNewKeyRequest {
     key_provisioner_public_keys: Vec<EncPubKey>,
+    num_shares: usize,
+    threshold: usize,
 }
 
 /// `EnclaveSigned<T>`
@@ -178,6 +180,10 @@ pub struct ProvisionerInitState {
     limiter_state: LimiterState,
     /// Hashi BTC master key used to derive child keys for diff inputs
     hashi_btc_master_pubkey: BitcoinPubkey,
+    /// Reconstruction threshold for the current BTC key's secret sharing.
+    /// Set at genesis by `setup_new_key`; carried across enclave restarts by
+    /// each KP and digest-matched across the T submissions.
+    threshold: usize,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -251,6 +257,9 @@ pub struct CurrentKeyState {
     pub seq: u64,
     pub encrypted_shares: Vec<EncryptedShare>,
     pub share_commitments: ShareCommitments,
+    /// Reconstruction threshold (`t`) used when the shares were created. `n`
+    /// is implicit in `encrypted_shares.len()` / `share_commitments.len()`.
+    pub threshold: usize,
 }
 
 /// OI: operator_init
@@ -363,17 +372,35 @@ impl S3Config {
 }
 
 impl SetupNewKeyRequest {
-    pub fn new(public_keys: Vec<EncPubKey>) -> GuardianResult<Self> {
-        if public_keys.len() != NUM_OF_SHARES {
-            return Err(InvalidInputs("provide enough public keys".into()));
+    pub fn new(
+        public_keys: Vec<EncPubKey>,
+        num_shares: usize,
+        threshold: usize,
+    ) -> GuardianResult<Self> {
+        if public_keys.len() != num_shares {
+            return Err(InvalidInputs(format!(
+                "expected {num_shares} public keys, got {}",
+                public_keys.len()
+            )));
         }
+        validate_share_params(num_shares, threshold)?;
         Ok(Self {
             key_provisioner_public_keys: public_keys,
+            num_shares,
+            threshold,
         })
     }
 
     pub fn public_keys(&self) -> &[EncPubKey] {
         &self.key_provisioner_public_keys
+    }
+
+    pub fn num_shares(&self) -> usize {
+        self.num_shares
+    }
+
+    pub fn threshold(&self) -> usize {
+        self.threshold
     }
 }
 
@@ -413,6 +440,7 @@ impl ProvisionerInitState {
         withdrawal_config: WithdrawalConfig,
         limiter_state: LimiterState,
         hashi_btc_master_pubkey: BitcoinPubkey,
+        threshold: usize,
     ) -> GuardianResult<Self> {
         // Validate that limiter state is consistent with config.
         if limiter_state.num_tokens_available > withdrawal_config.max_bucket_capacity_sats {
@@ -420,11 +448,18 @@ impl ProvisionerInitState {
                 "limiter num_tokens_available exceeds max_bucket_capacity".into(),
             ));
         }
+        if threshold < crypto::MIN_THRESHOLD {
+            return Err(InvalidInputs(format!(
+                "threshold {threshold} below minimum {}",
+                crypto::MIN_THRESHOLD
+            )));
+        }
         Ok(Self {
             committee,
             withdrawal_config,
             limiter_state,
             hashi_btc_master_pubkey,
+            threshold,
         })
     }
 
@@ -447,12 +482,14 @@ impl ProvisionerInitState {
         WithdrawalConfig,
         LimiterState,
         BitcoinPubkey,
+        usize,
     ) {
         (
             self.committee,
             self.withdrawal_config,
             self.limiter_state,
             self.hashi_btc_master_pubkey,
+            self.threshold,
         )
     }
 
@@ -462,6 +499,10 @@ impl ProvisionerInitState {
 
     pub fn hashi_btc_master_pubkey(&self) -> BitcoinPubkey {
         self.hashi_btc_master_pubkey
+    }
+
+    pub fn threshold(&self) -> usize {
+        self.threshold
     }
 
     pub fn digest(&self) -> [u8; 32] {
@@ -787,6 +828,7 @@ struct ProvisionerInitStateRepr {
     pub withdrawal_config: WithdrawalConfig,
     pub limiter_state: LimiterState,
     pub hashi_btc_master_pubkey: BitcoinPubkey,
+    pub threshold: usize,
 }
 
 /// Converter from T -> Self that internally validates addresses
@@ -851,12 +893,13 @@ impl From<StandardWithdrawalRequest> for StandardWithdrawalRequestWire {
 
 impl From<&ProvisionerInitState> for ProvisionerInitStateRepr {
     fn from(state: &ProvisionerInitState) -> Self {
-        let (committee, config, limiter_state, pubkey) = state.clone().into_parts();
+        let (committee, config, limiter_state, pubkey, threshold) = state.clone().into_parts();
         Self {
             committee: (&committee).into(),
             withdrawal_config: config,
             limiter_state,
             hashi_btc_master_pubkey: pubkey,
+            threshold,
         }
     }
 }

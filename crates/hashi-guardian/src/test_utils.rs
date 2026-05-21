@@ -126,9 +126,10 @@ pub struct OperatorInitTestArgs {
 
 impl Default for OperatorInitTestArgs {
     fn default() -> Self {
-        let commitments = (1..=NUM_OF_SHARES)
+        const TEST_N: u16 = 5;
+        let commitments = (1..=TEST_N)
             .map(|id| ShareCommitment {
-                id: std::num::NonZeroU16::new(id as u16).unwrap(),
+                id: std::num::NonZeroU16::new(id).unwrap(),
                 digest: vec![],
             })
             .collect();
@@ -218,8 +219,13 @@ pub fn finalize_enclave(
     enclave.config.set_hashi_btc_pk(master_pubkey)?;
     enclave.config.set_withdrawal_config(withdrawal_config)?;
 
-    let init_state =
-        ProvisionerInitState::new(committee, withdrawal_config, limiter_state, master_pubkey)?;
+    let init_state = ProvisionerInitState::new(
+        committee,
+        withdrawal_config,
+        limiter_state,
+        master_pubkey,
+        3, /* default threshold for test enclaves */
+    )?;
     enclave.state.init(init_state)?;
 
     enclave

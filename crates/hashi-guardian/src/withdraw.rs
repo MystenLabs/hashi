@@ -260,6 +260,7 @@ mod tests {
             withdrawal_config,
             limiter_state,
             hashi_btc_master_pubkey,
+            3, /* default threshold for test enclaves */
         )
         .unwrap();
         enclave.state.init(init_state).unwrap();

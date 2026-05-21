@@ -83,8 +83,15 @@ message S3BucketInfo {
 
 // Untrusted wire DTO. Converted to a validated domain request in the server.
 message SetupNewKeyRequest {
-  // HPKE public keys for key provisioners (NUM_OF_SHARES entries expected).
+  // HPKE public keys for key provisioners. Length must equal `num_shares`.
   repeated bytes key_provisioner_public_keys = 1;
+
+  // Total number of shares to split the new BTC key into. Must match
+  // `key_provisioner_public_keys.len()`.
+  optional uint32 num_shares = 2;
+
+  // Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
+  optional uint32 threshold = 3;
 }
 
 // Ciphertext produced by HPKE encryption.
@@ -182,6 +189,11 @@ message ProvisionerInitState {
 
   // Rate limiter state.
   LimiterState limiter_state = 6;
+
+  // Reconstruction threshold for the current BTC key's secret sharing. Must
+  // be >= MIN_THRESHOLD (= 2). Digest-matched across the T submissions, like
+  // the rest of this state.
+  optional uint32 threshold = 7;
 }
 
 message WithdrawalConfig {

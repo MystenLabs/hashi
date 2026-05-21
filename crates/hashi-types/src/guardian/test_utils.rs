@@ -11,7 +11,6 @@ use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
 use super::LimiterState;
-use super::NUM_OF_SHARES;
 use super::OperatorInitRequest;
 use super::ProvisionerInitRequest;
 use super::ProvisionerInitState;
@@ -25,6 +24,10 @@ use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
 use super::WithdrawalConfig;
 use super::WithdrawalID;
+
+// Default secret-sharing params used by mock_for_testing helpers.
+const TEST_N: usize = 5;
+const TEST_T: usize = 3;
 use super::bitcoin_utils::BTC_LIB;
 use super::bitcoin_utils::InputUTXO;
 use super::bitcoin_utils::OutputUTXO;
@@ -95,12 +98,12 @@ impl GetGuardianInfoResponse {
 impl SetupNewKeyRequest {
     pub fn mock_for_testing() -> Self {
         let pk = EncPubKey::from_bytes(&[0u8; 32]).unwrap();
-        SetupNewKeyRequest::new(vec![pk; NUM_OF_SHARES]).unwrap()
+        SetupNewKeyRequest::new(vec![pk; TEST_N], TEST_N, TEST_T).unwrap()
     }
 }
 
 fn dummy_commitments() -> ShareCommitments {
-    let commitments = (0..NUM_OF_SHARES)
+    let commitments = (0..TEST_N)
         .map(|i| ShareCommitment {
             id: NonZeroU16::new((i + 1) as u16).unwrap(),
             digest: vec![0u8; 32],
@@ -110,7 +113,7 @@ fn dummy_commitments() -> ShareCommitments {
 }
 
 fn dummy_encrypted_shares() -> Vec<EncryptedShare> {
-    (0..NUM_OF_SHARES)
+    (0..TEST_N)
         .map(|i| EncryptedShare {
             id: NonZeroU16::new((i + 1) as u16).unwrap(),
             ciphertext: Ciphertext {
@@ -145,7 +148,7 @@ impl OperatorInitRequest {
         };
 
         let mut share_commitments = vec![];
-        for i in 0..NUM_OF_SHARES {
+        for i in 0..TEST_N {
             share_commitments.push(ShareCommitment {
                 id: NonZeroU16::new((i + 1) as u16).unwrap(),
                 digest: vec![0u8; 32],
@@ -214,6 +217,7 @@ impl ProvisionerInitState {
             withdrawal_config,
             limiter_state,
             hashi_btc_master_pubkey,
+            TEST_T,
         )
         .expect("valid ProvisionerInitState")
     }
@@ -235,6 +239,7 @@ impl ProvisionerInitState {
                 next_seq: 0,
             },
             kp.x_only_public_key().0,
+            TEST_T,
         )
         .expect("valid ProvisionerInitState")
     }

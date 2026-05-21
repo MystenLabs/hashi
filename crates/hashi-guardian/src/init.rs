@@ -160,10 +160,8 @@ pub async fn provisioner_init(
     }
     received_shares.push(share);
     let current_share_count = received_shares.len();
-    info!(
-        "Total shares received: {}/{}.",
-        current_share_count, THRESHOLD
-    );
+    let threshold = request.state().threshold();
+    info!("Total shares received: {current_share_count}/{threshold}.");
 
     // Note: This S3 log does not serve any security purpose.
     enclave
@@ -175,7 +173,7 @@ pub async fn provisioner_init(
         .expect("Unable to log ProvisionerInitSuccess");
 
     // 5) If we have enough shares, finish initialization: combine shares & set config
-    if current_share_count >= THRESHOLD {
+    if current_share_count >= threshold {
         let shares_vec: Vec<Share> = received_shares.iter().cloned().collect();
         finalize_init(&shares_vec, &enclave, request.into_state()).await;
         // Log to S3 indicating that withdrawals can be expected henceforth
@@ -202,7 +200,8 @@ async fn finalize_init(
     incoming_state: ProvisionerInitState,
 ) {
     info!("Threshold reached, combining shares.");
-    let enclave_btc_keypair = combine_shares(shares).expect("Unable to combine shares");
+    let enclave_btc_keypair =
+        combine_shares(shares, incoming_state.threshold()).expect("Unable to combine shares");
 
     info!("Setting enclave keypair.");
     enclave
@@ -242,15 +241,17 @@ fn verify_share(share: &Share, commitments: &ShareCommitments) -> GuardianResult
 mod tests {
     use super::*;
     use crate::OperatorInitTestArgs;
-    use hashi_types::guardian::crypto::NUM_OF_SHARES;
     use hashi_types::guardian::test_utils::create_btc_keypair;
     use k256::SecretKey;
+
+    const TEST_N: usize = 5;
+    const TEST_T: usize = 3;
 
     /// Helper: Generate test shares and initialized enclave
     /// Returns (shares, enclave)
     async fn setup_test_shares_and_enclave() -> (Vec<Share>, Arc<Enclave>) {
         let sk = SecretKey::random(&mut rand::thread_rng());
-        let shares = split_secret(&sk, &mut rand::thread_rng());
+        let shares = split_secret(&sk, TEST_N, TEST_T, &mut rand::thread_rng()).unwrap();
         let share_commitments = ShareCommitments::from_shares(&shares).unwrap();
         let enclave = Enclave::create_operator_initialized_with(
             OperatorInitTestArgs::default().with_commitments(share_commitments),
@@ -264,8 +265,7 @@ mod tests {
         let (shares, enclave) = setup_test_shares_and_enclave().await;
         let init_state = ProvisionerInitState::mock_for_testing(None);
 
-        // Simulate THRESHOLD KPs calling provisioner_init
-        for (i, share) in shares.iter().enumerate().take(NUM_OF_SHARES) {
+        for (i, share) in shares.iter().enumerate().take(TEST_N) {
             let request = ProvisionerInitRequest::build_from_share_and_state(
                 share,
                 enclave.encryption_public_key(),
@@ -275,13 +275,11 @@ mod tests {
 
             let result = provisioner_init(enclave.clone(), request).await;
 
-            // Check behavior based on whether we've reached/exceeded threshold
-            if i == THRESHOLD - 1 {
+            if i == TEST_T - 1 {
                 // At exactly threshold (first time), call should succeed
                 assert!(
                     result.is_ok(),
-                    "Should succeed at threshold (iteration {})",
-                    i
+                    "Should succeed at threshold (iteration {i})"
                 );
                 assert!(
                     enclave.config.is_enclave_btc_keypair_set(),
@@ -291,14 +289,9 @@ mod tests {
                     enclave.config.is_hashi_btc_master_pubkey_set(),
                     "Hashi BTC key should be set after threshold"
                 );
-            } else if i >= THRESHOLD {
+            } else if i >= TEST_T {
                 // After threshold, subsequent init calls should fail
-                assert!(
-                    result.is_err(),
-                    "Should fail at iteration {}: {:?}",
-                    i,
-                    result
-                );
+                assert!(result.is_err(), "Should fail at iteration {i}: {result:?}");
                 assert!(
                     enclave.config.is_enclave_btc_keypair_set(),
                     "Bitcoin key should still be set"
@@ -317,7 +310,7 @@ mod tests {
             }
         }
 
-        println!("Successfully initialized enclave with {} shares", THRESHOLD);
+        println!("Successfully initialized enclave with {TEST_T} shares");
     }
 
     #[tokio::test]
