@@ -22,7 +22,6 @@ use fastcrypto_tbls::random_oracle::RandomOracle;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use hashi_types::committee::Committee;
 use hashi_types::committee::CommitteeMember;
-use hashi_types::committee::EncryptionPrivateKey;
 use hashi_types::committee::EncryptionPublicKey;
 use hashi_types::committee::MemberSignature;
 use std::collections::BTreeMap;
@@ -955,6 +954,38 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
     assert!(
         err.to_string().contains("no committee for epoch"),
         "Error should mention missing committee"
+    );
+}
+
+#[test]
+fn test_mpc_manager_new_fails_on_encryption_key_mismatch() {
+    let setup = TestSetup::new(5);
+    let mut rng = rand::thread_rng();
+    let wrong_encryption_key = PrivateKey::<EncryptionGroupElement>::new(&mut rng);
+
+    let result = MpcManager::new(
+        setup.address(0),
+        &setup.committee_set,
+        setup.epoch(),
+        setup.session_id(),
+        wrong_encryption_key,
+        None,
+        setup.signing_keys[0].clone(),
+        Box::new(InMemoryPublicMessagesStore::new()),
+        TEST_CHAIN_ID,
+        None,
+        TEST_BATCH_SIZE_PER_WEIGHT,
+        None,
+        &test_metrics(),
+    );
+
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => panic!("Should fail on encryption key mismatch"),
+    };
+    assert!(
+        matches!(&err, MpcError::InvalidConfig(msg) if msg.contains("encryption key mismatch")),
+        "Expected MpcError::InvalidConfig with mismatch message, got: {err}"
     );
 }
 
@@ -7966,20 +7997,7 @@ fn test_reconstruct_from_dkg_certificates_uses_previous_encryption_key() {
         s
     };
 
-    // The previous epoch's encryption key (matches what dealers encrypted to).
     let prev_key = setup.encryption_keys[target_index].clone();
-    // A fresh, independent key for the new epoch.
-    let new_key = EncryptionPrivateKey::new(&mut rng);
-    assert_ne!(
-        EncryptionPublicKey::from_private_key(&prev_key)
-            .as_element()
-            .to_byte_array(),
-        EncryptionPublicKey::from_private_key(&new_key)
-            .as_element()
-            .to_byte_array(),
-        "test setup precondition: new and previous keys must differ"
-    );
-
     // With `previous_encryption_key = Some(prev_key)`: reconstruction succeeds.
     let session_id = SessionId::new(TEST_CHAIN_ID, target_epoch, &ProtocolType::Dkg);
     let manager_with_prev = MpcManager::new(
@@ -7987,7 +8005,7 @@ fn test_reconstruct_from_dkg_certificates_uses_previous_encryption_key() {
         &committee_set,
         target_epoch,
         session_id.clone(),
-        new_key.clone(),
+        prev_key.clone(),
         Some(prev_key.clone()),
         setup.signing_keys[target_index].clone(),
         Box::new(build_store()),
@@ -8015,7 +8033,7 @@ fn test_reconstruct_from_dkg_certificates_uses_previous_encryption_key() {
         &committee_set,
         target_epoch,
         session_id,
-        new_key,
+        prev_key,
         None,
         setup.signing_keys[target_index].clone(),
         Box::new(build_store()),

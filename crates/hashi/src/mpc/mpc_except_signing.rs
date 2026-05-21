@@ -196,10 +196,11 @@ impl MpcManager {
                 .expect("party_id was just derived from this committee") as i64,
         );
         if !keys_match {
-            tracing::error!(
-                "Encryption key mismatch: config private key derives a different public key \
-                 from what is registered on-chain for this node."
-            );
+            return Err(MpcError::InvalidConfig(format!(
+                "encryption key mismatch at epoch {epoch}: local {my} vs on-chain {chain}",
+                my = hex::encode(my_pk.as_element().to_byte_array()),
+                chain = hex::encode(committee_pk.as_element().to_byte_array()),
+            )));
         }
         let (previous_epoch, previous_committee) =
             match committee_set.previous_committee_for_target(epoch) {
