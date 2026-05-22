@@ -11,10 +11,12 @@
 mod nesting;
 mod object;
 mod ownership;
+mod traversal;
 mod typed;
 
 pub use nesting::{NestedUids, UidToContainer};
 pub use ownership::{OwnedByAddress, OwnedByObject};
+pub use traversal::RootedTraversal;
 pub use typed::ByType;
 
 use sui_sdk_types::{Address, Object, ObjectType, Owner, StructTag};
