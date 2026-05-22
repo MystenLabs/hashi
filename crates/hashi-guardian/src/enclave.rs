@@ -67,11 +67,11 @@ pub struct EnclaveState {
 /// provisioner_init flow completes; the OnceLock flags retain their state.
 #[derive(Default)]
 pub struct Scratchpad {
-    /// The received shares
+    /// The received shares during provisioner_init (non-setup mode) or rotate_kps (setup mode)
     pub shares: tokio::sync::Mutex<Vec<Share>>,
     /// Secret-sharing instance (commitments + N + T) set by operator_init.
     pub secret_sharing_instance: OnceLock<SecretSharingInstance>,
-    /// Hash of the state in ProvisionerInitRequest (non-setup mode) (or) RotateKps (setup mode)
+    /// Hash of the state in ProvisionerInitRequest (non-setup mode) or RotateKpsRequest (setup mode)
     pub state_hash: OnceLock<[u8; 32]>,
     /// Set once operator_init has successfully written all logs to S3.
     /// This prevents heartbeats from being emitted before operator_init logs.

@@ -40,8 +40,9 @@ async fn main() -> Result<()> {
         info!("Normal mode: provisioner_init/standard_withdrawal enabled; setup_new_key/rotate_kps disabled.");
     }
 
-    let signing_keys = GuardianSignKeyPair::new(rand::thread_rng());
-    let encryption_keys = GuardianEncKeyPair::random(&mut rand::thread_rng());
+    let mut rng = rand::thread_rng();
+    let signing_keys = GuardianSignKeyPair::new(&mut rng);
+    let encryption_keys = GuardianEncKeyPair::random(&mut rng);
     let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys));
 
     let svc = GuardianGrpc {
