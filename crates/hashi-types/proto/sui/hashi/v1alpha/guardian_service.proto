@@ -54,8 +54,8 @@ message SignedGuardianInfo {
 
 // Information about the guardian enclave.
 message GuardianInfoData {
-  // Share commitments (if set). Used by key provisioners to check that right key will be used.
-  optional GuardianShareCommitments share_commitments = 1;
+  // Secret-sharing config (if set).
+  optional SecretSharingConfig secret_sharing_config = 1;
 
   // S3 bucket info (if set). Used by key provisioners to check S3 bucket info.
   optional S3BucketInfo bucket_info = 2;
@@ -67,9 +67,14 @@ message GuardianInfoData {
   optional string server_version = 4;
 }
 
-// Wrapper to allow presence for a repeated field.
-message GuardianShareCommitments {
-  repeated GuardianShareCommitment share_commitments = 1;
+// Public description of the current BTC key's secret-sharing scheme.
+// `commitments.len() == num_shares` and `2 <= threshold <= num_shares`.
+// `sharing_seq` versions instances: 0 at setup, +1 per rotation.
+message SecretSharingConfig {
+  repeated GuardianShareCommitment commitments = 1;
+  optional uint32 num_shares = 2;
+  optional uint32 threshold = 3;
+  optional uint64 sharing_seq = 4;
 }
 
 message S3BucketInfo {
@@ -83,8 +88,15 @@ message S3BucketInfo {
 
 // Untrusted wire DTO. Converted to a validated domain request in the server.
 message SetupNewKeyRequest {
-  // HPKE public keys for key provisioners (NUM_OF_SHARES entries expected).
+  // HPKE public keys for key provisioners. Length must equal `num_shares`.
   repeated bytes key_provisioner_public_keys = 1;
+
+  // Total number of shares to split the new BTC key into. Must match
+  // `key_provisioner_public_keys.len()`.
+  optional uint32 num_shares = 2;
+
+  // Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
+  optional uint32 threshold = 3;
 }
 
 // Ciphertext produced by HPKE encryption.
@@ -135,8 +147,8 @@ message OperatorInitRequest {
   // S3 access keys
   S3Config s3_config = 1;
 
-  // Commitments published by the operator for the shares generated during setup.
-  repeated GuardianShareCommitment share_commitments = 2;
+  // Secret-sharing scheme for the current BTC key.
+  SecretSharingConfig secret_sharing_config = 2;
 
   // Network the guardian is operating on.
   optional Network network = 3;

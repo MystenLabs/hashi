@@ -26,6 +26,7 @@ use super::LimiterState;
 use super::OperatorInitRequest;
 use super::ProvisionerInitRequest;
 use super::ProvisionerInitState;
+use super::SecretSharingConfig;
 use super::SetupNewKeyRequest;
 use super::SetupNewKeyResponse;
 use super::ShareCommitment;
@@ -74,7 +75,10 @@ impl TryFrom<pb::SetupNewKeyRequest> for SetupNewKeyRequest {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| InvalidInputs(format!("invalid key_provisioner_public_key: {e}")))?;
 
-        SetupNewKeyRequest::new(pks)
+        let num_shares = req.num_shares.ok_or_else(|| missing("num_shares"))? as usize;
+        let threshold = req.threshold.ok_or_else(|| missing("threshold"))? as usize;
+
+        SetupNewKeyRequest::new(pks, num_shares, threshold)
     }
 }
 
@@ -122,11 +126,37 @@ impl TryFrom<pb::OperatorInitRequest> for OperatorInitRequest {
         let s3_config_pb = req.s3_config.ok_or_else(|| missing("s3_config"))?;
         let s3_config = pb_to_s3_config(s3_config_pb)?;
 
-        let share_commitments = pb_share_commitments_to_domain(&req.share_commitments)?;
+        let secret_sharing_config_pb = req
+            .secret_sharing_config
+            .ok_or_else(|| missing("secret_sharing_config"))?;
+        let secret_sharing_config = pb_to_secret_sharing_config(secret_sharing_config_pb)?;
 
         let network = pb_to_network(req.network.ok_or_else(|| missing("network"))?)?;
 
-        OperatorInitRequest::new(s3_config, share_commitments, network)
+        OperatorInitRequest::new(s3_config, secret_sharing_config, network)
+    }
+}
+
+pub fn pb_to_secret_sharing_config(
+    pb: pb::SecretSharingConfig,
+) -> GuardianResult<SecretSharingConfig> {
+    let commitments = pb_share_commitments_to_domain(&pb.commitments)?;
+    let num_shares = pb.num_shares.ok_or_else(|| missing("num_shares"))? as usize;
+    let threshold = pb.threshold.ok_or_else(|| missing("threshold"))? as usize;
+    let sharing_seq = pb.sharing_seq.ok_or_else(|| missing("sharing_seq"))?;
+    SecretSharingConfig::new(commitments, num_shares, threshold, sharing_seq)
+}
+
+pub fn secret_sharing_config_to_pb(cfg: &SecretSharingConfig) -> pb::SecretSharingConfig {
+    pb::SecretSharingConfig {
+        commitments: cfg
+            .commitments()
+            .iter()
+            .map(share_commitment_to_pb)
+            .collect(),
+        num_shares: Some(cfg.num_shares() as u32),
+        threshold: Some(cfg.threshold() as u32),
+        sharing_seq: Some(cfg.sharing_seq()),
     }
 }
 
@@ -300,6 +330,8 @@ pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequ
             .iter()
             .map(|pk| pk.to_bytes().to_vec().into())
             .collect(),
+        num_shares: Some(s.num_shares() as u32),
+        threshold: Some(s.threshold() as u32),
     }
 }
 
@@ -307,13 +339,10 @@ pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequ
 pub fn operator_init_request_to_pb(
     r: OperatorInitRequest,
 ) -> GuardianResult<pb::OperatorInitRequest> {
-    let (s3_config, share_commitments, network) = r.into_parts();
+    let (s3_config, secret_sharing_config, network) = r.into_parts();
     Ok(pb::OperatorInitRequest {
         s3_config: Some(s3_config_to_pb(s3_config)),
-        share_commitments: share_commitments
-            .into_iter()
-            .map(share_commitment_to_pb)
-            .collect(),
+        secret_sharing_config: Some(secret_sharing_config_to_pb(&secret_sharing_config)),
         network: Some(network_to_pb(network)?),
     })
 }
@@ -435,10 +464,10 @@ fn s3_bucket_info_to_pb(info: super::S3BucketInfo) -> pb::S3BucketInfo {
 }
 
 fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<GuardianInfo> {
-    let share_commitments = match data.share_commitments {
-        None => None,
-        Some(wrapper) => Some(pb_share_commitments_to_domain(&wrapper.share_commitments)?),
-    };
+    let secret_sharing_config = data
+        .secret_sharing_config
+        .map(pb_to_secret_sharing_config)
+        .transpose()?;
 
     let bucket_info = data.bucket_info.map(pb_to_s3_bucket_info).transpose()?;
 
@@ -452,7 +481,7 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
         .ok_or_else(|| missing("server_version"))?;
 
     Ok(GuardianInfo {
-        share_commitments,
+        secret_sharing_config,
         bucket_info,
         encryption_pubkey,
         server_version,
@@ -461,11 +490,10 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
 
 fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
     pb::GuardianInfoData {
-        share_commitments: info
-            .share_commitments
-            .map(|v| pb::GuardianShareCommitments {
-                share_commitments: v.into_iter().map(share_commitment_to_pb).collect(),
-            }),
+        secret_sharing_config: info
+            .secret_sharing_config
+            .as_ref()
+            .map(secret_sharing_config_to_pb),
         bucket_info: info.bucket_info.map(s3_bucket_info_to_pb),
         encryption_pubkey: Some(info.encryption_pubkey.into()),
         server_version: Some(info.server_version),

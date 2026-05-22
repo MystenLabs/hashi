@@ -10,13 +10,15 @@ Canonical key layout:
 - `heartbeat/{yyyy}/{mm}/{dd}/{hh}/{session_id}-{counter:020}.json`
 - `withdraw/{yyyy}/{mm}/{dd}/{hh}/success-{seq:020}-{session_id}-wid{wid}.json`
 - `withdraw/{yyyy}/{mm}/{dd}/{hh}/failure-{session_id}-wid{wid}-{rand8}.json`
+- `secret_sharing/{sharing_seq:020}-{session_id}.json`
 
 Where:
 
-- `session_id` is the enclave ephemeral signing pubkey bytes encoded as lowercase hex.
-- `init_suffix` is a semantic label (`oi-attestation-unsigned`, `oi-guardian-info`, `setup-new-key-success`, `pi-success-share-{share_id}`, `pi-enclave-fully-initialized`).
+- `session_id` is the first 16 hex chars of the enclave ephemeral signing pubkey (lowercase). Acts as a short per-session tag in keys; full pubkey verification still happens via the signed log payload (`SESSION_ID_HEX_LEN` in `hashi-types`).
+- `init_suffix` is a semantic label (`oi-attestation-unsigned`, `oi-guardian-info`, `pi-success-share-{share_id}`, `pi-enclave-fully-initialized`).
 - `counter` is a zero-padded decimal sequence number (used in heartbeats only).
-- `seq` is the limiter sequence number consumed by this withdrawal; zero-padded so lexicographic order within an hour bucket equals seq order.
+- `seq` (in `withdraw/`) is the zero-padded limiter sequence number consumed by the withdrawal.
+- `sharing_seq` (in `secret_sharing/`) is a zero-padded rotation counter — `setup_new_key` writes `0`; future key-provisioner rotations will append `prev+1`.
 - `rand8` is a random 8-hex suffix to avoid key collisions (failures only — successes are uniquely keyed by seq).
 
 ## Stream semantics
@@ -24,9 +26,12 @@ Where:
 - `init` logs are per-session and deterministic by semantic message kind.
 - `heartbeat` logs are hour-partitioned and strictly ordered per session.
 - `withdraw` logs are hour-partitioned. Successes are seq-sorted within a bucket so the KP rotating in the next enclave can recover limiter state by reading the lexicographically last success key.
+- `secret_sharing` logs are flat (not date-partitioned). Each entry is a `SecretSharingLogMessage { encrypted_shares, secret_sharing_config }` written by `setup_new_key` (genesis, `sharing_seq=0`). KPs read the lexicographically last entry to learn the current authoritative commitments and to fetch their encrypted shares.
 
 ## Why this layout
 
 - `init/{session_id}-...` keeps init logs session-addressable.
 - `heartbeat/...` and `withdraw/...` date partitions support efficient hour-based polling.
-- Prefixes (`init`, `heartbeat`, `withdraw`) allow independent S3 deletion policies.
+- `secret_sharing/` is flat because the consumer always wants "latest"; a lex sort over the whole prefix is cheap and gives that directly.
+- Zero-padding (`{seq:020}` in `withdraw/`, `{sharing_seq:020}` in `secret_sharing/`) makes lexicographic order over the keys equal seq order. The signed log payload embeds the same value, so a fetched object's filename and content can be cross-checked.
+- Prefixes (`init`, `heartbeat`, `withdraw`, `secret_sharing`) allow independent S3 deletion policies.

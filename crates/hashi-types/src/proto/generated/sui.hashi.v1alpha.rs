@@ -1150,9 +1150,9 @@ pub struct SignedGuardianInfo {
 /// Information about the guardian enclave.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GuardianInfoData {
-    /// Share commitments (if set). Used by key provisioners to check that right key will be used.
+    /// Secret-sharing config (if set).
     #[prost(message, optional, tag = "1")]
-    pub share_commitments: ::core::option::Option<GuardianShareCommitments>,
+    pub secret_sharing_config: ::core::option::Option<SecretSharingConfig>,
     /// S3 bucket info (if set). Used by key provisioners to check S3 bucket info.
     #[prost(message, optional, tag = "2")]
     pub bucket_info: ::core::option::Option<S3BucketInfo>,
@@ -1163,11 +1163,19 @@ pub struct GuardianInfoData {
     #[prost(string, optional, tag = "4")]
     pub server_version: ::core::option::Option<::prost::alloc::string::String>,
 }
-/// Wrapper to allow presence for a repeated field.
+/// Public description of the current BTC key's secret-sharing scheme.
+/// `commitments.len() == num_shares` and `2 <= threshold <= num_shares`.
+/// `sharing_seq` versions instances: 0 at setup, +1 per rotation.
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct GuardianShareCommitments {
+pub struct SecretSharingConfig {
     #[prost(message, repeated, tag = "1")]
-    pub share_commitments: ::prost::alloc::vec::Vec<GuardianShareCommitment>,
+    pub commitments: ::prost::alloc::vec::Vec<GuardianShareCommitment>,
+    #[prost(uint32, optional, tag = "2")]
+    pub num_shares: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "3")]
+    pub threshold: ::core::option::Option<u32>,
+    #[prost(uint64, optional, tag = "4")]
+    pub sharing_seq: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct S3BucketInfo {
@@ -1179,9 +1187,16 @@ pub struct S3BucketInfo {
 /// Untrusted wire DTO. Converted to a validated domain request in the server.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SetupNewKeyRequest {
-    /// HPKE public keys for key provisioners (NUM_OF_SHARES entries expected).
+    /// HPKE public keys for key provisioners. Length must equal `num_shares`.
     #[prost(bytes = "bytes", repeated, tag = "1")]
     pub key_provisioner_public_keys: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
+    /// Total number of shares to split the new BTC key into. Must match
+    /// `key_provisioner_public_keys.len()`.
+    #[prost(uint32, optional, tag = "2")]
+    pub num_shares: ::core::option::Option<u32>,
+    /// Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
+    #[prost(uint32, optional, tag = "3")]
+    pub threshold: ::core::option::Option<u32>,
 }
 /// Ciphertext produced by HPKE encryption.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1238,9 +1253,9 @@ pub struct OperatorInitRequest {
     /// S3 access keys
     #[prost(message, optional, tag = "1")]
     pub s3_config: ::core::option::Option<S3Config>,
-    /// Commitments published by the operator for the shares generated during setup.
-    #[prost(message, repeated, tag = "2")]
-    pub share_commitments: ::prost::alloc::vec::Vec<GuardianShareCommitment>,
+    /// Secret-sharing scheme for the current BTC key.
+    #[prost(message, optional, tag = "2")]
+    pub secret_sharing_config: ::core::option::Option<SecretSharingConfig>,
     /// Network the guardian is operating on.
     #[prost(enumeration = "Network", optional, tag = "3")]
     pub network: ::core::option::Option<i32>,

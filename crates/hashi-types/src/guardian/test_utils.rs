@@ -11,12 +11,12 @@ use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
 use super::LimiterState;
-use super::NUM_OF_SHARES;
 use super::OperatorInitRequest;
 use super::ProvisionerInitRequest;
 use super::ProvisionerInitState;
 use super::S3BucketInfo;
 use super::S3Config;
+use super::SecretSharingConfig;
 use super::SetupNewKeyRequest;
 use super::SetupNewKeyResponse;
 use super::ShareCommitment;
@@ -25,6 +25,10 @@ use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
 use super::WithdrawalConfig;
 use super::WithdrawalID;
+
+// Default secret-sharing params used by mock_for_testing helpers.
+const TEST_N: usize = 5;
+const TEST_T: usize = 3;
 use super::bitcoin_utils::BTC_LIB;
 use super::bitcoin_utils::InputUTXO;
 use super::bitcoin_utils::OutputUTXO;
@@ -73,7 +77,7 @@ impl GetGuardianInfoResponse {
         let signing_pub_key = signing_key.verification_key();
 
         let info = GuardianInfo {
-            share_commitments: None,
+            secret_sharing_config: None,
             bucket_info: Some(super::S3BucketInfo {
                 bucket: "bucket".to_string(),
                 region: "us-east-1".to_string(),
@@ -95,12 +99,12 @@ impl GetGuardianInfoResponse {
 impl SetupNewKeyRequest {
     pub fn mock_for_testing() -> Self {
         let pk = EncPubKey::from_bytes(&[0u8; 32]).unwrap();
-        SetupNewKeyRequest::new(vec![pk; NUM_OF_SHARES]).unwrap()
+        SetupNewKeyRequest::new(vec![pk; TEST_N], TEST_N, TEST_T).unwrap()
     }
 }
 
 fn dummy_commitments() -> ShareCommitments {
-    let commitments = (0..NUM_OF_SHARES)
+    let commitments = (0..TEST_N)
         .map(|i| ShareCommitment {
             id: NonZeroU16::new((i + 1) as u16).unwrap(),
             digest: vec![0u8; 32],
@@ -110,7 +114,7 @@ fn dummy_commitments() -> ShareCommitments {
 }
 
 fn dummy_encrypted_shares() -> Vec<EncryptedShare> {
-    (0..NUM_OF_SHARES)
+    (0..TEST_N)
         .map(|i| EncryptedShare {
             id: NonZeroU16::new((i + 1) as u16).unwrap(),
             ciphertext: Ciphertext {
@@ -145,16 +149,23 @@ impl OperatorInitRequest {
         };
 
         let mut share_commitments = vec![];
-        for i in 0..NUM_OF_SHARES {
+        for i in 0..TEST_N {
             share_commitments.push(ShareCommitment {
                 id: NonZeroU16::new((i + 1) as u16).unwrap(),
                 digest: vec![0u8; 32],
             })
         }
+        let secret_sharing_config = SecretSharingConfig::new(
+            ShareCommitments::new(share_commitments).unwrap(),
+            TEST_N,
+            TEST_T,
+            0,
+        )
+        .unwrap();
 
         OperatorInitRequest {
             s3_config,
-            share_commitments: ShareCommitments::new(share_commitments).unwrap(),
+            secret_sharing_config,
             network: super::Network::Regtest,
         }
     }

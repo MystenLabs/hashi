@@ -17,8 +17,10 @@ use tonic_health::server::health_reporter;
 use tracing::info;
 
 /// Enclave initialization.
-/// SETUP_MODE=true: only get_attestation, operator_init and setup_new_key are enabled.
-/// SETUP_MODE=false: all endpoints except setup_new_key are enabled.
+/// `setup_new_key` is gated to SETUP_MODE=true; `provisioner_init` and
+/// `standard_withdrawal` are gated to SETUP_MODE=false. Everything else
+/// (operator_init, get_guardian_info, …) is available in both modes. See the
+/// per-route gates in `rpc.rs`.
 #[tokio::main]
 async fn main() -> Result<()> {
     hashi_types::telemetry::TelemetryConfig::new()
@@ -33,9 +35,9 @@ async fn main() -> Result<()> {
         .unwrap_or(false);
 
     if setup_mode {
-        info!("Setup mode: setup_new_key route available, provisioner_init disabled.");
+        info!("Setup mode: setup_new_key enabled; provisioner_init/standard_withdrawal disabled.");
     } else {
-        info!("Normal mode: provisioner_init route available, setup_new_key disabled.");
+        info!("Normal mode: provisioner_init/standard_withdrawal enabled; setup_new_key disabled.");
     }
 
     let signing_keys = GuardianSignKeyPair::new(rand::thread_rng());

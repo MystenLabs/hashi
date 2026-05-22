@@ -54,19 +54,35 @@ use std::time::Duration;
 /// Object lock durations used for S3 log objects.
 ///
 /// These are public so that external verifiers/monitors can apply the same expectations.
-pub const S3_OBJECT_LOCK_DURATION_INIT: Duration = Duration::from_secs(5 * 60);
-pub const S3_OBJECT_LOCK_DURATION_WITHDRAW: Duration = Duration::from_secs(5 * 60);
-pub const S3_OBJECT_LOCK_DURATION_HEARTBEAT: Duration = Duration::from_secs(5 * 60);
+///
+/// TODO: Uniform 7 days is a coarse placeholder. Revisit per-log-type
+/// against the SLO we actually want to defend — heartbeats could be shorter,
+/// secret_sharing/withdraws likely want years.
+const ONE_WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+pub const S3_OBJECT_LOCK_DURATION_INIT: Duration = ONE_WEEK;
+pub const S3_OBJECT_LOCK_DURATION_WITHDRAW: Duration = ONE_WEEK;
+pub const S3_OBJECT_LOCK_DURATION_HEARTBEAT: Duration = ONE_WEEK;
+pub const S3_OBJECT_LOCK_DURATION_SECRET_SHARING: Duration = ONE_WEEK;
 
 /// S3 sub-prefixes used for guardian log streams.
 /// See `crates/hashi-guardian/README.md` for canonical key layout.
 pub const S3_DIR_INIT: &str = "init";
 pub const S3_DIR_WITHDRAW: &str = "withdraw";
 pub const S3_DIR_HEARTBEAT: &str = "heartbeat";
+pub const S3_DIR_SECRET_SHARING: &str = "secret_sharing";
 
-/// Canonical guardian session ID derived from the enclave signing public key.
+/// Length of the session ID prefix (hex chars) used in S3 keys. 16 hex =
+/// 64 bits of the signing pubkey, comfortably below any collision risk for
+/// realistic session counts.
+pub const SESSION_ID_HEX_LEN: usize = 16;
+
+/// Canonical guardian session ID — a short prefix of the hex-encoded signing
+/// public key. Used as a per-session tag in S3 object keys; full pubkey
+/// verification still happens via the signed log payload.
 pub fn session_id_from_signing_pubkey(signing_pub_key: &GuardianPubKey) -> String {
-    ::hex::encode(signing_pub_key.as_bytes())
+    let mut s = ::hex::encode(signing_pub_key.as_bytes());
+    s.truncate(SESSION_ID_HEX_LEN);
+    s
 }
 
 // ---------------------------------
@@ -132,6 +148,8 @@ pub struct VerifiedLogRecord {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetupNewKeyRequest {
     key_provisioner_public_keys: Vec<EncPubKey>,
+    num_shares: usize,
+    threshold: usize,
 }
 
 /// `EnclaveSigned<T>`
@@ -141,12 +159,12 @@ pub struct SetupNewKeyResponse {
     pub share_commitments: ShareCommitments,
 }
 
-/// Provides S3 API keys, share commitments and the BTC network to the enclave.
+/// Provides S3 API keys, secret-sharing config and the BTC network to the enclave.
 /// To be called by the operator.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OperatorInitRequest {
     s3_config: S3Config,
-    share_commitments: ShareCommitments,
+    secret_sharing_config: SecretSharingConfig,
     network: Network,
 }
 
@@ -187,8 +205,8 @@ pub struct GetGuardianInfoResponse {
 /// TODO: Add network?
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct GuardianInfo {
-    /// Share commitments (if set). Used by KPs to check that right key will be used.
-    pub share_commitments: Option<ShareCommitments>,
+    /// Secret-sharing config (if set). Used by KPs to check that the right key will be used.
+    pub secret_sharing_config: Option<SecretSharingConfig>,
     /// S3 bucket name (if set). Used by KPs to check S3 bucket info.
     pub bucket_info: Option<S3BucketInfo>,
     /// Encryption key. Used by KPs to encrypt their shares.
@@ -210,6 +228,8 @@ pub struct StandardWithdrawalRequest {
     /// Timestamp in unix seconds (used for rate limiting)
     timestamp_secs: u64,
     /// Monotonic sequence number for ordering
+    /// TODO: rename to `withdraw_seq` (and `LimiterState.next_seq` →
+    /// `next_withdraw_seq`) to disambiguate from `SecretSharingConfig.sharing_seq`.
     seq: u64,
 }
 
@@ -230,6 +250,16 @@ pub enum LogMessage {
     Heartbeat { seq: u64 },
     Init(Box<InitLogMessage>),
     Withdrawal(Box<WithdrawalLogMessage>),
+    SecretSharing(Box<SecretSharingLogMessage>),
+}
+
+/// Written by `setup_new_key` (genesis, `sharing_seq=0`) to advertise the
+/// current authoritative share state to KPs. See `crates/hashi-guardian/README.md`
+/// for the canonical S3 key layout and sharing_seq semantics.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct SecretSharingLogMessage {
+    pub encrypted_shares: Vec<EncryptedShare>,
+    pub secret_sharing_config: SecretSharingConfig,
 }
 
 /// OI: operator_init
@@ -245,11 +275,6 @@ pub enum InitLogMessage {
     },
     /// Share commitments given in /operator_init
     OIGuardianInfo(GuardianInfo),
-    /// A successful /setup_new_key call
-    SetupNewKeySuccess {
-        encrypted_shares: Vec<EncryptedShare>,
-        share_commitments: Vec<ShareCommitment>,
-    },
     /// A single successful /provisioner_init call (happens N times)
     PISuccess {
         share_id: ShareID,
@@ -344,29 +369,47 @@ impl S3Config {
 }
 
 impl SetupNewKeyRequest {
-    pub fn new(public_keys: Vec<EncPubKey>) -> GuardianResult<Self> {
-        if public_keys.len() != NUM_OF_SHARES {
-            return Err(InvalidInputs("provide enough public keys".into()));
+    pub fn new(
+        public_keys: Vec<EncPubKey>,
+        num_shares: usize,
+        threshold: usize,
+    ) -> GuardianResult<Self> {
+        if public_keys.len() != num_shares {
+            return Err(InvalidInputs(format!(
+                "expected {num_shares} public keys, got {}",
+                public_keys.len()
+            )));
         }
+        validate_share_params(num_shares, threshold)?;
         Ok(Self {
             key_provisioner_public_keys: public_keys,
+            num_shares,
+            threshold,
         })
     }
 
     pub fn public_keys(&self) -> &[EncPubKey] {
         &self.key_provisioner_public_keys
     }
+
+    pub fn num_shares(&self) -> usize {
+        self.num_shares
+    }
+
+    pub fn threshold(&self) -> usize {
+        self.threshold
+    }
 }
 
 impl OperatorInitRequest {
     pub fn new(
         s3_config: S3Config,
-        share_commitments: ShareCommitments,
+        secret_sharing_config: SecretSharingConfig,
         network: Network,
     ) -> GuardianResult<Self> {
         Ok(Self {
             s3_config,
-            share_commitments,
+            secret_sharing_config,
             network,
         })
     }
@@ -375,16 +418,16 @@ impl OperatorInitRequest {
         &self.s3_config
     }
 
-    pub fn share_commitments(&self) -> &ShareCommitments {
-        &self.share_commitments
+    pub fn secret_sharing_config(&self) -> &SecretSharingConfig {
+        &self.secret_sharing_config
     }
 
     pub fn network(&self) -> Network {
         self.network
     }
 
-    pub fn into_parts(self) -> (S3Config, ShareCommitments, Network) {
-        (self.s3_config, self.share_commitments, self.network)
+    pub fn into_parts(self) -> (S3Config, SecretSharingConfig, Network) {
+        (self.s3_config, self.secret_sharing_config, self.network)
     }
 }
 
@@ -517,7 +560,6 @@ impl StandardWithdrawalRequest {
 impl InitLogMessage {
     pub const OI_ATTEST_UNSIGNED: &'static str = "oi-attestation-unsigned";
     pub const OI_GUARDIAN_INFO: &'static str = "oi-guardian-info";
-    pub const SETUP_NEW_KEY_SUCCESS: &'static str = "setup-new-key-success";
     pub const PI_SUCCESS: &'static str = "pi-success-share";
     pub const PI_FULLY_INITIALIZED: &'static str = "pi-enclave-fully-initialized";
 
@@ -525,7 +567,6 @@ impl InitLogMessage {
         let suffix = match self {
             InitLogMessage::OIAttestationUnsigned { .. } => Self::OI_ATTEST_UNSIGNED.to_string(),
             InitLogMessage::OIGuardianInfo(_) => Self::OI_GUARDIAN_INFO.to_string(),
-            InitLogMessage::SetupNewKeySuccess { .. } => Self::SETUP_NEW_KEY_SUCCESS.to_string(),
             InitLogMessage::PISuccess { share_id, .. } => {
                 format!("{}-{}", Self::PI_SUCCESS, share_id.get())
             }
@@ -606,6 +647,7 @@ impl LogMessage {
                 S3HourScopedDirectory::new(S3_DIR_WITHDRAW, unix_millis_to_seconds(timestamp_ms))
                     .to_string()
             }
+            LogMessage::SecretSharing(..) => format!("{}/", S3_DIR_SECRET_SHARING),
         }
     }
 
@@ -615,6 +657,11 @@ impl LogMessage {
             LogMessage::Init(init_message) => init_message.log_name(prefix),
             LogMessage::Heartbeat { seq } => format!("{}-{:020}.json", prefix, seq),
             LogMessage::Withdrawal(withdrawal_message) => withdrawal_message.log_name(prefix),
+            LogMessage::SecretSharing(ss) => format!(
+                "{:020}-{}.json",
+                ss.secret_sharing_config.sharing_seq(),
+                prefix
+            ),
         }
     }
 
@@ -649,6 +696,7 @@ impl LogRecord {
             LogMessage::Init(..) => S3_OBJECT_LOCK_DURATION_INIT,
             LogMessage::Heartbeat { .. } => S3_OBJECT_LOCK_DURATION_HEARTBEAT,
             LogMessage::Withdrawal(..) => S3_OBJECT_LOCK_DURATION_WITHDRAW,
+            LogMessage::SecretSharing(..) => S3_OBJECT_LOCK_DURATION_SECRET_SHARING,
         }
     }
 
