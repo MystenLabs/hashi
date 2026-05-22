@@ -5,29 +5,28 @@
 //!
 //! A *derived* component is one whose value is computed from other
 //! components (base or derived) rather than written directly by user
-//! code. Derivations are registered with [`World::register_derived`] and
+//! code. Derivations are registered with
+//! [`World::register_derived`](crate::World::register_derived) and
 //! recomputed automatically when their inputs change.
 //!
-//! Concretely, every time a [`MutationBatch`](crate::MutationBatch) is
-//! committed:
+//! # Ordering: entity ownership, not component type
 //!
-//! 1. The scheduler drains the per-storage dirty sets to find which
-//!    entities changed for which component types.
-//! 2. It walks the *dependents* map to translate "entity E's component C
-//!    changed" into "every derivation that reads C needs to recompute for
-//!    E".
-//! 3. It processes derivations in topological order, so a derivation `D`
-//!    that depends on another derivation `B` always sees `B`'s updated
-//!    value.
-//! 4. After each derivation runs, any new dirty entries on its own
-//!    storage are propagated forward to its dependents.
+//! The scheduler orders recomputes by the Sui object-ownership graph,
+//! not by the derivation dependency graph: when a batch commits,
+//! children are always recomputed before their parents. This matches
+//! the natural direction for aggregating derivations (where a parent's
+//! value reads its children's), and re-parenting events propagate to
+//! both the old and new parent so they each get a chance to recompute.
 //!
-//! The dependency graph is a DAG by construction — cycles panic at the
-//! point of detection so they fail loudly in tests rather than diverging
-//! silently at runtime.
+//! Same-entity derivation chains (`A → B → C` all at one entity) still
+//! converge: the scheduler runs a fixed-point loop and each iteration
+//! drains storage dirty sets, so on iteration N+1 the freshly-dirtied
+//! downstream derivation gets picked up.
+//!
+//! Ownership cycles are a bug — the framework panics if it sees one
+//! while building the topological order.
 
 use std::any::TypeId;
-use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use sui_sdk_types::Address;
@@ -38,23 +37,41 @@ use crate::world::World;
 /// A component whose value is derived from other components.
 ///
 /// `compute` may return `None` to signal "no value for this entity right
-/// now" — the framework will remove any existing value of `Self` for that
-/// entity, which in turn dirties downstream derivations.
+/// now" — the framework will remove any existing value of `Self` for
+/// that entity, which in turn dirties downstream derivations.
 ///
-/// `dependencies()` must return the same list every time it's called; the
-/// framework caches the dependency graph and assumes it's stable.
+/// `dependencies()` must return the same list every time it's called;
+/// the framework relies on the declaration being stable.
 pub trait Derived: Component {
     fn dependencies() -> Vec<TypeId>;
 
     fn compute(world: &World, entity: Address) -> Option<Self>;
+
+    /// If `true`, the framework treats this derivation as aggregating
+    /// over child entities. Any change to a declared dependency at a
+    /// child of `E` will dirty this derivation for `E` (rather than for
+    /// the child). Re-parenting events additionally dirty the
+    /// derivation for both the old and new parent so each gets a chance
+    /// to reflect the lost / gained child.
+    ///
+    /// Children are resolved via `Owner::Object(uid)` lifted through
+    /// the built-in `UidToContainer` index, so dynamic fields nested
+    /// inside the parent count as children of the container.
+    ///
+    /// Defaults to `false`; flip it on per-derivation when you actually
+    /// fold over children.
+    fn aggregates_children() -> bool {
+        false
+    }
 }
 
-/// Erased recompute callback. Captures the concrete `D` so the World can
-/// store a uniform `Arc<dyn Fn>` per derivation regardless of type.
+/// Erased recompute callback. Captures the concrete `D` so the World
+/// can store a uniform `Arc<dyn Fn>` per derivation regardless of type.
 pub(crate) type RecomputeFn = Arc<dyn Fn(&mut World, Address) + Send + Sync>;
 
 pub(crate) struct Derivation {
     pub(crate) deps: Vec<TypeId>,
+    pub(crate) aggregates_children: bool,
     pub(crate) recompute: RecomputeFn,
 }
 
@@ -62,6 +79,7 @@ impl Derivation {
     pub(crate) fn new<D: Derived>() -> Self {
         Self {
             deps: D::dependencies(),
+            aggregates_children: D::aggregates_children(),
             recompute: Arc::new(|world, entity| match D::compute(world, entity) {
                 Some(value) => {
                     world.apply_insert::<D>(entity, value);
@@ -72,60 +90,4 @@ impl Derivation {
             }),
         }
     }
-}
-
-/// Topologically sort registered derivations so a derivation appears in
-/// the returned order *after* any other derivation it depends on.
-///
-/// Base components (those without an entry in `derivations`) don't
-/// participate in the ordering — only derivation-to-derivation edges
-/// contribute. Panics if a cycle is detected.
-pub(crate) fn topo_sort(derivations: &HashMap<TypeId, Derivation>) -> Vec<TypeId> {
-    let mut in_degree: HashMap<TypeId, usize> =
-        derivations.keys().map(|k| (*k, 0)).collect();
-    let mut adj: HashMap<TypeId, Vec<TypeId>> =
-        derivations.keys().map(|k| (*k, Vec::new())).collect();
-
-    for (derived, d) in derivations {
-        for dep in &d.deps {
-            if derivations.contains_key(dep) {
-                adj.get_mut(dep)
-                    .expect("derivations key present by construction")
-                    .push(*derived);
-                *in_degree
-                    .get_mut(derived)
-                    .expect("derivations key present by construction") += 1;
-            }
-        }
-    }
-
-    let mut queue: VecDeque<TypeId> = in_degree
-        .iter()
-        .filter_map(|(k, deg)| (*deg == 0).then_some(*k))
-        .collect();
-    let mut order: Vec<TypeId> = Vec::with_capacity(derivations.len());
-
-    while let Some(node) = queue.pop_front() {
-        order.push(node);
-        let nexts = adj
-            .get(&node)
-            .expect("derivations key present by construction")
-            .clone();
-        for next in nexts {
-            let d = in_degree
-                .get_mut(&next)
-                .expect("derivations key present by construction");
-            *d -= 1;
-            if *d == 0 {
-                queue.push_back(next);
-            }
-        }
-    }
-
-    assert_eq!(
-        order.len(),
-        derivations.len(),
-        "cycle detected in derivation graph"
-    );
-    order
 }
