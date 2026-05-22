@@ -98,7 +98,7 @@ public(package) fun set_guardian(self: &mut Config, url: String, public_key: vec
 }
 
 public(package) fun emergency_pause_threshold_bps(self: &Config): u64 {
-    self.try_get(EMERGENCY_PAUSE_THRESHOLD_BPS_KEY).map!(|v| v.as_u64()).destroy_or!(5100)
+    self.try_get(EMERGENCY_PAUSE_THRESHOLD_BPS_KEY).map!(|v| v.as_u64()).destroy_or!(500)
 }
 
 public(package) fun emergency_unpause_threshold_bps(self: &Config): u64 {
@@ -154,7 +154,7 @@ public(package) fun create(): Config {
 
     // Core defaults
     config.upsert(PAUSED_KEY, config_value::new_bool(false));
-    config.upsert(EMERGENCY_PAUSE_THRESHOLD_BPS_KEY, config_value::new_u64(5100));
+    config.upsert(EMERGENCY_PAUSE_THRESHOLD_BPS_KEY, config_value::new_u64(500));
     config.upsert(EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY, config_value::new_u64(6667));
 
     config
