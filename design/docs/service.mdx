@@ -44,3 +44,25 @@ block-beta
 
   broadcast["Ordered broadcast channel"]
 ```
+
+## Emergency pause and unpause
+
+The bridge supports an emergency pause mechanism that allows committee members
+to halt bridge operations when they detect anomalous or potentially malicious
+activity. This mechanism is part of the governance requests shown in the
+onchain state diagram above.
+
+The quorum thresholds for pause and unpause operations are intentionally
+asymmetric:
+
+- **Emergency pause threshold:** 5% (500 bps) of committee voting power. This
+  threshold is intentionally low so that even a small number of committee
+  members can rapidly halt bridge operations in response to an emergency.
+- **Unpause threshold:** 66.67% of committee voting power. This threshold is
+  intentionally high to ensure broad consensus among committee members before
+  resuming bridge operations.
+
+When enough committee members signal a pause to meet the emergency pause
+quorum, the bridge halts processing of deposits and withdrawals. Resuming
+operations requires a supermajority of committee voting power to signal an
+unpause, providing a strong safeguard against premature resumption.
