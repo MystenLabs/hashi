@@ -54,11 +54,7 @@ pub async fn run(
         // Checkpoint-level object pool (deduplicated). We pull new
         // values from here when applying.
         "objects.objects.object_id",
-        "objects.objects.version",
-        "objects.objects.digest",
-        "objects.objects.owner",
-        "objects.objects.object_type",
-        "objects.objects.contents",
+        "objects.objects.bcs",
         // Checkpoint summary fields we surface to consumers.
         "sequence_number",
         "summary.timestamp_ms",
@@ -214,7 +210,21 @@ fn changeset_from_tx(
                 let proto = combined.get(id_str).copied().ok_or(
                     IngestError::MissingObjectValue { id, state },
                 )?;
-                upserts.push(sui_sdk_types::Object::try_from(proto)?);
+                // Decode straight from the BCS field rather than going
+                // through the proto-to-sdk-types field-by-field
+                // conversion — the read mask only includes `bcs`.
+                let bytes = proto
+                    .bcs
+                    .as_ref()
+                    .and_then(|b| b.value.as_ref())
+                    .ok_or(IngestError::MissingObjectValue { id, state })?;
+                let object: sui_sdk_types::Object = bcs::from_bytes(bytes).map_err(|e| {
+                    IngestError::Conversion(sui_rpc::proto::TryFromProtoError::invalid(
+                        "bcs",
+                        e.to_string(),
+                    ))
+                })?;
+                upserts.push(object);
             }
             O::DoesNotExist => {
                 removals.push(id);

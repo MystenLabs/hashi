@@ -116,20 +116,34 @@ pub async fn scrape(
     Ok(checkpoint)
 }
 
+/// Read mask that just asks the server to return the BCS-serialized
+/// form of each `Object`. Faster and less error-prone than chasing
+/// every individual field the proto-to-sdk conversion needs — we just
+/// deserialize `sui_sdk_types::Object` straight out of the bytes.
+fn object_read_mask() -> FieldMask {
+    FieldMask::from_paths([ProtoObject::path_builder().bcs().finish()])
+}
+
+/// Decode a proto Object's `bcs` field into a `sui_sdk_types::Object`.
+/// Returns an error if the server didn't populate `bcs` (which means
+/// the read mask is wrong) or if BCS decoding fails.
+fn object_from_proto(proto: &ProtoObject, id: Address) -> Result<Object> {
+    let bcs_bytes = proto
+        .bcs
+        .as_ref()
+        .and_then(|b| b.value.as_ref())
+        .ok_or_else(|| anyhow!("Object {id} response missing bcs field"))?;
+    bcs::from_bytes::<Object>(bcs_bytes)
+        .with_context(|| format!("decoding bcs Object for {id}"))
+}
+
 async fn fetch_object(client: &mut Client, id: Address) -> Result<Object> {
     let response = client
         .ledger_client()
-        .get_object(GetObjectRequest::new(&id).with_read_mask(FieldMask::from_paths([
-            ProtoObject::path_builder().owner().finish(),
-            ProtoObject::path_builder().contents().finish(),
-            ProtoObject::path_builder().object_id(),
-            ProtoObject::path_builder().version(),
-            ProtoObject::path_builder().object_type(),
-        ])))
+        .get_object(GetObjectRequest::new(&id).with_read_mask(object_read_mask()))
         .await
         .with_context(|| format!("fetching {id}"))?;
-    Object::try_from(response.get_ref().object())
-        .with_context(|| format!("converting proto Object for {id}"))
+    object_from_proto(response.get_ref().object(), id)
 }
 
 async fn fetch_object_with_checkpoint(
@@ -138,13 +152,7 @@ async fn fetch_object_with_checkpoint(
 ) -> Result<(CheckpointInfo, Object)> {
     let response = client
         .ledger_client()
-        .get_object(GetObjectRequest::new(&id).with_read_mask(FieldMask::from_paths([
-            ProtoObject::path_builder().owner().finish(),
-            ProtoObject::path_builder().contents().finish(),
-            ProtoObject::path_builder().object_id(),
-            ProtoObject::path_builder().version(),
-            ProtoObject::path_builder().object_type(),
-        ])))
+        .get_object(GetObjectRequest::new(&id).with_read_mask(object_read_mask()))
         .await
         .with_context(|| format!("fetching {id}"))?;
     let checkpoint = CheckpointInfo {
@@ -158,8 +166,7 @@ async fn fetch_object_with_checkpoint(
             .epoch()
             .ok_or_else(|| anyhow!("response missing X_SUI_EPOCH header"))?,
     };
-    let obj = Object::try_from(response.get_ref().object())
-        .with_context(|| format!("converting proto Object for {id}"))?;
+    let obj = object_from_proto(response.get_ref().object(), id)?;
     Ok((checkpoint, obj))
 }
 
@@ -187,31 +194,27 @@ async fn list_bag_objects(
                 .with_parent(bag_id)
                 .with_page_size(u32::MAX)
                 .with_read_mask(FieldMask::from_paths([
-                    DynamicField::path_builder().field_object().owner().finish(),
-                    DynamicField::path_builder().field_object().contents().finish(),
-                    DynamicField::path_builder().field_object().object_id(),
-                    DynamicField::path_builder().field_object().version(),
-                    DynamicField::path_builder().field_object().object_type(),
-                    DynamicField::path_builder().child_object().owner().finish(),
-                    DynamicField::path_builder().child_object().contents().finish(),
-                    DynamicField::path_builder().child_object().object_id(),
-                    DynamicField::path_builder().child_object().version(),
-                    DynamicField::path_builder().child_object().object_type(),
+                    DynamicField::path_builder().field_object().bcs().finish(),
+                    DynamicField::path_builder().child_object().bcs().finish(),
                 ])),
         )
         .pipe(Box::pin);
 
     let mut out = Vec::new();
     while let Some(df) = stream.try_next().await? {
-        if let Some(proto) = df.field_object.as_ref()
-            && let Ok(obj) = Object::try_from(proto)
+        for proto in [df.field_object.as_ref(), df.child_object.as_ref()]
+            .into_iter()
+            .flatten()
         {
-            out.push((obj.object_id(), obj));
-        }
-        if let Some(proto) = df.child_object.as_ref()
-            && let Ok(obj) = Object::try_from(proto)
-        {
-            out.push((obj.object_id(), obj));
+            let Some(bytes) = proto.bcs.as_ref().and_then(|b| b.value.as_ref()) else {
+                continue;
+            };
+            // Skip entries that fail to decode; the bag may legitimately
+            // contain object kinds we don't model. The framework will
+            // simply not produce a Derived component for them.
+            if let Ok(obj) = bcs::from_bytes::<Object>(bytes) {
+                out.push((obj.object_id(), obj));
+            }
         }
     }
     Ok(out)

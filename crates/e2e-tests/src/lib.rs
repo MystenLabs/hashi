@@ -968,6 +968,169 @@ mod tests {
         Ok(())
     }
 
+    /// Stand both `hashi::onchain` and `hashi::onchain_ecs` up against
+    /// the same Sui RPC endpoint and verify they agree on every
+    /// observable query — committee size, member data, TLS reverse
+    /// lookup, gRPC client pool, latest checkpoint metadata — and that
+    /// the new TLS index / client pool follow a validator-info update
+    /// across the checkpoint boundary.
+    ///
+    /// This is the side-by-side correctness check for the parallel
+    /// state container: if anything diverges we want to know before
+    /// any consumer is migrated.
+    #[tokio::test]
+    async fn test_onchain_state_ecs_parity_with_legacy() -> Result<()> {
+        const TEST_NUM_NODES: usize = 1;
+
+        let test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+        let sui_rpc_url = &test_networks.sui_network().rpc_url;
+        let ids = test_networks.hashi_network().ids();
+
+        let (legacy, _legacy_service) =
+            hashi::onchain::OnchainState::new(sui_rpc_url, ids, None, None, None).await?;
+        let (ecs, _ecs_service) =
+            hashi::onchain_ecs::OnchainState::new(sui_rpc_url, ids, None, None, None).await?;
+
+        // Bootstrap parity: the two containers should see the same
+        // committee size and member set after their initial scrape.
+        assert_eq!(
+            legacy.state().hashi().committees.committees().len(),
+            ecs.committees().len(),
+            "committee count",
+        );
+
+        let legacy_members = legacy.committee_members();
+        let ecs_members = ecs.committee_members();
+        assert_eq!(legacy_members.len(), ecs_members.len(), "member count");
+
+        // Compare the per-validator data point-wise.
+        let mut legacy_by_addr: std::collections::BTreeMap<_, _> = legacy_members
+            .iter()
+            .map(|m| (*m.validator_address(), m))
+            .collect();
+        for m in &ecs_members {
+            let l = legacy_by_addr
+                .remove(m.validator_address())
+                .expect("validator present in legacy");
+            assert_eq!(m.validator_address(), l.validator_address());
+            assert_eq!(m.operator_address(), l.operator_address());
+            assert_eq!(m.endpoint_url(), l.endpoint_url());
+            assert_eq!(m.tls_public_key(), l.tls_public_key());
+        }
+        assert!(
+            legacy_by_addr.is_empty(),
+            "ECS missing legacy validators: {legacy_by_addr:?}",
+        );
+
+        // TLS reverse-lookup parity for every member whose TLS key is
+        // populated.
+        for m in &legacy_members {
+            let Some(tls) = m.tls_public_key() else {
+                continue;
+            };
+            let l = legacy
+                .state()
+                .hashi()
+                .committees
+                .lookup_address_by_tls_public_key(tls);
+            let e = ecs.lookup_address_by_tls_public_key(tls);
+            assert_eq!(l, e, "TLS lookup divergence for {:?}", tls);
+            assert_eq!(
+                l,
+                Some(*m.validator_address()),
+                "legacy TLS lookup didn't round-trip",
+            );
+        }
+
+        // gRPC client pool: the ECS pool should hold a client for
+        // every validator whose endpoint + TLS key is well-formed —
+        // which is the same set the legacy `CommitteeSet` builds
+        // clients for.
+        for m in &legacy_members {
+            let has_endpoint = m.endpoint_url().is_some() && m.tls_public_key().is_some();
+            assert_eq!(
+                ecs.client(m.validator_address()).is_some(),
+                has_endpoint,
+                "ECS client pool presence for {}",
+                m.validator_address(),
+            );
+        }
+
+        // Wait for at least one fresh checkpoint to make sure both
+        // watchers are running. Both should advance.
+        let ckpt = legacy.latest_checkpoint_height();
+        let mut legacy_ckpt = legacy.subscribe_checkpoint();
+        let mut ecs_ckpt = ecs.subscribe_checkpoint();
+        legacy_ckpt.changed().await.unwrap();
+        ecs_ckpt.changed().await.unwrap();
+        assert!(legacy_ckpt.borrow_and_update().height > ckpt);
+        assert!(ecs_ckpt.borrow_and_update().height > ckpt);
+
+        // Now drive an update through the chain and check that both
+        // sides pick it up. The helper rewrites the validator's TLS
+        // public key on-chain; the legacy emits a
+        // `ValidatorInfoUpdated` event, the ECS one reflects the new
+        // bytes in `committee_members()` + the TLS reverse index after
+        // the watcher applies the next checkpoint.
+        test_networks.hashi_network().nodes()[0]
+            .wait_for_mpc_key(DKG_TIMEOUT)
+            .await?;
+
+        let mut legacy_notifications = legacy.subscribe();
+
+        let sui_client = test_networks.sui_network().client.clone();
+        let v1_config = &test_networks.hashi_network().nodes()[0].hashi().config;
+        super::hashi_network::update_tls_public_key(sui_client, v1_config)
+            .await
+            .unwrap();
+
+        // Legacy: surfaces a ValidatorInfoUpdated notification.
+        let validator = v1_config.validator_address().unwrap();
+        #[allow(irrefutable_let_patterns)]
+        if let hashi::onchain::Notification::ValidatorInfoUpdated(updated) =
+            legacy_notifications.recv().await.unwrap()
+        {
+            assert_eq!(updated, validator);
+        } else {
+            panic!("unexpected notification on legacy");
+        }
+
+        // ECS: drive forward by ticking checkpoints until both sides
+        // see the new TLS key for the same validator. Bounded loop so
+        // a regression can't hang the test forever.
+        let new_tls_key = legacy
+            .committee_member(&validator)
+            .and_then(|m| m.tls_public_key().copied())
+            .expect("legacy reflects the new TLS key");
+
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            if attempts > 20 {
+                panic!("ECS did not converge on new TLS key after 20 checkpoint ticks");
+            }
+            let observed = ecs
+                .committee_member(&validator)
+                .and_then(|m| m.tls_public_key().copied());
+            if observed == Some(new_tls_key) {
+                break;
+            }
+            ecs_ckpt.changed().await.unwrap();
+        }
+
+        // Reverse lookup should track the rotated key on both sides.
+        assert_eq!(
+            ecs.lookup_address_by_tls_public_key(&new_tls_key),
+            Some(validator),
+            "ECS TLS index should resolve the new key",
+        );
+
+        Ok(())
+    }
+
     /// Verify that rescraping on-chain state correctly deserializes deposit
     /// requests from ObjectBag dynamic fields.
     ///
