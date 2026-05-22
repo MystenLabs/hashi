@@ -8,7 +8,6 @@
 use super::BitcoinSignature;
 use super::Ciphertext;
 use super::CommitteeSignatureWire;
-use super::EncPubKey;
 use super::EncryptedShare;
 use super::GetGuardianInfoResponse;
 use super::GuardianError;
@@ -24,6 +23,8 @@ use super::HashiSigned;
 use super::LimiterConfig;
 use super::LimiterState;
 use super::OperatorInitRequest;
+use super::PgpEncryptedShare;
+use super::PgpPublicCert;
 use super::ProvisionerInitRequest;
 use super::ProvisionerInitState;
 use super::SecretSharingConfig;
@@ -51,8 +52,6 @@ use bitcoin::Txid;
 use bitcoin::XOnlyPublicKey;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::Hash as _;
-use hpke::Deserializable;
-use hpke::Serializable;
 use std::num::NonZeroU16;
 use std::str::FromStr;
 
@@ -68,17 +67,17 @@ impl TryFrom<pb::SetupNewKeyRequest> for SetupNewKeyRequest {
     type Error = GuardianError;
 
     fn try_from(req: pb::SetupNewKeyRequest) -> Result<Self, Self::Error> {
-        let pks = req
-            .key_provisioner_public_keys
+        let certs = req
+            .key_provisioner_pgp_certs
             .iter()
-            .map(|b| EncPubKey::from_bytes(b))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| InvalidInputs(format!("invalid key_provisioner_public_key: {e}")))?;
+            .cloned()
+            .map(PgpPublicCert::new)
+            .collect::<GuardianResult<Vec<_>>>()?;
 
         let num_shares = req.num_shares.ok_or_else(|| missing("num_shares"))? as usize;
         let threshold = req.threshold.ok_or_else(|| missing("threshold"))? as usize;
 
-        SetupNewKeyRequest::new(pks, num_shares, threshold)
+        SetupNewKeyRequest::new(certs, num_shares, threshold)
     }
 }
 
@@ -93,13 +92,16 @@ impl TryFrom<pb::SignedSetupNewKeyResponse> for GuardianSigned<SetupNewKeyRespon
 
         let data = resp.data.ok_or_else(|| missing("data"))?;
 
-        let encrypted_shares: Vec<EncryptedShare> = data
+        let encrypted_shares: Vec<PgpEncryptedShare> = data
             .encrypted_shares
             .iter()
             .map(|b| {
-                Ok(EncryptedShare {
+                Ok(PgpEncryptedShare {
                     id: pb_to_share_id(b.id)?,
-                    ciphertext: pb_to_ciphertext(b.ciphertext.clone())?,
+                    armored_ciphertext: b
+                        .armored_ciphertext
+                        .clone()
+                        .ok_or_else(|| missing("armored_ciphertext"))?,
                 })
             })
             .collect::<GuardianResult<Vec<_>>>()?;
@@ -325,10 +327,10 @@ pub fn setup_new_key_response_signed_to_pb(
 
 pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequest {
     pb::SetupNewKeyRequest {
-        key_provisioner_public_keys: s
-            .public_keys()
+        key_provisioner_pgp_certs: s
+            .pgp_certs()
             .iter()
-            .map(|pk| pk.to_bytes().to_vec().into())
+            .map(|cert| cert.armored().to_string())
             .collect(),
         num_shares: Some(s.num_shares() as u32),
         threshold: Some(s.threshold() as u32),
@@ -618,6 +620,13 @@ fn ciphertext_to_pb(c: Ciphertext) -> pb::HpkeCiphertext {
     }
 }
 
+pub fn pgp_encrypted_share_to_pb(s: PgpEncryptedShare) -> pb::GuardianPgpEncryptedShare {
+    pb::GuardianPgpEncryptedShare {
+        id: Some(share_id_to_pb(s.id)),
+        armored_ciphertext: Some(s.armored_ciphertext),
+    }
+}
+
 pub fn encrypted_share_to_pb(s: EncryptedShare) -> pb::GuardianShareEncrypted {
     pb::GuardianShareEncrypted {
         id: Some(share_id_to_pb(s.id)),
@@ -637,7 +646,7 @@ pub fn setup_new_key_response_to_pb(r: SetupNewKeyResponse) -> pb::SetupNewKeyRe
         encrypted_shares: r
             .encrypted_shares
             .into_iter()
-            .map(encrypted_share_to_pb)
+            .map(pgp_encrypted_share_to_pb)
             .collect(),
         share_commitments: r
             .share_commitments

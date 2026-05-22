@@ -147,7 +147,7 @@ pub struct VerifiedLogRecord {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetupNewKeyRequest {
-    key_provisioner_public_keys: Vec<EncPubKey>,
+    key_provisioner_pgp_certs: Vec<PgpPublicCert>,
     num_shares: usize,
     threshold: usize,
 }
@@ -155,7 +155,7 @@ pub struct SetupNewKeyRequest {
 /// `EnclaveSigned<T>`
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SetupNewKeyResponse {
-    pub encrypted_shares: Vec<EncryptedShare>,
+    pub encrypted_shares: Vec<PgpEncryptedShare>,
     pub share_commitments: ShareCommitments,
 }
 
@@ -258,7 +258,7 @@ pub enum LogMessage {
 /// for the canonical S3 key layout and sharing_seq semantics.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct SecretSharingLogMessage {
-    pub encrypted_shares: Vec<EncryptedShare>,
+    pub encrypted_shares: Vec<PgpEncryptedShare>,
     pub secret_sharing_config: SecretSharingConfig,
 }
 
@@ -370,26 +370,26 @@ impl S3Config {
 
 impl SetupNewKeyRequest {
     pub fn new(
-        public_keys: Vec<EncPubKey>,
+        pgp_certs: Vec<PgpPublicCert>,
         num_shares: usize,
         threshold: usize,
     ) -> GuardianResult<Self> {
-        if public_keys.len() != num_shares {
+        if pgp_certs.len() != num_shares {
             return Err(InvalidInputs(format!(
-                "expected {num_shares} public keys, got {}",
-                public_keys.len()
+                "expected {num_shares} OpenPGP certificates, got {}",
+                pgp_certs.len()
             )));
         }
         validate_share_params(num_shares, threshold)?;
         Ok(Self {
-            key_provisioner_public_keys: public_keys,
+            key_provisioner_pgp_certs: pgp_certs,
             num_shares,
             threshold,
         })
     }
 
-    pub fn public_keys(&self) -> &[EncPubKey] {
-        &self.key_provisioner_public_keys
+    pub fn pgp_certs(&self) -> &[PgpPublicCert] {
+        &self.key_provisioner_pgp_certs
     }
 
     pub fn num_shares(&self) -> usize {

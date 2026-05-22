@@ -24,9 +24,17 @@ use k256::elliptic_curve::PrimeField;
 use k256::elliptic_curve::group::GroupEncoding;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
+use sequoia_openpgp as openpgp;
+use sequoia_openpgp::parse::Parse;
+use sequoia_openpgp::policy::StandardPolicy;
+use sequoia_openpgp::serialize::stream::Armorer;
+use sequoia_openpgp::serialize::stream::Encryptor;
+use sequoia_openpgp::serialize::stream::LiteralWriter;
+use sequoia_openpgp::serialize::stream::Message;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::num::NonZeroU16;
 use tracing::info;
 // ---------------------------------
@@ -75,6 +83,17 @@ pub fn validate_share_params(n: usize, t: usize) -> GuardianResult<()> {
 pub struct EncryptedShare {
     pub id: ShareID,
     pub ciphertext: Ciphertext,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct PgpEncryptedShare {
+    pub id: ShareID,
+    pub armored_ciphertext: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct PgpPublicCert {
+    armored: String,
 }
 
 pub type DigestBytes = Vec<u8>;
@@ -213,6 +232,17 @@ impl GuardianEncKeyPair {
     }
 }
 
+impl PgpPublicCert {
+    pub fn new(armored: String) -> GuardianResult<Self> {
+        validate_pgp_cert(&armored)?;
+        Ok(Self { armored })
+    }
+
+    pub fn armored(&self) -> &str {
+        &self.armored
+    }
+}
+
 pub fn to_scalar(id: ShareID) -> Scalar {
     Scalar::from(id.get() as u32)
 }
@@ -261,6 +291,56 @@ pub fn decrypt(
         aad.unwrap_or(&[0; 32]),
     )
     .map_err(|e| InvalidInputs(format!("Decryption failed: {}", e)))
+}
+
+fn parse_pgp_cert(armored: &str) -> GuardianResult<openpgp::Cert> {
+    openpgp::Cert::from_bytes(armored.as_bytes())
+        .map_err(|e| InvalidInputs(format!("invalid OpenPGP certificate: {e}")))
+}
+
+fn validate_pgp_cert(armored: &str) -> GuardianResult<()> {
+    let cert = parse_pgp_cert(armored)?;
+    let policy = StandardPolicy::new();
+    cert.keys()
+        .with_policy(&policy, None)
+        .supported()
+        .alive()
+        .revoked(false)
+        .for_transport_encryption()
+        .next()
+        .ok_or_else(|| InvalidInputs("OpenPGP certificate has no usable encryption key".into()))?;
+    Ok(())
+}
+
+fn pgp_encrypt_armored(plaintext: &[u8], cert: &PgpPublicCert) -> GuardianResult<String> {
+    let cert = parse_pgp_cert(cert.armored())?;
+    let policy = StandardPolicy::new();
+    let recipients = cert
+        .keys()
+        .with_policy(&policy, None)
+        .supported()
+        .alive()
+        .revoked(false)
+        .for_transport_encryption();
+    let mut ciphertext = Vec::new();
+    let message = Message::new(&mut ciphertext);
+    let message = Armorer::new(message)
+        .kind(openpgp::armor::Kind::Message)
+        .build()
+        .map_err(|e| InvalidInputs(format!("OpenPGP armor setup failed: {e}")))?;
+    let message = Encryptor::for_recipients(message, recipients)
+        .build()
+        .map_err(|e| InvalidInputs(format!("OpenPGP encryption setup failed: {e}")))?;
+    let mut writer = LiteralWriter::new(message)
+        .build()
+        .map_err(|e| InvalidInputs(format!("OpenPGP literal data setup failed: {e}")))?;
+    writer
+        .write_all(plaintext)
+        .map_err(|e| InvalidInputs(format!("OpenPGP encryption failed: {e}")))?;
+    writer
+        .finalize()
+        .map_err(|e| InvalidInputs(format!("OpenPGP encryption failed: {e}")))?;
+    String::from_utf8(ciphertext).map_err(|e| InvalidInputs(format!("invalid OpenPGP armor: {e}")))
 }
 
 // ---------------------------------
@@ -382,23 +462,34 @@ pub fn encrypt_share<R: CryptoRng + RngCore>(
 }
 
 /// Split `sk` into `kp_pubkeys.len()` shares with reconstruction threshold
-/// `t`, encrypt each to the matching KP pubkey, and compute the corresponding
-/// commitments. Share ID `i` (1..=N) is paired with `kp_pubkeys[i-1]`.
+/// `t`, encrypt each to the matching KP OpenPGP cert, and compute the corresponding
+/// commitments. Share ID `i` (1..=N) is paired with `kp_certs[i-1]`.
 pub fn split_and_encrypt_for_kps<R: CryptoRng + RngCore>(
     sk: &k256::SecretKey,
-    kp_pubkeys: &[EncPubKey],
+    kp_certs: &[PgpPublicCert],
     t: usize,
     rng: &mut R,
-) -> GuardianResult<(Vec<EncryptedShare>, ShareCommitments)> {
-    let n = kp_pubkeys.len();
+) -> GuardianResult<(Vec<PgpEncryptedShare>, ShareCommitments)> {
+    let n = kp_certs.len();
     let shares = split_secret(sk, n, t, rng)?;
     let mut encrypted_shares = Vec::with_capacity(n);
     let mut commitments = Vec::with_capacity(n);
-    for (share, pk) in shares.iter().zip(kp_pubkeys.iter()) {
-        encrypted_shares.push(encrypt_share(share, pk, None, rng));
+    for (share, cert) in shares.iter().zip(kp_certs.iter()) {
+        encrypted_shares.push(encrypt_share_for_provisioner(share, cert)?);
         commitments.push(commit_share(share));
     }
     Ok((encrypted_shares, ShareCommitments::new(commitments)?))
+}
+
+/// Encrypt a share for delivery to a key provisioner using OpenPGP ASCII armor.
+pub fn encrypt_share_for_provisioner(
+    share: &Share,
+    cert: &PgpPublicCert,
+) -> GuardianResult<PgpEncryptedShare> {
+    Ok(PgpEncryptedShare {
+        id: share.id,
+        armored_ciphertext: pgp_encrypt_armored(&share.value.to_bytes(), cert)?,
+    })
 }
 
 /// Decrypt an encrypted share with optional AAD

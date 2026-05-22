@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::Ciphertext;
-use super::EncPubKey;
 use super::EncryptedShare;
 use super::GetGuardianInfoResponse;
 use super::GuardianInfo;
@@ -12,6 +11,8 @@ use super::HashiCommitteeMember;
 use super::HashiSigned;
 use super::LimiterState;
 use super::OperatorInitRequest;
+use super::PgpEncryptedShare;
+use super::PgpPublicCert;
 use super::ProvisionerInitRequest;
 use super::ProvisionerInitState;
 use super::S3BucketInfo;
@@ -44,7 +45,8 @@ use bitcoin::secp256k1::Message;
 use bitcoin::secp256k1::SecretKey;
 use bitcoin::taproot::TapLeafHash;
 use ed25519_consensus::SigningKey;
-use hpke::Deserializable;
+use sequoia_openpgp::cert::prelude::CertBuilder;
+use sequoia_openpgp::serialize::Serialize;
 use std::num::NonZeroU16;
 use sui_sdk_types::Address as SuiAddress;
 use sui_sdk_types::bcs::FromBcs;
@@ -99,9 +101,21 @@ impl GetGuardianInfoResponse {
 
 impl SetupNewKeyRequest {
     pub fn mock_for_testing() -> Self {
-        let pk = EncPubKey::from_bytes(&[0u8; 32]).unwrap();
-        SetupNewKeyRequest::new(vec![pk; TEST_N], TEST_N, TEST_T).unwrap()
+        SetupNewKeyRequest::new(mock_pgp_certs(), TEST_N, TEST_T).unwrap()
     }
+}
+
+fn mock_pgp_cert() -> PgpPublicCert {
+    let (cert, _) = CertBuilder::general_purpose(["kp@example.com"])
+        .generate()
+        .unwrap();
+    let mut armored = Vec::new();
+    cert.armored().export(&mut armored).unwrap();
+    PgpPublicCert::new(String::from_utf8(armored).unwrap()).unwrap()
+}
+
+fn mock_pgp_certs() -> Vec<PgpPublicCert> {
+    (0..TEST_N).map(|_| mock_pgp_cert()).collect()
 }
 
 fn dummy_commitments() -> ShareCommitments {
@@ -114,14 +128,11 @@ fn dummy_commitments() -> ShareCommitments {
     ShareCommitments::new(commitments).unwrap()
 }
 
-fn dummy_encrypted_shares() -> Vec<EncryptedShare> {
+fn dummy_encrypted_shares() -> Vec<PgpEncryptedShare> {
     (0..TEST_N)
-        .map(|i| EncryptedShare {
+        .map(|i| PgpEncryptedShare {
             id: NonZeroU16::new((i + 1) as u16).unwrap(),
-            ciphertext: Ciphertext {
-                encapsulated_key: vec![0u8; 32],
-                aes_ciphertext: vec![0u8; 32],
-            },
+            armored_ciphertext: "-----BEGIN PGP MESSAGE-----\n\n-----END PGP MESSAGE-----".into(),
         })
         .collect()
 }

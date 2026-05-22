@@ -56,6 +56,9 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
 # Upstream issues: https://github.com/str4d/rage/issues/568
 #                  https://github.com/kellpossible/cargo-i18n/issues/150
 age = { git = "https://github.com/str4d/rage.git", rev = "92f437bc2a061312fa6633bb70c91eef91142fd4", features = ["cli-common", "plugin"] }
+# `crypto-rust` avoids linking against a system crypto backend for OpenPGP.
+# Sequoia requires the two `allow-*` flags to opt in to that pure-Rust backend.
+sequoia-openpgp = { version = "2.3.0", default-features = false, features = ["crypto-rust", "allow-experimental-crypto", "allow-variable-time-crypto"] }
 rust-embed = { version = "8", features = ["deterministic-timestamps"] }
 rustls = { version = "0.23.29", default-features = false, features = ["ring"] }
 ed25519-dalek = { version = "2.2.0", features = ["pem", "pkcs8", "rand_core"] }
