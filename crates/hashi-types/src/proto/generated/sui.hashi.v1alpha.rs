@@ -1165,6 +1165,7 @@ pub struct GuardianInfoData {
 }
 /// Public description of the current BTC key's secret-sharing scheme.
 /// `commitments.len() == num_shares` and `2 <= threshold <= num_shares`.
+/// `sharing_seq` versions instances: 0 at setup, +1 per rotation.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SecretSharingConfig {
     #[prost(message, repeated, tag = "1")]
@@ -1173,6 +1174,8 @@ pub struct SecretSharingConfig {
     pub num_shares: ::core::option::Option<u32>,
     #[prost(uint32, optional, tag = "3")]
     pub threshold: ::core::option::Option<u32>,
+    #[prost(uint64, optional, tag = "4")]
+    pub sharing_seq: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct S3BucketInfo {

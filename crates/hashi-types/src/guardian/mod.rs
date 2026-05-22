@@ -57,19 +57,19 @@ use std::time::Duration;
 ///
 /// TODO: Uniform 7 days is a coarse placeholder. Revisit per-log-type
 /// against the SLO we actually want to defend — heartbeats could be shorter,
-/// key_state/withdraws likely want years.
+/// secret_sharing/withdraws likely want years.
 const ONE_WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub const S3_OBJECT_LOCK_DURATION_INIT: Duration = ONE_WEEK;
 pub const S3_OBJECT_LOCK_DURATION_WITHDRAW: Duration = ONE_WEEK;
 pub const S3_OBJECT_LOCK_DURATION_HEARTBEAT: Duration = ONE_WEEK;
-pub const S3_OBJECT_LOCK_DURATION_KEY_STATE: Duration = ONE_WEEK;
+pub const S3_OBJECT_LOCK_DURATION_SECRET_SHARING: Duration = ONE_WEEK;
 
 /// S3 sub-prefixes used for guardian log streams.
 /// See `crates/hashi-guardian/README.md` for canonical key layout.
 pub const S3_DIR_INIT: &str = "init";
 pub const S3_DIR_WITHDRAW: &str = "withdraw";
 pub const S3_DIR_HEARTBEAT: &str = "heartbeat";
-pub const S3_DIR_KEY_STATE: &str = "key_state";
+pub const S3_DIR_SECRET_SHARING: &str = "secret_sharing";
 
 /// Length of the session ID prefix (hex chars) used in S3 keys. 16 hex =
 /// 64 bits of the signing pubkey, comfortably below any collision risk for
@@ -228,6 +228,8 @@ pub struct StandardWithdrawalRequest {
     /// Timestamp in unix seconds (used for rate limiting)
     timestamp_secs: u64,
     /// Monotonic sequence number for ordering
+    /// TODO: rename to `withdraw_seq` (and `LimiterState.next_seq` →
+    /// `next_withdraw_seq`) to disambiguate from `SecretSharingConfig.sharing_seq`.
     seq: u64,
 }
 
@@ -248,15 +250,14 @@ pub enum LogMessage {
     Heartbeat { seq: u64 },
     Init(Box<InitLogMessage>),
     Withdrawal(Box<WithdrawalLogMessage>),
-    KeyState(Box<CurrentKeyState>),
+    SecretSharing(Box<SecretSharingLogMessage>),
 }
 
-/// Written by `setup_new_key` (genesis, `seq=0`) to advertise the current
-/// authoritative share state to KPs. See `crates/hashi-guardian/README.md`
-/// for the canonical S3 key layout and seq semantics.
+/// Written by `setup_new_key` (genesis, `sharing_seq=0`) to advertise the
+/// current authoritative share state to KPs. See `crates/hashi-guardian/README.md`
+/// for the canonical S3 key layout and sharing_seq semantics.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct CurrentKeyState {
-    pub seq: u64,
+pub struct SecretSharingLogMessage {
     pub encrypted_shares: Vec<EncryptedShare>,
     pub secret_sharing_config: SecretSharingConfig,
 }
@@ -646,7 +647,7 @@ impl LogMessage {
                 S3HourScopedDirectory::new(S3_DIR_WITHDRAW, unix_millis_to_seconds(timestamp_ms))
                     .to_string()
             }
-            LogMessage::KeyState(..) => format!("{}/", S3_DIR_KEY_STATE),
+            LogMessage::SecretSharing(..) => format!("{}/", S3_DIR_SECRET_SHARING),
         }
     }
 
@@ -656,7 +657,11 @@ impl LogMessage {
             LogMessage::Init(init_message) => init_message.log_name(prefix),
             LogMessage::Heartbeat { seq } => format!("{}-{:020}.json", prefix, seq),
             LogMessage::Withdrawal(withdrawal_message) => withdrawal_message.log_name(prefix),
-            LogMessage::KeyState(key_state) => format!("{:020}-{}.json", key_state.seq, prefix),
+            LogMessage::SecretSharing(ss) => format!(
+                "{:020}-{}.json",
+                ss.secret_sharing_config.sharing_seq(),
+                prefix
+            ),
         }
     }
 
@@ -691,7 +696,7 @@ impl LogRecord {
             LogMessage::Init(..) => S3_OBJECT_LOCK_DURATION_INIT,
             LogMessage::Heartbeat { .. } => S3_OBJECT_LOCK_DURATION_HEARTBEAT,
             LogMessage::Withdrawal(..) => S3_OBJECT_LOCK_DURATION_WITHDRAW,
-            LogMessage::KeyState(..) => S3_OBJECT_LOCK_DURATION_KEY_STATE,
+            LogMessage::SecretSharing(..) => S3_OBJECT_LOCK_DURATION_SECRET_SHARING,
         }
     }
 

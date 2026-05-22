@@ -103,7 +103,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .await
         .with_context(|| format!("connect to guardian at {}", args.guardian_endpoint))?;
 
-    let secret_sharing_config = SecretSharingConfig::new(material.commitments.clone(), n, t)
+    let secret_sharing_config = SecretSharingConfig::new(material.commitments.clone(), n, t, 0)
         .map_err(|e| anyhow!("build SecretSharingConfig: {e:?}"))?;
     let operator_init_req = pb::OperatorInitRequest {
         s3_config: Some(pb::S3Config {
@@ -167,7 +167,8 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
     anyhow::ensure!(
         *returned_ssc.commitments() == material.commitments
             && returned_ssc.num_shares() == n
-            && returned_ssc.threshold() == t,
+            && returned_ssc.threshold() == t
+            && returned_ssc.sharing_seq() == 0,
         "secret-sharing config mismatch: guardian echoed different scheme than was submitted"
     );
 

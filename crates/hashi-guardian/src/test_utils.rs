@@ -136,7 +136,7 @@ impl Default for OperatorInitTestArgs {
             })
             .collect();
         let secret_sharing_config =
-            SecretSharingConfig::new(ShareCommitments::new(commitments).unwrap(), TEST_N, TEST_T)
+            SecretSharingConfig::new(ShareCommitments::new(commitments).unwrap(), TEST_N, TEST_T, 0)
                 .unwrap();
 
         Self {
@@ -154,7 +154,8 @@ impl OperatorInitTestArgs {
     }
 
     pub fn with_commitments(mut self, commitments: ShareCommitments) -> Self {
-        self.secret_sharing_config = SecretSharingConfig::new(commitments, TEST_N, TEST_T).unwrap();
+        self.secret_sharing_config =
+            SecretSharingConfig::new(commitments, TEST_N, TEST_T, 0).unwrap();
         self
     }
 

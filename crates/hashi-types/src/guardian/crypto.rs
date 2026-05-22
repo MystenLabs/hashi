@@ -86,11 +86,14 @@ pub struct ShareCommitment {
 pub struct ShareCommitments(BTreeMap<ShareID, DigestBytes>);
 
 /// Public description of the current BTC key's secret-sharing scheme.
+/// `sharing_seq` versions instances of the scheme: setup writes 0, each
+/// rotation bumps it by 1.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SecretSharingConfig {
     commitments: ShareCommitments,
     num_shares: usize,
     threshold: usize,
+    sharing_seq: u64,
 }
 
 impl SecretSharingConfig {
@@ -98,6 +101,7 @@ impl SecretSharingConfig {
         commitments: ShareCommitments,
         num_shares: usize,
         threshold: usize,
+        sharing_seq: u64,
     ) -> GuardianResult<Self> {
         if commitments.len() != num_shares {
             return Err(InvalidInputs(format!(
@@ -110,6 +114,7 @@ impl SecretSharingConfig {
             commitments,
             num_shares,
             threshold,
+            sharing_seq,
         })
     }
 
@@ -123,6 +128,10 @@ impl SecretSharingConfig {
 
     pub fn threshold(&self) -> usize {
         self.threshold
+    }
+
+    pub fn sharing_seq(&self) -> u64 {
+        self.sharing_seq
     }
 }
 

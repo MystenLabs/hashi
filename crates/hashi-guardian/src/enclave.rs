@@ -463,8 +463,9 @@ impl Enclave {
         self.write_log(LogMessage::Heartbeat { seq }).await
     }
 
-    pub async fn log_key_state(&self, state: CurrentKeyState) -> GuardianResult<()> {
-        self.write_log(LogMessage::KeyState(Box::new(state))).await
+    pub async fn log_secret_sharing(&self, state: SecretSharingLogMessage) -> GuardianResult<()> {
+        self.write_log(LogMessage::SecretSharing(Box::new(state)))
+            .await
     }
 
     // ========================================================================

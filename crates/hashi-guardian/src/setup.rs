@@ -12,7 +12,7 @@ use tracing::info;
 /// Set up a new BTC key. Flow:
 ///     1. KPs send their encryption pub keys to the operator
 ///     2. Operator calls setup_new_key (and optionally returns its response to all KPs)
-///     3. KPs fetch the setup_new_key response from `key_state/` in S3
+///     3. KPs fetch the setup_new_key response from `secret_sharing/` in S3
 pub async fn setup_new_key(
     enclave: Arc<Enclave>,
     request: SetupNewKeyRequest,
@@ -44,11 +44,10 @@ pub async fn setup_new_key(
         fingerprint_hex, n
     );
 
-    let secret_sharing_config = SecretSharingConfig::new(share_commitments.clone(), n, t)?;
+    let secret_sharing_config = SecretSharingConfig::new(share_commitments.clone(), n, t, 0)?;
 
     enclave
-        .log_key_state(CurrentKeyState {
-            seq: 0,
+        .log_secret_sharing(SecretSharingLogMessage {
             encrypted_shares: encrypted_shares.clone(),
             secret_sharing_config,
         })

@@ -159,6 +159,7 @@ impl OperatorInitRequest {
             ShareCommitments::new(share_commitments).unwrap(),
             TEST_N,
             TEST_T,
+            0,
         )
         .unwrap();
 

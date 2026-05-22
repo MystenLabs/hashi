@@ -143,7 +143,8 @@ pub fn pb_to_secret_sharing_config(
     let commitments = pb_share_commitments_to_domain(&pb.commitments)?;
     let num_shares = pb.num_shares.ok_or_else(|| missing("num_shares"))? as usize;
     let threshold = pb.threshold.ok_or_else(|| missing("threshold"))? as usize;
-    SecretSharingConfig::new(commitments, num_shares, threshold)
+    let sharing_seq = pb.sharing_seq.ok_or_else(|| missing("sharing_seq"))?;
+    SecretSharingConfig::new(commitments, num_shares, threshold, sharing_seq)
 }
 
 pub fn secret_sharing_config_to_pb(cfg: &SecretSharingConfig) -> pb::SecretSharingConfig {
@@ -155,6 +156,7 @@ pub fn secret_sharing_config_to_pb(cfg: &SecretSharingConfig) -> pb::SecretShari
             .collect(),
         num_shares: Some(cfg.num_shares() as u32),
         threshold: Some(cfg.threshold() as u32),
+        sharing_seq: Some(cfg.sharing_seq()),
     }
 }
 
