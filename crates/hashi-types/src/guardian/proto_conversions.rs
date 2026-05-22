@@ -8,8 +8,8 @@
 use super::BitcoinSignature;
 use super::Ciphertext;
 use super::CommitteeSignatureWire;
-use super::EncryptedShare;
 use super::GetGuardianInfoResponse;
+use super::GuardianEncryptedShare;
 use super::GuardianError;
 use super::GuardianError::InvalidInputs;
 use super::GuardianInfo;
@@ -20,10 +20,10 @@ use super::GuardianSigned;
 use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
+use super::KPEncryptedShare;
 use super::LimiterConfig;
 use super::LimiterState;
 use super::OperatorInitRequest;
-use super::PgpEncryptedShare;
 use super::PgpPublicCert;
 use super::ProvisionerInitRequest;
 use super::ProvisionerInitState;
@@ -92,11 +92,11 @@ impl TryFrom<pb::SignedSetupNewKeyResponse> for GuardianSigned<SetupNewKeyRespon
 
         let data = resp.data.ok_or_else(|| missing("data"))?;
 
-        let encrypted_shares: Vec<PgpEncryptedShare> = data
+        let encrypted_shares: Vec<KPEncryptedShare> = data
             .encrypted_shares
             .iter()
             .map(|b| {
-                Ok(PgpEncryptedShare {
+                Ok(KPEncryptedShare {
                     id: pb_to_share_id(b.id)?,
                     armored_ciphertext: b
                         .armored_ciphertext
@@ -171,7 +171,7 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
             .encrypted_share
             .ok_or_else(|| missing("encrypted_share"))?;
 
-        let encrypted_share = EncryptedShare {
+        let encrypted_share = GuardianEncryptedShare {
             id: pb_to_share_id(encrypted_share_pb.id)?,
             ciphertext: pb_to_ciphertext(encrypted_share_pb.ciphertext)?,
         };
@@ -353,7 +353,7 @@ pub fn provisioner_init_request_to_pb(
     r: ProvisionerInitRequest,
 ) -> GuardianResult<pb::ProvisionerInitRequest> {
     Ok(pb::ProvisionerInitRequest {
-        encrypted_share: Some(encrypted_share_to_pb(r.encrypted_share)),
+        encrypted_share: Some(guardian_encrypted_share_to_pb(r.encrypted_share)),
         state: Some(provisioner_init_state_to_pb(r.state)),
     })
 }
@@ -620,15 +620,15 @@ fn ciphertext_to_pb(c: Ciphertext) -> pb::HpkeCiphertext {
     }
 }
 
-pub fn pgp_encrypted_share_to_pb(s: PgpEncryptedShare) -> pb::GuardianPgpEncryptedShare {
-    pb::GuardianPgpEncryptedShare {
+pub fn kp_encrypted_share_to_pb(s: KPEncryptedShare) -> pb::KpEncryptedShare {
+    pb::KpEncryptedShare {
         id: Some(share_id_to_pb(s.id)),
         armored_ciphertext: Some(s.armored_ciphertext),
     }
 }
 
-pub fn encrypted_share_to_pb(s: EncryptedShare) -> pb::GuardianShareEncrypted {
-    pb::GuardianShareEncrypted {
+pub fn guardian_encrypted_share_to_pb(s: GuardianEncryptedShare) -> pb::GuardianEncryptedShare {
+    pb::GuardianEncryptedShare {
         id: Some(share_id_to_pb(s.id)),
         ciphertext: Some(ciphertext_to_pb(s.ciphertext)),
     }
@@ -646,7 +646,7 @@ pub fn setup_new_key_response_to_pb(r: SetupNewKeyResponse) -> pb::SetupNewKeyRe
         encrypted_shares: r
             .encrypted_shares
             .into_iter()
-            .map(pgp_encrypted_share_to_pb)
+            .map(kp_encrypted_share_to_pb)
             .collect(),
         share_commitments: r
             .share_commitments

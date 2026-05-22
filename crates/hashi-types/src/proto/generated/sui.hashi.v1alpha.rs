@@ -1216,7 +1216,7 @@ pub struct GuardianShareId {
 }
 /// HPKE-encrypted secret share sent to the guardian.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GuardianShareEncrypted {
+pub struct GuardianEncryptedShare {
     #[prost(message, optional, tag = "1")]
     pub id: ::core::option::Option<GuardianShareId>,
     #[prost(message, optional, tag = "2")]
@@ -1224,7 +1224,7 @@ pub struct GuardianShareEncrypted {
 }
 /// OpenPGP-encrypted secret share sent to a key provisioner.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GuardianPgpEncryptedShare {
+pub struct KpEncryptedShare {
     #[prost(message, optional, tag = "1")]
     pub id: ::core::option::Option<GuardianShareId>,
     #[prost(string, optional, tag = "2")]
@@ -1242,7 +1242,7 @@ pub struct GuardianShareCommitment {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SetupNewKeyResponseData {
     #[prost(message, repeated, tag = "1")]
-    pub encrypted_shares: ::prost::alloc::vec::Vec<GuardianPgpEncryptedShare>,
+    pub encrypted_shares: ::prost::alloc::vec::Vec<KpEncryptedShare>,
     #[prost(message, repeated, tag = "2")]
     pub share_commitments: ::prost::alloc::vec::Vec<GuardianShareCommitment>,
 }
@@ -1287,7 +1287,7 @@ pub struct S3Config {
 pub struct ProvisionerInitRequest {
     /// Encrypted share destined for this provisioner.
     #[prost(message, optional, tag = "1")]
-    pub encrypted_share: ::core::option::Option<GuardianShareEncrypted>,
+    pub encrypted_share: ::core::option::Option<GuardianEncryptedShare>,
     /// State used to initialize/restore the enclave. The share encryption binds to its digest as AAD.
     #[prost(message, optional, tag = "2")]
     pub state: ::core::option::Option<ProvisionerInitState>,

@@ -111,13 +111,13 @@ message GuardianShareID {
 }
 
 // HPKE-encrypted secret share sent to the guardian.
-message GuardianShareEncrypted {
+message GuardianEncryptedShare {
   GuardianShareID id = 1;
   HPKECiphertext ciphertext = 2;
 }
 
 // OpenPGP-encrypted secret share sent to a key provisioner.
-message GuardianPgpEncryptedShare {
+message KPEncryptedShare {
   GuardianShareID id = 1;
   optional string armored_ciphertext = 2;
 }
@@ -130,7 +130,7 @@ message GuardianShareCommitment {
 
 // Unsigned response payload.
 message SetupNewKeyResponseData {
-  repeated GuardianPgpEncryptedShare encrypted_shares = 1;
+  repeated KPEncryptedShare encrypted_shares = 1;
   repeated GuardianShareCommitment share_commitments = 2;
 }
 
@@ -182,7 +182,7 @@ enum Network {
 
 message ProvisionerInitRequest {
   // Encrypted share destined for this provisioner.
-  GuardianShareEncrypted encrypted_share = 1;
+  GuardianEncryptedShare encrypted_share = 1;
 
   // State used to initialize/restore the enclave. The share encryption binds to its digest as AAD.
   ProvisionerInitState state = 2;

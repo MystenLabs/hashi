@@ -2,16 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::Ciphertext;
-use super::EncryptedShare;
 use super::GetGuardianInfoResponse;
+use super::GuardianEncryptedShare;
 use super::GuardianInfo;
 use super::GuardianSigned;
 use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
+use super::KPEncryptedShare;
 use super::LimiterState;
 use super::OperatorInitRequest;
-use super::PgpEncryptedShare;
 use super::PgpPublicCert;
 use super::ProvisionerInitRequest;
 use super::ProvisionerInitState;
@@ -128,9 +128,9 @@ fn dummy_commitments() -> ShareCommitments {
     ShareCommitments::new(commitments).unwrap()
 }
 
-fn dummy_encrypted_shares() -> Vec<PgpEncryptedShare> {
+fn dummy_encrypted_shares() -> Vec<KPEncryptedShare> {
     (0..TEST_N)
-        .map(|i| PgpEncryptedShare {
+        .map(|i| KPEncryptedShare {
             id: NonZeroU16::new((i + 1) as u16).unwrap(),
             armored_ciphertext: "-----BEGIN PGP MESSAGE-----\n\n-----END PGP MESSAGE-----".into(),
         })
@@ -187,7 +187,7 @@ impl ProvisionerInitRequest {
     // NOTE: Incorrect encryption is used. Fix later if needed.
     pub fn mock_for_testing() -> Self {
         ProvisionerInitRequest {
-            encrypted_share: EncryptedShare {
+            encrypted_share: GuardianEncryptedShare {
                 id: NonZeroU16::new(1).unwrap(),
                 ciphertext: Ciphertext {
                     encapsulated_key: vec![0u8; 32],

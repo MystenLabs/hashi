@@ -80,20 +80,21 @@ pub fn validate_share_params(n: usize, t: usize) -> GuardianResult<()> {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct EncryptedShare {
+pub struct GuardianEncryptedShare {
     pub id: ShareID,
     pub ciphertext: Ciphertext,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct PgpEncryptedShare {
+pub struct KPEncryptedShare {
     pub id: ShareID,
     pub armored_ciphertext: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PgpPublicCert {
     armored: String,
+    cert: openpgp::Cert,
 }
 
 pub type DigestBytes = Vec<u8>;
@@ -234,8 +235,10 @@ impl GuardianEncKeyPair {
 
 impl PgpPublicCert {
     pub fn new(armored: String) -> GuardianResult<Self> {
-        validate_pgp_cert(&armored)?;
-        Ok(Self { armored })
+        let cert = openpgp::Cert::from_bytes(armored.as_bytes())
+            .map_err(|e| InvalidInputs(format!("invalid OpenPGP certificate: {e}")))?;
+        validate_pgp_cert(&cert)?;
+        Ok(Self { armored, cert })
     }
 
     pub fn armored(&self) -> &str {
@@ -293,13 +296,7 @@ pub fn decrypt(
     .map_err(|e| InvalidInputs(format!("Decryption failed: {}", e)))
 }
 
-fn parse_pgp_cert(armored: &str) -> GuardianResult<openpgp::Cert> {
-    openpgp::Cert::from_bytes(armored.as_bytes())
-        .map_err(|e| InvalidInputs(format!("invalid OpenPGP certificate: {e}")))
-}
-
-fn validate_pgp_cert(armored: &str) -> GuardianResult<()> {
-    let cert = parse_pgp_cert(armored)?;
+fn validate_pgp_cert(cert: &openpgp::Cert) -> GuardianResult<()> {
     let policy = StandardPolicy::new();
     cert.keys()
         .with_policy(&policy, None)
@@ -313,9 +310,9 @@ fn validate_pgp_cert(armored: &str) -> GuardianResult<()> {
 }
 
 fn pgp_encrypt_armored(plaintext: &[u8], cert: &PgpPublicCert) -> GuardianResult<String> {
-    let cert = parse_pgp_cert(cert.armored())?;
     let policy = StandardPolicy::new();
     let recipients = cert
+        .cert
         .keys()
         .with_policy(&policy, None)
         .supported()
@@ -453,8 +450,8 @@ pub fn encrypt_share<R: CryptoRng + RngCore>(
     pk: &EncPubKey,
     aad: Option<&[u8; 32]>,
     rng: &mut R,
-) -> EncryptedShare {
-    EncryptedShare {
+) -> GuardianEncryptedShare {
+    GuardianEncryptedShare {
         id: share.id,
         ciphertext: encrypt(&share.value.to_bytes(), pk, aad, rng)
             .expect("neither plaintext nor aad are long"),
@@ -469,7 +466,7 @@ pub fn split_and_encrypt_for_kps<R: CryptoRng + RngCore>(
     kp_certs: &[PgpPublicCert],
     t: usize,
     rng: &mut R,
-) -> GuardianResult<(Vec<PgpEncryptedShare>, ShareCommitments)> {
+) -> GuardianResult<(Vec<KPEncryptedShare>, ShareCommitments)> {
     let n = kp_certs.len();
     let shares = split_secret(sk, n, t, rng)?;
     let mut encrypted_shares = Vec::with_capacity(n);
@@ -485,8 +482,8 @@ pub fn split_and_encrypt_for_kps<R: CryptoRng + RngCore>(
 pub fn encrypt_share_for_provisioner(
     share: &Share,
     cert: &PgpPublicCert,
-) -> GuardianResult<PgpEncryptedShare> {
-    Ok(PgpEncryptedShare {
+) -> GuardianResult<KPEncryptedShare> {
+    Ok(KPEncryptedShare {
         id: share.id,
         armored_ciphertext: pgp_encrypt_armored(&share.value.to_bytes(), cert)?,
     })
@@ -494,7 +491,7 @@ pub fn encrypt_share_for_provisioner(
 
 /// Decrypt an encrypted share with optional AAD
 pub fn decrypt_share(
-    encrypted_share: &EncryptedShare,
+    encrypted_share: &GuardianEncryptedShare,
     sk: &EncSecKey,
     aad: Option<&[u8; 32]>,
 ) -> GuardianResult<Share> {
@@ -553,6 +550,16 @@ pub fn exp_g(scalar: &Scalar) -> CompressedPoint {
 mod tests {
     use super::*;
     use k256::SecretKey;
+    use sequoia_openpgp::cert::prelude::CertBuilder;
+    use sequoia_openpgp::crypto::SessionKey;
+    use sequoia_openpgp::parse::stream::DecryptionHelper;
+    use sequoia_openpgp::parse::stream::DecryptorBuilder;
+    use sequoia_openpgp::parse::stream::MessageStructure;
+    use sequoia_openpgp::parse::stream::VerificationHelper;
+    use sequoia_openpgp::policy::Policy;
+    use sequoia_openpgp::serialize::Serialize;
+    use sequoia_openpgp::types::SymmetricAlgorithm;
+    use std::io;
 
     #[test]
     fn test_encrypt_and_decrypt() {
@@ -568,6 +575,79 @@ mod tests {
             decrypt(&ciphertext, keypair.secret_key(), wrong_aad)
                 .is_err_and(|x| matches!(x, InvalidInputs(_)))
         );
+    }
+
+    #[test]
+    fn test_pgp_encrypt_armored_and_decrypt() {
+        let policy = StandardPolicy::new();
+        let (cert, _) = CertBuilder::general_purpose(["kp@example.com"])
+            .generate()
+            .unwrap();
+        let mut armored = Vec::new();
+        cert.armored().export(&mut armored).unwrap();
+        let public_cert = PgpPublicCert::new(String::from_utf8(armored).unwrap()).unwrap();
+
+        let plaintext = b"secret share bytes";
+        let ciphertext = pgp_encrypt_armored(plaintext, &public_cert).unwrap();
+        assert!(ciphertext.starts_with("-----BEGIN PGP MESSAGE-----"));
+
+        let helper = PgpDecryptHelper {
+            cert: &cert,
+            policy: &policy,
+        };
+        let mut decryptor = DecryptorBuilder::from_bytes(ciphertext.as_bytes())
+            .unwrap()
+            .with_policy(&policy, None, helper)
+            .unwrap();
+        let mut decrypted = Vec::new();
+        io::copy(&mut decryptor, &mut decrypted).unwrap();
+
+        assert_eq!(plaintext, decrypted.as_slice());
+    }
+
+    struct PgpDecryptHelper<'a> {
+        cert: &'a openpgp::Cert,
+        policy: &'a dyn Policy,
+    }
+
+    impl VerificationHelper for PgpDecryptHelper<'_> {
+        fn get_certs(
+            &mut self,
+            _ids: &[openpgp::KeyHandle],
+        ) -> openpgp::Result<Vec<openpgp::Cert>> {
+            Ok(Vec::new())
+        }
+
+        fn check(&mut self, _structure: MessageStructure) -> openpgp::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl DecryptionHelper for PgpDecryptHelper<'_> {
+        fn decrypt(
+            &mut self,
+            pkesks: &[openpgp::packet::PKESK],
+            _skesks: &[openpgp::packet::SKESK],
+            sym_algo: Option<SymmetricAlgorithm>,
+            decrypt: &mut dyn FnMut(Option<SymmetricAlgorithm>, &SessionKey) -> bool,
+        ) -> openpgp::Result<Option<openpgp::Cert>> {
+            let key = self
+                .cert
+                .keys()
+                .unencrypted_secret()
+                .with_policy(self.policy, None)
+                .for_transport_encryption()
+                .next()
+                .unwrap()
+                .key()
+                .clone();
+            let mut keypair = key.into_keypair()?;
+            pkesks[0]
+                .decrypt(&mut keypair, sym_algo)
+                .map(|(algo, session_key)| decrypt(algo, &session_key));
+
+            Ok(None)
+        }
     }
 
     // Verify secret reconstruction with varying number of shares (0 to n).

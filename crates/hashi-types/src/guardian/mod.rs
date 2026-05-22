@@ -155,7 +155,7 @@ pub struct SetupNewKeyRequest {
 /// `EnclaveSigned<T>`
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SetupNewKeyResponse {
-    pub encrypted_shares: Vec<PgpEncryptedShare>,
+    pub encrypted_shares: Vec<KPEncryptedShare>,
     pub share_commitments: ShareCommitments,
 }
 
@@ -172,7 +172,7 @@ pub struct OperatorInitRequest {
 /// To be called by Key Provisioners (who may be outside entities).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProvisionerInitRequest {
-    encrypted_share: EncryptedShare,
+    encrypted_share: GuardianEncryptedShare,
     state: ProvisionerInitState,
 }
 
@@ -258,7 +258,7 @@ pub enum LogMessage {
 /// for the canonical S3 key layout and sharing_seq semantics.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct SecretSharingLogMessage {
-    pub encrypted_shares: Vec<PgpEncryptedShare>,
+    pub encrypted_shares: Vec<KPEncryptedShare>,
     pub secret_sharing_config: SecretSharingConfig,
 }
 
@@ -496,7 +496,7 @@ impl ProvisionerInitState {
 }
 
 impl ProvisionerInitRequest {
-    pub fn new(encrypted_share: EncryptedShare, state: ProvisionerInitState) -> Self {
+    pub fn new(encrypted_share: GuardianEncryptedShare, state: ProvisionerInitState) -> Self {
         Self {
             encrypted_share,
             state,
@@ -517,7 +517,7 @@ impl ProvisionerInitRequest {
         ProvisionerInitRequest::new(encrypted_share, state)
     }
 
-    pub fn encrypted_share(&self) -> &EncryptedShare {
+    pub fn encrypted_share(&self) -> &GuardianEncryptedShare {
         &self.encrypted_share
     }
 
