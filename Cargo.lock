@@ -5810,7 +5810,15 @@ dependencies = [
 name = "sui-ecs"
 version = "0.0.0"
 dependencies = [
+ "bcs",
+ "futures",
+ "serde",
+ "serde_derive",
+ "sui-rpc",
  "sui-sdk-types",
+ "thiserror 1.0.69",
+ "tokio",
+ "tonic",
 ]
 
 [[package]]

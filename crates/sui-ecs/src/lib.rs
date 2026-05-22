@@ -37,12 +37,14 @@
 pub mod base;
 pub mod component;
 pub mod index;
+pub mod ingest;
 pub mod move_bound;
 pub mod scheduler;
 pub mod world;
 
 pub use component::Component;
 pub use index::{Index, IndexStorage, OneToMany, OneToOne};
+pub use ingest::{ChangeSet, IngestError, apply_object_stream};
 pub use move_bound::MoveBound;
 pub use scheduler::Derived;
 pub use world::{MutationBatch, World};
