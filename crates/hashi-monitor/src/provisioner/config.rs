@@ -33,11 +33,11 @@ impl GuardianConfig {
         })?;
         // TODO: also verify num_shares and threshold against KP-side expected values.
         let share_commitments = info
-            .secret_sharing_config
+            .secret_sharing_instance
             .as_ref()
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "guardian info missing secret_sharing_config; operator_init may be incomplete"
+                    "guardian info missing secret_sharing_instance; operator_init may be incomplete"
                 )
             })?
             .commitments()

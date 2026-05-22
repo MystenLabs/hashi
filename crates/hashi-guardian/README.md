@@ -26,7 +26,7 @@ Where:
 - `init` logs are per-session and deterministic by semantic message kind.
 - `heartbeat` logs are hour-partitioned and strictly ordered per session.
 - `withdraw` logs are hour-partitioned. Successes are seq-sorted within a bucket so the KP rotating in the next enclave can recover limiter state by reading the lexicographically last success key.
-- `secret_sharing` logs are flat (not date-partitioned). Each entry is a `SecretSharingLogMessage { encrypted_shares, secret_sharing_config }` written by `setup_new_key` (genesis, `sharing_seq=0`). KPs read the lexicographically last entry to learn the current authoritative commitments and to fetch their encrypted shares.
+- `secret_sharing` logs are flat (not date-partitioned). Each entry is a `SecretSharingLogMessage { encrypted_shares, secret_sharing_instance }` written by `setup_new_key` (genesis, `sharing_seq=0`). KPs read the lexicographically last entry to learn the current authoritative commitments and to fetch their encrypted shares.
 
 ## Why this layout
 

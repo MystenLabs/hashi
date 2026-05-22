@@ -71,7 +71,7 @@ pub struct Scratchpad {
     /// TODO: Investigate if it can be moved to std::sync::Mutex
     pub shares: tokio::sync::Mutex<Vec<Share>>,
     /// Secret-sharing scheme (commitments + N + T) set by operator_init.
-    pub secret_sharing_config: OnceLock<SecretSharingConfig>,
+    pub secret_sharing_instance: OnceLock<SecretSharingInstance>,
     /// Hash of the state in ProvisionerInitRequest
     pub state_hash: OnceLock<[u8; 32]>,
     /// Set once operator_init has successfully written all logs to S3.
@@ -80,6 +80,10 @@ pub struct Scratchpad {
     /// Set once the provisioner init flow has successfully logged EnclaveFullyInitialized.
     /// This prevents withdrawals from starting before provisioner_init logs.
     pub provisioner_init_logging_complete: OnceLock<()>,
+    /// Set on successful completion of `setup_new_key`. One-shot per enclave
+    /// instance: subsequent `setup_new_key` calls are rejected and the operator
+    /// must restart the enclave.
+    pub setup_complete: OnceLock<()>,
 }
 
 pub struct EphemeralKeyPairs {
@@ -372,7 +376,7 @@ impl Enclave {
 
     pub fn is_operator_init_complete(&self) -> bool {
         self.config.is_operator_init_complete()
-            && self.scratchpad.secret_sharing_config.get().is_some()
+            && self.scratchpad.secret_sharing_instance.get().is_some()
             && self
                 .scratchpad
                 .operator_init_logging_complete
@@ -382,11 +386,15 @@ impl Enclave {
 
     pub fn is_operator_init_partially_complete(&self) -> bool {
         self.config.is_operator_init_partially_complete()
-            || self.scratchpad.secret_sharing_config.get().is_some()
+            || self.scratchpad.secret_sharing_instance.get().is_some()
     }
 
     pub fn is_fully_initialized(&self) -> bool {
         self.is_provisioner_init_complete() && self.is_operator_init_complete()
+    }
+
+    pub fn is_setup_complete(&self) -> bool {
+        self.scratchpad.setup_complete.get().is_some()
     }
 
     // ========================================================================
@@ -420,7 +428,7 @@ impl Enclave {
 
     pub fn info(&self) -> GuardianInfo {
         GuardianInfo {
-            secret_sharing_config: self.secret_sharing_config().ok().cloned(),
+            secret_sharing_instance: self.secret_sharing_instance().ok().cloned(),
             bucket_info: self
                 .config
                 .s3_logger()
@@ -476,16 +484,16 @@ impl Enclave {
         &self.scratchpad.shares
     }
 
-    pub fn secret_sharing_config(&self) -> GuardianResult<&SecretSharingConfig> {
+    pub fn secret_sharing_instance(&self) -> GuardianResult<&SecretSharingInstance> {
         self.scratchpad
-            .secret_sharing_config
+            .secret_sharing_instance
             .get()
             .ok_or(InvalidInputs("Secret sharing config not set".into()))
     }
 
-    pub fn set_secret_sharing_config(&self, cfg: SecretSharingConfig) -> GuardianResult<()> {
+    pub fn set_secret_sharing_instance(&self, cfg: SecretSharingInstance) -> GuardianResult<()> {
         self.scratchpad
-            .secret_sharing_config
+            .secret_sharing_instance
             .set(cfg)
             .map_err(|_| InvalidInputs("Secret sharing config already set".into()))
     }

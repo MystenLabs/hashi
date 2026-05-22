@@ -1152,7 +1152,7 @@ pub struct SignedGuardianInfo {
 pub struct GuardianInfoData {
     /// Secret-sharing config (if set).
     #[prost(message, optional, tag = "1")]
-    pub secret_sharing_config: ::core::option::Option<SecretSharingConfig>,
+    pub secret_sharing_instance: ::core::option::Option<SecretSharingInstance>,
     /// S3 bucket info (if set). Used by key provisioners to check S3 bucket info.
     #[prost(message, optional, tag = "2")]
     pub bucket_info: ::core::option::Option<S3BucketInfo>,
@@ -1167,7 +1167,7 @@ pub struct GuardianInfoData {
 /// `commitments.len() == num_shares` and `2 <= threshold <= num_shares`.
 /// `sharing_seq` versions instances: 0 at setup, +1 per rotation.
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SecretSharingConfig {
+pub struct SecretSharingInstance {
     #[prost(message, repeated, tag = "1")]
     pub commitments: ::prost::alloc::vec::Vec<GuardianShareCommitment>,
     #[prost(uint32, optional, tag = "2")]
@@ -1255,7 +1255,7 @@ pub struct OperatorInitRequest {
     pub s3_config: ::core::option::Option<S3Config>,
     /// Secret-sharing scheme for the current BTC key.
     #[prost(message, optional, tag = "2")]
-    pub secret_sharing_config: ::core::option::Option<SecretSharingConfig>,
+    pub secret_sharing_instance: ::core::option::Option<SecretSharingInstance>,
     /// Network the guardian is operating on.
     #[prost(enumeration = "Network", optional, tag = "3")]
     pub network: ::core::option::Option<i32>,

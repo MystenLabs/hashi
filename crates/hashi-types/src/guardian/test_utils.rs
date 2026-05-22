@@ -16,7 +16,7 @@ use super::ProvisionerInitRequest;
 use super::ProvisionerInitState;
 use super::S3BucketInfo;
 use super::S3Config;
-use super::SecretSharingConfig;
+use super::SecretSharingInstance;
 use super::SetupNewKeyRequest;
 use super::SetupNewKeyResponse;
 use super::ShareCommitment;
@@ -78,7 +78,7 @@ impl GetGuardianInfoResponse {
         let signing_pub_key = signing_key.verification_key();
 
         let info = GuardianInfo {
-            secret_sharing_config: None,
+            secret_sharing_instance: None,
             bucket_info: Some(super::S3BucketInfo {
                 bucket: "bucket".to_string(),
                 region: "us-east-1".to_string(),
@@ -156,7 +156,7 @@ impl OperatorInitRequest {
                 digest: vec![0u8; 32],
             })
         }
-        let secret_sharing_config = SecretSharingConfig::new(
+        let secret_sharing_instance = SecretSharingInstance::new(
             ShareCommitments::new(share_commitments).unwrap(),
             TEST_N,
             TEST_T,
@@ -166,7 +166,7 @@ impl OperatorInitRequest {
 
         OperatorInitRequest {
             s3_config,
-            secret_sharing_config,
+            secret_sharing_instance,
             network: super::Network::Regtest,
         }
     }

@@ -21,9 +21,13 @@ pub async fn setup_new_key(
     if !enclave.is_operator_init_complete() {
         return Err(InvalidInputs("call operator_init first".into()));
     }
+    if enclave.is_setup_complete() {
+        return Err(InvalidInputs("setup already complete".into()));
+    }
 
-    let n = request.num_shares();
-    let t = request.threshold();
+    let params = request.params();
+    let n = params.num_shares();
+    let t = params.threshold();
     let key_provisioner_pks = request.public_keys();
     info!("Received {} public keys.", key_provisioner_pks.len());
 
@@ -36,7 +40,8 @@ pub async fn setup_new_key(
         let fp = format!("{:x}", fingerprint(&sk));
         info!("Splitting secret into {n} shares (threshold: {t}).");
         let (encrypted, commitments) =
-            split_and_encrypt_for_kps(&sk, key_provisioner_pks, t, &mut rng)?;
+            split_and_encrypt_for_kps(&sk, key_provisioner_pks, params, &mut rng)
+                .expect("SetupNewKeyRequest::new validates pubkey count == params.num_shares()");
         (encrypted, commitments, fp)
     };
     info!(
@@ -44,12 +49,12 @@ pub async fn setup_new_key(
         fingerprint_hex, n
     );
 
-    let secret_sharing_config = SecretSharingConfig::new(share_commitments.clone(), n, t, 0)?;
+    let ss_instance = SecretSharingInstance::new(share_commitments.clone(), n, t, 0)?;
 
     enclave
         .log_secret_sharing(SecretSharingLogMessage {
             encrypted_shares: encrypted_shares.clone(),
-            secret_sharing_config,
+            secret_sharing_instance: ss_instance,
         })
         .await?;
 
@@ -58,6 +63,11 @@ pub async fn setup_new_key(
         share_commitments,
     });
 
+    enclave
+        .scratchpad
+        .setup_complete
+        .set(())
+        .map_err(|_| InvalidInputs("setup_complete already set".into()))?;
     Ok(response)
 }
 

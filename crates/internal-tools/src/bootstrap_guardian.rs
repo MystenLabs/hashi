@@ -23,7 +23,8 @@ use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::ProvisionerInitState;
-use hashi_types::guardian::SecretSharingConfig;
+use hashi_types::guardian::SecretSharingInstance;
+use hashi_types::guardian::SecretSharingParams;
 use hashi_types::guardian::Share;
 use hashi_types::guardian::ShareCommitment;
 use hashi_types::guardian::ShareCommitments;
@@ -31,7 +32,7 @@ use hashi_types::guardian::WithdrawalConfig;
 use hashi_types::guardian::crypto::commit_share;
 use hashi_types::guardian::crypto::split_secret;
 use hashi_types::guardian::proto_conversions::provisioner_init_request_to_pb;
-use hashi_types::guardian::proto_conversions::secret_sharing_config_to_pb;
+use hashi_types::guardian::proto_conversions::secret_sharing_instance_to_pb;
 use hashi_types::guardian::session_id_from_signing_pubkey;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
@@ -103,8 +104,8 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .await
         .with_context(|| format!("connect to guardian at {}", args.guardian_endpoint))?;
 
-    let secret_sharing_config = SecretSharingConfig::new(material.commitments.clone(), n, t, 0)
-        .map_err(|e| anyhow!("build SecretSharingConfig: {e:?}"))?;
+    let secret_sharing_instance = SecretSharingInstance::new(material.commitments.clone(), n, t, 0)
+        .map_err(|e| anyhow!("build SecretSharingInstance: {e:?}"))?;
     let operator_init_req = pb::OperatorInitRequest {
         s3_config: Some(pb::S3Config {
             access_key: Some(access_key),
@@ -112,7 +113,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
             bucket_name: Some(bucket.clone()),
             region: Some(region.clone()),
         }),
-        secret_sharing_config: Some(secret_sharing_config_to_pb(&secret_sharing_config)),
+        secret_sharing_instance: Some(secret_sharing_instance_to_pb(&secret_sharing_instance)),
         network: Some(network as i32),
     };
     tracing::info!("calling OperatorInit");
@@ -161,9 +162,9 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         returned_bucket.bucket,
     );
     let returned_ssc = info
-        .secret_sharing_config
+        .secret_sharing_instance
         .as_ref()
-        .ok_or_else(|| anyhow!("guardian info missing secret_sharing_config"))?;
+        .ok_or_else(|| anyhow!("guardian info missing secret_sharing_instance"))?;
     anyhow::ensure!(
         *returned_ssc.commitments() == material.commitments
             && returned_ssc.num_shares() == n
@@ -259,7 +260,9 @@ fn generate_share_material<R: CryptoRng + RngCore>(
 ) -> Result<ShareMaterial> {
     let k256_sk = k256::SecretKey::random(&mut *rng);
 
-    let shares = split_secret(&k256_sk, n, t, rng).map_err(|e| anyhow!("split_secret: {e:?}"))?;
+    let params =
+        SecretSharingParams::new(n, t).map_err(|e| anyhow!("invalid sharing params: {e:?}"))?;
+    let shares = split_secret(&k256_sk, &params, rng);
     let commitments_vec: Vec<ShareCommitment> = shares.iter().map(commit_share).collect();
     let commitments =
         ShareCommitments::new(commitments_vec).expect("commitments built from a valid share set");
