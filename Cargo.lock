@@ -5807,6 +5807,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sui-ecs"
+version = "0.0.0"
+dependencies = [
+ "sui-sdk-types",
+]
+
+[[package]]
 name = "sui-futures"
 version = "1.67.0"
 source = "git+https://github.com/MystenLabs/sui.git?rev=77a42de4be99383b98518541e0c6002d720cafc8#77a42de4be99383b98518541e0c6002d720cafc8"

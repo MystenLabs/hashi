@@ -1,0 +1,9 @@
+[package]
+name = "sui-ecs"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+sui-sdk-types.workspace = true
+
+[dev-dependencies]
