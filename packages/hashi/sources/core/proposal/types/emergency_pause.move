@@ -4,7 +4,7 @@
 /// Emergency pause/unpause governance module.
 ///
 /// A single proposal type that can either pause or unpause the bridge.
-/// Pausing requires 51% quorum; unpausing requires ~67% quorum.
+/// Pausing uses a low quorum for fast response; unpausing requires supermajority.
 module hashi::emergency_pause;
 
 use hashi::{hashi::Hashi, proposal};
