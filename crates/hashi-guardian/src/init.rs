@@ -273,6 +273,7 @@ mod tests {
         let (shares, enclave) = setup_test_shares_and_enclave().await;
         let init_state = ProvisionerInitState::mock_for_testing(None);
 
+        // Simulate KPs calling provisioner_init
         for (i, share) in shares.iter().enumerate().take(TEST_N) {
             let request = ProvisionerInitRequest::build_from_share_and_state(
                 share,
