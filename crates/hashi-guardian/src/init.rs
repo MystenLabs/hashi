@@ -283,6 +283,7 @@ mod tests {
 
             let result = provisioner_init(enclave.clone(), request).await;
 
+            // Check behavior based on whether we've reached/exceeded threshold
             if i == TEST_T - 1 {
                 // At exactly threshold (first time), call should succeed
                 assert!(
