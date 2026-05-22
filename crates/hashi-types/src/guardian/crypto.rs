@@ -478,12 +478,15 @@ mod tests {
     // - Full round-trip produces equivalent keys
     #[test]
     fn test_varying_share_count() {
+        // Start with a k256::SecretKey
         let original_k256_sk = SecretKey::random(&mut rand::thread_rng());
         let original_bytes = original_k256_sk.to_bytes();
 
+        // Split the secret into shares
         let shares =
             split_secret(&original_k256_sk, TEST_N, TEST_T, &mut rand::thread_rng()).unwrap();
 
+        // Test reconstruction with varying numbers of shares from 0 to TEST_N
         for num_shares in 0..=TEST_N {
             let shares_subset = &shares[0..num_shares];
             let result = combine_shares(shares_subset, TEST_T);
@@ -497,6 +500,7 @@ mod tests {
                         // Good: operation failed as expected
                     }
                     Ok(reconstructed) => {
+                        // Operation succeeded but should produce wrong secret
                         let reconstructed_bytes = reconstructed.secret_bytes();
                         assert_ne!(
                             original_bytes.as_slice(),
@@ -506,8 +510,11 @@ mod tests {
                     }
                 }
             } else {
+                // With threshold or more shares, reconstruction should succeed and match original
                 let reconstructed_secp_sk = result.unwrap();
                 let reconstructed_bytes = reconstructed_secp_sk.secret_bytes();
+
+                // Verify the reconstructed secret matches the original
                 assert_eq!(
                     original_bytes.as_slice(),
                     &reconstructed_bytes,
@@ -517,14 +524,17 @@ mod tests {
         }
     }
 
-    // Verify any subset of t shares works
+    // Verify any subset of TEST_T shares works
     #[test]
     fn test_varying_subsets() {
         let original_sk = SecretKey::random(&mut rand::thread_rng());
         let original_bytes = original_sk.to_bytes();
 
+        // Generate all shares
         let shares = split_secret(&original_sk, TEST_N, TEST_T, &mut rand::thread_rng()).unwrap();
 
+        // Test different combinations of TEST_T shares
+        // Try shares [0,1,2], [1,2,3], [2,3,4], etc.
         for start_idx in 0..=(TEST_N - TEST_T) {
             let subset = &shares[start_idx..(start_idx + TEST_T)];
             let reconstructed = combine_shares(subset, TEST_T).unwrap();

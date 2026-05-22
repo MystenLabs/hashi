@@ -159,7 +159,7 @@ pub struct SetupNewKeyResponse {
     pub share_commitments: ShareCommitments,
 }
 
-/// Provides S3 API keys, share-sharing config and the BTC network to the enclave.
+/// Provides S3 API keys, secret-sharing config and the BTC network to the enclave.
 /// To be called by the operator.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OperatorInitRequest {
@@ -205,7 +205,7 @@ pub struct GetGuardianInfoResponse {
 /// TODO: Add network?
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct GuardianInfo {
-    /// Secret-sharing config (if set).
+    /// Secret-sharing config (if set). Used by KPs to check that the right key will be used.
     pub secret_sharing_config: Option<SecretSharingConfig>,
     /// S3 bucket name (if set). Used by KPs to check S3 bucket info.
     pub bucket_info: Option<S3BucketInfo>,
@@ -265,9 +265,6 @@ pub struct CurrentKeyState {
 /// PI: provisioner_init
 /// Init messages are expected to be logged in the following order:
 /// OIAttestationUnsigned -> OIGuardianInfo -> PISuccess (T times) -> PIEnclaveFullyInitialized.
-///
-/// Note: `setup_new_key` emits `LogMessage::KeyState` to the `key_state/`
-/// directory rather than to `init/`.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum InitLogMessage {
     /// Attestation and signing public key posted in /operator_init
