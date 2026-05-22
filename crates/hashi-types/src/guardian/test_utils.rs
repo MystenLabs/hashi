@@ -26,9 +26,6 @@ use super::StandardWithdrawalResponse;
 use super::WithdrawalConfig;
 use super::WithdrawalID;
 
-// Default secret-sharing params used by mock_for_testing helpers.
-const TEST_N: usize = 5;
-const TEST_T: usize = 3;
 use super::bitcoin_utils::BTC_LIB;
 use super::bitcoin_utils::InputUTXO;
 use super::bitcoin_utils::OutputUTXO;
@@ -55,6 +52,10 @@ use sui_sdk_types::bcs::FromBcs;
 use crate::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
 use crate::committee::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
 use crate::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
+
+// Default secret-sharing params used by mock_for_testing helpers.
+const TEST_N: usize = 5;
+const TEST_T: usize = 3;
 
 // -------------------------------
 // Shared deterministic test values
