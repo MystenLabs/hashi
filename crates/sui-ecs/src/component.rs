@@ -59,7 +59,6 @@ impl<C: Component> Storage<C> {
         self.data.len()
     }
 
-    #[allow(dead_code)] // used by the reactive scheduler (forthcoming).
     pub(crate) fn drain_dirty(&mut self) -> impl Iterator<Item = Address> + '_ {
         self.dirty.drain()
     }
@@ -68,9 +67,14 @@ impl<C: Component> Storage<C> {
 /// Type-erased component storage. The `World` keeps these behind
 /// `Box<dyn AnyStorage>` keyed by `TypeId::of::<C>()`; downcasting back
 /// to `Storage<C>` happens at the access boundary.
+///
+/// `drain_dirty_erased` is surfaced at the erased level so the scheduler
+/// can walk every component type uniformly without needing to know its
+/// concrete `C`.
 pub(crate) trait AnyStorage: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
+    fn drain_dirty_erased(&mut self) -> Vec<Address>;
 }
 
 impl<C: Component> AnyStorage for Storage<C> {
@@ -80,5 +84,9 @@ impl<C: Component> AnyStorage for Storage<C> {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn drain_dirty_erased(&mut self) -> Vec<Address> {
+        self.drain_dirty().collect()
     }
 }

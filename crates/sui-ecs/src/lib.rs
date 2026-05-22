@@ -37,8 +37,10 @@
 pub mod base;
 pub mod component;
 pub mod index;
+pub mod scheduler;
 pub mod world;
 
 pub use component::Component;
 pub use index::{Index, IndexStorage, OneToMany, OneToOne};
+pub use scheduler::Derived;
 pub use world::{MutationBatch, World};
