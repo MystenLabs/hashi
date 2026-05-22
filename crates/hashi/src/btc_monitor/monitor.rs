@@ -2,13 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Result;
 use kyoto::FeeRate;
 use kyoto::HeaderCheckpoint;
 use kyoto::Warning;
+use lru::LruCache;
 use rand::Rng;
 use sui_futures::service::Service;
 use tokio::sync::oneshot;
@@ -64,6 +67,90 @@ struct CachedDepositEntry {
     last_updated_tip: u32,
 }
 
+struct DepositLookupCache {
+    tx_blocks: LruCache<bitcoin::Txid, HeaderCheckpoint>,
+    block_heights: LruCache<bitcoin::BlockHash, u32>,
+    transactions: LruCache<bitcoin::Txid, Arc<bitcoin::Transaction>>,
+}
+
+impl DepositLookupCache {
+    /// Sizes for the shared deposit lookup caches. These caches collapse repeated
+    /// per-output lookups for large deposit transactions while keeping memory bounded.
+    const TX_BLOCK_CACHE_SIZE: NonZeroUsize = NonZeroUsize::new(4096).unwrap();
+    const BLOCK_HEIGHT_CACHE_SIZE: NonZeroUsize = NonZeroUsize::new(128).unwrap();
+    const TRANSACTION_CACHE_SIZE: NonZeroUsize = NonZeroUsize::new(4096).unwrap();
+
+    fn new() -> Self {
+        Self {
+            tx_blocks: LruCache::new(Self::TX_BLOCK_CACHE_SIZE),
+            block_heights: LruCache::new(Self::BLOCK_HEIGHT_CACHE_SIZE),
+            transactions: LruCache::new(Self::TRANSACTION_CACHE_SIZE),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.tx_blocks.clear();
+        self.block_heights.clear();
+        self.transactions.clear();
+    }
+
+    fn invalidate_tx(&mut self, txid: &bitcoin::Txid) {
+        self.tx_blocks.pop(txid);
+        self.transactions.pop(txid);
+    }
+}
+
+#[derive(Clone)]
+struct SharedDepositLookupCache {
+    inner: Arc<Mutex<DepositLookupCache>>,
+}
+
+impl SharedDepositLookupCache {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(DepositLookupCache::new())),
+        }
+    }
+
+    fn clear(&self) {
+        self.lock().clear();
+    }
+
+    fn get_tx_block(&self, txid: &bitcoin::Txid) -> Option<HeaderCheckpoint> {
+        self.lock().tx_blocks.get(txid).copied()
+    }
+
+    fn put_tx_block(&self, txid: bitcoin::Txid, block_info: HeaderCheckpoint) {
+        self.lock().tx_blocks.put(txid, block_info);
+    }
+
+    fn get_block_height(&self, block_hash: &bitcoin::BlockHash) -> Option<u32> {
+        self.lock().block_heights.get(block_hash).copied()
+    }
+
+    fn put_block_height(&self, block_hash: bitcoin::BlockHash, height: u32) {
+        self.lock().block_heights.put(block_hash, height);
+    }
+
+    fn get_transaction(&self, txid: &bitcoin::Txid) -> Option<Arc<bitcoin::Transaction>> {
+        self.lock().transactions.get(txid).cloned()
+    }
+
+    fn put_transaction(&self, txid: bitcoin::Txid, transaction: Arc<bitcoin::Transaction>) {
+        self.lock().transactions.put(txid, transaction);
+    }
+
+    fn invalidate_tx(&self, txid: &bitcoin::Txid) {
+        self.lock().invalidate_tx(txid);
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, DepositLookupCache> {
+        self.inner
+            .lock()
+            .expect("deposit lookup cache lock poisoned")
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DepositConfirmError {
     #[error("UTXO {txid}:{vout} has already been spent on Bitcoin")]
@@ -93,6 +180,7 @@ pub struct Monitor {
     pending_deposits: Vec<PendingDeposit>,
     pending_deposit_workers: JoinSet<()>,
     rpc_workers: JoinSet<()>,
+    deposit_lookup_cache: SharedDepositLookupCache,
     deposit_observation_cache: HashMap<bitcoin::OutPoint, CachedDepositEntry>,
 }
 
@@ -166,6 +254,7 @@ impl Monitor {
                     pending_deposits: vec![],
                     pending_deposit_workers: JoinSet::new(),
                     rpc_workers: JoinSet::new(),
+                    deposit_lookup_cache: SharedDepositLookupCache::new(),
                     deposit_observation_cache: HashMap::new(),
                 };
 
@@ -249,6 +338,7 @@ impl Monitor {
             current_node = new_node;
             current_client = new_client;
             self.requester = current_client.requester.clone();
+            self.deposit_lookup_cache.clear();
 
             info!("Kyoto node rebuilt, resuming monitor");
         }
@@ -397,6 +487,7 @@ impl Monitor {
                     reorganized.len()
                 );
                 self.metrics.kyoto_reorgs.inc();
+                self.deposit_lookup_cache.clear();
                 if let Some(new_tip) = accepted.last() {
                     self.tip = Some(kyoto::HeaderCheckpoint::new(
                         new_tip.height,
@@ -537,6 +628,7 @@ impl Monitor {
                 self.bitcoind_rpc.clone(),
                 self.requester.clone(),
                 self.client_tx.clone(),
+                self.deposit_lookup_cache.clone(),
                 pending_deposit,
             ));
     }
@@ -683,6 +775,7 @@ impl Monitor {
                     self.bitcoind_rpc.clone(),
                     self.requester.clone(),
                     self.client_tx.clone(),
+                    self.deposit_lookup_cache.clone(),
                     pending_deposit,
                 ));
         }
@@ -694,6 +787,7 @@ impl Monitor {
         bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
         requester: kyoto::Requester,
         client_tx: tokio::sync::mpsc::Sender<MonitorMessage>,
+        deposit_lookup_cache: SharedDepositLookupCache,
         mut pending_deposit: PendingDeposit,
     ) {
         if pending_deposit.result_tx.is_closed() {
@@ -706,77 +800,87 @@ impl Monitor {
         let outpoint = pending_deposit.outpoint;
 
         // Look up block from the txid.
-        let block_info = match pending_deposit.block_info {
-            Some(block_info) => block_info,
-            None => {
-                debug!(
-                    "Looking up block for transaction {}",
-                    pending_deposit.outpoint.txid
-                );
-                let txid = pending_deposit.outpoint.txid;
-                let tx_info = match btc_rpc_call(&bitcoind_rpc, move |rpc| {
-                    rpc.get_raw_transaction_verbose(txid)
-                })
-                .await
-                {
-                    Ok(tx_info) => tx_info,
-                    Err(corepc_client::client_sync::Error::JsonRpc(
-                        jsonrpc::error::Error::Rpc(ref e),
-                    )) if e.code == -5 => {
-                        // RPC error -5: "No such mempool or blockchain transaction"
-                        debug!("Transaction {txid} not found in mempool or blockchain");
-                        send_observation(&client_tx, outpoint, CachedDepositObservation::NotFound)
-                            .await;
-                        return;
-                    }
-                    Err(e) => {
-                        error!("Failed to look up txid {txid}: {e}");
-                        return;
-                    }
-                };
-                let tx_info = match tx_info.into_model() {
-                    Ok(info) => info,
-                    Err(e) => {
-                        error!(
-                            "Failed to parse transaction info for {}: {e}",
-                            pending_deposit.outpoint.txid
-                        );
-                        return;
-                    }
-                };
-                let Some(block_hash) = tx_info.block_hash else {
-                    debug!(
-                        "Transaction {} is not yet included in a block",
-                        pending_deposit.outpoint.txid
-                    );
-                    send_observation(&client_tx, outpoint, CachedDepositObservation::InMempool)
+        let cached_block_info = deposit_lookup_cache.get_tx_block(&pending_deposit.outpoint.txid);
+        let block_info = if let Some(block_info) = pending_deposit.block_info {
+            block_info
+        } else if let Some(block_info) = cached_block_info {
+            block_info
+        } else {
+            debug!(
+                "Looking up block for transaction {}",
+                pending_deposit.outpoint.txid
+            );
+            let txid = pending_deposit.outpoint.txid;
+            let tx_info = match btc_rpc_call(&bitcoind_rpc, move |rpc| {
+                rpc.get_raw_transaction_verbose(txid)
+            })
+            .await
+            {
+                Ok(tx_info) => tx_info,
+                Err(corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(
+                    ref e,
+                ))) if e.code == -5 => {
+                    // RPC error -5: "No such mempool or blockchain transaction"
+                    debug!("Transaction {txid} not found in mempool or blockchain");
+                    send_observation(&client_tx, outpoint, CachedDepositObservation::NotFound)
                         .await;
                     return;
-                };
-                // Verify the block hash is in kyoto's independently-validated
-                // chain of most work. This catches a malicious bitcoind reporting
-                // a fake or forked block hash.
-                let height = match requester.height_of_hash(block_hash).await {
-                    Ok(Some(height)) => height,
-                    Ok(None) => {
-                        warn!(
-                            "Block hash {block_hash} from bitcoind not yet on kyoto's chain \
-                             (sync lag, recent reorg, or malicious bitcoind); will retry."
-                        );
-                        return;
-                    }
-                    Err(e) => {
-                        error!("Failed to look up block hash {block_hash} in kyoto: {e}");
-                        return;
-                    }
-                };
-                let block_info = kyoto::HeaderCheckpoint {
-                    height,
-                    hash: block_hash,
-                };
-                pending_deposit.block_info = Some(block_info);
-                block_info
-            }
+                }
+                Err(e) => {
+                    error!("Failed to look up txid {txid}: {e}");
+                    return;
+                }
+            };
+            let tx_info = match tx_info.into_model() {
+                Ok(info) => info,
+                Err(e) => {
+                    error!(
+                        "Failed to parse transaction info for {}: {e}",
+                        pending_deposit.outpoint.txid
+                    );
+                    return;
+                }
+            };
+            let Some(block_hash) = tx_info.block_hash else {
+                debug!(
+                    "Transaction {} is not yet included in a block",
+                    pending_deposit.outpoint.txid
+                );
+                send_observation(&client_tx, outpoint, CachedDepositObservation::InMempool).await;
+                return;
+            };
+            // Verify the block hash is in kyoto's independently-validated
+            // chain of most work. This catches a malicious bitcoind reporting
+            // a fake or forked block hash.
+            let cached_height = deposit_lookup_cache.get_block_height(&block_hash);
+            let height = match cached_height {
+                Some(height) => height,
+                None => {
+                    let height = match requester.height_of_hash(block_hash).await {
+                        Ok(Some(height)) => height,
+                        Ok(None) => {
+                            warn!(
+                                "Block hash {block_hash} from bitcoind not yet on kyoto's chain \
+                                     (sync lag, recent reorg, or malicious bitcoind); will retry."
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            error!("Failed to look up block hash {block_hash} in kyoto: {e}");
+                            return;
+                        }
+                    };
+                    deposit_lookup_cache.put_block_height(block_hash, height);
+                    height
+                }
+            };
+            let block_info = kyoto::HeaderCheckpoint {
+                height,
+                hash: block_hash,
+            };
+            pending_deposit.block_info = Some(block_info);
+            deposit_lookup_cache.put_tx_block(txid, block_info);
+            block_info
         };
 
         send_observation(
@@ -799,36 +903,48 @@ impl Monitor {
         }
 
         // If deposit is confirmed, look up the TxOut info.
-        let block = match requester.get_block(block_info.hash).await {
-            Ok(block) => block,
-            Err(kyoto::error::FetchBlockError::UnknownHash) => {
-                // Error: The block is no longer in the current chain.
-                // TODO: Verify kyoto won't return blocks outside the chain of most work
-                warn!(
-                    "Pending deposit {:?}: Block is no longer in the current chain",
-                    pending_deposit.as_ref(),
-                );
-                pending_deposit.block_info = None;
-                return;
+        let txid = pending_deposit.outpoint.txid;
+        let cached_transaction = deposit_lookup_cache.get_transaction(&txid);
+        let transaction = match cached_transaction {
+            Some(transaction) => transaction,
+            None => {
+                let block = match requester.get_block(block_info.hash).await {
+                    Ok(block) => block,
+                    Err(kyoto::error::FetchBlockError::UnknownHash) => {
+                        // Error: The block is no longer in the current chain.
+                        // TODO: Verify kyoto won't return blocks outside the chain of most work
+                        warn!(
+                            "Pending deposit {:?}: Block is no longer in the current chain",
+                            pending_deposit.as_ref(),
+                        );
+                        pending_deposit.block_info = None;
+                        deposit_lookup_cache.invalidate_tx(&txid);
+                        return;
+                    }
+                    Err(e) => {
+                        error!("Failed to look up block {}: {}", block_info.hash, e);
+                        return;
+                    }
+                };
+                let Some(transaction) = block
+                    .block
+                    .txdata
+                    .iter()
+                    .find(|tx| tx.compute_txid() == pending_deposit.outpoint.txid)
+                else {
+                    // Error: The transaction is not actually in the block.
+                    warn!(
+                        "Pending deposit {:?}: Transaction not present in the block reported by the Bitcoin Core node! Possibly malicious behavior by the Bitcoin Core node.",
+                        pending_deposit.as_ref(),
+                    );
+                    pending_deposit.block_info = None;
+                    deposit_lookup_cache.invalidate_tx(&txid);
+                    return;
+                };
+                let transaction = Arc::new(transaction.clone());
+                deposit_lookup_cache.put_transaction(txid, transaction.clone());
+                transaction
             }
-            Err(e) => {
-                error!("Failed to look up block {}: {}", block_info.hash, e);
-                return;
-            }
-        };
-        let Some(transaction) = block
-            .block
-            .txdata
-            .iter()
-            .find(|tx| tx.compute_txid() == pending_deposit.outpoint.txid)
-        else {
-            // Error: The transaction is not actually in the block.
-            warn!(
-                "Pending deposit {:?}: Transaction not present in the block reported by the Bitcoin Core node! Possibly malicious behavior by the Bitcoin Core node.",
-                pending_deposit.as_ref(),
-            );
-            pending_deposit.block_info = None;
-            return;
         };
 
         let txout = match transaction.tx_out(pending_deposit.outpoint.vout.try_into().unwrap()) {
@@ -1135,6 +1251,46 @@ mod tests {
             observation,
             last_updated_tip,
         }
+    }
+
+    fn block_hash(seed: u8) -> bitcoin::BlockHash {
+        let mut bytes = [0u8; 32];
+        bytes[0] = seed;
+        bitcoin::BlockHash::from_byte_array(bytes)
+    }
+
+    #[test]
+    fn deposit_lookup_cache_records_and_clears_entries() {
+        let txid = make_outpoint(1).txid;
+        let block_hash = block_hash(2);
+        let block_info = HeaderCheckpoint::new(42, block_hash);
+        let cache = SharedDepositLookupCache::new();
+
+        cache.put_tx_block(txid, block_info);
+        cache.put_block_height(block_hash, 42);
+
+        assert_eq!(cache.get_tx_block(&txid), Some(block_info));
+        assert_eq!(cache.get_block_height(&block_hash), Some(42));
+
+        cache.clear();
+
+        assert!(cache.get_tx_block(&txid).is_none());
+        assert!(cache.get_block_height(&block_hash).is_none());
+    }
+
+    #[test]
+    fn deposit_lookup_cache_invalidates_tx_entries_only() {
+        let txid = make_outpoint(1).txid;
+        let block_hash = block_hash(2);
+        let block_info = HeaderCheckpoint::new(42, block_hash);
+        let cache = SharedDepositLookupCache::new();
+
+        cache.put_tx_block(txid, block_info);
+        cache.put_block_height(block_hash, 42);
+        cache.invalidate_tx(&txid);
+
+        assert!(cache.get_tx_block(&txid).is_none());
+        assert_eq!(cache.get_block_height(&block_hash), Some(42));
     }
 
     #[test]

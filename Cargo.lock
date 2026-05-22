@@ -2856,6 +2856,7 @@ dependencies = [
  "http 1.4.0",
  "jiff",
  "jsonrpc",
+ "lru",
  "prometheus",
  "prometheus-closure-metric",
  "proptest",

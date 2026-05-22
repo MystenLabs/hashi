@@ -18,6 +18,7 @@ bitcoin.workspace = true
 corepc-client.workspace = true
 jsonrpc.workspace = true
 kyoto.workspace = true
+lru.workspace = true
 
 # Dependencies for the protobuf definitions
 tonic.workspace = true
