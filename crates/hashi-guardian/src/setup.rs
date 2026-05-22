@@ -49,7 +49,8 @@ pub async fn setup_new_key(
         fingerprint_hex, n
     );
 
-    let ss_instance = SecretSharingInstance::new(share_commitments.clone(), n, t, 0)?;
+    let ss_instance = SecretSharingInstance::new(share_commitments.clone(), n, t, 0)
+        .expect("(n, t) validated by SetupNewKeyRequest; commitments produced with matching count");
 
     enclave
         .log_secret_sharing(SecretSharingLogMessage {

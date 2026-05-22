@@ -63,6 +63,9 @@ async fn main() -> Result<()> {
         .add_service(GuardianServiceServer::new(svc))
         .serve(addr);
 
+    // TODO: skip spawning the heartbeat writer when setup_mode=true. Setup-mode
+    // heartbeats are picked up by the normal-mode `heartbeat_audit`, which
+    // keys on session_id only and can't distinguish modes (PCRs are identical).
     let heartbeat_future = HeartbeatWriter::new(enclave, MAX_HEARTBEAT_FAILURES_INTERVAL)
         .run(HEARTBEAT_INTERVAL, HEARTBEAT_RETRY_INTERVAL);
 

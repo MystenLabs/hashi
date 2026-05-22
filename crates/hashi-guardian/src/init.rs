@@ -187,6 +187,7 @@ pub async fn provisioner_init(
             .await
             .expect("Unable to log EnclaveFullyInitialized");
 
+        received_shares.clear();
         enclave
             .scratchpad
             .provisioner_init_logging_complete

@@ -63,8 +63,8 @@ pub struct EnclaveState {
     rate_limiter: OnceLock<Arc<tokio::sync::Mutex<RateLimiter>>>,
 }
 
-/// Scratchpad used only during initialization.
-/// Note: We don't clear it post-init because it does not have a lot of data.
+/// Scratchpad used only during initialization. `shares` is cleared once the
+/// init flow that gathered it completes; the OnceLock flags retain their state.
 #[derive(Default)]
 pub struct Scratchpad {
     /// The received shares
