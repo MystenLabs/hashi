@@ -25,26 +25,27 @@
 //! - **Bootstrap**: walks bag dynamic fields and dumps objects into the
 //!   world; the framework's Derived registrations decide what to parse.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::RwLock;
 
 use anyhow::Result;
 use sui_ecs::World;
 use sui_ecs::base;
 use sui_rpc::Client;
 use sui_sdk_types::Address;
-use std::sync::RwLock;
 use tokio::sync::broadcast;
 use tokio::sync::watch;
 
 use crate::config::HashiIds;
 
-pub mod components;
 pub mod bootstrap;
+pub mod components;
 pub mod watcher;
 
 pub use components::{
     BitcoinStateField, CommitteeEntry, DepositRequestEntry, HashiRoot, MemberInfoEntry,
-    ProposalEntry, ProposalType,
+    ProposalEntry, ProposalType, RichMemberInfo, TlsKeyToAddress,
 };
 
 const BROADCAST_CHANNEL_CAPACITY: usize = 100;
@@ -79,21 +80,47 @@ impl std::fmt::Debug for OnchainState {
 }
 
 struct Inner {
-    #[allow(unused)]
     ids: HashiIds,
     #[allow(unused)]
     client: Client,
     world: Arc<RwLock<World>>,
     notifications: broadcast::Sender<Notification>,
     checkpoint: watch::Sender<CheckpointInfo>,
+    /// Settings used when constructing per-validator gRPC clients.
+    /// Held separately from the World because the values come from
+    /// the host process, not the chain.
+    client_config: RwLock<ClientConfig>,
+    /// Per-validator gRPC client pool, rebuilt after each checkpoint.
+    /// Mirrors the legacy `CommitteeSet.clients` field; held alongside
+    /// the world rather than inside it because the construction
+    /// depends on host-side config the framework doesn't see.
+    clients: RwLock<BTreeMap<Address, crate::grpc::Client>>,
+}
+
+#[derive(Default)]
+struct ClientConfig {
+    tls_private_key: Option<ed25519_dalek::SigningKey>,
+    grpc_max_decoding_message_size: Option<usize>,
+    metrics: Option<Arc<crate::metrics::Metrics>>,
 }
 
 impl OnchainState {
-    /// Build a fresh state from a gRPC endpoint URL. Bootstraps the
-    /// world by scraping live objects, then returns immediately —
-    /// callers spawn [`Self::run_watcher`] to follow updates.
-    pub async fn new(grpc_url: &str, ids: HashiIds) -> Result<Self> {
-        let client = Client::new(grpc_url)?;
+    /// Build a fresh state and a background watcher service. Same
+    /// signature as [`crate::onchain::OnchainState::new`] so callers
+    /// can swap implementations transparently.
+    ///
+    /// Bootstraps the world by scraping live objects, populates the
+    /// per-validator gRPC client pool from the parsed `MemberInfo`s,
+    /// then spawns an abortable background task that follows the
+    /// checkpoint stream and applies object effects.
+    pub async fn new(
+        sui_rpc_url: &str,
+        ids: HashiIds,
+        tls_private_key: Option<ed25519_dalek::SigningKey>,
+        grpc_max_decoding_message_size: Option<usize>,
+        metrics: Option<Arc<crate::metrics::Metrics>>,
+    ) -> Result<(Self, sui_futures::service::Service)> {
+        let client = Client::new(sui_rpc_url)?;
         let mut world = World::new();
         base::install(&mut world);
         components::install(&mut world);
@@ -110,26 +137,142 @@ impl OnchainState {
         let (notifications, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let (checkpoint_tx, _) = watch::channel(checkpoint);
 
-        Ok(Self(Arc::new(Inner {
+        let state = Self(Arc::new(Inner {
             ids,
-            client,
-            world,
-            notifications,
-            checkpoint: checkpoint_tx,
-        })))
+            client: client.clone(),
+            world: world.clone(),
+            notifications: notifications.clone(),
+            checkpoint: checkpoint_tx.clone(),
+            client_config: RwLock::new(ClientConfig {
+                tls_private_key,
+                grpc_max_decoding_message_size,
+                metrics,
+            }),
+            clients: RwLock::new(BTreeMap::new()),
+        }));
+        // Populate the gRPC client pool now that bootstrap has filled
+        // RichMemberInfo for every validator. After this, the watcher
+        // re-runs `rebuild_clients` every time it applies a
+        // checkpoint, so any MemberInfo rotation will refresh the pool
+        // on the next chain heartbeat.
+        state.rebuild_clients();
+
+        let watcher_state = state.clone();
+        let service = sui_futures::service::Service::new().spawn_aborting(async move {
+            let _ = watcher_state.run_watcher().await;
+            Ok(())
+        });
+
+        Ok((state, service))
     }
 
-    /// Spawn-friendly background task that follows checkpoint updates.
-    /// Returns when the upstream stream is unrecoverable; until then it
-    /// reconnects on transient errors with 5s backoff.
+    /// Drive the checkpoint subscription loop. Stays in [`crate::onchain_ecs`]
+    /// to mirror the legacy entry-point shape; normally called via the
+    /// `Service` returned from [`Self::new`].
     pub async fn run_watcher(&self) -> Result<()> {
         watcher::run(
             self.0.client.clone(),
             self.0.world.clone(),
             self.0.checkpoint.clone(),
             self.0.notifications.clone(),
+            self.clone(),
         )
         .await
+    }
+
+    // ---- gRPC client pool & TLS lookup -------------------------------------
+
+    /// Reverse-lookup a validator address by its TLS public key. Backed
+    /// by the framework's [`TlsKeyToAddress`] index, which the
+    /// scheduler keeps in sync with `MemberInfoEntry` writes.
+    pub fn lookup_address_by_tls_public_key(
+        &self,
+        tls_public_key: &ed25519_dalek::VerifyingKey,
+    ) -> Option<Address> {
+        let world = self.0.world.read().expect("world lock poisoned");
+        world
+            .index::<TlsKeyToAddress>()?
+            .get(tls_public_key.as_bytes())
+            .copied()
+    }
+
+    /// Per-validator gRPC client. Pool is rebuilt eagerly after every
+    /// checkpoint commit, so changes to validator endpoints/TLS keys
+    /// land in the pool on the next chain heartbeat after their
+    /// `MemberInfo` is written.
+    pub fn client(&self, validator: &Address) -> Option<crate::grpc::Client> {
+        self.0
+            .clients
+            .read()
+            .expect("clients lock poisoned")
+            .get(validator)
+            .cloned()
+    }
+
+    /// Replace the TLS signing key used for outbound client auth.
+    /// Rebuilds the entire pool so existing client handles point at
+    /// the new key.
+    pub fn set_tls_private_key(&self, key: ed25519_dalek::SigningKey) {
+        self.0
+            .client_config
+            .write()
+            .expect("client config lock poisoned")
+            .tls_private_key = Some(key);
+        self.rebuild_clients();
+    }
+
+    pub fn set_grpc_max_decoding_message_size(&self, limit: usize) {
+        self.0
+            .client_config
+            .write()
+            .expect("client config lock poisoned")
+            .grpc_max_decoding_message_size = Some(limit);
+        self.rebuild_clients();
+    }
+
+    pub fn set_metrics(&self, metrics: Arc<crate::metrics::Metrics>) {
+        self.0
+            .client_config
+            .write()
+            .expect("client config lock poisoned")
+            .metrics = Some(metrics);
+        self.rebuild_clients();
+    }
+
+    /// Walk `RichMemberInfo` for every validator with valid endpoint
+    /// and TLS material, build a fresh `grpc::Client`, and swap the
+    /// pool in one shot. Called from [`Self::new`] after bootstrap and
+    /// from the watcher after each applied checkpoint.
+    pub(crate) fn rebuild_clients(&self) {
+        let world = self.0.world.read().expect("world lock poisoned");
+        let config = self.0.client_config.read().expect("client config lock poisoned");
+
+        let new_pool: BTreeMap<Address, crate::grpc::Client> = world
+            .iter::<RichMemberInfo>()
+            .filter_map(|(_, info)| {
+                let info = &info.0;
+                let endpoint = info.endpoint_url()?;
+                let tls_public_key = info.tls_public_key()?;
+                let tls_config = match &config.tls_private_key {
+                    Some(priv_key) => crate::tls::make_client_config_with_client_auth(
+                        priv_key,
+                        tls_public_key,
+                    ),
+                    None => crate::tls::make_client_config(tls_public_key),
+                };
+                let mut client =
+                    crate::grpc::Client::new(endpoint, tls_config).ok()?;
+                if let Some(limit) = config.grpc_max_decoding_message_size {
+                    client = client.max_decoding_message_size(limit);
+                }
+                if let Some(metrics) = &config.metrics {
+                    client = client.with_metrics(metrics.clone());
+                }
+                Some((*info.validator_address(), client))
+            })
+            .collect();
+
+        *self.0.clients.write().expect("clients lock poisoned") = new_pool;
     }
 
     // ---- channel handles (mirror the existing surface) ---------------------
@@ -176,12 +319,39 @@ impl OnchainState {
         f(world.get::<HashiRoot>(self.0.ids.hashi_object_id).map(|h| &h.0))
     }
 
-    /// All currently-tracked validator `MemberInfo`s.
-    pub fn committee_members(&self) -> Vec<hashi_types::move_types::MemberInfo> {
+    /// All currently-tracked validator `MemberInfo`s, in the same
+    /// validated shape (`types::MemberInfo` with parsed BLS pubkey,
+    /// `http::Uri`, etc.) that the legacy container produces.
+    pub fn committee_members(&self) -> Vec<crate::onchain::types::MemberInfo> {
+        let world = self.0.world.read().expect("world lock poisoned");
+        world
+            .iter::<RichMemberInfo>()
+            .map(|(_, m)| m.0.clone())
+            .collect()
+    }
+
+    /// Look up a single validator by address. Returns `None` if the
+    /// validator's BLS key isn't representable; use
+    /// [`Self::committee_member_raw`] if you need the wire shape.
+    pub fn committee_member(
+        &self,
+        validator: &Address,
+    ) -> Option<crate::onchain::types::MemberInfo> {
+        let world = self.0.world.read().expect("world lock poisoned");
+        world
+            .iter::<RichMemberInfo>()
+            .find(|(_, m)| m.0.validator_address() == validator)
+            .map(|(_, m)| m.0.clone())
+    }
+
+    /// Raw `move_types::MemberInfo` for every validator — same shape
+    /// as the on-chain Move struct, no BLS / URI parsing. Useful when
+    /// you want every entry regardless of whether its keys validate.
+    pub fn committee_members_raw(&self) -> Vec<hashi_types::move_types::MemberInfo> {
         let world = self.0.world.read().expect("world lock poisoned");
         world
             .iter::<MemberInfoEntry>()
-            .map(|(_, m)| clone_member(&m.0))
+            .map(|(_, m)| clone_raw_member(&m.0))
             .collect()
     }
 
@@ -249,10 +419,11 @@ fn proposals_under_bag(world: &World, bag_id: Address) -> Vec<ProposalEntry> {
         .collect()
 }
 
-/// `MemberInfo` doesn't derive `Clone`, so we copy field-by-field. Kept
-/// internal because it duplicates a small amount of boilerplate; if
-/// the upstream type ever gets a `Clone` derive, this can go away.
-fn clone_member(
+/// `move_types::MemberInfo` doesn't derive `Clone`, so we copy
+/// field-by-field. Kept internal because it duplicates a small amount
+/// of boilerplate; if the upstream type ever gets a `Clone` derive,
+/// this can go away.
+fn clone_raw_member(
     m: &hashi_types::move_types::MemberInfo,
 ) -> hashi_types::move_types::MemberInfo {
     hashi_types::move_types::MemberInfo {
@@ -469,6 +640,8 @@ mod tests {
             world,
             notifications,
             checkpoint,
+            client_config: RwLock::new(ClientConfig::default()),
+            clients: RwLock::new(BTreeMap::new()),
         }))
     }
 
@@ -574,7 +747,7 @@ mod tests {
         );
 
         let mut endpoints: Vec<_> = state
-            .committee_members()
+            .committee_members_raw()
             .into_iter()
             .map(|m| m.endpoint_url)
             .collect();
@@ -650,7 +823,7 @@ mod tests {
         );
 
         let initial: Vec<_> = state
-            .committee_members()
+            .committee_members_raw()
             .into_iter()
             .map(|m| m.endpoint_url)
             .collect();
@@ -664,7 +837,7 @@ mod tests {
         }
 
         let after: Vec<_> = state
-            .committee_members()
+            .committee_members_raw()
             .into_iter()
             .map(|m| m.endpoint_url)
             .collect();
@@ -720,13 +893,13 @@ mod tests {
                 (field_id, field_obj),
             ],
         );
-        assert_eq!(state.committee_members().len(), 1);
+        assert_eq!(state.committee_members_raw().len(), 1);
 
         {
             let mut w = state.0.world.write().expect("world lock poisoned");
             w.remove::<SuiObject>(field_id);
         }
-        assert!(state.committee_members().is_empty());
+        assert!(state.committee_members_raw().is_empty());
         // And the MemberInfoEntry Component is removed too — the
         // scheduler dropped it via Derived::compute returning None.
         let w = state.0.world.read().expect("world lock poisoned");
@@ -787,5 +960,171 @@ mod tests {
         let owned = w.index::<base::OwnedByObject>().expect("registered");
         let kids: Vec<_> = owned.get(&members_bag).copied().collect();
         assert_eq!(kids, vec![field_id]);
+    }
+
+    /// Exercise the TLS reverse index end-to-end: insert a member info
+    /// whose `tls_public_key` is 32 bytes and verify
+    /// `lookup_address_by_tls_public_key` returns the validator address
+    /// — the same surface the legacy `CommitteeSet` exposes.
+    #[tokio::test]
+    async fn tls_index_resolves_validator_address() {
+        use ed25519_dalek::{SigningKey, VerifyingKey};
+        use rand::rngs::OsRng;
+
+        let pkg = addr(0x60);
+        let hashi_id = addr(0x61);
+        let members_bag = addr(0x62);
+        let validator = addr(0xA0);
+        let field_id = addr(0xC0);
+
+        // Generate a real ed25519 keypair so VerifyingKey decoding
+        // succeeds. We only care about the public bytes — they're what
+        // the index keys on and what the lookup matches against.
+        let signing = SigningKey::generate(&mut OsRng);
+        let verifying: VerifyingKey = signing.verifying_key();
+
+        let mut member = make_member_info(validator);
+        member.tls_public_key = verifying.as_bytes().to_vec();
+
+        let ids = HashiIds {
+            package_id: pkg,
+            hashi_object_id: hashi_id,
+        };
+        let state = synthetic_state(
+            hashi_id,
+            ids,
+            vec![
+                (
+                    hashi_id,
+                    make_hashi_object(
+                        hashi_id,
+                        HashiBags {
+                            members: members_bag,
+                            committees: addr(0x63),
+                            proposals_active: addr(0x64),
+                            proposals_executed: addr(0x65),
+                            treasury: addr(0x66),
+                            tob: addr(0x67),
+                        },
+                        pkg,
+                    ),
+                ),
+                (
+                    field_id,
+                    make_field_object(
+                        field_id,
+                        validator,
+                        member,
+                        member_info_struct_tag(pkg),
+                        members_bag,
+                    ),
+                ),
+            ],
+        );
+
+        // Resolves via the framework-maintained TlsKeyToAddress index.
+        assert_eq!(
+            state.lookup_address_by_tls_public_key(&verifying),
+            Some(validator),
+        );
+
+        // A different (random) key shouldn't resolve to anyone.
+        let other = SigningKey::generate(&mut OsRng).verifying_key();
+        assert_eq!(state.lookup_address_by_tls_public_key(&other), None);
+    }
+
+    /// When a validator's TLS public key is rotated, the index entry
+    /// should follow — the old key no longer resolves, the new one
+    /// does. Mirrors the legacy `update_validator` behavior but driven
+    /// by the scheduler's automatic re-derivation.
+    #[tokio::test]
+    async fn tls_index_follows_key_rotation() {
+        use ed25519_dalek::{SigningKey, VerifyingKey};
+        use rand::rngs::OsRng;
+
+        let pkg = addr(0x70);
+        let hashi_id = addr(0x71);
+        let members_bag = addr(0x72);
+        let validator = addr(0xA0);
+        let field_id = addr(0xC0);
+
+        let old_signing = SigningKey::generate(&mut OsRng);
+        let old_key: VerifyingKey = old_signing.verifying_key();
+        let new_signing = SigningKey::generate(&mut OsRng);
+        let new_key: VerifyingKey = new_signing.verifying_key();
+
+        let mut member_v1 = make_member_info(validator);
+        member_v1.tls_public_key = old_key.as_bytes().to_vec();
+        let mut member_v2 = make_member_info(validator);
+        member_v2.tls_public_key = new_key.as_bytes().to_vec();
+
+        let ids = HashiIds {
+            package_id: pkg,
+            hashi_object_id: hashi_id,
+        };
+        let state = synthetic_state(
+            hashi_id,
+            ids,
+            vec![
+                (
+                    hashi_id,
+                    make_hashi_object(
+                        hashi_id,
+                        HashiBags {
+                            members: members_bag,
+                            committees: addr(0x73),
+                            proposals_active: addr(0x74),
+                            proposals_executed: addr(0x75),
+                            treasury: addr(0x76),
+                            tob: addr(0x77),
+                        },
+                        pkg,
+                    ),
+                ),
+                (
+                    field_id,
+                    make_field_object(
+                        field_id,
+                        validator,
+                        member_v1,
+                        member_info_struct_tag(pkg),
+                        members_bag,
+                    ),
+                ),
+            ],
+        );
+
+        assert_eq!(
+            state.lookup_address_by_tls_public_key(&old_key),
+            Some(validator),
+        );
+
+        // Re-write the MemberInfo Object with the new TLS key — same
+        // code path the watcher takes when a `ValidatorUpdated`
+        // transaction lands.
+        {
+            let mut w = state.0.world.write().expect("world lock poisoned");
+            w.insert::<SuiObject>(
+                field_id,
+                make_field_object(
+                    field_id,
+                    validator,
+                    member_v2,
+                    member_info_struct_tag(pkg),
+                    members_bag,
+                ),
+            );
+        }
+
+        assert_eq!(
+            state.lookup_address_by_tls_public_key(&old_key),
+            None,
+            "old key should no longer resolve",
+        );
+        assert_eq!(
+            state.lookup_address_by_tls_public_key(&new_key),
+            Some(validator),
+            "new key should resolve to the same validator",
+        );
     }
 }

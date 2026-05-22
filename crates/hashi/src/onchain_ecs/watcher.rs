@@ -36,11 +36,17 @@ use super::Notification;
 
 /// Long-running subscription loop. Drains the checkpoint subscription
 /// stream into the world, retrying with backoff on transport errors.
+///
+/// `owner` is the parent `OnchainState` handle. After each successfully
+/// applied checkpoint the watcher calls `owner.rebuild_clients()` so
+/// the per-validator gRPC pool reflects any `MemberInfo` rotations
+/// from that checkpoint without a separate notification path.
 pub async fn run(
     mut client: Client,
     world: Arc<RwLock<World>>,
     checkpoint_tx: watch::Sender<CheckpointInfo>,
     notifications: broadcast::Sender<Notification>,
+    owner: super::OnchainState,
 ) -> Result<()> {
     let read_mask = FieldMask::from_paths([
         // Per-transaction effects — what changed and how.
@@ -91,6 +97,14 @@ pub async fn run(
             {
                 warn!("apply_checkpoint failed: {e}");
             }
+            // Refresh the per-validator gRPC pool after every applied
+            // checkpoint. Cost is bounded by the number of validators
+            // and most checkpoints won't touch `MemberInfo`, but the
+            // unconditional rebuild keeps this simple — a smarter
+            // approach would gate on whether any `MemberInfoEntry`
+            // storage was dirtied, which would need a fresh hook on
+            // the scheduler.
+            owner.rebuild_clients();
         }
     }
 }

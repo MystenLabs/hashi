@@ -16,10 +16,12 @@
 
 use std::any::TypeId;
 
-use sui_ecs::{Component, Derived, World};
+use sui_ecs::{Component, Derived, Index, OneToOne, World};
 use sui_sdk_types::{Address, Object, StructTag, TypeTag};
 
 use hashi_types::move_types;
+
+use crate::onchain::{convert_move_uncompressed_g1_pubkey, parse_encryption_public_key, types};
 
 // ---- top-level objects --------------------------------------------------
 
@@ -73,8 +75,12 @@ impl Derived for BitcoinStateField {
 
 // ---- per-entry dynamic fields (one entity per bag entry) ---------------
 
-/// One validator's `MemberInfo`, sitting in a `Field<Address, MemberInfo>`
-/// dynamic field on the committees.members bag.
+/// One validator's `MemberInfo` — the raw move-type as it sits in the
+/// `Field<Address, MemberInfo>` dynamic field. Kept separate from the
+/// "rich" parsed version (see [`RichMemberInfo`]) so consumers that
+/// only need the wire shape don't pay for BLS validation, and so the
+/// TLS reverse index can be populated even when BLS parsing of the
+/// same entry would have failed.
 #[derive(Debug)]
 pub struct MemberInfoEntry(pub move_types::MemberInfo);
 
@@ -96,6 +102,68 @@ impl Derived for MemberInfoEntry {
             .ok()
             .map(|f| MemberInfoEntry(f.value))
     }
+}
+
+/// Validated `MemberInfo` — same `types::MemberInfo` shape the legacy
+/// container produces. Derived from [`MemberInfoEntry`], so the
+/// scheduler re-runs the parse automatically whenever the underlying
+/// chain object changes. Entries whose BLS bytes don't decode silently
+/// produce `None` and the component is dropped for that entity — the
+/// legacy path's behavior is to panic, which is wrong for a derivation
+/// (it would tear down the entire world).
+#[derive(Debug, Clone)]
+pub struct RichMemberInfo(pub types::MemberInfo);
+
+impl Component for RichMemberInfo {}
+
+impl Derived for RichMemberInfo {
+    fn dependencies() -> Vec<TypeId> {
+        vec![TypeId::of::<MemberInfoEntry>()]
+    }
+
+    fn compute(world: &World, entity: Address) -> Option<Self> {
+        let raw = world.get::<MemberInfoEntry>(entity)?;
+        let move_types::MemberInfo {
+            validator_address,
+            operator_address,
+            next_epoch_public_key,
+            endpoint_url,
+            tls_public_key,
+            next_epoch_encryption_public_key,
+        } = &raw.0;
+
+        // blst panics on malformed G1 bytes; treat that as "this
+        // entry isn't representable as a rich MemberInfo" rather than
+        // letting the panic escape the derivation.
+        let bls = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            convert_move_uncompressed_g1_pubkey(next_epoch_public_key)
+        }))
+        .ok()?;
+
+        Some(RichMemberInfo(types::MemberInfo {
+            validator_address: *validator_address,
+            operator_address: *operator_address,
+            next_epoch_public_key: bls,
+            endpoint_url: endpoint_url.clone().try_into().ok(),
+            tls_public_key: tls_public_key.as_slice().try_into().ok(),
+            next_epoch_encryption_public_key: parse_encryption_public_key(
+                next_epoch_encryption_public_key.as_slice(),
+            )
+            .map(Into::into),
+        }))
+    }
+}
+
+/// Reverse index: validator TLS public key bytes -> validator address.
+///
+/// Driven by `MemberInfoEntry` (the *raw* shape) rather than
+/// `RichMemberInfo`, so the index is populated regardless of whether
+/// BLS validation succeeds for an entry. The TLS check only needs 32
+/// well-formed bytes; we don't care about the BLS key here.
+pub struct TlsKeyToAddress;
+
+impl Index for TlsKeyToAddress {
+    type Storage = OneToOne<[u8; 32], Address>;
 }
 
 /// One per-epoch `Committee` sitting in a `Field<u64, Committee>` on
@@ -270,12 +338,32 @@ fn classify_proposal(type_param: &TypeTag) -> ProposalType {
 
 /// Register every component this module defines on `world` so the
 /// scheduler will keep parsed values in sync with their underlying
-/// `Object`s.
+/// `Object`s. Also wires up framework-maintained indexes such as
+/// [`TlsKeyToAddress`].
 pub fn install(world: &mut World) {
     world.register_derived::<HashiRoot>();
     world.register_derived::<BitcoinStateField>();
     world.register_derived::<MemberInfoEntry>();
+    world.register_derived::<RichMemberInfo>();
     world.register_derived::<CommitteeEntry>();
     world.register_derived::<DepositRequestEntry>();
     world.register_derived::<ProposalEntry>();
+
+    world
+        .register_index::<TlsKeyToAddress>()
+        .driven_by::<MemberInfoEntry>()
+        .on_insert(|idx, _entity, info| {
+            // The on-chain field is `vector<u8>` so anything other than
+            // 32 bytes is invalid; skip those rather than truncating.
+            if let Ok(bytes) = <[u8; 32]>::try_from(info.0.tls_public_key.as_slice()) {
+                idx.insert(bytes, info.0.validator_address);
+            }
+        })
+        .on_remove(|idx, _entity, info| {
+            if let Ok(bytes) = <[u8; 32]>::try_from(info.0.tls_public_key.as_slice()) {
+                idx.remove(&bytes);
+            }
+        })
+        .register();
 }
+

@@ -43,7 +43,9 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 pub mod types;
 mod watcher;
 
-fn parse_encryption_public_key(bytes: &[u8]) -> Option<crate::mpc::EncryptionGroupElement> {
+pub(crate) fn parse_encryption_public_key(
+    bytes: &[u8],
+) -> Option<crate::mpc::EncryptionGroupElement> {
     let array: [u8; 32] = bytes.try_into().ok()?;
     crate::mpc::EncryptionGroupElement::from_byte_array(&array).ok()
 }
@@ -1033,7 +1035,7 @@ async fn scrape_committee(
     Ok(convert_move_committee(field.value))
 }
 
-fn convert_move_committee_member(
+pub(crate) fn convert_move_committee_member(
     move_types::CommitteeMember {
         validator_address,
         public_key,
@@ -1074,7 +1076,7 @@ fn convert_move_committee(c: move_types::Committee) -> Committee {
     )
 }
 
-fn convert_move_uncompressed_g1_pubkey(uncompressed_g1: &[u8]) -> BLS12381PublicKey {
+pub(crate) fn convert_move_uncompressed_g1_pubkey(uncompressed_g1: &[u8]) -> BLS12381PublicKey {
     use fastcrypto::traits::ToFromBytes;
     let pubkey = blst::min_pk::PublicKey::deserialize(uncompressed_g1)
         .expect("onchain value is uncompressed G1");
