@@ -7,3 +7,6 @@ edition = "2024"
 sui-sdk-types.workspace = true
 
 [dev-dependencies]
+bcs.workspace = true
+serde.workspace = true
+serde_derive.workspace = true
