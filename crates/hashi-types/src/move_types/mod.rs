@@ -36,7 +36,7 @@ fn extract_type_param<T: MoveType>(event_type: &StructTag) -> Result<TypeTag, an
 }
 
 /// Rust version of the Move hashi::hashi::Hashi type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct Hashi {
     pub id: Address,
     pub committees: CommitteeSet,
@@ -65,7 +65,7 @@ pub struct BitcoinState {
 }
 
 /// Rust version of the Move hashi::committee_set::CommitteeSet type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct CommitteeSet {
     pub members: Bag,
     /// The current epoch.
@@ -78,7 +78,7 @@ pub struct CommitteeSet {
 }
 
 /// Rust version of the Move sui::bag::Bag type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct Bag {
     pub id: Address,
     pub size: u64,
@@ -87,7 +87,7 @@ pub struct Bag {
 /// Rust version of the Move sui::object_bag::ObjectBag type.
 pub type ObjectBag = Bag;
 
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct Field<N, V> {
     pub id: Address,
     pub name: N,
@@ -95,7 +95,7 @@ pub struct Field<N, V> {
 }
 
 /// Rust version of the Move hashi::committee_set::MemberInfo type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct MemberInfo {
     /// Sui Validator Address of this node
     pub validator_address: Address,
@@ -168,7 +168,7 @@ pub struct Committee {
 }
 
 /// Rust version of the Move hashi::config::Config type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct Config {
     pub config: Vec<(String, ConfigValue)>,
     pub enabled_versions: VecSet<u64>,
@@ -176,7 +176,7 @@ pub struct Config {
 }
 
 /// Rust version of the Move sui::package::UpgradeCap type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct UpgradeCap {
     pub id: Address,
     pub package: Address,
@@ -196,18 +196,18 @@ pub enum ConfigValue {
 }
 
 /// Rust version of the Move sui::vec_set::VecSet type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct VecSet<T> {
     pub contents: Vec<T>,
 }
 
 /// Rust version of the Move hashi::treasury::Treasury type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct Treasury {
     pub objects: ObjectBag,
 }
 
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct TreasuryCap {
     pub id: Address,
     pub supply: u64,
@@ -225,7 +225,7 @@ pub struct Coin {
 }
 
 /// Rust version of the Move hashi::proposals::Proposals type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug, serde_derive::Serialize, serde_derive::Deserialize)]
 pub struct Proposals {
     /// Proposals that have been created but not yet executed.
     pub active: ObjectBag,

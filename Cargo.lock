@@ -2870,6 +2870,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "sui-crypto",
+ "sui-ecs",
  "sui-futures",
  "sui-http",
  "sui-rpc",
