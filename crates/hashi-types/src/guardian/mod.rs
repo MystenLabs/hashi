@@ -187,6 +187,23 @@ pub struct ProvisionerInitState {
     hashi_btc_master_pubkey: BitcoinPubkey,
 }
 
+/// Setup-mode rotation request. Each *current* KP submits one of these.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RotateKpsRequest {
+    encrypted_old_share: GuardianEncryptedShare,
+    state: RotateKpsState,
+}
+
+/// The portion of a `RotateKpsRequest` that must agree across all T old KPs
+/// (digest-matched in-enclave). Asymmetry between old and new (`n`, `t`) is
+/// allowed.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RotateKpsState {
+    /// Armored OpenPGP certs for the new KP set. Length equals `new_params.num_shares()`.
+    new_kp_pgp_certs: Vec<String>,
+    new_params: SecretSharingParams,
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct GetGuardianInfoResponse {
     /// AWS Nitro attestation
@@ -530,6 +547,90 @@ impl ProvisionerInitRequest {
 
     pub fn into_state(self) -> ProvisionerInitState {
         self.state
+    }
+}
+
+impl RotateKpsState {
+    pub fn new(
+        new_kp_pgp_certs: Vec<String>,
+        new_num_shares: usize,
+        new_threshold: usize,
+    ) -> GuardianResult<Self> {
+        let new_params = SecretSharingParams::new(new_num_shares, new_threshold)?;
+        if new_kp_pgp_certs.len() != new_params.num_shares() {
+            return Err(InvalidInputs(format!(
+                "expected {} new KP certs, got {}",
+                new_params.num_shares(),
+                new_kp_pgp_certs.len()
+            )));
+        }
+        for i in 0..new_kp_pgp_certs.len() {
+            for j in (i + 1)..new_kp_pgp_certs.len() {
+                if new_kp_pgp_certs[i] == new_kp_pgp_certs[j] {
+                    return Err(InvalidInputs("duplicate new KP cert".into()));
+                }
+            }
+        }
+        Ok(Self {
+            new_kp_pgp_certs,
+            new_params,
+        })
+    }
+
+    pub fn new_kp_pgp_certs(&self) -> &[String] {
+        &self.new_kp_pgp_certs
+    }
+
+    pub fn new_params(&self) -> &SecretSharingParams {
+        &self.new_params
+    }
+
+    pub fn into_parts(self) -> (Vec<String>, SecretSharingParams) {
+        (self.new_kp_pgp_certs, self.new_params)
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        let bytes = bcs::to_bytes(self).expect("serialization should work");
+        Blake2b::<U32>::digest(bytes).into()
+    }
+}
+
+impl RotateKpsRequest {
+    pub fn new(encrypted_old_share: GuardianEncryptedShare, state: RotateKpsState) -> Self {
+        Self {
+            encrypted_old_share,
+            state,
+        }
+    }
+
+    /// Build by encrypting `share` to `enclave_pub_key` with `state.digest()`
+    /// bound as HPKE AAD — so the share is cryptographically tied to the
+    /// specific rotation target the KP is authorizing.
+    pub fn build_from_share_and_state<R: CryptoRng + RngCore>(
+        share: &Share,
+        enclave_pub_key: &EncPubKey,
+        state: RotateKpsState,
+        rng: &mut R,
+    ) -> Self {
+        let state_hash = state.digest();
+        let encrypted_old_share = encrypt_share(share, enclave_pub_key, Some(&state_hash), rng);
+        RotateKpsRequest::new(encrypted_old_share, state)
+    }
+
+    pub fn encrypted_old_share(&self) -> &GuardianEncryptedShare {
+        &self.encrypted_old_share
+    }
+
+    pub fn state(&self) -> &RotateKpsState {
+        &self.state
+    }
+
+    pub fn into_state(self) -> RotateKpsState {
+        self.state
+    }
+
+    pub fn into_parts(self) -> (GuardianEncryptedShare, RotateKpsState) {
+        (self.encrypted_old_share, self.state)
     }
 }
 

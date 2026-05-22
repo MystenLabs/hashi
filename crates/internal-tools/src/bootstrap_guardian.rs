@@ -294,6 +294,7 @@ fn parse_network(s: &str) -> Result<pb::Network> {
 mod tests {
     use super::*;
     use hashi_types::guardian::crypto::combine_shares;
+    use hashi_types::guardian::crypto::k256_sk_to_btc_keypair;
 
     #[test]
     fn generated_shares_reconstruct_to_master_pubkey() {
@@ -304,8 +305,9 @@ mod tests {
 
         assert_eq!(material.shares.len(), TEST_N);
         let subset = &material.shares[..TEST_T];
-        let reconstructed = combine_shares(subset, TEST_T).expect("threshold shares combine");
-        let (reconstructed_xonly, _) = reconstructed.x_only_public_key();
+        let reconstructed_sk = combine_shares(subset, TEST_T).expect("threshold shares combine");
+        let reconstructed_kp = k256_sk_to_btc_keypair(&reconstructed_sk);
+        let (reconstructed_xonly, _) = reconstructed_kp.x_only_public_key();
         assert_eq!(reconstructed_xonly, material.master_pubkey);
     }
 }

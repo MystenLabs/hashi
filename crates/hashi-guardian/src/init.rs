@@ -5,8 +5,8 @@ use crate::getters::get_attestation;
 use crate::Enclave;
 use crate::S3Logger;
 use hashi_types::guardian::crypto::combine_shares;
-use hashi_types::guardian::crypto::commit_share;
 use hashi_types::guardian::crypto::decrypt_share;
+use hashi_types::guardian::crypto::k256_sk_to_btc_keypair;
 use hashi_types::guardian::crypto::Share;
 use hashi_types::guardian::InitLogMessage::OIAttestationUnsigned;
 use hashi_types::guardian::InitLogMessage::OIGuardianInfo;
@@ -138,21 +138,11 @@ pub async fn provisioner_init(
     let instance = enclave
         .secret_sharing_instance()
         .expect("secret-sharing instance should be set after operator_init");
-    verify_share(&share, instance.commitments())?;
+    instance.commitments().verify_share(&share)?;
     info!("Share verified.");
 
     // 3) Set state_hash OR make sure whatever was previously set matches. Panics upon mismatch.
-    info!("Checking state hash.");
-    match enclave.state_hash() {
-        Some(existing_state_hash) if *existing_state_hash != state_hash => {
-            panic!("State hash mismatch")
-        }
-        Some(_) => info!("State hash matches existing."),
-        None => {
-            enclave.set_state_hash(state_hash)?;
-            info!("State hash set.");
-        }
-    }
+    enclave.check_or_set_state_hash(state_hash)?;
 
     // MILESTONE: At this point, we are sure it is a legitimate payload (both share & state)
 
@@ -208,7 +198,8 @@ async fn finalize_init(
     incoming_state: ProvisionerInitState,
 ) {
     info!("Threshold reached, combining shares.");
-    let enclave_btc_keypair = combine_shares(shares, threshold).expect("Unable to combine shares");
+    let enclave_k256_sk = combine_shares(shares, threshold).expect("Unable to combine shares");
+    let enclave_btc_keypair = k256_sk_to_btc_keypair(&enclave_k256_sk);
 
     info!("Setting enclave keypair.");
     enclave
@@ -235,13 +226,6 @@ async fn finalize_init(
         .expect("Unable to init state");
 
     info!("Enclave initialization complete.");
-}
-
-fn verify_share(share: &Share, commitments: &ShareCommitments) -> GuardianResult<()> {
-    commitments
-        .contains(&commit_share(share))
-        .then_some(())
-        .ok_or_else(|| InvalidInputs("No matching share found".into()))
 }
 
 #[cfg(test)]

@@ -12,6 +12,12 @@ service GuardianService {
   // Setup mode only: generate a new BTC key and distribute encrypted shares.
   rpc SetupNewKey(SetupNewKeyRequest) returns (SignedSetupNewKeyResponse);
 
+  // Setup mode only: rotate the KP set holding the existing BTC key. Each
+  // current KP submits one of these; once threshold is reached, the enclave
+  // reconstructs the BTC key, re-splits it for the new KP set, and writes
+  // the new CurrentKeyState to key_state/.
+  rpc RotateKps(RotateKpsRequest) returns (RotateKpsResponse);
+
   // Operator initialization: provide config and commitments before provisioning.
   rpc OperatorInit(OperatorInitRequest) returns (OperatorInitResponse);
 
@@ -234,6 +240,25 @@ message LimiterConfig {
 }
 
 message ProvisionerInitResponse {}
+
+// ==========================
+//        RotateKps
+// ==========================
+
+// Each current KP submits one. T submissions must agree on the state
+// portion (digest-matched in-enclave; same digest is also HPKE AAD on the
+// encrypted share). Asymmetry between old and new (n, t) is allowed.
+message RotateKpsRequest {
+  GuardianEncryptedShare encrypted_old_share = 1;
+
+  // Armored OpenPGP certificates for the new KP set. Length must equal new_num_shares.
+  repeated string new_kp_pgp_certs = 2;
+
+  optional uint32 new_num_shares = 3;
+  optional uint32 new_threshold = 4;
+}
+
+message RotateKpsResponse {}
 
 // ============================
 //    StandardWithdrawal

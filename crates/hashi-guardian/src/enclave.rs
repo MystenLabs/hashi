@@ -71,7 +71,7 @@ pub struct Scratchpad {
     pub shares: tokio::sync::Mutex<Vec<Share>>,
     /// Secret-sharing instance (commitments + N + T) set by operator_init.
     pub secret_sharing_instance: OnceLock<SecretSharingInstance>,
-    /// Hash of the state in ProvisionerInitRequest
+    /// Hash of the state in ProvisionerInitRequest (non-setup mode) (or) RotateKps (setup mode)
     pub state_hash: OnceLock<[u8; 32]>,
     /// Set once operator_init has successfully written all logs to S3.
     /// This prevents heartbeats from being emitted before operator_init logs.
@@ -497,14 +497,24 @@ impl Enclave {
             .map_err(|_| InvalidInputs("Secret-sharing instance already set".into()))
     }
 
-    pub fn state_hash(&self) -> Option<&[u8; 32]> {
-        self.scratchpad.state_hash.get()
-    }
-
-    pub fn set_state_hash(&self, hash: [u8; 32]) -> GuardianResult<()> {
-        self.scratchpad
-            .state_hash
-            .set(hash)
-            .map_err(|_| InvalidInputs("State hash already set".into()))
+    /// Match `state_hash` against the previously-stored hash from earlier
+    /// submissions in the same multi-KP flow. Sets it on the first call;
+    /// panics on mismatch (any divergence between KPs means at least one is
+    /// malicious or misconfigured — refuse to proceed).
+    pub fn check_or_set_state_hash(&self, state_hash: [u8; 32]) -> GuardianResult<()> {
+        match self.scratchpad.state_hash.get() {
+            Some(existing) if *existing != state_hash => {
+                panic!("State hash mismatch")
+            }
+            Some(_) => info!("State hash matches existing."),
+            None => {
+                self.scratchpad
+                    .state_hash
+                    .set(state_hash)
+                    .map_err(|_| InvalidInputs("State hash already set".into()))?;
+                info!("State hash set.");
+            }
+        }
+        Ok(())
     }
 }

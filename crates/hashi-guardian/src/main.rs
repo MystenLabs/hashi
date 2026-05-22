@@ -17,10 +17,10 @@ use tonic_health::server::health_reporter;
 use tracing::info;
 
 /// Enclave initialization.
-/// `setup_new_key` is gated to SETUP_MODE=true; `provisioner_init` and
-/// `standard_withdrawal` are gated to SETUP_MODE=false. Everything else
-/// (operator_init, get_guardian_info, …) is available in both modes. See the
-/// per-route gates in `rpc.rs`.
+/// `setup_new_key` and `rotate_kps` are gated to SETUP_MODE=true;
+/// `provisioner_init` and `standard_withdrawal` are gated to SETUP_MODE=false.
+/// Everything else (operator_init, get_guardian_info, …) is available in
+/// both modes. See the per-route gates in `rpc.rs`.
 #[tokio::main]
 async fn main() -> Result<()> {
     hashi_types::telemetry::TelemetryConfig::new()
@@ -35,9 +35,9 @@ async fn main() -> Result<()> {
         .unwrap_or(false);
 
     if setup_mode {
-        info!("Setup mode: setup_new_key enabled; provisioner_init/standard_withdrawal disabled.");
+        info!("Setup mode: setup_new_key/rotate_kps enabled; provisioner_init/standard_withdrawal disabled.");
     } else {
-        info!("Normal mode: provisioner_init/standard_withdrawal enabled; setup_new_key disabled.");
+        info!("Normal mode: provisioner_init/standard_withdrawal enabled; setup_new_key/rotate_kps disabled.");
     }
 
     let signing_keys = GuardianSignKeyPair::new(rand::thread_rng());

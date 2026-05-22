@@ -27,6 +27,8 @@ use super::OperatorInitRequest;
 use super::PgpPublicCert;
 use super::ProvisionerInitRequest;
 use super::ProvisionerInitState;
+use super::RotateKpsRequest;
+use super::RotateKpsState;
 use super::SecretSharingInstance;
 use super::SetupNewKeyRequest;
 use super::SetupNewKeyResponse;
@@ -183,6 +185,29 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
         let state = ProvisionerInitState::try_from(state_pb)?;
 
         Ok(ProvisionerInitRequest::new(encrypted_share, state))
+    }
+}
+
+impl TryFrom<pb::RotateKpsRequest> for RotateKpsRequest {
+    type Error = GuardianError;
+
+    fn try_from(req: pb::RotateKpsRequest) -> Result<Self, Self::Error> {
+        let encrypted_share_pb = req
+            .encrypted_old_share
+            .ok_or_else(|| missing("encrypted_old_share"))?;
+        let encrypted_old_share = GuardianEncryptedShare {
+            id: pb_to_share_id(encrypted_share_pb.id)?,
+            ciphertext: pb_to_ciphertext(encrypted_share_pb.ciphertext)?,
+        };
+
+        let new_num_shares = req
+            .new_num_shares
+            .ok_or_else(|| missing("new_num_shares"))? as usize;
+        let new_threshold = req.new_threshold.ok_or_else(|| missing("new_threshold"))? as usize;
+
+        let state = RotateKpsState::new(req.new_kp_pgp_certs, new_num_shares, new_threshold)?;
+
+        Ok(RotateKpsRequest::new(encrypted_old_share, state))
     }
 }
 
@@ -368,6 +393,17 @@ pub fn provisioner_init_state_to_pb(s: ProvisionerInitState) -> pb::ProvisionerI
         withdrawal_config: Some(withdrawal_config_to_pb(withdrawal_config)),
         hashi_btc_master_pubkey: Some(hashi_btc_master_pubkey.serialize().to_vec().into()),
         limiter_state: Some(limiter_state_to_pb(limiter_state)),
+    }
+}
+
+pub fn rotate_kps_request_to_pb(r: RotateKpsRequest) -> pb::RotateKpsRequest {
+    let (encrypted_old_share, state) = r.into_parts();
+    let (new_kp_pgp_certs, new_params) = state.into_parts();
+    pb::RotateKpsRequest {
+        encrypted_old_share: Some(guardian_encrypted_share_to_pb(encrypted_old_share)),
+        new_kp_pgp_certs,
+        new_num_shares: Some(new_params.num_shares() as u32),
+        new_threshold: Some(new_params.threshold() as u32),
     }
 }
 

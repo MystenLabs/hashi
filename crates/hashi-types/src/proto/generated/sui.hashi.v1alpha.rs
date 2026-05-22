@@ -1343,6 +1343,23 @@ pub struct LimiterConfig {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProvisionerInitResponse {}
+/// Each current KP submits one. T submissions must agree on the state
+/// portion (digest-matched in-enclave; same digest is also HPKE AAD on the
+/// encrypted share). Asymmetry between old and new (n, t) is allowed.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RotateKpsRequest {
+    #[prost(message, optional, tag = "1")]
+    pub encrypted_old_share: ::core::option::Option<GuardianEncryptedShare>,
+    /// Armored OpenPGP certificates for the new KP set. Length must equal new_num_shares.
+    #[prost(string, repeated, tag = "2")]
+    pub new_kp_pgp_certs: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(uint32, optional, tag = "3")]
+    pub new_num_shares: ::core::option::Option<u32>,
+    #[prost(uint32, optional, tag = "4")]
+    pub new_threshold: ::core::option::Option<u32>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RotateKpsResponse {}
 /// Hashi-signed wrapper for the withdrawal request.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SignedStandardWithdrawalRequest {
@@ -1567,6 +1584,36 @@ pub mod guardian_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Setup mode only: rotate the KP set holding the existing BTC key. Each
+        /// current KP submits one of these; once threshold is reached, the enclave
+        /// reconstructs the BTC key, re-splits it for the new KP set, and writes
+        /// the new CurrentKeyState to key_state/.
+        pub async fn rotate_kps(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RotateKpsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RotateKpsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.GuardianService/RotateKps",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("sui.hashi.v1alpha.GuardianService", "RotateKps"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         /// Operator initialization: provide config and commitments before provisioning.
         pub async fn operator_init(
             &mut self,
@@ -1683,6 +1730,17 @@ pub mod guardian_service_server {
             request: tonic::Request<super::SetupNewKeyRequest>,
         ) -> std::result::Result<
             tonic::Response<super::SignedSetupNewKeyResponse>,
+            tonic::Status,
+        >;
+        /// Setup mode only: rotate the KP set holding the existing BTC key. Each
+        /// current KP submits one of these; once threshold is reached, the enclave
+        /// reconstructs the BTC key, re-splits it for the new KP set, and writes
+        /// the new CurrentKeyState to key_state/.
+        async fn rotate_kps(
+            &self,
+            request: tonic::Request<super::RotateKpsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RotateKpsResponse>,
             tonic::Status,
         >;
         /// Operator initialization: provide config and commitments before provisioning.
@@ -1862,6 +1920,51 @@ pub mod guardian_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = SetupNewKeySvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.GuardianService/RotateKps" => {
+                    #[allow(non_camel_case_types)]
+                    struct RotateKpsSvc<T: GuardianService>(pub Arc<T>);
+                    impl<
+                        T: GuardianService,
+                    > tonic::server::UnaryService<super::RotateKpsRequest>
+                    for RotateKpsSvc<T> {
+                        type Response = super::RotateKpsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RotateKpsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as GuardianService>::rotate_kps(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RotateKpsSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
