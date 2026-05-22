@@ -180,7 +180,7 @@ pub async fn provisioner_init(
     // 5) If we have enough shares, finish initialization: combine shares & set config
     if current_share_count >= threshold {
         let shares_vec: Vec<Share> = received_shares.iter().cloned().collect();
-        finalize_init(&shares_vec, &enclave, request.into_state()).await;
+        finalize_init(&shares_vec, threshold, &enclave, request.into_state()).await;
         // Log to S3 indicating that withdrawals can be expected henceforth
         enclave
             .log_init(PIEnclaveFullyInitialized)
@@ -201,14 +201,11 @@ pub async fn provisioner_init(
 /// Panics upon an error as the enclaves state is irrecoverable at this point.
 async fn finalize_init(
     shares: &[Share],
+    threshold: usize,
     enclave: &Arc<Enclave>,
     incoming_state: ProvisionerInitState,
 ) {
     info!("Threshold reached, combining shares.");
-    let threshold = enclave
-        .secret_sharing_config()
-        .expect("secret sharing config set during operator_init")
-        .threshold();
     let enclave_btc_keypair = combine_shares(shares, threshold).expect("Unable to combine shares");
 
     info!("Setting enclave keypair.");
