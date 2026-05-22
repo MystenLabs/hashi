@@ -135,9 +135,13 @@ impl Default for OperatorInitTestArgs {
                 digest: vec![],
             })
             .collect();
-        let secret_sharing_config =
-            SecretSharingConfig::new(ShareCommitments::new(commitments).unwrap(), TEST_N, TEST_T, 0)
-                .unwrap();
+        let secret_sharing_config = SecretSharingConfig::new(
+            ShareCommitments::new(commitments).unwrap(),
+            TEST_N,
+            TEST_T,
+            0,
+        )
+        .unwrap();
 
         Self {
             network: Network::Regtest,
