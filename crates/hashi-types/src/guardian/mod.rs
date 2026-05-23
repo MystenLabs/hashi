@@ -211,9 +211,8 @@ pub struct GuardianInfo {
     pub bucket_info: Option<S3BucketInfo>,
     /// Encryption key. Used by KPs to encrypt their shares.
     pub encryption_pubkey: EncPubKeyBytes,
-    /// Server version
-    /// TODO: Replace with hashi ServerVersion to include crate SHA and version
-    pub server_version: String,
+    /// Git revision of the guardian build. Untrusted (enclave-self-reported).
+    pub untrusted_git_revision: String,
 }
 
 /// An "immediate withdrawal" request. `HashiSigned<T>.`

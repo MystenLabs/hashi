@@ -84,7 +84,7 @@ impl GetGuardianInfoResponse {
                 region: "us-east-1".to_string(),
             }),
             encryption_pubkey: vec![0u8; 32],
-            server_version: "v1".to_string(),
+            untrusted_git_revision: "unknown".to_string(),
         };
 
         GetGuardianInfoResponse {

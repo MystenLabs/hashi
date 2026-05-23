@@ -476,15 +476,15 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
         .ok_or_else(|| missing("encryption_pubkey"))?
         .to_vec();
 
-    let server_version = data
-        .server_version
-        .ok_or_else(|| missing("server_version"))?;
+    let untrusted_git_revision = data
+        .untrusted_git_revision
+        .ok_or_else(|| missing("untrusted_git_revision"))?;
 
     Ok(GuardianInfo {
         secret_sharing_config,
         bucket_info,
         encryption_pubkey,
-        server_version,
+        untrusted_git_revision,
     })
 }
 
@@ -496,7 +496,7 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
             .map(secret_sharing_config_to_pb),
         bucket_info: info.bucket_info.map(s3_bucket_info_to_pb),
         encryption_pubkey: Some(info.encryption_pubkey.into()),
-        server_version: Some(info.server_version),
+        untrusted_git_revision: Some(info.untrusted_git_revision),
     }
 }
 

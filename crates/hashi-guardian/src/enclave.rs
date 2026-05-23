@@ -427,8 +427,7 @@ impl Enclave {
                 .ok()
                 .map(|l| l.bucket_info().clone()),
             encryption_pubkey: self.encryption_public_key().to_bytes().to_vec(),
-            // TODO: Change it
-            server_version: "v1".to_string(),
+            untrusted_git_revision: env!("GIT_REVISION").to_string(),
         }
     }
 

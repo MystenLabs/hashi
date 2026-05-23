@@ -63,8 +63,10 @@ message GuardianInfoData {
   // Guardian encryption public key (32 bytes).
   optional bytes encryption_pubkey = 3;
 
-  // Server version.
-  optional string server_version = 4;
+  // Git revision of the guardian build. Untrusted (enclave-self-reported);
+  // KP tooling verifies by reproducibly building at this revision and
+  // matching the resulting PCRs against the session's attestation PCRs.
+  optional string untrusted_git_revision = 4;
 }
 
 // Public description of the current BTC key's secret-sharing scheme.

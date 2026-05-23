@@ -1159,9 +1159,11 @@ pub struct GuardianInfoData {
     /// Guardian encryption public key (32 bytes).
     #[prost(bytes = "bytes", optional, tag = "3")]
     pub encryption_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
-    /// Server version.
+    /// Git revision of the guardian build. Untrusted (enclave-self-reported);
+    /// KP tooling verifies by reproducibly building at this revision and
+    /// matching the resulting PCRs against the session's attestation PCRs.
     #[prost(string, optional, tag = "4")]
-    pub server_version: ::core::option::Option<::prost::alloc::string::String>,
+    pub untrusted_git_revision: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Public description of the current BTC key's secret-sharing scheme.
 /// `commitments.len() == num_shares` and `2 <= threshold <= num_shares`.
