@@ -103,12 +103,14 @@ impl DepositLookupCache {
 #[derive(Clone)]
 struct SharedDepositLookupCache {
     inner: Arc<Mutex<DepositLookupCache>>,
+    metrics: Arc<Metrics>,
 }
 
 impl SharedDepositLookupCache {
-    fn new() -> Self {
+    fn new(metrics: Arc<Metrics>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(DepositLookupCache::new())),
+            metrics,
         }
     }
 
@@ -117,7 +119,9 @@ impl SharedDepositLookupCache {
     }
 
     fn get_tx_block(&self, txid: &bitcoin::Txid) -> Option<HeaderCheckpoint> {
-        self.lock().tx_blocks.get(txid).copied()
+        let result = self.lock().tx_blocks.get(txid).copied();
+        self.record_request("tx_block", result.is_some());
+        result
     }
 
     fn put_tx_block(&self, txid: bitcoin::Txid, block_info: HeaderCheckpoint) {
@@ -125,7 +129,9 @@ impl SharedDepositLookupCache {
     }
 
     fn get_block_height(&self, block_hash: &bitcoin::BlockHash) -> Option<u32> {
-        self.lock().block_heights.get(block_hash).copied()
+        let result = self.lock().block_heights.get(block_hash).copied();
+        self.record_request("block_height", result.is_some());
+        result
     }
 
     fn put_block_height(&self, block_hash: bitcoin::BlockHash, height: u32) {
@@ -133,7 +139,9 @@ impl SharedDepositLookupCache {
     }
 
     fn get_transaction(&self, txid: &bitcoin::Txid) -> Option<Arc<bitcoin::Transaction>> {
-        self.lock().transactions.get(txid).cloned()
+        let result = self.lock().transactions.get(txid).cloned();
+        self.record_request("transaction", result.is_some());
+        result
     }
 
     fn put_transaction(&self, txid: bitcoin::Txid, transaction: Arc<bitcoin::Transaction>) {
@@ -148,6 +156,14 @@ impl SharedDepositLookupCache {
         self.inner
             .lock()
             .expect("deposit lookup cache lock poisoned")
+    }
+
+    fn record_request(&self, cache: &'static str, hit: bool) {
+        let result = if hit { "hit" } else { "miss" };
+        self.metrics
+            .deposit_lookup_cache_requests_total
+            .with_label_values(&[cache, result])
+            .inc();
     }
 }
 
@@ -245,7 +261,7 @@ impl Monitor {
 
                 let mut monitor = Monitor {
                     config,
-                    metrics,
+                    metrics: metrics.clone(),
                     bitcoind_rpc,
                     requester: kyoto_client.requester.clone(),
                     client_tx,
@@ -254,7 +270,7 @@ impl Monitor {
                     pending_deposits: vec![],
                     pending_deposit_workers: JoinSet::new(),
                     rpc_workers: JoinSet::new(),
-                    deposit_lookup_cache: SharedDepositLookupCache::new(),
+                    deposit_lookup_cache: SharedDepositLookupCache::new(metrics),
                     deposit_observation_cache: HashMap::new(),
                 };
 
@@ -796,14 +812,13 @@ impl Monitor {
         }
 
         pending_deposit.checked_at_height = tip.height;
-        let mut pending_deposit = PendingDepositGuard::new(pending_deposit, client_tx.clone());
+        let pending_deposit = PendingDepositGuard::new(pending_deposit, client_tx.clone());
         let outpoint = pending_deposit.outpoint;
 
         // Look up block from the txid.
-        let cached_block_info = deposit_lookup_cache.get_tx_block(&pending_deposit.outpoint.txid);
-        let block_info = if let Some(block_info) = pending_deposit.block_info {
-            block_info
-        } else if let Some(block_info) = cached_block_info {
+        let block_info = if let Some(block_info) =
+            deposit_lookup_cache.get_tx_block(&pending_deposit.outpoint.txid)
+        {
             block_info
         } else {
             debug!(
@@ -878,7 +893,6 @@ impl Monitor {
                 height,
                 hash: block_hash,
             };
-            pending_deposit.block_info = Some(block_info);
             deposit_lookup_cache.put_tx_block(txid, block_info);
             block_info
         };
@@ -917,7 +931,6 @@ impl Monitor {
                             "Pending deposit {:?}: Block is no longer in the current chain",
                             pending_deposit.as_ref(),
                         );
-                        pending_deposit.block_info = None;
                         deposit_lookup_cache.invalidate_tx(&txid);
                         return;
                     }
@@ -937,7 +950,6 @@ impl Monitor {
                         "Pending deposit {:?}: Transaction not present in the block reported by the Bitcoin Core node! Possibly malicious behavior by the Bitcoin Core node.",
                         pending_deposit.as_ref(),
                     );
-                    pending_deposit.block_info = None;
                     deposit_lookup_cache.invalidate_tx(&txid);
                     return;
                 };
@@ -1076,7 +1088,6 @@ struct PendingDeposit {
     /// monitor stays Sui-unaware. Stays with the deposit through any
     /// re-enqueues by `PendingDepositGuard`.
     confirmation_threshold: u32,
-    block_info: Option<kyoto::HeaderCheckpoint>,
     result_tx: oneshot::Sender<Result<bitcoin::TxOut, DepositConfirmError>>,
     checked_at_height: u32,
 }
@@ -1152,7 +1163,6 @@ impl MonitorClient {
         let pending_deposit = PendingDeposit {
             outpoint,
             confirmation_threshold,
-            block_info: None,
             result_tx: tx,
             checked_at_height: 0,
         };
@@ -1246,6 +1256,13 @@ mod tests {
             .get()
     }
 
+    fn cache_requests(metrics: &Metrics, cache: &str, result: &str) -> u64 {
+        metrics
+            .deposit_lookup_cache_requests_total
+            .with_label_values(&[cache, result])
+            .get()
+    }
+
     fn entry(observation: CachedDepositObservation, last_updated_tip: u32) -> CachedDepositEntry {
         CachedDepositEntry {
             observation,
@@ -1259,23 +1276,46 @@ mod tests {
         bitcoin::BlockHash::from_byte_array(bytes)
     }
 
+    fn pending_deposit_for(
+        outpoint: bitcoin::OutPoint,
+    ) -> (
+        PendingDeposit,
+        oneshot::Receiver<Result<bitcoin::TxOut, DepositConfirmError>>,
+    ) {
+        let (result_tx, result_rx) = oneshot::channel();
+        (
+            PendingDeposit {
+                outpoint,
+                confirmation_threshold: 100,
+                result_tx,
+                checked_at_height: 0,
+            },
+            result_rx,
+        )
+    }
+
     #[test]
     fn deposit_lookup_cache_records_and_clears_entries() {
         let txid = make_outpoint(1).txid;
         let block_hash = block_hash(2);
         let block_info = HeaderCheckpoint::new(42, block_hash);
-        let cache = SharedDepositLookupCache::new();
+        let metrics = Arc::new(fresh_metrics());
+        let cache = SharedDepositLookupCache::new(metrics.clone());
 
         cache.put_tx_block(txid, block_info);
         cache.put_block_height(block_hash, 42);
 
         assert_eq!(cache.get_tx_block(&txid), Some(block_info));
         assert_eq!(cache.get_block_height(&block_hash), Some(42));
+        assert_eq!(cache_requests(&metrics, "tx_block", "hit"), 1);
+        assert_eq!(cache_requests(&metrics, "block_height", "hit"), 1);
 
         cache.clear();
 
         assert!(cache.get_tx_block(&txid).is_none());
         assert!(cache.get_block_height(&block_hash).is_none());
+        assert_eq!(cache_requests(&metrics, "tx_block", "miss"), 1);
+        assert_eq!(cache_requests(&metrics, "block_height", "miss"), 1);
     }
 
     #[test]
@@ -1283,7 +1323,7 @@ mod tests {
         let txid = make_outpoint(1).txid;
         let block_hash = block_hash(2);
         let block_info = HeaderCheckpoint::new(42, block_hash);
-        let cache = SharedDepositLookupCache::new();
+        let cache = SharedDepositLookupCache::new(Arc::new(fresh_metrics()));
 
         cache.put_tx_block(txid, block_info);
         cache.put_block_height(block_hash, 42);
@@ -1291,6 +1331,38 @@ mod tests {
 
         assert!(cache.get_tx_block(&txid).is_none());
         assert_eq!(cache.get_block_height(&block_hash), Some(42));
+    }
+
+    #[tokio::test]
+    async fn process_pending_deposit_reuses_cached_tx_block_for_shared_txid() {
+        let metrics = Arc::new(fresh_metrics());
+        let cache = SharedDepositLookupCache::new(metrics.clone());
+        let txid = make_outpoint(1).txid;
+        let block_info = HeaderCheckpoint::new(42, block_hash(2));
+        cache.put_tx_block(txid, block_info);
+        let (client_tx, _client_rx) = tokio::sync::mpsc::channel(10);
+        let mut result_rxs = Vec::new();
+        let (_, kyoto_client) = Monitor::build_kyoto_node(&MonitorConfig::default());
+
+        for vout in [0, 1] {
+            let (pending_deposit, result_rx) =
+                pending_deposit_for(bitcoin::OutPoint { txid, vout });
+            result_rxs.push(result_rx);
+            Monitor::process_pending_deposit(
+                HeaderCheckpoint::new(50, block_hash(3)),
+                100,
+                Arc::new(corepc_client::client_sync::v29::Client::new(
+                    "http://127.0.0.1:1",
+                )),
+                kyoto_client.requester.clone(),
+                client_tx.clone(),
+                cache.clone(),
+                pending_deposit,
+            )
+            .await;
+        }
+
+        assert_eq!(cache_requests(&metrics, "tx_block", "hit"), 2);
     }
 
     #[test]
