@@ -44,8 +44,10 @@ pub mod components;
 pub mod watcher;
 
 pub use components::{
-    BitcoinStateField, CommitteeEntry, DepositRequestEntry, HashiRoot, MemberInfoEntry,
-    ProposalEntry, ProposalType, RichMemberInfo, TlsKeyToAddress,
+    BitcoinStateField, CommitteeByEpoch, CommitteeEntry, DepositRequestEntry, HashiRoot,
+    MemberInfoEntry, MetadataCapEntry, ProposalEntry, ProposalType, RichCommittee,
+    RichConfig, RichMemberInfo, TlsKeyToAddress, TreasuryCapEntry, UtxoRecordEntry,
+    WithdrawalRequestEntry, WithdrawalTransactionEntry,
 };
 
 const BROADCAST_CHANNEL_CAPACITY: usize = 100;
@@ -431,13 +433,176 @@ impl OnchainState {
             .collect()
     }
 
-    /// All cached per-epoch committees.
-    pub fn committees(&self) -> Vec<hashi_types::move_types::Committee> {
+    /// All cached per-epoch committees, in the rich
+    /// `hashi_types::committee::Committee` shape the legacy container
+    /// produces.
+    pub fn committees(&self) -> Vec<hashi_types::committee::Committee> {
         let world = self.0.world.read().expect("world lock poisoned");
         world
-            .iter::<CommitteeEntry>()
-            .map(|(_, c)| clone_committee(&c.0))
+            .iter::<RichCommittee>()
+            .map(|(_, c)| c.0.clone())
             .collect()
+    }
+
+    /// Committee for the current epoch, resolved via the
+    /// `CommitteeByEpoch` index plus the epoch off the parsed
+    /// `HashiRoot`. Returns `None` if the world hasn't been
+    /// bootstrapped or the committee isn't tracked.
+    pub fn current_committee(&self) -> Option<hashi_types::committee::Committee> {
+        let world = self.0.world.read().expect("world lock poisoned");
+        let epoch = world.get::<HashiRoot>(self.0.ids.hashi_object_id)?.0.committees.epoch;
+        let entity = *world.index::<CommitteeByEpoch>()?.get(&epoch)?;
+        world.get::<RichCommittee>(entity).map(|c| c.0.clone())
+    }
+
+    /// Convenience: the current committee's member list. Mirrors the
+    /// legacy method of the same name.
+    pub fn current_committee_members(
+        &self,
+    ) -> Option<Vec<hashi_types::committee::CommitteeMember>> {
+        self.current_committee().map(|c| c.members().to_vec())
+    }
+
+    // ---- pending bitcoin state ---------------------------------------------
+
+    /// All currently pending withdrawal requests.
+    pub fn withdrawal_requests(&self) -> Vec<hashi_types::move_types::WithdrawalRequest> {
+        let world = self.0.world.read().expect("world lock poisoned");
+        world
+            .iter::<WithdrawalRequestEntry>()
+            .map(|(_, w)| w.0.clone())
+            .collect()
+    }
+
+    /// Lookup a single pending withdrawal request by id.
+    pub fn withdrawal_request(
+        &self,
+        id: &Address,
+    ) -> Option<hashi_types::move_types::WithdrawalRequest> {
+        let world = self.0.world.read().expect("world lock poisoned");
+        world
+            .iter::<WithdrawalRequestEntry>()
+            .find(|(_, w)| w.0.id == *id)
+            .map(|(_, w)| w.0.clone())
+    }
+
+    /// In-flight withdrawal transactions awaiting confirmation.
+    pub fn withdrawal_txns(&self) -> Vec<hashi_types::move_types::WithdrawalTransaction> {
+        let world = self.0.world.read().expect("world lock poisoned");
+        world
+            .iter::<WithdrawalTransactionEntry>()
+            .map(|(_, t)| clone_withdrawal_txn(&t.0))
+            .collect()
+    }
+
+    /// Lookup a single in-flight withdrawal transaction by id.
+    pub fn withdrawal_txn(
+        &self,
+        id: &Address,
+    ) -> Option<hashi_types::move_types::WithdrawalTransaction> {
+        let world = self.0.world.read().expect("world lock poisoned");
+        world
+            .iter::<WithdrawalTransactionEntry>()
+            .find(|(_, t)| t.0.id == *id)
+            .map(|(_, t)| clone_withdrawal_txn(&t.0))
+    }
+
+    /// Active UTXOs — every recorded UTXO whose `locked_by` is `None`.
+    /// Matches the filter `UtxoPool::active_utxos` applies on the
+    /// legacy side.
+    pub fn active_utxos(&self) -> Vec<hashi_types::move_types::Utxo> {
+        let world = self.0.world.read().expect("world lock poisoned");
+        world
+            .iter::<UtxoRecordEntry>()
+            .filter(|(_, r)| r.0.locked_by.is_none())
+            .map(|(_, r)| r.0.utxo.clone())
+            .collect()
+    }
+
+    // ---- treasury ----------------------------------------------------------
+
+    /// Sui-framework `TreasuryCap`s held inside the hashi treasury,
+    /// keyed by coin type.
+    pub fn treasury_caps(
+        &self,
+    ) -> std::collections::BTreeMap<
+        sui_sdk_types::TypeTag,
+        crate::onchain::types::TreasuryCap,
+    > {
+        let world = self.0.world.read().expect("world lock poisoned");
+        world
+            .iter::<TreasuryCapEntry>()
+            .map(|(_, c)| (c.0.coin_type.clone(), clone_treasury_cap(&c.0)))
+            .collect()
+    }
+
+    /// Sui-framework metadata caps held inside the hashi treasury,
+    /// keyed by coin type.
+    pub fn metadata_caps(
+        &self,
+    ) -> std::collections::BTreeMap<sui_sdk_types::TypeTag, crate::onchain::types::MetadataCap>
+    {
+        let world = self.0.world.read().expect("world lock poisoned");
+        world
+            .iter::<MetadataCapEntry>()
+            .map(|(_, c)| (c.0.coin_type.clone(), clone_metadata_cap(&c.0)))
+            .collect()
+    }
+
+    // ---- top-level scalars + config ----------------------------------------
+
+    /// Address of the top-level Hashi object. Static for the lifetime
+    /// of this state container.
+    pub fn hashi_id(&self) -> Address {
+        self.0.ids.hashi_object_id
+    }
+
+    /// Address of the package this container is reading from. We
+    /// don't yet track upgrade history in the world, so this returns
+    /// the package_id passed at construction.
+    pub fn package_id(&self) -> Option<Address> {
+        Some(self.0.ids.package_id)
+    }
+
+    /// The current Sui-side epoch as the chain object reports it.
+    pub fn epoch(&self) -> u64 {
+        let world = self.0.world.read().expect("world lock poisoned");
+        world
+            .get::<HashiRoot>(self.0.ids.hashi_object_id)
+            .map(|h| h.0.committees.epoch)
+            .unwrap_or(0)
+    }
+
+    /// MPC threshold public key bytes for the current epoch.
+    pub fn mpc_public_key(&self) -> Vec<u8> {
+        let world = self.0.world.read().expect("world lock poisoned");
+        world
+            .get::<HashiRoot>(self.0.ids.hashi_object_id)
+            .map(|h| h.0.committees.mpc_public_key.clone())
+            .unwrap_or_default()
+    }
+
+    /// Run a closure against the rich [`crate::onchain::types::Config`]
+    /// view. The closure form keeps the read lock scope tight; for
+    /// one-shot readers prefer the convenience accessors below.
+    pub fn with_config<R>(
+        &self,
+        f: impl FnOnce(Option<&crate::onchain::types::Config>) -> R,
+    ) -> R {
+        let world = self.0.world.read().expect("world lock poisoned");
+        f(world.get::<RichConfig>(self.0.ids.hashi_object_id).map(|c| &c.0))
+    }
+
+    pub fn bitcoin_deposit_minimum(&self) -> u64 {
+        self.with_config(|c| c.map(|c| c.bitcoin_deposit_minimum()).unwrap_or(0))
+    }
+
+    pub fn bitcoin_withdrawal_minimum(&self) -> u64 {
+        self.with_config(|c| c.map(|c| c.bitcoin_withdrawal_minimum()).unwrap_or(0))
+    }
+
+    pub fn paused(&self) -> bool {
+        self.with_config(|c| c.map(|c| c.paused()).unwrap_or(false))
     }
 }
 
@@ -474,14 +639,32 @@ fn clone_raw_member(
     }
 }
 
-/// `move_types::Committee` doesn't derive `Clone`, but Serialize+
-/// Deserialize are already in scope so a round-trip is the cheapest
-/// way to clone in lieu of upstream getting the derive.
-fn clone_committee(
-    c: &hashi_types::move_types::Committee,
-) -> hashi_types::move_types::Committee {
-    let bytes = bcs::to_bytes(c).expect("Committee serializes");
-    bcs::from_bytes(&bytes).expect("just-serialized Committee round-trips")
+/// `move_types::WithdrawalTransaction` doesn't derive `Clone`; round
+/// trip through BCS so the query API can hand out owned copies. Same
+/// trick we use for `Committee`.
+fn clone_withdrawal_txn(
+    t: &hashi_types::move_types::WithdrawalTransaction,
+) -> hashi_types::move_types::WithdrawalTransaction {
+    let bytes = bcs::to_bytes(t).expect("WithdrawalTransaction serializes");
+    bcs::from_bytes(&bytes).expect("WithdrawalTransaction round-trips")
+}
+
+/// `TreasuryCap` and `MetadataCap` aren't `Clone` either; copy field
+/// by field. Both are tiny (one TypeTag + Address + maybe a u64) so
+/// this is cheap.
+fn clone_treasury_cap(c: &crate::onchain::types::TreasuryCap) -> crate::onchain::types::TreasuryCap {
+    crate::onchain::types::TreasuryCap {
+        coin_type: c.coin_type.clone(),
+        id: c.id,
+        supply: c.supply,
+    }
+}
+
+fn clone_metadata_cap(c: &crate::onchain::types::MetadataCap) -> crate::onchain::types::MetadataCap {
+    crate::onchain::types::MetadataCap {
+        coin_type: c.coin_type.clone(),
+        id: c.id,
+    }
 }
 
 /// Build a single validator's gRPC client from a parsed `MemberInfo`

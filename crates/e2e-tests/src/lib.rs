@@ -1002,6 +1002,70 @@ mod tests {
             "committee count",
         );
 
+        // Top-level scalars + treasury composition.
+        assert_eq!(legacy.epoch(), ecs.epoch(), "epoch");
+        assert_eq!(
+            legacy.hashi_id(),
+            ecs.hashi_id(),
+            "hashi root object id",
+        );
+        assert_eq!(
+            legacy.mpc_public_key(),
+            ecs.mpc_public_key(),
+            "MPC public key bytes",
+        );
+        assert_eq!(
+            legacy.bitcoin_deposit_minimum(),
+            ecs.bitcoin_deposit_minimum(),
+            "bitcoin_deposit_minimum",
+        );
+        assert_eq!(
+            legacy.bitcoin_withdrawal_minimum(),
+            ecs.bitcoin_withdrawal_minimum(),
+            "bitcoin_withdrawal_minimum",
+        );
+        assert_eq!(
+            legacy.state().hashi().treasury.treasury_caps.len(),
+            ecs.treasury_caps().len(),
+            "treasury_caps count",
+        );
+        assert_eq!(
+            legacy.state().hashi().treasury.metadata_caps.len(),
+            ecs.metadata_caps().len(),
+            "metadata_caps count",
+        );
+
+        // current_committee resolves on both sides to the same content.
+        let legacy_current = legacy.current_committee();
+        let ecs_current = ecs.current_committee();
+        match (legacy_current.as_ref(), ecs_current.as_ref()) {
+            (Some(l), Some(e)) => {
+                assert_eq!(l.epoch(), e.epoch(), "current_committee epoch");
+                assert_eq!(l.members().len(), e.members().len(), "current_committee member count");
+            }
+            (None, None) => {}
+            (l, e) => panic!("current_committee divergence: legacy={l:?} ecs={e:?}"),
+        }
+
+        // Withdrawal queue + active UTXOs start empty post-bootstrap
+        // (this test doesn't drive any deposits/withdrawals); the two
+        // sides should agree on lengths regardless.
+        assert_eq!(
+            legacy.withdrawal_requests().len(),
+            ecs.withdrawal_requests().len(),
+            "withdrawal_requests count",
+        );
+        assert_eq!(
+            legacy.withdrawal_txns().len(),
+            ecs.withdrawal_txns().len(),
+            "withdrawal_txns count",
+        );
+        assert_eq!(
+            legacy.active_utxos().len(),
+            ecs.active_utxos().len(),
+            "active_utxos count",
+        );
+
         let legacy_members = legacy.committee_members();
         let ecs_members = ecs.committee_members();
         assert_eq!(legacy_members.len(), ecs_members.len(), "member count");

@@ -787,7 +787,7 @@ pub(crate) async fn scrape_hashi_config(
     Ok(convert_move_config(config))
 }
 
-fn convert_move_config(config: move_types::Config) -> types::Config {
+pub(crate) fn convert_move_config(config: move_types::Config) -> types::Config {
     types::Config {
         config: config.config.into_iter().collect(),
         enabled_versions: config.enabled_versions.contents.into_iter().collect(),
@@ -1055,7 +1055,7 @@ pub(crate) fn convert_move_committee_member(
     )
 }
 
-fn convert_move_committee(c: move_types::Committee) -> Committee {
+pub(crate) fn convert_move_committee(c: move_types::Committee) -> Committee {
     let members = c
         .members
         .into_iter()

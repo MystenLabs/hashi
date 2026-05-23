@@ -47,7 +47,13 @@ pub async fn scrape(
     let btc_object = fetch_object(&mut client, bitcoin_state_field_id).await?;
 
     // Apply stage 1 atomically.
-    let (members_bag, committees_bag, proposals_active, proposals_executed) = {
+    let (
+        members_bag,
+        committees_bag,
+        proposals_active,
+        proposals_executed,
+        treasury_bag,
+    ) = {
         let mut world = world_lock.write().expect("world lock poisoned");
         let mut batch = world.batch();
         batch
@@ -64,12 +70,18 @@ pub async fn scrape(
             hashi.0.committees.committees.id,
             hashi.0.proposals.active.id,
             hashi.0.proposals.executed.id,
+            hashi.0.treasury.objects.id,
         )
     };
 
     // We also want the BitcoinState's nested bag ids — those live in
     // the BitcoinStateField's parsed value.
-    let (deposit_requests_bag, withdrawal_requests_bag, utxo_records_bag) = {
+    let (
+        deposit_requests_bag,
+        withdrawal_requests_bag,
+        withdrawal_txns_bag,
+        utxo_records_bag,
+    ) = {
         let world = world_lock.read().expect("world lock poisoned");
         let bs = world
             .get::<BitcoinStateField>(bitcoin_state_field_id)
@@ -77,6 +89,7 @@ pub async fn scrape(
         (
             bs.0.value.deposit_queue.requests.id,
             bs.0.value.withdrawal_queue.requests.id,
+            bs.0.value.withdrawal_queue.withdrawal_txns.id,
             bs.0.value.utxo_pool.utxo_records.id,
         )
     };
@@ -90,8 +103,10 @@ pub async fn scrape(
         committees_bag,
         proposals_active,
         proposals_executed,
+        treasury_bag,
         deposit_requests_bag,
         withdrawal_requests_bag,
+        withdrawal_txns_bag,
         utxo_records_bag,
     ];
 

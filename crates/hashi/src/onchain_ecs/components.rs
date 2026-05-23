@@ -277,6 +277,190 @@ impl Derived for ProposalEntry {
     }
 }
 
+// ---- withdrawal / utxo / treasury entries ------------------------------
+
+/// One pending withdrawal request. Stored on chain as a top-level
+/// object held in the withdrawal_queue.requests `ObjectBag`, so the
+/// underlying `Object` *is* the `WithdrawalRequest` Move struct.
+#[derive(Debug)]
+pub struct WithdrawalRequestEntry(pub move_types::WithdrawalRequest);
+
+impl Component for WithdrawalRequestEntry {}
+
+impl Derived for WithdrawalRequestEntry {
+    fn dependencies() -> Vec<TypeId> {
+        vec![TypeId::of::<Object>()]
+    }
+
+    fn compute(world: &World, entity: Address) -> Option<Self> {
+        parse_struct::<move_types::WithdrawalRequest>(
+            world,
+            entity,
+            "withdrawal_queue",
+            "WithdrawalRequest",
+        )
+        .map(WithdrawalRequestEntry)
+    }
+}
+
+/// One in-flight withdrawal transaction. Same shape as
+/// `WithdrawalRequestEntry`: top-level `key` object held in the
+/// `withdrawal_txns` `ObjectBag`.
+#[derive(Debug)]
+pub struct WithdrawalTransactionEntry(pub move_types::WithdrawalTransaction);
+
+impl Component for WithdrawalTransactionEntry {}
+
+impl Derived for WithdrawalTransactionEntry {
+    fn dependencies() -> Vec<TypeId> {
+        vec![TypeId::of::<Object>()]
+    }
+
+    fn compute(world: &World, entity: Address) -> Option<Self> {
+        parse_struct::<move_types::WithdrawalTransaction>(
+            world,
+            entity,
+            "withdrawal_queue",
+            "WithdrawalTransaction",
+        )
+        .map(WithdrawalTransactionEntry)
+    }
+}
+
+/// One UTXO record (active *or* locked). Stored as the value side of a
+/// `Field<UtxoId, UtxoRecord>` dynamic field — the field object's
+/// Move type is `0x2::dynamic_field::Field<.., UtxoRecord>`.
+#[derive(Debug)]
+pub struct UtxoRecordEntry(pub move_types::UtxoRecord);
+
+impl Component for UtxoRecordEntry {}
+
+impl Derived for UtxoRecordEntry {
+    fn dependencies() -> Vec<TypeId> {
+        vec![TypeId::of::<Object>()]
+    }
+
+    fn compute(world: &World, entity: Address) -> Option<Self> {
+        let obj = world.get::<Object>(entity)?;
+        let ms = obj.as_struct()?;
+        let tag = ms.object_type();
+        if !is_field_with_value(tag, "utxo_pool", "UtxoRecord") {
+            return None;
+        }
+        bcs::from_bytes::<
+            move_types::Field<move_types::UtxoId, move_types::UtxoRecord>,
+        >(ms.contents())
+            .ok()
+            .map(|f| UtxoRecordEntry(f.value))
+    }
+}
+
+/// One Sui-framework treasury cap held inside the hashi `Treasury` bag.
+/// Move type is `0x2::coin::TreasuryCap<T>` for some coin type `T`; the
+/// `T` is captured as part of the rich type.
+#[derive(Debug)]
+pub struct TreasuryCapEntry(pub crate::onchain::types::TreasuryCap);
+
+impl Component for TreasuryCapEntry {}
+
+impl Derived for TreasuryCapEntry {
+    fn dependencies() -> Vec<TypeId> {
+        vec![TypeId::of::<Object>()]
+    }
+
+    fn compute(world: &World, entity: Address) -> Option<Self> {
+        let obj = world.get::<Object>(entity)?;
+        let ms = obj.as_struct()?;
+        let type_tag = TypeTag::Struct(Box::new(ms.object_type().clone()));
+        crate::onchain::types::TreasuryCap::try_from_contents(&type_tag, ms.contents())
+            .map(TreasuryCapEntry)
+    }
+}
+
+/// One Sui-framework metadata cap from the coin registry. Same shape
+/// story as [`TreasuryCapEntry`].
+#[derive(Debug)]
+pub struct MetadataCapEntry(pub crate::onchain::types::MetadataCap);
+
+impl Component for MetadataCapEntry {}
+
+impl Derived for MetadataCapEntry {
+    fn dependencies() -> Vec<TypeId> {
+        vec![TypeId::of::<Object>()]
+    }
+
+    fn compute(world: &World, entity: Address) -> Option<Self> {
+        let obj = world.get::<Object>(entity)?;
+        let ms = obj.as_struct()?;
+        let type_tag = TypeTag::Struct(Box::new(ms.object_type().clone()));
+        crate::onchain::types::MetadataCap::try_from_contents(&type_tag, ms.contents())
+            .map(MetadataCapEntry)
+    }
+}
+
+/// Validated per-epoch committee — `hashi_types::committee::Committee`
+/// with parsed BLS pubkeys, fallback encryption keys, and the bps
+/// fields narrowed to u16. Derived from `CommitteeEntry`.
+#[derive(Debug)]
+pub struct RichCommittee(pub hashi_types::committee::Committee);
+
+impl Component for RichCommittee {}
+
+impl Derived for RichCommittee {
+    fn dependencies() -> Vec<TypeId> {
+        vec![TypeId::of::<CommitteeEntry>()]
+    }
+
+    fn compute(world: &World, entity: Address) -> Option<Self> {
+        let raw = world.get::<CommitteeEntry>(entity)?;
+        // `Committee`'s narrow-to-u16 conversions panic on overflow;
+        // wrap the call so a single malformed committee doesn't tear
+        // down the whole world.
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::onchain::convert_move_committee(clone_committee(&raw.0))
+        }))
+        .ok()
+        .map(RichCommittee)
+    }
+}
+
+/// Validated `Config` — same `crate::onchain::types::Config` shape the
+/// legacy container produces (BTreeMap-keyed, enabled_versions as
+/// BTreeSet, upgrade_cap unwrapped). Derived from `HashiRoot`.
+#[derive(Debug)]
+pub struct RichConfig(pub crate::onchain::types::Config);
+
+impl Component for RichConfig {}
+
+impl Derived for RichConfig {
+    fn dependencies() -> Vec<TypeId> {
+        vec![TypeId::of::<HashiRoot>()]
+    }
+
+    fn compute(world: &World, entity: Address) -> Option<Self> {
+        let root = world.get::<HashiRoot>(entity)?;
+        // Clone via BCS round-trip — `move_types::Config` isn't Clone
+        // and we want to leave the HashiRoot value intact.
+        let bytes = bcs::to_bytes(&root.0.config).ok()?;
+        let move_config: move_types::Config = bcs::from_bytes(&bytes).ok()?;
+        Some(RichConfig(crate::onchain::convert_move_config(move_config)))
+    }
+}
+
+/// Reverse index: epoch → entity id holding the `RichCommittee` for
+/// that epoch. Lets `current_committee` resolve in one hash lookup.
+pub struct CommitteeByEpoch;
+
+impl Index for CommitteeByEpoch {
+    type Storage = OneToOne<u64, Address>;
+}
+
+/// `move_types::Committee` doesn't derive `Clone`; round-trip via BCS.
+fn clone_committee(c: &move_types::Committee) -> move_types::Committee {
+    let bytes = bcs::to_bytes(c).expect("Committee serializes");
+    bcs::from_bytes(&bytes).expect("just-serialized Committee round-trips")
+}
+
 // ---- helpers -----------------------------------------------------------
 
 fn parse_struct<T: serde::de::DeserializeOwned>(
@@ -346,8 +530,15 @@ pub fn install(world: &mut World) {
     world.register_derived::<MemberInfoEntry>();
     world.register_derived::<RichMemberInfo>();
     world.register_derived::<CommitteeEntry>();
+    world.register_derived::<RichCommittee>();
     world.register_derived::<DepositRequestEntry>();
+    world.register_derived::<WithdrawalRequestEntry>();
+    world.register_derived::<WithdrawalTransactionEntry>();
+    world.register_derived::<UtxoRecordEntry>();
+    world.register_derived::<TreasuryCapEntry>();
+    world.register_derived::<MetadataCapEntry>();
     world.register_derived::<ProposalEntry>();
+    world.register_derived::<RichConfig>();
 
     world
         .register_index::<TlsKeyToAddress>()
@@ -363,6 +554,19 @@ pub fn install(world: &mut World) {
             if let Ok(bytes) = <[u8; 32]>::try_from(info.0.tls_public_key.as_slice()) {
                 idx.remove(&bytes);
             }
+        })
+        .register();
+
+    // Reverse-lookup committee-by-epoch so `current_committee` is a
+    // single index hit on top of `HashiRoot.committees.epoch`.
+    world
+        .register_index::<CommitteeByEpoch>()
+        .driven_by::<RichCommittee>()
+        .on_insert(|idx, entity, c| {
+            idx.insert(c.0.epoch(), entity);
+        })
+        .on_remove(|idx, _entity, c| {
+            idx.remove(&c.0.epoch());
         })
         .register();
 }
