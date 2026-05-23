@@ -239,36 +239,74 @@ impl OnchainState {
         self.rebuild_clients();
     }
 
-    /// Walk `RichMemberInfo` for every validator with valid endpoint
-    /// and TLS material, build a fresh `grpc::Client`, and swap the
-    /// pool in one shot. Called from [`Self::new`] after bootstrap and
-    /// from the watcher after each applied checkpoint.
+    /// Surgically refresh the gRPC client pool for the entities whose
+    /// `RichMemberInfo` was touched in the latest checkpoint commit.
+    ///
+    /// For each touched entity: if its `RichMemberInfo` still resolves
+    /// (the member exists post-batch), build a fresh client and swap
+    /// it in. If it no longer resolves, the entry was removed — and we
+    /// won't know its validator address from the entity id alone, so
+    /// the orphan sweep at the bottom handles those by dropping any
+    /// pool entry that isn't backed by *some* `RichMemberInfo`.
+    ///
+    /// Validators whose info didn't change keep their existing
+    /// `Arc<Client>` handles bit-identical across the call —
+    /// consumers holding cloned references see no churn.
+    pub(crate) fn refresh_clients_for<I>(&self, touched: I)
+    where
+        I: IntoIterator<Item = Address>,
+    {
+        let world = self.0.world.read().expect("world lock poisoned");
+        let config = self
+            .0
+            .client_config
+            .read()
+            .expect("client config lock poisoned");
+        let mut clients = self.0.clients.write().expect("clients lock poisoned");
+
+        for entity in touched {
+            if let Some(info) = world.get::<RichMemberInfo>(entity) {
+                let validator = *info.0.validator_address();
+                if let Some(new_client) = build_client(&info.0, &config) {
+                    clients.insert(validator, new_client);
+                } else {
+                    // Member is present but lacks the endpoint/TLS
+                    // material we need to build a client. Drop any
+                    // stale entry — it's no longer reachable.
+                    clients.remove(&validator);
+                }
+            }
+            // If RichMemberInfo isn't present, the entry was removed
+            // (or never produced a rich value). The orphan sweep
+            // below picks it up.
+        }
+
+        // Orphan sweep: drop any pool entry whose validator address no
+        // longer appears in any `RichMemberInfo`. Bounded by the size
+        // of the pool, which is at most the validator-set size.
+        let live: std::collections::BTreeSet<Address> = world
+            .iter::<RichMemberInfo>()
+            .map(|(_, m)| *m.0.validator_address())
+            .collect();
+        clients.retain(|addr, _| live.contains(addr));
+    }
+
+    /// Walk every `RichMemberInfo` and rebuild the pool from scratch.
+    /// Called from [`Self::new`] after bootstrap; the watcher calls
+    /// [`Self::refresh_clients_for`] instead so checkpoints don't pay
+    /// for a full rebuild.
     pub(crate) fn rebuild_clients(&self) {
         let world = self.0.world.read().expect("world lock poisoned");
-        let config = self.0.client_config.read().expect("client config lock poisoned");
+        let config = self
+            .0
+            .client_config
+            .read()
+            .expect("client config lock poisoned");
 
         let new_pool: BTreeMap<Address, crate::grpc::Client> = world
             .iter::<RichMemberInfo>()
             .filter_map(|(_, info)| {
-                let info = &info.0;
-                let endpoint = info.endpoint_url()?;
-                let tls_public_key = info.tls_public_key()?;
-                let tls_config = match &config.tls_private_key {
-                    Some(priv_key) => crate::tls::make_client_config_with_client_auth(
-                        priv_key,
-                        tls_public_key,
-                    ),
-                    None => crate::tls::make_client_config(tls_public_key),
-                };
-                let mut client =
-                    crate::grpc::Client::new(endpoint, tls_config).ok()?;
-                if let Some(limit) = config.grpc_max_decoding_message_size {
-                    client = client.max_decoding_message_size(limit);
-                }
-                if let Some(metrics) = &config.metrics {
-                    client = client.with_metrics(metrics.clone());
-                }
-                Some((*info.validator_address(), client))
+                build_client(&info.0, &config).map(|c| (*info.0.validator_address(), c))
             })
             .collect();
 
@@ -444,6 +482,34 @@ fn clone_committee(
 ) -> hashi_types::move_types::Committee {
     let bytes = bcs::to_bytes(c).expect("Committee serializes");
     bcs::from_bytes(&bytes).expect("just-serialized Committee round-trips")
+}
+
+/// Build a single validator's gRPC client from a parsed `MemberInfo`
+/// and the per-process client config. Returns `None` if the member
+/// lacks an endpoint or TLS key, or if `grpc::Client::new` rejects the
+/// URI/TLS pair. Shared between full rebuilds (`rebuild_clients`) and
+/// the surgical, per-touched-entity path
+/// (`refresh_clients_for`).
+fn build_client(
+    info: &crate::onchain::types::MemberInfo,
+    config: &ClientConfig,
+) -> Option<crate::grpc::Client> {
+    let endpoint = info.endpoint_url()?;
+    let tls_public_key = info.tls_public_key()?;
+    let tls_config = match &config.tls_private_key {
+        Some(priv_key) => {
+            crate::tls::make_client_config_with_client_auth(priv_key, tls_public_key)
+        }
+        None => crate::tls::make_client_config(tls_public_key),
+    };
+    let mut client = crate::grpc::Client::new(endpoint, tls_config).ok()?;
+    if let Some(limit) = config.grpc_max_decoding_message_size {
+        client = client.max_decoding_message_size(limit);
+    }
+    if let Some(metrics) = &config.metrics {
+        client = client.with_metrics(metrics.clone());
+    }
+    Some(client)
 }
 
 #[cfg(test)]

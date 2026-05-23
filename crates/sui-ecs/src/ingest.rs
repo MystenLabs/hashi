@@ -159,7 +159,11 @@ impl ChangeSet {
     /// Apply this ChangeSet to `world` as a single batch — one logical
     /// transaction per Sui transaction. Consumes the ChangeSet so its
     /// owned `Object` values can move directly into storage.
-    pub fn apply(self, world: &mut World) {
+    ///
+    /// Returns a [`CommitReport`](crate::CommitReport) so the caller
+    /// can react surgically to which entities changed (e.g. to refresh
+    /// only the validators whose `MemberInfo` was touched).
+    pub fn apply(self, world: &mut World) -> crate::CommitReport {
         let mut batch = world.batch();
         for obj in self.upserts {
             let id = obj.object_id();
@@ -168,7 +172,7 @@ impl ChangeSet {
         for id in self.removals {
             batch.remove::<Object>(id);
         }
-        batch.commit();
+        batch.commit()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -190,7 +194,10 @@ fn output_state(changed: &proto::ChangedObject) -> OutputObjectState {
 ///
 /// Suitable for the bootstrap path only — the live-update path needs
 /// per-transaction batching via [`ChangeSet`].
-pub async fn apply_object_stream<S>(world: &mut World, stream: S) -> Result<usize, IngestError>
+pub async fn apply_object_stream<S>(
+    world: &mut World,
+    stream: S,
+) -> Result<(usize, crate::CommitReport), IngestError>
 where
     S: Stream<Item = Result<proto::Object, tonic::Status>>,
 {
@@ -206,8 +213,8 @@ where
         count += 1;
     }
 
-    batch.commit();
-    Ok(count)
+    let report = batch.commit();
+    Ok((count, report))
 }
 
 #[cfg(test)]
@@ -276,7 +283,7 @@ mod tests {
             .map(|id| Ok(proto::Object::from(make_object(*id))))
             .collect();
 
-        let count = apply_object_stream(&mut world, stream::iter(proto_objs))
+        let (count, _report) = apply_object_stream(&mut world, stream::iter(proto_objs))
             .await
             .expect("ingest");
         assert_eq!(count, 3);

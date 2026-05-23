@@ -21,19 +21,30 @@ use sui_sdk_types::Address;
 pub trait Component: 'static + Send + Sync + Sized {}
 
 /// Storage for a single component type. One instance per registered C.
+///
+/// Tracks two independent dirty channels:
+///
+/// - `propagation_dirty` — drained by the reactive scheduler as it
+///   walks the dependency graph. Empty by the time `run_scheduler`
+///   returns.
+/// - `committed_dirty` — accumulates the same set of writes but
+///   survives the scheduler. The caller drains it via the
+///   `CommitReport` returned from `MutationBatch::commit` (or
+///   `World::insert` / `remove`). This is what lets external consumers
+///   reason about "which entities changed in this commit" without
+///   diffing snapshots themselves.
 pub(crate) struct Storage<C: Component> {
     data: HashMap<Address, C>,
-    /// Entities touched (insert or remove) since the last `drain_dirty`.
-    /// Drained by the reactive scheduler at commit time. Lives here so
-    /// each storage owns its own change log.
-    dirty: HashSet<Address>,
+    propagation_dirty: HashSet<Address>,
+    committed_dirty: HashSet<Address>,
 }
 
 impl<C: Component> Storage<C> {
     pub(crate) fn new() -> Self {
         Self {
             data: HashMap::new(),
-            dirty: HashSet::new(),
+            propagation_dirty: HashSet::new(),
+            committed_dirty: HashSet::new(),
         }
     }
 
@@ -42,12 +53,14 @@ impl<C: Component> Storage<C> {
     }
 
     pub(crate) fn insert(&mut self, id: Address, value: C) -> Option<C> {
-        self.dirty.insert(id);
+        self.propagation_dirty.insert(id);
+        self.committed_dirty.insert(id);
         self.data.insert(id, value)
     }
 
     pub(crate) fn remove(&mut self, id: Address) -> Option<C> {
-        self.dirty.insert(id);
+        self.propagation_dirty.insert(id);
+        self.committed_dirty.insert(id);
         self.data.remove(&id)
     }
 
@@ -59,8 +72,12 @@ impl<C: Component> Storage<C> {
         self.data.len()
     }
 
-    pub(crate) fn drain_dirty(&mut self) -> impl Iterator<Item = Address> + '_ {
-        self.dirty.drain()
+    pub(crate) fn drain_propagation_dirty(&mut self) -> impl Iterator<Item = Address> + '_ {
+        self.propagation_dirty.drain()
+    }
+
+    pub(crate) fn drain_committed_dirty(&mut self) -> impl Iterator<Item = Address> + '_ {
+        self.committed_dirty.drain()
     }
 }
 
@@ -68,13 +85,14 @@ impl<C: Component> Storage<C> {
 /// `Box<dyn AnyStorage>` keyed by `TypeId::of::<C>()`; downcasting back
 /// to `Storage<C>` happens at the access boundary.
 ///
-/// `drain_dirty_erased` is surfaced at the erased level so the scheduler
-/// can walk every component type uniformly without needing to know its
-/// concrete `C`.
+/// Both `drain_*_erased` variants are surfaced at the erased level so
+/// the scheduler can walk every component type uniformly without
+/// needing to know each concrete `C`.
 pub(crate) trait AnyStorage: Any + Send + Sync {
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
-    fn drain_dirty_erased(&mut self) -> Vec<Address>;
+    fn drain_propagation_dirty_erased(&mut self) -> Vec<Address>;
+    fn drain_committed_dirty_erased(&mut self) -> Vec<Address>;
 }
 
 impl<C: Component> AnyStorage for Storage<C> {
@@ -86,7 +104,11 @@ impl<C: Component> AnyStorage for Storage<C> {
         self
     }
 
-    fn drain_dirty_erased(&mut self) -> Vec<Address> {
-        self.drain_dirty().collect()
+    fn drain_propagation_dirty_erased(&mut self) -> Vec<Address> {
+        self.drain_propagation_dirty().collect()
+    }
+
+    fn drain_committed_dirty_erased(&mut self) -> Vec<Address> {
+        self.drain_committed_dirty().collect()
     }
 }

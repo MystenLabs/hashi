@@ -47,4 +47,4 @@ pub use index::{Index, IndexStorage, OneToMany, OneToOne};
 pub use ingest::{ChangeSet, IngestError, apply_object_stream};
 pub use move_bound::MoveBound;
 pub use scheduler::Derived;
-pub use world::{MutationBatch, World};
+pub use world::{CommitReport, MutationBatch, World};

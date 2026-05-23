@@ -88,42 +88,65 @@ pub async fn run(
             let Some(checkpoint) = response.checkpoint.as_ref() else {
                 continue;
             };
-            if let Err(e) = apply_checkpoint(&world, checkpoint, &checkpoint_tx, &notifications)
-                .await
+            if let Err(e) = apply_checkpoint(
+                &world,
+                checkpoint,
+                &checkpoint_tx,
+                &notifications,
+                &owner,
+            )
+            .await
             {
                 warn!("apply_checkpoint failed: {e}");
             }
-            // Refresh the per-validator gRPC pool after every applied
-            // checkpoint. Cost is bounded by the number of validators
-            // and most checkpoints won't touch `MemberInfo`, but the
-            // unconditional rebuild keeps this simple — a smarter
-            // approach would gate on whether any `MemberInfoEntry`
-            // storage was dirtied, which would need a fresh hook on
-            // the scheduler.
-            owner.rebuild_clients();
         }
     }
 }
 
 /// Apply every transaction in a checkpoint to `world`, one batch per
-/// transaction — the atomicity boundary we settled on. Returns once the
-/// final-tx batch commits.
+/// transaction. For each per-tx commit, accumulate the
+/// [`sui_ecs::CommitReport`] entries for `MemberInfoEntry` /
+/// `RichMemberInfo` and hand them to the owning `OnchainState` so the
+/// gRPC client pool only rebuilds the validators whose info actually
+/// changed — no per-checkpoint full rebuild.
 pub async fn apply_checkpoint(
     world: &RwLock<World>,
     ckpt: &Checkpoint,
     checkpoint_tx: &watch::Sender<CheckpointInfo>,
     _notifications: &broadcast::Sender<Notification>,
+    owner: &super::OnchainState,
 ) -> Result<()> {
-    // Index the checkpoint-level object pool once; reuse across each
-    // tx's ChangeSet conversion. The stream populates `Checkpoint.objects`
-    // instead of `ExecutedTransaction.objects` to deduplicate across
-    // transactions that touch the same object.
+    use std::collections::HashSet;
+    use sui_sdk_types::Address;
+
+    use super::components::{MemberInfoEntry, RichMemberInfo};
+
     let pool = build_pool(ckpt);
+
+    // Union of entity ids whose `RichMemberInfo` was touched across
+    // every transaction in this checkpoint. We rebuild clients for
+    // these (and only these) once the whole checkpoint has been
+    // applied so consumers see a single coherent pool view per
+    // checkpoint heartbeat. Also tracks `MemberInfoEntry` writes so
+    // even entries that never produce a `RichMemberInfo` (e.g. BLS
+    // bytes fail to decode) still trigger an orphan sweep.
+    let mut touched_members: HashSet<Address> = HashSet::new();
+    let mut any_member_change = false;
 
     for tx in &ckpt.transactions {
         let changeset = changeset_from_tx(tx, &pool)?;
-        let mut w = world.write().expect("world lock poisoned");
-        changeset.apply(&mut w);
+        let report = {
+            let mut w = world.write().expect("world lock poisoned");
+            changeset.apply(&mut w)
+        };
+        touched_members.extend(report.changed::<RichMemberInfo>());
+        if report.any_changed::<MemberInfoEntry>() {
+            any_member_change = true;
+        }
+    }
+
+    if any_member_change {
+        owner.refresh_clients_for(touched_members.iter().copied());
     }
 
     // Surface checkpoint metadata to consumers.

@@ -15,6 +15,50 @@ use crate::component::{AnyStorage, Component, Storage};
 use crate::index::{AnyIndexStorage, Driver, Index, IndexBuilder, OneToOne};
 use crate::scheduler::{Derivation, Derived};
 
+/// Summary of every entity write that landed during a single commit.
+///
+/// Returned from [`MutationBatch::commit`] (and the convenience
+/// [`World::insert`] / [`World::remove`]) so external consumers can
+/// react surgically to "what changed" without diffing snapshots
+/// themselves. The report covers both direct writes the caller made
+/// and the derived-component writes the scheduler emitted in response.
+#[derive(Debug, Default)]
+pub struct CommitReport {
+    by_type: HashMap<TypeId, HashSet<Address>>,
+}
+
+impl CommitReport {
+    /// Entities whose value for component `C` was inserted or removed
+    /// during this commit. Iterator order is unspecified; collect into
+    /// a sorted container if you need stable order.
+    pub fn changed<C: Component>(&self) -> impl Iterator<Item = Address> + '_ {
+        self.by_type
+            .get(&TypeId::of::<C>())
+            .into_iter()
+            .flat_map(|s| s.iter().copied())
+    }
+
+    /// True iff at least one entity's `C` value was written during
+    /// this commit.
+    pub fn any_changed<C: Component>(&self) -> bool {
+        self.by_type
+            .get(&TypeId::of::<C>())
+            .is_some_and(|s| !s.is_empty())
+    }
+
+    /// True iff *no* component had any entity written during this
+    /// commit. Useful as a fast-path check for callers that don't care
+    /// about typed access.
+    pub fn is_empty(&self) -> bool {
+        self.by_type.values().all(|s| s.is_empty())
+    }
+
+    pub(crate) fn record(&mut self, ty: TypeId, entities: impl IntoIterator<Item = Address>) {
+        let bucket = self.by_type.entry(ty).or_default();
+        bucket.extend(entities);
+    }
+}
+
 /// Central state container.
 ///
 /// Holds one `Storage<C>` per registered component type, one
@@ -173,16 +217,20 @@ impl World {
     /// therefore *does* run the scheduler. For multiple writes that
     /// should land atomically, use `batch()` and call `commit()` once
     /// at the end.
-    pub fn insert<C: Component>(&mut self, id: Address, value: C) -> Option<C> {
+    ///
+    /// Returns the previous value (if any) plus the commit report.
+    /// Most callers that don't need the report can ignore the second
+    /// tuple element.
+    pub fn insert<C: Component>(&mut self, id: Address, value: C) -> (Option<C>, CommitReport) {
         let old = self.apply_insert::<C>(id, value);
-        self.run_scheduler();
-        old
+        let report = self.run_scheduler();
+        (old, report)
     }
 
-    pub fn remove<C: Component>(&mut self, id: Address) -> Option<C> {
+    pub fn remove<C: Component>(&mut self, id: Address) -> (Option<C>, CommitReport) {
         let old = self.apply_remove::<C>(id);
-        self.run_scheduler();
-        old
+        let report = self.run_scheduler();
+        (old, report)
     }
 
     /// Start a per-transaction mutation batch. Writes hit storage and
@@ -311,14 +359,15 @@ impl World {
     /// recompute every dirty derivation at each entity in that order.
     /// Loops until no more work is produced — which terminates because
     /// derivation deps form a DAG and ownership is acyclic.
-    pub(crate) fn run_scheduler(&mut self) {
+    pub(crate) fn run_scheduler(&mut self) -> CommitReport {
         if self.derivations.is_empty() {
             // No derivations registered, but still drain the dirty
             // sets and ownership queue so they don't accumulate across
-            // commits.
-            self.drain_all_dirty();
+            // commits. The propagation-side state has nothing to do;
+            // the committed-side gets harvested into the report.
+            self.drain_all_propagation_dirty();
             self.ownership_invalidations.clear();
-            return;
+            return self.harvest_commit_report();
         }
 
         let mut work: HashMap<Address, HashSet<TypeId>> = HashMap::new();
@@ -348,6 +397,30 @@ impl World {
             // derivations; pick those up before deciding to exit.
             self.propagate_dirty_into(&mut work);
         }
+
+        self.harvest_commit_report()
+    }
+
+    /// Drain every storage's `committed_dirty` set into a fresh report.
+    /// Called once at the end of a scheduler pass so the caller sees
+    /// every component+entity that was touched during the commit,
+    /// including derived components the scheduler wrote on their
+    /// behalf.
+    fn harvest_commit_report(&mut self) -> CommitReport {
+        let mut report = CommitReport::default();
+        for (ty, storage) in self.components.iter_mut() {
+            let touched = storage.drain_committed_dirty_erased();
+            if !touched.is_empty() {
+                report.record(*ty, touched);
+            }
+        }
+        report
+    }
+
+    fn drain_all_propagation_dirty(&mut self) {
+        for storage in self.components.values_mut() {
+            let _ = storage.drain_propagation_dirty_erased();
+        }
     }
 
     /// Drain per-storage dirty sets and the ownership invalidation
@@ -364,7 +437,7 @@ impl World {
             .components
             .iter_mut()
             .filter_map(|(ty, s)| {
-                let dirty = s.drain_dirty_erased();
+                let dirty = s.drain_propagation_dirty_erased();
                 (!dirty.is_empty()).then_some((*ty, dirty))
             })
             .collect();
@@ -416,12 +489,6 @@ impl World {
                     work.entry(parent).or_default().insert(*d_ty);
                 }
             }
-        }
-    }
-
-    fn drain_all_dirty(&mut self) {
-        for storage in self.components.values_mut() {
-            let _ = storage.drain_dirty_erased();
         }
     }
 
@@ -527,8 +594,11 @@ impl<'a> MutationBatch<'a> {
 
     /// Finalize the batch: run the reactive scheduler so any derived
     /// components dependent on the writes above get recomputed.
-    pub fn commit(self) {
-        self.world.run_scheduler();
+    /// Returns a [`CommitReport`] describing every entity write that
+    /// landed during the commit, including the derived writes the
+    /// scheduler emitted.
+    pub fn commit(self) -> CommitReport {
+        self.world.run_scheduler()
     }
 }
 
@@ -620,7 +690,7 @@ mod tests {
         let child = addr(2);
 
         world.insert::<OwnerComp>(child, OwnerComp(parent));
-        let old = world.remove::<OwnerComp>(child);
+        let (old, _) = world.remove::<OwnerComp>(child);
         assert!(old.is_some());
 
         let idx = world.index::<OwnedBy>().unwrap();
@@ -720,6 +790,48 @@ mod tests {
             world.get::<OwnerHighHigh>(entity).map(|o| o.0),
             Some(addr(42))
         );
+    }
+
+    #[test]
+    fn commit_report_lists_changed_entities() {
+        let mut world = World::new();
+        world.register::<OwnerComp>();
+
+        let a = addr(1);
+        let b = addr(2);
+
+        let (_, report) = world.insert::<OwnerComp>(a, OwnerComp(addr(10)));
+        let touched: HashSet<Address> = report.changed::<OwnerComp>().collect();
+        assert_eq!(touched, [a].into_iter().collect::<HashSet<_>>());
+        assert!(report.any_changed::<OwnerComp>());
+
+        // Batch with multiple writes should aggregate into one report.
+        let report = {
+            let mut batch = world.batch();
+            batch.insert::<OwnerComp>(b, OwnerComp(addr(11)));
+            batch.remove::<OwnerComp>(a);
+            batch.commit()
+        };
+        let touched: HashSet<Address> = report.changed::<OwnerComp>().collect();
+        assert_eq!(touched, [a, b].into_iter().collect::<HashSet<_>>());
+    }
+
+    #[test]
+    fn commit_report_covers_derived_components() {
+        let mut world = World::new();
+        world.register::<OwnerComp>();
+        world.register_derived::<OwnerHigh>();
+
+        let entity = addr(7);
+        let (_, report) = world.insert::<OwnerComp>(entity, OwnerComp(addr(1)));
+
+        // Direct write touches OwnerComp; the scheduler then derives
+        // OwnerHigh at the same entity, so both component types appear
+        // in the report.
+        let owner_touched: HashSet<Address> = report.changed::<OwnerComp>().collect();
+        let high_touched: HashSet<Address> = report.changed::<OwnerHigh>().collect();
+        assert_eq!(owner_touched, [entity].into_iter().collect::<HashSet<_>>());
+        assert_eq!(high_touched, [entity].into_iter().collect::<HashSet<_>>());
     }
 
     #[test]
