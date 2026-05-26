@@ -330,7 +330,7 @@ fn validate_pgp_cert(cert: &openpgp::Cert) -> GuardianResult<()> {
     Ok(())
 }
 
-fn pgp_encrypt_armored(plaintext: &[u8], cert: &PgpPublicCert) -> GuardianResult<String> {
+fn pgp_encrypt_armored(plaintext: &[u8], cert: &PgpPublicCert) -> String {
     let policy = StandardPolicy::new();
     let recipients = cert
         .cert
@@ -345,20 +345,20 @@ fn pgp_encrypt_armored(plaintext: &[u8], cert: &PgpPublicCert) -> GuardianResult
     let message = Armorer::new(message)
         .kind(openpgp::armor::Kind::Message)
         .build()
-        .map_err(|e| InvalidInputs(format!("OpenPGP armor setup failed: {e}")))?;
+        .expect("OpenPGP armor setup should not fail when writing to Vec");
     let message = Encryptor::for_recipients(message, recipients)
         .build()
-        .map_err(|e| InvalidInputs(format!("OpenPGP encryption setup failed: {e}")))?;
+        .expect("PgpPublicCert validation ensures an encryption recipient");
     let mut writer = LiteralWriter::new(message)
         .build()
-        .map_err(|e| InvalidInputs(format!("OpenPGP literal data setup failed: {e}")))?;
+        .expect("OpenPGP literal data setup should not fail");
     writer
         .write_all(plaintext)
-        .map_err(|e| InvalidInputs(format!("OpenPGP encryption failed: {e}")))?;
+        .expect("OpenPGP encryption should not fail when writing to Vec");
     writer
         .finalize()
-        .map_err(|e| InvalidInputs(format!("OpenPGP encryption failed: {e}")))?;
-    String::from_utf8(ciphertext).map_err(|e| InvalidInputs(format!("invalid OpenPGP armor: {e}")))
+        .expect("OpenPGP encryption finalization should not fail when writing to Vec");
+    String::from_utf8(ciphertext).expect("OpenPGP ASCII armor should be valid UTF-8")
 }
 
 // ---------------------------------
@@ -479,42 +479,41 @@ pub fn encrypt_share<R: CryptoRng + RngCore>(
 /// Split `sk` into `params.num_shares()` shares with reconstruction threshold
 /// `params.threshold()`, encrypt each to the matching KP OpenPGP cert, and
 /// compute the corresponding commitments. Share ID `i` (1..=N) is paired with
-/// `kp_certs[i-1]`. Errors if `kp_certs.len() != params.num_shares()`.
+/// `kp_certs[i-1]`.
+///
+/// # Panics
+///
+/// Panics if `kp_certs.len() != params.num_shares()`.
 pub fn split_and_encrypt_for_kps<R: CryptoRng + RngCore>(
     sk: &k256::SecretKey,
     kp_certs: &[PgpPublicCert],
     params: &SecretSharingParams,
     rng: &mut R,
-) -> GuardianResult<(Vec<KPEncryptedShare>, ShareCommitments)> {
-    if kp_certs.len() != params.num_shares() {
-        return Err(InvalidInputs(format!(
-            "expected {} kp_certs, got {}",
-            params.num_shares(),
-            kp_certs.len()
-        )));
-    }
+) -> (Vec<KPEncryptedShare>, ShareCommitments) {
+    assert_eq!(
+        kp_certs.len(),
+        params.num_shares(),
+        "SetupNewKeyRequest validation ensures one KP cert per share",
+    );
     let shares = split_secret(sk, params, rng);
     let n = params.num_shares();
     let mut encrypted_shares = Vec::with_capacity(n);
     let mut commitments = Vec::with_capacity(n);
     for (share, cert) in shares.iter().zip(kp_certs.iter()) {
-        encrypted_shares.push(encrypt_share_for_provisioner(share, cert)?);
+        encrypted_shares.push(encrypt_share_for_provisioner(share, cert));
         commitments.push(commit_share(share));
     }
     let commitments =
         ShareCommitments::new(commitments).expect("share IDs 1..=n are unique by construction");
-    Ok((encrypted_shares, commitments))
+    (encrypted_shares, commitments)
 }
 
 /// Encrypt a share for delivery to a key provisioner using OpenPGP ASCII armor.
-pub fn encrypt_share_for_provisioner(
-    share: &Share,
-    cert: &PgpPublicCert,
-) -> GuardianResult<KPEncryptedShare> {
-    Ok(KPEncryptedShare {
+pub fn encrypt_share_for_provisioner(share: &Share, cert: &PgpPublicCert) -> KPEncryptedShare {
+    KPEncryptedShare {
         id: share.id,
-        armored_ciphertext: pgp_encrypt_armored(&share.value.to_bytes(), cert)?,
-    })
+        armored_ciphertext: pgp_encrypt_armored(&share.value.to_bytes(), cert),
+    }
 }
 
 /// Decrypt an encrypted share with optional AAD
@@ -616,7 +615,7 @@ mod tests {
         let public_cert = PgpPublicCert::new(String::from_utf8(armored).unwrap()).unwrap();
 
         let plaintext = b"secret share bytes";
-        let ciphertext = pgp_encrypt_armored(plaintext, &public_cert).unwrap();
+        let ciphertext = pgp_encrypt_armored(plaintext, &public_cert);
         assert!(ciphertext.starts_with("-----BEGIN PGP MESSAGE-----"));
 
         let helper = PgpDecryptHelper {

@@ -46,7 +46,7 @@ pub async fn setup_new_key(
         let fp = format!("{:x}", fingerprint(&sk));
         info!("Splitting secret into {n} shares (threshold: {t}).");
         let (encrypted, commitments) =
-            split_and_encrypt_for_kps(&sk, key_provisioner_certs, params, &mut rng)?;
+            split_and_encrypt_for_kps(&sk, key_provisioner_certs, params, &mut rng);
         (encrypted, commitments, fp)
     };
     info!(
