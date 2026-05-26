@@ -147,14 +147,14 @@ pub struct VerifiedLogRecord {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetupNewKeyRequest {
-    key_provisioner_public_keys: Vec<EncPubKey>,
+    key_provisioner_pgp_certs: Vec<PgpPublicCert>,
     params: SecretSharingParams,
 }
 
 /// `EnclaveSigned<T>`
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SetupNewKeyResponse {
-    pub encrypted_shares: Vec<EncryptedShare>,
+    pub encrypted_shares: Vec<KPEncryptedShare>,
     pub share_commitments: ShareCommitments,
 }
 
@@ -171,7 +171,7 @@ pub struct OperatorInitRequest {
 /// To be called by Key Provisioners (who may be outside entities).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProvisionerInitRequest {
-    encrypted_share: EncryptedShare,
+    encrypted_share: GuardianEncryptedShare,
     state: ProvisionerInitState,
 }
 
@@ -257,7 +257,7 @@ pub enum LogMessage {
 /// for the canonical S3 key layout and sharing_seq semantics.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct SecretSharingLogMessage {
-    pub encrypted_shares: Vec<EncryptedShare>,
+    pub encrypted_shares: Vec<KPEncryptedShare>,
     pub secret_sharing_instance: SecretSharingInstance,
 }
 
@@ -369,26 +369,26 @@ impl S3Config {
 
 impl SetupNewKeyRequest {
     pub fn new(
-        public_keys: Vec<EncPubKey>,
+        pgp_certs: Vec<PgpPublicCert>,
         num_shares: usize,
         threshold: usize,
     ) -> GuardianResult<Self> {
         let params = SecretSharingParams::new(num_shares, threshold)?;
-        if public_keys.len() != params.num_shares() {
+        if pgp_certs.len() != params.num_shares() {
             return Err(InvalidInputs(format!(
-                "expected {} public keys, got {}",
+                "expected {} OpenPGP certificates, got {}",
                 params.num_shares(),
-                public_keys.len()
+                pgp_certs.len()
             )));
         }
         Ok(Self {
-            key_provisioner_public_keys: public_keys,
+            key_provisioner_pgp_certs: pgp_certs,
             params,
         })
     }
 
-    pub fn public_keys(&self) -> &[EncPubKey] {
-        &self.key_provisioner_public_keys
+    pub fn pgp_certs(&self) -> &[PgpPublicCert] {
+        &self.key_provisioner_pgp_certs
     }
 
     pub fn params(&self) -> &SecretSharingParams {
@@ -499,7 +499,7 @@ impl ProvisionerInitState {
 }
 
 impl ProvisionerInitRequest {
-    pub fn new(encrypted_share: EncryptedShare, state: ProvisionerInitState) -> Self {
+    pub fn new(encrypted_share: GuardianEncryptedShare, state: ProvisionerInitState) -> Self {
         Self {
             encrypted_share,
             state,
@@ -520,7 +520,7 @@ impl ProvisionerInitRequest {
         ProvisionerInitRequest::new(encrypted_share, state)
     }
 
-    pub fn encrypted_share(&self) -> &EncryptedShare {
+    pub fn encrypted_share(&self) -> &GuardianEncryptedShare {
         &self.encrypted_share
     }
 

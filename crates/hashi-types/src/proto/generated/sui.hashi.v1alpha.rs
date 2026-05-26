@@ -1187,11 +1187,13 @@ pub struct S3BucketInfo {
 /// Untrusted wire DTO. Converted to a validated domain request in the server.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SetupNewKeyRequest {
-    /// HPKE public keys for key provisioners. Length must equal `num_shares`.
-    #[prost(bytes = "bytes", repeated, tag = "1")]
-    pub key_provisioner_public_keys: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
+    /// Armored OpenPGP certificates for key provisioners. Length must equal `num_shares`.
+    #[prost(string, repeated, tag = "1")]
+    pub key_provisioner_pgp_certs: ::prost::alloc::vec::Vec<
+        ::prost::alloc::string::String,
+    >,
     /// Total number of shares to split the new BTC key into. Must match
-    /// `key_provisioner_public_keys.len()`.
+    /// `key_provisioner_pgp_certs.len()`.
     #[prost(uint32, optional, tag = "2")]
     pub num_shares: ::core::option::Option<u32>,
     /// Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
@@ -1212,13 +1214,21 @@ pub struct GuardianShareId {
     #[prost(uint32, optional, tag = "1")]
     pub id: ::core::option::Option<u32>,
 }
-/// Encrypted secret share sent to a key provisioner.
+/// HPKE-encrypted secret share sent to the guardian.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GuardianShareEncrypted {
+pub struct GuardianEncryptedShare {
     #[prost(message, optional, tag = "1")]
     pub id: ::core::option::Option<GuardianShareId>,
     #[prost(message, optional, tag = "2")]
     pub ciphertext: ::core::option::Option<HpkeCiphertext>,
+}
+/// OpenPGP-encrypted secret share sent to a key provisioner.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct KpEncryptedShare {
+    #[prost(message, optional, tag = "1")]
+    pub id: ::core::option::Option<GuardianShareId>,
+    #[prost(string, optional, tag = "2")]
+    pub armored_ciphertext: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Commitment to a secret share.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1232,7 +1242,7 @@ pub struct GuardianShareCommitment {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SetupNewKeyResponseData {
     #[prost(message, repeated, tag = "1")]
-    pub encrypted_shares: ::prost::alloc::vec::Vec<GuardianShareEncrypted>,
+    pub encrypted_shares: ::prost::alloc::vec::Vec<KpEncryptedShare>,
     #[prost(message, repeated, tag = "2")]
     pub share_commitments: ::prost::alloc::vec::Vec<GuardianShareCommitment>,
 }
@@ -1277,7 +1287,7 @@ pub struct S3Config {
 pub struct ProvisionerInitRequest {
     /// Encrypted share destined for this provisioner.
     #[prost(message, optional, tag = "1")]
-    pub encrypted_share: ::core::option::Option<GuardianShareEncrypted>,
+    pub encrypted_share: ::core::option::Option<GuardianEncryptedShare>,
     /// State used to initialize/restore the enclave. The share encryption binds to its digest as AAD.
     #[prost(message, optional, tag = "2")]
     pub state: ::core::option::Option<ProvisionerInitState>,

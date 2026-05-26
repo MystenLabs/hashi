@@ -88,11 +88,11 @@ message S3BucketInfo {
 
 // Untrusted wire DTO. Converted to a validated domain request in the server.
 message SetupNewKeyRequest {
-  // HPKE public keys for key provisioners. Length must equal `num_shares`.
-  repeated bytes key_provisioner_public_keys = 1;
+  // Armored OpenPGP certificates for key provisioners. Length must equal `num_shares`.
+  repeated string key_provisioner_pgp_certs = 1;
 
   // Total number of shares to split the new BTC key into. Must match
-  // `key_provisioner_public_keys.len()`.
+  // `key_provisioner_pgp_certs.len()`.
   optional uint32 num_shares = 2;
 
   // Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
@@ -110,10 +110,16 @@ message GuardianShareID {
   optional uint32 id = 1;
 }
 
-// Encrypted secret share sent to a key provisioner.
-message GuardianShareEncrypted {
+// HPKE-encrypted secret share sent to the guardian.
+message GuardianEncryptedShare {
   GuardianShareID id = 1;
   HPKECiphertext ciphertext = 2;
+}
+
+// OpenPGP-encrypted secret share sent to a key provisioner.
+message KPEncryptedShare {
+  GuardianShareID id = 1;
+  optional string armored_ciphertext = 2;
 }
 
 // Commitment to a secret share.
@@ -124,7 +130,7 @@ message GuardianShareCommitment {
 
 // Unsigned response payload.
 message SetupNewKeyResponseData {
-  repeated GuardianShareEncrypted encrypted_shares = 1;
+  repeated KPEncryptedShare encrypted_shares = 1;
   repeated GuardianShareCommitment share_commitments = 2;
 }
 
@@ -176,7 +182,7 @@ enum Network {
 
 message ProvisionerInitRequest {
   // Encrypted share destined for this provisioner.
-  GuardianShareEncrypted encrypted_share = 1;
+  GuardianEncryptedShare encrypted_share = 1;
 
   // State used to initialize/restore the enclave. The share encryption binds to its digest as AAD.
   ProvisionerInitState state = 2;
