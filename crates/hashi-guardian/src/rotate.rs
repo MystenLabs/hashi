@@ -5,9 +5,9 @@ use crate::Enclave;
 use hashi_types::guardian::crypto::combine_shares;
 use hashi_types::guardian::crypto::decrypt_share;
 use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
+use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::SecretSharingInstance;
-use hashi_types::guardian::SecretSharingLogMessage;
 use hashi_types::guardian::*;
 use std::sync::Arc;
 use tracing::info;
@@ -18,21 +18,30 @@ use tracing::info;
 /// old share against the enclave's stored commitments, and on threshold:
 ///   1. reconstructs the BTC key in memory,
 ///   2. re-splits it with fresh randomness, encrypting to `state.new_kp_pgp_certs`,
-///   3. writes `SecretSharingLogMessage` with `sharing_seq = prev + 1`.
+///   3. writes `CeremonyLogMessage` with `sharing_seq = prev + 1`.
 ///      New KPs fetch their encrypted shares from there.
 ///
 /// The enclave does not persist the reconstructed BTC key — its only job is
-/// to mint the new `SecretSharingLogMessage`.
+/// to mint the new `CeremonyLogMessage`.
 pub async fn rotate_kps(enclave: Arc<Enclave>, request: RotateKpsRequest) -> GuardianResult<()> {
     info!("/rotate_kps - Received request.");
 
-    // Serialize calls; reuses the shared decrypted_shares mutex (provisioner_init
-    // is disabled in setup mode so the vec is only ever touched by rotate_kps here).
-    let mut received_shares = enclave.decrypted_shares().lock().await;
-
+    // Hold the ceremony guard across the whole call so the enclave runs
+    // exactly one ceremony: a concurrent setup_new_key (which also holds
+    // it) can't interleave, and once a rotation finalizes the flag rejects the
+    // remaining (old_n - old_t) old KPs — otherwise they'd re-enter the
+    // finalize branch below and re-split the key at the same sharing_seq.
+    let mut ceremony_complete = enclave.scratchpad.ceremony_complete.lock().await;
     if !enclave.is_operator_init_complete() {
         return Err(InvalidInputs("call operator_init first".into()));
     }
+    if *ceremony_complete {
+        return Err(InvalidInputs("setup or rotation already complete".into()));
+    }
+
+    // Accumulate shares across calls; provisioner_init (which shares this vec)
+    // is disabled in ceremony mode, so only rotate_kps touches it here.
+    let mut received_shares = enclave.decrypted_shares().lock().await;
     info!("Enclave state validated.");
 
     let state = request.state();
@@ -68,10 +77,14 @@ pub async fn rotate_kps(enclave: Arc<Enclave>, request: RotateKpsRequest) -> Gua
     let old_t = instance.threshold();
     info!("Total shares received: {count}/{old_t}.");
 
-    // 5) On threshold: reconstruct, re-split, emit new SecretSharingLogMessage
+    // 5) On threshold: reconstruct, re-split, emit new CeremonyLogMessage
     if count >= old_t {
         let shares_vec: Vec<Share> = received_shares.iter().cloned().collect();
         finalize_rotation(&enclave, &shares_vec, instance, request.into_state()).await?;
+
+        // Clear shares as we are done using them
+        received_shares.clear();
+        *ceremony_complete = true;
     }
 
     Ok(())
@@ -109,9 +122,9 @@ async fn finalize_rotation(
     let new_sharing_seq = old_instance.sharing_seq() + 1;
     let new_secret_sharing_instance =
         SecretSharingInstance::new(share_commitments, n, t, new_sharing_seq)?;
-    info!("Writing SecretSharingLogMessage sharing_seq={new_sharing_seq} to secret_sharing/.");
+    info!("Writing CeremonyLogMessage sharing_seq={new_sharing_seq} to ceremony/.");
     enclave
-        .log_secret_sharing(SecretSharingLogMessage {
+        .log_ceremony(CeremonyLogMessage {
             encrypted_shares,
             secret_sharing_instance: new_secret_sharing_instance,
         })
@@ -128,11 +141,10 @@ mod tests {
     use crate::test_utils::CapturedPuts;
     use crate::OperatorInitTestArgs;
     use hashi_types::guardian::crypto::split_secret;
+    use hashi_types::guardian::test_utils::mock_pgp_certs_armored;
     use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::LogRecord;
     use k256::SecretKey;
-    use sequoia_openpgp::cert::prelude::CertBuilder;
-    use sequoia_openpgp::serialize::Serialize;
 
     const TEST_N: usize = 5;
     const TEST_T: usize = 3;
@@ -153,25 +165,11 @@ mod tests {
         (sk, shares, captures, enclave)
     }
 
-    /// Generate `n` fresh armored OpenPGP certs to serve as the new KP set.
-    fn fresh_new_kp_certs(n: usize) -> Vec<String> {
-        (0..n)
-            .map(|_| {
-                let (cert, _) = CertBuilder::general_purpose(["kp@example.com"])
-                    .generate()
-                    .unwrap();
-                let mut armored = Vec::new();
-                cert.armored().export(&mut armored).unwrap();
-                String::from_utf8(armored).unwrap()
-            })
-            .collect()
-    }
-
     fn build_state() -> RotateKpsState {
-        RotateKpsState::new(fresh_new_kp_certs(TEST_N), TEST_N, TEST_T).unwrap()
+        RotateKpsState::new(mock_pgp_certs_armored(TEST_N), TEST_N, TEST_T).unwrap()
     }
 
-    /// Assert the rotation captured a single secret_sharing/ log at
+    /// Assert the rotation captured a single ceremony/ log at
     /// `sharing_seq = 1` with the expected instance params and one PGP-armored
     /// share per new KP.
     ///
@@ -182,19 +180,19 @@ mod tests {
         let captured = captures.lock().unwrap();
         let ss_logs: Vec<_> = captured
             .iter()
-            .filter(|(k, _)| k.starts_with("secret_sharing/"))
+            .filter(|(k, _)| k.starts_with("ceremony/"))
             .collect();
-        assert_eq!(ss_logs.len(), 1, "expected one secret_sharing/ log");
+        assert_eq!(ss_logs.len(), 1, "expected one ceremony/ log");
         let (key, body) = ss_logs[0];
 
         assert!(
-            key.starts_with("secret_sharing/00000000000000000001-"),
+            key.starts_with("ceremony/00000000000000000001-"),
             "expected sharing_seq=1, got key {key}"
         );
 
         let record: LogRecord = serde_json::from_slice(body).unwrap();
-        let LogMessage::SecretSharing(ss) = record.message else {
-            panic!("expected SecretSharing variant");
+        let LogMessage::Ceremony(ss) = record.message else {
+            panic!("expected Ceremony variant");
         };
         assert_eq!(ss.secret_sharing_instance.sharing_seq(), 1);
         assert_eq!(ss.secret_sharing_instance.num_shares(), new_n);
@@ -212,7 +210,7 @@ mod tests {
     #[tokio::test]
     async fn happy_path_threshold_reached() {
         let (_sk, shares, captures, enclave) = setup_rotation_enclave().await;
-        let state = RotateKpsState::new(fresh_new_kp_certs(TEST_N), TEST_N, TEST_T).unwrap();
+        let state = RotateKpsState::new(mock_pgp_certs_armored(TEST_N), TEST_N, TEST_T).unwrap();
 
         for share in shares.iter().take(TEST_T) {
             let req = RotateKpsRequest::build_from_share_and_state(
@@ -231,7 +229,7 @@ mod tests {
     async fn happy_path_asymmetric_n_t() {
         // Old (n=5, t=3); rotate to new (n=3, t=2).
         let (_sk, shares, captures, enclave) = setup_rotation_enclave().await;
-        let state = RotateKpsState::new(fresh_new_kp_certs(3), 3, 2).unwrap();
+        let state = RotateKpsState::new(mock_pgp_certs_armored(3), 3, 2).unwrap();
 
         for share in shares.iter().take(TEST_T) {
             let req = RotateKpsRequest::build_from_share_and_state(
@@ -244,6 +242,41 @@ mod tests {
         }
 
         assert_rotation_output(&captures, 3, 2);
+    }
+
+    #[tokio::test]
+    async fn rejects_submissions_after_complete() {
+        let (_sk, shares, captures, enclave) = setup_rotation_enclave().await;
+        let state = build_state();
+
+        // Reach threshold → rotation finalizes.
+        for share in shares.iter().take(TEST_T) {
+            let req = RotateKpsRequest::build_from_share_and_state(
+                share,
+                enclave.encryption_public_key(),
+                state.clone(),
+                &mut rand::thread_rng(),
+            );
+            rotate_kps(enclave.clone(), req).await.expect("ok");
+        }
+
+        // A remaining old KP submits after completion: rejected, not re-split.
+        let late = RotateKpsRequest::build_from_share_and_state(
+            &shares[TEST_T],
+            enclave.encryption_public_key(),
+            state,
+            &mut rand::thread_rng(),
+        );
+        let err = rotate_kps(enclave, late).await.expect_err("should reject");
+        assert!(matches!(err, InvalidInputs(_)));
+
+        // Exactly one ceremony/ log — finalization happened once.
+        let captured = captures.lock().unwrap();
+        let ss_count = captured
+            .iter()
+            .filter(|(k, _)| k.starts_with("ceremony/"))
+            .count();
+        assert_eq!(ss_count, 1, "rotation must finalize exactly once");
     }
 
     #[tokio::test]
@@ -311,22 +344,6 @@ mod tests {
             &mut rand::thread_rng(),
         );
         let err = rotate_kps(enclave, req).await.expect_err("should fail");
-        assert!(matches!(err, InvalidInputs(_)));
-    }
-
-    #[test]
-    fn rotate_kps_state_new_rejects_wrong_cert_count() {
-        let mut certs = fresh_new_kp_certs(TEST_N);
-        certs.pop();
-        let err = RotateKpsState::new(certs, TEST_N, TEST_T).expect_err("should fail");
-        assert!(matches!(err, InvalidInputs(_)));
-    }
-
-    #[test]
-    fn rotate_kps_state_new_rejects_duplicate_certs() {
-        let mut certs = fresh_new_kp_certs(TEST_N);
-        certs[1] = certs[0].clone();
-        let err = RotateKpsState::new(certs, TEST_N, TEST_T).expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
     }
 

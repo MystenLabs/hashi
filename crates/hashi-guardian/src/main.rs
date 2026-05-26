@@ -17,8 +17,8 @@ use tonic_health::server::health_reporter;
 use tracing::info;
 
 /// Enclave initialization.
-/// `setup_new_key` and `rotate_kps` are gated to SETUP_MODE=true;
-/// `provisioner_init` and `standard_withdrawal` are gated to SETUP_MODE=false.
+/// `setup_new_key` and `rotate_kps` are gated to CEREMONY_MODE=true;
+/// `provisioner_init` and `standard_withdrawal` are gated to CEREMONY_MODE=false.
 /// Everything else (operator_init, get_guardian_info, …) is available in
 /// both modes. See the per-route gates in `rpc.rs`.
 #[tokio::main]
@@ -28,14 +28,14 @@ async fn main() -> Result<()> {
         .with_env()
         .init();
 
-    // Check if SETUP_MODE is enabled (defaults to false)
-    let setup_mode = std::env::var("SETUP_MODE")
+    // Check if CEREMONY_MODE is enabled (defaults to false)
+    let ceremony_mode = std::env::var("CEREMONY_MODE")
         .ok()
         .and_then(|v| v.parse::<bool>().ok())
         .unwrap_or(false);
 
-    if setup_mode {
-        info!("Setup mode: setup_new_key/rotate_kps enabled; provisioner_init/standard_withdrawal disabled.");
+    if ceremony_mode {
+        info!("Ceremony mode: setup_new_key/rotate_kps enabled; provisioner_init/standard_withdrawal disabled.");
     } else {
         info!("Normal mode: provisioner_init/standard_withdrawal enabled; setup_new_key/rotate_kps disabled.");
     }
@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
 
     let svc = GuardianGrpc {
         enclave: enclave.clone(),
-        setup_mode,
+        ceremony_mode,
     };
 
     let addr = "0.0.0.0:3000".parse()?;
@@ -64,10 +64,10 @@ async fn main() -> Result<()> {
         .add_service(GuardianServiceServer::new(svc))
         .serve(addr);
 
-    // Don't emit heartbeats in setup mode: their primary function is
+    // Don't emit heartbeats in ceremony mode: their primary function is
     // to allow KPs to detect old sessions that might still be running
-    // in order to bypass limiter. Not a concern for setup mode.
-    if setup_mode {
+    // in order to bypass limiter. Not a concern for ceremony mode.
+    if ceremony_mode {
         return server_future
             .await
             .map_err(|e| anyhow::anyhow!("Server error: {}", e));

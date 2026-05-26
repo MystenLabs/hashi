@@ -105,13 +105,22 @@ impl SetupNewKeyRequest {
     }
 }
 
-fn mock_pgp_cert() -> PgpPublicCert {
+fn mock_pgp_cert_armored() -> String {
     let (cert, _) = CertBuilder::general_purpose(["kp@example.com"])
         .generate()
         .unwrap();
     let mut armored = Vec::new();
     cert.armored().export(&mut armored).unwrap();
-    PgpPublicCert::new(String::from_utf8(armored).unwrap()).unwrap()
+    String::from_utf8(armored).unwrap()
+}
+
+/// Generate `n` fresh armored OpenPGP certs (distinct keys), e.g. for a new KP set.
+pub fn mock_pgp_certs_armored(n: usize) -> Vec<String> {
+    (0..n).map(|_| mock_pgp_cert_armored()).collect()
+}
+
+fn mock_pgp_cert() -> PgpPublicCert {
+    PgpPublicCert::new(mock_pgp_cert_armored()).unwrap()
 }
 
 fn mock_pgp_certs() -> Vec<PgpPublicCert> {

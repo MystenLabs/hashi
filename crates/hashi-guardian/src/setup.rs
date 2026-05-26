@@ -12,20 +12,20 @@ use tracing::info;
 /// Set up a new BTC key. Flow:
 ///     1. KPs send their OpenPGP certificates to the operator
 ///     2. Operator calls setup_new_key (and optionally returns its response to all KPs)
-///     3. KPs fetch the setup_new_key response from `secret_sharing/` in S3
+///     3. KPs fetch the setup_new_key response from `ceremony/` in S3
 pub async fn setup_new_key(
     enclave: Arc<Enclave>,
     request: SetupNewKeyRequest,
 ) -> GuardianResult<GuardianSigned<SetupNewKeyResponse>> {
     info!("/setup_new_key - Received request.");
-    // Hold the guard across the whole flow so concurrent callers can't both
-    // pass the completion check below and each generate a key.
-    let mut setup_complete = enclave.scratchpad.setup_new_key_lock.lock().await;
+    // Hold the ceremony guard across the whole flow so concurrent setup_new_key
+    // /rotate_kps callers can't both pass the completion check below and run.
+    let mut ceremony_complete = enclave.scratchpad.ceremony_complete.lock().await;
     if !enclave.is_operator_init_complete() {
         return Err(InvalidInputs("call operator_init first".into()));
     }
-    if *setup_complete {
-        return Err(InvalidInputs("setup already complete".into()));
+    if *ceremony_complete {
+        return Err(InvalidInputs("setup or rotation already complete".into()));
     }
 
     let params = request.params();
@@ -58,7 +58,7 @@ pub async fn setup_new_key(
         .expect("(n, t) validated by SetupNewKeyRequest; commitments produced with matching count");
 
     enclave
-        .log_secret_sharing(SecretSharingLogMessage {
+        .log_ceremony(CeremonyLogMessage {
             encrypted_shares: encrypted_shares.clone(),
             secret_sharing_instance: ss_instance,
         })
@@ -69,7 +69,7 @@ pub async fn setup_new_key(
         share_commitments,
     });
 
-    *setup_complete = true;
+    *ceremony_complete = true;
     Ok(response)
 }
 

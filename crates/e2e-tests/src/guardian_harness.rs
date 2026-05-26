@@ -50,7 +50,7 @@ impl GuardianHarness {
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
         let svc = GuardianGrpc {
             enclave: enclave.clone(),
-            setup_mode: false,
+            ceremony_mode: false,
         };
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
         let server_handle = tokio::spawn(async move {

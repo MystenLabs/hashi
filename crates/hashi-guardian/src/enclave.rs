@@ -67,11 +67,11 @@ pub struct EnclaveState {
 /// provisioner_init flow completes; the OnceLock flags retain their state.
 #[derive(Default)]
 pub struct Scratchpad {
-    /// The received shares during provisioner_init (non-setup mode) or rotate_kps (setup mode)
+    /// The received shares during provisioner_init (non-ceremony mode) or rotate_kps (ceremony mode)
     pub shares: tokio::sync::Mutex<Vec<Share>>,
     /// Secret-sharing instance (commitments + N + T) set by operator_init.
     pub secret_sharing_instance: OnceLock<SecretSharingInstance>,
-    /// Hash of the state in ProvisionerInitRequest (non-setup mode) or RotateKpsRequest (setup mode)
+    /// Hash of the state in ProvisionerInitRequest (non-ceremony mode) or RotateKpsRequest (ceremony mode)
     pub state_hash: OnceLock<[u8; 32]>,
     /// Set once operator_init has successfully written all logs to S3.
     /// This prevents heartbeats from being emitted before operator_init logs.
@@ -79,11 +79,12 @@ pub struct Scratchpad {
     /// Set once the provisioner init flow has successfully logged EnclaveFullyInitialized.
     /// This prevents withdrawals from starting before provisioner_init logs.
     pub provisioner_init_logging_complete: OnceLock<()>,
-    /// Serializes `setup_new_key` and records whether it has completed. The
-    /// guard is held across the whole flow so concurrent callers can't both
-    /// generate a key; the inner `bool` is set once setup succeeds, making it
-    /// one-shot per enclave instance (the operator must restart to redo setup).
-    pub setup_new_key_lock: tokio::sync::Mutex<bool>,
+    /// Guards the single ceremony per enclave: `setup_new_key` (genesis) or
+    /// `rotate_kps` (rotation), never both. Each holds this guard across its
+    /// flow so the two can't interleave; the `bool` flips true once a ceremony
+    /// finalizes, making it one-shot per enclave instance (the operator
+    /// restarts to run another).
+    pub ceremony_complete: tokio::sync::Mutex<bool>,
 }
 
 pub struct EphemeralKeyPairs {
@@ -467,9 +468,8 @@ impl Enclave {
         self.write_log(LogMessage::Heartbeat { seq }).await
     }
 
-    pub async fn log_secret_sharing(&self, state: SecretSharingLogMessage) -> GuardianResult<()> {
-        self.write_log(LogMessage::SecretSharing(Box::new(state)))
-            .await
+    pub async fn log_ceremony(&self, state: CeremonyLogMessage) -> GuardianResult<()> {
+        self.write_log(LogMessage::Ceremony(Box::new(state))).await
     }
 
     // ========================================================================

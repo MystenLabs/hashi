@@ -9,13 +9,13 @@ service GuardianService {
   // Query the service for general information about its current state.
   rpc GetGuardianInfo(GetGuardianInfoRequest) returns (GetGuardianInfoResponse);
 
-  // Setup mode only: generate a new BTC key and distribute encrypted shares.
+  // Ceremony mode only: generate a new BTC key and distribute encrypted shares.
   rpc SetupNewKey(SetupNewKeyRequest) returns (SignedSetupNewKeyResponse);
 
-  // Setup mode only: rotate the KP set holding the existing BTC key. Each
+  // Ceremony mode only: rotate the KP set holding the existing BTC key. Each
   // current KP submits one of these; once threshold is reached, the enclave
   // reconstructs the BTC key, re-splits it for the new KP set, and writes
-  // the new CurrentKeyState to key_state/.
+  // the new share state to ceremony/.
   rpc RotateKps(RotateKpsRequest) returns (RotateKpsResponse);
 
   // Operator initialization: provide config and commitments before provisioning.

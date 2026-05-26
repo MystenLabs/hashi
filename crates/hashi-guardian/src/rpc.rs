@@ -26,7 +26,7 @@ use tonic::Status;
 #[derive(Clone)]
 pub struct GuardianGrpc {
     pub enclave: Arc<Enclave>,
-    pub setup_mode: bool,
+    pub ceremony_mode: bool,
 }
 
 fn to_status(e: GuardianError) -> Status {
@@ -40,19 +40,19 @@ fn to_status(e: GuardianError) -> Status {
 }
 
 impl GuardianGrpc {
-    fn require_setup_mode(&self, endpoint: &str) -> Result<(), Status> {
-        if !self.setup_mode {
+    fn require_ceremony_mode(&self, endpoint: &str) -> Result<(), Status> {
+        if !self.ceremony_mode {
             return Err(Status::failed_precondition(format!(
-                "{endpoint} is disabled when SETUP_MODE=false"
+                "{endpoint} is disabled when CEREMONY_MODE=false"
             )));
         }
         Ok(())
     }
 
     fn require_normal_mode(&self, endpoint: &str) -> Result<(), Status> {
-        if self.setup_mode {
+        if self.ceremony_mode {
             return Err(Status::failed_precondition(format!(
-                "{endpoint} is disabled when SETUP_MODE=true"
+                "{endpoint} is disabled when CEREMONY_MODE=true"
             )));
         }
         Ok(())
@@ -78,7 +78,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         request: Request<proto::SetupNewKeyRequest>,
     ) -> anyhow::Result<Response<proto::SignedSetupNewKeyResponse>, Status> {
-        self.require_setup_mode("setup_new_key")?;
+        self.require_ceremony_mode("setup_new_key")?;
 
         let domain_req: SetupNewKeyRequest = request.into_inner().try_into().map_err(to_status)?;
 
@@ -95,11 +95,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         request: Request<proto::RotateKpsRequest>,
     ) -> Result<Response<proto::RotateKpsResponse>, Status> {
-        if !self.setup_mode {
-            return Err(Status::failed_precondition(
-                "rotate_kps is disabled when SETUP_MODE=false",
-            ));
-        }
+        self.require_ceremony_mode("rotate_kps")?;
 
         let domain_req: RotateKpsRequest = request.into_inner().try_into().map_err(to_status)?;
 

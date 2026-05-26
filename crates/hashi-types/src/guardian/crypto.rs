@@ -102,17 +102,6 @@ impl SecretSharingParams {
     }
 }
 
-/// Parse a list of HPKE public keys from their byte representation.
-pub fn parse_enc_pubkeys<B: AsRef<[u8]>>(bytes_list: &[B]) -> GuardianResult<Vec<EncPubKey>> {
-    bytes_list
-        .iter()
-        .map(|b| {
-            EncPubKey::from_bytes(b.as_ref())
-                .map_err(|e| InvalidInputs(format!("invalid KP pubkey: {e}")))
-        })
-        .collect()
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct GuardianEncryptedShare {
     pub id: ShareID,

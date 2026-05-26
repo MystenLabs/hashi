@@ -57,19 +57,19 @@ use std::time::Duration;
 ///
 /// TODO: Uniform 7 days is a coarse placeholder. Revisit per-log-type
 /// against the SLO we actually want to defend — heartbeats could be shorter,
-/// secret_sharing/withdraws likely want years.
+/// ceremony/withdraws likely want years.
 const ONE_WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub const S3_OBJECT_LOCK_DURATION_INIT: Duration = ONE_WEEK;
 pub const S3_OBJECT_LOCK_DURATION_WITHDRAW: Duration = ONE_WEEK;
 pub const S3_OBJECT_LOCK_DURATION_HEARTBEAT: Duration = ONE_WEEK;
-pub const S3_OBJECT_LOCK_DURATION_SECRET_SHARING: Duration = ONE_WEEK;
+pub const S3_OBJECT_LOCK_DURATION_CEREMONY: Duration = ONE_WEEK;
 
 /// S3 sub-prefixes used for guardian log streams.
 /// See `crates/hashi-guardian/README.md` for canonical key layout.
 pub const S3_DIR_INIT: &str = "init";
 pub const S3_DIR_WITHDRAW: &str = "withdraw";
 pub const S3_DIR_HEARTBEAT: &str = "heartbeat";
-pub const S3_DIR_SECRET_SHARING: &str = "secret_sharing";
+pub const S3_DIR_CEREMONY: &str = "ceremony";
 
 /// Length of the session ID prefix (hex chars) used in S3 keys. 16 hex =
 /// 64 bits of the signing pubkey, comfortably below any collision risk for
@@ -199,7 +199,8 @@ pub struct RotateKpsRequest {
 /// allowed.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RotateKpsState {
-    /// Armored OpenPGP certs for the new KP set. Length equals `new_params.num_shares()`.
+    /// Armored OpenPGP certs for the new KP set, sorted to a canonical order
+    /// (see `RotateKpsState::new`). Length equals `new_params.num_shares()`.
     new_kp_pgp_certs: Vec<String>,
     new_params: SecretSharingParams,
 }
@@ -266,14 +267,16 @@ pub enum LogMessage {
     Heartbeat { seq: u64 },
     Init(Box<InitLogMessage>),
     Withdrawal(Box<WithdrawalLogMessage>),
-    SecretSharing(Box<SecretSharingLogMessage>),
+    Ceremony(Box<CeremonyLogMessage>),
 }
 
-/// Written by `setup_new_key` (genesis, `sharing_seq=0`) to advertise the
-/// current authoritative share state to KPs. See `crates/hashi-guardian/README.md`
-/// for the canonical S3 key layout and sharing_seq semantics.
+/// Written to `ceremony/` by `setup_new_key` (genesis, `sharing_seq=0`) or
+/// `rotate_kps` (rotation, `sharing_seq=prev+1`) to advertise the current
+/// authoritative share state to KPs. See
+/// `crates/hashi-guardian/README.md` for the canonical S3 key layout.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct SecretSharingLogMessage {
+pub struct CeremonyLogMessage {
+    // TODO: Remove encryption's from S3 => Return to operator or serve on get_guardian_info
     pub encrypted_shares: Vec<KPEncryptedShare>,
     pub secret_sharing_instance: SecretSharingInstance,
 }
@@ -564,11 +567,14 @@ impl RotateKpsState {
                 new_kp_pgp_certs.len()
             )));
         }
-        for i in 0..new_kp_pgp_certs.len() {
-            for j in (i + 1)..new_kp_pgp_certs.len() {
-                if new_kp_pgp_certs[i] == new_kp_pgp_certs[j] {
-                    return Err(InvalidInputs("duplicate new KP cert".into()));
-                }
+        // Sort to a canonical order so the serialized state's digest (which all
+        // T old KPs must agree on) is independent of submission order. Sorting
+        // also makes duplicates adjacent.
+        let mut new_kp_pgp_certs = new_kp_pgp_certs;
+        new_kp_pgp_certs.sort();
+        for pair in new_kp_pgp_certs.windows(2) {
+            if pair[0] == pair[1] {
+                return Err(InvalidInputs("duplicate new KP cert".into()));
             }
         }
         Ok(Self {
@@ -751,7 +757,7 @@ impl LogMessage {
                 S3HourScopedDirectory::new(S3_DIR_WITHDRAW, unix_millis_to_seconds(timestamp_ms))
                     .to_string()
             }
-            LogMessage::SecretSharing(..) => format!("{}/", S3_DIR_SECRET_SHARING),
+            LogMessage::Ceremony(..) => format!("{}/", S3_DIR_CEREMONY),
         }
     }
 
@@ -761,7 +767,7 @@ impl LogMessage {
             LogMessage::Init(init_message) => init_message.log_name(prefix),
             LogMessage::Heartbeat { seq } => format!("{}-{:020}.json", prefix, seq),
             LogMessage::Withdrawal(withdrawal_message) => withdrawal_message.log_name(prefix),
-            LogMessage::SecretSharing(ss) => format!(
+            LogMessage::Ceremony(ss) => format!(
                 "{:020}-{}.json",
                 ss.secret_sharing_instance.sharing_seq(),
                 prefix
@@ -800,7 +806,7 @@ impl LogRecord {
             LogMessage::Init(..) => S3_OBJECT_LOCK_DURATION_INIT,
             LogMessage::Heartbeat { .. } => S3_OBJECT_LOCK_DURATION_HEARTBEAT,
             LogMessage::Withdrawal(..) => S3_OBJECT_LOCK_DURATION_WITHDRAW,
-            LogMessage::SecretSharing(..) => S3_OBJECT_LOCK_DURATION_SECRET_SHARING,
+            LogMessage::Ceremony(..) => S3_OBJECT_LOCK_DURATION_CEREMONY,
         }
     }
 
@@ -1000,6 +1006,37 @@ mod tests {
 
     fn set_timestamp(log: &mut LogRecord, timestamp_ms: UnixMillis) {
         log.timestamp_ms = timestamp_ms;
+    }
+
+    #[test]
+    fn rotate_kps_state_new_rejects_wrong_cert_count() {
+        let mut certs = test_utils::mock_pgp_certs_armored(5);
+        certs.pop();
+        assert!(matches!(
+            RotateKpsState::new(certs, 5, 3).unwrap_err(),
+            InvalidInputs(_)
+        ));
+    }
+
+    #[test]
+    fn rotate_kps_state_new_rejects_duplicate_certs() {
+        let mut certs = test_utils::mock_pgp_certs_armored(5);
+        certs[1] = certs[0].clone();
+        assert!(matches!(
+            RotateKpsState::new(certs, 5, 3).unwrap_err(),
+            InvalidInputs(_)
+        ));
+    }
+
+    #[test]
+    fn rotate_kps_state_digest_is_order_independent() {
+        let certs = test_utils::mock_pgp_certs_armored(5);
+        let reversed: Vec<String> = certs.iter().rev().cloned().collect();
+        let a = RotateKpsState::new(certs, 5, 3).unwrap();
+        let b = RotateKpsState::new(reversed, 5, 3).unwrap();
+        // Same set, different input order ⇒ identical canonical form and digest.
+        assert_eq!(a.new_kp_pgp_certs(), b.new_kp_pgp_certs());
+        assert_eq!(a.digest(), b.digest());
     }
 
     #[test]

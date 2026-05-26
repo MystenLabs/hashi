@@ -1557,7 +1557,7 @@ pub mod guardian_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Setup mode only: generate a new BTC key and distribute encrypted shares.
+        /// Ceremony mode only: generate a new BTC key and distribute encrypted shares.
         pub async fn setup_new_key(
             &mut self,
             request: impl tonic::IntoRequest<super::SetupNewKeyRequest>,
@@ -1584,10 +1584,10 @@ pub mod guardian_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Setup mode only: rotate the KP set holding the existing BTC key. Each
+        /// Ceremony mode only: rotate the KP set holding the existing BTC key. Each
         /// current KP submits one of these; once threshold is reached, the enclave
         /// reconstructs the BTC key, re-splits it for the new KP set, and writes
-        /// the new CurrentKeyState to key_state/.
+        /// the new share state to ceremony/.
         pub async fn rotate_kps(
             &mut self,
             request: impl tonic::IntoRequest<super::RotateKpsRequest>,
@@ -1724,7 +1724,7 @@ pub mod guardian_service_server {
             tonic::Response<super::GetGuardianInfoResponse>,
             tonic::Status,
         >;
-        /// Setup mode only: generate a new BTC key and distribute encrypted shares.
+        /// Ceremony mode only: generate a new BTC key and distribute encrypted shares.
         async fn setup_new_key(
             &self,
             request: tonic::Request<super::SetupNewKeyRequest>,
@@ -1732,10 +1732,10 @@ pub mod guardian_service_server {
             tonic::Response<super::SignedSetupNewKeyResponse>,
             tonic::Status,
         >;
-        /// Setup mode only: rotate the KP set holding the existing BTC key. Each
+        /// Ceremony mode only: rotate the KP set holding the existing BTC key. Each
         /// current KP submits one of these; once threshold is reached, the enclave
         /// reconstructs the BTC key, re-splits it for the new KP set, and writes
-        /// the new CurrentKeyState to key_state/.
+        /// the new share state to ceremony/.
         async fn rotate_kps(
             &self,
             request: tonic::Request<super::RotateKpsRequest>,
