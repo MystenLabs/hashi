@@ -599,7 +599,10 @@ impl OnchainState {
             Vec<(Address, move_types::DealerSubmissionV1)>,
         )>,
     > {
-        let epoch_certs = match self.fetch_epoch_certs(protocol_id, epoch, batch_index).await? {
+        let epoch_certs = match self
+            .fetch_epoch_certs(protocol_id, epoch, batch_index)
+            .await?
+        {
             Some(certs) => certs,
             None => return Ok(None),
         };

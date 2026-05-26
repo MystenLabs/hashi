@@ -116,9 +116,14 @@ pub async fn fetch_certificates(
 impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     async fn publish(&self, cert: CertificateV1) -> ChannelResult<()> {
         let dealer = cert.dealer_address();
-        let existing = fetch_certificates(&self.onchain_state, self.protocol_id, self.epoch, self.batch_index)
-            .await
-            .map_err(ChannelError::from)?;
+        let existing = fetch_certificates(
+            &self.onchain_state,
+            self.protocol_id,
+            self.epoch,
+            self.batch_index,
+        )
+        .await
+        .map_err(ChannelError::from)?;
         if existing.iter().any(|(d, _)| *d == dealer) {
             return Ok(());
         }
@@ -136,9 +141,14 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                 return Ok(cert);
             }
             // TODO: Optimize by checking table size first to avoid redundant fetches.
-            let all_certs = fetch_certificates(&self.onchain_state, self.protocol_id, self.epoch, self.batch_index)
-                .await
-                .map_err(ChannelError::from)?;
+            let all_certs = fetch_certificates(
+                &self.onchain_state,
+                self.protocol_id,
+                self.epoch,
+                self.batch_index,
+            )
+            .await
+            .map_err(ChannelError::from)?;
             for (dealer, cert) in all_certs {
                 if !self.seen_dealers.contains(&dealer) {
                     self.seen_dealers.insert(dealer);
@@ -152,8 +162,13 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     }
 
     async fn certified_dealers(&mut self) -> Vec<Address> {
-        if let Ok(all_certs) =
-            fetch_certificates(&self.onchain_state, self.protocol_id, self.epoch, self.batch_index).await
+        if let Ok(all_certs) = fetch_certificates(
+            &self.onchain_state,
+            self.protocol_id,
+            self.epoch,
+            self.batch_index,
+        )
+        .await
         {
             for (dealer, cert) in all_certs {
                 if !self.seen_dealers.contains(&dealer) {

@@ -49,7 +49,10 @@ pub struct Hashi {
 
 impl Hashi {
     pub fn num_consumed_presigs_for_protocol(&self, protocol_id: u8) -> u64 {
-        self.num_consumed_presigs.get(&protocol_id).copied().unwrap_or(0)
+        self.num_consumed_presigs
+            .get(&protocol_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn schnorr_consumed_presigs(&self) -> u64 {
