@@ -52,7 +52,7 @@ pub async fn operator_init(
         .expect("Unable to set network");
 
     info!(
-        "Storing secret-sharing config: n={}, t={}, {} commitments.",
+        "Storing secret-sharing instance: n={}, t={}, {} commitments.",
         secret_sharing_instance.num_shares(),
         secret_sharing_instance.threshold(),
         secret_sharing_instance.commitments().len()
@@ -65,7 +65,7 @@ pub async fn operator_init(
     }
     enclave
         .set_secret_sharing_instance(secret_sharing_instance)
-        .expect("Unable to set secret sharing config");
+        .expect("Unable to set secret-sharing instance");
 
     // Log to S3!
     // 1) Attestation and pub key help authenticate all subsequent enclave-signed messages.
@@ -135,10 +135,10 @@ pub async fn provisioner_init(
 
     // 2) Verify the share against the commitment
     info!("Verifying share against commitment.");
-    let ssc = enclave
+    let instance = enclave
         .secret_sharing_instance()
-        .expect("secret sharing config should be set after operator_init");
-    verify_share(&share, ssc.commitments())?;
+        .expect("secret-sharing instance should be set after operator_init");
+    verify_share(&share, instance.commitments())?;
     info!("Share verified.");
 
     // 3) Set state_hash OR make sure whatever was previously set matches. Panics upon mismatch.
@@ -154,7 +154,7 @@ pub async fn provisioner_init(
         }
     }
 
-    // MILESTONE: At this point, we are sure it is a legitimate payload (both share & config)
+    // MILESTONE: At this point, we are sure it is a legitimate payload (both share & instance)
 
     // 4) Persist share
     info!("Persisting share.");
@@ -165,7 +165,7 @@ pub async fn provisioner_init(
     }
     received_shares.push(share);
     let current_share_count = received_shares.len();
-    let threshold = ssc.threshold();
+    let threshold = instance.threshold();
     info!("Total shares received: {current_share_count}/{threshold}.");
 
     // Note: This S3 log does not serve any security purpose.
@@ -187,6 +187,7 @@ pub async fn provisioner_init(
             .await
             .expect("Unable to log EnclaveFullyInitialized");
 
+        // Clear shares as we are done using them
         received_shares.clear();
         enclave
             .scratchpad

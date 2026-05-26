@@ -149,16 +149,18 @@ pub fn pb_to_secret_sharing_instance(
     SecretSharingInstance::new(commitments, num_shares, threshold, sharing_seq)
 }
 
-pub fn secret_sharing_instance_to_pb(cfg: &SecretSharingInstance) -> pb::SecretSharingInstance {
+pub fn secret_sharing_instance_to_pb(
+    instance: &SecretSharingInstance,
+) -> pb::SecretSharingInstance {
     pb::SecretSharingInstance {
-        commitments: cfg
+        commitments: instance
             .commitments()
             .iter()
             .map(share_commitment_to_pb)
             .collect(),
-        num_shares: Some(cfg.num_shares() as u32),
-        threshold: Some(cfg.threshold() as u32),
-        sharing_seq: Some(cfg.sharing_seq()),
+        num_shares: Some(instance.num_shares() as u32),
+        threshold: Some(instance.threshold() as u32),
+        sharing_seq: Some(instance.sharing_seq()),
     }
 }
 

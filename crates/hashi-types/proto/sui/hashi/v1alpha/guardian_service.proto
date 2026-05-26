@@ -54,7 +54,7 @@ message SignedGuardianInfo {
 
 // Information about the guardian enclave.
 message GuardianInfoData {
-  // Secret-sharing config (if set).
+  // Secret-sharing instance (if set).
   optional SecretSharingInstance secret_sharing_instance = 1;
 
   // S3 bucket info (if set). Used by key provisioners to check S3 bucket info.

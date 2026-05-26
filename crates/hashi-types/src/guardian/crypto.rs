@@ -84,7 +84,7 @@ impl SecretSharingParams {
         }
         if num_shares > MAX_NUM_SHARES {
             return Err(InvalidInputs(format!(
-                "{num_shares} must be less than u16::MAX"
+                "{num_shares} must be at most u16::MAX"
             )));
         }
         Ok(Self {
@@ -362,11 +362,11 @@ fn pgp_encrypt_armored(plaintext: &[u8], cert: &PgpPublicCert) -> GuardianResult
 }
 
 // ---------------------------------
-//    Secret Sharing utilities
+//    Secret-sharing utilities
 // ---------------------------------
 
 /// Split a k256 SecretKey into `params.num_shares()` shares using Shamir's
-/// secret sharing with reconstruction threshold `params.threshold()`.
+/// secret-sharing with reconstruction threshold `params.threshold()`.
 pub fn split_secret<R: CryptoRng + RngCore>(
     sk: &k256::SecretKey,
     params: &SecretSharingParams,
@@ -820,7 +820,7 @@ mod tests {
         // num_shares < threshold.
         assert!(SecretSharingParams::new(2, 3).is_err());
         assert!(SecretSharingParams::new(5, 7).is_err());
-        // num_shares > threshold.
+        // num_shares > MAX_NUM_SHARES.
         assert!(SecretSharingParams::new(MAX_NUM_SHARES + 1, 3).is_err());
     }
 

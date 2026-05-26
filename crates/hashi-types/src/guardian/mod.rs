@@ -158,7 +158,7 @@ pub struct SetupNewKeyResponse {
     pub share_commitments: ShareCommitments,
 }
 
-/// Provides S3 API keys, secret-sharing config and the BTC network to the enclave.
+/// Provides S3 API keys, secret-sharing instance and the BTC network to the enclave.
 /// To be called by the operator.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OperatorInitRequest {
@@ -204,7 +204,7 @@ pub struct GetGuardianInfoResponse {
 /// TODO: Add network?
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct GuardianInfo {
-    /// Secret-sharing config (if set). Used by KPs to check that the right key will be used.
+    /// Secret-sharing instance (if set). Used by KPs to check that the right key will be used.
     pub secret_sharing_instance: Option<SecretSharingInstance>,
     /// S3 bucket name (if set). Used by KPs to check S3 bucket info.
     pub bucket_info: Option<S3BucketInfo>,

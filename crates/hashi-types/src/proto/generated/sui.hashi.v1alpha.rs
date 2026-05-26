@@ -1150,7 +1150,7 @@ pub struct SignedGuardianInfo {
 /// Information about the guardian enclave.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GuardianInfoData {
-    /// Secret-sharing config (if set).
+    /// Secret-sharing instance (if set).
     #[prost(message, optional, tag = "1")]
     pub secret_sharing_instance: ::core::option::Option<SecretSharingInstance>,
     /// S3 bucket info (if set). Used by key provisioners to check S3 bucket info.

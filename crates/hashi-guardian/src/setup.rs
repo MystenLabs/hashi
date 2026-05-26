@@ -18,10 +18,13 @@ pub async fn setup_new_key(
     request: SetupNewKeyRequest,
 ) -> GuardianResult<GuardianSigned<SetupNewKeyResponse>> {
     info!("/setup_new_key - Received request.");
+    // Hold the guard across the whole flow so concurrent callers can't both
+    // pass the completion check below and each generate a key.
+    let mut setup_complete = enclave.scratchpad.setup_new_key_lock.lock().await;
     if !enclave.is_operator_init_complete() {
         return Err(InvalidInputs("call operator_init first".into()));
     }
-    if enclave.is_setup_complete() {
+    if *setup_complete {
         return Err(InvalidInputs("setup already complete".into()));
     }
 
@@ -66,11 +69,7 @@ pub async fn setup_new_key(
         share_commitments,
     });
 
-    enclave
-        .scratchpad
-        .setup_complete
-        .set(())
-        .map_err(|_| InvalidInputs("setup_complete already set".into()))?;
+    *setup_complete = true;
     Ok(response)
 }
 

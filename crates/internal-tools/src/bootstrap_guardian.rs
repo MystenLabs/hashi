@@ -161,16 +161,16 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         returned_bucket.region,
         returned_bucket.bucket,
     );
-    let returned_ssc = info
+    let returned_instance = info
         .secret_sharing_instance
         .as_ref()
         .ok_or_else(|| anyhow!("guardian info missing secret_sharing_instance"))?;
     anyhow::ensure!(
-        *returned_ssc.commitments() == material.commitments
-            && returned_ssc.num_shares() == n
-            && returned_ssc.threshold() == t
-            && returned_ssc.sharing_seq() == 0,
-        "secret-sharing config mismatch: guardian echoed different scheme than was submitted"
+        *returned_instance.commitments() == material.commitments
+            && returned_instance.num_shares() == n
+            && returned_instance.threshold() == t
+            && returned_instance.sharing_seq() == 0,
+        "secret-sharing instance mismatch: guardian echoed different scheme than was submitted"
     );
 
     let enc_pubkey = EncPubKey::from_bytes(&info.encryption_pubkey)

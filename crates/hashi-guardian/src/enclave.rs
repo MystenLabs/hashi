@@ -64,13 +64,12 @@ pub struct EnclaveState {
 }
 
 /// Scratchpad used only during initialization. `shares` is cleared once the
-/// init flow that gathered it completes; the OnceLock flags retain their state.
+/// provisioner_init flow completes; the OnceLock flags retain their state.
 #[derive(Default)]
 pub struct Scratchpad {
     /// The received shares
-    /// TODO: Investigate if it can be moved to std::sync::Mutex
     pub shares: tokio::sync::Mutex<Vec<Share>>,
-    /// Secret-sharing scheme (commitments + N + T) set by operator_init.
+    /// Secret-sharing instance (commitments + N + T) set by operator_init.
     pub secret_sharing_instance: OnceLock<SecretSharingInstance>,
     /// Hash of the state in ProvisionerInitRequest
     pub state_hash: OnceLock<[u8; 32]>,
@@ -80,10 +79,11 @@ pub struct Scratchpad {
     /// Set once the provisioner init flow has successfully logged EnclaveFullyInitialized.
     /// This prevents withdrawals from starting before provisioner_init logs.
     pub provisioner_init_logging_complete: OnceLock<()>,
-    /// Set on successful completion of `setup_new_key`. One-shot per enclave
-    /// instance: subsequent `setup_new_key` calls are rejected and the operator
-    /// must restart the enclave.
-    pub setup_complete: OnceLock<()>,
+    /// Serializes `setup_new_key` and records whether it has completed. The
+    /// guard is held across the whole flow so concurrent callers can't both
+    /// generate a key; the inner `bool` is set once setup succeeds, making it
+    /// one-shot per enclave instance (the operator must restart to redo setup).
+    pub setup_new_key_lock: tokio::sync::Mutex<bool>,
 }
 
 pub struct EphemeralKeyPairs {
@@ -393,10 +393,6 @@ impl Enclave {
         self.is_provisioner_init_complete() && self.is_operator_init_complete()
     }
 
-    pub fn is_setup_complete(&self) -> bool {
-        self.scratchpad.setup_complete.get().is_some()
-    }
-
     // ========================================================================
     // Ephemeral Keypairs (Encryption & Signing)
     // ========================================================================
@@ -488,14 +484,14 @@ impl Enclave {
         self.scratchpad
             .secret_sharing_instance
             .get()
-            .ok_or(InvalidInputs("Secret sharing config not set".into()))
+            .ok_or(InvalidInputs("Secret-sharing instance not set".into()))
     }
 
-    pub fn set_secret_sharing_instance(&self, cfg: SecretSharingInstance) -> GuardianResult<()> {
+    pub fn set_secret_sharing_instance(&self, instance: SecretSharingInstance) -> GuardianResult<()> {
         self.scratchpad
             .secret_sharing_instance
-            .set(cfg)
-            .map_err(|_| InvalidInputs("Secret sharing config already set".into()))
+            .set(instance)
+            .map_err(|_| InvalidInputs("Secret-sharing instance already set".into()))
     }
 
     pub fn state_hash(&self) -> Option<&[u8; 32]> {
