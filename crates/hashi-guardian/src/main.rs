@@ -63,6 +63,15 @@ async fn main() -> Result<()> {
         .add_service(GuardianServiceServer::new(svc))
         .serve(addr);
 
+    // Don't emit heartbeats in setup mode: their primary function is
+    // to allow KPs to detect old sessions that might still be running
+    // in order to bypass limiter. Not a concern for setup mode.
+    if setup_mode {
+        return server_future
+            .await
+            .map_err(|e| anyhow::anyhow!("Server error: {}", e));
+    }
+
     let heartbeat_future = HeartbeatWriter::new(enclave, MAX_HEARTBEAT_FAILURES_INTERVAL)
         .run(HEARTBEAT_INTERVAL, HEARTBEAT_RETRY_INTERVAL);
 

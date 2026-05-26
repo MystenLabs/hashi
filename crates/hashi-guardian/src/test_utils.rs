@@ -120,7 +120,7 @@ pub fn mock_logger_with_layout(keys: impl IntoIterator<Item = String>) -> S3Logg
 
 pub struct OperatorInitTestArgs {
     pub network: Network,
-    pub secret_sharing_config: SecretSharingConfig,
+    pub secret_sharing_instance: SecretSharingInstance,
     pub s3_logger: S3Logger,
 }
 
@@ -135,7 +135,7 @@ impl Default for OperatorInitTestArgs {
                 digest: vec![],
             })
             .collect();
-        let secret_sharing_config = SecretSharingConfig::new(
+        let secret_sharing_instance = SecretSharingInstance::new(
             ShareCommitments::new(commitments).unwrap(),
             TEST_N,
             TEST_T,
@@ -145,7 +145,7 @@ impl Default for OperatorInitTestArgs {
 
         Self {
             network: Network::Regtest,
-            secret_sharing_config,
+            secret_sharing_instance,
             s3_logger: mock_logger(),
         }
     }
@@ -158,8 +158,8 @@ impl OperatorInitTestArgs {
     }
 
     pub fn with_commitments(mut self, commitments: ShareCommitments) -> Self {
-        self.secret_sharing_config =
-            SecretSharingConfig::new(commitments, TEST_N, TEST_T, 0).unwrap();
+        self.secret_sharing_instance =
+            SecretSharingInstance::new(commitments, TEST_N, TEST_T, 0).unwrap();
         self
     }
 
@@ -186,7 +186,7 @@ impl Enclave {
         enclave.config.set_s3_logger(args.s3_logger).unwrap();
         enclave.config.set_bitcoin_network(args.network).unwrap();
         enclave
-            .set_secret_sharing_config(args.secret_sharing_config)
+            .set_secret_sharing_instance(args.secret_sharing_instance)
             .unwrap();
         enclave
             .scratchpad

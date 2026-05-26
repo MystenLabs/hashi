@@ -58,25 +58,48 @@ pub struct Share {
     pub value: Scalar,
 }
 
-/// Minimum reconstruction threshold (`t > 1`). A `t == 1` setup gives any
-/// single KP unilateral control of the secret, defeating the point of secret
-/// sharing.
+/// Minimum reconstruction threshold (`t > 1`).
 pub const MIN_THRESHOLD: usize = 2;
+/// Maximum total number of shares (`n <= u16::MAX`)
+pub const MAX_NUM_SHARES: usize = u16::MAX as usize;
 
-/// Validate a `(n, t)` secret-sharing parameter pair.
-pub fn validate_share_params(n: usize, t: usize) -> GuardianResult<()> {
-    if t < MIN_THRESHOLD {
-        return Err(InvalidInputs(format!(
-            "threshold {t} below minimum {MIN_THRESHOLD}"
-        )));
+/// Validated `(n, t)` secret-sharing parameters.
+#[derive(Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq)]
+pub struct SecretSharingParams {
+    num_shares: usize,
+    threshold: usize,
+}
+
+impl SecretSharingParams {
+    pub fn new(num_shares: usize, threshold: usize) -> GuardianResult<Self> {
+        if threshold < MIN_THRESHOLD {
+            return Err(InvalidInputs(format!(
+                "threshold {threshold} below minimum {MIN_THRESHOLD}"
+            )));
+        }
+        if num_shares < threshold {
+            return Err(InvalidInputs(format!(
+                "num_shares {num_shares} below threshold {threshold}"
+            )));
+        }
+        if num_shares > MAX_NUM_SHARES {
+            return Err(InvalidInputs(format!(
+                "{num_shares} must be at most u16::MAX"
+            )));
+        }
+        Ok(Self {
+            num_shares,
+            threshold,
+        })
     }
-    if n < t {
-        return Err(InvalidInputs(format!("num_shares {n} below threshold {t}")));
+
+    pub fn num_shares(&self) -> usize {
+        self.num_shares
     }
-    if n > u16::MAX as usize {
-        return Err(InvalidInputs(format!("{n} must be less than u16::MAX")));
+
+    pub fn threshold(&self) -> usize {
+        self.threshold
     }
-    Ok(())
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -109,34 +132,32 @@ pub struct ShareCommitment {
 pub struct ShareCommitments(BTreeMap<ShareID, DigestBytes>);
 
 /// Public description of the current BTC key's secret-sharing scheme.
-/// `sharing_seq` versions instances of the scheme: setup writes 0, each
-/// rotation bumps it by 1.
+/// `sharing_seq` versions the instance: setup writes 0, each rotation bumps it by 1.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct SecretSharingConfig {
+pub struct SecretSharingInstance {
     commitments: ShareCommitments,
-    num_shares: usize,
-    threshold: usize,
+    params: SecretSharingParams,
     sharing_seq: u64,
 }
 
-impl SecretSharingConfig {
+impl SecretSharingInstance {
     pub fn new(
         commitments: ShareCommitments,
         num_shares: usize,
         threshold: usize,
         sharing_seq: u64,
     ) -> GuardianResult<Self> {
-        if commitments.len() != num_shares {
+        let params = SecretSharingParams::new(num_shares, threshold)?;
+        if commitments.len() != params.num_shares() {
             return Err(InvalidInputs(format!(
-                "expected {num_shares} commitments, got {}",
+                "expected {} commitments, got {}",
+                params.num_shares(),
                 commitments.len()
             )));
         }
-        validate_share_params(num_shares, threshold)?;
         Ok(Self {
             commitments,
-            num_shares,
-            threshold,
+            params,
             sharing_seq,
         })
     }
@@ -146,11 +167,11 @@ impl SecretSharingConfig {
     }
 
     pub fn num_shares(&self) -> usize {
-        self.num_shares
+        self.params.num_shares()
     }
 
     pub fn threshold(&self) -> usize {
-        self.threshold
+        self.params.threshold()
     }
 
     pub fn sharing_seq(&self) -> u64 {
@@ -341,32 +362,29 @@ fn pgp_encrypt_armored(plaintext: &[u8], cert: &PgpPublicCert) -> GuardianResult
 }
 
 // ---------------------------------
-//    Secret Sharing utilities
+//    Secret-sharing utilities
 // ---------------------------------
 
-/// Split a k256 SecretKey into `n` shares using Shamir's secret sharing with
-/// reconstruction threshold `t`.
+/// Split a k256 SecretKey into `params.num_shares()` shares using Shamir's
+/// secret-sharing with reconstruction threshold `params.threshold()`.
 pub fn split_secret<R: CryptoRng + RngCore>(
     sk: &k256::SecretKey,
-    n: usize,
-    t: usize,
+    params: &SecretSharingParams,
     rng: &mut R,
-) -> GuardianResult<Vec<Share>> {
-    validate_share_params(n, t)?;
+) -> Vec<Share> {
     let secret = *sk.to_nonzero_scalar().as_ref();
     let mut coefficients = vec![secret];
-    for _ in 0..(t - 1) {
+    for _ in 0..(params.threshold() - 1) {
         coefficients.push(Scalar::random(&mut *rng))
     }
 
-    // Evaluate
-    Ok((1..=n)
-        .map(|i| NonZeroU16::new(i as u16).expect("Not zeroes!"))
+    (1..=params.num_shares())
+        .map(|i| NonZeroU16::new(i as u16).expect("validated num_shares fits in u16"))
         .map(|i| Share {
             id: i,
             value: eval_poly(i, &coefficients),
         })
-        .collect())
+        .collect()
 }
 
 // Coefficients: [c0, c1, c2, c3]
@@ -458,24 +476,34 @@ pub fn encrypt_share<R: CryptoRng + RngCore>(
     }
 }
 
-/// Split `sk` into `kp_pubkeys.len()` shares with reconstruction threshold
-/// `t`, encrypt each to the matching KP OpenPGP cert, and compute the corresponding
-/// commitments. Share ID `i` (1..=N) is paired with `kp_certs[i-1]`.
+/// Split `sk` into `params.num_shares()` shares with reconstruction threshold
+/// `params.threshold()`, encrypt each to the matching KP OpenPGP cert, and
+/// compute the corresponding commitments. Share ID `i` (1..=N) is paired with
+/// `kp_certs[i-1]`. Errors if `kp_certs.len() != params.num_shares()`.
 pub fn split_and_encrypt_for_kps<R: CryptoRng + RngCore>(
     sk: &k256::SecretKey,
     kp_certs: &[PgpPublicCert],
-    t: usize,
+    params: &SecretSharingParams,
     rng: &mut R,
 ) -> GuardianResult<(Vec<KPEncryptedShare>, ShareCommitments)> {
-    let n = kp_certs.len();
-    let shares = split_secret(sk, n, t, rng)?;
+    if kp_certs.len() != params.num_shares() {
+        return Err(InvalidInputs(format!(
+            "expected {} kp_certs, got {}",
+            params.num_shares(),
+            kp_certs.len()
+        )));
+    }
+    let shares = split_secret(sk, params, rng);
+    let n = params.num_shares();
     let mut encrypted_shares = Vec::with_capacity(n);
     let mut commitments = Vec::with_capacity(n);
     for (share, cert) in shares.iter().zip(kp_certs.iter()) {
         encrypted_shares.push(encrypt_share_for_provisioner(share, cert)?);
         commitments.push(commit_share(share));
     }
-    Ok((encrypted_shares, ShareCommitments::new(commitments)?))
+    let commitments =
+        ShareCommitments::new(commitments).expect("share IDs 1..=n are unique by construction");
+    Ok((encrypted_shares, commitments))
 }
 
 /// Encrypt a share for delivery to a key provisioner using OpenPGP ASCII armor.
@@ -657,7 +685,11 @@ mod tests {
     fn check_reconstruction_with_varying_share_count(n: usize, t: usize) {
         let original_k256_sk = SecretKey::random(&mut rand::thread_rng());
         let original_bytes = original_k256_sk.to_bytes();
-        let shares = split_secret(&original_k256_sk, n, t, &mut rand::thread_rng()).unwrap();
+        let shares = split_secret(
+            &original_k256_sk,
+            &SecretSharingParams::new(n, t).unwrap(),
+            &mut rand::thread_rng(),
+        );
 
         for num_shares in 0..=n {
             let result = combine_shares(&shares[0..num_shares], t);
@@ -682,7 +714,11 @@ mod tests {
     fn check_varying_subsets(n: usize, t: usize) {
         let original_sk = SecretKey::random(&mut rand::thread_rng());
         let original_bytes = original_sk.to_bytes();
-        let shares = split_secret(&original_sk, n, t, &mut rand::thread_rng()).unwrap();
+        let shares = split_secret(
+            &original_sk,
+            &SecretSharingParams::new(n, t).unwrap(),
+            &mut rand::thread_rng(),
+        );
 
         for start_idx in 0..=(n - t) {
             let subset = &shares[start_idx..(start_idx + t)];
@@ -697,7 +733,11 @@ mod tests {
 
     fn check_combine_shares_rejects_duplicate_ids(n: usize, t: usize) {
         let sk = SecretKey::random(&mut rand::thread_rng());
-        let shares = split_secret(&sk, n, t, &mut rand::thread_rng()).unwrap();
+        let shares = split_secret(
+            &sk,
+            &SecretSharingParams::new(n, t).unwrap(),
+            &mut rand::thread_rng(),
+        );
 
         // First t-1 distinct shares plus a duplicate of shares[0].
         let mut duplicate_shares: Vec<_> = shares.iter().take(t - 1).copied().collect();
@@ -764,24 +804,24 @@ mod tests {
     }
 
     #[test]
-    fn validate_share_params_cases() {
+    fn secret_sharing_params_validation_cases() {
         // Valid pairs.
-        for &(n, t) in &[(2, 2), (3, 2), (5, 3), (10, 7), (u16::MAX as usize, 100)] {
-            validate_share_params(n, t)
+        for &(n, t) in &[(2, 2), (3, 2), (5, 3), (10, 7), (MAX_NUM_SHARES, 100)] {
+            SecretSharingParams::new(n, t)
                 .unwrap_or_else(|e| panic!("(n={n}, t={t}) should be valid: {e}"));
         }
         // Threshold below minimum.
         for t in 0..MIN_THRESHOLD {
             assert!(
-                validate_share_params(5, t).is_err(),
+                SecretSharingParams::new(5, t).is_err(),
                 "t={t} (< MIN_THRESHOLD={MIN_THRESHOLD}) should be rejected"
             );
         }
         // num_shares < threshold.
-        assert!(validate_share_params(2, 3).is_err());
-        assert!(validate_share_params(5, 7).is_err());
-        // num_shares > u16::MAX.
-        assert!(validate_share_params(u16::MAX as usize + 1, 3).is_err());
+        assert!(SecretSharingParams::new(2, 3).is_err());
+        assert!(SecretSharingParams::new(5, 7).is_err());
+        // num_shares > MAX_NUM_SHARES.
+        assert!(SecretSharingParams::new(MAX_NUM_SHARES + 1, 3).is_err());
     }
 
     // Test eval function with specific coefficients

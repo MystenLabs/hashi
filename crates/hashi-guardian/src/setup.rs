@@ -18,12 +18,19 @@ pub async fn setup_new_key(
     request: SetupNewKeyRequest,
 ) -> GuardianResult<GuardianSigned<SetupNewKeyResponse>> {
     info!("/setup_new_key - Received request.");
+    // Hold the guard across the whole flow so concurrent callers can't both
+    // pass the completion check below and each generate a key.
+    let mut setup_complete = enclave.scratchpad.setup_new_key_lock.lock().await;
     if !enclave.is_operator_init_complete() {
         return Err(InvalidInputs("call operator_init first".into()));
     }
+    if *setup_complete {
+        return Err(InvalidInputs("setup already complete".into()));
+    }
 
-    let n = request.num_shares();
-    let t = request.threshold();
+    let params = request.params();
+    let n = params.num_shares();
+    let t = params.threshold();
     let key_provisioner_certs = request.pgp_certs();
     info!(
         "Received {} OpenPGP certificates.",
@@ -39,7 +46,7 @@ pub async fn setup_new_key(
         let fp = format!("{:x}", fingerprint(&sk));
         info!("Splitting secret into {n} shares (threshold: {t}).");
         let (encrypted, commitments) =
-            split_and_encrypt_for_kps(&sk, key_provisioner_certs, t, &mut rng)?;
+            split_and_encrypt_for_kps(&sk, key_provisioner_certs, params, &mut rng)?;
         (encrypted, commitments, fp)
     };
     info!(
@@ -47,12 +54,13 @@ pub async fn setup_new_key(
         fingerprint_hex, n
     );
 
-    let secret_sharing_config = SecretSharingConfig::new(share_commitments.clone(), n, t, 0)?;
+    let ss_instance = SecretSharingInstance::new(share_commitments.clone(), n, t, 0)
+        .expect("(n, t) validated by SetupNewKeyRequest; commitments produced with matching count");
 
     enclave
         .log_secret_sharing(SecretSharingLogMessage {
             encrypted_shares: encrypted_shares.clone(),
-            secret_sharing_config,
+            secret_sharing_instance: ss_instance,
         })
         .await?;
 
@@ -61,6 +69,7 @@ pub async fn setup_new_key(
         share_commitments,
     });
 
+    *setup_complete = true;
     Ok(response)
 }
 

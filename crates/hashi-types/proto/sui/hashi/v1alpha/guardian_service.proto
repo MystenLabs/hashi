@@ -54,8 +54,8 @@ message SignedGuardianInfo {
 
 // Information about the guardian enclave.
 message GuardianInfoData {
-  // Secret-sharing config (if set).
-  optional SecretSharingConfig secret_sharing_config = 1;
+  // Secret-sharing instance (if set).
+  optional SecretSharingInstance secret_sharing_instance = 1;
 
   // S3 bucket info (if set). Used by key provisioners to check S3 bucket info.
   optional S3BucketInfo bucket_info = 2;
@@ -70,7 +70,7 @@ message GuardianInfoData {
 // Public description of the current BTC key's secret-sharing scheme.
 // `commitments.len() == num_shares` and `2 <= threshold <= num_shares`.
 // `sharing_seq` versions instances: 0 at setup, +1 per rotation.
-message SecretSharingConfig {
+message SecretSharingInstance {
   repeated GuardianShareCommitment commitments = 1;
   optional uint32 num_shares = 2;
   optional uint32 threshold = 3;
@@ -154,7 +154,7 @@ message OperatorInitRequest {
   S3Config s3_config = 1;
 
   // Secret-sharing scheme for the current BTC key.
-  SecretSharingConfig secret_sharing_config = 2;
+  SecretSharingInstance secret_sharing_instance = 2;
 
   // Network the guardian is operating on.
   optional Network network = 3;

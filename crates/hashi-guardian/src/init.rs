@@ -35,7 +35,7 @@ pub async fn operator_init(
     }
     info!("Enclave state validated.");
 
-    let (config, secret_sharing_config, network) = request.into_parts();
+    let (config, secret_sharing_instance, network) = request.into_parts();
     let logger = S3Logger::new_checked(&config).await?;
     info!("S3 connectivity check complete.");
 
@@ -52,20 +52,20 @@ pub async fn operator_init(
         .expect("Unable to set network");
 
     info!(
-        "Storing secret-sharing config: n={}, t={}, {} commitments.",
-        secret_sharing_config.num_shares(),
-        secret_sharing_config.threshold(),
-        secret_sharing_config.commitments().len()
+        "Storing secret-sharing instance: n={}, t={}, {} commitments.",
+        secret_sharing_instance.num_shares(),
+        secret_sharing_instance.threshold(),
+        secret_sharing_instance.commitments().len()
     );
-    for (i, share_commitment) in secret_sharing_config.commitments().iter().enumerate() {
+    for (i, share_commitment) in secret_sharing_instance.commitments().iter().enumerate() {
         info!(
             "Share {}: ID {} Digest {:x?}.",
             i, share_commitment.id, share_commitment.digest
         );
     }
     enclave
-        .set_secret_sharing_config(secret_sharing_config)
-        .expect("Unable to set secret sharing config");
+        .set_secret_sharing_instance(secret_sharing_instance)
+        .expect("Unable to set secret-sharing instance");
 
     // Log to S3!
     // 1) Attestation and pub key help authenticate all subsequent enclave-signed messages.
@@ -135,10 +135,10 @@ pub async fn provisioner_init(
 
     // 2) Verify the share against the commitment
     info!("Verifying share against commitment.");
-    let ssc = enclave
-        .secret_sharing_config()
-        .expect("secret sharing config should be set after operator_init");
-    verify_share(&share, ssc.commitments())?;
+    let instance = enclave
+        .secret_sharing_instance()
+        .expect("secret-sharing instance should be set after operator_init");
+    verify_share(&share, instance.commitments())?;
     info!("Share verified.");
 
     // 3) Set state_hash OR make sure whatever was previously set matches. Panics upon mismatch.
@@ -154,7 +154,7 @@ pub async fn provisioner_init(
         }
     }
 
-    // MILESTONE: At this point, we are sure it is a legitimate payload (both share & config)
+    // MILESTONE: At this point, we are sure it is a legitimate payload (both share & state)
 
     // 4) Persist share
     info!("Persisting share.");
@@ -165,7 +165,7 @@ pub async fn provisioner_init(
     }
     received_shares.push(share);
     let current_share_count = received_shares.len();
-    let threshold = ssc.threshold();
+    let threshold = instance.threshold();
     info!("Total shares received: {current_share_count}/{threshold}.");
 
     // Note: This S3 log does not serve any security purpose.
@@ -187,6 +187,8 @@ pub async fn provisioner_init(
             .await
             .expect("Unable to log EnclaveFullyInitialized");
 
+        // Clear shares as we are done using them
+        received_shares.clear();
         enclave
             .scratchpad
             .provisioner_init_logging_complete
@@ -256,7 +258,8 @@ mod tests {
     /// Returns (shares, enclave)
     async fn setup_test_shares_and_enclave() -> (Vec<Share>, Arc<Enclave>) {
         let sk = SecretKey::random(&mut rand::thread_rng());
-        let shares = split_secret(&sk, TEST_N, TEST_T, &mut rand::thread_rng()).unwrap();
+        let params = SecretSharingParams::new(TEST_N, TEST_T).unwrap();
+        let shares = split_secret(&sk, &params, &mut rand::thread_rng());
         let share_commitments = ShareCommitments::from_shares(&shares).unwrap();
         let enclave = Enclave::create_operator_initialized_with(
             OperatorInitTestArgs::default().with_commitments(share_commitments),

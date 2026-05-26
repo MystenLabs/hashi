@@ -148,8 +148,7 @@ pub struct VerifiedLogRecord {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetupNewKeyRequest {
     key_provisioner_pgp_certs: Vec<PgpPublicCert>,
-    num_shares: usize,
-    threshold: usize,
+    params: SecretSharingParams,
 }
 
 /// `EnclaveSigned<T>`
@@ -159,12 +158,12 @@ pub struct SetupNewKeyResponse {
     pub share_commitments: ShareCommitments,
 }
 
-/// Provides S3 API keys, secret-sharing config and the BTC network to the enclave.
+/// Provides S3 API keys, secret-sharing instance and the BTC network to the enclave.
 /// To be called by the operator.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OperatorInitRequest {
     s3_config: S3Config,
-    secret_sharing_config: SecretSharingConfig,
+    secret_sharing_instance: SecretSharingInstance,
     network: Network,
 }
 
@@ -205,8 +204,8 @@ pub struct GetGuardianInfoResponse {
 /// TODO: Add network?
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct GuardianInfo {
-    /// Secret-sharing config (if set). Used by KPs to check that the right key will be used.
-    pub secret_sharing_config: Option<SecretSharingConfig>,
+    /// Secret-sharing instance (if set). Used by KPs to check that the right key will be used.
+    pub secret_sharing_instance: Option<SecretSharingInstance>,
     /// S3 bucket name (if set). Used by KPs to check S3 bucket info.
     pub bucket_info: Option<S3BucketInfo>,
     /// Encryption key. Used by KPs to encrypt their shares.
@@ -229,7 +228,7 @@ pub struct StandardWithdrawalRequest {
     timestamp_secs: u64,
     /// Monotonic sequence number for ordering
     /// TODO: rename to `withdraw_seq` (and `LimiterState.next_seq` →
-    /// `next_withdraw_seq`) to disambiguate from `SecretSharingConfig.sharing_seq`.
+    /// `next_withdraw_seq`) to disambiguate from `SecretSharingInstance.sharing_seq`.
     seq: u64,
 }
 
@@ -259,7 +258,7 @@ pub enum LogMessage {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct SecretSharingLogMessage {
     pub encrypted_shares: Vec<KPEncryptedShare>,
-    pub secret_sharing_config: SecretSharingConfig,
+    pub secret_sharing_instance: SecretSharingInstance,
 }
 
 /// OI: operator_init
@@ -374,17 +373,17 @@ impl SetupNewKeyRequest {
         num_shares: usize,
         threshold: usize,
     ) -> GuardianResult<Self> {
-        if pgp_certs.len() != num_shares {
+        let params = SecretSharingParams::new(num_shares, threshold)?;
+        if pgp_certs.len() != params.num_shares() {
             return Err(InvalidInputs(format!(
-                "expected {num_shares} OpenPGP certificates, got {}",
+                "expected {} OpenPGP certificates, got {}",
+                params.num_shares(),
                 pgp_certs.len()
             )));
         }
-        validate_share_params(num_shares, threshold)?;
         Ok(Self {
             key_provisioner_pgp_certs: pgp_certs,
-            num_shares,
-            threshold,
+            params,
         })
     }
 
@@ -392,24 +391,28 @@ impl SetupNewKeyRequest {
         &self.key_provisioner_pgp_certs
     }
 
+    pub fn params(&self) -> &SecretSharingParams {
+        &self.params
+    }
+
     pub fn num_shares(&self) -> usize {
-        self.num_shares
+        self.params.num_shares()
     }
 
     pub fn threshold(&self) -> usize {
-        self.threshold
+        self.params.threshold()
     }
 }
 
 impl OperatorInitRequest {
     pub fn new(
         s3_config: S3Config,
-        secret_sharing_config: SecretSharingConfig,
+        secret_sharing_instance: SecretSharingInstance,
         network: Network,
     ) -> GuardianResult<Self> {
         Ok(Self {
             s3_config,
-            secret_sharing_config,
+            secret_sharing_instance,
             network,
         })
     }
@@ -418,16 +421,16 @@ impl OperatorInitRequest {
         &self.s3_config
     }
 
-    pub fn secret_sharing_config(&self) -> &SecretSharingConfig {
-        &self.secret_sharing_config
+    pub fn secret_sharing_instance(&self) -> &SecretSharingInstance {
+        &self.secret_sharing_instance
     }
 
     pub fn network(&self) -> Network {
         self.network
     }
 
-    pub fn into_parts(self) -> (S3Config, SecretSharingConfig, Network) {
-        (self.s3_config, self.secret_sharing_config, self.network)
+    pub fn into_parts(self) -> (S3Config, SecretSharingInstance, Network) {
+        (self.s3_config, self.secret_sharing_instance, self.network)
     }
 }
 
@@ -659,7 +662,7 @@ impl LogMessage {
             LogMessage::Withdrawal(withdrawal_message) => withdrawal_message.log_name(prefix),
             LogMessage::SecretSharing(ss) => format!(
                 "{:020}-{}.json",
-                ss.secret_sharing_config.sharing_seq(),
+                ss.secret_sharing_instance.sharing_seq(),
                 prefix
             ),
         }

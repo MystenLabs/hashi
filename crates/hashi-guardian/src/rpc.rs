@@ -37,6 +37,26 @@ fn to_status(e: GuardianError) -> Status {
     }
 }
 
+impl GuardianGrpc {
+    fn require_setup_mode(&self, endpoint: &str) -> Result<(), Status> {
+        if !self.setup_mode {
+            return Err(Status::failed_precondition(format!(
+                "{endpoint} is disabled when SETUP_MODE=false"
+            )));
+        }
+        Ok(())
+    }
+
+    fn require_normal_mode(&self, endpoint: &str) -> Result<(), Status> {
+        if self.setup_mode {
+            return Err(Status::failed_precondition(format!(
+                "{endpoint} is disabled when SETUP_MODE=true"
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[tonic::async_trait]
 impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     async fn get_guardian_info(
@@ -56,11 +76,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         request: Request<proto::SetupNewKeyRequest>,
     ) -> anyhow::Result<Response<proto::SignedSetupNewKeyResponse>, Status> {
-        if !self.setup_mode {
-            return Err(Status::failed_precondition(
-                "setup_new_key is disabled when SETUP_MODE=false",
-            ));
-        }
+        self.require_setup_mode("setup_new_key")?;
 
         let domain_req: SetupNewKeyRequest = request.into_inner().try_into().map_err(to_status)?;
 
@@ -91,11 +107,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         request: Request<proto::ProvisionerInitRequest>,
     ) -> Result<Response<proto::ProvisionerInitResponse>, Status> {
-        if self.setup_mode {
-            return Err(Status::failed_precondition(
-                "provisioner_init is disabled when SETUP_MODE=true",
-            ));
-        }
+        self.require_normal_mode("provisioner_init")?;
 
         let domain_req = request.into_inner().try_into().map_err(to_status)?;
 
@@ -110,11 +122,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         request: Request<proto::SignedStandardWithdrawalRequest>,
     ) -> Result<Response<proto::SignedStandardWithdrawalResponse>, Status> {
-        if self.setup_mode {
-            return Err(Status::failed_precondition(
-                "standard_withdrawal is disabled when SETUP_MODE=true",
-            ));
-        }
+        self.require_normal_mode("standard_withdrawal")?;
 
         // proto to domain
         let domain_req = pb_to_signed_standard_withdrawal_request_wire(request.into_inner())
