@@ -198,6 +198,28 @@ pub struct Config {
     /// complaint recovery flow. Must not be set on mainnet or testnet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_corrupt_shares_for: Option<Address>,
+
+    /// Configure pushing Prometheus metrics out to a sui-proxy instance. When
+    /// unset, the push task is not started and the only metrics surface is the
+    /// local scrape endpoint at `metrics_http_address`.
+    ///
+    /// The push uses the same `tls_private_key` already registered on chain in
+    /// `MemberInfo.tls_public_key`, so no additional credential setup is
+    /// required for operators that have already completed hashi committee
+    /// registration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics_push: Option<MetricsPushConfig>,
+}
+
+#[derive(Clone, Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct MetricsPushConfig {
+    /// sui-proxy `/publish/metrics` URL (e.g. `https://metrics-proxy.testnet.example.com/publish/metrics`).
+    pub push_url: String,
+
+    /// How often to push. Defaults to 60s if unset (matches sui-node default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub push_interval_seconds: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
