@@ -1032,7 +1032,11 @@ impl SuiTxExecutor {
         skip_all,
         fields(cert_kind = tracing::field::Empty),
     )]
-    pub async fn execute_submit_certificate(&mut self, cert: &CertificateV1) -> anyhow::Result<()> {
+    pub async fn execute_submit_certificate(
+        &mut self,
+        protocol_id: u8,
+        cert: &CertificateV1,
+    ) -> anyhow::Result<()> {
         let (inner_cert, function_name, batch_index) = match cert {
             CertificateV1::Dkg(c) => (c, "submit_dkg_cert", None),
             CertificateV1::Rotation(c) => (c, "submit_rotation_cert", None),
@@ -1056,8 +1060,9 @@ impl SuiTxExecutor {
                 .as_shared()
                 .with_mutable(true),
         );
+        let protocol_id_arg = builder.pure(&protocol_id);
         let epoch_arg = builder.pure(&epoch);
-        let mut args = vec![hashi_arg, epoch_arg];
+        let mut args = vec![hashi_arg, protocol_id_arg, epoch_arg];
         if let Some(bi) = batch_index {
             args.push(builder.pure(&bi));
         }

@@ -130,7 +130,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
 
         let mut executor = self.create_executor();
         executor
-            .execute_submit_certificate(&cert)
+            .execute_submit_certificate(self.protocol_id, &cert)
             .await
             .map_err(|e| ChannelError::Other(e.to_string()))
     }
