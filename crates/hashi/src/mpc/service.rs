@@ -36,7 +36,9 @@ use hashi_types::committee::BLS12381Signature;
 use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::Committee;
 use hashi_types::committee::certificate_threshold;
-use hashi_types::move_types::{Entry, ReconfigCompletionMessage, VecMap};
+use hashi_types::move_types::Entry;
+use hashi_types::move_types::ReconfigCompletionMessage;
+use hashi_types::move_types::VecMap;
 
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
