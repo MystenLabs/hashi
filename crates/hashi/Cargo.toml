@@ -65,6 +65,11 @@ fjall.workspace = true
 # DKG dependencies
 fastcrypto.workspace = true
 fastcrypto-tbls.workspace = true
+# Metrics push: snappy compression for the Prometheus remote-write payload
+# sui-proxy expects. mTLS cert generation reuses rcgen (already a dep) and
+# ed25519-dalek (already a dep).
+snap.workspace = true
+reqwest.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 hex.workspace = true

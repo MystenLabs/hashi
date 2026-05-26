@@ -188,6 +188,21 @@ async fn run_server(config_path: Option<std::path::PathBuf>) -> anyhow::Result<(
         prometheus::default_registry().clone(),
     );
 
+    // If configured, start pushing metrics to a sui-proxy instance. Operators
+    // who haven't set `metrics_push` get only the local scrape endpoint, which
+    // is the current pre-launch behavior.
+    if let Some(push_cfg) = config.metrics_push.clone() {
+        match hashi::metrics_push::start(
+            push_cfg,
+            config.tls_private_key().map_err(|e| {
+                anyhow::anyhow!("metrics_push set but tls_private_key not loadable: {e}")
+            })?,
+        ) {
+            Ok(()) => tracing::info!("hashi metrics push task started"),
+            Err(e) => tracing::error!("failed to start metrics push task: {e:#}"),
+        }
+    }
+
     let server_version = ServerVersion::new(env!("CARGO_BIN_NAME"), VERSION);
 
     let hashi = Hashi::new(server_version, config_path, config)?;
