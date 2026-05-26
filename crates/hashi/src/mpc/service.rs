@@ -36,7 +36,7 @@ use hashi_types::committee::BLS12381Signature;
 use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::Committee;
 use hashi_types::committee::certificate_threshold;
-use hashi_types::move_types::ReconfigCompletionMessage;
+use hashi_types::move_types::{Entry, ReconfigCompletionMessage, VecMap};
 
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
@@ -267,7 +267,7 @@ impl MpcService {
         let onchain_state = self.inner.onchain_state().clone();
         let epoch = onchain_state.epoch();
         let protocol_type = onchain_state
-            .fetch_certs(epoch, None)
+            .fetch_certs(0, epoch, None)
             .await?
             .map(|(pt, _)| pt);
         let onchain_mpc_key = onchain_state.mpc_public_key();
@@ -277,7 +277,7 @@ impl MpcService {
             onchain_mpc_key.len(),
         );
         let output = match protocol_type {
-            Some(hashi_types::move_types::ProtocolType::KeyRotation) => {
+            Some(hashi_types::move_types::ProtocolType::KeyRotation { .. }) => {
                 self.setup_key_rotation(epoch)?;
                 self.run_key_rotation(epoch).await
             }
@@ -305,6 +305,7 @@ impl MpcService {
         let mut tob_channel = SuiTobChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,
+            0, // protocol_id: Schnorr
             target_epoch,
             None,
             signer,
@@ -344,6 +345,7 @@ impl MpcService {
         let mut tob_channel = SuiTobChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,
+            0, // protocol_id: Schnorr
             epoch,
             Some(batch_index),
             signer,
@@ -404,7 +406,7 @@ impl MpcService {
         let (num_consumed, epoch, committee) = {
             let state = self.inner.onchain_state().state();
             let hashi = state.hashi();
-            let num_consumed = hashi.num_consumed_presigs;
+            let num_consumed = hashi.schnorr_consumed_presigs();
             let epoch = hashi.committees.epoch();
             let committee = hashi
                 .committees
@@ -536,7 +538,7 @@ impl MpcService {
     ) -> anyhow::Result<Presignatures> {
         let onchain_state = self.inner.onchain_state().clone();
         let (_, certs) = onchain_state
-            .fetch_certs(epoch, Some(batch_index))
+            .fetch_certs(0, epoch, Some(batch_index))
             .await?
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -810,7 +812,7 @@ impl MpcService {
             "run_key_rotation: target_epoch={target_epoch}, previous_epoch={previous_epoch}, \
              onchain_epoch={onchain_epoch}, onchain_mpc_key={onchain_mpc_key}",
         );
-        let previous_certs = fetch_certificates(&onchain_state, previous_epoch, None)
+        let previous_certs = fetch_certificates(&onchain_state, 0, previous_epoch, None)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to fetch previous certificates: {e}"))?;
         let previous_certs: Vec<CertificateV1> =
@@ -825,6 +827,7 @@ impl MpcService {
         let mut tob_channel = SuiTobChannel::new(
             self.inner.config.hashi_ids(),
             onchain_state,
+            0, // protocol_id: Schnorr
             target_epoch,
             None,
             signer,
@@ -854,9 +857,15 @@ impl MpcService {
             .get(&epoch)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("no committee found for epoch {}", epoch))?;
+        let protocol_keys = VecMap {
+            contents: vec![Entry {
+                key: 0u8,
+                value: mpc_public_key.clone(),
+            }],
+        };
         let message = ReconfigCompletionMessage {
             epoch,
-            mpc_public_key: mpc_public_key.clone(),
+            protocol_keys: protocol_keys.clone(),
         };
         let my_address = self.inner.config.validator_address()?;
         let signing_key =
@@ -890,8 +899,13 @@ impl MpcService {
             let result = async {
                 let mut executor =
                     crate::sui_tx_executor::SuiTxExecutor::from_hashi(self.inner.clone())?;
+                let keys_for_ptb: Vec<(u8, Vec<u8>)> = protocol_keys
+                    .contents
+                    .iter()
+                    .map(|e| (e.key, e.value.clone()))
+                    .collect();
                 executor
-                    .execute_end_reconfig(&mpc_public_key, cert.committee_signature())
+                    .execute_end_reconfig(&keys_for_ptb, cert.committee_signature())
                     .await
             };
             match result.await {
@@ -915,7 +929,12 @@ impl MpcService {
     ) -> anyhow::Result<hashi_types::committee::SignedMessage<ReconfigCompletionMessage>> {
         let message = ReconfigCompletionMessage {
             epoch,
-            mpc_public_key: mpc_public_key.to_vec(),
+            protocol_keys: VecMap {
+                contents: vec![Entry {
+                    key: 0u8,
+                    value: mpc_public_key.to_vec(),
+                }],
+            },
         };
         let my_address = self.inner.config.validator_address()?;
         let my_sig_bytes = self

@@ -107,6 +107,7 @@ pub struct State {
 
 #[derive(serde_derive::Serialize)]
 struct TobKey {
+    protocol_id: u8,
     epoch: u64,
     batch_index: Option<u32>,
 }
@@ -551,11 +552,16 @@ impl OnchainState {
     // TODO: Cache this data in State and update via watcher events instead of fetching on-demand.
     pub async fn fetch_epoch_certs(
         &self,
+        protocol_id: u8,
         epoch: u64,
         batch_index: Option<u32>,
     ) -> Result<Option<move_types::EpochCertsV1>> {
         let tob_id = self.tob_id();
-        let key = TobKey { epoch, batch_index };
+        let key = TobKey {
+            protocol_id,
+            epoch,
+            batch_index,
+        };
         let key_bcs = bcs::to_bytes(&key)?;
         let mut stream = self
             .0
@@ -584,6 +590,7 @@ impl OnchainState {
     /// Returns the protocol type and raw move types; caller is responsible for conversion.
     pub async fn fetch_certs(
         &self,
+        protocol_id: u8,
         epoch: u64,
         batch_index: Option<u32>,
     ) -> Result<
@@ -592,7 +599,7 @@ impl OnchainState {
             Vec<(Address, move_types::DealerSubmissionV1)>,
         )>,
     > {
-        let epoch_certs = match self.fetch_epoch_certs(epoch, batch_index).await? {
+        let epoch_certs = match self.fetch_epoch_certs(protocol_id, epoch, batch_index).await? {
             Some(certs) => certs,
             None => return Ok(None),
         };
@@ -781,7 +788,14 @@ async fn scrape_hashi(
     committee_set
         .set_epoch(committees.epoch)
         .set_pending_epoch_change(committees.pending_epoch_change)
-        .set_mpc_public_key(committees.mpc_public_key)
+        .set_mpc_public_keys(
+            committees
+                .mpc_public_keys
+                .contents
+                .into_iter()
+                .map(|e| (e.key, e.value))
+                .collect(),
+        )
         .set_members(member_info)
         .set_committees(committees_per_epoch);
 
@@ -797,7 +811,11 @@ async fn scrape_hashi(
             utxo_pool,
             proposals,
             tob_id: tob.id,
-            num_consumed_presigs,
+            num_consumed_presigs: num_consumed_presigs
+                .contents
+                .into_iter()
+                .map(|e| (e.key, e.value))
+                .collect(),
         },
     ))
 }

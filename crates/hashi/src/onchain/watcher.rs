@@ -639,13 +639,19 @@ async fn handle_events(
                 state.notify(Notification::StartReconfig(epoch));
             }
             HashiEvent::EndReconfigEvent(end_reconfig_event) => {
+                let protocol_keys = end_reconfig_event
+                    .protocol_keys
+                    .contents
+                    .iter()
+                    .map(|e| (e.key, e.value.clone()))
+                    .collect();
                 let mut state = state.state_mut();
                 state
                     .hashi
                     .committees
                     .set_epoch(end_reconfig_event.epoch)
                     .set_pending_epoch_change(None)
-                    .set_mpc_public_key(end_reconfig_event.mpc_public_key.clone());
+                    .set_mpc_public_keys(protocol_keys);
             }
         }
     }

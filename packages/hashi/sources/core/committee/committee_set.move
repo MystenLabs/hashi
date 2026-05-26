@@ -10,7 +10,8 @@ use sui::{
     bag::Bag,
     bcs,
     bls12381::{UncompressedG1, bls12381_min_pk_verify, g1_from_bytes, g1_to_uncompressed_g1},
-    group_ops::Element
+    group_ops::Element,
+    vec_map::{Self, VecMap}
 };
 
 //
@@ -24,8 +25,8 @@ public struct CommitteeSet has store {
     committees: Bag,
     //TODO do we want more info for this?
     pending_epoch_change: Option<u64>,
-    /// The MPC committee's threshold public key.
-    mpc_public_key: vector<u8>,
+    /// Per-protocol MPC threshold public keys.
+    mpc_public_keys: VecMap<u8, vector<u8>>,
 }
 
 public(package) fun create(ctx: &mut TxContext): CommitteeSet {
@@ -34,7 +35,7 @@ public(package) fun create(ctx: &mut TxContext): CommitteeSet {
         epoch: 0,
         committees: sui::bag::new(ctx),
         pending_epoch_change: option::none(),
-        mpc_public_key: std::vector::empty(),
+        mpc_public_keys: vec_map::empty(),
     }
 }
 
@@ -396,22 +397,21 @@ public(package) fun start_reconfig(
 
 public(package) fun end_reconfig(
     self: &mut CommitteeSet,
-    mpc_public_key: vector<u8>,
+    protocol_keys: VecMap<u8, vector<u8>>,
     _ctx: &TxContext,
 ): u64 {
     assert!(self.is_reconfiguring());
     let next_epoch = self.pending_epoch_change.extract();
     assert!(self.has_committee(next_epoch));
 
-    // If the mpc_public_key is empty, then this is the initial reconfig where
-    // DKG is run and we need to set the produced pubkey.
-    if (self.mpc_public_key.is_empty()) {
-        self.mpc_public_key = mpc_public_key;
-    };
-
-    // On subsequent reconfigs where key resharing is performing instead of
-    // DKG, we need to ensure that the pubkey remains constant
-    assert!(self.mpc_public_key == mpc_public_key);
+    let keys = protocol_keys.keys();
+    keys.do_ref!(|pid| {
+        let key = protocol_keys.get(pid);
+        if (!self.mpc_public_keys.contains(pid)) {
+            self.mpc_public_keys.insert(*pid, *key);
+        };
+        assert!(self.mpc_public_keys.get(pid) == key);
+    });
 
     self.epoch = next_epoch;
     next_epoch
