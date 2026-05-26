@@ -487,7 +487,10 @@ impl Enclave {
             .ok_or(InvalidInputs("Secret-sharing instance not set".into()))
     }
 
-    pub fn set_secret_sharing_instance(&self, instance: SecretSharingInstance) -> GuardianResult<()> {
+    pub fn set_secret_sharing_instance(
+        &self,
+        instance: SecretSharingInstance,
+    ) -> GuardianResult<()> {
         self.scratchpad
             .secret_sharing_instance
             .set(instance)

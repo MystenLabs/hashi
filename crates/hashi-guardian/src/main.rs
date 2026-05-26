@@ -63,10 +63,9 @@ async fn main() -> Result<()> {
         .add_service(GuardianServiceServer::new(svc))
         .serve(addr);
 
-    // Don't emit heartbeats in setup mode: they share the heartbeat dir with
-    // normal-mode ones and `heartbeat_audit` keys on session_id only (PCRs are
-    // identical across modes), so a setup-mode session would pollute the
-    // single-live-session check that gates provisioner_init.
+    // Don't emit heartbeats in setup mode: their primary function is
+    // to allow KPs to detect old sessions that might still be running
+    // in order to bypass limiter. Not a concern for setup mode.
     if setup_mode {
         return server_future
             .await

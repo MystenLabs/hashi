@@ -154,7 +154,7 @@ pub async fn provisioner_init(
         }
     }
 
-    // MILESTONE: At this point, we are sure it is a legitimate payload (both share & instance)
+    // MILESTONE: At this point, we are sure it is a legitimate payload (both share & state)
 
     // 4) Persist share
     info!("Persisting share.");
