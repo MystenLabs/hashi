@@ -112,9 +112,9 @@ pub struct MpcManager {
 
     // Mutable during the epoch
     pub dealer_outputs: HashMap<DealerOutputsKey, avss::PartialOutput>,
-    pub dkg_messages: HashMap<Address, avss::Message>,
-    pub rotation_messages: HashMap<Address, RotationMessages>,
-    pub nonce_messages: HashMap<(u32, Address), NonceMessage>,
+    pub current_dkg_messages: HashMap<Address, avss::Message>,
+    pub current_rotation_messages: HashMap<Address, RotationMessages>,
+    pub current_nonce_messages: HashMap<(u32, Address), NonceMessage>,
     pub message_responses: HashMap<MessageResponsesKey, MpcResult<SendMessagesResponse>>,
     pub complaints_to_process: HashMap<ComplaintsToProcessKey, complaint::Complaint>,
     pub complaint_responses: HashMap<ComplaintResponsesKey, ComplaintResponse>,
@@ -252,9 +252,9 @@ impl MpcManager {
             previous_reconfig_output_threshold,
             previous_reconfig_input_threshold,
             dealer_outputs: HashMap::new(),
-            dkg_messages: HashMap::new(),
-            rotation_messages: HashMap::new(),
-            nonce_messages: HashMap::new(),
+            current_dkg_messages: HashMap::new(),
+            current_rotation_messages: HashMap::new(),
+            current_nonce_messages: HashMap::new(),
             message_responses: HashMap::new(),
             complaints_to_process: HashMap::new(),
             complaint_responses: HashMap::new(),
@@ -645,7 +645,7 @@ impl MpcManager {
                 .map_err(|e| MpcError::StorageError(e.to_string()))?
             {
                 if let Messages::Rotation(msgs) = message {
-                    mgr.rotation_messages.insert(dealer, msgs);
+                    mgr.current_rotation_messages.insert(dealer, msgs);
                 }
             }
         }
@@ -666,7 +666,7 @@ impl MpcManager {
                 let certified_share_count: usize = certified
                     .iter()
                     .filter_map(|d| {
-                        let messages = mgr.rotation_messages.get(d)?;
+                        let messages = mgr.current_rotation_messages.get(d)?;
                         if messages.is_empty() {
                             return None;
                         }
@@ -976,7 +976,7 @@ impl MpcManager {
             }
             let needs_retrieval = {
                 let mgr = mpc_manager.read().unwrap();
-                match mgr.dkg_messages.get(&dealer) {
+                match mgr.current_dkg_messages.get(&dealer) {
                     None => true,
                     Some(stored_msg) => {
                         compute_messages_hash(&Messages::Dkg(stored_msg.clone()))
@@ -1052,7 +1052,7 @@ impl MpcManager {
                         .signers(&mgr.committee)
                         .expect("certificate verified above");
                     let message = mgr
-                        .dkg_messages
+                        .current_dkg_messages
                         .get(&dealer)
                         .ok_or_else(|| {
                             MpcError::ProtocolFailed(format!(
@@ -1272,7 +1272,7 @@ impl MpcManager {
             };
             let needs_retrieval = {
                 let mgr = mpc_manager.read().unwrap();
-                match mgr.rotation_messages.get(&dealer) {
+                match mgr.current_rotation_messages.get(&dealer) {
                     None => true,
                     Some(stored_msgs) => {
                         compute_messages_hash(&Messages::Rotation(stored_msgs.clone()))
@@ -1339,7 +1339,7 @@ impl MpcManager {
                     .signers(&mgr.committee)
                     .expect("certificate verified above");
                 let msgs = mgr
-                    .rotation_messages
+                    .current_rotation_messages
                     .get(&dealer)
                     .ok_or_else(|| {
                         MpcError::ProtocolFailed(format!(
@@ -1686,7 +1686,9 @@ impl MpcManager {
         dealer: Address,
         message: &avss::Message,
     ) -> MpcResult<()> {
-        self.dkg_messages.insert(dealer, message.clone());
+        if epoch == self.mpc_config.epoch {
+            self.current_dkg_messages.insert(dealer, message.clone());
+        }
         self.public_messages_store
             .store_dealer_message(epoch, &dealer, message)
             .map_err(|e| MpcError::StorageError(e.to_string()))?;
@@ -1699,7 +1701,10 @@ impl MpcManager {
         dealer: Address,
         messages: &RotationMessages,
     ) -> MpcResult<()> {
-        self.rotation_messages.insert(dealer, messages.clone());
+        if epoch == self.mpc_config.epoch {
+            self.current_rotation_messages
+                .insert(dealer, messages.clone());
+        }
         self.public_messages_store
             .store_rotation_messages(epoch, &dealer, messages)
             .map_err(|e| MpcError::StorageError(e.to_string()))?;
@@ -1712,8 +1717,10 @@ impl MpcManager {
         dealer: Address,
         nonce: &NonceMessage,
     ) -> MpcResult<()> {
-        self.nonce_messages
-            .insert((nonce.batch_index, dealer), nonce.clone());
+        if epoch == self.mpc_config.epoch {
+            self.current_nonce_messages
+                .insert((nonce.batch_index, dealer), nonce.clone());
+        }
         self.public_messages_store
             .store_nonce_message(epoch, nonce.batch_index, &dealer, &nonce.message)
             .map_err(|e| MpcError::StorageError(e.to_string()))?;
@@ -1726,7 +1733,7 @@ impl MpcManager {
         batch_index: u32,
         expected_hash: &MessageHash,
     ) -> bool {
-        if let Some(stored) = self.nonce_messages.get(&(batch_index, dealer)) {
+        if let Some(stored) = self.current_nonce_messages.get(&(batch_index, dealer)) {
             return compute_messages_hash(&Messages::NonceGeneration(stored.clone()))
                 != *expected_hash;
         }
@@ -1746,7 +1753,8 @@ impl MpcManager {
             };
             let hash_mismatch =
                 compute_messages_hash(&Messages::NonceGeneration(nonce.clone())) != *expected_hash;
-            self.nonce_messages.insert((batch_index, dealer), nonce);
+            self.current_nonce_messages
+                .insert((batch_index, dealer), nonce);
             hash_mismatch
         } else {
             true
@@ -1892,7 +1900,7 @@ impl MpcManager {
             return;
         }
         let mut mgr = mpc_manager.write().unwrap();
-        mgr.nonce_messages.retain(|(b, _), _| *b >= cutoff);
+        mgr.current_nonce_messages.retain(|(b, _), _| *b >= cutoff);
         mgr.dealer_nonce_outputs.retain(|(b, _), _| *b >= cutoff);
         mgr.complaints_to_process.retain(|k, _| match k {
             ComplaintsToProcessKey::NonceGeneration { batch_index: b, .. } => *b >= cutoff,
@@ -1912,7 +1920,7 @@ impl MpcManager {
         let output_key = DealerOutputsKey::Dkg(dealer);
         let complaint_key = ComplaintsToProcessKey::Dkg(dealer);
         let message = self
-            .dkg_messages
+            .current_dkg_messages
             .get(&dealer)
             .ok_or_else(|| MpcError::NotFound("No DKG message for dealer".into()))?
             .clone();
@@ -1934,7 +1942,7 @@ impl MpcManager {
         dealer: Address,
         batch_index: u32,
     ) -> MpcResult<()> {
-        let message = match self.nonce_messages.get(&(batch_index, dealer)) {
+        let message = match self.current_nonce_messages.get(&(batch_index, dealer)) {
             Some(nonce) => nonce.message.clone(),
             None => self
                 .public_messages_store
@@ -1989,7 +1997,7 @@ impl MpcManager {
         previous_dkg_output: &MpcOutput,
     ) -> MpcResult<()> {
         let rotation_messages = self
-            .rotation_messages
+            .current_rotation_messages
             .get(dealer)
             .ok_or_else(|| MpcError::ProtocolFailed("No rotation messages for dealer".into()))?
             .clone();
@@ -2215,14 +2223,14 @@ impl MpcManager {
         &mut self,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> MpcResult<DealerFlowData> {
-        let messages = match self.dkg_messages.get(&self.address) {
+        let messages = match self.current_dkg_messages.get(&self.address) {
             Some(msg) => Messages::Dkg(msg.clone()),
             None => match self
                 .public_messages_store
                 .get_dealer_message(self.mpc_config.epoch, &self.address)
             {
                 Ok(Some(msg)) => {
-                    self.dkg_messages.insert(self.address, msg.clone());
+                    self.current_dkg_messages.insert(self.address, msg.clone());
                     Messages::Dkg(msg)
                 }
                 Ok(None) => {
@@ -2242,14 +2250,15 @@ impl MpcManager {
         previous: &MpcOutput,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> MpcResult<DealerFlowData> {
-        let messages = match self.rotation_messages.get(&self.address) {
+        let messages = match self.current_rotation_messages.get(&self.address) {
             Some(msgs) => Messages::Rotation(msgs.clone()),
             None => match self
                 .public_messages_store
                 .get_rotation_messages(self.mpc_config.epoch, &self.address)
             {
                 Ok(Some(msgs)) => {
-                    self.rotation_messages.insert(self.address, msgs.clone());
+                    self.current_rotation_messages
+                        .insert(self.address, msgs.clone());
                     Messages::Rotation(msgs)
                 }
                 Ok(None) => {
@@ -2273,7 +2282,10 @@ impl MpcManager {
         batch_index: u32,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> MpcResult<DealerFlowData> {
-        let messages = match self.nonce_messages.get(&(batch_index, self.address)) {
+        let messages = match self
+            .current_nonce_messages
+            .get(&(batch_index, self.address))
+        {
             Some(nonce) => Messages::NonceGeneration(nonce.clone()),
             None => match self.public_messages_store.get_nonce_message(
                 self.mpc_config.epoch,
@@ -2285,7 +2297,7 @@ impl MpcManager {
                         batch_index,
                         message: msg,
                     };
-                    self.nonce_messages
+                    self.current_nonce_messages
                         .insert((batch_index, self.address), nonce.clone());
                     Messages::NonceGeneration(nonce)
                 }
@@ -2495,7 +2507,7 @@ impl MpcManager {
                     dealer: *dealer,
                 })
                 .ok_or_else(|| MpcError::ProtocolFailed("No nonce complaint for dealer".into()))?;
-            let message = match mgr.nonce_messages.get(&(batch_index, *dealer)) {
+            let message = match mgr.current_nonce_messages.get(&(batch_index, *dealer)) {
                 Some(nonce) => nonce.message.clone(),
                 None => mgr
                     .public_messages_store
@@ -2669,7 +2681,7 @@ impl MpcManager {
             .map_err(|e| MpcError::StorageError(e.to_string()))?
         {
             if let Messages::Dkg(msg) = message {
-                self.dkg_messages.insert(dealer, msg);
+                self.current_dkg_messages.insert(dealer, msg);
             }
         }
         for (dealer, message) in self
@@ -2678,7 +2690,7 @@ impl MpcManager {
             .map_err(|e| MpcError::StorageError(e.to_string()))?
         {
             if let Messages::Rotation(msgs) = message {
-                self.rotation_messages.insert(dealer, msgs);
+                self.current_rotation_messages.insert(dealer, msgs);
             }
         }
         Ok(())
@@ -3569,23 +3581,6 @@ impl MpcManager {
                             },
                             complaint,
                         );
-                        if !mgr
-                            .nonce_messages
-                            .contains_key(&(complaint_batch_index, dealer_address))
-                            && let Ok(Some(msg)) = mgr.public_messages_store.get_nonce_message(
-                                epoch,
-                                complaint_batch_index,
-                                &dealer_address,
-                            )
-                        {
-                            mgr.nonce_messages.insert(
-                                (complaint_batch_index, dealer_address),
-                                NonceMessage {
-                                    batch_index: complaint_batch_index,
-                                    message: msg,
-                                },
-                            );
-                        }
                         certs
                             .iter()
                             .find(|(addr, _)| *addr == dealer_address)
@@ -3851,16 +3846,16 @@ impl MpcManager {
     ) -> Option<Messages> {
         match protocol_type {
             ProtocolTypeIndicator::Dkg => self
-                .dkg_messages
+                .current_dkg_messages
                 .get(dealer)
                 .map(|m| Messages::Dkg(m.clone())),
             ProtocolTypeIndicator::KeyRotation => self
-                .rotation_messages
+                .current_rotation_messages
                 .get(dealer)
                 .map(|m| Messages::Rotation(m.clone())),
             ProtocolTypeIndicator::NonceGeneration => {
                 let batch_index = batch_index?;
-                self.nonce_messages
+                self.current_nonce_messages
                     .get(&(batch_index, *dealer))
                     .map(|m| Messages::NonceGeneration(m.clone()))
             }

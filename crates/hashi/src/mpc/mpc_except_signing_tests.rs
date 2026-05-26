@@ -1410,7 +1410,11 @@ fn test_dealer_receiver_flow() {
     );
 
     // Verify dealer message was stored in memory for signature recovery
-    assert!(receiver_manager.dkg_messages.contains_key(&dealer_address));
+    assert!(
+        receiver_manager
+            .current_dkg_messages
+            .contains_key(&dealer_address)
+    );
 
     // Verify dealer message was persisted to storage
     let stored = receiver_manager
@@ -2020,7 +2024,7 @@ async fn test_run_as_party_recovers_shares_via_complaint() {
     let dealer_0_mgr = setup.create_dealer_with_message(0, &mut rng);
     let dealer_0_message = Messages::Dkg(
         dealer_0_mgr
-            .dkg_messages
+            .current_dkg_messages
             .get(&dealer_0_addr)
             .unwrap()
             .clone(),
@@ -2806,8 +2810,20 @@ async fn test_run_as_party_retrieves_missing_dealer_messages() {
     let party_manager = setup.create_manager(3);
 
     // Get the dealer messages for certificate creation
-    let msg1 = Messages::Dkg(dealer1_mgr.dkg_messages.get(&dealer1_addr).unwrap().clone());
-    let msg2 = Messages::Dkg(dealer2_mgr.dkg_messages.get(&dealer2_addr).unwrap().clone());
+    let msg1 = Messages::Dkg(
+        dealer1_mgr
+            .current_dkg_messages
+            .get(&dealer1_addr)
+            .unwrap()
+            .clone(),
+    );
+    let msg2 = Messages::Dkg(
+        dealer2_mgr
+            .current_dkg_messages
+            .get(&dealer2_addr)
+            .unwrap()
+            .clone(),
+    );
 
     let epoch = setup.epoch();
     // Create signatures for certificates
@@ -2852,7 +2868,7 @@ async fn test_run_as_party_retrieves_missing_dealer_messages() {
     let mut mock_tob = MockOrderedBroadcastChannel::new(certificates);
 
     // Verify party doesn't have any dealer messages yet
-    assert!(party_manager.dkg_messages.is_empty());
+    assert!(party_manager.current_dkg_messages.is_empty());
 
     let party_manager = Arc::new(RwLock::new(party_manager));
 
@@ -2863,8 +2879,8 @@ async fn test_run_as_party_retrieves_missing_dealer_messages() {
 
     assert!(result.is_ok());
     let mgr = party_manager.read().unwrap();
-    assert!(mgr.dkg_messages.contains_key(&dealer1_addr));
-    assert!(mgr.dkg_messages.contains_key(&dealer2_addr));
+    assert!(mgr.current_dkg_messages.contains_key(&dealer1_addr));
+    assert!(mgr.current_dkg_messages.contains_key(&dealer2_addr));
     // DKG: outputs keyed by dealer address
     assert!(
         mgr.dealer_outputs
@@ -2895,15 +2911,27 @@ async fn test_run_as_party_aborts_on_retrieval_failure() {
     let party_manager = setup.create_manager(3);
 
     // Get the dealer messages for certificate creation
-    let msg1 = Messages::Dkg(dealer1_mgr.dkg_messages.get(&dealer1_addr).unwrap().clone());
+    let msg1 = Messages::Dkg(
+        dealer1_mgr
+            .current_dkg_messages
+            .get(&dealer1_addr)
+            .unwrap()
+            .clone(),
+    );
     let msg2 = Messages::Dkg(
         _dealer2_mgr
-            .dkg_messages
+            .current_dkg_messages
             .get(&dealer2_addr)
             .unwrap()
             .clone(),
     );
-    let msg3 = Messages::Dkg(dealer3_mgr.dkg_messages.get(&dealer3_addr).unwrap().clone());
+    let msg3 = Messages::Dkg(
+        dealer3_mgr
+            .current_dkg_messages
+            .get(&dealer3_addr)
+            .unwrap()
+            .clone(),
+    );
 
     let epoch = setup.epoch();
     // Helper to create signatures
@@ -2973,10 +3001,10 @@ async fn test_run_as_party_aborts_on_retrieval_failure() {
 
     // Verify party has dealer1 message (processed before failure)
     let mgr = party_manager.read().unwrap();
-    assert!(mgr.dkg_messages.contains_key(&dealer1_addr));
+    assert!(mgr.current_dkg_messages.contains_key(&dealer1_addr));
     // But NOT dealer2 or dealer3 (aborted before processing these)
-    assert!(!mgr.dkg_messages.contains_key(&dealer2_addr));
-    assert!(!mgr.dkg_messages.contains_key(&dealer3_addr));
+    assert!(!mgr.current_dkg_messages.contains_key(&dealer2_addr));
+    assert!(!mgr.current_dkg_messages.contains_key(&dealer3_addr));
 }
 
 #[tokio::test]
@@ -2987,8 +3015,13 @@ async fn test_run_as_party_aborts_on_failed_recovery() {
     // Create dealer 0 with a message - recovery will fail
     let dealer0_addr = setup.address(0);
     let dealer0_mgr = setup.create_dealer_with_message(0, &mut rng);
-    let dealer0_message =
-        Messages::Dkg(dealer0_mgr.dkg_messages.get(&dealer0_addr).unwrap().clone());
+    let dealer0_message = Messages::Dkg(
+        dealer0_mgr
+            .current_dkg_messages
+            .get(&dealer0_addr)
+            .unwrap()
+            .clone(),
+    );
     let dealer0_message_hash = compute_messages_hash(&dealer0_message);
     let dealer0_dkg_message = DealerMessagesHash {
         dealer_address: dealer0_addr,
@@ -2998,8 +3031,13 @@ async fn test_run_as_party_aborts_on_failed_recovery() {
     // Create dealer 1 - would be processed if we continued
     let dealer1_addr = setup.address(1);
     let dealer1_mgr = setup.create_dealer_with_message(1, &mut rng);
-    let dealer1_message =
-        Messages::Dkg(dealer1_mgr.dkg_messages.get(&dealer1_addr).unwrap().clone());
+    let dealer1_message = Messages::Dkg(
+        dealer1_mgr
+            .current_dkg_messages
+            .get(&dealer1_addr)
+            .unwrap()
+            .clone(),
+    );
     let dealer1_message_hash = compute_messages_hash(&dealer1_message);
     let dealer1_dkg_message = DealerMessagesHash {
         dealer_address: dealer1_addr,
@@ -3198,7 +3236,7 @@ fn test_handle_retrieve_messages_request_db_fallback_dkg() {
         .store_dealer_message(manager.mpc_config.epoch, &dealer_address, &dealer_message)
         .unwrap();
     // Verify it's NOT in the in-memory map.
-    assert!(!manager.dkg_messages.contains_key(&dealer_address));
+    assert!(!manager.current_dkg_messages.contains_key(&dealer_address));
 
     // Request with the current epoch — DB fallback should serve it.
     let request = RetrieveMessagesRequest {
@@ -3237,7 +3275,11 @@ fn test_handle_retrieve_messages_request_db_fallback_rotation() {
         .store_rotation_messages(manager.mpc_config.epoch, &dealer_address, &rotation_msgs)
         .unwrap();
     // Verify NOT in in-memory map.
-    assert!(!manager.rotation_messages.contains_key(&dealer_address));
+    assert!(
+        !manager
+            .current_rotation_messages
+            .contains_key(&dealer_address)
+    );
 
     let request = RetrieveMessagesRequest {
         dealer: dealer_address,
@@ -3271,7 +3313,7 @@ fn test_handle_retrieve_messages_request_skips_memory_for_different_epoch() {
     // Put DIFFERENT "current epoch" messages in the in-memory map.
     let current_msgs = manager.create_rotation_messages(&dkg_output, &mut rng);
     manager
-        .rotation_messages
+        .current_rotation_messages
         .insert(dealer_address, current_msgs.clone());
 
     // Request previous epoch's messages — should get DB data, not in-memory.
@@ -3288,6 +3330,150 @@ fn test_handle_retrieve_messages_request_skips_memory_for_different_epoch() {
     assert_eq!(
         expected_hash, actual_hash,
         "Should return DB messages for previous epoch, not in-memory current epoch messages"
+    );
+}
+
+#[test]
+fn test_cache_and_persist_rotation_messages_does_not_overwrite_in_memory_with_non_current_epoch() {
+    let mut rng = rand::thread_rng();
+    let rotation_setup = RotationTestSetup::new();
+    let (mut manager, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
+
+    let dealer_address = rotation_setup.setup.address(0);
+    let prev_epoch = manager.mpc_config.epoch - 1;
+
+    let current_msgs = manager.create_rotation_messages(&dkg_output, &mut rng);
+    manager
+        .current_rotation_messages
+        .insert(dealer_address, current_msgs.clone());
+
+    let prev_msgs = manager.create_rotation_messages(&dkg_output, &mut rng);
+    assert_ne!(
+        compute_messages_hash(&Messages::Rotation(current_msgs.clone())),
+        compute_messages_hash(&Messages::Rotation(prev_msgs.clone())),
+        "Test precondition: the two message sets must differ",
+    );
+
+    manager
+        .cache_and_persist_rotation_messages(prev_epoch, dealer_address, &prev_msgs)
+        .unwrap();
+
+    let stored_prev = manager
+        .public_messages_store
+        .get_rotation_messages(prev_epoch, &dealer_address)
+        .unwrap()
+        .expect("Store should have the cross-epoch entry");
+    assert_eq!(
+        compute_messages_hash(&Messages::Rotation(stored_prev)),
+        compute_messages_hash(&Messages::Rotation(prev_msgs)),
+    );
+
+    let cached = manager
+        .current_rotation_messages
+        .get(&dealer_address)
+        .expect("In-memory entry should still be present");
+    assert_eq!(
+        compute_messages_hash(&Messages::Rotation(cached.clone())),
+        compute_messages_hash(&Messages::Rotation(current_msgs)),
+        "Cross-epoch persist must not overwrite current-epoch in-memory cache",
+    );
+}
+
+#[test]
+fn test_cache_and_persist_dkg_message_does_not_overwrite_in_memory_with_non_current_epoch() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let mut manager =
+        setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+
+    let dealer_address = setup.address(0);
+    let prev_epoch = manager.mpc_config.epoch - 1;
+
+    let current_msg = manager.create_dealer_message(&mut rng);
+    manager
+        .current_dkg_messages
+        .insert(dealer_address, current_msg.clone());
+
+    let prev_msg = manager.create_dealer_message(&mut rng);
+    assert_ne!(
+        compute_messages_hash(&Messages::Dkg(current_msg.clone())),
+        compute_messages_hash(&Messages::Dkg(prev_msg.clone())),
+        "Test precondition: the two messages must differ",
+    );
+
+    manager
+        .cache_and_persist_dkg_message(prev_epoch, dealer_address, &prev_msg)
+        .unwrap();
+
+    let stored_prev = manager
+        .public_messages_store
+        .get_dealer_message(prev_epoch, &dealer_address)
+        .unwrap()
+        .expect("Store should have the cross-epoch entry");
+    assert_eq!(
+        compute_messages_hash(&Messages::Dkg(stored_prev)),
+        compute_messages_hash(&Messages::Dkg(prev_msg)),
+    );
+
+    let cached = manager
+        .current_dkg_messages
+        .get(&dealer_address)
+        .expect("In-memory entry should still be present");
+    assert_eq!(
+        compute_messages_hash(&Messages::Dkg(cached.clone())),
+        compute_messages_hash(&Messages::Dkg(current_msg)),
+        "Cross-epoch persist must not overwrite current-epoch in-memory cache",
+    );
+}
+
+#[test]
+fn test_cache_and_persist_nonce_message_does_not_overwrite_in_memory_with_non_current_epoch() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let mut manager =
+        setup.create_manager_with_store(0, Box::new(InMemoryPublicMessagesStore::new()));
+
+    let dealer_address = setup.address(0);
+    let prev_epoch = manager.mpc_config.epoch - 1;
+    let batch_index = 0u32;
+
+    let current_nonce = create_nonce_dealer_message(&setup, 0, batch_index, &mut rng);
+    manager
+        .current_nonce_messages
+        .insert((batch_index, dealer_address), current_nonce.clone());
+
+    let prev_nonce = create_nonce_dealer_message(&setup, 0, batch_index, &mut rng);
+    assert_ne!(
+        compute_messages_hash(&Messages::NonceGeneration(current_nonce.clone())),
+        compute_messages_hash(&Messages::NonceGeneration(prev_nonce.clone())),
+        "Test precondition: the two messages must differ",
+    );
+
+    manager
+        .cache_and_persist_nonce_message(prev_epoch, dealer_address, &prev_nonce)
+        .unwrap();
+
+    let stored_prev_msg = manager
+        .public_messages_store
+        .get_nonce_message(prev_epoch, batch_index, &dealer_address)
+        .unwrap()
+        .expect("Store should have the cross-epoch entry");
+    assert_eq!(
+        compute_messages_hash(&Messages::NonceGeneration(NonceMessage {
+            batch_index,
+            message: stored_prev_msg,
+        })),
+        compute_messages_hash(&Messages::NonceGeneration(prev_nonce)),
+    );
+
+    let cached = manager
+        .current_nonce_messages
+        .get(&(batch_index, dealer_address))
+        .expect("In-memory entry should still be present");
+    assert_eq!(
+        compute_messages_hash(&Messages::NonceGeneration(cached.clone())),
+        compute_messages_hash(&Messages::NonceGeneration(current_nonce)),
+        "Cross-epoch persist must not overwrite current-epoch in-memory cache",
     );
 }
 
@@ -3310,7 +3496,11 @@ fn test_handle_retrieve_messages_request_nonce_db_fallback() {
             &nonce_msg.message,
         )
         .unwrap();
-    assert!(!manager.nonce_messages.contains_key(&(0, dealer_address)));
+    assert!(
+        !manager
+            .current_nonce_messages
+            .contains_key(&(0, dealer_address))
+    );
 
     // DB fallback should serve nonce gen messages when batch_index is provided.
     let result = manager.handle_retrieve_messages_request(&RetrieveMessagesRequest {
@@ -3353,7 +3543,7 @@ fn test_process_certified_nonce_message_db_fallback() {
         .unwrap();
     assert!(
         !receiver
-            .nonce_messages
+            .current_nonce_messages
             .contains_key(&(batch_index, dealer_addr)),
         "precondition: in-memory cache empty for this batch/dealer"
     );
@@ -3383,7 +3573,7 @@ fn test_prepare_dealer_flow_survives_restart() {
     let hash1 = compute_messages_hash(&flow1.request.messages);
 
     // Simulate restart: wipe in-memory cache.
-    manager.dkg_messages.clear();
+    manager.current_dkg_messages.clear();
 
     // Second call: must load from DB, not regenerate.
     let flow2 = manager.prepare_dkg_dealer_flow(&mut rng).unwrap();
@@ -3395,7 +3585,7 @@ fn test_prepare_dealer_flow_survives_restart() {
     );
     // Cache should be re-populated on DB hit.
     assert!(
-        manager.dkg_messages.contains_key(&manager.address),
+        manager.current_dkg_messages.contains_key(&manager.address),
         "in-memory cache should be re-populated after DB hit",
     );
 }
@@ -3419,7 +3609,7 @@ fn test_prepare_rotation_dealer_flow_survives_restart() {
     // Simulate restart: wipe in-memory caches that `try_sign_rotation_messages`
     // uses to track which shares it already processed. On a real restart,
     // `dealer_outputs` is wiped; the DB-backed messages persist.
-    manager.rotation_messages.clear();
+    manager.current_rotation_messages.clear();
     manager.dealer_outputs.clear();
 
     let flow2 = manager
@@ -3432,7 +3622,9 @@ fn test_prepare_rotation_dealer_flow_survives_restart() {
         "rotation dealer message should be identical after simulated restart",
     );
     assert!(
-        manager.rotation_messages.contains_key(&manager.address),
+        manager
+            .current_rotation_messages
+            .contains_key(&manager.address),
         "in-memory cache should be re-populated after DB hit",
     );
 }
@@ -3450,7 +3642,7 @@ fn test_prepare_nonce_dealer_flow_survives_restart() {
         .unwrap();
     let hash1 = compute_messages_hash(&flow1.request.messages);
 
-    manager.nonce_messages.clear();
+    manager.current_nonce_messages.clear();
 
     let flow2 = manager
         .prepare_nonce_dealer_flow(batch_index, &mut rng)
@@ -3463,7 +3655,7 @@ fn test_prepare_nonce_dealer_flow_survives_restart() {
     );
     assert!(
         manager
-            .nonce_messages
+            .current_nonce_messages
             .contains_key(&(batch_index, manager.address)),
         "in-memory cache should be re-populated after DB hit",
     );
@@ -3524,7 +3716,7 @@ fn test_handle_complain_request_rederives_output_rejects_invalid_proof() {
 
     // Manually insert without processing (so no dealer_output)
     if let Messages::Dkg(msg) = dealer_messages {
-        manager.dkg_messages.insert(dealer_address, msg);
+        manager.current_dkg_messages.insert(dealer_address, msg);
     }
 
     // For DKG, share_index is None (dealer has only one share)
@@ -3791,7 +3983,10 @@ async fn test_recover_shares_via_complaint_no_complaint_for_dealer() {
     let dealer_addr = setup.address(0);
     let dealer_manager = setup.create_dealer_with_message(0, &mut rng);
 
-    let dealer_message_raw = dealer_manager.dkg_messages.get(&dealer_addr).unwrap();
+    let dealer_message_raw = dealer_manager
+        .current_dkg_messages
+        .get(&dealer_addr)
+        .unwrap();
     let dealer_message = &Messages::Dkg(dealer_message_raw.clone());
     let messages_hash = compute_messages_hash(dealer_message);
     let dkg_message = DealerMessagesHash {
@@ -3840,7 +4035,13 @@ async fn test_recover_shares_via_complaint_p2p_failure() {
     // Create dealer with a message
     let dealer_addr = setup.address(0);
     let dealer_mgr = setup.create_dealer_with_message(0, &mut rng);
-    let dealer_message = Messages::Dkg(dealer_mgr.dkg_messages.get(&dealer_addr).unwrap().clone());
+    let dealer_message = Messages::Dkg(
+        dealer_mgr
+            .current_dkg_messages
+            .get(&dealer_addr)
+            .unwrap()
+            .clone(),
+    );
 
     // Create party manager with a complaint
     let party_addr = setup.address(1);
@@ -4063,7 +4264,7 @@ async fn test_retrieve_dealer_message_success() {
     // Get dealer's message for certificate creation
     let dealer_message = &Messages::Dkg(
         dealer_manager
-            .dkg_messages
+            .current_dkg_messages
             .get(&dealer_address)
             .unwrap()
             .clone(),
@@ -4102,7 +4303,7 @@ async fn test_retrieve_dealer_message_success() {
 
     assert!(result.is_ok());
     let mgr = party_manager.read().unwrap();
-    assert!(mgr.dkg_messages.contains_key(&dealer_address));
+    assert!(mgr.current_dkg_messages.contains_key(&dealer_address));
     // Message is stored but not yet processed (that happens during run_as_party)
     // DKG: outputs keyed by dealer address
     assert!(
@@ -4141,7 +4342,13 @@ async fn test_retrieve_dealer_message_retries_multiple_signers() {
     let party_mgr = setup.create_manager(2);
 
     // Get dealer's message for certificate creation
-    let dealer_message = &Messages::Dkg(dealer_mgr.dkg_messages.get(&dealer_addr).unwrap().clone());
+    let dealer_message = &Messages::Dkg(
+        dealer_mgr
+            .current_dkg_messages
+            .get(&dealer_addr)
+            .unwrap()
+            .clone(),
+    );
 
     // Create DkgMessage
     let messages_hash = compute_messages_hash(dealer_message);
@@ -4182,7 +4389,7 @@ async fn test_retrieve_dealer_message_retries_multiple_signers() {
         party_mgr
             .read()
             .unwrap()
-            .dkg_messages
+            .current_dkg_messages
             .contains_key(&dealer_addr)
     );
 }
@@ -4202,7 +4409,13 @@ async fn test_retrieve_dealer_message_all_signers_fail() {
     let party_mgr = setup.create_manager(1);
 
     // Get dealer's message for certificate creation
-    let dealer_message = &Messages::Dkg(dealer_mgr.dkg_messages.get(&dealer_addr).unwrap().clone());
+    let dealer_message = &Messages::Dkg(
+        dealer_mgr
+            .current_dkg_messages
+            .get(&dealer_addr)
+            .unwrap()
+            .clone(),
+    );
 
     // Create DkgMessage
     let messages_hash = compute_messages_hash(dealer_message);
@@ -4254,7 +4467,7 @@ async fn test_retrieve_dealer_message_rejects_wrong_hash() {
     let dealer_a_mgr = setup.create_dealer_with_message(0, &mut rng);
     let message_a = Messages::Dkg(
         dealer_a_mgr
-            .dkg_messages
+            .current_dkg_messages
             .get(&dealer_a_addr)
             .unwrap()
             .clone(),
@@ -4265,7 +4478,7 @@ async fn test_retrieve_dealer_message_rejects_wrong_hash() {
     let dealer_b_mgr = setup.create_dealer_with_message(1, &mut rng);
     let message_b = Messages::Dkg(
         dealer_b_mgr
-            .dkg_messages
+            .current_dkg_messages
             .get(&dealer_b_addr)
             .unwrap()
             .clone(),
@@ -4282,7 +4495,7 @@ async fn test_retrieve_dealer_message_rejects_wrong_hash() {
     // Byzantine: store dealer B's message under dealer A's address
     if let Messages::Dkg(msg) = &message_b {
         byzantine_signer
-            .dkg_messages
+            .current_dkg_messages
             .insert(dealer_a_addr, msg.clone());
     }
 
@@ -4328,7 +4541,7 @@ async fn test_retrieve_dealer_message_rejects_wrong_hash() {
         party_mgr
             .read()
             .unwrap()
-            .dkg_messages
+            .current_dkg_messages
             .contains_key(&dealer_a_addr)
     );
 }
@@ -4556,7 +4769,7 @@ fn setup_party_with_complaint(
         .insert(ComplaintsToProcessKey::Dkg(*dealer_address), complaint);
     if let Messages::Dkg(msg) = dealer_messages {
         party_manager
-            .dkg_messages
+            .current_dkg_messages
             .insert(*dealer_address, msg.clone());
     }
 }
@@ -4698,7 +4911,9 @@ async fn test_handle_send_messages_request_invalid_shares_cached_on_retry() {
 
     // Verify message was stored (for later retrieval)
     assert!(
-        receiver_manager.dkg_messages.contains_key(&dealer_addr),
+        receiver_manager
+            .current_dkg_messages
+            .contains_key(&dealer_addr),
         "Message should be stored even if invalid"
     );
 
@@ -4743,7 +4958,7 @@ async fn test_handle_send_messages_request_post_restart_reprocesses() {
     let dealer_addr = setup.address(1);
     let dealer_manager = setup.create_dealer_with_message(1, &mut rng);
     let dealer_message = dealer_manager
-        .dkg_messages
+        .current_dkg_messages
         .get(&dealer_addr)
         .expect("dealer should have stored its own message")
         .clone();
@@ -4761,7 +4976,9 @@ async fn test_handle_send_messages_request_post_restart_reprocesses() {
         )
         .unwrap();
     assert!(
-        receiver_manager.dkg_messages.contains_key(&dealer_addr),
+        receiver_manager
+            .current_dkg_messages
+            .contains_key(&dealer_addr),
         "precondition: stored message present"
     );
     let dkg_cache_key = MessageResponsesKey::Dkg {
@@ -4881,7 +5098,7 @@ async fn test_retrieve_stores_invalid_message_for_later_complaint() {
     {
         let mgr = receiver_manager.read().unwrap();
         assert!(
-            mgr.dkg_messages.contains_key(&dealer_addr),
+            mgr.current_dkg_messages.contains_key(&dealer_addr),
             "Invalid message should be stored for later complaint processing"
         );
     }
@@ -5091,7 +5308,10 @@ async fn test_restart_dealer_reuses_stored_message() {
 
     // Verify message was loaded (storage returns raw message, loaded as Messages::Dkg)
     assert_eq!(restarted_manager.address, dealer_address);
-    let loaded_raw = restarted_manager.dkg_messages.get(&dealer_address).unwrap();
+    let loaded_raw = restarted_manager
+        .current_dkg_messages
+        .get(&dealer_address)
+        .unwrap();
     assert_eq!(
         compute_messages_hash(&Messages::Dkg(loaded_raw.clone())),
         original_hash
@@ -5127,7 +5347,7 @@ async fn test_restart_dealer_reuses_stored_message() {
     let final_raw = restarted_manager
         .read()
         .unwrap()
-        .dkg_messages
+        .current_dkg_messages
         .get(&dealer_address)
         .unwrap()
         .clone();
@@ -5150,8 +5370,16 @@ async fn test_restart_party_uses_stored_messages_without_retrieval() {
     let dealer2_mgr = setup.create_dealer_with_message(1, &mut rng);
 
     // Extract raw avss::Message for storage
-    let msg1 = dealer1_mgr.dkg_messages.get(&dealer1_addr).unwrap().clone();
-    let msg2 = dealer2_mgr.dkg_messages.get(&dealer2_addr).unwrap().clone();
+    let msg1 = dealer1_mgr
+        .current_dkg_messages
+        .get(&dealer1_addr)
+        .unwrap()
+        .clone();
+    let msg2 = dealer2_mgr
+        .current_dkg_messages
+        .get(&dealer2_addr)
+        .unwrap()
+        .clone();
 
     // Create tracking store with pre-populated messages (simulating restart)
     let store_count = Arc::new(AtomicUsize::new(0));
@@ -5165,11 +5393,15 @@ async fn test_restart_party_uses_stored_messages_without_retrieval() {
 
     // Verify messages were loaded on construction
     assert!(
-        party_manager.dkg_messages.contains_key(&dealer1_addr),
+        party_manager
+            .current_dkg_messages
+            .contains_key(&dealer1_addr),
         "dealer1 message should be loaded"
     );
     assert!(
-        party_manager.dkg_messages.contains_key(&dealer2_addr),
+        party_manager
+            .current_dkg_messages
+            .contains_key(&dealer2_addr),
         "dealer2 message should be loaded"
     );
 
@@ -5393,7 +5625,7 @@ impl RotationTestSetup {
             .unwrap();
 
         // Clear DKG state to prepare for rotation (new committee formation)
-        receiver_manager.dkg_messages.clear();
+        receiver_manager.current_dkg_messages.clear();
         receiver_manager.dealer_outputs.clear();
         receiver_manager.complaints_to_process.clear();
         receiver_manager.message_responses.clear();
@@ -5423,7 +5655,7 @@ impl RotationTestSetup {
             .unwrap();
 
         // Clear DKG state to prepare for rotation (new committee formation)
-        receiver_manager.dkg_messages.clear();
+        receiver_manager.current_dkg_messages.clear();
         receiver_manager.dealer_outputs.clear();
         receiver_manager.complaints_to_process.clear();
         receiver_manager.message_responses.clear();
@@ -5450,7 +5682,7 @@ impl RotationTestSetup {
             .unwrap();
 
         // Clear DKG state to prepare for rotation (new committee formation)
-        dealer_manager.dkg_messages.clear();
+        dealer_manager.current_dkg_messages.clear();
         dealer_manager.dealer_outputs.clear();
         dealer_manager.complaints_to_process.clear();
         dealer_manager.message_responses.clear();
@@ -5461,7 +5693,7 @@ impl RotationTestSetup {
         let rotation_messages = Messages::Rotation(msgs.clone());
         let dealer_address = self.setup.address(dealer_index);
         dealer_manager
-            .rotation_messages
+            .current_rotation_messages
             .insert(dealer_address, msgs);
 
         (dealer_manager, dkg_output, rotation_messages)
@@ -5490,7 +5722,7 @@ impl RotationTestSetup {
             .unwrap();
 
         // Clear DKG state to prepare for rotation (new committee formation)
-        dealer_manager.dkg_messages.clear();
+        dealer_manager.current_dkg_messages.clear();
         dealer_manager.dealer_outputs.clear();
         dealer_manager.complaints_to_process.clear();
         dealer_manager.message_responses.clear();
@@ -5501,7 +5733,7 @@ impl RotationTestSetup {
         let rotation_messages = Messages::Rotation(msgs.clone());
         let dealer_address = self.setup.address(dealer_index);
         dealer_manager
-            .rotation_messages
+            .current_rotation_messages
             .insert(dealer_address, msgs);
 
         (dealer_manager, dkg_output, rotation_messages)
@@ -5746,7 +5978,7 @@ async fn test_run_key_rotation() {
             let prev_output = manager.previous_output.clone().unwrap();
             let msgs = manager.create_rotation_messages(&prev_output, &mut rng);
             let rotation_messages = Messages::Rotation(msgs.clone());
-            manager.rotation_messages.insert(addr, msgs);
+            manager.current_rotation_messages.insert(addr, msgs);
             let own_sig = manager
                 .try_sign_rotation_messages(&prev_output, addr, &rotation_messages)
                 .unwrap();
@@ -5761,7 +5993,9 @@ async fn test_run_key_rotation() {
             let other_manager = other_managers.get_mut(&other_addr).unwrap();
             let other_prev_output = other_manager.previous_output.clone().unwrap();
             if let Messages::Rotation(ref msgs) = rotation_messages {
-                other_manager.rotation_messages.insert(addr, msgs.clone());
+                other_manager
+                    .current_rotation_messages
+                    .insert(addr, msgs.clone());
             }
             other_manager
                 .try_sign_rotation_messages(&other_prev_output, addr, &rotation_messages)
@@ -5877,7 +6111,7 @@ async fn test_run_key_rotation_skips_dealer_phase() {
                 let prev_output = manager.previous_output.clone().unwrap();
                 let msgs = manager.create_rotation_messages(&prev_output, &mut rng);
                 let rotation_messages = Messages::Rotation(msgs.clone());
-                manager.rotation_messages.insert(addr, msgs.clone());
+                manager.current_rotation_messages.insert(addr, msgs.clone());
                 // Simulate RPC delivery: test_manager (validator 0) needs to
                 // know about this dealer's messages so the dealer skip check
                 // counts them under the robust filter (which excludes
@@ -5885,7 +6119,7 @@ async fn test_run_key_rotation_skips_dealer_phase() {
                 test_manager
                     .write()
                     .unwrap()
-                    .rotation_messages
+                    .current_rotation_messages
                     .insert(addr, msgs);
                 let own_sig = manager
                     .try_sign_rotation_messages(&prev_output, addr, &rotation_messages)
@@ -5899,7 +6133,7 @@ async fn test_run_key_rotation_skips_dealer_phase() {
                 let signer = other_managers.get_mut(&signer_addr).unwrap();
                 let signer_prev = signer.previous_output.clone().unwrap();
                 if let Messages::Rotation(ref msgs) = rotation_messages {
-                    signer.rotation_messages.insert(addr, msgs.clone());
+                    signer.current_rotation_messages.insert(addr, msgs.clone());
                 }
                 signer
                     .try_sign_rotation_messages(&signer_prev, addr, &rotation_messages)
@@ -5977,7 +6211,7 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
             let empty_msgs = BTreeMap::new();
             let rotation_messages = Messages::Rotation(empty_msgs.clone());
             manager
-                .rotation_messages
+                .current_rotation_messages
                 .insert(validator_2_addr, empty_msgs);
             let prev_output = manager.previous_output.clone().unwrap();
             let own_sig = manager
@@ -6016,7 +6250,7 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
             let msgs = manager.create_rotation_messages(&prev_output, &mut rng);
             let rotation_messages = Messages::Rotation(msgs.clone());
             manager
-                .rotation_messages
+                .current_rotation_messages
                 .insert(validator_1_addr, msgs.clone());
             let own_sig = manager
                 .try_sign_rotation_messages(&prev_output, validator_1_addr, &rotation_messages)
@@ -6029,7 +6263,7 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
             let signer_prev = signer.previous_output.clone().unwrap();
             if let Messages::Rotation(ref msgs) = v1_rotation_messages {
                 signer
-                    .rotation_messages
+                    .current_rotation_messages
                     .insert(validator_1_addr, msgs.clone());
             }
             signer
@@ -6053,17 +6287,17 @@ async fn test_run_key_rotation_excludes_empty_messages_from_share_count() {
     {
         // Validator 2: empty messages (the key scenario the filter must handle).
         test_manager
-            .rotation_messages
+            .current_rotation_messages
             .insert(validator_2_addr, BTreeMap::new());
         // Validator 1: valid messages.
         let other_managers = mock_p2p.managers.lock().unwrap();
         let v1_msgs = other_managers[&validator_1_addr]
-            .rotation_messages
+            .current_rotation_messages
             .get(&validator_1_addr)
             .unwrap()
             .clone();
         test_manager
-            .rotation_messages
+            .current_rotation_messages
             .insert(validator_1_addr, v1_msgs);
     }
     let test_manager = Arc::new(RwLock::new(test_manager));
@@ -6148,7 +6382,9 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
         {
             let prev_output = test_manager.previous_output.clone().unwrap();
             if let Messages::Rotation(ref msgs) = wrong_messages {
-                test_manager.rotation_messages.insert(addr_2, msgs.clone());
+                test_manager
+                    .current_rotation_messages
+                    .insert(addr_2, msgs.clone());
             }
             test_manager
                 .try_sign_rotation_messages(&prev_output, addr_2, &wrong_messages)
@@ -6162,7 +6398,9 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
             let manager = other_managers.get_mut(&addr_2).unwrap();
             let prev_output = manager.previous_output.clone().unwrap();
             if let Messages::Rotation(ref msgs) = correct_messages {
-                manager.rotation_messages.insert(addr_2, msgs.clone());
+                manager
+                    .current_rotation_messages
+                    .insert(addr_2, msgs.clone());
             }
             own_sig = manager
                 .try_sign_rotation_messages(&prev_output, addr_2, &correct_messages)
@@ -6175,7 +6413,9 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
             let signer = other_managers.get_mut(&addr_1).unwrap();
             let signer_prev = signer.previous_output.clone().unwrap();
             if let Messages::Rotation(ref msgs) = correct_messages {
-                signer.rotation_messages.insert(addr_2, msgs.clone());
+                signer
+                    .current_rotation_messages
+                    .insert(addr_2, msgs.clone());
             }
             signer
                 .try_sign_rotation_messages(&signer_prev, addr_2, &correct_messages)
@@ -6206,7 +6446,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
             let prev_output = manager.previous_output.clone().unwrap();
             let msgs = manager.create_rotation_messages(&prev_output, &mut rng);
             let rotation_messages = Messages::Rotation(msgs.clone());
-            manager.rotation_messages.insert(addr_3, msgs);
+            manager.current_rotation_messages.insert(addr_3, msgs);
             let own_sig = manager
                 .try_sign_rotation_messages(&prev_output, addr_3, &rotation_messages)
                 .unwrap();
@@ -6218,7 +6458,9 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
             let signer = other_managers.get_mut(&addr_1).unwrap();
             let signer_prev = signer.previous_output.clone().unwrap();
             if let Messages::Rotation(ref msgs) = rotation_messages {
-                signer.rotation_messages.insert(addr_3, msgs.clone());
+                signer
+                    .current_rotation_messages
+                    .insert(addr_3, msgs.clone());
             }
             signer
                 .try_sign_rotation_messages(&signer_prev, addr_3, &rotation_messages)
@@ -6246,7 +6488,7 @@ async fn test_run_key_rotation_recovers_from_hash_mismatch() {
         for (dealer, msgs) in &correct_rotation_msgs {
             if let Messages::Rotation(rot_msgs) = msgs {
                 ref_manager
-                    .rotation_messages
+                    .current_rotation_messages
                     .insert(*dealer, rot_msgs.clone());
             }
             ref_manager
@@ -6352,7 +6594,7 @@ async fn test_run_key_rotation_with_complaint_recovery() {
             rotation_setup.create_receiver_with_memory_store(cheating_dealer_idx);
         mgr.previous_output = Some(output.clone());
         if let Messages::Rotation(ref msgs) = cheating_rotation_messages {
-            mgr.rotation_messages
+            mgr.current_rotation_messages
                 .insert(cheating_dealer_addr, msgs.clone());
         }
         mgr.try_sign_rotation_messages(&output, cheating_dealer_addr, &cheating_rotation_messages)
@@ -6369,7 +6611,7 @@ async fn test_run_key_rotation_with_complaint_recovery() {
         // Store and process cheating messages (their shares are fine)
         if let Messages::Rotation(ref msgs) = cheating_rotation_messages {
             manager
-                .rotation_messages
+                .current_rotation_messages
                 .insert(cheating_dealer_addr, msgs.clone());
         }
         let sig = manager
@@ -6622,7 +6864,9 @@ async fn test_prepare_previous_output_retrieves_missing_dkg_messages() {
                 .setup
                 .address(rotation_setup.dealer_indices[j]);
             if let Messages::Dkg(dkg_msg) = msg {
-                manager.dkg_messages.insert(dealer_addr, dkg_msg.clone());
+                manager
+                    .current_dkg_messages
+                    .insert(dealer_addr, dkg_msg.clone());
             }
         }
         other_managers_map.insert(rotation_setup.setup.address(i), manager);
@@ -6688,7 +6932,8 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
         let rotation_messages = Messages::Rotation(msgs.clone());
         // Store in all dealers so signers can serve retrieval requests.
         for d in dealers.iter_mut() {
-            d.1.rotation_messages.insert(dealer_addr, msgs.clone());
+            d.1.current_rotation_messages
+                .insert(dealer_addr, msgs.clone());
         }
         dealer_rotation_messages.insert(dealer_addr, msgs);
 
@@ -6784,7 +7029,7 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
 
     // Store rotation messages in receiver's state
     receiver_manager
-        .rotation_messages
+        .current_rotation_messages
         .insert(rotation_dealer_addr, rotation_map.clone());
 
     // Process all shares to get valid outputs
@@ -6973,7 +7218,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
         _ => unreachable!(),
     };
     test_manager
-        .rotation_messages
+        .current_rotation_messages
         .insert(dealer_addr, cheating_map_ref.clone());
 
     // Test party processes cheating message with their CORRECT key, generating a complaint
@@ -7007,7 +7252,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
         manager.previous_output = Some(output.clone());
         // Store the cheating messages - other parties can still process them
         manager
-            .rotation_messages
+            .current_rotation_messages
             .insert(dealer_addr, cheating_map_ref.clone());
         // Other parties process and get valid outputs (their shares are not corrupted)
         manager
@@ -7018,7 +7263,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
 
     // Add dealer to other managers (dealer also has the cheating message since they created it)
     dealer_manager
-        .rotation_messages
+        .current_rotation_messages
         .insert(dealer_addr, cheating_map_ref.clone());
     dealer_manager
         .try_sign_rotation_messages(&dealer_dkg_output, dealer_addr, &cheating_messages)
@@ -7173,7 +7418,7 @@ fn test_handle_complain_request_success() {
     // Responder stores the cheating messages
     if let Messages::Rotation(ref msgs) = cheating_messages {
         responder_manager
-            .rotation_messages
+            .current_rotation_messages
             .insert(dealer_addr, msgs.clone());
     }
 
@@ -7363,7 +7608,7 @@ fn test_dealer_restart_reuses_stored_rotation_messages() {
             .unwrap();
 
         // Clear DKG state to prepare for rotation
-        dealer_manager.dkg_messages.clear();
+        dealer_manager.current_dkg_messages.clear();
         dealer_manager.dealer_outputs.clear();
         rotation_setup.prepare_for_rotation(&mut dealer_manager);
 
@@ -7397,7 +7642,7 @@ fn test_dealer_restart_reuses_stored_rotation_messages() {
     let dkg_output = new_dealer_manager
         .complete_dkg(rotation_setup.certificates.keys().copied())
         .unwrap();
-    new_dealer_manager.dkg_messages.clear();
+    new_dealer_manager.current_dkg_messages.clear();
     new_dealer_manager.dealer_outputs.clear();
     rotation_setup.prepare_for_rotation(&mut new_dealer_manager);
 
@@ -7433,11 +7678,14 @@ fn test_dealer_restart_reuses_stored_rotation_messages() {
 
     // Load into rotation_messages (what would happen on restart)
     new_dealer_manager
-        .rotation_messages
+        .current_rotation_messages
         .insert(dealer_addr, stored_messages.clone());
 
     // Verify the manager would reuse these messages
-    match new_dealer_manager.rotation_messages.get(&dealer_addr) {
+    match new_dealer_manager
+        .current_rotation_messages
+        .get(&dealer_addr)
+    {
         Some(msgs) => {
             assert_eq!(
                 msgs.len(),
@@ -7513,7 +7761,9 @@ fn test_party_restart_uses_stored_rotation_messages() {
     // Verify rotation messages were loaded from store
     for dealer_addr in rotation_messages_map.keys() {
         assert!(
-            party_manager.rotation_messages.contains_key(dealer_addr),
+            party_manager
+                .current_rotation_messages
+                .contains_key(dealer_addr),
             "Rotation messages for dealer {:?} should be loaded from store",
             dealer_addr
         );
@@ -8134,7 +8384,9 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
         // Create rotation messages (encrypted for epoch 101's nodes)
         let msgs = dealer_manager.create_rotation_messages(&dkg_outputs[dealer_idx], &mut rng);
         let rotation_messages = Messages::Rotation(msgs.clone());
-        dealer_manager.rotation_messages.insert(dealer_addr, msgs);
+        dealer_manager
+            .current_rotation_messages
+            .insert(dealer_addr, msgs);
 
         // Self-sign
         let own_sig = dealer_manager
@@ -8745,7 +8997,9 @@ fn test_handle_complain_request_rotation_rederives_output_rejects_invalid_proof(
 
     // Insert rotation messages but do NOT process them (no dealer_outputs)
     if let Messages::Rotation(ref msgs) = rotation_messages {
-        receiver.rotation_messages.insert(dealer_addr, msgs.clone());
+        receiver
+            .current_rotation_messages
+            .insert(dealer_addr, msgs.clone());
     }
 
     // Build complaint
@@ -8858,7 +9112,7 @@ fn test_handle_complain_request_rotation_caches_response() {
     responder.previous_output = Some(responder_dkg_output.clone());
     if let Messages::Rotation(ref msgs) = cheating_messages {
         responder
-            .rotation_messages
+            .current_rotation_messages
             .insert(dealer_addr, msgs.clone());
     }
     responder
@@ -8988,7 +9242,7 @@ fn test_handle_send_messages_request_different_protocols_same_sender_coexist() {
     // Build a DKG message from sender.
     let dealer_mgr = setup.create_dealer_with_message(sender_idx, &mut rng);
     let dkg_message = dealer_mgr
-        .dkg_messages
+        .current_dkg_messages
         .get(&sender_addr)
         .expect("dealer should have stored its own DKG message")
         .clone();
@@ -9105,7 +9359,7 @@ fn test_handle_complain_request_nonce_rederives_output_rejects_invalid_proof() {
     // Insert message manually without processing (no nonce_outputs)
     let mut receiver = setup.create_manager(0);
     receiver
-        .nonce_messages
+        .current_nonce_messages
         .insert((0, dealer_addr), nonce_messages.clone());
 
     let request = ComplainRequest {
@@ -9578,7 +9832,7 @@ async fn test_run_nonce_generation_preserves_other_batch_state() {
             batch_index: fake_batch,
             message: dealer_messages[2].message.clone(),
         };
-        mgr.nonce_messages
+        mgr.current_nonce_messages
             .insert((fake_batch, fake_dealer), fake_msg);
     }
 
@@ -9594,7 +9848,8 @@ async fn test_run_nonce_generation_preserves_other_batch_state() {
 
     let mgr = test_manager.read().unwrap();
     assert!(
-        mgr.nonce_messages.contains_key(&(fake_batch, fake_dealer)),
+        mgr.current_nonce_messages
+            .contains_key(&(fake_batch, fake_dealer)),
         "batch {fake_batch} state must survive run_nonce_generation({batch_index}) — \
          clear block must not return"
     );
@@ -9654,7 +9909,7 @@ async fn test_run_nonce_generation_prunes_old_batch_state() {
     {
         let mut mgr = test_manager.write().unwrap();
         for b in [0u32, 1, 2] {
-            mgr.nonce_messages.insert(
+            mgr.current_nonce_messages.insert(
                 (b, fake_dealer),
                 NonceMessage {
                     batch_index: b,
@@ -9676,15 +9931,15 @@ async fn test_run_nonce_generation_prunes_old_batch_state() {
 
     let mgr = test_manager.read().unwrap();
     assert!(
-        !mgr.nonce_messages.contains_key(&(0, fake_dealer)),
+        !mgr.current_nonce_messages.contains_key(&(0, fake_dealer)),
         "batch 0 entries should be pruned"
     );
     assert!(
-        !mgr.nonce_messages.contains_key(&(1, fake_dealer)),
+        !mgr.current_nonce_messages.contains_key(&(1, fake_dealer)),
         "batch 1 entries should be pruned"
     );
     assert!(
-        mgr.nonce_messages.contains_key(&(2, fake_dealer)),
+        mgr.current_nonce_messages.contains_key(&(2, fake_dealer)),
         "batch 2 entries should be retained (most recent before run_batch_index)"
     );
 }
@@ -9739,7 +9994,7 @@ async fn test_run_as_nonce_party_loads_from_store_after_restart() {
     // but keep the store intact (simulates restart where DB persists).
     let mut test_manager = managers.remove(0);
     let required_weight = 2 * test_manager.mpc_config.max_faulty + 1;
-    test_manager.nonce_messages.clear();
+    test_manager.current_nonce_messages.clear();
     test_manager.dealer_nonce_outputs.clear();
     test_manager.message_responses.clear();
 
@@ -9778,10 +10033,10 @@ async fn test_run_as_nonce_party_loads_from_store_after_restart() {
     // The in-memory cache should have been repopulated from the store
     // (at least for the certified dealers).
     assert!(
-        mgr.nonce_messages.len() >= required_weight as usize,
+        mgr.current_nonce_messages.len() >= required_weight as usize,
         "At least {} nonce messages should be repopulated from store, got {}",
         required_weight,
-        mgr.nonce_messages.len()
+        mgr.current_nonce_messages.len()
     );
 }
 
@@ -9925,10 +10180,10 @@ async fn test_recover_nonce_shares_via_complaint_db_fallback() {
         .unwrap();
 
     // Simulate post-prune state: in-memory cache is empty, DB still has the message.
-    test_manager.nonce_messages.clear();
+    test_manager.current_nonce_messages.clear();
     assert!(
         !test_manager
-            .nonce_messages
+            .current_nonce_messages
             .contains_key(&(batch_index, dealer_addr)),
         "precondition: cache cleared"
     );
