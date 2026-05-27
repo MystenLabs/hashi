@@ -25,7 +25,8 @@ const EBadGuardianPublicKeyLength: vector<u8> = b"Guardian public key must be 32
 #[error(code = 3)]
 const EBadGuardianBtcPublicKeyLength: vector<u8> = b"Guardian BTC public key must be 32 bytes";
 #[error(code = 4)]
-const EGuardianBtcPublicKeyImmutable: vector<u8> = b"Guardian BTC public key cannot be changed once set";
+const EGuardianBtcPublicKeyImmutable: vector<u8> =
+    b"Guardian BTC public key cannot be changed once set";
 
 const PAUSED_KEY: vector<u8> = b"paused";
 const GUARDIAN_URL_KEY: vector<u8> = b"guardian_url";
@@ -120,10 +121,7 @@ public(package) fun assert_valid_guardian_public_key(public_key: &vector<u8>) {
 /// prevents a governance proposal from invalidating every deposit
 /// address already derived against the previous key.
 public(package) fun set_guardian_btc_public_key(self: &mut Config, btc_public_key: vector<u8>) {
-    assert!(
-        btc_public_key.length() == GUARDIAN_BTC_PUBLIC_KEY_LEN,
-        EBadGuardianBtcPublicKeyLength,
-    );
+    assert!(btc_public_key.length() == GUARDIAN_BTC_PUBLIC_KEY_LEN, EBadGuardianBtcPublicKeyLength);
     let existing = self.guardian_btc_public_key();
     if (existing.is_some()) {
         assert!(existing.destroy_some() == btc_public_key, EGuardianBtcPublicKeyImmutable);
