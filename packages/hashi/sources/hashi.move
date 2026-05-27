@@ -132,9 +132,7 @@ entry fun finish_publish(
     };
 
     if (guardian_btc_public_key.is_some()) {
-        self
-            .config_mut()
-            .set_guardian_btc_public_key(guardian_btc_public_key.destroy_some());
+        self.config_mut().set_guardian_btc_public_key(guardian_btc_public_key.destroy_some());
     } else {
         guardian_btc_public_key.destroy_none();
     };

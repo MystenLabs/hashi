@@ -490,9 +490,8 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
     let enclave_btc_pubkey = data
         .enclave_btc_pubkey
         .map(|bytes| {
-            super::BitcoinPubkey::from_slice(bytes.as_ref()).map_err(|e| {
-                InvalidInputs(format!("invalid enclave_btc_pubkey: {e}"))
-            })
+            super::BitcoinPubkey::from_slice(bytes.as_ref())
+                .map_err(|e| InvalidInputs(format!("invalid enclave_btc_pubkey: {e}")))
         })
         .transpose()?;
 

@@ -228,9 +228,8 @@ pub async fn publish_and_init(
     let bitcoin_chain_id_arg = builder.pure(&bitcoin_chain_id_addr);
     let guardian_url_arg = builder.pure(&guardian.map(|g| g.url.as_str()));
     let guardian_public_key_arg = builder.pure(&guardian.map(|g| g.public_key.as_slice()));
-    let guardian_btc_public_key_arg = builder.pure(
-        &guardian.and_then(|g| g.btc_public_key.as_deref()),
-    );
+    let guardian_btc_public_key_arg =
+        builder.pure(&guardian.and_then(|g| g.btc_public_key.as_deref()));
     let confirmation_threshold_arg = builder.pure(&bitcoin_overrides.confirmation_threshold);
     let deposit_time_delay_ms_arg = builder.pure(&bitcoin_overrides.deposit_time_delay_ms);
     let coin_registry_arg = builder.object(
