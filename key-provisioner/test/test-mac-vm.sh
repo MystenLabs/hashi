@@ -24,6 +24,9 @@ tart clone "$image" "$vm_name"
 echo "Setting VM memory to 16 GB"
 tart set "$vm_name" --memory 16384
 
+echo "Setting VM disk to 75 GB"
+tart set "$vm_name" --disk-size 75
+
 echo "Running VM $vm_name"
 tart run --dir=hashi:"$repo_root" "$vm_name" &
 
