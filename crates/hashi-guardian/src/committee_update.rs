@@ -16,16 +16,9 @@ use std::sync::Arc;
 use tracing::error;
 use tracing::info;
 
-/// Advance the guardian's committee from the current epoch N to N+1 (or no-op
-/// if `signed.message().new_committee.epoch <= current_epoch`).
-///
-/// Verifies that the outgoing committee (the guardian's current one) signed
-/// the transition with sufficient weight, then swaps the in-memory committee
-/// atomically. Both successful and rejected attempts are logged to S3 for
-/// audit.
-///
-/// Returns the guardian's committee epoch *after* the call (which equals the
-/// proposed epoch on success, or the unchanged current epoch for a no-op).
+/// Advance the guardian's committee from N to N+1, verifying that the
+/// outgoing committee signed the transition with threshold weight. Idempotent
+/// on already-applied or older transitions. Returns the post-call epoch.
 pub async fn update_committee(
     enclave: Arc<Enclave>,
     signed: HashiSigned<CommitteeTransition>,
@@ -38,8 +31,6 @@ pub async fn update_committee(
     let current_epoch = current.epoch();
     let proposed_epoch = signed.message().new_committee.epoch;
 
-    // Idempotency: silently accept already-applied or older transitions.
-    // Lets the leader's catch-up loop retry without races.
     if proposed_epoch <= current_epoch {
         info!(
             current_epoch,
@@ -48,7 +39,6 @@ pub async fn update_committee(
         return Ok(current_epoch);
     }
 
-    // Strictly sequential transitions. Catch-up walks one epoch at a time.
     if proposed_epoch != current_epoch + 1 {
         let err = InvalidInputs(format!(
             "non-sequential committee transition: current {current_epoch} -> proposed {proposed_epoch}"
@@ -57,25 +47,21 @@ pub async fn update_committee(
         return Err(err);
     }
 
-    // The outgoing committee's threshold is derived from its own weight, not
-    // from `WithdrawalConfig.committee_threshold` — that field is genesis-only.
+    // Threshold is derived from the outgoing committee's own weight, not
+    // from `WithdrawalConfig.committee_threshold` (genesis-only).
     let threshold = certificate_threshold(current.total_weight());
     if let Err(e) = verify_hashi_cert(current.clone(), threshold, &signed) {
         log_failure(&enclave, current_epoch, &signed, &e).await;
         return Err(e);
     }
 
-    // The transition carries a `move_types::Committee` (BCS-stable); convert
-    // back to the in-memory form (which rebuilds the address index, etc.).
-    let new_committee_move = signed.message().new_committee.clone();
-    let new_committee: HashiCommittee = new_committee_move
+    let new_committee: HashiCommittee = signed
+        .message()
+        .new_committee
         .clone()
         .try_into()
         .map_err(|e| InvalidInputs(format!("invalid new committee in transition: {e}")))?;
 
-    // Defensive: the BCS payload's epoch field must match the wire-level
-    // proposed epoch we already checked. Disagreement would indicate a
-    // proto-conversion bug; reject rather than silently re-bind.
     if new_committee.epoch() != proposed_epoch {
         let err = InvalidInputs(format!(
             "new committee epoch ({}) does not match transition epoch ({proposed_epoch})",
@@ -85,9 +71,9 @@ pub async fn update_committee(
         return Err(err);
     }
 
-    // Log success FIRST (immutable audit), then swap in memory. If the S3
-    // write fails, the committee isn't advanced — caller retries.
-    log_success(&enclave, current_epoch, &signed, &new_committee_move).await?;
+    // Log first (immutable audit); only swap in memory if the S3 write
+    // succeeded. Caller retries on log failure.
+    log_success(&enclave, current_epoch, &signed).await?;
     enclave.state.replace_committee(new_committee)?;
 
     info!(
@@ -102,8 +88,8 @@ async fn log_success(
     enclave: &Enclave,
     from_epoch: u64,
     signed: &HashiSigned<CommitteeTransition>,
-    new_committee: &hashi_types::move_types::Committee,
 ) -> GuardianResult<()> {
+    let new_committee = &signed.message().new_committee;
     let msg = CommitteeUpdateLogMessage::Success {
         from_epoch,
         to_epoch: new_committee.epoch,
@@ -157,9 +143,6 @@ mod tests {
     }
 
     fn mock_bls_sk() -> Bls12381PrivateKey {
-        // Deterministic key derived from a fixed seed RNG so tests are
-        // reproducible. We avoid sharing the in-crate `TEST_HASHI_BLS_SK_BYTES`
-        // constant because it's private.
         use rand::SeedableRng;
         let mut rng = rand::rngs::StdRng::seed_from_u64(0x000C_0FFE_EBAD_F00D);
         Bls12381PrivateKey::generate(&mut rng)
@@ -184,8 +167,7 @@ mod tests {
         )
     }
 
-    /// Sign a transition with `signing_epoch` (which becomes the embedded
-    /// epoch in the certificate) over the given `new_committee`.
+    /// Sign a transition with `signing_epoch` over the given `new_committee`.
     fn sign_transition_at(
         signing_epoch: u64,
         new_committee: HashiCommittee,
@@ -234,7 +216,6 @@ mod tests {
     #[tokio::test]
     async fn already_applied_is_noop() {
         let enclave = enclave_at_epoch(5).await;
-        // Try to "advance" to an epoch we're already at — must be a no-op.
         let signed = sign_transition_at(5, committee_at(5));
 
         let new_epoch = update_committee(enclave.clone(), signed).await.unwrap();
@@ -245,7 +226,6 @@ mod tests {
     #[tokio::test]
     async fn non_sequential_rejected() {
         let enclave = enclave_at_epoch(5).await;
-        // Skipping ahead by 2 must be rejected — catch-up walks one epoch at a time.
         let signed = sign_transition_at(5, committee_at(7));
 
         let err = update_committee(enclave.clone(), signed)
@@ -255,16 +235,13 @@ mod tests {
             matches!(err, GuardianError::InvalidInputs(_)),
             "expected InvalidInputs, got {err:?}"
         );
-        // Committee unchanged.
         assert_eq!(enclave.state.get_committee().unwrap().epoch(), 5);
     }
 
     #[tokio::test]
     async fn wrong_signing_epoch_rejected() {
-        // Outgoing committee is at epoch 5, but the signature is made with
-        // signing_epoch = 4 — the guardian must reject because the embedded
-        // epoch doesn't match the current committee.
         let enclave = enclave_at_epoch(5).await;
+        // Signing epoch 4 doesn't match outgoing committee at 5.
         let signed = sign_transition_at(4, committee_at(6));
 
         let err = update_committee(enclave.clone(), signed)

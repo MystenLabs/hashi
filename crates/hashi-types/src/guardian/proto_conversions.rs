@@ -962,10 +962,9 @@ fn output_utxo_wire_to_pb(output: OutputUTXOWire) -> pb::OutputUtxo {
 //   Committee Transition
 // ----------------------------------
 
-/// Convert a `pb::Committee` (wire) into the BCS-stable `move_types::Committee`
-/// form used inside `CommitteeTransition`. Validates the proto into a
-/// `HashiCommittee` first (so member keys round-trip and total_weight
-/// matches), then projects back to the move-typed shape.
+/// Decode the wire `Committee` into the BCS-stable `move_types::Committee`,
+/// going through `HashiCommittee` so member keys and `total_weight` are
+/// validated before we project back.
 fn pb_to_move_committee(c: pb::Committee) -> GuardianResult<crate::move_types::Committee> {
     let hashi_committee = pb_to_hashi_committee(c)?;
     Ok(crate::move_types::Committee::from(&hashi_committee))

@@ -201,8 +201,7 @@ pub struct GetGuardianInfoResponse {
     pub limiter_state: Option<LimiterState>,
     /// Immutable limiter configuration (if initialized).
     pub limiter_config: Option<LimiterConfig>,
-    /// Current committee epoch (if committee initialized). Used by hashi
-    /// nodes to drive `UpdateCommittee` catch-up.
+    /// Current committee epoch (if initialized). Drives `UpdateCommittee` catch-up.
     pub current_committee_epoch: Option<u64>,
 }
 
@@ -243,14 +242,10 @@ pub struct StandardWithdrawalResponse {
     pub enclave_signatures: Vec<BitcoinSignature>,
 }
 
-/// Committee handoff message. Wrapped in `HashiSigned<CommitteeTransition>`
-/// — the outgoing committee N signs `(N, CommitteeTransition)`, authorizing
-/// the guardian to advance to `new_committee` (whose epoch must be N + 1).
-///
-/// `new_committee` is stored in the wire-compatible `move_types::Committee`
-/// form. Hashi and the guardian convert to/from `HashiCommittee` at the
-/// boundary; the BCS serialization matches the Move on-chain layout exactly,
-/// so signatures verify across the boundary.
+/// Committee handoff payload. Wrapped in `HashiSigned<CommitteeTransition>`:
+/// the outgoing committee N signs `(N, transition)` to authorize advancing
+/// to `new_committee` at epoch N+1. Carried in `move_types::Committee` so the
+/// BCS bytes match the Move on-chain layout.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CommitteeTransition {
     pub new_committee: crate::move_types::Committee,

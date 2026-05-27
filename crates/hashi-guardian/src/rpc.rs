@@ -150,11 +150,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         request: Request<proto::SignedCommitteeTransition>,
     ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
-        if self.setup_mode {
-            return Err(Status::failed_precondition(
-                "update_committee is disabled when SETUP_MODE=true",
-            ));
-        }
+        self.require_normal_mode("update_committee")?;
 
         let signed = pb_to_signed_committee_transition(request.into_inner()).map_err(to_status)?;
         let current_committee_epoch =

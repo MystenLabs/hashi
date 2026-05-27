@@ -293,10 +293,8 @@ impl EnclaveState {
         Ok(())
     }
 
-    /// Atomically replace the committee with a new one. Used by the
-    /// `UpdateCommittee` handler after verifying the outgoing committee's
-    /// threshold signature on the transition. Fails if the committee has
-    /// never been initialized (use `set_committee` from `init` for that).
+    /// Atomically replace an already-initialized committee. Used by
+    /// `UpdateCommittee`; fails before `init` has run.
     pub fn replace_committee(&self, committee: HashiCommittee) -> GuardianResult<()> {
         info!(
             "Replacing committee with new committee for epoch {}.",
