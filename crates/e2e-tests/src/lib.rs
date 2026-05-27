@@ -117,7 +117,6 @@ pub struct TestNetworksBuilder {
     /// On-chain config overrides applied after DKG completes, before `build()`
     /// returns. Each entry is run through the full propose/vote/execute flow.
     onchain_config_overrides: Vec<(String, hashi_types::move_types::ConfigValue)>,
-    with_guardian: bool,
 }
 
 impl TestNetworksBuilder {
@@ -135,19 +134,7 @@ impl TestNetworksBuilder {
             hashi_builder: HashiNetworkBuilder::new(),
             bitcoin_builder: BitcoinNodeBuilder::new(),
             onchain_config_overrides,
-            // Guardian is now load-bearing for every deposit and withdrawal,
-            // so e2e tests always spin one up. The opt-in flag is preserved
-            // as a no-op for callers that explicitly request it.
-            with_guardian: true,
         }
-    }
-
-    /// Kept for explicit call-sites that opt in to the guardian. After the
-    /// 2-of-2 deposit cutover this is always on, but the method still
-    /// exists so callers don't have to be updated in lockstep.
-    pub fn with_guardian(mut self) -> Self {
-        self.with_guardian = true;
-        self
     }
 
     pub fn with_nodes(mut self, num_nodes: usize) -> Self {
@@ -261,10 +248,6 @@ impl TestNetworksBuilder {
         // publish, so the on-chain config can pin the right BTC pubkey.
         // Provisioner-init (which needs the hashi DKG output) runs later
         // via `finalize_guardian_harness`.
-        anyhow::ensure!(
-            self.with_guardian,
-            "TestNetworksBuilder requires `with_guardian` after the 2-of-2 cutover",
-        );
         let guardian_harness =
             guardian_harness::GuardianHarness::start(bitcoin::Network::Regtest).await?;
         let guardian_btc_pubkey = guardian_harness.ensure_btc_pubkey()?;

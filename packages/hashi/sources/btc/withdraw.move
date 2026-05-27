@@ -47,11 +47,9 @@ public struct WithdrawalCommitmentMessage has copy, drop, store {
 
 // MESSAGE STEP 3
 //
-// The BLS-certed message MUST bind both signature arrays. If only the
-// MPC sigs were covered, a malicious leader could pair a valid MPC sig
-// set with a garbage guardian sig set and still pass the cert check at
-// the on-chain `sign_withdrawal` call, leaving an unbroadcastable
-// transaction on chain.
+// The cert binds both signature arrays — otherwise a malicious leader
+// could pair valid MPC sigs with garbage guardian sigs and the cert
+// would still pass.
 public struct WithdrawalSignedMessage has copy, drop, store {
     withdrawal_id: address,
     request_ids: vector<address>,
