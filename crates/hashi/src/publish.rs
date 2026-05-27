@@ -105,10 +105,9 @@ stderr: {}",
 pub struct GuardianConfig {
     pub url: String,
     pub public_key: Vec<u8>,
-    /// Optional x-only BTC pubkey of the enclave (32 bytes). When `None`,
-    /// the on-chain `guardian_btc_public_key` field is left unset and
-    /// hashi-server falls back to legacy single-key deposit addresses.
-    /// Once 2-of-2 deposits are turned on, this becomes required.
+    /// X-only enclave BTC pubkey (32 bytes). `None` skips publishing it
+    /// on-chain — hashi-server then falls back to legacy single-key
+    /// deposits until the follow-up cutover.
     pub btc_public_key: Option<Vec<u8>>,
 }
 

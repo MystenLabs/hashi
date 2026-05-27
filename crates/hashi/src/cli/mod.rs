@@ -517,9 +517,8 @@ pub struct PublishOpts {
     #[clap(long)]
     pub guardian_public_key: Option<String>,
 
-    /// Guardian BTC pubkey (x-only, 32 bytes hex). Published on-chain so
-    /// hashi-server can derive 2-of-2 (mpc, guardian) taproot deposit
-    /// addresses. Optional today; required once 2-of-2 deposits ship.
+    /// Guardian BTC pubkey, x-only hex-encoded (32 bytes). Published
+    /// on-chain for 2-of-2 deposit address derivation.
     #[clap(long)]
     pub guardian_btc_public_key: Option<String>,
 

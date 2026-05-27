@@ -62,10 +62,8 @@ pub struct Hashi {
     screener_client: OnceLock<Option<grpc::screener_client::ScreenerClient>>,
     guardian_client: OnceLock<Option<grpc::guardian_client::GuardianClient>>,
     guardian_signing_pubkey: OnceLock<Option<hashi_types::guardian::GuardianPubKey>>,
-    /// X-only BTC pubkey of the enclave, pinned after first successful
-    /// verification against the on-chain `guardian_btc_public_key`. Used
-    /// by deposit-address derivation and withdrawal sighash construction
-    /// once 2-of-2 taproot deposits are live.
+    /// X-only enclave BTC pubkey, pinned after first verification against
+    /// the on-chain `guardian_btc_public_key`.
     guardian_btc_pubkey: OnceLock<Option<hashi_types::guardian::BitcoinPubkey>>,
     local_limiter: OnceLock<Arc<guardian_limiter::LocalLimiter>>,
     /// `(seq, wid)` of the last guardian-finalized withdrawal, for pacing.
@@ -251,10 +249,6 @@ impl Hashi {
             .and_then(|opt| opt.as_ref())
     }
 
-    /// Pinned x-only BTC pubkey of the guardian enclave. Returns `None`
-    /// until [`Hashi::try_seed_guardian_state`] has run and (a) the
-    /// on-chain `guardian_btc_public_key` is set, (b) the live guardian's
-    /// `/info` reports the same value.
     pub fn guardian_btc_pubkey(&self) -> Option<&hashi_types::guardian::BitcoinPubkey> {
         self.guardian_btc_pubkey.get().and_then(|opt| opt.as_ref())
     }
@@ -893,12 +887,8 @@ impl Hashi {
         verify_signing_pub_key_matches(signing_pub_key, expected.as_deref(), &self.metrics)
     }
 
-    /// Verify the `enclave_btc_pubkey` from a fresh `GetGuardianInfo` against
-    /// the on-chain `guardian_btc_public_key` and, on success, pin it in
-    /// `Hashi::guardian_btc_pubkey`. Treated like the Ed25519 key: on-chain
-    /// `None` (legacy chains pre-PR-A) skips the check; live `None` when
-    /// on-chain is `Some` is fatal — the guardian must be at least
-    /// `provisioner_init`-complete before we'll seed.
+    /// BTC-key analogue of [`Self::verify_guardian_signing_pubkey`]. Pins
+    /// the live key on success; only when both sides report `Some`.
     fn verify_and_pin_guardian_btc_pubkey(
         &self,
         live: Option<hashi_types::guardian::BitcoinPubkey>,
@@ -913,9 +903,6 @@ impl Hashi {
         if !verify_btc_pub_key_matches(live.as_ref(), expected.as_deref(), &self.metrics) {
             return false;
         }
-        // Pin only when both sides agree on a Some value — skipping when either
-        // side is None leaves the OnceLock unset so legacy deployments keep
-        // operating without a guardian BTC pubkey until both sides catch up.
         if let Some(live) = live {
             let _ = self.guardian_btc_pubkey.set(Some(live));
         }
@@ -1081,12 +1068,9 @@ fn verify_signing_pub_key_matches(
     false
 }
 
-/// Same shape as [`verify_signing_pub_key_matches`] but for the
-/// enclave's BTC pubkey. On-chain `None` skips the check (legacy
-/// chains pre-this-PR). On-chain `Some` requires the live guardian to
-/// report the same value; absent (`live = None`) is treated as fatal
-/// because the on-chain key was set by an operator who saw the live
-/// guardian return it at deploy time.
+/// BTC-key analogue of [`verify_signing_pub_key_matches`]. Extra fatal
+/// case: when the on-chain key is `Some` but the live guardian doesn't
+/// return one — the deploy must have come from a guardian that did.
 fn verify_btc_pub_key_matches(
     live: Option<&hashi_types::guardian::BitcoinPubkey>,
     expected: Option<&[u8]>,
@@ -1473,9 +1457,7 @@ mod test {
     fn verify_btc_pub_key_matches_skips_when_expected_absent() {
         let pk = random_btc_pubkey();
         let metrics = fresh_metrics();
-        // Pre-feature chains have no on-chain BTC key — skip the check.
         assert!(crate::verify_btc_pub_key_matches(Some(&pk), None, &metrics));
-        // Same when the live guardian is also absent.
         assert!(crate::verify_btc_pub_key_matches(None, None, &metrics));
         assert_eq!(btc_key_mismatch_count(&metrics), 0);
         assert_eq!(btc_key_missing_count(&metrics), 0);

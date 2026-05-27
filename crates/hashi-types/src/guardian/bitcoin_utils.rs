@@ -543,8 +543,7 @@ fn compute_taproot_artifacts(
     (address_script, leaf_hash)
 }
 
-/// Bridge deposit address for the 2-of-2 enclave/hashi taproot script-path
-/// (`tr(NUMS, multi_a(2, enclave, derived_hashi))`).
+/// Deposit address for `tr(NUMS, multi_a(2, enclave, derived_hashi))`.
 pub fn two_of_two_taproot_script_path_address(
     enclave_pubkey: &BitcoinPubkey,
     hashi_master_pubkey: &BitcoinPubkey,
@@ -555,11 +554,7 @@ pub fn two_of_two_taproot_script_path_address(
         .address(network)
 }
 
-/// Artifacts needed to spend a 2-of-2 enclave/hashi taproot output via the
-/// script path: the tap leaf script (used for the witness), the control
-/// block proving the leaf is part of the taptree, and the leaf hash (used
-/// when constructing the sighash). Mirrors
-/// [`single_key_taproot_script_path_spend_artifacts`].
+/// 2-of-2 sibling of [`single_key_taproot_script_path_spend_artifacts`].
 pub fn two_of_two_taproot_script_path_spend_artifacts(
     enclave_pubkey: &BitcoinPubkey,
     hashi_master_pubkey: &BitcoinPubkey,

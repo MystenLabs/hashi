@@ -131,7 +131,7 @@ fun test_set_guardian_btc_public_key_rejects_wrong_length() {
     let bad_pk = vector::tabulate!(31, |i| (i as u8));
     config::set_guardian_btc_public_key(hashi.config_mut(), bad_pk);
 
-    abort // unreachable
+    std::unit_test::destroy(hashi);
 }
 
 #[test, expected_failure(abort_code = ::hashi::config::EGuardianBtcPublicKeyImmutable)]
@@ -142,10 +142,9 @@ fun test_set_guardian_btc_public_key_rejects_rotation() {
     let first = vector::tabulate!(32, |i| (i as u8));
     let second = vector::tabulate!(32, |i| ((i + 1) as u8));
     config::set_guardian_btc_public_key(hashi.config_mut(), first);
-    // Different value must abort.
     config::set_guardian_btc_public_key(hashi.config_mut(), second);
 
-    abort // unreachable
+    std::unit_test::destroy(hashi);
 }
 
 #[test]
