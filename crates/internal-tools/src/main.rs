@@ -14,6 +14,7 @@ use hashi::onchain::OnchainState;
 
 mod bootstrap_guardian;
 mod dump_utxos;
+mod fetch_guardian_info;
 mod key_recovery;
 mod sweep_utxos;
 mod utxo_csv;
@@ -59,6 +60,10 @@ enum Commands {
         config: ConfigArgs,
         #[command(flatten)]
         args: bootstrap_guardian::Args,
+    },
+    FetchGuardianInfo {
+        #[command(flatten)]
+        args: fetch_guardian_info::Args,
     },
 }
 
@@ -114,5 +119,6 @@ async fn main() -> anyhow::Result<()> {
                     .context("failed to connect to Sui RPC")?;
             bootstrap_guardian::run(args, &onchain_state).await
         }
+        Commands::FetchGuardianInfo { args } => fetch_guardian_info::run(args).await,
     }
 }

@@ -20,10 +20,13 @@ const PACKAGE_VERSION: u64 = 1;
 const EVersionDisabled: vector<u8> = b"Version disabled";
 #[error(code = 1)]
 const EDisableCurrentVersion: vector<u8> = b"Cannot disable current version";
+#[error(code = 2)]
+const EBadGuardianPublicKeyLength: vector<u8> = b"Guardian public key must be 32 bytes";
 
 const PAUSED_KEY: vector<u8> = b"paused";
 const GUARDIAN_URL_KEY: vector<u8> = b"guardian_url";
 const GUARDIAN_PUBLIC_KEY_KEY: vector<u8> = b"guardian_public_key";
+const GUARDIAN_PUBLIC_KEY_LEN: u64 = 32;
 const EMERGENCY_PAUSE_THRESHOLD_BPS_KEY: vector<u8> = b"governance_emergency_pause_threshold_bps";
 const EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY: vector<u8> =
     b"governance_emergency_unpause_threshold_bps";
@@ -93,6 +96,7 @@ public(package) fun guardian_public_key(self: &Config): Option<vector<u8>> {
 }
 
 public(package) fun set_guardian(self: &mut Config, url: String, public_key: vector<u8>) {
+    assert!(public_key.length() == GUARDIAN_PUBLIC_KEY_LEN, EBadGuardianPublicKeyLength);
     self.upsert(GUARDIAN_URL_KEY, config_value::new_string(url));
     self.upsert(GUARDIAN_PUBLIC_KEY_KEY, config_value::new_bytes(public_key));
 }
