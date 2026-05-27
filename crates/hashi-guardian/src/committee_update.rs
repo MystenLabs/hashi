@@ -22,9 +22,7 @@ pub async fn update_committee(
     enclave: Arc<Enclave>,
     signed: HashiSigned<CommitteeTransition>,
 ) -> GuardianResult<u64> {
-    // Serialize the read/log/replace sequence — without this, a stalled
-    // call validated against epoch E could resume after newer calls
-    // moved the committee past E+1 and overwrite it with a stale value.
+    // Serialize so a stalled call can't roll the committee backwards.
     let _update_guard = enclave.state.committee_update_lock.lock().await;
 
     if !enclave.is_fully_initialized() {
@@ -194,7 +192,6 @@ mod tests {
             network: Network::Regtest,
             committee: committee_at(epoch),
             master_pubkey: kp.x_only_public_key().0,
-            // Test committee has a single member with weight 10.
             withdrawal_config: WithdrawalConfig {
                 committee_threshold: 10,
                 refill_rate_sats_per_sec: 0,
@@ -263,9 +260,6 @@ mod tests {
     async fn replace_committee_rejects_stale_expected_epoch() {
         let enclave = enclave_at_epoch(5).await;
 
-        // The on-disk epoch is 5; replacing with an `expected_current_epoch`
-        // of 4 should be rejected so a stale caller can't overwrite a newer
-        // committee even if it bypasses the serializing lock.
         let err = enclave
             .state
             .replace_committee(committee_at(6), 4)

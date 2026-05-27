@@ -58,10 +58,8 @@ pub struct EnclaveConfig {
 pub struct EnclaveState {
     /// Current Hashi committee.
     committee: RwLock<Option<Arc<HashiCommittee>>>,
-    /// Serializes `update_committee` so its read/log/replace sequence is
-    /// atomic. Without this, a stalled call validated against epoch E
-    /// could resume after newer updates moved the committee past E+1 and
-    /// overwrite it with a stale committee.
+    /// Serializes `update_committee` so concurrent calls can't race the
+    /// read/log/replace sequence and roll the epoch backwards.
     pub committee_update_lock: tokio::sync::Mutex<()>,
     /// Rate limiter. Set once during provisioner_init.
     /// Uses `Arc<tokio::Mutex>` so the guard can be held across `.await`.
@@ -298,10 +296,8 @@ impl EnclaveState {
         Ok(())
     }
 
-    /// Replace an already-initialized committee. Called from `UpdateCommittee`.
-    /// Rejects the swap unless the in-memory committee is still at
-    /// `expected_current_epoch`, so a stale caller can't roll a newer
-    /// committee backwards even if the serializing lock is bypassed.
+    /// Replace an already-initialized committee. Rejects the swap unless
+    /// the in-memory epoch matches `expected_current_epoch`.
     pub fn replace_committee(
         &self,
         committee: HashiCommittee,

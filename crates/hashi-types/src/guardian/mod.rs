@@ -319,17 +319,14 @@ pub enum WithdrawalLogMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum CommitteeUpdateLogMessage {
-    /// Committee handoff success. The new epoch is `new_committee.epoch`;
-    /// transitions are always `epoch -> epoch + 1` so we don't store
-    /// `to_epoch` (it'd duplicate `new_committee.epoch`).
+    /// Committee handoff success. The new epoch is `new_committee.epoch`.
     Success {
         from_epoch: u64,
         new_committee: crate::move_types::Committee,
         request_sign: CommitteeSignature,
     },
-    /// Committee handoff failure. We store both epochs because a failure
-    /// can arrive with a `proposed_epoch` that isn't `from_epoch + 1`
-    /// (non-sequential transitions are one of the failure modes).
+    /// Committee handoff failure. `proposed_epoch` can diverge from
+    /// `from_epoch + 1` (non-sequential transitions are one failure mode).
     Failure {
         from_epoch: u64,
         proposed_epoch: u64,
