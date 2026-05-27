@@ -19,7 +19,7 @@ use hashi_types::guardian::bitcoin_utils;
 use hashi_types::proto::MemberSignature;
 use thiserror::Error;
 
-fn path_bytes_or_zero(derivation_path: Option<&sui_sdk_types::Address>) -> [u8; 32] {
+pub(crate) fn path_bytes_or_zero(derivation_path: Option<&sui_sdk_types::Address>) -> [u8; 32] {
     derivation_path.map(|p| p.into_inner()).unwrap_or([0u8; 32])
 }
 
