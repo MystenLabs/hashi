@@ -2433,6 +2433,8 @@ impl LeaderService {
         inner: &Arc<Hashi>,
         from_epoch: u64,
     ) -> anyhow::Result<SignedMessage<CommitteeTransition>> {
+        // TODO: hashi committee epochs are sparse — find the next entry in
+        // `committees` instead of assuming `+1`.
         let to_epoch = from_epoch + 1;
         let (from_committee, new_committee) = {
             let onchain = inner.onchain_state();

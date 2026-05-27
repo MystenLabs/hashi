@@ -599,6 +599,8 @@ impl Hashi {
         &self,
         from_epoch: u64,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
+        // TODO: hashi committee epochs are sparse — find the next entry in
+        // `committees` instead of assuming `+1`.
         let to_epoch = from_epoch + 1;
         let validator_address = self
             .config
