@@ -63,8 +63,7 @@ pub struct Hashi {
     guardian_client: OnceLock<Option<grpc::guardian_client::GuardianClient>>,
     guardian_signing_pubkey: OnceLock<Option<hashi_types::guardian::GuardianPubKey>>,
     local_limiter: OnceLock<Arc<guardian_limiter::LocalLimiter>>,
-    /// `(seq, wid)` of the last withdrawal finalized through the guardian,
-    /// paced against the local limiter to avoid reusing a consumed seq.
+    /// `(seq, wid)` of the last guardian-finalized withdrawal, for pacing.
     guardian_last_finalized: RwLock<Option<(u64, sui_sdk_types::Address)>>,
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
