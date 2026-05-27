@@ -142,7 +142,17 @@ pub async fn provisioner_init(
     info!("Share verified.");
 
     // 3) Set state_hash OR make sure whatever was previously set matches. Panics upon mismatch.
-    enclave.check_or_set_state_hash(state_hash)?;
+    info!("Checking state hash.");
+    match enclave.state_hash() {
+        Some(existing_state_hash) if *existing_state_hash != state_hash => {
+            panic!("State hash mismatch")
+        }
+        Some(_) => info!("State hash matches existing."),
+        None => {
+            enclave.set_state_hash(state_hash)?;
+            info!("State hash set.");
+        }
+    }
 
     // MILESTONE: At this point, we are sure it is a legitimate payload (both share & state)
 

@@ -35,6 +35,7 @@ pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuard
         signed_info: enclave.sign(enclave.info()),
         limiter_state,
         limiter_config,
+        encrypted_shares: enclave.latest_encrypted_shares(),
     })
 }
 

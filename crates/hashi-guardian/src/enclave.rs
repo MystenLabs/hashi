@@ -67,11 +67,11 @@ pub struct EnclaveState {
 /// provisioner_init flow completes; the OnceLock flags retain their state.
 #[derive(Default)]
 pub struct Scratchpad {
-    /// The received shares during provisioner_init (non-ceremony mode) or rotate_kps (ceremony mode)
+    /// Shares received during provisioner_init.
     pub shares: tokio::sync::Mutex<Vec<Share>>,
     /// Secret-sharing instance (commitments + N + T) set by operator_init.
     pub secret_sharing_instance: OnceLock<SecretSharingInstance>,
-    /// Hash of the state in ProvisionerInitRequest (non-ceremony mode) or RotateKpsRequest (ceremony mode)
+    /// Hash of the state in ProvisionerInitRequest.
     pub state_hash: OnceLock<[u8; 32]>,
     /// Set once operator_init has successfully written all logs to S3.
     /// This prevents heartbeats from being emitted before operator_init logs.
@@ -85,6 +85,9 @@ pub struct Scratchpad {
     /// finalizes, making it one-shot per enclave instance (the operator
     /// restarts to run another).
     pub ceremony_complete: tokio::sync::Mutex<bool>,
+    /// Encrypted shares produced by the ceremony (`setup_new_key` or
+    /// `rotate_kps`), served to KPs from `get_guardian_info`. Set once.
+    pub latest_encrypted_shares: OnceLock<Vec<KPEncryptedShare>>,
 }
 
 pub struct EphemeralKeyPairs {
@@ -497,24 +500,32 @@ impl Enclave {
             .map_err(|_| InvalidInputs("Secret-sharing instance already set".into()))
     }
 
-    /// Match `state_hash` against the previously-stored hash from earlier
-    /// submissions in the same multi-KP flow. Sets it on the first call;
-    /// panics on mismatch (any divergence between KPs means at least one is
-    /// malicious or misconfigured — refuse to proceed).
-    pub fn check_or_set_state_hash(&self, state_hash: [u8; 32]) -> GuardianResult<()> {
-        match self.scratchpad.state_hash.get() {
-            Some(existing) if *existing != state_hash => {
-                panic!("State hash mismatch")
-            }
-            Some(_) => info!("State hash matches existing."),
-            None => {
-                self.scratchpad
-                    .state_hash
-                    .set(state_hash)
-                    .map_err(|_| InvalidInputs("State hash already set".into()))?;
-                info!("State hash set.");
-            }
-        }
-        Ok(())
+    /// Stash the ceremony's encrypted shares for KPs to fetch via
+    /// `get_guardian_info`. One ceremony per enclave, so this is set once.
+    pub fn set_latest_encrypted_shares(&self, shares: Vec<KPEncryptedShare>) -> GuardianResult<()> {
+        self.scratchpad
+            .latest_encrypted_shares
+            .set(shares)
+            .map_err(|_| InvalidInputs("Latest encrypted shares already set".into()))
+    }
+
+    /// Encrypted shares from the ceremony, or empty if none has run.
+    pub fn latest_encrypted_shares(&self) -> Vec<KPEncryptedShare> {
+        self.scratchpad
+            .latest_encrypted_shares
+            .get()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn state_hash(&self) -> Option<&[u8; 32]> {
+        self.scratchpad.state_hash.get()
+    }
+
+    pub fn set_state_hash(&self, hash: [u8; 32]) -> GuardianResult<()> {
+        self.scratchpad
+            .state_hash
+            .set(hash)
+            .map_err(|_| InvalidInputs("State hash already set".into()))
     }
 }

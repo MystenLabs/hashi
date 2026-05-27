@@ -12,25 +12,17 @@ use hashi_types::guardian::*;
 use std::sync::Arc;
 use tracing::info;
 
-/// Setup-mode rotation flow. Each *current* KP submits one of these. The
-/// enclave digest-matches `state` across the current threshold submissions
-/// (HPKE AAD on the encrypted old share is the same digest), verifies each
-/// old share against the enclave's stored commitments, and on threshold:
-///   1. reconstructs the BTC key in memory,
-///   2. re-splits it with fresh randomness, encrypting to `state.new_kp_pgp_certs`,
-///   3. writes `CeremonyLogMessage` with `sharing_seq = prev + 1`.
-///      New KPs fetch their encrypted shares from there.
-///
-/// The enclave does not persist the reconstructed BTC key — its only job is
-/// to mint the new `CeremonyLogMessage`.
-pub async fn rotate_kps(enclave: Arc<Enclave>, request: RotateKpsRequest) -> GuardianResult<()> {
+/// Operator-relayed setup-mode rotation: the operator submits the current KPs'
+/// encrypted old shares in one call. The enclave verifies them, reconstructs and
+/// re-splits the BTC key to the new KP set, logs the new instance, returns the new shares.
+pub async fn rotate_kps(
+    enclave: Arc<Enclave>,
+    request: RotateKpsRequest,
+) -> GuardianResult<GuardianSigned<RotateKpsResponse>> {
     info!("/rotate_kps - Received request.");
 
-    // Hold the ceremony guard across the whole call so the enclave runs
-    // exactly one ceremony: a concurrent setup_new_key (which also holds
-    // it) can't interleave, and once a rotation finalizes the flag rejects the
-    // remaining (old_n - old_t) old KPs — otherwise they'd re-enter the
-    // finalize branch below and re-split the key at the same sharing_seq.
+    // Hold the ceremony guard for the whole call: blocks a concurrent
+    // setup_new_key, and the flag rejects re-entry after one ceremony finalizes.
     let mut ceremony_complete = enclave.scratchpad.ceremony_complete.lock().await;
     if !enclave.is_operator_init_complete() {
         return Err(InvalidInputs("call operator_init first".into()));
@@ -39,55 +31,39 @@ pub async fn rotate_kps(enclave: Arc<Enclave>, request: RotateKpsRequest) -> Gua
         return Err(InvalidInputs("setup or rotation already complete".into()));
     }
 
-    // Accumulate shares across calls; provisioner_init (which shares this vec)
-    // is disabled in ceremony mode, so only rotate_kps touches it here.
-    let mut received_shares = enclave.decrypted_shares().lock().await;
-    info!("Enclave state validated.");
-
-    let state = request.state();
+    let (encrypted_old_shares, state) = request.into_parts();
 
     let instance = enclave
         .secret_sharing_instance()
         .expect("secret-sharing instance should be set after operator_init");
+    let old_t = instance.threshold();
 
     let sk = enclave.encryption_secret_key();
-    let share_id = request.encrypted_old_share().id;
     let state_hash = state.digest();
-    info!("Share ID: {:?}.", share_id);
 
-    // 1) Decrypt the share (HPKE AAD = state digest)
-    let old_share = decrypt_share(request.encrypted_old_share(), sk, Some(&state_hash))?;
-    info!("Share decrypted.");
-
-    // 2) Verify the share against the enclave's stored commitments
-    instance.commitments().verify_share(&old_share)?;
-    info!("Share verified.");
-
-    // 3) State hash must match across submissions
-    enclave.check_or_set_state_hash(state_hash)?;
-
-    // MILESTONE: legitimate payload (both share & state) confirmed.
-
-    // 4) Persist share, rejecting duplicates
-    if received_shares.iter().any(|s| s.id == old_share.id) {
-        return Err(InvalidInputs("Duplicate share ID".into()));
+    // Decrypt and verify every submission. A share only decrypts if its KP bound
+    // this same `state` as AAD, so the decrypted shares all agree on the target.
+    let mut old_shares: Vec<Share> = Vec::with_capacity(encrypted_old_shares.len());
+    for enc in &encrypted_old_shares {
+        let share = decrypt_share(enc, sk, Some(&state_hash))?;
+        instance.commitments().verify_share(&share)?;
+        if old_shares.iter().any(|s| s.id == share.id) {
+            return Err(InvalidInputs("Duplicate share ID".into()));
+        }
+        old_shares.push(share);
     }
-    received_shares.push(old_share);
-    let count = received_shares.len();
-    let old_t = instance.threshold();
-    info!("Total shares received: {count}/{old_t}.");
+    info!("Verified {}/{old_t} old shares.", old_shares.len());
 
-    // 5) On threshold: reconstruct, re-split, emit new CeremonyLogMessage
-    if count >= old_t {
-        let shares_vec: Vec<Share> = received_shares.iter().cloned().collect();
-        finalize_rotation(&enclave, &shares_vec, instance, request.into_state()).await?;
-
-        // Clear shares as we are done using them
-        received_shares.clear();
-        *ceremony_complete = true;
+    if old_shares.len() < old_t {
+        return Err(InvalidInputs(format!(
+            "need at least {old_t} shares, got {}",
+            old_shares.len()
+        )));
     }
 
-    Ok(())
+    let response = finalize_rotation(&enclave, &old_shares, instance, state).await?;
+    *ceremony_complete = true;
+    Ok(response)
 }
 
 async fn finalize_rotation(
@@ -95,20 +71,18 @@ async fn finalize_rotation(
     old_shares: &[Share],
     old_instance: &SecretSharingInstance,
     state: RotateKpsState,
-) -> GuardianResult<()> {
+) -> GuardianResult<GuardianSigned<RotateKpsResponse>> {
     info!("Threshold reached, reconstructing BTC key.");
 
     let k256_sk =
         combine_shares(old_shares, old_instance.threshold()).expect("threshold shares reach");
 
-    let new_params = state.new_params();
+    let (new_kp_pgp_certs, new_params) = state.into_parts();
     let n = new_params.num_shares();
     let t = new_params.threshold();
     info!("Re-splitting for {n} new KPs (threshold: {t}).");
-    let new_certs = state
-        .new_kp_pgp_certs()
-        .iter()
-        .cloned()
+    let new_certs = new_kp_pgp_certs
+        .into_iter()
         .map(PgpPublicCert::new)
         .collect::<GuardianResult<Vec<_>>>()?;
 
@@ -116,7 +90,7 @@ async fn finalize_rotation(
     // future stays Send.
     let (encrypted_shares, share_commitments) = {
         let mut rng = rand::thread_rng();
-        split_and_encrypt_for_kps(&k256_sk, &new_certs, new_params, &mut rng)
+        split_and_encrypt_for_kps(&k256_sk, &new_certs, &new_params, &mut rng)
     };
 
     let new_sharing_seq = old_instance.sharing_seq() + 1;
@@ -125,13 +99,14 @@ async fn finalize_rotation(
     info!("Writing CeremonyLogMessage sharing_seq={new_sharing_seq} to ceremony/.");
     enclave
         .log_ceremony(CeremonyLogMessage {
-            encrypted_shares,
             secret_sharing_instance: new_secret_sharing_instance,
         })
         .await?;
 
+    enclave.set_latest_encrypted_shares(encrypted_shares.clone())?;
+
     info!("Rotation complete.");
-    Ok(())
+    Ok(enclave.sign(RotateKpsResponse { encrypted_shares }))
 }
 
 #[cfg(test)]
@@ -169,60 +144,94 @@ mod tests {
         RotateKpsState::new(mock_pgp_certs_armored(TEST_N), TEST_N, TEST_T).unwrap()
     }
 
-    /// Assert the rotation captured a single ceremony/ log at
-    /// `sharing_seq = 1` with the expected instance params and one PGP-armored
-    /// share per new KP.
+    /// Bundle one submission per share, all bound to `state.digest()` as AAD —
+    /// i.e. what the operator assembles from the current KPs.
+    fn build_request(
+        shares: &[Share],
+        enclave: &Enclave,
+        state: RotateKpsState,
+    ) -> RotateKpsRequest {
+        let submissions = shares
+            .iter()
+            .map(|s| {
+                RotateKpsRequest::build_from_share_and_state(
+                    s,
+                    enclave.encryption_public_key(),
+                    &state,
+                    &mut rand::thread_rng(),
+                )
+            })
+            .collect();
+        RotateKpsRequest::new(submissions, state)
+    }
+
+    /// Run one rotation and return its verified response shares.
+    async fn rotate_and_verify(
+        enclave: &Arc<Enclave>,
+        req: RotateKpsRequest,
+    ) -> Vec<KPEncryptedShare> {
+        let signed = rotate_kps(enclave.clone(), req).await.expect("ok");
+        signed
+            .verify(&enclave.signing_pubkey())
+            .expect("response signed by enclave")
+            .encrypted_shares
+    }
+
+    /// Assert the rotation returned `new_n` PGP-armored shares and produced
+    /// exactly one `ceremony/` log at `sharing_seq = 1` carrying the instance
+    /// only (no ciphertexts).
     ///
     /// TODO: strengthen this (and setup_new_key's test) to decrypt the armored
     /// shares with the new KPs' PGP secret keys and verify they reconstruct the
     /// original BTC key, once a PGP-decrypt test helper exists.
-    fn assert_rotation_output(captures: &CapturedPuts, new_n: usize, new_t: usize) {
+    fn assert_rotation_output(
+        captures: &CapturedPuts,
+        response_shares: &[KPEncryptedShare],
+        new_n: usize,
+        new_t: usize,
+    ) {
+        assert_eq!(response_shares.len(), new_n);
+        for enc in response_shares {
+            assert!(
+                enc.armored_ciphertext
+                    .starts_with("-----BEGIN PGP MESSAGE-----"),
+                "expected a PGP-armored share in the response"
+            );
+        }
+
         let captured = captures.lock().unwrap();
-        let ss_logs: Vec<_> = captured
+        let ceremony_logs: Vec<_> = captured
             .iter()
             .filter(|(k, _)| k.starts_with("ceremony/"))
             .collect();
-        assert_eq!(ss_logs.len(), 1, "expected one ceremony/ log");
-        let (key, body) = ss_logs[0];
-
+        assert_eq!(ceremony_logs.len(), 1, "expected one ceremony/ log");
+        let (key, body) = ceremony_logs[0];
         assert!(
             key.starts_with("ceremony/00000000000000000001-"),
             "expected sharing_seq=1, got key {key}"
         );
+        assert!(
+            !std::str::from_utf8(body)
+                .unwrap()
+                .contains("BEGIN PGP MESSAGE"),
+            "ceremony log must not contain ciphertexts"
+        );
 
         let record: LogRecord = serde_json::from_slice(body).unwrap();
-        let LogMessage::Ceremony(ss) = record.message else {
+        let LogMessage::Ceremony(ceremony) = record.message else {
             panic!("expected Ceremony variant");
         };
-        assert_eq!(ss.secret_sharing_instance.sharing_seq(), 1);
-        assert_eq!(ss.secret_sharing_instance.num_shares(), new_n);
-        assert_eq!(ss.secret_sharing_instance.threshold(), new_t);
-        assert_eq!(ss.encrypted_shares.len(), new_n);
-        for enc in &ss.encrypted_shares {
-            assert!(
-                enc.armored_ciphertext
-                    .starts_with("-----BEGIN PGP MESSAGE-----"),
-                "expected a PGP-armored share"
-            );
-        }
+        assert_eq!(ceremony.secret_sharing_instance.sharing_seq(), 1);
+        assert_eq!(ceremony.secret_sharing_instance.num_shares(), new_n);
+        assert_eq!(ceremony.secret_sharing_instance.threshold(), new_t);
     }
 
     #[tokio::test]
     async fn happy_path_threshold_reached() {
         let (_sk, shares, captures, enclave) = setup_rotation_enclave().await;
-        let state = RotateKpsState::new(mock_pgp_certs_armored(TEST_N), TEST_N, TEST_T).unwrap();
-
-        for share in shares.iter().take(TEST_T) {
-            let req = RotateKpsRequest::build_from_share_and_state(
-                share,
-                enclave.encryption_public_key(),
-                state.clone(),
-                &mut rand::thread_rng(),
-            );
-            rotate_kps(enclave.clone(), req).await.expect("ok");
-        }
-
-        assert_rotation_output(&captures, TEST_N, TEST_T);
+        let req = build_request(&shares[..TEST_T], &enclave, build_state());
+        let response_shares = rotate_and_verify(&enclave, req).await;
+        assert_rotation_output(&captures, &response_shares, TEST_N, TEST_T);
     }
 
     #[tokio::test]
@@ -230,119 +239,118 @@ mod tests {
         // Old (n=5, t=3); rotate to new (n=3, t=2).
         let (_sk, shares, captures, enclave) = setup_rotation_enclave().await;
         let state = RotateKpsState::new(mock_pgp_certs_armored(3), 3, 2).unwrap();
-
-        for share in shares.iter().take(TEST_T) {
-            let req = RotateKpsRequest::build_from_share_and_state(
-                share,
-                enclave.encryption_public_key(),
-                state.clone(),
-                &mut rand::thread_rng(),
-            );
-            rotate_kps(enclave.clone(), req).await.expect("ok");
-        }
-
-        assert_rotation_output(&captures, 3, 2);
+        let req = build_request(&shares[..TEST_T], &enclave, state);
+        let response_shares = rotate_and_verify(&enclave, req).await;
+        assert_rotation_output(&captures, &response_shares, 3, 2);
     }
 
     #[tokio::test]
-    async fn rejects_submissions_after_complete() {
+    async fn rejects_second_call_after_complete() {
         let (_sk, shares, captures, enclave) = setup_rotation_enclave().await;
-        let state = build_state();
 
-        // Reach threshold → rotation finalizes.
-        for share in shares.iter().take(TEST_T) {
-            let req = RotateKpsRequest::build_from_share_and_state(
-                share,
-                enclave.encryption_public_key(),
-                state.clone(),
-                &mut rand::thread_rng(),
-            );
-            rotate_kps(enclave.clone(), req).await.expect("ok");
-        }
+        // First call reaches threshold and finalizes.
+        let req = build_request(&shares[..TEST_T], &enclave, build_state());
+        rotate_kps(enclave.clone(), req).await.expect("ok");
 
-        // A remaining old KP submits after completion: rejected, not re-split.
-        let late = RotateKpsRequest::build_from_share_and_state(
-            &shares[TEST_T],
-            enclave.encryption_public_key(),
-            state,
-            &mut rand::thread_rng(),
-        );
-        let err = rotate_kps(enclave, late).await.expect_err("should reject");
+        // A second call is rejected outright — no re-split.
+        let req2 = build_request(&shares[..TEST_T], &enclave, build_state());
+        let err = rotate_kps(enclave, req2).await.expect_err("should reject");
         assert!(matches!(err, InvalidInputs(_)));
 
-        // Exactly one ceremony/ log — finalization happened once.
         let captured = captures.lock().unwrap();
-        let ss_count = captured
+        let count = captured
             .iter()
             .filter(|(k, _)| k.starts_with("ceremony/"))
             .count();
-        assert_eq!(ss_count, 1, "rotation must finalize exactly once");
+        assert_eq!(count, 1, "rotation must finalize exactly once");
     }
 
     #[tokio::test]
-    async fn rejects_duplicate_share_id() {
+    async fn rejects_duplicate_share_id_in_batch() {
         let (_sk, shares, _captures, enclave) = setup_rotation_enclave().await;
         let state = build_state();
+        let mut rng = rand::thread_rng();
+        // Two submissions from the same KP (same share id).
+        let submissions = vec![
+            RotateKpsRequest::build_from_share_and_state(
+                &shares[0],
+                enclave.encryption_public_key(),
+                &state,
+                &mut rng,
+            ),
+            RotateKpsRequest::build_from_share_and_state(
+                &shares[0],
+                enclave.encryption_public_key(),
+                &state,
+                &mut rng,
+            ),
+            RotateKpsRequest::build_from_share_and_state(
+                &shares[1],
+                enclave.encryption_public_key(),
+                &state,
+                &mut rng,
+            ),
+        ];
+        let req = RotateKpsRequest::new(submissions, state);
 
-        let req1 = RotateKpsRequest::build_from_share_and_state(
-            &shares[0],
-            enclave.encryption_public_key(),
-            state.clone(),
-            &mut rand::thread_rng(),
-        );
-        rotate_kps(enclave.clone(), req1).await.unwrap();
-
-        // Same KP submits again.
-        let req2 = RotateKpsRequest::build_from_share_and_state(
-            &shares[0],
-            enclave.encryption_public_key(),
-            state,
-            &mut rand::thread_rng(),
-        );
-        let err = rotate_kps(enclave, req2).await.expect_err("should fail");
+        let err = rotate_kps(enclave, req).await.expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
     }
 
     #[tokio::test]
-    #[should_panic(expected = "State hash mismatch")]
-    async fn rejects_mismatched_state() {
+    async fn rejects_below_threshold() {
+        let (_sk, shares, _captures, enclave) = setup_rotation_enclave().await;
+        // Only T-1 submissions.
+        let req = build_request(&shares[..TEST_T - 1], &enclave, build_state());
+        let err = rotate_kps(enclave, req).await.expect_err("should fail");
+        assert!(matches!(err, InvalidInputs(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_share_with_mismatched_aad() {
+        // A submission bound to a different `state` won't decrypt under the
+        // request's `state` AAD, so the whole request is rejected gracefully
+        // (no panic — the old cross-call state-hash check is gone).
         let (_sk, shares, _captures, enclave) = setup_rotation_enclave().await;
         let state1 = build_state();
-        // Different `new_kp_pgp_certs` ⇒ different digest.
         let state2 = build_state();
         assert_ne!(state1.new_kp_pgp_certs(), state2.new_kp_pgp_certs());
 
-        let req1 = RotateKpsRequest::build_from_share_and_state(
-            &shares[0],
-            enclave.encryption_public_key(),
-            state1,
-            &mut rand::thread_rng(),
-        );
-        rotate_kps(enclave.clone(), req1).await.unwrap();
+        let mut rng = rand::thread_rng();
+        let submissions = vec![
+            RotateKpsRequest::build_from_share_and_state(
+                &shares[0],
+                enclave.encryption_public_key(),
+                &state1,
+                &mut rng,
+            ),
+            RotateKpsRequest::build_from_share_and_state(
+                &shares[1],
+                enclave.encryption_public_key(),
+                &state2,
+                &mut rng,
+            ),
+            RotateKpsRequest::build_from_share_and_state(
+                &shares[2],
+                enclave.encryption_public_key(),
+                &state2,
+                &mut rng,
+            ),
+        ];
+        let req = RotateKpsRequest::new(submissions, state2);
 
-        let req2 = RotateKpsRequest::build_from_share_and_state(
-            &shares[1],
-            enclave.encryption_public_key(),
-            state2,
-            &mut rand::thread_rng(),
-        );
-        let _ = rotate_kps(enclave, req2).await;
+        let err = rotate_kps(enclave, req).await.expect_err("should fail");
+        assert!(matches!(err, InvalidInputs(_)));
     }
 
     #[tokio::test]
     async fn rejects_share_not_matching_commitments() {
         let (_sk, _shares, _captures, enclave) = setup_rotation_enclave().await;
-        let state = build_state();
         let bogus_share = Share {
             id: std::num::NonZeroU16::new(1).unwrap(),
             value: k256::Scalar::from(42u32),
         };
-        let req = RotateKpsRequest::build_from_share_and_state(
-            &bogus_share,
-            enclave.encryption_public_key(),
-            state,
-            &mut rand::thread_rng(),
-        );
+        let req = build_request(std::slice::from_ref(&bogus_share), &enclave, build_state());
         let err = rotate_kps(enclave, req).await.expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
     }
@@ -353,14 +361,7 @@ mod tests {
         let sk = SecretKey::random(&mut rand::thread_rng());
         let params = SecretSharingParams::new(TEST_N, TEST_T).unwrap();
         let shares = split_secret(&sk, &params, &mut rand::thread_rng());
-        let state = build_state();
-
-        let req = RotateKpsRequest::build_from_share_and_state(
-            &shares[0],
-            enclave.encryption_public_key(),
-            state,
-            &mut rand::thread_rng(),
-        );
+        let req = build_request(&shares[..TEST_T], &enclave, build_state());
         let err = rotate_kps(enclave, req).await.expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
     }

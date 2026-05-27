@@ -26,7 +26,7 @@ Where:
 - `init` logs are per-session and deterministic by semantic message kind.
 - `heartbeat` logs are hour-partitioned and strictly ordered per session.
 - `withdraw` logs are hour-partitioned. Successes are seq-sorted within a bucket so the KP rotating in the next enclave can recover limiter state by reading the lexicographically last success key.
-- `ceremony` logs are flat (not date-partitioned). Each entry is a `CeremonyLogMessage { encrypted_shares, secret_sharing_instance }` written by `setup_new_key` (genesis, `sharing_seq=0`) or `rotate_kps` (each rotation, `sharing_seq=prev+1`). KPs read the lexicographically last entry to learn the current authoritative instance (commitments + N + T) and to fetch their encrypted shares.
+- `ceremony` logs are flat (not date-partitioned). Each entry is a `CeremonyLogMessage { secret_sharing_instance }` written by `setup_new_key` (genesis, `sharing_seq=0`) or `rotate_kps` (each rotation, `sharing_seq=prev+1`). KPs read the lexicographically last entry to learn the current authoritative instance (commitments + N + T). The log does not carry the encrypted shares; KPs fetch their ciphertexts from the `setup_new_key` / `rotate_kps` response or from `get_guardian_info`, decrypt them, and verify the result against the instance's per-share commitments.
 
 ## Why this layout
 

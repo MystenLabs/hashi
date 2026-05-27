@@ -102,6 +102,8 @@ pub enum IntentType {
     StandardWithdrawalResponse = 2,
     /// Intent for GuardianInfo
     GuardianInfo = 3,
+    /// Intent for RotateKpsResponse
+    RotateKpsResponse = 4,
 }
 
 /// Trait for types that can be signed, providing domain separation via an intent.
@@ -187,22 +189,30 @@ pub struct ProvisionerInitState {
     hashi_btc_master_pubkey: BitcoinPubkey,
 }
 
-/// Setup-mode rotation request. Each *current* KP submits one of these.
+/// Setup-mode rotation request, assembled by the operator from the current KPs'
+/// encrypted old shares (each bound to `state.digest()` as AAD) and the shared
+/// rotation target `state`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RotateKpsRequest {
-    encrypted_old_share: GuardianEncryptedShare,
+    encrypted_old_shares: Vec<GuardianEncryptedShare>,
     state: RotateKpsState,
 }
 
-/// The portion of a `RotateKpsRequest` that must agree across all T old KPs
-/// (digest-matched in-enclave). Asymmetry between old and new (`n`, `t`) is
-/// allowed.
+/// The shared rotation target all current KPs authorize. Each binds
+/// `state.digest()` as HPKE AAD on its submission, so the enclave only decrypts
+/// ones that agree on it. Old/new (`n`, `t`) may differ.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RotateKpsState {
     /// Armored OpenPGP certs for the new KP set, sorted to a canonical order
     /// (see `RotateKpsState::new`). Length equals `new_params.num_shares()`.
     new_kp_pgp_certs: Vec<String>,
     new_params: SecretSharingParams,
+}
+
+/// `EnclaveSigned<T>`. The new KP set's encrypted shares, returned by `rotate_kps`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct RotateKpsResponse {
+    pub encrypted_shares: Vec<KPEncryptedShare>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -214,9 +224,14 @@ pub struct GetGuardianInfoResponse {
     /// Signed guardian info
     pub signed_info: GuardianSigned<GuardianInfo>,
     /// Current rate limiter state (if initialized).
+    /// TODO: Move to signed?
     pub limiter_state: Option<LimiterState>,
     /// Immutable limiter configuration (if initialized).
+    /// TODO: Move to signed?
     pub limiter_config: Option<LimiterConfig>,
+    /// Encrypted shares from the ceremony (empty in non-ceremony mode); KPs
+    /// fetch their share here and verify it against the instance commitments.
+    pub encrypted_shares: Vec<KPEncryptedShare>,
 }
 
 /// TODO: Add network?
@@ -270,14 +285,11 @@ pub enum LogMessage {
     Ceremony(Box<CeremonyLogMessage>),
 }
 
-/// Written to `ceremony/` by `setup_new_key` (genesis, `sharing_seq=0`) or
-/// `rotate_kps` (rotation, `sharing_seq=prev+1`) to advertise the current
-/// authoritative share state to KPs. See
-/// `crates/hashi-guardian/README.md` for the canonical S3 key layout.
+/// The current authoritative share state, written to `ceremony/` each ceremony.
+/// Carries only the secret-sharing instance; ciphertexts are delivered out-of-band
+/// and verified against its commitments. TODO: add a ciphertext hash if delivery audit is ever needed.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct CeremonyLogMessage {
-    // TODO: Remove encryption's from S3 => Return to operator or serve on get_guardian_info
-    pub encrypted_shares: Vec<KPEncryptedShare>,
     pub secret_sharing_instance: SecretSharingInstance,
 }
 
@@ -375,6 +387,10 @@ impl SigningIntent for StandardWithdrawalResponse {
 
 impl SigningIntent for GuardianInfo {
     const INTENT: IntentType = IntentType::GuardianInfo;
+}
+
+impl SigningIntent for RotateKpsResponse {
+    const INTENT: IntentType = IntentType::RotateKpsResponse;
 }
 
 impl S3Config {
@@ -602,41 +618,36 @@ impl RotateKpsState {
 }
 
 impl RotateKpsRequest {
-    pub fn new(encrypted_old_share: GuardianEncryptedShare, state: RotateKpsState) -> Self {
+    pub fn new(encrypted_old_shares: Vec<GuardianEncryptedShare>, state: RotateKpsState) -> Self {
         Self {
-            encrypted_old_share,
+            encrypted_old_shares,
             state,
         }
     }
 
-    /// Build by encrypting `share` to `enclave_pub_key` with `state.digest()`
-    /// bound as HPKE AAD — so the share is cryptographically tied to the
-    /// specific rotation target the KP is authorizing.
+    /// Encrypt one KP's `share` to `enclave_pub_key` with `state.digest()` bound
+    /// as HPKE AAD — tying the share to the specific rotation target that KP is
+    /// authorizing. Each current KP produces one of these; the operator bundles
+    /// them into a `RotateKpsRequest`.
     pub fn build_from_share_and_state<R: CryptoRng + RngCore>(
         share: &Share,
         enclave_pub_key: &EncPubKey,
-        state: RotateKpsState,
+        state: &RotateKpsState,
         rng: &mut R,
-    ) -> Self {
-        let state_hash = state.digest();
-        let encrypted_old_share = encrypt_share(share, enclave_pub_key, Some(&state_hash), rng);
-        RotateKpsRequest::new(encrypted_old_share, state)
+    ) -> GuardianEncryptedShare {
+        encrypt_share(share, enclave_pub_key, Some(&state.digest()), rng)
     }
 
-    pub fn encrypted_old_share(&self) -> &GuardianEncryptedShare {
-        &self.encrypted_old_share
+    pub fn encrypted_old_shares(&self) -> &[GuardianEncryptedShare] {
+        &self.encrypted_old_shares
     }
 
     pub fn state(&self) -> &RotateKpsState {
         &self.state
     }
 
-    pub fn into_state(self) -> RotateKpsState {
-        self.state
-    }
-
-    pub fn into_parts(self) -> (GuardianEncryptedShare, RotateKpsState) {
-        (self.encrypted_old_share, self.state)
+    pub fn into_parts(self) -> (Vec<GuardianEncryptedShare>, RotateKpsState) {
+        (self.encrypted_old_shares, self.state)
     }
 }
 

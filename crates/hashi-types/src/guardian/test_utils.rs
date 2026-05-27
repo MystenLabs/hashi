@@ -15,6 +15,7 @@ use super::OperatorInitRequest;
 use super::PgpPublicCert;
 use super::ProvisionerInitRequest;
 use super::ProvisionerInitState;
+use super::RotateKpsResponse;
 use super::S3BucketInfo;
 use super::S3Config;
 use super::SecretSharingInstance;
@@ -95,6 +96,7 @@ impl GetGuardianInfoResponse {
             signed_info: GuardianSigned::new(info, &signing_key, 1234),
             limiter_state: None,
             limiter_config: None,
+            encrypted_shares: dummy_encrypted_shares(),
         }
     }
 }
@@ -153,6 +155,16 @@ impl GuardianSigned<SetupNewKeyResponse> {
             share_commitments: dummy_commitments(),
         };
 
+        let signing_kp = SigningKey::from([1u8; 32]);
+        GuardianSigned::new(resp, &signing_kp, 0)
+    }
+}
+
+impl GuardianSigned<RotateKpsResponse> {
+    pub fn mock_for_testing() -> Self {
+        let resp = RotateKpsResponse {
+            encrypted_shares: dummy_encrypted_shares(),
+        };
         let signing_kp = SigningKey::from([1u8; 32]);
         GuardianSigned::new(resp, &signing_kp, 0)
     }

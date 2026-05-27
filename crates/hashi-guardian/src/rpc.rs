@@ -94,16 +94,18 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     async fn rotate_kps(
         &self,
         request: Request<proto::RotateKpsRequest>,
-    ) -> Result<Response<proto::RotateKpsResponse>, Status> {
+    ) -> Result<Response<proto::SignedRotateKpsResponse>, Status> {
         self.require_ceremony_mode("rotate_kps")?;
 
         let domain_req: RotateKpsRequest = request.into_inner().try_into().map_err(to_status)?;
 
-        rotate::rotate_kps(self.enclave.clone(), domain_req)
+        let signed = rotate::rotate_kps(self.enclave.clone(), domain_req)
             .await
             .map_err(to_status)?;
 
-        Ok(Response::new(proto::RotateKpsResponse {}))
+        let resp = proto_conversions::rotate_kps_response_signed_to_pb(signed);
+
+        Ok(Response::new(resp))
     }
 
     // Note: operator_init should be available both in setup and normal modes.
