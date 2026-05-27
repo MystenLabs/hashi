@@ -255,9 +255,7 @@ impl Hashi {
     /// until [`Hashi::try_seed_guardian_state`] has run and (a) the
     /// on-chain `guardian_btc_public_key` is set, (b) the live guardian's
     /// `/info` reports the same value.
-    pub fn guardian_btc_pubkey(
-        &self,
-    ) -> Option<&hashi_types::guardian::BitcoinPubkey> {
+    pub fn guardian_btc_pubkey(&self) -> Option<&hashi_types::guardian::BitcoinPubkey> {
         self.guardian_btc_pubkey.get().and_then(|opt| opt.as_ref())
     }
 
@@ -1549,11 +1547,7 @@ mod test {
         let pk = random_btc_pubkey();
         let metrics = fresh_metrics();
         // Pre-feature chains have no on-chain BTC key — skip the check.
-        assert!(crate::verify_btc_pub_key_matches(
-            Some(&pk),
-            None,
-            &metrics
-        ));
+        assert!(crate::verify_btc_pub_key_matches(Some(&pk), None, &metrics));
         // Same when the live guardian is also absent.
         assert!(crate::verify_btc_pub_key_matches(None, None, &metrics));
         assert_eq!(btc_key_mismatch_count(&metrics), 0);
