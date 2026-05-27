@@ -33,6 +33,7 @@ pub use bitcoin::Address as BitcoinAddress;
 pub use bitcoin::secp256k1::Keypair as BitcoinKeypair;
 pub use bitcoin::secp256k1::XOnlyPublicKey as BitcoinPubkey;
 pub use bitcoin::taproot::Signature as BitcoinSignature;
+
 use bitcoin::*;
 use blake2::Blake2b;
 use blake2::Digest;
@@ -42,6 +43,10 @@ pub use ed25519_consensus::Signature as GuardianSignature;
 pub use ed25519_consensus::SigningKey as GuardianSignKeyPair;
 pub use ed25519_consensus::VerificationKey as GuardianPubKey;
 pub use errors::*;
+/// The raw MPC verifying key as a curve point — y-parity preserved.
+/// Used wherever the 2-of-2 descriptor needs to derive a child key that
+/// matches the MPC's signing protocol, which works directly on the raw `G`.
+pub use fastcrypto_tbls::threshold_schnorr::G as HashiMasterG;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
@@ -187,8 +192,10 @@ pub struct ProvisionerInitState {
     withdrawal_config: WithdrawalConfig,
     /// Limiter state (tokens available, timestamp, seq)
     limiter_state: LimiterState,
-    /// Hashi BTC master key used to derive child keys for diff inputs
-    hashi_btc_master_pubkey: BitcoinPubkey,
+    /// Raw MPC verifying key (curve point with y-parity preserved). The
+    /// guardian uses this directly for `derive_verifying_key` so the
+    /// 2-of-2 child key in the leaf script matches the MPC signature.
+    hashi_btc_master_pubkey: HashiMasterG,
 }
 
 /// Setup-mode rotation request, assembled by the operator from the current KPs'
@@ -511,7 +518,7 @@ impl ProvisionerInitState {
         committee: HashiCommittee,
         withdrawal_config: WithdrawalConfig,
         limiter_state: LimiterState,
-        hashi_btc_master_pubkey: BitcoinPubkey,
+        hashi_btc_master_pubkey: HashiMasterG,
     ) -> GuardianResult<Self> {
         // Validate that limiter state is consistent with config.
         if limiter_state.num_tokens_available > withdrawal_config.max_bucket_capacity_sats {
@@ -539,14 +546,7 @@ impl ProvisionerInitState {
         }
     }
 
-    pub fn into_parts(
-        self,
-    ) -> (
-        HashiCommittee,
-        WithdrawalConfig,
-        LimiterState,
-        BitcoinPubkey,
-    ) {
+    pub fn into_parts(self) -> (HashiCommittee, WithdrawalConfig, LimiterState, HashiMasterG) {
         (
             self.committee,
             self.withdrawal_config,
@@ -559,7 +559,7 @@ impl ProvisionerInitState {
         &self.withdrawal_config
     }
 
-    pub fn hashi_btc_master_pubkey(&self) -> BitcoinPubkey {
+    pub fn hashi_btc_master_pubkey(&self) -> HashiMasterG {
         self.hashi_btc_master_pubkey
     }
 
@@ -995,7 +995,7 @@ struct ProvisionerInitStateRepr {
     pub committee: crate::move_types::Committee,
     pub withdrawal_config: WithdrawalConfig,
     pub limiter_state: LimiterState,
-    pub hashi_btc_master_pubkey: BitcoinPubkey,
+    pub hashi_btc_master_pubkey: HashiMasterG,
 }
 
 /// Converter from T -> Self that internally validates addresses

@@ -341,9 +341,7 @@ impl Hashi {
         // 5. Verify change output (if present) goes to hashi root pubkey
         if output_count == request_count + 1 {
             let change_output = &approval.outputs[request_count];
-            let hashi_pubkey = self.get_hashi_pubkey()?;
-            let expected_address =
-                witness_program_from_address(&self.get_deposit_address(&hashi_pubkey, None)?)?;
+            let expected_address = witness_program_from_address(&self.get_deposit_address(None)?)?;
             anyhow::ensure!(
                 change_output.bitcoin_address == expected_address,
                 "Change output does not go to hashi root pubkey"
@@ -836,14 +834,12 @@ impl Hashi {
         unsigned_tx: &bitcoin::Transaction,
         inputs: &[Utxo],
     ) -> anyhow::Result<Vec<[u8; 32]>> {
-        let hashi_pubkey = self.get_hashi_pubkey()?;
         let spend_inputs = inputs
             .iter()
             .map(|input| {
-                let address =
-                    self.get_deposit_address(&hashi_pubkey, input.derivation_path.as_ref())?;
+                let address = self.get_deposit_address(input.derivation_path.as_ref())?;
                 let (_, _, leaf_hash) =
-                    self.deposit_spend_artifacts(&hashi_pubkey, input.derivation_path.as_ref())?;
+                    self.deposit_spend_artifacts(input.derivation_path.as_ref())?;
                 Ok((
                     TxOut {
                         value: Amount::from_sat(input.amount),
@@ -938,11 +934,8 @@ impl Hashi {
         let max_fee_rate = CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD;
         let fee_rate = kyoto_fee_rate.clamp(min_fee_rate, max_fee_rate);
 
-        let hashi_pubkey = self
-            .get_hashi_pubkey()
-            .map_err(WithdrawalCommitmentError::BtcTxBuildFailed)?;
         let change_address = self
-            .get_deposit_address(&hashi_pubkey, None)
+            .get_deposit_address(None)
             .map_err(WithdrawalCommitmentError::BtcTxBuildFailed)?;
 
         let configured_max_inputs = CoinSelectionParams::DEFAULT_MAX_INPUTS;
@@ -1458,17 +1451,14 @@ pub fn build_guardian_withdrawal_request(
     use hashi_types::guardian::bitcoin_utils::OutputUTXO;
     use hashi_types::guardian::bitcoin_utils::TxUTXOs;
 
-    let hashi_pubkey = hashi.get_hashi_pubkey()?;
     let network = hashi.config.bitcoin_network();
 
     let inputs = txn
         .inputs
         .iter()
         .map(|utxo| {
-            let (_, _, leaf_hash) =
-                hashi.deposit_spend_artifacts(&hashi_pubkey, utxo.derivation_path.as_ref())?;
-            let address =
-                hashi.get_deposit_address(&hashi_pubkey, utxo.derivation_path.as_ref())?;
+            let (_, _, leaf_hash) = hashi.deposit_spend_artifacts(utxo.derivation_path.as_ref())?;
+            let address = hashi.get_deposit_address(utxo.derivation_path.as_ref())?;
 
             let outpoint = bitcoin::OutPoint {
                 txid: utxo.id.txid.into(),

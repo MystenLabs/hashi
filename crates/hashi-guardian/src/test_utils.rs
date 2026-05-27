@@ -245,7 +245,7 @@ pub async fn create_operator_initialized_enclave(args: OperatorInitTestArgs) -> 
 pub struct FullyInitializedArgs {
     pub network: Network,
     pub committee: HashiCommittee,
-    pub master_pubkey: BitcoinPubkey,
+    pub master_pubkey: HashiMasterG,
     pub withdrawal_config: WithdrawalConfig,
     pub limiter_state: LimiterState,
 }
@@ -279,7 +279,7 @@ pub fn set_or_get_enclave_btc_pubkey(enclave: &Arc<Enclave>) -> GuardianResult<B
 pub fn finalize_enclave(
     enclave: &Arc<Enclave>,
     committee: HashiCommittee,
-    master_pubkey: BitcoinPubkey,
+    master_pubkey: HashiMasterG,
     withdrawal_config: WithdrawalConfig,
     limiter_state: LimiterState,
 ) -> GuardianResult<()> {
