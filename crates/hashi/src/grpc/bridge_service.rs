@@ -397,10 +397,16 @@ fn parse_withdrawal_tx_signing(
         .iter()
         .map(|bytes| bytes.to_vec())
         .collect();
+    let guardian_signatures: Vec<Vec<u8>> = request
+        .guardian_signatures
+        .iter()
+        .map(|bytes| bytes.to_vec())
+        .collect();
     Ok(WithdrawalTxSigning {
         withdrawal_id,
         request_ids,
         signatures,
+        guardian_signatures,
     })
 }
 

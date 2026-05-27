@@ -136,11 +136,18 @@ pub struct WithdrawalTxCommitment {
 
 /// The data that validators BLS-sign over to store witness signatures on-chain.
 /// This is the step 3 certificate.
+///
+/// MUST bind both signature arrays. The on-chain `sign_withdrawal` entry
+/// then writes them together; without the binding a malicious leader
+/// could pair a valid MPC sig set with a garbage guardian sig set and
+/// the on-chain check would still pass, leaving an unbroadcastable
+/// transaction.
 #[derive(Clone, Debug, serde_derive::Serialize)]
 pub struct WithdrawalTxSigning {
     pub withdrawal_id: Address,
     pub request_ids: Vec<Address>,
     pub signatures: Vec<Vec<u8>>,
+    pub guardian_signatures: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, serde_derive::Serialize)]
@@ -506,8 +513,15 @@ impl Hashi {
 
         anyhow::ensure!(
             message.signatures.len() == txn.inputs.len(),
-            "Signature count ({}) does not match input count ({}) for WithdrawalTransaction {}",
+            "MPC signature count ({}) does not match input count ({}) for WithdrawalTransaction {}",
             message.signatures.len(),
+            txn.inputs.len(),
+            message.withdrawal_id
+        );
+        anyhow::ensure!(
+            message.guardian_signatures.len() == txn.inputs.len(),
+            "Guardian signature count ({}) does not match input count ({}) for WithdrawalTransaction {}",
+            message.guardian_signatures.len(),
             txn.inputs.len(),
             message.withdrawal_id
         );
@@ -515,30 +529,52 @@ impl Hashi {
         let tx = self.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
         let signing_messages = self.withdrawal_signing_messages(&tx, &txn.inputs)?;
         let hashi_pubkey = self.get_hashi_pubkey()?;
+        let guardian_btc_pubkey = self
+            .guardian_btc_pubkey()
+            .copied()
+            .ok_or_else(|| anyhow!("Guardian BTC pubkey not yet pinned; cannot validate withdrawal"))?;
+        let guardian_schnorr_pk = SchnorrPublicKey::from_byte_array(&guardian_btc_pubkey.serialize())
+            .map_err(|e| anyhow!("Failed to convert guardian BTC pubkey: {e}"))?;
 
-        for (i, (sig_bytes, sighash)) in message
+        for (i, ((mpc_sig_bytes, guardian_sig_bytes), sighash)) in message
             .signatures
             .iter()
+            .zip(message.guardian_signatures.iter())
             .zip(signing_messages.iter())
             .enumerate()
         {
-            let arr: &[u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
+            // MPC: verify against the derived hashi child key.
+            let mpc_arr: &[u8; 64] = mpc_sig_bytes.as_slice().try_into().map_err(|_| {
                 anyhow!(
-                    "Signature {i} is not 64 bytes for WithdrawalTransaction {}",
+                    "MPC signature {i} is not 64 bytes for WithdrawalTransaction {}",
                     message.withdrawal_id
                 )
             })?;
-            let sig = SchnorrSignature::from_byte_array(arr)
-                .map_err(|e| anyhow!("Invalid Schnorr signature at input {i}: {e}"))?;
-
+            let mpc_sig = SchnorrSignature::from_byte_array(mpc_arr)
+                .map_err(|e| anyhow!("Invalid MPC Schnorr signature at input {i}: {e}"))?;
             let input_pubkey =
                 self.deposit_pubkey(&hashi_pubkey, txn.inputs[i].derivation_path.as_ref())?;
-            let schnorr_pk = SchnorrPublicKey::from_byte_array(&input_pubkey.serialize())
-                .map_err(|e| anyhow!("Failed to convert pubkey for input {i}: {e}"))?;
+            let mpc_schnorr_pk = SchnorrPublicKey::from_byte_array(&input_pubkey.serialize())
+                .map_err(|e| anyhow!("Failed to convert mpc pubkey for input {i}: {e}"))?;
+            mpc_schnorr_pk
+                .verify(sighash, &mpc_sig)
+                .map_err(|e| anyhow!("MPC signature verification failed for input {i}: {e}"))?;
 
-            schnorr_pk
-                .verify(sighash, &sig)
-                .map_err(|e| anyhow!("Signature verification failed for input {i}: {e}"))?;
+            // Guardian: verify against the on-chain enclave BTC pubkey.
+            // Same sighash — both sigs commit to the same multi_a leaf.
+            let guardian_arr: &[u8; 64] =
+                guardian_sig_bytes.as_slice().try_into().map_err(|_| {
+                    anyhow!(
+                        "Guardian signature {i} is not 64 bytes for WithdrawalTransaction {}",
+                        message.withdrawal_id
+                    )
+                })?;
+            let guardian_sig = SchnorrSignature::from_byte_array(guardian_arr).map_err(|e| {
+                anyhow!("Invalid guardian Schnorr signature at input {i}: {e}")
+            })?;
+            guardian_schnorr_pk
+                .verify(sighash, &guardian_sig)
+                .map_err(|e| anyhow!("Guardian signature verification failed for input {i}: {e}"))?;
         }
 
         self.sign_message_proto(message)
