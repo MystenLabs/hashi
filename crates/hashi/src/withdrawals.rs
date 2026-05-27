@@ -804,10 +804,10 @@ impl Hashi {
         let spend_inputs = inputs
             .iter()
             .map(|input| {
-                let pubkey = self.deposit_pubkey(&hashi_pubkey, input.derivation_path.as_ref())?;
-                let address = self.bitcoin_address_from_pubkey(&pubkey);
+                let address =
+                    self.get_deposit_address(&hashi_pubkey, input.derivation_path.as_ref())?;
                 let (_, _, leaf_hash) =
-                    bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
+                    self.deposit_spend_artifacts(&hashi_pubkey, input.derivation_path.as_ref())?;
                 Ok((
                     TxOut {
                         value: Amount::from_sat(input.amount),
@@ -1429,10 +1429,10 @@ pub fn build_guardian_withdrawal_request(
         .inputs
         .iter()
         .map(|utxo| {
-            let pubkey = hashi.deposit_pubkey(&hashi_pubkey, utxo.derivation_path.as_ref())?;
             let (_, _, leaf_hash) =
-                bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
-            let address = hashi.bitcoin_address_from_pubkey(&pubkey);
+                hashi.deposit_spend_artifacts(&hashi_pubkey, utxo.derivation_path.as_ref())?;
+            let address =
+                hashi.get_deposit_address(&hashi_pubkey, utxo.derivation_path.as_ref())?;
 
             let outpoint = bitcoin::OutPoint {
                 txid: utxo.id.txid.into(),
