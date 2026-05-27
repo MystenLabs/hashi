@@ -609,6 +609,13 @@ impl Config {
             _ => None,
         }
     }
+
+    pub fn guardian_btc_public_key(&self) -> Option<&[u8]> {
+        match self.config.get("guardian_btc_public_key") {
+            Some(ConfigValue::Bytes(v)) => Some(v.as_slice()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug)]
