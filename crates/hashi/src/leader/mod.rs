@@ -1753,7 +1753,6 @@ impl LeaderService {
             txn.inputs.len()
         );
 
-        let hashi_pubkey = inner.get_hashi_pubkey()?;
         for (((input, txn_input), hashi_sig_bytes), guardian_sig_bytes) in tx
             .input
             .iter_mut()
@@ -1762,7 +1761,7 @@ impl LeaderService {
             .zip(raw_guardian_sigs)
         {
             let (script, control_block, _) =
-                inner.deposit_spend_artifacts(&hashi_pubkey, txn_input.derivation_path.as_ref())?;
+                inner.deposit_spend_artifacts(txn_input.derivation_path.as_ref())?;
             let mut witness = bitcoin::Witness::new();
             // multi_a satisfier order: hashi_sig (bottom) then guardian_sig (top).
             witness.push(hashi_sig_bytes);

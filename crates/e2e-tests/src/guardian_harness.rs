@@ -14,6 +14,7 @@ use hashi_guardian::create_operator_initialized_enclave;
 use hashi_guardian::rpc::GuardianGrpc;
 use hashi_types::committee::Committee as HashiCommittee;
 use hashi_types::guardian::BitcoinPubkey;
+use hashi_types::guardian::HashiMasterG;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::WithdrawalConfig;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
@@ -77,7 +78,7 @@ impl GuardianHarness {
     pub async fn finalize(
         &self,
         committee: HashiCommittee,
-        master_pubkey: BitcoinPubkey,
+        master_pubkey: HashiMasterG,
         withdrawal_config: WithdrawalConfig,
         limiter_state: LimiterState,
     ) -> Result<()> {

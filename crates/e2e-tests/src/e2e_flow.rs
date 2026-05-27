@@ -1941,8 +1941,7 @@ mod tests {
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();
         let hbtc_recipient = user_key.public_key().derive_address();
 
-        let deposit_address =
-            hashi.get_deposit_address(&hashi.get_onchain_mpc_pubkey()?, Some(&hbtc_recipient))?;
+        let deposit_address = hashi.get_deposit_address(Some(&hbtc_recipient))?;
 
         // --- Create 500 Bitcoin deposits ---
         // Each deposit is 40,000 sats (above the 30,000 on-chain minimum),
