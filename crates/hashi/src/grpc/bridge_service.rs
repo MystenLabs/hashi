@@ -135,10 +135,7 @@ impl BridgeService for HttpService {
         }))
     }
 
-    /// Validate and BLS-sign a `CommitteeTransition` from `from_epoch` to
-    /// `from_epoch + 1` for the guardian. The transition's `new_committee`
-    /// is reconstructed deterministically from on-chain state — clients
-    /// cannot supply it on the wire.
+    /// Validate and BLS-sign a `CommitteeTransition` for the guardian.
     #[tracing::instrument(
         level = "info",
         skip_all,

@@ -253,10 +253,9 @@ impl LeaderService {
         }
     }
 
-    /// Spawn a one-shot background task that walks the guardian forward
-    /// through any missing committee transitions. Idempotent: if one is
-    /// already running, this is a no-op. The guardian's own idempotency
-    /// makes duplicate transitions across leadership churn safe.
+    /// Spawn a one-shot task that drives the guardian forward to the on-chain
+    /// epoch. No-op if one is already running; the guardian itself is
+    /// idempotent so duplicate transitions across leader churn are safe.
     fn maybe_reconcile_guardian_committee(&mut self) {
         if self.inner.guardian_client().is_none() {
             return;
@@ -2340,45 +2339,32 @@ impl LeaderService {
     // Guardian: committee handoff (post-rotation)
     // ========================================================================
 
-    /// Walk the guardian forward one epoch at a time until its committee
-    /// matches the on-chain epoch. Each step collects a threshold of
-    /// signatures from the OUTGOING committee (using their historical
-    /// per-epoch BLS keys retained in our DB).
+    /// Walk the guardian one epoch at a time until its committee matches
+    /// the on-chain epoch. Each step gathers a threshold cert from the
+    /// outgoing committee using the historical per-epoch BLS keys.
     async fn reconcile_guardian_committee(inner: &Arc<Hashi>) -> anyhow::Result<()> {
         let Some(guardian) = inner.guardian_client() else {
             return Ok(());
         };
 
-        // Bound the catch-up to keep a single iteration well-behaved. A real
-        // catch-up should be at most a couple of epochs.
+        // Real catch-up should be a couple of epochs at most; cap so a
+        // single iteration stays well-behaved.
         const MAX_TRANSITIONS_PER_RECONCILE: usize = 8;
 
         for _ in 0..MAX_TRANSITIONS_PER_RECONCILE {
-            let rpc_start = std::time::Instant::now();
-            let info_pb = match guardian.get_guardian_info().await {
-                Ok(info) => {
-                    inner.metrics.record_guardian_rpc(
-                        crate::metrics::GUARDIAN_RPC_METHOD_GET_GUARDIAN_INFO,
-                        crate::metrics::GUARDIAN_RPC_OUTCOME_OK,
-                        rpc_start.elapsed().as_secs_f64(),
-                    );
-                    info
-                }
-                Err(e) => {
-                    inner.metrics.record_guardian_rpc(
-                        crate::metrics::GUARDIAN_RPC_METHOD_GET_GUARDIAN_INFO,
-                        crate::metrics::GUARDIAN_RPC_OUTCOME_UNAVAILABLE,
-                        rpc_start.elapsed().as_secs_f64(),
-                    );
-                    anyhow::bail!("GetGuardianInfo failed: {e}");
-                }
-            };
+            let info_pb = Self::time_guardian_rpc(
+                inner,
+                crate::metrics::GUARDIAN_RPC_METHOD_GET_GUARDIAN_INFO,
+                guardian.get_guardian_info(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("GetGuardianInfo failed: {e}"))?;
             let info: hashi_types::guardian::GetGuardianInfoResponse = info_pb
                 .try_into()
                 .map_err(|e| anyhow::anyhow!("parse GetGuardianInfoResponse: {e:?}"))?;
             let Some(guardian_epoch) = info.current_committee_epoch else {
-                // Guardian hasn't completed ProvisionerInit yet; nothing to
-                // reconcile until the bootstrap CLI seeds it.
+                // Guardian hasn't completed ProvisionerInit yet; the bootstrap
+                // CLI seeds it.
                 return Ok(());
             };
             inner
@@ -2399,25 +2385,13 @@ impl LeaderService {
             let signed = Self::collect_committee_transition_signatures(inner, from_epoch).await?;
             let proto = signed_committee_transition_to_pb(&signed);
 
-            let rpc_start = std::time::Instant::now();
-            let resp = match guardian.update_committee(proto).await {
-                Ok(resp) => {
-                    inner.metrics.record_guardian_rpc(
-                        crate::metrics::GUARDIAN_RPC_METHOD_UPDATE_COMMITTEE,
-                        crate::metrics::GUARDIAN_RPC_OUTCOME_OK,
-                        rpc_start.elapsed().as_secs_f64(),
-                    );
-                    resp
-                }
-                Err(status) => {
-                    inner.metrics.record_guardian_rpc(
-                        crate::metrics::GUARDIAN_RPC_METHOD_UPDATE_COMMITTEE,
-                        crate::metrics::GUARDIAN_RPC_OUTCOME_UNAVAILABLE,
-                        rpc_start.elapsed().as_secs_f64(),
-                    );
-                    anyhow::bail!("UpdateCommittee failed: {}", status.message());
-                }
-            };
+            let resp = Self::time_guardian_rpc(
+                inner,
+                crate::metrics::GUARDIAN_RPC_METHOD_UPDATE_COMMITTEE,
+                guardian.update_committee(proto),
+            )
+            .await
+            .map_err(|status| anyhow::anyhow!("UpdateCommittee failed: {}", status.message()))?;
             let new_guardian_epoch = resp.current_committee_epoch.unwrap_or(from_epoch);
             inner
                 .metrics
@@ -2429,8 +2403,8 @@ impl LeaderService {
                 "Advanced guardian committee"
             );
 
-            // Defensive: if the guardian didn't advance (e.g., it rejected
-            // silently into a no-op), stop instead of looping.
+            // Defensive: stop if the guardian didn't advance instead of
+            // looping forever.
             if new_guardian_epoch <= from_epoch {
                 anyhow::bail!(
                     "guardian failed to advance: still at {new_guardian_epoch} after sending {}->{}",
@@ -2444,6 +2418,26 @@ impl LeaderService {
              next leader tick will continue"
         );
         Ok(())
+    }
+
+    /// Time an RPC and record the outcome under `method`. OK / Unavailable
+    /// only — callers map specific errors before invoking if they need a
+    /// finer-grained outcome.
+    async fn time_guardian_rpc<F, T, E>(inner: &Arc<Hashi>, method: &str, fut: F) -> Result<T, E>
+    where
+        F: std::future::Future<Output = Result<T, E>>,
+    {
+        let start = std::time::Instant::now();
+        let result = fut.await;
+        let outcome = if result.is_ok() {
+            crate::metrics::GUARDIAN_RPC_OUTCOME_OK
+        } else {
+            crate::metrics::GUARDIAN_RPC_OUTCOME_UNAVAILABLE
+        };
+        inner
+            .metrics
+            .record_guardian_rpc(method, outcome, start.elapsed().as_secs_f64());
+        result
     }
 
     async fn collect_committee_transition_signatures(

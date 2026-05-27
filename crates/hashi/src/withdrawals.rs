@@ -546,8 +546,7 @@ impl Hashi {
 
     // --- Generic BLS signing helper ---
 
-    /// Proto-format BLS signing helper for gRPC responses. Signs at the
-    /// *current* on-chain epoch.
+    /// Proto-format BLS signing helper. Signs at the current on-chain epoch.
     fn sign_message_proto<T: serde::Serialize>(
         &self,
         message: &T,
@@ -555,10 +554,9 @@ impl Hashi {
         self.sign_message_proto_at_epoch(message, self.onchain_state().epoch())
     }
 
-    /// Like `sign_message_proto`, but signs at a specified epoch using that
-    /// epoch's historical signing key from the DB. Used by the committee
-    /// handoff flow, where the OLD committee N signs a transition message
-    /// after the node has already advanced internally to N+1.
+    /// Sign at a specific historical `epoch` using that epoch's signing key
+    /// from the DB. Used by the committee handoff where the outgoing
+    /// committee signs after the node has internally advanced.
     pub(crate) fn sign_message_proto_at_epoch<T: serde::Serialize>(
         &self,
         message: &T,
@@ -597,12 +595,10 @@ impl Hashi {
 
     // --- Guardian: validate and BLS-sign a `CommitteeTransition` ---
 
-    /// As a current/former committee member at `from_epoch`, validate that
-    /// the on-chain committee at `from_epoch + 1` exists and BLS-sign a
-    /// `CommitteeTransition { new_committee }` with the historical
-    /// `from_epoch` signing key. The new-committee payload is built from
-    /// on-chain state — the leader can't trick us into signing an
-    /// attacker-crafted committee.
+    /// Rebuild the `CommitteeTransition { new_committee }` payload from
+    /// on-chain state at `from_epoch + 1` and BLS-sign it with the historical
+    /// `from_epoch` key. Building from chain state means the leader can't
+    /// supply attacker-crafted committee bytes on the wire.
     #[tracing::instrument(level = "info", skip_all, fields(from_epoch))]
     pub fn validate_and_sign_committee_transition(
         &self,

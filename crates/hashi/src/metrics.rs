@@ -52,8 +52,7 @@ pub struct Metrics {
     pub guardian_rpc_total: IntCounterVec,
     pub guardian_rpc_duration_seconds: HistogramVec,
 
-    /// Last-observed committee epoch reported by the guardian's
-    /// `GetGuardianInfo`. Updated by the leader's reconcile task.
+    /// Guardian's committee epoch as of the leader's last reconcile.
     pub guardian_current_committee_epoch: IntGauge,
 
     // Kyoto (Bitcoin light client) metrics
