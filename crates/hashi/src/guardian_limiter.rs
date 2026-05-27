@@ -124,12 +124,9 @@ impl LocalLimiter {
         Ok(())
     }
 
-    /// Overwrite local state with the guardian's authoritative `state`. The
-    /// guardian is the source of truth; this is the recovery path for a mirror
-    /// that has drifted and that the watcher's event stream cannot re-sync on
-    /// its own — e.g. a `WithdrawalSignedEvent` dropped across a
-    /// checkpoint-subscription reconnect, then skipped on redelivery via
-    /// `signatures.is_some()`. Config is immutable and left unchanged.
+    /// Overwrite local state with the guardian's authoritative `state` (the
+    /// recovery path when the watcher's event stream can't re-sync on its own,
+    /// e.g. an event dropped across a checkpoint-subscription reconnect).
     pub fn reconcile_to(&self, state: LimiterState) {
         *self.state.write().unwrap() = state;
     }
@@ -154,17 +151,13 @@ pub(crate) fn should_defer_guardian_finalize(
     last_finalized.is_some_and(|(last_seq, last_wid)| next_seq <= last_seq && wid != last_wid)
 }
 
-/// Consecutive reconcile ticks the local limiter must stay drifted from the
-/// guardian *at the same local seq* before we treat it as a genuine stall. This
-/// rules out normal in-flight lag, where the mirror trails the guardian by a
-/// little but keeps advancing as `WithdrawalSignedEvent`s arrive (so the local
-/// seq changes between ticks and the streak resets).
+/// Consecutive reconcile ticks the mirror must stay drifted *at the same local
+/// seq* before we treat it as a genuine stall (vs. normal in-flight lag, where
+/// `local_seq` keeps advancing between ticks).
 pub(crate) const STALL_RECONCILE_TICKS: u32 = 4;
 
-/// Detects a local limiter that has drifted from the guardian and stayed frozen
-/// long enough to be a genuine stall rather than transient lag. Fed one
-/// observation per reconcile tick; a positive result means the caller should
-/// [`LocalLimiter::reconcile_to`] the guardian's authoritative state.
+/// Detects a frozen mirror over a streak of reconcile ticks; returns `true`
+/// once the streak crosses [`STALL_RECONCILE_TICKS`] and resets afterwards.
 #[derive(Default)]
 pub(crate) struct LimiterStallTracker {
     frozen_at_seq: Option<u64>,
@@ -172,9 +165,6 @@ pub(crate) struct LimiterStallTracker {
 }
 
 impl LimiterStallTracker {
-    /// Record the latest local/guardian seqs; returns true once the mirror has
-    /// been stalled long enough that it should be reconciled. Resets after
-    /// signalling, so the caller reconciles at most once per detected stall.
     pub(crate) fn observe(&mut self, local_seq: u64, guardian_seq: u64) -> bool {
         if local_seq == guardian_seq {
             self.reset();

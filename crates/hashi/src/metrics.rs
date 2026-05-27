@@ -381,7 +381,7 @@ impl Metrics {
             .unwrap(),
             guardian_limiter_reconciled_total: register_int_counter_with_registry!(
                 "hashi_guardian_limiter_reconciled_total",
-                "Times the local limiter was reconciled to the guardian's authoritative state after stalling behind/ahead — recovers a WithdrawalSignedEvent dropped across a checkpoint-subscription reconnect",
+                "Local limiter reconciled to the guardian after a stall (recovers events dropped across a checkpoint-subscription reconnect)",
                 registry,
             )
             .unwrap(),

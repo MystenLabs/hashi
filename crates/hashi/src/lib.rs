@@ -806,8 +806,7 @@ impl Hashi {
         true
     }
 
-    /// GetGuardianInfo RPC, recording the outbound RPC metric. Shared by the
-    /// initial seed and the periodic limiter reconcile. `None` on RPC failure.
+    /// `GetGuardianInfo` RPC + outbound RPC metric; `None` on failure.
     async fn fetch_guardian_info(&self) -> Option<hashi_types::proto::GetGuardianInfoResponse> {
         let client = self.guardian_client()?;
         let rpc_start = std::time::Instant::now();
@@ -834,14 +833,8 @@ impl Hashi {
         }
     }
 
-    /// Re-align the local limiter to the guardian when it has stalled. The
-    /// watcher advances the limiter from the on-chain `WithdrawalSignedEvent`
-    /// stream (the fast path), but that stream can gap across a
-    /// checkpoint-subscription reconnect — `scrape_hashi` re-marks the in-flight
-    /// txn signed, so the redelivered event is skipped via `signatures.is_some()`
-    /// and the mirror is left stuck behind the guardian. The guardian is
-    /// authoritative, so snap to it, but only once `tracker` confirms the drift
-    /// has persisted long enough to not be ordinary in-flight lag.
+    /// Snap the local limiter to the guardian once `tracker` confirms the
+    /// drift has persisted past ordinary in-flight lag.
     async fn reconcile_guardian_limiter(
         &self,
         tracker: &mut guardian_limiter::LimiterStallTracker,
@@ -895,9 +888,7 @@ impl Hashi {
             .await;
             tracing::info!("Guardian bootstrap complete");
 
-            // Reconciliation safety net: re-align the local mirror to the
-            // authoritative guardian whenever the event-driven fast path has
-            // demonstrably stalled (see `reconcile_guardian_limiter`).
+            // Safety net for the event-driven fast path: see `reconcile_guardian_limiter`.
             let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut tracker = guardian_limiter::LimiterStallTracker::default();
