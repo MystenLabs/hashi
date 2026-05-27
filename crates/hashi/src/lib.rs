@@ -880,9 +880,8 @@ impl Hashi {
         }
     }
 
-    /// Forward-reconcile to the guardian immediately, bypassing the stall
-    /// detector. Triggered by a watcher rescrape, where a dropped event likely
-    /// left the mirror behind. Forward-only: the guardian's seq is monotonic.
+    /// Forward-only reconcile triggered by a watcher rescrape (which likely
+    /// dropped an event); skips the stall detector. Guardian seq is monotonic.
     async fn reconcile_guardian_limiter_eager(&self) {
         let Some((limiter, state)) = self.guardian_limiter_and_state().await else {
             return;
