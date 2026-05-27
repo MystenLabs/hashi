@@ -15,8 +15,21 @@
     {
       darwinConfigurations.hashi-guardian-key-provisioner = nix-darwin.lib.darwinSystem {
         system = "aarch64-darwin";
+
         modules = [
+          ({ pkgs, ... }:
           {
+            environment.systemPackages = [
+              pkgs.cargo
+              pkgs.cargo-nextest
+              pkgs.clippy
+              pkgs.helix
+              pkgs.neovim
+              pkgs.rust-analyzer
+              pkgs.rustc
+              pkgs.rustfmt
+            ];
+
             nix.enable = false; # For determinate nix
             nix.settings = {
               substituters = [
@@ -27,51 +40,55 @@
                 "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
               ];
             };
+
             nixpkgs.hostPlatform = "aarch64-darwin";
+
             system.primaryUser = "admin";
             system.stateVersion = 7;
 
-            system.defaults.NSGlobalDomain.NSAutomaticWindowAnimationsEnabled = false;
-            system.defaults.NSGlobalDomain.AppleInterfaceStyle = "Dark";
-
-            system.defaults.CustomUserPreferences = {
-              NSGlobalDomain.ApplePersistenceIgnoreState = true;
-              "com.apple.loginwindow" = {
-                LoginwindowLaunchesRelaunchApps = false;
-                TALLogoutSavesState = false;
+            system.defaults = {
+              CustomUserPreferences = {
+                NSGlobalDomain.ApplePersistenceIgnoreState = true;
+                "com.apple.loginwindow" = {
+                  LoginwindowLaunchesRelaunchApps = false;
+                  TALLogoutSavesState = false;
+                };
               };
-            };
 
-            system.defaults.WindowManager = {
-              StageManagerHideWidgets = true;
-              StandardHideWidgets = true;
-            };
+              NSGlobalDomain = {
+                AppleInterfaceStyle = "Dark";
+                NSAutomaticWindowAnimationsEnabled = false;
+              };
 
-            system.defaults.dock = {
-              autohide = false;
-              orientation = "right";
-              persistent-apps = [
-                "/System/Applications/System Settings.app"
-                "/System/Applications/Utilities/Terminal.app"
-                "/System/Cryptexes/App/System/Applications/Safari.app"
-              ];
-              persistent-others = [ ];
-              show-recents = false;
-            };
+              WindowManager = {
+                StageManagerHideWidgets = true;
+                StandardHideWidgets = true;
+              };
 
-            system.defaults.finder = {
-              AppleShowAllExtensions = true;
-              AppleShowAllFiles = true;
-              FXRemoveOldTrashItems = true;
-              _FXShowPosixPathInTitle = true;
-              _FXSortFoldersFirst = true;
+              dock = {
+                autohide = false;
+                orientation = "right";
+                persistent-apps = [
+                  "/System/Applications/Utilities/Terminal.app"
+                ];
+                persistent-others = [ ];
+                show-recents = false;
+              };
+
+              finder = {
+                AppleShowAllExtensions = true;
+                AppleShowAllFiles = true;
+                FXRemoveOldTrashItems = true;
+                _FXShowPosixPathInTitle = true;
+                _FXSortFoldersFirst = true;
+              };
             };
 
             system.keyboard = {
               enableKeyMapping = true;
               remapCapsLockToEscape = true;
             };
-          }
+          })
         ];
       };
     };
