@@ -1408,12 +1408,7 @@ impl LeaderService {
                 );
                 return Ok(());
             }
-            // Pace guardian finalization: the local limiter only advances on
-            // the prior withdrawal's on-chain `WithdrawalSignedEvent`, but the
-            // guardian advances synchronously, so finalizing a *different* wid
-            // before that catches up would reuse a consumed seq. Same-wid
-            // retries are allowed (replay drives the local advance, and the
-            // response cache serves them idempotently).
+            // Pace guardian finalize on the local limiter to avoid reusing a consumed seq.
             if inner.guardian_client().is_some()
                 && inner.guardian_should_defer_finalize(next_seq, txn.id)
             {
@@ -1464,7 +1459,6 @@ impl LeaderService {
                 seq,
             )
             .await?;
-            // Gate the next (different) finalize on the local limiter catching up.
             inner.record_guardian_finalized(seq, txn.id);
         }
 

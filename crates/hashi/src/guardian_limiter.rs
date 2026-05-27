@@ -134,10 +134,8 @@ fn project_capacity(config: &LimiterConfig, state: &LimiterState, timestamp_secs
         .min(config.max_bucket_capacity)
 }
 
-/// Defer a finalize when the local limiter is still behind a seq the guardian
-/// already consumed for a *different* withdrawal — sending it now would draw a
-/// `seq mismatch`. Same-wid retries are allowed (replay drives the local
-/// advance; the response cache serves them idempotently).
+/// Defer when the local limiter is behind a guardian-consumed seq for a
+/// *different* withdrawal; same-wid retries are served idempotently.
 pub(crate) fn should_defer_guardian_finalize(
     next_seq: u64,
     last_finalized: Option<(u64, sui_sdk_types::Address)>,
@@ -241,15 +239,10 @@ mod tests {
     fn defer_only_for_a_different_wid_at_an_already_consumed_seq() {
         let a = sui_sdk_types::Address::new([1u8; 32]);
         let b = sui_sdk_types::Address::new([2u8; 32]);
-        // Nothing finalized yet -> never defer.
         assert!(!should_defer_guardian_finalize(0, None, a));
-        // Different wid reusing a consumed seq (local limiter behind) -> defer.
         assert!(should_defer_guardian_finalize(5, Some((5, a)), b));
-        // A stale (lower) seq for a different wid -> defer.
         assert!(should_defer_guardian_finalize(4, Some((5, a)), b));
-        // Same wid retrying its own seq -> allowed (response cache serves it).
         assert!(!should_defer_guardian_finalize(5, Some((5, a)), a));
-        // Local limiter caught up (next_seq advanced) -> allowed.
         assert!(!should_defer_guardian_finalize(6, Some((5, a)), b));
     }
 }
