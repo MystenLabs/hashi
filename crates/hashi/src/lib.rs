@@ -857,12 +857,8 @@ impl Hashi {
         Some((limiter, state))
     }
 
-    /// Verify a fresh `GetGuardianInfo` `signing_pub_key` against the on-chain
-    /// `guardian_public_key`. Mismatch is fatal: log, bump
-    /// `bootstrap_outcomes{outcome="key_mismatch"}`, return false. On-chain
-    /// `None` (legacy chains without the key) skips the check. Re-reads on
-    /// each call so a corrective `UpdateGuardian` governance proposal heals
-    /// the node without a hashi-server restart.
+    /// Re-reads the on-chain expected key on every call so a corrective
+    /// `UpdateGuardian` proposal heals the node without a restart.
     fn verify_guardian_signing_pubkey(
         &self,
         signing_pub_key: &hashi_types::guardian::GuardianPubKey,
@@ -1328,7 +1324,6 @@ mod test {
     fn verify_signing_pub_key_matches_skips_when_expected_absent() {
         let pubkey = random_signing_pubkey();
         let metrics = fresh_metrics();
-        // Pre-feature chains have no on-chain key — verification is a no-op.
         assert!(crate::verify_signing_pub_key_matches(
             &pubkey, None, &metrics
         ));
@@ -1346,10 +1341,6 @@ mod test {
             Some(&wrong),
             &metrics
         ));
-        assert_eq!(
-            key_mismatch_count(&metrics),
-            1,
-            "mismatch must bump the key_mismatch outcome counter"
-        );
+        assert_eq!(key_mismatch_count(&metrics), 1);
     }
 }

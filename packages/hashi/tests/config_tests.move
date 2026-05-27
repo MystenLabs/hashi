@@ -92,7 +92,7 @@ fun test_set_guardian_rejects_wrong_length_key() {
     let bad_pk = vector::tabulate!(31, |i| (i as u8));
     config::set_guardian(hashi.config_mut(), url, bad_pk);
 
-    abort // unreachable; assertion above must fire
+    std::unit_test::destroy(hashi);
 }
 
 #[test]
