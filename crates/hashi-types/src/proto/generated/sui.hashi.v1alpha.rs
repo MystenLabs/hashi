@@ -175,13 +175,12 @@ pub struct SignGuardianWithdrawalRequestResponse {
     #[prost(message, optional, tag = "1")]
     pub member_signature: ::core::option::Option<MemberSignature>,
 }
-/// Peers reconstruct the same `CommitteeTransition` from on-chain state at
-/// `from_epoch + 1` and BLS-sign it with their historical epoch-`from_epoch`
-/// signing key. No new committee bytes on the wire — peers can't be tricked
-/// into signing an attacker-crafted committee.
+/// Peers rebuild the `CommitteeTransition` from on-chain state at
+/// `from_epoch + 1` and sign with their historical `from_epoch` BLS key.
+/// No committee bytes travel on the wire.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignCommitteeTransitionRequest {
-    /// The outgoing committee's epoch. Implies new_epoch = from_epoch + 1.
+    /// Outgoing committee epoch (new_epoch = from_epoch + 1).
     #[prost(uint64, tag = "1")]
     pub from_epoch: u64,
 }
@@ -520,8 +519,8 @@ pub mod bridge_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Sign a committee transition from `from_epoch` to `from_epoch + 1` so the
-        /// leader can aggregate a certificate to advance the guardian's committee.
+        /// Sign a committee transition `from_epoch` -> `from_epoch + 1` so the leader
+        /// can build a cert to drive the guardian's `UpdateCommittee`.
         pub async fn sign_committee_transition(
             &mut self,
             request: impl tonic::IntoRequest<super::SignCommitteeTransitionRequest>,
@@ -632,8 +631,8 @@ pub mod bridge_service_server {
             tonic::Response<super::SignWithdrawalConfirmationResponse>,
             tonic::Status,
         >;
-        /// Sign a committee transition from `from_epoch` to `from_epoch + 1` so the
-        /// leader can aggregate a certificate to advance the guardian's committee.
+        /// Sign a committee transition `from_epoch` -> `from_epoch + 1` so the leader
+        /// can build a cert to drive the guardian's `UpdateCommittee`.
         async fn sign_committee_transition(
             &self,
             request: tonic::Request<super::SignCommitteeTransitionRequest>,
