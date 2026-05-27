@@ -766,10 +766,15 @@ impl Hashi {
         let mut signatures_by_input = Vec::with_capacity(signing_messages.len());
         for (input_index, message) in signing_messages.iter().enumerate() {
             let request_id = withdrawal_input_signing_request_id(&txn.id, input_index as u32);
+            // Change UTXOs (`derivation_path = None`) ride the `[0; 32]`
+            // path everywhere else (leaf script, `deposit_pubkey`). MPC
+            // must too — passing `None` signs for master `G`, not the
+            // `derive(G, [0; 32])` child the 2-of-2 leaf binds.
             let derivation_address = txn
                 .inputs
                 .get(input_index)
-                .and_then(|input| input.derivation_path.as_ref().map(|path| path.into_inner()));
+                .map(|input| crate::deposits::path_bytes_or_zero(input.derivation_path.as_ref()))
+                .expect("input_index iterated from signing_messages.len() == txn.inputs.len()");
             let sign_start = std::time::Instant::now();
             let global_presig_index = txn.presig_start_index + input_index as u64;
             let sign_result = signing_manager
@@ -779,7 +784,7 @@ impl Hashi {
                     message,
                     global_presig_index,
                     &beacon,
-                    derivation_address.as_ref(),
+                    Some(&derivation_address),
                     WITHDRAWAL_SIGNING_TIMEOUT,
                     &self.metrics,
                 )
