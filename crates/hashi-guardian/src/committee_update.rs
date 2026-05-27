@@ -3,11 +3,11 @@
 
 use crate::withdraw::verify_hashi_cert;
 use crate::Enclave;
-use hashi_types::committee::certificate_threshold;
 use hashi_types::guardian::CommitteeTransition;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::EnclaveUninitialized;
+use hashi_types::guardian::GuardianError::InternalError;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::HashiCommittee;
@@ -22,6 +22,11 @@ pub async fn update_committee(
     enclave: Arc<Enclave>,
     signed: HashiSigned<CommitteeTransition>,
 ) -> GuardianResult<u64> {
+    // Serialize the read/log/replace sequence — without this, a stalled
+    // call validated against epoch E could resume after newer calls
+    // moved the committee past E+1 and overwrite it with a stale value.
+    let _update_guard = enclave.state.committee_update_lock.lock().await;
+
     if !enclave.is_fully_initialized() {
         return Err(EnclaveUninitialized);
     }
@@ -39,14 +44,16 @@ pub async fn update_committee(
         let err = InvalidInputs(format!(
             "non-sequential committee transition: current {current_epoch} -> proposed {proposed_epoch}"
         ));
-        log_failure(&enclave, current_epoch, &signed, &err).await;
+        log_failure(&enclave, current_epoch, &signed, &err).await?;
         return Err(err);
     }
 
-    // `WithdrawalConfig.committee_threshold` is genesis-only; derive fresh.
-    let threshold = certificate_threshold(current.total_weight());
+    let threshold = enclave
+        .config
+        .committee_threshold()
+        .expect("Committee threshold should be set");
     if let Err(e) = verify_hashi_cert(current.clone(), threshold, &signed) {
-        log_failure(&enclave, current_epoch, &signed, &e).await;
+        log_failure(&enclave, current_epoch, &signed, &e).await?;
         return Err(e);
     }
 
@@ -62,13 +69,16 @@ pub async fn update_committee(
             "new committee epoch ({}) does not match transition epoch ({proposed_epoch})",
             new_committee.epoch()
         ));
-        log_failure(&enclave, current_epoch, &signed, &err).await;
+        log_failure(&enclave, current_epoch, &signed, &err).await?;
         return Err(err);
     }
 
     // Log before the in-memory swap so failed S3 writes don't advance the committee.
     log_success(&enclave, current_epoch, &signed).await?;
-    enclave.state.replace_committee(new_committee)?;
+    enclave
+        .state
+        .replace_committee(new_committee, current_epoch)
+        .expect("committee initialized at current_epoch under the update lock");
 
     info!(
         from_epoch = current_epoch,
@@ -83,11 +93,9 @@ async fn log_success(
     from_epoch: u64,
     signed: &HashiSigned<CommitteeTransition>,
 ) -> GuardianResult<()> {
-    let new_committee = &signed.message().new_committee;
     let msg = CommitteeUpdateLogMessage::Success {
         from_epoch,
-        to_epoch: new_committee.epoch,
-        new_committee: new_committee.clone(),
+        new_committee: signed.message().new_committee.clone(),
         request_sign: signed.committee_signature().clone(),
     };
     enclave.log_committee_update(msg).await
@@ -98,20 +106,24 @@ async fn log_failure(
     from_epoch: u64,
     signed: &HashiSigned<CommitteeTransition>,
     err: &GuardianError,
-) {
+) -> GuardianResult<()> {
+    let proposed_epoch = signed.message().new_committee.epoch;
     let msg = CommitteeUpdateLogMessage::Failure {
         from_epoch,
-        proposed_epoch: signed.message().new_committee.epoch,
+        proposed_epoch,
         request_sign: signed.committee_signature().clone(),
         error: err.clone(),
     };
     if let Err(log_err) = enclave.log_committee_update(msg).await {
         error!(
             from_epoch,
-            proposed_epoch = signed.message().new_committee.epoch,
-            "failed to log committee update failure to S3: {log_err:?}"
+            proposed_epoch, "failed to log committee update failure to S3: {log_err:?}"
         );
+        return Err(InternalError(format!(
+            "Failed to log committee update error {err} due to S3 logging error {log_err}"
+        )));
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -182,8 +194,9 @@ mod tests {
             network: Network::Regtest,
             committee: committee_at(epoch),
             master_pubkey: kp.x_only_public_key().0,
+            // Test committee has a single member with weight 10.
             withdrawal_config: WithdrawalConfig {
-                committee_threshold: 0,
+                committee_threshold: 10,
                 refill_rate_sats_per_sec: 0,
                 max_bucket_capacity_sats: 1_000,
             },
@@ -239,6 +252,24 @@ mod tests {
         let err = update_committee(enclave.clone(), signed)
             .await
             .expect_err("mismatched signing epoch must error");
+        assert!(
+            matches!(err, GuardianError::InvalidInputs(_)),
+            "expected InvalidInputs, got {err:?}"
+        );
+        assert_eq!(enclave.state.get_committee().unwrap().epoch(), 5);
+    }
+
+    #[tokio::test]
+    async fn replace_committee_rejects_stale_expected_epoch() {
+        let enclave = enclave_at_epoch(5).await;
+
+        // The on-disk epoch is 5; replacing with an `expected_current_epoch`
+        // of 4 should be rejected so a stale caller can't overwrite a newer
+        // committee even if it bypasses the serializing lock.
+        let err = enclave
+            .state
+            .replace_committee(committee_at(6), 4)
+            .expect_err("stale expected_current_epoch must error");
         assert!(
             matches!(err, GuardianError::InvalidInputs(_)),
             "expected InvalidInputs, got {err:?}"

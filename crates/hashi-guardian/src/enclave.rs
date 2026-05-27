@@ -58,6 +58,11 @@ pub struct EnclaveConfig {
 pub struct EnclaveState {
     /// Current Hashi committee.
     committee: RwLock<Option<Arc<HashiCommittee>>>,
+    /// Serializes `update_committee` so its read/log/replace sequence is
+    /// atomic. Without this, a stalled call validated against epoch E
+    /// could resume after newer updates moved the committee past E+1 and
+    /// overwrite it with a stale committee.
+    pub committee_update_lock: tokio::sync::Mutex<()>,
     /// Rate limiter. Set once during provisioner_init.
     /// Uses `Arc<tokio::Mutex>` so the guard can be held across `.await`.
     rate_limiter: OnceLock<Arc<tokio::sync::Mutex<RateLimiter>>>,
@@ -294,15 +299,28 @@ impl EnclaveState {
     }
 
     /// Replace an already-initialized committee. Called from `UpdateCommittee`.
-    pub fn replace_committee(&self, committee: HashiCommittee) -> GuardianResult<()> {
+    /// Rejects the swap unless the in-memory committee is still at
+    /// `expected_current_epoch`, so a stale caller can't roll a newer
+    /// committee backwards even if the serializing lock is bypassed.
+    pub fn replace_committee(
+        &self,
+        committee: HashiCommittee,
+        expected_current_epoch: u64,
+    ) -> GuardianResult<()> {
         info!("Replacing committee for epoch {}.", committee.epoch());
 
         let mut guard = self
             .committee
             .write()
             .expect("rwlock should never throw an error");
-        if guard.is_none() {
-            return Err(InvalidInputs("committee not initialized".into()));
+        let current_epoch = guard
+            .as_ref()
+            .ok_or_else(|| InvalidInputs("committee not initialized".into()))?
+            .epoch();
+        if current_epoch != expected_current_epoch {
+            return Err(InvalidInputs(format!(
+                "committee epoch mismatch: expected {expected_current_epoch}, actual {current_epoch}"
+            )));
         }
         *guard = Some(Arc::new(committee));
         Ok(())
@@ -368,6 +386,7 @@ impl Enclave {
             config: EnclaveConfig::new(signing_keys, encryption_keys),
             state: EnclaveState {
                 committee: RwLock::new(None),
+                committee_update_lock: tokio::sync::Mutex::new(()),
                 rate_limiter: OnceLock::new(),
             },
             scratchpad: Scratchpad::default(),

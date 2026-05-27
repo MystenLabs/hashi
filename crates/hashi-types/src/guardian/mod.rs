@@ -319,14 +319,17 @@ pub enum WithdrawalLogMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum CommitteeUpdateLogMessage {
-    /// Committee handoff success
+    /// Committee handoff success. The new epoch is `new_committee.epoch`;
+    /// transitions are always `epoch -> epoch + 1` so we don't store
+    /// `to_epoch` (it'd duplicate `new_committee.epoch`).
     Success {
         from_epoch: u64,
-        to_epoch: u64,
         new_committee: crate::move_types::Committee,
         request_sign: CommitteeSignature,
     },
-    /// Committee handoff failure
+    /// Committee handoff failure. We store both epochs because a failure
+    /// can arrive with a `proposed_epoch` that isn't `from_epoch + 1`
+    /// (non-sequential transitions are one of the failure modes).
     Failure {
         from_epoch: u64,
         proposed_epoch: u64,
@@ -657,24 +660,23 @@ impl WithdrawalLogMessage {
 }
 
 impl CommitteeUpdateLogMessage {
+    /// Success keys lead with the new epoch (zero-padded) so a lex listing
+    /// is epoch-sorted; failures lead with `failure-` so they sort after
+    /// all successes, leaving the lex-last success key as the latest
+    /// successfully-applied epoch.
     pub fn log_name(&self, prefix: &str) -> String {
-        let random_suffix = rand::random::<u32>();
-        let (status, from_epoch, to_epoch) = match self {
-            CommitteeUpdateLogMessage::Success {
-                from_epoch,
-                to_epoch,
-                ..
-            } => ("success", *from_epoch, *to_epoch),
-            CommitteeUpdateLogMessage::Failure {
-                from_epoch,
-                proposed_epoch,
-                ..
-            } => ("failure", *from_epoch, *proposed_epoch),
-        };
-        format!(
-            "{}-{:020}-{:020}-{}-{:08x}.json",
-            prefix, from_epoch, to_epoch, status, random_suffix
-        )
+        match self {
+            CommitteeUpdateLogMessage::Success { new_committee, .. } => {
+                format!("{:020}-{}.json", new_committee.epoch, prefix)
+            }
+            CommitteeUpdateLogMessage::Failure { proposed_epoch, .. } => {
+                let random_suffix = rand::random::<u32>();
+                format!(
+                    "failure-{:020}-{}-{:08x}.json",
+                    proposed_epoch, prefix, random_suffix
+                )
+            }
+        }
     }
 }
 
@@ -704,11 +706,7 @@ impl LogMessage {
                     .to_string()
             }
             LogMessage::SecretSharing(..) => format!("{}/", S3_DIR_SECRET_SHARING),
-            LogMessage::CommitteeUpdate(..) => S3HourScopedDirectory::new(
-                S3_DIR_COMMITTEE_UPDATE,
-                unix_millis_to_seconds(timestamp_ms),
-            )
-            .to_string(),
+            LogMessage::CommitteeUpdate(..) => format!("{}/", S3_DIR_COMMITTEE_UPDATE),
         }
     }
 

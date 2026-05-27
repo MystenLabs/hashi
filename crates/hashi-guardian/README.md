@@ -11,6 +11,8 @@ Canonical key layout:
 - `withdraw/{yyyy}/{mm}/{dd}/{hh}/success-{seq:020}-{session_id}-wid{wid}.json`
 - `withdraw/{yyyy}/{mm}/{dd}/{hh}/failure-{session_id}-wid{wid}-{rand8}.json`
 - `secret_sharing/{sharing_seq:020}-{session_id}.json`
+- `committee-update/{new_epoch:020}-{session_id}.json`
+- `committee-update/failure-{proposed_epoch:020}-{session_id}-{rand8}.json`
 
 Where:
 
@@ -19,6 +21,7 @@ Where:
 - `counter` is a zero-padded decimal sequence number (used in heartbeats only).
 - `seq` (in `withdraw/`) is the zero-padded limiter sequence number consumed by the withdrawal.
 - `sharing_seq` (in `secret_sharing/`) is a zero-padded rotation counter — `setup_new_key` writes `0`; future key-provisioner rotations will append `prev+1`.
+- `new_epoch` / `proposed_epoch` (in `committee-update/`) are the zero-padded committee epoch numbers — `new_epoch` is `from_epoch + 1` for successes; `proposed_epoch` is the requested epoch for failures (may not be `from_epoch + 1`).
 - `rand8` is a random 8-hex suffix to avoid key collisions (failures only — successes are uniquely keyed by seq).
 
 ## Stream semantics
@@ -27,11 +30,12 @@ Where:
 - `heartbeat` logs are hour-partitioned and strictly ordered per session.
 - `withdraw` logs are hour-partitioned. Successes are seq-sorted within a bucket so the KP rotating in the next enclave can recover limiter state by reading the lexicographically last success key.
 - `secret_sharing` logs are flat (not date-partitioned). Each entry is a `SecretSharingLogMessage { encrypted_shares, secret_sharing_instance }` written by `setup_new_key` (genesis, `sharing_seq=0`). KPs read the lexicographically last entry to learn the current authoritative commitments and to fetch their encrypted shares.
+- `committee-update` logs are flat (not date-partitioned). Successes are epoch-sorted; failures lead with `failure-` so all successes sort first — the lex-last non-`failure-` key is the latest successfully-applied epoch.
 
 ## Why this layout
 
 - `init/{session_id}-...` keeps init logs session-addressable.
 - `heartbeat/...` and `withdraw/...` date partitions support efficient hour-based polling.
-- `secret_sharing/` is flat because the consumer always wants "latest"; a lex sort over the whole prefix is cheap and gives that directly.
-- Zero-padding (`{seq:020}` in `withdraw/`, `{sharing_seq:020}` in `secret_sharing/`) makes lexicographic order over the keys equal seq order. The signed log payload embeds the same value, so a fetched object's filename and content can be cross-checked.
-- Prefixes (`init`, `heartbeat`, `withdraw`, `secret_sharing`) allow independent S3 deletion policies.
+- `secret_sharing/` and `committee-update/` are flat because the consumer always wants "latest"; a lex sort over the whole prefix is cheap and gives that directly.
+- Zero-padding (`{seq:020}` in `withdraw/`, `{sharing_seq:020}` in `secret_sharing/`, `{new_epoch:020}` in `committee-update/`) makes lexicographic order over the keys equal seq/epoch order. The signed log payload embeds the same value, so a fetched object's filename and content can be cross-checked.
+- Prefixes (`init`, `heartbeat`, `withdraw`, `secret_sharing`, `committee-update`) allow independent S3 deletion policies.
