@@ -319,17 +319,16 @@ pub enum WithdrawalLogMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum CommitteeUpdateLogMessage {
-    /// Committee handoff success. The new epoch is `new_committee.epoch`.
+    /// `new_committee.epoch` is the applied epoch.
     Success {
-        from_epoch: u64,
         new_committee: crate::move_types::Committee,
         request_sign: CommitteeSignature,
     },
-    /// Committee handoff failure. `proposed_epoch` can diverge from
-    /// `from_epoch + 1` (non-sequential transitions are one failure mode).
+    /// `new_committee` is what was proposed (may have been rejected for a
+    /// non-sequential epoch); the guardian's state at the time is implied
+    /// by the prior `Success` log.
     Failure {
-        from_epoch: u64,
-        proposed_epoch: u64,
+        new_committee: crate::move_types::Committee,
         request_sign: CommitteeSignature,
         error: GuardianError,
     },
@@ -666,11 +665,11 @@ impl CommitteeUpdateLogMessage {
             CommitteeUpdateLogMessage::Success { new_committee, .. } => {
                 format!("{:020}-{}.json", new_committee.epoch, prefix)
             }
-            CommitteeUpdateLogMessage::Failure { proposed_epoch, .. } => {
+            CommitteeUpdateLogMessage::Failure { new_committee, .. } => {
                 let random_suffix = rand::random::<u32>();
                 format!(
                     "failure-{:020}-{}-{:08x}.json",
-                    proposed_epoch, prefix, random_suffix
+                    new_committee.epoch, prefix, random_suffix
                 )
             }
         }

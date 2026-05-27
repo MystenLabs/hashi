@@ -21,7 +21,7 @@ Where:
 - `counter` is a zero-padded decimal sequence number (used in heartbeats only).
 - `seq` (in `withdraw/`) is the zero-padded limiter sequence number consumed by the withdrawal.
 - `sharing_seq` (in `secret_sharing/`) is a zero-padded rotation counter — `setup_new_key` writes `0`; future key-provisioner rotations will append `prev+1`.
-- `new_epoch` / `proposed_epoch` (in `committee-update/`) are the zero-padded committee epoch numbers — `new_epoch` is `from_epoch + 1` for successes; `proposed_epoch` is the requested epoch for failures (may not be `from_epoch + 1`).
+- `new_epoch` / `proposed_epoch` (in `committee-update/`) are the zero-padded committee epoch numbers — `new_epoch` is the just-applied epoch for successes; `proposed_epoch` is the requested epoch for failures (which may have been rejected for being non-sequential).
 - `rand8` is a random 8-hex suffix to avoid key collisions (failures only — successes are uniquely keyed by seq).
 
 ## Stream semantics

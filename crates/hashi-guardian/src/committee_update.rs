@@ -42,7 +42,7 @@ pub async fn update_committee(
         let err = InvalidInputs(format!(
             "non-sequential committee transition: current {current_epoch} -> proposed {proposed_epoch}"
         ));
-        log_failure(&enclave, current_epoch, &signed, &err).await?;
+        log_failure(&enclave, &signed, &err).await?;
         return Err(err);
     }
 
@@ -51,7 +51,7 @@ pub async fn update_committee(
         .committee_threshold()
         .expect("Committee threshold should be set");
     if let Err(e) = verify_hashi_cert(current.clone(), threshold, &signed) {
-        log_failure(&enclave, current_epoch, &signed, &e).await?;
+        log_failure(&enclave, &signed, &e).await?;
         return Err(e);
     }
 
@@ -67,12 +67,12 @@ pub async fn update_committee(
             "new committee epoch ({}) does not match transition epoch ({proposed_epoch})",
             new_committee.epoch()
         ));
-        log_failure(&enclave, current_epoch, &signed, &err).await?;
+        log_failure(&enclave, &signed, &err).await?;
         return Err(err);
     }
 
     // Log before the in-memory swap so failed S3 writes don't advance the committee.
-    log_success(&enclave, current_epoch, &signed).await?;
+    log_success(&enclave, &signed).await?;
     enclave
         .state
         .replace_committee(new_committee, current_epoch)
@@ -88,11 +88,9 @@ pub async fn update_committee(
 
 async fn log_success(
     enclave: &Enclave,
-    from_epoch: u64,
     signed: &HashiSigned<CommitteeTransition>,
 ) -> GuardianResult<()> {
     let msg = CommitteeUpdateLogMessage::Success {
-        from_epoch,
         new_committee: signed.message().new_committee.clone(),
         request_sign: signed.committee_signature().clone(),
     };
@@ -101,22 +99,16 @@ async fn log_success(
 
 async fn log_failure(
     enclave: &Enclave,
-    from_epoch: u64,
     signed: &HashiSigned<CommitteeTransition>,
     err: &GuardianError,
 ) -> GuardianResult<()> {
-    let proposed_epoch = signed.message().new_committee.epoch;
     let msg = CommitteeUpdateLogMessage::Failure {
-        from_epoch,
-        proposed_epoch,
+        new_committee: signed.message().new_committee.clone(),
         request_sign: signed.committee_signature().clone(),
         error: err.clone(),
     };
     if let Err(log_err) = enclave.log_committee_update(msg).await {
-        error!(
-            from_epoch,
-            proposed_epoch, "failed to log committee update failure to S3: {log_err:?}"
-        );
+        error!("failed to log committee update failure to S3: {log_err:?}");
         return Err(InternalError(format!(
             "Failed to log committee update error {err} due to S3 logging error {log_err}"
         )));
