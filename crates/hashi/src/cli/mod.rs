@@ -1025,13 +1025,13 @@ pub async fn run_set_guardian_btc_public_key(
         .btc_public_key
         .strip_prefix("0x")
         .unwrap_or(&opts.btc_public_key);
-    let btc_pubkey = hex::decode(btc_pubkey_hex).context("invalid hex for --btc-public-key")?;
+    let btc_pubkey = hex::decode(btc_pubkey_hex).context("Invalid hex for --btc-public-key")?;
 
-    let package_id: Address = opts.package_id.parse().context("invalid --package-id")?;
+    let package_id: Address = opts.package_id.parse().context("Invalid --package-id")?;
     let hashi_object_id: Address = opts
         .hashi_object_id
         .parse()
-        .context("invalid --hashi-object-id")?;
+        .context("Invalid --hashi-object-id")?;
 
     let signer = crate::config::load_ed25519_private_key_from_path(&opts.keypair)?;
     print_info(&format!(
