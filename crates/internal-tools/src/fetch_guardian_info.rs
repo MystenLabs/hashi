@@ -1,16 +1,18 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Fetch a deployed guardian's signing public key.
+//! Fetch deployed guardian's public keys.
 //!
-//! Calls `GuardianService/GetGuardianInfo` and prints the hex-encoded
-//! Ed25519 `signing_pub_key` to stdout. Used by the deploy workflow to feed
-//! `hashi publish --guardian-public-key` so the key gets recorded on chain.
+//! Calls `GuardianService/GetGuardianInfo` and prints a hex-encoded key
+//! to stdout. Used by the deploy workflow to feed `hashi publish
+//! --guardian-public-key` / `--guardian-btc-public-key` so the keys get
+//! recorded on chain.
 
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use clap::Parser;
+use clap::ValueEnum;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
@@ -20,6 +22,20 @@ pub struct Args {
     /// gRPC endpoint of the deployed guardian (e.g. `http://localhost:3000`).
     #[arg(long, env = "GUARDIAN_ENDPOINT")]
     pub endpoint: String,
+
+    /// Which key to print. Defaults to the Ed25519 signing pub key for
+    /// backwards compatibility with the deploy workflow.
+    #[arg(long, value_enum, default_value_t = Field::SigningPubKey)]
+    pub field: Field,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum Field {
+    /// Ed25519 RPC identity key (32 bytes hex).
+    SigningPubKey,
+    /// X-only BTC pubkey of the enclave (32 bytes hex). Aborts if the
+    /// guardian has not yet completed `provisioner_init`.
+    EnclaveBtcPubkey,
 }
 
 pub async fn run(args: Args) -> Result<()> {
@@ -33,6 +49,19 @@ pub async fn run(args: Args) -> Result<()> {
         .into_inner();
     let info = GetGuardianInfoResponse::try_from(resp)
         .map_err(|e| anyhow!("decode GetGuardianInfoResponse: {e:?}"))?;
-    println!("{}", hex::encode(info.signing_pub_key.as_bytes()));
+    match args.field {
+        Field::SigningPubKey => {
+            println!("{}", hex::encode(info.signing_pub_key.as_bytes()));
+        }
+        Field::EnclaveBtcPubkey => {
+            let btc_pk = info.signed_info.data.enclave_btc_pubkey.ok_or_else(|| {
+                anyhow!(
+                    "guardian /info did not return enclave_btc_pubkey; \
+                     provisioner_init may not have completed"
+                )
+            })?;
+            println!("{}", hex::encode(btc_pk.serialize()));
+        }
+    }
     Ok(())
 }
