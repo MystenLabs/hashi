@@ -352,7 +352,7 @@ impl Metrics {
             .unwrap(),
             guardian_limiter_anchor_events_skipped_total: register_int_counter_with_registry!(
                 "hashi_guardian_limiter_anchor_events_skipped_total",
-                "WithdrawalSignedEvent observations skipped because signatures were already recorded — covers checkpoint-stream redelivery and bootstrap-replay events",
+                "WithdrawalSignedEvent observations skipped as duplicates (checkpoint redelivery or bootstrap replay)",
                 registry,
             )
             .unwrap(),

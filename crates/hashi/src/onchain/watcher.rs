@@ -451,14 +451,10 @@ async fn handle_events(
                 // Advance uses the event's checkpoint timestamp (~sign-time)
                 // rather than `txn.timestamp_ms` (creation time) to stay in
                 // lockstep with the guardian's `last_updated_at`.
-                //
-                // `signatures.is_some()` doubles as a "have we already
-                // accounted for this txn?" flag, set on the first apply
-                // here and by `scrape_hashi` at bootstrap. It keeps the
-                // limiter idempotent if `SubscribeCheckpoints` redelivers
-                // a checkpoint, and it also skips historical events that
-                // the bootstrap snapshot already counted via the
-                // guardian's `next_seq`.
+                // `signatures.is_some()` makes the apply idempotent — set
+                // here on the first observation and by `scrape_hashi` at
+                // bootstrap, so checkpoint redelivery and bootstrap-replay
+                // events are skipped.
                 let (limiter_inputs, pick_to_sign_ms) = {
                     let mut state = state.state_mut();
                     state
