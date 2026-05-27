@@ -39,7 +39,6 @@ use hashi_types::guardian::CommitteeTransition;
 use hashi_types::guardian::GuardianSigned;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalResponse;
-use hashi_types::guardian::bitcoin_utils;
 use hashi_types::guardian::proto_conversions::signed_committee_transition_to_pb;
 use hashi_types::guardian::proto_conversions::signed_standard_withdrawal_request_to_pb;
 use hashi_types::proto::SignCommitteeTransitionRequest;
@@ -1697,7 +1696,15 @@ impl LeaderService {
         }
     }
 
-    /// Rebuild a fully signed Bitcoin transaction from on-chain WithdrawalTransaction
+    /// Rebuild a fully signed Bitcoin transaction from on-chain
+    /// `WithdrawalTransaction` data and broadcast-ready 2-of-2 witness.
+    ///
+    /// Witness layout per input (BIP342 multi_a, verified against
+    /// rust-miniscript's `Terminal::MultiA` satisfier):
+    ///
+    /// ```text
+    /// [hashi_sig, guardian_sig, leaf_script, control_block]
+    /// ```
     fn rebuild_signed_tx_from_onchain(
         inner: &Arc<Hashi>,
         txn: &WithdrawalTransaction,
@@ -1705,15 +1712,24 @@ impl LeaderService {
         let raw_sigs = txn
             .signatures
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No signatures on withdrawal transaction"))?;
+            .ok_or_else(|| anyhow::anyhow!("No MPC signatures on withdrawal transaction"))?;
+        let raw_guardian_sigs = txn.guardian_signatures.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("No guardian signatures on withdrawal transaction")
+        })?;
 
         let mut tx = inner.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
 
         anyhow::ensure!(
             raw_sigs.len() == tx.input.len(),
-            "Signature count mismatch: tx has {} inputs, on-chain has {} signatures",
+            "MPC signature count mismatch: tx has {} inputs, on-chain has {} signatures",
             tx.input.len(),
             raw_sigs.len()
+        );
+        anyhow::ensure!(
+            raw_guardian_sigs.len() == tx.input.len(),
+            "Guardian signature count mismatch: tx has {} inputs, on-chain has {} signatures",
+            tx.input.len(),
+            raw_guardian_sigs.len()
         );
         anyhow::ensure!(
             tx.input.len() == txn.inputs.len(),
@@ -1723,14 +1739,19 @@ impl LeaderService {
         );
 
         let hashi_pubkey = inner.get_hashi_pubkey()?;
-        for ((input, txn_input), sig_bytes) in
-            tx.input.iter_mut().zip(txn.inputs.iter()).zip(raw_sigs)
+        for (((input, txn_input), hashi_sig_bytes), guardian_sig_bytes) in tx
+            .input
+            .iter_mut()
+            .zip(txn.inputs.iter())
+            .zip(raw_sigs)
+            .zip(raw_guardian_sigs)
         {
-            let pubkey = inner.deposit_pubkey(&hashi_pubkey, txn_input.derivation_path.as_ref())?;
             let (script, control_block, _) =
-                bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
+                inner.deposit_spend_artifacts(&hashi_pubkey, txn_input.derivation_path.as_ref())?;
             let mut witness = bitcoin::Witness::new();
-            witness.push(sig_bytes);
+            // multi_a satisfier order: hashi_sig (bottom) then guardian_sig (top).
+            witness.push(hashi_sig_bytes);
+            witness.push(guardian_sig_bytes);
             witness.push(script.to_bytes());
             witness.push(control_block.serialize());
             input.witness = witness;
