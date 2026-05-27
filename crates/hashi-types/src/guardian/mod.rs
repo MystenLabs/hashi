@@ -242,10 +242,9 @@ pub struct StandardWithdrawalResponse {
     pub enclave_signatures: Vec<BitcoinSignature>,
 }
 
-/// Committee handoff payload. Wrapped in `HashiSigned<CommitteeTransition>`:
-/// the outgoing committee N signs `(N, transition)` to authorize advancing
-/// to `new_committee` at epoch N+1. Carried in `move_types::Committee` so the
-/// BCS bytes match the Move on-chain layout.
+/// Committee handoff payload signed by the outgoing committee as
+/// `HashiSigned<CommitteeTransition>`. `new_committee` is the Move BCS
+/// shape so on-chain and guardian signatures match.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CommitteeTransition {
     pub new_committee: crate::move_types::Committee,
@@ -320,14 +319,14 @@ pub enum WithdrawalLogMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum CommitteeUpdateLogMessage {
-    /// Committee was advanced from `from_epoch` to `to_epoch`.
+    /// Committee handoff success
     Success {
         from_epoch: u64,
         to_epoch: u64,
         new_committee: crate::move_types::Committee,
         request_sign: CommitteeSignature,
     },
-    /// Update was rejected. Logged for forensic trail.
+    /// Committee handoff failure
     Failure {
         from_epoch: u64,
         proposed_epoch: u64,

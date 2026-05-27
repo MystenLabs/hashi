@@ -1134,9 +1134,7 @@ pub struct GetGuardianInfoResponse {
     /// Immutable limiter configuration (if initialized).
     #[prost(message, optional, tag = "5")]
     pub limiter_config: ::core::option::Option<LimiterConfig>,
-    /// Current committee epoch (if committee is initialized). Hashi nodes use
-    /// this to detect whether the guardian needs catch-up `UpdateCommittee`
-    /// calls to advance to the on-chain epoch.
+    /// Current committee epoch (if initialized). Drives `UpdateCommittee` catch-up.
     #[prost(uint64, optional, tag = "6")]
     pub current_committee_epoch: ::core::option::Option<u64>,
 }
@@ -1392,8 +1390,7 @@ pub struct StandardWithdrawalResponseData {
     #[prost(bytes = "bytes", repeated, tag = "1")]
     pub enclave_signatures: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
 }
-/// The new committee for epoch (current_epoch + 1). The outgoing committee
-/// signs `(current_epoch, CommitteeTransition)` to authorize the handoff.
+/// Handoff payload. `new_committee.epoch` must equal `current_epoch + 1`.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CommitteeTransition {
     #[prost(message, optional, tag = "1")]
@@ -1403,16 +1400,13 @@ pub struct CommitteeTransition {
 pub struct SignedCommitteeTransition {
     #[prost(message, optional, tag = "1")]
     pub data: ::core::option::Option<CommitteeTransition>,
-    /// Committee signature by the OUTGOING committee. `epoch` inside is the
-    /// outgoing committee's epoch (one less than `data.new_committee.epoch`).
+    /// Outgoing committee's signature; `epoch` is `new_committee.epoch - 1`.
     #[prost(message, optional, tag = "2")]
     pub committee_signature: ::core::option::Option<CommitteeSignature>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct UpdateCommitteeResponse {
-    /// Guardian's current committee epoch after applying (or no-oping on)
-    /// the transition. For idempotent calls — proposed epoch already current
-    /// or older — this echoes the unchanged current epoch.
+    /// Guardian's committee epoch after the call (unchanged on no-op).
     #[prost(uint64, optional, tag = "1")]
     pub current_committee_epoch: ::core::option::Option<u64>,
 }
@@ -1683,10 +1677,7 @@ pub mod guardian_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Advance the guardian's committee from epoch N to N+1. The transition
-        /// message carries the new committee and a threshold signature from the
-        /// outgoing committee N. Idempotent: a transition whose new epoch is at or
-        /// below the guardian's current epoch is a no-op.
+        /// Advance the guardian's committee one epoch (signed by the outgoing committee). Idempotent.
         pub async fn update_committee(
             &mut self,
             request: impl tonic::IntoRequest<super::SignedCommitteeTransition>,
@@ -1771,10 +1762,7 @@ pub mod guardian_service_server {
             tonic::Response<super::SignedStandardWithdrawalResponse>,
             tonic::Status,
         >;
-        /// Advance the guardian's committee from epoch N to N+1. The transition
-        /// message carries the new committee and a threshold signature from the
-        /// outgoing committee N. Idempotent: a transition whose new epoch is at or
-        /// below the guardian's current epoch is a no-op.
+        /// Advance the guardian's committee one epoch (signed by the outgoing committee). Idempotent.
         async fn update_committee(
             &self,
             request: tonic::Request<super::SignedCommitteeTransition>,

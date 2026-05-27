@@ -293,13 +293,9 @@ impl EnclaveState {
         Ok(())
     }
 
-    /// Atomically replace an already-initialized committee. Used by
-    /// `UpdateCommittee`; fails before `init` has run.
+    /// Replace an already-initialized committee. Called from `UpdateCommittee`.
     pub fn replace_committee(&self, committee: HashiCommittee) -> GuardianResult<()> {
-        info!(
-            "Replacing committee with new committee for epoch {}.",
-            committee.epoch()
-        );
+        info!("Replacing committee for epoch {}.", committee.epoch());
 
         let mut guard = self
             .committee
