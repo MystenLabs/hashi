@@ -153,8 +153,10 @@ pub(crate) fn should_defer_guardian_finalize(
 
 /// Consecutive reconcile ticks the mirror must stay drifted *at the same local
 /// seq* before we treat it as a genuine stall (vs. normal in-flight lag, where
-/// `local_seq` keeps advancing between ticks).
-pub(crate) const STALL_RECONCILE_TICKS: u32 = 4;
+/// `local_seq` keeps advancing between ticks). 20 ticks ≈ 5 min at 15 s — wide
+/// enough that a slow guardian-RPC → on-chain-event round-trip doesn't trip a
+/// false stall and over-advance the mirror.
+pub(crate) const STALL_RECONCILE_TICKS: u32 = 20;
 
 /// Detects a frozen mirror over a streak of reconcile ticks; returns `true`
 /// once the streak crosses [`STALL_RECONCILE_TICKS`] and resets afterwards.
