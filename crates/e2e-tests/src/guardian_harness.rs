@@ -104,6 +104,14 @@ impl GuardianHarness {
     pub fn enclave(&self) -> &Arc<Enclave> {
         &self.enclave
     }
+
+    /// Generate (or return the already-generated) enclave BTC pubkey
+    /// without running provisioner-init. Used by e2e setup to publish
+    /// the pubkey on-chain before hashi DKG completes.
+    pub fn ensure_btc_pubkey(&self) -> Result<BitcoinPubkey> {
+        hashi_guardian::test_utils::set_or_get_enclave_btc_pubkey(&self.enclave)
+            .map_err(|e| anyhow::anyhow!("set_or_get_enclave_btc_pubkey: {e:?}"))
+    }
 }
 
 impl Drop for GuardianHarness {

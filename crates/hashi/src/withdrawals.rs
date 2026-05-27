@@ -529,12 +529,12 @@ impl Hashi {
         let tx = self.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
         let signing_messages = self.withdrawal_signing_messages(&tx, &txn.inputs)?;
         let hashi_pubkey = self.get_hashi_pubkey()?;
-        let guardian_btc_pubkey = self
-            .guardian_btc_pubkey()
-            .copied()
-            .ok_or_else(|| anyhow!("Guardian BTC pubkey not yet pinned; cannot validate withdrawal"))?;
-        let guardian_schnorr_pk = SchnorrPublicKey::from_byte_array(&guardian_btc_pubkey.serialize())
-            .map_err(|e| anyhow!("Failed to convert guardian BTC pubkey: {e}"))?;
+        let guardian_btc_pubkey = self.guardian_btc_pubkey().copied().ok_or_else(|| {
+            anyhow!("Guardian BTC pubkey not yet pinned; cannot validate withdrawal")
+        })?;
+        let guardian_schnorr_pk =
+            SchnorrPublicKey::from_byte_array(&guardian_btc_pubkey.serialize())
+                .map_err(|e| anyhow!("Failed to convert guardian BTC pubkey: {e}"))?;
 
         for (i, ((mpc_sig_bytes, guardian_sig_bytes), sighash)) in message
             .signatures
@@ -569,12 +569,13 @@ impl Hashi {
                         message.withdrawal_id
                     )
                 })?;
-            let guardian_sig = SchnorrSignature::from_byte_array(guardian_arr).map_err(|e| {
-                anyhow!("Invalid guardian Schnorr signature at input {i}: {e}")
-            })?;
+            let guardian_sig = SchnorrSignature::from_byte_array(guardian_arr)
+                .map_err(|e| anyhow!("Invalid guardian Schnorr signature at input {i}: {e}"))?;
             guardian_schnorr_pk
                 .verify(sighash, &guardian_sig)
-                .map_err(|e| anyhow!("Guardian signature verification failed for input {i}: {e}"))?;
+                .map_err(|e| {
+                    anyhow!("Guardian signature verification failed for input {i}: {e}")
+                })?;
         }
 
         self.sign_message_proto(message)

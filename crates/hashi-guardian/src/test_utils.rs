@@ -250,15 +250,15 @@ pub struct FullyInitializedArgs {
     pub limiter_state: LimiterState,
 }
 
-/// Drive an operator-initialized enclave to fully-initialized state without
-/// running the share-encryption round-trip. Generates a fresh BTC keypair.
-pub fn finalize_enclave(
-    enclave: &Arc<Enclave>,
-    committee: HashiCommittee,
-    master_pubkey: BitcoinPubkey,
-    withdrawal_config: WithdrawalConfig,
-    limiter_state: LimiterState,
-) -> GuardianResult<()> {
+/// Generate and set a fresh BTC keypair on an operator-init'd enclave.
+/// Returns the x-only pubkey so callers can publish it on-chain before
+/// the rest of provisioner-init has run (i.e. before DKG completes and
+/// `finalize_enclave` can be called). Idempotent: returns the existing
+/// pubkey if the keypair has already been set.
+pub fn set_or_get_enclave_btc_pubkey(enclave: &Arc<Enclave>) -> GuardianResult<BitcoinPubkey> {
+    if let Ok(pk) = enclave.config.enclave_btc_pubkey() {
+        return Ok(pk);
+    }
     let secp = Secp256k1::new();
     let mut sk_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut sk_bytes);
@@ -266,7 +266,26 @@ pub fn finalize_enclave(
         &secp,
         &SecretKey::from_slice(&sk_bytes).expect("random bytes form a valid secp256k1 key"),
     );
+    let pk = enclave_btc_keypair.x_only_public_key().0;
     enclave.config.set_btc_keypair(enclave_btc_keypair)?;
+    Ok(pk)
+}
+
+/// Drive an operator-initialized enclave to fully-initialized state
+/// without running the share-encryption round-trip. The BTC keypair may
+/// have been generated up front via [`set_or_get_enclave_btc_pubkey`]
+/// (so the on-chain `guardian_btc_public_key` was set at publish time);
+/// if not, a fresh one is generated here.
+pub fn finalize_enclave(
+    enclave: &Arc<Enclave>,
+    committee: HashiCommittee,
+    master_pubkey: BitcoinPubkey,
+    withdrawal_config: WithdrawalConfig,
+    limiter_state: LimiterState,
+) -> GuardianResult<()> {
+    // Ensure the BTC keypair is set (idempotent — no-op if a caller
+    // already generated it before publish).
+    let _ = set_or_get_enclave_btc_pubkey(enclave)?;
     enclave.config.set_hashi_btc_pk(master_pubkey)?;
     enclave.config.set_withdrawal_config(withdrawal_config)?;
 

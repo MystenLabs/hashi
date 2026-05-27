@@ -280,7 +280,7 @@ entry fun sign_withdrawal(
         withdrawal_id,
         signatures,
         guardian_signatures,
-        ..
+        ..,
     } = approval;
 
     let queue = hashi.bitcoin_mut().withdrawal_queue_mut();

@@ -49,9 +49,7 @@ pub fn derive_deposit_address(
     // The 2-of-2 helper internally derives the hashi pubkey from the
     // `[u8; 32]` path. Use a zero path for the "no derivation" case so
     // the change address is stable for an undeposited master key.
-    let path_bytes = derivation_path
-        .map(|p| p.into_inner())
-        .unwrap_or([0u8; 32]);
+    let path_bytes = derivation_path.map(|p| p.into_inner()).unwrap_or([0u8; 32]);
 
     Ok(bitcoin_utils::two_of_two_taproot_script_path_address(
         guardian_btc_pubkey,
@@ -279,11 +277,13 @@ impl Hashi {
     )> {
         let guardian_pubkey = self.require_guardian_btc_pubkey()?;
         let path_bytes = path_bytes_or_zero(derivation_path);
-        Ok(bitcoin_utils::two_of_two_taproot_script_path_spend_artifacts(
-            &guardian_pubkey,
-            hashi_pubkey,
-            &path_bytes,
-        ))
+        Ok(
+            bitcoin_utils::two_of_two_taproot_script_path_spend_artifacts(
+                &guardian_pubkey,
+                hashi_pubkey,
+                &path_bytes,
+            ),
+        )
     }
 
     /// Hashi committee's child pubkey for `derivation_path`. Returned as
