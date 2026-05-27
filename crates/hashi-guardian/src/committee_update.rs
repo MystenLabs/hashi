@@ -3,6 +3,7 @@
 
 use crate::withdraw::verify_hashi_cert;
 use crate::Enclave;
+use hashi_types::committee::certificate_threshold;
 use hashi_types::guardian::CommitteeTransition;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GuardianError;
@@ -16,7 +17,10 @@ use std::sync::Arc;
 use tracing::error;
 use tracing::info;
 
-/// Advance the committee one epoch with a cert from the outgoing committee.
+/// Advance the committee to a future epoch with a cert from the outgoing
+/// committee. Hashi epochs can skip values (reconfig is sparse), so the
+/// proposed epoch is only required to be strictly greater than the
+/// current one; sequentiality is not enforced.
 /// Idempotent on already-applied or older transitions.
 pub async fn update_committee(
     enclave: Arc<Enclave>,
@@ -38,20 +42,13 @@ pub async fn update_committee(
         return Ok(current_epoch);
     }
 
-    if proposed_epoch != current_epoch + 1 {
-        let err = InvalidInputs(format!(
-            "non-sequential committee transition: current {current_epoch} -> proposed {proposed_epoch}"
-        ));
-        log_failure(&enclave, &signed, &err).await?;
-        return Err(err);
-    }
-
-    let threshold = enclave
-        .config
-        .committee_threshold()
-        .expect("Committee threshold should be set");
+    // Match hashi's leader, which bails its sig collection at
+    // `certificate_threshold(from_committee.total_weight())`. Using a
+    // higher (configured) threshold here would reject otherwise-valid
+    // certs.
+    let threshold = certificate_threshold(current.total_weight());
     if let Err(e) = verify_hashi_cert(current.clone(), threshold, &signed) {
-        log_failure(&enclave, &signed, &e).await?;
+        log_failure(&enclave, current_epoch, &signed, &e).await?;
         return Err(e);
     }
 
@@ -67,12 +64,12 @@ pub async fn update_committee(
             "new committee epoch ({}) does not match transition epoch ({proposed_epoch})",
             new_committee.epoch()
         ));
-        log_failure(&enclave, &signed, &err).await?;
+        log_failure(&enclave, current_epoch, &signed, &err).await?;
         return Err(err);
     }
 
     // Log before the in-memory swap so failed S3 writes don't advance the committee.
-    log_success(&enclave, &signed).await?;
+    log_success(&enclave, current_epoch, &signed).await?;
     enclave
         .state
         .replace_committee(new_committee, current_epoch)
@@ -88,9 +85,11 @@ pub async fn update_committee(
 
 async fn log_success(
     enclave: &Enclave,
+    from_epoch: u64,
     signed: &HashiSigned<CommitteeTransition>,
 ) -> GuardianResult<()> {
     let msg = CommitteeUpdateLogMessage::Success {
+        from_epoch,
         new_committee: signed.message().new_committee.clone(),
         request_sign: signed.committee_signature().clone(),
     };
@@ -99,16 +98,21 @@ async fn log_success(
 
 async fn log_failure(
     enclave: &Enclave,
+    from_epoch: u64,
     signed: &HashiSigned<CommitteeTransition>,
     err: &GuardianError,
 ) -> GuardianResult<()> {
     let msg = CommitteeUpdateLogMessage::Failure {
+        from_epoch,
         new_committee: signed.message().new_committee.clone(),
         request_sign: signed.committee_signature().clone(),
         error: err.clone(),
     };
     if let Err(log_err) = enclave.log_committee_update(msg).await {
-        error!("failed to log committee update failure to S3: {log_err:?}");
+        error!(
+            from_epoch,
+            "failed to log committee update failure to S3: {log_err:?}"
+        );
         return Err(InternalError(format!(
             "Failed to log committee update error {err} due to S3 logging error {log_err}"
         )));
@@ -185,7 +189,7 @@ mod tests {
             committee: committee_at(epoch),
             master_pubkey: kp.x_only_public_key().0,
             withdrawal_config: WithdrawalConfig {
-                committee_threshold: 10,
+                committee_threshold: 0,
                 refill_rate_sats_per_sec: 0,
                 max_bucket_capacity_sats: 1_000,
             },
@@ -219,18 +223,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_sequential_rejected() {
+    async fn forward_skip_advances_committee() {
+        // Hashi committee epochs can skip values (sparse reconfig). A cert
+        // signed by the current committee for a future non-adjacent epoch
+        // is legitimate and must be accepted.
         let enclave = enclave_at_epoch(5).await;
         let signed = sign_transition_at(5, committee_at(7));
 
-        let err = update_committee(enclave.clone(), signed)
-            .await
-            .expect_err("non-sequential transition must error");
-        assert!(
-            matches!(err, GuardianError::InvalidInputs(_)),
-            "expected InvalidInputs, got {err:?}"
-        );
-        assert_eq!(enclave.state.get_committee().unwrap().epoch(), 5);
+        let new_epoch = update_committee(enclave.clone(), signed).await.unwrap();
+        assert_eq!(new_epoch, 7);
+        assert_eq!(enclave.state.get_committee().unwrap().epoch(), 7);
     }
 
     #[tokio::test]

@@ -319,15 +319,19 @@ pub enum WithdrawalLogMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum CommitteeUpdateLogMessage {
-    /// `new_committee.epoch` is the applied epoch.
+    /// `from_epoch` is the guardian's current epoch at the time; the
+    /// applied epoch is `new_committee.epoch`. Both are recorded because
+    /// hashi reconfig is sparse — `new_committee.epoch` is not
+    /// necessarily `from_epoch + 1`.
     Success {
+        from_epoch: u64,
         new_committee: crate::move_types::Committee,
         request_sign: CommitteeSignature,
     },
-    /// `new_committee` is what was proposed (may have been rejected for a
-    /// non-sequential epoch); the guardian's state at the time is implied
-    /// by the prior `Success` log.
+    /// `from_epoch` is the guardian's current epoch at the time;
+    /// `new_committee` is what was proposed (and rejected).
     Failure {
+        from_epoch: u64,
         new_committee: crate::move_types::Committee,
         request_sign: CommitteeSignature,
         error: GuardianError,
