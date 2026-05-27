@@ -838,9 +838,7 @@ impl Hashi {
     }
 
     /// Fetch the guardian's authoritative `LimiterState` and the live local
-    /// limiter handle. `None` if the limiter isn't seeded, the RPC fails, or
-    /// the guardian's signing key doesn't match the on-chain expected key
-    /// (treated as fatal: a stale or wrong guardian must not steer the limiter).
+    /// limiter handle. `None` if not seeded, the RPC fails, or pubkey mismatches.
     async fn guardian_limiter_and_state(
         &self,
     ) -> Option<(
@@ -857,8 +855,7 @@ impl Hashi {
         Some((limiter, state))
     }
 
-    /// Re-reads the on-chain expected key on every call so a corrective
-    /// `UpdateGuardian` proposal heals the node without a restart.
+    /// Re-read on each call so `UpdateGuardian` heals without a restart.
     fn verify_guardian_signing_pubkey(
         &self,
         signing_pub_key: &hashi_types::guardian::GuardianPubKey,
@@ -1008,9 +1005,7 @@ fn assert_test_only_config(sui_chain_id: &str, bitcoin_chain_id: &str, field_nam
     );
 }
 
-/// Pure check separated from [`Hashi`] so it's unit-testable without an
-/// `OnchainState`. `expected = None` means the chain pre-dates the on-chain
-/// guardian pubkey and we skip the check (backwards-compat).
+/// `expected = None` skips the check (pre-feature chains).
 fn verify_signing_pub_key_matches(
     signing_pub_key: &hashi_types::guardian::GuardianPubKey,
     expected: Option<&[u8]>,
