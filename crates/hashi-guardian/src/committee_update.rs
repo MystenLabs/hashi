@@ -16,9 +16,8 @@ use std::sync::Arc;
 use tracing::error;
 use tracing::info;
 
-/// Advance the guardian's committee from N to N+1, verifying that the
-/// outgoing committee signed the transition with threshold weight. Idempotent
-/// on already-applied or older transitions. Returns the post-call epoch.
+/// Advance the committee one epoch with a cert from the outgoing committee.
+/// Idempotent on already-applied or older transitions.
 pub async fn update_committee(
     enclave: Arc<Enclave>,
     signed: HashiSigned<CommitteeTransition>,
@@ -32,10 +31,7 @@ pub async fn update_committee(
     let proposed_epoch = signed.message().new_committee.epoch;
 
     if proposed_epoch <= current_epoch {
-        info!(
-            current_epoch,
-            proposed_epoch, "update_committee: no-op (already at or past proposed epoch)"
-        );
+        info!(current_epoch, proposed_epoch, "update_committee: no-op");
         return Ok(current_epoch);
     }
 
@@ -47,8 +43,7 @@ pub async fn update_committee(
         return Err(err);
     }
 
-    // Threshold is derived from the outgoing committee's own weight, not
-    // from `WithdrawalConfig.committee_threshold` (genesis-only).
+    // `WithdrawalConfig.committee_threshold` is genesis-only; derive fresh.
     let threshold = certificate_threshold(current.total_weight());
     if let Err(e) = verify_hashi_cert(current.clone(), threshold, &signed) {
         log_failure(&enclave, current_epoch, &signed, &e).await;
@@ -71,8 +66,7 @@ pub async fn update_committee(
         return Err(err);
     }
 
-    // Log first (immutable audit); only swap in memory if the S3 write
-    // succeeded. Caller retries on log failure.
+    // Log before the in-memory swap so failed S3 writes don't advance the committee.
     log_success(&enclave, current_epoch, &signed).await?;
     enclave.state.replace_committee(new_committee)?;
 
@@ -167,7 +161,6 @@ mod tests {
         )
     }
 
-    /// Sign a transition with `signing_epoch` over the given `new_committee`.
     fn sign_transition_at(
         signing_epoch: u64,
         new_committee: HashiCommittee,
@@ -241,7 +234,6 @@ mod tests {
     #[tokio::test]
     async fn wrong_signing_epoch_rejected() {
         let enclave = enclave_at_epoch(5).await;
-        // Signing epoch 4 doesn't match outgoing committee at 5.
         let signed = sign_transition_at(4, committee_at(6));
 
         let err = update_committee(enclave.clone(), signed)
