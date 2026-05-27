@@ -253,9 +253,6 @@ impl LeaderService {
         }
     }
 
-    /// Spawn a one-shot task that drives the guardian forward to the on-chain
-    /// epoch. No-op if one is already running; the guardian itself is
-    /// idempotent so duplicate transitions across leader churn are safe.
     fn maybe_reconcile_guardian_committee(&mut self) {
         if self.inner.guardian_client().is_none() {
             return;
@@ -2339,16 +2336,12 @@ impl LeaderService {
     // Guardian: committee handoff (post-rotation)
     // ========================================================================
 
-    /// Walk the guardian one epoch at a time until its committee matches
-    /// the on-chain epoch. Each step gathers a threshold cert from the
-    /// outgoing committee using the historical per-epoch BLS keys.
+    /// Walk the guardian forward one epoch at a time until it matches the chain.
     async fn reconcile_guardian_committee(inner: &Arc<Hashi>) -> anyhow::Result<()> {
         let Some(guardian) = inner.guardian_client() else {
             return Ok(());
         };
 
-        // Real catch-up should be a couple of epochs at most; cap so a
-        // single iteration stays well-behaved.
         const MAX_TRANSITIONS_PER_RECONCILE: usize = 8;
 
         for _ in 0..MAX_TRANSITIONS_PER_RECONCILE {
@@ -2363,8 +2356,7 @@ impl LeaderService {
                 .try_into()
                 .map_err(|e| anyhow::anyhow!("parse GetGuardianInfoResponse: {e:?}"))?;
             let Some(guardian_epoch) = info.current_committee_epoch else {
-                // Guardian hasn't completed ProvisionerInit yet; the bootstrap
-                // CLI seeds it.
+                // ProvisionerInit hasn't run yet; the bootstrap CLI seeds it.
                 return Ok(());
             };
             inner
@@ -2403,8 +2395,7 @@ impl LeaderService {
                 "Advanced guardian committee"
             );
 
-            // Defensive: stop if the guardian didn't advance instead of
-            // looping forever.
+            // Bail out instead of looping if the guardian didn't advance.
             if new_guardian_epoch <= from_epoch {
                 anyhow::bail!(
                     "guardian failed to advance: still at {new_guardian_epoch} after sending {}->{}",
@@ -2420,9 +2411,7 @@ impl LeaderService {
         Ok(())
     }
 
-    /// Time an RPC and record the outcome under `method`. OK / Unavailable
-    /// only — callers map specific errors before invoking if they need a
-    /// finer-grained outcome.
+    /// Time `fut` and record OK / Unavailable under `method`.
     async fn time_guardian_rpc<F, T, E>(inner: &Arc<Hashi>, method: &str, fut: F) -> Result<T, E>
     where
         F: std::future::Future<Output = Result<T, E>>,

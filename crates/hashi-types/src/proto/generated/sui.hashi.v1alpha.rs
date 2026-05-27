@@ -175,9 +175,7 @@ pub struct SignGuardianWithdrawalRequestResponse {
     #[prost(message, optional, tag = "1")]
     pub member_signature: ::core::option::Option<MemberSignature>,
 }
-/// Peers rebuild the `CommitteeTransition` from on-chain state at
-/// `from_epoch + 1` and sign with their historical `from_epoch` BLS key.
-/// No committee bytes travel on the wire.
+/// Peers rebuild the transition from on-chain state; no committee bytes on the wire.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignCommitteeTransitionRequest {
     /// Outgoing committee epoch (new_epoch = from_epoch + 1).
@@ -519,8 +517,7 @@ pub mod bridge_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Sign a committee transition `from_epoch` -> `from_epoch + 1` so the leader
-        /// can build a cert to drive the guardian's `UpdateCommittee`.
+        /// Sign a committee transition for the guardian's `UpdateCommittee`.
         pub async fn sign_committee_transition(
             &mut self,
             request: impl tonic::IntoRequest<super::SignCommitteeTransitionRequest>,
@@ -631,8 +628,7 @@ pub mod bridge_service_server {
             tonic::Response<super::SignWithdrawalConfirmationResponse>,
             tonic::Status,
         >;
-        /// Sign a committee transition `from_epoch` -> `from_epoch + 1` so the leader
-        /// can build a cert to drive the guardian's `UpdateCommittee`.
+        /// Sign a committee transition for the guardian's `UpdateCommittee`.
         async fn sign_committee_transition(
             &self,
             request: tonic::Request<super::SignCommitteeTransitionRequest>,
