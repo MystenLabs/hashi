@@ -351,42 +351,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_bitcoin_withdrawal_e2e_flow() -> Result<()> {
-        run_bitcoin_withdrawal_e2e(false).await
-    }
-
-    #[tokio::test]
-    async fn test_bitcoin_withdrawal_with_guardian_e2e_flow() -> Result<()> {
-        run_bitcoin_withdrawal_e2e(true).await
-    }
-
-    async fn run_bitcoin_withdrawal_e2e(with_guardian: bool) -> Result<()> {
         init_test_logging();
-        let label = if with_guardian {
-            " (with guardian)"
-        } else {
-            ""
-        };
-        info!("=== Starting Bitcoin Withdrawal E2E Test{label} ===");
+        info!("=== Starting Bitcoin Withdrawal E2E Test ===");
 
-        let mut builder = TestNetworksBuilder::new().with_nodes(4);
-        if with_guardian {
-            builder = builder.with_guardian();
-        }
+        let builder = TestNetworksBuilder::new().with_nodes(4);
         let mut networks = setup_test_networks(builder).await?;
 
-        if with_guardian {
-            for node in networks.hashi_network.nodes() {
-                assert!(node.hashi().config.guardian_endpoint().is_some());
-                assert!(node.hashi().guardian_client().is_some());
-                // Harness waits for limiter bootstrap before returning.
-                assert!(node.hashi().local_limiter().is_some());
-            }
-            let harness = networks
-                .guardian_harness
-                .as_ref()
-                .expect("harness present when .with_guardian() is set");
-            assert!(harness.enclave().is_fully_initialized());
+        for node in networks.hashi_network.nodes() {
+            assert!(node.hashi().config.guardian_endpoint().is_some());
+            assert!(node.hashi().guardian_client().is_some());
+            // Harness waits for limiter bootstrap before returning.
+            assert!(node.hashi().local_limiter().is_some());
         }
+        let harness = networks
+            .guardian_harness
+            .as_ref()
+            .expect("harness present after 2-of-2 cutover");
+        assert!(harness.enclave().is_fully_initialized());
 
         let deposit_amount_sats = 100_000u64;
         let hbtc_recipient = create_deposit_and_wait(&mut networks, deposit_amount_sats).await?;
@@ -463,40 +444,38 @@ mod tests {
         )
         .await?;
 
-        if with_guardian {
-            let guardian_state = networks
-                .guardian_harness
-                .as_ref()
-                .expect("harness present when .with_guardian() is set")
-                .enclave()
-                .state
-                .limiter_state()
-                .await
-                .expect("guardian limiter state present after a successful withdrawal");
-            assert_eq!(guardian_state.next_seq, 1);
-            let local_state = hashi
-                .local_limiter()
-                .expect("local limiter present after bootstrap")
-                .snapshot();
-            // `last_updated_at` can drift a few seconds — watcher uses the
-            // event-carrying checkpoint, guardian the leader's signing one.
-            assert_eq!(local_state.next_seq, guardian_state.next_seq);
-            assert_eq!(
-                local_state.num_tokens_available,
-                guardian_state.num_tokens_available,
-            );
-            let drift = local_state
-                .last_updated_at
-                .checked_sub(guardian_state.last_updated_at);
-            assert!(
-                matches!(drift, Some(0..=60)),
-                "local last_updated_at ({}) must be 0–60s after guardian's ({})",
-                local_state.last_updated_at,
-                guardian_state.last_updated_at,
-            );
-        }
+        let guardian_state = networks
+            .guardian_harness
+            .as_ref()
+            .expect("harness present after 2-of-2 cutover")
+            .enclave()
+            .state
+            .limiter_state()
+            .await
+            .expect("guardian limiter state present after a successful withdrawal");
+        assert_eq!(guardian_state.next_seq, 1);
+        let local_state = hashi
+            .local_limiter()
+            .expect("local limiter present after bootstrap")
+            .snapshot();
+        // `last_updated_at` can drift a few seconds — watcher uses the
+        // event-carrying checkpoint, guardian the leader's signing one.
+        assert_eq!(local_state.next_seq, guardian_state.next_seq);
+        assert_eq!(
+            local_state.num_tokens_available,
+            guardian_state.num_tokens_available,
+        );
+        let drift = local_state
+            .last_updated_at
+            .checked_sub(guardian_state.last_updated_at);
+        assert!(
+            matches!(drift, Some(0..=60)),
+            "local last_updated_at ({}) must be 0–60s after guardian's ({})",
+            local_state.last_updated_at,
+            guardian_state.last_updated_at,
+        );
 
-        info!("=== Bitcoin Withdrawal E2E Test{label} Passed ===");
+        info!("=== Bitcoin Withdrawal E2E Test Passed ===");
         Ok(())
     }
 

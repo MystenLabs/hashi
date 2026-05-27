@@ -135,13 +135,9 @@ pub struct WithdrawalTxCommitment {
 }
 
 /// The data that validators BLS-sign over to store witness signatures on-chain.
-/// This is the step 3 certificate.
-///
-/// MUST bind both signature arrays. The on-chain `sign_withdrawal` entry
-/// then writes them together; without the binding a malicious leader
-/// could pair a valid MPC sig set with a garbage guardian sig set and
-/// the on-chain check would still pass, leaving an unbroadcastable
-/// transaction.
+/// This is the step 3 certificate. The cert binds both signature arrays
+/// — otherwise a malicious leader could pair valid MPC sigs with garbage
+/// guardian sigs and the on-chain check would still pass.
 #[derive(Clone, Debug, serde_derive::Serialize)]
 pub struct WithdrawalTxSigning {
     pub withdrawal_id: Address,
@@ -528,7 +524,6 @@ impl Hashi {
 
         let tx = self.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
         let signing_messages = self.withdrawal_signing_messages(&tx, &txn.inputs)?;
-        let hashi_pubkey = self.get_hashi_pubkey()?;
         let guardian_btc_pubkey = self.guardian_btc_pubkey().copied().ok_or_else(|| {
             anyhow!("Guardian BTC pubkey not yet pinned; cannot validate withdrawal")
         })?;
@@ -552,8 +547,7 @@ impl Hashi {
             })?;
             let mpc_sig = SchnorrSignature::from_byte_array(mpc_arr)
                 .map_err(|e| anyhow!("Invalid MPC Schnorr signature at input {i}: {e}"))?;
-            let input_pubkey =
-                self.deposit_pubkey(&hashi_pubkey, txn.inputs[i].derivation_path.as_ref())?;
+            let input_pubkey = self.deposit_pubkey(txn.inputs[i].derivation_path.as_ref())?;
             let mpc_schnorr_pk = SchnorrPublicKey::from_byte_array(&input_pubkey.serialize())
                 .map_err(|e| anyhow!("Failed to convert mpc pubkey for input {i}: {e}"))?;
             mpc_schnorr_pk

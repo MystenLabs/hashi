@@ -23,16 +23,9 @@ fn path_bytes_or_zero(derivation_path: Option<&sui_sdk_types::Address>) -> [u8; 
     derivation_path.map(|p| p.into_inner()).unwrap_or([0u8; 32])
 }
 
-/// Derive a deposit address as the 2-of-2 taproot script-path output
 /// `tr(NUMS, multi_a(2, guardian_btc_pubkey, derive(mpc_pubkey, path)))`.
-///
-/// `mpc_key` is the 33-byte compressed MPC committee pubkey (subject to
-/// BIP32-style derivation by `path`). `guardian_btc_pubkey` is the
-/// x-only enclave key (32 bytes), used as-is — the guardian holds a
-/// single Bitcoin key shared across every deposit.
-///
-/// `path = None` means "change address": no derivation on the MPC key,
-/// same 2-of-2 leaf using the master MPC key directly.
+/// `path = None` (change address) maps to a zero-byte path so deposit
+/// and withdrawal sides agree on the leaf key without a special case.
 pub fn derive_deposit_address(
     mpc_key: &ProjectivePoint,
     guardian_btc_pubkey: &XOnlyPublicKey,
@@ -46,15 +39,10 @@ pub fn derive_deposit_address(
             .context("Failed to parse x-only MPC key")?
     };
 
-    // The 2-of-2 helper internally derives the hashi pubkey from the
-    // `[u8; 32]` path. Use a zero path for the "no derivation" case so
-    // the change address is stable for an undeposited master key.
-    let path_bytes = derivation_path.map(|p| p.into_inner()).unwrap_or([0u8; 32]);
-
     Ok(bitcoin_utils::two_of_two_taproot_script_path_address(
         guardian_btc_pubkey,
         &mpc_master_xonly,
-        &path_bytes,
+        &path_bytes_or_zero(derivation_path),
         btc_network,
     ))
 }
@@ -263,9 +251,9 @@ impl Hashi {
         ))
     }
 
-    /// 2-of-2 taproot leaf artifacts for spending a deposit UTXO whose
-    /// hashi child key was derived along `derivation_path`. Used by the
-    /// withdrawal sighash construction and the rebroadcast witness.
+    /// 2-of-2 taproot leaf artifacts (script, control block, leaf hash)
+    /// for a deposit UTXO. Used by the withdrawal sighash and the
+    /// rebroadcast witness builder.
     pub(crate) fn deposit_spend_artifacts(
         &self,
         hashi_pubkey: &XOnlyPublicKey,
@@ -276,72 +264,40 @@ impl Hashi {
         bitcoin::taproot::TapLeafHash,
     )> {
         let guardian_pubkey = self.require_guardian_btc_pubkey()?;
-        let path_bytes = path_bytes_or_zero(derivation_path);
         Ok(
             bitcoin_utils::two_of_two_taproot_script_path_spend_artifacts(
                 &guardian_pubkey,
                 hashi_pubkey,
-                &path_bytes,
+                &path_bytes_or_zero(derivation_path),
             ),
         )
     }
 
-    /// Hashi committee's child pubkey for `derivation_path`. Returned as
-    /// the x-only key — used to verify the MPC's per-input Schnorr sig
-    /// against the leaf, even though the script binds both this and the
-    /// guardian's pubkey.
+    /// Hashi committee's child pubkey at `derivation_path`. `None` maps
+    /// to a zero-byte path (change outputs).
     pub(crate) fn deposit_pubkey(
         &self,
-        hashi_pubkey: &XOnlyPublicKey,
         derivation_path: Option<&sui_sdk_types::Address>,
     ) -> anyhow::Result<XOnlyPublicKey> {
-        if let Some(path) = derivation_path {
-            // Prefer the local signing manager (available after DKG preparation).
-            // Fall back to the on-chain key, which is guaranteed present once the
-            // initial committee has formed and `end_reconfig` has been processed.
-            let verifying_key = self
-                .signing_verifying_key()
-                .map(Ok)
-                .unwrap_or_else(|| self.onchain_verifying_key_g())
-                .context("MPC public key not available yet")?;
-            let derived = fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(
-                &verifying_key,
-                &path.into_inner(),
-            );
-            let pubkey = XOnlyPublicKey::from_slice(&derived.to_byte_array())
-                .context("valid 32-byte x-only key")?;
-            Ok(pubkey)
-        } else {
-            // `None` path is the bridge's "change output" leaf — we use a
-            // zero-byte derivation path so deposit and withdrawal sides
-            // agree on the key without a special `Option::None` script.
-            let verifying_key = self
-                .signing_verifying_key()
-                .map(Ok)
-                .unwrap_or_else(|| self.onchain_verifying_key_g())
-                .context("MPC public key not available yet")?;
-            let derived = fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(
-                &verifying_key,
-                &[0u8; 32],
-            );
-            let pubkey = XOnlyPublicKey::from_slice(&derived.to_byte_array())
-                .context("valid 32-byte x-only key")?;
-            let _ = hashi_pubkey;
-            Ok(pubkey)
-        }
+        // Prefer the local signing manager (available after DKG preparation).
+        // Fall back to the on-chain key, which is guaranteed present once the
+        // initial committee has formed and `end_reconfig` has been processed.
+        let verifying_key = self
+            .signing_verifying_key()
+            .map(Ok)
+            .unwrap_or_else(|| self.onchain_verifying_key_g())
+            .context("MPC public key not available yet")?;
+        let derived = fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(
+            &verifying_key,
+            &path_bytes_or_zero(derivation_path),
+        );
+        XOnlyPublicKey::from_slice(&derived.to_byte_array()).context("valid 32-byte x-only key")
     }
 
-    /// Read the guardian BTC pubkey pinned during `try_seed_guardian_state`.
-    /// Errors when the guardian-required cutover is live but the cache
-    /// hasn't been populated yet — callers should treat that as "not
-    /// ready", not as a permanent failure.
     fn require_guardian_btc_pubkey(&self) -> anyhow::Result<XOnlyPublicKey> {
-        self.guardian_btc_pubkey().copied().ok_or_else(|| {
-            anyhow!(
-                "Guardian BTC pubkey not yet available; \
-                 try_seed_guardian_state has not pinned it"
-            )
-        })
+        self.guardian_btc_pubkey()
+            .copied()
+            .ok_or_else(|| anyhow!("Guardian BTC pubkey not yet pinned"))
     }
 
     pub fn get_hashi_pubkey(&self) -> anyhow::Result<XOnlyPublicKey> {

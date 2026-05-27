@@ -664,11 +664,8 @@ impl Hashi {
         .or_else(|| self.config.guardian_endpoint().map(|s| s.to_string()))
         .ok_or_else(|| {
             anyhow!(
-                "Guardian is required: no `guardian_url` on-chain and no \
-                 `guardian_endpoint` in local config / env override. Bridge \
-                 deposit addresses are 2-of-2 (mpc, guardian) and every \
-                 withdrawal needs the guardian's signature, so hashi-server \
-                 refuses to start without one."
+                "Guardian is required: set `guardian_url` on-chain or \
+                 `guardian_endpoint` in local config / env override"
             )
         })?;
 
