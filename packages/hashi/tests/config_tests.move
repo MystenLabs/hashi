@@ -148,30 +148,6 @@ fun test_set_guardian_btc_public_key_rejects_rotation() {
 }
 
 #[test]
-fun test_set_deployer_stores_address() {
-    let ctx = &mut test_utils::new_tx_context(@0x100, 0);
-    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
-
-    assert!(config::deployer(hashi.config()).is_none());
-
-    config::set_deployer(hashi.config_mut(), @0xDE);
-    assert!(config::deployer(hashi.config()).destroy_some() == @0xDE);
-
-    std::unit_test::destroy(hashi);
-}
-
-#[test, expected_failure(abort_code = ::hashi::config::EDeployerAlreadySet)]
-fun test_set_deployer_rejects_overwrite() {
-    let ctx = &mut test_utils::new_tx_context(@0x100, 0);
-    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
-
-    config::set_deployer(hashi.config_mut(), @0xDE);
-    config::set_deployer(hashi.config_mut(), @0xDE);
-
-    std::unit_test::destroy(hashi);
-}
-
-#[test]
 fun test_bitcoin_withdrawal_minimum_updates() {
     let ctx = &mut test_utils::new_tx_context(@0x100, 0);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);

@@ -541,37 +541,6 @@ pub struct PublishOpts {
     pub yes: bool,
 }
 
-/// Options for the `set-guardian-btc-public-key` subcommand.
-///
-/// Publishes the guardian's enclave BTC pubkey on the already-published
-/// Hashi object. Signed by the original deployer keypair.
-#[derive(Args)]
-pub struct SetGuardianBtcPublicKeyOpts {
-    /// Sui RPC endpoint URL
-    #[clap(long, env = "SUI_RPC_URL")]
-    pub sui_rpc_url: String,
-
-    /// Path to the deployer keypair (same one that signed `hashi publish`)
-    #[clap(long, short = 'k', env = "HASHI_KEYPAIR")]
-    pub keypair: std::path::PathBuf,
-
-    /// Hashi package ID (output of `hashi publish`)
-    #[clap(long, env = "HASHI_PACKAGE_ID")]
-    pub package_id: String,
-
-    /// Hashi shared-object ID (output of `hashi publish`)
-    #[clap(long, env = "HASHI_OBJECT_ID")]
-    pub hashi_object_id: String,
-
-    /// Guardian BTC pubkey, x-only hex-encoded (32 bytes)
-    #[clap(long)]
-    pub btc_public_key: String,
-
-    /// Enable verbose output
-    #[clap(long, short)]
-    pub verbose: bool,
-}
-
 /// Options for the `register` subcommand.
 ///
 /// Unlike other CLI commands this uses a validator config file (the same one
@@ -1009,49 +978,6 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
     std::fs::write(out_path, &json)?;
     print_success(&format!("Wrote {out_path}"));
 
-    Ok(())
-}
-
-/// Run the `set-guardian-btc-public-key` command – pin the guardian BTC pubkey on the deployed Hashi.
-pub async fn run_set_guardian_btc_public_key(
-    opts: SetGuardianBtcPublicKeyOpts,
-) -> anyhow::Result<()> {
-    use sui_sdk_types::Address;
-
-    crate::init_crypto_provider();
-    init_tracing(opts.verbose);
-
-    let btc_pubkey_hex = opts
-        .btc_public_key
-        .strip_prefix("0x")
-        .unwrap_or(&opts.btc_public_key);
-    let btc_pubkey = hex::decode(btc_pubkey_hex).context("Invalid hex for --btc-public-key")?;
-
-    let package_id: Address = opts.package_id.parse().context("Invalid --package-id")?;
-    let hashi_object_id: Address = opts
-        .hashi_object_id
-        .parse()
-        .context("Invalid --hashi-object-id")?;
-
-    let signer = crate::config::load_ed25519_private_key_from_path(&opts.keypair)?;
-    print_info(&format!(
-        "Sender address: {}",
-        signer.public_key().derive_address()
-    ));
-    print_info(&format!("Hashi object:   {hashi_object_id}"));
-    print_info(&format!("Package:        {package_id}"));
-
-    let mut client = sui_rpc::Client::new(&opts.sui_rpc_url)?;
-    crate::publish::set_guardian_btc_public_key(
-        &mut client,
-        &signer,
-        package_id,
-        hashi_object_id,
-        btc_pubkey,
-    )
-    .await?;
-
-    print_success("Guardian BTC pubkey published on-chain");
     Ok(())
 }
 

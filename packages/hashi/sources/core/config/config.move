@@ -27,8 +27,6 @@ const EBadGuardianBtcPublicKeyLength: vector<u8> = b"Guardian BTC public key mus
 #[error(code = 4)]
 const EGuardianBtcPublicKeyImmutable: vector<u8> =
     b"Guardian BTC public key cannot be changed once set";
-#[error(code = 5)]
-const EDeployerAlreadySet: vector<u8> = b"Deployer already set";
 
 const PAUSED_KEY: vector<u8> = b"paused";
 const GUARDIAN_URL_KEY: vector<u8> = b"guardian_url";
@@ -36,7 +34,6 @@ const GUARDIAN_PUBLIC_KEY_KEY: vector<u8> = b"guardian_public_key";
 const GUARDIAN_PUBLIC_KEY_LEN: u64 = 32;
 const GUARDIAN_BTC_PUBLIC_KEY_KEY: vector<u8> = b"guardian_btc_public_key";
 const GUARDIAN_BTC_PUBLIC_KEY_LEN: u64 = 32;
-const DEPLOYER_KEY: vector<u8> = b"deployer";
 const EMERGENCY_PAUSE_THRESHOLD_BPS_KEY: vector<u8> = b"governance_emergency_pause_threshold_bps";
 const EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY: vector<u8> =
     b"governance_emergency_unpause_threshold_bps";
@@ -130,17 +127,6 @@ public(package) fun set_guardian_btc_public_key(self: &mut Config, btc_public_ke
         existing.destroy_none();
     };
     self.upsert(GUARDIAN_BTC_PUBLIC_KEY_KEY, config_value::new_bytes(btc_public_key));
-}
-
-public(package) fun deployer(self: &Config): Option<address> {
-    self.try_get(DEPLOYER_KEY).map!(|v| v.as_address())
-}
-
-/// Pinned at publish time to the address that called `finish_publish`.
-/// One-time set; subsequent calls abort.
-public(package) fun set_deployer(self: &mut Config, deployer: address) {
-    assert!(self.deployer().is_none(), EDeployerAlreadySet);
-    self.upsert(DEPLOYER_KEY, config_value::new_address(deployer));
 }
 
 public(package) fun emergency_pause_threshold_bps(self: &Config): u64 {

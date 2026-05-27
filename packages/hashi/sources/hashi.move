@@ -24,8 +24,6 @@ const EReconfiguring: vector<u8> = b"System is currently reconfiguring";
 const ENoCommittee: vector<u8> = b"No committee exists for the current epoch";
 #[error]
 const EWrongUpgradeCap: vector<u8> = b"Upgrade cap does not belong to this package";
-#[error]
-const ENotDeployer: vector<u8> = b"Caller is not the original deployer";
 
 public struct Hashi has key {
     id: UID,
@@ -119,7 +117,6 @@ entry fun finish_publish(
     assert!(upgrade_cap.package() == this_package_id, EWrongUpgradeCap);
 
     self.config_mut().set_upgrade_cap(upgrade_cap);
-    self.config_mut().set_deployer(ctx.sender());
     hashi::btc_config::set_bitcoin_chain_id(self.config_mut(), bitcoin_chain_id);
 
     if (guardian_url.is_some() && guardian_public_key.is_some()) {
@@ -161,19 +158,6 @@ entry fun finish_publish(
     let (treasury_cap, metadata_cap) = hashi::btc::create(coin_registry, ctx);
     self.treasury.register_treasury_cap(treasury_cap);
     self.treasury.register_metadata_cap(metadata_cap);
-}
-
-/// Pin the guardian BTC pubkey after `finish_publish`. Gated to the deployer:
-/// the underlying setter rejects rotation, so a front-run would brick deposits.
-entry fun set_guardian_btc_public_key(
-    self: &mut Hashi,
-    btc_public_key: vector<u8>,
-    ctx: &TxContext,
-) {
-    self.config.assert_version_enabled();
-    let deployer = self.config().deployer().destroy_or!(abort ENotDeployer);
-    assert!(ctx.sender() == deployer, ENotDeployer);
-    self.config_mut().set_guardian_btc_public_key(btc_public_key);
 }
 
 public(package) fun id(self: &Hashi): &UID {
