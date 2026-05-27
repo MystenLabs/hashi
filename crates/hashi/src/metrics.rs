@@ -1096,6 +1096,9 @@ pub const GUARDIAN_BOOTSTRAP_OUTCOME_SUCCESS: &str = "success";
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_RPC_FAILURE: &str = "rpc_failure";
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_PARSE_FAILURE: &str = "parse_failure";
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_NO_LIMITER_YET: &str = "no_limiter_yet";
+/// `GetGuardianInfo.signing_pub_key` did not match the on-chain
+/// `guardian_public_key`. Refuse to seed the limiter; alert.
+pub const GUARDIAN_BOOTSTRAP_OUTCOME_KEY_MISMATCH: &str = "key_mismatch";
 
 pub const GUARDIAN_RPC_METHOD_GET_GUARDIAN_INFO: &str = "get_guardian_info";
 pub const GUARDIAN_RPC_METHOD_STANDARD_WITHDRAWAL: &str = "standard_withdrawal";
@@ -1274,6 +1277,7 @@ mod tests {
             GUARDIAN_BOOTSTRAP_OUTCOME_RPC_FAILURE,
             GUARDIAN_BOOTSTRAP_OUTCOME_PARSE_FAILURE,
             GUARDIAN_BOOTSTRAP_OUTCOME_NO_LIMITER_YET,
+            GUARDIAN_BOOTSTRAP_OUTCOME_KEY_MISMATCH,
         ] {
             metrics.record_guardian_bootstrap_outcome(outcome);
         }

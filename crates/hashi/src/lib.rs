@@ -781,6 +781,9 @@ impl Hashi {
                 return false;
             }
         };
+        if !self.verify_guardian_signing_pubkey(&info.signing_pub_key) {
+            return false;
+        }
         let _ = self.guardian_signing_pubkey.set(Some(info.signing_pub_key));
         let (Some(state), Some(config)) = (info.limiter_state, info.limiter_config) else {
             self.metrics.record_guardian_bootstrap_outcome(
@@ -835,7 +838,9 @@ impl Hashi {
     }
 
     /// Fetch the guardian's authoritative `LimiterState` and the live local
-    /// limiter handle. `None` if the limiter isn't seeded or the RPC fails.
+    /// limiter handle. `None` if the limiter isn't seeded, the RPC fails, or
+    /// the guardian's signing key doesn't match the on-chain expected key
+    /// (treated as fatal: a stale or wrong guardian must not steer the limiter).
     async fn guardian_limiter_and_state(
         &self,
     ) -> Option<(
@@ -845,8 +850,31 @@ impl Hashi {
         let limiter = self.local_limiter()?;
         let info_pb = self.fetch_guardian_info().await?;
         let info = hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb).ok()?;
+        if !self.verify_guardian_signing_pubkey(&info.signing_pub_key) {
+            return None;
+        }
         let state = info.limiter_state?;
         Some((limiter, state))
+    }
+
+    /// Verify a fresh `GetGuardianInfo` `signing_pub_key` against the on-chain
+    /// `guardian_public_key`. Mismatch is fatal: log, bump
+    /// `bootstrap_outcomes{outcome="key_mismatch"}`, return false. On-chain
+    /// `None` (legacy chains without the key) skips the check. Re-reads on
+    /// each call so a corrective `UpdateGuardian` governance proposal heals
+    /// the node without a hashi-server restart.
+    fn verify_guardian_signing_pubkey(
+        &self,
+        signing_pub_key: &hashi_types::guardian::GuardianPubKey,
+    ) -> bool {
+        let expected = self
+            .onchain_state()
+            .state()
+            .hashi()
+            .config
+            .guardian_public_key()
+            .map(<[u8]>::to_vec);
+        verify_signing_pub_key_matches(signing_pub_key, expected.as_deref(), &self.metrics)
     }
 
     /// Snap the local limiter to the guardian's authoritative state.
@@ -982,6 +1010,30 @@ fn assert_test_only_config(sui_chain_id: &str, bitcoin_chain_id: &str, field_nam
             && bitcoin_chain_id == constants::BITCOIN_REGTEST_CHAIN_ID,
         "{field_name} is only allowed on regtest"
     );
+}
+
+/// Pure check separated from [`Hashi`] so it's unit-testable without an
+/// `OnchainState`. `expected = None` means the chain pre-dates the on-chain
+/// guardian pubkey and we skip the check (backwards-compat).
+fn verify_signing_pub_key_matches(
+    signing_pub_key: &hashi_types::guardian::GuardianPubKey,
+    expected: Option<&[u8]>,
+    metrics: &metrics::Metrics,
+) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+    if signing_pub_key.as_bytes().as_slice() == expected {
+        return true;
+    }
+    metrics.record_guardian_bootstrap_outcome(metrics::GUARDIAN_BOOTSTRAP_OUTCOME_KEY_MISMATCH);
+    tracing::error!(
+        on_chain = %hex::encode(expected),
+        from_info = %hex::encode(signing_pub_key.as_bytes()),
+        "FATAL: guardian /info signing_pub_key does not match on-chain \
+         guardian_public_key; refusing to seed or reconcile local limiter",
+    );
+    false
 }
 
 #[cfg(test)]
@@ -1238,5 +1290,66 @@ mod test {
         //             dbg!(resp);
         //             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         //         }
+    }
+
+    // --- guardian /info pubkey verification ---
+
+    fn fresh_metrics() -> std::sync::Arc<crate::metrics::Metrics> {
+        let registry = prometheus::Registry::new();
+        std::sync::Arc::new(crate::metrics::Metrics::new(&registry))
+    }
+
+    fn key_mismatch_count(metrics: &crate::metrics::Metrics) -> u64 {
+        metrics
+            .guardian_bootstrap_outcomes_total
+            .with_label_values(&[crate::metrics::GUARDIAN_BOOTSTRAP_OUTCOME_KEY_MISMATCH])
+            .get()
+    }
+
+    fn random_signing_pubkey() -> hashi_types::guardian::GuardianPubKey {
+        let signing_key = hashi_types::guardian::GuardianSignKeyPair::new(rand::thread_rng());
+        signing_key.verification_key()
+    }
+
+    #[test]
+    fn verify_signing_pub_key_matches_passes_when_equal() {
+        let pubkey = random_signing_pubkey();
+        let expected = pubkey.as_bytes().to_vec();
+        let metrics = fresh_metrics();
+        assert!(crate::verify_signing_pub_key_matches(
+            &pubkey,
+            Some(&expected),
+            &metrics
+        ));
+        assert_eq!(key_mismatch_count(&metrics), 0);
+    }
+
+    #[test]
+    fn verify_signing_pub_key_matches_skips_when_expected_absent() {
+        let pubkey = random_signing_pubkey();
+        let metrics = fresh_metrics();
+        // Pre-feature chains have no on-chain key — verification is a no-op.
+        assert!(crate::verify_signing_pub_key_matches(
+            &pubkey, None, &metrics
+        ));
+        assert_eq!(key_mismatch_count(&metrics), 0);
+    }
+
+    #[test]
+    fn verify_signing_pub_key_matches_fails_on_mismatch() {
+        let live = random_signing_pubkey();
+        let mut wrong = live.as_bytes().to_vec();
+        wrong[0] ^= 0xff;
+        let metrics = fresh_metrics();
+        assert!(!crate::verify_signing_pub_key_matches(
+            &live,
+            Some(&wrong),
+            &metrics
+        ));
+        assert_eq!(
+            key_mismatch_count(&metrics),
+            1,
+            "mismatch must bump the key_mismatch outcome counter"
+        );
     }
 }
