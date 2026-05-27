@@ -95,8 +95,7 @@ pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Ar
             }
 
             rescrape_state = false;
-            // Rescrape rebuilt state from chain, but the event-driven limiter
-            // just gapped — nudge the reconcile loop to re-align it now.
+            // Rescrape gapped the event-driven limiter; trigger an eager reconcile.
             state.request_limiter_reconcile();
         }
 
