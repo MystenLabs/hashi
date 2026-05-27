@@ -116,10 +116,8 @@ public(package) fun assert_valid_guardian_public_key(public_key: &vector<u8>) {
     assert!(public_key.length() == GUARDIAN_PUBLIC_KEY_LEN, EBadGuardianPublicKeyLength);
 }
 
-/// Set the guardian's BTC signing public key (32 bytes, x-only). Once
-/// set, the value is immutable — re-setting must use the same key. This
-/// prevents a governance proposal from invalidating every deposit
-/// address already derived against the previous key.
+/// Pin the guardian's x-only BTC pubkey (32 bytes). Immutable once set —
+/// rotating it would invalidate every 2-of-2 deposit address derived against it.
 public(package) fun set_guardian_btc_public_key(self: &mut Config, btc_public_key: vector<u8>) {
     assert!(btc_public_key.length() == GUARDIAN_BTC_PUBLIC_KEY_LEN, EBadGuardianBtcPublicKeyLength);
     let existing = self.guardian_btc_public_key();

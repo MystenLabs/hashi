@@ -476,9 +476,6 @@ impl Enclave {
             encryption_pubkey: self.encryption_public_key().to_bytes().to_vec(),
             // TODO: Change it
             server_version: "v1".to_string(),
-            // Present after `provisioner_init` sets the enclave BTC keypair.
-            // Hashi reads this at startup and compares against the on-chain
-            // `Config::guardian_btc_public_key`.
             enclave_btc_pubkey: self.config.enclave_btc_pubkey().ok(),
         }
     }

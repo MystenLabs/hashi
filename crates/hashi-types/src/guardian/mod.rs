@@ -250,8 +250,7 @@ pub struct GuardianInfo {
     /// Server version
     /// TODO: Replace with hashi ServerVersion to include crate SHA and version
     pub server_version: String,
-    /// X-only Bitcoin pubkey of the enclave's BTC signing key. Absent
-    /// before `provisioner_init` has set the keypair.
+    /// Enclave BTC signing pubkey (x-only). Absent before `provisioner_init`.
     pub enclave_btc_pubkey: Option<BitcoinPubkey>,
 }
 

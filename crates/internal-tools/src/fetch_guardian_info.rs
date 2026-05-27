@@ -32,8 +32,7 @@ pub struct Args {
 pub enum Field {
     /// Ed25519 RPC identity key (32 bytes hex).
     SigningPubKey,
-    /// X-only BTC pubkey of the enclave (32 bytes hex). Aborts if the
-    /// guardian has not yet completed `provisioner_init`.
+    /// X-only enclave BTC pubkey (32 bytes hex). Absent before `provisioner_init`.
     EnclaveBtcPubkey,
 }
 

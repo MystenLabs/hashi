@@ -62,8 +62,6 @@ pub struct Hashi {
     screener_client: OnceLock<Option<grpc::screener_client::ScreenerClient>>,
     guardian_client: OnceLock<Option<grpc::guardian_client::GuardianClient>>,
     guardian_signing_pubkey: OnceLock<Option<hashi_types::guardian::GuardianPubKey>>,
-    /// X-only enclave BTC pubkey, pinned after first verification against
-    /// the on-chain `guardian_btc_public_key`.
     guardian_btc_pubkey: OnceLock<Option<hashi_types::guardian::BitcoinPubkey>>,
     local_limiter: OnceLock<Arc<guardian_limiter::LocalLimiter>>,
     /// `(seq, wid)` of the last guardian-finalized withdrawal, for pacing.
@@ -889,7 +887,7 @@ impl Hashi {
     }
 
     /// BTC-key analogue of [`Self::verify_guardian_signing_pubkey`]. Pins
-    /// the live key on success; only when both sides report `Some`.
+    /// the live key in `guardian_btc_pubkey` on first successful match.
     fn verify_and_pin_guardian_btc_pubkey(
         &self,
         live: Option<hashi_types::guardian::BitcoinPubkey>,
@@ -904,7 +902,9 @@ impl Hashi {
         if !verify_btc_pub_key_matches(live.as_ref(), expected.as_deref(), &self.metrics) {
             return false;
         }
-        if let Some(live) = live {
+        // Pin only when on-chain is Some — otherwise we'd cache an unverified
+        // key from /info during the gap before `publish-guardian-btc-pubkey`.
+        if let (Some(_), Some(live)) = (expected, live) {
             let _ = self.guardian_btc_pubkey.set(Some(live));
         }
         true

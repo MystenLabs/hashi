@@ -105,9 +105,6 @@ stderr: {}",
 pub struct GuardianConfig {
     pub url: String,
     pub public_key: Vec<u8>,
-    /// X-only enclave BTC pubkey (32 bytes). `None` skips publishing it
-    /// on-chain — hashi-server then falls back to legacy single-key
-    /// deposits until the follow-up cutover.
     pub btc_public_key: Option<Vec<u8>>,
 }
 
