@@ -1098,11 +1098,7 @@ pub const GUARDIAN_BOOTSTRAP_OUTCOME_PARSE_FAILURE: &str = "parse_failure";
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_NO_LIMITER_YET: &str = "no_limiter_yet";
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_KEY_MISMATCH: &str = "key_mismatch";
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID: &str = "signature_invalid";
-/// `GetGuardianInfo.enclave_btc_pubkey` did not match the on-chain
-/// `guardian_btc_public_key`. Refuse to seed the limiter; alert.
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_BTC_KEY_MISMATCH: &str = "btc_key_mismatch";
-/// On-chain `guardian_btc_public_key` is set but the live guardian's
-/// `/info` did not include `enclave_btc_pubkey`. Refuse to seed; alert.
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_BTC_KEY_MISSING_FROM_INFO: &str = "btc_key_missing_from_info";
 
 pub const GUARDIAN_RPC_METHOD_GET_GUARDIAN_INFO: &str = "get_guardian_info";

@@ -23,8 +23,7 @@ pub struct Args {
     #[arg(long, env = "GUARDIAN_ENDPOINT")]
     pub endpoint: String,
 
-    /// Which key to print. Defaults to the Ed25519 signing pub key for
-    /// backwards compatibility with the deploy workflow.
+    /// Which key to print.
     #[arg(long, value_enum, default_value_t = Field::SigningPubKey)]
     pub field: Field,
 }
