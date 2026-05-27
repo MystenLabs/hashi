@@ -307,6 +307,9 @@ pub struct CommittedRequestInfo {
 }
 
 /// Rust version of the Move hashi::withdrawal_queue::WithdrawalTransaction type.
+///
+/// Field order MUST match the Move struct exactly — these are BCS-decoded
+/// from on-chain bytes and are positional.
 #[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct WithdrawalTransaction {
     pub id: Address,
@@ -317,7 +320,11 @@ pub struct WithdrawalTransaction {
     pub change_output: Option<OutputUtxo>,
     pub timestamp_ms: u64,
     pub randomness: Vec<u8>,
+    /// Per-input Schnorr signatures from the MPC committee.
     pub signatures: Option<Vec<Vec<u8>>>,
+    /// Per-input Schnorr signatures from the guardian enclave. Together
+    /// with `signatures`, forms the 2-of-2 taproot witness on broadcast.
+    pub guardian_signatures: Option<Vec<Vec<u8>>>,
     pub presig_start_index: u64,
     pub epoch: u64,
 }
@@ -1084,7 +1091,11 @@ impl From<WithdrawalPickedForProcessingEvent> for HashiEvent {
 pub struct WithdrawalSignedEvent {
     pub withdrawal_txn_id: Address,
     pub request_ids: Vec<Address>,
+    /// Per-input MPC committee Schnorr signatures.
     pub signatures: Vec<Vec<u8>>,
+    /// Per-input guardian enclave Schnorr signatures (same length as
+    /// `signatures`). Together they form the 2-of-2 taproot witness.
+    pub guardian_signatures: Vec<Vec<u8>>,
 }
 
 impl MoveType for WithdrawalSignedEvent {

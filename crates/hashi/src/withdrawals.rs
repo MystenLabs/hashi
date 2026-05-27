@@ -1533,6 +1533,7 @@ mod tests {
             timestamp_ms: 0,
             randomness: vec![],
             signatures: None,
+            guardian_signatures: None,
             presig_start_index: 0,
             epoch: 0,
         }

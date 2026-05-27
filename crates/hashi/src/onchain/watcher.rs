@@ -467,6 +467,7 @@ async fn handle_events(
                     {
                         Some(txn) if txn.signatures.is_none() => {
                             txn.signatures = Some(event.signatures.clone());
+                            txn.guardian_signatures = Some(event.guardian_signatures.clone());
                             let amount_sats = withdrawal_limiter_consumption_amount(txn);
                             let timestamp_secs = checkpoint_timestamp_ms / 1000;
                             let pick_to_sign =
