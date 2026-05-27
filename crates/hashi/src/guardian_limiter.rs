@@ -134,14 +134,10 @@ fn project_capacity(config: &LimiterConfig, state: &LimiterState, timestamp_secs
         .min(config.max_bucket_capacity)
 }
 
-/// Whether a guardian finalize for `wid` at `next_seq` must be deferred: the
-/// guardian already consumed this seq for a *different* withdrawal and the local
-/// limiter — which advances only when the on-chain `WithdrawalSignedEvent` is
-/// observed — has not yet caught up, so sending `next_seq` now would draw a
-/// guardian `seq mismatch`. A same-wid retry at the same seq is *not* deferred:
-/// deferring it would stall its own recovery, since replaying that withdrawal is
-/// what lets the limiter advance. (When the guardian response cache is present it
-/// additionally serves such a retry idempotently.)
+/// Defer a finalize when the local limiter is still behind a seq the guardian
+/// already consumed for a *different* withdrawal — sending it now would draw a
+/// `seq mismatch`. Same-wid retries are allowed (replay drives the local
+/// advance; the response cache serves them idempotently).
 pub(crate) fn should_defer_guardian_finalize(
     next_seq: u64,
     last_finalized: Option<(u64, sui_sdk_types::Address)>,
