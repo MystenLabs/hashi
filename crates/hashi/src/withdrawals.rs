@@ -554,9 +554,7 @@ impl Hashi {
         self.sign_message_proto_at_epoch(message, self.onchain_state().epoch())
     }
 
-    /// Sign at a specific historical `epoch` using that epoch's signing key
-    /// from the DB. Used by the committee handoff where the outgoing
-    /// committee signs after the node has internally advanced.
+    /// Sign at a specific historical `epoch` using that epoch's DB key.
     pub(crate) fn sign_message_proto_at_epoch<T: serde::Serialize>(
         &self,
         message: &T,
@@ -595,10 +593,7 @@ impl Hashi {
 
     // --- Guardian: validate and BLS-sign a `CommitteeTransition` ---
 
-    /// Rebuild the `CommitteeTransition { new_committee }` payload from
-    /// on-chain state at `from_epoch + 1` and BLS-sign it with the historical
-    /// `from_epoch` key. Building from chain state means the leader can't
-    /// supply attacker-crafted committee bytes on the wire.
+    /// Rebuild the transition from on-chain state and sign with the historical key.
     #[tracing::instrument(level = "info", skip_all, fields(from_epoch))]
     pub fn validate_and_sign_committee_transition(
         &self,
