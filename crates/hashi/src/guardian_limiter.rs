@@ -149,7 +149,7 @@ pub(crate) fn should_defer_guardian_finalize(
     last_finalized.is_some_and(|(last_seq, last_wid)| next_seq <= last_seq && wid != last_wid)
 }
 
-/// 20 ticks ≈ 5 min at 15 s — beyond a slow guardian→on-chain RTT.
+/// 20 ticks ≈ 5 min.
 pub(crate) const STALL_RECONCILE_TICKS: u32 = 20;
 
 /// Detects a mirror frozen at the same `local_seq` for [`STALL_RECONCILE_TICKS`] consecutive ticks.
