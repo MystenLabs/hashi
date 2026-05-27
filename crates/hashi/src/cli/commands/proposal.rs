@@ -679,6 +679,11 @@ pub async fn create_update_guardian_proposal(
 ) -> Result<()> {
     let public_key = hex::decode(public_key_hex.strip_prefix("0x").unwrap_or(public_key_hex))
         .context("Invalid hex for public key")?;
+    anyhow::ensure!(
+        public_key.len() == 32,
+        "--public-key must be 32 bytes (Ed25519), got {} bytes",
+        public_key.len(),
+    );
 
     println!("\n{}", "Creating Update Guardian Proposal:".bold());
     println!("  URL:        {}", url);

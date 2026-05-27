@@ -96,9 +96,13 @@ public(package) fun guardian_public_key(self: &Config): Option<vector<u8>> {
 }
 
 public(package) fun set_guardian(self: &mut Config, url: String, public_key: vector<u8>) {
-    assert!(public_key.length() == GUARDIAN_PUBLIC_KEY_LEN, EBadGuardianPublicKeyLength);
+    assert_valid_guardian_public_key(&public_key);
     self.upsert(GUARDIAN_URL_KEY, config_value::new_string(url));
     self.upsert(GUARDIAN_PUBLIC_KEY_KEY, config_value::new_bytes(public_key));
+}
+
+public(package) fun assert_valid_guardian_public_key(public_key: &vector<u8>) {
+    assert!(public_key.length() == GUARDIAN_PUBLIC_KEY_LEN, EBadGuardianPublicKeyLength);
 }
 
 public(package) fun emergency_pause_threshold_bps(self: &Config): u64 {

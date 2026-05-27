@@ -855,18 +855,13 @@ impl Hashi {
         Some((limiter, state))
     }
 
-    /// Re-read on each call so `UpdateGuardian` heals without a restart.
+    /// Read on each call: a chain that didn't publish the key at hashi
+    /// startup may bind `guardian_public_key` later via governance.
     fn verify_guardian_signing_pubkey(
         &self,
         signing_pub_key: &hashi_types::guardian::GuardianPubKey,
     ) -> bool {
-        let expected = self
-            .onchain_state()
-            .state()
-            .hashi()
-            .config
-            .guardian_public_key()
-            .map(<[u8]>::to_vec);
+        let expected = self.onchain_state().guardian_public_key();
         verify_signing_pub_key_matches(signing_pub_key, expected.as_deref(), &self.metrics)
     }
 
