@@ -1727,9 +1727,10 @@ impl LeaderService {
             .signatures
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No MPC signatures on withdrawal transaction"))?;
-        let raw_guardian_sigs = txn.guardian_signatures.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("No guardian signatures on withdrawal transaction")
-        })?;
+        let raw_guardian_sigs = txn
+            .guardian_signatures
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No guardian signatures on withdrawal transaction"))?;
 
         let mut tx = inner.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
 
