@@ -543,6 +543,50 @@ fn compute_taproot_artifacts(
     (address_script, leaf_hash)
 }
 
+/// Bridge deposit address for the 2-of-2 enclave/hashi taproot script-path
+/// (`tr(NUMS, multi_a(2, enclave, derived_hashi))`).
+pub fn two_of_two_taproot_script_path_address(
+    enclave_pubkey: &BitcoinPubkey,
+    hashi_master_pubkey: &BitcoinPubkey,
+    hashi_derivation_path: &DerivationPath,
+    network: Network,
+) -> BitcoinAddress {
+    compute_taproot_descriptor(enclave_pubkey, hashi_master_pubkey, hashi_derivation_path)
+        .address(network)
+}
+
+/// Artifacts needed to spend a 2-of-2 enclave/hashi taproot output via the
+/// script path: the tap leaf script (used for the witness), the control
+/// block proving the leaf is part of the taptree, and the leaf hash (used
+/// when constructing the sighash). Mirrors
+/// [`single_key_taproot_script_path_spend_artifacts`].
+pub fn two_of_two_taproot_script_path_spend_artifacts(
+    enclave_pubkey: &BitcoinPubkey,
+    hashi_master_pubkey: &BitcoinPubkey,
+    hashi_derivation_path: &DerivationPath,
+) -> (ScriptBuf, ControlBlock, TapLeafHash) {
+    let desc =
+        compute_taproot_descriptor(enclave_pubkey, hashi_master_pubkey, hashi_derivation_path);
+
+    let tap_tree = desc.tap_tree().expect("descriptor should have a tap tree");
+    let leaf = tap_tree
+        .leaves()
+        .next()
+        .expect("tap tree should have at least one leaf");
+    let tap_script = leaf.compute_script();
+
+    let control_block = desc
+        .spend_info()
+        .leaves()
+        .next()
+        .expect("spend info should have at least one leaf")
+        .into_control_block();
+
+    let leaf_hash = TapLeafHash::from_script(&tap_script, LeafVersion::TapScript);
+
+    (tap_script, control_block, leaf_hash)
+}
+
 /// Derives a child public key using unhardened derivation from a parent public key.
 ///
 /// Uses the provided derivation path to compute a new public key.
@@ -703,23 +747,17 @@ mod bitcoin_tests {
         hashi_derivation_path: &DerivationPath,
         network: Network,
     ) -> (BitcoinAddress, ControlBlock, ScriptBuf) {
-        let desc =
-            compute_taproot_descriptor(enclave_pubkey, hashi_master_pubkey, hashi_derivation_path);
-        let addr = desc.address(network);
-
-        let tap_tree = desc.tap_tree().expect("descriptor should have tap tree");
-        if tap_tree.leaves().len() != 1 {
-            panic!("expected exactly one leaf in tap tree");
-        }
-        let tap_script = tap_tree.leaves().next().unwrap().compute_script();
-
-        let spend_info = desc.spend_info();
-        let control_block = spend_info
-            .leaves()
-            .next()
-            .expect("spend info should have at least one leaf")
-            .into_control_block();
-
+        let addr = two_of_two_taproot_script_path_address(
+            enclave_pubkey,
+            hashi_master_pubkey,
+            hashi_derivation_path,
+            network,
+        );
+        let (tap_script, control_block, _) = two_of_two_taproot_script_path_spend_artifacts(
+            enclave_pubkey,
+            hashi_master_pubkey,
+            hashi_derivation_path,
+        );
         (addr, control_block, tap_script)
     }
 
