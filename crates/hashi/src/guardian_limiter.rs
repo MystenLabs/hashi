@@ -149,9 +149,7 @@ pub(crate) fn should_defer_guardian_finalize(
     last_finalized.is_some_and(|(last_seq, last_wid)| next_seq <= last_seq && wid != last_wid)
 }
 
-/// Ticks the mirror must stay frozen at the same local seq before we treat
-/// it as a real stall. 20 ticks ≈ 5 min at 15 s — wide enough that a slow
-/// guardian-RPC → on-chain-event RTT doesn't trip a false stall.
+/// 20 ticks ≈ 5 min at 15 s — beyond a slow guardian→on-chain RTT.
 pub(crate) const STALL_RECONCILE_TICKS: u32 = 20;
 
 /// Detects a mirror frozen at the same `local_seq` for [`STALL_RECONCILE_TICKS`] consecutive ticks.
