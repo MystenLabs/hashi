@@ -98,13 +98,18 @@ public(package) fun assert_not_reconfiguring(self: &Hashi) {
 
 // Function that needs to be called immediately after publishing to finalize
 // some input parameters, register BTC and the package's UpgradeCap.
+//
+// The guardian URL, signing key, and BTC key are all required: the
+// guardian is a load-bearing component of every deposit address (2-of-2
+// taproot leaf) and every withdrawal signature, so a deploy without
+// them would produce a non-functional bridge.
 entry fun finish_publish(
     self: &mut Hashi,
     upgrade_cap: sui::package::UpgradeCap,
     bitcoin_chain_id: address,
-    guardian_url: Option<String>,
-    guardian_public_key: Option<vector<u8>>,
-    guardian_btc_public_key: Option<vector<u8>>,
+    guardian_url: String,
+    guardian_public_key: vector<u8>,
+    guardian_btc_public_key: vector<u8>,
     bitcoin_confirmation_threshold: Option<u64>,
     bitcoin_deposit_time_delay_ms: Option<u64>,
     coin_registry: &mut sui::coin_registry::CoinRegistry,
@@ -119,24 +124,8 @@ entry fun finish_publish(
     self.config_mut().set_upgrade_cap(upgrade_cap);
     hashi::btc_config::set_bitcoin_chain_id(self.config_mut(), bitcoin_chain_id);
 
-    // Guardian config is all-or-nothing: URL, signing key, and BTC key must be
-    // set together. A partial config (e.g. URL/key without the BTC key) would
-    // derive 2-of-2 deposit addresses that can never be spent.
-    if (
-        guardian_url.is_some() && guardian_public_key.is_some() && guardian_btc_public_key.is_some()
-    ) {
-        self
-            .config_mut()
-            .set_guardian(
-                guardian_url.destroy_some(),
-                guardian_public_key.destroy_some(),
-            );
-        self.config_mut().set_guardian_btc_public_key(guardian_btc_public_key.destroy_some());
-    } else {
-        guardian_url.destroy_none();
-        guardian_public_key.destroy_none();
-        guardian_btc_public_key.destroy_none();
-    };
+    self.config_mut().set_guardian(guardian_url, guardian_public_key);
+    self.config_mut().set_guardian_btc_public_key(guardian_btc_public_key);
 
     if (bitcoin_confirmation_threshold.is_some()) {
         hashi::btc_config::set_bitcoin_confirmation_threshold(
