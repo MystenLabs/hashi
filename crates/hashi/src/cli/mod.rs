@@ -517,6 +517,12 @@ pub struct PublishOpts {
     #[clap(long)]
     pub guardian_public_key: Option<String>,
 
+    /// Guardian BTC pubkey (x-only, 32 bytes hex). Published on-chain so
+    /// hashi-server can derive 2-of-2 (mpc, guardian) taproot deposit
+    /// addresses. Optional today; required once 2-of-2 deposits ship.
+    #[clap(long)]
+    pub guardian_btc_public_key: Option<String>,
+
     /// Override `bitcoin_confirmation_threshold` on-chain at publish time.
     /// Falls back to the Move package's `init_defaults` (currently 6) when omitted.
     #[clap(long)]
@@ -908,6 +914,19 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
     let mut client = sui_rpc::Client::new(&opts.sui_rpc_url)?;
 
     // Build optional guardian config
+    let guardian_btc_public_key = match opts.guardian_btc_public_key {
+        Some(hex_str) => {
+            let bytes = hex::decode(hex_str.strip_prefix("0x").unwrap_or(&hex_str))
+                .context("Invalid hex for --guardian-btc-public-key")?;
+            anyhow::ensure!(
+                bytes.len() == 32,
+                "--guardian-btc-public-key must be 32 bytes (x-only), got {} bytes",
+                bytes.len(),
+            );
+            Some(bytes)
+        }
+        None => None,
+    };
     let guardian = match (opts.guardian_url, opts.guardian_public_key) {
         (Some(url), Some(pk_hex)) => {
             let public_key = hex::decode(pk_hex.strip_prefix("0x").unwrap_or(&pk_hex))
@@ -917,9 +936,19 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
                 "--guardian-public-key must be 32 bytes (Ed25519), got {} bytes",
                 public_key.len(),
             );
-            Some(crate::publish::GuardianConfig { url, public_key })
+            Some(crate::publish::GuardianConfig {
+                url,
+                public_key,
+                btc_public_key: guardian_btc_public_key,
+            })
         }
-        (None, None) => None,
+        (None, None) => {
+            anyhow::ensure!(
+                guardian_btc_public_key.is_none(),
+                "--guardian-btc-public-key requires --guardian-url and --guardian-public-key"
+            );
+            None
+        }
         _ => anyhow::bail!(
             "--guardian-url and --guardian-public-key must both be provided or both omitted"
         ),

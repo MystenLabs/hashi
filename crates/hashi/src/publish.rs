@@ -105,6 +105,11 @@ stderr: {}",
 pub struct GuardianConfig {
     pub url: String,
     pub public_key: Vec<u8>,
+    /// Optional x-only BTC pubkey of the enclave (32 bytes). When `None`,
+    /// the on-chain `guardian_btc_public_key` field is left unset and
+    /// hashi-server falls back to legacy single-key deposit addresses.
+    /// Once 2-of-2 deposits are turned on, this becomes required.
+    pub btc_public_key: Option<Vec<u8>>,
 }
 
 /// Optional Bitcoin config overrides applied during `finish_publish`. Any
@@ -223,6 +228,9 @@ pub async fn publish_and_init(
     let bitcoin_chain_id_arg = builder.pure(&bitcoin_chain_id_addr);
     let guardian_url_arg = builder.pure(&guardian.map(|g| g.url.as_str()));
     let guardian_public_key_arg = builder.pure(&guardian.map(|g| g.public_key.as_slice()));
+    let guardian_btc_public_key_arg = builder.pure(
+        &guardian.and_then(|g| g.btc_public_key.as_deref()),
+    );
     let confirmation_threshold_arg = builder.pure(&bitcoin_overrides.confirmation_threshold);
     let deposit_time_delay_ms_arg = builder.pure(&bitcoin_overrides.deposit_time_delay_ms);
     let coin_registry_arg = builder.object(
@@ -243,6 +251,7 @@ pub async fn publish_and_init(
             bitcoin_chain_id_arg,
             guardian_url_arg,
             guardian_public_key_arg,
+            guardian_btc_public_key_arg,
             confirmation_threshold_arg,
             deposit_time_delay_ms_arg,
             coin_registry_arg,

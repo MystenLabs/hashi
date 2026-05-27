@@ -104,6 +104,7 @@ entry fun finish_publish(
     bitcoin_chain_id: address,
     guardian_url: Option<String>,
     guardian_public_key: Option<vector<u8>>,
+    guardian_btc_public_key: Option<vector<u8>>,
     bitcoin_confirmation_threshold: Option<u64>,
     bitcoin_deposit_time_delay_ms: Option<u64>,
     coin_registry: &mut sui::coin_registry::CoinRegistry,
@@ -128,6 +129,14 @@ entry fun finish_publish(
     } else {
         guardian_url.destroy_none();
         guardian_public_key.destroy_none();
+    };
+
+    if (guardian_btc_public_key.is_some()) {
+        self
+            .config_mut()
+            .set_guardian_btc_public_key(guardian_btc_public_key.destroy_some());
+    } else {
+        guardian_btc_public_key.destroy_none();
     };
 
     if (bitcoin_confirmation_threshold.is_some()) {
