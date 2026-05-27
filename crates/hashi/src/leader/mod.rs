@@ -1466,26 +1466,39 @@ impl LeaderService {
         // 3. Post-MPC: forward to guardian for the enclave signature. Reuses
         // the `timestamp_secs` from the pre-MPC validate so the BLS-signed
         // certificate covers a consistent `(timestamp, seq, amount)` triple.
-        if let (Some(guardian), Some(seq)) = (inner.guardian_client(), expected_limiter_seq) {
-            Self::finalize_withdrawal_through_guardian(
-                &inner,
-                &txn,
-                &members,
-                guardian,
-                timestamp_secs,
-                seq,
-            )
-            .await?;
-            inner.record_guardian_finalized(seq, txn.id);
-        }
+        // The per-input enclave signatures are stored on-chain alongside the
+        // MPC sigs to satisfy the 2-of-2 deposit witness.
+        let guardian_signatures: Vec<Vec<u8>> =
+            match (inner.guardian_client(), expected_limiter_seq) {
+                (Some(guardian), Some(seq)) => {
+                    let sigs = Self::finalize_withdrawal_through_guardian(
+                        &inner,
+                        &txn,
+                        &members,
+                        guardian,
+                        timestamp_secs,
+                        seq,
+                    )
+                    .await?;
+                    inner.record_guardian_finalized(seq, txn.id);
+                    sigs
+                }
+                _ => {
+                    anyhow::bail!(
+                        "Guardian endpoint or seq missing — refusing to sign \
+                         a 2-of-2 withdrawal without the guardian half of the \
+                         witness"
+                    );
+                }
+            };
 
-        // 4. Build the WithdrawalTxSigning and get BLS certificate via fan-out
+        // 4. Build the WithdrawalTxSigning (binds BOTH sig arrays) and get
+        // the BLS certificate via fan-out.
         let signed_message = WithdrawalTxSigning {
             withdrawal_id: txn.id,
             request_ids: txn.request_ids.clone(),
             signatures: witness_signatures.clone(),
-            // Carried empty until the 2-of-2 cutover populates it.
-            guardian_signatures: vec![],
+            guardian_signatures: guardian_signatures.clone(),
         };
 
         let committee = inner
@@ -1532,6 +1545,7 @@ impl LeaderService {
             &txn.id,
             &txn.request_ids.clone(),
             &witness_signatures,
+            &guardian_signatures,
             signed.committee_signature(),
         )
         .await
@@ -2169,13 +2183,20 @@ impl LeaderService {
         withdrawal_id: &Address,
         request_ids: &[Address],
         signatures: &[Vec<u8>],
+        guardian_signatures: &[Vec<u8>],
         cert: &CommitteeSignature,
     ) -> anyhow::Result<u64> {
         info!("Submitting sign_withdrawal for {:?}", withdrawal_id);
 
         let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
         executor
-            .execute_sign_withdrawal(withdrawal_id, request_ids, signatures, &[], cert)
+            .execute_sign_withdrawal(
+                withdrawal_id,
+                request_ids,
+                signatures,
+                guardian_signatures,
+                cert,
+            )
             .await
     }
 
@@ -2200,6 +2221,8 @@ impl LeaderService {
     // Guardian: post-MPC enclave-signature RPC
     // ========================================================================
 
+    /// Returns the per-input guardian Schnorr signatures (64 bytes each)
+    /// for inclusion in the on-chain `sign_withdrawal` PTB.
     #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id, seq))]
     async fn finalize_withdrawal_through_guardian(
         inner: &Arc<Hashi>,
@@ -2208,7 +2231,7 @@ impl LeaderService {
         guardian: &crate::grpc::guardian_client::GuardianClient,
         timestamp_secs: u64,
         seq: u64,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<Vec<u8>>> {
         let signed_request =
             Self::collect_guardian_withdrawal_signatures(inner, txn, members, timestamp_secs, seq)
                 .await?;
@@ -2259,7 +2282,7 @@ impl LeaderService {
                 );
             })
             .map_err(|e| anyhow::anyhow!("Failed to parse guardian withdrawal response: {e}"))?;
-        signed_response
+        let response = signed_response
             .verify(pubkey)
             .inspect_err(|_| {
                 Self::record_guardian_rpc_outcome(
@@ -2272,13 +2295,34 @@ impl LeaderService {
                 anyhow::anyhow!("Guardian response signature verification failed: {e:?}")
             })?;
 
+        anyhow::ensure!(
+            response.enclave_signatures.len() == txn.inputs.len(),
+            "Guardian returned {} enclave_signatures but tx has {} inputs",
+            response.enclave_signatures.len(),
+            txn.inputs.len(),
+        );
+        let guardian_signatures: Vec<Vec<u8>> = response
+            .enclave_signatures
+            .iter()
+            .enumerate()
+            .map(|(i, sig)| {
+                let bytes = sig.to_vec();
+                anyhow::ensure!(
+                    bytes.len() == 64,
+                    "Guardian enclave_signatures[{i}] is {} bytes, expected 64",
+                    bytes.len(),
+                );
+                Ok(bytes)
+            })
+            .collect::<anyhow::Result<_>>()?;
+
         Self::record_guardian_rpc_outcome(
             inner,
             crate::metrics::GUARDIAN_RPC_OUTCOME_OK,
             rpc_elapsed,
         );
         info!(seq, "Guardian approved withdrawal");
-        Ok(())
+        Ok(guardian_signatures)
     }
 
     fn record_guardian_rpc_outcome(inner: &Arc<Hashi>, outcome: &str, elapsed_secs: f64) {
