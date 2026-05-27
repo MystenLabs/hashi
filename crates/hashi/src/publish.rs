@@ -276,3 +276,59 @@ pub async fn publish_and_init(
         hashi_object_id,
     })
 }
+
+/// Call `hashi::set_guardian_btc_public_key`. Signer must match the on-chain deployer pin.
+pub async fn set_guardian_btc_public_key(
+    client: &mut Client,
+    signer: &Ed25519PrivateKey,
+    package_id: Address,
+    hashi_object_id: Address,
+    btc_public_key: Vec<u8>,
+) -> Result<()> {
+    anyhow::ensure!(
+        btc_public_key.len() == 32,
+        "guardian BTC public key must be 32 bytes (x-only), got {}",
+        btc_public_key.len(),
+    );
+
+    let sender = signer.public_key().derive_address();
+    let mut builder = TransactionBuilder::new();
+    builder.set_sender(sender);
+
+    let hashi_arg = builder.object(
+        ObjectInput::new(hashi_object_id)
+            .as_shared()
+            .with_mutable(true),
+    );
+    let btc_pk_arg = builder.pure(&btc_public_key);
+
+    builder.move_call(
+        Function::new(
+            package_id,
+            Identifier::from_static("hashi"),
+            Identifier::from_static("set_guardian_btc_public_key"),
+        ),
+        vec![hashi_arg, btc_pk_arg],
+    );
+
+    let transaction = builder.build(client).await?;
+    let signature = signer.sign_transaction(&transaction)?;
+
+    let response = client
+        .execute_transaction_and_wait_for_checkpoint(
+            ExecuteTransactionRequest::new(transaction.into())
+                .with_signatures(vec![signature.into()])
+                .with_read_mask(FieldMask::from_str("*")),
+            std::time::Duration::from_secs(30),
+        )
+        .await?
+        .into_inner();
+
+    anyhow::ensure!(
+        response.transaction().effects().status().success(),
+        "set_guardian_btc_public_key transaction failed: {:?}",
+        response.transaction().effects().status(),
+    );
+
+    Ok(())
+}

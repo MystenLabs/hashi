@@ -76,6 +76,12 @@ enum Commands {
         register_opts: hashi::cli::RegisterOpts,
     },
 
+    /// Publish the guardian's enclave BTC pubkey on an already-published Hashi
+    SetGuardianBtcPublicKey {
+        #[clap(flatten)]
+        opts: hashi::cli::SetGuardianBtcPublicKeyOpts,
+    },
+
     /// Deposit BTC into the Hashi bridge
     Deposit {
         #[clap(flatten)]
@@ -132,6 +138,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Publish { publish_opts } => hashi::cli::run_publish(publish_opts).await,
         Commands::Register { register_opts } => hashi::cli::run_register(register_opts).await,
+        Commands::SetGuardianBtcPublicKey { opts } => {
+            hashi::cli::run_set_guardian_btc_public_key(opts).await
+        }
         Commands::Deposit { cli_opts, action } => {
             hashi::cli::run(cli_opts, hashi::cli::CliCommand::Deposit { action }).await
         }
