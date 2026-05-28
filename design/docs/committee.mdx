@@ -1,7 +1,7 @@
 ---
 title: Committee
 description: The Hashi committee is a subset of the Sui validator set that operates the protocol's MPC signing service.
-keywords: [ committee, validators, registration, BLS, MPC, hand-off ]
+keywords: [ committee, validators, registration, BLS, MPC, hand-off, transition ]
 ---
 
 Hashi is a native protocol, meaning the members of the Hashi committee are a
@@ -79,3 +79,21 @@ participate in the hand-off protocol. This design makes that assumption,
 because of the challenges of enforcing tight coupling, and an economic
 mechanism can be added later to motivate older committee members to
 participate in the hand-off process.
+
+## Committee transition
+
+When the onchain epoch advances, the Hashi committee must transition from the old committee to the new one. The leader node is responsible for detecting the epoch change and driving this transition so that the guardian committee matches the current onchain epoch.
+
+### Role of the leader
+
+The leader monitors the onchain epoch and initiates the committee transition when it detects that the current guardian committee no longer matches the onchain epoch. The leader coordinates the transition by requesting signatures from members of the old committee through the `SignCommitteeTransition` RPC.
+
+### The SignCommitteeTransition RPC
+
+The `SignCommitteeTransition` RPC allows the leader to collect authorization from old committee members to transition to the new committee. When a peer receives a `SignCommitteeTransition` request, it validates the transition and signs using its BLS key from the historical epoch in which it was an active committee member, rather than its current-epoch BLS key.
+
+Using historical epoch BLS keys is necessary because committee members might have rotated their keys since the epoch in which they served on the old committee. By signing with the BLS key that was active during the relevant epoch, each member proves it was a legitimate member of the old committee and authorizes the transition to the new one.
+
+### Transition requirements
+
+The leader must collect `SignCommitteeTransition` signatures from old committee members representing at least `2f+1` stake-weighted participation. Once the leader gathers enough signatures, the transition to the new committee is authorized and the guardian committee updates to match the onchain epoch.
