@@ -8,11 +8,13 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// Immutable configuration for the token bucket rate limiter.
-#[derive(Debug, Copy, Clone, PartialEq, Serialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LimiterConfig {
     /// Refill rate in sats per second.
+    #[serde(rename = "refill_rate_sats_per_sec", alias = "refill_rate")]
     pub refill_rate: u64,
     /// Maximum bucket capacity in sats.
+    #[serde(rename = "max_bucket_capacity_sats", alias = "max_bucket_capacity")]
     pub max_bucket_capacity: u64,
 }
 
@@ -37,9 +39,9 @@ impl LimiterState {
     /// logs in the prior enclave's walk-back window), `next_seq = 0` may not
     /// match Hashi's current seq counter. Recover the real seq from a
     /// separate source instead of falling back to 0.
-    pub fn genesis(config: &super::WithdrawalConfig) -> Self {
+    pub fn genesis(config: &super::LimiterConfig) -> Self {
         Self {
-            num_tokens_available: config.max_bucket_capacity_sats,
+            num_tokens_available: config.max_bucket_capacity,
             last_updated_at: 0,
             next_seq: 0,
         }

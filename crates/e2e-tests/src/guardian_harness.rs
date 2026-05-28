@@ -15,7 +15,7 @@ use hashi_guardian::rpc::GuardianGrpc;
 use hashi_types::committee::Committee as HashiCommittee;
 use hashi_types::guardian::BitcoinPubkey;
 use hashi_types::guardian::LimiterState;
-use hashi_types::guardian::WithdrawalConfig;
+use hashi_types::guardian::LimiterConfig;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -78,7 +78,7 @@ impl GuardianHarness {
         &self,
         committee: HashiCommittee,
         master_pubkey: BitcoinPubkey,
-        withdrawal_config: WithdrawalConfig,
+        withdrawal_config: LimiterConfig,
         limiter_state: LimiterState,
     ) -> Result<()> {
         hashi_guardian::test_utils::finalize_enclave(
@@ -117,12 +117,9 @@ impl Drop for GuardianHarness {
     }
 }
 
-pub fn default_test_withdrawal_config(committee: &HashiCommittee) -> WithdrawalConfig {
-    let total_weight = committee.total_weight();
-    let committee_threshold = total_weight.div_ceil(3) * 2;
-    WithdrawalConfig {
-        committee_threshold,
-        refill_rate_sats_per_sec: 0,
-        max_bucket_capacity_sats: 100_000_000,
+pub fn default_test_withdrawal_config(_committee: &HashiCommittee) -> LimiterConfig {
+    LimiterConfig {
+        refill_rate: 0,
+        max_bucket_capacity: 100_000_000,
     }
 }

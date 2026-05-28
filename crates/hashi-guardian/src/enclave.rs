@@ -50,7 +50,7 @@ pub struct EnclaveConfig {
     /// Hashi BTC public key used to derive child keys (set in provisioner_init)
     hashi_btc_master_pubkey: OnceLock<BitcoinPubkey>,
     /// Withdraw related config's (set in provisioner_init)
-    withdrawal_config: OnceLock<WithdrawalConfig>,
+    withdrawal_config: OnceLock<LimiterConfig>,
 }
 
 /// Mutable state that changes during operation.
@@ -162,20 +162,16 @@ impl EnclaveConfig {
     // Withdrawal Configuration
     // ========================================================================
 
-    pub fn withdrawal_config(&self) -> GuardianResult<&WithdrawalConfig> {
+    pub fn withdrawal_config(&self) -> GuardianResult<&LimiterConfig> {
         self.withdrawal_config
             .get()
-            .ok_or(InvalidInputs("WithdrawalConfig is not initialized".into()))
+            .ok_or(InvalidInputs("LimiterConfig is not initialized".into()))
     }
 
-    pub fn set_withdrawal_config(&self, config: WithdrawalConfig) -> GuardianResult<()> {
+    pub fn set_withdrawal_config(&self, config: LimiterConfig) -> GuardianResult<()> {
         self.withdrawal_config
             .set(config)
-            .map_err(|_| InvalidInputs("WithdrawalConfig already set".into()))
-    }
-
-    pub fn committee_threshold(&self) -> GuardianResult<u64> {
-        Ok(self.withdrawal_config()?.committee_threshold)
+            .map_err(|_| InvalidInputs("LimiterConfig already set".into()))
     }
 
     // ========================================================================

@@ -135,7 +135,7 @@ mod tests {
     use hashi_types::guardian::test_utils::create_btc_keypair;
     use hashi_types::guardian::HashiCommitteeMember;
     use hashi_types::guardian::LimiterState;
-    use hashi_types::guardian::WithdrawalConfig;
+    use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::WithdrawalID as SuiAddress;
 
     fn mock_signer_address() -> SuiAddress {
@@ -188,10 +188,9 @@ mod tests {
             network: Network::Regtest,
             committee: committee_at(epoch),
             master_pubkey: kp.x_only_public_key().0,
-            withdrawal_config: WithdrawalConfig {
-                committee_threshold: 0,
-                refill_rate_sats_per_sec: 0,
-                max_bucket_capacity_sats: 1_000,
+            withdrawal_config: LimiterConfig {
+                refill_rate: 0,
+                max_bucket_capacity: 1_000,
             },
             limiter_state: LimiterState {
                 num_tokens_available: 1_000,

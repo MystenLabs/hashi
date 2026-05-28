@@ -3,6 +3,7 @@
 
 use crate::Enclave;
 use bitcoin::Txid;
+use hashi_types::committee::certificate_threshold;
 use hashi_types::guardian::now_timestamp_secs;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::EnclaveUninitialized;
@@ -72,10 +73,7 @@ async fn normal_withdrawal_inner(
 
     // 1) Verify certificate (before acquiring limiter lock)
     let committee = enclave.state.get_committee()?;
-    let threshold = enclave
-        .config
-        .committee_threshold()
-        .expect("Committee threshold should be set");
+    let threshold = certificate_threshold(committee.total_weight());
 
     info!("Verifying request certificate.");
     verify_hashi_cert(committee, threshold, &signed_request)?;
@@ -220,7 +218,7 @@ mod tests {
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::ProvisionerInitState;
     use hashi_types::guardian::StandardWithdrawalRequest;
-    use hashi_types::guardian::WithdrawalConfig;
+    use hashi_types::guardian::LimiterConfig;
 
     /// Sets up an enclave with a single committee and token bucket limiter.
     async fn setup_fully_initialized_enclave(
@@ -244,10 +242,9 @@ mod tests {
             .unwrap();
 
         let refill_rate = 0; // no refill in tests unless specified
-        let withdrawal_config = WithdrawalConfig {
-            committee_threshold: 1,
-            refill_rate_sats_per_sec: refill_rate,
-            max_bucket_capacity_sats,
+        let withdrawal_config = LimiterConfig {
+            refill_rate,
+            max_bucket_capacity: max_bucket_capacity_sats,
         };
         enclave
             .config

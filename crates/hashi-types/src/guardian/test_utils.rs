@@ -25,7 +25,7 @@ use super::ShareCommitment;
 use super::ShareCommitments;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
-use super::WithdrawalConfig;
+use super::LimiterConfig;
 use super::WithdrawalID;
 
 use super::bitcoin_utils::BTC_LIB;
@@ -249,7 +249,7 @@ fn mock_committee_with_one_member(epoch: u64) -> HashiCommittee {
 
 impl ProvisionerInitState {
     pub fn from_parts_for_testing(
-        withdrawal_config: WithdrawalConfig,
+        withdrawal_config: LimiterConfig,
         limiter_state: LimiterState,
         committee: HashiCommittee,
         hashi_btc_master_pubkey: super::BitcoinPubkey,
@@ -269,10 +269,9 @@ impl ProvisionerInitState {
 
         ProvisionerInitState::new(
             mock_committee_with_one_member(0),
-            WithdrawalConfig {
-                committee_threshold: 0,
-                refill_rate_sats_per_sec: 10,
-                max_bucket_capacity_sats: max_capacity,
+            LimiterConfig {
+                refill_rate: 10,
+                max_bucket_capacity: max_capacity,
             },
             LimiterState {
                 num_tokens_available: max_capacity,

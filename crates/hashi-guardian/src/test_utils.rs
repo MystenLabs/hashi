@@ -246,7 +246,7 @@ pub struct FullyInitializedArgs {
     pub network: Network,
     pub committee: HashiCommittee,
     pub master_pubkey: BitcoinPubkey,
-    pub withdrawal_config: WithdrawalConfig,
+    pub withdrawal_config: LimiterConfig,
     pub limiter_state: LimiterState,
 }
 
@@ -256,7 +256,7 @@ pub fn finalize_enclave(
     enclave: &Arc<Enclave>,
     committee: HashiCommittee,
     master_pubkey: BitcoinPubkey,
-    withdrawal_config: WithdrawalConfig,
+    withdrawal_config: LimiterConfig,
     limiter_state: LimiterState,
 ) -> GuardianResult<()> {
     let secp = Secp256k1::new();

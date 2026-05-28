@@ -41,7 +41,6 @@ use super::SignedStandardWithdrawalRequestWire;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalRequestWire;
 use super::StandardWithdrawalResponse;
-use super::WithdrawalConfig;
 use super::bitcoin_utils::ExternalOutputUTXOWire;
 use super::bitcoin_utils::InputUTXOWire;
 use super::bitcoin_utils::InternalOutputUTXO;
@@ -253,7 +252,7 @@ impl TryFrom<pb::ProvisionerInitState> for ProvisionerInitState {
         let withdrawal_config_pb = state_pb
             .withdrawal_config
             .ok_or_else(|| missing("withdrawal_config"))?;
-        let withdrawal_config = pb_to_withdrawal_config(withdrawal_config_pb)?;
+        let withdrawal_config = pb_to_limiter_config(withdrawal_config_pb)?;
 
         let limiter_state = pb_to_limiter_state(
             state_pb
@@ -449,7 +448,7 @@ pub fn provisioner_init_state_to_pb(s: ProvisionerInitState) -> pb::ProvisionerI
 
     pb::ProvisionerInitState {
         committee: Some(hashi_committee_to_pb(committee)),
-        withdrawal_config: Some(withdrawal_config_to_pb(withdrawal_config)),
+        withdrawal_config: Some(limiter_config_to_pb(withdrawal_config)),
         hashi_btc_master_pubkey: Some(hashi_btc_master_pubkey.serialize().to_vec().into()),
         limiter_state: Some(limiter_state_to_pb(limiter_state)),
     }
@@ -762,10 +761,7 @@ pub fn setup_new_key_response_to_pb(r: SetupNewKeyResponse) -> pb::SetupNewKeyRe
     }
 }
 
-fn pb_to_withdrawal_config(cfg: pb::WithdrawalConfig) -> GuardianResult<WithdrawalConfig> {
-    let committee_threshold = cfg
-        .committee_threshold
-        .ok_or_else(|| missing("committee_threshold"))?;
+fn pb_to_limiter_config(cfg: pb::LimiterConfig) -> GuardianResult<LimiterConfig> {
     let refill_rate_sats_per_sec = cfg
         .refill_rate_sats_per_sec
         .ok_or_else(|| missing("refill_rate_sats_per_sec"))?;
@@ -773,18 +769,16 @@ fn pb_to_withdrawal_config(cfg: pb::WithdrawalConfig) -> GuardianResult<Withdraw
         .max_bucket_capacity_sats
         .ok_or_else(|| missing("max_bucket_capacity_sats"))?;
 
-    Ok(WithdrawalConfig {
-        committee_threshold,
-        refill_rate_sats_per_sec,
-        max_bucket_capacity_sats,
+    Ok(LimiterConfig {
+        refill_rate: refill_rate_sats_per_sec,
+        max_bucket_capacity: max_bucket_capacity_sats,
     })
 }
 
-fn withdrawal_config_to_pb(cfg: WithdrawalConfig) -> pb::WithdrawalConfig {
-    pb::WithdrawalConfig {
-        committee_threshold: Some(cfg.committee_threshold),
-        refill_rate_sats_per_sec: Some(cfg.refill_rate_sats_per_sec),
-        max_bucket_capacity_sats: Some(cfg.max_bucket_capacity_sats),
+fn limiter_config_to_pb(cfg: LimiterConfig) -> pb::LimiterConfig {
+    pb::LimiterConfig {
+        refill_rate_sats_per_sec: Some(cfg.refill_rate),
+        max_bucket_capacity_sats: Some(cfg.max_bucket_capacity),
     }
 }
 
@@ -809,26 +803,6 @@ fn limiter_state_to_pb(state: LimiterState) -> pb::LimiterState {
         num_tokens_available_sats: Some(state.num_tokens_available),
         last_updated_at_secs: Some(state.last_updated_at),
         next_seq: Some(state.next_seq),
-    }
-}
-
-fn pb_to_limiter_config(cfg: pb::LimiterConfig) -> GuardianResult<LimiterConfig> {
-    let refill_rate = cfg
-        .refill_rate_sats_per_sec
-        .ok_or_else(|| missing("refill_rate_sats_per_sec"))?;
-    let max_bucket_capacity = cfg
-        .max_bucket_capacity_sats
-        .ok_or_else(|| missing("max_bucket_capacity_sats"))?;
-    Ok(LimiterConfig {
-        refill_rate,
-        max_bucket_capacity,
-    })
-}
-
-fn limiter_config_to_pb(cfg: LimiterConfig) -> pb::LimiterConfig {
-    pb::LimiterConfig {
-        refill_rate_sats_per_sec: Some(cfg.refill_rate),
-        max_bucket_capacity_sats: Some(cfg.max_bucket_capacity),
     }
 }
 

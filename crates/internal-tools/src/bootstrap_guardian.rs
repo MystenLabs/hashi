@@ -16,7 +16,6 @@ use bitcoin::secp256k1::Secp256k1;
 use bitcoin::secp256k1::SecretKey as BtcSecretKey;
 use clap::Parser;
 use hashi::onchain::OnchainState;
-use hashi_types::committee::certificate_threshold;
 use hashi_types::guardian::BitcoinPubkey;
 use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GetGuardianInfoResponse;
@@ -28,7 +27,7 @@ use hashi_types::guardian::SecretSharingParams;
 use hashi_types::guardian::Share;
 use hashi_types::guardian::ShareCommitment;
 use hashi_types::guardian::ShareCommitments;
-use hashi_types::guardian::WithdrawalConfig;
+use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::crypto::commit_share;
 use hashi_types::guardian::crypto::split_secret;
 use hashi_types::guardian::proto_conversions::provisioner_init_request_to_pb;
@@ -84,11 +83,9 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .current_committee()
         .ok_or_else(|| anyhow!("no current committee on chain (DKG not yet complete?)"))?;
     let committee_epoch = committee.epoch();
-    let committee_threshold = certificate_threshold(committee.total_weight());
     tracing::info!(
         committee_epoch,
         committee_total_weight = committee.total_weight(),
-        committee_threshold,
         num_members = committee.members().len(),
         "fetched on-chain committee"
     );
@@ -177,10 +174,9 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .map_err(|e| anyhow!("decode guardian encryption pubkey (session={session_id}): {e:?}"))?;
     tracing::info!(session_id = %session_id, "guardian info verified");
 
-    let withdrawal_config = WithdrawalConfig {
-        committee_threshold,
-        refill_rate_sats_per_sec: args.refill_rate_sats_per_sec,
-        max_bucket_capacity_sats: args.max_bucket_capacity_sats,
+    let withdrawal_config = LimiterConfig {
+        refill_rate: args.refill_rate_sats_per_sec,
+        max_bucket_capacity: args.max_bucket_capacity_sats,
     };
     let limiter_state = LimiterState::genesis(&withdrawal_config);
     let state = ProvisionerInitState::new(
@@ -232,7 +228,6 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         hex::encode(material.master_pubkey.serialize())
     );
     println!("  committee_epoch:          {committee_epoch}");
-    println!("  committee_threshold:      {committee_threshold}");
     println!(
         "  refill_rate_sats_per_sec: {}",
         args.refill_rate_sats_per_sec

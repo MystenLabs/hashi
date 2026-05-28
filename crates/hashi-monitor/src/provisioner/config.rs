@@ -9,7 +9,7 @@ use hashi_types::guardian::S3Config;
 use hashi_types::guardian::Share;
 use hashi_types::guardian::ShareCommitments;
 use hashi_types::guardian::ShareID;
-use hashi_types::guardian::WithdrawalConfig;
+use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::proto_conversions::pb_share_commitments_to_domain;
 use hashi_types::move_types::Committee as CommitteeRepr;
 use hashi_types::proto as pb;
@@ -75,7 +75,7 @@ pub struct ProvisionerConfig {
     // Current Hashi committee
     pub hashi_committee: CommitteeRepr,
     // Withdrawal config
-    pub withdrawal_config: WithdrawalConfig,
+    pub withdrawal_config: LimiterConfig,
     // Hashi BTC pubkey
     pub hashi_btc_master_pubkey: BitcoinPubkey,
 }

@@ -184,7 +184,7 @@ pub struct ProvisionerInitState {
     /// Current Hashi committee
     committee: HashiCommittee,
     /// Withdrawal config (includes limiter config)
-    withdrawal_config: WithdrawalConfig,
+    withdrawal_config: LimiterConfig,
     /// Limiter state (tokens available, timestamp, seq)
     limiter_state: LimiterState,
     /// Hashi BTC master key used to derive child keys for diff inputs
@@ -393,16 +393,6 @@ pub struct S3BucketInfo {
     pub region: String,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WithdrawalConfig {
-    /// Committee threshold expressed in terms of weight
-    pub committee_threshold: u64,
-    /// Token refill rate in sats per second
-    pub refill_rate_sats_per_sec: u64,
-    /// Maximum bucket capacity in sats
-    pub max_bucket_capacity_sats: u64,
-}
-
 // ---------------------------------
 //          Helper impl's
 // ---------------------------------
@@ -507,12 +497,12 @@ impl OperatorInitRequest {
 impl ProvisionerInitState {
     pub fn new(
         committee: HashiCommittee,
-        withdrawal_config: WithdrawalConfig,
+        withdrawal_config: LimiterConfig,
         limiter_state: LimiterState,
         hashi_btc_master_pubkey: BitcoinPubkey,
     ) -> GuardianResult<Self> {
         // Validate that limiter state is consistent with config.
-        if limiter_state.num_tokens_available > withdrawal_config.max_bucket_capacity_sats {
+        if limiter_state.num_tokens_available > withdrawal_config.max_bucket_capacity {
             return Err(InvalidInputs(
                 "limiter num_tokens_available exceeds max_bucket_capacity".into(),
             ));
@@ -531,17 +521,14 @@ impl ProvisionerInitState {
     }
 
     pub fn limiter_config(&self) -> LimiterConfig {
-        LimiterConfig {
-            refill_rate: self.withdrawal_config.refill_rate_sats_per_sec,
-            max_bucket_capacity: self.withdrawal_config.max_bucket_capacity_sats,
-        }
+        self.withdrawal_config
     }
 
     pub fn into_parts(
         self,
     ) -> (
         HashiCommittee,
-        WithdrawalConfig,
+        LimiterConfig,
         LimiterState,
         BitcoinPubkey,
     ) {
@@ -553,7 +540,7 @@ impl ProvisionerInitState {
         )
     }
 
-    pub fn withdrawal_config(&self) -> &WithdrawalConfig {
+    pub fn withdrawal_config(&self) -> &LimiterConfig {
         &self.withdrawal_config
     }
 
@@ -991,7 +978,7 @@ pub struct SignedStandardWithdrawalRequestWire {
 #[derive(Serialize)]
 struct ProvisionerInitStateRepr {
     pub committee: crate::move_types::Committee,
-    pub withdrawal_config: WithdrawalConfig,
+    pub withdrawal_config: LimiterConfig,
     pub limiter_state: LimiterState,
     pub hashi_btc_master_pubkey: BitcoinPubkey,
 }

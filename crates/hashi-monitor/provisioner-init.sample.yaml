@@ -44,7 +44,6 @@ hashi_committee:
 
 # Withdrawal/limiter parameters the enclave will be initialized with.
 withdrawal_config:
-  committee_threshold: 1
   refill_rate_sats_per_sec: 1000
   max_bucket_capacity_sats: 100000000
 

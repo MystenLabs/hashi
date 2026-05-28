@@ -51,7 +51,7 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
             // fill it.)
             recovered.num_tokens_available = recovered
                 .num_tokens_available
-                .min(cfg.withdrawal_config.max_bucket_capacity_sats);
+                .min(cfg.withdrawal_config.max_bucket_capacity);
             recovered
         }
         None => {
