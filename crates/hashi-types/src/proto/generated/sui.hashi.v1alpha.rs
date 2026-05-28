@@ -1406,7 +1406,7 @@ pub struct ProvisionerInitState {
     /// Current Hashi committee.
     #[prost(message, optional, tag = "1")]
     pub committee: ::core::option::Option<Committee>,
-    /// Withdrawal policy configuration.
+    /// Limiter configuration.
     #[prost(message, optional, tag = "2")]
     pub limiter_config: ::core::option::Option<LimiterConfig>,
     /// X-only public key bytes (32 bytes).

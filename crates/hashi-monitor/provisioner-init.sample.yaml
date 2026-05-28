@@ -42,7 +42,7 @@ hashi_committee:
   mpc_weight_reduction_allowed_delta: 0
   mpc_max_faulty_in_basis_points: 3300
 
-# Withdrawal/limiter parameters the enclave will be initialized with.
+# Limiter parameters the enclave will be initialized with.
 limiter_config:
   refill_rate: 1000
   max_bucket_capacity: 100000000

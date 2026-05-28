@@ -208,7 +208,7 @@ message ProvisionerInitState {
   // Current Hashi committee.
   Committee committee = 1;
 
-  // Withdrawal policy configuration.
+  // Limiter configuration.
   LimiterConfig limiter_config = 2;
 
   // X-only public key bytes (32 bytes).
