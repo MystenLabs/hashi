@@ -343,7 +343,7 @@ async fn finalize_guardian_harness(networks: &mut TestNetworks) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("no current committee after DKG"))?;
     let master_pubkey = hashi.get_onchain_mpc_pubkey()?;
 
-    let limiter_config = default_test_limiter_config(&committee);
+    let limiter_config = default_test_limiter_config();
     let limiter_state = LimiterState::genesis(&limiter_config);
 
     let harness = networks

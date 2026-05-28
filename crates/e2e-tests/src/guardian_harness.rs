@@ -117,7 +117,7 @@ impl Drop for GuardianHarness {
     }
 }
 
-pub fn default_test_limiter_config(_committee: &HashiCommittee) -> LimiterConfig {
+pub fn default_test_limiter_config() -> LimiterConfig {
     LimiterConfig {
         refill_rate: 0,
         max_bucket_capacity: 100_000_000,

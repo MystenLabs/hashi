@@ -762,16 +762,16 @@ pub fn setup_new_key_response_to_pb(r: SetupNewKeyResponse) -> pb::SetupNewKeyRe
 }
 
 fn pb_to_limiter_config(cfg: pb::LimiterConfig) -> GuardianResult<LimiterConfig> {
-    let refill_rate_sats_per_sec = cfg
+    let refill_rate = cfg
         .refill_rate_sats_per_sec
         .ok_or_else(|| missing("refill_rate_sats_per_sec"))?;
-    let max_bucket_capacity_sats = cfg
+    let max_bucket_capacity = cfg
         .max_bucket_capacity_sats
         .ok_or_else(|| missing("max_bucket_capacity_sats"))?;
 
     Ok(LimiterConfig {
-        refill_rate: refill_rate_sats_per_sec,
-        max_bucket_capacity: max_bucket_capacity_sats,
+        refill_rate,
+        max_bucket_capacity,
     })
 }
 
