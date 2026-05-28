@@ -251,6 +251,12 @@ impl LeaderService {
                 }
                 Some(result) = OptionFuture::from(self.guardian_committee_reconcile_task.as_mut()) => {
                     self.guardian_committee_reconcile_task = None;
+                    // On failure, clear the epoch gate so the next tick retries
+                    // (e.g. transient guardian downtime); success holds the gate
+                    // until the hashi epoch advances again.
+                    if !matches!(&result, Ok(Ok(()))) {
+                        self.last_guardian_reconcile_epoch = None;
+                    }
                     Self::log_task_result("guardian_committee_reconcile", result);
                 }
 
