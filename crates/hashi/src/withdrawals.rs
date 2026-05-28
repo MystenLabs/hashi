@@ -141,6 +141,7 @@ pub struct WithdrawalTxSigning {
     pub withdrawal_id: Address,
     pub request_ids: Vec<Address>,
     pub signatures: Vec<Vec<u8>>,
+    pub guardian_signatures: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, serde_derive::Serialize)]

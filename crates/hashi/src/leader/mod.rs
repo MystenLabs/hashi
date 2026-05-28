@@ -1485,6 +1485,8 @@ impl LeaderService {
             withdrawal_id: txn.id,
             request_ids: txn.request_ids.clone(),
             signatures: witness_signatures.clone(),
+            // Carried empty until the 2-of-2 cutover populates it.
+            guardian_signatures: vec![],
         };
 
         let committee = inner
@@ -2152,7 +2154,7 @@ impl LeaderService {
 
         let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
         executor
-            .execute_sign_withdrawal(withdrawal_id, request_ids, signatures, cert)
+            .execute_sign_withdrawal(withdrawal_id, request_ids, signatures, &[], cert)
             .await
     }
 
@@ -2644,6 +2646,11 @@ impl WithdrawalTxSigning {
                 .collect(),
             signatures: self
                 .signatures
+                .iter()
+                .map(|sig| sig.clone().into())
+                .collect(),
+            guardian_signatures: self
+                .guardian_signatures
                 .iter()
                 .map(|sig| sig.clone().into())
                 .collect(),
