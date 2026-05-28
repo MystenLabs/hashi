@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Context;
-use fastcrypto::serde_helpers::ToFromByteArray;
 use tonic::Request;
 use tonic::Response;
 use tonic::Status;
@@ -27,8 +26,8 @@ use hashi_types::proto::SignWithdrawalConfirmationRequest;
 use hashi_types::proto::SignWithdrawalConfirmationResponse;
 use hashi_types::proto::SignWithdrawalRequestApprovalRequest;
 use hashi_types::proto::SignWithdrawalRequestApprovalResponse;
+use hashi_types::proto::SignWithdrawalTransactionPartial;
 use hashi_types::proto::SignWithdrawalTransactionRequest;
-use hashi_types::proto::SignWithdrawalTransactionResponse;
 use hashi_types::proto::SignWithdrawalTxConstructionRequest;
 use hashi_types::proto::SignWithdrawalTxConstructionResponse;
 use hashi_types::proto::SignWithdrawalTxSigningRequest;
@@ -40,6 +39,9 @@ use super::HttpService;
 
 #[tonic::async_trait]
 impl BridgeService for HttpService {
+    type SignWithdrawalTransactionStream =
+        tokio_stream::wrappers::ReceiverStream<Result<SignWithdrawalTransactionPartial, Status>>;
+
     /// Query the service for general information about its current state.
     async fn get_service_info(
         &self,
@@ -204,7 +206,7 @@ impl BridgeService for HttpService {
     async fn sign_withdrawal_transaction(
         &self,
         request: Request<SignWithdrawalTransactionRequest>,
-    ) -> Result<Response<SignWithdrawalTransactionResponse>, Status> {
+    ) -> Result<Response<Self::SignWithdrawalTransactionStream>, Status> {
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
         let req = request.get_ref();
@@ -216,21 +218,27 @@ impl BridgeService for HttpService {
             tracing::field::display(&withdrawal_txn_id),
         );
         tracing::info!("sign_withdrawal_transaction called");
-        let signatures = self
-            .inner
-            .validate_and_sign_withdrawal_tx(&withdrawal_txn_id, expected_limiter_seq)
-            .await
-            .map_err(|e| {
+        let concurrency = self.inner.config.withdrawal_signing_concurrency();
+        let (tx, rx) = tokio::sync::mpsc::channel(concurrency);
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            if let Err(e) = inner
+                .validate_and_sign_withdrawal_tx(
+                    &withdrawal_txn_id,
+                    expected_limiter_seq,
+                    tx.clone(),
+                )
+                .await
+            {
                 tracing::error!("sign_withdrawal_transaction failed: {e}");
-                Status::failed_precondition(e.to_string())
-            })?;
-        tracing::info!("sign_withdrawal_transaction succeeded");
-        Ok(Response::new(SignWithdrawalTransactionResponse {
-            signatures_by_input: signatures
-                .iter()
-                .map(|sig| sig.to_byte_array().to_vec().into())
-                .collect(),
-        }))
+                let _ = tx
+                    .send(Err(Status::failed_precondition(e.to_string())))
+                    .await;
+            }
+        });
+        Ok(Response::new(tokio_stream::wrappers::ReceiverStream::new(
+            rx,
+        )))
     }
 
     /// Step 3: Validate and sign the BLS certificate over witness signatures.

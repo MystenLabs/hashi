@@ -643,9 +643,12 @@ impl Hashi {
         &self,
         withdrawal_txn_id: &Address,
         expected_limiter_seq: Option<u64>,
-    ) -> anyhow::Result<Vec<SchnorrSignature>> {
+        sink: tokio::sync::mpsc::Sender<
+            Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
+        >,
+    ) -> anyhow::Result<()> {
         let (txn, unsigned_tx) = self.validate_withdrawal_signing(withdrawal_txn_id).await?;
-        self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx, expected_limiter_seq)
+        self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx, expected_limiter_seq, sink)
             .await
     }
 
@@ -684,10 +687,13 @@ impl Hashi {
     )]
     async fn mpc_sign_withdrawal_tx(
         &self,
-        txn: &crate::onchain::types::WithdrawalTransaction,
+        txn: &WithdrawalTransaction,
         unsigned_tx: &bitcoin::Transaction,
         expected_limiter_seq: Option<u64>,
-    ) -> anyhow::Result<Vec<SchnorrSignature>> {
+        sink: tokio::sync::mpsc::Sender<
+            Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
+        >,
+    ) -> anyhow::Result<()> {
         let onchain_state = self.onchain_state().clone();
         let epoch = onchain_state.epoch();
         if txn.epoch != epoch {
@@ -734,7 +740,6 @@ impl Hashi {
         let beacon = S::from_bytes_mod_order(&txn.randomness);
         let signing_messages = self.withdrawal_signing_messages(unsigned_tx, &txn.inputs)?;
         let concurrency = self.config.withdrawal_signing_concurrency();
-        let total = signing_messages.len();
         let signing_manager_ref = &signing_manager;
         let p2p_channel_ref = &p2p_channel;
         let beacon_ref = &beacon;
@@ -742,72 +747,75 @@ impl Hashi {
         let txn_id = txn.id;
         let presig_start = txn.presig_start_index;
         let inputs = &txn.inputs;
+        let sink_ref = &sink;
         // Run the per-input MPC signs concurrently (bounded by `concurrency`).
-        let results: Vec<anyhow::Result<SchnorrSignature>> =
-            futures::stream::iter(signing_messages.into_iter().enumerate())
-                .map(|(input_index, message)| async move {
-                    let request_id =
-                        withdrawal_input_signing_request_id(&txn_id, input_index as u32);
-                    let derivation_address = inputs.get(input_index).and_then(|input| {
-                        input.derivation_path.as_ref().map(|path| path.into_inner())
-                    });
-                    let sign_start = std::time::Instant::now();
-                    let global_presig_index = presig_start + input_index as u64;
-                    let sign_result = signing_manager_ref
-                        .sign(
-                            p2p_channel_ref,
-                            request_id,
-                            &message,
-                            global_presig_index,
-                            beacon_ref,
-                            derivation_address.as_ref(),
-                            WITHDRAWAL_SIGNING_TIMEOUT,
-                            metrics_ref,
-                        )
-                        .await;
-                    let sign_duration = sign_start.elapsed().as_secs_f64();
-                    match &sign_result {
-                        Ok(_) => {
-                            metrics_ref
-                                .mpc_sign_duration_seconds
-                                .with_label_values(&["success"])
-                                .observe(sign_duration);
-                            metrics_ref
-                                .presig_pool_remaining
-                                .set(signing_manager_ref.presignatures_remaining() as i64);
-                        }
-                        Err(e) => {
-                            metrics_ref
-                                .mpc_sign_duration_seconds
-                                .with_label_values(&["failure"])
-                                .observe(sign_duration);
-                            let reason = match e {
-                                crate::mpc::types::SigningError::Timeout { .. } => "timeout",
-                                crate::mpc::types::SigningError::PoolExhausted => "pool_exhausted",
-                                crate::mpc::types::SigningError::TooManyInvalidSignatures {
-                                    ..
-                                } => "too_many_invalid",
-                                crate::mpc::types::SigningError::CryptoError(_) => "crypto_error",
-                                _ => "other",
-                            };
-                            metrics_ref
-                                .mpc_sign_failures_total
-                                .with_label_values(&[reason])
-                                .inc();
-                        }
+        futures::stream::iter(signing_messages.into_iter().enumerate())
+            .map(|(input_index, message)| async move {
+                let request_id = withdrawal_input_signing_request_id(&txn_id, input_index as u32);
+                let derivation_address = inputs
+                    .get(input_index)
+                    .and_then(|input| input.derivation_path.as_ref().map(|path| path.into_inner()));
+                let sign_start = std::time::Instant::now();
+                let global_presig_index = presig_start + input_index as u64;
+                let sign_result = signing_manager_ref
+                    .sign(
+                        p2p_channel_ref,
+                        request_id,
+                        &message,
+                        global_presig_index,
+                        beacon_ref,
+                        derivation_address.as_ref(),
+                        WITHDRAWAL_SIGNING_TIMEOUT,
+                        metrics_ref,
+                    )
+                    .await;
+                let sign_duration = sign_start.elapsed().as_secs_f64();
+                match &sign_result {
+                    Ok(_) => {
+                        metrics_ref
+                            .mpc_sign_duration_seconds
+                            .with_label_values(&["success"])
+                            .observe(sign_duration);
+                        metrics_ref
+                            .presig_pool_remaining
+                            .set(signing_manager_ref.presignatures_remaining() as i64);
                     }
-                    sign_result.map_err(|e| {
-                        anyhow!("Failed to sign withdrawal transaction input {input_index}: {e}")
+                    Err(e) => {
+                        metrics_ref
+                            .mpc_sign_duration_seconds
+                            .with_label_values(&["failure"])
+                            .observe(sign_duration);
+                        let reason = match e {
+                            crate::mpc::types::SigningError::Timeout { .. } => "timeout",
+                            crate::mpc::types::SigningError::PoolExhausted => "pool_exhausted",
+                            crate::mpc::types::SigningError::TooManyInvalidSignatures {
+                                ..
+                            } => "too_many_invalid",
+                            crate::mpc::types::SigningError::CryptoError(_) => "crypto_error",
+                            _ => "other",
+                        };
+                        metrics_ref
+                            .mpc_sign_failures_total
+                            .with_label_values(&[reason])
+                            .inc();
+                    }
+                }
+                let partial = sign_result
+                    .map(|sig| hashi_types::proto::SignWithdrawalTransactionPartial {
+                        input_index: input_index as u32,
+                        signature: sig.to_byte_array().to_vec().into(),
                     })
-                })
-                .buffered(concurrency)
-                .collect()
-                .await;
-        let mut signatures_by_input = Vec::with_capacity(total);
-        for result in results {
-            signatures_by_input.push(result?);
-        }
-        Ok(signatures_by_input)
+                    .map_err(|e| {
+                        tonic::Status::internal(format!(
+                            "Failed to sign withdrawal transaction input {input_index}: {e}"
+                        ))
+                    });
+                let _ = sink_ref.send(partial).await;
+            })
+            .buffer_unordered(concurrency)
+            .for_each(|()| std::future::ready(()))
+            .await;
+        Ok(())
     }
 
     pub(crate) fn withdrawal_signing_messages(

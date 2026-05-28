@@ -3094,6 +3094,7 @@ dependencies = [
  "test-strategy",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "toml 0.9.12+spec-1.1.0",
  "tonic",

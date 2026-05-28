@@ -1451,12 +1451,15 @@ impl LeaderService {
         // 1. Request signed withdrawal tx witnesses from committee members.
         // MPC signing requires all threshold members to participate simultaneously
         // via P2P, so we must fan out requests in parallel.
-        let signatures_by_input =
-            Self::collect_withdrawal_tx_signatures(&inner, &txn.id, expected_limiter_seq, &members)
-                .await
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Failed to collect MPC signatures for {:?}", txn.id)
-                })?;
+        let signatures_by_input = Self::collect_withdrawal_tx_signatures(
+            &inner,
+            &txn.id,
+            expected_limiter_seq,
+            txn.inputs.len(),
+            &members,
+        )
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Failed to collect MPC signatures for {:?}", txn.id))?;
 
         // 2. Extract raw signature bytes for on-chain storage
         let witness_signatures: Vec<Vec<u8>> = signatures_by_input
@@ -1974,6 +1977,7 @@ impl LeaderService {
         inner: &Arc<Hashi>,
         withdrawal_txn_id: &Address,
         expected_limiter_seq: Option<u64>,
+        expected_input_count: usize,
         member: &CommitteeMember,
     ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let validator_address = member.validator_address();
@@ -1994,39 +1998,60 @@ impl LeaderService {
             expected_limiter_seq,
         };
 
-        let response = rpc_client
+        let mut stream = rpc_client
             .sign_withdrawal_transaction(proto_request)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
-                    "Failed to get withdrawal tx signature from {validator_address}: {e}"
+                    "Failed to start withdrawal tx signature stream from {validator_address}: {e}"
+                )
+            })?
+            .into_inner();
+        let mut by_index: Vec<Option<SchnorrSignature>> =
+            (0..expected_input_count).map(|_| None).collect();
+        let mut received = 0usize;
+        while let Some(partial) = stream
+            .message()
+            .await
+            .map_err(|e| anyhow::anyhow!("stream error from {validator_address}: {e}"))?
+        {
+            let idx = partial.input_index as usize;
+            let slot = by_index.get_mut(idx).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Withdrawal tx signature stream from {validator_address} returned out-of-range input_index {idx} (expected < {expected_input_count})",
                 )
             })?;
-
-        trace!(
-            "Retrieved withdrawal tx signature from {}",
-            validator_address
-        );
-
-        response
-            .into_inner()
-            .signatures_by_input
-            .iter()
-            .map(|sig_bytes| {
-                let bytes: [u8; 64] = sig_bytes.as_ref().try_into().map_err(|_| {
-                    anyhow::anyhow!("Invalid Schnorr signature length from {validator_address}")
-                })?;
-                SchnorrSignature::from_byte_array(&bytes).map_err(|e| {
-                    anyhow::anyhow!("Invalid Schnorr signature from {validator_address}: {e}")
-                })
-            })
-            .collect()
+            if slot.is_some() {
+                anyhow::bail!(
+                    "Withdrawal tx signature stream from {validator_address} returned duplicate input_index {idx}",
+                );
+            }
+            let bytes: [u8; 64] = partial.signature.as_ref().try_into().map_err(|_| {
+                anyhow::anyhow!("Invalid signature length from {validator_address}")
+            })?;
+            let sig = SchnorrSignature::from_byte_array(&bytes)
+                .map_err(|e| anyhow::anyhow!("Invalid signature from {validator_address}: {e}"))?;
+            *slot = Some(sig);
+            received += 1;
+        }
+        trace!("Retrieved {received} withdrawal tx signatures from {validator_address}",);
+        if received != expected_input_count {
+            anyhow::bail!(
+                "Withdrawal tx signature stream from {validator_address} returned {received} partials, expected {expected_input_count}",
+            );
+        }
+        by_index.into_iter().collect::<Option<Vec<_>>>().ok_or_else(|| {
+            anyhow::anyhow!(
+                "internal invariant violated: count matched but slot was empty (from {validator_address})",
+            )
+        })
     }
 
     async fn collect_withdrawal_tx_signatures(
         inner: &Arc<Hashi>,
         withdrawal_txn_id: &Address,
         expected_limiter_seq: Option<u64>,
+        expected_input_count: usize,
         members: &[CommitteeMember],
     ) -> Option<Vec<SchnorrSignature>> {
         let futures: Vec<_> = members
@@ -2036,6 +2061,7 @@ impl LeaderService {
                     inner,
                     withdrawal_txn_id,
                     expected_limiter_seq,
+                    expected_input_count,
                     member,
                 )
             })
