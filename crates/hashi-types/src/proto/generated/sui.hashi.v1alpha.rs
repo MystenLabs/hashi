@@ -178,7 +178,9 @@ pub struct SignGuardianWithdrawalRequestResponse {
 /// Peers rebuild the transition from on-chain state; no committee bytes on the wire.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignCommitteeTransitionRequest {
-    /// Outgoing committee epoch (new_epoch = from_epoch + 1).
+    /// Outgoing committee epoch. The new committee is the next entry in the
+    /// on-chain `committees` map after `from_epoch` — committee epochs are
+    /// sparse, so it is not generally `from_epoch + 1`.
     #[prost(uint64, tag = "1")]
     pub from_epoch: u64,
 }

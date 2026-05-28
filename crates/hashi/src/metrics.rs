@@ -1078,7 +1078,6 @@ pub const GUARDIAN_BOOTSTRAP_OUTCOME_NO_LIMITER_YET: &str = "no_limiter_yet";
 
 pub const GUARDIAN_RPC_METHOD_GET_GUARDIAN_INFO: &str = "get_guardian_info";
 pub const GUARDIAN_RPC_METHOD_STANDARD_WITHDRAWAL: &str = "standard_withdrawal";
-pub const GUARDIAN_RPC_METHOD_UPDATE_COMMITTEE: &str = "update_committee";
 
 pub const GUARDIAN_RPC_OUTCOME_OK: &str = "ok";
 pub const GUARDIAN_RPC_OUTCOME_SEQ_MISMATCH: &str = "seq_mismatch";

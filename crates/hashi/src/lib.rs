@@ -637,6 +637,7 @@ impl Hashi {
         let guardian = if let Some(endpoint) = guardian_endpoint.as_deref() {
             match grpc::guardian_client::GuardianClient::new(endpoint) {
                 Ok(client) => {
+                    let client = client.with_metrics(self.metrics.clone());
                     tracing::info!("Guardian client configured for {}", client.endpoint());
                     Some(client)
                 }

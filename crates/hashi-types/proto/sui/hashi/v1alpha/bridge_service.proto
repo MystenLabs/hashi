@@ -191,7 +191,9 @@ message SignGuardianWithdrawalRequestResponse {
 
 // Peers rebuild the transition from on-chain state; no committee bytes on the wire.
 message SignCommitteeTransitionRequest {
-  // Outgoing committee epoch (new_epoch = from_epoch + 1).
+  // Outgoing committee epoch. The new committee is the next entry in the
+  // on-chain `committees` map after `from_epoch` — committee epochs are
+  // sparse, so it is not generally `from_epoch + 1`.
   uint64 from_epoch = 1;
 }
 

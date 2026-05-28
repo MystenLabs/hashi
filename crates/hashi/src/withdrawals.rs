@@ -599,9 +599,6 @@ impl Hashi {
         &self,
         from_epoch: u64,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
-        // TODO: hashi committee epochs are sparse — find the next entry in
-        // `committees` instead of assuming `+1`.
-        let to_epoch = from_epoch + 1;
         let validator_address = self
             .config
             .validator_address()
@@ -621,9 +618,15 @@ impl Hashi {
             anyhow::bail!("not a member of the committee at epoch {from_epoch}");
         }
 
+        // Hashi committee epochs are sparse: the next entry after `from_epoch`
+        // is generally not `from_epoch + 1`. Both leader and followers derive
+        // the same `to_epoch` from on-chain state, so they sign the same
+        // transition.
         let new_committee = committees_map
-            .get(&to_epoch)
-            .ok_or_else(|| anyhow!("no on-chain committee for epoch {to_epoch}"))?;
+            .range((from_epoch + 1)..)
+            .next()
+            .map(|(_, c)| c)
+            .ok_or_else(|| anyhow!("no on-chain committee epoch after {from_epoch}"))?;
 
         let transition = hashi_types::guardian::CommitteeTransition {
             new_committee: hashi_types::move_types::Committee::from(new_committee),
