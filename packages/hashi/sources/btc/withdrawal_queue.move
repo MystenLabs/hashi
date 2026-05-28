@@ -88,7 +88,13 @@ public struct WithdrawalTransaction has key, store {
     change_output: Option<OutputUtxo>,
     timestamp_ms: u64,
     randomness: vector<u8>,
+    /// Per-input Schnorr signatures from the MPC committee. Populated by
+    /// `sign_withdrawal` once both the MPC and the guardian have signed.
     signatures: Option<vector<vector<u8>>>,
+    /// Per-input Schnorr signatures from the guardian enclave. Same length
+    /// as `signatures`; together they form the 2-of-2 taproot witness.
+    /// Populated by `sign_withdrawal` alongside `signatures`.
+    guardian_signatures: Option<vector<vector<u8>>>,
     /// Global presignature start index assigned at construction time.
     /// Input `i` uses presig at index `presig_start_index + i`.
     presig_start_index: u64,
@@ -346,6 +352,7 @@ public(package) fun new_withdrawal_txn(
         timestamp_ms: clock.timestamp_ms(),
         randomness,
         signatures: option::none(),
+        guardian_signatures: option::none(),
         presig_start_index,
         epoch,
     }
@@ -384,9 +391,11 @@ public(package) fun sign_withdrawal_txn(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
     signatures: vector<vector<u8>>,
+    guardian_signatures: vector<vector<u8>>,
 ) {
     let txn: &mut WithdrawalTransaction = self.withdrawal_txns.borrow_mut(withdrawal_id);
     txn.signatures = option::some(signatures);
+    txn.guardian_signatures = option::some(guardian_signatures);
     emit_withdrawal_signed(txn);
 }
 
@@ -529,6 +538,7 @@ public(package) fun emit_withdrawal_signed(self: &WithdrawalTransaction) {
         withdrawal_txn_id: self.id.to_address(),
         request_ids: self.request_ids,
         signatures: *self.signatures.borrow(),
+        guardian_signatures: *self.guardian_signatures.borrow(),
     });
 }
 
@@ -587,7 +597,12 @@ public struct WithdrawalPickedForProcessingEvent has copy, drop {
 public struct WithdrawalSignedEvent has copy, drop {
     withdrawal_txn_id: address,
     request_ids: vector<address>,
+    /// Per-input Schnorr signatures from the MPC committee.
     signatures: vector<vector<u8>>,
+    /// Per-input Schnorr signatures from the guardian enclave. Same
+    /// length as `signatures`; the watcher pairs index `i` of both to
+    /// form the witness for input `i` at broadcast time.
+    guardian_signatures: vector<vector<u8>>,
 }
 
 public struct WithdrawalPresigsReassignedEvent has copy, drop {
@@ -632,6 +647,7 @@ public(package) fun new_withdrawal_txn_for_testing(
         timestamp_ms: clock.timestamp_ms(),
         randomness: vector[0, 0, 0, 0],
         signatures: option::none(),
+        guardian_signatures: option::none(),
         presig_start_index: 0,
         epoch: 0,
     }
