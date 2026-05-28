@@ -12,6 +12,7 @@ use super::BitcoinKeypair;
 use super::BitcoinPubkey;
 use super::BitcoinSignature;
 use super::GuardianError::InvalidInputs;
+use super::HashiMasterG;
 use bitcoin::absolute::LockTime;
 use bitcoin::address::NetworkChecked;
 use bitcoin::address::NetworkUnchecked;
@@ -29,7 +30,6 @@ use bitcoin::transaction::Version;
 use bitcoin::*;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto_tbls::threshold_schnorr::Address as SuiAddress;
-use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key;
 use miniscript::Descriptor;
 use miniscript::descriptor::Tr;
@@ -254,7 +254,7 @@ impl OutputUTXO {
     /// Internal outputs derive their child key from this raw G — using only
     /// the x-only/even-y projection would silently produce a different child
     /// key for half of all MPC vks, breaking the 2-of-2 leaf script.
-    pub fn to_txout(&self, enclave_pubkey: &BitcoinPubkey, hashi_master_g: &G) -> TxOut {
+    pub fn to_txout(&self, enclave_pubkey: &BitcoinPubkey, hashi_master_g: &HashiMasterG) -> TxOut {
         match self {
             OutputUTXO::External(ExternalOutputUTXO { address, amount }) => TxOut {
                 value: *amount,
@@ -321,7 +321,7 @@ impl TxUTXOs {
     pub fn compute_all_outputs(
         &self,
         enclave_pubkey: &BitcoinPubkey,
-        hashi_master_g: &G,
+        hashi_master_g: &HashiMasterG,
     ) -> Vec<TxOut> {
         self.outputs
             .iter()
@@ -367,7 +367,11 @@ impl TxUTXOs {
     }
 
     /// Constructs an unsigned Bitcoin transaction for these UTXOs.
-    fn unsigned_tx(&self, enclave_pubkey: &BitcoinPubkey, hashi_master_g: &G) -> Transaction {
+    fn unsigned_tx(
+        &self,
+        enclave_pubkey: &BitcoinPubkey,
+        hashi_master_g: &HashiMasterG,
+    ) -> Transaction {
         let all_outputs = self.compute_all_outputs(enclave_pubkey, hashi_master_g);
         construct_tx(
             self.inputs.iter().map(|input| input.txin()).collect(),
@@ -381,7 +385,7 @@ impl TxUTXOs {
     pub fn signing_messages_and_txid(
         &self,
         enclave_pubkey: &BitcoinPubkey,
-        hashi_master_g: &G,
+        hashi_master_g: &HashiMasterG,
     ) -> (Vec<Message>, Txid) {
         let tx = self.unsigned_tx(enclave_pubkey, hashi_master_g);
         let prevouts: Vec<TxOut> = self.inputs.iter().map(|input| input.prevout()).collect();
@@ -469,7 +473,7 @@ pub fn construct_tx(inputs: Vec<TxIn>, outputs: Vec<TxOut>) -> Transaction {
 /// match the MPC signature for ~half of all vks.
 pub fn compute_taproot_descriptor(
     enclave_pubkey: &BitcoinPubkey,
-    hashi_master_g: &G,
+    hashi_master_g: &HashiMasterG,
     hashi_derivation_path: &DerivationPath,
 ) -> Tr<BitcoinPubkey> {
     let derived_hashi_pubkey = derive_hashi_child_pubkey(hashi_master_g, hashi_derivation_path);
@@ -494,7 +498,7 @@ pub fn compute_taproot_descriptor(
 /// signing protocol produces signatures against, so the leaf script will
 /// agree with the on-chain signed witness.
 pub fn derive_hashi_child_pubkey(
-    hashi_master_g: &G,
+    hashi_master_g: &HashiMasterG,
     hashi_derivation_path: &DerivationPath,
 ) -> BitcoinPubkey {
     let derived = derive_verifying_key(hashi_master_g, hashi_derivation_path);
@@ -546,7 +550,7 @@ fn single_key_taproot_script_path_spend_info(
 /// Computes both the address and leaf script for a given derivation path and network.
 fn compute_taproot_artifacts(
     enclave_pubkey: &BitcoinPubkey,
-    hashi_master_g: &G,
+    hashi_master_g: &HashiMasterG,
     hashi_derivation_path: &DerivationPath,
 ) -> (ScriptBuf, TapLeafHash) {
     let desc = compute_taproot_descriptor(enclave_pubkey, hashi_master_g, hashi_derivation_path);
@@ -564,7 +568,7 @@ fn compute_taproot_artifacts(
 /// Deposit address for `tr(NUMS, multi_a(2, enclave, derived_hashi))`.
 pub fn two_of_two_taproot_script_path_address(
     enclave_pubkey: &BitcoinPubkey,
-    hashi_master_g: &G,
+    hashi_master_g: &HashiMasterG,
     hashi_derivation_path: &DerivationPath,
     network: Network,
 ) -> BitcoinAddress {
@@ -575,7 +579,7 @@ pub fn two_of_two_taproot_script_path_address(
 /// 2-of-2 sibling of [`single_key_taproot_script_path_spend_artifacts`].
 pub fn two_of_two_taproot_script_path_spend_artifacts(
     enclave_pubkey: &BitcoinPubkey,
-    hashi_master_g: &G,
+    hashi_master_g: &HashiMasterG,
     hashi_derivation_path: &DerivationPath,
 ) -> (ScriptBuf, ControlBlock, TapLeafHash) {
     let desc = compute_taproot_descriptor(enclave_pubkey, hashi_master_g, hashi_derivation_path);
@@ -733,8 +737,8 @@ mod bitcoin_tests {
     /// bitcoin-lib `Keypair` always signs against the even-y projection of
     /// its master pubkey, so the descriptor derivation must use the same
     /// parent to agree.
-    fn hashi_master_g_from_xonly(pubkey: &BitcoinPubkey) -> G {
-        G::with_even_y_from_x_be_bytes(&pubkey.serialize()).expect("valid x coordinate")
+    fn hashi_master_g_from_xonly(pubkey: &BitcoinPubkey) -> HashiMasterG {
+        HashiMasterG::with_even_y_from_x_be_bytes(&pubkey.serialize()).expect("valid x coordinate")
     }
 
     fn create_taproot_artifacts_for_test(
@@ -765,7 +769,8 @@ mod bitcoin_tests {
 
         // Convert Bitcoin BitcoinPubkey -> fastcrypto G -> Bitcoin BitcoinPubkey
         let x_bytes = hashi_pk.serialize();
-        let g_point = G::with_even_y_from_x_be_bytes(&x_bytes).expect("valid x coordinate");
+        let g_point =
+            HashiMasterG::with_even_y_from_x_be_bytes(&x_bytes).expect("valid x coordinate");
         let schnorr_key = SchnorrPublicKey::try_from(&g_point).expect("valid schnorr key");
         let reconstructed_x_bytes = schnorr_key.to_byte_array();
         assert_eq!(
@@ -897,36 +902,54 @@ mod bitcoin_tests {
     }
 
     // Regression: an odd-y MPC master key used to silently disagree between
-    // the witness leaf script (which reconstructed an even-y parent from the
+    // the 2-of-2 leaf script (which reconstructed an even-y parent from the
     // x-only bytes) and the MPC signature (which signs against
-    // `derive_verifying_key(raw_g, path)`), giving "Invalid Schnorr
-    // signature" at Bitcoin. `derive_hashi_child_pubkey` consumes the raw G
-    // so the two derivations now agree regardless of y-parity.
+    // `derive_verifying_key(raw_g, path)`), giving "Invalid Schnorr signature"
+    // at Bitcoin. This builds the real leaf for an odd-y master and asserts it
+    // embeds the MPC-signed child key, not the even-y-forced one.
     #[test]
-    fn derive_hashi_child_pubkey_matches_mpc_for_odd_y_master() {
+    fn two_of_two_leaf_embeds_mpc_signed_child_for_odd_y_master() {
         use fastcrypto::groups::GroupElement;
         use fastcrypto_tbls::threshold_schnorr::S;
 
-        // Find a scalar whose G * s has ODD y so we exercise the formerly
-        // broken branch (the parent's y-parity didn't survive the x-only
-        // round-trip in the descriptor).
+        // Find a master G with ODD y so we exercise the formerly-broken branch.
         let raw_g = loop {
             let mut bytes = [0u8; 32];
             rand::Rng::fill(&mut rand::thread_rng(), &mut bytes);
-            let sk = S::from_bytes_mod_order(&bytes);
-            let g = G::generator() * sk;
+            let g = HashiMasterG::generator() * S::from_bytes_mod_order(&bytes);
             if !g.has_even_y().unwrap() {
                 break g;
             }
         };
-        assert!(!raw_g.has_even_y().unwrap(), "expected odd-y point");
 
-        let address = [42u8; 32];
-        let mpc_child = derive_verifying_key(&raw_g, &address).to_byte_array();
-        let descriptor_child = derive_hashi_child_pubkey(&raw_g, &address).serialize();
-        assert_eq!(
-            mpc_child, descriptor_child,
-            "derive_hashi_child_pubkey must match the MPC's derived key for any y-parity",
+        let enclave_pubkey = create_btc_keypair(&[7u8; 32]).x_only_public_key().0;
+        let path = [42u8; 32];
+
+        // The child key the MPC actually produces signatures against.
+        let mpc_child = derive_verifying_key(&raw_g, &path).to_byte_array();
+        // The child the old even-y-forcing code would have embedded instead.
+        let raw_g_xonly = SchnorrPublicKey::try_from(&raw_g)
+            .expect("valid schnorr key")
+            .to_byte_array();
+        let forced_even =
+            HashiMasterG::with_even_y_from_x_be_bytes(&raw_g_xonly).expect("valid x coordinate");
+        let buggy_child = derive_verifying_key(&forced_even, &path).to_byte_array();
+        assert_ne!(
+            buggy_child, mpc_child,
+            "odd-y parent must change the child, else this test can't catch the regression"
+        );
+
+        // The production 2-of-2 leaf must embed the MPC-signed child.
+        let (leaf_script, _, _) =
+            two_of_two_taproot_script_path_spend_artifacts(&enclave_pubkey, &raw_g, &path);
+        let script = leaf_script.as_bytes();
+        assert!(
+            script.windows(32).any(|w| w == mpc_child.as_slice()),
+            "2-of-2 leaf must embed the MPC-signed child key"
+        );
+        assert!(
+            !script.windows(32).any(|w| w == buggy_child.as_slice()),
+            "2-of-2 leaf must not embed the even-y-forced child key"
         );
     }
 }
