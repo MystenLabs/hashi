@@ -12,20 +12,20 @@ use tracing::info;
 /// Set up a new BTC key. Flow:
 ///     1. KPs send their OpenPGP certificates to the operator
 ///     2. Operator calls setup_new_key (and optionally returns its response to all KPs)
-///     3. KPs fetch the setup_new_key response from `secret_sharing/` in S3
+///     3. KPs fetch the setup_new_key response from `ceremony/` in S3
 pub async fn setup_new_key(
     enclave: Arc<Enclave>,
     request: SetupNewKeyRequest,
 ) -> GuardianResult<GuardianSigned<SetupNewKeyResponse>> {
     info!("/setup_new_key - Received request.");
-    // Hold the guard across the whole flow so concurrent callers can't both
-    // pass the completion check below and each generate a key.
-    let mut setup_complete = enclave.scratchpad.setup_new_key_lock.lock().await;
+    // Hold the ceremony guard across the whole flow so concurrent setup_new_key
+    // /rotate_kps callers can't both pass the completion check below and run.
+    let mut ceremony_complete = enclave.scratchpad.ceremony_complete.lock().await;
     if !enclave.is_operator_init_complete() {
         return Err(InvalidInputs("call operator_init first".into()));
     }
-    if *setup_complete {
-        return Err(InvalidInputs("setup already complete".into()));
+    if *ceremony_complete {
+        return Err(InvalidInputs("setup or rotation already complete".into()));
     }
 
     let params = request.params();
@@ -58,24 +58,29 @@ pub async fn setup_new_key(
         .expect("(n, t) validated by SetupNewKeyRequest; commitments produced with matching count");
 
     enclave
-        .log_secret_sharing(SecretSharingLogMessage {
-            encrypted_shares: encrypted_shares.clone(),
+        .log_ceremony(CeremonyLogMessage {
             secret_sharing_instance: ss_instance,
         })
         .await?;
+
+    enclave.set_latest_encrypted_shares(encrypted_shares.clone())?;
 
     let response = enclave.sign(SetupNewKeyResponse {
         encrypted_shares,
         share_commitments,
     });
 
-    *setup_complete = true;
+    *ceremony_complete = true;
     Ok(response)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mock_logger_capturing;
+    use crate::OperatorInitTestArgs;
+    use hashi_types::guardian::LogMessage;
+    use hashi_types::guardian::LogRecord;
     use sequoia_openpgp::cert::prelude::CertBuilder;
     use sequoia_openpgp::serialize::Serialize;
 
@@ -98,18 +103,46 @@ mod tests {
 
     #[tokio::test]
     async fn test_setup_new_key() {
-        let enclave = Enclave::create_operator_initialized().await;
+        let (logger, captures) = mock_logger_capturing();
+        let enclave = Enclave::create_operator_initialized_with(
+            OperatorInitTestArgs::default().with_s3_logger(logger),
+        )
+        .await;
         let verification_key = &enclave.signing_pubkey();
         let request = mock_setup_new_key_request();
         let resp = setup_new_key(enclave.clone(), request).await.unwrap();
         let validated_resp = resp.verify(verification_key).unwrap();
+
+        // Response still carries the armored ciphertexts.
         assert_eq!(validated_resp.encrypted_shares.len(), TEST_N);
         assert_eq!(validated_resp.share_commitments.len(), TEST_N);
-
-        for enc_share in validated_resp.encrypted_shares.iter().take(TEST_N) {
+        for enc_share in &validated_resp.encrypted_shares {
             assert!(enc_share
                 .armored_ciphertext
                 .starts_with("-----BEGIN PGP MESSAGE-----"));
         }
+
+        // The ceremony log records the instance only — no ciphertexts.
+        let captured = captures.lock().unwrap();
+        let ceremony_logs: Vec<_> = captured
+            .iter()
+            .filter(|(k, _)| k.starts_with("ceremony/"))
+            .collect();
+        assert_eq!(ceremony_logs.len(), 1, "expected one ceremony/ log");
+        let (_key, body) = ceremony_logs[0];
+        assert!(
+            !std::str::from_utf8(body)
+                .unwrap()
+                .contains("BEGIN PGP MESSAGE"),
+            "ceremony log must not contain ciphertexts"
+        );
+
+        let record: LogRecord = serde_json::from_slice(body).unwrap();
+        let LogMessage::Ceremony(ceremony) = record.message else {
+            panic!("expected Ceremony variant");
+        };
+        assert_eq!(ceremony.secret_sharing_instance.sharing_seq(), 0);
+        assert_eq!(ceremony.secret_sharing_instance.num_shares(), TEST_N);
+        assert_eq!(ceremony.secret_sharing_instance.threshold(), TEST_T);
     }
 }

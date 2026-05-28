@@ -27,6 +27,45 @@ pub fn mock_logger() -> S3Logger {
     S3Logger::from_client_for_tests(S3Config::mock_for_testing(), client)
 }
 
+/// Captured `(key, body)` pairs from a `mock_logger_capturing()` logger.
+pub type CapturedPuts = Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
+
+/// Mock S3 logger that captures every PutObject's (key, body) into the returned
+/// Vec. Lets tests assert on what was written. Body is captured via `match_requests`
+/// (same Mutex side-channel trick as `mock_logger_with_layout`).
+///
+/// TODO: retrofit `setup_new_key`, `operator_init`/`provisioner_init`,
+/// `withdraw`, and `heartbeat` tests to use this — they currently rely on
+/// in-process side effects and the response payload, leaving the on-S3 log
+/// shape unverified.
+pub fn mock_logger_capturing() -> (S3Logger, CapturedPuts) {
+    use aws_sdk_s3::operation::put_object::PutObjectOutput;
+    use aws_sdk_s3::Client;
+    use aws_smithy_mocks::mock;
+    use aws_smithy_mocks::mock_client;
+    use aws_smithy_mocks::RuleMode;
+    use hashi_types::guardian::S3Config;
+
+    let captures: CapturedPuts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captures_w = captures.clone();
+
+    let put_ok = mock!(Client::put_object)
+        .match_requests(move |req| {
+            let key = req.key().expect("put_object missing key").to_string();
+            let body = req
+                .body()
+                .bytes()
+                .expect("body should be in-memory in tests")
+                .to_vec();
+            captures_w.lock().unwrap().push((key, body));
+            true
+        })
+        .then_output(|| PutObjectOutput::builder().build());
+    let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
+    let logger = S3Logger::from_client_for_tests(S3Config::mock_for_testing(), client);
+    (logger, captures)
+}
+
 /// Mock S3 logger whose `list_objects_v2(delimiter='/')` and
 /// `list_object_versions` responses are computed from an in-memory key set —
 /// useful for testing layered prefix tree-walks. PutObject also succeeds.

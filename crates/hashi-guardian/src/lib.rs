@@ -13,6 +13,7 @@ pub mod enclave;
 pub mod getters;
 pub mod heartbeat;
 pub mod init;
+pub mod rotate;
 pub mod rpc;
 pub mod s3_logger; // used by the monitor
 pub mod setup;
@@ -30,6 +31,8 @@ pub use test_utils::create_fully_initialized_enclave;
 pub use test_utils::create_operator_initialized_enclave;
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_utils::mock_logger;
+#[cfg(any(test, feature = "test-utils"))]
+pub use test_utils::mock_logger_capturing;
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_utils::mock_logger_with_layout;
 #[cfg(any(test, feature = "test-utils"))]

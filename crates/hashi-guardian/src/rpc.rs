@@ -4,6 +4,7 @@
 use crate::committee_update;
 use crate::getters;
 use crate::init;
+use crate::rotate;
 use crate::setup;
 use crate::withdraw;
 use crate::Enclave;
@@ -15,6 +16,7 @@ use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::*;
 use hashi_types::guardian::HashiSigned;
 use hashi_types::guardian::OperatorInitRequest;
+use hashi_types::guardian::RotateKpsRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::proto;
@@ -26,7 +28,7 @@ use tonic::Status;
 #[derive(Clone)]
 pub struct GuardianGrpc {
     pub enclave: Arc<Enclave>,
-    pub setup_mode: bool,
+    pub ceremony_mode: bool,
 }
 
 fn to_status(e: GuardianError) -> Status {
@@ -40,19 +42,19 @@ fn to_status(e: GuardianError) -> Status {
 }
 
 impl GuardianGrpc {
-    fn require_setup_mode(&self, endpoint: &str) -> Result<(), Status> {
-        if !self.setup_mode {
+    fn require_ceremony_mode(&self, endpoint: &str) -> Result<(), Status> {
+        if !self.ceremony_mode {
             return Err(Status::failed_precondition(format!(
-                "{endpoint} is disabled when SETUP_MODE=false"
+                "{endpoint} is disabled when CEREMONY_MODE=false"
             )));
         }
         Ok(())
     }
 
     fn require_normal_mode(&self, endpoint: &str) -> Result<(), Status> {
-        if self.setup_mode {
+        if self.ceremony_mode {
             return Err(Status::failed_precondition(format!(
-                "{endpoint} is disabled when SETUP_MODE=true"
+                "{endpoint} is disabled when CEREMONY_MODE=true"
             )));
         }
         Ok(())
@@ -78,7 +80,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         request: Request<proto::SetupNewKeyRequest>,
     ) -> anyhow::Result<Response<proto::SignedSetupNewKeyResponse>, Status> {
-        self.require_setup_mode("setup_new_key")?;
+        self.require_ceremony_mode("setup_new_key")?;
 
         let domain_req: SetupNewKeyRequest = request.into_inner().try_into().map_err(to_status)?;
 
@@ -87,6 +89,23 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
             .map_err(to_status)?;
 
         let resp = proto_conversions::setup_new_key_response_signed_to_pb(signed);
+
+        Ok(Response::new(resp))
+    }
+
+    async fn rotate_kps(
+        &self,
+        request: Request<proto::RotateKpsRequest>,
+    ) -> Result<Response<proto::SignedRotateKpsResponse>, Status> {
+        self.require_ceremony_mode("rotate_kps")?;
+
+        let domain_req: RotateKpsRequest = request.into_inner().try_into().map_err(to_status)?;
+
+        let signed = rotate::rotate_kps(self.enclave.clone(), domain_req)
+            .await
+            .map_err(to_status)?;
+
+        let resp = proto_conversions::rotate_kps_response_signed_to_pb(signed);
 
         Ok(Response::new(resp))
     }

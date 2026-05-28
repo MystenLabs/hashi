@@ -208,6 +208,13 @@ impl ShareCommitments {
             .is_some_and(|digest| digest == &commitment.digest)
     }
 
+    /// Verify `share`'s commitment is in this set.
+    pub fn verify_share(&self, share: &Share) -> GuardianResult<()> {
+        self.contains(&commit_share(share))
+            .then_some(())
+            .ok_or_else(|| InvalidInputs("No matching share found".into()))
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = ShareCommitment> + '_ {
         self.0.iter().map(|(id, digest)| ShareCommitment {
             id: *id,
@@ -400,9 +407,11 @@ pub fn eval_poly(pos: ShareID, coefficients: &[Scalar]) -> Scalar {
     out
 }
 
-/// Combine secret shares to a secp256k1 secret key with reconstruction
+/// Combine secret shares into the reconstructed `k256::SecretKey` with
 /// threshold `t`. Errors on duplicate share IDs or fewer than `t` shares.
-pub fn combine_shares(shares: &[Share], t: usize) -> GuardianResult<bitcoin::secp256k1::Keypair> {
+/// Callers that need a `bitcoin::secp256k1::Keypair` should pass the result
+/// through `k256_sk_to_btc_keypair`.
+pub fn combine_shares(shares: &[Share], t: usize) -> GuardianResult<k256::SecretKey> {
     // Validation: ensure no duplicates
     let mut seen_ids = std::collections::HashSet::new();
     for share in shares {
@@ -445,12 +454,18 @@ pub fn combine_shares(shares: &[Share], t: usize) -> GuardianResult<bitcoin::sec
 
     info!("Bitcoin key created with fingerprint {:x}", exp_g(&result));
 
-    // Note: Library switching works because k256's to_bytes and secp256k1's from_slice both
-    //       use big-endian representation. We are juggling between two libraries because secp256k1
-    //       does not expose the arithmetic tools needed to implement secret-sharing.
-    let sk = bitcoin::secp256k1::SecretKey::from_slice(&result.to_bytes())
-        .expect("casting secret key into secp256k1 failed");
-    Ok(bitcoin::secp256k1::Keypair::from_secret_key(&BTC_LIB, &sk))
+    Ok(k256::SecretKey::from_slice(&result.to_bytes())
+        .expect("k256 scalar bytes are a valid k256 secret key"))
+}
+
+/// Convert a `k256::SecretKey` to a `bitcoin::secp256k1::Keypair`. Both libs
+/// use big-endian 32-byte scalars so the byte round-trip is value-preserving.
+/// We juggle between the two libraries because secp256k1 does not expose the
+/// arithmetic tools needed for secret-sharing.
+pub fn k256_sk_to_btc_keypair(sk: &k256::SecretKey) -> bitcoin::secp256k1::Keypair {
+    let btc_sk = bitcoin::secp256k1::SecretKey::from_slice(&sk.to_bytes())
+        .expect("k256 secret key bytes are a valid secp256k1 secret key");
+    bitcoin::secp256k1::Keypair::from_secret_key(&BTC_LIB, &btc_sk)
 }
 
 /// Create a commitment (hash) for a share
@@ -701,8 +716,8 @@ mod tests {
             } else {
                 let reconstructed = result.unwrap();
                 assert_eq!(
-                    original_bytes.as_slice(),
-                    &reconstructed.secret_bytes(),
+                    original_bytes,
+                    reconstructed.to_bytes(),
                     "n={n} t={t} num_shares={num_shares}: should reconstruct original",
                 );
             }
@@ -723,8 +738,8 @@ mod tests {
             let subset = &shares[start_idx..(start_idx + t)];
             let reconstructed = combine_shares(subset, t).unwrap();
             assert_eq!(
-                original_bytes.as_slice(),
-                &reconstructed.secret_bytes(),
+                original_bytes,
+                reconstructed.to_bytes(),
                 "n={n} t={t} start_idx={start_idx}: subset should reconstruct original",
             );
         }

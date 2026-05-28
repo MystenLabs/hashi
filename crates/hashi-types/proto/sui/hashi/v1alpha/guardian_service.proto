@@ -9,8 +9,15 @@ service GuardianService {
   // Query the service for general information about its current state.
   rpc GetGuardianInfo(GetGuardianInfoRequest) returns (GetGuardianInfoResponse);
 
-  // Setup mode only: generate a new BTC key and distribute encrypted shares.
+  // Ceremony mode only: generate a new BTC key and distribute encrypted shares.
   rpc SetupNewKey(SetupNewKeyRequest) returns (SignedSetupNewKeyResponse);
+
+  // Ceremony mode only: rotate the KP set holding the existing BTC key. The
+  // operator submits the current KPs' encrypted old shares in one request; once
+  // threshold-many verify, the enclave reconstructs the BTC key, re-splits it
+  // for the new KP set, writes the new share state (hashes) to ceremony/, and
+  // returns the new encrypted shares.
+  rpc RotateKps(RotateKpsRequest) returns (SignedRotateKpsResponse);
 
   // Operator initialization: provide config and commitments before provisioning.
   rpc OperatorInit(OperatorInitRequest) returns (OperatorInitResponse);
@@ -45,6 +52,9 @@ message GetGuardianInfoResponse {
 
   // Current committee epoch (if initialized). Drives `UpdateCommittee` catch-up.
   optional uint64 current_committee_epoch = 6;
+
+  // Encrypted shares from the latest ceremony (empty if none yet).
+  repeated KPEncryptedShare encrypted_shares = 7;
 }
 
 // Guardian-signed wrapper around `GuardianInfoData`.
@@ -240,6 +250,40 @@ message LimiterConfig {
 }
 
 message ProvisionerInitResponse {}
+
+// ==========================
+//        RotateKps
+// ==========================
+
+// Assembled by the operator from the current KPs' encrypted old shares plus the
+// shared rotation target. Each old share binds the same state digest as HPKE
+// AAD, so the enclave only decrypts submissions that agree on the target.
+// Asymmetry between old and new (n, t) is allowed.
+message RotateKpsRequest {
+  repeated GuardianEncryptedShare encrypted_old_shares = 1;
+
+  // Armored OpenPGP certificates for the new KP set. Length must equal new_num_shares.
+  repeated string new_kp_pgp_certs = 2;
+
+  optional uint32 new_num_shares = 3;
+  optional uint32 new_threshold = 4;
+}
+
+// Unsigned response payload.
+message RotateKpsResponseData {
+  repeated KPEncryptedShare encrypted_shares = 1;
+}
+
+// Application-layer signed response.
+message SignedRotateKpsResponse {
+  RotateKpsResponseData data = 1;
+
+  // Milliseconds since Unix epoch.
+  optional uint64 timestamp_ms = 2;
+
+  // Signature over (intent || data || timestamp).
+  optional bytes signature = 3;
+}
 
 // ============================
 //    StandardWithdrawal

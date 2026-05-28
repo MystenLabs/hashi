@@ -28,6 +28,9 @@ use super::OperatorInitRequest;
 use super::PgpPublicCert;
 use super::ProvisionerInitRequest;
 use super::ProvisionerInitState;
+use super::RotateKpsRequest;
+use super::RotateKpsResponse;
+use super::RotateKpsState;
 use super::SecretSharingInstance;
 use super::SetupNewKeyRequest;
 use super::SetupNewKeyResponse;
@@ -64,6 +67,24 @@ use crate::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 //      Proto -> Domain (deserialization)
 // --------------------------------------------
 
+fn pb_to_kp_encrypted_share(pb: pb::KpEncryptedShare) -> GuardianResult<KPEncryptedShare> {
+    Ok(KPEncryptedShare {
+        id: pb_to_share_id(pb.id)?,
+        armored_ciphertext: pb
+            .armored_ciphertext
+            .ok_or_else(|| missing("armored_ciphertext"))?,
+    })
+}
+
+fn pb_to_guardian_encrypted_share(
+    pb: pb::GuardianEncryptedShare,
+) -> GuardianResult<GuardianEncryptedShare> {
+    Ok(GuardianEncryptedShare {
+        id: pb_to_share_id(pb.id)?,
+        ciphertext: pb_to_ciphertext(pb.ciphertext)?,
+    })
+}
+
 impl TryFrom<pb::SetupNewKeyRequest> for SetupNewKeyRequest {
     type Error = GuardianError;
 
@@ -93,18 +114,10 @@ impl TryFrom<pb::SignedSetupNewKeyResponse> for GuardianSigned<SetupNewKeyRespon
 
         let data = resp.data.ok_or_else(|| missing("data"))?;
 
-        let encrypted_shares: Vec<KPEncryptedShare> = data
+        let encrypted_shares = data
             .encrypted_shares
-            .iter()
-            .map(|b| {
-                Ok(KPEncryptedShare {
-                    id: pb_to_share_id(b.id)?,
-                    armored_ciphertext: b
-                        .armored_ciphertext
-                        .clone()
-                        .ok_or_else(|| missing("armored_ciphertext"))?,
-                })
-            })
+            .into_iter()
+            .map(pb_to_kp_encrypted_share)
             .collect::<GuardianResult<Vec<_>>>()?;
 
         let share_commitments = pb_share_commitments_to_domain(&data.share_commitments)?;
@@ -174,16 +187,59 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
             .encrypted_share
             .ok_or_else(|| missing("encrypted_share"))?;
 
-        let encrypted_share = GuardianEncryptedShare {
-            id: pb_to_share_id(encrypted_share_pb.id)?,
-            ciphertext: pb_to_ciphertext(encrypted_share_pb.ciphertext)?,
-        };
+        let encrypted_share = pb_to_guardian_encrypted_share(encrypted_share_pb)?;
 
         // State
         let state_pb = req.state.ok_or_else(|| missing("state"))?;
         let state = ProvisionerInitState::try_from(state_pb)?;
 
         Ok(ProvisionerInitRequest::new(encrypted_share, state))
+    }
+}
+
+impl TryFrom<pb::RotateKpsRequest> for RotateKpsRequest {
+    type Error = GuardianError;
+
+    fn try_from(req: pb::RotateKpsRequest) -> Result<Self, Self::Error> {
+        let encrypted_old_shares = req
+            .encrypted_old_shares
+            .into_iter()
+            .map(pb_to_guardian_encrypted_share)
+            .collect::<GuardianResult<Vec<_>>>()?;
+
+        let new_num_shares = req
+            .new_num_shares
+            .ok_or_else(|| missing("new_num_shares"))? as usize;
+        let new_threshold = req.new_threshold.ok_or_else(|| missing("new_threshold"))? as usize;
+
+        let state = RotateKpsState::new(req.new_kp_pgp_certs, new_num_shares, new_threshold)?;
+
+        Ok(RotateKpsRequest::new(encrypted_old_shares, state))
+    }
+}
+
+impl TryFrom<pb::SignedRotateKpsResponse> for GuardianSigned<RotateKpsResponse> {
+    type Error = GuardianError;
+
+    fn try_from(resp: pb::SignedRotateKpsResponse) -> Result<Self, Self::Error> {
+        let signature_bytes = resp.signature.ok_or_else(|| missing("signature"))?;
+        let signature = GuardianSignature::try_from(signature_bytes.as_ref())
+            .map_err(|e| InvalidInputs(format!("invalid signature: {e}")))?;
+
+        let data = resp.data.ok_or_else(|| missing("data"))?;
+        let encrypted_shares = data
+            .encrypted_shares
+            .into_iter()
+            .map(pb_to_kp_encrypted_share)
+            .collect::<GuardianResult<Vec<_>>>()?;
+
+        let timestamp_ms = resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?;
+
+        Ok(GuardianSigned {
+            data: RotateKpsResponse { encrypted_shares },
+            timestamp_ms,
+            signature,
+        })
     }
 }
 
@@ -239,6 +295,12 @@ impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
         let limiter_state = resp.limiter_state.map(pb_to_limiter_state).transpose()?;
         let limiter_config = resp.limiter_config.map(pb_to_limiter_config).transpose()?;
 
+        let encrypted_shares = resp
+            .encrypted_shares
+            .into_iter()
+            .map(pb_to_kp_encrypted_share)
+            .collect::<GuardianResult<Vec<_>>>()?;
+
         Ok(GetGuardianInfoResponse {
             attestation: attestation.to_vec(),
             signing_pub_key,
@@ -246,6 +308,7 @@ impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
             limiter_state,
             limiter_config,
             current_committee_epoch: resp.current_committee_epoch,
+            encrypted_shares,
         })
     }
 }
@@ -329,6 +392,25 @@ pub fn setup_new_key_response_signed_to_pb(
     }
 }
 
+pub fn rotate_kps_response_signed_to_pb(
+    s: GuardianSigned<RotateKpsResponse>,
+) -> pb::SignedRotateKpsResponse {
+    let signature = s.signature.to_bytes().to_vec();
+
+    pb::SignedRotateKpsResponse {
+        data: Some(pb::RotateKpsResponseData {
+            encrypted_shares: s
+                .data
+                .encrypted_shares
+                .into_iter()
+                .map(kp_encrypted_share_to_pb)
+                .collect(),
+        }),
+        timestamp_ms: Some(s.timestamp_ms),
+        signature: Some(signature.into()),
+    }
+}
+
 pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequest {
     pb::SetupNewKeyRequest {
         key_provisioner_pgp_certs: s
@@ -373,6 +455,20 @@ pub fn provisioner_init_state_to_pb(s: ProvisionerInitState) -> pb::ProvisionerI
     }
 }
 
+pub fn rotate_kps_request_to_pb(r: RotateKpsRequest) -> pb::RotateKpsRequest {
+    let (encrypted_old_shares, state) = r.into_parts();
+    let (new_kp_pgp_certs, new_params) = state.into_parts();
+    pb::RotateKpsRequest {
+        encrypted_old_shares: encrypted_old_shares
+            .into_iter()
+            .map(guardian_encrypted_share_to_pb)
+            .collect(),
+        new_kp_pgp_certs,
+        new_num_shares: Some(new_params.num_shares() as u32),
+        new_threshold: Some(new_params.threshold() as u32),
+    }
+}
+
 pub fn get_guardian_info_response_to_pb(r: GetGuardianInfoResponse) -> pb::GetGuardianInfoResponse {
     pb::GetGuardianInfoResponse {
         attestation: Some(r.attestation.into()),
@@ -381,6 +477,11 @@ pub fn get_guardian_info_response_to_pb(r: GetGuardianInfoResponse) -> pb::GetGu
         limiter_state: r.limiter_state.map(limiter_state_to_pb),
         limiter_config: r.limiter_config.map(limiter_config_to_pb),
         current_committee_epoch: r.current_committee_epoch,
+        encrypted_shares: r
+            .encrypted_shares
+            .into_iter()
+            .map(kp_encrypted_share_to_pb)
+            .collect(),
     }
 }
 
@@ -1060,6 +1161,14 @@ mod tests {
         let resp = GuardianSigned::<SetupNewKeyResponse>::mock_for_testing();
         let pb = setup_new_key_response_signed_to_pb(resp.clone());
         let back = GuardianSigned::<SetupNewKeyResponse>::try_from(pb).unwrap();
+        assert_eq!(resp, back);
+    }
+
+    #[test]
+    fn signed_rotate_kps_response_round_trip() {
+        let resp = GuardianSigned::<RotateKpsResponse>::mock_for_testing();
+        let pb = rotate_kps_response_signed_to_pb(resp.clone());
+        let back = GuardianSigned::<RotateKpsResponse>::try_from(pb).unwrap();
         assert_eq!(resp, back);
     }
 
