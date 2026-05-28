@@ -364,17 +364,21 @@ async fn finalize_guardian_harness(networks: &mut TestNetworks) -> Result<()> {
         .await?;
     tracing::info!("guardian harness finalized");
 
-    // Wait for every node's async limiter bootstrap to complete so
-    // tests don't race it.
+    // Wait for every *running* node's async limiter bootstrap to complete so
+    // tests don't race it. Only the initially-active nodes are started here; a
+    // pending new-member node (e.g. the key-rotation tests, which start the
+    // final validator later via `register_and_start_pending_node`) bootstraps
+    // its limiter when it starts, so skip nodes that aren't running yet.
     futures::future::try_join_all(
         networks
             .hashi_network
             .nodes()
             .iter()
+            .filter(|node| node.is_running())
             .map(|node| node.wait_for_local_limiter(std::time::Duration::from_secs(60))),
     )
     .await?;
-    tracing::info!("all hashi nodes have bootstrapped their local limiter");
+    tracing::info!("running hashi nodes have bootstrapped their local limiter");
     Ok(())
 }
 
