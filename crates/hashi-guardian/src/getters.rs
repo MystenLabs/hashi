@@ -29,12 +29,14 @@ pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuard
     let attestation = get_attestation(&signing_pub_key)?;
     let limiter_state = enclave.state.limiter_state().await;
     let limiter_config = enclave.state.limiter_config().await;
+    let current_committee_epoch = enclave.state.get_committee().ok().map(|c| c.epoch());
     Ok(GetGuardianInfoResponse {
         attestation,
         signing_pub_key,
         signed_info: enclave.sign(enclave.info()),
         limiter_state,
         limiter_config,
+        current_committee_epoch,
         encrypted_shares: enclave.latest_encrypted_shares(),
     })
 }

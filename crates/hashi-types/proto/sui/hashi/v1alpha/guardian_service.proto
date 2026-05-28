@@ -27,6 +27,9 @@ service GuardianService {
 
   // Standard withdrawal: request immediate withdrawal signature.
   rpc StandardWithdrawal(SignedStandardWithdrawalRequest) returns (SignedStandardWithdrawalResponse);
+
+  // Advance the guardian's committee one epoch (signed by the outgoing committee). Idempotent.
+  rpc UpdateCommittee(SignedCommitteeTransition) returns (UpdateCommitteeResponse);
 }
 
 message GetGuardianInfoRequest {}
@@ -47,8 +50,11 @@ message GetGuardianInfoResponse {
   // Immutable limiter configuration (if initialized).
   LimiterConfig limiter_config = 5;
 
+  // Current committee epoch (if initialized). Drives `UpdateCommittee` catch-up.
+  optional uint64 current_committee_epoch = 6;
+
   // Encrypted shares from the latest ceremony (empty if none yet).
-  repeated KPEncryptedShare encrypted_shares = 6;
+  repeated KPEncryptedShare encrypted_shares = 7;
 }
 
 // Guardian-signed wrapper around `GuardianInfoData`.
@@ -321,4 +327,25 @@ message SignedStandardWithdrawalResponse {
 message StandardWithdrawalResponseData {
   // Bitcoin signatures for each input (64 bytes each, Schnorr signatures).
   repeated bytes enclave_signatures = 1;
+}
+
+// ============================
+//      UpdateCommittee
+// ============================
+
+// Handoff payload. `new_committee.epoch` must equal `current_epoch + 1`.
+message CommitteeTransition {
+  Committee new_committee = 1;
+}
+
+message SignedCommitteeTransition {
+  CommitteeTransition data = 1;
+
+  // Outgoing committee's signature; `epoch` is `new_committee.epoch - 1`.
+  CommitteeSignature committee_signature = 2;
+}
+
+message UpdateCommitteeResponse {
+  // Guardian's committee epoch after the call (unchanged on no-op).
+  optional uint64 current_committee_epoch = 1;
 }

@@ -1134,8 +1134,11 @@ pub struct GetGuardianInfoResponse {
     /// Immutable limiter configuration (if initialized).
     #[prost(message, optional, tag = "5")]
     pub limiter_config: ::core::option::Option<LimiterConfig>,
+    /// Current committee epoch (if initialized). Drives `UpdateCommittee` catch-up.
+    #[prost(uint64, optional, tag = "6")]
+    pub current_committee_epoch: ::core::option::Option<u64>,
     /// Encrypted shares from the latest ceremony (empty if none yet).
-    #[prost(message, repeated, tag = "6")]
+    #[prost(message, repeated, tag = "7")]
     pub encrypted_shares: ::prost::alloc::vec::Vec<KpEncryptedShare>,
 }
 /// Guardian-signed wrapper around `GuardianInfoData`.
@@ -1423,6 +1426,26 @@ pub struct StandardWithdrawalResponseData {
     /// Bitcoin signatures for each input (64 bytes each, Schnorr signatures).
     #[prost(bytes = "bytes", repeated, tag = "1")]
     pub enclave_signatures: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
+}
+/// Handoff payload. `new_committee.epoch` must equal `current_epoch + 1`.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CommitteeTransition {
+    #[prost(message, optional, tag = "1")]
+    pub new_committee: ::core::option::Option<Committee>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SignedCommitteeTransition {
+    #[prost(message, optional, tag = "1")]
+    pub data: ::core::option::Option<CommitteeTransition>,
+    /// Outgoing committee's signature; `epoch` is `new_committee.epoch - 1`.
+    #[prost(message, optional, tag = "2")]
+    pub committee_signature: ::core::option::Option<CommitteeSignature>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct UpdateCommitteeResponse {
+    /// Guardian's committee epoch after the call (unchanged on no-op).
+    #[prost(uint64, optional, tag = "1")]
+    pub current_committee_epoch: ::core::option::Option<u64>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -1722,6 +1745,36 @@ pub mod guardian_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// Advance the guardian's committee one epoch (signed by the outgoing committee). Idempotent.
+        pub async fn update_committee(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SignedCommitteeTransition>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpdateCommitteeResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.GuardianService/UpdateCommittee",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.GuardianService",
+                        "UpdateCommittee",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -1787,6 +1840,14 @@ pub mod guardian_service_server {
             request: tonic::Request<super::SignedStandardWithdrawalRequest>,
         ) -> std::result::Result<
             tonic::Response<super::SignedStandardWithdrawalResponse>,
+            tonic::Status,
+        >;
+        /// Advance the guardian's committee one epoch (signed by the outgoing committee). Idempotent.
+        async fn update_committee(
+            &self,
+            request: tonic::Request<super::SignedCommitteeTransition>,
+        ) -> std::result::Result<
+            tonic::Response<super::UpdateCommitteeResponse>,
             tonic::Status,
         >;
     }
@@ -2126,6 +2187,52 @@ pub mod guardian_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = StandardWithdrawalSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.GuardianService/UpdateCommittee" => {
+                    #[allow(non_camel_case_types)]
+                    struct UpdateCommitteeSvc<T: GuardianService>(pub Arc<T>);
+                    impl<
+                        T: GuardianService,
+                    > tonic::server::UnaryService<super::SignedCommitteeTransition>
+                    for UpdateCommitteeSvc<T> {
+                        type Response = super::UpdateCommitteeResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SignedCommitteeTransition>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as GuardianService>::update_committee(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = UpdateCommitteeSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
