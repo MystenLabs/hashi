@@ -912,6 +912,11 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
         (Some(url), Some(pk_hex)) => {
             let public_key = hex::decode(pk_hex.strip_prefix("0x").unwrap_or(&pk_hex))
                 .context("Invalid hex for --guardian-public-key")?;
+            anyhow::ensure!(
+                public_key.len() == 32,
+                "--guardian-public-key must be 32 bytes (Ed25519), got {} bytes",
+                public_key.len(),
+            );
             Some(crate::publish::GuardianConfig { url, public_key })
         }
         (None, None) => None,

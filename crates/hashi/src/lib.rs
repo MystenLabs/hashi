@@ -781,6 +781,12 @@ impl Hashi {
                 return false;
             }
         };
+        if !self.verify_guardian_signing_pubkey(&info.signing_pub_key) {
+            return false;
+        }
+        if !verify_guardian_signed_info(info.signed_info, &info.signing_pub_key, &self.metrics) {
+            return false;
+        }
         let _ = self.guardian_signing_pubkey.set(Some(info.signing_pub_key));
         let (Some(state), Some(config)) = (info.limiter_state, info.limiter_config) else {
             self.metrics.record_guardian_bootstrap_outcome(
@@ -835,7 +841,7 @@ impl Hashi {
     }
 
     /// Fetch the guardian's authoritative `LimiterState` and the live local
-    /// limiter handle. `None` if the limiter isn't seeded or the RPC fails.
+    /// limiter handle. `None` if not seeded, the RPC fails, or pubkey mismatches.
     async fn guardian_limiter_and_state(
         &self,
     ) -> Option<(
@@ -845,8 +851,24 @@ impl Hashi {
         let limiter = self.local_limiter()?;
         let info_pb = self.fetch_guardian_info().await?;
         let info = hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb).ok()?;
+        if !self.verify_guardian_signing_pubkey(&info.signing_pub_key) {
+            return None;
+        }
+        if !verify_guardian_signed_info(info.signed_info, &info.signing_pub_key, &self.metrics) {
+            return None;
+        }
         let state = info.limiter_state?;
         Some((limiter, state))
+    }
+
+    /// Read on each call: a chain that didn't publish the key at hashi
+    /// startup may bind `guardian_public_key` later via governance.
+    fn verify_guardian_signing_pubkey(
+        &self,
+        signing_pub_key: &hashi_types::guardian::GuardianPubKey,
+    ) -> bool {
+        let expected = self.onchain_state().guardian_public_key();
+        verify_signing_pub_key_matches(signing_pub_key, expected.as_deref(), &self.metrics)
     }
 
     /// Snap the local limiter to the guardian's authoritative state.
@@ -982,6 +1004,51 @@ fn assert_test_only_config(sui_chain_id: &str, bitcoin_chain_id: &str, field_nam
             && bitcoin_chain_id == constants::BITCOIN_REGTEST_CHAIN_ID,
         "{field_name} is only allowed on regtest"
     );
+}
+
+/// Verify the signature on the guardian's `/info` envelope under its
+/// own `signing_pub_key`. Caller is responsible for verifying that the
+/// pubkey itself matches on-chain first; this is the second leg of the
+/// trust chain (signed_info → enclave that holds the on-chain pubkey).
+fn verify_guardian_signed_info(
+    signed_info: hashi_types::guardian::GuardianSigned<hashi_types::guardian::GuardianInfo>,
+    signing_pub_key: &hashi_types::guardian::GuardianPubKey,
+    metrics: &metrics::Metrics,
+) -> bool {
+    if let Err(e) = signed_info.verify(signing_pub_key) {
+        metrics.record_guardian_bootstrap_outcome(
+            metrics::GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID,
+        );
+        tracing::error!(
+            error = ?e,
+            "FATAL: guardian /info signed_info signature invalid under its own \
+             signing_pub_key; refusing to seed or reconcile local limiter",
+        );
+        return false;
+    }
+    true
+}
+
+/// `expected = None` skips the check (pre-feature chains).
+fn verify_signing_pub_key_matches(
+    signing_pub_key: &hashi_types::guardian::GuardianPubKey,
+    expected: Option<&[u8]>,
+    metrics: &metrics::Metrics,
+) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+    if signing_pub_key.as_bytes().as_slice() == expected {
+        return true;
+    }
+    metrics.record_guardian_bootstrap_outcome(metrics::GUARDIAN_BOOTSTRAP_OUTCOME_KEY_MISMATCH);
+    tracing::error!(
+        on_chain = %hex::encode(expected),
+        from_info = %hex::encode(signing_pub_key.as_bytes()),
+        "FATAL: guardian /info signing_pub_key does not match on-chain \
+         guardian_public_key; refusing to seed or reconcile local limiter",
+    );
+    false
 }
 
 #[cfg(test)]
@@ -1238,5 +1305,112 @@ mod test {
         //             dbg!(resp);
         //             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         //         }
+    }
+
+    // --- guardian /info pubkey verification ---
+
+    fn fresh_metrics() -> std::sync::Arc<crate::metrics::Metrics> {
+        let registry = prometheus::Registry::new();
+        std::sync::Arc::new(crate::metrics::Metrics::new(&registry))
+    }
+
+    fn key_mismatch_count(metrics: &crate::metrics::Metrics) -> u64 {
+        metrics
+            .guardian_bootstrap_outcomes_total
+            .with_label_values(&[crate::metrics::GUARDIAN_BOOTSTRAP_OUTCOME_KEY_MISMATCH])
+            .get()
+    }
+
+    fn signature_invalid_count(metrics: &crate::metrics::Metrics) -> u64 {
+        metrics
+            .guardian_bootstrap_outcomes_total
+            .with_label_values(&[crate::metrics::GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID])
+            .get()
+    }
+
+    fn random_signing_pubkey() -> hashi_types::guardian::GuardianPubKey {
+        let signing_key = hashi_types::guardian::GuardianSignKeyPair::new(rand::thread_rng());
+        signing_key.verification_key()
+    }
+
+    #[test]
+    fn verify_signing_pub_key_matches_passes_when_equal() {
+        let pubkey = random_signing_pubkey();
+        let expected = pubkey.as_bytes().to_vec();
+        let metrics = fresh_metrics();
+        assert!(crate::verify_signing_pub_key_matches(
+            &pubkey,
+            Some(&expected),
+            &metrics
+        ));
+        assert_eq!(key_mismatch_count(&metrics), 0);
+    }
+
+    #[test]
+    fn verify_signing_pub_key_matches_skips_when_expected_absent() {
+        let pubkey = random_signing_pubkey();
+        let metrics = fresh_metrics();
+        assert!(crate::verify_signing_pub_key_matches(
+            &pubkey, None, &metrics
+        ));
+        assert_eq!(key_mismatch_count(&metrics), 0);
+    }
+
+    #[test]
+    fn verify_signing_pub_key_matches_fails_on_mismatch() {
+        let live = random_signing_pubkey();
+        let mut wrong = live.as_bytes().to_vec();
+        wrong[0] ^= 0xff;
+        let metrics = fresh_metrics();
+        assert!(!crate::verify_signing_pub_key_matches(
+            &live,
+            Some(&wrong),
+            &metrics
+        ));
+        assert_eq!(key_mismatch_count(&metrics), 1);
+    }
+
+    #[test]
+    fn verify_guardian_signed_info_passes_for_valid_signature() {
+        let resp = hashi_types::guardian::GetGuardianInfoResponse::mock_for_testing();
+        let metrics = fresh_metrics();
+        assert!(crate::verify_guardian_signed_info(
+            resp.signed_info,
+            &resp.signing_pub_key,
+            &metrics,
+        ));
+        assert_eq!(signature_invalid_count(&metrics), 0);
+    }
+
+    #[test]
+    fn verify_guardian_signed_info_fails_when_pubkey_did_not_sign() {
+        // Mock signs with key A, exposes pub_key_A. Verify under pub_key_B
+        // (random) — must fail and bump the metric.
+        let resp = hashi_types::guardian::GetGuardianInfoResponse::mock_for_testing();
+        let wrong_pubkey = random_signing_pubkey();
+        let metrics = fresh_metrics();
+        assert!(!crate::verify_guardian_signed_info(
+            resp.signed_info,
+            &wrong_pubkey,
+            &metrics,
+        ));
+        assert_eq!(signature_invalid_count(&metrics), 1);
+    }
+
+    #[test]
+    fn verify_guardian_signed_info_fails_when_signature_tampered() {
+        let mut resp = hashi_types::guardian::GetGuardianInfoResponse::mock_for_testing();
+        // Flip a byte of the signature so verification under the original
+        // pubkey now fails.
+        let mut sig_bytes: [u8; 64] = resp.signed_info.signature.to_bytes();
+        sig_bytes[0] ^= 0xff;
+        resp.signed_info.signature = hashi_types::guardian::GuardianSignature::from(sig_bytes);
+        let metrics = fresh_metrics();
+        assert!(!crate::verify_guardian_signed_info(
+            resp.signed_info,
+            &resp.signing_pub_key,
+            &metrics,
+        ));
+        assert_eq!(signature_invalid_count(&metrics), 1);
     }
 }
