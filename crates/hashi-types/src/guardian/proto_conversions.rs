@@ -588,11 +588,20 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
         .server_version
         .ok_or_else(|| missing("server_version"))?;
 
+    let enclave_btc_pubkey = data
+        .enclave_btc_pubkey
+        .map(|bytes| {
+            super::BitcoinPubkey::from_slice(bytes.as_ref())
+                .map_err(|e| InvalidInputs(format!("invalid enclave_btc_pubkey: {e}")))
+        })
+        .transpose()?;
+
     Ok(GuardianInfo {
         secret_sharing_instance,
         bucket_info,
         encryption_pubkey,
         server_version,
+        enclave_btc_pubkey,
     })
 }
 
@@ -605,6 +614,9 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
         bucket_info: info.bucket_info.map(s3_bucket_info_to_pb),
         encryption_pubkey: Some(info.encryption_pubkey.into()),
         server_version: Some(info.server_version),
+        enclave_btc_pubkey: info
+            .enclave_btc_pubkey
+            .map(|pk| pk.serialize().to_vec().into()),
     }
 }
 
@@ -1146,6 +1158,25 @@ mod tests {
         let pb = get_guardian_info_response_to_pb(resp.clone());
         let back = GetGuardianInfoResponse::try_from(pb).unwrap();
         assert_eq!(resp, back);
+    }
+
+    #[test]
+    fn guardian_info_data_with_enclave_btc_pubkey_round_trip() {
+        use super::super::test_utils::create_btc_keypair;
+        let kp = create_btc_keypair(&[7u8; 32]);
+        let pk = kp.x_only_public_key().0;
+
+        let info = GuardianInfo {
+            secret_sharing_instance: None,
+            bucket_info: None,
+            encryption_pubkey: vec![0u8; 32],
+            server_version: "v1".to_string(),
+            enclave_btc_pubkey: Some(pk),
+        };
+        let pb = guardian_info_data_to_pb(info.clone());
+        let back = pb_to_guardian_info_data(pb).unwrap();
+        assert_eq!(info, back);
+        assert_eq!(back.enclave_btc_pubkey, Some(pk));
     }
 
     #[test]

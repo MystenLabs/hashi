@@ -1098,6 +1098,8 @@ pub const GUARDIAN_BOOTSTRAP_OUTCOME_PARSE_FAILURE: &str = "parse_failure";
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_NO_LIMITER_YET: &str = "no_limiter_yet";
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_KEY_MISMATCH: &str = "key_mismatch";
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID: &str = "signature_invalid";
+pub const GUARDIAN_BOOTSTRAP_OUTCOME_BTC_KEY_MISMATCH: &str = "btc_key_mismatch";
+pub const GUARDIAN_BOOTSTRAP_OUTCOME_BTC_KEY_MISSING_FROM_INFO: &str = "btc_key_missing_from_info";
 
 pub const GUARDIAN_RPC_METHOD_GET_GUARDIAN_INFO: &str = "get_guardian_info";
 pub const GUARDIAN_RPC_METHOD_STANDARD_WITHDRAWAL: &str = "standard_withdrawal";
@@ -1278,6 +1280,8 @@ mod tests {
             GUARDIAN_BOOTSTRAP_OUTCOME_NO_LIMITER_YET,
             GUARDIAN_BOOTSTRAP_OUTCOME_KEY_MISMATCH,
             GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID,
+            GUARDIAN_BOOTSTRAP_OUTCOME_BTC_KEY_MISMATCH,
+            GUARDIAN_BOOTSTRAP_OUTCOME_BTC_KEY_MISSING_FROM_INFO,
         ] {
             metrics.record_guardian_bootstrap_outcome(outcome);
         }

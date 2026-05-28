@@ -136,6 +136,15 @@ impl EnclaveConfig {
             .map_err(|_| InvalidInputs("Bitcoin key already set".into()))
     }
 
+    /// Returns the x-only pubkey of the enclave's BTC signing key.
+    /// Returns `Err` until `provisioner_init` has set the keypair.
+    pub fn enclave_btc_pubkey(&self) -> GuardianResult<BitcoinPubkey> {
+        self.enclave_btc_keypair
+            .get()
+            .map(|kp| kp.x_only_public_key().0)
+            .ok_or(InvalidInputs("Bitcoin key is not initialized".into()))
+    }
+
     pub fn set_hashi_btc_pk(&self, pk: BitcoinPubkey) -> GuardianResult<()> {
         self.hashi_btc_master_pubkey
             .set(pk)
@@ -467,6 +476,7 @@ impl Enclave {
             encryption_pubkey: self.encryption_public_key().to_bytes().to_vec(),
             // TODO: Change it
             server_version: "v1".to_string(),
+            enclave_btc_pubkey: self.config.enclave_btc_pubkey().ok(),
         }
     }
 

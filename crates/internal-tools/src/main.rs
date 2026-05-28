@@ -15,6 +15,7 @@ use hashi::onchain::OnchainState;
 mod bootstrap_guardian;
 mod dump_utxos;
 mod fetch_guardian_info;
+mod generate_master_key;
 mod key_recovery;
 mod sweep_utxos;
 mod utxo_csv;
@@ -64,6 +65,13 @@ enum Commands {
     FetchGuardianInfo {
         #[command(flatten)]
         args: fetch_guardian_info::Args,
+    },
+    /// Generate a fresh BTC master keypair for the guardian. Used by the
+    /// deploy workflow: pin the pubkey on-chain via `hashi publish`, then
+    /// hand the secret to `bootstrap-guardian --master-secret-hex`.
+    GenerateMasterKey {
+        #[command(flatten)]
+        args: generate_master_key::Args,
     },
 }
 
@@ -120,5 +128,6 @@ async fn main() -> anyhow::Result<()> {
             bootstrap_guardian::run(args, &onchain_state).await
         }
         Commands::FetchGuardianInfo { args } => fetch_guardian_info::run(args).await,
+        Commands::GenerateMasterKey { args } => generate_master_key::run(args),
     }
 }

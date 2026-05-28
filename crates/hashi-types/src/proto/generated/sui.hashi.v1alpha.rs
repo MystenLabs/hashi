@@ -1271,6 +1271,10 @@ pub struct GuardianInfoData {
     /// Server version.
     #[prost(string, optional, tag = "4")]
     pub server_version: ::core::option::Option<::prost::alloc::string::String>,
+    /// X-only Bitcoin pubkey of the enclave's BTC signing key (32 bytes).
+    /// Absent before `provisioner_init` has set the keypair.
+    #[prost(bytes = "bytes", optional, tag = "5")]
+    pub enclave_btc_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
 }
 /// Public description of the current BTC key's secret-sharing scheme.
 /// `commitments.len() == num_shares` and `2 <= threshold <= num_shares`.
