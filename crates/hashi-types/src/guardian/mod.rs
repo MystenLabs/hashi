@@ -524,14 +524,7 @@ impl ProvisionerInitState {
         self.withdrawal_config
     }
 
-    pub fn into_parts(
-        self,
-    ) -> (
-        HashiCommittee,
-        LimiterConfig,
-        LimiterState,
-        BitcoinPubkey,
-    ) {
+    pub fn into_parts(self) -> (HashiCommittee, LimiterConfig, LimiterState, BitcoinPubkey) {
         (
             self.committee,
             self.withdrawal_config,

@@ -4,12 +4,12 @@
 use anyhow::Context;
 use hashi_types::guardian::BitcoinPubkey;
 use hashi_types::guardian::GuardianInfo;
+use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::S3BucketInfo;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::Share;
 use hashi_types::guardian::ShareCommitments;
 use hashi_types::guardian::ShareID;
-use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::proto_conversions::pb_share_commitments_to_domain;
 use hashi_types::move_types::Committee as CommitteeRepr;
 use hashi_types::proto as pb;

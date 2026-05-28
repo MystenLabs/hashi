@@ -215,10 +215,10 @@ mod tests {
     use crate::OperatorInitTestArgs;
     use bitcoin::Network;
     use hashi_types::guardian::test_utils::create_btc_keypair;
+    use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::ProvisionerInitState;
     use hashi_types::guardian::StandardWithdrawalRequest;
-    use hashi_types::guardian::LimiterConfig;
 
     /// Sets up an enclave with a single committee and token bucket limiter.
     async fn setup_fully_initialized_enclave(

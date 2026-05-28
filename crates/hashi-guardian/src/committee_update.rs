@@ -134,8 +134,8 @@ mod tests {
     use hashi_types::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
     use hashi_types::guardian::test_utils::create_btc_keypair;
     use hashi_types::guardian::HashiCommitteeMember;
-    use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::LimiterConfig;
+    use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::WithdrawalID as SuiAddress;
 
     fn mock_signer_address() -> SuiAddress {

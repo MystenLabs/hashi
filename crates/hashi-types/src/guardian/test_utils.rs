@@ -10,6 +10,7 @@ use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
 use super::KPEncryptedShare;
+use super::LimiterConfig;
 use super::LimiterState;
 use super::OperatorInitRequest;
 use super::PgpPublicCert;
@@ -25,7 +26,6 @@ use super::ShareCommitment;
 use super::ShareCommitments;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
-use super::LimiterConfig;
 use super::WithdrawalID;
 
 use super::bitcoin_utils::BTC_LIB;
