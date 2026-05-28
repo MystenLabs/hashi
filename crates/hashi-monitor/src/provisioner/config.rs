@@ -74,7 +74,7 @@ pub struct ProvisionerConfig {
     /// ProvisionerInitState
     // Current Hashi committee
     pub hashi_committee: CommitteeRepr,
-    // Withdrawal config
+    // Limiter config
     pub limiter_config: LimiterConfig,
     // Hashi BTC pubkey
     pub hashi_btc_master_pubkey: BitcoinPubkey,

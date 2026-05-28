@@ -183,7 +183,7 @@ pub struct ProvisionerInitRequest {
 pub struct ProvisionerInitState {
     /// Current Hashi committee
     committee: HashiCommittee,
-    /// Withdrawal config (includes limiter config)
+    /// Limiter config
     limiter_config: LimiterConfig,
     /// Limiter state (tokens available, timestamp, seq)
     limiter_state: LimiterState,
