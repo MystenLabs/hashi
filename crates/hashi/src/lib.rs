@@ -834,36 +834,67 @@ impl Hashi {
         }
     }
 
+    /// Fetch the guardian's authoritative `LimiterState` and the live local
+    /// limiter handle. `None` if the limiter isn't seeded or the RPC fails.
+    async fn guardian_limiter_and_state(
+        &self,
+    ) -> Option<(
+        Arc<guardian_limiter::LocalLimiter>,
+        hashi_types::guardian::LimiterState,
+    )> {
+        let limiter = self.local_limiter()?;
+        let info_pb = self.fetch_guardian_info().await?;
+        let info = hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb).ok()?;
+        let state = info.limiter_state?;
+        Some((limiter, state))
+    }
+
+    /// Snap the local limiter to the guardian's authoritative state.
+    fn apply_limiter_reconcile(
+        &self,
+        limiter: &guardian_limiter::LocalLimiter,
+        state: hashi_types::guardian::LimiterState,
+    ) {
+        limiter.reconcile_to(state);
+        self.metrics.guardian_limiter_reconciled_total.inc();
+        self.metrics.record_limiter_state(&state, limiter.config());
+    }
+
     /// Snap the local limiter to the guardian once `tracker` confirms the
     /// drift has persisted past ordinary in-flight lag.
     async fn reconcile_guardian_limiter(
         &self,
         tracker: &mut guardian_limiter::LimiterStallTracker,
     ) {
-        let Some(limiter) = self.local_limiter() else {
+        let Some((limiter, state)) = self.guardian_limiter_and_state().await else {
             return;
         };
         let local_seq = limiter.next_seq();
-        let Some(info_pb) = self.fetch_guardian_info().await else {
-            return;
-        };
-        let Ok(info) = hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb) else {
-            return;
-        };
-        let Some(state) = info.limiter_state else {
-            return;
-        };
-        if !tracker.observe(local_seq, state.next_seq) {
-            return;
+        if tracker.observe(local_seq, state.next_seq) {
+            tracing::warn!(
+                local_seq,
+                guardian_seq = state.next_seq,
+                "Local guardian limiter stalled away from the guardian; reconciled to authoritative state",
+            );
+            self.apply_limiter_reconcile(&limiter, state);
         }
-        limiter.reconcile_to(state);
-        self.metrics.guardian_limiter_reconciled_total.inc();
-        self.metrics.record_limiter_state(&state, limiter.config());
-        tracing::warn!(
-            local_seq,
-            guardian_seq = state.next_seq,
-            "Local guardian limiter stalled away from the guardian; reconciled to authoritative state",
-        );
+    }
+
+    /// Forward-only reconcile triggered by a watcher rescrape (which likely
+    /// dropped an event); skips the stall detector. Guardian seq is monotonic.
+    async fn reconcile_guardian_limiter_eager(&self) {
+        let Some((limiter, state)) = self.guardian_limiter_and_state().await else {
+            return;
+        };
+        let local_seq = limiter.next_seq();
+        if state.next_seq > local_seq {
+            tracing::warn!(
+                local_seq,
+                guardian_seq = state.next_seq,
+                "Local guardian limiter behind guardian after watcher rescrape; reconciled to authoritative state",
+            );
+            self.apply_limiter_reconcile(&limiter, state);
+        }
     }
 
     fn start_guardian_bootstrap(self: Arc<Self>) -> Service {
@@ -889,13 +920,26 @@ impl Hashi {
             .await;
             tracing::info!("Guardian bootstrap complete");
 
-            // Safety net for the event-driven fast path: see `reconcile_guardian_limiter`.
+            // Safety net for the event-driven fast path: periodic tick catches
+            // slow drifts (stall-gated); rescrape notify catches them eagerly.
+            let reconcile_notify = self.onchain_state().limiter_reconcile_notify();
+            // Pinned + re-armed so a notify can't be lost to `select!` cancellation.
+            let rescraped = reconcile_notify.notified();
+            tokio::pin!(rescraped);
             let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut tracker = guardian_limiter::LimiterStallTracker::default();
             loop {
-                interval.tick().await;
-                self.reconcile_guardian_limiter(&mut tracker).await;
+                tokio::select! {
+                    _ = interval.tick() => {
+                        self.reconcile_guardian_limiter(&mut tracker).await;
+                    }
+                    _ = &mut rescraped => {
+                        // Re-arm first so a rescrape during the reconcile isn't lost.
+                        rescraped.set(reconcile_notify.notified());
+                        self.reconcile_guardian_limiter_eager().await;
+                    }
+                }
             }
         })
     }
