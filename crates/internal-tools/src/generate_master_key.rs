@@ -19,7 +19,7 @@ use rand::thread_rng;
 pub enum OutputFormat {
     /// `{"secret_hex":"…","pubkey_hex":"…"}` on one line.
     Json,
-    /// `MASTER_SECRET_HEX=…\nMASTER_PUBKEY_HEX=…` — sourceable by shell.
+    /// `HASHI_MASTER_SECRET_HEX=…\nHASHI_MASTER_PUBKEY_HEX=…` — sourceable by shell.
     Env,
 }
 
@@ -49,8 +49,8 @@ pub fn run(args: Args) -> Result<()> {
             println!("{{\"secret_hex\":\"{secret_hex}\",\"pubkey_hex\":\"{pubkey_hex}\"}}");
         }
         OutputFormat::Env => {
-            println!("MASTER_SECRET_HEX={secret_hex}");
-            println!("MASTER_PUBKEY_HEX={pubkey_hex}");
+            println!("HASHI_MASTER_SECRET_HEX={secret_hex}");
+            println!("HASHI_MASTER_PUBKEY_HEX={pubkey_hex}");
         }
     }
     Ok(())

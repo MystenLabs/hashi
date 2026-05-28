@@ -126,14 +126,14 @@ entry fun finish_publish(
                 guardian_url.destroy_some(),
                 guardian_public_key.destroy_some(),
             );
+        if (guardian_btc_public_key.is_some()) {
+            self.config_mut().set_guardian_btc_public_key(guardian_btc_public_key.destroy_some());
+        } else {
+            guardian_btc_public_key.destroy_none();
+        };
     } else {
         guardian_url.destroy_none();
         guardian_public_key.destroy_none();
-    };
-
-    if (guardian_btc_public_key.is_some()) {
-        self.config_mut().set_guardian_btc_public_key(guardian_btc_public_key.destroy_some());
-    } else {
         guardian_btc_public_key.destroy_none();
     };
 

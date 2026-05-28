@@ -917,11 +917,9 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
         Some(hex_str) => {
             let bytes = hex::decode(hex_str.strip_prefix("0x").unwrap_or(&hex_str))
                 .context("Invalid hex for --guardian-btc-public-key")?;
-            anyhow::ensure!(
-                bytes.len() == 32,
-                "--guardian-btc-public-key must be 32 bytes (x-only), got {} bytes",
-                bytes.len(),
-            );
+            // from_slice requires exactly 32 bytes and a valid curve point.
+            hashi_types::guardian::BitcoinPubkey::from_slice(&bytes)
+                .context("--guardian-btc-public-key must be a 32-byte x-only Bitcoin pubkey")?;
             Some(bytes)
         }
         None => None,

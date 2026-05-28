@@ -112,6 +112,26 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
     tracing::info!(master_pubkey = %hex::encode(material.master_pubkey.serialize()),
         n, t, "generated share material");
 
+    // Derived key must match the pubkey pinned on-chain at publish; a wrong or
+    // missing --master-secret-hex would otherwise provision a key the chain rejects.
+    let onchain_btc_pubkey = onchain_state
+        .state()
+        .hashi()
+        .config
+        .guardian_btc_public_key()
+        .map(<[u8]>::to_vec);
+    if let Some(onchain) = onchain_btc_pubkey {
+        let derived = material.master_pubkey.serialize();
+        anyhow::ensure!(
+            derived.as_slice() == onchain.as_slice(),
+            "derived master pubkey {} does not match on-chain \
+             guardian_btc_public_key {}; check HASHI_MASTER_SECRET_HEX",
+            hex::encode(derived),
+            hex::encode(&onchain),
+        );
+        tracing::info!("master pubkey matches on-chain guardian_btc_public_key");
+    }
+
     let mut client = GuardianServiceClient::connect(args.guardian_endpoint.clone())
         .await
         .with_context(|| format!("connect to guardian at {}", args.guardian_endpoint))?;
