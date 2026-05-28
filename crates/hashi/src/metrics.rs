@@ -53,6 +53,9 @@ pub struct Metrics {
     pub guardian_rpc_total: IntCounterVec,
     pub guardian_rpc_duration_seconds: HistogramVec,
 
+    /// Guardian's committee epoch as of the leader's last reconcile.
+    pub guardian_current_committee_epoch: IntGauge,
+
     // Kyoto (Bitcoin light client) metrics
     pub kyoto_connected_peers: IntGauge,
     pub kyoto_synced: IntGauge,
@@ -381,6 +384,12 @@ impl Metrics {
                 "Latency of outbound RPC calls to the guardian by method and outcome",
                 &["method", "outcome"],
                 LATENCY_SEC_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            guardian_current_committee_epoch: register_int_gauge_with_registry!(
+                "hashi_guardian_current_committee_epoch",
+                "Committee epoch reported by the guardian as of the last reconcile RPC",
                 registry,
             )
             .unwrap(),
