@@ -51,6 +51,7 @@ pub struct Metrics {
     pub guardian_limiter_batch_truncated_total: IntCounter,
     pub guardian_limiter_batch_stuck_head_total: IntCounter,
     pub guardian_finalize_deferred_total: IntCounter,
+    pub guardian_limiter_reconciled_total: IntCounter,
     pub guardian_rpc_total: IntCounterVec,
     pub guardian_rpc_duration_seconds: HistogramVec,
 
@@ -375,6 +376,12 @@ impl Metrics {
             guardian_finalize_deferred_total: register_int_counter_with_registry!(
                 "hashi_guardian_finalize_deferred_total",
                 "Times the leader deferred a guardian finalize while waiting for the local limiter to catch up to the guardian's consumed seq (prevents stale-seq mismatches)",
+                registry,
+            )
+            .unwrap(),
+            guardian_limiter_reconciled_total: register_int_counter_with_registry!(
+                "hashi_guardian_limiter_reconciled_total",
+                "Local limiter reconciled to the guardian after a stall (recovers events dropped across a checkpoint-subscription reconnect)",
                 registry,
             )
             .unwrap(),
