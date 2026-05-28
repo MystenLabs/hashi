@@ -6,27 +6,31 @@
 //! Orchestrates config loading, recipient/identity resolution, and user-facing
 //! output. The core archive logic lives in [`crate::backup`].
 
-use age::Decryptor;
-use age::IdentityFile;
-use age::cli_common::UiCallbacks;
 use anyhow::Context;
 use anyhow::Result;
-use flate2::read::GzDecoder;
+use hashi_types::pgp::PgpPublicCert;
+use hashi_types::pgp::decrypt_with_gpg;
+use hashi_types::pgp::decrypt_with_secret_key;
 use std::fs;
 use std::fs::File;
+use std::io;
 use std::path::Path;
-use std::str::FromStr;
+use std::path::PathBuf;
 
 use crate::backup;
-use crate::backup::BackupRecipient;
 use crate::cli::print_success;
 use crate::config::Config;
 use crate::db::Database;
 
+pub enum RestoreDecryptor {
+    LocalSecretKey { secret_key_path: PathBuf },
+    GpgAgent { homedir: Option<PathBuf> },
+}
+
 /// Save an encrypted backup of the node config, referenced files, and database
 pub fn save(
     node_config_path: &Path,
-    backup_age_pubkey_override: Option<String>,
+    backup_pgp_cert_override: Option<String>,
     output_dir: &Path,
 ) -> Result<()> {
     let node_config = crate::config::Config::load(node_config_path).with_context(|| {
@@ -36,7 +40,7 @@ pub fn save(
         )
     })?;
 
-    let recipient = resolve_backup_recipient(&node_config, backup_age_pubkey_override)?;
+    let recipient = resolve_backup_recipient(&node_config, backup_pgp_cert_override)?;
 
     let db_path = node_config.db.as_ref().ok_or_else(|| {
         anyhow::anyhow!(
@@ -85,27 +89,34 @@ pub fn save(
 
 pub(crate) fn resolve_backup_recipient(
     node_config: &Config,
-    backup_age_pubkey_override: Option<String>,
-) -> Result<BackupRecipient> {
-    backup_age_pubkey_override
-        .map(|value| BackupRecipient::from_str(&value))
+    backup_pgp_cert_override: Option<String>,
+) -> Result<PgpPublicCert> {
+    backup_pgp_cert_override
+        .map(|value| {
+            let path = Path::new(&value);
+            let cert = if path.is_file() {
+                fs::read_to_string(path)
+                    .with_context(|| format!("Failed to read OpenPGP certificate from {value}"))?
+            } else {
+                value
+            };
+            PgpPublicCert::new(cert)
+        })
         .transpose()?
-        .or_else(|| node_config.backup_age_pubkey.clone())
+        .or_else(|| node_config.backup_pgp_cert.clone())
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "No age public key configured. Pass --backup-age-pubkey or set backup-age-pubkey in the node config."
+                "No OpenPGP backup certificate configured. Pass --backup-pgp-cert or set backup-pgp-cert in the node config."
             )
         })
 }
 
 pub fn restore(
     backup_tarball: &Path,
-    backup_age_identity: &Path,
+    decryptor: RestoreDecryptor,
     output_dir: &Path,
     copy_to_original_paths: bool,
 ) -> Result<()> {
-    let identities = load_backup_identities(backup_age_identity)?;
-
     let extract_dir = output_dir.join(backup::extract_dir_name(backup_tarball)?);
     if extract_dir
         .try_exists()
@@ -133,28 +144,30 @@ pub fn restore(
             )
         })?;
 
-    let input = File::open(backup_tarball)
-        .with_context(|| format!("Failed to open backup tarball {}", backup_tarball.display()))?;
-    let decryptor = Decryptor::new(input)
-        .with_context(|| format!("Failed to parse age header of {}", backup_tarball.display()))?;
-    let decrypted = decryptor
-        .decrypt(identities.iter().map(|i| i.as_ref() as &dyn age::Identity))
-        .with_context(|| {
-            format!(
-                "Failed to decrypt {}; is {} the correct age identity?",
-                backup_tarball.display(),
-                backup_age_identity.display()
-            )
-        })?;
-    let decompressed = GzDecoder::new(decrypted);
-    let mut archive = tar::Archive::new(decompressed);
-    let mut entries = archive.entries()?;
-    let manifest_entry = entries
-        .next()
-        .transpose()?
-        .ok_or_else(|| anyhow::anyhow!("Backup archive is empty"))?;
-    let (manifest, manifest_toml) = backup::read_backup_manifest(manifest_entry)?;
-    backup::restore_backup_entries(entries, staging.path(), &manifest)?;
+    // Both decryptors yield the decompressed tar: sequoia inflates the OpenPGP
+    // compression layer in-process, and `gpg --decrypt` inflates it before
+    // streaming to us.
+    let mut decrypted: Box<dyn io::Read> = match decryptor {
+        RestoreDecryptor::LocalSecretKey { secret_key_path } => Box::new(
+            decrypt_with_local_secret_key(backup_tarball, &secret_key_path)?,
+        ),
+        RestoreDecryptor::GpgAgent { homedir } => {
+            Box::new(decrypt_with_gpg(backup_tarball, homedir.as_deref())?)
+        }
+    };
+    let (manifest, manifest_toml) = {
+        let mut archive = tar::Archive::new(&mut decrypted);
+        let mut entries = archive.entries()?;
+        let manifest_entry = entries
+            .next()
+            .transpose()?
+            .ok_or_else(|| anyhow::anyhow!("Backup archive is empty"))?;
+        let (manifest, manifest_toml) = backup::read_backup_manifest(manifest_entry)?;
+        backup::restore_backup_entries(entries, staging.path(), &manifest)?;
+        (manifest, manifest_toml)
+    };
+    io::copy(&mut decrypted, &mut io::sink())
+        .context("Failed to finish reading encrypted backup stream")?;
     // Manifest is written last so it acts as a marker that extraction finished
     // successfully. Any earlier failure leaves the staging dir without a
     // manifest, so partial state can never be confused for a complete restore.
@@ -186,26 +199,31 @@ pub fn restore(
     Ok(())
 }
 
-fn load_backup_identities(
-    backup_age_identity: &Path,
-) -> Result<Vec<Box<dyn age::Identity + Send + Sync>>> {
-    let path_str = backup_age_identity.to_str().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Age identity path is not valid UTF-8: {}",
-            backup_age_identity.display()
+fn decrypt_with_local_secret_key(
+    backup_tarball: &Path,
+    secret_key_path: &Path,
+) -> Result<impl io::Read + use<>> {
+    let input = File::open(backup_tarball)
+        .with_context(|| format!("Failed to open backup tarball {}", backup_tarball.display()))?;
+    let secret_key = fs::read(secret_key_path).with_context(|| {
+        format!(
+            "Failed to read OpenPGP secret key from {}",
+            secret_key_path.display()
         )
     })?;
-    IdentityFile::from_file(path_str.to_string())?
-        .with_callbacks(UiCallbacks)
-        .into_identities()
-        .map_err(Into::into)
+    decrypt_with_secret_key(input, &secret_key).with_context(|| {
+        format!(
+            "Failed to decrypt {}; is {} the correct OpenPGP secret key?",
+            backup_tarball.display(),
+            secret_key_path.display()
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use age::secrecy::ExposeSecret;
-    use age::x25519;
+    use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use std::path::Path;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -266,22 +284,15 @@ mod tests {
     struct SavedBackup {
         _dir: TempDir,
         tarball: PathBuf,
-        identity_file: PathBuf,
+        secret_key_file: PathBuf,
     }
 
-    /// Run `save` with a freshly generated age identity and return everything `restore` needs.
-    fn save_with_fresh_identity(fixture: &TestFixture) -> SavedBackup {
+    /// Run `save` with a freshly generated OpenPGP key and return everything `restore` needs.
+    fn save_with_fresh_pgp_key(fixture: &TestFixture) -> SavedBackup {
         let dir = tempfile::Builder::new().tempdir().unwrap();
+        let (public_cert, secret_key) = mock_pgp_keypair();
 
-        let identity = x25519::Identity::generate();
-        let recipient = identity.to_public();
-
-        save(
-            &fixture.node_config_path,
-            Some(recipient.to_string()),
-            dir.path(),
-        )
-        .unwrap();
+        save(&fixture.node_config_path, Some(public_cert), dir.path()).unwrap();
 
         let tarball = fs::read_dir(dir.path())
             .unwrap()
@@ -292,19 +303,25 @@ mod tests {
                     .and_then(|name| name.to_str())
                     .map(|name| {
                         name.starts_with(backup::BACKUP_FILE_NAME_PREFIX)
-                            && name.ends_with(".tar.gz.age")
+                            && name.ends_with(".tar.asc")
                     })
                     .unwrap_or(false)
             })
             .expect("save() did not produce a tarball");
 
-        let identity_file = dir.path().join("identity.txt");
-        fs::write(&identity_file, identity.to_string().expose_secret()).unwrap();
+        let secret_key_file = dir.path().join("secret-key.asc");
+        fs::write(&secret_key_file, secret_key).unwrap();
 
         SavedBackup {
             _dir: dir,
             tarball,
-            identity_file,
+            secret_key_file,
+        }
+    }
+
+    fn local_secret_key_decryptor(backup: &SavedBackup) -> RestoreDecryptor {
+        RestoreDecryptor::LocalSecretKey {
+            secret_key_path: backup.secret_key_file.clone(),
         }
     }
 
@@ -340,10 +357,16 @@ mod tests {
     #[test]
     fn round_trip_restores_files_to_output_dir() {
         let fixture = TestFixture::new();
-        let backup = save_with_fresh_identity(&fixture);
+        let backup = save_with_fresh_pgp_key(&fixture);
 
         let out = tempfile::Builder::new().tempdir().unwrap();
-        restore(&backup.tarball, &backup.identity_file, out.path(), false).unwrap();
+        restore(
+            &backup.tarball,
+            local_secret_key_decryptor(&backup),
+            out.path(),
+            false,
+        )
+        .unwrap();
 
         let extract_dir = expected_extract_dir(&backup.tarball, out.path());
         assert!(extract_dir.join("config.toml").is_file());
@@ -374,9 +397,42 @@ mod tests {
     }
 
     #[test]
+    fn restore_rejects_truncated_backup_before_finalizing_extract_dir() {
+        let fixture = TestFixture::new();
+        let backup = save_with_fresh_pgp_key(&fixture);
+
+        let original = fs::read(&backup.tarball).unwrap();
+        assert!(original.len() > 32, "backup unexpectedly small");
+        fs::write(&backup.tarball, &original[..original.len() - 32]).unwrap();
+
+        let out = tempfile::Builder::new().tempdir().unwrap();
+        let extract_dir = expected_extract_dir(&backup.tarball, out.path());
+        let err = restore(
+            &backup.tarball,
+            local_secret_key_decryptor(&backup),
+            out.path(),
+            false,
+        )
+        .unwrap_err();
+
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("Failed to finish reading encrypted backup stream")
+                || chain.contains("OpenPGP")
+                || chain.contains("unexpected end of file"),
+            "expected truncated backup error, got: {chain}"
+        );
+        assert!(
+            !extract_dir.exists(),
+            "restore must not finalize {} after a truncated backup",
+            extract_dir.display()
+        );
+    }
+
+    #[test]
     fn round_trip_copy_to_original_paths_rewrites_originals() {
         let fixture = TestFixture::new();
-        let backup = save_with_fresh_identity(&fixture);
+        let backup = save_with_fresh_pgp_key(&fixture);
 
         let db_path = fixture.db_path();
 
@@ -388,7 +444,13 @@ mod tests {
         fs::remove_dir_all(&db_path).unwrap();
 
         let out = tempfile::Builder::new().tempdir().unwrap();
-        restore(&backup.tarball, &backup.identity_file, out.path(), true).unwrap();
+        restore(
+            &backup.tarball,
+            local_secret_key_decryptor(&backup),
+            out.path(),
+            true,
+        )
+        .unwrap();
 
         // Only node config files are backed up; CLI config and its referenced
         // files are intentionally ignored.
@@ -412,13 +474,19 @@ mod tests {
     #[test]
     fn restore_refuses_to_overwrite_existing_original_paths() {
         let fixture = TestFixture::new();
-        let backup = save_with_fresh_identity(&fixture);
+        let backup = save_with_fresh_pgp_key(&fixture);
 
         // Leave the node config in place. The copy-back loop should refuse to
         // overwrite it before touching the database.
 
         let out = tempfile::Builder::new().tempdir().unwrap();
-        let err = restore(&backup.tarball, &backup.identity_file, out.path(), true).unwrap_err();
+        let err = restore(
+            &backup.tarball,
+            local_secret_key_decryptor(&backup),
+            out.path(),
+            true,
+        )
+        .unwrap_err();
         let chain = format!("{err:#}");
         assert!(
             chain.contains("Refusing to overwrite existing original path"),
@@ -466,11 +534,17 @@ mod tests {
             btc_key_path: PathBuf::new(),
         };
 
-        let backup = save_with_fresh_identity(&fixture);
+        let backup = save_with_fresh_pgp_key(&fixture);
 
         // Verify the archive contains both key.pem and key-2.pem.
         let out = tempfile::Builder::new().tempdir().unwrap();
-        restore(&backup.tarball, &backup.identity_file, out.path(), false).unwrap();
+        restore(
+            &backup.tarball,
+            local_secret_key_decryptor(&backup),
+            out.path(),
+            false,
+        )
+        .unwrap();
 
         let extract_dir = expected_extract_dir(&backup.tarball, out.path());
         assert_file_eq(&extract_dir.join("key.pem"), b"tls-key-bytes");
@@ -485,7 +559,13 @@ mod tests {
         fs::remove_dir_all(&db_path).unwrap();
 
         let out2 = tempfile::Builder::new().tempdir().unwrap();
-        restore(&backup.tarball, &backup.identity_file, out2.path(), true).unwrap();
+        restore(
+            &backup.tarball,
+            local_secret_key_decryptor(&backup),
+            out2.path(),
+            true,
+        )
+        .unwrap();
 
         assert_file_eq(&tls_key_path, b"tls-key-bytes");
         assert_file_eq(&op_key_path, b"operator-key-bytes");
@@ -517,10 +597,16 @@ mod tests {
                 .unwrap();
         }
 
-        let backup = save_with_fresh_identity(&fixture);
+        let backup = save_with_fresh_pgp_key(&fixture);
 
         let out = tempfile::Builder::new().tempdir().unwrap();
-        restore(&backup.tarball, &backup.identity_file, out.path(), false).unwrap();
+        restore(
+            &backup.tarball,
+            local_secret_key_decryptor(&backup),
+            out.path(),
+            false,
+        )
+        .unwrap();
 
         // Open the extracted snapshot directory directly — no copy-to-original step.
         // This is the real test of the stated goal: a decrypted/extracted snapshot
@@ -552,17 +638,45 @@ mod tests {
     }
 
     #[test]
-    fn save_uses_node_config_backup_age_pubkey() {
+    fn save_uses_node_config_backup_pgp_cert() {
         let fixture = TestFixture::new();
-        let identity = x25519::Identity::generate();
-        let recipient = identity.to_public();
+        let (public_cert, _) = mock_pgp_keypair();
 
         let mut node_config = crate::config::Config::load(&fixture.node_config_path).unwrap();
-        node_config.backup_age_pubkey = Some(recipient.to_string().parse().unwrap());
+        node_config.backup_pgp_cert = Some(PgpPublicCert::new(public_cert).unwrap());
         node_config.save(&fixture.node_config_path).unwrap();
 
         let dir = tempfile::Builder::new().tempdir().unwrap();
         save(&fixture.node_config_path, None, dir.path()).unwrap();
+    }
+
+    #[test]
+    fn save_accepts_backup_pgp_cert_file_override() {
+        let fixture = TestFixture::new();
+        let (public_cert, _) = mock_pgp_keypair();
+        let dir = tempfile::Builder::new().tempdir().unwrap();
+        let cert_path = dir.path().join("backup-cert.asc");
+        fs::write(&cert_path, public_cert).unwrap();
+
+        save(
+            &fixture.node_config_path,
+            Some(cert_path.to_string_lossy().into_owned()),
+            dir.path(),
+        )
+        .unwrap();
+
+        assert!(
+            fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .path()
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(backup::BACKUP_FILE_NAME_PREFIX)
+                        && name.ends_with(".tar.asc"))),
+            "save() did not produce a .tar.asc backup"
+        );
     }
 
     #[test]
@@ -574,13 +688,8 @@ mod tests {
         fs::remove_dir_all(&db_path).unwrap();
 
         let out = tempfile::Builder::new().tempdir().unwrap();
-        let identity = x25519::Identity::generate();
-        let err = save(
-            &fixture.node_config_path,
-            Some(identity.to_public().to_string()),
-            out.path(),
-        )
-        .unwrap_err();
+        let (public_cert, _) = mock_pgp_keypair();
+        let err = save(&fixture.node_config_path, Some(public_cert), out.path()).unwrap_err();
 
         let chain = format!("{err:#}");
         assert!(
@@ -609,13 +718,8 @@ mod tests {
         let _running_node = crate::db::Database::open(&db_path).unwrap();
 
         let out = tempfile::Builder::new().tempdir().unwrap();
-        let identity = x25519::Identity::generate();
-        let err = save(
-            &fixture.node_config_path,
-            Some(identity.to_public().to_string()),
-            out.path(),
-        )
-        .unwrap_err();
+        let (public_cert, _) = mock_pgp_keypair();
+        let err = save(&fixture.node_config_path, Some(public_cert), out.path()).unwrap_err();
 
         let chain = format!("{err:#}");
         assert!(
@@ -642,10 +746,16 @@ mod tests {
         node_config.operator_private_key = Some(op_key_path.to_string_lossy().into_owned());
         node_config.save(&fixture.node_config_path).unwrap();
 
-        let backup = save_with_fresh_identity(&fixture);
+        let backup = save_with_fresh_pgp_key(&fixture);
 
         let out = tempfile::Builder::new().tempdir().unwrap();
-        restore(&backup.tarball, &backup.identity_file, out.path(), false).unwrap();
+        restore(
+            &backup.tarball,
+            local_secret_key_decryptor(&backup),
+            out.path(),
+            false,
+        )
+        .unwrap();
 
         let extract_dir = expected_extract_dir(&backup.tarball, out.path());
         assert_file_eq(&extract_dir.join("tls.pem"), b"tls-key-bytes");
@@ -664,13 +774,8 @@ mod tests {
         node_config.save(&fixture.node_config_path).unwrap();
 
         let out = tempfile::Builder::new().tempdir().unwrap();
-        let identity = x25519::Identity::generate();
-        let err = save(
-            &fixture.node_config_path,
-            Some(identity.to_public().to_string()),
-            out.path(),
-        )
-        .unwrap_err();
+        let (public_cert, _) = mock_pgp_keypair();
+        let err = save(&fixture.node_config_path, Some(public_cert), out.path()).unwrap_err();
 
         let chain = format!("{err:#}");
         assert!(
@@ -700,23 +805,24 @@ mod tests {
         // Just running save without error is the assertion: if the inline
         // PEM were treated as a path, the pre-flight `file.exists()` check
         // in save() would bail.
-        let _ = save_with_fresh_identity(&fixture);
+        let _ = save_with_fresh_pgp_key(&fixture);
     }
 
     #[test]
-    fn restore_rejects_tarball_without_age_suffix() {
+    fn restore_rejects_tarball_without_pgp_suffix() {
         let fixture = TestFixture::new();
-        let backup = save_with_fresh_identity(&fixture);
+        let backup = save_with_fresh_pgp_key(&fixture);
 
         // Rename the tarball to strip the suffix entirely.
         let bad = backup.tarball.with_file_name("totally-not-a-backup");
         fs::rename(&backup.tarball, &bad).unwrap();
 
         let out = tempfile::Builder::new().tempdir().unwrap();
-        let err = restore(&bad, &backup.identity_file, out.path(), false).unwrap_err();
+        let err =
+            restore(&bad, local_secret_key_decryptor(&backup), out.path(), false).unwrap_err();
         let chain = format!("{err:#}");
         assert!(
-            chain.contains(".tar.gz.age suffix"),
+            chain.contains(".tar.asc suffix"),
             "expected suffix-required error, got: {chain}"
         );
     }
@@ -724,7 +830,7 @@ mod tests {
     #[test]
     fn restore_copy_to_original_paths_restores_into_existing_empty_db_dir() {
         let fixture = TestFixture::new();
-        let backup = save_with_fresh_identity(&fixture);
+        let backup = save_with_fresh_pgp_key(&fixture);
 
         let db_path = fixture.db_path();
 
@@ -736,7 +842,13 @@ mod tests {
         fs::create_dir(&db_path).unwrap();
 
         let out = tempfile::Builder::new().tempdir().unwrap();
-        restore(&backup.tarball, &backup.identity_file, out.path(), true).unwrap();
+        restore(
+            &backup.tarball,
+            local_secret_key_decryptor(&backup),
+            out.path(),
+            true,
+        )
+        .unwrap();
 
         assert!(fixture.node_config_path.is_file());
         let _db = crate::db::Database::open(&db_path).unwrap();
@@ -745,7 +857,7 @@ mod tests {
     #[test]
     fn restore_copy_to_original_paths_refuses_non_empty_db_dir() {
         let fixture = TestFixture::new();
-        let backup = save_with_fresh_identity(&fixture);
+        let backup = save_with_fresh_pgp_key(&fixture);
 
         let db_path = fixture.db_path();
 
@@ -758,7 +870,13 @@ mod tests {
         assert!(db_path.exists(), "db dir should still exist for this test");
 
         let out = tempfile::Builder::new().tempdir().unwrap();
-        let err = restore(&backup.tarball, &backup.identity_file, out.path(), true).unwrap_err();
+        let err = restore(
+            &backup.tarball,
+            local_secret_key_decryptor(&backup),
+            out.path(),
+            true,
+        )
+        .unwrap_err();
         let chain = format!("{err:#}");
         assert!(
             chain.contains("Refusing to restore database into non-empty directory"),

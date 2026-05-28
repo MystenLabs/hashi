@@ -105,15 +105,9 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub db: Option<PathBuf>,
 
-    /// Age recipient public key used for node backups.
-    ///
-    /// Accepts both native x25519 recipients and plugin recipients (e.g. YubiKey).
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "crate::backup::optional_age_recipient"
-    )]
-    pub backup_age_pubkey: Option<crate::backup::BackupRecipient>,
+    /// Armored OpenPGP certificate used for node backups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_pgp_cert: Option<hashi_types::pgp::PgpPublicCert>,
 
     /// Directory to write automatic encrypted backups into.
     ///
