@@ -11,7 +11,6 @@ use bitcoin::ScriptBuf;
 
 use bitcoin::secp256k1::XOnlyPublicKey;
 use fastcrypto::groups::secp256k1::ProjectivePoint;
-use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::G;
@@ -305,31 +304,6 @@ impl Hashi {
         self.guardian_btc_pubkey()
             .copied()
             .ok_or_else(|| anyhow!("Guardian BTC pubkey not yet pinned"))
-    }
-
-    pub fn get_hashi_pubkey(&self) -> anyhow::Result<XOnlyPublicKey> {
-        let g = self
-            .mpc_handle()
-            .context("MpcHandle not initialized")?
-            .public_key()
-            .context("MPC public key not available yet")?;
-        // Convert G (ProjectivePoint, 33 bytes compressed) to SchnorrPublicKey (32 bytes x-only)
-        let schnorr_pk = SchnorrPublicKey::try_from(&g)
-            .map_err(|e| anyhow!("invalid group element for schnorr key: {e}"))?;
-        Ok(XOnlyPublicKey::from_slice(&schnorr_pk.to_byte_array())?)
-    }
-
-    /// Read the MPC public key from on-chain state.
-    ///
-    /// Unlike `get_hashi_pubkey`, this does not depend on the node's local DKG
-    /// completion channel. The on-chain key is set during `end_reconfig` event
-    /// processing, so it is guaranteed to be present once the initial committee
-    /// has formed (i.e., after `HashiNetworkBuilder::build()` returns).
-    pub fn get_onchain_mpc_pubkey(&self) -> anyhow::Result<XOnlyPublicKey> {
-        let g = self.onchain_verifying_key_g()?;
-        let schnorr_pk = SchnorrPublicKey::try_from(&g)
-            .map_err(|e| anyhow!("invalid group element for schnorr key: {e}"))?;
-        Ok(XOnlyPublicKey::from_slice(&schnorr_pk.to_byte_array())?)
     }
 
     /// Deserialize the BCS-encoded MPC group element from on-chain state.

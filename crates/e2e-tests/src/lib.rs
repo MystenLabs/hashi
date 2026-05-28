@@ -347,9 +347,9 @@ async fn finalize_guardian_harness(networks: &mut TestNetworks) -> Result<()> {
         .current_committee()
         .ok_or_else(|| anyhow::anyhow!("no current committee after DKG"))?;
     // Pass the raw `G` (with y-parity) so the guardian's child-key
-    // derivation matches the MPC's signing path. Sending only the x-only
-    // projection (`get_onchain_mpc_pubkey`) would force an even-y parent
-    // and silently disagree with MPC sigs for half of all DKG outputs.
+    // derivation matches the MPC's signing path. Using only the x-only
+    // projection would force an even-y parent and silently disagree with
+    // MPC sigs for half of all DKG outputs.
     let master_pubkey = hashi.onchain_verifying_key_g()?;
 
     let withdrawal_config = default_test_withdrawal_config(&committee);
