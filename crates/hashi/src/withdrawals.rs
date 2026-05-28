@@ -21,6 +21,7 @@ use fastcrypto::hash::HashFunction;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::S;
+use futures::stream::StreamExt;
 use hashi_types::bitcoin_txid::BitcoinTxid;
 use hashi_types::guardian::bitcoin_utils;
 use std::collections::BTreeMap;
@@ -732,65 +733,79 @@ impl Hashi {
         })?;
         let beacon = S::from_bytes_mod_order(&txn.randomness);
         let signing_messages = self.withdrawal_signing_messages(unsigned_tx, &txn.inputs)?;
-        let mut signatures_by_input = Vec::with_capacity(signing_messages.len());
-        for (input_index, message) in signing_messages.iter().enumerate() {
-            let request_id = withdrawal_input_signing_request_id(&txn.id, input_index as u32);
-            let derivation_address = txn
-                .inputs
-                .get(input_index)
-                .and_then(|input| input.derivation_path.as_ref().map(|path| path.into_inner()));
-            let sign_start = std::time::Instant::now();
-            let global_presig_index = txn.presig_start_index + input_index as u64;
-            let sign_result = signing_manager
-                .sign(
-                    &p2p_channel,
-                    request_id,
-                    message,
-                    global_presig_index,
-                    &beacon,
-                    derivation_address.as_ref(),
-                    WITHDRAWAL_SIGNING_TIMEOUT,
-                    &self.metrics,
-                )
-                .await;
-            let sign_duration = sign_start.elapsed().as_secs_f64();
-
-            match &sign_result {
-                Ok(_) => {
-                    self.metrics
-                        .mpc_sign_duration_seconds
-                        .with_label_values(&["success"])
-                        .observe(sign_duration);
-                    self.metrics
-                        .presig_pool_remaining
-                        .set(signing_manager.presignatures_remaining() as i64);
-                }
-                Err(e) => {
-                    self.metrics
-                        .mpc_sign_duration_seconds
-                        .with_label_values(&["failure"])
-                        .observe(sign_duration);
-                    let reason = match e {
-                        crate::mpc::types::SigningError::Timeout { .. } => "timeout",
-                        crate::mpc::types::SigningError::PoolExhausted => "pool_exhausted",
-                        crate::mpc::types::SigningError::TooManyInvalidSignatures { .. } => {
-                            "too_many_invalid"
+        let concurrency = self.config.withdrawal_signing_concurrency();
+        let total = signing_messages.len();
+        let signing_manager_ref = &signing_manager;
+        let p2p_channel_ref = &p2p_channel;
+        let beacon_ref = &beacon;
+        let metrics_ref = &*self.metrics;
+        let txn_id = txn.id;
+        let presig_start = txn.presig_start_index;
+        let inputs = &txn.inputs;
+        // Run the per-input MPC signs concurrently (bounded by `concurrency`).
+        let results: Vec<anyhow::Result<SchnorrSignature>> =
+            futures::stream::iter(signing_messages.into_iter().enumerate())
+                .map(|(input_index, message)| async move {
+                    let request_id =
+                        withdrawal_input_signing_request_id(&txn_id, input_index as u32);
+                    let derivation_address = inputs.get(input_index).and_then(|input| {
+                        input.derivation_path.as_ref().map(|path| path.into_inner())
+                    });
+                    let sign_start = std::time::Instant::now();
+                    let global_presig_index = presig_start + input_index as u64;
+                    let sign_result = signing_manager_ref
+                        .sign(
+                            p2p_channel_ref,
+                            request_id,
+                            &message,
+                            global_presig_index,
+                            beacon_ref,
+                            derivation_address.as_ref(),
+                            WITHDRAWAL_SIGNING_TIMEOUT,
+                            metrics_ref,
+                        )
+                        .await;
+                    let sign_duration = sign_start.elapsed().as_secs_f64();
+                    match &sign_result {
+                        Ok(_) => {
+                            metrics_ref
+                                .mpc_sign_duration_seconds
+                                .with_label_values(&["success"])
+                                .observe(sign_duration);
+                            metrics_ref
+                                .presig_pool_remaining
+                                .set(signing_manager_ref.presignatures_remaining() as i64);
                         }
-                        crate::mpc::types::SigningError::CryptoError(_) => "crypto_error",
-                        _ => "other",
-                    };
-                    self.metrics
-                        .mpc_sign_failures_total
-                        .with_label_values(&[reason])
-                        .inc();
-                }
-            }
-
-            let signature = sign_result.map_err(|e| {
-                anyhow!("Failed to sign withdrawal transaction input {input_index}: {e}")
-            })?;
-
-            signatures_by_input.push(signature);
+                        Err(e) => {
+                            metrics_ref
+                                .mpc_sign_duration_seconds
+                                .with_label_values(&["failure"])
+                                .observe(sign_duration);
+                            let reason = match e {
+                                crate::mpc::types::SigningError::Timeout { .. } => "timeout",
+                                crate::mpc::types::SigningError::PoolExhausted => "pool_exhausted",
+                                crate::mpc::types::SigningError::TooManyInvalidSignatures {
+                                    ..
+                                } => "too_many_invalid",
+                                crate::mpc::types::SigningError::CryptoError(_) => "crypto_error",
+                                _ => "other",
+                            };
+                            metrics_ref
+                                .mpc_sign_failures_total
+                                .with_label_values(&[reason])
+                                .inc();
+                        }
+                    }
+                    sign_result.map_err(|e| {
+                        anyhow!("Failed to sign withdrawal transaction input {input_index}: {e}")
+                    })
+                })
+                .buffered(concurrency)
+                .collect()
+                .await;
+        let mut signatures_by_input = Vec::with_capacity(total);
+        for result in results {
+            signatures_by_input.push(result?);
         }
         Ok(signatures_by_input)
     }
