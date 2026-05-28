@@ -7,6 +7,7 @@
 
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::RwLock;
 
@@ -149,39 +150,44 @@ pub(crate) fn should_defer_guardian_finalize(
     last_finalized.is_some_and(|(last_seq, last_wid)| next_seq <= last_seq && wid != last_wid)
 }
 
-/// 20 ticks ≈ 5 min.
-pub(crate) const STALL_RECONCILE_TICKS: u32 = 20;
+/// 20 ticks ≈ 5 min at the reconcile cadence.
+pub(crate) const STALL_RECONCILE_TICKS: usize = 20;
 
-/// Detects a mirror frozen at the same `local_seq` for [`STALL_RECONCILE_TICKS`] consecutive ticks.
+/// Flags a local mirror that has fallen out of lockstep with the guardian.
+///
+/// The guardian bumps `next_seq` at finalize-request time but a node only
+/// advances on the matching on-chain `WithdrawalSignedEvent`, so `local <
+/// guardian` is ordinary in-flight lag and must not, on its own, trip a
+/// reconcile (forward-snapping a healthy mirror would double-count the event
+/// still in flight). We fire only when the mirror has failed to reach the
+/// seq the guardian held a full [`STALL_RECONCILE_TICKS`] window ago — by
+/// now those withdrawals have certainly emitted their events, so a mirror
+/// still short has genuinely dropped one — or when it runs ahead of the
+/// guardian, which can only happen once lockstep is already lost.
 #[derive(Default)]
 pub(crate) struct LimiterStallTracker {
-    frozen_at_seq: Option<u64>,
-    frozen_ticks: u32,
+    /// Guardian `next_seq` seen on each of the last [`STALL_RECONCILE_TICKS`] ticks.
+    guardian_seq_window: VecDeque<u64>,
 }
 
 impl LimiterStallTracker {
     pub(crate) fn observe(&mut self, local_seq: u64, guardian_seq: u64) -> bool {
-        if local_seq == guardian_seq {
-            self.reset();
-            return false;
+        // Once the window is full its front is the guardian seq from a full
+        // window ago; the mirror should have reached it by now.
+        let stalled = self.guardian_seq_window.len() == STALL_RECONCILE_TICKS
+            && self
+                .guardian_seq_window
+                .front()
+                .is_some_and(|&windowed_seq| local_seq < windowed_seq || local_seq > guardian_seq);
+        if stalled {
+            self.guardian_seq_window.clear();
+            return true;
         }
-        if self.frozen_at_seq == Some(local_seq) {
-            self.frozen_ticks += 1;
-        } else {
-            self.frozen_at_seq = Some(local_seq);
-            self.frozen_ticks = 1;
+        self.guardian_seq_window.push_back(guardian_seq);
+        if self.guardian_seq_window.len() > STALL_RECONCILE_TICKS {
+            self.guardian_seq_window.pop_front();
         }
-        if self.frozen_ticks >= STALL_RECONCILE_TICKS {
-            self.reset();
-            true
-        } else {
-            false
-        }
-    }
-
-    fn reset(&mut self) {
-        self.frozen_at_seq = None;
-        self.frozen_ticks = 0;
+        false
     }
 }
 
@@ -310,38 +316,69 @@ mod tests {
     }
 
     #[test]
-    fn stall_tracker_ignores_normal_advancing_lag() {
+    fn stall_tracker_ignores_normal_in_flight_lag() {
         let mut tracker = LimiterStallTracker::default();
-        // Mirror trails the guardian by one but keeps advancing -> never a stall.
-        for seq in 5..5 + 3 * u64::from(STALL_RECONCILE_TICKS) {
-            assert!(!tracker.observe(seq, seq + 1));
+        // Guardian advances every tick; the mirror trails by one (an event in
+        // flight) but always reaches the seq the guardian held a window ago.
+        // Spanning several full windows, this normal skew must never fire.
+        for tick in 0..(3 * STALL_RECONCILE_TICKS) as u64 {
+            assert!(!tracker.observe(100 + tick, 101 + tick));
         }
     }
 
     #[test]
-    fn stall_tracker_resets_when_caught_up() {
+    fn stall_tracker_does_not_fire_once_the_mirror_catches_up() {
         let mut tracker = LimiterStallTracker::default();
-        assert!(!tracker.observe(21, 22));
-        assert!(!tracker.observe(22, 22)); // caught up -> reset
-        assert!(!tracker.observe(22, 23)); // streak starts over
-    }
-
-    #[test]
-    fn stall_tracker_fires_after_persistent_freeze_then_resets() {
-        let mut tracker = LimiterStallTracker::default();
+        // Behind for most of a window, then the in-flight events land and the
+        // mirror reaches the guardian -> no stall, even across later windows.
         for _ in 0..STALL_RECONCILE_TICKS - 1 {
-            assert!(!tracker.observe(21, 22));
+            assert!(!tracker.observe(40, 45));
         }
-        assert!(tracker.observe(21, 22)); // genuine stall
-        assert!(!tracker.observe(21, 22)); // reset after firing
+        for _ in 0..2 * STALL_RECONCILE_TICKS {
+            assert!(!tracker.observe(45, 45));
+        }
     }
 
     #[test]
-    fn stall_tracker_fires_for_overshoot_too() {
+    fn stall_tracker_stays_quiet_until_a_full_window_of_history() {
         let mut tracker = LimiterStallTracker::default();
-        for _ in 0..STALL_RECONCILE_TICKS - 1 {
-            assert!(!tracker.observe(24, 22)); // local ahead of the guardian
+        // A mirror behind from the first tick is still granted a full window
+        // before any reconcile, so a cold/booting limiter isn't acted on.
+        for _ in 0..STALL_RECONCILE_TICKS {
+            assert!(!tracker.observe(0, 9));
         }
-        assert!(tracker.observe(24, 22));
+    }
+
+    #[test]
+    fn stall_tracker_fires_when_frozen_behind_a_stalled_guardian() {
+        let mut tracker = LimiterStallTracker::default();
+        // Leader deficit: mirror wedged at 50 while the guardian sits at 52
+        // (the stuck leader finalizes nothing new). Fires after a full window.
+        for _ in 0..STALL_RECONCILE_TICKS {
+            assert!(!tracker.observe(50, 52));
+        }
+        assert!(tracker.observe(50, 52));
+    }
+
+    #[test]
+    fn stall_tracker_fires_when_advancing_mirror_stays_below_the_window() {
+        let mut tracker = LimiterStallTracker::default();
+        // The mirror creeps up each tick but started so far behind a plateaued
+        // guardian that it still hasn't reached where the guardian was a full
+        // window ago -> a real dropped event, not in-flight lag.
+        for tick in 0..STALL_RECONCILE_TICKS as u64 {
+            assert!(!tracker.observe(100 + tick, 200));
+        }
+        assert!(tracker.observe(100 + STALL_RECONCILE_TICKS as u64, 200));
+    }
+
+    #[test]
+    fn stall_tracker_fires_for_a_mirror_running_ahead() {
+        let mut tracker = LimiterStallTracker::default();
+        // local ahead of the guardian can only happen once lockstep is lost.
+        for _ in 0..STALL_RECONCILE_TICKS {
+            assert!(!tracker.observe(30, 28));
+        }
+        assert!(tracker.observe(30, 28));
     }
 }
