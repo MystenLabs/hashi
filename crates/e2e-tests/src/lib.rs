@@ -323,7 +323,7 @@ impl TestNetworksBuilder {
 }
 
 async fn finalize_guardian_harness(networks: &mut TestNetworks) -> Result<()> {
-    use crate::guardian_harness::default_test_withdrawal_config;
+    use crate::guardian_harness::default_test_limiter_config;
     use hashi_types::guardian::LimiterState;
 
     let nodes = networks.hashi_network.nodes();
@@ -343,15 +343,15 @@ async fn finalize_guardian_harness(networks: &mut TestNetworks) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("no current committee after DKG"))?;
     let master_pubkey = hashi.get_onchain_mpc_pubkey()?;
 
-    let withdrawal_config = default_test_withdrawal_config(&committee);
-    let limiter_state = LimiterState::genesis(&withdrawal_config);
+    let limiter_config = default_test_limiter_config(&committee);
+    let limiter_state = LimiterState::genesis(&limiter_config);
 
     let harness = networks
         .guardian_harness
         .as_ref()
         .expect("guardian_harness set when finalize_guardian_harness is called");
     harness
-        .finalize(committee, master_pubkey, withdrawal_config, limiter_state)
+        .finalize(committee, master_pubkey, limiter_config, limiter_state)
         .await?;
     tracing::info!("guardian harness finalized");
 

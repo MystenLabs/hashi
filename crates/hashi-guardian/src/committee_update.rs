@@ -188,7 +188,7 @@ mod tests {
             network: Network::Regtest,
             committee: committee_at(epoch),
             master_pubkey: kp.x_only_public_key().0,
-            withdrawal_config: LimiterConfig {
+            limiter_config: LimiterConfig {
                 refill_rate: 0,
                 max_bucket_capacity: 1_000,
             },

@@ -174,14 +174,14 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .map_err(|e| anyhow!("decode guardian encryption pubkey (session={session_id}): {e:?}"))?;
     tracing::info!(session_id = %session_id, "guardian info verified");
 
-    let withdrawal_config = LimiterConfig {
+    let limiter_config = LimiterConfig {
         refill_rate: args.refill_rate_sats_per_sec,
         max_bucket_capacity: args.max_bucket_capacity_sats,
     };
-    let limiter_state = LimiterState::genesis(&withdrawal_config);
+    let limiter_state = LimiterState::genesis(&limiter_config);
     let state = ProvisionerInitState::new(
         committee,
-        withdrawal_config,
+        limiter_config,
         limiter_state,
         material.master_pubkey,
     )

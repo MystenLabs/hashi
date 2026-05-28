@@ -1408,7 +1408,7 @@ pub struct ProvisionerInitState {
     pub committee: ::core::option::Option<Committee>,
     /// Withdrawal policy configuration.
     #[prost(message, optional, tag = "2")]
-    pub withdrawal_config: ::core::option::Option<LimiterConfig>,
+    pub limiter_config: ::core::option::Option<LimiterConfig>,
     /// X-only public key bytes (32 bytes).
     #[prost(bytes = "bytes", optional, tag = "4")]
     pub hashi_btc_master_pubkey: ::core::option::Option<::prost::bytes::Bytes>,

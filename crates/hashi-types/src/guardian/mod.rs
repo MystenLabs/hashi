@@ -184,7 +184,7 @@ pub struct ProvisionerInitState {
     /// Current Hashi committee
     committee: HashiCommittee,
     /// Withdrawal config (includes limiter config)
-    withdrawal_config: LimiterConfig,
+    limiter_config: LimiterConfig,
     /// Limiter state (tokens available, timestamp, seq)
     limiter_state: LimiterState,
     /// Hashi BTC master key used to derive child keys for diff inputs
@@ -497,19 +497,19 @@ impl OperatorInitRequest {
 impl ProvisionerInitState {
     pub fn new(
         committee: HashiCommittee,
-        withdrawal_config: LimiterConfig,
+        limiter_config: LimiterConfig,
         limiter_state: LimiterState,
         hashi_btc_master_pubkey: BitcoinPubkey,
     ) -> GuardianResult<Self> {
         // Validate that limiter state is consistent with config.
-        if limiter_state.num_tokens_available > withdrawal_config.max_bucket_capacity {
+        if limiter_state.num_tokens_available > limiter_config.max_bucket_capacity {
             return Err(InvalidInputs(
                 "limiter num_tokens_available exceeds max_bucket_capacity".into(),
             ));
         }
         Ok(Self {
             committee,
-            withdrawal_config,
+            limiter_config,
             limiter_state,
             hashi_btc_master_pubkey,
         })
@@ -517,24 +517,20 @@ impl ProvisionerInitState {
 
     /// Build a `RateLimiter` from the config and state in this init state.
     pub fn build_rate_limiter(&self) -> GuardianResult<RateLimiter> {
-        RateLimiter::new(self.limiter_config(), self.limiter_state)
-    }
-
-    pub fn limiter_config(&self) -> LimiterConfig {
-        self.withdrawal_config
+        RateLimiter::new(*self.limiter_config(), self.limiter_state)
     }
 
     pub fn into_parts(self) -> (HashiCommittee, LimiterConfig, LimiterState, BitcoinPubkey) {
         (
             self.committee,
-            self.withdrawal_config,
+            self.limiter_config,
             self.limiter_state,
             self.hashi_btc_master_pubkey,
         )
     }
 
-    pub fn withdrawal_config(&self) -> &LimiterConfig {
-        &self.withdrawal_config
+    pub fn limiter_config(&self) -> &LimiterConfig {
+        &self.limiter_config
     }
 
     pub fn hashi_btc_master_pubkey(&self) -> BitcoinPubkey {
@@ -971,7 +967,7 @@ pub struct SignedStandardWithdrawalRequestWire {
 #[derive(Serialize)]
 struct ProvisionerInitStateRepr {
     pub committee: crate::move_types::Committee,
-    pub withdrawal_config: LimiterConfig,
+    pub limiter_config: LimiterConfig,
     pub limiter_state: LimiterState,
     pub hashi_btc_master_pubkey: BitcoinPubkey,
 }
@@ -1041,7 +1037,7 @@ impl From<&ProvisionerInitState> for ProvisionerInitStateRepr {
         let (committee, config, limiter_state, pubkey) = state.clone().into_parts();
         Self {
             committee: (&committee).into(),
-            withdrawal_config: config,
+            limiter_config: config,
             limiter_state,
             hashi_btc_master_pubkey: pubkey,
         }

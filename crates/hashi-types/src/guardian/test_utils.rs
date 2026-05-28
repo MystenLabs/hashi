@@ -249,14 +249,14 @@ fn mock_committee_with_one_member(epoch: u64) -> HashiCommittee {
 
 impl ProvisionerInitState {
     pub fn from_parts_for_testing(
-        withdrawal_config: LimiterConfig,
+        limiter_config: LimiterConfig,
         limiter_state: LimiterState,
         committee: HashiCommittee,
         hashi_btc_master_pubkey: super::BitcoinPubkey,
     ) -> Self {
         ProvisionerInitState::new(
             committee,
-            withdrawal_config,
+            limiter_config,
             limiter_state,
             hashi_btc_master_pubkey,
         )

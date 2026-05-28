@@ -246,7 +246,7 @@ pub struct FullyInitializedArgs {
     pub network: Network,
     pub committee: HashiCommittee,
     pub master_pubkey: BitcoinPubkey,
-    pub withdrawal_config: LimiterConfig,
+    pub limiter_config: LimiterConfig,
     pub limiter_state: LimiterState,
 }
 
@@ -256,7 +256,7 @@ pub fn finalize_enclave(
     enclave: &Arc<Enclave>,
     committee: HashiCommittee,
     master_pubkey: BitcoinPubkey,
-    withdrawal_config: LimiterConfig,
+    limiter_config: LimiterConfig,
     limiter_state: LimiterState,
 ) -> GuardianResult<()> {
     let secp = Secp256k1::new();
@@ -268,10 +268,10 @@ pub fn finalize_enclave(
     );
     enclave.config.set_btc_keypair(enclave_btc_keypair)?;
     enclave.config.set_hashi_btc_pk(master_pubkey)?;
-    enclave.config.set_withdrawal_config(withdrawal_config)?;
+    enclave.config.set_limiter_config(limiter_config)?;
 
     let init_state =
-        ProvisionerInitState::new(committee, withdrawal_config, limiter_state, master_pubkey)?;
+        ProvisionerInitState::new(committee, limiter_config, limiter_state, master_pubkey)?;
     enclave.state.init(init_state)?;
 
     enclave
@@ -290,7 +290,7 @@ pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc
         network,
         committee,
         master_pubkey,
-        withdrawal_config,
+        limiter_config,
         limiter_state,
     } = args;
 
@@ -302,7 +302,7 @@ pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc
         &enclave,
         committee,
         master_pubkey,
-        withdrawal_config,
+        limiter_config,
         limiter_state,
     )
     .expect("finalize_enclave should succeed on a fresh enclave");

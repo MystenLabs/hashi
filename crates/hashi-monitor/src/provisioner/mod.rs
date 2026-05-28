@@ -51,19 +51,19 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
             // fill it.)
             recovered.num_tokens_available = recovered
                 .num_tokens_available
-                .min(cfg.withdrawal_config.max_bucket_capacity);
+                .min(cfg.limiter_config.max_bucket_capacity);
             recovered
         }
         None => {
             info!("no prior Success withdrawal logs found; initializing limiter from genesis");
-            LimiterState::genesis(&cfg.withdrawal_config)
+            LimiterState::genesis(&cfg.limiter_config)
         }
     };
 
     let committee = cfg.hashi_committee.try_into()?;
     let state = ProvisionerInitState::new(
         committee,
-        cfg.withdrawal_config,
+        cfg.limiter_config,
         limiter_state,
         cfg.hashi_btc_master_pubkey,
     )

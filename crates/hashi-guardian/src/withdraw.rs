@@ -242,19 +242,16 @@ mod tests {
             .unwrap();
 
         let refill_rate = 0; // no refill in tests unless specified
-        let withdrawal_config = LimiterConfig {
+        let limiter_config = LimiterConfig {
             refill_rate,
             max_bucket_capacity: max_bucket_capacity_sats,
         };
-        enclave
-            .config
-            .set_withdrawal_config(withdrawal_config)
-            .unwrap();
+        enclave.config.set_limiter_config(limiter_config).unwrap();
 
-        let limiter_state = LimiterState::genesis(&withdrawal_config);
+        let limiter_state = LimiterState::genesis(&limiter_config);
         let init_state = ProvisionerInitState::new(
             committee,
-            withdrawal_config,
+            limiter_config,
             limiter_state,
             hashi_btc_master_pubkey,
         )

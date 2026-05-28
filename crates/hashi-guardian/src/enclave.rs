@@ -50,7 +50,7 @@ pub struct EnclaveConfig {
     /// Hashi BTC public key used to derive child keys (set in provisioner_init)
     hashi_btc_master_pubkey: OnceLock<BitcoinPubkey>,
     /// Withdraw related config's (set in provisioner_init)
-    withdrawal_config: OnceLock<LimiterConfig>,
+    limiter_config: OnceLock<LimiterConfig>,
 }
 
 /// Mutable state that changes during operation.
@@ -109,7 +109,7 @@ impl EnclaveConfig {
             enclave_btc_keypair: OnceLock::new(),
             btc_network: OnceLock::new(),
             hashi_btc_master_pubkey: OnceLock::new(),
-            withdrawal_config: OnceLock::new(),
+            limiter_config: OnceLock::new(),
         }
     }
 
@@ -162,14 +162,14 @@ impl EnclaveConfig {
     // Withdrawal Configuration
     // ========================================================================
 
-    pub fn withdrawal_config(&self) -> GuardianResult<&LimiterConfig> {
-        self.withdrawal_config
+    pub fn limiter_config(&self) -> GuardianResult<&LimiterConfig> {
+        self.limiter_config
             .get()
             .ok_or(InvalidInputs("LimiterConfig is not initialized".into()))
     }
 
-    pub fn set_withdrawal_config(&self, config: LimiterConfig) -> GuardianResult<()> {
-        self.withdrawal_config
+    pub fn set_limiter_config(&self, config: LimiterConfig) -> GuardianResult<()> {
+        self.limiter_config
             .set(config)
             .map_err(|_| InvalidInputs("LimiterConfig already set".into()))
     }
@@ -216,14 +216,14 @@ impl EnclaveConfig {
     pub fn is_provisioner_init_complete(&self) -> bool {
         self.is_enclave_btc_keypair_set()
             && self.is_hashi_btc_master_pubkey_set()
-            && self.withdrawal_config.get().is_some()
+            && self.limiter_config.get().is_some()
     }
 
     /// Check if any provisioner_init configuration has been set
     pub fn is_provisioner_init_partially_complete(&self) -> bool {
         self.is_enclave_btc_keypair_set()
             || self.is_hashi_btc_master_pubkey_set()
-            || self.withdrawal_config.get().is_some()
+            || self.limiter_config.get().is_some()
     }
 }
 

@@ -11,10 +11,8 @@ use serde::Serialize;
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LimiterConfig {
     /// Refill rate in sats per second.
-    #[serde(rename = "refill_rate_sats_per_sec", alias = "refill_rate")]
     pub refill_rate: u64,
     /// Maximum bucket capacity in sats.
-    #[serde(rename = "max_bucket_capacity_sats", alias = "max_bucket_capacity")]
     pub max_bucket_capacity: u64,
 }
 

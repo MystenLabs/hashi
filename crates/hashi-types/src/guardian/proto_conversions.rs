@@ -249,10 +249,10 @@ impl TryFrom<pb::ProvisionerInitState> for ProvisionerInitState {
         let committee_pb = state_pb.committee.ok_or_else(|| missing("committee"))?;
         let committee = pb_to_hashi_committee(committee_pb)?;
 
-        let withdrawal_config_pb = state_pb
-            .withdrawal_config
-            .ok_or_else(|| missing("withdrawal_config"))?;
-        let withdrawal_config = pb_to_limiter_config(withdrawal_config_pb)?;
+        let limiter_config_pb = state_pb
+            .limiter_config
+            .ok_or_else(|| missing("limiter_config"))?;
+        let limiter_config = pb_to_limiter_config(limiter_config_pb)?;
 
         let limiter_state = pb_to_limiter_state(
             state_pb
@@ -269,7 +269,7 @@ impl TryFrom<pb::ProvisionerInitState> for ProvisionerInitState {
 
         ProvisionerInitState::new(
             committee,
-            withdrawal_config,
+            limiter_config,
             limiter_state,
             hashi_btc_master_pubkey,
         )
@@ -444,11 +444,11 @@ pub fn provisioner_init_request_to_pb(
 }
 
 pub fn provisioner_init_state_to_pb(s: ProvisionerInitState) -> pb::ProvisionerInitState {
-    let (committee, withdrawal_config, limiter_state, hashi_btc_master_pubkey) = s.into_parts();
+    let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) = s.into_parts();
 
     pb::ProvisionerInitState {
         committee: Some(hashi_committee_to_pb(committee)),
-        withdrawal_config: Some(limiter_config_to_pb(withdrawal_config)),
+        limiter_config: Some(limiter_config_to_pb(limiter_config)),
         hashi_btc_master_pubkey: Some(hashi_btc_master_pubkey.serialize().to_vec().into()),
         limiter_state: Some(limiter_state_to_pb(limiter_state)),
     }

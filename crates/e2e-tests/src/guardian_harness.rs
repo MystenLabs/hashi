@@ -78,14 +78,14 @@ impl GuardianHarness {
         &self,
         committee: HashiCommittee,
         master_pubkey: BitcoinPubkey,
-        withdrawal_config: LimiterConfig,
+        limiter_config: LimiterConfig,
         limiter_state: LimiterState,
     ) -> Result<()> {
         hashi_guardian::test_utils::finalize_enclave(
             &self.enclave,
             committee,
             master_pubkey,
-            withdrawal_config,
+            limiter_config,
             limiter_state,
         )
         .map_err(|e| anyhow::anyhow!("finalize guardian enclave: {e:?}"))?;
@@ -117,7 +117,7 @@ impl Drop for GuardianHarness {
     }
 }
 
-pub fn default_test_withdrawal_config(_committee: &HashiCommittee) -> LimiterConfig {
+pub fn default_test_limiter_config(_committee: &HashiCommittee) -> LimiterConfig {
     LimiterConfig {
         refill_rate: 0,
         max_bucket_capacity: 100_000_000,
