@@ -513,6 +513,14 @@ impl OnchainState {
             .map(<[u8]>::to_vec)
     }
 
+    pub fn guardian_btc_public_key(&self) -> Option<Vec<u8>> {
+        self.state()
+            .hashi()
+            .config
+            .guardian_btc_public_key()
+            .map(<[u8]>::to_vec)
+    }
+
     pub fn bridge_service_client(
         &self,
         validator: &Address,

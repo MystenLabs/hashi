@@ -892,13 +892,7 @@ impl Hashi {
         &self,
         live: Option<hashi_types::guardian::BitcoinPubkey>,
     ) -> bool {
-        let expected = self
-            .onchain_state()
-            .state()
-            .hashi()
-            .config
-            .guardian_btc_public_key()
-            .map(<[u8]>::to_vec);
+        let expected = self.onchain_state().guardian_btc_public_key();
         if !verify_btc_pub_key_matches(live.as_ref(), expected.as_deref(), &self.metrics) {
             return false;
         }

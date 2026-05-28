@@ -933,6 +933,13 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
                 "--guardian-public-key must be 32 bytes (Ed25519), got {} bytes",
                 public_key.len(),
             );
+            // The guardian is configured all-or-nothing on-chain: the BTC key is
+            // required alongside the URL/signing key, else `finish_publish` would
+            // silently skip the whole guardian config.
+            anyhow::ensure!(
+                guardian_btc_public_key.is_some(),
+                "--guardian-btc-public-key is required with --guardian-url and --guardian-public-key"
+            );
             Some(crate::publish::GuardianConfig {
                 url,
                 public_key,

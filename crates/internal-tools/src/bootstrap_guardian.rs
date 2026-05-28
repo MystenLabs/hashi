@@ -114,12 +114,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
 
     // Derived key must match the pubkey pinned on-chain at publish; a wrong or
     // missing --master-secret-hex would otherwise provision a key the chain rejects.
-    let onchain_btc_pubkey = onchain_state
-        .state()
-        .hashi()
-        .config
-        .guardian_btc_public_key()
-        .map(<[u8]>::to_vec);
+    let onchain_btc_pubkey = onchain_state.guardian_btc_public_key();
     if let Some(onchain) = onchain_btc_pubkey {
         let derived = material.master_pubkey.serialize();
         anyhow::ensure!(

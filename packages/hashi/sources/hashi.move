@@ -119,18 +119,19 @@ entry fun finish_publish(
     self.config_mut().set_upgrade_cap(upgrade_cap);
     hashi::btc_config::set_bitcoin_chain_id(self.config_mut(), bitcoin_chain_id);
 
-    if (guardian_url.is_some() && guardian_public_key.is_some()) {
+    // Guardian config is all-or-nothing: URL, signing key, and BTC key must be
+    // set together. A partial config (e.g. URL/key without the BTC key) would
+    // derive 2-of-2 deposit addresses that can never be spent.
+    if (
+        guardian_url.is_some() && guardian_public_key.is_some() && guardian_btc_public_key.is_some()
+    ) {
         self
             .config_mut()
             .set_guardian(
                 guardian_url.destroy_some(),
                 guardian_public_key.destroy_some(),
             );
-        if (guardian_btc_public_key.is_some()) {
-            self.config_mut().set_guardian_btc_public_key(guardian_btc_public_key.destroy_some());
-        } else {
-            guardian_btc_public_key.destroy_none();
-        };
+        self.config_mut().set_guardian_btc_public_key(guardian_btc_public_key.destroy_some());
     } else {
         guardian_url.destroy_none();
         guardian_public_key.destroy_none();
