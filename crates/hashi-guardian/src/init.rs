@@ -5,7 +5,7 @@ use crate::getters::get_attestation;
 use crate::Enclave;
 use crate::S3Logger;
 use hashi_types::guardian::crypto::combine_shares;
-use hashi_types::guardian::crypto::decrypt_share;
+use hashi_types::guardian::crypto::decrypt_verify_shares;
 use hashi_types::guardian::crypto::k256_sk_to_btc_keypair;
 use hashi_types::guardian::crypto::Share;
 use hashi_types::guardian::InitLogMessage::OIAttestationUnsigned;
@@ -209,28 +209,17 @@ pub async fn provisioner_init(
         .state_hash()
         .expect("withdraw-mode operator_init installs the state_hash");
 
-    let encrypted_shares = request.into_parts();
-
     // Decrypt and verify every submission. A share only decrypts if its KP bound
     // the enclave's state_hash as AAD, so the decrypted shares all agree on the
     // operator-supplied state.
-    let mut shares: Vec<Share> = Vec::with_capacity(encrypted_shares.len());
-    for enc in &encrypted_shares {
-        let share = decrypt_share(enc, sk, Some(&state_hash))?;
-        instance.commitments().verify_share(&share)?;
-        if shares.iter().any(|s| s.id == share.id) {
-            return Err(InvalidInputs("Duplicate share ID".into()));
-        }
-        shares.push(share);
-    }
-    info!("Verified {}/{threshold} shares.", shares.len());
-
-    if shares.len() < threshold {
-        return Err(InvalidInputs(format!(
-            "need at least {threshold} shares, got {}",
-            shares.len()
-        )));
-    }
+    let shares = decrypt_verify_shares(
+        request.encrypted_shares(),
+        sk,
+        &state_hash,
+        instance.commitments(),
+        threshold,
+    )?;
+    info!("Verified {} shares (threshold {threshold}).", shares.len());
 
     let share_ids = shares.iter().map(|s| s.id).collect();
     finalize_init(&shares, threshold, &enclave).await;

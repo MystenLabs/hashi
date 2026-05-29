@@ -3,7 +3,7 @@
 
 use crate::Enclave;
 use hashi_types::guardian::crypto::combine_shares;
-use hashi_types::guardian::crypto::decrypt_share;
+use hashi_types::guardian::crypto::decrypt_verify_shares;
 use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::GuardianError::InvalidInputs;
@@ -40,23 +40,17 @@ pub async fn rotate_kps(
 
     // Decrypt and verify every submission. A share only decrypts if its KP bound
     // this same `state` as AAD, so the decrypted shares all agree on the target.
-    let mut old_shares: Vec<Share> = Vec::with_capacity(encrypted_old_shares.len());
-    for enc in &encrypted_old_shares {
-        let share = decrypt_share(enc, sk, Some(&state_hash))?;
-        old_instance.commitments().verify_share(&share)?;
-        if old_shares.iter().any(|s| s.id == share.id) {
-            return Err(InvalidInputs("Duplicate share ID".into()));
-        }
-        old_shares.push(share);
-    }
-    info!("Verified {}/{old_t} old shares.", old_shares.len());
-
-    if old_shares.len() < old_t {
-        return Err(InvalidInputs(format!(
-            "need at least {old_t} shares, got {}",
-            old_shares.len()
-        )));
-    }
+    let old_shares = decrypt_verify_shares(
+        &encrypted_old_shares,
+        sk,
+        &state_hash,
+        old_instance.commitments(),
+        old_t,
+    )?;
+    info!(
+        "Verified {} old shares (threshold {old_t}).",
+        old_shares.len()
+    );
 
     let response = finalize_rotation(&enclave, &old_shares, &old_instance, state).await?;
     *ceremony_complete = true;
