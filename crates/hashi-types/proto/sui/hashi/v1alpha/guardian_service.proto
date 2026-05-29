@@ -86,7 +86,7 @@ message GuardianInfoData {
   // Absent before `provisioner_init` has set the keypair.
   optional bytes enclave_btc_pubkey = 5;
 
-  // Digest of the operator-supplied WithdrawModeConfig (32 bytes, if set).
+  // Digest of the operator-supplied WithdrawModeState (32 bytes, if set).
   optional bytes state_hash = 6;
 }
 
@@ -176,8 +176,8 @@ message OperatorInitRequest {
   // S3 access keys
   S3Config s3_config = 1;
 
-  // Withdraw-mode config (absent for a ceremony enclave); the enclave binds its
-  // digest as the share-decryption AAD and exposes the digest via GuardianInfo.
+  // Withdraw-mode config (absent for a ceremony enclave); the enclave binds the
+  // inner state's digest as the share-decryption AAD and exposes it via GuardianInfo.
   WithdrawModeConfig state = 4;
 }
 
@@ -203,7 +203,7 @@ enum Network {
 
 message ProvisionerInitRequest {
   // Encrypted share destined for this provisioner. Its HPKE AAD binds the
-  // enclave's state_hash (the WithdrawModeConfig digest), so a share only
+  // enclave's state_hash (the WithdrawModeState digest), so a share only
   // decrypts if the KP agreed on the operator-supplied state.
   GuardianEncryptedShare encrypted_share = 1;
 }

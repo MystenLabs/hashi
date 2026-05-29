@@ -1281,7 +1281,7 @@ pub struct GuardianInfoData {
     /// Absent before `provisioner_init` has set the keypair.
     #[prost(bytes = "bytes", optional, tag = "5")]
     pub enclave_btc_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
-    /// Digest of the operator-supplied WithdrawModeConfig (32 bytes, if set).
+    /// Digest of the operator-supplied WithdrawModeState (32 bytes, if set).
     #[prost(bytes = "bytes", optional, tag = "6")]
     pub state_hash: ::core::option::Option<::prost::bytes::Bytes>,
 }
@@ -1385,8 +1385,8 @@ pub struct OperatorInitRequest {
     /// S3 access keys
     #[prost(message, optional, tag = "1")]
     pub s3_config: ::core::option::Option<S3Config>,
-    /// Withdraw-mode config (absent for a ceremony enclave); the enclave binds its
-    /// digest as the share-decryption AAD and exposes the digest via GuardianInfo.
+    /// Withdraw-mode config (absent for a ceremony enclave); the enclave binds the
+    /// inner state's digest as the share-decryption AAD and exposes it via GuardianInfo.
     #[prost(message, optional, tag = "4")]
     pub state: ::core::option::Option<WithdrawModeConfig>,
 }
@@ -1406,7 +1406,7 @@ pub struct S3Config {
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProvisionerInitRequest {
     /// Encrypted share destined for this provisioner. Its HPKE AAD binds the
-    /// enclave's state_hash (the WithdrawModeConfig digest), so a share only
+    /// enclave's state_hash (the WithdrawModeState digest), so a share only
     /// decrypts if the KP agreed on the operator-supplied state.
     #[prost(message, optional, tag = "1")]
     pub encrypted_share: ::core::option::Option<GuardianEncryptedShare>,

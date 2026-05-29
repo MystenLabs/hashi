@@ -31,9 +31,6 @@ pub async fn rotate_kps(
         return Err(InvalidInputs("setup or rotation already complete".into()));
     }
 
-    // The old key's instance is supplied in the request (the operator reads it
-    // from the latest `ceremony/` log); a fresh ceremony enclave has no other
-    // source for the old commitments + threshold.
     let (encrypted_old_shares, old_instance, state) = request.into_parts();
     let old_t = old_instance.threshold();
 

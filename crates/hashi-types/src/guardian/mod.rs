@@ -186,7 +186,7 @@ pub struct OperatorInitRequest {
 }
 
 /// Provides one KP's encrypted key share to the enclave. The share's HPKE AAD
-/// binds the enclave's `state_hash` (the `WithdrawModeConfig` digest), so a share
+/// binds the enclave's `state_hash` (the `WithdrawModeState` digest), so a share
 /// only decrypts if the KP agreed on the operator-supplied state.
 /// To be called by Key Provisioners (who may be outside entities).
 #[derive(Debug, Clone, PartialEq)]
@@ -281,7 +281,7 @@ pub struct GuardianInfo {
     pub bucket_info: Option<S3BucketInfo>,
     /// Encryption key. Used by KPs to encrypt their shares.
     pub encryption_pubkey: EncPubKeyBytes,
-    /// Digest of the operator-supplied `WithdrawModeConfig` (set after operator_init).
+    /// Digest of the operator-supplied `WithdrawModeState` (set after operator_init).
     /// KPs recompute it from their verified sources and match to confirm config.
     pub state_hash: Option<[u8; 32]>,
     /// Server version
@@ -585,7 +585,9 @@ impl WithdrawModeState {
         self.hashi_btc_master_pubkey
     }
 
-    /// The `state_hash` — the only digest in the system.
+    /// The `state_hash`: the digest KPs bind as their share-encryption AAD.
+    /// Excludes `secret_sharing_instance` (enforced via verify_share) and
+    /// `network` (share-irrelevant), which is why those live outside this struct.
     pub fn digest(&self) -> [u8; 32] {
         let bytes =
             bcs::to_bytes(&WithdrawModeStateRepr::from(self)).expect("serialization should work");

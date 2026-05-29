@@ -79,7 +79,7 @@ pub struct Scratchpad {
     pub shares: tokio::sync::Mutex<Vec<Share>>,
     /// Secret-sharing instance (commitments + N + T) set by operator_init.
     pub secret_sharing_instance: OnceLock<SecretSharingInstance>,
-    /// Digest of the operator-supplied WithdrawModeConfig (set in operator_init);
+    /// Digest of the operator-supplied WithdrawModeState (set in operator_init);
     /// the AAD KPs bind on their share submissions.
     pub state_hash: OnceLock<[u8; 32]>,
     /// Set once operator_init has successfully written all logs to S3.
@@ -193,17 +193,8 @@ impl EnclaveConfig {
             .map_err(|_| InvalidInputs("S3 logger already set".into()))
     }
 
-    // ========================================================================
-    // Initialization Status
-    // ========================================================================
-
     pub fn is_enclave_btc_keypair_set(&self) -> bool {
         self.enclave_btc_keypair.get().is_some()
-    }
-
-    /// Provisioner_init config is complete: the reconstructed BTC keypair is set.
-    pub fn is_provisioner_init_complete(&self) -> bool {
-        self.is_enclave_btc_keypair_set()
     }
 }
 
@@ -348,8 +339,10 @@ impl Enclave {
         self.config.mode
     }
 
+    /// Provisioner_init is complete: the reconstructed BTC keypair is set and
+    /// its installation has been logged.
     pub fn is_provisioner_init_complete(&self) -> bool {
-        self.config.is_provisioner_init_complete()
+        self.config.is_enclave_btc_keypair_set()
             && self
                 .scratchpad
                 .provisioner_init_logging_complete
@@ -378,18 +371,21 @@ impl Enclave {
     /// Whether every field operator_init installs is present (mode-aware). Only
     /// used to assert the `operator_init_logging_complete` invariant above.
     fn operator_init_state_installed(&self) -> bool {
-        let base = self.config.s3_logger.get().is_some()
-            && self.config.btc_network.get().is_some()
-            && self.scratchpad.secret_sharing_instance.get().is_some();
-        if self.config.mode == EnclaveMode::Ceremony {
-            // Ceremony enclaves (setup_new_key/rotate_kps) carry no WithdrawModeConfig.
-            base
-        } else {
-            // Normal enclaves additionally install the WithdrawModeConfig.
-            base && self.scratchpad.state_hash.get().is_some()
-                && self.config.hashi_btc_master_pubkey.get().is_some()
-                && self.state.get_committee().is_ok()
-                && self.state.rate_limiter.get().is_some()
+        // Both modes install the S3 logger; a ceremony enclave installs nothing else.
+        if self.config.s3_logger.get().is_none() {
+            return false;
+        }
+        match self.config.mode {
+            EnclaveMode::Ceremony => true,
+            // Withdraw enclaves additionally install the WithdrawModeConfig.
+            EnclaveMode::Withdraw => {
+                self.config.btc_network.get().is_some()
+                    && self.scratchpad.secret_sharing_instance.get().is_some()
+                    && self.scratchpad.state_hash.get().is_some()
+                    && self.config.hashi_btc_master_pubkey.get().is_some()
+                    && self.state.get_committee().is_ok()
+                    && self.state.rate_limiter.get().is_some()
+            }
         }
     }
 
