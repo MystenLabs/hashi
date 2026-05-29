@@ -90,12 +90,12 @@ async fn finalize_rotation(
     };
 
     let new_sharing_seq = old_instance.sharing_seq() + 1;
-    let new_secret_sharing_instance =
-        SecretSharingInstance::new(share_commitments, n, t, new_sharing_seq)?;
+    let new_instance = SecretSharingInstance::new(share_commitments, n, t, new_sharing_seq)?;
     info!("Writing CeremonyLogMessage sharing_seq={new_sharing_seq} to ceremony/.");
     enclave
-        .log_ceremony(CeremonyLogMessage {
-            secret_sharing_instance: new_secret_sharing_instance,
+        .log_ceremony(CeremonyLogMessage::Rotate {
+            old_instance: old_instance.clone(),
+            new_instance,
         })
         .await?;
 
@@ -220,9 +220,20 @@ mod tests {
         let LogMessage::Ceremony(ceremony) = record.message else {
             panic!("expected Ceremony variant");
         };
-        assert_eq!(ceremony.secret_sharing_instance.sharing_seq(), 1);
-        assert_eq!(ceremony.secret_sharing_instance.num_shares(), new_n);
-        assert_eq!(ceremony.secret_sharing_instance.threshold(), new_t);
+        let CeremonyLogMessage::Rotate {
+            old_instance,
+            new_instance,
+        } = *ceremony
+        else {
+            panic!("expected Rotate variant");
+        };
+        // The consumed old instance is recorded for chain auditability.
+        assert_eq!(old_instance.sharing_seq(), 0);
+        assert_eq!(old_instance.num_shares(), TEST_N);
+        assert_eq!(old_instance.threshold(), TEST_T);
+        assert_eq!(new_instance.sharing_seq(), 1);
+        assert_eq!(new_instance.num_shares(), new_n);
+        assert_eq!(new_instance.threshold(), new_t);
     }
 
     #[tokio::test]
@@ -358,11 +369,33 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_before_operator_init() {
+        // No operator_init, so the enclave has no instance to read; build the old
+        // instance standalone. The call must reject before ever touching it.
         let enclave = Enclave::create_with_random_keys();
         let sk = SecretKey::random(&mut rand::thread_rng());
         let params = SecretSharingParams::new(TEST_N, TEST_T).unwrap();
         let shares = split_secret(&sk, &params, &mut rand::thread_rng());
-        let req = build_request(&shares[..TEST_T], &enclave, build_state());
+        let state = build_state();
+        let mut rng = rand::thread_rng();
+        let submissions = shares[..TEST_T]
+            .iter()
+            .map(|s| {
+                RotateKpsRequest::build_from_share_and_state(
+                    s,
+                    enclave.encryption_public_key(),
+                    &state,
+                    &mut rng,
+                )
+            })
+            .collect();
+        let old_instance = SecretSharingInstance::new(
+            ShareCommitments::from_shares(&shares).unwrap(),
+            TEST_N,
+            TEST_T,
+            0,
+        )
+        .unwrap();
+        let req = RotateKpsRequest::new(submissions, old_instance, state);
         let err = rotate_kps(enclave, req).await.expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
     }

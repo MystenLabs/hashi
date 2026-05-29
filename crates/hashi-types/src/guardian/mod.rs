@@ -337,12 +337,29 @@ pub enum LogMessage {
     CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
 }
 
-/// The current authoritative share state, written to `ceremony/` each ceremony.
-/// Carries only the secret-sharing instance; ciphertexts are delivered out-of-band
-/// and verified against its commitments. TODO: add a ciphertext hash if delivery audit is ever needed.
+/// The authoritative share state, written to `ceremony/` after each ceremony.
+/// Carries only instances (commitments + n/t/seq); ciphertexts are delivered
+/// out-of-band and verified against the commitments. A rotation records the
+/// `old_instance` it consumed so the chain is auditable from the log alone.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct CeremonyLogMessage {
-    pub secret_sharing_instance: SecretSharingInstance,
+pub enum CeremonyLogMessage {
+    /// Initial key setup (`setup_new_key`); `instance` has `sharing_seq` 0.
+    NewKey { instance: SecretSharingInstance },
+    /// Key rotation (`rotate_kps`) from `old_instance` to `new_instance`.
+    Rotate {
+        old_instance: SecretSharingInstance,
+        new_instance: SecretSharingInstance,
+    },
+}
+
+impl CeremonyLogMessage {
+    /// The resulting instance's `sharing_seq` — used as the `ceremony/` object key.
+    pub fn sharing_seq(&self) -> u64 {
+        match self {
+            CeremonyLogMessage::NewKey { instance } => instance.sharing_seq(),
+            CeremonyLogMessage::Rotate { new_instance, .. } => new_instance.sharing_seq(),
+        }
+    }
 }
 
 /// OI: operator_init
@@ -903,11 +920,7 @@ impl LogMessage {
             LogMessage::Init(init_message) => init_message.log_name(prefix),
             LogMessage::Heartbeat { seq } => format!("{}-{:020}.json", prefix, seq),
             LogMessage::Withdrawal(withdrawal_message) => withdrawal_message.log_name(prefix),
-            LogMessage::Ceremony(ss) => format!(
-                "{:020}-{}.json",
-                ss.secret_sharing_instance.sharing_seq(),
-                prefix
-            ),
+            LogMessage::Ceremony(ss) => format!("{:020}-{}.json", ss.sharing_seq(), prefix),
             LogMessage::CommitteeUpdate(committee_message) => committee_message.log_name(prefix),
         }
     }

@@ -58,8 +58,8 @@ pub async fn setup_new_key(
         .expect("(n, t) validated by SetupNewKeyRequest; commitments produced with matching count");
 
     enclave
-        .log_ceremony(CeremonyLogMessage {
-            secret_sharing_instance: ss_instance,
+        .log_ceremony(CeremonyLogMessage::NewKey {
+            instance: ss_instance,
         })
         .await?;
 
@@ -141,8 +141,11 @@ mod tests {
         let LogMessage::Ceremony(ceremony) = record.message else {
             panic!("expected Ceremony variant");
         };
-        assert_eq!(ceremony.secret_sharing_instance.sharing_seq(), 0);
-        assert_eq!(ceremony.secret_sharing_instance.num_shares(), TEST_N);
-        assert_eq!(ceremony.secret_sharing_instance.threshold(), TEST_T);
+        let CeremonyLogMessage::NewKey { instance } = *ceremony else {
+            panic!("expected NewKey variant");
+        };
+        assert_eq!(instance.sharing_seq(), 0);
+        assert_eq!(instance.num_shares(), TEST_N);
+        assert_eq!(instance.threshold(), TEST_T);
     }
 }

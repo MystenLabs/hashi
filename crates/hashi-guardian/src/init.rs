@@ -198,13 +198,11 @@ pub async fn provisioner_init(
 
     let sk = enclave.encryption_secret_key();
     let share_id = request.encrypted_share().id;
-    // The state_hash was fixed at operator_init; it is the AAD every KP binds.
-    // Absent means the operator booted this enclave without an WithdrawModeConfig
-    // (a ceremony-mode config) — surface it gracefully rather than panicking.
-    let state_hash = enclave
+    // Always set here: provisioner_init is withdraw-mode only, and the
+    // operator_init check above guarantees a withdraw-mode enclave installed it.
+    let state_hash = *enclave
         .state_hash()
-        .copied()
-        .ok_or_else(|| InvalidInputs("operator did not supply init state".into()))?;
+        .expect("withdraw-mode operator_init installs the state_hash");
     info!("Share ID: {:?}.", share_id);
 
     // 1) Decrypt the share (AAD = enclave state_hash). A share only decrypts if
