@@ -47,10 +47,16 @@ pub struct Metrics {
     pub guardian_limiter_validate_total: IntCounterVec,
     pub guardian_limiter_apply_total: IntCounterVec,
     pub guardian_limiter_anchor_events_total: IntCounter,
+    pub guardian_limiter_anchor_events_skipped_total: IntCounter,
     pub guardian_limiter_batch_truncated_total: IntCounter,
     pub guardian_limiter_batch_stuck_head_total: IntCounter,
+    pub guardian_finalize_deferred_total: IntCounter,
+    pub guardian_limiter_reconciled_total: IntCounter,
     pub guardian_rpc_total: IntCounterVec,
     pub guardian_rpc_duration_seconds: HistogramVec,
+
+    /// Guardian's committee epoch as of the leader's last reconcile.
+    pub guardian_current_committee_epoch: IntGauge,
 
     // Kyoto (Bitcoin light client) metrics
     pub kyoto_connected_peers: IntGauge,
@@ -349,6 +355,12 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            guardian_limiter_anchor_events_skipped_total: register_int_counter_with_registry!(
+                "hashi_guardian_limiter_anchor_events_skipped_total",
+                "WithdrawalSignedEvent observations skipped as duplicates (checkpoint redelivery or bootstrap replay)",
+                registry,
+            )
+            .unwrap(),
             guardian_limiter_batch_truncated_total: register_int_counter_with_registry!(
                 "hashi_guardian_limiter_batch_truncated_total",
                 "Times the leader's approved batch was truncated by local-limiter capacity (the head fits, the tail does not)",
@@ -358,6 +370,18 @@ impl Metrics {
             guardian_limiter_batch_stuck_head_total: register_int_counter_with_registry!(
                 "hashi_guardian_limiter_batch_stuck_head_total",
                 "Times the head of the leader's approved batch already exceeded local-limiter capacity",
+                registry,
+            )
+            .unwrap(),
+            guardian_finalize_deferred_total: register_int_counter_with_registry!(
+                "hashi_guardian_finalize_deferred_total",
+                "Times the leader deferred a guardian finalize while waiting for the local limiter to catch up to the guardian's consumed seq (prevents stale-seq mismatches)",
+                registry,
+            )
+            .unwrap(),
+            guardian_limiter_reconciled_total: register_int_counter_with_registry!(
+                "hashi_guardian_limiter_reconciled_total",
+                "Local limiter reconciled to the guardian after a stall (recovers events dropped across a checkpoint-subscription reconnect)",
                 registry,
             )
             .unwrap(),
@@ -374,6 +398,12 @@ impl Metrics {
                 "Latency of outbound RPC calls to the guardian by method and outcome",
                 &["method", "outcome"],
                 LATENCY_SEC_BUCKETS.to_vec(),
+                registry,
+            )
+            .unwrap(),
+            guardian_current_committee_epoch: register_int_gauge_with_registry!(
+                "hashi_guardian_current_committee_epoch",
+                "Committee epoch reported by the guardian as of the last reconcile RPC",
                 registry,
             )
             .unwrap(),
@@ -1066,6 +1096,10 @@ pub const GUARDIAN_BOOTSTRAP_OUTCOME_SUCCESS: &str = "success";
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_RPC_FAILURE: &str = "rpc_failure";
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_PARSE_FAILURE: &str = "parse_failure";
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_NO_LIMITER_YET: &str = "no_limiter_yet";
+pub const GUARDIAN_BOOTSTRAP_OUTCOME_KEY_MISMATCH: &str = "key_mismatch";
+pub const GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID: &str = "signature_invalid";
+pub const GUARDIAN_BOOTSTRAP_OUTCOME_BTC_KEY_MISMATCH: &str = "btc_key_mismatch";
+pub const GUARDIAN_BOOTSTRAP_OUTCOME_BTC_KEY_MISSING_FROM_INFO: &str = "btc_key_missing_from_info";
 
 pub const GUARDIAN_RPC_METHOD_GET_GUARDIAN_INFO: &str = "get_guardian_info";
 pub const GUARDIAN_RPC_METHOD_STANDARD_WITHDRAWAL: &str = "standard_withdrawal";
@@ -1244,6 +1278,10 @@ mod tests {
             GUARDIAN_BOOTSTRAP_OUTCOME_RPC_FAILURE,
             GUARDIAN_BOOTSTRAP_OUTCOME_PARSE_FAILURE,
             GUARDIAN_BOOTSTRAP_OUTCOME_NO_LIMITER_YET,
+            GUARDIAN_BOOTSTRAP_OUTCOME_KEY_MISMATCH,
+            GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID,
+            GUARDIAN_BOOTSTRAP_OUTCOME_BTC_KEY_MISMATCH,
+            GUARDIAN_BOOTSTRAP_OUTCOME_BTC_KEY_MISSING_FROM_INFO,
         ] {
             metrics.record_guardian_bootstrap_outcome(outcome);
         }

@@ -95,6 +95,8 @@ pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Ar
             }
 
             rescrape_state = false;
+            // Rescrape gapped the event-driven limiter; trigger an eager reconcile.
+            state.request_limiter_reconcile();
         }
 
         while let Some(item) = subscription.next().await {
@@ -451,6 +453,7 @@ async fn handle_events(
                 // Advance uses the event's checkpoint timestamp (~sign-time)
                 // rather than `txn.timestamp_ms` (creation time) to stay in
                 // lockstep with the guardian's `last_updated_at`.
+                // Gate on `signatures.is_none()` for idempotency across checkpoint redelivery and bootstrap replay.
                 let (limiter_inputs, pick_to_sign_ms) = {
                     let mut state = state.state_mut();
                     state
@@ -462,7 +465,7 @@ async fn handle_events(
                         .withdrawal_txns
                         .get_mut(&event.withdrawal_txn_id)
                     {
-                        Some(txn) => {
+                        Some(txn) if txn.signatures.is_none() => {
                             txn.signatures = Some(event.signatures.clone());
                             let amount_sats = withdrawal_limiter_consumption_amount(txn);
                             let timestamp_secs = checkpoint_timestamp_ms / 1000;
@@ -470,9 +473,18 @@ async fn handle_events(
                                 checkpoint_timestamp_ms.saturating_sub(txn.timestamp_ms);
                             (Some((amount_sats, timestamp_secs)), Some(pick_to_sign))
                         }
-                        None => (None, None),
+                        _ => (None, None),
                     }
                 };
+                if limiter_inputs.is_none() {
+                    tracing::debug!(
+                        withdrawal_txn_id = %event.withdrawal_txn_id,
+                        "Skipping limiter apply: WithdrawalSignedEvent for already-signed txn"
+                    );
+                    if let Some(metrics) = state.metrics() {
+                        metrics.guardian_limiter_anchor_events_skipped_total.inc();
+                    }
+                }
                 if let Some(d) = pick_to_sign_ms
                     && let Some(metrics) = state.metrics()
                 {

@@ -82,8 +82,12 @@ message GuardianInfoData {
   // Server version.
   optional string server_version = 4;
 
+  // X-only Bitcoin pubkey of the enclave's BTC signing key (32 bytes).
+  // Absent before `provisioner_init` has set the keypair.
+  optional bytes enclave_btc_pubkey = 5;
+
   // Digest of the operator-supplied EnclaveInitState (32 bytes, if set).
-  optional bytes state_hash = 5;
+  optional bytes state_hash = 6;
 }
 
 // Public description of the current BTC key's secret-sharing scheme.

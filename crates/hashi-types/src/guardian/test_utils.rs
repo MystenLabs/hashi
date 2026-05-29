@@ -89,6 +89,7 @@ impl GetGuardianInfoResponse {
             encryption_pubkey: vec![0u8; 32],
             state_hash: None,
             server_version: "v1".to_string(),
+            enclave_btc_pubkey: None,
         };
 
         GetGuardianInfoResponse {

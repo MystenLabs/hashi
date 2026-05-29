@@ -92,6 +92,9 @@ struct Inner {
     /// `LocalLimiter` carries its own `RwLock<LimiterState>`, so we just
     /// need set-once semantics for the slot itself.
     local_limiter: OnceLock<Arc<crate::guardian_limiter::LocalLimiter>>,
+    /// Pinged by the watcher after a reconnect rescrape, so the reconcile
+    /// loop can re-align the local limiter immediately.
+    guardian_reconcile_notify: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Debug)]
@@ -147,6 +150,7 @@ impl OnchainState {
             grpc_max_decoding_message_size,
             metrics: metrics.clone(),
             local_limiter: OnceLock::new(),
+            guardian_reconcile_notify: Arc::new(tokio::sync::Notify::new()),
         }
         .pipe(Arc::new)
         .pipe(Self);
@@ -210,6 +214,16 @@ impl OnchainState {
         if self.0.local_limiter.set(limiter).is_err() {
             tracing::warn!("OnchainState::set_local_limiter called twice; ignoring");
         }
+    }
+
+    /// Ask the reconcile loop to re-align the local limiter now.
+    pub(crate) fn request_limiter_reconcile(&self) {
+        self.0.guardian_reconcile_notify.notify_one();
+    }
+
+    /// Handle the reconcile loop awaits on.
+    pub(crate) fn limiter_reconcile_notify(&self) -> Arc<tokio::sync::Notify> {
+        self.0.guardian_reconcile_notify.clone()
     }
 
     pub fn latest_checkpoint_timestamp_ms(&self) -> u64 {
@@ -481,6 +495,30 @@ impl OnchainState {
 
     pub fn mpc_max_faulty_in_basis_points(&self) -> u16 {
         self.state().hashi().config.mpc_max_faulty_in_basis_points()
+    }
+
+    pub fn guardian_url(&self) -> Option<String> {
+        self.state()
+            .hashi()
+            .config
+            .guardian_url()
+            .map(str::to_string)
+    }
+
+    pub fn guardian_public_key(&self) -> Option<Vec<u8>> {
+        self.state()
+            .hashi()
+            .config
+            .guardian_public_key()
+            .map(<[u8]>::to_vec)
+    }
+
+    pub fn guardian_btc_public_key(&self) -> Option<Vec<u8>> {
+        self.state()
+            .hashi()
+            .config
+            .guardian_btc_public_key()
+            .map(<[u8]>::to_vec)
     }
 
     pub fn bridge_service_client(

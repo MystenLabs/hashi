@@ -71,6 +71,13 @@ pub struct Args {
     /// Reconstruction threshold for the BTC key.
     #[arg(long, env = "HASHI_THRESHOLD", default_value_t = 3)]
     threshold: usize,
+
+    /// Pre-generated master secret (32 bytes, hex). Required when the
+    /// pubkey was pinned on-chain at publish time; the secret must match
+    /// the `guardian_btc_public_key` recorded in `Config`. Omit only for
+    /// dev paths that don't pin the pubkey upfront.
+    #[arg(long, env = "HASHI_MASTER_SECRET_HEX")]
+    master_secret_hex: Option<String>,
 }
 
 pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
@@ -97,9 +104,29 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
     let mut rng = thread_rng();
     let n = args.num_shares;
     let t = args.threshold;
-    let material = generate_share_material(n, t, &mut rng)?;
+    let existing_secret = args
+        .master_secret_hex
+        .as_deref()
+        .map(parse_master_secret)
+        .transpose()?;
+    let material = generate_share_material(n, t, &mut rng, existing_secret)?;
     tracing::info!(master_pubkey = %hex::encode(material.master_pubkey.serialize()),
         n, t, "generated share material");
+
+    // Derived key must match the pubkey pinned on-chain at publish; a wrong or
+    // missing --master-secret-hex would otherwise provision a key the chain rejects.
+    let onchain_btc_pubkey = onchain_state.guardian_btc_public_key();
+    if let Some(onchain) = onchain_btc_pubkey {
+        let derived = material.master_pubkey.serialize();
+        anyhow::ensure!(
+            derived.as_slice() == onchain.as_slice(),
+            "derived master pubkey {} does not match on-chain \
+             guardian_btc_public_key {}; check HASHI_MASTER_SECRET_HEX",
+            hex::encode(derived),
+            hex::encode(&onchain),
+        );
+        tracing::info!("master pubkey matches on-chain guardian_btc_public_key");
+    }
 
     let mut client = GuardianServiceClient::connect(args.guardian_endpoint.clone())
         .await
@@ -260,13 +287,16 @@ struct ShareMaterial {
 
 /// Fresh BTC master key + Shamir shares + matching commitments, all in memory.
 /// `master_pubkey` is the x-only key the guardian reconstructs from any `t`
-/// shares out of `n`.
+/// shares out of `n`. When `existing_secret` is `Some`, the shares are split
+/// from that secret so the resulting `master_pubkey` matches whatever was
+/// already pinned on-chain at publish time.
 fn generate_share_material<R: CryptoRng + RngCore>(
     n: usize,
     t: usize,
     rng: &mut R,
+    existing_secret: Option<k256::SecretKey>,
 ) -> Result<ShareMaterial> {
-    let k256_sk = k256::SecretKey::random(&mut *rng);
+    let k256_sk = existing_secret.unwrap_or_else(|| k256::SecretKey::random(&mut *rng));
 
     let params =
         SecretSharingParams::new(n, t).map_err(|e| anyhow!("invalid sharing params: {e:?}"))?;
@@ -286,6 +316,18 @@ fn generate_share_material<R: CryptoRng + RngCore>(
         commitments,
         master_pubkey,
     })
+}
+
+fn parse_master_secret(hex_str: &str) -> Result<k256::SecretKey> {
+    let bytes = hex::decode(hex_str.trim_start_matches("0x"))
+        .context("invalid hex for --master-secret-hex")?;
+    anyhow::ensure!(
+        bytes.len() == 32,
+        "--master-secret-hex must decode to 32 bytes, got {}",
+        bytes.len(),
+    );
+    k256::SecretKey::from_slice(&bytes)
+        .map_err(|e| anyhow!("--master-secret-hex is not a valid secp256k1 scalar: {e}"))
 }
 
 fn required_env(name: &str) -> Result<String> {
@@ -309,7 +351,7 @@ mod tests {
         const TEST_N: usize = 5;
         const TEST_T: usize = 3;
         let mut rng = rand::thread_rng();
-        let material = generate_share_material(TEST_N, TEST_T, &mut rng).unwrap();
+        let material = generate_share_material(TEST_N, TEST_T, &mut rng, None).unwrap();
 
         assert_eq!(material.shares.len(), TEST_N);
         let subset = &material.shares[..TEST_T];
@@ -317,5 +359,41 @@ mod tests {
         let reconstructed_kp = k256_sk_to_btc_keypair(&reconstructed_sk);
         let (reconstructed_xonly, _) = reconstructed_kp.x_only_public_key();
         assert_eq!(reconstructed_xonly, material.master_pubkey);
+    }
+
+    #[test]
+    fn pre_supplied_secret_round_trips_through_shares() {
+        const TEST_N: usize = 5;
+        const TEST_T: usize = 3;
+        let mut rng = rand::thread_rng();
+        let secret = k256::SecretKey::random(&mut rng);
+        let expected_xonly = {
+            let secp = Secp256k1::new();
+            let sk = BtcSecretKey::from_slice(&secret.to_bytes()).unwrap();
+            Keypair::from_secret_key(&secp, &sk).x_only_public_key().0
+        };
+
+        let material =
+            generate_share_material(TEST_N, TEST_T, &mut rng, Some(secret.clone())).unwrap();
+        assert_eq!(material.master_pubkey, expected_xonly);
+
+        let subset = &material.shares[..TEST_T];
+        let reconstructed = combine_shares(subset, TEST_T).expect("threshold shares combine");
+        let reconstructed_kp = k256_sk_to_btc_keypair(&reconstructed);
+        let (reconstructed_xonly, _) = reconstructed_kp.x_only_public_key();
+        assert_eq!(reconstructed_xonly, expected_xonly);
+    }
+
+    #[test]
+    fn parse_master_secret_accepts_0x_prefix() {
+        let hex = "0x".to_string() + &"11".repeat(32);
+        let sk = parse_master_secret(&hex).unwrap();
+        assert_eq!(sk.to_bytes().as_slice(), [0x11u8; 32].as_slice());
+    }
+
+    #[test]
+    fn parse_master_secret_rejects_wrong_length() {
+        let err = parse_master_secret(&"ab".repeat(31)).unwrap_err();
+        assert!(format!("{err}").contains("32 bytes"));
     }
 }

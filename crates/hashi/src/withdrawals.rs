@@ -546,12 +546,20 @@ impl Hashi {
 
     // --- Generic BLS signing helper ---
 
-    /// Proto-format BLS signing helper for gRPC responses.
+    /// Proto-format BLS signing helper. Signs at the current on-chain epoch.
     fn sign_message_proto<T: serde::Serialize>(
         &self,
         message: &T,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
-        let epoch = self.onchain_state().epoch();
+        self.sign_message_proto_at_epoch(message, self.onchain_state().epoch())
+    }
+
+    /// Sign at a specific historical `epoch` using that epoch's DB key.
+    pub(crate) fn sign_message_proto_at_epoch<T: serde::Serialize>(
+        &self,
+        message: &T,
+        epoch: u64,
+    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
         let validator_address = self
             .config
             .validator_address()
@@ -581,6 +589,50 @@ impl Hashi {
             public_key: Some(public_key_bytes),
             signature: Some(signature_bytes),
         })
+    }
+
+    // --- Guardian: validate and BLS-sign a `CommitteeTransition` ---
+
+    /// Rebuild the transition from on-chain state and sign with the historical key.
+    #[tracing::instrument(level = "info", skip_all, fields(from_epoch))]
+    pub fn validate_and_sign_committee_transition(
+        &self,
+        from_epoch: u64,
+    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
+        let validator_address = self
+            .config
+            .validator_address()
+            .map_err(|e| anyhow!("No validator address configured: {e}"))?;
+
+        let onchain = self.onchain_state();
+        let state = onchain.state();
+        let committees_map = state.hashi().committees.committees();
+        let from_committee = committees_map
+            .get(&from_epoch)
+            .ok_or_else(|| anyhow!("no on-chain committee for epoch {from_epoch}"))?;
+        if !from_committee
+            .members()
+            .iter()
+            .any(|m| m.validator_address() == validator_address)
+        {
+            anyhow::bail!("not a member of the committee at epoch {from_epoch}");
+        }
+
+        // Hashi committee epochs are sparse: the next entry after `from_epoch`
+        // is generally not `from_epoch + 1`. Both leader and followers derive
+        // the same `to_epoch` from on-chain state, so they sign the same
+        // transition.
+        let new_committee = committees_map
+            .range((from_epoch + 1)..)
+            .next()
+            .map(|(_, c)| c)
+            .ok_or_else(|| anyhow!("no on-chain committee epoch after {from_epoch}"))?;
+
+        let transition = hashi_types::guardian::CommitteeTransition {
+            new_committee: hashi_types::move_types::Committee::from(new_committee),
+        };
+
+        self.sign_message_proto_at_epoch(&transition, from_epoch)
     }
 
     // --- MPC BTC tx signing ---

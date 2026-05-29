@@ -25,6 +25,8 @@ service BridgeService {
   rpc SignWithdrawalTxSigning(SignWithdrawalTxSigningRequest) returns (SignWithdrawalTxSigningResponse);
   // Step 4: Sign committee approval to confirm a processed withdrawal on-chain.
   rpc SignWithdrawalConfirmation(SignWithdrawalConfirmationRequest) returns (SignWithdrawalConfirmationResponse);
+  // Sign a committee transition for the guardian's `UpdateCommittee`.
+  rpc SignCommitteeTransition(SignCommitteeTransitionRequest) returns (SignCommitteeTransitionResponse);
 }
 
 message GetServiceInfoRequest {}
@@ -184,5 +186,17 @@ message SignGuardianWithdrawalRequestRequest {
 }
 
 message SignGuardianWithdrawalRequestResponse {
+  MemberSignature member_signature = 1;
+}
+
+// Peers rebuild the transition from on-chain state; no committee bytes on the wire.
+message SignCommitteeTransitionRequest {
+  // Outgoing committee epoch. The new committee is the next entry in the
+  // on-chain `committees` map after `from_epoch` — committee epochs are
+  // sparse, so it is not generally `from_epoch + 1`.
+  uint64 from_epoch = 1;
+}
+
+message SignCommitteeTransitionResponse {
   MemberSignature member_signature = 1;
 }
