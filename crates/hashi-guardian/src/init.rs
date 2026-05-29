@@ -36,6 +36,23 @@ pub async fn operator_init(
     }
     info!("Enclave state validated.");
 
+    // A normal (withdrawal-serving) enclave must carry the EnclaveInitState; a
+    // ceremony enclave must not. Reject the mismatch up front (recoverable
+    // operator misconfig) so no half-initialized state is left behind.
+    match (enclave.ceremony_mode(), request.state().is_some()) {
+        (false, false) => {
+            return Err(InvalidInputs(
+                "normal-mode operator_init requires init state".into(),
+            ));
+        }
+        (true, true) => {
+            return Err(InvalidInputs(
+                "ceremony-mode operator_init must not carry init state".into(),
+            ));
+        }
+        _ => {}
+    }
+
     let (s3_config, secret_sharing_instance, network, state) = request.into_parts();
     let logger = S3Logger::new_checked(&s3_config).await?;
     info!("S3 connectivity check complete.");
