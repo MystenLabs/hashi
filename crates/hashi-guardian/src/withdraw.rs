@@ -3,6 +3,7 @@
 
 use crate::Enclave;
 use bitcoin::Txid;
+use hashi_types::committee::certificate_threshold;
 use hashi_types::guardian::now_timestamp_secs;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::EnclaveUninitialized;
@@ -72,10 +73,7 @@ async fn normal_withdrawal_inner(
 
     // 1) Verify certificate (before acquiring limiter lock)
     let committee = enclave.state.get_committee()?;
-    let threshold = enclave
-        .config
-        .committee_threshold()
-        .expect("Committee threshold should be set");
+    let threshold = certificate_threshold(committee.total_weight());
 
     info!("Verifying request certificate.");
     verify_hashi_cert(committee, threshold, &signed_request)?;
@@ -219,10 +217,10 @@ mod tests {
     use hashi_types::guardian::test_utils::create_btc_keypair;
     use hashi_types::guardian::BitcoinPubkey;
     use hashi_types::guardian::HashiMasterG;
+    use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::ProvisionerInitState;
     use hashi_types::guardian::StandardWithdrawalRequest;
-    use hashi_types::guardian::WithdrawalConfig;
 
     /// Tests build their fake "hashi master" from a `bitcoin::Keypair`. The
     /// bitcoin-lib keypair always signs against the even-y projection of its
@@ -254,20 +252,16 @@ mod tests {
             .unwrap();
 
         let refill_rate = 0; // no refill in tests unless specified
-        let withdrawal_config = WithdrawalConfig {
-            committee_threshold: 1,
-            refill_rate_sats_per_sec: refill_rate,
-            max_bucket_capacity_sats,
+        let limiter_config = LimiterConfig {
+            refill_rate,
+            max_bucket_capacity: max_bucket_capacity_sats,
         };
-        enclave
-            .config
-            .set_withdrawal_config(withdrawal_config)
-            .unwrap();
+        enclave.config.set_limiter_config(limiter_config).unwrap();
 
-        let limiter_state = LimiterState::genesis(&withdrawal_config);
+        let limiter_state = LimiterState::genesis(&limiter_config);
         let init_state = ProvisionerInitState::new(
             committee,
-            withdrawal_config,
+            limiter_config,
             limiter_state,
             hashi_btc_master_pubkey,
         )

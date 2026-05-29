@@ -212,25 +212,14 @@ message ProvisionerInitState {
   // Current Hashi committee.
   Committee committee = 1;
 
-  // Withdrawal policy configuration.
-  WithdrawalConfig withdrawal_config = 2;
+  // Limiter configuration.
+  LimiterConfig limiter_config = 2;
 
   // X-only public key bytes (32 bytes).
   optional bytes hashi_btc_master_pubkey = 4;
 
   // Rate limiter state.
   LimiterState limiter_state = 6;
-}
-
-message WithdrawalConfig {
-  // Committee threshold expressed in terms of weight.
-  optional uint64 committee_threshold = 1;
-
-  // Token refill rate in sats per second.
-  optional uint64 refill_rate_sats_per_sec = 2;
-
-  // Maximum bucket capacity in sats.
-  optional uint64 max_bucket_capacity_sats = 3;
 }
 
 message LimiterState {
