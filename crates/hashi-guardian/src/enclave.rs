@@ -52,7 +52,8 @@ pub struct EnclaveConfig {
     enclave_btc_keypair: OnceLock<Keypair>,
     /// BTC network: mainnet, testnet, regtest (set in operator_init)
     btc_network: OnceLock<Network>,
-    /// Raw MPC verifying key as a curve point. Stored with y-parity.
+    /// Raw MPC verifying key as a curve point. Stored with y-parity so the
+    /// 2-of-2 child-key derivation matches the MPC's signing protocol.
     /// Set in operator_init.
     hashi_btc_master_pubkey: OnceLock<HashiMasterG>,
     /// Limiter config (set in operator_init)
