@@ -254,7 +254,7 @@ impl EnclaveInitState {
         withdrawal_config: WithdrawalConfig,
         limiter_state: LimiterState,
         committee: HashiCommittee,
-        hashi_btc_master_pubkey: super::BitcoinPubkey,
+        hashi_btc_master_pubkey: super::HashiMasterG,
     ) -> Self {
         EnclaveInitState::new(
             committee,
@@ -269,6 +269,14 @@ impl EnclaveInitState {
         let kp = kp.unwrap_or(create_btc_keypair(&[1u8; 32]));
         let max_capacity = 1000;
 
+        // Convert the bitcoin-lib keypair's x-only pubkey to a raw `G` point.
+        // The bitcoin Keypair always signs against its even-y projection, so
+        // building `G` from the x-only bytes via `with_even_y_from_x_be_bytes`
+        // gives the parent that matches what the keypair signs against.
+        let x_bytes = kp.x_only_public_key().0.serialize();
+        let hashi_btc_master_pubkey =
+            super::HashiMasterG::with_even_y_from_x_be_bytes(&x_bytes).expect("valid x coordinate");
+
         EnclaveInitState::new(
             mock_committee_with_one_member(0),
             WithdrawalConfig {
@@ -281,7 +289,7 @@ impl EnclaveInitState {
                 last_updated_at: 0,
                 next_seq: 0,
             },
-            kp.x_only_public_key().0,
+            hashi_btc_master_pubkey,
         )
         .expect("valid EnclaveInitState")
     }

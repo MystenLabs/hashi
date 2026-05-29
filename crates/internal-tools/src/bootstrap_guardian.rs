@@ -21,6 +21,7 @@ use hashi_types::guardian::BitcoinPubkey;
 use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::EnclaveInitState;
 use hashi_types::guardian::GetGuardianInfoResponse;
+use hashi_types::guardian::HashiMasterG;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::SecretSharingInstance;
@@ -140,13 +141,14 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         max_bucket_capacity_sats: args.max_bucket_capacity_sats,
     };
     let limiter_state = LimiterState::genesis(&withdrawal_config);
-    let state = EnclaveInitState::new(
-        committee,
-        withdrawal_config,
-        limiter_state,
-        material.master_pubkey,
-    )
-    .map_err(|e| anyhow!("build EnclaveInitState: {e:?}"))?;
+    // The bootstrap utility builds the guardian's BTC keypair from a fresh
+    // bitcoin-lib keypair, which always signs against the even-y projection of
+    // its pubkey. Reconstruct the matching `G` point so downstream derivations
+    // agree on y-parity.
+    let master_g = HashiMasterG::with_even_y_from_x_be_bytes(&material.master_pubkey.serialize())
+        .map_err(|e| anyhow!("convert master pubkey to G: {e:?}"))?;
+    let state = EnclaveInitState::new(committee, withdrawal_config, limiter_state, master_g)
+        .map_err(|e| anyhow!("build EnclaveInitState: {e:?}"))?;
     let state_hash = state.digest();
 
     let secret_sharing_instance = SecretSharingInstance::new(material.commitments.clone(), n, t, 0)

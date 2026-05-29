@@ -14,6 +14,7 @@ use hashi_types::guardian::bitcoin_utils::sign_btc_tx;
 use hashi_types::guardian::bitcoin_utils::TxUTXOs;
 use hashi_types::guardian::crypto::Share;
 use hashi_types::guardian::GuardianError::InvalidInputs;
+use hashi_types::guardian::HashiMasterG;
 use hashi_types::guardian::*;
 use hpke::Serializable;
 use serde::Serialize;
@@ -51,8 +52,10 @@ pub struct EnclaveConfig {
     enclave_btc_keypair: OnceLock<Keypair>,
     /// BTC network: mainnet, testnet, regtest (set in operator_init)
     btc_network: OnceLock<Network>,
-    /// Hashi BTC public key used to derive child keys (set in provisioner_init)
-    hashi_btc_master_pubkey: OnceLock<BitcoinPubkey>,
+    /// Raw MPC verifying key as a curve point. Stored with y-parity so the
+    /// 2-of-2 child-key derivation matches the MPC's signing protocol.
+    /// Set in provisioner_init.
+    hashi_btc_master_pubkey: OnceLock<HashiMasterG>,
     /// Withdraw related config's (set in provisioner_init)
     withdrawal_config: OnceLock<WithdrawalConfig>,
 }
@@ -149,7 +152,7 @@ impl EnclaveConfig {
             .ok_or(InvalidInputs("Bitcoin key is not initialized".into()))
     }
 
-    pub fn set_hashi_btc_pk(&self, pk: BitcoinPubkey) -> GuardianResult<()> {
+    pub fn set_hashi_btc_pk(&self, pk: HashiMasterG) -> GuardianResult<()> {
         self.hashi_btc_master_pubkey
             .set(pk)
             .map_err(|_| InvalidInputs("Hashi BTC key is already set".into()))

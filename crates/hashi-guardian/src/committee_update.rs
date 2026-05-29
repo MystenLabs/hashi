@@ -184,10 +184,14 @@ mod tests {
 
     async fn enclave_at_epoch(epoch: u64) -> Arc<Enclave> {
         let kp = create_btc_keypair(&[1u8; 32]);
+        let master_pubkey = hashi_types::guardian::HashiMasterG::with_even_y_from_x_be_bytes(
+            &kp.x_only_public_key().0.serialize(),
+        )
+        .expect("valid x coordinate");
         create_fully_initialized_enclave(FullyInitializedArgs {
             network: Network::Regtest,
             committee: committee_at(epoch),
-            master_pubkey: kp.x_only_public_key().0,
+            master_pubkey,
             withdrawal_config: WithdrawalConfig {
                 committee_threshold: 0,
                 refill_rate_sats_per_sec: 0,

@@ -134,9 +134,15 @@ pub struct SignWithdrawalTxSigningRequest {
     /// Withdrawal request ids (each 32 bytes).
     #[prost(bytes = "bytes", repeated, tag = "2")]
     pub request_ids: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
-    /// One Schnorr signature per transaction input.
+    /// One MPC Schnorr signature per transaction input (64 bytes each).
     #[prost(bytes = "bytes", repeated, tag = "3")]
     pub signatures: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
+    /// One guardian Schnorr signature per transaction input (64 bytes each).
+    /// Same length as `signatures`. Followers verify each entry against
+    /// the on-chain `guardian_btc_public_key` before BLS-signing the
+    /// certificate; the BLS cert binds both arrays.
+    #[prost(bytes = "bytes", repeated, tag = "4")]
+    pub guardian_signatures: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignWithdrawalTxSigningResponse {

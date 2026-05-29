@@ -39,7 +39,6 @@ use hashi_types::guardian::CommitteeTransition;
 use hashi_types::guardian::GuardianSigned;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalResponse;
-use hashi_types::guardian::bitcoin_utils;
 use hashi_types::guardian::proto_conversions::signed_committee_transition_to_pb;
 use hashi_types::guardian::proto_conversions::signed_standard_withdrawal_request_to_pb;
 use hashi_types::proto::SignCommitteeTransitionRequest;
@@ -1467,24 +1466,39 @@ impl LeaderService {
         // 3. Post-MPC: forward to guardian for the enclave signature. Reuses
         // the `timestamp_secs` from the pre-MPC validate so the BLS-signed
         // certificate covers a consistent `(timestamp, seq, amount)` triple.
-        if let (Some(guardian), Some(seq)) = (inner.guardian_client(), expected_limiter_seq) {
-            Self::finalize_withdrawal_through_guardian(
-                &inner,
-                &txn,
-                &members,
-                guardian,
-                timestamp_secs,
-                seq,
-            )
-            .await?;
-            inner.record_guardian_finalized(seq, txn.id);
-        }
+        // The per-input enclave signatures are stored on-chain alongside the
+        // MPC sigs to satisfy the 2-of-2 deposit witness.
+        let guardian_signatures: Vec<Vec<u8>> =
+            match (inner.guardian_client(), expected_limiter_seq) {
+                (Some(guardian), Some(seq)) => {
+                    let sigs = Self::finalize_withdrawal_through_guardian(
+                        &inner,
+                        &txn,
+                        &members,
+                        guardian,
+                        timestamp_secs,
+                        seq,
+                    )
+                    .await?;
+                    inner.record_guardian_finalized(seq, txn.id);
+                    sigs
+                }
+                _ => {
+                    anyhow::bail!(
+                        "Guardian endpoint or seq missing — refusing to sign \
+                         a 2-of-2 withdrawal without the guardian half of the \
+                         witness"
+                    );
+                }
+            };
 
-        // 4. Build the WithdrawalTxSigning and get BLS certificate via fan-out
+        // 4. Build the WithdrawalTxSigning (binds BOTH sig arrays) and get
+        // the BLS certificate via fan-out.
         let signed_message = WithdrawalTxSigning {
             withdrawal_id: txn.id,
             request_ids: txn.request_ids.clone(),
             signatures: witness_signatures.clone(),
+            guardian_signatures: guardian_signatures.clone(),
         };
 
         let committee = inner
@@ -1531,6 +1545,7 @@ impl LeaderService {
             &txn.id,
             &txn.request_ids.clone(),
             &witness_signatures,
+            &guardian_signatures,
             signed.committee_signature(),
         )
         .await
@@ -1695,7 +1710,15 @@ impl LeaderService {
         }
     }
 
-    /// Rebuild a fully signed Bitcoin transaction from on-chain WithdrawalTransaction
+    /// Rebuild a fully signed Bitcoin transaction from on-chain
+    /// `WithdrawalTransaction` data and broadcast-ready 2-of-2 witness.
+    ///
+    /// Witness layout per input (BIP342 multi_a, verified against
+    /// rust-miniscript's `Terminal::MultiA` satisfier):
+    ///
+    /// ```text
+    /// [hashi_sig, guardian_sig, leaf_script, control_block]
+    /// ```
     fn rebuild_signed_tx_from_onchain(
         inner: &Arc<Hashi>,
         txn: &WithdrawalTransaction,
@@ -1703,15 +1726,25 @@ impl LeaderService {
         let raw_sigs = txn
             .signatures
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No signatures on withdrawal transaction"))?;
+            .ok_or_else(|| anyhow::anyhow!("No MPC signatures on withdrawal transaction"))?;
+        let raw_guardian_sigs = txn
+            .guardian_signatures
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No guardian signatures on withdrawal transaction"))?;
 
         let mut tx = inner.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
 
         anyhow::ensure!(
             raw_sigs.len() == tx.input.len(),
-            "Signature count mismatch: tx has {} inputs, on-chain has {} signatures",
+            "MPC signature count mismatch: tx has {} inputs, on-chain has {} signatures",
             tx.input.len(),
             raw_sigs.len()
+        );
+        anyhow::ensure!(
+            raw_guardian_sigs.len() == tx.input.len(),
+            "Guardian signature count mismatch: tx has {} inputs, on-chain has {} signatures",
+            tx.input.len(),
+            raw_guardian_sigs.len()
         );
         anyhow::ensure!(
             tx.input.len() == txn.inputs.len(),
@@ -1720,15 +1753,19 @@ impl LeaderService {
             txn.inputs.len()
         );
 
-        let hashi_pubkey = inner.get_hashi_pubkey()?;
-        for ((input, txn_input), sig_bytes) in
-            tx.input.iter_mut().zip(txn.inputs.iter()).zip(raw_sigs)
+        for (((input, txn_input), hashi_sig_bytes), guardian_sig_bytes) in tx
+            .input
+            .iter_mut()
+            .zip(txn.inputs.iter())
+            .zip(raw_sigs)
+            .zip(raw_guardian_sigs)
         {
-            let pubkey = inner.deposit_pubkey(&hashi_pubkey, txn_input.derivation_path.as_ref())?;
             let (script, control_block, _) =
-                bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
+                inner.deposit_spend_artifacts(txn_input.derivation_path.as_ref())?;
             let mut witness = bitcoin::Witness::new();
-            witness.push(sig_bytes);
+            // multi_a satisfier order: hashi_sig (bottom) then guardian_sig (top).
+            witness.push(hashi_sig_bytes);
+            witness.push(guardian_sig_bytes);
             witness.push(script.to_bytes());
             witness.push(control_block.serialize());
             input.witness = witness;
@@ -2146,13 +2183,20 @@ impl LeaderService {
         withdrawal_id: &Address,
         request_ids: &[Address],
         signatures: &[Vec<u8>],
+        guardian_signatures: &[Vec<u8>],
         cert: &CommitteeSignature,
     ) -> anyhow::Result<u64> {
         info!("Submitting sign_withdrawal for {:?}", withdrawal_id);
 
         let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
         executor
-            .execute_sign_withdrawal(withdrawal_id, request_ids, signatures, cert)
+            .execute_sign_withdrawal(
+                withdrawal_id,
+                request_ids,
+                signatures,
+                guardian_signatures,
+                cert,
+            )
             .await
     }
 
@@ -2177,6 +2221,8 @@ impl LeaderService {
     // Guardian: post-MPC enclave-signature RPC
     // ========================================================================
 
+    /// Returns the per-input guardian Schnorr signatures (64 bytes each)
+    /// for inclusion in the on-chain `sign_withdrawal` PTB.
     #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id, seq))]
     async fn finalize_withdrawal_through_guardian(
         inner: &Arc<Hashi>,
@@ -2185,7 +2231,7 @@ impl LeaderService {
         guardian: &crate::grpc::guardian_client::GuardianClient,
         timestamp_secs: u64,
         seq: u64,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<Vec<u8>>> {
         let signed_request =
             Self::collect_guardian_withdrawal_signatures(inner, txn, members, timestamp_secs, seq)
                 .await?;
@@ -2236,7 +2282,7 @@ impl LeaderService {
                 );
             })
             .map_err(|e| anyhow::anyhow!("Failed to parse guardian withdrawal response: {e}"))?;
-        signed_response
+        let response = signed_response
             .verify(pubkey)
             .inspect_err(|_| {
                 Self::record_guardian_rpc_outcome(
@@ -2249,13 +2295,34 @@ impl LeaderService {
                 anyhow::anyhow!("Guardian response signature verification failed: {e:?}")
             })?;
 
+        anyhow::ensure!(
+            response.enclave_signatures.len() == txn.inputs.len(),
+            "Guardian returned {} enclave_signatures but tx has {} inputs",
+            response.enclave_signatures.len(),
+            txn.inputs.len(),
+        );
+        let guardian_signatures: Vec<Vec<u8>> = response
+            .enclave_signatures
+            .iter()
+            .enumerate()
+            .map(|(i, sig)| {
+                let bytes = sig.to_vec();
+                anyhow::ensure!(
+                    bytes.len() == 64,
+                    "Guardian enclave_signatures[{i}] is {} bytes, expected 64",
+                    bytes.len(),
+                );
+                Ok(bytes)
+            })
+            .collect::<anyhow::Result<_>>()?;
+
         Self::record_guardian_rpc_outcome(
             inner,
             crate::metrics::GUARDIAN_RPC_OUTCOME_OK,
             rpc_elapsed,
         );
         info!(seq, "Guardian approved withdrawal");
-        Ok(())
+        Ok(guardian_signatures)
     }
 
     fn record_guardian_rpc_outcome(inner: &Arc<Hashi>, outcome: &str, elapsed_secs: f64) {
@@ -2644,6 +2711,11 @@ impl WithdrawalTxSigning {
                 .collect(),
             signatures: self
                 .signatures
+                .iter()
+                .map(|sig| sig.clone().into())
+                .collect(),
+            guardian_signatures: self
+                .guardian_signatures
                 .iter()
                 .map(|sig| sig.clone().into())
                 .collect(),

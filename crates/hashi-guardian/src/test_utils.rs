@@ -271,14 +271,20 @@ pub async fn create_operator_initialized_enclave(args: OperatorInitTestArgs) -> 
 pub struct FullyInitializedArgs {
     pub network: Network,
     pub committee: HashiCommittee,
-    pub master_pubkey: BitcoinPubkey,
+    pub master_pubkey: HashiMasterG,
     pub withdrawal_config: WithdrawalConfig,
     pub limiter_state: LimiterState,
 }
 
-/// Drive an operator-initialized enclave to fully-initialized by installing a
-/// fresh BTC keypair (the rest of the state was set at operator_init).
-pub fn finalize_enclave(enclave: &Arc<Enclave>) -> GuardianResult<()> {
+/// Generate and set a fresh BTC keypair on an operator-init'd enclave.
+/// Returns the x-only pubkey so callers can publish it on-chain before
+/// the rest of provisioner-init has run (i.e. before DKG completes and
+/// `finalize_enclave` can be called). Idempotent: returns the existing
+/// pubkey if the keypair has already been set.
+pub fn set_or_get_enclave_btc_pubkey(enclave: &Arc<Enclave>) -> GuardianResult<BitcoinPubkey> {
+    if let Ok(pk) = enclave.config.enclave_btc_pubkey() {
+        return Ok(pk);
+    }
     let secp = Secp256k1::new();
     let mut sk_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut sk_bytes);
@@ -286,7 +292,17 @@ pub fn finalize_enclave(enclave: &Arc<Enclave>) -> GuardianResult<()> {
         &secp,
         &SecretKey::from_slice(&sk_bytes).expect("random bytes form a valid secp256k1 key"),
     );
+    let pk = enclave_btc_keypair.x_only_public_key().0;
     enclave.config.set_btc_keypair(enclave_btc_keypair)?;
+    Ok(pk)
+}
+
+/// Drive an operator-initialized enclave to fully-initialized by setting the
+/// BTC keypair (the rest of the state was installed at operator_init). The
+/// keypair may already exist from an earlier [`set_or_get_enclave_btc_pubkey`]
+/// (idempotent).
+pub fn finalize_enclave(enclave: &Arc<Enclave>) -> GuardianResult<()> {
+    let _ = set_or_get_enclave_btc_pubkey(enclave)?;
 
     enclave
         .scratchpad

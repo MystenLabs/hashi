@@ -53,9 +53,9 @@ use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::TapLeafHash;
 use bitcoin::Txid;
-use bitcoin::XOnlyPublicKey;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::Hash as _;
+use fastcrypto::serde_helpers::ToFromByteArray;
 use std::num::NonZeroU16;
 use std::str::FromStr;
 
@@ -261,8 +261,14 @@ impl TryFrom<pb::EnclaveInitState> for EnclaveInitState {
             .hashi_btc_master_pubkey
             .ok_or_else(|| missing("hashi_btc_master_pubkey"))?;
 
-        let hashi_btc_master_pubkey = XOnlyPublicKey::from_slice(master_pk_bytes.as_ref())
-            .map_err(|e| InvalidInputs(format!("invalid hashi_btc_master_pubkey: {e}")))?;
+        let master_pk_bytes_arr: [u8; 33] = master_pk_bytes.as_ref().try_into().map_err(|_| {
+            InvalidInputs(format!(
+                "hashi_btc_master_pubkey must be 33 bytes (compressed), got {}",
+                master_pk_bytes.len()
+            ))
+        })?;
+        let hashi_btc_master_pubkey = super::HashiMasterG::from_byte_array(&master_pk_bytes_arr)
+            .map_err(|e| InvalidInputs(format!("invalid hashi_btc_master_pubkey: {e:?}")))?;
 
         EnclaveInitState::new(
             committee,
@@ -446,7 +452,7 @@ pub fn enclave_init_state_to_pb(s: EnclaveInitState) -> pb::EnclaveInitState {
     pb::EnclaveInitState {
         committee: Some(hashi_committee_to_pb(committee)),
         withdrawal_config: Some(withdrawal_config_to_pb(withdrawal_config)),
-        hashi_btc_master_pubkey: Some(hashi_btc_master_pubkey.serialize().to_vec().into()),
+        hashi_btc_master_pubkey: Some(hashi_btc_master_pubkey.to_byte_array().to_vec().into()),
         limiter_state: Some(limiter_state_to_pb(limiter_state)),
     }
 }
