@@ -1422,13 +1422,14 @@ pub struct S3Config {
     #[prost(string, optional, tag = "4")]
     pub region: ::core::option::Option<::prost::alloc::string::String>,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+/// Assembled from the current KPs' encrypted shares (in the relay model, by the
+/// relay once it has collected enough). Each share's HPKE AAD binds the enclave's
+/// state_hash (the WithdrawModeState digest), so a share only decrypts if the KP
+/// agreed on the operator-supplied state.
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ProvisionerInitRequest {
-    /// Encrypted share destined for this provisioner. Its HPKE AAD binds the
-    /// enclave's state_hash (the WithdrawModeState digest), so a share only
-    /// decrypts if the KP agreed on the operator-supplied state.
-    #[prost(message, optional, tag = "1")]
-    pub encrypted_share: ::core::option::Option<GuardianEncryptedShare>,
+    #[prost(message, repeated, tag = "1")]
+    pub encrypted_shares: ::prost::alloc::vec::Vec<GuardianEncryptedShare>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct WithdrawModeConfig {

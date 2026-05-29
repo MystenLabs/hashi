@@ -12,7 +12,6 @@ use bitcoin::Network;
 use bitcoin::Txid;
 use hashi_types::guardian::bitcoin_utils::sign_btc_tx;
 use hashi_types::guardian::bitcoin_utils::TxUTXOs;
-use hashi_types::guardian::crypto::Share;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::HashiMasterG;
 use hashi_types::guardian::*;
@@ -71,12 +70,10 @@ pub struct EnclaveState {
     rate_limiter: OnceLock<Arc<tokio::sync::Mutex<RateLimiter>>>,
 }
 
-/// Scratchpad used only during initialization. `shares` is cleared once the
-/// provisioner_init flow completes; the OnceLock flags retain their state.
+/// Scratchpad used only during initialization. The OnceLock flags retain their
+/// state for the life of the enclave.
 #[derive(Default)]
 pub struct Scratchpad {
-    /// Shares received during provisioner_init.
-    pub shares: tokio::sync::Mutex<Vec<Share>>,
     /// Secret-sharing instance (commitments + N + T) set by operator_init.
     pub secret_sharing_instance: OnceLock<SecretSharingInstance>,
     /// Digest of the operator-supplied WithdrawModeState (set in operator_init);
@@ -492,10 +489,6 @@ impl Enclave {
     // ========================================================================
     // Scratchpad (Initialization-only data)
     // ========================================================================
-
-    pub fn decrypted_shares(&self) -> &tokio::sync::Mutex<Vec<Share>> {
-        &self.scratchpad.shares
-    }
 
     pub fn secret_sharing_instance(&self) -> GuardianResult<&SecretSharingInstance> {
         self.scratchpad

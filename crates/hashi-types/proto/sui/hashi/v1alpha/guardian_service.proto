@@ -201,11 +201,12 @@ enum Network {
 //      ProvisionerInit
 // ==========================
 
+// Assembled from the current KPs' encrypted shares (in the relay model, by the
+// relay once it has collected enough). Each share's HPKE AAD binds the enclave's
+// state_hash (the WithdrawModeState digest), so a share only decrypts if the KP
+// agreed on the operator-supplied state.
 message ProvisionerInitRequest {
-  // Encrypted share destined for this provisioner. Its HPKE AAD binds the
-  // enclave's state_hash (the WithdrawModeState digest), so a share only
-  // decrypts if the KP agreed on the operator-supplied state.
-  GuardianEncryptedShare encrypted_share = 1;
+  repeated GuardianEncryptedShare encrypted_shares = 1;
 }
 
 message WithdrawModeConfig {

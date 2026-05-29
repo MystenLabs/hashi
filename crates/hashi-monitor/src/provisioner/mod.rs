@@ -8,21 +8,15 @@ mod limiter_recovery;
 use anyhow::Context;
 use hashi_guardian::s3_logger::S3Logger;
 use hashi_types::guardian::EncPubKey;
-use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::HashiMasterG;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::WithdrawModeState;
-use hashi_types::guardian::proto_conversions::provisioner_init_request_to_pb;
-use hashi_types::guardian::session_id_from_signing_pubkey;
 use hashi_types::guardian::verify_enclave_attestation;
-use hashi_types::proto as pb;
 use hpke::Deserializable;
 use rand::thread_rng;
 use tracing::info;
-
-use crate::provisioner::config::GuardianConfig;
 
 pub use config::ProvisionerConfig;
 
@@ -88,28 +82,21 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
 
     let guardian_pub_key =
         EncPubKey::from_bytes(&guardian_info.encryption_pubkey).map_err(|e| anyhow::anyhow!(e))?;
-    let request = ProvisionerInitRequest::build_from_share(
+    let encrypted_share = ProvisionerInitRequest::build_from_share(
         &cfg.share.to_domain()?,
         &guardian_pub_key,
         state_hash,
         &mut thread_rng(),
     );
-    let share_id = request.encrypted_share().id.get();
+    let share_id = encrypted_share.id.get();
     info!(
         share_id,
         state_hash = hex::encode(state_hash),
-        "built provisioner-init request"
+        "built provisioner-init share"
     );
 
-    if let Some(endpoint) = cfg.guardian_endpoint {
-        submit_provisioner_init_to_guardian(
-            &endpoint,
-            &session_id,
-            &expected_guardian_config,
-            request,
-        )
-        .await?;
-    }
+    // TODO: forward `encrypted_share` to the relay, which collects T-of-N KP
+    // shares and submits them to the guardian in one ProvisionerInit call.
     Ok(())
 }
 
@@ -128,63 +115,4 @@ pub async fn get_guardian_info_from_s3(
         .get_guardian_info(session_id, &signing_pubkey)
         .await
         .map_err(|e| anyhow::anyhow!(e))
-}
-
-async fn submit_provisioner_init_to_guardian(
-    endpoint: &str,
-    expected_session_id: &str,
-    expected_guardian_config: &GuardianConfig,
-    request: ProvisionerInitRequest,
-) -> anyhow::Result<()> {
-    let mut client =
-        pb::guardian_service_client::GuardianServiceClient::connect(endpoint.to_string())
-            .await
-            .with_context(|| format!("failed to connect to guardian endpoint {endpoint}"))?;
-
-    prechecks(&mut client, expected_session_id, expected_guardian_config)
-        .await
-        .with_context(|| "guardian endpoint pre-check failed")?;
-
-    info!("prechecks passed, submitting ProvisionerInit");
-    let pb_request = provisioner_init_request_to_pb(request)?;
-    client
-        .provisioner_init(pb_request)
-        .await
-        .with_context(|| format!("guardian ProvisionerInit RPC failed at {endpoint}"))?;
-
-    info!("successfully submitted ProvisionerInit request");
-    Ok(())
-}
-
-async fn prechecks(
-    client: &mut pb::guardian_service_client::GuardianServiceClient<tonic::transport::Channel>,
-    expected_session_id: &str,
-    expected_guardian_config: &GuardianConfig,
-) -> anyhow::Result<()> {
-    let resp_pb = client
-        .get_guardian_info(pb::GetGuardianInfoRequest {})
-        .await
-        .with_context(|| "GetGuardianInfo RPC failed")?
-        .into_inner();
-
-    let resp = <GetGuardianInfoResponse as TryFrom<pb::GetGuardianInfoResponse>>::try_from(resp_pb)
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-    let signing_pub_key = resp.signing_pub_key;
-    let actual_session_id = session_id_from_signing_pubkey(&signing_pub_key);
-    anyhow::ensure!(
-        actual_session_id == expected_session_id,
-        "guardian endpoint session mismatch: expected {}, got {}",
-        expected_session_id,
-        actual_session_id
-    );
-
-    let info = resp
-        .signed_info
-        .verify(&signing_pub_key)
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-    expected_guardian_config.ensure_matches_info(&info)?;
-
-    Ok(())
 }

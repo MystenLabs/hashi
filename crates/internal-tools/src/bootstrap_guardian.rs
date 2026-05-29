@@ -236,17 +236,21 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .map_err(|e| anyhow!("decode guardian encryption pubkey (session={session_id}): {e:?}"))?;
     tracing::info!(session_id = %session_id, "guardian info verified");
 
-    for (i, share) in material.shares.iter().take(t).enumerate() {
-        tracing::info!("submitting ProvisionerInit share {}/{t}", i + 1);
-        let req =
-            ProvisionerInitRequest::build_from_share(share, &enc_pubkey, state_hash, &mut rng);
-        let pb_req = provisioner_init_request_to_pb(req)
-            .map_err(|e| anyhow!("encode ProvisionerInitRequest: {e:?}"))?;
-        client
-            .provisioner_init(pb_req)
-            .await
-            .with_context(|| format!("ProvisionerInit share {} RPC failed", i + 1))?;
-    }
+    tracing::info!("submitting ProvisionerInit with {t} shares");
+    let encrypted_shares = material
+        .shares
+        .iter()
+        .take(t)
+        .map(|share| {
+            ProvisionerInitRequest::build_from_share(share, &enc_pubkey, state_hash, &mut rng)
+        })
+        .collect();
+    let pb_req = provisioner_init_request_to_pb(ProvisionerInitRequest::new(encrypted_shares))
+        .map_err(|e| anyhow!("encode ProvisionerInitRequest: {e:?}"))?;
+    client
+        .provisioner_init(pb_req)
+        .await
+        .context("ProvisionerInit RPC failed")?;
 
     // Pin: confirm we're still talking to the same enclave session we set up.
     // If the guardian restarted between OperatorInit and now, the new session
