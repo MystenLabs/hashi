@@ -56,8 +56,6 @@ pub struct EnclaveConfig {
     /// 2-of-2 child-key derivation matches the MPC's signing protocol.
     /// Set in operator_init.
     hashi_btc_master_pubkey: OnceLock<HashiMasterG>,
-    /// Limiter config (set in operator_init)
-    limiter_config: OnceLock<LimiterConfig>,
 }
 
 /// Mutable state that changes during operation.
@@ -122,7 +120,6 @@ impl EnclaveConfig {
             enclave_btc_keypair: OnceLock::new(),
             btc_network: OnceLock::new(),
             hashi_btc_master_pubkey: OnceLock::new(),
-            limiter_config: OnceLock::new(),
         }
     }
 
@@ -181,22 +178,6 @@ impl EnclaveConfig {
     }
 
     // ========================================================================
-    // Withdrawal Configuration
-    // ========================================================================
-
-    pub fn limiter_config(&self) -> GuardianResult<&LimiterConfig> {
-        self.limiter_config
-            .get()
-            .ok_or(InvalidInputs("LimiterConfig is not initialized".into()))
-    }
-
-    pub fn set_limiter_config(&self, config: LimiterConfig) -> GuardianResult<()> {
-        self.limiter_config
-            .set(config)
-            .map_err(|_| InvalidInputs("LimiterConfig already set".into()))
-    }
-
-    // ========================================================================
     // S3 Logger
     // ========================================================================
 
@@ -230,9 +211,11 @@ impl EnclaveConfig {
         self.s3_logger.get().is_some() && self.btc_network.get().is_some()
     }
 
-    /// Check if any operator_init base config has been set
+    /// Check if any operator_init config field has been set
     pub fn is_operator_init_partially_complete(&self) -> bool {
-        self.s3_logger.get().is_some() || self.btc_network.get().is_some()
+        self.s3_logger.get().is_some()
+            || self.btc_network.get().is_some()
+            || self.is_hashi_btc_master_pubkey_set()
     }
 
     /// Provisioner_init config is complete: the reconstructed BTC keypair is set.
@@ -412,6 +395,7 @@ impl Enclave {
     pub fn is_operator_init_partially_complete(&self) -> bool {
         self.config.is_operator_init_partially_complete()
             || self.scratchpad.secret_sharing_instance.get().is_some()
+            || self.scratchpad.state_hash.get().is_some()
     }
 
     pub fn is_fully_initialized(&self) -> bool {

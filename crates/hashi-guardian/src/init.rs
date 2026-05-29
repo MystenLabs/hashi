@@ -36,22 +36,9 @@ pub async fn operator_init(
     }
     info!("Enclave state validated.");
 
-    // A normal (withdrawal-serving) enclave must carry the EnclaveInitState; a
-    // ceremony enclave must not. Reject the mismatch up front (recoverable
-    // operator misconfig) so no half-initialized state is left behind.
-    match (enclave.ceremony_mode(), request.state().is_some()) {
-        (false, false) => {
-            return Err(InvalidInputs(
-                "normal-mode operator_init requires init state".into(),
-            ));
-        }
-        (true, true) => {
-            return Err(InvalidInputs(
-                "ceremony-mode operator_init must not carry init state".into(),
-            ));
-        }
-        _ => {}
-    }
+    // A normal enclave must carry the init state and a ceremony enclave must not;
+    // reject the mismatch up front so no half-initialized state is left behind.
+    request.validate(enclave.ceremony_mode())?;
 
     let (s3_config, secret_sharing_instance, network, state) = request.into_parts();
     let logger = S3Logger::new_checked(&s3_config).await?;
@@ -91,9 +78,9 @@ pub async fn operator_init(
     // enclaves (setup/rotate) leave it unset.
     if let Some(state) = state {
         let state_hash = state.digest();
-        let rate_limiter = state.build_rate_limiter()?;
-        let (committee, limiter_config, _limiter_state, hashi_btc_master_pubkey) =
+        let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) =
             state.into_parts();
+        let rate_limiter = RateLimiter::new(limiter_config, limiter_state)?;
 
         info!("Setting state hash.");
         enclave
@@ -105,12 +92,6 @@ pub async fn operator_init(
             .config
             .set_hashi_btc_pk(hashi_btc_master_pubkey)
             .expect("Unable to set hashi BTC master pubkey");
-
-        info!("Setting limiter config.");
-        enclave
-            .config
-            .set_limiter_config(limiter_config)
-            .expect("Unable to set limiter config");
 
         info!("Installing committee and rate limiter.");
         enclave

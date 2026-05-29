@@ -245,14 +245,13 @@ impl Enclave {
 
         let state = args.init_state;
         let state_hash = state.digest();
-        let rate_limiter = state.build_rate_limiter().unwrap();
-        let (committee, limiter_config, _limiter_state, hashi_btc_master_pubkey) =
+        let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) =
             state.into_parts();
+        let rate_limiter = RateLimiter::new(limiter_config, limiter_state).unwrap();
         self.set_state_hash(state_hash).unwrap();
         self.config
             .set_hashi_btc_pk(hashi_btc_master_pubkey)
             .unwrap();
-        self.config.set_limiter_config(limiter_config).unwrap();
         self.state.init(committee, rate_limiter).unwrap();
 
         self.scratchpad

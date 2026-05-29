@@ -515,6 +515,20 @@ impl OperatorInitRequest {
         self.state.as_ref()
     }
 
+    /// Validate against the enclave's mode: a normal (withdrawal-serving) enclave
+    /// must carry the `EnclaveInitState`, a ceremony enclave must not.
+    pub fn validate(&self, ceremony_mode: bool) -> GuardianResult<()> {
+        match (ceremony_mode, self.state.is_some()) {
+            (false, false) => Err(InvalidInputs(
+                "normal-mode operator_init requires init state".into(),
+            )),
+            (true, true) => Err(InvalidInputs(
+                "ceremony-mode operator_init must not carry init state".into(),
+            )),
+            _ => Ok(()),
+        }
+    }
+
     pub fn into_parts(
         self,
     ) -> (
@@ -551,11 +565,6 @@ impl EnclaveInitState {
             limiter_state,
             hashi_btc_master_pubkey,
         })
-    }
-
-    /// Build a `RateLimiter` from the config and state in this init state.
-    pub fn build_rate_limiter(&self) -> GuardianResult<RateLimiter> {
-        RateLimiter::new(*self.limiter_config(), self.limiter_state)
     }
 
     pub fn into_parts(self) -> (HashiCommittee, LimiterConfig, LimiterState, HashiMasterG) {
