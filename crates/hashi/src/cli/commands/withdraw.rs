@@ -45,11 +45,13 @@ pub async fn run(action: WithdrawCommands, config: &CliConfig, tx_opts: &TxOptio
 
 async fn request(
     config: &CliConfig,
-    _tx_opts: &TxOptions,
+    tx_opts: &TxOptions,
     amount: u64,
     btc_address: &str,
     count: usize,
 ) -> Result<()> {
+    use crate::sui_tx_executor::TxMode;
+
     config.validate()?;
     anyhow::ensure!(count >= 1, "--count must be at least 1");
 
@@ -58,9 +60,20 @@ async fn request(
         hashi_object_id: config.hashi_object_id(),
     };
 
-    let signer = config
-        .load_keypair()?
-        .context("Keypair required for withdrawal request. Set keypair_path in config.")?;
+    // A keypair is optional: serialize/dry-run only need the sender address.
+    let signer = config.load_keypair()?;
+    if tx_opts.mode() == TxMode::Execute && signer.is_none() {
+        anyhow::bail!(
+            "Keypair required to submit a withdrawal request (set keypair_path in config), \
+             or use --serialize-unsigned-transaction to emit an unsigned transaction."
+        );
+    }
+
+    // Sender: explicit --sender (e.g. a multisig), else the keypair's address.
+    // The BTC balance is drawn from this sender during the build.
+    let sender = tx_opts
+        .sender
+        .or_else(|| signer.as_ref().map(|s| s.public_key().derive_address()));
 
     // Parse the BTC destination address and verify it matches the configured network
     let btc_network = crate::btc_monitor::config::parse_btc_network(
@@ -73,28 +86,63 @@ async fn request(
         .context("Withdrawal address does not match the configured Bitcoin network")?;
     let destination_bytes = witness_program_from_address(&btc_addr)?;
 
-    let client = sui_rpc::Client::new(&config.sui_rpc_url)?;
-    let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
+    let mut client = sui_rpc::Client::new(&config.sui_rpc_url)?;
 
+    // A single request supports all tx modes (execute / dry-run /
+    // serialize-unsigned) via the builder + finalize path.
     if count == 1 {
-        print_info(&format!("Withdrawal amount: {} sats", amount));
-        print_info(&format!("BTC destination: {}", btc_address));
-        print_info("Submitting withdrawal request on Sui...");
+        print_info(&format!("Withdrawal amount: {amount} sats"));
+        print_info(&format!("BTC destination: {btc_address}"));
 
-        let request_id = executor
-            .execute_create_withdrawal_request(amount, destination_bytes)
-            .await?;
+        let builder = crate::sui_tx_executor::build_create_withdrawal_request(
+            hashi_ids,
+            amount,
+            destination_bytes,
+        );
 
-        print_success(&format!("Withdrawal request created: {}", request_id));
+        match tx_opts.mode() {
+            TxMode::SerializeUnsigned => print_info("Building unsigned withdrawal request..."),
+            TxMode::DryRun => print_info("Simulating withdrawal request (dry-run)..."),
+            TxMode::Execute => print_info("Submitting withdrawal request on Sui..."),
+        }
+
+        let outcome = crate::sui_tx_executor::finalize(
+            &mut client,
+            signer.as_ref(),
+            builder,
+            sender,
+            &tx_opts.gas_overrides(),
+            tx_opts.mode(),
+            std::time::Duration::from_secs(10),
+        )
+        .await?;
+
+        if let Some(response) = crate::cli::print_tx_outcome(outcome) {
+            let request_id =
+                crate::sui_tx_executor::withdrawal_request_id_from_response(&response)?;
+            print_success(&format!("Withdrawal request created: {request_id}"));
+        }
         return Ok(());
     }
+
+    // `--count > 1` bulk-submits many requests across PTBs and only makes sense
+    // for direct execution: there is no batch builder to emit or simulate, so
+    // --serialize-unsigned-transaction / --dry-run apply to a single request.
+    anyhow::ensure!(
+        tx_opts.mode() == TxMode::Execute,
+        "--count > 1 only supports execute mode; --serialize-unsigned-transaction \
+         and --dry-run apply to a single withdrawal request"
+    );
+
+    // Execute mode guarantees a signer (rejected above otherwise).
+    let signer = signer.expect("execute mode requires a signer");
+    let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
 
     // ~3 PTB commands per request (split + call) vs the 1024 command cap.
     const CHUNK_SIZE: usize = 250;
 
     print_info(&format!(
-        "Submitting {} withdrawal requests of {} sats to {} ({} per PTB)...",
-        count, amount, btc_address, CHUNK_SIZE
+        "Submitting {count} withdrawal requests of {amount} sats to {btc_address} ({CHUNK_SIZE} per PTB)...",
     ));
 
     let total_chunks = count.div_ceil(CHUNK_SIZE);
@@ -105,8 +153,7 @@ async fn request(
         chunk_idx += 1;
         let this_batch = remaining.min(CHUNK_SIZE);
         print_info(&format!(
-            "Batch {}/{} ({} requests)...",
-            chunk_idx, total_chunks, this_batch
+            "Batch {chunk_idx}/{total_chunks} ({this_batch} requests)...",
         ));
         let ids = executor
             .execute_create_withdrawal_requests_batch(amount, destination_bytes.clone(), this_batch)
@@ -115,33 +162,65 @@ async fn request(
         remaining -= this_batch;
     }
 
-    print_success(&format!("Created {} withdrawal requests", submitted));
+    print_success(&format!("Created {submitted} withdrawal requests"));
 
     Ok(())
 }
 
-async fn cancel(config: &CliConfig, _tx_opts: &TxOptions, request_id: &str) -> Result<()> {
+async fn cancel(config: &CliConfig, tx_opts: &TxOptions, request_id: &str) -> Result<()> {
+    use crate::sui_tx_executor::TxMode;
+
     config.validate()?;
 
     let req_addr = request_id
         .parse::<sui_sdk_types::Address>()
         .context("Invalid request ID")?;
 
-    let signer = config
-        .load_keypair()?
-        .context("Keypair required to cancel withdrawal.")?;
-
     let hashi_ids = crate::config::HashiIds {
         package_id: config.package_id(),
         hashi_object_id: config.hashi_object_id(),
     };
 
-    let client = sui_rpc::Client::new(&config.sui_rpc_url)?;
-    let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
+    let signer = config.load_keypair()?;
+    if tx_opts.mode() == TxMode::Execute && signer.is_none() {
+        anyhow::bail!(
+            "Keypair required to cancel a withdrawal, or use \
+             --serialize-unsigned-transaction to emit an unsigned transaction."
+        );
+    }
 
-    print_info("Cancelling withdrawal...");
-    executor.execute_cancel_withdrawal(&req_addr).await?;
-    print_success("Withdrawal cancelled.");
+    // The refunded Balance<BTC> is sent to `sender`, which must equal the
+    // transaction sender. Required up front so the PTB can address the refund.
+    let sender = tx_opts
+        .sender
+        .or_else(|| signer.as_ref().map(|s| s.public_key().derive_address()))
+        .context(
+            "No sender available: pass --sender (the refund recipient) or configure a keypair",
+        )?;
+
+    let builder = crate::sui_tx_executor::build_cancel_withdrawal(hashi_ids, &req_addr, sender);
+
+    match tx_opts.mode() {
+        TxMode::SerializeUnsigned => print_info("Building unsigned withdrawal cancellation..."),
+        TxMode::DryRun => print_info("Simulating withdrawal cancellation (dry-run)..."),
+        TxMode::Execute => print_info("Cancelling withdrawal..."),
+    }
+
+    let mut client = sui_rpc::Client::new(&config.sui_rpc_url)?;
+    let outcome = crate::sui_tx_executor::finalize(
+        &mut client,
+        signer.as_ref(),
+        builder,
+        Some(sender),
+        &tx_opts.gas_overrides(),
+        tx_opts.mode(),
+        std::time::Duration::from_secs(10),
+    )
+    .await?;
+
+    if crate::cli::print_tx_outcome(outcome).is_some() {
+        print_success("Withdrawal cancelled.");
+    }
 
     Ok(())
 }

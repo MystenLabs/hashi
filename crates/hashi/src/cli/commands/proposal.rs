@@ -14,9 +14,9 @@ use tabled::Tabled;
 use crate::cli::TxOptions;
 use crate::cli::client::CreateProposalParams;
 use crate::cli::client::HashiClient;
-use crate::cli::client::SimulationResult;
 use crate::cli::client::get_proposal_type_arg;
 use crate::cli::config::CliConfig;
+use crate::cli::print_detail;
 use crate::cli::print_info;
 use crate::cli::print_warning;
 use crate::cli::types::Proposal;
@@ -25,69 +25,44 @@ use crate::cli::types::display;
 /// Print metadata if present
 fn print_metadata(metadata: &[(String, String)]) {
     if !metadata.is_empty() {
-        println!("  {}", "Metadata:".bold());
+        print_detail(&format!("  {}", "Metadata:".bold()));
         for (key, value) in metadata {
-            println!("    {}: {}", key.dimmed(), value);
+            print_detail(&format!("    {}: {}", key.dimmed(), value));
         }
     }
 }
 
-/// Print simulation (dry-run) results
-fn print_simulation_result(result: &SimulationResult) {
-    println!("\n{}", "🔍 Dry-run Results:".bold());
-    println!("  {} {}", "Sender:".dimmed(), result.sender.to_hex().cyan());
-    println!(
-        "  {} {} MIST",
-        "Gas Budget:".dimmed(),
-        result.gas_budget.to_string().cyan()
-    );
-    println!(
-        "  {} {} MIST/unit",
-        "Gas Price:".dimmed(),
-        result.gas_price.to_string().cyan()
-    );
-    let max_cost_sui = (result.gas_budget as f64) / 1_000_000_000.0;
-    println!(
-        "  {} {:.6} SUI",
-        "Max Cost:".dimmed(),
-        format!("{:.6}", max_cost_sui).yellow()
-    );
-    println!(
-        "\n  {} Transaction was simulated successfully. Use without --dry-run to execute.",
-        "✓".green()
-    );
-}
-
-/// Execute or simulate a transaction based on tx_opts.
+/// Finalize a transaction according to `tx_opts`: serialize it unsigned,
+/// dry-run it, or sign and submit it.
 ///
 /// Returns `Some(response)` when a real transaction was executed, and `None`
-/// on dry-run or when no keypair is configured.
+/// for dry-run, serialize-unsigned, or when execution is requested but no
+/// keypair is configured.
 async fn execute_or_simulate(
     client: &mut HashiClient,
     tx: sui_transaction_builder::TransactionBuilder,
     tx_opts: &TxOptions,
 ) -> Result<Option<ExecuteTransactionResponse>> {
-    if !client.can_execute() {
-        print_warning("Transaction execution requires keypair configuration (--keypair).");
+    use crate::sui_tx_executor::TxMode;
+
+    // Only the execute path needs a keypair; serialize/dry-run build with just
+    // the sender address.
+    if tx_opts.mode() == TxMode::Execute && !client.can_execute() {
+        print_warning(
+            "Transaction execution requires a keypair (--keypair). Use \
+             --serialize-unsigned-transaction to emit an unsigned transaction, or --dry-run.",
+        );
         return Ok(None);
     }
 
-    if tx_opts.dry_run {
-        print_info("Simulating transaction (dry-run)...");
-        let result = client.simulate(tx).await?;
-        print_simulation_result(&result);
-        return Ok(None);
+    match tx_opts.mode() {
+        TxMode::SerializeUnsigned => print_info("Building unsigned transaction..."),
+        TxMode::DryRun => print_info("Simulating transaction (dry-run)..."),
+        TxMode::Execute => print_info("Executing transaction..."),
     }
 
-    print_info("Executing transaction...");
-    let response = client.execute(tx).await?;
-    let digest = response.transaction().digest();
-    println!(
-        "\n{} Transaction submitted: {}",
-        "✓".green(),
-        digest.to_string().cyan()
-    );
-    Ok(Some(response))
+    let outcome = client.finalize_tx(tx, tx_opts).await?;
+    Ok(crate::cli::print_tx_outcome(outcome).map(|response| *response))
 }
 
 /// Print the newly-created proposal's ID after a `create_*_proposal` call,
@@ -233,12 +208,10 @@ pub async fn vote(
 
     let proposal_type_str = display::format_proposal_type(&proposal.proposal_type);
 
-    println!("\n{}", "Proposal Details:".bold());
-    println!("  Type: {}", proposal_type_str.cyan());
+    print_detail(&format!("\n{}", "Proposal Details:".bold()));
+    print_detail(&format!("  Type: {}", proposal_type_str.cyan()));
 
-    if !tx_opts.skip_confirm {
-        prompt_continue("vote on this proposal").await?;
-    }
+    prompt_continue("vote on this proposal", tx_opts).await?;
 
     print_info("Building vote transaction...");
 
@@ -339,12 +312,10 @@ pub async fn remove_vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOpti
 
     let proposal_type_str = display::format_proposal_type(&proposal.proposal_type);
 
-    println!("\n{}", "Proposal Details:".bold());
-    println!("  Type: {}", proposal_type_str.cyan());
+    print_detail(&format!("\n{}", "Proposal Details:".bold()));
+    print_detail(&format!("  Type: {}", proposal_type_str.cyan()));
 
-    if !tx_opts.skip_confirm {
-        prompt_continue("remove your vote from this proposal").await?;
-    }
+    prompt_continue("remove your vote from this proposal", tx_opts).await?;
 
     print_info("Building remove_vote transaction...");
 
@@ -385,13 +356,11 @@ pub async fn execute(config: &CliConfig, proposal_id: &str, tx_opts: &TxOptions)
         );
     }
 
-    println!("\n{}", "Execute Proposal:".bold());
-    println!("  Type: {}", proposal_type_str.cyan());
-    println!("  ID:   {}", proposal_id);
+    print_detail(&format!("\n{}", "Execute Proposal:".bold()));
+    print_detail(&format!("  Type: {}", proposal_type_str.cyan()));
+    print_detail(&format!("  ID:   {}", proposal_id));
 
-    if !tx_opts.skip_confirm {
-        prompt_continue("execute this proposal").await?;
-    }
+    prompt_continue("execute this proposal", tx_opts).await?;
 
     let tx = client.build_execute_proposal_transaction(proposal_addr, proposal_type)?;
 
@@ -457,13 +426,11 @@ pub async fn create_upgrade_proposal(
         (Some(_), Some(_)) => unreachable!("clap enforces mutual exclusion"),
     };
 
-    println!("\n{}", "Creating Upgrade Proposal:".bold());
-    println!("  Digest: 0x{}", hex::encode(&digest_bytes));
+    print_detail(&format!("\n{}", "Creating Upgrade Proposal:".bold()));
+    print_detail(&format!("  Digest: 0x{}", hex::encode(&digest_bytes)));
     print_metadata(&metadata);
 
-    if !tx_opts.skip_confirm {
-        prompt_continue("create this upgrade proposal").await?;
-    }
+    prompt_continue("create this upgrade proposal", tx_opts).await?;
 
     let tx = client.build_create_proposal_transaction(CreateProposalParams::Upgrade {
         digest: digest_bytes,
@@ -487,14 +454,12 @@ pub async fn create_update_config_proposal(
     let value = parse_config_value(value_str)
         .context("Invalid value format. Use type:value, e.g. u64:1000 or bool:true")?;
 
-    println!("\n{}", "Creating Update Config Proposal:".bold());
-    println!("  Key:   {}", key);
-    println!("  Value: {}", value_str);
+    print_detail(&format!("\n{}", "Creating Update Config Proposal:".bold()));
+    print_detail(&format!("  Key:   {}", key));
+    print_detail(&format!("  Value: {}", value_str));
     print_metadata(&metadata);
 
-    if !tx_opts.skip_confirm {
-        prompt_continue("create this config update proposal").await?;
-    }
+    prompt_continue("create this config update proposal", tx_opts).await?;
 
     let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateConfig {
@@ -551,9 +516,7 @@ pub async fn create_update_mpc_config_proposal(
         );
     }
 
-    if !tx_opts.skip_confirm {
-        prompt_continue("create this MPC config update proposal").await?;
-    }
+    prompt_continue("create this MPC config update proposal", tx_opts).await?;
 
     let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateMpcConfig {
@@ -597,13 +560,11 @@ pub async fn create_enable_version_proposal(
     metadata: Vec<(String, String)>,
     tx_opts: &TxOptions,
 ) -> Result<()> {
-    println!("\n{}", "Creating Enable Version Proposal:".bold());
-    println!("  Version: {}", version);
+    print_detail(&format!("\n{}", "Creating Enable Version Proposal:".bold()));
+    print_detail(&format!("  Version: {}", version));
     print_metadata(&metadata);
 
-    if !tx_opts.skip_confirm {
-        prompt_continue("create this enable version proposal").await?;
-    }
+    prompt_continue("create this enable version proposal", tx_opts).await?;
 
     let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::EnableVersion {
@@ -624,13 +585,14 @@ pub async fn create_disable_version_proposal(
     metadata: Vec<(String, String)>,
     tx_opts: &TxOptions,
 ) -> Result<()> {
-    println!("\n{}", "Creating Disable Version Proposal:".bold());
-    println!("  Version: {}", version);
+    print_detail(&format!(
+        "\n{}",
+        "Creating Disable Version Proposal:".bold()
+    ));
+    print_detail(&format!("  Version: {}", version));
     print_metadata(&metadata);
 
-    if !tx_opts.skip_confirm {
-        prompt_continue("create this disable version proposal").await?;
-    }
+    prompt_continue("create this disable version proposal", tx_opts).await?;
 
     let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::DisableVersion {
@@ -651,13 +613,11 @@ pub async fn create_abort_reconfig_proposal(
     metadata: Vec<(String, String)>,
     tx_opts: &TxOptions,
 ) -> Result<()> {
-    println!("\n{}", "Creating Abort Reconfig Proposal:".bold());
+    print_detail(&format!("\n{}", "Creating Abort Reconfig Proposal:".bold()));
     print_info(&format!("Target epoch: {epoch}"));
     print_metadata(&metadata);
 
-    if !tx_opts.skip_confirm {
-        prompt_continue("create this abort reconfig proposal").await?;
-    }
+    prompt_continue("create this abort reconfig proposal", tx_opts).await?;
 
     let mut client = HashiClient::new(config).await?;
     let tx = client
@@ -685,14 +645,15 @@ pub async fn create_update_guardian_proposal(
         public_key.len(),
     );
 
-    println!("\n{}", "Creating Update Guardian Proposal:".bold());
-    println!("  URL:        {}", url);
-    println!("  Public Key: 0x{}", hex::encode(&public_key));
+    print_detail(&format!(
+        "\n{}",
+        "Creating Update Guardian Proposal:".bold()
+    ));
+    print_detail(&format!("  URL:        {}", url));
+    print_detail(&format!("  Public Key: 0x{}", hex::encode(&public_key)));
     print_metadata(&metadata);
 
-    if !tx_opts.skip_confirm {
-        prompt_continue("create this update guardian proposal").await?;
-    }
+    prompt_continue("create this update guardian proposal", tx_opts).await?;
 
     let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateGuardian {
@@ -798,12 +759,19 @@ fn print_proposal_detailed(
     println!("{}", "━".repeat(60).dimmed());
 }
 
-/// Pause for user acknowledgement. Press enter to proceed, Ctrl+C to cancel.
-async fn prompt_continue(action: &str) -> Result<()> {
+/// Pause for user acknowledgement before an actual execution. No-op when the
+/// user passed `-y/--yes`, or in dry-run / serialize-unsigned mode — those
+/// change no on-chain state, and serialize mode must keep stdout clean.
+async fn prompt_continue(action: &str, tx_opts: &TxOptions) -> Result<()> {
+    use crate::sui_tx_executor::TxMode;
     use tokio::io::AsyncBufReadExt;
     use tokio::io::BufReader;
 
-    println!(
+    if tx_opts.skip_confirm || tx_opts.mode() != TxMode::Execute {
+        return Ok(());
+    }
+
+    eprintln!(
         "\n{}",
         format!("Press enter to {action}, or Ctrl+C to cancel...").yellow()
     );
