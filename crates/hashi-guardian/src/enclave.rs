@@ -203,23 +203,6 @@ impl EnclaveConfig {
         self.enclave_btc_keypair.get().is_some()
     }
 
-    pub fn is_hashi_btc_master_pubkey_set(&self) -> bool {
-        self.hashi_btc_master_pubkey.get().is_some()
-    }
-
-    /// Operator_init base config is complete: S3 logger and network are set.
-    /// (The withdrawal-serving `EnclaveInitState` is separate and optional.)
-    pub fn is_operator_init_complete(&self) -> bool {
-        self.s3_logger.get().is_some() && self.btc_network.get().is_some()
-    }
-
-    /// Check if any operator_init config field has been set
-    pub fn is_operator_init_partially_complete(&self) -> bool {
-        self.s3_logger.get().is_some()
-            || self.btc_network.get().is_some()
-            || self.is_hashi_btc_master_pubkey_set()
-    }
-
     /// Provisioner_init config is complete: the reconstructed BTC keypair is set.
     pub fn is_provisioner_init_complete(&self) -> bool {
         self.is_enclave_btc_keypair_set()
@@ -335,7 +318,7 @@ impl EnclaveState {
         Some(*limiter.lock().await.state())
     }
 
-    pub async fn limiter_config(&self) -> Option<hashi_types::guardian::LimiterConfig> {
+    pub async fn limiter_config(&self) -> Option<LimiterConfig> {
         let limiter = self.rate_limiter.get()?;
         Some(*limiter.lock().await.config())
     }
@@ -378,26 +361,39 @@ impl Enclave {
     }
 
     pub fn is_operator_init_complete(&self) -> bool {
-        let base = self.config.is_operator_init_complete()
-            && self.scratchpad.secret_sharing_instance.get().is_some()
-            && self
-                .scratchpad
-                .operator_init_logging_complete
-                .get()
-                .is_some();
-        // A normal (withdrawal-serving) enclave also needs the operator-supplied
-        // EnclaveInitState, recorded as the state_hash; a ceremony enclave does not.
-        if self.config.ceremony_mode {
-            base
-        } else {
-            base && self.scratchpad.state_hash.get().is_some()
-        }
+        let logged = self
+            .scratchpad
+            .operator_init_logging_complete
+            .get()
+            .is_some();
+        // commit_operator_init sets this flag last in an all-or-nothing commit, so
+        // a set flag implies every installed field is present. The debug-only
+        // backstop catches a future change that sets the flag without the state
+        // (e.g. reordering the commit). The converse can fail transiently if a
+        // commit panicked after the sets but before logging, so it is not asserted.
+        debug_assert!(
+            !logged || self.operator_init_state_installed(),
+            "operator_init_logging_complete set but operator_init state is incomplete"
+        );
+        logged
     }
 
-    pub fn is_operator_init_partially_complete(&self) -> bool {
-        self.config.is_operator_init_partially_complete()
-            || self.scratchpad.secret_sharing_instance.get().is_some()
-            || self.scratchpad.state_hash.get().is_some()
+    /// Whether every field operator_init installs is present (mode-aware). Only
+    /// used to assert the `operator_init_logging_complete` invariant above.
+    fn operator_init_state_installed(&self) -> bool {
+        let base = self.config.s3_logger.get().is_some()
+            && self.config.btc_network.get().is_some()
+            && self.scratchpad.secret_sharing_instance.get().is_some();
+        if self.config.ceremony_mode {
+            // Ceremony enclaves (setup_new_key/rotate_kps) carry no EnclaveInitState.
+            base
+        } else {
+            // Normal enclaves additionally install the EnclaveInitState.
+            base && self.scratchpad.state_hash.get().is_some()
+                && self.config.hashi_btc_master_pubkey.get().is_some()
+                && self.state.get_committee().is_ok()
+                && self.state.rate_limiter.get().is_some()
+        }
     }
 
     pub fn is_fully_initialized(&self) -> bool {

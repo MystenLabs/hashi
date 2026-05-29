@@ -17,36 +17,101 @@ use std::sync::Arc;
 use tracing::info;
 use GuardianError::*;
 
-/// Receives S3 API keys, secret-sharing instance, BTC network, and the
-/// `EnclaveInitState` (committee, limiter, withdrawal config, BTC master pubkey);
-/// installs them and fixes the `state_hash`. Errors on malformed/dup calls, panics otherwise.
+/// Validated, fully-built inputs for the commit phase of `operator_init`. Building
+/// this is the fallible part; committing it is not.
+struct OperatorInitCommit {
+    logger: S3Logger,
+    network: bitcoin::Network,
+    secret_sharing_instance: SecretSharingInstance,
+    /// Normal-mode `EnclaveInitState`, built and ready to install; `None` for a
+    /// ceremony enclave.
+    init_state: Option<InitStateInstall>,
+}
+
+/// The normal-mode `EnclaveInitState` pieces, ready to install on the enclave.
+struct InitStateInstall {
+    state_hash: [u8; 32],
+    hashi_btc_master_pubkey: HashiMasterG,
+    committee: HashiCommittee,
+    rate_limiter: RateLimiter,
+}
+
+/// Receives S3 API keys, secret-sharing instance, BTC network, and — for a normal
+/// (withdrawal-serving) enclave — the `EnclaveInitState`; installs them and fixes
+/// the `state_hash`.
+///
+/// Invariant: operator_init never returns an `Err` from a partially-initialized
+/// enclave. Every fallible step (request validation, S3 connectivity, rate-limiter
+/// construction) runs before any state is mutated, so an early `Err` leaves the
+/// enclave untouched and retryable. The mutation then happens entirely in
+/// `commit_operator_init`, which returns `()` — it cannot report an error, so a
+/// half-mutated enclave is never observed via an `Err`.
 pub async fn operator_init(
     enclave: Arc<Enclave>,
     request: OperatorInitRequest,
 ) -> GuardianResult<()> {
     info!("/operator_init - Received request.");
 
-    // Serialize: hold the control lock across the check-then-set so concurrent
-    // callers can't both pass validation and then race the config `.set()`s.
+    // Serialize so concurrent callers can't race the check-then-commit below.
     let _guard = enclave.control_lock.lock().await;
 
-    // Validation
     if enclave.is_operator_init_complete() {
-        return Err(InvalidInputs("Operator init finished".into()));
+        return Err(InvalidInputs("operator_init already complete".into()));
     }
-    if enclave.is_operator_init_partially_complete() {
-        // shouldn't reach inside as we panic
-        unreachable!("Operator init did not fully complete.");
-    }
-    info!("Enclave state validated.");
 
-    // A normal enclave must carry the init state and a ceremony enclave must not;
-    // reject the mismatch up front so no half-initialized state is left behind.
+    // ---- Validate & build: Nothing in this phase mutates enclave state, so any
+    // error here leaves the enclave untouched. ----
+
+    // A normal enclave must carry the init state and a ceremony enclave must not.
     request.validate(enclave.ceremony_mode())?;
 
     let (s3_config, secret_sharing_instance, network, state) = request.into_parts();
     let logger = S3Logger::new_checked(&s3_config).await?;
     info!("S3 connectivity check complete.");
+
+    // Build the normal-mode EnclaveInitState pieces (incl. the rate limiter, the
+    // last fallible step) up front; `None` for a ceremony enclave.
+    let init_state = match state {
+        Some(state) => {
+            let state_hash = state.digest();
+            let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) =
+                state.into_parts();
+            let rate_limiter = RateLimiter::new(limiter_config, limiter_state)?;
+            Some(InitStateInstall {
+                state_hash,
+                hashi_btc_master_pubkey,
+                committee,
+                rate_limiter,
+            })
+        }
+        None => None,
+    };
+
+    // ---- All-or-nothing Commit: Nothing in this phase errors out. ----
+    commit_operator_init(
+        &enclave,
+        OperatorInitCommit {
+            logger,
+            network,
+            secret_sharing_instance,
+            init_state,
+        },
+    )
+    .await;
+    Ok(())
+}
+
+/// Install the validated config on the enclave and write the operator_init logs.
+/// Infallible by design (returns `()`, see the `operator_init` invariant): every
+/// `set` here runs on a fresh enclave under the control lock, and the I/O steps
+/// (attestation, S3 logging) panic on failure rather than return.
+async fn commit_operator_init(enclave: &Enclave, commit: OperatorInitCommit) {
+    let OperatorInitCommit {
+        logger,
+        network,
+        secret_sharing_instance,
+        init_state,
+    } = commit;
 
     info!("Storing S3 configuration.");
     enclave
@@ -76,16 +141,13 @@ pub async fn operator_init(
         .set_secret_sharing_instance(secret_sharing_instance)
         .expect("Unable to set secret-sharing instance");
 
-    // Install the operator-supplied init state and bind its digest as the
-    // state_hash — the AAD every KP's share submission must match. Only a
-    // withdrawal-serving (normal-mode) enclave carries this; ceremony-mode
-    // enclaves (setup/rotate) leave it unset.
-    if let Some(state) = state {
-        let state_hash = state.digest();
-        let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) =
-            state.into_parts();
-        let rate_limiter = RateLimiter::new(limiter_config, limiter_state)?;
-
+    if let Some(InitStateInstall {
+        state_hash,
+        hashi_btc_master_pubkey,
+        committee,
+        rate_limiter,
+    }) = init_state
+    {
         info!("Setting state hash.");
         enclave
             .set_state_hash(state_hash)
@@ -128,7 +190,6 @@ pub async fn operator_init(
         .expect("operator_init_logging_complete should only be set once");
 
     info!("Operator initialization complete.");
-    Ok(())
 }
 
 /// Receives one KP's encrypted share. Decrypts it under the enclave's state_hash
@@ -263,6 +324,53 @@ mod tests {
         )
         .await;
         (shares, enclave)
+    }
+
+    /// Run commit_operator_init on a fresh enclave for the given mode (normal =>
+    /// carries the EnclaveInitState; ceremony => none).
+    async fn commit_for_mode(ceremony_mode: bool) -> Arc<Enclave> {
+        let enclave = Arc::new(Enclave::new(
+            GuardianSignKeyPair::new(rand::thread_rng()),
+            GuardianEncKeyPair::random(&mut rand::thread_rng()),
+            ceremony_mode,
+        ));
+
+        let args = OperatorInitTestArgs::default();
+        let init_state = (!ceremony_mode).then(|| {
+            let state_hash = args.init_state.digest();
+            let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) =
+                args.init_state.clone().into_parts();
+            InitStateInstall {
+                state_hash,
+                hashi_btc_master_pubkey,
+                committee,
+                rate_limiter: RateLimiter::new(limiter_config, limiter_state).unwrap(),
+            }
+        });
+
+        commit_operator_init(
+            &enclave,
+            OperatorInitCommit {
+                logger: args.s3_logger,
+                network: args.network,
+                secret_sharing_instance: args.secret_sharing_instance,
+                init_state,
+            },
+        )
+        .await;
+        enclave
+    }
+
+    #[tokio::test]
+    async fn commit_marks_operator_init_complete_normal_mode() {
+        let enclave = commit_for_mode(false).await;
+        assert!(enclave.is_operator_init_complete());
+    }
+
+    #[tokio::test]
+    async fn commit_marks_operator_init_complete_ceremony_mode() {
+        let enclave = commit_for_mode(true).await;
+        assert!(enclave.is_operator_init_complete());
     }
 
     #[tokio::test]
