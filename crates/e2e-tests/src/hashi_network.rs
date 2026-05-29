@@ -246,6 +246,23 @@ impl HashiNetwork {
         node.start().await?;
         Ok(())
     }
+
+    /// Start every validator that isn't already running, staggered to avoid the
+    /// Kyoto peer-ban cascade on regtest. Does NOT register them on-chain —
+    /// registration is the operator's responsibility (e.g. via the CLI in
+    /// localnet `--manual` mode); a node that boots already-registered simply
+    /// publishes its next-epoch keys and proceeds to genesis.
+    pub async fn start_pending_validators(&mut self) -> Result<()> {
+        let mut first = true;
+        for node in self.nodes.iter_mut().filter(|n| !n.is_running()) {
+            if !first {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            first = false;
+            node.start().await?;
+        }
+        Ok(())
+    }
 }
 
 pub struct HashiNetworkBuilder {
@@ -432,27 +449,31 @@ impl HashiNetworkBuilder {
 
         // Wait for the initial committee to appear on-chain, which indicates
         // that the genesis bootstrap (start_reconfig → DKG → end_reconfig)
-        // has completed.
-        let genesis_timeout = std::time::Duration::from_secs(120);
-        tokio::time::timeout(genesis_timeout, async {
-            loop {
-                if let Some(onchain) = nodes[0].hashi().onchain_state_opt()
-                    && onchain.current_committee().is_some()
-                    && onchain
-                        .state()
-                        .hashi()
-                        .committees
-                        .pending_epoch_change()
-                        .is_none()
-                {
-                    break;
+        // has completed. Skipped when no nodes are started up front (e.g.
+        // localnet `--manual` mode, where registration is driven externally
+        // before the validators are launched).
+        if initially_active > 0 {
+            let genesis_timeout = std::time::Duration::from_secs(120);
+            tokio::time::timeout(genesis_timeout, async {
+                loop {
+                    if let Some(onchain) = nodes[0].hashi().onchain_state_opt()
+                        && onchain.current_committee().is_some()
+                        && onchain
+                            .state()
+                            .hashi()
+                            .committees
+                            .pending_epoch_change()
+                            .is_none()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(POLL_INTERVAL).await;
                 }
-                tokio::time::sleep(POLL_INTERVAL).await;
-            }
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("Timed out waiting for initial committee to form"))?;
-        debug!("Initial committee formed on-chain");
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("Timed out waiting for initial committee to form"))?;
+            debug!("Initial committee formed on-chain");
+        }
 
         Ok(HashiNetwork {
             ids: hashi_ids,
