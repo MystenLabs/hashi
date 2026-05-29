@@ -11,7 +11,6 @@ use bitcoin::ScriptBuf;
 
 use bitcoin::secp256k1::XOnlyPublicKey;
 use fastcrypto::groups::secp256k1::ProjectivePoint;
-use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::G;
@@ -19,28 +18,28 @@ use hashi_types::guardian::bitcoin_utils;
 use hashi_types::proto::MemberSignature;
 use thiserror::Error;
 
-/// Derive a deposit address from a compressed MPC public key (33-byte ProjectivePoint),
-/// an optional derivation path, and the target Bitcoin network.
+pub(crate) fn path_bytes_or_zero(derivation_path: Option<&sui_sdk_types::Address>) -> [u8; 32] {
+    derivation_path.map(|p| p.into_inner()).unwrap_or([0u8; 32])
+}
+
+/// `tr(NUMS, multi_a(2, guardian_btc_pubkey, derive(mpc_pubkey, path)))`.
+/// `path = None` (change address) maps to a zero-byte path so deposit
+/// and withdrawal sides agree on the leaf key without a special case.
+///
+/// `mpc_key` is the raw MPC verifying key (`G`). The derivation is taken
+/// directly against this point — using only the x-only projection would
+/// silently force the parent to even-y and produce a different child key
+/// for ~half of all MPC vks, breaking the 2-of-2 leaf script.
 pub fn derive_deposit_address(
     mpc_key: &ProjectivePoint,
+    guardian_btc_pubkey: &XOnlyPublicKey,
     derivation_path: Option<&sui_sdk_types::Address>,
     btc_network: bitcoin::Network,
 ) -> anyhow::Result<bitcoin::Address> {
-    let xonly = if let Some(path) = derivation_path {
-        let derived = fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(
-            mpc_key,
-            &path.into_inner(),
-        );
-        XOnlyPublicKey::from_slice(&derived.to_byte_array()).context("valid 32-byte x-only key")?
-    } else {
-        let schnorr_pk = SchnorrPublicKey::try_from(mpc_key)
-            .context("Failed to convert MPC key to schnorr key")?;
-        XOnlyPublicKey::from_slice(&schnorr_pk.to_byte_array())
-            .context("Failed to parse x-only key")?
-    };
-
-    Ok(bitcoin_utils::single_key_taproot_script_path_address(
-        &xonly,
+    Ok(bitcoin_utils::two_of_two_taproot_script_path_address(
+        guardian_btc_pubkey,
+        mpc_key,
+        &path_bytes_or_zero(derivation_path),
         btc_network,
     ))
 }
@@ -220,9 +219,8 @@ impl Hashi {
                     ))
                 },
             )?;
-        let hashi_pubkey = self.get_hashi_pubkey().map_err(DepositError::NotReady)?;
         let expected_address = self
-            .get_deposit_address(&hashi_pubkey, deposit_request.utxo.derivation_path.as_ref())
+            .get_deposit_address(deposit_request.utxo.derivation_path.as_ref())
             .map_err(DepositError::DepositDataMismatch)?;
 
         if deposit_address != expected_address {
@@ -236,73 +234,83 @@ impl Hashi {
 
     pub fn get_deposit_address(
         &self,
-        hashi_pubkey: &XOnlyPublicKey,
         derivation_path: Option<&sui_sdk_types::Address>,
     ) -> anyhow::Result<bitcoin::Address> {
-        let pubkey = self.deposit_pubkey(hashi_pubkey, derivation_path)?;
-        Ok(self.bitcoin_address_from_pubkey(&pubkey))
+        let mpc_g = self.mpc_master_g()?;
+        let guardian_pubkey = self.require_guardian_btc_pubkey()?;
+        let path_bytes = path_bytes_or_zero(derivation_path);
+        Ok(bitcoin_utils::two_of_two_taproot_script_path_address(
+            &guardian_pubkey,
+            &mpc_g,
+            &path_bytes,
+            self.config.bitcoin_network(),
+        ))
     }
 
+    /// 2-of-2 taproot leaf artifacts (script, control block, leaf hash)
+    /// for a deposit UTXO. Used by the withdrawal sighash and the
+    /// rebroadcast witness builder.
+    pub(crate) fn deposit_spend_artifacts(
+        &self,
+        derivation_path: Option<&sui_sdk_types::Address>,
+    ) -> anyhow::Result<(
+        bitcoin::ScriptBuf,
+        bitcoin::taproot::ControlBlock,
+        bitcoin::taproot::TapLeafHash,
+    )> {
+        let mpc_g = self.mpc_master_g()?;
+        let guardian_pubkey = self.require_guardian_btc_pubkey()?;
+        Ok(
+            bitcoin_utils::two_of_two_taproot_script_path_spend_artifacts(
+                &guardian_pubkey,
+                &mpc_g,
+                &path_bytes_or_zero(derivation_path),
+            ),
+        )
+    }
+
+    /// Raw MPC verifying key (`G`) with y-parity preserved. Prefers the
+    /// local signing manager (set immediately after DKG completes); falls
+    /// back to the on-chain key. Both sources point at the same value.
+    fn mpc_master_g(&self) -> anyhow::Result<G> {
+        self.signing_verifying_key()
+            .map(Ok)
+            .unwrap_or_else(|| self.onchain_verifying_key_g())
+            .context("MPC public key not available yet")
+    }
+
+    /// Hashi committee's child pubkey at `derivation_path`. `None` maps
+    /// to a zero-byte path (change outputs).
     pub(crate) fn deposit_pubkey(
         &self,
-        hashi_pubkey: &XOnlyPublicKey,
         derivation_path: Option<&sui_sdk_types::Address>,
     ) -> anyhow::Result<XOnlyPublicKey> {
-        if let Some(path) = derivation_path {
-            // Prefer the local signing manager (available after DKG preparation).
-            // Fall back to the on-chain key, which is guaranteed present once the
-            // initial committee has formed and `end_reconfig` has been processed.
-            let verifying_key = self
-                .signing_verifying_key()
-                .map(Ok)
-                .unwrap_or_else(|| self.onchain_verifying_key_g())
-                .context("MPC public key not available yet")?;
-            let derived = fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(
-                &verifying_key,
-                &path.into_inner(),
-            );
-            let pubkey = XOnlyPublicKey::from_slice(&derived.to_byte_array())
-                .context("valid 32-byte x-only key")?;
-            Ok(pubkey)
-        } else {
-            Ok(*hashi_pubkey)
-        }
-    }
-
-    pub(crate) fn bitcoin_address_from_pubkey(&self, pubkey: &XOnlyPublicKey) -> bitcoin::Address {
-        bitcoin_utils::single_key_taproot_script_path_address(pubkey, self.config.bitcoin_network())
-    }
-
-    pub fn get_hashi_pubkey(&self) -> anyhow::Result<XOnlyPublicKey> {
-        let g = self
-            .mpc_handle()
-            .context("MpcHandle not initialized")?
-            .public_key()
+        // Prefer the local signing manager (available after DKG preparation).
+        // Fall back to the on-chain key, which is guaranteed present once the
+        // initial committee has formed and `end_reconfig` has been processed.
+        let verifying_key = self
+            .signing_verifying_key()
+            .map(Ok)
+            .unwrap_or_else(|| self.onchain_verifying_key_g())
             .context("MPC public key not available yet")?;
-        // Convert G (ProjectivePoint, 33 bytes compressed) to SchnorrPublicKey (32 bytes x-only)
-        let schnorr_pk = SchnorrPublicKey::try_from(&g)
-            .map_err(|e| anyhow!("invalid group element for schnorr key: {e}"))?;
-        Ok(XOnlyPublicKey::from_slice(&schnorr_pk.to_byte_array())?)
+        let derived = fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(
+            &verifying_key,
+            &path_bytes_or_zero(derivation_path),
+        );
+        XOnlyPublicKey::from_slice(&derived.to_byte_array()).context("valid 32-byte x-only key")
     }
 
-    /// Read the MPC public key from on-chain state.
-    ///
-    /// Unlike `get_hashi_pubkey`, this does not depend on the node's local DKG
-    /// completion channel. The on-chain key is set during `end_reconfig` event
-    /// processing, so it is guaranteed to be present once the initial committee
-    /// has formed (i.e., after `HashiNetworkBuilder::build()` returns).
-    pub fn get_onchain_mpc_pubkey(&self) -> anyhow::Result<XOnlyPublicKey> {
-        let g = self.onchain_verifying_key_g()?;
-        let schnorr_pk = SchnorrPublicKey::try_from(&g)
-            .map_err(|e| anyhow!("invalid group element for schnorr key: {e}"))?;
-        Ok(XOnlyPublicKey::from_slice(&schnorr_pk.to_byte_array())?)
+    fn require_guardian_btc_pubkey(&self) -> anyhow::Result<XOnlyPublicKey> {
+        self.guardian_btc_pubkey()
+            .copied()
+            .ok_or_else(|| anyhow!("Guardian BTC pubkey not yet pinned"))
     }
 
     /// Deserialize the BCS-encoded MPC group element from on-chain state.
     ///
     /// The on-chain key is stored as `bcs::to_bytes(&G)` in the `CommitteeSet`
     /// and is populated atomically with the `end_reconfig` event.
-    fn onchain_verifying_key_g(&self) -> anyhow::Result<G> {
+    pub fn onchain_verifying_key_g(&self) -> anyhow::Result<G> {
         let bytes = self.onchain_state().mpc_public_key();
         anyhow::ensure!(
             !bytes.is_empty(),

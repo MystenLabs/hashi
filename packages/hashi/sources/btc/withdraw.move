@@ -46,10 +46,15 @@ public struct WithdrawalCommitmentMessage has copy, drop, store {
 }
 
 // MESSAGE STEP 3
+//
+// The cert binds both signature arrays — otherwise a malicious leader
+// could pair valid MPC sigs with garbage guardian sigs and the cert
+// would still pass.
 public struct WithdrawalSignedMessage has copy, drop, store {
     withdrawal_id: address,
     request_ids: vector<address>,
     signatures: vector<vector<u8>>,
+    guardian_signatures: vector<vector<u8>>,
 }
 
 // MESSAGE STEP 4
@@ -76,8 +81,14 @@ public(package) fun new_withdrawal_signed_message(
     withdrawal_id: address,
     request_ids: vector<address>,
     signatures: vector<vector<u8>>,
+    guardian_signatures: vector<vector<u8>>,
 ): WithdrawalSignedMessage {
-    WithdrawalSignedMessage { withdrawal_id, request_ids, signatures }
+    WithdrawalSignedMessage {
+        withdrawal_id,
+        request_ids,
+        signatures,
+        guardian_signatures,
+    }
 }
 
 public(package) fun new_withdrawal_confirmation_message(
@@ -246,6 +257,7 @@ entry fun sign_withdrawal(
     withdrawal_id: address,
     request_ids: vector<address>,
     signatures: vector<vector<u8>>,
+    guardian_signatures: vector<vector<u8>>,
     cert: CommitteeSignature,
 ) {
     hashi.config().assert_version_enabled();
@@ -253,14 +265,24 @@ entry fun sign_withdrawal(
     // Do not allow signing of withdrawals during a reconfiguration.
     hashi.assert_not_reconfiguring();
 
-    let approval = WithdrawalSignedMessage { withdrawal_id, request_ids, signatures };
+    let approval = WithdrawalSignedMessage {
+        withdrawal_id,
+        request_ids,
+        signatures,
+        guardian_signatures,
+    };
 
     hashi.verify(approval, cert);
 
-    let WithdrawalSignedMessage { withdrawal_id, signatures, .. } = approval;
+    let WithdrawalSignedMessage {
+        withdrawal_id,
+        signatures,
+        guardian_signatures,
+        ..,
+    } = approval;
 
     let queue = hashi.bitcoin_mut().withdrawal_queue_mut();
-    queue.sign_withdrawal_txn(withdrawal_id, signatures);
+    queue.sign_withdrawal_txn(withdrawal_id, signatures, guardian_signatures);
     queue.update_requests_signed(&request_ids);
 }
 

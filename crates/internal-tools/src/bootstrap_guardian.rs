@@ -19,6 +19,7 @@ use hashi::onchain::OnchainState;
 use hashi_types::guardian::BitcoinPubkey;
 use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GetGuardianInfoResponse;
+use hashi_types::guardian::HashiMasterG;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
@@ -206,13 +207,14 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         max_bucket_capacity: args.max_bucket_capacity_sats,
     };
     let limiter_state = LimiterState::genesis(&limiter_config);
-    let state = ProvisionerInitState::new(
-        committee,
-        limiter_config,
-        limiter_state,
-        material.master_pubkey,
-    )
-    .map_err(|e| anyhow!("build ProvisionerInitState: {e:?}"))?;
+    // The bootstrap utility builds the guardian's BTC keypair from a fresh
+    // bitcoin-lib keypair, which always signs against the even-y projection
+    // of its pubkey. Reconstruct the matching `G` point so downstream
+    // derivations agree on y-parity.
+    let master_g = HashiMasterG::with_even_y_from_x_be_bytes(&material.master_pubkey.serialize())
+        .map_err(|e| anyhow!("convert master pubkey to G: {e:?}"))?;
+    let state = ProvisionerInitState::new(committee, limiter_config, limiter_state, master_g)
+        .map_err(|e| anyhow!("build ProvisionerInitState: {e:?}"))?;
 
     for (i, share) in material.shares.iter().take(t).enumerate() {
         tracing::info!("submitting ProvisionerInit share {}/{t}", i + 1);

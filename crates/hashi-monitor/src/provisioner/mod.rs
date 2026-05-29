@@ -10,6 +10,7 @@ use hashi_guardian::s3_logger::S3Logger;
 use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;
+use hashi_types::guardian::HashiMasterG;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::ProvisionerInitState;
@@ -61,13 +62,15 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
     };
 
     let committee = cfg.hashi_committee.try_into()?;
-    let state = ProvisionerInitState::new(
-        committee,
-        cfg.limiter_config,
-        limiter_state,
-        cfg.hashi_btc_master_pubkey,
-    )
-    .map_err(|e| anyhow::anyhow!(e))?;
+    // Config holds the master pubkey as a 32-byte x-only key; reconstruct
+    // the even-y `G` so derivations match the BIP-340 even-y convention.
+    // TODO: extend the YAML to carry the y-parity bit (or the full 33-byte
+    // compressed pubkey) so this also handles odd-y MPC outputs.
+    let master_g =
+        HashiMasterG::with_even_y_from_x_be_bytes(&cfg.hashi_btc_master_pubkey.serialize())
+            .map_err(|e| anyhow::anyhow!("convert master pubkey to G: {e:?}"))?;
+    let state = ProvisionerInitState::new(committee, cfg.limiter_config, limiter_state, master_g)
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     let guardian_pub_key =
         EncPubKey::from_bytes(&guardian_info.encryption_pubkey).map_err(|e| anyhow::anyhow!(e))?;

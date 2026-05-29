@@ -14,6 +14,7 @@ use hashi_guardian::create_operator_initialized_enclave;
 use hashi_guardian::rpc::GuardianGrpc;
 use hashi_types::committee::Committee as HashiCommittee;
 use hashi_types::guardian::BitcoinPubkey;
+use hashi_types::guardian::HashiMasterG;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
@@ -77,7 +78,7 @@ impl GuardianHarness {
     pub async fn finalize(
         &self,
         committee: HashiCommittee,
-        master_pubkey: BitcoinPubkey,
+        master_pubkey: HashiMasterG,
         limiter_config: LimiterConfig,
         limiter_state: LimiterState,
     ) -> Result<()> {
@@ -103,6 +104,14 @@ impl GuardianHarness {
 
     pub fn enclave(&self) -> &Arc<Enclave> {
         &self.enclave
+    }
+
+    /// Generate (or return the already-generated) enclave BTC pubkey
+    /// without running provisioner-init. Used by e2e setup to publish
+    /// the pubkey on-chain before hashi DKG completes.
+    pub fn ensure_btc_pubkey(&self) -> Result<BitcoinPubkey> {
+        hashi_guardian::test_utils::set_or_get_enclave_btc_pubkey(&self.enclave)
+            .map_err(|e| anyhow::anyhow!("set_or_get_enclave_btc_pubkey: {e:?}"))
     }
 }
 

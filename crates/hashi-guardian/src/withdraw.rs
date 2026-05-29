@@ -215,10 +215,19 @@ mod tests {
     use crate::OperatorInitTestArgs;
     use bitcoin::Network;
     use hashi_types::guardian::test_utils::create_btc_keypair;
+    use hashi_types::guardian::BitcoinPubkey;
+    use hashi_types::guardian::HashiMasterG;
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::ProvisionerInitState;
     use hashi_types::guardian::StandardWithdrawalRequest;
+
+    /// Tests build their fake "hashi master" from a `bitcoin::Keypair`. The
+    /// bitcoin-lib keypair always signs against the even-y projection of its
+    /// pubkey, so reconstruct the `G` point with even-y so derivations agree.
+    fn hashi_master_g_from_btc_xonly(pubkey: &BitcoinPubkey) -> HashiMasterG {
+        HashiMasterG::with_even_y_from_x_be_bytes(&pubkey.serialize()).expect("valid x coordinate")
+    }
 
     /// Sets up an enclave with a single committee and token bucket limiter.
     async fn setup_fully_initialized_enclave(
@@ -233,7 +242,8 @@ mod tests {
 
         let enclave_kp = create_btc_keypair(&[8u8; 32]);
         let hashi_kp = create_btc_keypair(&[6u8; 32]);
-        let hashi_btc_master_pubkey = hashi_kp.x_only_public_key().0;
+        let hashi_btc_master_pubkey =
+            hashi_master_g_from_btc_xonly(&hashi_kp.x_only_public_key().0);
 
         enclave.config.set_btc_keypair(enclave_kp).unwrap();
         enclave

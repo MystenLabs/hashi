@@ -58,42 +58,32 @@ pub async fn run(action: DepositCommands, config: &CliConfig, tx_opts: &TxOption
     }
 }
 
-/// Parse raw on-chain MPC public key bytes and derive the deposit address.
+/// Parse raw on-chain MPC public key bytes and derive the 2-of-2 deposit address.
 pub fn cli_derive_deposit_address(
     mpc_pubkey_bytes: &[u8],
+    guardian_btc_pubkey_bytes: &[u8],
     recipient: Option<&sui_sdk_types::Address>,
     btc_network: bitcoin::Network,
 ) -> Result<bitcoin::Address> {
     use fastcrypto::groups::secp256k1::ProjectivePoint;
     use fastcrypto::serde_helpers::ToFromByteArray;
 
-    let mpc_key = match mpc_pubkey_bytes.len() {
-        33 => <ProjectivePoint as ToFromByteArray<33>>::from_byte_array(
-            mpc_pubkey_bytes
-                .try_into()
-                .context("MPC key must be 33 bytes")?,
-        )
-        .context("Failed to parse MPC key as ProjectivePoint")?,
-        32 => {
-            if recipient.is_some() {
-                anyhow::bail!(
-                    "Key derivation requires the full 33-byte compressed MPC key, \
-                     but only 32-byte x-only key is available"
-                );
-            }
-            let xonly = XOnlyPublicKey::from_slice(mpc_pubkey_bytes)
-                .context("Failed to parse 32-byte MPC key")?;
-            return Ok(
-                hashi_types::guardian::bitcoin_utils::single_key_taproot_script_path_address(
-                    &xonly,
-                    btc_network,
-                ),
-            );
-        }
-        n => anyhow::bail!("Unexpected MPC public key length: {} bytes", n),
-    };
+    anyhow::ensure!(
+        mpc_pubkey_bytes.len() == 33,
+        "MPC key must be 33 bytes (compressed), got {}",
+        mpc_pubkey_bytes.len(),
+    );
+    let mpc_key = <ProjectivePoint as ToFromByteArray<33>>::from_byte_array(
+        mpc_pubkey_bytes
+            .try_into()
+            .context("MPC key must be 33 bytes")?,
+    )
+    .context("Failed to parse MPC key as ProjectivePoint")?;
 
-    crate::deposits::derive_deposit_address(&mpc_key, recipient, btc_network)
+    let guardian_btc_pubkey = XOnlyPublicKey::from_slice(guardian_btc_pubkey_bytes)
+        .context("Guardian BTC pubkey must be 32 bytes (x-only)")?;
+
+    crate::deposits::derive_deposit_address(&mpc_key, &guardian_btc_pubkey, recipient, btc_network)
 }
 
 async fn generate_address(config: &CliConfig, recipient: &str) -> Result<()> {
@@ -103,6 +93,9 @@ async fn generate_address(config: &CliConfig, recipient: &str) -> Result<()> {
     if mpc_pubkey.is_empty() {
         anyhow::bail!("MPC public key not available on-chain. Has the committee completed DKG?");
     }
+    let guardian_btc_pubkey = client.fetch_guardian_btc_public_key().context(
+        "Guardian BTC pubkey is not yet on-chain. Did finish_publish run with --guardian-btc-public-key?",
+    )?;
 
     let is_change = recipient.is_empty();
     let recipient_addr = if is_change {
@@ -119,7 +112,12 @@ async fn generate_address(config: &CliConfig, recipient: &str) -> Result<()> {
         config.bitcoin.as_ref().and_then(|b| b.network.as_deref()),
     )?;
 
-    let address = cli_derive_deposit_address(&mpc_pubkey, recipient_addr.as_ref(), btc_network)?;
+    let address = cli_derive_deposit_address(
+        &mpc_pubkey,
+        &guardian_btc_pubkey,
+        recipient_addr.as_ref(),
+        btc_network,
+    )?;
 
     let title = if is_change {
         "Deposit Address (Change Address)"
@@ -238,13 +236,20 @@ async fn request_all(
                 "MPC public key not available on-chain. Has the committee completed DKG?"
             );
         }
+        let guardian_btc_pubkey = client.fetch_guardian_btc_public_key().context(
+            "Guardian BTC pubkey is not yet on-chain. Did finish_publish run with --guardian-btc-public-key?",
+        )?;
 
         let btc_network = crate::btc_monitor::config::parse_btc_network(
             config.bitcoin.as_ref().and_then(|b| b.network.as_deref()),
         )?;
 
-        let deposit_address =
-            cli_derive_deposit_address(&mpc_pubkey, derivation_path.as_ref(), btc_network)?;
+        let deposit_address = cli_derive_deposit_address(
+            &mpc_pubkey,
+            &guardian_btc_pubkey,
+            derivation_path.as_ref(),
+            btc_network,
+        )?;
 
         // Look up the transaction and find all matching outputs
         let raw_tx = btc_rpc

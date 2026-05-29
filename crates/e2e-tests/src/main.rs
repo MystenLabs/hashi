@@ -734,10 +734,22 @@ async fn cmd_deposit(amount: u64, recipient: Option<&str>, data_dir: &Path) -> R
         anyhow::bail!("MPC public key not available on-chain. Has the committee completed DKG?");
     }
 
-    // Derive deposit address
+    let guardian_btc_pubkey = onchain_state
+        .state()
+        .hashi()
+        .config
+        .guardian_btc_public_key()
+        .map(<[u8]>::to_vec)
+        .context(
+            "Guardian BTC pubkey not available on-chain. \
+             Did finish_publish run with --guardian-btc-public-key?",
+        )?;
+
+    // Derive deposit address (2-of-2 taproot)
     let btc_network = bitcoin::Network::Regtest;
     let deposit_address = hashi::cli::commands::deposit::cli_derive_deposit_address(
         &mpc_pubkey,
+        &guardian_btc_pubkey,
         Some(&recipient_addr),
         btc_network,
     )?;

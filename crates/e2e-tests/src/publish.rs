@@ -13,6 +13,7 @@ pub async fn publish(
     dir: &Path,
     client: &mut Client,
     private_key: &Ed25519PrivateKey,
+    guardian: &hashi::publish::GuardianConfig,
 ) -> Result<HashiIds> {
     let params = hashi::publish::BuildParams {
         sui_binary: sui_binary(),
@@ -27,7 +28,7 @@ pub async fn publish(
         private_key,
         compiled,
         bitcoin_chain_id,
-        None,
+        guardian,
         &hashi::publish::BitcoinConfigOverrides::default(),
     )
     .await

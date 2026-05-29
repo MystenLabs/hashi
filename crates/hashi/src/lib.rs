@@ -661,34 +661,24 @@ impl Hashi {
             let state = self.onchain_state().state();
             state.hashi().config.guardian_url().map(|s| s.to_string())
         }
-        .or_else(|| self.config.guardian_endpoint().map(|s| s.to_string()));
+        .or_else(|| self.config.guardian_endpoint().map(|s| s.to_string()))
+        .ok_or_else(|| {
+            anyhow!(
+                "Guardian is required: set `guardian_url` on-chain or \
+                 `guardian_endpoint` in local config / env override"
+            )
+        })?;
 
-        let guardian = if let Some(endpoint) = guardian_endpoint.as_deref() {
-            match grpc::guardian_client::GuardianClient::new(endpoint) {
-                Ok(client) => {
-                    let client = client.with_metrics(self.metrics.clone());
-                    tracing::info!("Guardian client configured for {}", client.endpoint());
-                    Some(client)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to configure guardian client for {}: {}",
-                        endpoint,
-                        e
-                    );
-                    None
-                }
-            }
-        } else {
-            tracing::info!("No guardian endpoint configured; guardian integration disabled");
-            None
-        };
+        let guardian = grpc::guardian_client::GuardianClient::new(&guardian_endpoint)
+            .map_err(|e| {
+                anyhow!("Failed to configure guardian client for {guardian_endpoint}: {e}")
+            })?
+            .with_metrics(self.metrics.clone());
+        tracing::info!("Guardian client configured for {}", guardian.endpoint());
 
-        self.metrics
-            .guardian_enabled
-            .set(if guardian.is_some() { 1 } else { 0 });
+        self.metrics.guardian_enabled.set(1);
         self.guardian_client
-            .set(guardian)
+            .set(Some(guardian))
             .map_err(|_| anyhow!("Guardian client already initialized"))?;
 
         // Verify the local bitcoin_chain_id matches the on-chain value.
