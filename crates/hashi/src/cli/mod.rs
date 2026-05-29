@@ -90,6 +90,30 @@ pub struct CliGlobalOpts {
     /// Simulate the transaction without executing (dry-run)
     #[clap(long)]
     pub dry_run: bool,
+
+    /// Build the transaction and print it as base64 (BCS `TransactionData`)
+    /// instead of signing/executing. The unsigned transaction is the only thing
+    /// written to stdout, ready for `sui keytool sign` + `sui client
+    /// execute-signed-tx` (e.g. multisig). No keypair required; pair with
+    /// --sender to set the signing address.
+    #[clap(long, conflicts_with = "dry_run")]
+    pub serialize_unsigned_transaction: bool,
+
+    /// Sender address to build the transaction for (e.g. a multisig address).
+    /// Defaults to the configured keypair's address; required when serializing
+    /// or dry-running without a keypair.
+    #[clap(long)]
+    pub sender: Option<String>,
+
+    /// Pin the gas coin (object id) used to pay for the transaction. Only the
+    /// id is needed. Defaults to fullnode gas selection, or `gas_coin` from the
+    /// config file.
+    #[clap(long)]
+    pub gas: Option<String>,
+
+    /// Gas price override in MIST per unit. Defaults to the reference gas price.
+    #[clap(long)]
+    pub gas_price: Option<u64>,
 }
 
 #[derive(Subcommand)]
@@ -453,9 +477,41 @@ pub struct TxOptions {
     pub skip_confirm: bool,
     /// If true, simulate the transaction without executing
     pub dry_run: bool,
+    /// If true, build and print the unsigned transaction as base64 instead of
+    /// signing/executing it.
+    pub serialize_unsigned: bool,
+    /// Explicit sender address (e.g. a multisig). `None` => derive from the
+    /// configured keypair.
+    pub sender: Option<sui_sdk_types::Address>,
+    /// Pin a specific gas coin object id (`None` => fullnode gas selection).
+    pub gas_object: Option<sui_sdk_types::Address>,
+    /// Gas price override in MIST/unit (`None` => reference price).
+    pub gas_price: Option<u64>,
 }
 
 impl TxOptions {
+    /// The finalization mode implied by the flags. `--serialize-unsigned-transaction`
+    /// wins over `--dry-run` (they are also mutually exclusive at the clap layer).
+    pub fn mode(&self) -> crate::sui_tx_executor::TxMode {
+        use crate::sui_tx_executor::TxMode;
+        if self.serialize_unsigned {
+            TxMode::SerializeUnsigned
+        } else if self.dry_run {
+            TxMode::DryRun
+        } else {
+            TxMode::Execute
+        }
+    }
+
+    /// The manual gas overrides implied by the flags.
+    pub fn gas_overrides(&self) -> crate::sui_tx_executor::GasOverrides {
+        crate::sui_tx_executor::GasOverrides {
+            gas_object: self.gas_object,
+            gas_budget: self.gas_budget,
+            gas_price: self.gas_price,
+        }
+    }
+
     /// Get gas budget, using the provided estimate if not explicitly set
     pub fn gas_budget_or(&self, estimate: u64) -> u64 {
         self.gas_budget.unwrap_or(estimate)
@@ -467,6 +523,65 @@ impl TxOptions {
             // Add 20% safety margin to estimates
             estimate.saturating_mul(120).saturating_div(100)
         })
+    }
+}
+
+#[cfg(test)]
+mod tx_options_tests {
+    use super::TxOptions;
+    use crate::sui_tx_executor::TxMode;
+
+    fn base() -> TxOptions {
+        TxOptions {
+            gas_budget: None,
+            skip_confirm: false,
+            dry_run: false,
+            serialize_unsigned: false,
+            sender: None,
+            gas_object: None,
+            gas_price: None,
+        }
+    }
+
+    #[test]
+    fn mode_defaults_to_execute() {
+        assert_eq!(base().mode(), TxMode::Execute);
+    }
+
+    #[test]
+    fn dry_run_maps_to_dry_run() {
+        let opts = TxOptions {
+            dry_run: true,
+            ..base()
+        };
+        assert_eq!(opts.mode(), TxMode::DryRun);
+    }
+
+    #[test]
+    fn serialize_unsigned_wins_over_dry_run() {
+        // The flags are mutually exclusive at the clap layer, but if both were
+        // set, serialize-unsigned must take precedence (we never execute).
+        let opts = TxOptions {
+            serialize_unsigned: true,
+            dry_run: true,
+            ..base()
+        };
+        assert_eq!(opts.mode(), TxMode::SerializeUnsigned);
+    }
+
+    #[test]
+    fn gas_overrides_pass_through() {
+        let gas = sui_sdk_types::Address::from_static("0x2");
+        let opts = TxOptions {
+            gas_object: Some(gas),
+            gas_budget: Some(123),
+            gas_price: Some(7),
+            ..base()
+        };
+        let overrides = opts.gas_overrides();
+        assert_eq!(overrides.gas_object, Some(gas));
+        assert_eq!(overrides.gas_budget, Some(123));
+        assert_eq!(overrides.gas_price, Some(7));
     }
 }
 
@@ -562,10 +677,12 @@ pub struct RegisterOpts {
     #[clap(long)]
     pub operator_address: Option<String>,
 
-    /// Print the unsigned transaction as base64 instead of executing it.
-    /// Useful for signing with a hardware wallet. No private key is required.
-    #[clap(long)]
-    pub print_only: bool,
+    /// Build the transaction and print it as base64 (BCS `TransactionData`)
+    /// instead of executing it — for offline / multisig signing via
+    /// `sui keytool sign`. No private key required. (`--print-only` is a
+    /// deprecated alias.)
+    #[clap(long = "serialize-unsigned-transaction", alias = "print-only")]
+    pub serialize_unsigned: bool,
 
     /// Enable verbose output
     #[clap(long, short)]
@@ -625,11 +742,33 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
         btc_overrides,
     )?;
 
+    let sender = opts
+        .sender
+        .as_deref()
+        .map(str::parse::<sui_sdk_types::Address>)
+        .transpose()
+        .context("Invalid --sender address")?;
+    let gas_object = opts
+        .gas
+        .as_deref()
+        .map(str::parse::<sui_sdk_types::Address>)
+        .transpose()
+        .context("Invalid --gas object id")?
+        .or(config.gas_coin);
+
     let tx_opts = TxOptions {
         gas_budget: opts.gas_budget,
         skip_confirm: opts.yes,
         dry_run: opts.dry_run,
+        serialize_unsigned: opts.serialize_unsigned_transaction,
+        sender,
+        gas_object,
+        gas_price: opts.gas_price,
     };
+
+    // In serialize-unsigned mode, keep stdout clean (base64 only) by sending
+    // all human-readable notes to stderr.
+    set_notes_to_stderr(tx_opts.serialize_unsigned);
 
     match command {
         CliCommand::Proposal { action } => match action {
@@ -843,19 +982,102 @@ fn init_tracing(verbose: bool) {
         .init();
 }
 
+/// When set, human-readable notes/summaries are written to stderr instead of
+/// stdout. This is enabled in `--serialize-unsigned-transaction` mode so that
+/// stdout carries only the base64 unsigned transaction (safe to pipe into
+/// `sui keytool sign`).
+static NOTES_TO_STDERR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Route human-readable notes/summaries to stderr (keeping stdout clean for
+/// machine-readable output). Call once when entering a serialize-unsigned flow.
+pub fn set_notes_to_stderr(enabled: bool) {
+    NOTES_TO_STDERR.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn notes_to_stderr() -> bool {
+    NOTES_TO_STDERR.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Print a human-readable note/summary line. Goes to stderr in serialize mode
+/// (so stdout stays clean for the base64 transaction), stdout otherwise.
+pub fn print_detail(msg: &str) {
+    if notes_to_stderr() {
+        eprintln!("{msg}");
+    } else {
+        println!("{msg}");
+    }
+}
+
 /// Print a success message
 pub fn print_success(msg: &str) {
-    println!("{} {}", "✓".green().bold(), msg);
+    print_detail(&format!("{} {}", "✓".green().bold(), msg));
 }
 
 /// Print an info message
 pub fn print_info(msg: &str) {
-    println!("{} {}", "ℹ".blue().bold(), msg);
+    print_detail(&format!("{} {}", "ℹ".blue().bold(), msg));
 }
 
 /// Print a warning message
 pub fn print_warning(msg: &str) {
-    println!("{} {}", "⚠".yellow().bold(), msg);
+    print_detail(&format!("{} {}", "⚠".yellow().bold(), msg));
+}
+
+/// Render the result of a finalized transaction and return the execution
+/// response when one was produced (execute mode only). The serialized unsigned
+/// transaction is the only thing written to stdout; everything else is a note.
+pub fn print_tx_outcome(
+    outcome: crate::sui_tx_executor::TxOutcome,
+) -> Option<Box<sui_rpc::proto::sui::rpc::v2::ExecuteTransactionResponse>> {
+    use crate::sui_tx_executor::TxOutcome;
+    match outcome {
+        TxOutcome::Serialized(tx_base64) => {
+            println!("{tx_base64}");
+            None
+        }
+        TxOutcome::Simulated {
+            sender,
+            gas_budget,
+            gas_price,
+        } => {
+            print_detail(&format!("\n{}", "🔍 Dry-run Results:".bold()));
+            print_detail(&format!(
+                "  {} {}",
+                "Sender:".dimmed(),
+                sender.to_hex().cyan()
+            ));
+            print_detail(&format!(
+                "  {} {} MIST",
+                "Gas Budget:".dimmed(),
+                gas_budget.to_string().cyan()
+            ));
+            print_detail(&format!(
+                "  {} {} MIST/unit",
+                "Gas Price:".dimmed(),
+                gas_price.to_string().cyan()
+            ));
+            let max_cost_sui = (gas_budget as f64) / 1_000_000_000.0;
+            print_detail(&format!(
+                "  {} {:.6} SUI",
+                "Max Cost:".dimmed(),
+                format!("{max_cost_sui:.6}").yellow()
+            ));
+            print_detail(&format!(
+                "\n  {} Transaction simulated successfully (not executed).",
+                "✓".green()
+            ));
+            None
+        }
+        TxOutcome::Executed(response) => {
+            let digest = response.transaction().digest();
+            print_detail(&format!(
+                "\n{} Transaction submitted: {}",
+                "✓".green(),
+                digest.to_string().cyan()
+            ));
+            Some(response)
+        }
+    }
 }
 
 /// Print an in-progress status line (no newline) that can be overwritten.
@@ -976,6 +1198,9 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
 
     init_tracing(opts.verbose);
 
+    // In serialize mode keep stdout clean (base64 only); notes go to stderr.
+    set_notes_to_stderr(opts.serialize_unsigned);
+
     // Load the validator config
     let config = crate::config::Config::load(&opts.config)?;
 
@@ -997,7 +1222,7 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
     print_info(&format!("Validator address: {validator_address}"));
     print_info(&format!("Sui RPC: {sui_rpc_url}"));
 
-    if opts.print_only {
+    if opts.serialize_unsigned {
         // Build the transaction and print as base64 without executing.
         // No private key is required for this path.
         let mut client = sui_rpc::Client::new(&sui_rpc_url)?;

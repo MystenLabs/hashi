@@ -139,12 +139,14 @@ async fn generate_address(config: &CliConfig, recipient: &str) -> Result<()> {
 
 async fn request(
     config: &CliConfig,
-    _tx_opts: &TxOptions,
+    tx_opts: &TxOptions,
     txid: &str,
     vout: u32,
     amount: u64,
     recipient: Option<&str>,
 ) -> Result<()> {
+    use crate::sui_tx_executor::TxMode;
+
     config.validate()?;
 
     let hashi_ids = crate::config::HashiIds {
@@ -152,49 +154,91 @@ async fn request(
         hashi_object_id: config.hashi_object_id(),
     };
 
-    let signer = config
-        .load_keypair()?
-        .context("Keypair required for deposit request. Set keypair_path in config.")?;
+    // A keypair is optional: serialize/dry-run only need the sender address.
+    let signer = config.load_keypair()?;
+    if tx_opts.mode() == TxMode::Execute && signer.is_none() {
+        anyhow::bail!(
+            "Keypair required to submit a deposit request (set keypair_path in config), \
+             or use --serialize-unsigned-transaction to emit an unsigned transaction."
+        );
+    }
 
+    // Sender: explicit --sender (e.g. a multisig), else the keypair's address.
+    let sender = tx_opts
+        .sender
+        .or_else(|| signer.as_ref().map(|s| s.public_key().derive_address()));
+
+    // hBTC recipient defaults to the sender when not given explicitly.
     let derivation_path = match recipient {
         Some(r) => Some(
             r.parse::<sui_sdk_types::Address>()
                 .context("Invalid recipient Sui address")?,
         ),
         None => {
-            let addr = signer.public_key().derive_address();
-            print_info(&format!(
-                "No --recipient specified, defaulting to signer address {}",
-                addr
-            ));
+            let addr = sender.context(
+                "No --recipient given and no sender to default to; pass --recipient, \
+                 --sender, or configure a keypair",
+            )?;
+            print_info(&format!("No --recipient specified, defaulting to {addr}"));
             Some(addr)
         }
     };
 
-    let client = sui_rpc::Client::new(&config.sui_rpc_url)?;
-    let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
-
     let parsed_txid: bitcoin::Txid = txid.parse().context("Invalid txid")?;
     let txid_address = sui_sdk_types::Address::new(parsed_txid.to_byte_array());
 
-    print_info("Submitting deposit request on Sui...");
+    let builder = crate::sui_tx_executor::build_create_deposit_request(
+        hashi_ids,
+        txid_address,
+        vout,
+        amount,
+        derivation_path,
+    );
 
-    let request_id = executor
-        .execute_create_deposit_request(txid_address, vout, amount, derivation_path)
-        .await?;
+    match tx_opts.mode() {
+        TxMode::SerializeUnsigned => print_info("Building unsigned deposit request..."),
+        TxMode::DryRun => print_info("Simulating deposit request (dry-run)..."),
+        TxMode::Execute => print_info("Submitting deposit request on Sui..."),
+    }
 
-    print_success(&format!("Deposit request created: {}", request_id));
+    let mut client = sui_rpc::Client::new(&config.sui_rpc_url)?;
+    let outcome = crate::sui_tx_executor::finalize(
+        &mut client,
+        signer.as_ref(),
+        builder,
+        sender,
+        &tx_opts.gas_overrides(),
+        tx_opts.mode(),
+        std::time::Duration::from_secs(10),
+    )
+    .await?;
+
+    if let Some(response) = crate::cli::print_tx_outcome(outcome) {
+        let request_id = crate::sui_tx_executor::deposit_request_id_from_response(&response)?;
+        print_success(&format!("Deposit request created: {request_id}"));
+    }
 
     Ok(())
 }
 
 async fn request_all(
     config: &CliConfig,
-    _tx_opts: &TxOptions,
+    tx_opts: &TxOptions,
     txid: &str,
     outputs: Option<&str>,
     recipient: Option<&str>,
 ) -> Result<()> {
+    // This batches outputs into one transaction per ~333 deposits, so it can't
+    // emit a single unsigned/dry-run transaction. Direct the user to the
+    // per-output command for those modes.
+    if tx_opts.mode() != crate::sui_tx_executor::TxMode::Execute {
+        anyhow::bail!(
+            "`deposit request` builds one transaction per batch of outputs and cannot emit a \
+             single unsigned or dry-run transaction. Use `deposit request-single` per output \
+             with --serialize-unsigned-transaction or --dry-run."
+        );
+    }
+
     config.validate()?;
 
     let hashi_ids = crate::config::HashiIds {
