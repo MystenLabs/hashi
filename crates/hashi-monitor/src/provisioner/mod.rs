@@ -8,15 +8,21 @@ mod limiter_recovery;
 use anyhow::Context;
 use hashi_guardian::s3_logger::S3Logger;
 use hashi_types::guardian::EncPubKey;
+use hashi_types::guardian::GetGuardianInfoResponse;
+use hashi_types::guardian::GuardianEncryptedShare;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::HashiMasterG;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::WithdrawModeState;
+use hashi_types::guardian::session_id_from_signing_pubkey;
 use hashi_types::guardian::verify_enclave_attestation;
+use hashi_types::proto as pb;
 use hpke::Deserializable;
 use rand::thread_rng;
 use tracing::info;
+
+use crate::provisioner::config::GuardianConfig;
 
 pub use config::ProvisionerConfig;
 
@@ -95,8 +101,17 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
         "built provisioner-init share"
     );
 
-    // TODO: forward `encrypted_share` to the relay, which collects T-of-N KP
-    // shares and submits them to the guardian in one ProvisionerInit call.
+    // Send this KP's single share to the relay, which collects T-of-N shares
+    // before forwarding them to the guardian in one ProvisionerInit call.
+    if let Some(endpoint) = cfg.relay_endpoint {
+        submit_provisioner_init_to_relay(
+            &endpoint,
+            &session_id,
+            &expected_guardian_config,
+            encrypted_share,
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -115,4 +130,66 @@ pub async fn get_guardian_info_from_s3(
         .get_guardian_info(session_id, &signing_pubkey)
         .await
         .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Run the relay-side pre-checks for this KP's share. The relay fronts the
+/// guardian's `GetGuardianInfo`, so we verify it against the expected session
+/// and config before handing over the share.
+///
+/// TODO: once the relay exposes `single_provisioner_init`, send `encrypted_share`
+/// to it here. The relay collects T-of-N shares before calling the guardian's
+/// batch `provisioner_init`.
+async fn submit_provisioner_init_to_relay(
+    endpoint: &str,
+    expected_session_id: &str,
+    expected_guardian_config: &GuardianConfig,
+    encrypted_share: GuardianEncryptedShare,
+) -> anyhow::Result<()> {
+    let mut client =
+        pb::guardian_service_client::GuardianServiceClient::connect(endpoint.to_string())
+            .await
+            .with_context(|| format!("failed to connect to relay endpoint {endpoint}"))?;
+
+    prechecks(&mut client, expected_session_id, expected_guardian_config)
+        .await
+        .with_context(|| "relay endpoint pre-check failed")?;
+
+    info!(
+        share_id = encrypted_share.id.get(),
+        "relay prechecks passed; share submission awaits single_provisioner_init"
+    );
+    Ok(())
+}
+
+async fn prechecks(
+    client: &mut pb::guardian_service_client::GuardianServiceClient<tonic::transport::Channel>,
+    expected_session_id: &str,
+    expected_guardian_config: &GuardianConfig,
+) -> anyhow::Result<()> {
+    let resp_pb = client
+        .get_guardian_info(pb::GetGuardianInfoRequest {})
+        .await
+        .with_context(|| "GetGuardianInfo RPC failed")?
+        .into_inner();
+
+    let resp = <GetGuardianInfoResponse as TryFrom<pb::GetGuardianInfoResponse>>::try_from(resp_pb)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    let signing_pub_key = resp.signing_pub_key;
+    let actual_session_id = session_id_from_signing_pubkey(&signing_pub_key);
+    anyhow::ensure!(
+        actual_session_id == expected_session_id,
+        "relay endpoint session mismatch: expected {}, got {}",
+        expected_session_id,
+        actual_session_id
+    );
+
+    let info = resp
+        .signed_info
+        .verify(&signing_pub_key)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    expected_guardian_config.ensure_matches_info(&info)?;
+
+    Ok(())
 }

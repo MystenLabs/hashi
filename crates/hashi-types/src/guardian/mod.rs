@@ -366,7 +366,7 @@ impl CeremonyLogMessage {
 /// OI: operator_init
 /// PI: provisioner_init
 /// Init messages are expected to be logged in the following order:
-/// OIAttestationUnsigned -> OIGuardianInfo -> PISuccess (T times) -> PIEnclaveFullyInitialized.
+/// OIAttestationUnsigned -> OIGuardianInfo -> PIEnclaveFullyInitialized.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum InitLogMessage {
     /// Attestation and signing public key posted in /operator_init
@@ -377,13 +377,9 @@ pub enum InitLogMessage {
     /// Signed GuardianInfo logged in /operator_init (secret-sharing instance,
     /// state_hash, encryption/BTC pubkeys).
     OIGuardianInfo(GuardianInfo),
-    /// A single successful /provisioner_init call (happens N times)
-    PISuccess {
-        share_id: ShareID,
-        state_hash: [u8; 32],
-    },
-    /// Threshold reached - enclave fully initialized (happens once)
-    PIEnclaveFullyInitialized,
+    /// Threshold reached — enclave fully initialized (happens once). Records the
+    /// ids of the shares that were combined.
+    PIEnclaveFullyInitialized { share_ids: Vec<ShareID> },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -806,17 +802,15 @@ impl StandardWithdrawalRequest {
 impl InitLogMessage {
     pub const OI_ATTEST_UNSIGNED: &'static str = "oi-attestation-unsigned";
     pub const OI_GUARDIAN_INFO: &'static str = "oi-guardian-info";
-    pub const PI_SUCCESS: &'static str = "pi-success-share";
     pub const PI_FULLY_INITIALIZED: &'static str = "pi-enclave-fully-initialized";
 
     pub fn log_name(&self, prefix: &str) -> String {
         let suffix = match self {
             InitLogMessage::OIAttestationUnsigned { .. } => Self::OI_ATTEST_UNSIGNED.to_string(),
             InitLogMessage::OIGuardianInfo(_) => Self::OI_GUARDIAN_INFO.to_string(),
-            InitLogMessage::PISuccess { share_id, .. } => {
-                format!("{}-{}", Self::PI_SUCCESS, share_id.get())
+            InitLogMessage::PIEnclaveFullyInitialized { .. } => {
+                Self::PI_FULLY_INITIALIZED.to_string()
             }
-            InitLogMessage::PIEnclaveFullyInitialized => Self::PI_FULLY_INITIALIZED.to_string(),
         };
 
         format!("{}-{}.json", prefix, suffix)

@@ -11,7 +11,6 @@ use hashi_types::guardian::crypto::Share;
 use hashi_types::guardian::InitLogMessage::OIAttestationUnsigned;
 use hashi_types::guardian::InitLogMessage::OIGuardianInfo;
 use hashi_types::guardian::InitLogMessage::PIEnclaveFullyInitialized;
-use hashi_types::guardian::InitLogMessage::PISuccess;
 use hashi_types::guardian::*;
 use std::sync::Arc;
 use tracing::info;
@@ -222,14 +221,6 @@ pub async fn provisioner_init(
         if shares.iter().any(|s| s.id == share.id) {
             return Err(InvalidInputs("Duplicate share ID".into()));
         }
-        // Note: This S3 log does not serve any security purpose.
-        enclave
-            .log_init(PISuccess {
-                share_id: share.id,
-                state_hash,
-            })
-            .await
-            .expect("Unable to log ProvisionerInitSuccess");
         shares.push(share);
     }
     info!("Verified {}/{threshold} shares.", shares.len());
@@ -241,10 +232,12 @@ pub async fn provisioner_init(
         )));
     }
 
+    let share_ids = shares.iter().map(|s| s.id).collect();
     finalize_init(&shares, threshold, &enclave).await;
-    // Log to S3 indicating that withdrawals can be expected henceforth.
+    // Log to S3 indicating that withdrawals can be expected henceforth. This log
+    // does not serve any security purpose.
     enclave
-        .log_init(PIEnclaveFullyInitialized)
+        .log_init(PIEnclaveFullyInitialized { share_ids })
         .await
         .expect("Unable to log EnclaveFullyInitialized");
 
@@ -405,7 +398,9 @@ mod tests {
         );
         let req = ProvisionerInitRequest::new(vec![enc]);
 
-        let err = provisioner_init(enclave, req).await.expect_err("should fail");
+        let err = provisioner_init(enclave, req)
+            .await
+            .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
     }
 
@@ -426,7 +421,9 @@ mod tests {
         );
         let req = ProvisionerInitRequest::new(vec![enc]);
 
-        let err = provisioner_init(enclave, req).await.expect_err("should fail");
+        let err = provisioner_init(enclave, req)
+            .await
+            .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
     }
 
@@ -441,7 +438,9 @@ mod tests {
         };
         let req = build_request(std::slice::from_ref(&bogus_share), &enclave);
 
-        let err = provisioner_init(enclave, req).await.expect_err("should fail");
+        let err = provisioner_init(enclave, req)
+            .await
+            .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
     }
 
@@ -452,7 +451,9 @@ mod tests {
         let dupes = [shares[0].clone(), shares[0].clone(), shares[1].clone()];
         let req = build_request(&dupes, &enclave);
 
-        let err = provisioner_init(enclave, req).await.expect_err("should fail");
+        let err = provisioner_init(enclave, req)
+            .await
+            .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
     }
 }
