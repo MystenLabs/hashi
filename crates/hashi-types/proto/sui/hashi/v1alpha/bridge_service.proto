@@ -153,8 +153,14 @@ message SignWithdrawalTxSigningRequest {
   // Withdrawal request ids (each 32 bytes).
   repeated bytes request_ids = 2;
 
-  // One Schnorr signature per transaction input.
+  // One MPC Schnorr signature per transaction input (64 bytes each).
   repeated bytes signatures = 3;
+
+  // One guardian Schnorr signature per transaction input (64 bytes each).
+  // Same length as `signatures`. Followers verify each entry against
+  // the on-chain `guardian_btc_public_key` before BLS-signing the
+  // certificate; the BLS cert binds both arrays.
+  repeated bytes guardian_signatures = 4;
 }
 
 message SignWithdrawalTxSigningResponse {

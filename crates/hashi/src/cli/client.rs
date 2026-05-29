@@ -349,6 +349,17 @@ impl HashiClient {
         self.onchain_state.mpc_public_key()
     }
 
+    /// Fetch the guardian's x-only BTC pubkey from on-chain config.
+    /// Returns `None` on pre-feature chains where the field is unset.
+    pub fn fetch_guardian_btc_public_key(&self) -> Option<Vec<u8>> {
+        self.onchain_state
+            .state()
+            .hashi()
+            .config
+            .guardian_btc_public_key()
+            .map(<[u8]>::to_vec)
+    }
+
     /// Fetch pending deposit requests
     pub fn fetch_deposit_requests(&self) -> Vec<crate::onchain::types::DepositRequest> {
         self.onchain_state.deposit_requests()

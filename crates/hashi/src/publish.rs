@@ -101,11 +101,14 @@ stderr: {}",
     })
 }
 
-/// Optional guardian configuration for post-publish initialization.
+/// Guardian configuration for post-publish initialization. Required —
+/// every deposit address is a 2-of-2 (mpc, guardian) taproot leaf, so a
+/// guardian-less deploy can't produce spendable deposits.
 pub struct GuardianConfig {
     pub url: String,
     pub public_key: Vec<u8>,
-    pub btc_public_key: Option<Vec<u8>>,
+    /// X-only BTC pubkey of the enclave (32 bytes).
+    pub btc_public_key: Vec<u8>,
 }
 
 /// Optional Bitcoin config overrides applied during `finish_publish`. Any
@@ -131,7 +134,7 @@ pub async fn publish_and_init(
     signer: &Ed25519PrivateKey,
     publish: sui_sdk_types::Publish,
     bitcoin_chain_id: &str,
-    guardian: Option<&GuardianConfig>,
+    guardian: &GuardianConfig,
     bitcoin_overrides: &BitcoinConfigOverrides,
 ) -> Result<HashiIds> {
     let sender = signer.public_key().derive_address();
@@ -222,10 +225,9 @@ pub async fn publish_and_init(
     );
     let upgrade_cap_arg = builder.object(ObjectInput::new(upgrade_cap_id).as_owned());
     let bitcoin_chain_id_arg = builder.pure(&bitcoin_chain_id_addr);
-    let guardian_url_arg = builder.pure(&guardian.map(|g| g.url.as_str()));
-    let guardian_public_key_arg = builder.pure(&guardian.map(|g| g.public_key.as_slice()));
-    let guardian_btc_public_key_arg =
-        builder.pure(&guardian.and_then(|g| g.btc_public_key.as_deref()));
+    let guardian_url_arg = builder.pure(&guardian.url.as_str());
+    let guardian_public_key_arg = builder.pure(&guardian.public_key.as_slice());
+    let guardian_btc_public_key_arg = builder.pure(&guardian.btc_public_key.as_slice());
     let confirmation_threshold_arg = builder.pure(&bitcoin_overrides.confirmation_threshold);
     let deposit_time_delay_ms_arg = builder.pure(&bitcoin_overrides.deposit_time_delay_ms);
     let coin_registry_arg = builder.object(
