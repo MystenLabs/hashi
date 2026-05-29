@@ -26,6 +26,10 @@ pub async fn operator_init(
 ) -> GuardianResult<()> {
     info!("/operator_init - Received request.");
 
+    // Serialize: hold the control lock across the check-then-set so concurrent
+    // callers can't both pass validation and then race the config `.set()`s.
+    let _guard = enclave.control_lock.lock().await;
+
     // Validation
     if enclave.is_operator_init_complete() {
         return Err(InvalidInputs("Operator init finished".into()));

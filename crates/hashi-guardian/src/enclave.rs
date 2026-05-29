@@ -36,6 +36,11 @@ pub struct Enclave {
     pub state: EnclaveState,
     /// Initialization scratchpad
     pub scratchpad: Scratchpad,
+    /// Serializes control-plane RPCs (operator_init, update_committee) so
+    /// concurrent callers can't race a check-then-set. Held across the handler.
+    /// TODO: fold provisioner_init / ceremony serialization in here too, once
+    /// their dual-purpose locks (share accumulator / one-shot bool) are untangled.
+    pub control_lock: tokio::sync::Mutex<()>,
 }
 
 /// Configuration set during initialization (immutable after set)
@@ -63,9 +68,6 @@ pub struct EnclaveConfig {
 pub struct EnclaveState {
     /// Current Hashi committee.
     committee: RwLock<Option<Arc<HashiCommittee>>>,
-    /// Serializes `update_committee` so concurrent calls can't race the
-    /// read/log/replace sequence and roll the epoch backwards.
-    pub committee_update_lock: tokio::sync::Mutex<()>,
     /// Rate limiter. Set once during operator_init.
     /// Uses `Arc<tokio::Mutex>` so the guard can be held across `.await`.
     rate_limiter: OnceLock<Arc<tokio::sync::Mutex<RateLimiter>>>,
@@ -353,10 +355,10 @@ impl Enclave {
             config: EnclaveConfig::new(signing_keys, encryption_keys, ceremony_mode),
             state: EnclaveState {
                 committee: RwLock::new(None),
-                committee_update_lock: tokio::sync::Mutex::new(()),
                 rate_limiter: OnceLock::new(),
             },
             scratchpad: Scratchpad::default(),
+            control_lock: tokio::sync::Mutex::new(()),
         }
     }
 
