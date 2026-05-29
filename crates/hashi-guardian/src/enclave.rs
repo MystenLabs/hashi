@@ -55,8 +55,8 @@ pub struct EnclaveConfig {
     /// Raw MPC verifying key as a curve point. Stored with y-parity.
     /// Set in operator_init.
     hashi_btc_master_pubkey: OnceLock<HashiMasterG>,
-    /// Withdraw related config's (set in operator_init)
-    withdrawal_config: OnceLock<WithdrawalConfig>,
+    /// Limiter config (set in operator_init)
+    limiter_config: OnceLock<LimiterConfig>,
 }
 
 /// Mutable state that changes during operation.
@@ -121,7 +121,7 @@ impl EnclaveConfig {
             enclave_btc_keypair: OnceLock::new(),
             btc_network: OnceLock::new(),
             hashi_btc_master_pubkey: OnceLock::new(),
-            withdrawal_config: OnceLock::new(),
+            limiter_config: OnceLock::new(),
         }
     }
 
@@ -183,20 +183,16 @@ impl EnclaveConfig {
     // Withdrawal Configuration
     // ========================================================================
 
-    pub fn withdrawal_config(&self) -> GuardianResult<&WithdrawalConfig> {
-        self.withdrawal_config
+    pub fn limiter_config(&self) -> GuardianResult<&LimiterConfig> {
+        self.limiter_config
             .get()
-            .ok_or(InvalidInputs("WithdrawalConfig is not initialized".into()))
+            .ok_or(InvalidInputs("LimiterConfig is not initialized".into()))
     }
 
-    pub fn set_withdrawal_config(&self, config: WithdrawalConfig) -> GuardianResult<()> {
-        self.withdrawal_config
+    pub fn set_limiter_config(&self, config: LimiterConfig) -> GuardianResult<()> {
+        self.limiter_config
             .set(config)
-            .map_err(|_| InvalidInputs("WithdrawalConfig already set".into()))
-    }
-
-    pub fn committee_threshold(&self) -> GuardianResult<u64> {
-        Ok(self.withdrawal_config()?.committee_threshold)
+            .map_err(|_| InvalidInputs("LimiterConfig already set".into()))
     }
 
     // ========================================================================

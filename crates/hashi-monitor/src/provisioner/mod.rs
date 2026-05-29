@@ -52,12 +52,12 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
             // fill it.)
             recovered.num_tokens_available = recovered
                 .num_tokens_available
-                .min(cfg.withdrawal_config.max_bucket_capacity_sats);
+                .min(cfg.limiter_config.max_bucket_capacity);
             recovered
         }
         None => {
             info!("no prior Success withdrawal logs found; initializing limiter from genesis");
-            LimiterState::genesis(&cfg.withdrawal_config)
+            LimiterState::genesis(&cfg.limiter_config)
         }
     };
 
@@ -72,7 +72,7 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
         HashiMasterG::with_even_y_from_x_be_bytes(&cfg.hashi_btc_master_pubkey.serialize())
             .map_err(|e| anyhow::anyhow!("convert master pubkey to G: {e:?}"))?;
     let expected_state =
-        EnclaveInitState::new(committee, cfg.withdrawal_config, limiter_state, master_g)
+        EnclaveInitState::new(committee, cfg.limiter_config, limiter_state, master_g)
             .map_err(|e| anyhow::anyhow!(e))?;
     let state_hash = expected_state.digest();
 

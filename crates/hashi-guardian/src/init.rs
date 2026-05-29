@@ -75,7 +75,7 @@ pub async fn operator_init(
     if let Some(state) = state {
         let state_hash = state.digest();
         let rate_limiter = state.build_rate_limiter()?;
-        let (committee, withdrawal_config, _limiter_state, hashi_btc_master_pubkey) =
+        let (committee, limiter_config, _limiter_state, hashi_btc_master_pubkey) =
             state.into_parts();
 
         info!("Setting state hash.");
@@ -89,11 +89,11 @@ pub async fn operator_init(
             .set_hashi_btc_pk(hashi_btc_master_pubkey)
             .expect("Unable to set hashi BTC master pubkey");
 
-        info!("Setting withdrawal config.");
+        info!("Setting limiter config.");
         enclave
             .config
-            .set_withdrawal_config(withdrawal_config)
-            .expect("Unable to set withdrawal config");
+            .set_limiter_config(limiter_config)
+            .expect("Unable to set limiter config");
 
         info!("Installing committee and rate limiter.");
         enclave

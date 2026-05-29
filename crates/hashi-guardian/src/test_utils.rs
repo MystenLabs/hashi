@@ -246,15 +246,13 @@ impl Enclave {
         let state = args.init_state;
         let state_hash = state.digest();
         let rate_limiter = state.build_rate_limiter().unwrap();
-        let (committee, withdrawal_config, _limiter_state, hashi_btc_master_pubkey) =
+        let (committee, limiter_config, _limiter_state, hashi_btc_master_pubkey) =
             state.into_parts();
         self.set_state_hash(state_hash).unwrap();
         self.config
             .set_hashi_btc_pk(hashi_btc_master_pubkey)
             .unwrap();
-        self.config
-            .set_withdrawal_config(withdrawal_config)
-            .unwrap();
+        self.config.set_limiter_config(limiter_config).unwrap();
         self.state.init(committee, rate_limiter).unwrap();
 
         self.scratchpad
@@ -272,7 +270,7 @@ pub struct FullyInitializedArgs {
     pub network: Network,
     pub committee: HashiCommittee,
     pub master_pubkey: HashiMasterG,
-    pub withdrawal_config: WithdrawalConfig,
+    pub limiter_config: LimiterConfig,
     pub limiter_state: LimiterState,
 }
 
@@ -320,12 +318,12 @@ pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc
         network,
         committee,
         master_pubkey,
-        withdrawal_config,
+        limiter_config,
         limiter_state,
     } = args;
 
     let init_state = EnclaveInitState::from_parts_for_testing(
-        withdrawal_config,
+        limiter_config,
         limiter_state,
         committee,
         master_pubkey,

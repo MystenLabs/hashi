@@ -16,12 +16,12 @@ use bitcoin::secp256k1::Secp256k1;
 use bitcoin::secp256k1::SecretKey as BtcSecretKey;
 use clap::Parser;
 use hashi::onchain::OnchainState;
-use hashi_types::committee::certificate_threshold;
 use hashi_types::guardian::BitcoinPubkey;
 use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::EnclaveInitState;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::HashiMasterG;
+use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::SecretSharingInstance;
@@ -29,7 +29,6 @@ use hashi_types::guardian::SecretSharingParams;
 use hashi_types::guardian::Share;
 use hashi_types::guardian::ShareCommitment;
 use hashi_types::guardian::ShareCommitments;
-use hashi_types::guardian::WithdrawalConfig;
 use hashi_types::guardian::crypto::commit_share;
 use hashi_types::guardian::crypto::split_secret;
 use hashi_types::guardian::proto_conversions::enclave_init_state_to_pb;
@@ -93,11 +92,9 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .current_committee()
         .ok_or_else(|| anyhow!("no current committee on chain (DKG not yet complete?)"))?;
     let committee_epoch = committee.epoch();
-    let committee_threshold = certificate_threshold(committee.total_weight());
     tracing::info!(
         committee_epoch,
         committee_total_weight = committee.total_weight(),
-        committee_threshold,
         num_members = committee.members().len(),
         "fetched on-chain committee"
     );
@@ -135,19 +132,18 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
 
     // The operator now supplies the full init state at OperatorInit; its digest
     // is the state_hash KPs bind as their share-encryption AAD.
-    let withdrawal_config = WithdrawalConfig {
-        committee_threshold,
-        refill_rate_sats_per_sec: args.refill_rate_sats_per_sec,
-        max_bucket_capacity_sats: args.max_bucket_capacity_sats,
+    let limiter_config = LimiterConfig {
+        refill_rate: args.refill_rate_sats_per_sec,
+        max_bucket_capacity: args.max_bucket_capacity_sats,
     };
-    let limiter_state = LimiterState::genesis(&withdrawal_config);
+    let limiter_state = LimiterState::genesis(&limiter_config);
     // The bootstrap utility builds the guardian's BTC keypair from a fresh
     // bitcoin-lib keypair, which always signs against the even-y projection of
     // its pubkey. Reconstruct the matching `G` point so downstream derivations
     // agree on y-parity.
     let master_g = HashiMasterG::with_even_y_from_x_be_bytes(&material.master_pubkey.serialize())
         .map_err(|e| anyhow!("convert master pubkey to G: {e:?}"))?;
-    let state = EnclaveInitState::new(committee, withdrawal_config, limiter_state, master_g)
+    let state = EnclaveInitState::new(committee, limiter_config, limiter_state, master_g)
         .map_err(|e| anyhow!("build EnclaveInitState: {e:?}"))?;
     let state_hash = state.digest();
 
@@ -269,7 +265,6 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         hex::encode(material.master_pubkey.serialize())
     );
     println!("  committee_epoch:          {committee_epoch}");
-    println!("  committee_threshold:      {committee_threshold}");
     println!(
         "  refill_rate_sats_per_sec: {}",
         args.refill_rate_sats_per_sec

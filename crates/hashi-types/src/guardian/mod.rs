@@ -195,8 +195,8 @@ pub struct ProvisionerInitRequest {
 pub struct EnclaveInitState {
     /// Current Hashi committee
     committee: HashiCommittee,
-    /// Withdrawal config (includes limiter config)
-    withdrawal_config: WithdrawalConfig,
+    /// Limiter config
+    limiter_config: LimiterConfig,
     /// Limiter state (tokens available, timestamp, seq)
     limiter_state: LimiterState,
     /// Raw MPC verifying key (curve point with y-parity preserved). The
@@ -413,16 +413,6 @@ pub struct S3BucketInfo {
     pub region: String,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WithdrawalConfig {
-    /// Committee threshold expressed in terms of weight
-    pub committee_threshold: u64,
-    /// Token refill rate in sats per second
-    pub refill_rate_sats_per_sec: u64,
-    /// Maximum bucket capacity in sats
-    pub max_bucket_capacity_sats: u64,
-}
-
 // ---------------------------------
 //          Helper impl's
 // ---------------------------------
@@ -545,19 +535,19 @@ impl OperatorInitRequest {
 impl EnclaveInitState {
     pub fn new(
         committee: HashiCommittee,
-        withdrawal_config: WithdrawalConfig,
+        limiter_config: LimiterConfig,
         limiter_state: LimiterState,
         hashi_btc_master_pubkey: HashiMasterG,
     ) -> GuardianResult<Self> {
         // Validate that limiter state is consistent with config.
-        if limiter_state.num_tokens_available > withdrawal_config.max_bucket_capacity_sats {
+        if limiter_state.num_tokens_available > limiter_config.max_bucket_capacity {
             return Err(InvalidInputs(
                 "limiter num_tokens_available exceeds max_bucket_capacity".into(),
             ));
         }
         Ok(Self {
             committee,
-            withdrawal_config,
+            limiter_config,
             limiter_state,
             hashi_btc_master_pubkey,
         })
@@ -565,27 +555,20 @@ impl EnclaveInitState {
 
     /// Build a `RateLimiter` from the config and state in this init state.
     pub fn build_rate_limiter(&self) -> GuardianResult<RateLimiter> {
-        RateLimiter::new(self.limiter_config(), self.limiter_state)
+        RateLimiter::new(*self.limiter_config(), self.limiter_state)
     }
 
-    pub fn limiter_config(&self) -> LimiterConfig {
-        LimiterConfig {
-            refill_rate: self.withdrawal_config.refill_rate_sats_per_sec,
-            max_bucket_capacity: self.withdrawal_config.max_bucket_capacity_sats,
-        }
-    }
-
-    pub fn into_parts(self) -> (HashiCommittee, WithdrawalConfig, LimiterState, HashiMasterG) {
+    pub fn into_parts(self) -> (HashiCommittee, LimiterConfig, LimiterState, HashiMasterG) {
         (
             self.committee,
-            self.withdrawal_config,
+            self.limiter_config,
             self.limiter_state,
             self.hashi_btc_master_pubkey,
         )
     }
 
-    pub fn withdrawal_config(&self) -> &WithdrawalConfig {
-        &self.withdrawal_config
+    pub fn limiter_config(&self) -> &LimiterConfig {
+        &self.limiter_config
     }
 
     pub fn hashi_btc_master_pubkey(&self) -> HashiMasterG {
@@ -1010,7 +993,7 @@ pub struct SignedStandardWithdrawalRequestWire {
 #[derive(Serialize)]
 struct EnclaveInitStateRepr {
     pub committee: crate::move_types::Committee,
-    pub withdrawal_config: WithdrawalConfig,
+    pub limiter_config: LimiterConfig,
     pub limiter_state: LimiterState,
     pub hashi_btc_master_pubkey: HashiMasterG,
 }
@@ -1080,7 +1063,7 @@ impl From<&EnclaveInitState> for EnclaveInitStateRepr {
         let (committee, config, limiter_state, pubkey) = state.clone().into_parts();
         Self {
             committee: (&committee).into(),
-            withdrawal_config: config,
+            limiter_config: config,
             limiter_state,
             hashi_btc_master_pubkey: pubkey,
         }

@@ -1422,27 +1422,15 @@ pub struct EnclaveInitState {
     /// Current Hashi committee.
     #[prost(message, optional, tag = "1")]
     pub committee: ::core::option::Option<Committee>,
-    /// Withdrawal policy configuration.
+    /// Limiter configuration.
     #[prost(message, optional, tag = "2")]
-    pub withdrawal_config: ::core::option::Option<WithdrawalConfig>,
+    pub limiter_config: ::core::option::Option<LimiterConfig>,
     /// X-only public key bytes (32 bytes).
     #[prost(bytes = "bytes", optional, tag = "4")]
     pub hashi_btc_master_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
     /// Rate limiter state.
     #[prost(message, optional, tag = "6")]
     pub limiter_state: ::core::option::Option<LimiterState>,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct WithdrawalConfig {
-    /// Committee threshold expressed in terms of weight.
-    #[prost(uint64, optional, tag = "1")]
-    pub committee_threshold: ::core::option::Option<u64>,
-    /// Token refill rate in sats per second.
-    #[prost(uint64, optional, tag = "2")]
-    pub refill_rate_sats_per_sec: ::core::option::Option<u64>,
-    /// Maximum bucket capacity in sats.
-    #[prost(uint64, optional, tag = "3")]
-    pub max_bucket_capacity_sats: ::core::option::Option<u64>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LimiterState {
