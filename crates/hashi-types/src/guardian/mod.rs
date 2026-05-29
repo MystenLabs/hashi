@@ -162,25 +162,32 @@ pub struct SetupNewKeyResponse {
     pub share_commitments: ShareCommitments,
 }
 
-/// Provides S3 API keys, secret-sharing instance and the BTC network to the enclave.
-/// To be called by the operator.
+/// Operator-supplied bootstrap: S3 API keys, secret-sharing instance, BTC
+/// network, and — for a withdrawal-serving (normal-mode) enclave — the
+/// `EnclaveInitState` whose digest the enclave binds as the share-decryption
+/// AAD. Ceremony-mode enclaves (setup/rotate) pass `state: None`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OperatorInitRequest {
     s3_config: S3Config,
     secret_sharing_instance: SecretSharingInstance,
     network: Network,
+    state: Option<EnclaveInitState>,
 }
 
-/// Provides key shares and all other necessary state values to the enclaves.
+/// Provides one KP's encrypted key share to the enclave. The share's HPKE AAD
+/// binds the enclave's `state_hash` (the `EnclaveInitState` digest), so a share
+/// only decrypts if the KP agreed on the operator-supplied state.
 /// To be called by Key Provisioners (who may be outside entities).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProvisionerInitRequest {
     encrypted_share: GuardianEncryptedShare,
-    state: ProvisionerInitState,
 }
 
+/// Operator-supplied state that initializes the enclave and that KPs verify.
+/// Its `digest()` is the `state_hash`: bound as HPKE AAD on each KP's share and
+/// exposed (as a hash) via `GuardianInfo`. Supplied to `operator_init`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ProvisionerInitState {
+pub struct EnclaveInitState {
     /// Current Hashi committee
     committee: HashiCommittee,
     /// Withdrawal config (includes limiter config)
@@ -247,6 +254,9 @@ pub struct GuardianInfo {
     pub bucket_info: Option<S3BucketInfo>,
     /// Encryption key. Used by KPs to encrypt their shares.
     pub encryption_pubkey: EncPubKeyBytes,
+    /// Digest of the operator-supplied `EnclaveInitState` (set after operator_init).
+    /// KPs recompute it from their verified sources and match to confirm config.
+    pub state_hash: Option<[u8; 32]>,
     /// Server version
     /// TODO: Replace with hashi ServerVersion to include crate SHA and version
     pub server_version: String,
@@ -479,11 +489,13 @@ impl OperatorInitRequest {
         s3_config: S3Config,
         secret_sharing_instance: SecretSharingInstance,
         network: Network,
+        state: Option<EnclaveInitState>,
     ) -> GuardianResult<Self> {
         Ok(Self {
             s3_config,
             secret_sharing_instance,
             network,
+            state,
         })
     }
 
@@ -499,12 +511,28 @@ impl OperatorInitRequest {
         self.network
     }
 
-    pub fn into_parts(self) -> (S3Config, SecretSharingInstance, Network) {
-        (self.s3_config, self.secret_sharing_instance, self.network)
+    pub fn state(&self) -> Option<&EnclaveInitState> {
+        self.state.as_ref()
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        S3Config,
+        SecretSharingInstance,
+        Network,
+        Option<EnclaveInitState>,
+    ) {
+        (
+            self.s3_config,
+            self.secret_sharing_instance,
+            self.network,
+            self.state,
+        )
     }
 }
 
-impl ProvisionerInitState {
+impl EnclaveInitState {
     pub fn new(
         committee: HashiCommittee,
         withdrawal_config: WithdrawalConfig,
@@ -562,44 +590,32 @@ impl ProvisionerInitState {
     }
 
     pub fn digest(&self) -> [u8; 32] {
-        let bytes = bcs::to_bytes(&ProvisionerInitStateRepr::from(self))
-            .expect("serialization should work");
+        let bytes =
+            bcs::to_bytes(&EnclaveInitStateRepr::from(self)).expect("serialization should work");
         Blake2b::<U32>::digest(bytes).into()
     }
 }
 
 impl ProvisionerInitRequest {
-    pub fn new(encrypted_share: GuardianEncryptedShare, state: ProvisionerInitState) -> Self {
-        Self {
-            encrypted_share,
-            state,
-        }
+    pub fn new(encrypted_share: GuardianEncryptedShare) -> Self {
+        Self { encrypted_share }
     }
 
-    /// Create a new ProvisionerInitRequest by encrypting the share to the enclave's public key.
-    /// In addition, it sets the state hash as AAD for the encryption effectively
-    /// allowing the enclave to trust that state is indeed coming from the KP.
-    pub fn build_from_share_and_state<R: CryptoRng + RngCore>(
+    /// Encrypt `share` to the enclave's public key, binding `state_hash` (the
+    /// enclave's `EnclaveInitState` digest) as HPKE AAD. The enclave only
+    /// decrypts shares from KPs that agreed on that state.
+    pub fn build_from_share<R: CryptoRng + RngCore>(
         share: &Share,
         enclave_pub_key: &EncPubKey,
-        state: ProvisionerInitState,
+        state_hash: [u8; 32],
         rng: &mut R,
     ) -> Self {
-        let state_hash = state.digest();
         let encrypted_share = encrypt_share(share, enclave_pub_key, Some(&state_hash), rng);
-        ProvisionerInitRequest::new(encrypted_share, state)
+        ProvisionerInitRequest::new(encrypted_share)
     }
 
     pub fn encrypted_share(&self) -> &GuardianEncryptedShare {
         &self.encrypted_share
-    }
-
-    pub fn state(&self) -> &ProvisionerInitState {
-        &self.state
-    }
-
-    pub fn into_state(self) -> ProvisionerInitState {
-        self.state
     }
 }
 
@@ -987,9 +1003,9 @@ pub struct SignedStandardWithdrawalRequestWire {
     pub signature: CommitteeSignatureWire,
 }
 
-/// Serializable representation of ProvisionerInitState. Used for computing its digest.
+/// Serializable representation of EnclaveInitState. Used for computing its digest.
 #[derive(Serialize)]
-struct ProvisionerInitStateRepr {
+struct EnclaveInitStateRepr {
     pub committee: crate::move_types::Committee,
     pub withdrawal_config: WithdrawalConfig,
     pub limiter_state: LimiterState,
@@ -1056,8 +1072,8 @@ impl From<StandardWithdrawalRequest> for StandardWithdrawalRequestWire {
     }
 }
 
-impl From<&ProvisionerInitState> for ProvisionerInitStateRepr {
-    fn from(state: &ProvisionerInitState) -> Self {
+impl From<&EnclaveInitState> for EnclaveInitStateRepr {
+    fn from(state: &EnclaveInitState) -> Self {
         let (committee, config, limiter_state, pubkey) = state.clone().into_parts();
         Self {
             committee: (&committee).into(),

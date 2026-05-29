@@ -9,6 +9,7 @@ use super::BitcoinSignature;
 use super::Ciphertext;
 use super::CommitteeSignatureWire;
 use super::CommitteeTransition;
+use super::EnclaveInitState;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianError;
@@ -27,7 +28,6 @@ use super::LimiterState;
 use super::OperatorInitRequest;
 use super::PgpPublicCert;
 use super::ProvisionerInitRequest;
-use super::ProvisionerInitState;
 use super::RotateKpsRequest;
 use super::RotateKpsResponse;
 use super::RotateKpsState;
@@ -149,7 +149,9 @@ impl TryFrom<pb::OperatorInitRequest> for OperatorInitRequest {
 
         let network = pb_to_network(req.network.ok_or_else(|| missing("network"))?)?;
 
-        OperatorInitRequest::new(s3_config, secret_sharing_instance, network)
+        let state = req.state.map(EnclaveInitState::try_from).transpose()?;
+
+        OperatorInitRequest::new(s3_config, secret_sharing_instance, network, state)
     }
 }
 
@@ -182,18 +184,12 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
     type Error = GuardianError;
 
     fn try_from(req: pb::ProvisionerInitRequest) -> Result<Self, Self::Error> {
-        // Encrypted share
         let encrypted_share_pb = req
             .encrypted_share
             .ok_or_else(|| missing("encrypted_share"))?;
-
         let encrypted_share = pb_to_guardian_encrypted_share(encrypted_share_pb)?;
 
-        // State
-        let state_pb = req.state.ok_or_else(|| missing("state"))?;
-        let state = ProvisionerInitState::try_from(state_pb)?;
-
-        Ok(ProvisionerInitRequest::new(encrypted_share, state))
+        Ok(ProvisionerInitRequest::new(encrypted_share))
     }
 }
 
@@ -243,10 +239,10 @@ impl TryFrom<pb::SignedRotateKpsResponse> for GuardianSigned<RotateKpsResponse> 
     }
 }
 
-impl TryFrom<pb::ProvisionerInitState> for ProvisionerInitState {
+impl TryFrom<pb::EnclaveInitState> for EnclaveInitState {
     type Error = GuardianError;
 
-    fn try_from(state_pb: pb::ProvisionerInitState) -> Result<Self, Self::Error> {
+    fn try_from(state_pb: pb::EnclaveInitState) -> Result<Self, Self::Error> {
         let committee_pb = state_pb.committee.ok_or_else(|| missing("committee"))?;
         let committee = pb_to_hashi_committee(committee_pb)?;
 
@@ -268,7 +264,7 @@ impl TryFrom<pb::ProvisionerInitState> for ProvisionerInitState {
         let hashi_btc_master_pubkey = XOnlyPublicKey::from_slice(master_pk_bytes.as_ref())
             .map_err(|e| InvalidInputs(format!("invalid hashi_btc_master_pubkey: {e}")))?;
 
-        ProvisionerInitState::new(
+        EnclaveInitState::new(
             committee,
             withdrawal_config,
             limiter_state,
@@ -427,11 +423,12 @@ pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequ
 pub fn operator_init_request_to_pb(
     r: OperatorInitRequest,
 ) -> GuardianResult<pb::OperatorInitRequest> {
-    let (s3_config, secret_sharing_instance, network) = r.into_parts();
+    let (s3_config, secret_sharing_instance, network, state) = r.into_parts();
     Ok(pb::OperatorInitRequest {
         s3_config: Some(s3_config_to_pb(s3_config)),
         secret_sharing_instance: Some(secret_sharing_instance_to_pb(&secret_sharing_instance)),
         network: Some(network_to_pb(network)?),
+        state: state.map(enclave_init_state_to_pb),
     })
 }
 
@@ -440,14 +437,13 @@ pub fn provisioner_init_request_to_pb(
 ) -> GuardianResult<pb::ProvisionerInitRequest> {
     Ok(pb::ProvisionerInitRequest {
         encrypted_share: Some(guardian_encrypted_share_to_pb(r.encrypted_share)),
-        state: Some(provisioner_init_state_to_pb(r.state)),
     })
 }
 
-pub fn provisioner_init_state_to_pb(s: ProvisionerInitState) -> pb::ProvisionerInitState {
+pub fn enclave_init_state_to_pb(s: EnclaveInitState) -> pb::EnclaveInitState {
     let (committee, withdrawal_config, limiter_state, hashi_btc_master_pubkey) = s.into_parts();
 
-    pb::ProvisionerInitState {
+    pb::EnclaveInitState {
         committee: Some(hashi_committee_to_pb(committee)),
         withdrawal_config: Some(withdrawal_config_to_pb(withdrawal_config)),
         hashi_btc_master_pubkey: Some(hashi_btc_master_pubkey.serialize().to_vec().into()),
@@ -588,10 +584,19 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
         .server_version
         .ok_or_else(|| missing("server_version"))?;
 
+    let state_hash = data
+        .state_hash
+        .map(|b| {
+            <[u8; 32]>::try_from(b.as_ref())
+                .map_err(|_| InvalidInputs("state_hash must be 32 bytes".into()))
+        })
+        .transpose()?;
+
     Ok(GuardianInfo {
         secret_sharing_instance,
         bucket_info,
         encryption_pubkey,
+        state_hash,
         server_version,
     })
 }
@@ -604,6 +609,7 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
             .map(secret_sharing_instance_to_pb),
         bucket_info: info.bucket_info.map(s3_bucket_info_to_pb),
         encryption_pubkey: Some(info.encryption_pubkey.into()),
+        state_hash: info.state_hash.map(|h| h.to_vec().into()),
         server_version: Some(info.server_version),
     }
 }

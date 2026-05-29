@@ -217,8 +217,8 @@ mod tests {
     use crate::OperatorInitTestArgs;
     use bitcoin::Network;
     use hashi_types::guardian::test_utils::create_btc_keypair;
+    use hashi_types::guardian::EnclaveInitState;
     use hashi_types::guardian::LimiterState;
-    use hashi_types::guardian::ProvisionerInitState;
     use hashi_types::guardian::StandardWithdrawalRequest;
     use hashi_types::guardian::WithdrawalConfig;
 
@@ -228,20 +228,8 @@ mod tests {
         committee: HashiCommittee,
         max_bucket_capacity_sats: u64,
     ) -> Arc<Enclave> {
-        let enclave = Enclave::create_operator_initialized_with(
-            OperatorInitTestArgs::default().with_network(network),
-        )
-        .await;
-
-        let enclave_kp = create_btc_keypair(&[8u8; 32]);
         let hashi_kp = create_btc_keypair(&[6u8; 32]);
         let hashi_btc_master_pubkey = hashi_kp.x_only_public_key().0;
-
-        enclave.config.set_btc_keypair(enclave_kp).unwrap();
-        enclave
-            .config
-            .set_hashi_btc_pk(hashi_btc_master_pubkey)
-            .unwrap();
 
         let refill_rate = 0; // no refill in tests unless specified
         let withdrawal_config = WithdrawalConfig {
@@ -249,20 +237,27 @@ mod tests {
             refill_rate_sats_per_sec: refill_rate,
             max_bucket_capacity_sats,
         };
-        enclave
-            .config
-            .set_withdrawal_config(withdrawal_config)
-            .unwrap();
-
         let limiter_state = LimiterState::genesis(&withdrawal_config);
-        let init_state = ProvisionerInitState::new(
-            committee,
+        let init_state = EnclaveInitState::from_parts_for_testing(
             withdrawal_config,
             limiter_state,
+            committee,
             hashi_btc_master_pubkey,
+        );
+
+        // operator_init now installs committee/limiter/withdrawal-config/btc-master.
+        let enclave = Enclave::create_operator_initialized_with(
+            OperatorInitTestArgs::default()
+                .with_network(network)
+                .with_init_state(init_state),
         )
-        .unwrap();
-        enclave.state.init(init_state).unwrap();
+        .await;
+
+        // The reconstructed BTC keypair (set by provisioner_init in production).
+        enclave
+            .config
+            .set_btc_keypair(create_btc_keypair(&[8u8; 32]))
+            .unwrap();
 
         enclave
             .scratchpad

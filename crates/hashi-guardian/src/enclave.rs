@@ -206,67 +206,34 @@ impl EnclaveConfig {
         self.hashi_btc_master_pubkey.get().is_some()
     }
 
-    /// Check if operator_init configuration is complete (S3 logger and network)
+    /// Operator_init base config is complete: S3 logger and network are set.
+    /// (The withdrawal-serving `EnclaveInitState` is separate and optional.)
     pub fn is_operator_init_complete(&self) -> bool {
         self.s3_logger.get().is_some() && self.btc_network.get().is_some()
     }
 
-    /// Check if any operator_init configuration has been set
+    /// Check if any operator_init base config has been set
     pub fn is_operator_init_partially_complete(&self) -> bool {
         self.s3_logger.get().is_some() || self.btc_network.get().is_some()
     }
 
-    /// Check if provisioner_init configuration is complete (BTC keys and withdrawal config)
+    /// Provisioner_init config is complete: the reconstructed BTC keypair is set.
     pub fn is_provisioner_init_complete(&self) -> bool {
         self.is_enclave_btc_keypair_set()
-            && self.is_hashi_btc_master_pubkey_set()
-            && self.withdrawal_config.get().is_some()
     }
 
-    /// Check if any provisioner_init configuration has been set
+    /// The reconstructed BTC keypair is set.
     pub fn is_provisioner_init_partially_complete(&self) -> bool {
         self.is_enclave_btc_keypair_set()
-            || self.is_hashi_btc_master_pubkey_set()
-            || self.withdrawal_config.get().is_some()
     }
 }
 
 impl EnclaveState {
-    pub fn init(&self, incoming_state: ProvisionerInitState) -> GuardianResult<()> {
-        let rate_limiter = incoming_state.build_rate_limiter()?;
-        let (committee, _, _, _) = incoming_state.into_parts();
-
+    /// Install the operator-supplied committee + rate limiter. Called from operator_init.
+    pub fn init(&self, committee: HashiCommittee, rate_limiter: RateLimiter) -> GuardianResult<()> {
         self.set_committee(committee)?;
         self.set_rate_limiter(rate_limiter)?;
         Ok(())
-    }
-
-    // ========================================================================
-    // Initialization Status
-    // ========================================================================
-
-    fn status_check_inner(&self) -> (bool, bool) {
-        let committee_init = self
-            .committee
-            .read()
-            .expect("rwlock read should not fail")
-            .is_some();
-
-        let limiter_init = self.rate_limiter.get().is_some();
-
-        (committee_init, limiter_init)
-    }
-
-    /// Check if state init is complete
-    pub fn is_provisioner_init_complete(&self) -> bool {
-        let (committee_init, limiter_init) = self.status_check_inner();
-        committee_init && limiter_init
-    }
-
-    /// Check if any state has been set
-    pub fn is_provisioner_init_partially_complete(&self) -> bool {
-        let (committee_init, limiter_init) = self.status_check_inner();
-        committee_init || limiter_init
     }
 
     // ========================================================================
@@ -285,7 +252,7 @@ impl EnclaveState {
             .ok_or_else(|| InvalidInputs("committee not initialized".into()))
     }
 
-    /// Set committee. Called only from init(ProvisionerInitState)
+    /// Set committee. Called only from `init` (operator_init).
     fn set_committee(&self, committee: HashiCommittee) -> GuardianResult<()> {
         info!("Setting committee for epoch {}.", committee.epoch());
 
@@ -395,7 +362,6 @@ impl Enclave {
 
     pub fn is_provisioner_init_complete(&self) -> bool {
         self.config.is_provisioner_init_complete()
-            && self.state.is_provisioner_init_complete()
             && self
                 .scratchpad
                 .provisioner_init_logging_complete
@@ -405,7 +371,6 @@ impl Enclave {
 
     pub fn is_provisioner_init_partially_complete(&self) -> bool {
         self.config.is_provisioner_init_partially_complete()
-            || self.state.is_provisioner_init_partially_complete()
     }
 
     pub fn is_operator_init_complete(&self) -> bool {
@@ -465,6 +430,7 @@ impl Enclave {
                 .ok()
                 .map(|l| l.bucket_info().clone()),
             encryption_pubkey: self.encryption_public_key().to_bytes().to_vec(),
+            state_hash: self.state_hash().copied(),
             // TODO: Change it
             server_version: "v1".to_string(),
         }

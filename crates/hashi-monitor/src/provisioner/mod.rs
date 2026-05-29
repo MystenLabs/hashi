@@ -8,11 +8,11 @@ mod limiter_recovery;
 use anyhow::Context;
 use hashi_guardian::s3_logger::S3Logger;
 use hashi_types::guardian::EncPubKey;
+use hashi_types::guardian::EnclaveInitState;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
-use hashi_types::guardian::ProvisionerInitState;
 use hashi_types::guardian::proto_conversions::provisioner_init_request_to_pb;
 use hashi_types::guardian::session_id_from_signing_pubkey;
 use hashi_types::guardian::verify_enclave_attestation;
@@ -60,28 +60,40 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
         }
     };
 
+    // Recompute the init state the operator should have booted the enclave with;
+    // its digest is the state_hash we bind as the share's AAD.
     let committee = cfg.hashi_committee.try_into()?;
-    let state = ProvisionerInitState::new(
+    let expected_state = EnclaveInitState::new(
         committee,
         cfg.withdrawal_config,
         limiter_state,
         cfg.hashi_btc_master_pubkey,
     )
     .map_err(|e| anyhow::anyhow!(e))?;
+    let state_hash = expected_state.digest();
+
+    // Fail fast (IOP-225 step D): the enclave must have been booted with the
+    // state we expect, else our share won't decrypt under its state_hash AAD.
+    let enclave_state_hash = guardian_info
+        .state_hash
+        .context("guardian info is missing state_hash")?;
+    anyhow::ensure!(
+        state_hash == enclave_state_hash,
+        "state_hash mismatch: enclave booted with a different init state"
+    );
 
     let guardian_pub_key =
         EncPubKey::from_bytes(&guardian_info.encryption_pubkey).map_err(|e| anyhow::anyhow!(e))?;
-    let request = ProvisionerInitRequest::build_from_share_and_state(
+    let request = ProvisionerInitRequest::build_from_share(
         &cfg.share.to_domain()?,
         &guardian_pub_key,
-        state,
+        state_hash,
         &mut thread_rng(),
     );
     let share_id = request.encrypted_share().id.get();
-    let state_digest_hex = hex::encode(request.state().digest());
     info!(
         share_id,
-        state_digest = state_digest_hex,
+        state_hash = hex::encode(state_hash),
         "built provisioner-init request"
     );
 

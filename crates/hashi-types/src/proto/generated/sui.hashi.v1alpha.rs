@@ -1168,6 +1168,9 @@ pub struct GuardianInfoData {
     /// Server version.
     #[prost(string, optional, tag = "4")]
     pub server_version: ::core::option::Option<::prost::alloc::string::String>,
+    /// Digest of the operator-supplied EnclaveInitState (32 bytes, if set).
+    #[prost(bytes = "bytes", optional, tag = "5")]
+    pub state_hash: ::core::option::Option<::prost::bytes::Bytes>,
 }
 /// Public description of the current BTC key's secret-sharing scheme.
 /// `commitments.len() == num_shares` and `2 <= threshold <= num_shares`.
@@ -1275,6 +1278,10 @@ pub struct OperatorInitRequest {
     /// Network the guardian is operating on.
     #[prost(enumeration = "Network", optional, tag = "3")]
     pub network: ::core::option::Option<i32>,
+    /// Operator-supplied init state; the enclave binds its digest as the
+    /// share-decryption AAD and exposes the digest via GuardianInfo.
+    #[prost(message, optional, tag = "4")]
+    pub state: ::core::option::Option<EnclaveInitState>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct OperatorInitResponse {}
@@ -1289,17 +1296,16 @@ pub struct S3Config {
     #[prost(string, optional, tag = "4")]
     pub region: ::core::option::Option<::prost::alloc::string::String>,
 }
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProvisionerInitRequest {
-    /// Encrypted share destined for this provisioner.
+    /// Encrypted share destined for this provisioner. Its HPKE AAD binds the
+    /// enclave's state_hash (the EnclaveInitState digest), so a share only
+    /// decrypts if the KP agreed on the operator-supplied state.
     #[prost(message, optional, tag = "1")]
     pub encrypted_share: ::core::option::Option<GuardianEncryptedShare>,
-    /// State used to initialize/restore the enclave. The share encryption binds to its digest as AAD.
-    #[prost(message, optional, tag = "2")]
-    pub state: ::core::option::Option<ProvisionerInitState>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ProvisionerInitState {
+pub struct EnclaveInitState {
     /// Current Hashi committee.
     #[prost(message, optional, tag = "1")]
     pub committee: ::core::option::Option<Committee>,

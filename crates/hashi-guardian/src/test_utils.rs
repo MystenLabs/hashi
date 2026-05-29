@@ -161,6 +161,7 @@ pub struct OperatorInitTestArgs {
     pub network: Network,
     pub secret_sharing_instance: SecretSharingInstance,
     pub s3_logger: S3Logger,
+    pub init_state: EnclaveInitState,
 }
 
 const TEST_N: usize = 5;
@@ -186,6 +187,7 @@ impl Default for OperatorInitTestArgs {
             network: Network::Regtest,
             secret_sharing_instance,
             s3_logger: mock_logger(),
+            init_state: EnclaveInitState::mock_for_testing(None),
         }
     }
 }
@@ -193,6 +195,11 @@ impl Default for OperatorInitTestArgs {
 impl OperatorInitTestArgs {
     pub fn with_network(mut self, network: Network) -> Self {
         self.network = network;
+        self
+    }
+
+    pub fn with_init_state(mut self, init_state: EnclaveInitState) -> Self {
+        self.init_state = init_state;
         self
     }
 
@@ -222,19 +229,37 @@ impl Enclave {
 
     pub async fn create_operator_initialized_with(args: OperatorInitTestArgs) -> Arc<Self> {
         let enclave = Self::create_with_random_keys();
-        enclave.config.set_s3_logger(args.s3_logger).unwrap();
-        enclave.config.set_bitcoin_network(args.network).unwrap();
+        enclave.install_operator_init_for_testing(args);
+        assert!(enclave.is_operator_init_complete() && !enclave.is_provisioner_init_complete());
         enclave
-            .set_secret_sharing_instance(args.secret_sharing_instance)
+    }
+
+    /// Apply operator_init's installs to an existing enclave (mirrors `operator_init`).
+    /// Lets a harness defer operator-init until DKG output is available.
+    pub fn install_operator_init_for_testing(&self, args: OperatorInitTestArgs) {
+        self.config.set_s3_logger(args.s3_logger).unwrap();
+        self.config.set_bitcoin_network(args.network).unwrap();
+        self.set_secret_sharing_instance(args.secret_sharing_instance)
             .unwrap();
-        enclave
-            .scratchpad
+
+        let state = args.init_state;
+        let state_hash = state.digest();
+        let rate_limiter = state.build_rate_limiter().unwrap();
+        let (committee, withdrawal_config, _limiter_state, hashi_btc_master_pubkey) =
+            state.into_parts();
+        self.set_state_hash(state_hash).unwrap();
+        self.config
+            .set_hashi_btc_pk(hashi_btc_master_pubkey)
+            .unwrap();
+        self.config
+            .set_withdrawal_config(withdrawal_config)
+            .unwrap();
+        self.state.init(committee, rate_limiter).unwrap();
+
+        self.scratchpad
             .operator_init_logging_complete
             .set(())
             .expect("operator_init_logging_complete should only be set once");
-
-        assert!(enclave.is_operator_init_complete() && !enclave.is_provisioner_init_complete());
-        enclave
     }
 }
 
@@ -250,15 +275,9 @@ pub struct FullyInitializedArgs {
     pub limiter_state: LimiterState,
 }
 
-/// Drive an operator-initialized enclave to fully-initialized state without
-/// running the share-encryption round-trip. Generates a fresh BTC keypair.
-pub fn finalize_enclave(
-    enclave: &Arc<Enclave>,
-    committee: HashiCommittee,
-    master_pubkey: BitcoinPubkey,
-    withdrawal_config: WithdrawalConfig,
-    limiter_state: LimiterState,
-) -> GuardianResult<()> {
+/// Drive an operator-initialized enclave to fully-initialized by installing a
+/// fresh BTC keypair (the rest of the state was set at operator_init).
+pub fn finalize_enclave(enclave: &Arc<Enclave>) -> GuardianResult<()> {
     let secp = Secp256k1::new();
     let mut sk_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut sk_bytes);
@@ -267,12 +286,6 @@ pub fn finalize_enclave(
         &SecretKey::from_slice(&sk_bytes).expect("random bytes form a valid secp256k1 key"),
     );
     enclave.config.set_btc_keypair(enclave_btc_keypair)?;
-    enclave.config.set_hashi_btc_pk(master_pubkey)?;
-    enclave.config.set_withdrawal_config(withdrawal_config)?;
-
-    let init_state =
-        ProvisionerInitState::new(committee, withdrawal_config, limiter_state, master_pubkey)?;
-    enclave.state.init(init_state)?;
 
     enclave
         .scratchpad
@@ -294,18 +307,20 @@ pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc
         limiter_state,
     } = args;
 
-    let enclave =
-        create_operator_initialized_enclave(OperatorInitTestArgs::default().with_network(network))
-            .await;
-
-    finalize_enclave(
-        &enclave,
-        committee,
-        master_pubkey,
+    let init_state = EnclaveInitState::from_parts_for_testing(
         withdrawal_config,
         limiter_state,
+        committee,
+        master_pubkey,
+    );
+    let enclave = create_operator_initialized_enclave(
+        OperatorInitTestArgs::default()
+            .with_network(network)
+            .with_init_state(init_state),
     )
-    .expect("finalize_enclave should succeed on a fresh enclave");
+    .await;
+
+    finalize_enclave(&enclave).expect("finalize_enclave should succeed on a fresh enclave");
 
     assert!(enclave.is_fully_initialized());
     enclave

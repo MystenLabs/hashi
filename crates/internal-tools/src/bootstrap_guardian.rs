@@ -19,10 +19,10 @@ use hashi::onchain::OnchainState;
 use hashi_types::committee::certificate_threshold;
 use hashi_types::guardian::BitcoinPubkey;
 use hashi_types::guardian::EncPubKey;
+use hashi_types::guardian::EnclaveInitState;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
-use hashi_types::guardian::ProvisionerInitState;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::SecretSharingParams;
 use hashi_types::guardian::Share;
@@ -31,6 +31,7 @@ use hashi_types::guardian::ShareCommitments;
 use hashi_types::guardian::WithdrawalConfig;
 use hashi_types::guardian::crypto::commit_share;
 use hashi_types::guardian::crypto::split_secret;
+use hashi_types::guardian::proto_conversions::enclave_init_state_to_pb;
 use hashi_types::guardian::proto_conversions::provisioner_init_request_to_pb;
 use hashi_types::guardian::proto_conversions::secret_sharing_instance_to_pb;
 use hashi_types::guardian::session_id_from_signing_pubkey;
@@ -104,6 +105,23 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .await
         .with_context(|| format!("connect to guardian at {}", args.guardian_endpoint))?;
 
+    // The operator now supplies the full init state at OperatorInit; its digest
+    // is the state_hash KPs bind as their share-encryption AAD.
+    let withdrawal_config = WithdrawalConfig {
+        committee_threshold,
+        refill_rate_sats_per_sec: args.refill_rate_sats_per_sec,
+        max_bucket_capacity_sats: args.max_bucket_capacity_sats,
+    };
+    let limiter_state = LimiterState::genesis(&withdrawal_config);
+    let state = EnclaveInitState::new(
+        committee,
+        withdrawal_config,
+        limiter_state,
+        material.master_pubkey,
+    )
+    .map_err(|e| anyhow!("build EnclaveInitState: {e:?}"))?;
+    let state_hash = state.digest();
+
     let secret_sharing_instance = SecretSharingInstance::new(material.commitments.clone(), n, t, 0)
         .map_err(|e| anyhow!("build SecretSharingInstance: {e:?}"))?;
     let operator_init_req = pb::OperatorInitRequest {
@@ -115,6 +133,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         }),
         secret_sharing_instance: Some(secret_sharing_instance_to_pb(&secret_sharing_instance)),
         network: Some(network as i32),
+        state: Some(enclave_init_state_to_pb(state)),
     };
     tracing::info!("calling OperatorInit");
     client
@@ -172,33 +191,22 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
             && returned_instance.sharing_seq() == 0,
         "secret-sharing instance mismatch: guardian echoed different scheme than was submitted"
     );
+    let returned_state_hash = info
+        .state_hash
+        .ok_or_else(|| anyhow!("guardian info missing state_hash"))?;
+    anyhow::ensure!(
+        returned_state_hash == state_hash,
+        "state_hash mismatch: guardian echoed a different init state than was submitted"
+    );
 
     let enc_pubkey = EncPubKey::from_bytes(&info.encryption_pubkey)
         .map_err(|e| anyhow!("decode guardian encryption pubkey (session={session_id}): {e:?}"))?;
     tracing::info!(session_id = %session_id, "guardian info verified");
 
-    let withdrawal_config = WithdrawalConfig {
-        committee_threshold,
-        refill_rate_sats_per_sec: args.refill_rate_sats_per_sec,
-        max_bucket_capacity_sats: args.max_bucket_capacity_sats,
-    };
-    let limiter_state = LimiterState::genesis(&withdrawal_config);
-    let state = ProvisionerInitState::new(
-        committee,
-        withdrawal_config,
-        limiter_state,
-        material.master_pubkey,
-    )
-    .map_err(|e| anyhow!("build ProvisionerInitState: {e:?}"))?;
-
     for (i, share) in material.shares.iter().take(t).enumerate() {
         tracing::info!("submitting ProvisionerInit share {}/{t}", i + 1);
-        let req = ProvisionerInitRequest::build_from_share_and_state(
-            share,
-            &enc_pubkey,
-            state.clone(),
-            &mut rng,
-        );
+        let req =
+            ProvisionerInitRequest::build_from_share(share, &enc_pubkey, state_hash, &mut rng);
         let pb_req = provisioner_init_request_to_pb(req)
             .map_err(|e| anyhow!("encode ProvisionerInitRequest: {e:?}"))?;
         client

@@ -267,7 +267,7 @@ impl TestNetworksBuilder {
             hashi_builder = hashi_builder.with_guardian_endpoint(harness.endpoint().to_string());
             tracing::info!(
                 endpoint = %harness.endpoint(),
-                "guardian harness started (operator-init)"
+                "guardian harness started (serving; init deferred to finalize)"
             );
             Some(harness)
         } else {

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::Ciphertext;
+use super::EnclaveInitState;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianInfo;
@@ -14,7 +15,6 @@ use super::LimiterState;
 use super::OperatorInitRequest;
 use super::PgpPublicCert;
 use super::ProvisionerInitRequest;
-use super::ProvisionerInitState;
 use super::RotateKpsResponse;
 use super::S3BucketInfo;
 use super::S3Config;
@@ -87,6 +87,7 @@ impl GetGuardianInfoResponse {
                 region: "us-east-1".to_string(),
             }),
             encryption_pubkey: vec![0u8; 32],
+            state_hash: None,
             server_version: "v1".to_string(),
         };
 
@@ -201,6 +202,7 @@ impl OperatorInitRequest {
             s3_config,
             secret_sharing_instance,
             network: super::Network::Regtest,
+            state: Some(EnclaveInitState::mock_for_testing(None)),
         }
     }
 }
@@ -216,7 +218,6 @@ impl ProvisionerInitRequest {
                     aes_ciphertext: vec![0u8; 32],
                 },
             },
-            state: ProvisionerInitState::mock_for_testing(None),
         }
     }
 }
@@ -247,27 +248,27 @@ fn mock_committee_with_one_member(epoch: u64) -> HashiCommittee {
     )
 }
 
-impl ProvisionerInitState {
+impl EnclaveInitState {
     pub fn from_parts_for_testing(
         withdrawal_config: WithdrawalConfig,
         limiter_state: LimiterState,
         committee: HashiCommittee,
         hashi_btc_master_pubkey: super::BitcoinPubkey,
     ) -> Self {
-        ProvisionerInitState::new(
+        EnclaveInitState::new(
             committee,
             withdrawal_config,
             limiter_state,
             hashi_btc_master_pubkey,
         )
-        .expect("valid ProvisionerInitState")
+        .expect("valid EnclaveInitState")
     }
 
     pub fn mock_for_testing(kp: Option<Keypair>) -> Self {
         let kp = kp.unwrap_or(create_btc_keypair(&[1u8; 32]));
         let max_capacity = 1000;
 
-        ProvisionerInitState::new(
+        EnclaveInitState::new(
             mock_committee_with_one_member(0),
             WithdrawalConfig {
                 committee_threshold: 0,
@@ -281,7 +282,7 @@ impl ProvisionerInitState {
             },
             kp.x_only_public_key().0,
         )
-        .expect("valid ProvisionerInitState")
+        .expect("valid EnclaveInitState")
     }
 }
 

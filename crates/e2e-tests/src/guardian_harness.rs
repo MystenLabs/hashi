@@ -3,17 +3,17 @@
 
 //! In-process `hashi-guardian` for integration tests. Two stages:
 //! [`GuardianHarness::start`] serves gRPC; [`GuardianHarness::finalize`]
-//! runs provisioner-init once hashi DKG output is on chain.
+//! runs operator- and provisioner-init once hashi DKG output is on chain.
 
 use anyhow::Context;
 use anyhow::Result;
 use bitcoin::Network;
 use hashi_guardian::Enclave;
 use hashi_guardian::OperatorInitTestArgs;
-use hashi_guardian::create_operator_initialized_enclave;
 use hashi_guardian::rpc::GuardianGrpc;
 use hashi_types::committee::Committee as HashiCommittee;
 use hashi_types::guardian::BitcoinPubkey;
+use hashi_types::guardian::EnclaveInitState;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::WithdrawalConfig;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
@@ -28,18 +28,17 @@ use tonic::transport::Server;
 pub struct GuardianHarness {
     enclave: Arc<Enclave>,
     endpoint: String,
+    network: Network,
     shutdown_tx: Option<oneshot::Sender<()>>,
     server_handle: Option<JoinHandle<()>>,
 }
 
 impl GuardianHarness {
-    /// Start an operator-init'd guardian. Withdrawal RPCs stay gated until
-    /// [`Self::finalize`] completes provisioner-init.
+    /// Start a guardian serving gRPC. The enclave is uninitialized; operator-
+    /// and provisioner-init both run in [`Self::finalize`] once DKG output exists
+    /// (operator-init now carries the committee + BTC master key).
     pub async fn start(network: Network) -> Result<Self> {
-        let enclave = create_operator_initialized_enclave(
-            OperatorInitTestArgs::default().with_network(network),
-        )
-        .await;
+        let enclave = Enclave::create_with_random_keys();
 
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -68,12 +67,14 @@ impl GuardianHarness {
         Ok(Self {
             enclave,
             endpoint,
+            network,
             shutdown_tx: Some(shutdown_tx),
             server_handle: Some(server_handle),
         })
     }
 
-    /// Complete provisioner-init using the committee and master pubkey from hashi DKG.
+    /// Operator-init (committee + master pubkey from hashi DKG) then
+    /// provisioner-init the served enclave, bringing it to fully-initialized.
     pub async fn finalize(
         &self,
         committee: HashiCommittee,
@@ -81,14 +82,19 @@ impl GuardianHarness {
         withdrawal_config: WithdrawalConfig,
         limiter_state: LimiterState,
     ) -> Result<()> {
-        hashi_guardian::test_utils::finalize_enclave(
-            &self.enclave,
-            committee,
-            master_pubkey,
+        let init_state = EnclaveInitState::from_parts_for_testing(
             withdrawal_config,
             limiter_state,
-        )
-        .map_err(|e| anyhow::anyhow!("finalize guardian enclave: {e:?}"))?;
+            committee,
+            master_pubkey,
+        );
+        self.enclave.install_operator_init_for_testing(
+            OperatorInitTestArgs::default()
+                .with_network(self.network)
+                .with_init_state(init_state),
+        );
+        hashi_guardian::test_utils::finalize_enclave(&self.enclave)
+            .map_err(|e| anyhow::anyhow!("finalize guardian enclave: {e:?}"))?;
 
         anyhow::ensure!(
             self.enclave.is_fully_initialized(),
