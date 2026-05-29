@@ -36,14 +36,14 @@ pub struct Enclave {
     pub state: EnclaveState,
     /// Initialization scratchpad
     pub scratchpad: Scratchpad,
-    /// Set at boot from CEREMONY_MODE. A ceremony enclave runs
-    /// setup_new_key/rotate_kps and needs no withdrawal state; a normal enclave
-    /// runs provisioner_init/withdrawals and requires the EnclaveInitState.
-    ceremony_mode: bool,
 }
 
 /// Configuration set during initialization (immutable after set)
 pub struct EnclaveConfig {
+    /// Set at boot from CEREMONY_MODE. A ceremony enclave runs
+    /// setup_new_key/rotate_kps and needs no withdrawal state; a normal enclave
+    /// runs provisioner_init/withdrawals and requires the EnclaveInitState.
+    ceremony_mode: bool,
     /// Ephemeral keypair (set on boot)
     eph_keys: EphemeralKeyPairs,
     /// S3 client & config (set in operator_init)
@@ -52,23 +52,22 @@ pub struct EnclaveConfig {
     enclave_btc_keypair: OnceLock<Keypair>,
     /// BTC network: mainnet, testnet, regtest (set in operator_init)
     btc_network: OnceLock<Network>,
-    /// Raw MPC verifying key as a curve point. Stored with y-parity so the
-    /// 2-of-2 child-key derivation matches the MPC's signing protocol.
-    /// Set in provisioner_init.
+    /// Raw MPC verifying key as a curve point. Stored with y-parity.
+    /// Set in operator_init.
     hashi_btc_master_pubkey: OnceLock<HashiMasterG>,
-    /// Withdraw related config's (set in provisioner_init)
+    /// Withdraw related config's (set in operator_init)
     withdrawal_config: OnceLock<WithdrawalConfig>,
 }
 
 /// Mutable state that changes during operation.
-/// Note: State is initialized during provisioner_init.
+/// Note: committee + rate limiter are installed during operator_init.
 pub struct EnclaveState {
     /// Current Hashi committee.
     committee: RwLock<Option<Arc<HashiCommittee>>>,
     /// Serializes `update_committee` so concurrent calls can't race the
     /// read/log/replace sequence and roll the epoch backwards.
     pub committee_update_lock: tokio::sync::Mutex<()>,
-    /// Rate limiter. Set once during provisioner_init.
+    /// Rate limiter. Set once during operator_init.
     /// Uses `Arc<tokio::Mutex>` so the guard can be held across `.await`.
     rate_limiter: OnceLock<Arc<tokio::sync::Mutex<RateLimiter>>>,
 }
@@ -81,7 +80,8 @@ pub struct Scratchpad {
     pub shares: tokio::sync::Mutex<Vec<Share>>,
     /// Secret-sharing instance (commitments + N + T) set by operator_init.
     pub secret_sharing_instance: OnceLock<SecretSharingInstance>,
-    /// Hash of the state in ProvisionerInitRequest.
+    /// Digest of the operator-supplied EnclaveInitState (set in operator_init);
+    /// the AAD KPs bind on their share submissions.
     pub state_hash: OnceLock<[u8; 32]>,
     /// Set once operator_init has successfully written all logs to S3.
     /// This prevents heartbeats from being emitted before operator_init logs.
@@ -106,8 +106,13 @@ pub struct EphemeralKeyPairs {
 }
 
 impl EnclaveConfig {
-    pub fn new(signing_keys: GuardianSignKeyPair, encryption_keys: GuardianEncKeyPair) -> Self {
+    pub fn new(
+        signing_keys: GuardianSignKeyPair,
+        encryption_keys: GuardianEncKeyPair,
+        ceremony_mode: bool,
+    ) -> Self {
         EnclaveConfig {
+            ceremony_mode,
             eph_keys: EphemeralKeyPairs {
                 signing_keys,
                 encryption_keys,
@@ -365,21 +370,20 @@ impl Enclave {
         ceremony_mode: bool,
     ) -> Self {
         Enclave {
-            config: EnclaveConfig::new(signing_keys, encryption_keys),
+            config: EnclaveConfig::new(signing_keys, encryption_keys, ceremony_mode),
             state: EnclaveState {
                 committee: RwLock::new(None),
                 committee_update_lock: tokio::sync::Mutex::new(()),
                 rate_limiter: OnceLock::new(),
             },
             scratchpad: Scratchpad::default(),
-            ceremony_mode,
         }
     }
 
     /// Whether this enclave runs ceremony flows (setup_new_key/rotate_kps)
     /// rather than the normal withdrawal-serving flows.
     pub fn ceremony_mode(&self) -> bool {
-        self.ceremony_mode
+        self.config.ceremony_mode
     }
 
     pub fn is_provisioner_init_complete(&self) -> bool {
@@ -401,7 +405,7 @@ impl Enclave {
                 .is_some();
         // A normal (withdrawal-serving) enclave also needs the operator-supplied
         // EnclaveInitState, recorded as the state_hash; a ceremony enclave does not.
-        if self.ceremony_mode {
+        if self.config.ceremony_mode {
             base
         } else {
             base && self.scratchpad.state_hash.get().is_some()

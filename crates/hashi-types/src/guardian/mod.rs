@@ -336,7 +336,8 @@ pub enum InitLogMessage {
         attestation: Attestation,
         signing_public_key: GuardianPubKey,
     },
-    /// Share commitments given in /operator_init
+    /// Signed GuardianInfo logged in /operator_init (secret-sharing instance,
+    /// state_hash, encryption/BTC pubkeys).
     OIGuardianInfo(GuardianInfo),
     /// A single successful /provisioner_init call (happens N times)
     PISuccess {
