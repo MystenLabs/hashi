@@ -150,13 +150,6 @@ pub async fn provisioner_init(
     if enclave.is_provisioner_init_complete() {
         return Err(InvalidInputs("Provisioner init already complete".into()));
     }
-    if enclave.is_provisioner_init_partially_complete() {
-        debug_assert!(
-            false,
-            "provisioner_init partially complete; this should not happen"
-        );
-        return Err(InvalidInputs("Provisioner init partially complete".into()));
-    }
     info!("Enclave state validated.");
 
     let sk = enclave.encryption_secret_key();

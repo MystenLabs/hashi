@@ -216,10 +216,11 @@ impl OperatorInitTestArgs {
 }
 
 impl Enclave {
+    /// Normal-mode enclave (ceremony_mode = false) with fresh random keys.
     pub fn create_with_random_keys() -> Arc<Self> {
         let signing_keys = GuardianSignKeyPair::new(rand::thread_rng());
         let encryption_keys = GuardianEncKeyPair::random(&mut rand::thread_rng());
-        Arc::new(Enclave::new(signing_keys, encryption_keys))
+        Arc::new(Enclave::new(signing_keys, encryption_keys, false))
     }
 
     /// Create an enclave post operator_init() but pre provisioner_init().

@@ -43,11 +43,10 @@ async fn main() -> Result<()> {
     let mut rng = rand::thread_rng();
     let signing_keys = GuardianSignKeyPair::new(&mut rng);
     let encryption_keys = GuardianEncKeyPair::random(&mut rng);
-    let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys));
+    let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys, ceremony_mode));
 
     let svc = GuardianGrpc {
         enclave: enclave.clone(),
-        ceremony_mode,
     };
 
     let addr = "0.0.0.0:3000".parse()?;

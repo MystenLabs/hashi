@@ -35,6 +35,10 @@ pub struct Enclave {
     pub state: EnclaveState,
     /// Initialization scratchpad
     pub scratchpad: Scratchpad,
+    /// Set at boot from CEREMONY_MODE. A ceremony enclave runs
+    /// setup_new_key/rotate_kps and needs no withdrawal state; a normal enclave
+    /// runs provisioner_init/withdrawals and requires the EnclaveInitState.
+    ceremony_mode: bool,
 }
 
 /// Configuration set during initialization (immutable after set)
@@ -230,11 +234,6 @@ impl EnclaveConfig {
     pub fn is_provisioner_init_complete(&self) -> bool {
         self.is_enclave_btc_keypair_set()
     }
-
-    /// The reconstructed BTC keypair is set.
-    pub fn is_provisioner_init_partially_complete(&self) -> bool {
-        self.is_enclave_btc_keypair_set()
-    }
 }
 
 impl EnclaveState {
@@ -357,7 +356,11 @@ impl Enclave {
     // Construction & Initialization Status
     // ========================================================================
 
-    pub fn new(signing_keys: GuardianSignKeyPair, encryption_keys: GuardianEncKeyPair) -> Self {
+    pub fn new(
+        signing_keys: GuardianSignKeyPair,
+        encryption_keys: GuardianEncKeyPair,
+        ceremony_mode: bool,
+    ) -> Self {
         Enclave {
             config: EnclaveConfig::new(signing_keys, encryption_keys),
             state: EnclaveState {
@@ -366,7 +369,14 @@ impl Enclave {
                 rate_limiter: OnceLock::new(),
             },
             scratchpad: Scratchpad::default(),
+            ceremony_mode,
         }
+    }
+
+    /// Whether this enclave runs ceremony flows (setup_new_key/rotate_kps)
+    /// rather than the normal withdrawal-serving flows.
+    pub fn ceremony_mode(&self) -> bool {
+        self.ceremony_mode
     }
 
     pub fn is_provisioner_init_complete(&self) -> bool {
@@ -378,18 +388,21 @@ impl Enclave {
                 .is_some()
     }
 
-    pub fn is_provisioner_init_partially_complete(&self) -> bool {
-        self.config.is_provisioner_init_partially_complete()
-    }
-
     pub fn is_operator_init_complete(&self) -> bool {
-        self.config.is_operator_init_complete()
+        let base = self.config.is_operator_init_complete()
             && self.scratchpad.secret_sharing_instance.get().is_some()
             && self
                 .scratchpad
                 .operator_init_logging_complete
                 .get()
-                .is_some()
+                .is_some();
+        // A normal (withdrawal-serving) enclave also needs the operator-supplied
+        // EnclaveInitState, recorded as the state_hash; a ceremony enclave does not.
+        if self.ceremony_mode {
+            base
+        } else {
+            base && self.scratchpad.state_hash.get().is_some()
+        }
     }
 
     pub fn is_operator_init_partially_complete(&self) -> bool {

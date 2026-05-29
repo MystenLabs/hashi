@@ -28,7 +28,6 @@ use tonic::Status;
 #[derive(Clone)]
 pub struct GuardianGrpc {
     pub enclave: Arc<Enclave>,
-    pub ceremony_mode: bool,
 }
 
 fn to_status(e: GuardianError) -> Status {
@@ -43,7 +42,7 @@ fn to_status(e: GuardianError) -> Status {
 
 impl GuardianGrpc {
     fn require_ceremony_mode(&self, endpoint: &str) -> Result<(), Status> {
-        if !self.ceremony_mode {
+        if !self.enclave.ceremony_mode() {
             return Err(Status::failed_precondition(format!(
                 "{endpoint} is disabled when CEREMONY_MODE=false"
             )));
@@ -52,7 +51,7 @@ impl GuardianGrpc {
     }
 
     fn require_normal_mode(&self, endpoint: &str) -> Result<(), Status> {
-        if self.ceremony_mode {
+        if self.enclave.ceremony_mode() {
             return Err(Status::failed_precondition(format!(
                 "{endpoint} is disabled when CEREMONY_MODE=true"
             )));
