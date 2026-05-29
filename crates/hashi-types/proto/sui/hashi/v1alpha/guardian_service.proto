@@ -86,7 +86,7 @@ message GuardianInfoData {
   // Absent before `provisioner_init` has set the keypair.
   optional bytes enclave_btc_pubkey = 5;
 
-  // Digest of the operator-supplied EnclaveInitState (32 bytes, if set).
+  // Digest of the operator-supplied WithdrawModeConfig (32 bytes, if set).
   optional bytes state_hash = 6;
 }
 
@@ -176,15 +176,9 @@ message OperatorInitRequest {
   // S3 access keys
   S3Config s3_config = 1;
 
-  // Secret-sharing scheme for the current BTC key.
-  SecretSharingInstance secret_sharing_instance = 2;
-
-  // Network the guardian is operating on.
-  optional Network network = 3;
-
-  // Operator-supplied init state; the enclave binds its digest as the
-  // share-decryption AAD and exposes the digest via GuardianInfo.
-  EnclaveInitState state = 4;
+  // Withdraw-mode config (absent for a ceremony enclave); the enclave binds its
+  // digest as the share-decryption AAD and exposes the digest via GuardianInfo.
+  WithdrawModeConfig state = 4;
 }
 
 message OperatorInitResponse {}
@@ -209,12 +203,12 @@ enum Network {
 
 message ProvisionerInitRequest {
   // Encrypted share destined for this provisioner. Its HPKE AAD binds the
-  // enclave's state_hash (the EnclaveInitState digest), so a share only
+  // enclave's state_hash (the WithdrawModeConfig digest), so a share only
   // decrypts if the KP agreed on the operator-supplied state.
   GuardianEncryptedShare encrypted_share = 1;
 }
 
-message EnclaveInitState {
+message WithdrawModeConfig {
   // Current Hashi committee.
   Committee committee = 1;
 
@@ -226,6 +220,13 @@ message EnclaveInitState {
 
   // Rate limiter state.
   LimiterState limiter_state = 6;
+
+  // Secret-sharing scheme for the current BTC key. Carried for delivery; not
+  // part of the state_hash digest.
+  SecretSharingInstance secret_sharing_instance = 7;
+
+  // BTC network. Carried for delivery; not part of the state_hash digest.
+  optional Network network = 8;
 }
 
 message LimiterState {
@@ -266,6 +267,10 @@ message RotateKpsRequest {
 
   optional uint32 new_num_shares = 3;
   optional uint32 new_threshold = 4;
+
+  // The current key's secret-sharing instance (old commitments + threshold) the
+  // enclave verifies the submitted old shares against.
+  SecretSharingInstance old_instance = 5;
 }
 
 // Unsigned response payload.

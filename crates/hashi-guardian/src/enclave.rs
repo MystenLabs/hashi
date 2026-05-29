@@ -45,10 +45,8 @@ pub struct Enclave {
 
 /// Configuration set during initialization (immutable after set)
 pub struct EnclaveConfig {
-    /// Set at boot from CEREMONY_MODE. A ceremony enclave runs
-    /// setup_new_key/rotate_kps and needs no withdrawal state; a normal enclave
-    /// runs provisioner_init/withdrawals and requires the EnclaveInitState.
-    ceremony_mode: bool,
+    /// Enclave mode (set on boot).
+    mode: EnclaveMode,
     /// Ephemeral keypair (set on boot)
     eph_keys: EphemeralKeyPairs,
     /// S3 client & config (set in operator_init)
@@ -81,7 +79,7 @@ pub struct Scratchpad {
     pub shares: tokio::sync::Mutex<Vec<Share>>,
     /// Secret-sharing instance (commitments + N + T) set by operator_init.
     pub secret_sharing_instance: OnceLock<SecretSharingInstance>,
-    /// Digest of the operator-supplied EnclaveInitState (set in operator_init);
+    /// Digest of the operator-supplied WithdrawModeConfig (set in operator_init);
     /// the AAD KPs bind on their share submissions.
     pub state_hash: OnceLock<[u8; 32]>,
     /// Set once operator_init has successfully written all logs to S3.
@@ -110,10 +108,10 @@ impl EnclaveConfig {
     pub fn new(
         signing_keys: GuardianSignKeyPair,
         encryption_keys: GuardianEncKeyPair,
-        ceremony_mode: bool,
+        mode: EnclaveMode,
     ) -> Self {
         EnclaveConfig {
-            ceremony_mode,
+            mode,
             eph_keys: EphemeralKeyPairs {
                 signing_keys,
                 encryption_keys,
@@ -332,10 +330,10 @@ impl Enclave {
     pub fn new(
         signing_keys: GuardianSignKeyPair,
         encryption_keys: GuardianEncKeyPair,
-        ceremony_mode: bool,
+        mode: EnclaveMode,
     ) -> Self {
         Enclave {
-            config: EnclaveConfig::new(signing_keys, encryption_keys, ceremony_mode),
+            config: EnclaveConfig::new(signing_keys, encryption_keys, mode),
             state: EnclaveState {
                 committee: RwLock::new(None),
                 rate_limiter: OnceLock::new(),
@@ -345,10 +343,9 @@ impl Enclave {
         }
     }
 
-    /// Whether this enclave runs ceremony flows (setup_new_key/rotate_kps)
-    /// rather than the normal withdrawal-serving flows.
-    pub fn ceremony_mode(&self) -> bool {
-        self.config.ceremony_mode
+    /// Which flows this enclave serves (fixed at boot).
+    pub fn mode(&self) -> EnclaveMode {
+        self.config.mode
     }
 
     pub fn is_provisioner_init_complete(&self) -> bool {
@@ -384,11 +381,11 @@ impl Enclave {
         let base = self.config.s3_logger.get().is_some()
             && self.config.btc_network.get().is_some()
             && self.scratchpad.secret_sharing_instance.get().is_some();
-        if self.config.ceremony_mode {
-            // Ceremony enclaves (setup_new_key/rotate_kps) carry no EnclaveInitState.
+        if self.config.mode == EnclaveMode::Ceremony {
+            // Ceremony enclaves (setup_new_key/rotate_kps) carry no WithdrawModeConfig.
             base
         } else {
-            // Normal enclaves additionally install the EnclaveInitState.
+            // Normal enclaves additionally install the WithdrawModeConfig.
             base && self.scratchpad.state_hash.get().is_some()
                 && self.config.hashi_btc_master_pubkey.get().is_some()
                 && self.state.get_committee().is_ok()

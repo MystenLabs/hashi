@@ -92,6 +92,15 @@ pub fn session_id_from_signing_pubkey(signing_pub_key: &GuardianPubKey) -> Strin
     s
 }
 
+/// Which flows an enclave serves, fixed at boot. A `Ceremony` enclave runs
+/// `setup_new_key`/`rotate_kps`; a `Withdraw` enclave runs `provisioner_init` +
+/// `standard_withdrawal`. `operator_init`, `get_guardian_info` are enabled in both modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnclaveMode {
+    Ceremony,
+    Withdraw,
+}
+
 // ---------------------------------
 //          Intents
 // ---------------------------------
@@ -123,7 +132,6 @@ pub trait SigningIntent {
 // ---------------------------------
 
 /// Guardian-signed wrapper - adds timestamp and signature to any data
-/// TODO: Impl custom ser/deser for GuardianSignature as signatures are displayed as long bytes in S3 logs
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct GuardianSigned<T> {
     pub data: T,
@@ -167,20 +175,18 @@ pub struct SetupNewKeyResponse {
     pub share_commitments: ShareCommitments,
 }
 
-/// Operator-supplied bootstrap: S3 API keys, secret-sharing instance, BTC
-/// network, and — for a withdrawal-serving (normal-mode) enclave — the
-/// `EnclaveInitState` whose digest the enclave binds as the share-decryption
-/// AAD. Ceremony-mode enclaves (setup/rotate) pass `state: None`.
+/// Operator-supplied bootstrap. A ceremony-mode enclave (setup/rotate) needs only
+/// `s3_config`; a withdraw-mode enclave additionally carries the `WithdrawModeConfig`
+/// (committee, limiter, BTC master pubkey, secret-sharing instance, network) whose
+/// digest is the share-decryption AAD.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OperatorInitRequest {
     s3_config: S3Config,
-    secret_sharing_instance: SecretSharingInstance,
-    network: Network,
-    state: Option<EnclaveInitState>,
+    state: Option<WithdrawModeConfig>,
 }
 
 /// Provides one KP's encrypted key share to the enclave. The share's HPKE AAD
-/// binds the enclave's `state_hash` (the `EnclaveInitState` digest), so a share
+/// binds the enclave's `state_hash` (the `WithdrawModeConfig` digest), so a share
 /// only decrypts if the KP agreed on the operator-supplied state.
 /// To be called by Key Provisioners (who may be outside entities).
 #[derive(Debug, Clone, PartialEq)]
@@ -188,11 +194,11 @@ pub struct ProvisionerInitRequest {
     encrypted_share: GuardianEncryptedShare,
 }
 
-/// Operator-supplied state that initializes the enclave and that KPs verify.
-/// Its `digest()` is the `state_hash`: bound as HPKE AAD on each KP's share and
-/// exposed (as a hash) via `GuardianInfo`. Supplied to `operator_init`.
+/// The withdraw-mode state KPs attest to. Its `digest()` is the `state_hash`:
+/// bound as HPKE AAD on each KP's share and exposed (as a hash) via `GuardianInfo`.
+/// These are exactly the fields whose agreement is enforced *only* via the digest.
 #[derive(Debug, Clone, PartialEq)]
-pub struct EnclaveInitState {
+pub struct WithdrawModeState {
     /// Current Hashi committee
     committee: HashiCommittee,
     /// Limiter config
@@ -205,12 +211,26 @@ pub struct EnclaveInitState {
     hashi_btc_master_pubkey: HashiMasterG,
 }
 
+/// Full operator-supplied withdraw-mode config: the attested `WithdrawModeState`
+/// plus delivery-only fields that are enforced elsewhere and so are excluded from
+/// the digest (the instance via direct share verification; network is share-irrelevant).
+/// Supplied to `operator_init`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WithdrawModeConfig {
+    state: WithdrawModeState,
+    /// Secret-sharing scheme for the current BTC key (commitments + N + T).
+    secret_sharing_instance: SecretSharingInstance,
+    /// BTC network.
+    network: Network,
+}
+
 /// Setup-mode rotation request, assembled by the operator from the current KPs'
 /// encrypted old shares (each bound to `state.digest()` as AAD) and the shared
 /// rotation target `state`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RotateKpsRequest {
     encrypted_old_shares: Vec<GuardianEncryptedShare>,
+    old_instance: SecretSharingInstance,
     state: RotateKpsState,
 }
 
@@ -261,7 +281,7 @@ pub struct GuardianInfo {
     pub bucket_info: Option<S3BucketInfo>,
     /// Encryption key. Used by KPs to encrypt their shares.
     pub encryption_pubkey: EncPubKeyBytes,
-    /// Digest of the operator-supplied `EnclaveInitState` (set after operator_init).
+    /// Digest of the operator-supplied `WithdrawModeConfig` (set after operator_init).
     /// KPs recompute it from their verified sources and match to confirm config.
     pub state_hash: Option<[u8; 32]>,
     /// Server version
@@ -485,68 +505,49 @@ impl SetupNewKeyRequest {
 }
 
 impl OperatorInitRequest {
-    pub fn new(
-        s3_config: S3Config,
-        secret_sharing_instance: SecretSharingInstance,
-        network: Network,
-        state: Option<EnclaveInitState>,
-    ) -> GuardianResult<Self> {
-        Ok(Self {
+    /// Build a ceremony-mode request (S3 only).
+    pub fn new_ceremony(s3_config: S3Config) -> Self {
+        Self {
             s3_config,
-            secret_sharing_instance,
-            network,
-            state,
-        })
+            state: None,
+        }
+    }
+
+    /// Build a withdraw-mode request carrying the full operator config.
+    pub fn new_withdraw_mode(s3_config: S3Config, state: WithdrawModeConfig) -> Self {
+        Self {
+            s3_config,
+            state: Some(state),
+        }
     }
 
     pub fn s3_config(&self) -> &S3Config {
         &self.s3_config
     }
 
-    pub fn secret_sharing_instance(&self) -> &SecretSharingInstance {
-        &self.secret_sharing_instance
-    }
-
-    pub fn network(&self) -> Network {
-        self.network
-    }
-
-    pub fn state(&self) -> Option<&EnclaveInitState> {
+    pub fn state(&self) -> Option<&WithdrawModeConfig> {
         self.state.as_ref()
     }
 
-    /// Validate against the enclave's mode: a normal (withdrawal-serving) enclave
-    /// must carry the `EnclaveInitState`, a ceremony enclave must not.
-    pub fn validate(&self, ceremony_mode: bool) -> GuardianResult<()> {
-        match (ceremony_mode, self.state.is_some()) {
-            (false, false) => Err(InvalidInputs(
-                "normal-mode operator_init requires init state".into(),
+    /// `state` must be present iff the enclave runs in withdraw mode.
+    pub fn validate(&self, mode: EnclaveMode) -> GuardianResult<()> {
+        match (mode, self.state.is_some()) {
+            (EnclaveMode::Withdraw, false) => Err(InvalidInputs(
+                "withdraw-mode operator_init requires a WithdrawModeConfig".into(),
             )),
-            (true, true) => Err(InvalidInputs(
-                "ceremony-mode operator_init must not carry init state".into(),
+            (EnclaveMode::Ceremony, true) => Err(InvalidInputs(
+                "ceremony-mode operator_init must carry only S3 config".into(),
             )),
             _ => Ok(()),
         }
     }
 
-    pub fn into_parts(
-        self,
-    ) -> (
-        S3Config,
-        SecretSharingInstance,
-        Network,
-        Option<EnclaveInitState>,
-    ) {
-        (
-            self.s3_config,
-            self.secret_sharing_instance,
-            self.network,
-            self.state,
-        )
+    pub fn into_parts(self) -> (S3Config, Option<WithdrawModeConfig>) {
+        (self.s3_config, self.state)
     }
 }
 
-impl EnclaveInitState {
+impl WithdrawModeState {
     pub fn new(
         committee: HashiCommittee,
         limiter_config: LimiterConfig,
@@ -584,10 +585,50 @@ impl EnclaveInitState {
         self.hashi_btc_master_pubkey
     }
 
+    /// The `state_hash` — the only digest in the system.
     pub fn digest(&self) -> [u8; 32] {
         let bytes =
-            bcs::to_bytes(&EnclaveInitStateRepr::from(self)).expect("serialization should work");
+            bcs::to_bytes(&WithdrawModeStateRepr::from(self)).expect("serialization should work");
         Blake2b::<U32>::digest(bytes).into()
+    }
+}
+
+impl WithdrawModeConfig {
+    pub fn new(
+        committee: HashiCommittee,
+        limiter_config: LimiterConfig,
+        limiter_state: LimiterState,
+        hashi_btc_master_pubkey: HashiMasterG,
+        secret_sharing_instance: SecretSharingInstance,
+        network: Network,
+    ) -> GuardianResult<Self> {
+        let state = WithdrawModeState::new(
+            committee,
+            limiter_config,
+            limiter_state,
+            hashi_btc_master_pubkey,
+        )?;
+        Ok(Self {
+            state,
+            secret_sharing_instance,
+            network,
+        })
+    }
+
+    pub fn into_parts(self) -> (WithdrawModeState, SecretSharingInstance, Network) {
+        (self.state, self.secret_sharing_instance, self.network)
+    }
+
+    pub fn state(&self) -> &WithdrawModeState {
+        &self.state
+    }
+
+    pub fn secret_sharing_instance(&self) -> &SecretSharingInstance {
+        &self.secret_sharing_instance
+    }
+
+    pub fn network(&self) -> Network {
+        self.network
     }
 }
 
@@ -597,7 +638,7 @@ impl ProvisionerInitRequest {
     }
 
     /// Encrypt `share` to the enclave's public key, binding `state_hash` (the
-    /// enclave's `EnclaveInitState` digest) as HPKE AAD. The enclave only
+    /// enclave's `WithdrawModeConfig` digest) as HPKE AAD. The enclave only
     /// decrypts shares from KPs that agreed on that state.
     pub fn build_from_share<R: CryptoRng + RngCore>(
         share: &Share,
@@ -663,9 +704,14 @@ impl RotateKpsState {
 }
 
 impl RotateKpsRequest {
-    pub fn new(encrypted_old_shares: Vec<GuardianEncryptedShare>, state: RotateKpsState) -> Self {
+    pub fn new(
+        encrypted_old_shares: Vec<GuardianEncryptedShare>,
+        old_instance: SecretSharingInstance,
+        state: RotateKpsState,
+    ) -> Self {
         Self {
             encrypted_old_shares,
+            old_instance,
             state,
         }
     }
@@ -687,12 +733,22 @@ impl RotateKpsRequest {
         &self.encrypted_old_shares
     }
 
+    pub fn old_instance(&self) -> &SecretSharingInstance {
+        &self.old_instance
+    }
+
     pub fn state(&self) -> &RotateKpsState {
         &self.state
     }
 
-    pub fn into_parts(self) -> (Vec<GuardianEncryptedShare>, RotateKpsState) {
-        (self.encrypted_old_shares, self.state)
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<GuardianEncryptedShare>,
+        SecretSharingInstance,
+        RotateKpsState,
+    ) {
+        (self.encrypted_old_shares, self.old_instance, self.state)
     }
 }
 
@@ -998,9 +1054,9 @@ pub struct SignedStandardWithdrawalRequestWire {
     pub signature: CommitteeSignatureWire,
 }
 
-/// Serializable representation of EnclaveInitState. Used for computing its digest.
+/// Serializable representation of WithdrawModeState. Used for computing its digest.
 #[derive(Serialize)]
-struct EnclaveInitStateRepr {
+struct WithdrawModeStateRepr {
     pub committee: crate::move_types::Committee,
     pub limiter_config: LimiterConfig,
     pub limiter_state: LimiterState,
@@ -1067,8 +1123,8 @@ impl From<StandardWithdrawalRequest> for StandardWithdrawalRequestWire {
     }
 }
 
-impl From<&EnclaveInitState> for EnclaveInitStateRepr {
-    fn from(state: &EnclaveInitState) -> Self {
+impl From<&WithdrawModeState> for WithdrawModeStateRepr {
+    fn from(state: &WithdrawModeState) -> Self {
         let (committee, config, limiter_state, pubkey) = state.clone().into_parts();
         Self {
             committee: (&committee).into(),

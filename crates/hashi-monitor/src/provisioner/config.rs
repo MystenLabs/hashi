@@ -71,7 +71,7 @@ pub struct ProvisionerConfig {
     pub s3: S3Config,
     pub share_commitments: Vec<ShareCommitmentInput>,
 
-    /// Expected EnclaveInitState (operator-supplied; the KP recomputes its digest)
+    /// Expected WithdrawModeState (operator-supplied; the KP recomputes its digest)
     // Current Hashi committee
     pub hashi_committee: CommitteeRepr,
     // Limiter config

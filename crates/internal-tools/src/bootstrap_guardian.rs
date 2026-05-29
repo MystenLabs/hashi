@@ -18,7 +18,6 @@ use clap::Parser;
 use hashi::onchain::OnchainState;
 use hashi_types::guardian::BitcoinPubkey;
 use hashi_types::guardian::EncPubKey;
-use hashi_types::guardian::EnclaveInitState;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::HashiMasterG;
 use hashi_types::guardian::LimiterConfig;
@@ -29,6 +28,7 @@ use hashi_types::guardian::SecretSharingParams;
 use hashi_types::guardian::Share;
 use hashi_types::guardian::ShareCommitment;
 use hashi_types::guardian::ShareCommitments;
+use hashi_types::guardian::WithdrawModeConfig;
 use hashi_types::guardian::crypto::commit_share;
 use hashi_types::guardian::crypto::split_secret;
 use hashi_types::guardian::proto_conversions::enclave_init_state_to_pb;
@@ -143,8 +143,8 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
     // agree on y-parity.
     let master_g = HashiMasterG::with_even_y_from_x_be_bytes(&material.master_pubkey.serialize())
         .map_err(|e| anyhow!("convert master pubkey to G: {e:?}"))?;
-    let state = EnclaveInitState::new(committee, limiter_config, limiter_state, master_g)
-        .map_err(|e| anyhow!("build EnclaveInitState: {e:?}"))?;
+    let state = WithdrawModeConfig::new(committee, limiter_config, limiter_state, master_g)
+        .map_err(|e| anyhow!("build WithdrawModeConfig: {e:?}"))?;
     let state_hash = state.digest();
 
     let secret_sharing_instance = SecretSharingInstance::new(material.commitments.clone(), n, t, 0)

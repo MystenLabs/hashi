@@ -157,11 +157,12 @@ pub fn mock_logger_with_layout(keys: impl IntoIterator<Item = String>) -> S3Logg
     S3Logger::from_client_for_tests(S3Config::mock_for_testing(), client)
 }
 
+/// Args for building a withdraw-mode test enclave. The withdraw-mode params
+/// (committee, limiter, BTC master pubkey, secret-sharing instance, network) all
+/// live in `config`; `s3_logger` is the only separate field.
 pub struct OperatorInitTestArgs {
-    pub network: Network,
-    pub secret_sharing_instance: SecretSharingInstance,
     pub s3_logger: S3Logger,
-    pub init_state: EnclaveInitState,
+    pub config: WithdrawModeConfig,
 }
 
 const TEST_N: usize = 5;
@@ -169,43 +170,35 @@ const TEST_T: usize = 3;
 
 impl Default for OperatorInitTestArgs {
     fn default() -> Self {
-        let commitments = (1..=TEST_N)
-            .map(|id| ShareCommitment {
-                id: std::num::NonZeroU16::new(id as u16).unwrap(),
-                digest: vec![],
-            })
-            .collect();
-        let secret_sharing_instance = SecretSharingInstance::new(
-            ShareCommitments::new(commitments).unwrap(),
-            TEST_N,
-            TEST_T,
-            0,
-        )
-        .unwrap();
-
         Self {
-            network: Network::Regtest,
-            secret_sharing_instance,
             s3_logger: mock_logger(),
-            init_state: EnclaveInitState::mock_for_testing(None),
+            config: WithdrawModeConfig::mock_for_testing(None),
         }
     }
 }
 
 impl OperatorInitTestArgs {
+    /// Rebuild `config` with a different network.
     pub fn with_network(mut self, network: Network) -> Self {
-        self.network = network;
+        let (state, instance, _) = self.config.into_parts();
+        let (committee, lc, ls, master) = state.into_parts();
+        self.config =
+            WithdrawModeConfig::new(committee, lc, ls, master, instance, network).unwrap();
         self
     }
 
-    pub fn with_init_state(mut self, init_state: EnclaveInitState) -> Self {
-        self.init_state = init_state;
+    pub fn with_config(mut self, config: WithdrawModeConfig) -> Self {
+        self.config = config;
         self
     }
 
+    /// Rebuild `config` with a different secret-sharing instance.
     pub fn with_commitments(mut self, commitments: ShareCommitments) -> Self {
-        self.secret_sharing_instance =
-            SecretSharingInstance::new(commitments, TEST_N, TEST_T, 0).unwrap();
+        let instance = SecretSharingInstance::new(commitments, TEST_N, TEST_T, 0).unwrap();
+        let (state, _, network) = self.config.into_parts();
+        let (committee, lc, ls, master) = state.into_parts();
+        self.config =
+            WithdrawModeConfig::new(committee, lc, ls, master, instance, network).unwrap();
         self
     }
 
@@ -216,11 +209,15 @@ impl OperatorInitTestArgs {
 }
 
 impl Enclave {
-    /// Normal-mode enclave (ceremony_mode = false) with fresh random keys.
+    /// Withdraw-mode enclave with fresh random keys.
     pub fn create_with_random_keys() -> Arc<Self> {
         let signing_keys = GuardianSignKeyPair::new(rand::thread_rng());
         let encryption_keys = GuardianEncKeyPair::random(&mut rand::thread_rng());
-        Arc::new(Enclave::new(signing_keys, encryption_keys, false))
+        Arc::new(Enclave::new(
+            signing_keys,
+            encryption_keys,
+            EnclaveMode::Withdraw,
+        ))
     }
 
     /// Create an enclave post operator_init() but pre provisioner_init().
@@ -235,19 +232,18 @@ impl Enclave {
         enclave
     }
 
-    /// Apply operator_init's installs to an existing enclave (mirrors `operator_init`).
-    /// Lets a harness defer operator-init until DKG output is available.
+    /// Apply operator_init's installs to an existing enclave (mirrors `operator_init`'s
+    /// withdraw-mode commit). Lets a harness defer operator-init until DKG output exists.
     pub fn install_operator_init_for_testing(&self, args: OperatorInitTestArgs) {
         self.config.set_s3_logger(args.s3_logger).unwrap();
-        self.config.set_bitcoin_network(args.network).unwrap();
-        self.set_secret_sharing_instance(args.secret_sharing_instance)
-            .unwrap();
 
-        let state = args.init_state;
+        let (state, instance, network) = args.config.into_parts();
         let state_hash = state.digest();
         let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) =
             state.into_parts();
         let rate_limiter = RateLimiter::new(limiter_config, limiter_state).unwrap();
+        self.config.set_bitcoin_network(network).unwrap();
+        self.set_secret_sharing_instance(instance).unwrap();
         self.set_state_hash(state_hash).unwrap();
         self.config
             .set_hashi_btc_pk(hashi_btc_master_pubkey)
@@ -321,18 +317,16 @@ pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc
         limiter_state,
     } = args;
 
-    let init_state = EnclaveInitState::from_parts_for_testing(
+    let config = WithdrawModeConfig::from_parts_for_testing(
         limiter_config,
         limiter_state,
         committee,
         master_pubkey,
+        network,
     );
-    let enclave = create_operator_initialized_enclave(
-        OperatorInitTestArgs::default()
-            .with_network(network)
-            .with_init_state(init_state),
-    )
-    .await;
+    let enclave =
+        create_operator_initialized_enclave(OperatorInitTestArgs::default().with_config(config))
+            .await;
 
     finalize_enclave(&enclave).expect("finalize_enclave should succeed on a fresh enclave");
 

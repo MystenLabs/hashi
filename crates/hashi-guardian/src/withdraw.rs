@@ -216,11 +216,11 @@ mod tests {
     use bitcoin::Network;
     use hashi_types::guardian::test_utils::create_btc_keypair;
     use hashi_types::guardian::BitcoinPubkey;
-    use hashi_types::guardian::EnclaveInitState;
     use hashi_types::guardian::HashiMasterG;
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::StandardWithdrawalRequest;
+    use hashi_types::guardian::WithdrawModeConfig;
 
     /// Tests build their fake "hashi master" from a `bitcoin::Keypair`. The
     /// bitcoin-lib keypair always signs against the even-y projection of its
@@ -245,18 +245,17 @@ mod tests {
             max_bucket_capacity: max_bucket_capacity_sats,
         };
         let limiter_state = LimiterState::genesis(&limiter_config);
-        let init_state = EnclaveInitState::from_parts_for_testing(
+        let config = WithdrawModeConfig::from_parts_for_testing(
             limiter_config,
             limiter_state,
             committee,
             hashi_btc_master_pubkey,
+            network,
         );
 
-        // operator_init now installs committee/limiter/withdrawal-config/btc-master.
+        // operator_init now installs committee/limiter/btc-master/instance/network.
         let enclave = Enclave::create_operator_initialized_with(
-            OperatorInitTestArgs::default()
-                .with_network(network)
-                .with_init_state(init_state),
+            OperatorInitTestArgs::default().with_config(config),
         )
         .await;
 

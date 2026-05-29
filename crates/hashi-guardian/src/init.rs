@@ -17,28 +17,20 @@ use std::sync::Arc;
 use tracing::info;
 use GuardianError::*;
 
-/// Validated, fully-built inputs for the commit phase of `operator_init`. Building
-/// this is the fallible part; committing it is not.
-struct OperatorInitCommit {
-    logger: S3Logger,
+/// The withdraw-mode state to install, built from `WithdrawModeConfig` (incl. the
+/// computed `state_hash` and the constructed rate limiter).
+struct WithdrawInstall {
+    state_hash: [u8; 32],
     network: bitcoin::Network,
     secret_sharing_instance: SecretSharingInstance,
-    /// Normal-mode `EnclaveInitState`, built and ready to install; `None` for a
-    /// ceremony enclave.
-    init_state: Option<InitStateInstall>,
-}
-
-/// The normal-mode `EnclaveInitState` pieces, ready to install on the enclave.
-struct InitStateInstall {
-    state_hash: [u8; 32],
     hashi_btc_master_pubkey: HashiMasterG,
     committee: HashiCommittee,
     rate_limiter: RateLimiter,
 }
 
-/// Receives S3 API keys, secret-sharing instance, BTC network, and — for a normal
-/// (withdrawal-serving) enclave — the `EnclaveInitState`; installs them and fixes
-/// the `state_hash`.
+/// Receives S3 API keys and — for a withdraw-mode enclave — the `WithdrawModeConfig`
+/// (committee, limiter, BTC master pubkey, secret-sharing instance, network);
+/// installs them and fixes the `state_hash`. A ceremony enclave carries only S3.
 ///
 /// Invariant: operator_init never returns an `Err` from a partially-initialized
 /// enclave. Every fallible step (request validation, S3 connectivity, rate-limiter
@@ -62,23 +54,26 @@ pub async fn operator_init(
     // ---- Validate & build: Nothing in this phase mutates enclave state, so any
     // error here leaves the enclave untouched. ----
 
-    // A normal enclave must carry the init state and a ceremony enclave must not.
-    request.validate(enclave.ceremony_mode())?;
+    // A withdraw-mode enclave must carry the config and a ceremony enclave must not.
+    request.validate(enclave.mode())?;
 
-    let (s3_config, secret_sharing_instance, network, state) = request.into_parts();
+    let (s3_config, state) = request.into_parts();
     let logger = S3Logger::new_checked(&s3_config).await?;
     info!("S3 connectivity check complete.");
 
-    // Build the normal-mode EnclaveInitState pieces (incl. the rate limiter, the
-    // last fallible step) up front; `None` for a ceremony enclave.
-    let init_state = match state {
-        Some(state) => {
-            let state_hash = state.digest();
+    // Build the withdraw-mode install bundle (incl. the rate limiter, the last
+    // fallible step) up front; `None` for a ceremony enclave.
+    let withdraw = match state {
+        Some(config) => {
+            let (withdraw_state, secret_sharing_instance, network) = config.into_parts();
+            let state_hash = withdraw_state.digest();
             let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) =
-                state.into_parts();
+                withdraw_state.into_parts();
             let rate_limiter = RateLimiter::new(limiter_config, limiter_state)?;
-            Some(InitStateInstall {
+            Some(WithdrawInstall {
                 state_hash,
+                network,
+                secret_sharing_instance,
                 hashi_btc_master_pubkey,
                 committee,
                 rate_limiter,
@@ -88,16 +83,7 @@ pub async fn operator_init(
     };
 
     // ---- All-or-nothing Commit: Nothing in this phase errors out. ----
-    commit_operator_init(
-        &enclave,
-        OperatorInitCommit {
-            logger,
-            network,
-            secret_sharing_instance,
-            init_state,
-        },
-    )
-    .await;
+    commit_operator_init(&enclave, logger, withdraw).await;
     Ok(())
 }
 
@@ -105,49 +91,44 @@ pub async fn operator_init(
 /// Infallible by design (returns `()`, see the `operator_init` invariant): every
 /// `set` here runs on a fresh enclave under the control lock, and the I/O steps
 /// (attestation, S3 logging) panic on failure rather than return.
-async fn commit_operator_init(enclave: &Enclave, commit: OperatorInitCommit) {
-    let OperatorInitCommit {
-        logger,
-        network,
-        secret_sharing_instance,
-        init_state,
-    } = commit;
-
+async fn commit_operator_init(
+    enclave: &Enclave,
+    logger: S3Logger,
+    withdraw: Option<WithdrawInstall>,
+) {
     info!("Storing S3 configuration.");
     enclave
         .config
         .set_s3_logger(logger)
         .expect("Unable to set logger");
 
-    info!("Setting bitcoin network to {:?}.", network);
-    enclave
-        .config
-        .set_bitcoin_network(network)
-        .expect("Unable to set network");
-
-    info!(
-        "Storing secret-sharing instance: n={}, t={}, {} commitments.",
-        secret_sharing_instance.num_shares(),
-        secret_sharing_instance.threshold(),
-        secret_sharing_instance.commitments().len()
-    );
-    for (i, share_commitment) in secret_sharing_instance.commitments().iter().enumerate() {
-        info!(
-            "Share {}: ID {} Digest {:x?}.",
-            i, share_commitment.id, share_commitment.digest
-        );
-    }
-    enclave
-        .set_secret_sharing_instance(secret_sharing_instance)
-        .expect("Unable to set secret-sharing instance");
-
-    if let Some(InitStateInstall {
+    // Withdraw-mode state (committee, limiter, BTC master pubkey, instance, network,
+    // state_hash); a ceremony enclave installs none of it.
+    if let Some(WithdrawInstall {
         state_hash,
+        network,
+        secret_sharing_instance,
         hashi_btc_master_pubkey,
         committee,
         rate_limiter,
-    }) = init_state
+    }) = withdraw
     {
+        info!("Setting bitcoin network to {:?}.", network);
+        enclave
+            .config
+            .set_bitcoin_network(network)
+            .expect("Unable to set network");
+
+        info!(
+            "Storing secret-sharing instance: n={}, t={}, {} commitments.",
+            secret_sharing_instance.num_shares(),
+            secret_sharing_instance.threshold(),
+            secret_sharing_instance.commitments().len()
+        );
+        enclave
+            .set_secret_sharing_instance(secret_sharing_instance)
+            .expect("Unable to set secret-sharing instance");
+
         info!("Setting state hash.");
         enclave
             .set_state_hash(state_hash)
@@ -218,7 +199,7 @@ pub async fn provisioner_init(
     let sk = enclave.encryption_secret_key();
     let share_id = request.encrypted_share().id;
     // The state_hash was fixed at operator_init; it is the AAD every KP binds.
-    // Absent means the operator booted this enclave without an EnclaveInitState
+    // Absent means the operator booted this enclave without an WithdrawModeConfig
     // (a ceremony-mode config) — surface it gracefully rather than panicking.
     let state_hash = enclave
         .state_hash()
@@ -326,50 +307,47 @@ mod tests {
         (shares, enclave)
     }
 
-    /// Run commit_operator_init on a fresh enclave for the given mode (normal =>
-    /// carries the EnclaveInitState; ceremony => none).
-    async fn commit_for_mode(ceremony_mode: bool) -> Arc<Enclave> {
+    /// Run commit_operator_init on a fresh enclave for the given mode (withdraw =>
+    /// carries the WithdrawModeConfig install bundle; ceremony => none).
+    async fn commit_for_mode(mode: EnclaveMode) -> Arc<Enclave> {
         let enclave = Arc::new(Enclave::new(
             GuardianSignKeyPair::new(rand::thread_rng()),
             GuardianEncKeyPair::random(&mut rand::thread_rng()),
-            ceremony_mode,
+            mode,
         ));
 
-        let args = OperatorInitTestArgs::default();
-        let init_state = (!ceremony_mode).then(|| {
-            let state_hash = args.init_state.digest();
-            let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) =
-                args.init_state.clone().into_parts();
-            InitStateInstall {
-                state_hash,
-                hashi_btc_master_pubkey,
-                committee,
-                rate_limiter: RateLimiter::new(limiter_config, limiter_state).unwrap(),
+        let withdraw = match mode {
+            EnclaveMode::Withdraw => {
+                let config = WithdrawModeConfig::mock_for_testing(None);
+                let (withdraw_state, secret_sharing_instance, network) = config.into_parts();
+                let state_hash = withdraw_state.digest();
+                let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) =
+                    withdraw_state.into_parts();
+                Some(WithdrawInstall {
+                    state_hash,
+                    network,
+                    secret_sharing_instance,
+                    hashi_btc_master_pubkey,
+                    committee,
+                    rate_limiter: RateLimiter::new(limiter_config, limiter_state).unwrap(),
+                })
             }
-        });
+            EnclaveMode::Ceremony => None,
+        };
 
-        commit_operator_init(
-            &enclave,
-            OperatorInitCommit {
-                logger: args.s3_logger,
-                network: args.network,
-                secret_sharing_instance: args.secret_sharing_instance,
-                init_state,
-            },
-        )
-        .await;
+        commit_operator_init(&enclave, crate::test_utils::mock_logger(), withdraw).await;
         enclave
     }
 
     #[tokio::test]
-    async fn commit_marks_operator_init_complete_normal_mode() {
-        let enclave = commit_for_mode(false).await;
+    async fn commit_marks_operator_init_complete_withdraw_mode() {
+        let enclave = commit_for_mode(EnclaveMode::Withdraw).await;
         assert!(enclave.is_operator_init_complete());
     }
 
     #[tokio::test]
     async fn commit_marks_operator_init_complete_ceremony_mode() {
-        let enclave = commit_for_mode(true).await;
+        let enclave = commit_for_mode(EnclaveMode::Ceremony).await;
         assert!(enclave.is_operator_init_complete());
     }
 

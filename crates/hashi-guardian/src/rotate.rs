@@ -31,12 +31,11 @@ pub async fn rotate_kps(
         return Err(InvalidInputs("setup or rotation already complete".into()));
     }
 
-    let (encrypted_old_shares, state) = request.into_parts();
-
-    let instance = enclave
-        .secret_sharing_instance()
-        .expect("secret-sharing instance should be set after operator_init");
-    let old_t = instance.threshold();
+    // The old key's instance is supplied in the request (the operator reads it
+    // from the latest `ceremony/` log); a fresh ceremony enclave has no other
+    // source for the old commitments + threshold.
+    let (encrypted_old_shares, old_instance, state) = request.into_parts();
+    let old_t = old_instance.threshold();
 
     let sk = enclave.encryption_secret_key();
     let state_hash = state.digest();
@@ -46,7 +45,7 @@ pub async fn rotate_kps(
     let mut old_shares: Vec<Share> = Vec::with_capacity(encrypted_old_shares.len());
     for enc in &encrypted_old_shares {
         let share = decrypt_share(enc, sk, Some(&state_hash))?;
-        instance.commitments().verify_share(&share)?;
+        old_instance.commitments().verify_share(&share)?;
         if old_shares.iter().any(|s| s.id == share.id) {
             return Err(InvalidInputs("Duplicate share ID".into()));
         }
@@ -61,7 +60,7 @@ pub async fn rotate_kps(
         )));
     }
 
-    let response = finalize_rotation(&enclave, &old_shares, instance, state).await?;
+    let response = finalize_rotation(&enclave, &old_shares, &old_instance, state).await?;
     *ceremony_complete = true;
     Ok(response)
 }
@@ -162,7 +161,10 @@ mod tests {
                 )
             })
             .collect();
-        RotateKpsRequest::new(submissions, state)
+        // The old instance the operator would read from `ceremony/`; here it's the
+        // one the enclave was set up with (matches the shares being submitted).
+        let old_instance = enclave.secret_sharing_instance().unwrap().clone();
+        RotateKpsRequest::new(submissions, old_instance, state)
     }
 
     /// Run one rotation and return its verified response shares.
@@ -291,7 +293,8 @@ mod tests {
                 &mut rng,
             ),
         ];
-        let req = RotateKpsRequest::new(submissions, state);
+        let old_instance = enclave.secret_sharing_instance().unwrap().clone();
+        let req = RotateKpsRequest::new(submissions, old_instance, state);
 
         let err = rotate_kps(enclave, req).await.expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
@@ -337,7 +340,8 @@ mod tests {
                 &mut rng,
             ),
         ];
-        let req = RotateKpsRequest::new(submissions, state2);
+        let old_instance = enclave.secret_sharing_instance().unwrap().clone();
+        let req = RotateKpsRequest::new(submissions, old_instance, state2);
 
         let err = rotate_kps(enclave, req).await.expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));

@@ -8,12 +8,12 @@ mod limiter_recovery;
 use anyhow::Context;
 use hashi_guardian::s3_logger::S3Logger;
 use hashi_types::guardian::EncPubKey;
-use hashi_types::guardian::EnclaveInitState;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::HashiMasterG;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
+use hashi_types::guardian::WithdrawModeState;
 use hashi_types::guardian::proto_conversions::provisioner_init_request_to_pb;
 use hashi_types::guardian::session_id_from_signing_pubkey;
 use hashi_types::guardian::verify_enclave_attestation;
@@ -72,7 +72,7 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
         HashiMasterG::with_even_y_from_x_be_bytes(&cfg.hashi_btc_master_pubkey.serialize())
             .map_err(|e| anyhow::anyhow!("convert master pubkey to G: {e:?}"))?;
     let expected_state =
-        EnclaveInitState::new(committee, cfg.limiter_config, limiter_state, master_g)
+        WithdrawModeState::new(committee, cfg.limiter_config, limiter_state, master_g)
             .map_err(|e| anyhow::anyhow!(e))?;
     let state_hash = expected_state.digest();
 

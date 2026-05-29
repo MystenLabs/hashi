@@ -8,6 +8,7 @@ use hashi_guardian::Enclave;
 use hashi_guardian::HEARTBEAT_INTERVAL;
 use hashi_guardian::HEARTBEAT_RETRY_INTERVAL;
 use hashi_guardian::MAX_HEARTBEAT_FAILURES_INTERVAL;
+use hashi_types::guardian::EnclaveMode;
 use hashi_types::guardian::GuardianEncKeyPair;
 use hashi_types::guardian::GuardianSignKeyPair;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
@@ -33,17 +34,22 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|v| v.parse::<bool>().ok())
         .unwrap_or(false);
+    let mode = if ceremony_mode {
+        EnclaveMode::Ceremony
+    } else {
+        EnclaveMode::Withdraw
+    };
 
     if ceremony_mode {
         info!("Ceremony mode: setup_new_key/rotate_kps enabled; provisioner_init/standard_withdrawal disabled.");
     } else {
-        info!("Normal mode: provisioner_init/standard_withdrawal enabled; setup_new_key/rotate_kps disabled.");
+        info!("Withdraw mode: provisioner_init/standard_withdrawal enabled; setup_new_key/rotate_kps disabled.");
     }
 
     let mut rng = rand::thread_rng();
     let signing_keys = GuardianSignKeyPair::new(&mut rng);
     let encryption_keys = GuardianEncKeyPair::random(&mut rng);
-    let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys, ceremony_mode));
+    let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys, mode));
 
     let svc = GuardianGrpc {
         enclave: enclave.clone(),

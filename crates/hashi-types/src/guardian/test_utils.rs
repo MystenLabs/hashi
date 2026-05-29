@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::Ciphertext;
-use super::EnclaveInitState;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianInfo;
@@ -26,6 +25,7 @@ use super::ShareCommitment;
 use super::ShareCommitments;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
+use super::WithdrawModeConfig;
 use super::WithdrawalID;
 
 use super::bitcoin_utils::BTC_LIB;
@@ -183,28 +183,10 @@ impl OperatorInitRequest {
                 region: "us-east-1".into(),
             },
         };
-
-        let mut share_commitments = vec![];
-        for i in 0..TEST_N {
-            share_commitments.push(ShareCommitment {
-                id: NonZeroU16::new((i + 1) as u16).unwrap(),
-                digest: vec![0u8; 32],
-            })
-        }
-        let secret_sharing_instance = SecretSharingInstance::new(
-            ShareCommitments::new(share_commitments).unwrap(),
-            TEST_N,
-            TEST_T,
-            0,
-        )
-        .unwrap();
-
-        OperatorInitRequest {
+        OperatorInitRequest::new_withdraw_mode(
             s3_config,
-            secret_sharing_instance,
-            network: super::Network::Regtest,
-            state: Some(EnclaveInitState::mock_for_testing(None)),
-        }
+            WithdrawModeConfig::mock_for_testing(None),
+        )
     }
 }
 
@@ -249,20 +231,23 @@ fn mock_committee_with_one_member(epoch: u64) -> HashiCommittee {
     )
 }
 
-impl EnclaveInitState {
+impl WithdrawModeConfig {
     pub fn from_parts_for_testing(
         limiter_config: LimiterConfig,
         limiter_state: LimiterState,
         committee: HashiCommittee,
         hashi_btc_master_pubkey: super::HashiMasterG,
+        network: super::Network,
     ) -> Self {
-        EnclaveInitState::new(
+        WithdrawModeConfig::new(
             committee,
             limiter_config,
             limiter_state,
             hashi_btc_master_pubkey,
+            dummy_secret_sharing_instance(),
+            network,
         )
-        .expect("valid EnclaveInitState")
+        .expect("valid WithdrawModeConfig")
     }
 
     pub fn mock_for_testing(kp: Option<Keypair>) -> Self {
@@ -277,7 +262,7 @@ impl EnclaveInitState {
         let hashi_btc_master_pubkey =
             super::HashiMasterG::with_even_y_from_x_be_bytes(&x_bytes).expect("valid x coordinate");
 
-        EnclaveInitState::new(
+        WithdrawModeConfig::new(
             mock_committee_with_one_member(0),
             LimiterConfig {
                 refill_rate: 10,
@@ -289,9 +274,17 @@ impl EnclaveInitState {
                 next_seq: 0,
             },
             hashi_btc_master_pubkey,
+            dummy_secret_sharing_instance(),
+            super::Network::Regtest,
         )
-        .expect("valid EnclaveInitState")
+        .expect("valid WithdrawModeConfig")
     }
+}
+
+/// A throwaway secret-sharing instance for tests that don't exercise share
+/// verification (it's carried in `WithdrawModeConfig` but not in the digest).
+fn dummy_secret_sharing_instance() -> SecretSharingInstance {
+    SecretSharingInstance::new(dummy_commitments(), TEST_N, TEST_T, 0).unwrap()
 }
 
 impl StandardWithdrawalRequest {

@@ -9,7 +9,6 @@ use super::BitcoinSignature;
 use super::Ciphertext;
 use super::CommitteeSignatureWire;
 use super::CommitteeTransition;
-use super::EnclaveInitState;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianError;
@@ -41,6 +40,7 @@ use super::SignedStandardWithdrawalRequestWire;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalRequestWire;
 use super::StandardWithdrawalResponse;
+use super::WithdrawModeConfig;
 use super::bitcoin_utils::ExternalOutputUTXOWire;
 use super::bitcoin_utils::InputUTXOWire;
 use super::bitcoin_utils::InternalOutputUTXO;
@@ -138,19 +138,12 @@ impl TryFrom<pb::OperatorInitRequest> for OperatorInitRequest {
     type Error = GuardianError;
 
     fn try_from(req: pb::OperatorInitRequest) -> Result<Self, Self::Error> {
-        let s3_config_pb = req.s3_config.ok_or_else(|| missing("s3_config"))?;
-        let s3_config = pb_to_s3_config(s3_config_pb)?;
-
-        let secret_sharing_instance_pb = req
-            .secret_sharing_instance
-            .ok_or_else(|| missing("secret_sharing_instance"))?;
-        let secret_sharing_instance = pb_to_secret_sharing_instance(secret_sharing_instance_pb)?;
-
-        let network = pb_to_network(req.network.ok_or_else(|| missing("network"))?)?;
-
-        let state = req.state.map(EnclaveInitState::try_from).transpose()?;
-
-        OperatorInitRequest::new(s3_config, secret_sharing_instance, network, state)
+        let s3_config = pb_to_s3_config(req.s3_config.ok_or_else(|| missing("s3_config"))?)?;
+        // `state` present ⇔ withdraw mode; absent ⇔ ceremony (S3 only).
+        match req.state.map(WithdrawModeConfig::try_from).transpose()? {
+            Some(state) => Ok(OperatorInitRequest::new_withdraw_mode(s3_config, state)),
+            None => Ok(OperatorInitRequest::new_ceremony(s3_config)),
+        }
     }
 }
 
@@ -209,7 +202,15 @@ impl TryFrom<pb::RotateKpsRequest> for RotateKpsRequest {
 
         let state = RotateKpsState::new(req.new_kp_pgp_certs, new_num_shares, new_threshold)?;
 
-        Ok(RotateKpsRequest::new(encrypted_old_shares, state))
+        let old_instance = pb_to_secret_sharing_instance(
+            req.old_instance.ok_or_else(|| missing("old_instance"))?,
+        )?;
+
+        Ok(RotateKpsRequest::new(
+            encrypted_old_shares,
+            old_instance,
+            state,
+        ))
     }
 }
 
@@ -238,10 +239,10 @@ impl TryFrom<pb::SignedRotateKpsResponse> for GuardianSigned<RotateKpsResponse> 
     }
 }
 
-impl TryFrom<pb::EnclaveInitState> for EnclaveInitState {
+impl TryFrom<pb::WithdrawModeConfig> for WithdrawModeConfig {
     type Error = GuardianError;
 
-    fn try_from(state_pb: pb::EnclaveInitState) -> Result<Self, Self::Error> {
+    fn try_from(state_pb: pb::WithdrawModeConfig) -> Result<Self, Self::Error> {
         let committee_pb = state_pb.committee.ok_or_else(|| missing("committee"))?;
         let committee = pb_to_hashi_committee(committee_pb)?;
 
@@ -269,11 +270,21 @@ impl TryFrom<pb::EnclaveInitState> for EnclaveInitState {
         let hashi_btc_master_pubkey = super::HashiMasterG::from_byte_array(&master_pk_bytes_arr)
             .map_err(|e| InvalidInputs(format!("invalid hashi_btc_master_pubkey: {e:?}")))?;
 
-        EnclaveInitState::new(
+        let secret_sharing_instance = pb_to_secret_sharing_instance(
+            state_pb
+                .secret_sharing_instance
+                .ok_or_else(|| missing("secret_sharing_instance"))?,
+        )?;
+
+        let network = pb_to_network(state_pb.network.ok_or_else(|| missing("network"))?)?;
+
+        WithdrawModeConfig::new(
             committee,
             limiter_config,
             limiter_state,
             hashi_btc_master_pubkey,
+            secret_sharing_instance,
+            network,
         )
     }
 }
@@ -428,12 +439,10 @@ pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequ
 pub fn operator_init_request_to_pb(
     r: OperatorInitRequest,
 ) -> GuardianResult<pb::OperatorInitRequest> {
-    let (s3_config, secret_sharing_instance, network, state) = r.into_parts();
+    let (s3_config, state) = r.into_parts();
     Ok(pb::OperatorInitRequest {
         s3_config: Some(s3_config_to_pb(s3_config)),
-        secret_sharing_instance: Some(secret_sharing_instance_to_pb(&secret_sharing_instance)),
-        network: Some(network_to_pb(network)?),
-        state: state.map(enclave_init_state_to_pb),
+        state: state.map(withdraw_mode_config_to_pb).transpose()?,
     })
 }
 
@@ -445,19 +454,23 @@ pub fn provisioner_init_request_to_pb(
     })
 }
 
-pub fn enclave_init_state_to_pb(s: EnclaveInitState) -> pb::EnclaveInitState {
-    let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) = s.into_parts();
+// Throws an error if network is invalid.
+pub fn withdraw_mode_config_to_pb(s: WithdrawModeConfig) -> GuardianResult<pb::WithdrawModeConfig> {
+    let (state, instance, network) = s.into_parts();
+    let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) = state.into_parts();
 
-    pb::EnclaveInitState {
+    Ok(pb::WithdrawModeConfig {
         committee: Some(hashi_committee_to_pb(committee)),
         limiter_config: Some(limiter_config_to_pb(limiter_config)),
         hashi_btc_master_pubkey: Some(hashi_btc_master_pubkey.to_byte_array().to_vec().into()),
         limiter_state: Some(limiter_state_to_pb(limiter_state)),
-    }
+        secret_sharing_instance: Some(secret_sharing_instance_to_pb(&instance)),
+        network: Some(network_to_pb(network)?),
+    })
 }
 
 pub fn rotate_kps_request_to_pb(r: RotateKpsRequest) -> pb::RotateKpsRequest {
-    let (encrypted_old_shares, state) = r.into_parts();
+    let (encrypted_old_shares, old_instance, state) = r.into_parts();
     let (new_kp_pgp_certs, new_params) = state.into_parts();
     pb::RotateKpsRequest {
         encrypted_old_shares: encrypted_old_shares
@@ -467,6 +480,7 @@ pub fn rotate_kps_request_to_pb(r: RotateKpsRequest) -> pb::RotateKpsRequest {
         new_kp_pgp_certs,
         new_num_shares: Some(new_params.num_shares() as u32),
         new_threshold: Some(new_params.threshold() as u32),
+        old_instance: Some(secret_sharing_instance_to_pb(&old_instance)),
     }
 }
 
