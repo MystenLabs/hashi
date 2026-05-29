@@ -96,6 +96,58 @@ fun test_set_guardian_rejects_wrong_length_key() {
 }
 
 #[test]
+fun test_set_guardian_btc_public_key_stores_value() {
+    let ctx = &mut test_utils::new_tx_context(@0x100, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
+
+    assert!(config::guardian_btc_public_key(hashi.config()).is_none());
+
+    let btc_pk = vector::tabulate!(32, |i| (i as u8));
+    config::set_guardian_btc_public_key(hashi.config_mut(), btc_pk);
+    assert!(config::guardian_btc_public_key(hashi.config()).destroy_some() == btc_pk);
+
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+fun test_set_guardian_btc_public_key_is_idempotent() {
+    let ctx = &mut test_utils::new_tx_context(@0x100, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
+
+    let btc_pk = vector::tabulate!(32, |i| (i as u8));
+    config::set_guardian_btc_public_key(hashi.config_mut(), btc_pk);
+    // Re-setting with the same value succeeds (idempotent).
+    config::set_guardian_btc_public_key(hashi.config_mut(), btc_pk);
+    assert!(config::guardian_btc_public_key(hashi.config()).destroy_some() == btc_pk);
+
+    std::unit_test::destroy(hashi);
+}
+
+#[test, expected_failure(abort_code = ::hashi::config::EBadGuardianBtcPublicKeyLength)]
+fun test_set_guardian_btc_public_key_rejects_wrong_length() {
+    let ctx = &mut test_utils::new_tx_context(@0x100, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
+
+    let bad_pk = vector::tabulate!(31, |i| (i as u8));
+    config::set_guardian_btc_public_key(hashi.config_mut(), bad_pk);
+
+    std::unit_test::destroy(hashi);
+}
+
+#[test, expected_failure(abort_code = ::hashi::config::EGuardianBtcPublicKeyImmutable)]
+fun test_set_guardian_btc_public_key_rejects_rotation() {
+    let ctx = &mut test_utils::new_tx_context(@0x100, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
+
+    let first = vector::tabulate!(32, |i| (i as u8));
+    let second = vector::tabulate!(32, |i| ((i + 1) as u8));
+    config::set_guardian_btc_public_key(hashi.config_mut(), first);
+    config::set_guardian_btc_public_key(hashi.config_mut(), second);
+
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
 fun test_bitcoin_withdrawal_minimum_updates() {
     let ctx = &mut test_utils::new_tx_context(@0x100, 0);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);

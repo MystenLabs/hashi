@@ -517,6 +517,11 @@ pub struct PublishOpts {
     #[clap(long)]
     pub guardian_public_key: Option<String>,
 
+    /// Guardian BTC pubkey, x-only hex-encoded (32 bytes). Published
+    /// on-chain for 2-of-2 deposit address derivation.
+    #[clap(long)]
+    pub guardian_btc_public_key: Option<String>,
+
     /// Override `bitcoin_confirmation_threshold` on-chain at publish time.
     /// Falls back to the Move package's `init_defaults` (currently 6) when omitted.
     #[clap(long)]
@@ -908,6 +913,17 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
     let mut client = sui_rpc::Client::new(&opts.sui_rpc_url)?;
 
     // Build optional guardian config
+    let guardian_btc_public_key = match opts.guardian_btc_public_key {
+        Some(hex_str) => {
+            let bytes = hex::decode(hex_str.strip_prefix("0x").unwrap_or(&hex_str))
+                .context("Invalid hex for --guardian-btc-public-key")?;
+            // from_slice requires exactly 32 bytes and a valid curve point.
+            hashi_types::guardian::BitcoinPubkey::from_slice(&bytes)
+                .context("--guardian-btc-public-key must be a 32-byte x-only Bitcoin pubkey")?;
+            Some(bytes)
+        }
+        None => None,
+    };
     let guardian = match (opts.guardian_url, opts.guardian_public_key) {
         (Some(url), Some(pk_hex)) => {
             let public_key = hex::decode(pk_hex.strip_prefix("0x").unwrap_or(&pk_hex))
@@ -917,9 +933,26 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
                 "--guardian-public-key must be 32 bytes (Ed25519), got {} bytes",
                 public_key.len(),
             );
-            Some(crate::publish::GuardianConfig { url, public_key })
+            // The guardian is configured all-or-nothing on-chain: the BTC key is
+            // required alongside the URL/signing key, else `finish_publish` would
+            // silently skip the whole guardian config.
+            anyhow::ensure!(
+                guardian_btc_public_key.is_some(),
+                "--guardian-btc-public-key is required with --guardian-url and --guardian-public-key"
+            );
+            Some(crate::publish::GuardianConfig {
+                url,
+                public_key,
+                btc_public_key: guardian_btc_public_key,
+            })
         }
-        (None, None) => None,
+        (None, None) => {
+            anyhow::ensure!(
+                guardian_btc_public_key.is_none(),
+                "--guardian-btc-public-key requires --guardian-url and --guardian-public-key"
+            );
+            None
+        }
         _ => anyhow::bail!(
             "--guardian-url and --guardian-public-key must both be provided or both omitted"
         ),
