@@ -437,7 +437,7 @@ mod tests {
     async fn rejects_duplicate_share_id_in_batch() {
         let (shares, enclave) = setup_test_shares_and_enclave().await;
         // Two submissions from the same KP (same share id).
-        let dupes = [shares[0].clone(), shares[0].clone(), shares[1].clone()];
+        let dupes = [shares[0], shares[0], shares[1]];
         let req = build_request(&dupes, &enclave);
 
         let err = provisioner_init(enclave, req)
