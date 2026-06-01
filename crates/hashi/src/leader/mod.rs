@@ -51,6 +51,7 @@ pub(crate) struct LeaderService {
     pending_deposit_requests: Vec<DepositRequest>,
     never_retry_deposit_ids: HashSet<Address>,
     inflight_deposits: HashSet<Address>,
+    delayed_deposit_processing_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     withdrawal_approval_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     withdrawal_commitment_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     withdrawal_signing_tasks: JoinSet<(Address, anyhow::Result<()>)>,
@@ -80,6 +81,7 @@ impl LeaderService {
             pending_deposit_requests: Vec::new(),
             never_retry_deposit_ids: HashSet::new(),
             inflight_deposits: HashSet::new(),
+            delayed_deposit_processing_task: None,
             withdrawal_approval_task: None,
             withdrawal_commitment_task: None,
             withdrawal_signing_tasks: JoinSet::new(),
@@ -166,6 +168,9 @@ impl LeaderService {
                     // We want to unconditionally reload deposits, even if we aren't the leader to
                     // avoid only the leader being able to reload the moment a block is seen.
                     self.reload_pending_deposit_requests();
+                    // Approved deposits may only become confirmable after the configured
+                    // Bitcoin deposit time-delay elapses, without another Bitcoin block.
+                    self.schedule_delayed_deposit_processing();
 
                     if !self.is_current_leader(checkpoint_height) {
                         continue;
@@ -195,6 +200,10 @@ impl LeaderService {
                 Some(result) = OptionFuture::from(self.withdrawal_commitment_task.as_mut()) => {
                     self.withdrawal_commitment_task = None;
                     Self::log_task_result("withdrawal_commitment", result);
+                }
+                Some(result) = OptionFuture::from(self.delayed_deposit_processing_task.as_mut()) => {
+                    let checkpoint_height = checkpoint_rx.borrow().height;
+                    self.handle_delayed_deposit_processing(result, checkpoint_height);
                 }
                 Some(result) = OptionFuture::from(self.deposit_gc_task.as_mut()) => {
                     self.deposit_gc_task = None;
