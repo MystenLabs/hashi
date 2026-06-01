@@ -318,7 +318,7 @@ pub enum BackupCommands {
         output_dir: std::path::PathBuf,
     },
 
-    /// Restore files from an encrypted config backup.
+    /// Restore files from a backup archive.
     ///
     /// When `--copy-to-original-paths` is set, files are written to the
     /// absolute paths stored in the manifest at backup time. If the restore
@@ -326,14 +326,14 @@ pub enum BackupCommands {
     /// those paths will be used verbatim — extract without the flag and copy
     /// files manually in that case.
     Restore {
-        /// Path to the encrypted backup tarball
+        /// Path to the backup tarball (.tar.asc encrypted or .tar unencrypted)
         backup_tarball: std::path::PathBuf,
 
-        /// OpenPGP secret key file used to decrypt the backup locally
+        /// OpenPGP secret key file used to decrypt encrypted .tar.asc backups locally
         #[clap(long)]
         backup_pgp_secret_key: Option<std::path::PathBuf>,
 
-        /// Decrypt with gpg instead of a local secret key file.
+        /// Decrypt encrypted .tar.asc backups with gpg instead of a local secret key file.
         ///
         /// Supports YubiKeys attached to this machine, and YubiKeys attached
         /// to a laptop over SSH when the laptop's gpg-agent socket is forwarded
@@ -793,17 +793,26 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 output_dir,
                 copy_to_original_paths,
             } => {
-                let decryptor = match (backup_pgp_secret_key, use_gpg_agent) {
-                    (Some(secret_key_path), false) => {
-                        commands::backup::RestoreDecryptor::LocalSecretKey { secret_key_path }
+                let decryptor = match crate::backup::archive_format(&backup_tarball)? {
+                    crate::backup::BackupArchiveFormat::Unencrypted => {
+                        commands::backup::RestoreDecryptor::Unencrypted
                     }
-                    (None, true) => commands::backup::RestoreDecryptor::GpgAgent {
-                        homedir: gpg_homedir,
-                    },
-                    (Some(_), true) | (None, false) => {
-                        anyhow::bail!(
-                            "Pass exactly one restore backend: --backup-pgp-secret-key or --use-gpg-agent"
-                        );
+                    crate::backup::BackupArchiveFormat::Encrypted => {
+                        match (backup_pgp_secret_key, use_gpg_agent) {
+                            (Some(secret_key_path), false) => {
+                                commands::backup::RestoreDecryptor::LocalSecretKey {
+                                    secret_key_path,
+                                }
+                            }
+                            (None, true) => commands::backup::RestoreDecryptor::GpgAgent {
+                                homedir: gpg_homedir,
+                            },
+                            (Some(_), true) | (None, false) => {
+                                anyhow::bail!(
+                                    "Pass exactly one restore backend: --backup-pgp-secret-key or --use-gpg-agent"
+                                );
+                            }
+                        }
                     }
                 };
                 commands::backup::restore(
