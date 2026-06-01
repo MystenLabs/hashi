@@ -154,6 +154,8 @@ impl LeaderService {
         self.delayed_deposit_processing_task = None;
         Self::log_task_result("delayed_deposit_processing", result);
 
+        self.reload_pending_deposit_requests();
+
         if self.is_current_leader(checkpoint_height) {
             debug!("Processing deposit requests after Bitcoin deposit time-delay");
             self.process_deposit_requests();
