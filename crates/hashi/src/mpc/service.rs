@@ -740,6 +740,12 @@ impl MpcService {
                         .add_member_pubkeys(member.encryption_public_key(), member.public_key());
                 }
             }
+            for member_info in committee_set.members().values() {
+                referenced.add_pending_registration(
+                    member_info.next_epoch_encryption_public_key(),
+                    member_info.next_epoch_public_key(),
+                );
+            }
             if let Some((prev_epoch, _)) = committee_set.previous_committee_for_target(target_epoch)
             {
                 referenced.add_committee_epoch(prev_epoch);

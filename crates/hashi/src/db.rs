@@ -26,17 +26,29 @@ pub struct Database {
     db: fjall::Database,
     // keyspaces
 
-    // Column Family used to store encryption keys.
+    // Column Family used to store encryption private keys, keyed by their own public key.
     //
-    // key: big endian u64 for the epoch the key is used for
-    // value: 32-byte RistrettoScalar
+    // key: `EncryptionPublicKey` bytes
+    // value: BCS-encoded `EncryptionPrivateKey`
     encryption_keys: Keyspace,
 
-    // Column Family used to store BLS signing (protocol) keys.
+    // Column Family used to store BLS signing private keys, keyed by their own public key.
     //
-    // key: big endian u64 for the epoch the key is used for
+    // key: `BLS12381PublicKey` bytes
     // value: BCS-encoded `Bls12381PrivateKey`
     signing_keys: Keyspace,
+
+    // Epoch -> encryption pubkey side-index.
+    //
+    // key: big endian u64 epoch
+    // value: `EncryptionPublicKey` bytes (the `encryption_keys` key for that epoch)
+    encryption_epoch_index: Keyspace,
+
+    // Epoch -> signing pubkey side-index.
+    //
+    // key: big endian u64 epoch
+    // value: `BLS12381PublicKey` bytes (the `signing_keys` key for that epoch)
+    signing_epoch_index: Keyspace,
 
     // Column Family used to store dealer messages for DKG.
     //
@@ -62,6 +74,8 @@ const SIGNING_KEYS_CF_NAME: &str = "signing_keys";
 const DEALER_MESSAGES_CF_NAME: &str = "dealer_messages";
 const ROTATION_MESSAGES_CF_NAME: &str = "rotation_messages";
 const NONCE_MESSAGES_CF_NAME: &str = "nonce_messages";
+const ENCRYPTION_EPOCH_INDEX_CF_NAME: &str = "encryption_epoch_index";
+const SIGNING_EPOCH_INDEX_CF_NAME: &str = "signing_epoch_index";
 
 const RETENTION_EXTRA_EPOCHS: u64 = 7;
 
@@ -70,13 +84,17 @@ const RETENTION_EXTRA_EPOCHS: u64 = 7;
 enum BackupKeyspace {
     EncryptionKeys,
     SigningKeys,
+    EncryptionEpochIndex,
+    SigningEpochIndex,
     DealerMessages,
     RotationMessages,
 }
 
-const BACKUP_KEYSPACES: [BackupKeyspace; 4] = [
+const BACKUP_KEYSPACES: [BackupKeyspace; 6] = [
     BackupKeyspace::EncryptionKeys,
     BackupKeyspace::SigningKeys,
+    BackupKeyspace::EncryptionEpochIndex,
+    BackupKeyspace::SigningEpochIndex,
     BackupKeyspace::DealerMessages,
     BackupKeyspace::RotationMessages,
 ];
@@ -86,6 +104,8 @@ impl BackupKeyspace {
         match self {
             Self::EncryptionKeys => ENCRYPTION_KEYS_CF_NAME,
             Self::SigningKeys => SIGNING_KEYS_CF_NAME,
+            Self::EncryptionEpochIndex => ENCRYPTION_EPOCH_INDEX_CF_NAME,
+            Self::SigningEpochIndex => SIGNING_EPOCH_INDEX_CF_NAME,
             Self::DealerMessages => DEALER_MESSAGES_CF_NAME,
             Self::RotationMessages => ROTATION_MESSAGES_CF_NAME,
         }
@@ -95,6 +115,8 @@ impl BackupKeyspace {
         match self {
             Self::EncryptionKeys => &db.encryption_keys,
             Self::SigningKeys => &db.signing_keys,
+            Self::EncryptionEpochIndex => &db.encryption_epoch_index,
+            Self::SigningEpochIndex => &db.signing_epoch_index,
             Self::DealerMessages => &db.dealer_messages,
             Self::RotationMessages => &db.rotation_messages,
         }
@@ -118,21 +140,31 @@ impl Database {
         let rotation_messages =
             db.keyspace(ROTATION_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)?;
         let nonce_messages = db.keyspace(NONCE_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)?;
+        let encryption_epoch_index = db.keyspace(
+            ENCRYPTION_EPOCH_INDEX_CF_NAME,
+            KeyspaceCreateOptions::default,
+        )?;
+        let signing_epoch_index =
+            db.keyspace(SIGNING_EPOCH_INDEX_CF_NAME, KeyspaceCreateOptions::default)?;
+        reject_legacy_epoch_keyed_format(&encryption_keys, ENCRYPTION_KEYS_CF_NAME)?;
+        reject_legacy_epoch_keyed_format(&signing_keys, SIGNING_KEYS_CF_NAME)?;
         Ok(Self {
             db,
             encryption_keys,
             signing_keys,
+            encryption_epoch_index,
+            signing_epoch_index,
             dealer_messages,
             rotation_messages,
             nonce_messages,
         })
     }
 
-    pub(crate) fn backup_keyspaces(&self) -> [(&'static str, &Keyspace); 4] {
+    pub(crate) fn backup_keyspaces(&self) -> [(&'static str, &Keyspace); 6] {
         BACKUP_KEYSPACES.map(|keyspace| (keyspace.name(), keyspace.keyspace(self)))
     }
 
-    pub(crate) fn backup_keyspace_names() -> [&'static str; 4] {
+    pub(crate) fn backup_keyspace_names() -> [&'static str; 6] {
         BACKUP_KEYSPACES.map(BackupKeyspace::name)
     }
 
@@ -140,135 +172,91 @@ impl Database {
         self.db.snapshot()
     }
 
-    /// Store encryption key for the given epoch.
+    /// Store an encryption private key, keyed by its public key, plus the
+    /// `epoch -> pubkey` side-index entry. Both writes commit in one atomic
+    /// `fjall` batch.
     ///
-    /// No-op if a key already exists for this epoch (idempotent for restart safety).
+    /// No-op if a key was already prepared for this epoch (idempotent for
+    /// restart safety).
     pub fn store_encryption_key(
         &self,
         epoch: u64,
         encryption_key: &EncryptionPrivateKey,
     ) -> Result<()> {
-        let key = epoch.to_be_bytes();
-        if !self.encryption_keys.contains_key(key)? {
-            let value = bcs::to_bytes(encryption_key).unwrap();
-            self.encryption_keys.insert(key, value)?;
+        let epoch_key = epoch.to_be_bytes();
+        if self.encryption_epoch_index.contains_key(epoch_key)? {
+            return Ok(());
         }
-        Ok(())
+        let pubkey = EncryptionPublicKey::from_private_key(encryption_key)
+            .as_element()
+            .to_byte_array()
+            .to_vec();
+        let value = bcs::to_bytes(encryption_key).unwrap();
+        let mut batch = self.db.batch();
+        batch.insert(&self.encryption_keys, pubkey.clone(), value);
+        batch.insert(&self.encryption_epoch_index, epoch_key, pubkey);
+        batch.commit()
     }
 
     pub fn latest_encryption_key_epoch(&self) -> Result<Option<u64>> {
-        let mut latest: Option<u64> = None;
-        for guard in self.encryption_keys.iter() {
-            let key = guard.key()?;
-            if let Ok(bytes) = <[u8; 8]>::try_from(key.as_ref()) {
-                let epoch = u64::from_be_bytes(bytes);
-                latest = Some(latest.map_or(epoch, |l: u64| l.max(epoch)));
-            }
-        }
-        Ok(latest)
+        latest_epoch(&self.encryption_epoch_index)
     }
 
     pub fn get_encryption_key(&self, epoch: u64) -> Result<Option<EncryptionPrivateKey>> {
-        let key = epoch.to_be_bytes();
-        let bytes = match self.encryption_keys.get(key) {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(e),
+        let Some(pubkey) = self.encryption_epoch_index.get(epoch.to_be_bytes())? else {
+            return Ok(None);
         };
-        let byte_array = (&*bytes).try_into().map_err(|_| {
-            fjall::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid point",
-            ))
-        })?;
-        let scalar = RistrettoScalar::from_byte_array(&byte_array).map_err(|_| {
-            fjall::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid point",
-            ))
-        })?;
-        Ok(Some(EncryptionPrivateKey::from(scalar)))
+        self.encryption_keys
+            .get(&*pubkey)?
+            .map(|bytes| decode_encryption_key(&bytes))
+            .transpose()
     }
 
     pub fn find_encryption_key_matching(
         &self,
         target: &EncryptionPublicKey,
     ) -> Result<Option<EncryptionPrivateKey>> {
-        let target_bytes = target.as_element().to_byte_array();
-        for guard in self.encryption_keys.iter() {
-            let value = guard.value()?;
-            let byte_array: [u8; 32] = (&*value).try_into().map_err(|_| {
-                fjall::Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "invalid point",
-                ))
-            })?;
-            let scalar = match RistrettoScalar::from_byte_array(&byte_array) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            let candidate = EncryptionPrivateKey::from(scalar);
-            let candidate_pub = EncryptionPublicKey::from_private_key(&candidate);
-            if candidate_pub.as_element().to_byte_array() == target_bytes {
-                return Ok(Some(candidate));
-            }
-        }
-        Ok(None)
+        self.encryption_keys
+            .get(target.as_element().to_byte_array())?
+            .map(|bytes| decode_encryption_key(&bytes))
+            .transpose()
     }
 
     pub fn store_signing_key(&self, epoch: u64, signing_key: &Bls12381PrivateKey) -> Result<()> {
-        let key = epoch.to_be_bytes();
-        if !self.signing_keys.contains_key(key)? {
-            let value = bcs::to_bytes(signing_key).unwrap();
-            self.signing_keys.insert(key, value)?;
+        let epoch_key = epoch.to_be_bytes();
+        if self.signing_epoch_index.contains_key(epoch_key)? {
+            return Ok(());
         }
-        Ok(())
+        let pubkey = signing_key.public_key().as_bytes().to_vec();
+        let value = bcs::to_bytes(signing_key).unwrap();
+        let mut batch = self.db.batch();
+        batch.insert(&self.signing_keys, pubkey.clone(), value);
+        batch.insert(&self.signing_epoch_index, epoch_key, pubkey);
+        batch.commit()
     }
 
     pub fn get_signing_key(&self, epoch: u64) -> Result<Option<Bls12381PrivateKey>> {
-        let key = epoch.to_be_bytes();
-        let bytes = match self.signing_keys.get(key) {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return Ok(None),
-            Err(e) => return Err(e),
+        let Some(pubkey) = self.signing_epoch_index.get(epoch.to_be_bytes())? else {
+            return Ok(None);
         };
-        let signing_key: Bls12381PrivateKey = bcs::from_bytes(&bytes).map_err(|_| {
-            fjall::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid BLS signing key encoding",
-            ))
-        })?;
-        Ok(Some(signing_key))
+        self.signing_keys
+            .get(&*pubkey)?
+            .map(|bytes| decode_signing_key(&bytes))
+            .transpose()
     }
 
     pub fn latest_signing_key_epoch(&self) -> Result<Option<u64>> {
-        let mut latest: Option<u64> = None;
-        for guard in self.signing_keys.iter() {
-            let key = guard.key()?;
-            if let Ok(bytes) = <[u8; 8]>::try_from(key.as_ref()) {
-                let epoch = u64::from_be_bytes(bytes);
-                latest = Some(latest.map_or(epoch, |l: u64| l.max(epoch)));
-            }
-        }
-        Ok(latest)
+        latest_epoch(&self.signing_epoch_index)
     }
 
     pub fn find_signing_key_matching(
         &self,
         target: &BLS12381PublicKey,
     ) -> Result<Option<Bls12381PrivateKey>> {
-        let target_bytes = target.as_ref();
-        for guard in self.signing_keys.iter() {
-            let value = guard.value()?;
-            let candidate: Bls12381PrivateKey = match bcs::from_bytes(&value) {
-                Ok(k) => k,
-                Err(_) => continue,
-            };
-            if candidate.public_key().as_ref() == target_bytes {
-                return Ok(Some(candidate));
-            }
-        }
-        Ok(None)
+        self.signing_keys
+            .get(target.as_bytes())?
+            .map(|bytes| decode_signing_key(&bytes))
+            .transpose()
     }
 
     pub fn store_dealer_message(
@@ -435,24 +423,23 @@ impl Database {
         pruning_references: &PruningReferences,
     ) -> Result<()> {
         let retention_cutoff = cutoff_epoch.saturating_sub(RETENTION_EXTRA_EPOCHS);
-        prune_keyspace_with(&self.encryption_keys, retention_cutoff, |_epoch, value| {
-            let Ok(key) = bcs::from_bytes::<EncryptionPrivateKey>(value) else {
-                return false;
-            };
-            let pub_bytes = EncryptionPublicKey::from_private_key(&key)
-                .as_element()
-                .to_byte_array()
-                .to_vec();
-            pruning_references.encryption_keys.contains(&pub_bytes)
-        })?;
-        prune_keyspace_with(&self.signing_keys, retention_cutoff, |_epoch, value| {
-            let Ok(key) = bcs::from_bytes::<Bls12381PrivateKey>(value) else {
-                return false;
-            };
-            pruning_references
-                .signing_keys
-                .contains(key.public_key().as_bytes())
-        })?;
+        // A key is retained if and only if its public key is referenced by a live committee or pending registration,
+        // or it was created within the retention buffer.
+        // The primary and its side-index rows are evicted together atomically.
+        prune_pubkey_keyspace(
+            &self.db,
+            &self.encryption_keys,
+            &self.encryption_epoch_index,
+            &pruning_references.encryption_keys,
+            retention_cutoff,
+        )?;
+        prune_pubkey_keyspace(
+            &self.db,
+            &self.signing_keys,
+            &self.signing_epoch_index,
+            &pruning_references.signing_keys,
+            retention_cutoff,
+        )?;
         let is_referenced_epoch =
             |epoch: u64, _value: &[u8]| pruning_references.committee_epochs.contains(&epoch);
         prune_keyspace_with(&self.dealer_messages, retention_cutoff, is_referenced_epoch)?;
@@ -483,6 +470,19 @@ impl PruningReferences {
             .insert(encryption_public_key.as_element().to_byte_array().to_vec());
         self.signing_keys
             .insert(signing_public_key.as_bytes().to_vec());
+    }
+
+    pub(crate) fn add_pending_registration(
+        &mut self,
+        next_epoch_encryption_public_key: Option<&EncryptionPublicKey>,
+        next_epoch_signing_public_key: &BLS12381PublicKey,
+    ) {
+        if let Some(encryption_public_key) = next_epoch_encryption_public_key {
+            self.encryption_keys
+                .insert(encryption_public_key.as_element().to_byte_array().to_vec());
+        }
+        self.signing_keys
+            .insert(next_epoch_signing_public_key.as_bytes().to_vec());
     }
 
     pub(crate) fn add_committee_epoch(&mut self, epoch: u64) {
@@ -561,6 +561,100 @@ where
         .collect();
     for key in keys_to_delete {
         keyspace.remove(key)?;
+    }
+    Ok(())
+}
+
+fn latest_epoch(side_index: &Keyspace) -> Result<Option<u64>> {
+    let mut latest: Option<u64> = None;
+    for guard in side_index.iter() {
+        let key = guard.key()?;
+        if let Ok(bytes) = <[u8; 8]>::try_from(key.as_ref()) {
+            let epoch = u64::from_be_bytes(bytes);
+            latest = Some(latest.map_or(epoch, |l: u64| l.max(epoch)));
+        }
+    }
+    Ok(latest)
+}
+
+fn decode_encryption_key(bytes: &[u8]) -> Result<EncryptionPrivateKey> {
+    let byte_array = bytes.try_into().map_err(|_| {
+        fjall::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid encryption key length",
+        ))
+    })?;
+    let scalar = RistrettoScalar::from_byte_array(&byte_array).map_err(|_| {
+        fjall::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid encryption key point",
+        ))
+    })?;
+    Ok(EncryptionPrivateKey::from(scalar))
+}
+
+fn decode_signing_key(bytes: &[u8]) -> Result<Bls12381PrivateKey> {
+    bcs::from_bytes(bytes).map_err(|_| {
+        fjall::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid BLS signing key encoding",
+        ))
+    })
+}
+
+/// TODO: Remove this guard after the first full redeploy
+fn reject_legacy_epoch_keyed_format(keyspace: &Keyspace, name: &str) -> anyhow::Result<()> {
+    if let Some(guard) = keyspace.iter().next() {
+        let key = guard.key().map_err(anyhow::Error::new)?;
+        if key.len() == 8 {
+            anyhow::bail!(
+                "{name} contains epoch-keyed (8-byte) entries from the old \
+                 schema; wipe the db dir and redeploy"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Committee-walk GC for a pubkey-keyed key keyspace and its epoch side-index.
+fn prune_pubkey_keyspace(
+    db: &fjall::Database,
+    keyspace: &Keyspace,
+    side_index: &Keyspace,
+    referenced: &std::collections::HashSet<Vec<u8>>,
+    retention_cutoff: u64,
+) -> Result<()> {
+    let mut epochs_of: std::collections::HashMap<Vec<u8>, Vec<u64>> =
+        std::collections::HashMap::new();
+    for guard in side_index.iter() {
+        let (key, pubkey) = guard.into_inner()?;
+        let Ok(epoch_bytes) = <[u8; 8]>::try_from(key.as_ref()) else {
+            continue;
+        };
+        epochs_of
+            .entry(pubkey.to_vec())
+            .or_default()
+            .push(u64::from_be_bytes(epoch_bytes));
+    }
+    let to_delete: Vec<Vec<u8>> = keyspace
+        .iter()
+        .filter_map(|guard| {
+            let key = guard.key().ok()?;
+            let pubkey = key.as_ref();
+            let recent = epochs_of
+                .get(pubkey)
+                .and_then(|epochs| epochs.iter().max())
+                .is_some_and(|epoch| *epoch >= retention_cutoff);
+            (!referenced.contains(pubkey) && !recent).then(|| key.to_vec())
+        })
+        .collect();
+    for pubkey in &to_delete {
+        let mut batch = db.batch();
+        batch.remove(keyspace, pubkey.as_slice());
+        for epoch in epochs_of.get(pubkey.as_slice()).into_iter().flatten() {
+            batch.remove(side_index, epoch.to_be_bytes());
+        }
+        batch.commit()?;
     }
     Ok(())
 }
@@ -1229,9 +1323,6 @@ pub(crate) mod tests {
         let mut rotation_msgs: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();
         rotation_msgs.insert(NonZeroU16::new(1).unwrap(), create_test_message());
         let nonce_msg = create_test_nonce_message();
-        let enc_key = EncryptionPrivateKey::new(&mut rand::thread_rng());
-        let sig_key = Bls12381PrivateKey::generate(&mut rand::thread_rng());
-
         // Cutoff far enough above the retention window that key keyspaces
         // also see prunes (i.e., `cutoff - RETENTION_EXTRA_EPOCHS > 1`).
         let cutoff = RETENTION_EXTRA_EPOCHS + 8;
@@ -1245,8 +1336,13 @@ pub(crate) mod tests {
                 .unwrap();
             db.store_nonce_message(epoch, 0, &dealer, &nonce_msg)
                 .unwrap();
-            db.store_encryption_key(epoch, &enc_key).unwrap();
-            db.store_signing_key(epoch, &sig_key).unwrap();
+            db.store_encryption_key(epoch, &EncryptionPrivateKey::new(&mut rand::thread_rng()))
+                .unwrap();
+            db.store_signing_key(
+                epoch,
+                &Bls12381PrivateKey::generate(&mut rand::thread_rng()),
+            )
+            .unwrap();
         }
 
         db.prune_messages_below(cutoff, &PruningReferences::default())
@@ -1499,6 +1595,198 @@ pub(crate) mod tests {
             db.get_signing_key(in_flight_epoch).unwrap().is_some(),
             "in-flight signing key (stored before start_reconfig captures it) must be retained by the flat cutoff"
         );
+    }
+
+    #[test]
+    fn test_prune_retains_key_referenced_only_by_pending_registration() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        // An aged key (epoch 5, well below the flat cutoff) that no committee
+        // captured, but that is still the node's pending next_epoch_*
+        // registration, so it must be retained.
+        let registered_encryption = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        let registered_signing = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+        db.store_encryption_key(5, &registered_encryption).unwrap();
+        db.store_signing_key(5, &registered_signing).unwrap();
+
+        // A second aged key with no reference at all (control — must be pruned).
+        db.store_encryption_key(6, &EncryptionPrivateKey::new(&mut rand::thread_rng()))
+            .unwrap();
+        db.store_signing_key(6, &Bls12381PrivateKey::generate(&mut rand::thread_rng()))
+            .unwrap();
+
+        let mut referenced = PruningReferences::default();
+        referenced.add_pending_registration(
+            Some(&EncryptionPublicKey::from_private_key(
+                &registered_encryption,
+            )),
+            &registered_signing.public_key(),
+        );
+
+        // Cutoff 20 → flat key cutoff 13; both keys are aged below it, so only
+        // the pending-registration reference can save the registered one.
+        db.prune_messages_below(20, &referenced).unwrap();
+
+        assert!(
+            db.get_encryption_key(5).unwrap().is_some(),
+            "encryption key referenced only by a pending registration must be retained"
+        );
+        assert!(
+            db.get_signing_key(5).unwrap().is_some(),
+            "signing key referenced only by a pending registration must be retained"
+        );
+        assert!(
+            db.get_encryption_key(6).unwrap().is_none(),
+            "unreferenced aged encryption key must be pruned"
+        );
+        assert!(
+            db.get_signing_key(6).unwrap().is_none(),
+            "unreferenced aged signing key must be pruned"
+        );
+    }
+
+    #[test]
+    fn test_duplicate_pubkey_across_epochs_shares_one_primary_row() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        // The same key prepared for two epochs: one primary row, two side-index
+        // rows (the registration-race shape). Both epochs must resolve.
+        let encryption = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        let signing = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+        db.store_encryption_key(10, &encryption).unwrap();
+        db.store_encryption_key(12, &encryption).unwrap();
+        db.store_signing_key(10, &signing).unwrap();
+        db.store_signing_key(12, &signing).unwrap();
+
+        assert_eq!(
+            db.encryption_keys.iter().count(),
+            1,
+            "one encryption primary row"
+        );
+        assert_eq!(db.signing_keys.iter().count(), 1, "one signing primary row");
+        assert_eq!(
+            db.encryption_epoch_index.iter().count(),
+            2,
+            "two encryption side-index rows"
+        );
+        assert_eq!(
+            db.signing_epoch_index.iter().count(),
+            2,
+            "two signing side-index rows"
+        );
+        assert!(db.get_encryption_key(10).unwrap().is_some());
+        assert!(db.get_encryption_key(12).unwrap().is_some());
+        assert!(db.get_signing_key(10).unwrap().is_some());
+        assert!(db.get_signing_key(12).unwrap().is_some());
+
+        // No references; both epochs (max = 12) are below the flat cutoff
+        // (20 - 7 = 13) → the primary AND both side-index rows must be removed
+        // together (not just the max-epoch side-index row).
+        db.prune_messages_below(20, &PruningReferences::default())
+            .unwrap();
+
+        assert_eq!(db.encryption_keys.iter().count(), 0);
+        assert_eq!(db.signing_keys.iter().count(), 0);
+        assert_eq!(
+            db.encryption_epoch_index.iter().count(),
+            0,
+            "every side-index row for the evicted pubkey must be cleaned up, not just the max-epoch one"
+        );
+        assert_eq!(db.signing_epoch_index.iter().count(), 0);
+    }
+
+    #[test]
+    fn test_open_rejects_legacy_epoch_keyed_keyspace() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        db.encryption_keys
+            .insert(5u64.to_be_bytes(), vec![0u8; 32])
+            .unwrap();
+        assert!(
+            super::reject_legacy_epoch_keyed_format(&db.encryption_keys, "encryption_keys")
+                .is_err(),
+            "an 8-byte (epoch) key in a primary keyspace must be rejected"
+        );
+
+        let tmpdir2 = tempfile::Builder::new().tempdir().unwrap();
+        let db2 = Database::open(tmpdir2.path()).unwrap();
+        db2.encryption_keys
+            .insert([7u8; 32], vec![0u8; 32])
+            .unwrap();
+        assert!(
+            super::reject_legacy_epoch_keyed_format(&db2.encryption_keys, "encryption_keys")
+                .is_ok(),
+            "a 32-byte (pubkey) key must be accepted"
+        );
+    }
+
+    #[test]
+    fn test_prune_keeps_key_storage_bounded_over_many_epochs() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let epochs = 60u64; // far more than RETENTION_EXTRA_EPOCHS
+
+        // One key kept referenced for the whole run (a long-lived committee),
+        // stored early so it ages far past the buffer — must never be pruned.
+        let pinned_encryption = EncryptionPrivateKey::new(&mut rand::thread_rng());
+        let pinned_signing = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+        db.store_encryption_key(1, &pinned_encryption).unwrap();
+        db.store_signing_key(1, &pinned_signing).unwrap();
+
+        // Each epoch prepares a fresh key (as in production) referenced only at
+        // its own epoch, then prunes — mirroring per-epoch reconfig + GC.
+        for epoch in 2..=epochs {
+            let encryption = EncryptionPrivateKey::new(&mut rand::thread_rng());
+            let signing = Bls12381PrivateKey::generate(&mut rand::thread_rng());
+            db.store_encryption_key(epoch, &encryption).unwrap();
+            db.store_signing_key(epoch, &signing).unwrap();
+
+            let mut referenced = PruningReferences::default();
+            referenced.add_member_pubkeys(
+                &EncryptionPublicKey::from_private_key(&pinned_encryption),
+                &pinned_signing.public_key(),
+            );
+            referenced.add_member_pubkeys(
+                &EncryptionPublicKey::from_private_key(&encryption),
+                &signing.public_key(),
+            );
+            db.prune_messages_below(epoch, &referenced).unwrap();
+        }
+
+        // Retained = referenced (the one pinned key) ∪ the recent window
+        // (RETENTION_EXTRA_EPOCHS epochs below the final cutoff) — that is
+        // O(RETENTION_EXTRA_EPOCHS + references), independent of `epochs`.
+        let bound = RETENTION_EXTRA_EPOCHS as usize + 3;
+        let encryption_count = db.encryption_keys.iter().count();
+        let signing_count = db.signing_keys.iter().count();
+        assert!(
+            encryption_count <= bound,
+            "encryption key storage must stay bounded by references + recent window, \
+             got {encryption_count} after {epochs} epochs"
+        );
+        assert!(
+            signing_count <= bound,
+            "signing key storage must stay bounded, got {signing_count} after {epochs} epochs"
+        );
+        // The load-bearing assertion: storage tracks the reference set, not the
+        // epoch count — fails if GC does not run.
+        assert!(
+            encryption_count < epochs as usize,
+            "storage must not grow with the epoch count"
+        );
+
+        // Side-index rows live exactly as long as their primary — none leak
+        // across many evictions.
+        assert_eq!(db.encryption_epoch_index.iter().count(), encryption_count);
+        assert_eq!(db.signing_epoch_index.iter().count(), signing_count);
+
+        // The long-lived referenced key survived despite aging far past the buffer.
+        assert!(db.get_encryption_key(1).unwrap().is_some());
+        assert!(db.get_signing_key(1).unwrap().is_some());
     }
 
     #[test]
