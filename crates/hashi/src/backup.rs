@@ -1,18 +1,18 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Core backup logic for creating and restoring encrypted backup archives.
+//! Core backup logic for creating encrypted backup archives and restoring backup archives.
 //!
 //! This module handles the mechanics of building backup manifests, encrypting
-//! files into age-wrapped gzip-compressed tar archives, and extracting them. CLI-specific
-//! orchestration (config loading, DB-open locking policy, and user output)
+//! files into OpenPGP-wrapped, compressed tar archives, and extracting encrypted or
+//! unencrypted tar archives. CLI-specific orchestration (config loading, DB-open locking policy, and user output)
 //! lives in [`crate::cli::commands::backup`].
 
-use age::cli_common::UiCallbacks;
 use anyhow::Context;
 use anyhow::Result;
+use hashi_types::pgp::PgpPublicCert;
+use hashi_types::pgp::armored_encrypt_writer;
 use std::collections::HashSet;
-use std::fmt;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -24,7 +24,6 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::Arc;
 use sui_futures::service::Service;
 use tokio::sync::mpsc;
@@ -35,87 +34,17 @@ use tracing::warn;
 use crate::Hashi;
 use crate::db::Database;
 
-use age::Encryptor;
-use age::plugin;
-use age::x25519;
 use fjall::KeyspaceCreateOptions;
 use fjall::Readable;
-use flate2::Compression;
-use flate2::write::GzEncoder;
 
 pub const BACKUP_FILE_NAME_PREFIX: &str = "hashi-backup";
 pub const BACKUP_MANIFEST_FILE_NAME: &str = "hashi-backup-manifest.toml";
 pub const DB_SNAPSHOT_TAR_PREFIX: &str = "hashi-db-snapshot";
 
-/// An age recipient that can be used as the target of a backup.
-///
-/// Supports both native x25519 recipients (`age1...`) and plugin recipients
-/// (`age1<plugin-name>1...`, e.g. `age1yubikey1...`). Plugin recipients are only
-/// resolved against a plugin binary at encryption time, so storing one in the
-/// config does not require the plugin to be installed.
-#[derive(Clone)]
-pub enum BackupRecipient {
-    Native(x25519::Recipient),
-    Plugin(plugin::Recipient),
-}
-
-impl FromStr for BackupRecipient {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if let Ok(recipient) = x25519::Recipient::from_str(s) {
-            return Ok(Self::Native(recipient));
-        }
-        match plugin::Recipient::from_str(s) {
-            Ok(recipient) => Ok(Self::Plugin(recipient)),
-            Err(plugin_err) => anyhow::bail!(
-                "failed to parse age recipient '{s}': not a valid x25519 recipient, and not a valid plugin recipient ({plugin_err})"
-            ),
-        }
-    }
-}
-
-impl fmt::Display for BackupRecipient {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Native(r) => write!(f, "{r}"),
-            Self::Plugin(r) => write!(f, "{r}"),
-        }
-    }
-}
-
-impl fmt::Debug for BackupRecipient {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "BackupRecipient({self})")
-    }
-}
-
-pub mod optional_age_recipient {
-    use super::BackupRecipient;
-    use serde::Deserialize;
-    use serde::Deserializer;
-    use serde::Serializer;
-    use std::str::FromStr;
-
-    pub fn serialize<S>(value: &Option<BackupRecipient>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match value {
-            Some(recipient) => serializer.serialize_some(&recipient.to_string()),
-            None => serializer.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<BackupRecipient>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = Option::<String>::deserialize(deserializer)?;
-        value
-            .map(|value| BackupRecipient::from_str(&value).map_err(serde::de::Error::custom))
-            .transpose()
-    }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackupArchiveFormat {
+    Encrypted,
+    Unencrypted,
 }
 
 enum BackupRequest {
@@ -313,18 +242,16 @@ pub fn build_backup_manifest(files: &[PathBuf], db_original_path: &Path) -> Resu
     })
 }
 
-pub fn encrypt_files_to_age_archive(
+pub fn encrypt_files_to_pgp_archive(
     manifest: &BackupManifest,
     db: &Database,
-    recipient: &dyn age::Recipient,
+    recipient: &PgpPublicCert,
     output_path: &Path,
 ) -> Result<()> {
     let output = create_file_strict(output_path)?;
-    let encryptor = Encryptor::with_recipients(std::iter::once(recipient))?;
-    let encrypted = encryptor.wrap_output(output)?;
-    let mut compressed = GzEncoder::new(encrypted, Compression::default());
+    let mut encrypted = armored_encrypt_writer(output, recipient)?;
     {
-        let mut archive = tar::Builder::new(&mut compressed);
+        let mut archive = tar::Builder::new(&mut encrypted);
         append_backup_manifest(&mut archive, manifest)?;
 
         for entry in &manifest.paths {
@@ -341,8 +268,7 @@ pub fn encrypt_files_to_age_archive(
 
         archive.finish()?;
     }
-    let encrypted = compressed.finish()?;
-    encrypted.finish()?;
+    encrypted.finalize()?;
 
     Ok(())
 }
@@ -351,7 +277,7 @@ pub fn save(
     node_config_path: &Path,
     node_config: &crate::config::Config,
     db: &Database,
-    recipient: &BackupRecipient,
+    recipient: &PgpPublicCert,
     output_dir: &Path,
 ) -> Result<PathBuf> {
     let files = backup_file_paths(node_config_path, node_config)?;
@@ -380,10 +306,8 @@ pub fn save(
         "Backing up files + database",
     );
 
-    let encryptor_recipient = build_encryptor_recipient(recipient)?;
-
     let output_path = output_dir.join(encrypted_backup_file_name());
-    encrypt_files_to_age_archive(&manifest, db, encryptor_recipient.as_ref(), &output_path)?;
+    encrypt_files_to_pgp_archive(&manifest, db, recipient, &output_path)?;
 
     Ok(output_path)
 }
@@ -445,32 +369,6 @@ fn is_inline_pem(value: &str) -> bool {
     value.trim_start().starts_with("-----BEGIN")
 }
 
-/// Materialize a `BackupRecipient` into a concrete `age::Recipient` trait object
-/// suitable for passing to `Encryptor::with_recipients`.
-///
-/// For plugin recipients, this is where `age-plugin-<name>` is looked up on
-/// `$PATH`, so this call will fail if the plugin binary is not installed.
-fn build_encryptor_recipient(recipient: &BackupRecipient) -> Result<Box<dyn age::Recipient>> {
-    match recipient {
-        BackupRecipient::Native(r) => Ok(Box::new(r.clone())),
-        BackupRecipient::Plugin(r) => {
-            let plugin_name = r.plugin().to_string();
-            let recipient_plugin = plugin::RecipientPluginV1::new(
-                &plugin_name,
-                std::slice::from_ref(r),
-                &[],
-                UiCallbacks,
-            )
-            .with_context(|| {
-                format!(
-                    "Failed to initialize age plugin '{plugin_name}'. Is `age-plugin-{plugin_name}` installed and on $PATH?"
-                )
-            })?;
-            Ok(Box::new(recipient_plugin))
-        }
-    }
-}
-
 pub fn encrypted_backup_file_name() -> PathBuf {
     // ISO 8601 basic format in UTC, e.g. 20260409T230419Z. Compact, sorts
     // lexicographically, and contains no characters that need escaping on any
@@ -479,7 +377,7 @@ pub fn encrypted_backup_file_name() -> PathBuf {
         .to_zoned(jiff::tz::TimeZone::UTC)
         .strftime("%Y%m%dT%H%M%SZ")
         .to_string();
-    PathBuf::from(format!("{BACKUP_FILE_NAME_PREFIX}-{timestamp}.tar.gz.age"))
+    PathBuf::from(format!("{BACKUP_FILE_NAME_PREFIX}-{timestamp}.tar.asc"))
 }
 
 fn append_backup_manifest<W: std::io::Write>(
@@ -571,10 +469,37 @@ fn append_db_backup_to_tar<W: Write>(
     Ok(())
 }
 
+/// Determine the format of a backup tarball from its file name.
+///
+/// `.tar.asc` backups are OpenPGP-encrypted; `.tar` backups are already plaintext.
+pub fn archive_format(backup_tarball: &Path) -> Result<BackupArchiveFormat> {
+    let file_name = backup_tarball
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Backup tarball path has no file name: {}",
+                backup_tarball.display()
+            )
+        })?;
+
+    if file_name.ends_with(".tar.asc") {
+        Ok(BackupArchiveFormat::Encrypted)
+    } else if file_name.ends_with(".tar") {
+        Ok(BackupArchiveFormat::Unencrypted)
+    } else {
+        anyhow::bail!(
+            "Backup tarball must have a .tar or .tar.asc suffix: {}",
+            backup_tarball.display()
+        );
+    }
+}
+
 /// Determine the directory name to extract a backup tarball into.
 ///
-/// Strips the `.tar.gz.age` suffix from the tarball's file name, so
-/// `<backup-prefix>-20260409T230419Z.tar.gz.age` becomes
+/// Strips the `.tar.asc` or `.tar` suffix from the tarball's file name, so
+/// `<backup-prefix>-20260409T230419Z.tar.asc` and
+/// `<backup-prefix>-20260409T230419Z.tar` both become
 /// `<backup-prefix>-20260409T230419Z`. An input without one of those
 /// suffixes is rejected rather than silently used verbatim, to avoid
 /// surprising extraction directory names when users point at the wrong file.
@@ -589,16 +514,20 @@ pub fn extract_dir_name(backup_tarball: &Path) -> Result<PathBuf> {
             )
         })?;
 
-    let stem = file_name.strip_suffix(".tar.gz.age").ok_or_else(|| {
-        anyhow::anyhow!(
-            "Backup tarball must have a .tar.gz.age suffix: {}",
+    let stem = if let Some(stem) = file_name.strip_suffix(".tar.asc") {
+        stem
+    } else if let Some(stem) = file_name.strip_suffix(".tar") {
+        stem
+    } else {
+        anyhow::bail!(
+            "Backup tarball must have a .tar or .tar.asc suffix: {}",
             backup_tarball.display()
-        )
-    })?;
+        );
+    };
 
     // Require the stem to be exactly one plain directory component when
     // joined under the user's output dir. Catches both the empty case (zero
-    // components) and traversal attempts like `../../tmp/pwn.tar.gz.age` (a
+    // components) and traversal attempts like `../../tmp/pwn.tar.asc` (a
     // `ParentDir` component, not `Normal`).
     let stem_path = Path::new(stem);
     let mut components = stem_path.components();
@@ -1090,7 +1019,18 @@ fn copy_dir_recursive_strict(src: &Path, dest: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hashi_types::pgp::PgpPublicCert;
+    use hashi_types::pgp::test_utils;
+    use hashi_types::pgp::test_utils::mock_pgp_cert;
+    use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use std::io::Cursor;
+    use std::process::Command;
+
+    fn temp_gnupg_home() -> tempfile::TempDir {
+        let homedir = tempfile::Builder::new().tempdir().unwrap();
+        test_utils::prepare_gnupg_home(homedir.path());
+        homedir
+    }
 
     fn db_only_manifest() -> BackupManifest {
         BackupManifest {
@@ -1395,14 +1335,57 @@ mod tests {
         node_config.save(&node_config_path).unwrap();
 
         let db = Database::open(&db_path).unwrap();
-        let identity = age::x25519::Identity::generate();
-        let recipient = identity.to_public().to_string().parse().unwrap();
+        let recipient = mock_pgp_cert();
         let out = tempfile::Builder::new().tempdir().unwrap();
 
         let output_path =
             save(&node_config_path, &node_config, &db, &recipient, out.path()).unwrap();
 
         assert!(output_path.is_file());
+    }
+
+    #[test]
+    fn backup_tarball_can_be_manually_decrypted_with_gpg() {
+        let src = tempfile::Builder::new().tempdir().unwrap();
+        let db_path = src.path().join("db");
+        let node_config_path = src.path().join("config.toml");
+        let node_config = crate::config::Config {
+            db: Some(db_path.clone()),
+            ..Default::default()
+        };
+        node_config.save(&node_config_path).unwrap();
+
+        let db = Database::open(&db_path).unwrap();
+        let (public_cert, secret_key) = mock_pgp_keypair();
+        let recipient = PgpPublicCert::new(public_cert).unwrap();
+        let out = tempfile::Builder::new().tempdir().unwrap();
+
+        let output_path =
+            save(&node_config_path, &node_config, &db, &recipient, out.path()).unwrap();
+
+        let homedir = temp_gnupg_home();
+        test_utils::gpg_import_secret_key(homedir.path(), &secret_key);
+
+        let output = Command::new("gpg")
+            .env("GNUPGHOME", homedir.path())
+            .arg("--decrypt")
+            .arg(&output_path)
+            .output()
+            .unwrap();
+        test_utils::assert_command_success(&output, "gpg --decrypt");
+
+        // gpg --decrypt inflates the OpenPGP compression layer, so its stdout
+        // is the raw tar.
+        let mut archive = tar::Archive::new(Cursor::new(output.stdout));
+        let has_manifest = archive
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap().path().unwrap().into_owned())
+            .any(|path| path == Path::new(BACKUP_MANIFEST_FILE_NAME));
+        assert!(
+            has_manifest,
+            "manual gpg decrypt did not produce a valid backup tarball"
+        );
     }
 
     #[test]

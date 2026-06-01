@@ -42,11 +42,10 @@ hashi_committee:
   mpc_weight_reduction_allowed_delta: 0
   mpc_max_faulty_in_basis_points: 3300
 
-# Withdrawal/limiter parameters the enclave will be initialized with.
-withdrawal_config:
-  committee_threshold: 1
-  refill_rate_sats_per_sec: 1000
-  max_bucket_capacity_sats: 100000000
+# Limiter parameters the enclave will be initialized with.
+limiter_config:
+  refill_rate: 1000
+  max_bucket_capacity: 100000000
 
 # Hashi BTC master x-only pubkey (32-byte hex).
 hashi_btc_master_pubkey: "0000000000000000000000000000000000000000000000000000000000000001"

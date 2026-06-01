@@ -118,6 +118,10 @@ pub struct SignWithdrawalTransactionRequest {
     /// before participating in MPC signing.
     #[prost(uint64, optional, tag = "2")]
     pub expected_limiter_seq: ::core::option::Option<u64>,
+    /// Leader's checkpoint timestamp (unix seconds), bounded by each member
+    /// against its own checkpoint clock. Absent from pre-upgrade leaders.
+    #[prost(uint64, optional, tag = "3")]
+    pub timestamp_secs: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignWithdrawalTransactionPartial {
@@ -137,9 +141,15 @@ pub struct SignWithdrawalTxSigningRequest {
     /// Withdrawal request ids (each 32 bytes).
     #[prost(bytes = "bytes", repeated, tag = "2")]
     pub request_ids: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
-    /// One Schnorr signature per transaction input.
+    /// One MPC Schnorr signature per transaction input (64 bytes each).
     #[prost(bytes = "bytes", repeated, tag = "3")]
     pub signatures: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
+    /// One guardian Schnorr signature per transaction input (64 bytes each).
+    /// Same length as `signatures`. Followers verify each entry against
+    /// the on-chain `guardian_btc_public_key` before BLS-signing the
+    /// certificate; the BLS cert binds both arrays.
+    #[prost(bytes = "bytes", repeated, tag = "4")]
+    pub guardian_signatures: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignWithdrawalTxSigningResponse {
@@ -1286,6 +1296,10 @@ pub struct GuardianInfoData {
     /// Server version.
     #[prost(string, optional, tag = "4")]
     pub server_version: ::core::option::Option<::prost::alloc::string::String>,
+    /// X-only Bitcoin pubkey of the enclave's BTC signing key (32 bytes).
+    /// Absent before `provisioner_init` has set the keypair.
+    #[prost(bytes = "bytes", optional, tag = "5")]
+    pub enclave_btc_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
 }
 /// Public description of the current BTC key's secret-sharing scheme.
 /// `commitments.len() == num_shares` and `2 <= threshold <= num_shares`.
@@ -1421,27 +1435,15 @@ pub struct ProvisionerInitState {
     /// Current Hashi committee.
     #[prost(message, optional, tag = "1")]
     pub committee: ::core::option::Option<Committee>,
-    /// Withdrawal policy configuration.
+    /// Limiter configuration.
     #[prost(message, optional, tag = "2")]
-    pub withdrawal_config: ::core::option::Option<WithdrawalConfig>,
+    pub limiter_config: ::core::option::Option<LimiterConfig>,
     /// X-only public key bytes (32 bytes).
     #[prost(bytes = "bytes", optional, tag = "4")]
     pub hashi_btc_master_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
     /// Rate limiter state.
     #[prost(message, optional, tag = "6")]
     pub limiter_state: ::core::option::Option<LimiterState>,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct WithdrawalConfig {
-    /// Committee threshold expressed in terms of weight.
-    #[prost(uint64, optional, tag = "1")]
-    pub committee_threshold: ::core::option::Option<u64>,
-    /// Token refill rate in sats per second.
-    #[prost(uint64, optional, tag = "2")]
-    pub refill_rate_sats_per_sec: ::core::option::Option<u64>,
-    /// Maximum bucket capacity in sats.
-    #[prost(uint64, optional, tag = "3")]
-    pub max_bucket_capacity_sats: ::core::option::Option<u64>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LimiterState {

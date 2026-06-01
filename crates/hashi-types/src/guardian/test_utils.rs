@@ -10,9 +10,9 @@ use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
 use super::KPEncryptedShare;
+use super::LimiterConfig;
 use super::LimiterState;
 use super::OperatorInitRequest;
-use super::PgpPublicCert;
 use super::ProvisionerInitRequest;
 use super::ProvisionerInitState;
 use super::RotateKpsResponse;
@@ -25,8 +25,9 @@ use super::ShareCommitment;
 use super::ShareCommitments;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
-use super::WithdrawalConfig;
 use super::WithdrawalID;
+use crate::pgp::test_utils::mock_pgp_certs;
+pub use crate::pgp::test_utils::mock_pgp_certs_armored;
 
 use super::bitcoin_utils::BTC_LIB;
 use super::bitcoin_utils::InputUTXO;
@@ -46,8 +47,6 @@ use bitcoin::secp256k1::Message;
 use bitcoin::secp256k1::SecretKey;
 use bitcoin::taproot::TapLeafHash;
 use ed25519_consensus::SigningKey;
-use sequoia_openpgp::cert::prelude::CertBuilder;
-use sequoia_openpgp::serialize::Serialize;
 use std::num::NonZeroU16;
 use sui_sdk_types::Address as SuiAddress;
 use sui_sdk_types::bcs::FromBcs;
@@ -88,6 +87,7 @@ impl GetGuardianInfoResponse {
             }),
             encryption_pubkey: vec![0u8; 32],
             server_version: "v1".to_string(),
+            enclave_btc_pubkey: None,
         };
 
         GetGuardianInfoResponse {
@@ -104,30 +104,8 @@ impl GetGuardianInfoResponse {
 
 impl SetupNewKeyRequest {
     pub fn mock_for_testing() -> Self {
-        SetupNewKeyRequest::new(mock_pgp_certs(), TEST_N, TEST_T).unwrap()
+        SetupNewKeyRequest::new(mock_pgp_certs(TEST_N), TEST_N, TEST_T).unwrap()
     }
-}
-
-fn mock_pgp_cert_armored() -> String {
-    let (cert, _) = CertBuilder::general_purpose(["kp@example.com"])
-        .generate()
-        .unwrap();
-    let mut armored = Vec::new();
-    cert.armored().export(&mut armored).unwrap();
-    String::from_utf8(armored).unwrap()
-}
-
-/// Generate `n` fresh armored OpenPGP certs (distinct keys), e.g. for a new KP set.
-pub fn mock_pgp_certs_armored(n: usize) -> Vec<String> {
-    (0..n).map(|_| mock_pgp_cert_armored()).collect()
-}
-
-fn mock_pgp_cert() -> PgpPublicCert {
-    PgpPublicCert::new(mock_pgp_cert_armored()).unwrap()
-}
-
-fn mock_pgp_certs() -> Vec<PgpPublicCert> {
-    (0..TEST_N).map(|_| mock_pgp_cert()).collect()
 }
 
 fn dummy_commitments() -> ShareCommitments {
@@ -249,14 +227,14 @@ fn mock_committee_with_one_member(epoch: u64) -> HashiCommittee {
 
 impl ProvisionerInitState {
     pub fn from_parts_for_testing(
-        withdrawal_config: WithdrawalConfig,
+        limiter_config: LimiterConfig,
         limiter_state: LimiterState,
         committee: HashiCommittee,
-        hashi_btc_master_pubkey: super::BitcoinPubkey,
+        hashi_btc_master_pubkey: super::HashiMasterG,
     ) -> Self {
         ProvisionerInitState::new(
             committee,
-            withdrawal_config,
+            limiter_config,
             limiter_state,
             hashi_btc_master_pubkey,
         )
@@ -267,19 +245,26 @@ impl ProvisionerInitState {
         let kp = kp.unwrap_or(create_btc_keypair(&[1u8; 32]));
         let max_capacity = 1000;
 
+        // Convert the bitcoin-lib keypair's x-only pubkey to a raw `G` point.
+        // The bitcoin Keypair always signs against its even-y projection, so
+        // building `G` from the x-only bytes via `with_even_y_from_x_be_bytes`
+        // gives the parent that matches what the keypair signs against.
+        let x_bytes = kp.x_only_public_key().0.serialize();
+        let hashi_btc_master_pubkey =
+            super::HashiMasterG::with_even_y_from_x_be_bytes(&x_bytes).expect("valid x coordinate");
+
         ProvisionerInitState::new(
             mock_committee_with_one_member(0),
-            WithdrawalConfig {
-                committee_threshold: 0,
-                refill_rate_sats_per_sec: 10,
-                max_bucket_capacity_sats: max_capacity,
+            LimiterConfig {
+                refill_rate: 10,
+                max_bucket_capacity: max_capacity,
             },
             LimiterState {
                 num_tokens_available: max_capacity,
                 last_updated_at: 0,
                 next_seq: 0,
             },
-            kp.x_only_public_key().0,
+            hashi_btc_master_pubkey,
         )
         .expect("valid ProvisionerInitState")
     }

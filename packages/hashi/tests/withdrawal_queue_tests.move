@@ -241,7 +241,8 @@ fun test_sign_withdrawal_txn() {
 
     // Sign the pending withdrawal via mutable borrow
     let test_signatures = vector[x"DEADBEEF", x"CAFEBABE"];
-    queue.sign_withdrawal_txn(pending_id, test_signatures);
+    let test_guardian_signatures = vector[x"AAAAAAAA", x"BBBBBBBB"];
+    queue.sign_withdrawal_txn(pending_id, test_signatures, test_guardian_signatures);
 
     // Remove and destroy
     let pending = queue.remove_withdrawal_txn(pending_id);
@@ -284,7 +285,7 @@ fun test_full_withdrawal_queue_lifecycle() {
     queue.insert_withdrawal_txn(pending);
 
     // Step 4: Sign — mutate pending withdrawal in place
-    queue.sign_withdrawal_txn(pending_id, vector[x"AA", x"BB"]);
+    queue.sign_withdrawal_txn(pending_id, vector[x"AA", x"BB"], vector[x"CC", x"DD"]);
 
     // Step 5: Confirm — remove and destroy
     let pending = queue.remove_withdrawal_txn(pending_id);

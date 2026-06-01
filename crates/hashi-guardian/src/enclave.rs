@@ -14,6 +14,7 @@ use hashi_types::guardian::bitcoin_utils::sign_btc_tx;
 use hashi_types::guardian::bitcoin_utils::TxUTXOs;
 use hashi_types::guardian::crypto::Share;
 use hashi_types::guardian::GuardianError::InvalidInputs;
+use hashi_types::guardian::HashiMasterG;
 use hashi_types::guardian::*;
 use hpke::Serializable;
 use serde::Serialize;
@@ -47,10 +48,12 @@ pub struct EnclaveConfig {
     enclave_btc_keypair: OnceLock<Keypair>,
     /// BTC network: mainnet, testnet, regtest (set in operator_init)
     btc_network: OnceLock<Network>,
-    /// Hashi BTC public key used to derive child keys (set in provisioner_init)
-    hashi_btc_master_pubkey: OnceLock<BitcoinPubkey>,
+    /// Raw MPC verifying key as a curve point. Stored with y-parity so the
+    /// 2-of-2 child-key derivation matches the MPC's signing protocol.
+    /// Set in provisioner_init.
+    hashi_btc_master_pubkey: OnceLock<HashiMasterG>,
     /// Withdraw related config's (set in provisioner_init)
-    withdrawal_config: OnceLock<WithdrawalConfig>,
+    limiter_config: OnceLock<LimiterConfig>,
 }
 
 /// Mutable state that changes during operation.
@@ -109,7 +112,7 @@ impl EnclaveConfig {
             enclave_btc_keypair: OnceLock::new(),
             btc_network: OnceLock::new(),
             hashi_btc_master_pubkey: OnceLock::new(),
-            withdrawal_config: OnceLock::new(),
+            limiter_config: OnceLock::new(),
         }
     }
 
@@ -136,7 +139,16 @@ impl EnclaveConfig {
             .map_err(|_| InvalidInputs("Bitcoin key already set".into()))
     }
 
-    pub fn set_hashi_btc_pk(&self, pk: BitcoinPubkey) -> GuardianResult<()> {
+    /// Returns the x-only pubkey of the enclave's BTC signing key.
+    /// Returns `Err` until `provisioner_init` has set the keypair.
+    pub fn enclave_btc_pubkey(&self) -> GuardianResult<BitcoinPubkey> {
+        self.enclave_btc_keypair
+            .get()
+            .map(|kp| kp.x_only_public_key().0)
+            .ok_or(InvalidInputs("Bitcoin key is not initialized".into()))
+    }
+
+    pub fn set_hashi_btc_pk(&self, pk: HashiMasterG) -> GuardianResult<()> {
         self.hashi_btc_master_pubkey
             .set(pk)
             .map_err(|_| InvalidInputs("Hashi BTC key is already set".into()))
@@ -162,20 +174,16 @@ impl EnclaveConfig {
     // Withdrawal Configuration
     // ========================================================================
 
-    pub fn withdrawal_config(&self) -> GuardianResult<&WithdrawalConfig> {
-        self.withdrawal_config
+    pub fn limiter_config(&self) -> GuardianResult<&LimiterConfig> {
+        self.limiter_config
             .get()
-            .ok_or(InvalidInputs("WithdrawalConfig is not initialized".into()))
+            .ok_or(InvalidInputs("LimiterConfig is not initialized".into()))
     }
 
-    pub fn set_withdrawal_config(&self, config: WithdrawalConfig) -> GuardianResult<()> {
-        self.withdrawal_config
+    pub fn set_limiter_config(&self, config: LimiterConfig) -> GuardianResult<()> {
+        self.limiter_config
             .set(config)
-            .map_err(|_| InvalidInputs("WithdrawalConfig already set".into()))
-    }
-
-    pub fn committee_threshold(&self) -> GuardianResult<u64> {
-        Ok(self.withdrawal_config()?.committee_threshold)
+            .map_err(|_| InvalidInputs("LimiterConfig already set".into()))
     }
 
     // ========================================================================
@@ -220,14 +228,14 @@ impl EnclaveConfig {
     pub fn is_provisioner_init_complete(&self) -> bool {
         self.is_enclave_btc_keypair_set()
             && self.is_hashi_btc_master_pubkey_set()
-            && self.withdrawal_config.get().is_some()
+            && self.limiter_config.get().is_some()
     }
 
     /// Check if any provisioner_init configuration has been set
     pub fn is_provisioner_init_partially_complete(&self) -> bool {
         self.is_enclave_btc_keypair_set()
             || self.is_hashi_btc_master_pubkey_set()
-            || self.withdrawal_config.get().is_some()
+            || self.limiter_config.get().is_some()
     }
 }
 
@@ -467,6 +475,7 @@ impl Enclave {
             encryption_pubkey: self.encryption_public_key().to_bytes().to_vec(),
             // TODO: Change it
             server_version: "v1".to_string(),
+            enclave_btc_pubkey: self.config.enclave_btc_pubkey().ok(),
         }
     }
 

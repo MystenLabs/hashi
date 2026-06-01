@@ -138,6 +138,10 @@ message SignWithdrawalTransactionRequest {
   // committee member validates this against its own limiter's `next_seq`
   // before participating in MPC signing.
   optional uint64 expected_limiter_seq = 2;
+
+  // Leader's checkpoint timestamp (unix seconds), bounded by each member
+  // against its own checkpoint clock. Absent from pre-upgrade leaders.
+  optional uint64 timestamp_secs = 3;
 }
 
 message SignWithdrawalTransactionPartial {
@@ -156,8 +160,14 @@ message SignWithdrawalTxSigningRequest {
   // Withdrawal request ids (each 32 bytes).
   repeated bytes request_ids = 2;
 
-  // One Schnorr signature per transaction input.
+  // One MPC Schnorr signature per transaction input (64 bytes each).
   repeated bytes signatures = 3;
+
+  // One guardian Schnorr signature per transaction input (64 bytes each).
+  // Same length as `signatures`. Followers verify each entry against
+  // the on-chain `guardian_btc_public_key` before BLS-signing the
+  // certificate; the BLS cert binds both arrays.
+  repeated bytes guardian_signatures = 4;
 }
 
 message SignWithdrawalTxSigningResponse {

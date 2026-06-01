@@ -3,7 +3,7 @@
 
 module hashi::update_guardian;
 
-use hashi::{hashi::Hashi, proposal};
+use hashi::{config, hashi::Hashi, proposal};
 use std::string::String;
 use sui::{clock::Clock, vec_map::VecMap};
 
@@ -23,6 +23,7 @@ public fun propose(
     ctx: &mut TxContext,
 ): ID {
     hashi.config().assert_version_enabled();
+    config::assert_valid_guardian_public_key(&public_key);
     proposal::create(
         hashi,
         UpdateGuardian { url, public_key },

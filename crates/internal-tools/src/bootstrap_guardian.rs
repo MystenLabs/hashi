@@ -16,10 +16,11 @@ use bitcoin::secp256k1::Secp256k1;
 use bitcoin::secp256k1::SecretKey as BtcSecretKey;
 use clap::Parser;
 use hashi::onchain::OnchainState;
-use hashi_types::committee::certificate_threshold;
 use hashi_types::guardian::BitcoinPubkey;
 use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GetGuardianInfoResponse;
+use hashi_types::guardian::HashiMasterG;
+use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::ProvisionerInitState;
@@ -28,7 +29,6 @@ use hashi_types::guardian::SecretSharingParams;
 use hashi_types::guardian::Share;
 use hashi_types::guardian::ShareCommitment;
 use hashi_types::guardian::ShareCommitments;
-use hashi_types::guardian::WithdrawalConfig;
 use hashi_types::guardian::crypto::commit_share;
 use hashi_types::guardian::crypto::split_secret;
 use hashi_types::guardian::proto_conversions::provisioner_init_request_to_pb;
@@ -70,6 +70,13 @@ pub struct Args {
     /// Reconstruction threshold for the BTC key.
     #[arg(long, env = "HASHI_THRESHOLD", default_value_t = 3)]
     threshold: usize,
+
+    /// Pre-generated master secret (32 bytes, hex). Required when the
+    /// pubkey was pinned on-chain at publish time; the secret must match
+    /// the `guardian_btc_public_key` recorded in `Config`. Omit only for
+    /// dev paths that don't pin the pubkey upfront.
+    #[arg(long, env = "HASHI_MASTER_SECRET_HEX")]
+    master_secret_hex: Option<String>,
 }
 
 pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
@@ -84,11 +91,9 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .current_committee()
         .ok_or_else(|| anyhow!("no current committee on chain (DKG not yet complete?)"))?;
     let committee_epoch = committee.epoch();
-    let committee_threshold = certificate_threshold(committee.total_weight());
     tracing::info!(
         committee_epoch,
         committee_total_weight = committee.total_weight(),
-        committee_threshold,
         num_members = committee.members().len(),
         "fetched on-chain committee"
     );
@@ -96,9 +101,29 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
     let mut rng = thread_rng();
     let n = args.num_shares;
     let t = args.threshold;
-    let material = generate_share_material(n, t, &mut rng)?;
+    let existing_secret = args
+        .master_secret_hex
+        .as_deref()
+        .map(parse_master_secret)
+        .transpose()?;
+    let material = generate_share_material(n, t, &mut rng, existing_secret)?;
     tracing::info!(master_pubkey = %hex::encode(material.master_pubkey.serialize()),
         n, t, "generated share material");
+
+    // Derived key must match the pubkey pinned on-chain at publish; a wrong or
+    // missing --master-secret-hex would otherwise provision a key the chain rejects.
+    let onchain_btc_pubkey = onchain_state.guardian_btc_public_key();
+    if let Some(onchain) = onchain_btc_pubkey {
+        let derived = material.master_pubkey.serialize();
+        anyhow::ensure!(
+            derived.as_slice() == onchain.as_slice(),
+            "derived master pubkey {} does not match on-chain \
+             guardian_btc_public_key {}; check HASHI_MASTER_SECRET_HEX",
+            hex::encode(derived),
+            hex::encode(&onchain),
+        );
+        tracing::info!("master pubkey matches on-chain guardian_btc_public_key");
+    }
 
     let mut client = GuardianServiceClient::connect(args.guardian_endpoint.clone())
         .await
@@ -177,19 +202,19 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .map_err(|e| anyhow!("decode guardian encryption pubkey (session={session_id}): {e:?}"))?;
     tracing::info!(session_id = %session_id, "guardian info verified");
 
-    let withdrawal_config = WithdrawalConfig {
-        committee_threshold,
-        refill_rate_sats_per_sec: args.refill_rate_sats_per_sec,
-        max_bucket_capacity_sats: args.max_bucket_capacity_sats,
+    let limiter_config = LimiterConfig {
+        refill_rate: args.refill_rate_sats_per_sec,
+        max_bucket_capacity: args.max_bucket_capacity_sats,
     };
-    let limiter_state = LimiterState::genesis(&withdrawal_config);
-    let state = ProvisionerInitState::new(
-        committee,
-        withdrawal_config,
-        limiter_state,
-        material.master_pubkey,
-    )
-    .map_err(|e| anyhow!("build ProvisionerInitState: {e:?}"))?;
+    let limiter_state = LimiterState::genesis(&limiter_config);
+    // The bootstrap utility builds the guardian's BTC keypair from a fresh
+    // bitcoin-lib keypair, which always signs against the even-y projection
+    // of its pubkey. Reconstruct the matching `G` point so downstream
+    // derivations agree on y-parity.
+    let master_g = HashiMasterG::with_even_y_from_x_be_bytes(&material.master_pubkey.serialize())
+        .map_err(|e| anyhow!("convert master pubkey to G: {e:?}"))?;
+    let state = ProvisionerInitState::new(committee, limiter_config, limiter_state, master_g)
+        .map_err(|e| anyhow!("build ProvisionerInitState: {e:?}"))?;
 
     for (i, share) in material.shares.iter().take(t).enumerate() {
         tracing::info!("submitting ProvisionerInit share {}/{t}", i + 1);
@@ -232,7 +257,6 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         hex::encode(material.master_pubkey.serialize())
     );
     println!("  committee_epoch:          {committee_epoch}");
-    println!("  committee_threshold:      {committee_threshold}");
     println!(
         "  refill_rate_sats_per_sec: {}",
         args.refill_rate_sats_per_sec
@@ -252,13 +276,16 @@ struct ShareMaterial {
 
 /// Fresh BTC master key + Shamir shares + matching commitments, all in memory.
 /// `master_pubkey` is the x-only key the guardian reconstructs from any `t`
-/// shares out of `n`.
+/// shares out of `n`. When `existing_secret` is `Some`, the shares are split
+/// from that secret so the resulting `master_pubkey` matches whatever was
+/// already pinned on-chain at publish time.
 fn generate_share_material<R: CryptoRng + RngCore>(
     n: usize,
     t: usize,
     rng: &mut R,
+    existing_secret: Option<k256::SecretKey>,
 ) -> Result<ShareMaterial> {
-    let k256_sk = k256::SecretKey::random(&mut *rng);
+    let k256_sk = existing_secret.unwrap_or_else(|| k256::SecretKey::random(&mut *rng));
 
     let params =
         SecretSharingParams::new(n, t).map_err(|e| anyhow!("invalid sharing params: {e:?}"))?;
@@ -278,6 +305,18 @@ fn generate_share_material<R: CryptoRng + RngCore>(
         commitments,
         master_pubkey,
     })
+}
+
+fn parse_master_secret(hex_str: &str) -> Result<k256::SecretKey> {
+    let bytes = hex::decode(hex_str.trim_start_matches("0x"))
+        .context("invalid hex for --master-secret-hex")?;
+    anyhow::ensure!(
+        bytes.len() == 32,
+        "--master-secret-hex must decode to 32 bytes, got {}",
+        bytes.len(),
+    );
+    k256::SecretKey::from_slice(&bytes)
+        .map_err(|e| anyhow!("--master-secret-hex is not a valid secp256k1 scalar: {e}"))
 }
 
 fn required_env(name: &str) -> Result<String> {
@@ -301,7 +340,7 @@ mod tests {
         const TEST_N: usize = 5;
         const TEST_T: usize = 3;
         let mut rng = rand::thread_rng();
-        let material = generate_share_material(TEST_N, TEST_T, &mut rng).unwrap();
+        let material = generate_share_material(TEST_N, TEST_T, &mut rng, None).unwrap();
 
         assert_eq!(material.shares.len(), TEST_N);
         let subset = &material.shares[..TEST_T];
@@ -309,5 +348,41 @@ mod tests {
         let reconstructed_kp = k256_sk_to_btc_keypair(&reconstructed_sk);
         let (reconstructed_xonly, _) = reconstructed_kp.x_only_public_key();
         assert_eq!(reconstructed_xonly, material.master_pubkey);
+    }
+
+    #[test]
+    fn pre_supplied_secret_round_trips_through_shares() {
+        const TEST_N: usize = 5;
+        const TEST_T: usize = 3;
+        let mut rng = rand::thread_rng();
+        let secret = k256::SecretKey::random(&mut rng);
+        let expected_xonly = {
+            let secp = Secp256k1::new();
+            let sk = BtcSecretKey::from_slice(&secret.to_bytes()).unwrap();
+            Keypair::from_secret_key(&secp, &sk).x_only_public_key().0
+        };
+
+        let material =
+            generate_share_material(TEST_N, TEST_T, &mut rng, Some(secret.clone())).unwrap();
+        assert_eq!(material.master_pubkey, expected_xonly);
+
+        let subset = &material.shares[..TEST_T];
+        let reconstructed = combine_shares(subset, TEST_T).expect("threshold shares combine");
+        let reconstructed_kp = k256_sk_to_btc_keypair(&reconstructed);
+        let (reconstructed_xonly, _) = reconstructed_kp.x_only_public_key();
+        assert_eq!(reconstructed_xonly, expected_xonly);
+    }
+
+    #[test]
+    fn parse_master_secret_accepts_0x_prefix() {
+        let hex = "0x".to_string() + &"11".repeat(32);
+        let sk = parse_master_secret(&hex).unwrap();
+        assert_eq!(sk.to_bytes().as_slice(), [0x11u8; 32].as_slice());
+    }
+
+    #[test]
+    fn parse_master_secret_rejects_wrong_length() {
+        let err = parse_master_secret(&"ab".repeat(31)).unwrap_err();
+        assert!(format!("{err}").contains("32 bytes"));
     }
 }

@@ -25,7 +25,6 @@ use super::KPEncryptedShare;
 use super::LimiterConfig;
 use super::LimiterState;
 use super::OperatorInitRequest;
-use super::PgpPublicCert;
 use super::ProvisionerInitRequest;
 use super::ProvisionerInitState;
 use super::RotateKpsRequest;
@@ -41,21 +40,21 @@ use super::SignedStandardWithdrawalRequestWire;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalRequestWire;
 use super::StandardWithdrawalResponse;
-use super::WithdrawalConfig;
 use super::bitcoin_utils::ExternalOutputUTXOWire;
 use super::bitcoin_utils::InputUTXOWire;
 use super::bitcoin_utils::InternalOutputUTXO;
 use super::bitcoin_utils::OutputUTXOWire;
 use super::bitcoin_utils::TxUTXOsWire;
+use crate::pgp::PgpPublicCert;
 use crate::proto as pb;
 use bitcoin::Address as BitcoinAddress;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::TapLeafHash;
 use bitcoin::Txid;
-use bitcoin::XOnlyPublicKey;
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::Hash as _;
+use fastcrypto::serde_helpers::ToFromByteArray;
 use std::num::NonZeroU16;
 use std::str::FromStr;
 
@@ -93,7 +92,7 @@ impl TryFrom<pb::SetupNewKeyRequest> for SetupNewKeyRequest {
             .key_provisioner_pgp_certs
             .iter()
             .cloned()
-            .map(PgpPublicCert::new)
+            .map(|cert| PgpPublicCert::new(cert).map_err(|e| InvalidInputs(e.to_string())))
             .collect::<GuardianResult<Vec<_>>>()?;
 
         let num_shares = req.num_shares.ok_or_else(|| missing("num_shares"))? as usize;
@@ -250,10 +249,10 @@ impl TryFrom<pb::ProvisionerInitState> for ProvisionerInitState {
         let committee_pb = state_pb.committee.ok_or_else(|| missing("committee"))?;
         let committee = pb_to_hashi_committee(committee_pb)?;
 
-        let withdrawal_config_pb = state_pb
-            .withdrawal_config
-            .ok_or_else(|| missing("withdrawal_config"))?;
-        let withdrawal_config = pb_to_withdrawal_config(withdrawal_config_pb)?;
+        let limiter_config_pb = state_pb
+            .limiter_config
+            .ok_or_else(|| missing("limiter_config"))?;
+        let limiter_config = pb_to_limiter_config(limiter_config_pb)?;
 
         let limiter_state = pb_to_limiter_state(
             state_pb
@@ -265,12 +264,18 @@ impl TryFrom<pb::ProvisionerInitState> for ProvisionerInitState {
             .hashi_btc_master_pubkey
             .ok_or_else(|| missing("hashi_btc_master_pubkey"))?;
 
-        let hashi_btc_master_pubkey = XOnlyPublicKey::from_slice(master_pk_bytes.as_ref())
-            .map_err(|e| InvalidInputs(format!("invalid hashi_btc_master_pubkey: {e}")))?;
+        let master_pk_bytes_arr: [u8; 33] = master_pk_bytes.as_ref().try_into().map_err(|_| {
+            InvalidInputs(format!(
+                "hashi_btc_master_pubkey must be 33 bytes (compressed), got {}",
+                master_pk_bytes.len()
+            ))
+        })?;
+        let hashi_btc_master_pubkey = super::HashiMasterG::from_byte_array(&master_pk_bytes_arr)
+            .map_err(|e| InvalidInputs(format!("invalid hashi_btc_master_pubkey: {e:?}")))?;
 
         ProvisionerInitState::new(
             committee,
-            withdrawal_config,
+            limiter_config,
             limiter_state,
             hashi_btc_master_pubkey,
         )
@@ -445,12 +450,12 @@ pub fn provisioner_init_request_to_pb(
 }
 
 pub fn provisioner_init_state_to_pb(s: ProvisionerInitState) -> pb::ProvisionerInitState {
-    let (committee, withdrawal_config, limiter_state, hashi_btc_master_pubkey) = s.into_parts();
+    let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) = s.into_parts();
 
     pb::ProvisionerInitState {
         committee: Some(hashi_committee_to_pb(committee)),
-        withdrawal_config: Some(withdrawal_config_to_pb(withdrawal_config)),
-        hashi_btc_master_pubkey: Some(hashi_btc_master_pubkey.serialize().to_vec().into()),
+        limiter_config: Some(limiter_config_to_pb(limiter_config)),
+        hashi_btc_master_pubkey: Some(hashi_btc_master_pubkey.to_byte_array().to_vec().into()),
         limiter_state: Some(limiter_state_to_pb(limiter_state)),
     }
 }
@@ -588,11 +593,20 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
         .server_version
         .ok_or_else(|| missing("server_version"))?;
 
+    let enclave_btc_pubkey = data
+        .enclave_btc_pubkey
+        .map(|bytes| {
+            super::BitcoinPubkey::from_slice(bytes.as_ref())
+                .map_err(|e| InvalidInputs(format!("invalid enclave_btc_pubkey: {e}")))
+        })
+        .transpose()?;
+
     Ok(GuardianInfo {
         secret_sharing_instance,
         bucket_info,
         encryption_pubkey,
         server_version,
+        enclave_btc_pubkey,
     })
 }
 
@@ -605,6 +619,9 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
         bucket_info: info.bucket_info.map(s3_bucket_info_to_pb),
         encryption_pubkey: Some(info.encryption_pubkey.into()),
         server_version: Some(info.server_version),
+        enclave_btc_pubkey: info
+            .enclave_btc_pubkey
+            .map(|pk| pk.serialize().to_vec().into()),
     }
 }
 
@@ -762,29 +779,24 @@ pub fn setup_new_key_response_to_pb(r: SetupNewKeyResponse) -> pb::SetupNewKeyRe
     }
 }
 
-fn pb_to_withdrawal_config(cfg: pb::WithdrawalConfig) -> GuardianResult<WithdrawalConfig> {
-    let committee_threshold = cfg
-        .committee_threshold
-        .ok_or_else(|| missing("committee_threshold"))?;
-    let refill_rate_sats_per_sec = cfg
+fn pb_to_limiter_config(cfg: pb::LimiterConfig) -> GuardianResult<LimiterConfig> {
+    let refill_rate = cfg
         .refill_rate_sats_per_sec
         .ok_or_else(|| missing("refill_rate_sats_per_sec"))?;
-    let max_bucket_capacity_sats = cfg
+    let max_bucket_capacity = cfg
         .max_bucket_capacity_sats
         .ok_or_else(|| missing("max_bucket_capacity_sats"))?;
 
-    Ok(WithdrawalConfig {
-        committee_threshold,
-        refill_rate_sats_per_sec,
-        max_bucket_capacity_sats,
+    Ok(LimiterConfig {
+        refill_rate,
+        max_bucket_capacity,
     })
 }
 
-fn withdrawal_config_to_pb(cfg: WithdrawalConfig) -> pb::WithdrawalConfig {
-    pb::WithdrawalConfig {
-        committee_threshold: Some(cfg.committee_threshold),
-        refill_rate_sats_per_sec: Some(cfg.refill_rate_sats_per_sec),
-        max_bucket_capacity_sats: Some(cfg.max_bucket_capacity_sats),
+fn limiter_config_to_pb(cfg: LimiterConfig) -> pb::LimiterConfig {
+    pb::LimiterConfig {
+        refill_rate_sats_per_sec: Some(cfg.refill_rate),
+        max_bucket_capacity_sats: Some(cfg.max_bucket_capacity),
     }
 }
 
@@ -809,26 +821,6 @@ fn limiter_state_to_pb(state: LimiterState) -> pb::LimiterState {
         num_tokens_available_sats: Some(state.num_tokens_available),
         last_updated_at_secs: Some(state.last_updated_at),
         next_seq: Some(state.next_seq),
-    }
-}
-
-fn pb_to_limiter_config(cfg: pb::LimiterConfig) -> GuardianResult<LimiterConfig> {
-    let refill_rate = cfg
-        .refill_rate_sats_per_sec
-        .ok_or_else(|| missing("refill_rate_sats_per_sec"))?;
-    let max_bucket_capacity = cfg
-        .max_bucket_capacity_sats
-        .ok_or_else(|| missing("max_bucket_capacity_sats"))?;
-    Ok(LimiterConfig {
-        refill_rate,
-        max_bucket_capacity,
-    })
-}
-
-fn limiter_config_to_pb(cfg: LimiterConfig) -> pb::LimiterConfig {
-    pb::LimiterConfig {
-        refill_rate_sats_per_sec: Some(cfg.refill_rate),
-        max_bucket_capacity_sats: Some(cfg.max_bucket_capacity),
     }
 }
 
@@ -1146,6 +1138,25 @@ mod tests {
         let pb = get_guardian_info_response_to_pb(resp.clone());
         let back = GetGuardianInfoResponse::try_from(pb).unwrap();
         assert_eq!(resp, back);
+    }
+
+    #[test]
+    fn guardian_info_data_with_enclave_btc_pubkey_round_trip() {
+        use super::super::test_utils::create_btc_keypair;
+        let kp = create_btc_keypair(&[7u8; 32]);
+        let pk = kp.x_only_public_key().0;
+
+        let info = GuardianInfo {
+            secret_sharing_instance: None,
+            bucket_info: None,
+            encryption_pubkey: vec![0u8; 32],
+            server_version: "v1".to_string(),
+            enclave_btc_pubkey: Some(pk),
+        };
+        let pb = guardian_info_data_to_pb(info.clone());
+        let back = pb_to_guardian_info_data(pb).unwrap();
+        assert_eq!(info, back);
+        assert_eq!(back.enclave_btc_pubkey, Some(pk));
     }
 
     #[test]

@@ -153,11 +153,10 @@ pub async fn create_deposit_and_wait(
     let user_key = networks.sui_network.user_keys.first().unwrap();
     let hbtc_recipient = user_key.public_key().derive_address();
     let hashi = networks.hashi_network.nodes()[0].hashi().clone();
-    // Use the on-chain MPC key rather than the local key-ready channel.
-    // The on-chain key is set during end_reconfig and is guaranteed
-    // available once HashiNetworkBuilder::build() returns.
-    let deposit_address =
-        hashi.get_deposit_address(&hashi.get_onchain_mpc_pubkey()?, Some(&hbtc_recipient))?;
+    // `get_deposit_address` internally reads the on-chain MPC key, which is
+    // populated atomically during `end_reconfig` and is guaranteed
+    // available once `HashiNetworkBuilder::build()` returns.
+    let deposit_address = hashi.get_deposit_address(Some(&hbtc_recipient))?;
 
     info!("Sending Bitcoin to deposit address...");
     let txid = networks

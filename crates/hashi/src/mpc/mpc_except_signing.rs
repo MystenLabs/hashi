@@ -3977,8 +3977,6 @@ fn process_avss_message(
     let session_id_hex = hex::encode(&session_id);
     let total_weight = nodes.total_weight();
     let num_nodes = nodes.num_nodes();
-    let message_bytes = bcs::to_bytes(message).ok();
-    let message_bytes_len = message_bytes.as_ref().map(|b| b.len()).unwrap_or(0);
     let receiver = avss::Receiver::new(
         nodes,
         party_id,
@@ -3990,15 +3988,10 @@ fn process_avss_message(
     match receiver.process_message(message) {
         Ok(pm) => Ok(pm),
         Err(e) => {
-            let dealer_msg_hex = message_bytes
-                .as_ref()
-                .map(hex::encode)
-                .unwrap_or_else(|| "serialize_failed".to_string());
             tracing::error!(
-                "process_avss_message failed: err={e}, party_id={party_id}, \
-                 threshold={threshold}, total_weight={total_weight}, num_nodes={num_nodes}, \
-                 message_bytes_len={message_bytes_len}, commitment={commitment_hex}, \
-                 session_id={session_id_hex}, dealer_msg_hex={dealer_msg_hex}"
+                "process_avss_message failed: err={e}, \
+                 total_weight={total_weight}, num_nodes={num_nodes}, \
+                 commitment={commitment_hex}, session_id={session_id_hex}"
             );
             Err(MpcError::from(e))
         }

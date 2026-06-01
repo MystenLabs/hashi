@@ -29,10 +29,12 @@ pub use crate::committee::CommitteeMember as HashiCommitteeMember;
 use crate::committee::CommitteeSignature;
 pub use crate::committee::SignedMessage as HashiSigned;
 use crate::guardian::s3_utils::S3HourScopedDirectory;
+use crate::pgp::PgpPublicCert;
 pub use bitcoin::Address as BitcoinAddress;
 pub use bitcoin::secp256k1::Keypair as BitcoinKeypair;
 pub use bitcoin::secp256k1::XOnlyPublicKey as BitcoinPubkey;
 pub use bitcoin::taproot::Signature as BitcoinSignature;
+
 use bitcoin::*;
 use blake2::Blake2b;
 use blake2::Digest;
@@ -42,6 +44,10 @@ pub use ed25519_consensus::Signature as GuardianSignature;
 pub use ed25519_consensus::SigningKey as GuardianSignKeyPair;
 pub use ed25519_consensus::VerificationKey as GuardianPubKey;
 pub use errors::*;
+/// The raw MPC verifying key as a curve point — y-parity preserved.
+/// Used wherever the 2-of-2 descriptor needs to derive a child key that
+/// matches the MPC's signing protocol, which works directly on the raw `G`.
+pub use fastcrypto_tbls::threshold_schnorr::G as HashiMasterG;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
@@ -183,12 +189,14 @@ pub struct ProvisionerInitRequest {
 pub struct ProvisionerInitState {
     /// Current Hashi committee
     committee: HashiCommittee,
-    /// Withdrawal config (includes limiter config)
-    withdrawal_config: WithdrawalConfig,
+    /// Limiter config
+    limiter_config: LimiterConfig,
     /// Limiter state (tokens available, timestamp, seq)
     limiter_state: LimiterState,
-    /// Hashi BTC master key used to derive child keys for diff inputs
-    hashi_btc_master_pubkey: BitcoinPubkey,
+    /// Raw MPC verifying key (curve point with y-parity preserved). The
+    /// guardian uses this directly for `derive_verifying_key` so the
+    /// 2-of-2 child key in the leaf script matches the MPC signature.
+    hashi_btc_master_pubkey: HashiMasterG,
 }
 
 /// Setup-mode rotation request, assembled by the operator from the current KPs'
@@ -250,6 +258,8 @@ pub struct GuardianInfo {
     /// Server version
     /// TODO: Replace with hashi ServerVersion to include crate SHA and version
     pub server_version: String,
+    /// Enclave BTC signing pubkey (x-only). Absent before `provisioner_init`.
+    pub enclave_btc_pubkey: Option<BitcoinPubkey>,
 }
 
 /// An "immediate withdrawal" request. `HashiSigned<T>.`
@@ -393,16 +403,6 @@ pub struct S3BucketInfo {
     pub region: String,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WithdrawalConfig {
-    /// Committee threshold expressed in terms of weight
-    pub committee_threshold: u64,
-    /// Token refill rate in sats per second
-    pub refill_rate_sats_per_sec: u64,
-    /// Maximum bucket capacity in sats
-    pub max_bucket_capacity_sats: u64,
-}
-
 // ---------------------------------
 //          Helper impl's
 // ---------------------------------
@@ -507,19 +507,19 @@ impl OperatorInitRequest {
 impl ProvisionerInitState {
     pub fn new(
         committee: HashiCommittee,
-        withdrawal_config: WithdrawalConfig,
+        limiter_config: LimiterConfig,
         limiter_state: LimiterState,
-        hashi_btc_master_pubkey: BitcoinPubkey,
+        hashi_btc_master_pubkey: HashiMasterG,
     ) -> GuardianResult<Self> {
         // Validate that limiter state is consistent with config.
-        if limiter_state.num_tokens_available > withdrawal_config.max_bucket_capacity_sats {
+        if limiter_state.num_tokens_available > limiter_config.max_bucket_capacity {
             return Err(InvalidInputs(
                 "limiter num_tokens_available exceeds max_bucket_capacity".into(),
             ));
         }
         Ok(Self {
             committee,
-            withdrawal_config,
+            limiter_config,
             limiter_state,
             hashi_btc_master_pubkey,
         })
@@ -527,37 +527,23 @@ impl ProvisionerInitState {
 
     /// Build a `RateLimiter` from the config and state in this init state.
     pub fn build_rate_limiter(&self) -> GuardianResult<RateLimiter> {
-        RateLimiter::new(self.limiter_config(), self.limiter_state)
+        RateLimiter::new(*self.limiter_config(), self.limiter_state)
     }
 
-    pub fn limiter_config(&self) -> LimiterConfig {
-        LimiterConfig {
-            refill_rate: self.withdrawal_config.refill_rate_sats_per_sec,
-            max_bucket_capacity: self.withdrawal_config.max_bucket_capacity_sats,
-        }
-    }
-
-    pub fn into_parts(
-        self,
-    ) -> (
-        HashiCommittee,
-        WithdrawalConfig,
-        LimiterState,
-        BitcoinPubkey,
-    ) {
+    pub fn into_parts(self) -> (HashiCommittee, LimiterConfig, LimiterState, HashiMasterG) {
         (
             self.committee,
-            self.withdrawal_config,
+            self.limiter_config,
             self.limiter_state,
             self.hashi_btc_master_pubkey,
         )
     }
 
-    pub fn withdrawal_config(&self) -> &WithdrawalConfig {
-        &self.withdrawal_config
+    pub fn limiter_config(&self) -> &LimiterConfig {
+        &self.limiter_config
     }
 
-    pub fn hashi_btc_master_pubkey(&self) -> BitcoinPubkey {
+    pub fn hashi_btc_master_pubkey(&self) -> HashiMasterG {
         self.hashi_btc_master_pubkey
     }
 
@@ -991,9 +977,9 @@ pub struct SignedStandardWithdrawalRequestWire {
 #[derive(Serialize)]
 struct ProvisionerInitStateRepr {
     pub committee: crate::move_types::Committee,
-    pub withdrawal_config: WithdrawalConfig,
+    pub limiter_config: LimiterConfig,
     pub limiter_state: LimiterState,
-    pub hashi_btc_master_pubkey: BitcoinPubkey,
+    pub hashi_btc_master_pubkey: HashiMasterG,
 }
 
 /// Converter from T -> Self that internally validates addresses
@@ -1061,7 +1047,7 @@ impl From<&ProvisionerInitState> for ProvisionerInitStateRepr {
         let (committee, config, limiter_state, pubkey) = state.clone().into_parts();
         Self {
             committee: (&committee).into(),
-            withdrawal_config: config,
+            limiter_config: config,
             limiter_state,
             hashi_btc_master_pubkey: pubkey,
         }

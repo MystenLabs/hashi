@@ -213,6 +213,7 @@ impl BridgeService for HttpService {
         let withdrawal_txn_id = Address::from_bytes(&req.withdrawal_txn_id)
             .map_err(|e| Status::invalid_argument(format!("invalid withdrawal_txn_id: {e}")))?;
         let expected_limiter_seq = req.expected_limiter_seq;
+        let timestamp_secs = req.timestamp_secs;
         tracing::Span::current().record(
             "withdrawal_txn_id",
             tracing::field::display(&withdrawal_txn_id),
@@ -226,6 +227,7 @@ impl BridgeService for HttpService {
                 .validate_and_sign_withdrawal_tx(
                     &withdrawal_txn_id,
                     expected_limiter_seq,
+                    timestamp_secs,
                     tx.clone(),
                 )
                 .await
@@ -405,10 +407,16 @@ fn parse_withdrawal_tx_signing(
         .iter()
         .map(|bytes| bytes.to_vec())
         .collect();
+    let guardian_signatures: Vec<Vec<u8>> = request
+        .guardian_signatures
+        .iter()
+        .map(|bytes| bytes.to_vec())
+        .collect();
     Ok(WithdrawalTxSigning {
         withdrawal_id,
         request_ids,
         signatures,
+        guardian_signatures,
     })
 }
 

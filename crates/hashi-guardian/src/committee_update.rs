@@ -134,8 +134,8 @@ mod tests {
     use hashi_types::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
     use hashi_types::guardian::test_utils::create_btc_keypair;
     use hashi_types::guardian::HashiCommitteeMember;
+    use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
-    use hashi_types::guardian::WithdrawalConfig;
     use hashi_types::guardian::WithdrawalID as SuiAddress;
 
     fn mock_signer_address() -> SuiAddress {
@@ -184,14 +184,17 @@ mod tests {
 
     async fn enclave_at_epoch(epoch: u64) -> Arc<Enclave> {
         let kp = create_btc_keypair(&[1u8; 32]);
+        let master_pubkey = hashi_types::guardian::HashiMasterG::with_even_y_from_x_be_bytes(
+            &kp.x_only_public_key().0.serialize(),
+        )
+        .expect("valid x coordinate");
         create_fully_initialized_enclave(FullyInitializedArgs {
             network: Network::Regtest,
             committee: committee_at(epoch),
-            master_pubkey: kp.x_only_public_key().0,
-            withdrawal_config: WithdrawalConfig {
-                committee_threshold: 0,
-                refill_rate_sats_per_sec: 0,
-                max_bucket_capacity_sats: 1_000,
+            master_pubkey,
+            limiter_config: LimiterConfig {
+                refill_rate: 0,
+                max_bucket_capacity: 1_000,
             },
             limiter_state: LimiterState {
                 num_tokens_available: 1_000,

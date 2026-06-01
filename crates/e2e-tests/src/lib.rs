@@ -117,7 +117,6 @@ pub struct TestNetworksBuilder {
     /// On-chain config overrides applied after DKG completes, before `build()`
     /// returns. Each entry is run through the full propose/vote/execute flow.
     onchain_config_overrides: Vec<(String, hashi_types::move_types::ConfigValue)>,
-    with_guardian: bool,
 }
 
 impl TestNetworksBuilder {
@@ -135,15 +134,7 @@ impl TestNetworksBuilder {
             hashi_builder: HashiNetworkBuilder::new(),
             bitcoin_builder: BitcoinNodeBuilder::new(),
             onchain_config_overrides,
-            with_guardian: false,
         }
-    }
-
-    /// Spin up an in-process guardian, wire its endpoint into every
-    /// hashi node, and finalize it once DKG completes.
-    pub fn with_guardian(mut self) -> Self {
-        self.with_guardian = true;
-        self
     }
 
     pub fn with_nodes(mut self, num_nodes: usize) -> Self {
@@ -253,26 +244,50 @@ impl TestNetworksBuilder {
             .await?;
         Self::cp_packages(dir.as_ref())?;
 
+        // Guardian must be reachable + have its BTC key generated BEFORE
+        // publish, so the on-chain config can pin the right BTC pubkey.
+        // Provisioner-init (which needs the hashi DKG output) runs later
+        // via `finalize_guardian_harness`.
+        let guardian_harness =
+            guardian_harness::GuardianHarness::start(bitcoin::Network::Regtest).await?;
+        let guardian_btc_pubkey = guardian_harness.ensure_btc_pubkey()?;
+        let guardian_config = hashi::publish::GuardianConfig {
+            url: guardian_harness.endpoint().to_string(),
+            public_key: guardian_harness
+                .enclave()
+                .signing_pubkey()
+                .as_bytes()
+                .to_vec(),
+            btc_public_key: guardian_btc_pubkey.serialize().to_vec(),
+        };
+        tracing::info!(
+            endpoint = %guardian_harness.endpoint(),
+            "guardian harness started (operator-init)"
+        );
+
+        let mut hashi_builder = self.hashi_builder;
+        hashi_builder =
+            hashi_builder.with_guardian_endpoint(guardian_harness.endpoint().to_string());
+
+        // The post-build steps below (on-chain config overrides, guardian
+        // provisioner-init) drive transactions through the running committee, so
+        // they need at least one validator launched at build time. In
+        // manual-bootstrap mode (0 initially-active validators) there are none,
+        // so skip them — registration/genesis/guardian-init are driven later.
+        let nodes_started = hashi_builder
+            .num_initially_active_nodes
+            .unwrap_or(hashi_builder.num_nodes)
+            > 0;
+
         let hashi_ids = publish(
             dir.as_ref(),
             &mut sui_network.client,
             sui_network.user_keys.first().unwrap(),
+            &guardian_config,
         )
         .await?;
 
-        let mut hashi_builder = self.hashi_builder;
-        let guardian_harness = if self.with_guardian {
-            let harness =
-                guardian_harness::GuardianHarness::start(bitcoin::Network::Regtest).await?;
-            hashi_builder = hashi_builder.with_guardian_endpoint(harness.endpoint().to_string());
-            tracing::info!(
-                endpoint = %harness.endpoint(),
-                "guardian harness started (operator-init)"
-            );
-            Some(harness)
-        } else {
-            None
-        };
+        let guardian_harness = Some(guardian_harness);
 
         let hashi_network = hashi_builder
             .build(
@@ -293,12 +308,12 @@ impl TestNetworksBuilder {
 
         tracing::info!("rpc url: {}", test_networks.sui_network().rpc_url);
 
-        if !self.onchain_config_overrides.is_empty() {
+        if nodes_started && !self.onchain_config_overrides.is_empty() {
             apply_onchain_config_overrides(&mut test_networks, &self.onchain_config_overrides)
                 .await?;
         }
 
-        if test_networks.guardian_harness.is_some() {
+        if nodes_started && test_networks.guardian_harness.is_some() {
             finalize_guardian_harness(&mut test_networks).await?;
         }
 
@@ -323,7 +338,7 @@ impl TestNetworksBuilder {
 }
 
 async fn finalize_guardian_harness(networks: &mut TestNetworks) -> Result<()> {
-    use crate::guardian_harness::default_test_withdrawal_config;
+    use crate::guardian_harness::default_test_limiter_config;
     use hashi_types::guardian::LimiterState;
 
     let nodes = networks.hashi_network.nodes();
@@ -341,31 +356,39 @@ async fn finalize_guardian_harness(networks: &mut TestNetworks) -> Result<()> {
         .onchain_state()
         .current_committee()
         .ok_or_else(|| anyhow::anyhow!("no current committee after DKG"))?;
-    let master_pubkey = hashi.get_onchain_mpc_pubkey()?;
+    // Pass the raw `G` (with y-parity) so the guardian's child-key
+    // derivation matches the MPC's signing path. Using only the x-only
+    // projection would force an even-y parent and silently disagree with
+    // MPC sigs for half of all DKG outputs.
+    let master_pubkey = hashi.onchain_verifying_key_g()?;
 
-    let withdrawal_config = default_test_withdrawal_config(&committee);
-    let limiter_state = LimiterState::genesis(&withdrawal_config);
+    let limiter_config = default_test_limiter_config();
+    let limiter_state = LimiterState::genesis(&limiter_config);
 
     let harness = networks
         .guardian_harness
         .as_ref()
         .expect("guardian_harness set when finalize_guardian_harness is called");
     harness
-        .finalize(committee, master_pubkey, withdrawal_config, limiter_state)
+        .finalize(committee, master_pubkey, limiter_config, limiter_state)
         .await?;
     tracing::info!("guardian harness finalized");
 
-    // Wait for every node's async limiter bootstrap to complete so
-    // tests don't race it.
+    // Wait for every *running* node's async limiter bootstrap to complete so
+    // tests don't race it. Only the initially-active nodes are started here; a
+    // pending new-member node (e.g. the key-rotation tests, which start the
+    // final validator later via `register_and_start_pending_node`) bootstraps
+    // its limiter when it starts, so skip nodes that aren't running yet.
     futures::future::try_join_all(
         networks
             .hashi_network
             .nodes()
             .iter()
+            .filter(|node| node.is_running())
             .map(|node| node.wait_for_local_limiter(std::time::Duration::from_secs(60))),
     )
     .await?;
-    tracing::info!("all hashi nodes have bootstrapped their local limiter");
+    tracing::info!("running hashi nodes have bootstrapped their local limiter");
     Ok(())
 }
 

@@ -226,7 +226,7 @@ async fn finalize_init(
     info!("Setting withdraw config.");
     enclave
         .config
-        .set_withdrawal_config(*incoming_state.withdrawal_config())
+        .set_limiter_config(*incoming_state.limiter_config())
         .expect("Unable to set withdraw config");
 
     info!("Setting enclave mutable state.");

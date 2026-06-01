@@ -497,6 +497,30 @@ impl OnchainState {
         self.state().hashi().config.mpc_max_faulty_in_basis_points()
     }
 
+    pub fn guardian_url(&self) -> Option<String> {
+        self.state()
+            .hashi()
+            .config
+            .guardian_url()
+            .map(str::to_string)
+    }
+
+    pub fn guardian_public_key(&self) -> Option<Vec<u8>> {
+        self.state()
+            .hashi()
+            .config
+            .guardian_public_key()
+            .map(<[u8]>::to_vec)
+    }
+
+    pub fn guardian_btc_public_key(&self) -> Option<Vec<u8>> {
+        self.state()
+            .hashi()
+            .config
+            .guardian_btc_public_key()
+            .map(<[u8]>::to_vec)
+    }
+
     pub fn bridge_service_client(
         &self,
         validator: &Address,

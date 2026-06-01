@@ -136,12 +136,15 @@ pub struct WithdrawalTxCommitment {
 }
 
 /// The data that validators BLS-sign over to store witness signatures on-chain.
-/// This is the step 3 certificate.
+/// This is the step 3 certificate. The cert binds both signature arrays
+/// — otherwise a malicious leader could pair valid MPC sigs with garbage
+/// guardian sigs and the on-chain check would still pass.
 #[derive(Clone, Debug, serde_derive::Serialize)]
 pub struct WithdrawalTxSigning {
     pub withdrawal_id: Address,
     pub request_ids: Vec<Address>,
     pub signatures: Vec<Vec<u8>>,
+    pub guardian_signatures: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, serde_derive::Serialize)]
@@ -339,9 +342,7 @@ impl Hashi {
         // 5. Verify change output (if present) goes to hashi root pubkey
         if output_count == request_count + 1 {
             let change_output = &approval.outputs[request_count];
-            let hashi_pubkey = self.get_hashi_pubkey()?;
-            let expected_address =
-                witness_program_from_address(&self.get_deposit_address(&hashi_pubkey, None)?)?;
+            let expected_address = witness_program_from_address(&self.get_deposit_address(None)?)?;
             anyhow::ensure!(
                 change_output.bitcoin_address == expected_address,
                 "Change output does not go to hashi root pubkey"
@@ -447,6 +448,19 @@ impl Hashi {
 
     // --- Guardian: validate and BLS-sign a `StandardWithdrawalRequest` ---
 
+    /// Reject a leader-supplied `timestamp_secs` that skews beyond the tolerance
+    /// from this node's checkpoint clock.
+    fn bound_leader_timestamp(&self, timestamp_secs: u64) -> anyhow::Result<()> {
+        let latest_checkpoint_secs = self.onchain_state().latest_checkpoint_timestamp_ms() / 1000;
+        let drift = timestamp_secs.abs_diff(latest_checkpoint_secs);
+        anyhow::ensure!(
+            drift <= GUARDIAN_TIMESTAMP_TOLERANCE_SECS,
+            "Withdrawal timestamp {timestamp_secs} is {drift}s away from local checkpoint \
+             {latest_checkpoint_secs} (tolerance: {GUARDIAN_TIMESTAMP_TOLERANCE_SECS}s)"
+        );
+        Ok(())
+    }
+
     #[tracing::instrument(level = "info", skip_all, fields(%withdrawal_txn_id, seq))]
     pub fn validate_and_sign_guardian_withdrawal_request(
         &self,
@@ -454,15 +468,7 @@ impl Hashi {
         timestamp_secs: u64,
         seq: u64,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
-        // Bound against the follower's own checkpoint clock to avoid wall-clock skew.
-        let latest_checkpoint_secs = self.onchain_state().latest_checkpoint_timestamp_ms() / 1000;
-        let drift = timestamp_secs.abs_diff(latest_checkpoint_secs);
-        if drift > GUARDIAN_TIMESTAMP_TOLERANCE_SECS {
-            anyhow::bail!(
-                "Guardian withdrawal timestamp {timestamp_secs} is {drift}s away from \
-                 local checkpoint {latest_checkpoint_secs} (tolerance: {GUARDIAN_TIMESTAMP_TOLERANCE_SECS}s)"
-            );
-        }
+        self.bound_leader_timestamp(timestamp_secs)?;
 
         let txn = self
             .onchain_state()
@@ -507,39 +513,67 @@ impl Hashi {
 
         anyhow::ensure!(
             message.signatures.len() == txn.inputs.len(),
-            "Signature count ({}) does not match input count ({}) for WithdrawalTransaction {}",
+            "MPC signature count ({}) does not match input count ({}) for WithdrawalTransaction {}",
             message.signatures.len(),
+            txn.inputs.len(),
+            message.withdrawal_id
+        );
+        anyhow::ensure!(
+            message.guardian_signatures.len() == txn.inputs.len(),
+            "Guardian signature count ({}) does not match input count ({}) for WithdrawalTransaction {}",
+            message.guardian_signatures.len(),
             txn.inputs.len(),
             message.withdrawal_id
         );
 
         let tx = self.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
         let signing_messages = self.withdrawal_signing_messages(&tx, &txn.inputs)?;
-        let hashi_pubkey = self.get_hashi_pubkey()?;
+        let guardian_btc_pubkey = self.guardian_btc_pubkey().copied().ok_or_else(|| {
+            anyhow!("Guardian BTC pubkey not yet pinned; cannot validate withdrawal")
+        })?;
+        let guardian_schnorr_pk =
+            SchnorrPublicKey::from_byte_array(&guardian_btc_pubkey.serialize())
+                .map_err(|e| anyhow!("Failed to convert guardian BTC pubkey: {e}"))?;
 
-        for (i, (sig_bytes, sighash)) in message
+        for (i, ((mpc_sig_bytes, guardian_sig_bytes), sighash)) in message
             .signatures
             .iter()
+            .zip(message.guardian_signatures.iter())
             .zip(signing_messages.iter())
             .enumerate()
         {
-            let arr: &[u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
+            // MPC: verify against the derived hashi child key.
+            let mpc_arr: &[u8; 64] = mpc_sig_bytes.as_slice().try_into().map_err(|_| {
                 anyhow!(
-                    "Signature {i} is not 64 bytes for WithdrawalTransaction {}",
+                    "MPC signature {i} is not 64 bytes for WithdrawalTransaction {}",
                     message.withdrawal_id
                 )
             })?;
-            let sig = SchnorrSignature::from_byte_array(arr)
-                .map_err(|e| anyhow!("Invalid Schnorr signature at input {i}: {e}"))?;
+            let mpc_sig = SchnorrSignature::from_byte_array(mpc_arr)
+                .map_err(|e| anyhow!("Invalid MPC Schnorr signature at input {i}: {e}"))?;
+            let input_pubkey = self.deposit_pubkey(txn.inputs[i].derivation_path.as_ref())?;
+            let mpc_schnorr_pk = SchnorrPublicKey::from_byte_array(&input_pubkey.serialize())
+                .map_err(|e| anyhow!("Failed to convert mpc pubkey for input {i}: {e}"))?;
+            mpc_schnorr_pk
+                .verify(sighash, &mpc_sig)
+                .map_err(|e| anyhow!("MPC signature verification failed for input {i}: {e}"))?;
 
-            let input_pubkey =
-                self.deposit_pubkey(&hashi_pubkey, txn.inputs[i].derivation_path.as_ref())?;
-            let schnorr_pk = SchnorrPublicKey::from_byte_array(&input_pubkey.serialize())
-                .map_err(|e| anyhow!("Failed to convert pubkey for input {i}: {e}"))?;
-
-            schnorr_pk
-                .verify(sighash, &sig)
-                .map_err(|e| anyhow!("Signature verification failed for input {i}: {e}"))?;
+            // Guardian: verify against the on-chain enclave BTC pubkey.
+            // Same sighash — both sigs commit to the same multi_a leaf.
+            let guardian_arr: &[u8; 64] =
+                guardian_sig_bytes.as_slice().try_into().map_err(|_| {
+                    anyhow!(
+                        "Guardian signature {i} is not 64 bytes for WithdrawalTransaction {}",
+                        message.withdrawal_id
+                    )
+                })?;
+            let guardian_sig = SchnorrSignature::from_byte_array(guardian_arr)
+                .map_err(|e| anyhow!("Invalid guardian Schnorr signature at input {i}: {e}"))?;
+            guardian_schnorr_pk
+                .verify(sighash, &guardian_sig)
+                .map_err(|e| {
+                    anyhow!("Guardian signature verification failed for input {i}: {e}")
+                })?;
         }
 
         self.sign_message_proto(message)
@@ -643,13 +677,20 @@ impl Hashi {
         &self,
         withdrawal_txn_id: &Address,
         expected_limiter_seq: Option<u64>,
+        timestamp_secs: Option<u64>,
         sink: tokio::sync::mpsc::Sender<
             Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
         >,
     ) -> anyhow::Result<()> {
         let (txn, unsigned_tx) = self.validate_withdrawal_signing(withdrawal_txn_id).await?;
-        self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx, expected_limiter_seq, sink)
-            .await
+        self.mpc_sign_withdrawal_tx(
+            &txn,
+            &unsigned_tx,
+            expected_limiter_seq,
+            timestamp_secs,
+            sink,
+        )
+        .await
     }
 
     pub async fn validate_withdrawal_signing(
@@ -690,6 +731,7 @@ impl Hashi {
         txn: &WithdrawalTransaction,
         unsigned_tx: &bitcoin::Transaction,
         expected_limiter_seq: Option<u64>,
+        timestamp_secs: Option<u64>,
         sink: tokio::sync::mpsc::Sender<
             Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
         >,
@@ -711,7 +753,15 @@ impl Hashi {
         match (self.local_limiter(), expected_limiter_seq) {
             (Some(limiter), Some(expected_seq)) => {
                 let amount_sats = withdrawal_limiter_consumption_amount(txn);
-                let timestamp_secs = txn.timestamp_ms / 1000;
+                // Leader's live checkpoint time (drift-bounded) so a throttled
+                // batch becomes signable as it refills; pre-upgrade leaders omit it.
+                let timestamp_secs = match timestamp_secs {
+                    Some(ts) => {
+                        self.bound_leader_timestamp(ts)?;
+                        ts
+                    }
+                    None => txn.timestamp_ms / 1000,
+                };
                 let result = limiter.validate_consume(expected_seq, timestamp_secs, amount_sats);
                 self.metrics.record_limiter_validate(
                     &result,
@@ -752,9 +802,16 @@ impl Hashi {
         futures::stream::iter(signing_messages.into_iter().enumerate())
             .map(|(input_index, message)| async move {
                 let request_id = withdrawal_input_signing_request_id(&txn_id, input_index as u32);
+                // Change UTXOs (`derivation_path = None`) ride the `[0; 32]`
+                // path everywhere else (leaf script, `deposit_pubkey`). MPC
+                // must too — passing `None` signs for master `G`, not the
+                // `derive(G, [0; 32])` child the 2-of-2 leaf binds.
                 let derivation_address = inputs
                     .get(input_index)
-                    .and_then(|input| input.derivation_path.as_ref().map(|path| path.into_inner()));
+                    .map(|input| {
+                        crate::deposits::path_bytes_or_zero(input.derivation_path.as_ref())
+                    })
+                    .expect("input_index iterated from signing_messages.len() == txn.inputs.len()");
                 let sign_start = std::time::Instant::now();
                 let global_presig_index = presig_start + input_index as u64;
                 let sign_result = signing_manager_ref
@@ -764,7 +821,7 @@ impl Hashi {
                         &message,
                         global_presig_index,
                         beacon_ref,
-                        derivation_address.as_ref(),
+                        Some(&derivation_address),
                         WITHDRAWAL_SIGNING_TIMEOUT,
                         metrics_ref,
                     )
@@ -823,14 +880,12 @@ impl Hashi {
         unsigned_tx: &bitcoin::Transaction,
         inputs: &[Utxo],
     ) -> anyhow::Result<Vec<[u8; 32]>> {
-        let hashi_pubkey = self.get_hashi_pubkey()?;
         let spend_inputs = inputs
             .iter()
             .map(|input| {
-                let pubkey = self.deposit_pubkey(&hashi_pubkey, input.derivation_path.as_ref())?;
-                let address = self.bitcoin_address_from_pubkey(&pubkey);
+                let address = self.get_deposit_address(input.derivation_path.as_ref())?;
                 let (_, _, leaf_hash) =
-                    bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
+                    self.deposit_spend_artifacts(input.derivation_path.as_ref())?;
                 Ok((
                     TxOut {
                         value: Amount::from_sat(input.amount),
@@ -925,11 +980,8 @@ impl Hashi {
         let max_fee_rate = CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD;
         let fee_rate = kyoto_fee_rate.clamp(min_fee_rate, max_fee_rate);
 
-        let hashi_pubkey = self
-            .get_hashi_pubkey()
-            .map_err(WithdrawalCommitmentError::BtcTxBuildFailed)?;
         let change_address = self
-            .get_deposit_address(&hashi_pubkey, None)
+            .get_deposit_address(None)
             .map_err(WithdrawalCommitmentError::BtcTxBuildFailed)?;
 
         let configured_max_inputs = CoinSelectionParams::DEFAULT_MAX_INPUTS;
@@ -1445,17 +1497,14 @@ pub fn build_guardian_withdrawal_request(
     use hashi_types::guardian::bitcoin_utils::OutputUTXO;
     use hashi_types::guardian::bitcoin_utils::TxUTXOs;
 
-    let hashi_pubkey = hashi.get_hashi_pubkey()?;
     let network = hashi.config.bitcoin_network();
 
     let inputs = txn
         .inputs
         .iter()
         .map(|utxo| {
-            let pubkey = hashi.deposit_pubkey(&hashi_pubkey, utxo.derivation_path.as_ref())?;
-            let (_, _, leaf_hash) =
-                bitcoin_utils::single_key_taproot_script_path_spend_artifacts(&pubkey);
-            let address = hashi.bitcoin_address_from_pubkey(&pubkey);
+            let (_, _, leaf_hash) = hashi.deposit_spend_artifacts(utxo.derivation_path.as_ref())?;
+            let address = hashi.get_deposit_address(utxo.derivation_path.as_ref())?;
 
             let outpoint = bitcoin::OutPoint {
                 txid: utxo.id.txid.into(),
@@ -1556,6 +1605,7 @@ mod tests {
             timestamp_ms: 0,
             randomness: vec![],
             signatures: None,
+            guardian_signatures: None,
             presig_start_index: 0,
             epoch: 0,
         }

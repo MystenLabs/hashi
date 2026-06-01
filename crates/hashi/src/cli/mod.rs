@@ -309,16 +309,16 @@ pub enum BackupCommands {
         /// Path to the validator node config file
         node_config_path: std::path::PathBuf,
 
-        /// Age recipient public key used to encrypt the backup
+        /// Armored OpenPGP certificate, or path to one, used to encrypt the backup
         #[clap(long)]
-        backup_age_pubkey: Option<String>,
+        backup_pgp_cert: Option<String>,
 
         /// Directory to write the encrypted backup into
         #[clap(long, default_value = ".")]
         output_dir: std::path::PathBuf,
     },
 
-    /// Restore files from an encrypted config backup.
+    /// Restore files from a backup archive.
     ///
     /// When `--copy-to-original-paths` is set, files are written to the
     /// absolute paths stored in the manifest at backup time. If the restore
@@ -326,12 +326,24 @@ pub enum BackupCommands {
     /// those paths will be used verbatim — extract without the flag and copy
     /// files manually in that case.
     Restore {
-        /// Path to the encrypted backup tarball
+        /// Path to the backup tarball (.tar.asc encrypted or .tar unencrypted)
         backup_tarball: std::path::PathBuf,
 
-        /// Age identity file used to decrypt the backup
+        /// OpenPGP secret key file used to decrypt encrypted .tar.asc backups locally
         #[clap(long)]
-        backup_age_identity: std::path::PathBuf,
+        backup_pgp_secret_key: Option<std::path::PathBuf>,
+
+        /// Decrypt encrypted .tar.asc backups with gpg instead of a local secret key file.
+        ///
+        /// Supports YubiKeys attached to this machine, and YubiKeys attached
+        /// to a laptop over SSH when the laptop's gpg-agent socket is forwarded
+        /// to the restore machine.
+        #[clap(long)]
+        use_gpg_agent: bool,
+
+        /// GNUPGHOME to use with --use-gpg-agent
+        #[clap(long, requires = "use_gpg_agent")]
+        gpg_homedir: Option<std::path::PathBuf>,
 
         /// Directory to extract the restored files into
         #[clap(long, default_value = ".")]
@@ -509,13 +521,19 @@ pub struct PublishOpts {
     #[clap(long)]
     pub bitcoin_chain_id: String,
 
-    /// Guardian gRPC endpoint URL (optional)
+    /// Guardian gRPC endpoint URL. Required — every deposit address is a
+    /// 2-of-2 (mpc, guardian) taproot leaf.
     #[clap(long)]
-    pub guardian_url: Option<String>,
+    pub guardian_url: String,
 
-    /// Guardian signing public key, hex-encoded (optional, requires --guardian-url)
+    /// Guardian Ed25519 signing pubkey, hex-encoded (32 bytes).
     #[clap(long)]
-    pub guardian_public_key: Option<String>,
+    pub guardian_public_key: String,
+
+    /// Guardian BTC pubkey, x-only hex-encoded (32 bytes). Published
+    /// on-chain for 2-of-2 deposit address derivation.
+    #[clap(long)]
+    pub guardian_btc_public_key: String,
 
     /// Override `bitcoin_confirmation_threshold` on-chain at publish time.
     /// Falls back to the Move package's `init_defaults` (currently 6) when omitted.
@@ -762,20 +780,44 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
         CliCommand::Backup { action } => match action {
             BackupCommands::Save {
                 node_config_path,
-                backup_age_pubkey,
+                backup_pgp_cert,
                 output_dir,
             } => {
-                commands::backup::save(&node_config_path, backup_age_pubkey, &output_dir)?;
+                commands::backup::save(&node_config_path, backup_pgp_cert, &output_dir)?;
             }
             BackupCommands::Restore {
                 backup_tarball,
-                backup_age_identity,
+                backup_pgp_secret_key,
+                use_gpg_agent,
+                gpg_homedir,
                 output_dir,
                 copy_to_original_paths,
             } => {
+                let decryptor = match crate::backup::archive_format(&backup_tarball)? {
+                    crate::backup::BackupArchiveFormat::Unencrypted => {
+                        commands::backup::RestoreDecryptor::Unencrypted
+                    }
+                    crate::backup::BackupArchiveFormat::Encrypted => {
+                        match (backup_pgp_secret_key, use_gpg_agent) {
+                            (Some(secret_key_path), false) => {
+                                commands::backup::RestoreDecryptor::LocalSecretKey {
+                                    secret_key_path,
+                                }
+                            }
+                            (None, true) => commands::backup::RestoreDecryptor::GpgAgent {
+                                homedir: gpg_homedir,
+                            },
+                            (Some(_), true) | (None, false) => {
+                                anyhow::bail!(
+                                    "Pass exactly one restore backend: --backup-pgp-secret-key or --use-gpg-agent"
+                                );
+                            }
+                        }
+                    }
+                };
                 commands::backup::restore(
                     &backup_tarball,
-                    &backup_age_identity,
+                    decryptor,
                     &output_dir,
                     copy_to_original_paths,
                 )?;
@@ -907,17 +949,33 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
     // Connect to RPC
     let mut client = sui_rpc::Client::new(&opts.sui_rpc_url)?;
 
-    // Build optional guardian config
-    let guardian = match (opts.guardian_url, opts.guardian_public_key) {
-        (Some(url), Some(pk_hex)) => {
-            let public_key = hex::decode(pk_hex.strip_prefix("0x").unwrap_or(&pk_hex))
-                .context("Invalid hex for --guardian-public-key")?;
-            Some(crate::publish::GuardianConfig { url, public_key })
-        }
-        (None, None) => None,
-        _ => anyhow::bail!(
-            "--guardian-url and --guardian-public-key must both be provided or both omitted"
-        ),
+    // Guardian is required — all three flags must be present.
+    let public_key = hex::decode(
+        opts.guardian_public_key
+            .strip_prefix("0x")
+            .unwrap_or(&opts.guardian_public_key),
+    )
+    .context("Invalid hex for --guardian-public-key")?;
+    anyhow::ensure!(
+        public_key.len() == 32,
+        "--guardian-public-key must be 32 bytes (Ed25519), got {} bytes",
+        public_key.len(),
+    );
+    let btc_public_key = hex::decode(
+        opts.guardian_btc_public_key
+            .strip_prefix("0x")
+            .unwrap_or(&opts.guardian_btc_public_key),
+    )
+    .context("Invalid hex for --guardian-btc-public-key")?;
+    anyhow::ensure!(
+        btc_public_key.len() == 32,
+        "--guardian-btc-public-key must be 32 bytes (x-only), got {} bytes",
+        btc_public_key.len(),
+    );
+    let guardian = crate::publish::GuardianConfig {
+        url: opts.guardian_url,
+        public_key,
+        btc_public_key,
     };
 
     let bitcoin_overrides = crate::publish::BitcoinConfigOverrides {
@@ -932,7 +990,7 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
         &signer,
         compiled,
         &opts.bitcoin_chain_id,
-        guardian.as_ref(),
+        &guardian,
         &bitcoin_overrides,
     )
     .await?;

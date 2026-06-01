@@ -79,6 +79,6 @@ The `provisioner-init` subcommand takes a separate YAML (`ProvisionerConfig`, se
   - Guardian S3 withdrawal log polling with attestation and signature verification.
   - BTC confirmation lookup via Bitcoin Core RPC.
   - Provisioner-init flow (heartbeat audit, attestation/config check, optional submission).
-  - Limiter state recovery: each successful withdrawal log embeds the post-consume `LimiterState`; on rotation, provisioner-init walks back hour buckets to find the max-seq Success log and uses its embedded state as the new enclave's initial state. Genesis path (no prior session in S3) seeds the limiter from `WithdrawalConfig` instead.
+  - Limiter state recovery: each successful withdrawal log embeds the post-consume `LimiterState`; on rotation, provisioner-init walks back hour buckets to find the max-seq Success log and uses its embedded state as the new enclave's initial state. Genesis path (no prior session in S3) seeds the limiter from `LimiterConfig` instead.
 - Not yet implemented:
   - Sui event polling — `AuditorCore::poll_sui` is a stub that returns `CursorUnmoved`, so E1 (withdrawal) and the deposit pipeline currently see no Sui input.

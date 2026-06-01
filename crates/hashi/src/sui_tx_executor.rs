@@ -1240,6 +1240,7 @@ impl SuiTxExecutor {
         withdrawal_id: &Address,
         request_ids: &[Address],
         signatures: &[Vec<u8>],
+        guardian_signatures: &[Vec<u8>],
         cert: &CommitteeSignature,
     ) -> anyhow::Result<u64> {
         let mut builder = TransactionBuilder::new();
@@ -1253,6 +1254,8 @@ impl SuiTxExecutor {
         let request_ids_vec = request_ids.to_vec();
         let request_ids_arg = builder.pure(&request_ids_vec);
         let signatures_arg = build_chunked_vec_vec_u8_arg(&mut builder, signatures);
+        let guardian_signatures_arg =
+            build_chunked_vec_vec_u8_arg(&mut builder, guardian_signatures);
         let cert_arg = build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, cert);
 
         builder.move_call(
@@ -1266,6 +1269,7 @@ impl SuiTxExecutor {
                 withdrawal_id_arg,
                 request_ids_arg,
                 signatures_arg,
+                guardian_signatures_arg,
                 cert_arg,
             ],
         );
