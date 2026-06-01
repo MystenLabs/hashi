@@ -1300,6 +1300,9 @@ pub struct GuardianInfoData {
     /// Absent before `provisioner_init` has set the keypair.
     #[prost(bytes = "bytes", optional, tag = "5")]
     pub enclave_btc_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
+    /// Digest of the operator-supplied WithdrawModeState (32 bytes, if set).
+    #[prost(bytes = "bytes", optional, tag = "6")]
+    pub state_hash: ::core::option::Option<::prost::bytes::Bytes>,
 }
 /// Public description of the current BTC key's secret-sharing scheme.
 /// `commitments.len() == num_shares` and `2 <= threshold <= num_shares`.
@@ -1401,12 +1404,10 @@ pub struct OperatorInitRequest {
     /// S3 access keys
     #[prost(message, optional, tag = "1")]
     pub s3_config: ::core::option::Option<S3Config>,
-    /// Secret-sharing scheme for the current BTC key.
-    #[prost(message, optional, tag = "2")]
-    pub secret_sharing_instance: ::core::option::Option<SecretSharingInstance>,
-    /// Network the guardian is operating on.
-    #[prost(enumeration = "Network", optional, tag = "3")]
-    pub network: ::core::option::Option<i32>,
+    /// Withdraw-mode config (absent for a ceremony enclave); the enclave binds the
+    /// inner state's digest as the share-decryption AAD and exposes it via GuardianInfo.
+    #[prost(message, optional, tag = "4")]
+    pub state: ::core::option::Option<WithdrawModeConfig>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct OperatorInitResponse {}
@@ -1421,29 +1422,35 @@ pub struct S3Config {
     #[prost(string, optional, tag = "4")]
     pub region: ::core::option::Option<::prost::alloc::string::String>,
 }
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProvisionerInitRequest {
-    /// Encrypted share destined for this provisioner.
+    /// Encrypted share destined for this provisioner. Its HPKE AAD binds the
+    /// enclave's state_hash (the WithdrawModeState digest), so a share only
+    /// decrypts if the KP agreed on the operator-supplied state.
     #[prost(message, optional, tag = "1")]
     pub encrypted_share: ::core::option::Option<GuardianEncryptedShare>,
-    /// State used to initialize/restore the enclave. The share encryption binds to its digest as AAD.
-    #[prost(message, optional, tag = "2")]
-    pub state: ::core::option::Option<ProvisionerInitState>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ProvisionerInitState {
+pub struct WithdrawModeConfig {
     /// Current Hashi committee.
     #[prost(message, optional, tag = "1")]
     pub committee: ::core::option::Option<Committee>,
     /// Limiter configuration.
     #[prost(message, optional, tag = "2")]
     pub limiter_config: ::core::option::Option<LimiterConfig>,
-    /// X-only public key bytes (32 bytes).
+    /// Compressed public key bytes (33 bytes).
     #[prost(bytes = "bytes", optional, tag = "4")]
     pub hashi_btc_master_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
     /// Rate limiter state.
     #[prost(message, optional, tag = "6")]
     pub limiter_state: ::core::option::Option<LimiterState>,
+    /// Secret-sharing scheme for the current BTC key. Carried for delivery; not
+    /// part of the state_hash digest.
+    #[prost(message, optional, tag = "7")]
+    pub secret_sharing_instance: ::core::option::Option<SecretSharingInstance>,
+    /// BTC network. Carried for delivery; not part of the state_hash digest.
+    #[prost(enumeration = "Network", optional, tag = "8")]
+    pub network: ::core::option::Option<i32>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LimiterState {
@@ -1484,6 +1491,10 @@ pub struct RotateKpsRequest {
     pub new_num_shares: ::core::option::Option<u32>,
     #[prost(uint32, optional, tag = "4")]
     pub new_threshold: ::core::option::Option<u32>,
+    /// The current key's secret-sharing instance (old commitments + threshold) the
+    /// enclave verifies the submitted old shares against.
+    #[prost(message, optional, tag = "5")]
+    pub old_instance: ::core::option::Option<SecretSharingInstance>,
 }
 /// Unsigned response payload.
 #[derive(Clone, PartialEq, ::prost::Message)]

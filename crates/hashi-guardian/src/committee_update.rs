@@ -27,7 +27,7 @@ pub async fn update_committee(
     signed: HashiSigned<CommitteeTransition>,
 ) -> GuardianResult<u64> {
     // Serialize so a stalled call can't roll the committee backwards.
-    let _update_guard = enclave.state.committee_update_lock.lock().await;
+    let _guard = enclave.control_lock.lock().await;
 
     if !enclave.is_fully_initialized() {
         return Err(EnclaveUninitialized);

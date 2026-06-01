@@ -262,7 +262,7 @@ impl TestNetworksBuilder {
         };
         tracing::info!(
             endpoint = %guardian_harness.endpoint(),
-            "guardian harness started (operator-init)"
+            "guardian harness started (serving; BTC key set, init deferred to finalize)"
         );
 
         let mut hashi_builder = self.hashi_builder;

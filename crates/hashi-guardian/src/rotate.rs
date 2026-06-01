@@ -32,12 +32,8 @@ pub async fn rotate_kps(
         return Err(InvalidInputs("setup or rotation already complete".into()));
     }
 
-    let (encrypted_old_shares, state) = request.into_parts();
-
-    let instance = enclave
-        .secret_sharing_instance()
-        .expect("secret-sharing instance should be set after operator_init");
-    let old_t = instance.threshold();
+    let (encrypted_old_shares, old_instance, state) = request.into_parts();
+    let old_t = old_instance.threshold();
 
     let sk = enclave.encryption_secret_key();
     let state_hash = state.digest();
@@ -47,7 +43,7 @@ pub async fn rotate_kps(
     let mut old_shares: Vec<Share> = Vec::with_capacity(encrypted_old_shares.len());
     for enc in &encrypted_old_shares {
         let share = decrypt_share(enc, sk, Some(&state_hash))?;
-        instance.commitments().verify_share(&share)?;
+        old_instance.commitments().verify_share(&share)?;
         if old_shares.iter().any(|s| s.id == share.id) {
             return Err(InvalidInputs("Duplicate share ID".into()));
         }
@@ -62,7 +58,7 @@ pub async fn rotate_kps(
         )));
     }
 
-    let response = finalize_rotation(&enclave, &old_shares, instance, state).await?;
+    let response = finalize_rotation(&enclave, &old_shares, &old_instance, state).await?;
     *ceremony_complete = true;
     Ok(response)
 }
@@ -95,12 +91,12 @@ async fn finalize_rotation(
     };
 
     let new_sharing_seq = old_instance.sharing_seq() + 1;
-    let new_secret_sharing_instance =
-        SecretSharingInstance::new(share_commitments, n, t, new_sharing_seq)?;
+    let new_instance = SecretSharingInstance::new(share_commitments, n, t, new_sharing_seq)?;
     info!("Writing CeremonyLogMessage sharing_seq={new_sharing_seq} to ceremony/.");
     enclave
-        .log_ceremony(CeremonyLogMessage {
-            secret_sharing_instance: new_secret_sharing_instance,
+        .log_ceremony(CeremonyLogMessage::Rotate {
+            old_instance: old_instance.clone(),
+            new_instance,
         })
         .await?;
 
@@ -163,7 +159,10 @@ mod tests {
                 )
             })
             .collect();
-        RotateKpsRequest::new(submissions, state)
+        // The old instance the operator would read from `ceremony/`; here it's the
+        // one the enclave was set up with (matches the shares being submitted).
+        let old_instance = enclave.secret_sharing_instance().unwrap().clone();
+        RotateKpsRequest::new(submissions, old_instance, state)
     }
 
     /// Run one rotation and return its verified response shares.
@@ -222,9 +221,20 @@ mod tests {
         let LogMessage::Ceremony(ceremony) = record.message else {
             panic!("expected Ceremony variant");
         };
-        assert_eq!(ceremony.secret_sharing_instance.sharing_seq(), 1);
-        assert_eq!(ceremony.secret_sharing_instance.num_shares(), new_n);
-        assert_eq!(ceremony.secret_sharing_instance.threshold(), new_t);
+        let CeremonyLogMessage::Rotate {
+            old_instance,
+            new_instance,
+        } = *ceremony
+        else {
+            panic!("expected Rotate variant");
+        };
+        // The consumed old instance is recorded for chain auditability.
+        assert_eq!(old_instance.sharing_seq(), 0);
+        assert_eq!(old_instance.num_shares(), TEST_N);
+        assert_eq!(old_instance.threshold(), TEST_T);
+        assert_eq!(new_instance.sharing_seq(), 1);
+        assert_eq!(new_instance.num_shares(), new_n);
+        assert_eq!(new_instance.threshold(), new_t);
     }
 
     #[tokio::test]
@@ -292,7 +302,8 @@ mod tests {
                 &mut rng,
             ),
         ];
-        let req = RotateKpsRequest::new(submissions, state);
+        let old_instance = enclave.secret_sharing_instance().unwrap().clone();
+        let req = RotateKpsRequest::new(submissions, old_instance, state);
 
         let err = rotate_kps(enclave, req).await.expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
@@ -338,7 +349,8 @@ mod tests {
                 &mut rng,
             ),
         ];
-        let req = RotateKpsRequest::new(submissions, state2);
+        let old_instance = enclave.secret_sharing_instance().unwrap().clone();
+        let req = RotateKpsRequest::new(submissions, old_instance, state2);
 
         let err = rotate_kps(enclave, req).await.expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
@@ -358,11 +370,33 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_before_operator_init() {
+        // No operator_init, so the enclave has no instance to read; build the old
+        // instance standalone. The call must reject before ever touching it.
         let enclave = Enclave::create_with_random_keys();
         let sk = SecretKey::random(&mut rand::thread_rng());
         let params = SecretSharingParams::new(TEST_N, TEST_T).unwrap();
         let shares = split_secret(&sk, &params, &mut rand::thread_rng());
-        let req = build_request(&shares[..TEST_T], &enclave, build_state());
+        let state = build_state();
+        let mut rng = rand::thread_rng();
+        let submissions = shares[..TEST_T]
+            .iter()
+            .map(|s| {
+                RotateKpsRequest::build_from_share_and_state(
+                    s,
+                    enclave.encryption_public_key(),
+                    &state,
+                    &mut rng,
+                )
+            })
+            .collect();
+        let old_instance = SecretSharingInstance::new(
+            ShareCommitments::from_shares(&shares).unwrap(),
+            TEST_N,
+            TEST_T,
+            0,
+        )
+        .unwrap();
+        let req = RotateKpsRequest::new(submissions, old_instance, state);
         let err = rotate_kps(enclave, req).await.expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
     }

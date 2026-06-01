@@ -36,10 +36,17 @@ pub struct Enclave {
     pub state: EnclaveState,
     /// Initialization scratchpad
     pub scratchpad: Scratchpad,
+    /// Serializes control-plane RPCs (operator_init, update_committee) so
+    /// concurrent callers can't race a check-then-set. Held across the handler.
+    /// TODO: fold provisioner_init / ceremony serialization in here too, once
+    /// their dual-purpose locks (share accumulator / one-shot bool) are untangled.
+    pub control_lock: tokio::sync::Mutex<()>,
 }
 
 /// Configuration set during initialization (immutable after set)
 pub struct EnclaveConfig {
+    /// Enclave mode (set on boot).
+    mode: EnclaveMode,
     /// Ephemeral keypair (set on boot)
     eph_keys: EphemeralKeyPairs,
     /// S3 client & config (set in operator_init)
@@ -50,21 +57,16 @@ pub struct EnclaveConfig {
     btc_network: OnceLock<Network>,
     /// Raw MPC verifying key as a curve point. Stored with y-parity so the
     /// 2-of-2 child-key derivation matches the MPC's signing protocol.
-    /// Set in provisioner_init.
+    /// Set in operator_init.
     hashi_btc_master_pubkey: OnceLock<HashiMasterG>,
-    /// Withdraw related config's (set in provisioner_init)
-    limiter_config: OnceLock<LimiterConfig>,
 }
 
 /// Mutable state that changes during operation.
-/// Note: State is initialized during provisioner_init.
+/// Note: committee + rate limiter are installed during operator_init.
 pub struct EnclaveState {
     /// Current Hashi committee.
     committee: RwLock<Option<Arc<HashiCommittee>>>,
-    /// Serializes `update_committee` so concurrent calls can't race the
-    /// read/log/replace sequence and roll the epoch backwards.
-    pub committee_update_lock: tokio::sync::Mutex<()>,
-    /// Rate limiter. Set once during provisioner_init.
+    /// Rate limiter. Set once during operator_init.
     /// Uses `Arc<tokio::Mutex>` so the guard can be held across `.await`.
     rate_limiter: OnceLock<Arc<tokio::sync::Mutex<RateLimiter>>>,
 }
@@ -77,7 +79,8 @@ pub struct Scratchpad {
     pub shares: tokio::sync::Mutex<Vec<Share>>,
     /// Secret-sharing instance (commitments + N + T) set by operator_init.
     pub secret_sharing_instance: OnceLock<SecretSharingInstance>,
-    /// Hash of the state in ProvisionerInitRequest.
+    /// Digest of the operator-supplied WithdrawModeState (set in operator_init);
+    /// the AAD KPs bind on their share submissions.
     pub state_hash: OnceLock<[u8; 32]>,
     /// Set once operator_init has successfully written all logs to S3.
     /// This prevents heartbeats from being emitted before operator_init logs.
@@ -102,8 +105,13 @@ pub struct EphemeralKeyPairs {
 }
 
 impl EnclaveConfig {
-    pub fn new(signing_keys: GuardianSignKeyPair, encryption_keys: GuardianEncKeyPair) -> Self {
+    pub fn new(
+        signing_keys: GuardianSignKeyPair,
+        encryption_keys: GuardianEncKeyPair,
+        mode: EnclaveMode,
+    ) -> Self {
         EnclaveConfig {
+            mode,
             eph_keys: EphemeralKeyPairs {
                 signing_keys,
                 encryption_keys,
@@ -112,7 +120,6 @@ impl EnclaveConfig {
             enclave_btc_keypair: OnceLock::new(),
             btc_network: OnceLock::new(),
             hashi_btc_master_pubkey: OnceLock::new(),
-            limiter_config: OnceLock::new(),
         }
     }
 
@@ -171,22 +178,6 @@ impl EnclaveConfig {
     }
 
     // ========================================================================
-    // Withdrawal Configuration
-    // ========================================================================
-
-    pub fn limiter_config(&self) -> GuardianResult<&LimiterConfig> {
-        self.limiter_config
-            .get()
-            .ok_or(InvalidInputs("LimiterConfig is not initialized".into()))
-    }
-
-    pub fn set_limiter_config(&self, config: LimiterConfig) -> GuardianResult<()> {
-        self.limiter_config
-            .set(config)
-            .map_err(|_| InvalidInputs("LimiterConfig already set".into()))
-    }
-
-    // ========================================================================
     // S3 Logger
     // ========================================================================
 
@@ -202,79 +193,17 @@ impl EnclaveConfig {
             .map_err(|_| InvalidInputs("S3 logger already set".into()))
     }
 
-    // ========================================================================
-    // Initialization Status
-    // ========================================================================
-
     pub fn is_enclave_btc_keypair_set(&self) -> bool {
         self.enclave_btc_keypair.get().is_some()
-    }
-
-    pub fn is_hashi_btc_master_pubkey_set(&self) -> bool {
-        self.hashi_btc_master_pubkey.get().is_some()
-    }
-
-    /// Check if operator_init configuration is complete (S3 logger and network)
-    pub fn is_operator_init_complete(&self) -> bool {
-        self.s3_logger.get().is_some() && self.btc_network.get().is_some()
-    }
-
-    /// Check if any operator_init configuration has been set
-    pub fn is_operator_init_partially_complete(&self) -> bool {
-        self.s3_logger.get().is_some() || self.btc_network.get().is_some()
-    }
-
-    /// Check if provisioner_init configuration is complete (BTC keys and withdrawal config)
-    pub fn is_provisioner_init_complete(&self) -> bool {
-        self.is_enclave_btc_keypair_set()
-            && self.is_hashi_btc_master_pubkey_set()
-            && self.limiter_config.get().is_some()
-    }
-
-    /// Check if any provisioner_init configuration has been set
-    pub fn is_provisioner_init_partially_complete(&self) -> bool {
-        self.is_enclave_btc_keypair_set()
-            || self.is_hashi_btc_master_pubkey_set()
-            || self.limiter_config.get().is_some()
     }
 }
 
 impl EnclaveState {
-    pub fn init(&self, incoming_state: ProvisionerInitState) -> GuardianResult<()> {
-        let rate_limiter = incoming_state.build_rate_limiter()?;
-        let (committee, _, _, _) = incoming_state.into_parts();
-
+    /// Install the operator-supplied committee + rate limiter. Called from operator_init.
+    pub fn init(&self, committee: HashiCommittee, rate_limiter: RateLimiter) -> GuardianResult<()> {
         self.set_committee(committee)?;
         self.set_rate_limiter(rate_limiter)?;
         Ok(())
-    }
-
-    // ========================================================================
-    // Initialization Status
-    // ========================================================================
-
-    fn status_check_inner(&self) -> (bool, bool) {
-        let committee_init = self
-            .committee
-            .read()
-            .expect("rwlock read should not fail")
-            .is_some();
-
-        let limiter_init = self.rate_limiter.get().is_some();
-
-        (committee_init, limiter_init)
-    }
-
-    /// Check if state init is complete
-    pub fn is_provisioner_init_complete(&self) -> bool {
-        let (committee_init, limiter_init) = self.status_check_inner();
-        committee_init && limiter_init
-    }
-
-    /// Check if any state has been set
-    pub fn is_provisioner_init_partially_complete(&self) -> bool {
-        let (committee_init, limiter_init) = self.status_check_inner();
-        committee_init || limiter_init
     }
 
     // ========================================================================
@@ -293,7 +222,16 @@ impl EnclaveState {
             .ok_or_else(|| InvalidInputs("committee not initialized".into()))
     }
 
-    /// Set committee. Called only from init(ProvisionerInitState)
+    /// Whether the committee is installed, without cloning the `Arc` — used by the
+    /// operator_init completeness check, which runs on the heartbeat/withdrawal path.
+    fn has_committee(&self) -> bool {
+        self.committee
+            .read()
+            .expect("rwlock should never throw an error")
+            .is_some()
+    }
+
+    /// Set committee. Called only from `init` (operator_init).
     fn set_committee(&self, committee: HashiCommittee) -> GuardianResult<()> {
         info!("Setting committee for epoch {}.", committee.epoch());
 
@@ -378,7 +316,7 @@ impl EnclaveState {
         Some(*limiter.lock().await.state())
     }
 
-    pub async fn limiter_config(&self) -> Option<hashi_types::guardian::LimiterConfig> {
+    pub async fn limiter_config(&self) -> Option<LimiterConfig> {
         let limiter = self.rate_limiter.get()?;
         Some(*limiter.lock().await.config())
     }
@@ -389,21 +327,31 @@ impl Enclave {
     // Construction & Initialization Status
     // ========================================================================
 
-    pub fn new(signing_keys: GuardianSignKeyPair, encryption_keys: GuardianEncKeyPair) -> Self {
+    pub fn new(
+        signing_keys: GuardianSignKeyPair,
+        encryption_keys: GuardianEncKeyPair,
+        mode: EnclaveMode,
+    ) -> Self {
         Enclave {
-            config: EnclaveConfig::new(signing_keys, encryption_keys),
+            config: EnclaveConfig::new(signing_keys, encryption_keys, mode),
             state: EnclaveState {
                 committee: RwLock::new(None),
-                committee_update_lock: tokio::sync::Mutex::new(()),
                 rate_limiter: OnceLock::new(),
             },
             scratchpad: Scratchpad::default(),
+            control_lock: tokio::sync::Mutex::new(()),
         }
     }
 
+    /// Which flows this enclave serves (fixed at boot).
+    pub fn mode(&self) -> EnclaveMode {
+        self.config.mode
+    }
+
+    /// Provisioner_init is complete: the reconstructed BTC keypair is set and
+    /// its installation has been logged.
     pub fn is_provisioner_init_complete(&self) -> bool {
-        self.config.is_provisioner_init_complete()
-            && self.state.is_provisioner_init_complete()
+        self.config.is_enclave_btc_keypair_set()
             && self
                 .scratchpad
                 .provisioner_init_logging_complete
@@ -411,24 +359,45 @@ impl Enclave {
                 .is_some()
     }
 
-    pub fn is_provisioner_init_partially_complete(&self) -> bool {
-        self.config.is_provisioner_init_partially_complete()
-            || self.state.is_provisioner_init_partially_complete()
-    }
-
     pub fn is_operator_init_complete(&self) -> bool {
-        self.config.is_operator_init_complete()
-            && self.scratchpad.secret_sharing_instance.get().is_some()
-            && self
-                .scratchpad
-                .operator_init_logging_complete
-                .get()
-                .is_some()
+        let logged = self
+            .scratchpad
+            .operator_init_logging_complete
+            .get()
+            .is_some();
+        // commit_operator_init sets this flag last in an all-or-nothing commit, so
+        // a set flag implies every installed field is present. This backstop holds
+        // in prod too (a violation aborts via `abort_on_panic`) and never fires
+        // transiently, since the flag is the last thing set. The converse is NOT
+        // checked: a normal commit installs the state before its (slow) S3 logging
+        // completes, and a lock-free reader (e.g. the heartbeat) can observe that
+        // window with state present but the flag unset.
+        assert!(
+            !logged || self.operator_init_state_installed(),
+            "operator_init_logging_complete set but operator_init state is incomplete"
+        );
+        logged
     }
 
-    pub fn is_operator_init_partially_complete(&self) -> bool {
-        self.config.is_operator_init_partially_complete()
-            || self.scratchpad.secret_sharing_instance.get().is_some()
+    /// Whether every field operator_init installs is present (mode-aware). Only
+    /// used to assert the `operator_init_logging_complete` invariant above.
+    fn operator_init_state_installed(&self) -> bool {
+        // Both modes install the S3 logger; a ceremony enclave installs nothing else.
+        if self.config.s3_logger.get().is_none() {
+            return false;
+        }
+        match self.config.mode {
+            EnclaveMode::Ceremony => true,
+            // Withdraw enclaves additionally install the WithdrawModeConfig.
+            EnclaveMode::Withdraw => {
+                self.config.btc_network.get().is_some()
+                    && self.scratchpad.secret_sharing_instance.get().is_some()
+                    && self.scratchpad.state_hash.get().is_some()
+                    && self.config.hashi_btc_master_pubkey.get().is_some()
+                    && self.state.has_committee()
+                    && self.state.rate_limiter.get().is_some()
+            }
+        }
     }
 
     pub fn is_fully_initialized(&self) -> bool {
@@ -473,6 +442,7 @@ impl Enclave {
                 .ok()
                 .map(|l| l.bucket_info().clone()),
             encryption_pubkey: self.encryption_public_key().to_bytes().to_vec(),
+            state_hash: self.state_hash().copied(),
             // TODO: Change it
             server_version: "v1".to_string(),
             enclave_btc_pubkey: self.config.enclave_btc_pubkey().ok(),

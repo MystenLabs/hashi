@@ -11,6 +11,7 @@ use std::env;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use bitcoin::Network;
 use bitcoin::secp256k1::Keypair;
 use bitcoin::secp256k1::Secp256k1;
 use bitcoin::secp256k1::SecretKey as BtcSecretKey;
@@ -23,16 +24,16 @@ use hashi_types::guardian::HashiMasterG;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
-use hashi_types::guardian::ProvisionerInitState;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::SecretSharingParams;
 use hashi_types::guardian::Share;
 use hashi_types::guardian::ShareCommitment;
 use hashi_types::guardian::ShareCommitments;
+use hashi_types::guardian::WithdrawModeConfig;
 use hashi_types::guardian::crypto::commit_share;
 use hashi_types::guardian::crypto::split_secret;
 use hashi_types::guardian::proto_conversions::provisioner_init_request_to_pb;
-use hashi_types::guardian::proto_conversions::secret_sharing_instance_to_pb;
+use hashi_types::guardian::proto_conversions::withdraw_mode_config_to_pb;
 use hashi_types::guardian::session_id_from_signing_pubkey;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
@@ -129,8 +130,32 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .await
         .with_context(|| format!("connect to guardian at {}", args.guardian_endpoint))?;
 
+    // The operator now supplies the full init state at OperatorInit; its digest
+    // is the state_hash KPs bind as their share-encryption AAD.
+    let limiter_config = LimiterConfig {
+        refill_rate: args.refill_rate_sats_per_sec,
+        max_bucket_capacity: args.max_bucket_capacity_sats,
+    };
+    let limiter_state = LimiterState::genesis(&limiter_config);
+    // The bootstrap utility builds the guardian's BTC keypair from a fresh
+    // bitcoin-lib keypair, which always signs against the even-y projection of
+    // its pubkey. Reconstruct the matching `G` point so downstream derivations
+    // agree on y-parity.
+    let master_g = HashiMasterG::with_even_y_from_x_be_bytes(&material.master_pubkey.serialize())
+        .map_err(|e| anyhow!("convert master pubkey to G: {e:?}"))?;
     let secret_sharing_instance = SecretSharingInstance::new(material.commitments.clone(), n, t, 0)
         .map_err(|e| anyhow!("build SecretSharingInstance: {e:?}"))?;
+    let config = WithdrawModeConfig::new(
+        committee,
+        limiter_config,
+        limiter_state,
+        master_g,
+        secret_sharing_instance,
+        network,
+    )
+    .map_err(|e| anyhow!("build WithdrawModeConfig: {e:?}"))?;
+    let state_hash = config.state().digest();
+
     let operator_init_req = pb::OperatorInitRequest {
         s3_config: Some(pb::S3Config {
             access_key: Some(access_key),
@@ -138,8 +163,10 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
             bucket_name: Some(bucket.clone()),
             region: Some(region.clone()),
         }),
-        secret_sharing_instance: Some(secret_sharing_instance_to_pb(&secret_sharing_instance)),
-        network: Some(network as i32),
+        state: Some(
+            withdraw_mode_config_to_pb(config)
+                .map_err(|e| anyhow!("encode WithdrawModeConfig: {e:?}"))?,
+        ),
     };
     tracing::info!("calling OperatorInit");
     client
@@ -197,33 +224,22 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
             && returned_instance.sharing_seq() == 0,
         "secret-sharing instance mismatch: guardian echoed different scheme than was submitted"
     );
+    let returned_state_hash = info
+        .state_hash
+        .ok_or_else(|| anyhow!("guardian info missing state_hash"))?;
+    anyhow::ensure!(
+        returned_state_hash == state_hash,
+        "state_hash mismatch: guardian echoed a different init state than was submitted"
+    );
 
     let enc_pubkey = EncPubKey::from_bytes(&info.encryption_pubkey)
         .map_err(|e| anyhow!("decode guardian encryption pubkey (session={session_id}): {e:?}"))?;
     tracing::info!(session_id = %session_id, "guardian info verified");
 
-    let limiter_config = LimiterConfig {
-        refill_rate: args.refill_rate_sats_per_sec,
-        max_bucket_capacity: args.max_bucket_capacity_sats,
-    };
-    let limiter_state = LimiterState::genesis(&limiter_config);
-    // The bootstrap utility builds the guardian's BTC keypair from a fresh
-    // bitcoin-lib keypair, which always signs against the even-y projection
-    // of its pubkey. Reconstruct the matching `G` point so downstream
-    // derivations agree on y-parity.
-    let master_g = HashiMasterG::with_even_y_from_x_be_bytes(&material.master_pubkey.serialize())
-        .map_err(|e| anyhow!("convert master pubkey to G: {e:?}"))?;
-    let state = ProvisionerInitState::new(committee, limiter_config, limiter_state, master_g)
-        .map_err(|e| anyhow!("build ProvisionerInitState: {e:?}"))?;
-
     for (i, share) in material.shares.iter().take(t).enumerate() {
         tracing::info!("submitting ProvisionerInit share {}/{t}", i + 1);
-        let req = ProvisionerInitRequest::build_from_share_and_state(
-            share,
-            &enc_pubkey,
-            state.clone(),
-            &mut rng,
-        );
+        let req =
+            ProvisionerInitRequest::build_from_share(share, &enc_pubkey, state_hash, &mut rng);
         let pb_req = provisioner_init_request_to_pb(req)
             .map_err(|e| anyhow!("encode ProvisionerInitRequest: {e:?}"))?;
         client
@@ -323,10 +339,16 @@ fn required_env(name: &str) -> Result<String> {
     env::var(name).map_err(|_| anyhow!("required env var `{name}` is not set"))
 }
 
-fn parse_network(s: &str) -> Result<pb::Network> {
-    pb::Network::from_str_name(&s.to_ascii_uppercase()).ok_or_else(|| {
-        anyhow!("unknown BITCOIN_NETWORK `{s}`; expected mainnet/testnet/regtest/signet")
-    })
+fn parse_network(s: &str) -> Result<Network> {
+    match s.to_ascii_lowercase().as_str() {
+        "mainnet" | "bitcoin" => Ok(Network::Bitcoin),
+        "testnet" => Ok(Network::Testnet),
+        "regtest" => Ok(Network::Regtest),
+        "signet" => Ok(Network::Signet),
+        _ => Err(anyhow!(
+            "unknown BITCOIN_NETWORK `{s}`; expected mainnet/testnet/regtest/signet"
+        )),
+    }
 }
 
 #[cfg(test)]

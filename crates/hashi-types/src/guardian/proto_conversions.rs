@@ -26,7 +26,6 @@ use super::LimiterConfig;
 use super::LimiterState;
 use super::OperatorInitRequest;
 use super::ProvisionerInitRequest;
-use super::ProvisionerInitState;
 use super::RotateKpsRequest;
 use super::RotateKpsResponse;
 use super::RotateKpsState;
@@ -40,6 +39,7 @@ use super::SignedStandardWithdrawalRequestWire;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalRequestWire;
 use super::StandardWithdrawalResponse;
+use super::WithdrawModeConfig;
 use super::bitcoin_utils::ExternalOutputUTXOWire;
 use super::bitcoin_utils::InputUTXOWire;
 use super::bitcoin_utils::InternalOutputUTXO;
@@ -138,17 +138,12 @@ impl TryFrom<pb::OperatorInitRequest> for OperatorInitRequest {
     type Error = GuardianError;
 
     fn try_from(req: pb::OperatorInitRequest) -> Result<Self, Self::Error> {
-        let s3_config_pb = req.s3_config.ok_or_else(|| missing("s3_config"))?;
-        let s3_config = pb_to_s3_config(s3_config_pb)?;
-
-        let secret_sharing_instance_pb = req
-            .secret_sharing_instance
-            .ok_or_else(|| missing("secret_sharing_instance"))?;
-        let secret_sharing_instance = pb_to_secret_sharing_instance(secret_sharing_instance_pb)?;
-
-        let network = pb_to_network(req.network.ok_or_else(|| missing("network"))?)?;
-
-        OperatorInitRequest::new(s3_config, secret_sharing_instance, network)
+        let s3_config = pb_to_s3_config(req.s3_config.ok_or_else(|| missing("s3_config"))?)?;
+        // `state` present ⇔ withdraw mode; absent ⇔ ceremony (S3 only).
+        match req.state.map(WithdrawModeConfig::try_from).transpose()? {
+            Some(state) => Ok(OperatorInitRequest::new_withdraw_mode(s3_config, state)),
+            None => Ok(OperatorInitRequest::new_ceremony(s3_config)),
+        }
     }
 }
 
@@ -181,18 +176,12 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
     type Error = GuardianError;
 
     fn try_from(req: pb::ProvisionerInitRequest) -> Result<Self, Self::Error> {
-        // Encrypted share
         let encrypted_share_pb = req
             .encrypted_share
             .ok_or_else(|| missing("encrypted_share"))?;
-
         let encrypted_share = pb_to_guardian_encrypted_share(encrypted_share_pb)?;
 
-        // State
-        let state_pb = req.state.ok_or_else(|| missing("state"))?;
-        let state = ProvisionerInitState::try_from(state_pb)?;
-
-        Ok(ProvisionerInitRequest::new(encrypted_share, state))
+        Ok(ProvisionerInitRequest::new(encrypted_share))
     }
 }
 
@@ -213,7 +202,15 @@ impl TryFrom<pb::RotateKpsRequest> for RotateKpsRequest {
 
         let state = RotateKpsState::new(req.new_kp_pgp_certs, new_num_shares, new_threshold)?;
 
-        Ok(RotateKpsRequest::new(encrypted_old_shares, state))
+        let old_instance = pb_to_secret_sharing_instance(
+            req.old_instance.ok_or_else(|| missing("old_instance"))?,
+        )?;
+
+        Ok(RotateKpsRequest::new(
+            encrypted_old_shares,
+            old_instance,
+            state,
+        ))
     }
 }
 
@@ -242,10 +239,10 @@ impl TryFrom<pb::SignedRotateKpsResponse> for GuardianSigned<RotateKpsResponse> 
     }
 }
 
-impl TryFrom<pb::ProvisionerInitState> for ProvisionerInitState {
+impl TryFrom<pb::WithdrawModeConfig> for WithdrawModeConfig {
     type Error = GuardianError;
 
-    fn try_from(state_pb: pb::ProvisionerInitState) -> Result<Self, Self::Error> {
+    fn try_from(state_pb: pb::WithdrawModeConfig) -> Result<Self, Self::Error> {
         let committee_pb = state_pb.committee.ok_or_else(|| missing("committee"))?;
         let committee = pb_to_hashi_committee(committee_pb)?;
 
@@ -273,11 +270,21 @@ impl TryFrom<pb::ProvisionerInitState> for ProvisionerInitState {
         let hashi_btc_master_pubkey = super::HashiMasterG::from_byte_array(&master_pk_bytes_arr)
             .map_err(|e| InvalidInputs(format!("invalid hashi_btc_master_pubkey: {e:?}")))?;
 
-        ProvisionerInitState::new(
+        let secret_sharing_instance = pb_to_secret_sharing_instance(
+            state_pb
+                .secret_sharing_instance
+                .ok_or_else(|| missing("secret_sharing_instance"))?,
+        )?;
+
+        let network = pb_to_network(state_pb.network.ok_or_else(|| missing("network"))?)?;
+
+        WithdrawModeConfig::new(
             committee,
             limiter_config,
             limiter_state,
             hashi_btc_master_pubkey,
+            secret_sharing_instance,
+            network,
         )
     }
 }
@@ -432,11 +439,10 @@ pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequ
 pub fn operator_init_request_to_pb(
     r: OperatorInitRequest,
 ) -> GuardianResult<pb::OperatorInitRequest> {
-    let (s3_config, secret_sharing_instance, network) = r.into_parts();
+    let (s3_config, state) = r.into_parts();
     Ok(pb::OperatorInitRequest {
         s3_config: Some(s3_config_to_pb(s3_config)),
-        secret_sharing_instance: Some(secret_sharing_instance_to_pb(&secret_sharing_instance)),
-        network: Some(network_to_pb(network)?),
+        state: state.map(withdraw_mode_config_to_pb).transpose()?,
     })
 }
 
@@ -445,23 +451,26 @@ pub fn provisioner_init_request_to_pb(
 ) -> GuardianResult<pb::ProvisionerInitRequest> {
     Ok(pb::ProvisionerInitRequest {
         encrypted_share: Some(guardian_encrypted_share_to_pb(r.encrypted_share)),
-        state: Some(provisioner_init_state_to_pb(r.state)),
     })
 }
 
-pub fn provisioner_init_state_to_pb(s: ProvisionerInitState) -> pb::ProvisionerInitState {
-    let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) = s.into_parts();
+// Throws an error if network is invalid.
+pub fn withdraw_mode_config_to_pb(s: WithdrawModeConfig) -> GuardianResult<pb::WithdrawModeConfig> {
+    let (state, instance, network) = s.into_parts();
+    let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) = state.into_parts();
 
-    pb::ProvisionerInitState {
+    Ok(pb::WithdrawModeConfig {
         committee: Some(hashi_committee_to_pb(committee)),
         limiter_config: Some(limiter_config_to_pb(limiter_config)),
         hashi_btc_master_pubkey: Some(hashi_btc_master_pubkey.to_byte_array().to_vec().into()),
         limiter_state: Some(limiter_state_to_pb(limiter_state)),
-    }
+        secret_sharing_instance: Some(secret_sharing_instance_to_pb(&instance)),
+        network: Some(network_to_pb(network)?),
+    })
 }
 
 pub fn rotate_kps_request_to_pb(r: RotateKpsRequest) -> pb::RotateKpsRequest {
-    let (encrypted_old_shares, state) = r.into_parts();
+    let (encrypted_old_shares, old_instance, state) = r.into_parts();
     let (new_kp_pgp_certs, new_params) = state.into_parts();
     pb::RotateKpsRequest {
         encrypted_old_shares: encrypted_old_shares
@@ -471,6 +480,7 @@ pub fn rotate_kps_request_to_pb(r: RotateKpsRequest) -> pb::RotateKpsRequest {
         new_kp_pgp_certs,
         new_num_shares: Some(new_params.num_shares() as u32),
         new_threshold: Some(new_params.threshold() as u32),
+        old_instance: Some(secret_sharing_instance_to_pb(&old_instance)),
     }
 }
 
@@ -593,6 +603,14 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
         .server_version
         .ok_or_else(|| missing("server_version"))?;
 
+    let state_hash = data
+        .state_hash
+        .map(|b| {
+            <[u8; 32]>::try_from(b.as_ref())
+                .map_err(|_| InvalidInputs("state_hash must be 32 bytes".into()))
+        })
+        .transpose()?;
+
     let enclave_btc_pubkey = data
         .enclave_btc_pubkey
         .map(|bytes| {
@@ -605,6 +623,7 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
         secret_sharing_instance,
         bucket_info,
         encryption_pubkey,
+        state_hash,
         server_version,
         enclave_btc_pubkey,
     })
@@ -618,6 +637,7 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
             .map(secret_sharing_instance_to_pb),
         bucket_info: info.bucket_info.map(s3_bucket_info_to_pb),
         encryption_pubkey: Some(info.encryption_pubkey.into()),
+        state_hash: info.state_hash.map(|h| h.to_vec().into()),
         server_version: Some(info.server_version),
         enclave_btc_pubkey: info
             .enclave_btc_pubkey
@@ -1150,6 +1170,7 @@ mod tests {
             secret_sharing_instance: None,
             bucket_info: None,
             encryption_pubkey: vec![0u8; 32],
+            state_hash: None,
             server_version: "v1".to_string(),
             enclave_btc_pubkey: Some(pk),
         };

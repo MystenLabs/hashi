@@ -13,7 +13,7 @@ use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::HashiMasterG;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
-use hashi_types::guardian::ProvisionerInitState;
+use hashi_types::guardian::WithdrawModeState;
 use hashi_types::guardian::proto_conversions::provisioner_init_request_to_pb;
 use hashi_types::guardian::session_id_from_signing_pubkey;
 use hashi_types::guardian::verify_enclave_attestation;
@@ -61,30 +61,43 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
         }
     };
 
+    // Recompute the init state the operator should have booted the enclave with;
+    // its digest is the state_hash we bind as the share's AAD.
     let committee = cfg.hashi_committee.try_into()?;
-    // Config holds the master pubkey as a 32-byte x-only key; reconstruct
-    // the even-y `G` so derivations match the BIP-340 even-y convention.
+    // Config holds the master pubkey as a 32-byte x-only key; reconstruct the
+    // even-y `G` so derivations match the BIP-340 even-y convention.
     // TODO: extend the YAML to carry the y-parity bit (or the full 33-byte
     // compressed pubkey) so this also handles odd-y MPC outputs.
     let master_g =
         HashiMasterG::with_even_y_from_x_be_bytes(&cfg.hashi_btc_master_pubkey.serialize())
             .map_err(|e| anyhow::anyhow!("convert master pubkey to G: {e:?}"))?;
-    let state = ProvisionerInitState::new(committee, cfg.limiter_config, limiter_state, master_g)
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let expected_state =
+        WithdrawModeState::new(committee, cfg.limiter_config, limiter_state, master_g)
+            .map_err(|e| anyhow::anyhow!(e))?;
+    let state_hash = expected_state.digest();
+
+    // Fail fast (IOP-225 step D): the enclave must have been booted with the
+    // state we expect, else our share won't decrypt under its state_hash AAD.
+    let enclave_state_hash = guardian_info
+        .state_hash
+        .context("guardian info is missing state_hash")?;
+    anyhow::ensure!(
+        state_hash == enclave_state_hash,
+        "state_hash mismatch: enclave booted with a different init state"
+    );
 
     let guardian_pub_key =
         EncPubKey::from_bytes(&guardian_info.encryption_pubkey).map_err(|e| anyhow::anyhow!(e))?;
-    let request = ProvisionerInitRequest::build_from_share_and_state(
+    let request = ProvisionerInitRequest::build_from_share(
         &cfg.share.to_domain()?,
         &guardian_pub_key,
-        state,
+        state_hash,
         &mut thread_rng(),
     );
     let share_id = request.encrypted_share().id.get();
-    let state_digest_hex = hex::encode(request.state().digest());
     info!(
         share_id,
-        state_digest = state_digest_hex,
+        state_hash = hex::encode(state_hash),
         "built provisioner-init request"
     );
 

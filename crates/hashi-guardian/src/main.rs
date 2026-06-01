@@ -8,6 +8,7 @@ use hashi_guardian::Enclave;
 use hashi_guardian::HEARTBEAT_INTERVAL;
 use hashi_guardian::HEARTBEAT_RETRY_INTERVAL;
 use hashi_guardian::MAX_HEARTBEAT_FAILURES_INTERVAL;
+use hashi_types::guardian::EnclaveMode;
 use hashi_types::guardian::GuardianEncKeyPair;
 use hashi_types::guardian::GuardianSignKeyPair;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
@@ -28,26 +29,32 @@ async fn main() -> Result<()> {
         .with_env()
         .init();
 
+    abort_on_panic();
+
     // Check if CEREMONY_MODE is enabled (defaults to false)
     let ceremony_mode = std::env::var("CEREMONY_MODE")
         .ok()
         .and_then(|v| v.parse::<bool>().ok())
         .unwrap_or(false);
+    let mode = if ceremony_mode {
+        EnclaveMode::Ceremony
+    } else {
+        EnclaveMode::Withdraw
+    };
 
     if ceremony_mode {
         info!("Ceremony mode: setup_new_key/rotate_kps enabled; provisioner_init/standard_withdrawal disabled.");
     } else {
-        info!("Normal mode: provisioner_init/standard_withdrawal enabled; setup_new_key/rotate_kps disabled.");
+        info!("Withdraw mode: provisioner_init/standard_withdrawal enabled; setup_new_key/rotate_kps disabled.");
     }
 
     let mut rng = rand::thread_rng();
     let signing_keys = GuardianSignKeyPair::new(&mut rng);
     let encryption_keys = GuardianEncKeyPair::random(&mut rng);
-    let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys));
+    let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys, mode));
 
     let svc = GuardianGrpc {
         enclave: enclave.clone(),
-        ceremony_mode,
     };
 
     let addr = "0.0.0.0:3000".parse()?;
@@ -84,4 +91,17 @@ async fn main() -> Result<()> {
             panic!("Heartbeat failed: {:?}", res)
         }
     }
+}
+
+/// Make any panic abort the process instead of unwinding to the tokio task
+/// boundary. The enclave holds key material that must never be served from a
+/// state where an invariant has already been violated, and a contained unwind
+/// can leave half-applied init state behind that a retry would then trip over.
+/// Fail fast and let the enclave be relaunched clean.
+fn abort_on_panic() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default(info); // keep the standard panic message + backtrace
+        std::process::abort();
+    }));
 }

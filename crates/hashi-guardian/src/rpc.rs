@@ -12,6 +12,7 @@ use hashi_types::guardian::proto_conversions;
 use hashi_types::guardian::proto_conversions::pb_to_signed_committee_transition;
 use hashi_types::guardian::proto_conversions::pb_to_signed_standard_withdrawal_request_wire;
 use hashi_types::guardian::AddressValidation;
+use hashi_types::guardian::EnclaveMode;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::*;
 use hashi_types::guardian::HashiSigned;
@@ -28,7 +29,6 @@ use tonic::Status;
 #[derive(Clone)]
 pub struct GuardianGrpc {
     pub enclave: Arc<Enclave>,
-    pub ceremony_mode: bool,
 }
 
 fn to_status(e: GuardianError) -> Status {
@@ -43,7 +43,7 @@ fn to_status(e: GuardianError) -> Status {
 
 impl GuardianGrpc {
     fn require_ceremony_mode(&self, endpoint: &str) -> Result<(), Status> {
-        if !self.ceremony_mode {
+        if self.enclave.mode() != EnclaveMode::Ceremony {
             return Err(Status::failed_precondition(format!(
                 "{endpoint} is disabled when CEREMONY_MODE=false"
             )));
@@ -52,7 +52,7 @@ impl GuardianGrpc {
     }
 
     fn require_normal_mode(&self, endpoint: &str) -> Result<(), Status> {
-        if self.ceremony_mode {
+        if self.enclave.mode() != EnclaveMode::Withdraw {
             return Err(Status::failed_precondition(format!(
                 "{endpoint} is disabled when CEREMONY_MODE=true"
             )));

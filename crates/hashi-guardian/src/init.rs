@@ -17,55 +17,139 @@ use std::sync::Arc;
 use tracing::info;
 use GuardianError::*;
 
-/// Receives S3 API keys & share commitments.
-/// Returns an error for malformed requests / dup call & panics for the rest.
+/// The withdraw-mode state to install, built from `WithdrawModeConfig` (incl. the
+/// computed `state_hash` and the constructed rate limiter).
+pub(crate) struct WithdrawInstall {
+    state_hash: [u8; 32],
+    network: bitcoin::Network,
+    secret_sharing_instance: SecretSharingInstance,
+    hashi_btc_master_pubkey: HashiMasterG,
+    committee: HashiCommittee,
+    rate_limiter: RateLimiter,
+}
+
+impl WithdrawInstall {
+    /// Decompose a `WithdrawModeConfig` into the install bundle, constructing the
+    /// rate limiter (the only fallible step). Shared by `operator_init` and tests.
+    pub(crate) fn from_config(config: WithdrawModeConfig) -> GuardianResult<Self> {
+        let (withdraw_state, secret_sharing_instance, network) = config.into_parts();
+        let state_hash = withdraw_state.digest();
+        let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) =
+            withdraw_state.into_parts();
+        let rate_limiter = RateLimiter::new(limiter_config, limiter_state)?;
+        Ok(Self {
+            state_hash,
+            network,
+            secret_sharing_instance,
+            hashi_btc_master_pubkey,
+            committee,
+            rate_limiter,
+        })
+    }
+
+    /// Install the bundle onto a fresh enclave. Infallible by design (see the
+    /// `operator_init` invariant): every set runs once on a fresh enclave.
+    pub(crate) fn install_into(self, enclave: &Enclave) {
+        info!("Setting bitcoin network to {:?}.", self.network);
+        enclave
+            .config
+            .set_bitcoin_network(self.network)
+            .expect("Unable to set network");
+
+        info!(
+            "Storing secret-sharing instance: n={}, t={}, {} commitments.",
+            self.secret_sharing_instance.num_shares(),
+            self.secret_sharing_instance.threshold(),
+            self.secret_sharing_instance.commitments().len()
+        );
+        enclave
+            .set_secret_sharing_instance(self.secret_sharing_instance)
+            .expect("Unable to set secret-sharing instance");
+
+        info!("Setting state hash.");
+        enclave
+            .set_state_hash(self.state_hash)
+            .expect("Unable to set state hash");
+
+        info!("Setting hashi BTC master pubkey.");
+        enclave
+            .config
+            .set_hashi_btc_pk(self.hashi_btc_master_pubkey)
+            .expect("Unable to set hashi BTC master pubkey");
+
+        info!("Installing committee and rate limiter.");
+        enclave
+            .state
+            .init(self.committee, self.rate_limiter)
+            .expect("Unable to init enclave state");
+    }
+}
+
+/// Receives S3 API keys and — for a withdraw-mode enclave — the `WithdrawModeConfig`
+/// (committee, limiter, BTC master pubkey, secret-sharing instance, network);
+/// installs them and fixes the `state_hash`. A ceremony enclave carries only S3.
+///
+/// Invariant: operator_init never returns an `Err` from a partially-initialized
+/// enclave. Every fallible step (request validation, S3 connectivity, rate-limiter
+/// construction) runs before any state is mutated, so an early `Err` leaves the
+/// enclave untouched and retryable. The mutation then happens entirely in
+/// `commit_operator_init`, which returns `()` — it cannot report an error, so a
+/// half-mutated enclave is never observed via an `Err`.
 pub async fn operator_init(
     enclave: Arc<Enclave>,
     request: OperatorInitRequest,
 ) -> GuardianResult<()> {
     info!("/operator_init - Received request.");
 
-    // Validation
-    if enclave.is_operator_init_complete() {
-        return Err(InvalidInputs("Operator init finished".into()));
-    }
-    if enclave.is_operator_init_partially_complete() {
-        // shouldn't reach inside as we panic
-        unreachable!("Operator init did not fully complete.");
-    }
-    info!("Enclave state validated.");
+    // Serialize so concurrent callers can't race the check-then-commit below.
+    let _guard = enclave.control_lock.lock().await;
 
-    let (config, secret_sharing_instance, network) = request.into_parts();
-    let logger = S3Logger::new_checked(&config).await?;
+    if enclave.is_operator_init_complete() {
+        return Err(InvalidInputs("operator_init already complete".into()));
+    }
+
+    // ---- Validate & build: Nothing in this phase mutates enclave state, so any
+    // error here leaves the enclave untouched. ----
+
+    // A withdraw-mode enclave must carry the config and a ceremony enclave must not.
+    request.validate(enclave.mode())?;
+
+    let (s3_config, state) = request.into_parts();
+    let logger = S3Logger::new_checked(&s3_config).await?;
     info!("S3 connectivity check complete.");
 
+    // Build the withdraw-mode install bundle (incl. the rate limiter, the last
+    // fallible step) up front; `None` for a ceremony enclave.
+    let withdraw = match state {
+        Some(config) => Some(WithdrawInstall::from_config(config)?),
+        None => None,
+    };
+
+    // ---- All-or-nothing Commit: Nothing in this phase errors out. ----
+    commit_operator_init(&enclave, logger, withdraw).await;
+    Ok(())
+}
+
+/// Install the validated config on the enclave and write the operator_init logs.
+/// Infallible by design (returns `()`, see the `operator_init` invariant): every
+/// `set` here runs on a fresh enclave under the control lock, and the I/O steps
+/// (attestation, S3 logging) panic on failure rather than return.
+async fn commit_operator_init(
+    enclave: &Enclave,
+    logger: S3Logger,
+    withdraw: Option<WithdrawInstall>,
+) {
     info!("Storing S3 configuration.");
     enclave
         .config
         .set_s3_logger(logger)
         .expect("Unable to set logger");
 
-    info!("Setting bitcoin network to {:?}.", network);
-    enclave
-        .config
-        .set_bitcoin_network(network)
-        .expect("Unable to set network");
-
-    info!(
-        "Storing secret-sharing instance: n={}, t={}, {} commitments.",
-        secret_sharing_instance.num_shares(),
-        secret_sharing_instance.threshold(),
-        secret_sharing_instance.commitments().len()
-    );
-    for (i, share_commitment) in secret_sharing_instance.commitments().iter().enumerate() {
-        info!(
-            "Share {}: ID {} Digest {:x?}.",
-            i, share_commitment.id, share_commitment.digest
-        );
+    // Withdraw-mode state (committee, limiter, BTC master pubkey, instance, network,
+    // state_hash); a ceremony enclave installs none of it.
+    if let Some(install) = withdraw {
+        install.install_into(enclave);
     }
-    enclave
-        .set_secret_sharing_instance(secret_sharing_instance)
-        .expect("Unable to set secret-sharing instance");
 
     // Log to S3!
     // 1) Attestation and pub key help authenticate all subsequent enclave-signed messages.
@@ -91,12 +175,12 @@ pub async fn operator_init(
         .expect("operator_init_logging_complete should only be set once");
 
     info!("Operator initialization complete.");
-    Ok(())
 }
 
-/// Receives btc key share and a bunch of config's ("state") from each KP.
-/// While accumulating shares, we use the state hash to compare if every KP is giving us the same state.
-/// When we have enough shares, we actually set all the state variables.
+/// Receives one KP's encrypted share. Decrypts it under the enclave's state_hash
+/// (set at operator_init) as AAD — so only shares from KPs that agreed on the
+/// operator-supplied state decrypt — verifies it against the commitments, and
+/// reconstructs the BTC key once threshold shares arrive.
 pub async fn provisioner_init(
     enclave: Arc<Enclave>,
     request: ProvisionerInitRequest,
@@ -114,21 +198,19 @@ pub async fn provisioner_init(
     if enclave.is_provisioner_init_complete() {
         return Err(InvalidInputs("Provisioner init already complete".into()));
     }
-    if enclave.is_provisioner_init_partially_complete() {
-        debug_assert!(
-            false,
-            "provisioner_init partially complete; this should not happen"
-        );
-        return Err(InvalidInputs("Provisioner init partially complete".into()));
-    }
     info!("Enclave state validated.");
 
     let sk = enclave.encryption_secret_key();
     let share_id = request.encrypted_share().id;
-    let state_hash = request.state().digest();
+    // Always set here: provisioner_init is withdraw-mode only, and the
+    // operator_init check above guarantees a withdraw-mode enclave installed it.
+    let state_hash = *enclave
+        .state_hash()
+        .expect("withdraw-mode operator_init installs the state_hash");
     info!("Share ID: {:?}.", share_id);
 
-    // 1) Decrypt the share
+    // 1) Decrypt the share (AAD = enclave state_hash). A share only decrypts if
+    //    the KP bound the same state the operator configured.
     info!("Decrypting share.");
     let share = decrypt_share(request.encrypted_share(), sk, Some(&state_hash))?;
     info!("Share decrypted.");
@@ -141,22 +223,10 @@ pub async fn provisioner_init(
     instance.commitments().verify_share(&share)?;
     info!("Share verified.");
 
-    // 3) Set state_hash OR make sure whatever was previously set matches. Panics upon mismatch.
-    info!("Checking state hash.");
-    match enclave.state_hash() {
-        Some(existing_state_hash) if *existing_state_hash != state_hash => {
-            panic!("State hash mismatch")
-        }
-        Some(_) => info!("State hash matches existing."),
-        None => {
-            enclave.set_state_hash(state_hash)?;
-            info!("State hash set.");
-        }
-    }
+    // MILESTONE: a share that decrypts under the enclave state_hash and matches a
+    // commitment is a legitimate submission from a KP that agreed on the state.
 
-    // MILESTONE: At this point, we are sure it is a legitimate payload (both share & state)
-
-    // 4) Persist share
+    // 3) Persist share
     info!("Persisting share.");
     let share_id = share.id;
     // Check for duplicate share ID (linear search is fine for small share count)
@@ -177,10 +247,10 @@ pub async fn provisioner_init(
         .await
         .expect("Unable to log ProvisionerInitSuccess");
 
-    // 5) If we have enough shares, finish initialization: combine shares & set config
+    // 4) If we have enough shares, reconstruct the BTC key & finish initialization.
     if current_share_count >= threshold {
         let shares_vec: Vec<Share> = received_shares.iter().cloned().collect();
-        finalize_init(&shares_vec, threshold, &enclave, request.into_state()).await;
+        finalize_init(&shares_vec, threshold, &enclave).await;
         // Log to S3 indicating that withdrawals can be expected henceforth
         enclave
             .log_init(PIEnclaveFullyInitialized)
@@ -199,14 +269,10 @@ pub async fn provisioner_init(
     Ok(())
 }
 
-/// Finalize the initialization process.
+/// Reconstruct the BTC key from the threshold shares and install it. The rest of
+/// the enclave state was set at operator_init.
 /// Panics upon an error as the enclaves state is irrecoverable at this point.
-async fn finalize_init(
-    shares: &[Share],
-    threshold: usize,
-    enclave: &Arc<Enclave>,
-    incoming_state: ProvisionerInitState,
-) {
+async fn finalize_init(shares: &[Share], threshold: usize, enclave: &Arc<Enclave>) {
     info!("Threshold reached, combining shares.");
     let enclave_k256_sk = combine_shares(shares, threshold).expect("Unable to combine shares");
     let enclave_btc_keypair = k256_sk_to_btc_keypair(&enclave_k256_sk);
@@ -217,24 +283,6 @@ async fn finalize_init(
         .set_btc_keypair(enclave_btc_keypair)
         .expect("Unable to set enclave keypair");
 
-    info!("Setting hashi public key.");
-    enclave
-        .config
-        .set_hashi_btc_pk(incoming_state.hashi_btc_master_pubkey())
-        .expect("Unable to set hashi public key");
-
-    info!("Setting withdraw config.");
-    enclave
-        .config
-        .set_limiter_config(*incoming_state.limiter_config())
-        .expect("Unable to set withdraw config");
-
-    info!("Setting enclave mutable state.");
-    enclave
-        .state
-        .init(incoming_state)
-        .expect("Unable to init state");
-
     info!("Enclave initialization complete.");
 }
 
@@ -242,7 +290,6 @@ async fn finalize_init(
 mod tests {
     use super::*;
     use crate::OperatorInitTestArgs;
-    use hashi_types::guardian::test_utils::create_btc_keypair;
     use k256::SecretKey;
 
     const TEST_N: usize = 5;
@@ -262,25 +309,57 @@ mod tests {
         (shares, enclave)
     }
 
+    /// Run commit_operator_init on a fresh enclave for the given mode (withdraw =>
+    /// carries the WithdrawModeConfig install bundle; ceremony => none).
+    async fn commit_for_mode(mode: EnclaveMode) -> Arc<Enclave> {
+        let enclave = Arc::new(Enclave::new(
+            GuardianSignKeyPair::new(rand::thread_rng()),
+            GuardianEncKeyPair::random(&mut rand::thread_rng()),
+            mode,
+        ));
+
+        let withdraw = match mode {
+            EnclaveMode::Withdraw => Some(
+                WithdrawInstall::from_config(WithdrawModeConfig::mock_for_testing(None)).unwrap(),
+            ),
+            EnclaveMode::Ceremony => None,
+        };
+
+        commit_operator_init(&enclave, crate::test_utils::mock_logger(), withdraw).await;
+        enclave
+    }
+
+    #[tokio::test]
+    async fn commit_marks_operator_init_complete_withdraw_mode() {
+        let enclave = commit_for_mode(EnclaveMode::Withdraw).await;
+        assert!(enclave.is_operator_init_complete());
+    }
+
+    #[tokio::test]
+    async fn commit_marks_operator_init_complete_ceremony_mode() {
+        let enclave = commit_for_mode(EnclaveMode::Ceremony).await;
+        assert!(enclave.is_operator_init_complete());
+    }
+
     #[tokio::test]
     async fn test_provisioner_init() {
         let (shares, enclave) = setup_test_shares_and_enclave().await;
-        let init_state = ProvisionerInitState::mock_for_testing(None);
+        let state_hash = *enclave.state_hash().unwrap();
 
-        // Simulate KPs calling provisioner_init
+        // Simulate KPs submitting share-only requests, each bound to the
+        // enclave's state_hash.
         for (i, share) in shares.iter().enumerate().take(TEST_N) {
-            let request = ProvisionerInitRequest::build_from_share_and_state(
+            let request = ProvisionerInitRequest::build_from_share(
                 share,
                 enclave.encryption_public_key(),
-                init_state.clone(),
+                state_hash,
                 &mut rand::thread_rng(),
             );
 
             let result = provisioner_init(enclave.clone(), request).await;
 
-            // Check behavior based on whether we've reached/exceeded threshold
             if i == TEST_T - 1 {
-                // At exactly threshold (first time), call should succeed
+                // At exactly threshold (first time), the BTC key is reconstructed.
                 assert!(
                     result.is_ok(),
                     "Should succeed at threshold (iteration {i})"
@@ -290,49 +369,41 @@ mod tests {
                     "Bitcoin key should be set after threshold"
                 );
                 assert!(
-                    enclave.config.is_hashi_btc_master_pubkey_set(),
-                    "Hashi BTC key should be set after threshold"
+                    enclave.is_fully_initialized(),
+                    "fully initialized at threshold"
                 );
             } else if i >= TEST_T {
-                // After threshold, subsequent init calls should fail
+                // After threshold, subsequent calls fail (already complete).
                 assert!(result.is_err(), "Should fail at iteration {i}: {result:?}");
                 assert!(
                     enclave.config.is_enclave_btc_keypair_set(),
                     "Bitcoin key should still be set"
                 );
             } else {
-                // Before threshold, call should succeed
+                // Before threshold, the BTC key is not yet reconstructed.
                 assert!(result.is_ok(), "Init should succeed before threshold");
                 assert!(
                     !enclave.config.is_enclave_btc_keypair_set(),
                     "Bitcoin key should not be set before threshold"
                 );
-                assert!(
-                    !enclave.config.is_hashi_btc_master_pubkey_set(),
-                    "Hashi BTC key should not be set before threshold"
-                );
             }
         }
-
-        println!("Successfully initialized enclave with {TEST_T} shares");
     }
 
     #[tokio::test]
     async fn test_provisioner_init_before_operator_init() {
-        // Create enclave without operator init
+        // Enclave without operator_init: no state_hash, so the request is
+        // rejected before its AAD is ever used.
         let enclave = Enclave::create_with_random_keys();
-
-        let init_state = ProvisionerInitState::mock_for_testing(None);
         let share = Share {
             id: std::num::NonZeroU16::new(1).unwrap(),
             value: k256::Scalar::ONE,
         };
-        let mut rng = rand::thread_rng();
-        let request = ProvisionerInitRequest::build_from_share_and_state(
+        let request = ProvisionerInitRequest::build_from_share(
             &share,
             enclave.encryption_public_key(),
-            init_state,
-            &mut rng,
+            [0u8; 32],
+            &mut rand::thread_rng(),
         );
 
         let result = provisioner_init(enclave, request).await;
@@ -341,52 +412,40 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic = "State hash mismatch"]
-    async fn test_provisioner_init_state_hash_mismatch() {
+    async fn test_provisioner_init_rejects_mismatched_state_hash() {
         let (shares, enclave) = setup_test_shares_and_enclave().await;
 
-        // First KP sends with state1
-        let state1 = ProvisionerInitState::mock_for_testing(None);
-        let request1 = ProvisionerInitRequest::build_from_share_and_state(
+        // A KP that binds a state_hash differing from the enclave's (i.e. it
+        // disagreed on the operator-supplied state) produces a share that fails
+        // to decrypt — rejected gracefully, not via a panic.
+        let wrong_state_hash = [0xABu8; 32];
+        assert_ne!(&wrong_state_hash, enclave.state_hash().unwrap());
+        let request = ProvisionerInitRequest::build_from_share(
             &shares[0],
             enclave.encryption_public_key(),
-            state1.clone(),
-            &mut rand::thread_rng(),
-        );
-        provisioner_init(enclave.clone(), request1).await.unwrap();
-
-        // Second KP tries to send with different state (different pub key)
-        let kp = create_btc_keypair(&[7u8; 32]);
-        let state2 = ProvisionerInitState::mock_for_testing(Some(kp));
-        assert_ne!(
-            state1.hashi_btc_master_pubkey(),
-            state2.hashi_btc_master_pubkey()
-        );
-        let request2 = ProvisionerInitRequest::build_from_share_and_state(
-            &shares[1],
-            enclave.encryption_public_key(),
-            state2,
+            wrong_state_hash,
             &mut rand::thread_rng(),
         );
 
-        // This should panic with "State hash mismatch"
-        provisioner_init(enclave, request2).await.unwrap();
+        let result = provisioner_init(enclave, request).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), InvalidInputs(_)));
     }
 
     #[tokio::test]
     async fn test_provisioner_init_invalid_share() {
         let (_shares, enclave) = setup_test_shares_and_enclave().await;
 
-        // Create a bogus share that won't match any commitment
+        // A bogus share decrypts (correct AAD) but fails the commitment check.
         let bogus_share = Share {
             id: std::num::NonZeroU16::new(1).unwrap(),
-            value: k256::Scalar::from(42u32), // Random value that won't match commitment
+            value: k256::Scalar::from(42u32),
         };
-        let state = ProvisionerInitState::mock_for_testing(None);
-        let request = ProvisionerInitRequest::build_from_share_and_state(
+        let state_hash = *enclave.state_hash().unwrap();
+        let request = ProvisionerInitRequest::build_from_share(
             &bogus_share,
             enclave.encryption_public_key(),
-            state,
+            state_hash,
             &mut rand::thread_rng(),
         );
 
@@ -398,24 +457,23 @@ mod tests {
     #[tokio::test]
     async fn test_provisioner_init_duplicate_share() {
         let (shares, enclave) = setup_test_shares_and_enclave().await;
-        let state = ProvisionerInitState::mock_for_testing(None);
+        let state_hash = *enclave.state_hash().unwrap();
 
-        // Send first share
-        let request1 = ProvisionerInitRequest::build_from_share_and_state(
+        let request1 = ProvisionerInitRequest::build_from_share(
             &shares[0],
             enclave.encryption_public_key(),
-            state.clone(),
+            state_hash,
             &mut rand::thread_rng(),
         );
         provisioner_init(enclave.clone(), request1)
             .await
             .expect("should not fail");
 
-        // Try to send the same share again (duplicate ID)
-        let request2 = ProvisionerInitRequest::build_from_share_and_state(
+        // Re-submitting the same share id is rejected.
+        let request2 = ProvisionerInitRequest::build_from_share(
             &shares[0],
             enclave.encryption_public_key(),
-            state,
+            state_hash,
             &mut rand::thread_rng(),
         );
         let result = provisioner_init(enclave, request2).await;

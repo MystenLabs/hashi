@@ -14,7 +14,6 @@ use super::LimiterConfig;
 use super::LimiterState;
 use super::OperatorInitRequest;
 use super::ProvisionerInitRequest;
-use super::ProvisionerInitState;
 use super::RotateKpsResponse;
 use super::S3BucketInfo;
 use super::S3Config;
@@ -25,6 +24,7 @@ use super::ShareCommitment;
 use super::ShareCommitments;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
+use super::WithdrawModeConfig;
 use super::WithdrawalID;
 use crate::pgp::test_utils::mock_pgp_certs;
 pub use crate::pgp::test_utils::mock_pgp_certs_armored;
@@ -86,6 +86,7 @@ impl GetGuardianInfoResponse {
                 region: "us-east-1".to_string(),
             }),
             encryption_pubkey: vec![0u8; 32],
+            state_hash: None,
             server_version: "v1".to_string(),
             enclave_btc_pubkey: None,
         };
@@ -159,27 +160,10 @@ impl OperatorInitRequest {
                 region: "us-east-1".into(),
             },
         };
-
-        let mut share_commitments = vec![];
-        for i in 0..TEST_N {
-            share_commitments.push(ShareCommitment {
-                id: NonZeroU16::new((i + 1) as u16).unwrap(),
-                digest: vec![0u8; 32],
-            })
-        }
-        let secret_sharing_instance = SecretSharingInstance::new(
-            ShareCommitments::new(share_commitments).unwrap(),
-            TEST_N,
-            TEST_T,
-            0,
-        )
-        .unwrap();
-
-        OperatorInitRequest {
+        OperatorInitRequest::new_withdraw_mode(
             s3_config,
-            secret_sharing_instance,
-            network: super::Network::Regtest,
-        }
+            WithdrawModeConfig::mock_for_testing(None),
+        )
     }
 }
 
@@ -194,7 +178,6 @@ impl ProvisionerInitRequest {
                     aes_ciphertext: vec![0u8; 32],
                 },
             },
-            state: ProvisionerInitState::mock_for_testing(None),
         }
     }
 }
@@ -225,20 +208,23 @@ fn mock_committee_with_one_member(epoch: u64) -> HashiCommittee {
     )
 }
 
-impl ProvisionerInitState {
+impl WithdrawModeConfig {
     pub fn from_parts_for_testing(
         limiter_config: LimiterConfig,
         limiter_state: LimiterState,
         committee: HashiCommittee,
         hashi_btc_master_pubkey: super::HashiMasterG,
+        network: super::Network,
     ) -> Self {
-        ProvisionerInitState::new(
+        WithdrawModeConfig::new(
             committee,
             limiter_config,
             limiter_state,
             hashi_btc_master_pubkey,
+            dummy_secret_sharing_instance(),
+            network,
         )
-        .expect("valid ProvisionerInitState")
+        .expect("valid WithdrawModeConfig")
     }
 
     pub fn mock_for_testing(kp: Option<Keypair>) -> Self {
@@ -253,7 +239,7 @@ impl ProvisionerInitState {
         let hashi_btc_master_pubkey =
             super::HashiMasterG::with_even_y_from_x_be_bytes(&x_bytes).expect("valid x coordinate");
 
-        ProvisionerInitState::new(
+        WithdrawModeConfig::new(
             mock_committee_with_one_member(0),
             LimiterConfig {
                 refill_rate: 10,
@@ -265,9 +251,17 @@ impl ProvisionerInitState {
                 next_seq: 0,
             },
             hashi_btc_master_pubkey,
+            dummy_secret_sharing_instance(),
+            super::Network::Regtest,
         )
-        .expect("valid ProvisionerInitState")
+        .expect("valid WithdrawModeConfig")
     }
+}
+
+/// A throwaway secret-sharing instance for tests that don't exercise share
+/// verification (it's carried in `WithdrawModeConfig` but not in the digest).
+fn dummy_secret_sharing_instance() -> SecretSharingInstance {
+    SecretSharingInstance::new(dummy_commitments(), TEST_N, TEST_T, 0).unwrap()
 }
 
 impl StandardWithdrawalRequest {

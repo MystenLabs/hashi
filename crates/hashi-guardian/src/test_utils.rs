@@ -157,10 +157,12 @@ pub fn mock_logger_with_layout(keys: impl IntoIterator<Item = String>) -> S3Logg
     S3Logger::from_client_for_tests(S3Config::mock_for_testing(), client)
 }
 
+/// Args for building a withdraw-mode test enclave. The withdraw-mode params
+/// (committee, limiter, BTC master pubkey, secret-sharing instance, network) all
+/// live in `config`; `s3_logger` is the only separate field.
 pub struct OperatorInitTestArgs {
-    pub network: Network,
-    pub secret_sharing_instance: SecretSharingInstance,
     pub s3_logger: S3Logger,
+    pub config: WithdrawModeConfig,
 }
 
 const TEST_N: usize = 5;
@@ -168,37 +170,26 @@ const TEST_T: usize = 3;
 
 impl Default for OperatorInitTestArgs {
     fn default() -> Self {
-        let commitments = (1..=TEST_N)
-            .map(|id| ShareCommitment {
-                id: std::num::NonZeroU16::new(id as u16).unwrap(),
-                digest: vec![],
-            })
-            .collect();
-        let secret_sharing_instance = SecretSharingInstance::new(
-            ShareCommitments::new(commitments).unwrap(),
-            TEST_N,
-            TEST_T,
-            0,
-        )
-        .unwrap();
-
         Self {
-            network: Network::Regtest,
-            secret_sharing_instance,
             s3_logger: mock_logger(),
+            config: WithdrawModeConfig::mock_for_testing(None),
         }
     }
 }
 
 impl OperatorInitTestArgs {
-    pub fn with_network(mut self, network: Network) -> Self {
-        self.network = network;
+    pub fn with_config(mut self, config: WithdrawModeConfig) -> Self {
+        self.config = config;
         self
     }
 
+    /// Rebuild `config` with a different secret-sharing instance.
     pub fn with_commitments(mut self, commitments: ShareCommitments) -> Self {
-        self.secret_sharing_instance =
-            SecretSharingInstance::new(commitments, TEST_N, TEST_T, 0).unwrap();
+        let instance = SecretSharingInstance::new(commitments, TEST_N, TEST_T, 0).unwrap();
+        let (state, _, network) = self.config.into_parts();
+        let (committee, lc, ls, master) = state.into_parts();
+        self.config =
+            WithdrawModeConfig::new(committee, lc, ls, master, instance, network).unwrap();
         self
     }
 
@@ -209,10 +200,15 @@ impl OperatorInitTestArgs {
 }
 
 impl Enclave {
+    /// Withdraw-mode enclave with fresh random keys.
     pub fn create_with_random_keys() -> Arc<Self> {
         let signing_keys = GuardianSignKeyPair::new(rand::thread_rng());
         let encryption_keys = GuardianEncKeyPair::random(&mut rand::thread_rng());
-        Arc::new(Enclave::new(signing_keys, encryption_keys))
+        Arc::new(Enclave::new(
+            signing_keys,
+            encryption_keys,
+            EnclaveMode::Withdraw,
+        ))
     }
 
     /// Create an enclave post operator_init() but pre provisioner_init().
@@ -222,19 +218,24 @@ impl Enclave {
 
     pub async fn create_operator_initialized_with(args: OperatorInitTestArgs) -> Arc<Self> {
         let enclave = Self::create_with_random_keys();
-        enclave.config.set_s3_logger(args.s3_logger).unwrap();
-        enclave.config.set_bitcoin_network(args.network).unwrap();
+        enclave.install_operator_init_for_testing(args);
+        assert!(enclave.is_operator_init_complete() && !enclave.is_provisioner_init_complete());
         enclave
-            .set_secret_sharing_instance(args.secret_sharing_instance)
-            .unwrap();
-        enclave
-            .scratchpad
+    }
+
+    /// Apply operator_init's installs to an existing enclave (mirrors `operator_init`'s
+    /// withdraw-mode commit). Lets a harness defer operator-init until DKG output exists.
+    pub fn install_operator_init_for_testing(&self, args: OperatorInitTestArgs) {
+        self.config.set_s3_logger(args.s3_logger).unwrap();
+
+        crate::init::WithdrawInstall::from_config(args.config)
+            .unwrap()
+            .install_into(self);
+
+        self.scratchpad
             .operator_init_logging_complete
             .set(())
             .expect("operator_init_logging_complete should only be set once");
-
-        assert!(enclave.is_operator_init_complete() && !enclave.is_provisioner_init_complete());
-        enclave
     }
 }
 
@@ -271,27 +272,12 @@ pub fn set_or_get_enclave_btc_pubkey(enclave: &Arc<Enclave>) -> GuardianResult<B
     Ok(pk)
 }
 
-/// Drive an operator-initialized enclave to fully-initialized state
-/// without running the share-encryption round-trip. The BTC keypair may
-/// have been generated up front via [`set_or_get_enclave_btc_pubkey`]
-/// (so the on-chain `guardian_btc_public_key` was set at publish time);
-/// if not, a fresh one is generated here.
-pub fn finalize_enclave(
-    enclave: &Arc<Enclave>,
-    committee: HashiCommittee,
-    master_pubkey: HashiMasterG,
-    limiter_config: LimiterConfig,
-    limiter_state: LimiterState,
-) -> GuardianResult<()> {
-    // Ensure the BTC keypair is set (idempotent — no-op if a caller
-    // already generated it before publish).
+/// Drive an operator-initialized enclave to fully-initialized by setting the
+/// BTC keypair (the rest of the state was installed at operator_init). The
+/// keypair may already exist from an earlier [`set_or_get_enclave_btc_pubkey`]
+/// (idempotent).
+pub fn finalize_enclave(enclave: &Arc<Enclave>) -> GuardianResult<()> {
     let _ = set_or_get_enclave_btc_pubkey(enclave)?;
-    enclave.config.set_hashi_btc_pk(master_pubkey)?;
-    enclave.config.set_limiter_config(limiter_config)?;
-
-    let init_state =
-        ProvisionerInitState::new(committee, limiter_config, limiter_state, master_pubkey)?;
-    enclave.state.init(init_state)?;
 
     enclave
         .scratchpad
@@ -313,18 +299,18 @@ pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc
         limiter_state,
     } = args;
 
-    let enclave =
-        create_operator_initialized_enclave(OperatorInitTestArgs::default().with_network(network))
-            .await;
-
-    finalize_enclave(
-        &enclave,
-        committee,
-        master_pubkey,
+    let config = WithdrawModeConfig::from_parts_for_testing(
         limiter_config,
         limiter_state,
-    )
-    .expect("finalize_enclave should succeed on a fresh enclave");
+        committee,
+        master_pubkey,
+        network,
+    );
+    let enclave =
+        create_operator_initialized_enclave(OperatorInitTestArgs::default().with_config(config))
+            .await;
+
+    finalize_enclave(&enclave).expect("finalize_enclave should succeed on a fresh enclave");
 
     assert!(enclave.is_fully_initialized());
     enclave
