@@ -901,6 +901,15 @@ impl Hashi {
         state: hashi_types::guardian::LimiterState,
     ) {
         limiter.reconcile_to(state);
+        self.record_limiter_reconcile(limiter, state);
+    }
+
+    /// Bump the reconcile counter and refresh the exported limiter gauges.
+    fn record_limiter_reconcile(
+        &self,
+        limiter: &guardian_limiter::LocalLimiter,
+        state: hashi_types::guardian::LimiterState,
+    ) {
         self.metrics.guardian_limiter_reconciled_total.inc();
         self.metrics.record_limiter_state(&state, limiter.config());
     }
@@ -922,6 +931,14 @@ impl Hashi {
                 "Local guardian limiter stalled away from the guardian; reconciled to authoritative state",
             );
             self.apply_limiter_reconcile(&limiter, state);
+        } else if limiter.reconcile_token_drift(state) {
+            // Equal seq, drifted bucket: the mirror debits at sign-time, the
+            // guardian at finalize-time — invisible to the seq-only tracker above.
+            self.record_limiter_reconcile(&limiter, state);
+            tracing::debug!(
+                seq = state.next_seq,
+                "Local guardian limiter token-drifted from the guardian; reconciled",
+            );
         }
     }
 
