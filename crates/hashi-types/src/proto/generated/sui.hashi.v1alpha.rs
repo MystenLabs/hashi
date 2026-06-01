@@ -1438,7 +1438,7 @@ pub struct WithdrawModeConfig {
     /// Limiter configuration.
     #[prost(message, optional, tag = "2")]
     pub limiter_config: ::core::option::Option<LimiterConfig>,
-    /// X-only public key bytes (32 bytes).
+    /// Compressed public key bytes (33 bytes).
     #[prost(bytes = "bytes", optional, tag = "4")]
     pub hashi_btc_master_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
     /// Rate limiter state.
