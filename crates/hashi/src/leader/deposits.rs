@@ -17,8 +17,10 @@ use hashi_types::committee::certificate_threshold;
 use hashi_types::proto::SignDepositConfirmationRequest;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 use sui_sdk_types::Address;
 use tokio::task::JoinSet;
+use tokio_util::task::AbortOnDropHandle;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -131,6 +133,30 @@ impl LeaderService {
 
                 (deposit_id, result)
             });
+        }
+    }
+
+    pub(super) fn schedule_delayed_deposit_processing(&mut self) {
+        let delay =
+            Duration::from_millis(self.inner.onchain_state().bitcoin_deposit_time_delay_ms());
+        self.delayed_deposit_processing_task =
+            Some(AbortOnDropHandle::new(tokio::task::spawn(async move {
+                tokio::time::sleep(delay).await;
+                Ok(())
+            })));
+    }
+
+    pub(super) fn handle_delayed_deposit_processing(
+        &mut self,
+        result: Result<anyhow::Result<()>, tokio::task::JoinError>,
+        checkpoint_height: u64,
+    ) {
+        self.delayed_deposit_processing_task = None;
+        Self::log_task_result("delayed_deposit_processing", result);
+
+        if self.is_current_leader(checkpoint_height) {
+            debug!("Processing deposit requests after Bitcoin deposit time-delay");
+            self.process_deposit_requests();
         }
     }
 
