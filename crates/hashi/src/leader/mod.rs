@@ -156,6 +156,12 @@ impl LeaderService {
         let mut checkpoint_rx = self.inner.onchain_state().subscribe_checkpoint();
         let mut btc_block_rx = self.inner.btc_monitor().subscribe_block_height();
 
+        // Re-armed each Bitcoin block to reload the worklist once after the deposit
+        // time-delay, so Sui-clock-gated Confirm transitions aren't stuck between blocks.
+        let deferred_deposit_reload = tokio::time::sleep(Duration::ZERO);
+        tokio::pin!(deferred_deposit_reload);
+        let mut deferred_deposit_reload_armed = false;
+
         loop {
             trace!("Waiting for next checkpoint or task completion...");
             tokio::select! {
@@ -205,6 +211,12 @@ impl LeaderService {
                     // avoid only the leader being able to reload the moment a block is seen.
                     self.reload_pending_deposit_requests();
 
+                    let delay_ms = self.inner.onchain_state().bitcoin_deposit_time_delay_ms();
+                    deferred_deposit_reload
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + Duration::from_millis(delay_ms));
+                    deferred_deposit_reload_armed = true;
+
                     if !self.is_current_leader(checkpoint_height) {
                         continue;
                     }
@@ -213,6 +225,16 @@ impl LeaderService {
 
                     self.check_delete_expired_deposit_requests(checkpoint_timestamp_ms);
                     self.process_deposit_requests();
+                }
+                () = &mut deferred_deposit_reload, if deferred_deposit_reload_armed => {
+                    deferred_deposit_reload_armed = false;
+                    // Reload for all (like the block arm); only the leader processes.
+                    self.reload_pending_deposit_requests();
+                    let checkpoint_height = checkpoint_rx.borrow().height;
+                    if self.is_current_leader(checkpoint_height) {
+                        debug!("Deposit time-delay elapsed; re-processing deposit worklist");
+                        self.process_deposit_requests();
+                    }
                 }
                 Some(result) = self.deposit_tasks.join_next() => {
                     self.handle_completed_deposit_task(result);
