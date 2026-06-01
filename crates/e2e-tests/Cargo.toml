@@ -45,6 +45,5 @@ name = "hashi-localnet"
 path = "src/main.rs"
 
 [dev-dependencies]
-age.workspace = true
 fastcrypto-tbls.workspace = true
 tracing-subscriber.workspace = true

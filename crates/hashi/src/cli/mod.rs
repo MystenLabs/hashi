@@ -309,9 +309,9 @@ pub enum BackupCommands {
         /// Path to the validator node config file
         node_config_path: std::path::PathBuf,
 
-        /// Age recipient public key used to encrypt the backup
+        /// Armored OpenPGP certificate, or path to one, used to encrypt the backup
         #[clap(long)]
-        backup_age_pubkey: Option<String>,
+        backup_pgp_cert: Option<String>,
 
         /// Directory to write the encrypted backup into
         #[clap(long, default_value = ".")]
@@ -329,9 +329,21 @@ pub enum BackupCommands {
         /// Path to the encrypted backup tarball
         backup_tarball: std::path::PathBuf,
 
-        /// Age identity file used to decrypt the backup
+        /// OpenPGP secret key file used to decrypt the backup locally
         #[clap(long)]
-        backup_age_identity: std::path::PathBuf,
+        backup_pgp_secret_key: Option<std::path::PathBuf>,
+
+        /// Decrypt with gpg instead of a local secret key file.
+        ///
+        /// Supports YubiKeys attached to this machine, and YubiKeys attached
+        /// to a laptop over SSH when the laptop's gpg-agent socket is forwarded
+        /// to the restore machine.
+        #[clap(long)]
+        use_gpg_agent: bool,
+
+        /// GNUPGHOME to use with --use-gpg-agent
+        #[clap(long, requires = "use_gpg_agent")]
+        gpg_homedir: Option<std::path::PathBuf>,
 
         /// Directory to extract the restored files into
         #[clap(long, default_value = ".")]
@@ -768,20 +780,35 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
         CliCommand::Backup { action } => match action {
             BackupCommands::Save {
                 node_config_path,
-                backup_age_pubkey,
+                backup_pgp_cert,
                 output_dir,
             } => {
-                commands::backup::save(&node_config_path, backup_age_pubkey, &output_dir)?;
+                commands::backup::save(&node_config_path, backup_pgp_cert, &output_dir)?;
             }
             BackupCommands::Restore {
                 backup_tarball,
-                backup_age_identity,
+                backup_pgp_secret_key,
+                use_gpg_agent,
+                gpg_homedir,
                 output_dir,
                 copy_to_original_paths,
             } => {
+                let decryptor = match (backup_pgp_secret_key, use_gpg_agent) {
+                    (Some(secret_key_path), false) => {
+                        commands::backup::RestoreDecryptor::LocalSecretKey { secret_key_path }
+                    }
+                    (None, true) => commands::backup::RestoreDecryptor::GpgAgent {
+                        homedir: gpg_homedir,
+                    },
+                    (Some(_), true) | (None, false) => {
+                        anyhow::bail!(
+                            "Pass exactly one restore backend: --backup-pgp-secret-key or --use-gpg-agent"
+                        );
+                    }
+                };
                 commands::backup::restore(
                     &backup_tarball,
-                    &backup_age_identity,
+                    decryptor,
                     &output_dir,
                     copy_to_original_paths,
                 )?;

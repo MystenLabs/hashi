@@ -1,135 +1,142 @@
 ---
 title: Hashi Node Backups
-description: How node operators encrypt and back up their essential data with age, with optional YubiKey-based key generation.
-keywords: [ operator, backup, age, YubiKey, encryption ]
+description: How node operators encrypt and restore essential node data with armored PGP backups, including YubiKey restore paths.
+keywords: [ operator, backup, PGP, YubiKey, encryption ]
 ---
 
-To prevent a node from being unable to rejoin the Hashi committee in the event
-of data loss, Hashi implements an automatic backup system. Every epoch, the key
-information needed to restore a node, including db data and config files, is
-saved to a compressed and encrypted file. You can restore a backup file through
-the hashi cli.
+Hashi automatically backs up the data a node needs to rejoin the committee after
+data loss. Every epoch, Hashi writes the node config, referenced key files,
+and database snapshot to a tar archive, then compresses and encrypts it as an
+ASCII-armored PGP message. The backup files use the suffix `.tar.asc`.
 
-## Creating an `age` private key
+Encryption only needs the public PGP certificate, so the backup key does not
+need to be present on the server during normal operation. Restore needs access
+to the matching private key, either as a local PGP secret-key file or through
+`gpg-agent` for YubiKey-backed keys. Because `gpg-agent` can be forwarded over
+SSH, you can restore on a remote server using a YubiKey plugged into your laptop
+instead of plugging the YubiKey into the server itself.
 
-For security reasons, we must encrypt the backups. Our backup procedure uses
-[`age`](https://github.com/FiloSottile/age).
+## Create a backup Key
 
 ### Option 1: Create a private key on a YubiKey (recommended)
 
-The recommended procedure is to generate an `age` private key entirely on
-a YubiKey and encrypt the key share with it. This makes it practically
-impossible for anyone to decrypt the backup without physical access to the
-YubiKey. The risk is that you will also be unable to decrypt the backup if
-you lose access to the YubiKey. To minimize this risk, obtain at least two
-YubiKeys and repeat the procedure for each.
+We recommend generating a PGP private key entirely on a YubiKey, and using its
+public key to encrypt the node backup. This makes it practically impossible for
+anyone to decrypt the backup without physical access to the YubiKey. The risk
+is that you will also be unable to decrypt the backup if you lose access to the
+YubiKey. To minimize this risk, we recommend obtaining at least two YubiKeys and
+repeating the procedure for each.
 
-For the initial YubiKey setup, you must use a machine with a physical USB
-port. After initial setup, you can encrypt the share to the public key of
-the YubiKey on any machine, including a cloud server without a USB port.
+For the initial YubiKey setup, you must use a machine with a physical USB port.
+After initial setup, you can encrypt the share to the public key of the YubiKey
+on any machine, including a cloud server without a USB port.
 
 1. Obtain a new [YubiKey 5 Series](https://www.yubico.com/products/yubikey-5-overview/).
    There are six models: the YubiKey 5C NFC, 5 NFC, 5C, 5 Nano, 5C Nano, and
-   5CI. Any of these models works, though avoid the Nano models because they
-   are smaller and easier to lose.
+   5CI. Any of these models works, though avoid the Nano models because they are
+   smaller and easier to lose.
 
-2. Install the required packages:
-    - The [`age`](https://github.com/FiloSottile/age) or
-      [`rage`](https://github.com/str4d/rage) package. Either works. `rage`
-      is an implementation of `age` in Rust. Both are widely available in
-      package repositories, and `rage` can also be installed with
-      `cargo install`. Install on both the machine with USB access and the
-      machine containing the key share.
-    - The [`age-plugin-yubikey`](https://github.com/str4d/age-plugin-yubikey)
-      package. This is also available on various package repositories, and
-      can also be installed with `cargo install`. Install only on the
-      machine with USB access.
+2. Install tools on the USB-capable machine:
+   - [oct](https://codeberg.org/openpgp-card/openpgp-card-tools), OpenPGP card tools.
 
-3. Generate an `age` private key on the YubiKey:
-    - On the machine with physical USB access, insert the YubiKey into the
-      machine's USB port. Ensure no other YubiKeys or smart cards are
-      plugged into the machine.
-    - Run `age-plugin-yubikey`. This starts the generation process.
-    - Select the YubiKey you plugged in.
-    - Select slot 1 for the new private key.
-    - Accept the default identity name by pressing **Enter**.
-    - Select the default Once PIN policy by pressing **Enter**.
-    - Select the default Always touch policy by pressing **Enter**.
-    - Press **y** to confirm generating the identity.
-    - Enter the current YubiKey PIN, which is the default `123456`.
-    - The setup prompts you to change the default PIN. Enter the current
-      PUK (PIN unblocking key, or admin PIN), which is the default
-      `12345678`.
-    - Enter a new PIN for the YubiKey. It can contain numbers, letters,
-      and symbols, and must be 6, 7, or 8 characters long. This PIN is
-      essential. If you lose it, you cannot decrypt the key share backup.
-      Back up this PIN in a safe place, such as a company password
-      manager. Do not use the default PIN. The value you enter is set for
-      both the PIN and the PUK.
-    - Touch the button on the YubiKey to allow certificate generation.
-    - Select the default identity filename by pressing **Enter**. This
-      identity file contains the public key for the private key you
-      generated on the YubiKey, and information telling `age` how to use
-      the private key on the YubiKey. It does not contain the private key.
+3. Insert a YubiKey and confirm it is visible. Make sure no other YubiKeys or
+   smartcards are plugged into the machine.
 
-4. Test encryption and decryption:
-    - Obtain your recipient by running `cat <identity-file-name>.txt`. You
-      see a value like
-      `age1yubikey1qwyxmxdzmw2fgfxv8na6g9xwsqcgn7vcjjte5qp9ehhse9gwpdd8zaejcc8`.
-      Save this value.
-    - Create a test text file. The contents can be anything. For example,
-      run `echo "Testing, 1, 2, 3..." > test.txt`.
-    - Encrypt the test file by running this command:
-      `age --recipient <recipient> --armor --output test.txt.age test.txt`.
-    - Run this command to decrypt:
-      `age --decrypt --identity <identify file path> hashi-key-share.age`.
-    - Enter your PIN.
-    - Tap the YubiKey to confirm.
-    - Confirm that the output matches the original test file.
+```sh
+$ oct list
+```
 
-5. Store the YubiKeys in a secure location, such as a company safe. Also
-   save the identity file in a secure location.
+You will see something like this:
+
+```
+Available OpenPGP cards:
+0006:26883270
+```
+
+4. Save the card id:
+
+```sh
+CARD=$(oct list --idents-only | head -n1)
+echo "$CARD"
+```
+
+5. Change default PINs
+
+The User PIN is used for daily cryptographic operations like decryption; the
+Admin PIN is used for card configuration such as generating/importing keys.
+
+The default PINs for new YubiKeys are:
+User PIN:  123456
+Admin PIN: 12345678
+
+PINs can contain numbers, letters, and symbols (despite the name), and must be
+6, 7, or 8 characters long.
+
+Determine a new user and admin key for the YubiKey. These PINs are essential. If
+you lose them, you cannot decrypt the node backups. Back up the PINs in a safe
+place, such as a company password manager. Do not use the default PINs.
+
+Change the PINs with the following commands. You will first be prompted to enter
+the current (default) PIN, then prompted to enter the new PIN twice.
+
+```sh
+oct pin --card "$CARD" set-user
+oct pin --card "$CARD" set-admin
+```
+
+6. Generate the PGP key on the YubiKey. You will be prompted to enter both the
+   new user and new admin PINs. The public key will be saved to the output file.
+
+```sh
+oct admin --card "$CARD" generate \
+  --userid "Your Name <you@example.com>" \
+  --output "yubikey-public-$CARD.pgp" \
+  curve25519
+```
+
+7. Repeat the above steps for any additional YubiKeys.
+
+8. Store the YubiKeys in a secure location, such as a company safe. Also save
+   the public key files in a secure location.
 
 ### Option 2: Create a local private key file
 
-If you do not want to use a YubiKey, you can generate an `age` private key
-locally and encrypt with it. Because the private key is stored in a normal
-file instead of on a YubiKey, there is a greater risk of unauthorized use
-of the private key. Store the file carefully.
+If you do not want to use a YubiKey, you can generate a PGP private key locally
+and encrypt with it. Because the private key is stored in a normal file instead
+of on a YubiKey, there is a greater risk of unauthorized use of the private key.
+Store the file carefully.
 
-1. Install the required packages:
-    - The [`age`](https://github.com/FiloSottile/age) or
-      [`rage`](https://github.com/str4d/rage) package. Either works. `rage`
-      is an implementation of `age` in Rust. Both are widely available in
-      package repositories, and `rage` can also be installed with
-      `cargo install`.
+1. Install tools:
+   - [sequoia-sq](https://gitlab.com/sequoia-pgp/sequoia-sq), Sequoia PGP.
 
 2. Generate a new key pair:
-    - Run the following command to generate a new public-private key pair
-      and save it to a file:
-      `age-keygen --output hashi-backup-secret-key.txt`.
 
-3. Test encryption and decryption:
-    - The recipient public key is printed by the previous command, looking
-      something like
-      `age1zeq3ve2rrz6qdccshxzny0jf7sd0r5qdfrakw0u9fps40svauy6s746j58`.
-      Save this value.
-    - Create a test text file. The contents can be anything. For example,
-      run `echo "Testing, 1, 2, 3..." > test.txt`.
-    - Encrypt the test file by running this command:
-      `age --recipient <recipient> --armor --output test.txt.age test.txt`.
-    - Run this command to decrypt:
-      `age --decrypt --identity hashi-backup-secret-key.txt test.txt.age`.
-    - Confirm that the output matches the key share.
+```sh
+sq key generate \
+  --own-key \
+  --name "Your Name" \
+  --email you@example.com \
+  --expiration never \
+  --without-password \
+  --output private-key.asc \
+  --rev-cert revocation-cert.asc
+```
 
-4. Store the private key file in a secure location, such as a company
-   password manager or a USB drive in a safe. Do not store the private key
-   file in the same location as the encrypted key share backup.
+3. Export the public key to a file. Note that despite the name, this doesn't
+   actually delete the private key, it just extracts the public key.
+
+```sh
+sq key delete \
+  --cert-file private-key.asc \
+  --output public-key.asc
+```
+
+4. Save the revocation, public key, and private key files in a secure location.
 
 ## Configuring hashi
 
-To enable automatic backups using the new age keypair, add the age recipient
-to the node config file under the field `backup-age-pubkey`.
+To enable automatic backups using the new PGP public key, add the public cert to
+the node config file under the field `backup-pgp-cert`.
 
 You can also configure the location where Hashi saves backups with the field
 `backup-dir`.

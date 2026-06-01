@@ -313,10 +313,10 @@ impl Hashi {
             );
             return Ok(None);
         };
-        let Some(recipient) = self.config.backup_age_pubkey.as_ref() else {
+        let Some(recipient) = self.config.backup_pgp_cert.as_ref() else {
             tracing::warn!(
                 epoch,
-                "Skipping automatic backup: backup_age_pubkey is not configured"
+                "Skipping automatic backup: backup_pgp_cert is not configured"
             );
             return Ok(None);
         };
@@ -1112,17 +1112,18 @@ fn verify_btc_pub_key_matches(
 
 #[cfg(test)]
 mod test {
-    use age::x25519;
     use fastcrypto::serde_helpers::ToFromByteArray;
     use hashi_types::committee::Bls12381PrivateKey;
     use hashi_types::committee::Committee;
     use hashi_types::committee::CommitteeMember;
     use hashi_types::committee::EncryptionPrivateKey;
     use hashi_types::committee::EncryptionPublicKey;
+    use hashi_types::pgp::test_utils::mock_pgp_cert;
     use sui_sdk_types::Address;
 
     use crate::Hashi;
     use crate::ServerVersion;
+
     use crate::config::Config;
     use crate::grpc::Client;
 
@@ -1184,11 +1185,10 @@ mod test {
         let db_path = tmpdir.path().join("db");
         let backup_dir = tmpdir.path().join("backups");
         let config_path = tmpdir.path().join("config.toml");
-        let recipient = x25519::Identity::generate().to_public();
 
         let config = Config {
             db: Some(db_path),
-            backup_age_pubkey: Some(recipient.to_string().parse().unwrap()),
+            backup_pgp_cert: Some(mock_pgp_cert()),
             backup_dir: Some(backup_dir.clone()),
             ..Default::default()
         };

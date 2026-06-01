@@ -25,7 +25,6 @@ use super::KPEncryptedShare;
 use super::LimiterConfig;
 use super::LimiterState;
 use super::OperatorInitRequest;
-use super::PgpPublicCert;
 use super::ProvisionerInitRequest;
 use super::ProvisionerInitState;
 use super::RotateKpsRequest;
@@ -46,6 +45,7 @@ use super::bitcoin_utils::InputUTXOWire;
 use super::bitcoin_utils::InternalOutputUTXO;
 use super::bitcoin_utils::OutputUTXOWire;
 use super::bitcoin_utils::TxUTXOsWire;
+use crate::pgp::PgpPublicCert;
 use crate::proto as pb;
 use bitcoin::Address as BitcoinAddress;
 use bitcoin::Amount;
@@ -92,7 +92,7 @@ impl TryFrom<pb::SetupNewKeyRequest> for SetupNewKeyRequest {
             .key_provisioner_pgp_certs
             .iter()
             .cloned()
-            .map(PgpPublicCert::new)
+            .map(|cert| PgpPublicCert::new(cert).map_err(|e| InvalidInputs(e.to_string())))
             .collect::<GuardianResult<Vec<_>>>()?;
 
         let num_shares = req.num_shares.ok_or_else(|| missing("num_shares"))? as usize;

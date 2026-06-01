@@ -13,7 +13,6 @@ use super::KPEncryptedShare;
 use super::LimiterConfig;
 use super::LimiterState;
 use super::OperatorInitRequest;
-use super::PgpPublicCert;
 use super::ProvisionerInitRequest;
 use super::ProvisionerInitState;
 use super::RotateKpsResponse;
@@ -27,6 +26,8 @@ use super::ShareCommitments;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
 use super::WithdrawalID;
+use crate::pgp::test_utils::mock_pgp_certs;
+pub use crate::pgp::test_utils::mock_pgp_certs_armored;
 
 use super::bitcoin_utils::BTC_LIB;
 use super::bitcoin_utils::InputUTXO;
@@ -46,8 +47,6 @@ use bitcoin::secp256k1::Message;
 use bitcoin::secp256k1::SecretKey;
 use bitcoin::taproot::TapLeafHash;
 use ed25519_consensus::SigningKey;
-use sequoia_openpgp::cert::prelude::CertBuilder;
-use sequoia_openpgp::serialize::Serialize;
 use std::num::NonZeroU16;
 use sui_sdk_types::Address as SuiAddress;
 use sui_sdk_types::bcs::FromBcs;
@@ -105,30 +104,8 @@ impl GetGuardianInfoResponse {
 
 impl SetupNewKeyRequest {
     pub fn mock_for_testing() -> Self {
-        SetupNewKeyRequest::new(mock_pgp_certs(), TEST_N, TEST_T).unwrap()
+        SetupNewKeyRequest::new(mock_pgp_certs(TEST_N), TEST_N, TEST_T).unwrap()
     }
-}
-
-fn mock_pgp_cert_armored() -> String {
-    let (cert, _) = CertBuilder::general_purpose(["kp@example.com"])
-        .generate()
-        .unwrap();
-    let mut armored = Vec::new();
-    cert.armored().export(&mut armored).unwrap();
-    String::from_utf8(armored).unwrap()
-}
-
-/// Generate `n` fresh armored OpenPGP certs (distinct keys), e.g. for a new KP set.
-pub fn mock_pgp_certs_armored(n: usize) -> Vec<String> {
-    (0..n).map(|_| mock_pgp_cert_armored()).collect()
-}
-
-fn mock_pgp_cert() -> PgpPublicCert {
-    PgpPublicCert::new(mock_pgp_cert_armored()).unwrap()
-}
-
-fn mock_pgp_certs() -> Vec<PgpPublicCert> {
-    (0..TEST_N).map(|_| mock_pgp_cert()).collect()
 }
 
 fn dummy_commitments() -> ShareCommitments {

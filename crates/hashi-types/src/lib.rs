@@ -5,6 +5,7 @@ pub mod bitcoin_txid;
 pub mod committee;
 pub mod guardian;
 pub mod move_types;
+pub mod pgp;
 pub mod proto;
 pub mod telemetry;
 pub mod utils;

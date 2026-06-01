@@ -19,12 +19,12 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
 
-    use age::secrecy::ExposeSecret;
-    use age::x25519;
     use anyhow::Result;
     use hashi::backup::BACKUP_FILE_NAME_PREFIX;
     use hashi::cli::commands;
+    use hashi::cli::commands::backup::RestoreDecryptor;
     use hashi::config::Config as HashiConfig;
+    use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use tempfile::TempDir;
 
     use crate::HashiNodeHandle;
@@ -55,15 +55,14 @@ mod tests {
         nodes[0].current_epoch().unwrap()
     }
 
-    /// Generate a fresh native x25519 age identity, write its secret to a
-    /// file, and return `(recipient_string, identity_file_path)` ready to be
+    /// Generate a fresh OpenPGP keypair, write its secret key to a
+    /// file, and return `(public_cert, secret_key_file_path)` ready to be
     /// passed to `backup::save` and `backup::restore` respectively.
-    fn generate_age_identity_pair(dir: &Path) -> (String, PathBuf) {
-        let identity = x25519::Identity::generate();
-        let recipient = identity.to_public().to_string();
-        let identity_path = dir.join("backup-identity.txt");
-        std::fs::write(&identity_path, identity.to_string().expose_secret()).unwrap();
-        (recipient, identity_path)
+    fn generate_pgp_keypair(dir: &Path) -> (String, PathBuf) {
+        let (public, secret) = mock_pgp_keypair();
+        let secret_key_path = dir.join("backup-secret-key.asc");
+        std::fs::write(&secret_key_path, secret).unwrap();
+        (public, secret_key_path)
     }
 
     /// Materialise an in-memory `HashiConfig` (the node's runtime config) to
@@ -82,7 +81,7 @@ mod tests {
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .find(|p| {
-                p.extension().and_then(|e| e.to_str()) == Some("age")
+                p.extension().and_then(|e| e.to_str()) == Some("asc")
                     && p.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
                         name.starts_with(&format!("{BACKUP_FILE_NAME_PREFIX}-"))
                     })
@@ -94,7 +93,7 @@ mod tests {
     ///
     /// 1. DKG on 4 nodes + one key rotation so node 0's DB contains entries
     ///    across multiple keyspaces.
-    /// 2. Shut down node 0. Serialise its config, generate an age identity,
+    /// 2. Shut down node 0. Serialise its config, generate an OpenPGP keypair,
     ///    and run `hashi backup save` to produce an encrypted tarball.
     /// 3. Delete node 0's on-disk state entirely (simulating "machine lost,
     ///    only the backup remains").
@@ -168,12 +167,12 @@ mod tests {
             .expect("node 0 must have a db path")
             .clone();
 
-        // 3. Serialise config, generate age identity, save backup.
+        // 3. Serialise config, generate OpenPGP keypair, save backup.
         let backup_dir = tempfile::Builder::new()
             .prefix("hashi-backup-e2e-")
             .tempdir()?;
         let node_config_path = write_node_config_to_disk(&node0_config, backup_dir.path());
-        let (recipient, identity_path) = generate_age_identity_pair(backup_dir.path());
+        let (recipient, secret_key_path) = generate_pgp_keypair(backup_dir.path());
 
         let save_out_dir: TempDir = tempfile::Builder::new()
             .prefix("hashi-backup-out-")
@@ -208,7 +207,7 @@ mod tests {
             .tempdir()?;
         commands::backup::restore(
             &tarball,
-            &identity_path,
+            RestoreDecryptor::LocalSecretKey { secret_key_path },
             restore_out_dir.path(),
             /* copy_to_original_paths */ true,
         )?;
