@@ -222,6 +222,15 @@ impl EnclaveState {
             .ok_or_else(|| InvalidInputs("committee not initialized".into()))
     }
 
+    /// Whether the committee is installed, without cloning the `Arc` — used by the
+    /// operator_init completeness check, which runs on the heartbeat/withdrawal path.
+    fn has_committee(&self) -> bool {
+        self.committee
+            .read()
+            .expect("rwlock should never throw an error")
+            .is_some()
+    }
+
     /// Set committee. Called only from `init` (operator_init).
     fn set_committee(&self, committee: HashiCommittee) -> GuardianResult<()> {
         info!("Setting committee for epoch {}.", committee.epoch());
@@ -385,7 +394,7 @@ impl Enclave {
                     && self.scratchpad.secret_sharing_instance.get().is_some()
                     && self.scratchpad.state_hash.get().is_some()
                     && self.config.hashi_btc_master_pubkey.get().is_some()
-                    && self.state.get_committee().is_ok()
+                    && self.state.has_committee()
                     && self.state.rate_limiter.get().is_some()
             }
         }
