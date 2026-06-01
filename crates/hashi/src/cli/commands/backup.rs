@@ -23,6 +23,7 @@ use crate::config::Config;
 use crate::db::Database;
 
 pub enum RestoreDecryptor {
+    Unencrypted,
     LocalSecretKey { secret_key_path: PathBuf },
     GpgAgent { homedir: Option<PathBuf> },
 }
@@ -144,10 +145,14 @@ pub fn restore(
             )
         })?;
 
-    // Both decryptors yield the decompressed tar: sequoia inflates the OpenPGP
-    // compression layer in-process, and `gpg --decrypt` inflates it before
-    // streaming to us.
-    let mut decrypted: Box<dyn io::Read> = match decryptor {
+    // Encrypted backups yield the decompressed tar after OpenPGP decryption.
+    // Unencrypted backups are already raw tar archives.
+    let mut backup_stream: Box<dyn io::Read> = match decryptor {
+        RestoreDecryptor::Unencrypted => {
+            Box::new(File::open(backup_tarball).with_context(|| {
+                format!("Failed to open backup tarball {}", backup_tarball.display())
+            })?)
+        }
         RestoreDecryptor::LocalSecretKey { secret_key_path } => Box::new(
             decrypt_with_local_secret_key(backup_tarball, &secret_key_path)?,
         ),
@@ -156,7 +161,7 @@ pub fn restore(
         }
     };
     let (manifest, manifest_toml) = {
-        let mut archive = tar::Archive::new(&mut decrypted);
+        let mut archive = tar::Archive::new(&mut backup_stream);
         let mut entries = archive.entries()?;
         let manifest_entry = entries
             .next()
@@ -166,8 +171,8 @@ pub fn restore(
         backup::restore_backup_entries(entries, staging.path(), &manifest)?;
         (manifest, manifest_toml)
     };
-    io::copy(&mut decrypted, &mut io::sink())
-        .context("Failed to finish reading encrypted backup stream")?;
+    io::copy(&mut backup_stream, &mut io::sink())
+        .context("Failed to finish reading backup stream")?;
     // Manifest is written last so it acts as a marker that extraction finished
     // successfully. Any earlier failure leaves the staging dir without a
     // manifest, so partial state can never be confused for a complete restore.
@@ -325,6 +330,18 @@ mod tests {
         }
     }
 
+    fn write_unencrypted_tar_backup(backup: &SavedBackup) -> PathBuf {
+        let secret_key = fs::read(&backup.secret_key_file).unwrap();
+        let encrypted = File::open(&backup.tarball).unwrap();
+        let mut decrypted = hashi_types::pgp::decrypt_with_secret_key(encrypted, &secret_key)
+            .expect("encrypted backup should decrypt");
+
+        let tarball = backup.tarball.with_extension("");
+        let mut output = File::create(&tarball).unwrap();
+        io::copy(&mut decrypted, &mut output).unwrap();
+        tarball
+    }
+
     fn assert_file_eq(path: &Path, expected: &[u8]) {
         let actual =
             fs::read(path).unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
@@ -417,7 +434,7 @@ mod tests {
 
         let chain = format!("{err:#}");
         assert!(
-            chain.contains("Failed to finish reading encrypted backup stream")
+            chain.contains("Failed to finish reading backup stream")
                 || chain.contains("OpenPGP")
                 || chain.contains("unexpected end of file"),
             "expected truncated backup error, got: {chain}"
@@ -809,7 +826,21 @@ mod tests {
     }
 
     #[test]
-    fn restore_rejects_tarball_without_pgp_suffix() {
+    fn restore_accepts_unencrypted_tar_without_decrypting() {
+        let fixture = TestFixture::new();
+        let backup = save_with_fresh_pgp_key(&fixture);
+        let tarball = write_unencrypted_tar_backup(&backup);
+
+        let out = tempfile::Builder::new().tempdir().unwrap();
+        restore(&tarball, RestoreDecryptor::Unencrypted, out.path(), false).unwrap();
+
+        let extract_dir = expected_extract_dir(&tarball, out.path());
+        assert!(extract_dir.join("config.toml").is_file());
+        assert!(extract_dir.join(backup::DB_SNAPSHOT_TAR_PREFIX).is_dir());
+    }
+
+    #[test]
+    fn restore_rejects_tarball_without_backup_suffix() {
         let fixture = TestFixture::new();
         let backup = save_with_fresh_pgp_key(&fixture);
 
@@ -822,7 +853,7 @@ mod tests {
             restore(&bad, local_secret_key_decryptor(&backup), out.path(), false).unwrap_err();
         let chain = format!("{err:#}");
         assert!(
-            chain.contains(".tar.asc suffix"),
+            chain.contains(".tar or .tar.asc suffix"),
             "expected suffix-required error, got: {chain}"
         );
     }

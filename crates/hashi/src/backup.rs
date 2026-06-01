@@ -1,11 +1,11 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Core backup logic for creating and restoring encrypted backup archives.
+//! Core backup logic for creating encrypted backup archives and restoring backup archives.
 //!
 //! This module handles the mechanics of building backup manifests, encrypting
-//! files into OpenPGP-wrapped, compressed tar archives, and extracting them. CLI-specific
-//! orchestration (config loading, DB-open locking policy, and user output)
+//! files into OpenPGP-wrapped, compressed tar archives, and extracting encrypted or
+//! unencrypted tar archives. CLI-specific orchestration (config loading, DB-open locking policy, and user output)
 //! lives in [`crate::cli::commands::backup`].
 
 use anyhow::Context;
@@ -40,6 +40,12 @@ use fjall::Readable;
 pub const BACKUP_FILE_NAME_PREFIX: &str = "hashi-backup";
 pub const BACKUP_MANIFEST_FILE_NAME: &str = "hashi-backup-manifest.toml";
 pub const DB_SNAPSHOT_TAR_PREFIX: &str = "hashi-db-snapshot";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackupArchiveFormat {
+    Encrypted,
+    Unencrypted,
+}
 
 enum BackupRequest {
     EpochChanged(u64),
@@ -463,10 +469,37 @@ fn append_db_backup_to_tar<W: Write>(
     Ok(())
 }
 
+/// Determine the format of a backup tarball from its file name.
+///
+/// `.tar.asc` backups are OpenPGP-encrypted; `.tar` backups are already plaintext.
+pub fn archive_format(backup_tarball: &Path) -> Result<BackupArchiveFormat> {
+    let file_name = backup_tarball
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Backup tarball path has no file name: {}",
+                backup_tarball.display()
+            )
+        })?;
+
+    if file_name.ends_with(".tar.asc") {
+        Ok(BackupArchiveFormat::Encrypted)
+    } else if file_name.ends_with(".tar") {
+        Ok(BackupArchiveFormat::Unencrypted)
+    } else {
+        anyhow::bail!(
+            "Backup tarball must have a .tar or .tar.asc suffix: {}",
+            backup_tarball.display()
+        );
+    }
+}
+
 /// Determine the directory name to extract a backup tarball into.
 ///
-/// Strips the `.tar.asc` suffix from the tarball's file name, so
-/// `<backup-prefix>-20260409T230419Z.tar.asc` becomes
+/// Strips the `.tar.asc` or `.tar` suffix from the tarball's file name, so
+/// `<backup-prefix>-20260409T230419Z.tar.asc` and
+/// `<backup-prefix>-20260409T230419Z.tar` both become
 /// `<backup-prefix>-20260409T230419Z`. An input without one of those
 /// suffixes is rejected rather than silently used verbatim, to avoid
 /// surprising extraction directory names when users point at the wrong file.
@@ -481,12 +514,16 @@ pub fn extract_dir_name(backup_tarball: &Path) -> Result<PathBuf> {
             )
         })?;
 
-    let stem = file_name.strip_suffix(".tar.asc").ok_or_else(|| {
-        anyhow::anyhow!(
-            "Backup tarball must have a .tar.asc suffix: {}",
+    let stem = if let Some(stem) = file_name.strip_suffix(".tar.asc") {
+        stem
+    } else if let Some(stem) = file_name.strip_suffix(".tar") {
+        stem
+    } else {
+        anyhow::bail!(
+            "Backup tarball must have a .tar or .tar.asc suffix: {}",
             backup_tarball.display()
-        )
-    })?;
+        );
+    };
 
     // Require the stem to be exactly one plain directory component when
     // joined under the user's output dir. Catches both the empty case (zero
