@@ -17,7 +17,7 @@ service BridgeService {
   // confirming that the validator agrees the bitcoin transaction is valid.
   rpc SignWithdrawalTxConstruction(SignWithdrawalTxConstructionRequest) returns (SignWithdrawalTxConstructionResponse);
   // Step 2b: Sign a bitcoin withdrawal transaction (MPC Schnorr).
-  rpc SignWithdrawalTransaction(SignWithdrawalTransactionRequest) returns (SignWithdrawalTransactionResponse);
+  rpc SignWithdrawalTransaction(SignWithdrawalTransactionRequest) returns (stream SignWithdrawalTransactionPartial);
   // Sign a guardian rate-limiting request; the leader aggregates the
   // certificate and forwards it to the guardian after MPC quorum.
   rpc SignGuardianWithdrawalRequest(SignGuardianWithdrawalRequestRequest) returns (SignGuardianWithdrawalRequestResponse);
@@ -144,9 +144,12 @@ message SignWithdrawalTransactionRequest {
   optional uint64 timestamp_secs = 3;
 }
 
-message SignWithdrawalTransactionResponse {
-  // One aggregated MPC Schnorr signature per transaction input.
-  repeated bytes signatures_by_input = 1;
+message SignWithdrawalTransactionPartial {
+  // Index of the transaction input this signature is for.
+  uint32 input_index = 1;
+
+  // 64-byte aggregated MPC signature for the input.
+  bytes signature = 2;
 }
 
 // Maps to crate::withdrawals::WithdrawalTxSigning

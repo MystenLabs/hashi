@@ -181,6 +181,7 @@ impl LeaderService {
             &txn.id,
             expected_limiter_seq,
             timestamp_secs,
+            txn.inputs.len(),
             &members,
         )
         .await
@@ -322,6 +323,7 @@ impl LeaderService {
         withdrawal_txn_id: &Address,
         expected_limiter_seq: Option<u64>,
         timestamp_secs: u64,
+        expected_input_count: usize,
         members: &[CommitteeMember],
     ) -> Option<Vec<SchnorrSignature>> {
         let futures: Vec<_> = members
@@ -332,6 +334,7 @@ impl LeaderService {
                     withdrawal_txn_id,
                     expected_limiter_seq,
                     timestamp_secs,
+                    expected_input_count,
                     member,
                 )
             })
@@ -362,6 +365,7 @@ impl LeaderService {
         withdrawal_txn_id: &Address,
         expected_limiter_seq: Option<u64>,
         timestamp_secs: u64,
+        expected_input_count: usize,
         member: &CommitteeMember,
     ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let validator_address = member.validator_address();
@@ -383,33 +387,53 @@ impl LeaderService {
             timestamp_secs: Some(timestamp_secs),
         };
 
-        let response = rpc_client
+        let mut stream = rpc_client
             .sign_withdrawal_transaction(proto_request)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
-                    "Failed to get withdrawal tx signature from {validator_address}: {e}"
+                    "Failed to start withdrawal tx signature stream from {validator_address}: {e}"
+                )
+            })?
+            .into_inner();
+        let mut by_index: Vec<Option<SchnorrSignature>> =
+            (0..expected_input_count).map(|_| None).collect();
+        let mut received = 0usize;
+        while let Some(partial) = stream
+            .message()
+            .await
+            .map_err(|e| anyhow::anyhow!("stream error from {validator_address}: {e}"))?
+        {
+            let idx = partial.input_index as usize;
+            let slot = by_index.get_mut(idx).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Withdrawal tx signature stream from {validator_address} returned out-of-range input_index {idx} (expected < {expected_input_count})",
                 )
             })?;
-
-        trace!(
-            "Retrieved withdrawal tx signature from {}",
-            validator_address
-        );
-
-        response
-            .into_inner()
-            .signatures_by_input
-            .iter()
-            .map(|sig_bytes| {
-                let bytes: [u8; 64] = sig_bytes.as_ref().try_into().map_err(|_| {
-                    anyhow::anyhow!("Invalid Schnorr signature length from {validator_address}")
-                })?;
-                SchnorrSignature::from_byte_array(&bytes).map_err(|e| {
-                    anyhow::anyhow!("Invalid Schnorr signature from {validator_address}: {e}")
-                })
-            })
-            .collect()
+            if slot.is_some() {
+                anyhow::bail!(
+                    "Withdrawal tx signature stream from {validator_address} returned duplicate input_index {idx}",
+                );
+            }
+            let bytes: [u8; 64] = partial.signature.as_ref().try_into().map_err(|_| {
+                anyhow::anyhow!("Invalid signature length from {validator_address}")
+            })?;
+            let sig = SchnorrSignature::from_byte_array(&bytes)
+                .map_err(|e| anyhow::anyhow!("Invalid signature from {validator_address}: {e}"))?;
+            *slot = Some(sig);
+            received += 1;
+        }
+        trace!("Retrieved {received} withdrawal tx signatures from {validator_address}",);
+        if received != expected_input_count {
+            anyhow::bail!(
+                "Withdrawal tx signature stream from {validator_address} returned {received} partials, expected {expected_input_count}",
+            );
+        }
+        by_index.into_iter().collect::<Option<Vec<_>>>().ok_or_else(|| {
+            anyhow::anyhow!(
+                "internal invariant violated: count matched but slot was empty (from {validator_address})",
+            )
+        })
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
