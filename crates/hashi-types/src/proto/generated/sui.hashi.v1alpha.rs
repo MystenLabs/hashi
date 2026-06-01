@@ -118,6 +118,10 @@ pub struct SignWithdrawalTransactionRequest {
     /// before participating in MPC signing.
     #[prost(uint64, optional, tag = "2")]
     pub expected_limiter_seq: ::core::option::Option<u64>,
+    /// Leader's checkpoint timestamp (unix seconds), bounded by each member
+    /// against its own checkpoint clock. Absent from pre-upgrade leaders.
+    #[prost(uint64, optional, tag = "3")]
+    pub timestamp_secs: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignWithdrawalTransactionResponse {

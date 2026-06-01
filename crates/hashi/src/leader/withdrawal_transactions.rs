@@ -176,12 +176,15 @@ impl LeaderService {
         // 1. Request signed withdrawal tx witnesses from committee members.
         // MPC signing requires all threshold members to participate simultaneously
         // via P2P, so we must fan out requests in parallel.
-        let signatures_by_input =
-            Self::collect_withdrawal_tx_signatures(&inner, &txn.id, expected_limiter_seq, &members)
-                .await
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Failed to collect MPC signatures for {:?}", txn.id)
-                })?;
+        let signatures_by_input = Self::collect_withdrawal_tx_signatures(
+            &inner,
+            &txn.id,
+            expected_limiter_seq,
+            timestamp_secs,
+            &members,
+        )
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Failed to collect MPC signatures for {:?}", txn.id))?;
 
         // 2. Extract raw signature bytes for on-chain storage
         let witness_signatures: Vec<Vec<u8>> = signatures_by_input
@@ -318,6 +321,7 @@ impl LeaderService {
         inner: &Arc<Hashi>,
         withdrawal_txn_id: &Address,
         expected_limiter_seq: Option<u64>,
+        timestamp_secs: u64,
         members: &[CommitteeMember],
     ) -> Option<Vec<SchnorrSignature>> {
         let futures: Vec<_> = members
@@ -327,6 +331,7 @@ impl LeaderService {
                     inner,
                     withdrawal_txn_id,
                     expected_limiter_seq,
+                    timestamp_secs,
                     member,
                 )
             })
@@ -356,6 +361,7 @@ impl LeaderService {
         inner: &Arc<Hashi>,
         withdrawal_txn_id: &Address,
         expected_limiter_seq: Option<u64>,
+        timestamp_secs: u64,
         member: &CommitteeMember,
     ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let validator_address = member.validator_address();
@@ -374,6 +380,7 @@ impl LeaderService {
         let proto_request = SignWithdrawalTransactionRequest {
             withdrawal_txn_id: withdrawal_txn_id.as_bytes().to_vec().into(),
             expected_limiter_seq,
+            timestamp_secs: Some(timestamp_secs),
         };
 
         let response = rpc_client

@@ -138,6 +138,10 @@ message SignWithdrawalTransactionRequest {
   // committee member validates this against its own limiter's `next_seq`
   // before participating in MPC signing.
   optional uint64 expected_limiter_seq = 2;
+
+  // Leader's checkpoint timestamp (unix seconds), bounded by each member
+  // against its own checkpoint clock. Absent from pre-upgrade leaders.
+  optional uint64 timestamp_secs = 3;
 }
 
 message SignWithdrawalTransactionResponse {
