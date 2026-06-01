@@ -319,9 +319,9 @@ mod tests {
         ));
 
         let withdraw = match mode {
-            EnclaveMode::Withdraw => {
-                Some(WithdrawInstall::from_config(WithdrawModeConfig::mock_for_testing(None)).unwrap())
-            }
+            EnclaveMode::Withdraw => Some(
+                WithdrawInstall::from_config(WithdrawModeConfig::mock_for_testing(None)).unwrap(),
+            ),
             EnclaveMode::Ceremony => None,
         };
 
