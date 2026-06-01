@@ -613,6 +613,10 @@ impl Hashi {
         &self,
         from_epoch: u64,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
+        if let Some(signature) = self.get_guardian_handoff_signature(from_epoch) {
+            return Ok(signature);
+        }
+
         let validator_address = self
             .config
             .validator_address()
@@ -646,7 +650,9 @@ impl Hashi {
             new_committee: hashi_types::move_types::Committee::from(new_committee),
         };
 
-        self.sign_message_proto_at_epoch(&transition, from_epoch)
+        let signature = self.sign_message_proto_at_epoch(&transition, from_epoch)?;
+        self.store_guardian_handoff_signature(from_epoch, signature.clone());
+        Ok(signature)
     }
 
     // --- MPC BTC tx signing ---

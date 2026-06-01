@@ -22,6 +22,7 @@ public struct CommitteeSet has store {
     /// The current epoch.
     epoch: u64,
     committees: Bag,
+    guardian_handoffs: Bag,
     //TODO do we want more info for this?
     pending_epoch_change: Option<u64>,
     /// The MPC committee's threshold public key.
@@ -33,9 +34,15 @@ public(package) fun create(ctx: &mut TxContext): CommitteeSet {
         members: sui::bag::new(ctx),
         epoch: 0,
         committees: sui::bag::new(ctx),
+        guardian_handoffs: sui::bag::new(ctx),
         pending_epoch_change: option::none(),
         mpc_public_key: std::vector::empty(),
     }
+}
+
+public struct GuardianCommitteeHandoff has store {
+    new_committee: Committee,
+    cert: committee::CommitteeSignature,
 }
 
 fun member(self: &CommitteeSet, validator_address: address): &MemberInfo {
@@ -64,6 +71,21 @@ public(package) fun has_committee(self: &CommitteeSet, epoch: u64): bool {
 
 fun insert_committee(self: &mut CommitteeSet, committee: Committee) {
     self.committees.add(committee.epoch(), committee)
+}
+
+public(package) fun insert_guardian_handoff(
+    self: &mut CommitteeSet,
+    from_epoch: u64,
+    new_committee: Committee,
+    cert: committee::CommitteeSignature,
+) {
+    assert!(!self.guardian_handoffs.contains_with_type<u64, GuardianCommitteeHandoff>(from_epoch));
+    self.guardian_handoffs.add(from_epoch, GuardianCommitteeHandoff { new_committee, cert })
+}
+
+#[test_only]
+public fun has_guardian_handoff_for_testing(self: &CommitteeSet, from_epoch: u64): bool {
+    self.guardian_handoffs.contains_with_type<u64, GuardianCommitteeHandoff>(from_epoch)
 }
 
 fun remove_committee(self: &mut CommitteeSet, epoch: u64): Committee {
