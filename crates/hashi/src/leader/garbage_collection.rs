@@ -4,7 +4,6 @@
 //! Garbage collection for expired on-chain data.
 
 use super::LeaderService;
-use super::PendingUtxoCleanup;
 use crate::onchain::types::DepositRequest;
 use crate::onchain::types::Proposal;
 use crate::onchain::types::ProposalType;
@@ -19,9 +18,11 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 
-// const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 3; // 3 days
-// const DEPOSIT_REQUEST_DELETE_DELAY_MS: u64 = 1000 * 60 * 60 * 24; // 1 day
-const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24; // 1 days
+pub(super) struct PendingUtxoCleanup {
+    pub(super) utxo_ids: Vec<UtxoId>,
+}
+
+const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24; // 1 day
 const DEPOSIT_REQUEST_DELETE_DELAY_MS: u64 = 1000 * 60; // 1 minute
 const MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC: usize = 500;
 
@@ -32,7 +33,7 @@ impl LeaderService {
     /// Check for and delete expired deposit requests.
     /// Deposit requests are sorted by timestamp and deleted if they are older than
     /// MAX_DEPOSIT_REQUEST_AGE_MS.
-    pub(crate) fn check_delete_expired_deposit_requests(&mut self, checkpoint_timestamp_ms: u64) {
+    pub(super) fn check_delete_expired_deposit_requests(&mut self, checkpoint_timestamp_ms: u64) {
         if self.deposit_gc_task.is_some() {
             debug!("Deposit GC task already in-flight, skipping");
             return;
@@ -89,7 +90,7 @@ impl LeaderService {
 
     /// Check for and delete expired proposals.
     /// Proposals are sorted by timestamp and deleted if they are older than MAX_PROPOSAL_AGE_MS.
-    pub(crate) fn check_delete_proposals(&mut self, checkpoint_timestamp_ms: u64) {
+    pub(super) fn check_delete_proposals(&mut self, checkpoint_timestamp_ms: u64) {
         debug!("Entering check_delete_proposals");
 
         if self.proposal_gc_task.is_some() {
@@ -140,7 +141,7 @@ impl LeaderService {
     /// scans on-chain state for orphaned locked UTXOs whose withdrawal has
     /// already been confirmed (handles the crash-between-confirm-and-cleanup
     /// case).
-    pub(crate) fn check_cleanup_spent_utxos(&mut self) {
+    pub(super) fn check_cleanup_spent_utxos(&mut self) {
         if self.utxo_cleanup_gc_task.is_some() {
             debug!("UTXO cleanup GC task already in-flight, skipping");
             return;
@@ -316,9 +317,7 @@ impl LeaderService {
 ///
 /// This is the pure-data core of [`LeaderService::discover_orphaned_utxo_cleanups`],
 /// extracted so it can be unit-tested without constructing a full `LeaderService`.
-pub(crate) fn find_spent_utxos_pending_cleanup(
-    utxo_records: &BTreeMap<UtxoId, UtxoRecord>,
-) -> Vec<UtxoId> {
+fn find_spent_utxos_pending_cleanup(utxo_records: &BTreeMap<UtxoId, UtxoRecord>) -> Vec<UtxoId> {
     utxo_records
         .iter()
         .filter(|(_, record)| record.spent_epoch.is_some())
