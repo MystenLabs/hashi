@@ -10,6 +10,8 @@ use sui_sdk_types::Address;
 
 use crate::constants::SUI_MAINNET_CHAIN_ID;
 
+const DEFAULT_WITHDRAWAL_SIGNING_CONCURRENCY: usize = 25;
+
 /// Load an Ed25519 private key from a file path or inline PEM string.
 ///
 /// Supported formats:
@@ -105,15 +107,9 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub db: Option<PathBuf>,
 
-    /// Age recipient public key used for node backups.
-    ///
-    /// Accepts both native x25519 recipients and plugin recipients (e.g. YubiKey).
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        with = "crate::backup::optional_age_recipient"
-    )]
-    pub backup_age_pubkey: Option<crate::backup::BackupRecipient>,
+    /// Armored OpenPGP certificate used for node backups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_pgp_cert: Option<hashi_types::pgp::PgpPublicCert>,
 
     /// Directory to write automatic encrypted backups into.
     ///
@@ -172,6 +168,14 @@ pub struct Config {
     /// Defaults to 70 (the algorithm's hard upper bound).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdrawal_max_batch_size: Option<usize>,
+
+    /// Max number of withdrawal-tx inputs whose MPC signatures the signer
+    /// will collect in parallel within a single `sign_withdrawal_transaction`
+    /// RPC.
+    ///
+    /// Defaults to 25.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawal_signing_concurrency: Option<usize>,
 
     /// Maximum number of mempool-only (0-confirmation) ancestors a UTXO may
     /// have and still be eligible as a coin-selection input. Constrains how
@@ -372,6 +376,12 @@ impl Config {
         self.withdrawal_max_batch_size
             .unwrap_or(crate::utxo_pool::CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS)
             .min(crate::utxo_pool::CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS)
+    }
+
+    pub fn withdrawal_signing_concurrency(&self) -> usize {
+        self.withdrawal_signing_concurrency
+            .unwrap_or(DEFAULT_WITHDRAWAL_SIGNING_CONCURRENCY)
+            .max(1)
     }
 
     pub fn max_mempool_chain_depth(&self) -> usize {

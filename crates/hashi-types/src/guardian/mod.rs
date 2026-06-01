@@ -29,6 +29,7 @@ pub use crate::committee::CommitteeMember as HashiCommitteeMember;
 use crate::committee::CommitteeSignature;
 pub use crate::committee::SignedMessage as HashiSigned;
 use crate::guardian::s3_utils::S3HourScopedDirectory;
+use crate::pgp::PgpPublicCert;
 pub use bitcoin::Address as BitcoinAddress;
 pub use bitcoin::secp256k1::Keypair as BitcoinKeypair;
 pub use bitcoin::secp256k1::XOnlyPublicKey as BitcoinPubkey;

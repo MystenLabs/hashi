@@ -313,10 +313,10 @@ impl Hashi {
             );
             return Ok(None);
         };
-        let Some(recipient) = self.config.backup_age_pubkey.as_ref() else {
+        let Some(recipient) = self.config.backup_pgp_cert.as_ref() else {
             tracing::warn!(
                 epoch,
-                "Skipping automatic backup: backup_age_pubkey is not configured"
+                "Skipping automatic backup: backup_pgp_cert is not configured"
             );
             return Ok(None);
         };
@@ -901,6 +901,15 @@ impl Hashi {
         state: hashi_types::guardian::LimiterState,
     ) {
         limiter.reconcile_to(state);
+        self.record_limiter_reconcile(limiter, state);
+    }
+
+    /// Bump the reconcile counter and refresh the exported limiter gauges.
+    fn record_limiter_reconcile(
+        &self,
+        limiter: &guardian_limiter::LocalLimiter,
+        state: hashi_types::guardian::LimiterState,
+    ) {
         self.metrics.guardian_limiter_reconciled_total.inc();
         self.metrics.record_limiter_state(&state, limiter.config());
     }
@@ -922,6 +931,14 @@ impl Hashi {
                 "Local guardian limiter stalled away from the guardian; reconciled to authoritative state",
             );
             self.apply_limiter_reconcile(&limiter, state);
+        } else if limiter.reconcile_token_drift(state) {
+            // Equal seq, drifted bucket: the mirror debits at sign-time, the
+            // guardian at finalize-time — invisible to the seq-only tracker above.
+            self.record_limiter_reconcile(&limiter, state);
+            tracing::debug!(
+                seq = state.next_seq,
+                "Local guardian limiter token-drifted from the guardian; reconciled",
+            );
         }
     }
 
@@ -1112,17 +1129,18 @@ fn verify_btc_pub_key_matches(
 
 #[cfg(test)]
 mod test {
-    use age::x25519;
     use fastcrypto::serde_helpers::ToFromByteArray;
     use hashi_types::committee::Bls12381PrivateKey;
     use hashi_types::committee::Committee;
     use hashi_types::committee::CommitteeMember;
     use hashi_types::committee::EncryptionPrivateKey;
     use hashi_types::committee::EncryptionPublicKey;
+    use hashi_types::pgp::test_utils::mock_pgp_cert;
     use sui_sdk_types::Address;
 
     use crate::Hashi;
     use crate::ServerVersion;
+
     use crate::config::Config;
     use crate::grpc::Client;
 
@@ -1184,11 +1202,10 @@ mod test {
         let db_path = tmpdir.path().join("db");
         let backup_dir = tmpdir.path().join("backups");
         let config_path = tmpdir.path().join("config.toml");
-        let recipient = x25519::Identity::generate().to_public();
 
         let config = Config {
             db: Some(db_path),
-            backup_age_pubkey: Some(recipient.to_string().parse().unwrap()),
+            backup_pgp_cert: Some(mock_pgp_cert()),
             backup_dir: Some(backup_dir.clone()),
             ..Default::default()
         };

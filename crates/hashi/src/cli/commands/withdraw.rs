@@ -250,6 +250,8 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
 
     let requests = client.fetch_withdrawal_requests();
     let pending = client.fetch_withdrawal_txns();
+    let signed_count = pending.iter().filter(|pw| pw.signatures.is_some()).count();
+    let committed_count = pending.len() - signed_count;
 
     match output_format {
         OutputFormat::Json => {
@@ -266,7 +268,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                 })
                 .collect();
 
-            let committed_or_signed: Vec<_> = pending
+            let withdrawal_txns: Vec<_> = pending
                 .iter()
                 .map(|pw| {
                     let txid_bytes: [u8; 32] = pw.id.into();
@@ -283,9 +285,10 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "queued": queued,
-                    "committed_or_signed": committed_or_signed,
+                    "withdrawal_txns": withdrawal_txns,
                     "queued_count": requests.len(),
-                    "committed_or_signed_count": pending.len(),
+                    "committed_count": committed_count,
+                    "signed_count": signed_count,
                 }))?
             );
         }
@@ -327,7 +330,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                     if !requests.is_empty() {
                         println!();
                     }
-                    println!("  {}", "Committed/Signed:".bold().underline());
+                    println!("  {}", "Pending Broadcast:".bold().underline());
                     for pw in &pending {
                         let txid_bytes: [u8; 32] = pw.id.into();
                         let txid = bitcoin::Txid::from_byte_array(txid_bytes);
@@ -346,9 +349,10 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                 }
 
                 println!(
-                    "\n  {} queued, {} committed/signed",
+                    "\n  {} queued, {} committed, {} signed",
                     requests.len(),
-                    pending.len()
+                    committed_count,
+                    signed_count
                 );
             }
 

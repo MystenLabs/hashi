@@ -81,24 +81,13 @@ mod tests {
     use crate::OperatorInitTestArgs;
     use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::LogRecord;
-    use sequoia_openpgp::cert::prelude::CertBuilder;
-    use sequoia_openpgp::serialize::Serialize;
+    use hashi_types::pgp::test_utils::mock_pgp_certs;
 
     const TEST_N: usize = 5;
     const TEST_T: usize = 3;
 
     fn mock_setup_new_key_request() -> SetupNewKeyRequest {
-        let mut public_certs = vec![];
-        for _i in 0..TEST_N {
-            let (cert, _) = CertBuilder::general_purpose(["kp@example.com"])
-                .generate()
-                .unwrap();
-            let mut armored = Vec::new();
-            cert.armored().export(&mut armored).unwrap();
-            public_certs.push(PgpPublicCert::new(String::from_utf8(armored).unwrap()).unwrap());
-        }
-
-        SetupNewKeyRequest::new(public_certs, TEST_N, TEST_T).unwrap()
+        SetupNewKeyRequest::new(mock_pgp_certs(TEST_N), TEST_N, TEST_T).unwrap()
     }
 
     #[tokio::test]

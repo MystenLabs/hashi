@@ -21,6 +21,7 @@ use fastcrypto::hash::HashFunction;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::S;
+use futures::stream::StreamExt;
 use hashi_types::bitcoin_txid::BitcoinTxid;
 use hashi_types::guardian::bitcoin_utils;
 use std::collections::BTreeMap;
@@ -447,6 +448,19 @@ impl Hashi {
 
     // --- Guardian: validate and BLS-sign a `StandardWithdrawalRequest` ---
 
+    /// Reject a leader-supplied `timestamp_secs` that skews beyond the tolerance
+    /// from this node's checkpoint clock.
+    fn bound_leader_timestamp(&self, timestamp_secs: u64) -> anyhow::Result<()> {
+        let latest_checkpoint_secs = self.onchain_state().latest_checkpoint_timestamp_ms() / 1000;
+        let drift = timestamp_secs.abs_diff(latest_checkpoint_secs);
+        anyhow::ensure!(
+            drift <= GUARDIAN_TIMESTAMP_TOLERANCE_SECS,
+            "Withdrawal timestamp {timestamp_secs} is {drift}s away from local checkpoint \
+             {latest_checkpoint_secs} (tolerance: {GUARDIAN_TIMESTAMP_TOLERANCE_SECS}s)"
+        );
+        Ok(())
+    }
+
     #[tracing::instrument(level = "info", skip_all, fields(%withdrawal_txn_id, seq))]
     pub fn validate_and_sign_guardian_withdrawal_request(
         &self,
@@ -454,15 +468,7 @@ impl Hashi {
         timestamp_secs: u64,
         seq: u64,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
-        // Bound against the follower's own checkpoint clock to avoid wall-clock skew.
-        let latest_checkpoint_secs = self.onchain_state().latest_checkpoint_timestamp_ms() / 1000;
-        let drift = timestamp_secs.abs_diff(latest_checkpoint_secs);
-        if drift > GUARDIAN_TIMESTAMP_TOLERANCE_SECS {
-            anyhow::bail!(
-                "Guardian withdrawal timestamp {timestamp_secs} is {drift}s away from \
-                 local checkpoint {latest_checkpoint_secs} (tolerance: {GUARDIAN_TIMESTAMP_TOLERANCE_SECS}s)"
-            );
-        }
+        self.bound_leader_timestamp(timestamp_secs)?;
 
         let txn = self
             .onchain_state()
@@ -671,10 +677,20 @@ impl Hashi {
         &self,
         withdrawal_txn_id: &Address,
         expected_limiter_seq: Option<u64>,
-    ) -> anyhow::Result<Vec<SchnorrSignature>> {
+        timestamp_secs: Option<u64>,
+        sink: tokio::sync::mpsc::Sender<
+            Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
+        >,
+    ) -> anyhow::Result<()> {
         let (txn, unsigned_tx) = self.validate_withdrawal_signing(withdrawal_txn_id).await?;
-        self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx, expected_limiter_seq)
-            .await
+        self.mpc_sign_withdrawal_tx(
+            &txn,
+            &unsigned_tx,
+            expected_limiter_seq,
+            timestamp_secs,
+            sink,
+        )
+        .await
     }
 
     pub async fn validate_withdrawal_signing(
@@ -712,10 +728,14 @@ impl Hashi {
     )]
     async fn mpc_sign_withdrawal_tx(
         &self,
-        txn: &crate::onchain::types::WithdrawalTransaction,
+        txn: &WithdrawalTransaction,
         unsigned_tx: &bitcoin::Transaction,
         expected_limiter_seq: Option<u64>,
-    ) -> anyhow::Result<Vec<SchnorrSignature>> {
+        timestamp_secs: Option<u64>,
+        sink: tokio::sync::mpsc::Sender<
+            Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
+        >,
+    ) -> anyhow::Result<()> {
         let onchain_state = self.onchain_state().clone();
         let epoch = onchain_state.epoch();
         if txn.epoch != epoch {
@@ -733,7 +753,15 @@ impl Hashi {
         match (self.local_limiter(), expected_limiter_seq) {
             (Some(limiter), Some(expected_seq)) => {
                 let amount_sats = withdrawal_limiter_consumption_amount(txn);
-                let timestamp_secs = txn.timestamp_ms / 1000;
+                // Leader's live checkpoint time (drift-bounded) so a throttled
+                // batch becomes signable as it refills; pre-upgrade leaders omit it.
+                let timestamp_secs = match timestamp_secs {
+                    Some(ts) => {
+                        self.bound_leader_timestamp(ts)?;
+                        ts
+                    }
+                    None => txn.timestamp_ms / 1000,
+                };
                 let result = limiter.validate_consume(expected_seq, timestamp_secs, amount_sats);
                 self.metrics.record_limiter_validate(
                     &result,
@@ -761,72 +789,90 @@ impl Hashi {
         })?;
         let beacon = S::from_bytes_mod_order(&txn.randomness);
         let signing_messages = self.withdrawal_signing_messages(unsigned_tx, &txn.inputs)?;
-        let mut signatures_by_input = Vec::with_capacity(signing_messages.len());
-        for (input_index, message) in signing_messages.iter().enumerate() {
-            let request_id = withdrawal_input_signing_request_id(&txn.id, input_index as u32);
-            // Change UTXOs (`derivation_path = None`) ride the `[0; 32]`
-            // path everywhere else (leaf script, `deposit_pubkey`). MPC
-            // must too — passing `None` signs for master `G`, not the
-            // `derive(G, [0; 32])` child the 2-of-2 leaf binds.
-            let derivation_address = txn
-                .inputs
-                .get(input_index)
-                .map(|input| crate::deposits::path_bytes_or_zero(input.derivation_path.as_ref()))
-                .expect("input_index iterated from signing_messages.len() == txn.inputs.len()");
-            let sign_start = std::time::Instant::now();
-            let global_presig_index = txn.presig_start_index + input_index as u64;
-            let sign_result = signing_manager
-                .sign(
-                    &p2p_channel,
-                    request_id,
-                    message,
-                    global_presig_index,
-                    &beacon,
-                    Some(&derivation_address),
-                    WITHDRAWAL_SIGNING_TIMEOUT,
-                    &self.metrics,
-                )
-                .await;
-            let sign_duration = sign_start.elapsed().as_secs_f64();
-
-            match &sign_result {
-                Ok(_) => {
-                    self.metrics
-                        .mpc_sign_duration_seconds
-                        .with_label_values(&["success"])
-                        .observe(sign_duration);
-                    self.metrics
-                        .presig_pool_remaining
-                        .set(signing_manager.presignatures_remaining() as i64);
+        let concurrency = self.config.withdrawal_signing_concurrency();
+        let signing_manager_ref = &signing_manager;
+        let p2p_channel_ref = &p2p_channel;
+        let beacon_ref = &beacon;
+        let metrics_ref = &*self.metrics;
+        let txn_id = txn.id;
+        let presig_start = txn.presig_start_index;
+        let inputs = &txn.inputs;
+        let sink_ref = &sink;
+        // Run the per-input MPC signs concurrently (bounded by `concurrency`).
+        futures::stream::iter(signing_messages.into_iter().enumerate())
+            .map(|(input_index, message)| async move {
+                let request_id = withdrawal_input_signing_request_id(&txn_id, input_index as u32);
+                // Change UTXOs (`derivation_path = None`) ride the `[0; 32]`
+                // path everywhere else (leaf script, `deposit_pubkey`). MPC
+                // must too — passing `None` signs for master `G`, not the
+                // `derive(G, [0; 32])` child the 2-of-2 leaf binds.
+                let derivation_address = inputs
+                    .get(input_index)
+                    .map(|input| {
+                        crate::deposits::path_bytes_or_zero(input.derivation_path.as_ref())
+                    })
+                    .expect("input_index iterated from signing_messages.len() == txn.inputs.len()");
+                let sign_start = std::time::Instant::now();
+                let global_presig_index = presig_start + input_index as u64;
+                let sign_result = signing_manager_ref
+                    .sign(
+                        p2p_channel_ref,
+                        request_id,
+                        &message,
+                        global_presig_index,
+                        beacon_ref,
+                        Some(&derivation_address),
+                        WITHDRAWAL_SIGNING_TIMEOUT,
+                        metrics_ref,
+                    )
+                    .await;
+                let sign_duration = sign_start.elapsed().as_secs_f64();
+                match &sign_result {
+                    Ok(_) => {
+                        metrics_ref
+                            .mpc_sign_duration_seconds
+                            .with_label_values(&["success"])
+                            .observe(sign_duration);
+                        metrics_ref
+                            .presig_pool_remaining
+                            .set(signing_manager_ref.presignatures_remaining() as i64);
+                    }
+                    Err(e) => {
+                        metrics_ref
+                            .mpc_sign_duration_seconds
+                            .with_label_values(&["failure"])
+                            .observe(sign_duration);
+                        let reason = match e {
+                            crate::mpc::types::SigningError::Timeout { .. } => "timeout",
+                            crate::mpc::types::SigningError::PoolExhausted => "pool_exhausted",
+                            crate::mpc::types::SigningError::TooManyInvalidSignatures {
+                                ..
+                            } => "too_many_invalid",
+                            crate::mpc::types::SigningError::CryptoError(_) => "crypto_error",
+                            _ => "other",
+                        };
+                        metrics_ref
+                            .mpc_sign_failures_total
+                            .with_label_values(&[reason])
+                            .inc();
+                    }
                 }
-                Err(e) => {
-                    self.metrics
-                        .mpc_sign_duration_seconds
-                        .with_label_values(&["failure"])
-                        .observe(sign_duration);
-                    let reason = match e {
-                        crate::mpc::types::SigningError::Timeout { .. } => "timeout",
-                        crate::mpc::types::SigningError::PoolExhausted => "pool_exhausted",
-                        crate::mpc::types::SigningError::TooManyInvalidSignatures { .. } => {
-                            "too_many_invalid"
-                        }
-                        crate::mpc::types::SigningError::CryptoError(_) => "crypto_error",
-                        _ => "other",
-                    };
-                    self.metrics
-                        .mpc_sign_failures_total
-                        .with_label_values(&[reason])
-                        .inc();
-                }
-            }
-
-            let signature = sign_result.map_err(|e| {
-                anyhow!("Failed to sign withdrawal transaction input {input_index}: {e}")
-            })?;
-
-            signatures_by_input.push(signature);
-        }
-        Ok(signatures_by_input)
+                let partial = sign_result
+                    .map(|sig| hashi_types::proto::SignWithdrawalTransactionPartial {
+                        input_index: input_index as u32,
+                        signature: sig.to_byte_array().to_vec().into(),
+                    })
+                    .map_err(|e| {
+                        tonic::Status::internal(format!(
+                            "Failed to sign withdrawal transaction input {input_index}: {e}"
+                        ))
+                    });
+                let _ = sink_ref.send(partial).await;
+            })
+            .buffer_unordered(concurrency)
+            .for_each(|()| std::future::ready(()))
+            .await;
+        Ok(())
     }
 
     pub(crate) fn withdrawal_signing_messages(

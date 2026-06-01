@@ -269,6 +269,16 @@ impl TestNetworksBuilder {
         hashi_builder =
             hashi_builder.with_guardian_endpoint(guardian_harness.endpoint().to_string());
 
+        // The post-build steps below (on-chain config overrides, guardian
+        // provisioner-init) drive transactions through the running committee, so
+        // they need at least one validator launched at build time. In
+        // manual-bootstrap mode (0 initially-active validators) there are none,
+        // so skip them — registration/genesis/guardian-init are driven later.
+        let nodes_started = hashi_builder
+            .num_initially_active_nodes
+            .unwrap_or(hashi_builder.num_nodes)
+            > 0;
+
         let hashi_ids = publish(
             dir.as_ref(),
             &mut sui_network.client,
@@ -298,12 +308,12 @@ impl TestNetworksBuilder {
 
         tracing::info!("rpc url: {}", test_networks.sui_network().rpc_url);
 
-        if !self.onchain_config_overrides.is_empty() {
+        if nodes_started && !self.onchain_config_overrides.is_empty() {
             apply_onchain_config_overrides(&mut test_networks, &self.onchain_config_overrides)
                 .await?;
         }
 
-        if test_networks.guardian_harness.is_some() {
+        if nodes_started && test_networks.guardian_harness.is_some() {
             finalize_guardian_harness(&mut test_networks).await?;
         }
 

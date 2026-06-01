@@ -118,12 +118,19 @@ pub struct SignWithdrawalTransactionRequest {
     /// before participating in MPC signing.
     #[prost(uint64, optional, tag = "2")]
     pub expected_limiter_seq: ::core::option::Option<u64>,
+    /// Leader's checkpoint timestamp (unix seconds), bounded by each member
+    /// against its own checkpoint clock. Absent from pre-upgrade leaders.
+    #[prost(uint64, optional, tag = "3")]
+    pub timestamp_secs: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SignWithdrawalTransactionResponse {
-    /// One aggregated MPC Schnorr signature per transaction input.
-    #[prost(bytes = "bytes", repeated, tag = "1")]
-    pub signatures_by_input: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
+pub struct SignWithdrawalTransactionPartial {
+    /// Index of the transaction input this signature is for.
+    #[prost(uint32, tag = "1")]
+    pub input_index: u32,
+    /// 64-byte aggregated MPC signature for the input.
+    #[prost(bytes = "bytes", tag = "2")]
+    pub signature: ::prost::bytes::Bytes,
 }
 /// Maps to crate::withdrawals::WithdrawalTxSigning
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -409,7 +416,9 @@ pub mod bridge_service_client {
             &mut self,
             request: impl tonic::IntoRequest<super::SignWithdrawalTransactionRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::SignWithdrawalTransactionResponse>,
+            tonic::Response<
+                tonic::codec::Streaming<super::SignWithdrawalTransactionPartial>,
+            >,
             tonic::Status,
         > {
             self.inner
@@ -432,7 +441,7 @@ pub mod bridge_service_client {
                         "SignWithdrawalTransaction",
                     ),
                 );
-            self.inner.unary(req, path, codec).await
+            self.inner.server_streaming(req, path, codec).await
         }
         /// Sign a guardian rate-limiting request; the leader aggregates the
         /// certificate and forwards it to the guardian after MPC quorum.
@@ -603,12 +612,21 @@ pub mod bridge_service_server {
             tonic::Response<super::SignWithdrawalTxConstructionResponse>,
             tonic::Status,
         >;
+        /// Server streaming response type for the SignWithdrawalTransaction method.
+        type SignWithdrawalTransactionStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<
+                    super::SignWithdrawalTransactionPartial,
+                    tonic::Status,
+                >,
+            >
+            + std::marker::Send
+            + 'static;
         /// Step 2b: Sign a bitcoin withdrawal transaction (MPC Schnorr).
         async fn sign_withdrawal_transaction(
             &self,
             request: tonic::Request<super::SignWithdrawalTransactionRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::SignWithdrawalTransactionResponse>,
+            tonic::Response<Self::SignWithdrawalTransactionStream>,
             tonic::Status,
         >;
         /// Sign a guardian rate-limiting request; the leader aggregates the
@@ -929,12 +947,13 @@ pub mod bridge_service_server {
                     struct SignWithdrawalTransactionSvc<T: BridgeService>(pub Arc<T>);
                     impl<
                         T: BridgeService,
-                    > tonic::server::UnaryService<
+                    > tonic::server::ServerStreamingService<
                         super::SignWithdrawalTransactionRequest,
                     > for SignWithdrawalTransactionSvc<T> {
-                        type Response = super::SignWithdrawalTransactionResponse;
+                        type Response = super::SignWithdrawalTransactionPartial;
+                        type ResponseStream = T::SignWithdrawalTransactionStream;
                         type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
+                            tonic::Response<Self::ResponseStream>,
                             tonic::Status,
                         >;
                         fn call(
@@ -971,7 +990,7 @@ pub mod bridge_service_server {
                                 max_decoding_message_size,
                                 max_encoding_message_size,
                             );
-                        let res = grpc.unary(method, req).await;
+                        let res = grpc.server_streaming(method, req).await;
                         Ok(res)
                     };
                     Box::pin(fut)

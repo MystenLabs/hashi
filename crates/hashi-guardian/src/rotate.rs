@@ -9,6 +9,7 @@ use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::*;
+use hashi_types::pgp::PgpPublicCert;
 use std::sync::Arc;
 use tracing::info;
 
@@ -79,7 +80,7 @@ async fn finalize_rotation(
     info!("Re-splitting for {n} new KPs (threshold: {t}).");
     let new_certs = new_kp_pgp_certs
         .into_iter()
-        .map(PgpPublicCert::new)
+        .map(|cert| PgpPublicCert::new(cert).map_err(|e| InvalidInputs(e.to_string())))
         .collect::<GuardianResult<Vec<_>>>()?;
 
     // Confine the !Send `ThreadRng` to a sync scope so the surrounding async
