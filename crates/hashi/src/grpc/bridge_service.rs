@@ -211,6 +211,7 @@ impl BridgeService for HttpService {
         let withdrawal_txn_id = Address::from_bytes(&req.withdrawal_txn_id)
             .map_err(|e| Status::invalid_argument(format!("invalid withdrawal_txn_id: {e}")))?;
         let expected_limiter_seq = req.expected_limiter_seq;
+        let timestamp_secs = req.timestamp_secs;
         tracing::Span::current().record(
             "withdrawal_txn_id",
             tracing::field::display(&withdrawal_txn_id),
@@ -218,7 +219,11 @@ impl BridgeService for HttpService {
         tracing::info!("sign_withdrawal_transaction called");
         let signatures = self
             .inner
-            .validate_and_sign_withdrawal_tx(&withdrawal_txn_id, expected_limiter_seq)
+            .validate_and_sign_withdrawal_tx(
+                &withdrawal_txn_id,
+                expected_limiter_seq,
+                timestamp_secs,
+            )
             .await
             .map_err(|e| {
                 tracing::error!("sign_withdrawal_transaction failed: {e}");

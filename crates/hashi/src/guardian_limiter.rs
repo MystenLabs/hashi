@@ -264,6 +264,24 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_consume_releases_after_refill() {
+        // An over-budget withdrawal clears once the bucket refills.
+        let limiter = make_limiter(0, 0, 7);
+        let amount = 80_000;
+        // refill_rate = 1_000/s ⇒ capacity_at(t) = t * 1_000 on an empty bucket.
+        let early = limiter.validate_consume(7, 10, amount).unwrap_err();
+        assert!(matches!(
+            early,
+            LocalLimiterError::InsufficientCapacity {
+                needed: 80_000,
+                available: 10_000,
+            }
+        ));
+        limiter.validate_consume(7, 100, amount).unwrap();
+        assert_eq!(limiter.next_seq(), 7);
+    }
+
+    #[test]
     fn test_apply_bumps_seq_and_updates_last_updated_at() {
         let limiter = make_limiter(0, 0, 42);
         limiter.validate_consume(42, 100, 80_000).unwrap();

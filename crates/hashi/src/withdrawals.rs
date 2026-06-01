@@ -447,6 +447,19 @@ impl Hashi {
 
     // --- Guardian: validate and BLS-sign a `StandardWithdrawalRequest` ---
 
+    /// Reject a leader-supplied `timestamp_secs` that skews beyond the tolerance
+    /// from this node's checkpoint clock.
+    fn bound_leader_timestamp(&self, timestamp_secs: u64) -> anyhow::Result<()> {
+        let latest_checkpoint_secs = self.onchain_state().latest_checkpoint_timestamp_ms() / 1000;
+        let drift = timestamp_secs.abs_diff(latest_checkpoint_secs);
+        anyhow::ensure!(
+            drift <= GUARDIAN_TIMESTAMP_TOLERANCE_SECS,
+            "Withdrawal timestamp {timestamp_secs} is {drift}s away from local checkpoint \
+             {latest_checkpoint_secs} (tolerance: {GUARDIAN_TIMESTAMP_TOLERANCE_SECS}s)"
+        );
+        Ok(())
+    }
+
     #[tracing::instrument(level = "info", skip_all, fields(%withdrawal_txn_id, seq))]
     pub fn validate_and_sign_guardian_withdrawal_request(
         &self,
@@ -454,15 +467,7 @@ impl Hashi {
         timestamp_secs: u64,
         seq: u64,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
-        // Bound against the follower's own checkpoint clock to avoid wall-clock skew.
-        let latest_checkpoint_secs = self.onchain_state().latest_checkpoint_timestamp_ms() / 1000;
-        let drift = timestamp_secs.abs_diff(latest_checkpoint_secs);
-        if drift > GUARDIAN_TIMESTAMP_TOLERANCE_SECS {
-            anyhow::bail!(
-                "Guardian withdrawal timestamp {timestamp_secs} is {drift}s away from \
-                 local checkpoint {latest_checkpoint_secs} (tolerance: {GUARDIAN_TIMESTAMP_TOLERANCE_SECS}s)"
-            );
-        }
+        self.bound_leader_timestamp(timestamp_secs)?;
 
         let txn = self
             .onchain_state()
@@ -671,9 +676,10 @@ impl Hashi {
         &self,
         withdrawal_txn_id: &Address,
         expected_limiter_seq: Option<u64>,
+        timestamp_secs: Option<u64>,
     ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let (txn, unsigned_tx) = self.validate_withdrawal_signing(withdrawal_txn_id).await?;
-        self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx, expected_limiter_seq)
+        self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx, expected_limiter_seq, timestamp_secs)
             .await
     }
 
@@ -715,6 +721,7 @@ impl Hashi {
         txn: &crate::onchain::types::WithdrawalTransaction,
         unsigned_tx: &bitcoin::Transaction,
         expected_limiter_seq: Option<u64>,
+        timestamp_secs: Option<u64>,
     ) -> anyhow::Result<Vec<SchnorrSignature>> {
         let onchain_state = self.onchain_state().clone();
         let epoch = onchain_state.epoch();
@@ -733,7 +740,15 @@ impl Hashi {
         match (self.local_limiter(), expected_limiter_seq) {
             (Some(limiter), Some(expected_seq)) => {
                 let amount_sats = withdrawal_limiter_consumption_amount(txn);
-                let timestamp_secs = txn.timestamp_ms / 1000;
+                // Leader's live checkpoint time (drift-bounded) so a throttled
+                // batch becomes signable as it refills; pre-upgrade leaders omit it.
+                let timestamp_secs = match timestamp_secs {
+                    Some(ts) => {
+                        self.bound_leader_timestamp(ts)?;
+                        ts
+                    }
+                    None => txn.timestamp_ms / 1000,
+                };
                 let result = limiter.validate_consume(expected_seq, timestamp_secs, amount_sats);
                 self.metrics.record_limiter_validate(
                     &result,
