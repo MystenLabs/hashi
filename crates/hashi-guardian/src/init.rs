@@ -19,13 +19,70 @@ use GuardianError::*;
 
 /// The withdraw-mode state to install, built from `WithdrawModeConfig` (incl. the
 /// computed `state_hash` and the constructed rate limiter).
-struct WithdrawInstall {
+pub(crate) struct WithdrawInstall {
     state_hash: [u8; 32],
     network: bitcoin::Network,
     secret_sharing_instance: SecretSharingInstance,
     hashi_btc_master_pubkey: HashiMasterG,
     committee: HashiCommittee,
     rate_limiter: RateLimiter,
+}
+
+impl WithdrawInstall {
+    /// Decompose a `WithdrawModeConfig` into the install bundle, constructing the
+    /// rate limiter (the only fallible step). Shared by `operator_init` and tests.
+    pub(crate) fn from_config(config: WithdrawModeConfig) -> GuardianResult<Self> {
+        let (withdraw_state, secret_sharing_instance, network) = config.into_parts();
+        let state_hash = withdraw_state.digest();
+        let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) =
+            withdraw_state.into_parts();
+        let rate_limiter = RateLimiter::new(limiter_config, limiter_state)?;
+        Ok(Self {
+            state_hash,
+            network,
+            secret_sharing_instance,
+            hashi_btc_master_pubkey,
+            committee,
+            rate_limiter,
+        })
+    }
+
+    /// Install the bundle onto a fresh enclave. Infallible by design (see the
+    /// `operator_init` invariant): every set runs once on a fresh enclave.
+    pub(crate) fn install_into(self, enclave: &Enclave) {
+        info!("Setting bitcoin network to {:?}.", self.network);
+        enclave
+            .config
+            .set_bitcoin_network(self.network)
+            .expect("Unable to set network");
+
+        info!(
+            "Storing secret-sharing instance: n={}, t={}, {} commitments.",
+            self.secret_sharing_instance.num_shares(),
+            self.secret_sharing_instance.threshold(),
+            self.secret_sharing_instance.commitments().len()
+        );
+        enclave
+            .set_secret_sharing_instance(self.secret_sharing_instance)
+            .expect("Unable to set secret-sharing instance");
+
+        info!("Setting state hash.");
+        enclave
+            .set_state_hash(self.state_hash)
+            .expect("Unable to set state hash");
+
+        info!("Setting hashi BTC master pubkey.");
+        enclave
+            .config
+            .set_hashi_btc_pk(self.hashi_btc_master_pubkey)
+            .expect("Unable to set hashi BTC master pubkey");
+
+        info!("Installing committee and rate limiter.");
+        enclave
+            .state
+            .init(self.committee, self.rate_limiter)
+            .expect("Unable to init enclave state");
+    }
 }
 
 /// Receives S3 API keys and — for a withdraw-mode enclave — the `WithdrawModeConfig`
@@ -64,21 +121,7 @@ pub async fn operator_init(
     // Build the withdraw-mode install bundle (incl. the rate limiter, the last
     // fallible step) up front; `None` for a ceremony enclave.
     let withdraw = match state {
-        Some(config) => {
-            let (withdraw_state, secret_sharing_instance, network) = config.into_parts();
-            let state_hash = withdraw_state.digest();
-            let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) =
-                withdraw_state.into_parts();
-            let rate_limiter = RateLimiter::new(limiter_config, limiter_state)?;
-            Some(WithdrawInstall {
-                state_hash,
-                network,
-                secret_sharing_instance,
-                hashi_btc_master_pubkey,
-                committee,
-                rate_limiter,
-            })
-        }
+        Some(config) => Some(WithdrawInstall::from_config(config)?),
         None => None,
     };
 
@@ -104,47 +147,8 @@ async fn commit_operator_init(
 
     // Withdraw-mode state (committee, limiter, BTC master pubkey, instance, network,
     // state_hash); a ceremony enclave installs none of it.
-    if let Some(WithdrawInstall {
-        state_hash,
-        network,
-        secret_sharing_instance,
-        hashi_btc_master_pubkey,
-        committee,
-        rate_limiter,
-    }) = withdraw
-    {
-        info!("Setting bitcoin network to {:?}.", network);
-        enclave
-            .config
-            .set_bitcoin_network(network)
-            .expect("Unable to set network");
-
-        info!(
-            "Storing secret-sharing instance: n={}, t={}, {} commitments.",
-            secret_sharing_instance.num_shares(),
-            secret_sharing_instance.threshold(),
-            secret_sharing_instance.commitments().len()
-        );
-        enclave
-            .set_secret_sharing_instance(secret_sharing_instance)
-            .expect("Unable to set secret-sharing instance");
-
-        info!("Setting state hash.");
-        enclave
-            .set_state_hash(state_hash)
-            .expect("Unable to set state hash");
-
-        info!("Setting hashi BTC master pubkey.");
-        enclave
-            .config
-            .set_hashi_btc_pk(hashi_btc_master_pubkey)
-            .expect("Unable to set hashi BTC master pubkey");
-
-        info!("Installing committee and rate limiter.");
-        enclave
-            .state
-            .init(committee, rate_limiter)
-            .expect("Unable to init enclave state");
+    if let Some(install) = withdraw {
+        install.install_into(enclave);
     }
 
     // Log to S3!
@@ -316,19 +320,7 @@ mod tests {
 
         let withdraw = match mode {
             EnclaveMode::Withdraw => {
-                let config = WithdrawModeConfig::mock_for_testing(None);
-                let (withdraw_state, secret_sharing_instance, network) = config.into_parts();
-                let state_hash = withdraw_state.digest();
-                let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) =
-                    withdraw_state.into_parts();
-                Some(WithdrawInstall {
-                    state_hash,
-                    network,
-                    secret_sharing_instance,
-                    hashi_btc_master_pubkey,
-                    committee,
-                    rate_limiter: RateLimiter::new(limiter_config, limiter_state).unwrap(),
-                })
+                Some(WithdrawInstall::from_config(WithdrawModeConfig::mock_for_testing(None)).unwrap())
             }
             EnclaveMode::Ceremony => None,
         };

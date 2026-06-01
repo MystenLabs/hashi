@@ -178,15 +178,6 @@ impl Default for OperatorInitTestArgs {
 }
 
 impl OperatorInitTestArgs {
-    /// Rebuild `config` with a different network.
-    pub fn with_network(mut self, network: Network) -> Self {
-        let (state, instance, _) = self.config.into_parts();
-        let (committee, lc, ls, master) = state.into_parts();
-        self.config =
-            WithdrawModeConfig::new(committee, lc, ls, master, instance, network).unwrap();
-        self
-    }
-
     pub fn with_config(mut self, config: WithdrawModeConfig) -> Self {
         self.config = config;
         self
@@ -237,18 +228,9 @@ impl Enclave {
     pub fn install_operator_init_for_testing(&self, args: OperatorInitTestArgs) {
         self.config.set_s3_logger(args.s3_logger).unwrap();
 
-        let (state, instance, network) = args.config.into_parts();
-        let state_hash = state.digest();
-        let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) =
-            state.into_parts();
-        let rate_limiter = RateLimiter::new(limiter_config, limiter_state).unwrap();
-        self.config.set_bitcoin_network(network).unwrap();
-        self.set_secret_sharing_instance(instance).unwrap();
-        self.set_state_hash(state_hash).unwrap();
-        self.config
-            .set_hashi_btc_pk(hashi_btc_master_pubkey)
-            .unwrap();
-        self.state.init(committee, rate_limiter).unwrap();
+        crate::init::WithdrawInstall::from_config(args.config)
+            .unwrap()
+            .install_into(self);
 
         self.scratchpad
             .operator_init_logging_complete
