@@ -357,11 +357,13 @@ impl Enclave {
             .get()
             .is_some();
         // commit_operator_init sets this flag last in an all-or-nothing commit, so
-        // a set flag implies every installed field is present. The debug-only
-        // backstop catches a future change that sets the flag without the state
-        // (e.g. reordering the commit). The converse can fail transiently if a
-        // commit panicked after the sets but before logging, so it is not asserted.
-        debug_assert!(
+        // a set flag implies every installed field is present. This backstop holds
+        // in prod too (a violation aborts via `abort_on_panic`) and never fires
+        // transiently, since the flag is the last thing set. The converse is NOT
+        // checked: a normal commit installs the state before its (slow) S3 logging
+        // completes, and a lock-free reader (e.g. the heartbeat) can observe that
+        // window with state present but the flag unset.
+        assert!(
             !logged || self.operator_init_state_installed(),
             "operator_init_logging_complete set but operator_init state is incomplete"
         );
