@@ -77,6 +77,13 @@ enum Commands {
         #[clap(long, default_value = "18443")]
         btc_rpc_port: u16,
 
+        /// Manual bootstrap: bring up infra + write per-validator CLI configs
+        /// but do NOT launch the validators or auto-form the committee. Register
+        /// validators yourself via `hashi register`, then press Enter to launch
+        /// them (DKG/genesis then runs automatically).
+        #[clap(long)]
+        manual: bool,
+
         #[command(flatten)]
         opts: LocalnetOpts,
     },
@@ -231,8 +238,18 @@ async fn main() -> Result<()> {
             num_validators,
             sui_rpc_port,
             btc_rpc_port,
+            manual,
             opts,
-        } => cmd_start(num_validators, sui_rpc_port, btc_rpc_port, &opts.data_dir).await,
+        } => {
+            cmd_start(
+                num_validators,
+                sui_rpc_port,
+                btc_rpc_port,
+                manual,
+                &opts.data_dir,
+            )
+            .await
+        }
         Commands::Stop { opts } => cmd_stop(&opts.data_dir).await,
         Commands::Status { opts } => cmd_status(&opts.data_dir),
         Commands::Info { opts } => cmd_info(&opts.data_dir),
@@ -260,6 +277,7 @@ async fn cmd_start(
     num_validators: usize,
     sui_rpc_port: u16,
     btc_rpc_port: u16,
+    manual: bool,
     data_dir: &Path,
 ) -> Result<()> {
     // Check for existing running instance
@@ -281,12 +299,19 @@ async fn cmd_start(
     );
     std::io::stdout().flush().ok();
 
-    let test_networks = TestNetworksBuilder::new()
+    let mut builder = TestNetworksBuilder::new()
         .with_nodes(num_validators)
         .with_sui_rpc_port(sui_rpc_port)
-        .with_btc_rpc_port(btc_rpc_port)
-        .build()
-        .await?;
+        .with_btc_rpc_port(btc_rpc_port);
+    if manual {
+        // Bring up infra + node handles but launch no validators and skip the
+        // committee-formation wait. The operator registers validators via the
+        // CLI, then we launch them further down. With 0 initially-active
+        // validators, the builder also skips the node-dependent post-build steps
+        // (on-chain config overrides, guardian provisioner-init).
+        builder = builder.with_initially_active_nodes(0);
+    }
+    let mut test_networks = builder.build().await?;
 
     let sui_rpc_url = &test_networks.sui_network().rpc_url;
     let btc_rpc_url = test_networks.bitcoin_node().rpc_url();
@@ -312,8 +337,7 @@ async fn cmd_start(
     std::fs::create_dir_all(&validators_dir)?;
     for (i, node) in test_networks.hashi_network().nodes().iter().enumerate() {
         let operator_pem = node
-            .hashi()
-            .config
+            .config()
             .operator_private_key
             .as_ref()
             .context("validator has no operator_private_key")?;
@@ -338,6 +362,28 @@ async fn cmd_start(
     // Write a CLI config file so `hashi` CLI can auto-discover the localnet
     write_cli_config(data_dir, &state)?;
 
+    // Per-validator CLI configs so governance commands can run *as* each
+    // committee member (the funded key above is not a committee member). In
+    // manual mode also write a minimal server config per validator for
+    // `hashi register --config`.
+    for (i, node) in test_networks.hashi_network().nodes().iter().enumerate() {
+        let keypair_path = validators_dir.join(format!("validator_{i}.pem"));
+        write_validator_cli_config(data_dir, &state, i, &keypair_path)?;
+        if manual {
+            let cfg = node.config();
+            let server = hashi::config::Config {
+                validator_address: cfg.validator_address,
+                operator_private_key: cfg.operator_private_key.clone(),
+                sui_rpc: Some(state.sui_rpc_url.clone()),
+                hashi_ids: Some(ids),
+                ..Default::default()
+            };
+            server
+                .save(&validators_dir.join(format!("validator_{i}.toml")))
+                .context("Failed to write validator server config")?;
+        }
+    }
+
     // Overwrite the "ℹ Starting..." line with a checkmark
     print!("\r{}", " ".repeat(60));
     println!(
@@ -347,6 +393,26 @@ async fn cmd_start(
     );
     println!();
     print_connection_details(&state);
+
+    if manual {
+        print_manual_bootstrap_guide(data_dir, num_validators);
+
+        use std::io::Write as _;
+        eprint!("\nPress Enter to launch the {num_validators} validators once registered... ");
+        std::io::stderr().flush().ok();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+
+        print_info("Launching validators...");
+        test_networks
+            .hashi_network_mut()
+            .start_pending_validators()
+            .await?;
+        print_success(
+            "Validators launched. DKG/genesis proceeds automatically once enough \
+             validators are registered.",
+        );
+    }
 
     print_info("Press Ctrl+C to stop the localnet.");
 
@@ -834,16 +900,16 @@ fn write_pem_to_disk(path: &Path, pem: &str) -> Result<()> {
 }
 
 /// Write a `hashi-cli.toml` config file that the main `hashi` CLI can read.
-fn write_cli_config(data_dir: &Path, state: &LocalnetState) -> Result<()> {
-    let config = hashi::cli::config::CliConfig {
+fn build_cli_config(
+    state: &LocalnetState,
+    keypair_path: Option<std::path::PathBuf>,
+) -> hashi::cli::config::CliConfig {
+    hashi::cli::config::CliConfig {
         loaded_from_path: None,
         sui_rpc_url: state.sui_rpc_url.clone(),
         package_id: state.package_id.parse().ok(),
         hashi_object_id: state.hashi_object_id.parse().ok(),
-        keypair_path: state
-            .funded_sui_keypair_path
-            .as_ref()
-            .map(std::path::PathBuf::from),
+        keypair_path,
         gas_coin: None,
         bitcoin: Some(hashi::cli::config::BitcoinConfig {
             rpc_url: Some(state.btc_rpc_url.clone()),
@@ -852,13 +918,59 @@ fn write_cli_config(data_dir: &Path, state: &LocalnetState) -> Result<()> {
             network: Some("regtest".to_string()),
             private_key_path: None,
         }),
-    };
+    }
+}
 
-    config
+fn write_cli_config(data_dir: &Path, state: &LocalnetState) -> Result<()> {
+    let keypair_path = state
+        .funded_sui_keypair_path
+        .as_ref()
+        .map(std::path::PathBuf::from);
+    build_cli_config(state, keypair_path)
         .save_to_file(&cli_config_path(data_dir))
         .context("Failed to write CLI config file")?;
-
     Ok(())
+}
+
+/// Write a per-validator CLI config (`cli-validator-N.toml`) that signs as that
+/// validator's operator key, so `hashi proposal …` commands can run as a
+/// committee member.
+fn write_validator_cli_config(
+    data_dir: &Path,
+    state: &LocalnetState,
+    index: usize,
+    keypair_path: &Path,
+) -> Result<()> {
+    build_cli_config(state, Some(keypair_path.to_path_buf()))
+        .save_to_file(&data_dir.join(format!("cli-validator-{index}.toml")))
+        .context("Failed to write per-validator CLI config")?;
+    Ok(())
+}
+
+/// Print the manual-bootstrap command guide: how to register validators via the
+/// CLI, then govern as a committee member.
+fn print_manual_bootstrap_guide(data_dir: &Path, num_validators: usize) {
+    let d = data_dir.display();
+    println!(
+        "\n{}",
+        "Manual bootstrap — drive registration via the hashi CLI:".bold()
+    );
+    println!("{}", "━".repeat(64).dimmed());
+    println!("  1. Register validators (each is one on-chain tx; nodes aren't running yet):");
+    for i in 0..num_validators {
+        println!("       hashi register --config {d}/validators/validator_{i}.toml -y");
+    }
+    println!("  2. Press Enter here to launch the validators (DKG/genesis runs automatically).");
+    println!("  3. Govern as a committee member (HASHI_CLI_CONFIG selects the identity):");
+    println!("       HASHI_CLI_CONFIG={d}/cli-validator-0.toml hashi committee epoch");
+    println!(
+        "       HASHI_CLI_CONFIG={d}/cli-validator-0.toml hashi proposal -y create \
+         update-config bitcoin_deposit_time_delay_ms u64:0"
+    );
+    println!(
+        "       HASHI_CLI_CONFIG={d}/cli-validator-1.toml hashi proposal -y vote <PROPOSAL_ID>"
+    );
+    println!("{}", "━".repeat(64).dimmed());
 }
 
 fn print_connection_details(state: &LocalnetState) {
