@@ -129,6 +129,18 @@ impl LocalLimiter {
     pub fn reconcile_to(&self, state: LimiterState) {
         *self.state.write().unwrap() = state;
     }
+
+    /// Snap to the guardian's `state`, but only at a matching `next_seq` so a
+    /// racing `apply_consume` is never clobbered. Returns whether it reconciled.
+    pub fn reconcile_token_drift(&self, state: LimiterState) -> bool {
+        let mut guard = self.state.write().unwrap();
+        if guard.next_seq == state.next_seq && *guard != state {
+            *guard = state;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 fn project_capacity(config: &LimiterConfig, state: &LimiterState, timestamp_secs: u64) -> u64 {
@@ -380,5 +392,27 @@ mod tests {
             assert!(!tracker.observe(30, 28));
         }
         assert!(tracker.observe(30, 28));
+    }
+
+    #[test]
+    fn reconcile_token_drift_only_at_matching_seq() {
+        let guardian = LimiterState {
+            num_tokens_available: 925_600,
+            last_updated_at: 838,
+            next_seq: 7,
+        };
+        // Same seq, diverged bucket → snaps.
+        let drifted = make_limiter(231_160, 839, 7);
+        assert!(drifted.reconcile_token_drift(guardian));
+        assert_eq!(drifted.snapshot(), guardian);
+        // Already in sync → no-op.
+        assert!(!drifted.reconcile_token_drift(guardian));
+        // Mirror raced ahead by seq → never clobbered.
+        let ahead = make_limiter(0, 900, 8);
+        assert!(!ahead.reconcile_token_drift(guardian));
+        assert_eq!(ahead.snapshot().next_seq, 8);
+        // Behind by seq (in-flight lag) → left to the stall/eager paths.
+        let behind = make_limiter(0, 900, 6);
+        assert!(!behind.reconcile_token_drift(guardian));
     }
 }
