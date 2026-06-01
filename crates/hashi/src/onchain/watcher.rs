@@ -683,6 +683,33 @@ async fn handle_events(
             }
             HashiEvent::EndReconfigEvent(end_reconfig_event) => {
                 let mut state = state.state_mut();
+                let pending_committee = state
+                    .hashi
+                    .committees
+                    .committees()
+                    .get(&end_reconfig_event.epoch)
+                    .cloned();
+                if let Some(new_committee) = pending_committee {
+                    let handoff = super::convert_move_guardian_handoff(
+                        hashi_types::move_types::GuardianCommitteeHandoff {
+                            new_committee: (&new_committee).into(),
+                            cert: end_reconfig_event.guardian_handoff_cert.clone(),
+                        },
+                    );
+                    match handoff {
+                        Ok(handoff) => {
+                            state
+                                .hashi
+                                .committees
+                                .guardian_handoffs_mut()
+                                .insert(end_reconfig_event.from_epoch, handoff);
+                        }
+                        Err(e) => tracing::error!(
+                            from_epoch = end_reconfig_event.from_epoch,
+                            "failed to convert guardian handoff from EndReconfigEvent: {e}"
+                        ),
+                    }
+                }
                 state
                     .hashi
                     .committees

@@ -36,6 +36,8 @@ use crate::config::HashiIds;
 use crate::mpc::fallback_encryption_public_key;
 use hashi_types::committee::Committee;
 use hashi_types::committee::CommitteeMember;
+use hashi_types::committee::SignedMessage;
+use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::move_types;
 
 const BROADCAST_CHANNEL_CAPACITY: usize = 100;
@@ -297,6 +299,18 @@ impl OnchainState {
     /// Returns the current epoch.
     pub fn epoch(&self) -> u64 {
         self.state().hashi.committees.epoch()
+    }
+
+    pub fn guardian_handoff(
+        &self,
+        from_epoch: u64,
+    ) -> Option<SignedMessage<CommitteeTransitionRequest>> {
+        self.state()
+            .hashi
+            .committees
+            .guardian_handoffs()
+            .get(&from_epoch)
+            .cloned()
     }
 
     /// Returns the MPC public key bytes.
@@ -761,6 +775,7 @@ async fn scrape_hashi(
     let (
         member_info,
         committees_per_epoch,
+        guardian_handoffs,
         treasury,
         deposit_queue,
         withdrawal_queue,
@@ -769,6 +784,7 @@ async fn scrape_hashi(
     ) = tokio::try_join!(
         scrape_all_member_info(client.clone(), committees.members.id),
         scrape_committees(client.clone(), committees.committees.id),
+        scrape_guardian_handoffs(client.clone(), committees.guardian_handoffs.id),
         scrape_treasury(client.clone(), treasury),
         scrape_deposit_requests(client.clone(), bitcoin_state.deposit_queue),
         scrape_withdrawal_queue(client.clone(), bitcoin_state.withdrawal_queue),
@@ -783,7 +799,9 @@ async fn scrape_hashi(
         .set_pending_epoch_change(committees.pending_epoch_change)
         .set_mpc_public_key(committees.mpc_public_key)
         .set_members(member_info)
-        .set_committees(committees_per_epoch);
+        .set_committees(committees_per_epoch)
+        .set_guardian_handoffs_id(committees.guardian_handoffs.id)
+        .set_guardian_handoffs(guardian_handoffs);
 
     Ok((
         checkpoint_info,
@@ -1044,6 +1062,40 @@ async fn scrape_committees(
     Ok(committees)
 }
 
+async fn scrape_guardian_handoffs(
+    client: Client,
+    guardian_handoffs_id: Address,
+) -> Result<BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>>> {
+    let handoffs: BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>> = client
+        .list_dynamic_fields(
+            ListDynamicFieldsRequest::default()
+                .with_parent(guardian_handoffs_id)
+                .with_page_size(u32::MAX)
+                .with_read_mask(FieldMask::from_paths([
+                    DynamicField::path_builder().name().finish(),
+                    DynamicField::path_builder().value().finish(),
+                ])),
+        )
+        .and_then(|field| async move {
+            let from_epoch: u64 = field
+                .name()
+                .deserialize()
+                .map_err(|e| tonic::Status::from_error(e.into()))?;
+            let handoff: move_types::GuardianCommitteeHandoff = field
+                .value()
+                .deserialize()
+                .map_err(|e| tonic::Status::from_error(e.into()))?;
+
+            let signed = convert_move_guardian_handoff(handoff)
+                .map_err(|e| tonic::Status::internal(e.to_string()))?;
+            Ok((from_epoch, signed))
+        })
+        .try_collect()
+        .await?;
+
+    Ok(handoffs)
+}
+
 async fn scrape_committee(
     mut client: Client,
     committees_id: Address,
@@ -1115,6 +1167,21 @@ fn convert_move_committee(c: move_types::Committee) -> Committee {
         max_faulty_in_basis_points,
         nonce_generation_protocol,
     )
+}
+
+fn convert_move_guardian_handoff(
+    handoff: move_types::GuardianCommitteeHandoff,
+) -> Result<SignedMessage<CommitteeTransitionRequest>> {
+    let transition = CommitteeTransitionRequest {
+        new_committee: handoff.new_committee,
+    };
+    SignedMessage::new(
+        handoff.cert.epoch,
+        transition,
+        &handoff.cert.signature,
+        &handoff.cert.signers_bitmap,
+    )
+    .map_err(|e| anyhow!("invalid guardian handoff cert: {e}"))
 }
 
 fn convert_move_uncompressed_g1_pubkey(uncompressed_g1: &[u8]) -> BLS12381PublicKey {

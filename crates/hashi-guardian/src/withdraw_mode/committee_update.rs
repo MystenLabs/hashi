@@ -83,6 +83,17 @@ pub async fn update_committee(
     Ok(proposed_epoch)
 }
 
+pub async fn update_committee_chain(
+    enclave: Arc<Enclave>,
+    transitions: Vec<HashiSigned<CommitteeTransitionRequest>>,
+) -> GuardianResult<u64> {
+    let mut current_epoch = enclave.state.get_committee()?.epoch();
+    for signed in transitions {
+        current_epoch = update_committee(enclave.clone(), signed).await?;
+    }
+    Ok(current_epoch)
+}
+
 async fn log_success(
     enclave: &Enclave,
     from_epoch: u64,
@@ -235,6 +246,41 @@ mod tests {
 
         let new_epoch = update_committee(enclave.clone(), signed).await.unwrap();
         assert_eq!(new_epoch, 7);
+        assert_eq!(enclave.state.get_committee().unwrap().epoch(), 7);
+    }
+
+    #[tokio::test]
+    async fn update_committee_chain_advances_multiple_handoffs() {
+        let enclave = enclave_at_epoch(5).await;
+        let transitions = vec![
+            sign_transition_at(5, committee_at(7)),
+            sign_transition_at(7, committee_at(9)),
+        ];
+
+        let new_epoch = update_committee_chain(enclave.clone(), transitions)
+            .await
+            .unwrap();
+
+        assert_eq!(new_epoch, 9);
+        assert_eq!(enclave.state.get_committee().unwrap().epoch(), 9);
+    }
+
+    #[tokio::test]
+    async fn update_committee_chain_rejects_bad_middle_handoff() {
+        let enclave = enclave_at_epoch(5).await;
+        let transitions = vec![
+            sign_transition_at(5, committee_at(7)),
+            sign_transition_at(6, committee_at(9)),
+        ];
+
+        let err = update_committee_chain(enclave.clone(), transitions)
+            .await
+            .expect_err("bad middle handoff must error");
+
+        assert!(
+            matches!(err, GuardianError::InvalidInputs(_)),
+            "expected InvalidInputs, got {err:?}"
+        );
         assert_eq!(enclave.state.get_committee().unwrap().epoch(), 7);
     }
 

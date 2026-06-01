@@ -182,4 +182,27 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
             current_committee_epoch: Some(current_committee_epoch),
         }))
     }
+
+    async fn update_committee_chain(
+        &self,
+        request: Request<proto::UpdateCommitteeChainRequest>,
+    ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
+        self.require_normal_mode("update_committee_chain")?;
+
+        let transitions = request
+            .into_inner()
+            .transitions
+            .into_iter()
+            .map(pb_to_signed_committee_transition)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(to_status)?;
+        let current_committee_epoch =
+            committee_update::update_committee_chain(self.enclave.clone(), transitions)
+                .await
+                .map_err(to_status)?;
+
+        Ok(Response::new(proto::UpdateCommitteeResponse {
+            current_committee_epoch: Some(current_committee_epoch),
+        }))
+    }
 }

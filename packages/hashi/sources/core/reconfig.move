@@ -44,18 +44,27 @@ entry fun start_reconfig(
 entry fun end_reconfig(
     self: &mut Hashi,
     mpc_public_key: vector<u8>,
-    cert: CommitteeSignature,
+    mpc_cert: CommitteeSignature,
+    guardian_handoff_cert: CommitteeSignature,
     ctx: &TxContext,
 ) {
     self.config().assert_version_enabled();
     assert!(self.committee_set().is_reconfiguring(), ENotReconfiguring);
+    let from_epoch = self.committee_set().epoch();
     let next_epoch = self.committee_set().pending_epoch_change().destroy_some();
     let next_committee = self.committee_set().get_committee(next_epoch);
+    let new_committee = *next_committee;
     let message = ReconfigCompletionMessage { epoch: next_epoch, mpc_public_key };
-    self.verify_with_committee(next_committee, message, cert);
+    self.verify_with_committee(next_committee, message, mpc_cert);
+
+    self.verify_with_committee(self.current_committee(), new_committee, guardian_handoff_cert);
+    self
+        .committee_set_mut()
+        .insert_guardian_handoff(from_epoch, new_committee, guardian_handoff_cert);
+
     self.reset_num_consumed_presigs();
     let epoch = self.committee_set_mut().end_reconfig(mpc_public_key, ctx);
-    sui::event::emit(EndReconfigEvent { epoch, mpc_public_key });
+    sui::event::emit(EndReconfigEvent { from_epoch, epoch, mpc_public_key, guardian_handoff_cert });
 }
 
 public struct StartReconfigEvent has copy, drop {
@@ -63,7 +72,98 @@ public struct StartReconfigEvent has copy, drop {
 }
 
 public struct EndReconfigEvent has copy, drop {
+    from_epoch: u64,
     epoch: u64,
     /// The MPC committee's threshold public key.
     mpc_public_key: vector<u8>,
+    guardian_handoff_cert: CommitteeSignature,
+}
+
+#[test_only]
+const VOTER1: address = @0x1;
+#[test_only]
+const VOTER2: address = @0x2;
+#[test_only]
+const VOTER3: address = @0x3;
+
+#[test_only]
+fun pending_committee_for_testing(epoch: u64): hashi::committee::Committee {
+    use hashi::{committee, test_utils};
+    use sui::bls12381;
+
+    let sk = test_utils::bls_sk_for_testing();
+    let public_key = bls12381::g1_to_uncompressed_g1(
+        &bls12381::g1_from_bytes(&test_utils::bls_min_pk_from_sk(&sk)),
+    );
+    let members = vector[
+        committee::new_committee_member(VOTER1, public_key, sk, 1),
+        committee::new_committee_member(VOTER2, public_key, sk, 1),
+        committee::new_committee_member(VOTER3, public_key, sk, 1),
+    ];
+    committee::new_committee(epoch, members, 3334, 800, 3333)
+}
+
+#[test_only]
+fun cert_message<T: copy + drop + store>(epoch: u64, message: &T): vector<u8> {
+    use sui::bcs;
+
+    let mut bytes = bcs::to_bytes(&epoch);
+    bytes.append(bcs::to_bytes(message));
+    bytes
+}
+
+#[test]
+fun test_end_reconfig_stores_guardian_handoff() {
+    use hashi::test_utils;
+
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let next_epoch = 1;
+    let next_committee = pending_committee_for_testing(next_epoch);
+    hashi.committee_set_mut().set_pending_reconfig_for_testing(next_committee);
+
+    let mpc_public_key = vector[];
+    let mpc_message = ReconfigCompletionMessage { epoch: next_epoch, mpc_public_key };
+    let mpc_cert = test_utils::sign_certificate(
+        next_epoch,
+        &cert_message(next_epoch, &mpc_message),
+        3,
+    );
+    let guardian_cert = test_utils::sign_certificate(0, &cert_message(0, &next_committee), 3);
+
+    end_reconfig(&mut hashi, mpc_public_key, mpc_cert, guardian_cert, ctx);
+
+    assert!(hashi.committee_set().epoch() == next_epoch);
+    assert!(hashi.committee_set().has_guardian_handoff_for_testing(0));
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure]
+fun test_end_reconfig_rejects_handoff_signed_by_wrong_committee() {
+    use hashi::test_utils;
+
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let next_epoch = 1;
+    let next_committee = pending_committee_for_testing(next_epoch);
+    hashi.committee_set_mut().set_pending_reconfig_for_testing(next_committee);
+
+    let mpc_public_key = vector[];
+    let mpc_message = ReconfigCompletionMessage { epoch: next_epoch, mpc_public_key };
+    let mpc_cert = test_utils::sign_certificate(
+        next_epoch,
+        &cert_message(next_epoch, &mpc_message),
+        3,
+    );
+    let guardian_cert = test_utils::sign_certificate(
+        next_epoch,
+        &cert_message(next_epoch, &next_committee),
+        3,
+    );
+
+    end_reconfig(&mut hashi, mpc_public_key, mpc_cert, guardian_cert, ctx);
+    std::unit_test::destroy(hashi);
 }

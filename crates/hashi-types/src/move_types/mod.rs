@@ -71,6 +71,7 @@ pub struct CommitteeSet {
     /// The current epoch.
     pub epoch: u64,
     pub committees: Bag,
+    pub guardian_handoffs: Bag,
     pub pending_epoch_change: Option<u64>,
 
     /// The MPC committee's threshold public key.
@@ -167,6 +168,13 @@ pub struct Committee {
     pub mpc_max_faulty_in_basis_points: u64,
     /// Nonce-generation protocol: 0 = vanilla broadcast, 1 = AVID
     pub mpc_nonce_generation_protocol: u64,
+}
+
+/// Rust version of the Move hashi::committee_set::GuardianCommitteeHandoff type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct GuardianCommitteeHandoff {
+    pub new_committee: Committee,
+    pub cert: CommitteeSignature,
 }
 
 /// Rust version of the Move hashi::config::Config type.
@@ -1300,8 +1308,10 @@ impl From<StartReconfigEvent> for HashiEvent {
 
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct EndReconfigEvent {
+    pub from_epoch: u64,
     pub epoch: u64,
     pub mpc_public_key: Vec<u8>,
+    pub guardian_handoff_cert: CommitteeSignature,
 }
 
 impl MoveType for EndReconfigEvent {
