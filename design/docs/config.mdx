@@ -81,6 +81,14 @@ When `true`, the protocol pauses processing of deposits and withdrawals.
 Requests already in the queue remain queued and resume processing when the
 system is unpaused. Reconfiguration and governance actions are not affected.
 
+**Pause** requires only **5% of committee weight** (500 bps), a deliberately
+low threshold so that a small number of operators can halt the bridge quickly
+in an emergency. **Unpause** requires the standard **66.67% of committee
+weight** (6667 bps) supermajority, ensuring broad consensus before resuming
+operations. This asymmetry reflects the principle that stopping the system in
+an emergency should be easy, while restarting it should require full governance
+agreement.
+
 ### `withdrawal_cancellation_cooldown_ms`
 
 | | |

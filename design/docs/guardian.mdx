@@ -9,4 +9,40 @@ Hashi uses a withdrawal guardian: a second signatory on the managed Bitcoin
 deposits. All deposits are spendable only with a 2-of-2 multisig where the
 guardian is one party and the Hashi MPC committee is the other.
 
-Additional details about the guardian integration are added before Testnet.
+## Secret sharing configuration
+
+The guardian's secret key is split into multiple shares using Shamir's Secret Sharing. This allows the key to be reconstructed only when a sufficient number of shares are combined, providing resilience against the loss of individual shares.
+
+The `SecretSharingConfig` structure defines two parameters:
+
+- **num_shares:** The total number of shares (N) the secret is split into.
+- **threshold:** The minimum number of shares (T) required to reconstruct the secret.
+
+`SecretSharingConfig` is carried through `OperatorInitRequest`, `CurrentKeyState`, and `GuardianInfo`, ensuring that the threshold parameters are consistently available wherever guardian key material is referenced.
+
+## Bootstrap
+
+You bootstrap the guardian using the `bootstrap_guardian` CLI command. This command accepts the following flags for configuring secret sharing:
+
+- `--num-shares`: The total number of shares to generate. Defaults to 5.
+- `--threshold`: The minimum number of shares required to reconstruct the guardian secret. Defaults to 3.
+
+For example, to bootstrap with the default 3-of-5 configuration:
+
+```
+$ bootstrap_guardian
+```
+
+To specify a custom threshold configuration:
+
+```
+$ bootstrap_guardian --num-shares 7 --threshold 4
+```
+
+## Operator initialization
+
+The N and T threshold parameters are specified at `OperatorInit` time. When an operator initializes, the `SecretSharingConfig` is included in the initialization request, ensuring that the guardian's secret sharing scheme is established as part of the operator bootstrap process.
+
+## Key state storage
+
+Guardian key state is persisted using the `key_state/` S3 stream format. This format stores the current state of the guardian's key material, enabling recovery and continuity across restarts.

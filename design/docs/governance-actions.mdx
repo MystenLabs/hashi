@@ -1,7 +1,7 @@
 ---
 title: Governance Actions
-description: Proposal types that the Hashi committee uses to upgrade packages, enable or disable versions, and update onchain configuration.
-keywords: [ governance, proposals, upgrade, configuration, package versions ]
+description: Proposal types that the Hashi committee uses to upgrade packages, enable or disable versions, pause or unpause operations, and update onchain configuration.
+keywords: [ governance, proposals, upgrade, configuration, package versions, pause, unpause ]
 ---
 
 Governance actions are each defined by a unique `Proposal<T>` type. Proposals
@@ -30,3 +30,14 @@ active version cannot be disabled, to avoid bricking the protocol.
 
 Updates a protocol configuration parameter by key. Supports any config
 key-value pair (for example, deposit fee, rate limits).
+
+## `Pause`
+
+Pauses bridge operations. This is an emergency action with a low quorum
+threshold of 5% (500 bps), allowing the bridge to be halted quickly if a
+security issue is detected.
+
+## `Unpause`
+
+Resumes bridge operations after a pause. Requires a higher quorum threshold
+of 66.67% to ensure broad committee consensus before resuming.
