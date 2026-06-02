@@ -693,28 +693,26 @@ impl Monitor {
         tx: bitcoin::Transaction,
         result_tx: oneshot::Sender<Result<()>>,
     ) {
-        // Use the bitcoind RPC, not kyoto's P2P submit_package (unreliable under load).
+        // Broadcast via the bitcoind RPC, not kyoto's P2P submit_package, which
+        // dropped its response or hung under load.
         let txid = tx.compute_txid();
-        let result = btc_rpc_call(&bitcoind_rpc, {
-            let tx = tx.clone();
-            move |rpc| rpc.send_raw_transaction(&tx)
-        })
-        .await;
+        let result = btc_rpc_call(&bitcoind_rpc, move |rpc| rpc.send_raw_transaction(&tx)).await;
         match result {
             Ok(_) => {
                 info!("Transaction {txid} broadcast via Bitcoin Core RPC");
                 let _ = result_tx.send(Ok(()));
             }
+            Err(corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(ref e)))
+                if e.code == -27 =>
+            {
+                // RPC error -27: tx already confirmed on-chain ("outputs already in utxo
+                // set"), so the broadcast succeeded. (A mempool duplicate returns Ok.)
+                debug!("Transaction {txid} already confirmed on-chain");
+                let _ = result_tx.send(Ok(()));
+            }
             Err(e) => {
-                // sendrawtransaction is idempotent; treat an already-known tx as success.
-                let msg = e.to_string();
-                if msg.to_lowercase().contains("already") {
-                    debug!("Transaction {txid} already known to Bitcoin Core: {msg}");
-                    let _ = result_tx.send(Ok(()));
-                } else {
-                    error!("Failed to broadcast transaction {txid}: {msg}");
-                    let _ = result_tx.send(Err(anyhow::anyhow!(e)));
-                }
+                error!("Failed to broadcast transaction {txid}: {e}");
+                let _ = result_tx.send(Err(anyhow::anyhow!(e)));
             }
         }
     }
