@@ -201,6 +201,7 @@ use sui_sdk_types::StructTag;
 use sui_sdk_types::Transaction;
 use sui_sdk_types::TypeTag;
 use sui_sdk_types::bcs::FromBcs;
+use sui_sdk_types::bcs::ToBcs;
 use sui_transaction_builder::Function;
 use sui_transaction_builder::ObjectInput;
 use sui_transaction_builder::TransactionBuilder;
@@ -227,6 +228,121 @@ const MOVE_STDLIB_ADDRESS: Address = Address::from_static("0x1");
 pub const SUI_CLOCK_OBJECT_ID: Address = Address::from_static("0x6");
 const SUI_SYSTEM_STATE_OBJECT_ID: Address = Address::from_static("0x5");
 const SUI_RANDOM_OBJECT_ID: Address = Address::from_static("0x8");
+
+/// How a built transaction should be finalized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxMode {
+    /// Sign with the local key and submit, waiting for the checkpoint.
+    Execute,
+    /// Build and dry-run only; report the gas estimate without submitting.
+    DryRun,
+    /// Build but do not sign: emit the unsigned transaction as base64-encoded
+    /// BCS `TransactionData`, ready for offline / multisig signing via
+    /// `sui keytool sign` + `sui client execute-signed-tx`.
+    SerializeUnsigned,
+}
+
+/// Optional manual overrides for the gas payment. Any field left `None` is
+/// resolved by the fullnode during the build/dry-run.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GasOverrides {
+    /// Pin a specific gas coin by object id. Only the id is needed — the online
+    /// build resolves the version/digest server-side.
+    pub gas_object: Option<Address>,
+    /// Fixed gas budget in MIST. When `None`, the dry-run computes it.
+    pub gas_budget: Option<u64>,
+    /// Fixed gas price in MIST/unit. When `None`, the reference price is used.
+    pub gas_price: Option<u64>,
+}
+
+impl GasOverrides {
+    fn apply(&self, builder: &mut TransactionBuilder) {
+        if let Some(gas_object) = self.gas_object {
+            builder.add_gas_objects([ObjectInput::new(gas_object)]);
+        }
+        if let Some(budget) = self.gas_budget {
+            builder.set_gas_budget(budget);
+        }
+        if let Some(price) = self.gas_price {
+            builder.set_gas_price(price);
+        }
+    }
+}
+
+/// The result of [`finalize`], depending on the [`TxMode`].
+pub enum TxOutcome {
+    /// `Execute`: the transaction was signed and submitted.
+    Executed(Box<ExecuteTransactionResponse>),
+    /// `DryRun`: the transaction was built and simulated but not submitted.
+    Simulated {
+        sender: Address,
+        gas_budget: u64,
+        gas_price: u64,
+    },
+    /// `SerializeUnsigned`: base64-encoded BCS `TransactionData` for external signing.
+    Serialized(String),
+}
+
+/// Set the sender and gas overrides on `builder`, then finish it according to
+/// `mode`: serialize it unsigned, dry-run it, or sign and submit it.
+///
+/// The sender is taken from `sender` if provided, otherwise derived from
+/// `signer`; if neither is available this errors. `signer` is only *required*
+/// for [`TxMode::Execute`] — the serialize and dry-run paths need only the
+/// sender address (no private key), which is what lets us produce an unsigned
+/// transaction for a multisig sender.
+pub async fn finalize(
+    client: &mut Client,
+    signer: Option<&Ed25519PrivateKey>,
+    mut builder: TransactionBuilder,
+    sender: Option<Address>,
+    gas: &GasOverrides,
+    mode: TxMode,
+    timeout: Duration,
+) -> anyhow::Result<TxOutcome> {
+    let sender = sender
+        .or_else(|| signer.map(|s| s.public_key().derive_address()))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no sender available: pass --sender <address> \
+                 (required when no keypair is configured)"
+            )
+        })?;
+    builder.set_sender(sender);
+    gas.apply(&mut builder);
+
+    match mode {
+        TxMode::SerializeUnsigned => {
+            let transaction = builder.build(client).await?;
+            Ok(TxOutcome::Serialized(transaction.to_bcs_base64()?))
+        }
+        TxMode::DryRun => {
+            let transaction = builder.build(client).await?;
+            Ok(TxOutcome::Simulated {
+                sender,
+                gas_budget: transaction.gas_payment.budget,
+                gas_price: transaction.gas_payment.price,
+            })
+        }
+        TxMode::Execute => {
+            let signer = signer.ok_or_else(|| {
+                anyhow::anyhow!("cannot execute transaction: no keypair configured")
+            })?;
+            let transaction = builder.build(client).await?;
+            let signature = signer.sign_transaction(&transaction)?;
+            let response = client
+                .execute_transaction_and_wait_for_checkpoint(
+                    ExecuteTransactionRequest::new(transaction.into())
+                        .with_signatures(vec![signature.into()])
+                        .with_read_mask(FieldMask::from_str("*")),
+                    timeout,
+                )
+                .await?
+                .into_inner();
+            Ok(TxOutcome::Executed(Box::new(response)))
+        }
+    }
+}
 
 /// A reusable executor for submitting Sui transactions.
 ///
@@ -288,6 +404,12 @@ impl SuiTxExecutor {
         self.signer.public_key().derive_address()
     }
 
+    /// Borrow the signer (e.g. so a shared finalizer can sign on this
+    /// executor's behalf).
+    pub fn signer(&self) -> &Ed25519PrivateKey {
+        &self.signer
+    }
+
     // ========================================================================
     // Generic execution methods
     // ========================================================================
@@ -306,32 +428,29 @@ impl SuiTxExecutor {
     )]
     pub async fn execute(
         &mut self,
-        mut builder: TransactionBuilder,
+        builder: TransactionBuilder,
     ) -> anyhow::Result<ExecuteTransactionResponse> {
-        let sender = self.signer.public_key().derive_address();
+        let outcome = finalize(
+            &mut self.client,
+            Some(&self.signer),
+            builder,
+            None,
+            &GasOverrides::default(),
+            TxMode::Execute,
+            self.timeout,
+        )
+        .await?;
 
-        builder.set_sender(sender);
-
-        let transaction = builder.build(&mut self.client).await?;
-        let signature = self.signer.sign_transaction(&transaction)?;
-
-        let response = self
-            .client
-            .execute_transaction_and_wait_for_checkpoint(
-                ExecuteTransactionRequest::new(transaction.into())
-                    .with_signatures(vec![signature.into()])
-                    .with_read_mask(FieldMask::from_str("*")),
-                self.timeout,
-            )
-            .await?
-            .into_inner();
+        let TxOutcome::Executed(response) = outcome else {
+            unreachable!("TxMode::Execute always yields TxOutcome::Executed");
+        };
 
         tracing::Span::current().record(
             "sui_digest",
             tracing::field::display(response.transaction().digest()),
         );
 
-        Ok(response)
+        Ok(*response)
     }
 
     // ========================================================================
@@ -503,54 +622,8 @@ impl SuiTxExecutor {
         amount_sats: u64,
         derivation_path: Option<Address>,
     ) -> anyhow::Result<Address> {
-        let mut builder = TransactionBuilder::new();
-
-        let hashi_arg = builder.object(
-            ObjectInput::new(self.hashi_ids.hashi_object_id)
-                .as_shared()
-                .with_mutable(true),
-        );
-        let clock_arg = builder.object(
-            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
-                .as_shared()
-                .with_mutable(false),
-        );
-
-        // Pure inputs
-        let txid_arg = builder.pure(&txid);
-        let vout_arg = builder.pure(&vout);
-        let amount_arg = builder.pure(&amount_sats);
-        let derivation_path_arg = builder.pure(&derivation_path);
-
-        // 1. Create UtxoId: utxo::utxo_id(txid, vout)
-        let utxo_id_arg = builder.move_call(
-            Function::new(
-                self.hashi_ids.package_id,
-                Identifier::from_static("utxo"),
-                Identifier::from_static("utxo_id"),
-            ),
-            vec![txid_arg, vout_arg],
-        );
-
-        // 2. Create Utxo: utxo::utxo(utxo_id, amount, derivation_path)
-        let utxo_arg = builder.move_call(
-            Function::new(
-                self.hashi_ids.package_id,
-                Identifier::from_static("utxo"),
-                Identifier::from_static("utxo"),
-            ),
-            vec![utxo_id_arg, amount_arg, derivation_path_arg],
-        );
-
-        // 3. Call deposit(hashi, utxo, clock)
-        builder.move_call(
-            Function::new(
-                self.hashi_ids.package_id,
-                Identifier::from_static("deposit"),
-                Identifier::from_static("deposit"),
-            ),
-            vec![hashi_arg, utxo_arg, clock_arg],
-        );
+        let builder =
+            build_create_deposit_request(self.hashi_ids, txid, vout, amount_sats, derivation_path);
 
         let response = self.execute(builder).await?;
 
@@ -561,18 +634,7 @@ impl SuiTxExecutor {
             );
         }
 
-        // Parse events to extract the deposit request ID
-        let events = response.transaction().events();
-        for event in events.events() {
-            let event_type = event.contents().name();
-
-            if event_type.contains("DepositRequestedEvent") {
-                let event_data = DepositRequestedEvent::from_bcs(event.contents().value())?;
-                return Ok(event_data.request_id);
-            }
-        }
-
-        anyhow::bail!("DepositRequestedEvent not found in transaction events")
+        deposit_request_id_from_response(&response)
     }
 
     /// Execute a batch deposit request transaction.
@@ -788,40 +850,10 @@ impl SuiTxExecutor {
         withdrawal_amount_sats: u64,
         destination_bytes: Vec<u8>,
     ) -> anyhow::Result<Address> {
-        let mut builder = TransactionBuilder::new();
-
-        // Shared objects
-        let hashi_arg = builder.object(
-            ObjectInput::new(self.hashi_ids.hashi_object_id)
-                .as_shared()
-                .with_mutable(true),
-        );
-        let clock_arg = builder.object(
-            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
-                .as_shared()
-                .with_mutable(false),
-        );
-
-        // BTC balance via Balance intent.
-        let btc_type = StructTag::new(
-            self.hashi_ids.package_id,
-            Identifier::from_static("btc"),
-            Identifier::from_static("BTC"),
-            vec![],
-        );
-        let btc_arg = builder.intent(BalanceIntent::new(btc_type, withdrawal_amount_sats));
-
-        // Pure inputs
-        let destination_arg = builder.pure(&destination_bytes);
-
-        // Call withdraw::request_withdrawal(hashi, clock, btc, bitcoin_address)
-        builder.move_call(
-            Function::new(
-                self.hashi_ids.package_id,
-                Identifier::from_static("withdraw"),
-                Identifier::from_static("request_withdrawal"),
-            ),
-            vec![hashi_arg, clock_arg, btc_arg, destination_arg],
+        let builder = build_create_withdrawal_request(
+            self.hashi_ids,
+            withdrawal_amount_sats,
+            destination_bytes,
         );
 
         let response = self.execute(builder).await?;
@@ -833,19 +865,9 @@ impl SuiTxExecutor {
             );
         }
 
-        // Parse events to extract the withdrawal request ID
-        for event in response.transaction().events().events() {
-            if event.contents().name().contains("WithdrawalRequestedEvent") {
-                let event_data = WithdrawalRequestedEvent::from_bcs(event.contents().value())?;
-                tracing::Span::current().record(
-                    "request_id",
-                    tracing::field::display(&event_data.request_id),
-                );
-                return Ok(event_data.request_id);
-            }
-        }
-
-        anyhow::bail!("WithdrawalRequestedEvent not found in transaction events")
+        let request_id = withdrawal_request_id_from_response(&response)?;
+        tracing::Span::current().record("request_id", tracing::field::display(&request_id));
+        Ok(request_id)
     }
 
     #[tracing::instrument(level = "info", skip_all)]
@@ -1302,47 +1324,7 @@ impl SuiTxExecutor {
         &mut self,
         withdrawal_id: &Address,
     ) -> anyhow::Result<()> {
-        let mut builder = TransactionBuilder::new();
-
-        let hashi_arg = builder.object(
-            ObjectInput::new(self.hashi_ids.hashi_object_id)
-                .as_shared()
-                .with_mutable(true),
-        );
-        let request_id_arg = builder.pure(withdrawal_id);
-        let clock_arg = builder.object(
-            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
-                .as_shared()
-                .with_mutable(false),
-        );
-
-        let refunded_balance = builder.move_call(
-            Function::new(
-                self.hashi_ids.package_id,
-                Identifier::from_static("withdraw"),
-                Identifier::from_static("cancel_withdrawal"),
-            ),
-            vec![hashi_arg, request_id_arg, clock_arg],
-        );
-
-        // Send the refunded Balance<BTC> back to the sender's address balance.
-        let btc_type = StructTag::new(
-            self.hashi_ids.package_id,
-            Identifier::from_static("btc"),
-            Identifier::from_static("BTC"),
-            vec![],
-        );
-        let sender = self.signer.public_key().derive_address();
-        let sender_arg = builder.pure(&sender);
-        builder.move_call(
-            Function::new(
-                Address::TWO,
-                Identifier::from_static("balance"),
-                Identifier::from_static("send_funds"),
-            )
-            .with_type_args(vec![btc_type.into()]),
-            vec![refunded_balance, sender_arg],
-        );
+        let builder = build_cancel_withdrawal(self.hashi_ids, withdrawal_id, self.sender());
 
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
@@ -1463,6 +1445,188 @@ impl SuiTxExecutor {
         }
         Ok(())
     }
+}
+
+/// Build the PTB for a single deposit request. Pure (no signer / no network),
+/// so it can be signed/executed by [`SuiTxExecutor::execute`] or serialized
+/// unsigned via [`finalize`].
+pub fn build_create_deposit_request(
+    hashi_ids: HashiIds,
+    txid: Address,
+    vout: u32,
+    amount_sats: u64,
+    derivation_path: Option<Address>,
+) -> TransactionBuilder {
+    let mut builder = TransactionBuilder::new();
+
+    let hashi_arg = builder.object(
+        ObjectInput::new(hashi_ids.hashi_object_id)
+            .as_shared()
+            .with_mutable(true),
+    );
+    let clock_arg = builder.object(
+        ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+            .as_shared()
+            .with_mutable(false),
+    );
+
+    let txid_arg = builder.pure(&txid);
+    let vout_arg = builder.pure(&vout);
+    let amount_arg = builder.pure(&amount_sats);
+    let derivation_path_arg = builder.pure(&derivation_path);
+
+    // utxo::utxo_id(txid, vout)
+    let utxo_id_arg = builder.move_call(
+        Function::new(
+            hashi_ids.package_id,
+            Identifier::from_static("utxo"),
+            Identifier::from_static("utxo_id"),
+        ),
+        vec![txid_arg, vout_arg],
+    );
+
+    // utxo::utxo(utxo_id, amount, derivation_path)
+    let utxo_arg = builder.move_call(
+        Function::new(
+            hashi_ids.package_id,
+            Identifier::from_static("utxo"),
+            Identifier::from_static("utxo"),
+        ),
+        vec![utxo_id_arg, amount_arg, derivation_path_arg],
+    );
+
+    // deposit::deposit(hashi, utxo, clock)
+    builder.move_call(
+        Function::new(
+            hashi_ids.package_id,
+            Identifier::from_static("deposit"),
+            Identifier::from_static("deposit"),
+        ),
+        vec![hashi_arg, utxo_arg, clock_arg],
+    );
+
+    builder
+}
+
+/// Extract the deposit request id from a successful deposit transaction.
+pub fn deposit_request_id_from_response(
+    response: &ExecuteTransactionResponse,
+) -> anyhow::Result<Address> {
+    for event in response.transaction().events().events() {
+        if event.contents().name().contains("DepositRequestedEvent") {
+            let event_data = DepositRequestedEvent::from_bcs(event.contents().value())?;
+            return Ok(event_data.request_id);
+        }
+    }
+    anyhow::bail!("DepositRequestedEvent not found in transaction events")
+}
+
+/// Build the PTB for a withdrawal request. The `Balance<BTC>` is drawn from the
+/// transaction sender via a balance intent, resolved at build time.
+pub fn build_create_withdrawal_request(
+    hashi_ids: HashiIds,
+    withdrawal_amount_sats: u64,
+    destination_bytes: Vec<u8>,
+) -> TransactionBuilder {
+    let mut builder = TransactionBuilder::new();
+
+    let hashi_arg = builder.object(
+        ObjectInput::new(hashi_ids.hashi_object_id)
+            .as_shared()
+            .with_mutable(true),
+    );
+    let clock_arg = builder.object(
+        ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+            .as_shared()
+            .with_mutable(false),
+    );
+
+    let btc_type = StructTag::new(
+        hashi_ids.package_id,
+        Identifier::from_static("btc"),
+        Identifier::from_static("BTC"),
+        vec![],
+    );
+    let btc_arg = builder.intent(BalanceIntent::new(btc_type, withdrawal_amount_sats));
+
+    let destination_arg = builder.pure(&destination_bytes);
+
+    // withdraw::request_withdrawal(hashi, clock, btc, bitcoin_address)
+    builder.move_call(
+        Function::new(
+            hashi_ids.package_id,
+            Identifier::from_static("withdraw"),
+            Identifier::from_static("request_withdrawal"),
+        ),
+        vec![hashi_arg, clock_arg, btc_arg, destination_arg],
+    );
+
+    builder
+}
+
+/// Extract the withdrawal request id from a successful withdrawal transaction.
+pub fn withdrawal_request_id_from_response(
+    response: &ExecuteTransactionResponse,
+) -> anyhow::Result<Address> {
+    for event in response.transaction().events().events() {
+        if event.contents().name().contains("WithdrawalRequestedEvent") {
+            let event_data = WithdrawalRequestedEvent::from_bcs(event.contents().value())?;
+            return Ok(event_data.request_id);
+        }
+    }
+    anyhow::bail!("WithdrawalRequestedEvent not found in transaction events")
+}
+
+/// Build the PTB for cancelling a withdrawal. The refunded `Balance<BTC>` is
+/// sent to `sender`'s address balance, so `sender` must be the same address the
+/// transaction is finalized for.
+pub fn build_cancel_withdrawal(
+    hashi_ids: HashiIds,
+    withdrawal_id: &Address,
+    sender: Address,
+) -> TransactionBuilder {
+    let mut builder = TransactionBuilder::new();
+
+    let hashi_arg = builder.object(
+        ObjectInput::new(hashi_ids.hashi_object_id)
+            .as_shared()
+            .with_mutable(true),
+    );
+    let request_id_arg = builder.pure(withdrawal_id);
+    let clock_arg = builder.object(
+        ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+            .as_shared()
+            .with_mutable(false),
+    );
+
+    let refunded_balance = builder.move_call(
+        Function::new(
+            hashi_ids.package_id,
+            Identifier::from_static("withdraw"),
+            Identifier::from_static("cancel_withdrawal"),
+        ),
+        vec![hashi_arg, request_id_arg, clock_arg],
+    );
+
+    // Send the refunded Balance<BTC> back to the sender's address balance.
+    let btc_type = StructTag::new(
+        hashi_ids.package_id,
+        Identifier::from_static("btc"),
+        Identifier::from_static("BTC"),
+        vec![],
+    );
+    let sender_arg = builder.pure(&sender);
+    builder.move_call(
+        Function::new(
+            Address::TWO,
+            Identifier::from_static("balance"),
+            Identifier::from_static("send_funds"),
+        )
+        .with_type_args(vec![btc_type.into()]),
+        vec![refunded_balance, sender_arg],
+    );
+
+    builder
 }
 
 /// Build a transaction to register and/or update validator metadata.

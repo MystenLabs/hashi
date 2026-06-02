@@ -18,7 +18,6 @@ use crate::sui_tx_executor::SuiTxExecutor;
 use anyhow::Context;
 use anyhow::Result;
 use hashi_types::move_types::ConfigValue;
-use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionResponse;
 use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
 use sui_sdk_types::StructTag;
@@ -154,41 +153,29 @@ impl HashiClient {
         self.executor.is_some()
     }
 
-    /// Execute a transaction built with `TransactionBuilder`.
+    /// Finalize `builder` according to `tx_opts`: serialize it unsigned,
+    /// dry-run it, or sign and submit it.
     ///
-    /// Returns an error if no keypair is configured.
-    pub async fn execute(
-        &mut self,
+    /// A keypair is required only for [`TxMode::Execute`](crate::sui_tx_executor::TxMode);
+    /// the serialize and dry-run paths build with just the sender address
+    /// (explicit `--sender`, or the keypair's address when one is configured).
+    pub async fn finalize_tx(
+        &self,
         builder: TransactionBuilder,
-    ) -> Result<ExecuteTransactionResponse> {
-        let executor = self
-            .executor
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Cannot execute transactions: no keypair configured"))?;
-
-        executor.execute(builder).await
-    }
-
-    /// Simulate a transaction (dry-run) without executing it.
-    ///
-    /// Returns the estimated gas budget on success.
-    /// This performs the same steps as execute but stops before signing/submitting.
-    pub async fn simulate(&mut self, mut builder: TransactionBuilder) -> Result<SimulationResult> {
-        let executor = self.executor.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("Cannot simulate transactions: no keypair configured")
-        })?;
-
-        let sender = executor.sender();
-        builder.set_sender(sender);
-
-        // Build the transaction - this internally does a dry-run for gas estimation
-        let transaction = builder.build(&mut self.onchain_state.client()).await?;
-
-        Ok(SimulationResult {
-            sender,
-            gas_budget: transaction.gas_payment.budget,
-            gas_price: transaction.gas_payment.price,
-        })
+        tx_opts: &crate::cli::TxOptions,
+    ) -> Result<crate::sui_tx_executor::TxOutcome> {
+        let signer = self.executor.as_ref().map(|e| e.signer());
+        let mut client = self.onchain_state.client();
+        crate::sui_tx_executor::finalize(
+            &mut client,
+            signer,
+            builder,
+            tx_opts.sender,
+            &tx_opts.gas_overrides(),
+            tx_opts.mode(),
+            std::time::Duration::from_secs(10),
+        )
+        .await
     }
 
     // ========================================================================
