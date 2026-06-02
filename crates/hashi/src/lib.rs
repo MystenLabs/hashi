@@ -901,6 +901,8 @@ impl Hashi {
         state: hashi_types::guardian::LimiterState,
     ) {
         limiter.reconcile_to(state);
+        // Back in lockstep with the guardian; clear the sticky drift flag.
+        self.metrics.guardian_limiter_drifted.set(0);
         self.record_limiter_reconcile(limiter, state);
     }
 
