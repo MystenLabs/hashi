@@ -176,12 +176,13 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
     type Error = GuardianError;
 
     fn try_from(req: pb::ProvisionerInitRequest) -> Result<Self, Self::Error> {
-        let encrypted_share_pb = req
-            .encrypted_share
-            .ok_or_else(|| missing("encrypted_share"))?;
-        let encrypted_share = pb_to_guardian_encrypted_share(encrypted_share_pb)?;
+        let encrypted_shares = req
+            .encrypted_shares
+            .into_iter()
+            .map(pb_to_guardian_encrypted_share)
+            .collect::<GuardianResult<Vec<_>>>()?;
 
-        Ok(ProvisionerInitRequest::new(encrypted_share))
+        Ok(ProvisionerInitRequest::new(encrypted_shares))
     }
 }
 
@@ -450,7 +451,11 @@ pub fn provisioner_init_request_to_pb(
     r: ProvisionerInitRequest,
 ) -> GuardianResult<pb::ProvisionerInitRequest> {
     Ok(pb::ProvisionerInitRequest {
-        encrypted_share: Some(guardian_encrypted_share_to_pb(r.encrypted_share)),
+        encrypted_shares: r
+            .into_parts()
+            .into_iter()
+            .map(guardian_encrypted_share_to_pb)
+            .collect(),
     })
 }
 

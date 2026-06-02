@@ -9,12 +9,12 @@ use anyhow::Context;
 use hashi_guardian::s3_logger::S3Logger;
 use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GetGuardianInfoResponse;
+use hashi_types::guardian::GuardianEncryptedShare;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::HashiMasterG;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::WithdrawModeState;
-use hashi_types::guardian::proto_conversions::provisioner_init_request_to_pb;
 use hashi_types::guardian::session_id_from_signing_pubkey;
 use hashi_types::guardian::verify_enclave_attestation;
 use hashi_types::proto as pb;
@@ -88,25 +88,27 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
 
     let guardian_pub_key =
         EncPubKey::from_bytes(&guardian_info.encryption_pubkey).map_err(|e| anyhow::anyhow!(e))?;
-    let request = ProvisionerInitRequest::build_from_share(
+    let encrypted_share = ProvisionerInitRequest::build_from_share(
         &cfg.share.to_domain()?,
         &guardian_pub_key,
         state_hash,
         &mut thread_rng(),
     );
-    let share_id = request.encrypted_share().id.get();
+    let share_id = encrypted_share.id.get();
     info!(
         share_id,
         state_hash = hex::encode(state_hash),
-        "built provisioner-init request"
+        "built provisioner-init share"
     );
 
-    if let Some(endpoint) = cfg.guardian_endpoint {
-        submit_provisioner_init_to_guardian(
+    // Send this KP's single share to the relay, which collects T-of-N shares
+    // before forwarding them to the guardian in one ProvisionerInit call.
+    if let Some(endpoint) = cfg.relay_endpoint {
+        submit_provisioner_init_to_relay(
             &endpoint,
             &session_id,
             &expected_guardian_config,
-            request,
+            encrypted_share,
         )
         .await?;
     }
@@ -130,29 +132,32 @@ pub async fn get_guardian_info_from_s3(
         .map_err(|e| anyhow::anyhow!(e))
 }
 
-async fn submit_provisioner_init_to_guardian(
+/// Run the relay-side pre-checks for this KP's share. The relay fronts the
+/// guardian's `GetGuardianInfo`, so we verify it against the expected session
+/// and config before handing over the share.
+///
+/// TODO: once the relay exposes `single_provisioner_init`, send `encrypted_share`
+/// to it here. The relay collects T-of-N shares before calling the guardian's
+/// batch `provisioner_init`.
+async fn submit_provisioner_init_to_relay(
     endpoint: &str,
     expected_session_id: &str,
     expected_guardian_config: &GuardianConfig,
-    request: ProvisionerInitRequest,
+    encrypted_share: GuardianEncryptedShare,
 ) -> anyhow::Result<()> {
     let mut client =
         pb::guardian_service_client::GuardianServiceClient::connect(endpoint.to_string())
             .await
-            .with_context(|| format!("failed to connect to guardian endpoint {endpoint}"))?;
+            .with_context(|| format!("failed to connect to relay endpoint {endpoint}"))?;
 
     prechecks(&mut client, expected_session_id, expected_guardian_config)
         .await
-        .with_context(|| "guardian endpoint pre-check failed")?;
+        .with_context(|| "relay endpoint pre-check failed")?;
 
-    info!("prechecks passed, submitting ProvisionerInit");
-    let pb_request = provisioner_init_request_to_pb(request)?;
-    client
-        .provisioner_init(pb_request)
-        .await
-        .with_context(|| format!("guardian ProvisionerInit RPC failed at {endpoint}"))?;
-
-    info!("successfully submitted ProvisionerInit request");
+    info!(
+        share_id = encrypted_share.id.get(),
+        "relay prechecks passed; share submission awaits single_provisioner_init"
+    );
     Ok(())
 }
 
@@ -174,7 +179,7 @@ async fn prechecks(
     let actual_session_id = session_id_from_signing_pubkey(&signing_pub_key);
     anyhow::ensure!(
         actual_session_id == expected_session_id,
-        "guardian endpoint session mismatch: expected {}, got {}",
+        "relay endpoint session mismatch: expected {}, got {}",
         expected_session_id,
         actual_session_id
     );

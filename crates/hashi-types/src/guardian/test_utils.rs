@@ -170,15 +170,13 @@ impl OperatorInitRequest {
 impl ProvisionerInitRequest {
     // NOTE: Incorrect encryption is used. Fix later if needed.
     pub fn mock_for_testing() -> Self {
-        ProvisionerInitRequest {
-            encrypted_share: GuardianEncryptedShare {
-                id: NonZeroU16::new(1).unwrap(),
-                ciphertext: Ciphertext {
-                    encapsulated_key: vec![0u8; 32],
-                    aes_ciphertext: vec![0u8; 32],
-                },
+        ProvisionerInitRequest::new(vec![GuardianEncryptedShare {
+            id: NonZeroU16::new(1).unwrap(),
+            ciphertext: Ciphertext {
+                encapsulated_key: vec![0u8; 32],
+                aes_ciphertext: vec![0u8; 32],
             },
-        }
+        }])
     }
 }
 

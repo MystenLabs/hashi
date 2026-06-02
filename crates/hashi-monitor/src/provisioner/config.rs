@@ -64,8 +64,9 @@ impl GuardianConfig {
 pub struct ProvisionerConfig {
     /// The Key Provisioner's secret share.
     pub share: ShareInput,
-    /// If endpoint is present, the tool will try to submit the request.
-    pub guardian_endpoint: Option<String>,
+    /// Relay endpoint the KP's encrypted share is forwarded to. The relay
+    /// collects T-of-N shares before submitting them to the guardian.
+    pub relay_endpoint: Option<String>,
 
     /// Config
     pub s3: S3Config,

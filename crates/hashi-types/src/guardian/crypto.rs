@@ -481,6 +481,35 @@ pub fn decrypt_share(
     }
 }
 
+/// Decrypt each submission under `aad`, verify it against `commitments`, and
+/// reject duplicate share ids. Errors if fewer than `threshold` shares result —
+/// i.e. the set can't reconstruct the secret. Shared by `provisioner_init` and
+/// `rotate_kps`, which collect a batch of KP shares the same way.
+pub fn decrypt_verify_shares(
+    encrypted: &[GuardianEncryptedShare],
+    sk: &EncSecKey,
+    aad: &[u8; 32],
+    commitments: &ShareCommitments,
+    threshold: usize,
+) -> GuardianResult<Vec<Share>> {
+    let mut shares: Vec<Share> = Vec::with_capacity(encrypted.len());
+    for enc in encrypted {
+        let share = decrypt_share(enc, sk, Some(aad))?;
+        commitments.verify_share(&share)?;
+        if shares.iter().any(|s| s.id == share.id) {
+            return Err(InvalidInputs("Duplicate share ID".into()));
+        }
+        shares.push(share);
+    }
+    if shares.len() < threshold {
+        return Err(InvalidInputs(format!(
+            "need at least {threshold} shares, got {}",
+            shares.len()
+        )));
+    }
+    Ok(shares)
+}
+
 // ---------------------------------
 //    Signing utilities
 // ---------------------------------

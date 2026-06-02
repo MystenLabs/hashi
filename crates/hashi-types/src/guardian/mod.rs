@@ -186,13 +186,13 @@ pub struct OperatorInitRequest {
     state: Option<WithdrawModeConfig>,
 }
 
-/// Provides one KP's encrypted key share to the enclave. The share's HPKE AAD
+/// The current KPs' encrypted key shares, assembled into one submission (in the
+/// relay model, by the relay once it has collected enough). Each share's HPKE AAD
 /// binds the enclave's `state_hash` (the `WithdrawModeState` digest), so a share
 /// only decrypts if the KP agreed on the operator-supplied state.
-/// To be called by Key Provisioners (who may be outside entities).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProvisionerInitRequest {
-    encrypted_share: GuardianEncryptedShare,
+    encrypted_shares: Vec<GuardianEncryptedShare>,
 }
 
 /// The withdraw-mode state KPs attest to. Its `digest()` is the `state_hash`:
@@ -366,7 +366,7 @@ impl CeremonyLogMessage {
 /// OI: operator_init
 /// PI: provisioner_init
 /// Init messages are expected to be logged in the following order:
-/// OIAttestationUnsigned -> OIGuardianInfo -> PISuccess (T times) -> PIEnclaveFullyInitialized.
+/// OIAttestationUnsigned -> OIGuardianInfo -> PIEnclaveFullyInitialized.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum InitLogMessage {
     /// Attestation and signing public key posted in /operator_init
@@ -377,13 +377,9 @@ pub enum InitLogMessage {
     /// Signed GuardianInfo logged in /operator_init (secret-sharing instance,
     /// state_hash, encryption/BTC pubkeys).
     OIGuardianInfo(GuardianInfo),
-    /// A single successful /provisioner_init call (happens N times)
-    PISuccess {
-        share_id: ShareID,
-        state_hash: [u8; 32],
-    },
-    /// Threshold reached - enclave fully initialized (happens once)
-    PIEnclaveFullyInitialized,
+    /// Threshold reached — enclave fully initialized (happens once). Records the
+    /// ids of the shares that were combined.
+    PIEnclaveFullyInitialized { share_ids: Vec<ShareID> },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -653,25 +649,29 @@ impl WithdrawModeConfig {
 }
 
 impl ProvisionerInitRequest {
-    pub fn new(encrypted_share: GuardianEncryptedShare) -> Self {
-        Self { encrypted_share }
+    pub fn new(encrypted_shares: Vec<GuardianEncryptedShare>) -> Self {
+        Self { encrypted_shares }
     }
 
-    /// Encrypt `share` to the enclave's public key, binding `state_hash` (the
-    /// enclave's `WithdrawModeConfig` digest) as HPKE AAD. The enclave only
-    /// decrypts shares from KPs that agreed on that state.
+    /// Encrypt one KP's `share` to the enclave's public key, binding `state_hash`
+    /// (the enclave's `WithdrawModeConfig` digest) as HPKE AAD — so the enclave
+    /// only decrypts shares from KPs that agreed on that state. Each KP produces
+    /// one of these; they are bundled into a `ProvisionerInitRequest`.
     pub fn build_from_share<R: CryptoRng + RngCore>(
         share: &Share,
         enclave_pub_key: &EncPubKey,
         state_hash: [u8; 32],
         rng: &mut R,
-    ) -> Self {
-        let encrypted_share = encrypt_share(share, enclave_pub_key, Some(&state_hash), rng);
-        ProvisionerInitRequest::new(encrypted_share)
+    ) -> GuardianEncryptedShare {
+        encrypt_share(share, enclave_pub_key, Some(&state_hash), rng)
     }
 
-    pub fn encrypted_share(&self) -> &GuardianEncryptedShare {
-        &self.encrypted_share
+    pub fn encrypted_shares(&self) -> &[GuardianEncryptedShare] {
+        &self.encrypted_shares
+    }
+
+    pub fn into_parts(self) -> Vec<GuardianEncryptedShare> {
+        self.encrypted_shares
     }
 }
 
@@ -802,17 +802,15 @@ impl StandardWithdrawalRequest {
 impl InitLogMessage {
     pub const OI_ATTEST_UNSIGNED: &'static str = "oi-attestation-unsigned";
     pub const OI_GUARDIAN_INFO: &'static str = "oi-guardian-info";
-    pub const PI_SUCCESS: &'static str = "pi-success-share";
     pub const PI_FULLY_INITIALIZED: &'static str = "pi-enclave-fully-initialized";
 
     pub fn log_name(&self, prefix: &str) -> String {
         let suffix = match self {
             InitLogMessage::OIAttestationUnsigned { .. } => Self::OI_ATTEST_UNSIGNED.to_string(),
             InitLogMessage::OIGuardianInfo(_) => Self::OI_GUARDIAN_INFO.to_string(),
-            InitLogMessage::PISuccess { share_id, .. } => {
-                format!("{}-{}", Self::PI_SUCCESS, share_id.get())
+            InitLogMessage::PIEnclaveFullyInitialized { .. } => {
+                Self::PI_FULLY_INITIALIZED.to_string()
             }
-            InitLogMessage::PIEnclaveFullyInitialized => Self::PI_FULLY_INITIALIZED.to_string(),
         };
 
         format!("{}-{}.json", prefix, suffix)
