@@ -558,7 +558,6 @@ impl Monitor {
             MonitorMessage::BroadcastTransaction(tx, result_tx) => {
                 self.rpc_workers.spawn(Self::broadcast_transaction(
                     self.bitcoind_rpc.clone(),
-                    self.requester.clone(),
                     tx,
                     result_tx,
                 ));
@@ -691,46 +690,31 @@ impl Monitor {
 
     async fn broadcast_transaction(
         bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
-        requester: kyoto::Requester,
         tx: bitcoin::Transaction,
         result_tx: oneshot::Sender<Result<()>>,
     ) {
-        // Temp hack to get warning messages when a transaction would be rejected
-        // TODO: https://linear.app/mysten-labs/issue/IOP-216/better-error-reporting-for-failed-btc-broadcasts
+        // Use the bitcoind RPC, not kyoto's P2P submit_package (unreliable under load).
         let txid = tx.compute_txid();
-        let accept_result = btc_rpc_call(&bitcoind_rpc, {
+        let result = btc_rpc_call(&bitcoind_rpc, {
             let tx = tx.clone();
-            move |rpc| rpc.test_mempool_accept(std::slice::from_ref(&tx))
+            move |rpc| rpc.send_raw_transaction(&tx)
         })
         .await;
-        match accept_result {
-            Ok(results) => match results.0.first() {
-                Some(result) if !result.allowed => {
-                    error!(
-                        "Bitcoin Core mempool will reject tx {txid}: {}",
-                        result.reject_reason.as_deref().unwrap_or("unknown reason")
-                    );
-                }
-                Some(_) => {
-                    debug!("Bitcoin Core mempool would accept tx {txid}");
-                }
-                None => {
-                    warn!("Bitcoin Core testmempoolaccept returned no result for tx {txid}");
-                }
-            },
-            Err(e) => {
-                warn!("Failed to run testmempoolaccept for tx {txid}: {e}");
-            }
-        }
-
-        match requester.submit_package(tx).await {
-            Ok(wtxid) => {
-                info!("Transaction {txid} broadcast acknowledged (wtxid: {wtxid})");
+        match result {
+            Ok(_) => {
+                info!("Transaction {txid} broadcast via Bitcoin Core RPC");
                 let _ = result_tx.send(Ok(()));
             }
             Err(e) => {
-                error!("Failed to broadcast transaction {txid}: {e}");
-                let _ = result_tx.send(Err(anyhow::anyhow!(e)));
+                // sendrawtransaction is idempotent; treat an already-known tx as success.
+                let msg = e.to_string();
+                if msg.to_lowercase().contains("already") {
+                    debug!("Transaction {txid} already known to Bitcoin Core: {msg}");
+                    let _ = result_tx.send(Ok(()));
+                } else {
+                    error!("Failed to broadcast transaction {txid}: {msg}");
+                    let _ = result_tx.send(Err(anyhow::anyhow!(e)));
+                }
             }
         }
     }
