@@ -558,7 +558,6 @@ impl Monitor {
             MonitorMessage::BroadcastTransaction(tx, result_tx) => {
                 self.rpc_workers.spawn(Self::broadcast_transaction(
                     self.bitcoind_rpc.clone(),
-                    self.requester.clone(),
                     tx,
                     result_tx,
                 ));
@@ -691,41 +690,24 @@ impl Monitor {
 
     async fn broadcast_transaction(
         bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
-        requester: kyoto::Requester,
         tx: bitcoin::Transaction,
         result_tx: oneshot::Sender<Result<()>>,
     ) {
-        // Temp hack to get warning messages when a transaction would be rejected
-        // TODO: https://linear.app/mysten-labs/issue/IOP-216/better-error-reporting-for-failed-btc-broadcasts
+        // Broadcast via the bitcoind RPC, not kyoto's P2P submit_package, which
+        // dropped its response or hung under load.
         let txid = tx.compute_txid();
-        let accept_result = btc_rpc_call(&bitcoind_rpc, {
-            let tx = tx.clone();
-            move |rpc| rpc.test_mempool_accept(std::slice::from_ref(&tx))
-        })
-        .await;
-        match accept_result {
-            Ok(results) => match results.0.first() {
-                Some(result) if !result.allowed => {
-                    error!(
-                        "Bitcoin Core mempool will reject tx {txid}: {}",
-                        result.reject_reason.as_deref().unwrap_or("unknown reason")
-                    );
-                }
-                Some(_) => {
-                    debug!("Bitcoin Core mempool would accept tx {txid}");
-                }
-                None => {
-                    warn!("Bitcoin Core testmempoolaccept returned no result for tx {txid}");
-                }
-            },
-            Err(e) => {
-                warn!("Failed to run testmempoolaccept for tx {txid}: {e}");
+        let result = btc_rpc_call(&bitcoind_rpc, move |rpc| rpc.send_raw_transaction(&tx)).await;
+        match result {
+            Ok(_) => {
+                info!("Transaction {txid} broadcast via Bitcoin Core RPC");
+                let _ = result_tx.send(Ok(()));
             }
-        }
-
-        match requester.submit_package(tx).await {
-            Ok(wtxid) => {
-                info!("Transaction {txid} broadcast acknowledged (wtxid: {wtxid})");
+            Err(corepc_client::client_sync::Error::JsonRpc(jsonrpc::error::Error::Rpc(ref e)))
+                if e.code == -27 =>
+            {
+                // RPC error -27: tx already confirmed on-chain ("outputs already in utxo
+                // set"), so the broadcast succeeded. (A mempool duplicate returns Ok.)
+                debug!("Transaction {txid} already confirmed on-chain");
                 let _ = result_tx.send(Ok(()));
             }
             Err(e) => {
