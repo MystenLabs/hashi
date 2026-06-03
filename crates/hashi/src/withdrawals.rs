@@ -626,7 +626,7 @@ impl Hashi {
         })
     }
 
-    // --- Guardian: validate and BLS-sign a `CommitteeTransition` ---
+    // --- Guardian: validate and BLS-sign a `CommitteeTransitionRequest` ---
 
     /// Rebuild the transition from on-chain state and sign with the historical key.
     #[tracing::instrument(level = "info", skip_all, fields(from_epoch))]
