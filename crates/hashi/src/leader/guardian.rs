@@ -270,13 +270,7 @@ impl LeaderService {
         // Seed `guardian_epoch` once from `GetGuardianInfo`; subsequent
         // iterations reuse `current_committee_epoch` from `UpdateCommittee`
         // and skip the extra round-trip.
-        let info_pb = guardian
-            .get_guardian_info()
-            .await
-            .map_err(|e| anyhow::anyhow!("GetGuardianInfo failed: {e}"))?;
-        let info: hashi_types::guardian::GetGuardianInfoResponse = info_pb
-            .try_into()
-            .map_err(|e| anyhow::anyhow!("parse GetGuardianInfoResponse: {e:?}"))?;
+        let info = inner.fetch_verified_guardian_info().await?;
         let Some(mut guardian_epoch) = info.current_committee_epoch else {
             // ProvisionerInit hasn't run yet; the bootstrap CLI seeds it.
             return Ok(());

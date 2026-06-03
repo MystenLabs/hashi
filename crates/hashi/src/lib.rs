@@ -763,32 +763,12 @@ impl Hashi {
 
     async fn try_seed_guardian_state(&self) -> bool {
         self.metrics.guardian_bootstrap_attempts_total.inc();
-        let Some(info_pb) = self.fetch_guardian_info().await else {
-            self.metrics
-                .record_guardian_bootstrap_outcome(metrics::GUARDIAN_BOOTSTRAP_OUTCOME_RPC_FAILURE);
+        let Ok(info) = self.fetch_verified_guardian_info().await else {
             return false;
         };
-        let info = match hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb) {
-            Ok(info) => info,
-            Err(e) => {
-                self.metrics.record_guardian_bootstrap_outcome(
-                    metrics::GUARDIAN_BOOTSTRAP_OUTCOME_PARSE_FAILURE,
-                );
-                tracing::warn!("guardian bootstrap: parse failed: {e:?}");
-                return false;
-            }
-        };
-        if !self.verify_guardian_signing_pubkey(&info.signing_pub_key) {
+        if !self.verify_and_pin_guardian_btc_pubkey(info.enclave_btc_pubkey) {
             return false;
         }
-        let enclave_btc_pubkey = info.signed_info.data.enclave_btc_pubkey;
-        if !verify_guardian_signed_info(info.signed_info, &info.signing_pub_key, &self.metrics) {
-            return false;
-        }
-        if !self.verify_and_pin_guardian_btc_pubkey(enclave_btc_pubkey) {
-            return false;
-        }
-        let _ = self.guardian_signing_pubkey.set(Some(info.signing_pub_key));
         let (Some(state), Some(config)) = (info.limiter_state, info.limiter_config) else {
             self.metrics.record_guardian_bootstrap_outcome(
                 metrics::GUARDIAN_BOOTSTRAP_OUTCOME_NO_LIMITER_YET,
@@ -841,6 +821,35 @@ impl Hashi {
         }
     }
 
+    /// The one trusted entry point for guardian `/info`: fetch, pin the signing
+    /// pubkey to on-chain, verify the signature, and return the *verified*
+    /// `GuardianInfo`. Callers must read guardian state only through this —
+    /// never `resp.signed_info.data` directly. Records the matching
+    /// bootstrap-outcome metric on each failure.
+    async fn fetch_verified_guardian_info(
+        &self,
+    ) -> anyhow::Result<hashi_types::guardian::GuardianInfo> {
+        let Some(info_pb) = self.fetch_guardian_info().await else {
+            self.metrics
+                .record_guardian_bootstrap_outcome(metrics::GUARDIAN_BOOTSTRAP_OUTCOME_RPC_FAILURE);
+            anyhow::bail!("GetGuardianInfo RPC failed");
+        };
+        let resp =
+            hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb).map_err(|e| {
+                self.metrics.record_guardian_bootstrap_outcome(
+                    metrics::GUARDIAN_BOOTSTRAP_OUTCOME_PARSE_FAILURE,
+                );
+                anyhow::anyhow!("parse GetGuardianInfoResponse: {e:?}")
+            })?;
+        let signing_pub_key = resp.signing_pub_key;
+        if !self.verify_guardian_signing_pubkey(&signing_pub_key) {
+            anyhow::bail!("guardian signing pubkey does not match on-chain");
+        }
+        let info = verify_guardian_signed_info(resp.signed_info, &signing_pub_key, &self.metrics)?;
+        let _ = self.guardian_signing_pubkey.set(Some(signing_pub_key));
+        Ok(info)
+    }
+
     /// Fetch the guardian's authoritative `LimiterState` and the live local
     /// limiter handle. `None` if not seeded, the RPC fails, or pubkey mismatches.
     async fn guardian_limiter_and_state(
@@ -850,16 +859,8 @@ impl Hashi {
         hashi_types::guardian::LimiterState,
     )> {
         let limiter = self.local_limiter()?;
-        let info_pb = self.fetch_guardian_info().await?;
-        let info = hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb).ok()?;
-        if !self.verify_guardian_signing_pubkey(&info.signing_pub_key) {
-            return None;
-        }
-        let enclave_btc_pubkey = info.signed_info.data.enclave_btc_pubkey;
-        if !verify_guardian_signed_info(info.signed_info, &info.signing_pub_key, &self.metrics) {
-            return None;
-        }
-        if !self.verify_and_pin_guardian_btc_pubkey(enclave_btc_pubkey) {
+        let info = self.fetch_verified_guardian_info().await.ok()?;
+        if !self.verify_and_pin_guardian_btc_pubkey(info.enclave_btc_pubkey) {
             return None;
         }
         let state = info.limiter_state?;
@@ -1057,8 +1058,8 @@ fn verify_guardian_signed_info(
     signed_info: hashi_types::guardian::GuardianSigned<hashi_types::guardian::GuardianInfo>,
     signing_pub_key: &hashi_types::guardian::GuardianPubKey,
     metrics: &metrics::Metrics,
-) -> bool {
-    if let Err(e) = signed_info.verify(signing_pub_key) {
+) -> anyhow::Result<hashi_types::guardian::GuardianInfo> {
+    signed_info.verify(signing_pub_key).map_err(|e| {
         metrics.record_guardian_bootstrap_outcome(
             metrics::GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID,
         );
@@ -1067,9 +1068,8 @@ fn verify_guardian_signed_info(
             "FATAL: guardian /info signed_info signature invalid under its own \
              signing_pub_key; refusing to seed or reconcile local limiter",
         );
-        return false;
-    }
-    true
+        anyhow::anyhow!("guardian signed_info signature invalid")
+    })
 }
 
 /// `expected = None` skips the check (pre-feature chains).
@@ -1453,11 +1453,10 @@ mod test {
     fn verify_guardian_signed_info_passes_for_valid_signature() {
         let resp = hashi_types::guardian::GetGuardianInfoResponse::mock_for_testing();
         let metrics = fresh_metrics();
-        assert!(crate::verify_guardian_signed_info(
-            resp.signed_info,
-            &resp.signing_pub_key,
-            &metrics,
-        ));
+        assert!(
+            crate::verify_guardian_signed_info(resp.signed_info, &resp.signing_pub_key, &metrics,)
+                .is_ok()
+        );
         assert_eq!(signature_invalid_count(&metrics), 0);
     }
 
@@ -1468,11 +1467,9 @@ mod test {
         let resp = hashi_types::guardian::GetGuardianInfoResponse::mock_for_testing();
         let wrong_pubkey = random_signing_pubkey();
         let metrics = fresh_metrics();
-        assert!(!crate::verify_guardian_signed_info(
-            resp.signed_info,
-            &wrong_pubkey,
-            &metrics,
-        ));
+        assert!(
+            crate::verify_guardian_signed_info(resp.signed_info, &wrong_pubkey, &metrics,).is_err()
+        );
         assert_eq!(signature_invalid_count(&metrics), 1);
     }
 
@@ -1485,11 +1482,10 @@ mod test {
         sig_bytes[0] ^= 0xff;
         resp.signed_info.signature = hashi_types::guardian::GuardianSignature::from(sig_bytes);
         let metrics = fresh_metrics();
-        assert!(!crate::verify_guardian_signed_info(
-            resp.signed_info,
-            &resp.signing_pub_key,
-            &metrics,
-        ));
+        assert!(
+            crate::verify_guardian_signed_info(resp.signed_info, &resp.signing_pub_key, &metrics,)
+                .is_err()
+        );
         assert_eq!(signature_invalid_count(&metrics), 1);
     }
 

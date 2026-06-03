@@ -462,7 +462,7 @@ impl Enclave {
     // Enclave Info
     // ========================================================================
 
-    pub fn info(&self) -> GuardianInfo {
+    pub async fn info(&self) -> GuardianInfo {
         GuardianInfo {
             secret_sharing_instance: self.secret_sharing_instance().ok().cloned(),
             bucket_info: self
@@ -475,6 +475,9 @@ impl Enclave {
             // TODO: Change it
             server_version: "v1".to_string(),
             enclave_btc_pubkey: self.config.enclave_btc_pubkey().ok(),
+            limiter_state: self.state.limiter_state().await,
+            limiter_config: self.state.limiter_config().await,
+            current_committee_epoch: self.state.get_committee().ok().map(|c| c.epoch()),
         }
     }
 
