@@ -8,7 +8,7 @@
 use super::BitcoinSignature;
 use super::Ciphertext;
 use super::CommitteeSignatureWire;
-use super::CommitteeTransition;
+use super::CommitteeTransitionRequest;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianError;
@@ -1108,7 +1108,7 @@ fn move_committee_to_pb(c: &crate::move_types::Committee) -> pb::Committee {
     }
 }
 
-pub fn committee_transition_to_pb(t: &CommitteeTransition) -> pb::CommitteeTransition {
+pub fn committee_transition_to_pb(t: &CommitteeTransitionRequest) -> pb::CommitteeTransition {
     pb::CommitteeTransition {
         new_committee: Some(move_committee_to_pb(&t.new_committee)),
     }
@@ -1116,14 +1116,14 @@ pub fn committee_transition_to_pb(t: &CommitteeTransition) -> pb::CommitteeTrans
 
 pub fn pb_to_committee_transition(
     t: pb::CommitteeTransition,
-) -> GuardianResult<CommitteeTransition> {
+) -> GuardianResult<CommitteeTransitionRequest> {
     let new_committee_pb = t.new_committee.ok_or_else(|| missing("new_committee"))?;
     let new_committee = pb_to_move_committee(new_committee_pb)?;
-    Ok(CommitteeTransition { new_committee })
+    Ok(CommitteeTransitionRequest { new_committee })
 }
 
 pub fn signed_committee_transition_to_pb(
-    signed: &HashiSigned<CommitteeTransition>,
+    signed: &HashiSigned<CommitteeTransitionRequest>,
 ) -> pb::SignedCommitteeTransition {
     pb::SignedCommitteeTransition {
         data: Some(committee_transition_to_pb(signed.message())),
@@ -1137,7 +1137,7 @@ pub fn signed_committee_transition_to_pb(
 
 pub fn pb_to_signed_committee_transition(
     req: pb::SignedCommitteeTransition,
-) -> GuardianResult<HashiSigned<CommitteeTransition>> {
+) -> GuardianResult<HashiSigned<CommitteeTransitionRequest>> {
     let data_pb = req.data.ok_or_else(|| missing("data"))?;
     let transition = pb_to_committee_transition(data_pb)?;
 
@@ -1146,7 +1146,7 @@ pub fn pb_to_signed_committee_transition(
         .ok_or_else(|| missing("committee_signature"))?;
     let (epoch, signature, bitmap) = pb_to_committee_signature(committee_signature_pb)?;
 
-    HashiSigned::<CommitteeTransition>::new(epoch, transition, &signature, &bitmap)
+    HashiSigned::<CommitteeTransitionRequest>::new(epoch, transition, &signature, &bitmap)
         .map_err(|e| InvalidInputs(format!("invalid signed committee transition: {e}")))
 }
 
@@ -1292,7 +1292,7 @@ mod tests {
             DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
             DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
         );
-        let transition = CommitteeTransition {
+        let transition = CommitteeTransitionRequest {
             new_committee: crate::move_types::Committee::from(&new_committee),
         };
         let sig = sk.sign(5, addr, &transition);

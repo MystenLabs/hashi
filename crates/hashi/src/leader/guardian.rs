@@ -10,7 +10,7 @@ use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::SignedMessage;
 use hashi_types::committee::certificate_threshold;
-use hashi_types::guardian::CommitteeTransition;
+use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::guardian::GuardianSigned;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalResponse;
@@ -348,7 +348,7 @@ impl LeaderService {
     async fn collect_committee_transition_signatures(
         inner: &Arc<Hashi>,
         from_epoch: u64,
-    ) -> anyhow::Result<SignedMessage<CommitteeTransition>> {
+    ) -> anyhow::Result<SignedMessage<CommitteeTransitionRequest>> {
         let (to_epoch, from_committee, new_committee) = {
             let onchain = inner.onchain_state();
             let state = onchain.state();
@@ -370,7 +370,7 @@ impl LeaderService {
             (to_epoch, from, to)
         };
 
-        let transition = CommitteeTransition {
+        let transition = CommitteeTransitionRequest {
             new_committee: hashi_types::move_types::Committee::from(&new_committee),
         };
         let required_weight = certificate_threshold(from_committee.total_weight());

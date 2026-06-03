@@ -663,7 +663,7 @@ impl Hashi {
             .map(|(_, c)| c)
             .ok_or_else(|| anyhow!("no on-chain committee epoch after {from_epoch}"))?;
 
-        let transition = hashi_types::guardian::CommitteeTransition {
+        let transition = hashi_types::guardian::CommitteeTransitionRequest {
             new_committee: hashi_types::move_types::Committee::from(new_committee),
         };
 

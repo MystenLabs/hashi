@@ -4,7 +4,7 @@
 use crate::withdraw::verify_hashi_cert;
 use crate::Enclave;
 use hashi_types::committee::certificate_threshold;
-use hashi_types::guardian::CommitteeTransition;
+use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::EnclaveUninitialized;
@@ -24,7 +24,7 @@ use tracing::info;
 /// Idempotent on already-applied or older transitions.
 pub async fn update_committee(
     enclave: Arc<Enclave>,
-    signed: HashiSigned<CommitteeTransition>,
+    signed: HashiSigned<CommitteeTransitionRequest>,
 ) -> GuardianResult<u64> {
     // Serialize so a stalled call can't roll the committee backwards.
     let _guard = enclave.control_lock.lock().await;
@@ -86,7 +86,7 @@ pub async fn update_committee(
 async fn log_success(
     enclave: &Enclave,
     from_epoch: u64,
-    signed: &HashiSigned<CommitteeTransition>,
+    signed: &HashiSigned<CommitteeTransitionRequest>,
 ) -> GuardianResult<()> {
     let msg = CommitteeUpdateLogMessage::Success {
         from_epoch,
@@ -99,7 +99,7 @@ async fn log_success(
 async fn log_failure(
     enclave: &Enclave,
     from_epoch: u64,
-    signed: &HashiSigned<CommitteeTransition>,
+    signed: &HashiSigned<CommitteeTransitionRequest>,
     err: &GuardianError,
 ) -> GuardianResult<()> {
     let msg = CommitteeUpdateLogMessage::Failure {
@@ -170,9 +170,9 @@ mod tests {
     fn sign_transition_at(
         signing_epoch: u64,
         new_committee: HashiCommittee,
-    ) -> HashiSigned<CommitteeTransition> {
+    ) -> HashiSigned<CommitteeTransitionRequest> {
         let outgoing = committee_at(signing_epoch);
-        let transition = CommitteeTransition {
+        let transition = CommitteeTransitionRequest {
             new_committee: hashi_types::move_types::Committee::from(&new_committee),
         };
         let sk = mock_bls_sk();
