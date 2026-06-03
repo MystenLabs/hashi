@@ -2,10 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Taproot descriptor, address, and child-key derivation for the 2-of-2
-//! (enclave + Hashi) deposit/withdrawal scheme, plus the single-key script-path
-//! helpers. The UTXO/transaction types that consume these live in `super::utxo`.
+//! (enclave + Hashi) deposit/withdrawal scheme. The UTXO/transaction types that
+//! consume these live in `super::utxo`.
 
-use super::BTC_LIB;
 use super::DerivationPath;
 use crate::guardian::BitcoinAddress;
 use crate::guardian::BitcoinPubkey;
@@ -13,8 +12,6 @@ use crate::guardian::HashiMasterG;
 use bitcoin::taproot::ControlBlock;
 use bitcoin::taproot::LeafVersion;
 use bitcoin::taproot::TapLeafHash;
-use bitcoin::taproot::TaprootBuilder;
-use bitcoin::taproot::TaprootSpendInfo;
 use bitcoin::*;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key;
@@ -73,42 +70,6 @@ pub fn nums_internal_key() -> BitcoinPubkey {
         .expect("valid nums key")
 }
 
-pub fn single_key_taproot_script_path_address(
-    pubkey: &BitcoinPubkey,
-    network: Network,
-) -> BitcoinAddress {
-    let (spend_info, _) = single_key_taproot_script_path_spend_info(pubkey);
-    BitcoinAddress::p2tr_tweaked(spend_info.output_key(), network)
-}
-
-pub fn single_key_taproot_script_path_spend_artifacts(
-    pubkey: &BitcoinPubkey,
-) -> (ScriptBuf, ControlBlock, TapLeafHash) {
-    let (spend_info, tapscript) = single_key_taproot_script_path_spend_info(pubkey);
-    let leaf_version = LeafVersion::TapScript;
-    let control_block = spend_info
-        .control_block(&(tapscript.clone(), leaf_version))
-        .expect("control block exists for tapscript leaf");
-    let leaf_hash = TapLeafHash::from_script(&tapscript, leaf_version);
-    (tapscript, control_block, leaf_hash)
-}
-
-fn single_key_taproot_script_path_spend_info(
-    pubkey: &BitcoinPubkey,
-) -> (TaprootSpendInfo, ScriptBuf) {
-    let nums_internal_key = nums_internal_key();
-    let tapscript = script::Builder::new()
-        .push_x_only_key(pubkey)
-        .push_opcode(opcodes::all::OP_CHECKSIG)
-        .into_script();
-    let spend_info = TaprootBuilder::new()
-        .add_leaf(0, tapscript.clone())
-        .expect("valid single-leaf tapscript tree")
-        .finalize(&*BTC_LIB, nums_internal_key)
-        .expect("valid taproot spend info");
-    (spend_info, tapscript)
-}
-
 /// Computes both the address and leaf script for a given derivation path and network.
 pub(super) fn compute_taproot_artifacts(
     enclave_pubkey: &BitcoinPubkey,
@@ -138,7 +99,7 @@ pub fn two_of_two_taproot_script_path_address(
         .address(network)
 }
 
-/// 2-of-2 sibling of [`single_key_taproot_script_path_spend_artifacts`].
+/// Spend artifacts for `tr(NUMS, multi_a(2, enclave, derived_hashi))`.
 pub fn two_of_two_taproot_script_path_spend_artifacts(
     enclave_pubkey: &BitcoinPubkey,
     hashi_master_g: &HashiMasterG,
@@ -169,6 +130,7 @@ pub fn two_of_two_taproot_script_path_spend_artifacts(
 mod bitcoin_tests {
     use super::*;
     use crate::guardian::BitcoinKeypair;
+    use crate::guardian::bitcoin_utils::BTC_LIB;
     use crate::guardian::bitcoin_utils::InputUTXO;
     use crate::guardian::bitcoin_utils::OutputUTXO;
     use crate::guardian::bitcoin_utils::TxUTXOs;
@@ -270,28 +232,6 @@ mod bitcoin_tests {
         assert_eq!(
             hashi_pk, reconstructed_pk,
             "Round-trip conversion should preserve the key"
-        );
-    }
-
-    #[test]
-    fn test_single_key_address_matches_descriptor() {
-        let (keypair, _) = gen_keypair_and_address(Some(TEST_HASHI_BTC_SK), Regtest);
-        let pubkey = keypair.x_only_public_key().0;
-
-        // Build the address via the direct function.
-        let addr_direct = single_key_taproot_script_path_address(&pubkey, Regtest);
-
-        // Build the address via a descriptor: tr({nums}, pk({key})).
-        let desc_str = format!("tr({},pk({}))", nums_internal_key(), pubkey);
-        let desc = Descriptor::<BitcoinPubkey>::from_str(&desc_str).expect("valid descriptor");
-        let addr_descriptor = match &desc {
-            Descriptor::Tr(tr) => tr.address(Regtest),
-            _ => panic!("expected taproot descriptor"),
-        };
-
-        assert_eq!(
-            addr_direct, addr_descriptor,
-            "single_key_taproot_script_path_address must match tr(nums, pk(key)) descriptor"
         );
     }
 
