@@ -137,12 +137,9 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         max_bucket_capacity: args.max_bucket_capacity_sats,
     };
     let limiter_state = LimiterState::genesis(&limiter_config);
-    // The bootstrap utility builds the guardian's BTC keypair from a fresh
-    // bitcoin-lib keypair, which always signs against the even-y projection of
-    // its pubkey. Reconstruct the matching `G` point so downstream derivations
-    // agree on y-parity.
-    let master_g = HashiMasterG::with_even_y_from_x_be_bytes(&material.master_pubkey.serialize())
-        .map_err(|e| anyhow!("convert master pubkey to G: {e:?}"))?;
+    // `hashi_btc_master_pubkey` is the MPC committee `G` the 2-of-2 scripts derive
+    // from — use the on-chain MPC `G` (as hashi does), not the guardian's own key.
+    let master_g = decode_mpc_master_g(&onchain_state.mpc_public_key())?;
     let secret_sharing_instance = SecretSharingInstance::new(material.commitments.clone(), n, t, 0)
         .map_err(|e| anyhow!("build SecretSharingInstance: {e:?}"))?;
     let config = WithdrawModeConfig::new(
@@ -343,6 +340,16 @@ fn required_env(name: &str) -> Result<String> {
     env::var(name).map_err(|_| anyhow!("required env var `{name}` is not set"))
 }
 
+/// Decode the on-chain MPC committee verifying key `G` (`mpc_public_key` = `bcs(G)`),
+/// matching `Hashi::onchain_verifying_key_g` — the point the guardian must derive from.
+fn decode_mpc_master_g(mpc_public_key: &[u8]) -> Result<HashiMasterG> {
+    anyhow::ensure!(
+        !mpc_public_key.is_empty(),
+        "on-chain mpc_public_key is empty (is DKG / end_reconfig complete?)"
+    );
+    bcs::from_bytes(mpc_public_key).map_err(|e| anyhow!("decode on-chain MPC verifying key G: {e}"))
+}
+
 fn parse_network(s: &str) -> Result<Network> {
     match s.to_ascii_lowercase().as_str() {
         "mainnet" | "bitcoin" => Ok(Network::Bitcoin),
@@ -360,6 +367,24 @@ mod tests {
     use super::*;
     use hashi_types::guardian::crypto::combine_shares;
     use hashi_types::guardian::crypto::k256_sk_to_btc_keypair;
+
+    #[test]
+    fn decode_mpc_master_g_round_trips_and_rejects_empty() {
+        use fastcrypto::groups::GroupElement;
+        // The on-chain `mpc_public_key` is `bcs::to_bytes(&G)`; decoding must yield
+        // the same point hashi derives from.
+        let g = HashiMasterG::generator();
+        let onchain_bytes = bcs::to_bytes(&g).expect("serialize G");
+        let decoded = decode_mpc_master_g(&onchain_bytes).expect("decode valid G");
+        assert_eq!(
+            bcs::to_bytes(&decoded).expect("re-serialize"),
+            onchain_bytes,
+            "decoded master G must round-trip the on-chain bytes"
+        );
+        // An empty key (DKG / end_reconfig not yet complete) is rejected, not
+        // silently turned into a bogus master.
+        assert!(decode_mpc_master_g(&[]).is_err());
+    }
 
     #[test]
     fn generated_shares_reconstruct_to_master_pubkey() {
