@@ -52,6 +52,7 @@ export async function onRouteDidUpdate({ location }) {
         apiHost: opts.apiHost,
         hashMode: !!opts.hashMode,
         trackLocalhost: !!opts.trackLocalhost,
+        autoCapturePageviews: false,
       });
       if (instance) {
         window.__plausible_instance__ = instance;
@@ -63,6 +64,8 @@ export async function onRouteDidUpdate({ location }) {
     }
   }
 
+  // Resolve a working track function, supporting both APIs, and expose it
+  // globally so components like AgentPrompt can fire custom events.
   const track = window.__plausible_instance__?.track || mod.track;
 
   if (typeof track !== "function") {
@@ -73,6 +76,8 @@ export async function onRouteDidUpdate({ location }) {
     );
     return;
   }
+
+  window.__plausible_track__ = track;
 
   track("pageview", {
     url: location.pathname + location.search + location.hash,
