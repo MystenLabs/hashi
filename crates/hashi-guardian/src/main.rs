@@ -3,8 +3,8 @@
 
 use anyhow::Result;
 use hashi_guardian::cache::CachingGuardianGrpc;
-use hashi_guardian::heartbeat::HeartbeatWriter;
 use hashi_guardian::rpc::GuardianGrpc;
+use hashi_guardian::withdraw_mode::heartbeat::HeartbeatWriter;
 use hashi_guardian::Enclave;
 use hashi_guardian::HEARTBEAT_INTERVAL;
 use hashi_guardian::HEARTBEAT_RETRY_INTERVAL;

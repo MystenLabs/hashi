@@ -1,12 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::committee_update;
-use crate::getters;
-use crate::init;
-use crate::rotate;
-use crate::setup;
-use crate::withdraw;
+use crate::ceremony_mode::rotate;
+use crate::ceremony_mode::setup;
+use crate::info;
+use crate::operator_init;
+use crate::withdraw_mode::committee_update;
+use crate::withdraw_mode::provisioner_init;
+use crate::withdraw_mode::standard;
 use crate::Enclave;
 use hashi_types::guardian::proto_conversions;
 use hashi_types::guardian::proto_conversions::pb_to_signed_committee_transition;
@@ -67,7 +68,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         _request: Request<proto::GetGuardianInfoRequest>,
     ) -> anyhow::Result<Response<proto::GetGuardianInfoResponse>, Status> {
-        let resp = getters::get_guardian_info(self.enclave.clone())
+        let resp = info::get_guardian_info(self.enclave.clone())
             .await
             .map_err(to_status)?;
 
@@ -117,7 +118,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     ) -> Result<Response<proto::OperatorInitResponse>, Status> {
         let domain_req: OperatorInitRequest = request.into_inner().try_into().map_err(to_status)?;
 
-        init::operator_init(self.enclave.clone(), domain_req)
+        operator_init::operator_init(self.enclave.clone(), domain_req)
             .await
             .map_err(to_status)?;
 
@@ -132,7 +133,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
 
         let domain_req = request.into_inner().try_into().map_err(to_status)?;
 
-        init::provisioner_init(self.enclave.clone(), domain_req)
+        provisioner_init::provisioner_init(self.enclave.clone(), domain_req)
             .await
             .map_err(to_status)?;
 
@@ -156,7 +157,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
                 .map_err(to_status)?;
 
         // core withdraw call
-        let response = withdraw::standard_withdrawal(self.enclave.clone(), validated_req)
+        let response = standard::standard_withdrawal(self.enclave.clone(), validated_req)
             .await
             .map_err(to_status)?;
 

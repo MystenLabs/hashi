@@ -24,7 +24,6 @@ use std::time::Duration;
 use tracing::info;
 
 use crate::s3_logger::S3Logger;
-use crate::withdraw::LimiterGuard;
 use hashi_types::committee::Committee as HashiCommittee;
 
 /// Enclave's config & state
@@ -319,6 +318,39 @@ impl EnclaveState {
     }
 }
 
+/// RAII guard that holds the limiter mutex via an owned guard, returned by
+/// [`EnclaveState::consume_from_limiter`]. Reverts on drop unless committed.
+pub struct LimiterGuard {
+    guard: tokio::sync::OwnedMutexGuard<RateLimiter>,
+    committed: bool,
+}
+
+impl LimiterGuard {
+    pub(crate) fn new(guard: tokio::sync::OwnedMutexGuard<RateLimiter>) -> Self {
+        Self {
+            guard,
+            committed: false,
+        }
+    }
+
+    /// Mark this withdrawal as successful. Prevents revert on drop.
+    pub fn commit(mut self) {
+        self.committed = true;
+    }
+
+    pub fn state(&self) -> &LimiterState {
+        self.guard.state()
+    }
+}
+
+impl Drop for LimiterGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.guard.revert();
+        }
+    }
+}
+
 impl Enclave {
     // ========================================================================
     // Construction & Initialization Status
@@ -430,7 +462,7 @@ impl Enclave {
     // Enclave Info
     // ========================================================================
 
-    pub fn info(&self) -> GuardianInfo {
+    pub async fn info(&self) -> GuardianInfo {
         GuardianInfo {
             secret_sharing_instance: self.secret_sharing_instance().ok().cloned(),
             bucket_info: self
@@ -443,6 +475,9 @@ impl Enclave {
             // TODO: Change it
             server_version: "v1".to_string(),
             enclave_btc_pubkey: self.config.enclave_btc_pubkey().ok(),
+            limiter_state: self.state.limiter_state().await,
+            limiter_config: self.state.limiter_config().await,
+            current_committee_epoch: self.state.get_committee().ok().map(|c| c.epoch()),
         }
     }
 
