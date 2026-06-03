@@ -834,14 +834,13 @@ impl Hashi {
                 .record_guardian_bootstrap_outcome(metrics::GUARDIAN_BOOTSTRAP_OUTCOME_RPC_FAILURE);
             anyhow::bail!("GetGuardianInfo RPC failed");
         };
-        let resp = hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb).map_err(
-            |e| {
+        let resp =
+            hashi_types::guardian::GetGuardianInfoResponse::try_from(info_pb).map_err(|e| {
                 self.metrics.record_guardian_bootstrap_outcome(
                     metrics::GUARDIAN_BOOTSTRAP_OUTCOME_PARSE_FAILURE,
                 );
                 anyhow::anyhow!("parse GetGuardianInfoResponse: {e:?}")
-            },
-        )?;
+            })?;
         let signing_pub_key = resp.signing_pub_key;
         if !self.verify_guardian_signing_pubkey(&signing_pub_key) {
             anyhow::bail!("guardian signing pubkey does not match on-chain");
@@ -1061,8 +1060,9 @@ fn verify_guardian_signed_info(
     metrics: &metrics::Metrics,
 ) -> anyhow::Result<hashi_types::guardian::GuardianInfo> {
     signed_info.verify(signing_pub_key).map_err(|e| {
-        metrics
-            .record_guardian_bootstrap_outcome(metrics::GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID);
+        metrics.record_guardian_bootstrap_outcome(
+            metrics::GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID,
+        );
         tracing::error!(
             error = ?e,
             "FATAL: guardian /info signed_info signature invalid under its own \
@@ -1453,12 +1453,10 @@ mod test {
     fn verify_guardian_signed_info_passes_for_valid_signature() {
         let resp = hashi_types::guardian::GetGuardianInfoResponse::mock_for_testing();
         let metrics = fresh_metrics();
-        assert!(crate::verify_guardian_signed_info(
-            resp.signed_info,
-            &resp.signing_pub_key,
-            &metrics,
-        )
-        .is_ok());
+        assert!(
+            crate::verify_guardian_signed_info(resp.signed_info, &resp.signing_pub_key, &metrics,)
+                .is_ok()
+        );
         assert_eq!(signature_invalid_count(&metrics), 0);
     }
 
@@ -1469,12 +1467,9 @@ mod test {
         let resp = hashi_types::guardian::GetGuardianInfoResponse::mock_for_testing();
         let wrong_pubkey = random_signing_pubkey();
         let metrics = fresh_metrics();
-        assert!(crate::verify_guardian_signed_info(
-            resp.signed_info,
-            &wrong_pubkey,
-            &metrics,
-        )
-        .is_err());
+        assert!(
+            crate::verify_guardian_signed_info(resp.signed_info, &wrong_pubkey, &metrics,).is_err()
+        );
         assert_eq!(signature_invalid_count(&metrics), 1);
     }
 
@@ -1487,12 +1482,10 @@ mod test {
         sig_bytes[0] ^= 0xff;
         resp.signed_info.signature = hashi_types::guardian::GuardianSignature::from(sig_bytes);
         let metrics = fresh_metrics();
-        assert!(crate::verify_guardian_signed_info(
-            resp.signed_info,
-            &resp.signing_pub_key,
-            &metrics,
-        )
-        .is_err());
+        assert!(
+            crate::verify_guardian_signed_info(resp.signed_info, &resp.signing_pub_key, &metrics,)
+                .is_err()
+        );
         assert_eq!(signature_invalid_count(&metrics), 1);
     }
 
