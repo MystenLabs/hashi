@@ -21,6 +21,7 @@ import ExampleImport from "@site/src/shared/components/ExampleImport";
 import SidebarIframe from "@site/src/shared/components/SidebarIframe";
 import ThemeToggle from "@site/src/shared/components/ThemeToggle";
 import Term from "@site/src/shared/components/Glossary/Term";
+import AgentPrompt from "@site/src/shared/components/AgentPrompt";
 import BetaTag from "@site/src/components/BetaTag";
 import EffortBox from "@site/src/components/EffortBox";
 
@@ -41,6 +42,7 @@ export default {
   SidebarIframe,
   ThemeToggle,
   Term,
+  AgentPrompt,
   BetaTag,
   EffortBox,
 };
