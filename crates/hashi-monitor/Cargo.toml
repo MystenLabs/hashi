@@ -12,6 +12,7 @@ clap.workspace = true
 hashi-types = { path = "../hashi-types" }
 # guardian imported for s3 logger
 hashi-guardian = { path = "../hashi-guardian" }
+bcs.workspace = true
 hex.workspace = true
 hpke.workspace = true
 k256.workspace = true
