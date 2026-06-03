@@ -89,15 +89,15 @@ impl GetGuardianInfoResponse {
             state_hash: None,
             server_version: "v1".to_string(),
             enclave_btc_pubkey: None,
+            limiter_state: None,
+            limiter_config: None,
+            current_committee_epoch: None,
         };
 
         GetGuardianInfoResponse {
             attestation: "abcd".as_bytes().to_vec(),
             signing_pub_key,
             signed_info: GuardianSigned::new(info, &signing_key, 1234),
-            limiter_state: None,
-            limiter_config: None,
-            current_committee_epoch: None,
             encrypted_shares: dummy_encrypted_shares(),
         }
     }

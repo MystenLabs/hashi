@@ -102,14 +102,6 @@ pub struct GetGuardianInfoResponse {
     pub signing_pub_key: GuardianPubKey,
     /// Signed guardian info
     pub signed_info: GuardianSigned<GuardianInfo>,
-    /// Current rate limiter state (if initialized).
-    /// TODO: Move to signed?
-    pub limiter_state: Option<LimiterState>,
-    /// Immutable limiter configuration (if initialized).
-    /// TODO: Move to signed?
-    pub limiter_config: Option<LimiterConfig>,
-    /// Current committee epoch (if initialized). Drives `UpdateCommittee` catch-up.
-    pub current_committee_epoch: Option<u64>,
     /// Encrypted shares from the ceremony (empty in non-ceremony mode); KPs
     /// fetch their share here and verify it against the instance commitments.
     pub encrypted_shares: Vec<KPEncryptedShare>,
@@ -132,6 +124,12 @@ pub struct GuardianInfo {
     pub server_version: String,
     /// Enclave BTC signing pubkey (x-only). Absent before `provisioner_init`.
     pub enclave_btc_pubkey: Option<BitcoinPubkey>,
+    /// Current rate limiter state (if initialized).
+    pub limiter_state: Option<LimiterState>,
+    /// Immutable limiter configuration (if initialized).
+    pub limiter_config: Option<LimiterConfig>,
+    /// Current committee epoch (if initialized). Drives `UpdateCommittee` catch-up.
+    pub current_committee_epoch: Option<u64>,
 }
 
 // ---------------------------------------

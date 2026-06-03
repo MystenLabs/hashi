@@ -1256,17 +1256,8 @@ pub struct GetGuardianInfoResponse {
     /// Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
     #[prost(message, optional, tag = "3")]
     pub signed_info: ::core::option::Option<SignedGuardianInfo>,
-    /// Current rate limiter state (if initialized).
-    #[prost(message, optional, tag = "4")]
-    pub limiter_state: ::core::option::Option<LimiterState>,
-    /// Immutable limiter configuration (if initialized).
-    #[prost(message, optional, tag = "5")]
-    pub limiter_config: ::core::option::Option<LimiterConfig>,
-    /// Current committee epoch (if initialized). Drives `UpdateCommittee` catch-up.
-    #[prost(uint64, optional, tag = "6")]
-    pub current_committee_epoch: ::core::option::Option<u64>,
     /// Encrypted shares from the latest ceremony (empty if none yet).
-    #[prost(message, repeated, tag = "7")]
+    #[prost(message, repeated, tag = "4")]
     pub encrypted_shares: ::prost::alloc::vec::Vec<KpEncryptedShare>,
 }
 /// Guardian-signed wrapper around `GuardianInfoData`.
@@ -1303,6 +1294,15 @@ pub struct GuardianInfoData {
     /// Digest of the operator-supplied WithdrawModeState (32 bytes, if set).
     #[prost(bytes = "bytes", optional, tag = "6")]
     pub state_hash: ::core::option::Option<::prost::bytes::Bytes>,
+    /// Current rate limiter state (if initialized).
+    #[prost(message, optional, tag = "7")]
+    pub limiter_state: ::core::option::Option<LimiterState>,
+    /// Immutable limiter configuration (if initialized).
+    #[prost(message, optional, tag = "8")]
+    pub limiter_config: ::core::option::Option<LimiterConfig>,
+    /// Current committee epoch (if initialized). Drives `UpdateCommittee` catch-up.
+    #[prost(uint64, optional, tag = "9")]
+    pub current_committee_epoch: ::core::option::Option<u64>,
 }
 /// Public description of the current BTC key's secret-sharing scheme.
 /// `commitments.len() == num_shares` and `2 <= threshold <= num_shares`.
