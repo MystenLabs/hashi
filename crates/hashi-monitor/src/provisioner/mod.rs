@@ -11,7 +11,6 @@ use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianEncryptedShare;
 use hashi_types::guardian::GuardianInfo;
-use hashi_types::guardian::HashiMasterG;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::WithdrawModeState;
@@ -61,16 +60,11 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
         }
     };
 
-    // Recompute the init state the operator should have booted the enclave with;
-    // its digest is the state_hash we bind as the share's AAD.
+    // Recompute the init state the operator booted the enclave with; its digest is
+    // the state_hash we bind as the share's AAD. `master_g` is the MPC committee `G`
+    // (see config doc), NOT the guardian's own BTC key.
+    let master_g = cfg.mpc_master_g()?;
     let committee = cfg.hashi_committee.try_into()?;
-    // Config holds the master pubkey as a 32-byte x-only key; reconstruct the
-    // even-y `G` so derivations match the BIP-340 even-y convention.
-    // TODO: extend the YAML to carry the y-parity bit (or the full 33-byte
-    // compressed pubkey) so this also handles odd-y MPC outputs.
-    let master_g =
-        HashiMasterG::with_even_y_from_x_be_bytes(&cfg.hashi_btc_master_pubkey.serialize())
-            .map_err(|e| anyhow::anyhow!("convert master pubkey to G: {e:?}"))?;
     let expected_state =
         WithdrawModeState::new(committee, cfg.limiter_config, limiter_state, master_g)
             .map_err(|e| anyhow::anyhow!(e))?;

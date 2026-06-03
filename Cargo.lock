@@ -2991,6 +2991,7 @@ name = "hashi-monitor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bcs",
  "bitcoin",
  "clap",
  "corepc-client",

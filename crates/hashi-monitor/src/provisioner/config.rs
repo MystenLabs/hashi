@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Context;
-use hashi_types::guardian::BitcoinPubkey;
 use hashi_types::guardian::GuardianInfo;
+use hashi_types::guardian::HashiMasterG;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::S3BucketInfo;
 use hashi_types::guardian::S3Config;
@@ -77,8 +77,9 @@ pub struct ProvisionerConfig {
     pub hashi_committee: CommitteeRepr,
     // Limiter config
     pub limiter_config: LimiterConfig,
-    // Hashi BTC pubkey
-    pub hashi_btc_master_pubkey: BitcoinPubkey,
+    /// MPC committee `G` (on-chain `CommitteeSet.mpc_public_key`) as hex of `bcs(G)`;
+    /// the derivation master (NOT the guardian's own key). Must match operator init.
+    pub hashi_btc_master_pubkey_hex: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -125,6 +126,19 @@ impl ProvisionerConfig {
             share_commitments,
         })
     }
+
+    /// The MPC committee verifying key `G`, decoded from `hashi_btc_master_pubkey_hex`.
+    pub fn mpc_master_g(&self) -> anyhow::Result<HashiMasterG> {
+        decode_master_g_hex(&self.hashi_btc_master_pubkey_hex)
+    }
+}
+
+/// Decode the MPC committee verifying key `G` from hex of its `bcs(G)` encoding
+/// (the same `bcs(G)` `Hashi::onchain_verifying_key_g` reads from chain).
+fn decode_master_g_hex(hex_str: &str) -> anyhow::Result<HashiMasterG> {
+    let bytes = hex::decode(hex_str.trim_start_matches("0x"))
+        .context("hashi_btc_master_pubkey_hex is not valid hex")?;
+    bcs::from_bytes(&bytes).context("decode MPC verifying key G from bcs(G)")
 }
 
 impl ShareCommitmentInput {
@@ -154,5 +168,19 @@ impl ShareInput {
             id: ShareID::from(id),
             value: scalar,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_master_g_hex_accepts_bcs_g_and_rejects_garbage() {
+        // hex of a real on-chain CommitteeSet.mpc_public_key (bcs(G), devnet).
+        let g_hex = "a6adc1f72da0e65df2dfb17820fe6dc26d42a84f5738a8b7cb1fa745626f818c00";
+        decode_master_g_hex(g_hex).expect("valid bcs(G) decodes");
+        assert!(decode_master_g_hex("nothex").is_err());
+        assert!(decode_master_g_hex("0011").is_err());
     }
 }
