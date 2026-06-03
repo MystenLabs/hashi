@@ -24,7 +24,6 @@ use std::time::Duration;
 use tracing::info;
 
 use crate::s3_logger::S3Logger;
-use crate::withdraw::LimiterGuard;
 use hashi_types::committee::Committee as HashiCommittee;
 
 /// Enclave's config & state
@@ -316,6 +315,39 @@ impl EnclaveState {
     pub async fn limiter_config(&self) -> Option<LimiterConfig> {
         let limiter = self.rate_limiter.get()?;
         Some(*limiter.lock().await.config())
+    }
+}
+
+/// RAII guard that holds the limiter mutex via an owned guard, returned by
+/// [`EnclaveState::consume_from_limiter`]. Reverts on drop unless committed.
+pub struct LimiterGuard {
+    guard: tokio::sync::OwnedMutexGuard<RateLimiter>,
+    committed: bool,
+}
+
+impl LimiterGuard {
+    pub(crate) fn new(guard: tokio::sync::OwnedMutexGuard<RateLimiter>) -> Self {
+        Self {
+            guard,
+            committed: false,
+        }
+    }
+
+    /// Mark this withdrawal as successful. Prevents revert on drop.
+    pub fn commit(mut self) {
+        self.committed = true;
+    }
+
+    pub fn state(&self) -> &LimiterState {
+        self.guard.state()
+    }
+}
+
+impl Drop for LimiterGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.guard.revert();
+        }
     }
 }
 
