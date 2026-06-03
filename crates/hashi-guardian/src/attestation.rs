@@ -1,13 +1,14 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::Enclave;
-use hashi_types::guardian::*;
-use std::sync::Arc;
-use tracing::info;
+//! Enclave attestation. In enclave builds this talks to the AWS Nitro Secure
+//! Module hardware; the `non-enclave-dev` feature and `cfg(test)` route to a
+//! mock document instead.
 
-// Only needed in enclave builds (for NSM hardware interaction).
-// The `non-enclave-dev` feature and `cfg(test)` both route to the stub below.
+use hashi_types::guardian::Attestation;
+use hashi_types::guardian::GuardianPubKey;
+use hashi_types::guardian::GuardianResult;
+
 #[cfg(not(any(test, feature = "non-enclave-dev")))]
 use hashi_types::guardian::GuardianError;
 #[cfg(not(any(test, feature = "non-enclave-dev")))]
@@ -20,27 +21,10 @@ use nsm_api::driver;
 use serde_bytes::ByteBuf;
 #[cfg(not(any(test, feature = "non-enclave-dev")))]
 use tracing::error;
+#[cfg(not(any(test, feature = "non-enclave-dev")))]
+use tracing::info;
 
-/// Endpoint that returns an attestation committed to the enclave's signing public key
-pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuardianInfoResponse> {
-    info!("/get_guardian_info - Received request");
-
-    let signing_pub_key = enclave.signing_pubkey();
-    let attestation = get_attestation(&signing_pub_key)?;
-    let limiter_state = enclave.state.limiter_state().await;
-    let limiter_config = enclave.state.limiter_config().await;
-    let current_committee_epoch = enclave.state.get_committee().ok().map(|c| c.epoch());
-    Ok(GetGuardianInfoResponse {
-        attestation,
-        signing_pub_key,
-        signed_info: enclave.sign(enclave.info()),
-        limiter_state,
-        limiter_config,
-        current_committee_epoch,
-        encrypted_shares: enclave.latest_encrypted_shares(),
-    })
-}
-
+/// Returns an attestation document committed to the enclave's signing public key.
 #[cfg(not(any(test, feature = "non-enclave-dev")))]
 pub fn get_attestation(signing_pk: &GuardianPubKey) -> GuardianResult<Attestation> {
     let signing_pk_bytes = signing_pk.to_bytes();

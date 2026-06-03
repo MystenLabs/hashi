@@ -228,7 +228,7 @@ impl Enclave {
     pub fn install_operator_init_for_testing(&self, args: OperatorInitTestArgs) {
         self.config.set_s3_logger(args.s3_logger).unwrap();
 
-        crate::init::WithdrawInstall::from_config(args.config)
+        crate::operator_init::WithdrawInstall::from_config(args.config)
             .unwrap()
             .install_into(self);
 

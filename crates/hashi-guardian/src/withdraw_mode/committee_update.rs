@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::withdraw::verify_hashi_cert;
+use crate::withdraw_mode::verify_hashi_cert;
 use crate::Enclave;
 use hashi_types::committee::certificate_threshold;
 use hashi_types::guardian::CommitteeTransitionRequest;
