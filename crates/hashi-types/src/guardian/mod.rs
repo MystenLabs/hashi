@@ -626,16 +626,9 @@ pub struct StandardWithdrawalRequestWire {
 }
 
 #[derive(Debug, Clone)]
-pub struct CommitteeSignatureWire {
-    pub epoch: u64,
-    pub signature: Vec<u8>,
-    pub bitmap: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
 pub struct SignedStandardWithdrawalRequestWire {
     pub data: StandardWithdrawalRequestWire,
-    pub signature: CommitteeSignatureWire,
+    pub signature: crate::move_types::CommitteeSignature,
 }
 
 /// Serializable representation of WithdrawModeState. Used for computing its digest.
@@ -663,7 +656,7 @@ impl AddressValidation<SignedStandardWithdrawalRequestWire>
             wire_value.signature.epoch,
             StandardWithdrawalRequest::validate_addr(wire_value.data, network)?,
             &wire_value.signature.signature,
-            &wire_value.signature.bitmap,
+            &wire_value.signature.signers_bitmap,
         )
         .map_err(|e| InvalidInputs(format!("{:?}", e)))
     }

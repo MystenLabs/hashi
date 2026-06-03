@@ -7,7 +7,7 @@
 
 use super::BitcoinSignature;
 use super::Ciphertext;
-use super::CommitteeSignatureWire;
+use crate::move_types::CommitteeSignature;
 use super::CommitteeTransitionRequest;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
@@ -353,10 +353,10 @@ pub fn pb_to_signed_standard_withdrawal_request_wire(
             timestamp_secs,
             seq,
         },
-        signature: CommitteeSignatureWire {
+        signature: CommitteeSignature {
             epoch,
             signature,
-            bitmap,
+            signers_bitmap: bitmap,
         },
     })
 }
