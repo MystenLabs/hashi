@@ -944,20 +944,21 @@ impl Hashi {
         }
     }
 
-    /// Forward-only reconcile triggered by a watcher rescrape (which likely
-    /// dropped an event); skips the stall detector. Guardian seq is monotonic.
-    async fn reconcile_guardian_limiter_eager(&self) {
+    /// Reconcile on a watcher rescrape. A rescrape can't tell a dropped signed event
+    /// (real drift) from an in-flight withdrawal (consumed by the guardian, event
+    /// pending), so forward-snapping `next_seq` would double-count the in-flight ones
+    /// (the snap counts them, then their `WithdrawalSignedEvent` counts them again).
+    /// So only re-align the bucket at a matching seq; seq drift is left to the stall tick.
+    async fn reconcile_guardian_limiter_on_rescrape(&self) {
         let Some((limiter, state)) = self.guardian_limiter_and_state().await else {
             return;
         };
-        let local_seq = limiter.next_seq();
-        if state.next_seq > local_seq {
-            tracing::warn!(
-                local_seq,
-                guardian_seq = state.next_seq,
-                "Local guardian limiter behind guardian after watcher rescrape; reconciled to authoritative state",
+        if limiter.reconcile_token_drift(state) {
+            self.record_limiter_reconcile(&limiter, state);
+            tracing::debug!(
+                seq = state.next_seq,
+                "Local guardian limiter bucket reconciled after watcher rescrape",
             );
-            self.apply_limiter_reconcile(&limiter, state);
         }
     }
 
@@ -984,8 +985,8 @@ impl Hashi {
             .await;
             tracing::info!("Guardian bootstrap complete");
 
-            // Safety net for the event-driven fast path: periodic tick catches
-            // slow drifts (stall-gated); rescrape notify catches them eagerly.
+            // Safety net for the event path: the periodic tick catches slow seq drift
+            // (stall-gated) + bucket drift; a rescrape notify re-aligns the bucket.
             let reconcile_notify = self.onchain_state().limiter_reconcile_notify();
             // Pinned + re-armed so a notify can't be lost to `select!` cancellation.
             let rescraped = reconcile_notify.notified();
@@ -1001,7 +1002,7 @@ impl Hashi {
                     _ = &mut rescraped => {
                         // Re-arm first so a rescrape during the reconcile isn't lost.
                         rescraped.set(reconcile_notify.notified());
-                        self.reconcile_guardian_limiter_eager().await;
+                        self.reconcile_guardian_limiter_on_rescrape().await;
                     }
                 }
             }
