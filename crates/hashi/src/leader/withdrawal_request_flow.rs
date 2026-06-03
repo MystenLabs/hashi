@@ -31,6 +31,8 @@ use tracing::info;
 use tracing::trace;
 use tracing::warn;
 
+const WITHDRAWAL_APPROVAL_PTB_BATCH_SIZE: usize = 400;
+
 impl LeaderService {
     // ========================================================================
     // Step 1: Approve unapproved withdrawal requests
@@ -61,7 +63,7 @@ impl LeaderService {
         self.withdrawal_approval_retry_tracker
             .prune(&unapproved_ids);
 
-        let to_process: Vec<_> = unapproved
+        let mut to_process: Vec<_> = unapproved
             .into_iter()
             .filter(|r| {
                 !self
@@ -69,6 +71,15 @@ impl LeaderService {
                     .should_skip(&r.id, checkpoint_timestamp_ms)
             })
             .collect();
+
+        if to_process.len() > WITHDRAWAL_APPROVAL_PTB_BATCH_SIZE {
+            info!(
+                available = to_process.len(),
+                batch_size = WITHDRAWAL_APPROVAL_PTB_BATCH_SIZE,
+                "Limiting withdrawal approval batch to PTB batch size",
+            );
+            to_process.truncate(WITHDRAWAL_APPROVAL_PTB_BATCH_SIZE);
+        }
 
         self.inner
             .metrics
