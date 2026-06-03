@@ -1188,6 +1188,19 @@ impl SuiTxExecutor {
             );
         }
 
+        // approve_request verifies a committee BLS cert per request, so a large
+        // batch can exceed the auto-estimated budget (the simulation fails with
+        // INSUFFICIENT_GAS). Set an explicit budget that scales with the batch;
+        // gas is a ceiling (only actual usage is charged) and this stays far
+        // below the protocol max.
+        const GAS_BUDGET_PER_REQUEST_MIST: u64 = 100_000_000; // 0.1 SUI
+        const GAS_BUDGET_BASE_MIST: u64 = 200_000_000; // 0.2 SUI
+        builder.set_gas_budget(
+            (approvals.len() as u64)
+                .saturating_mul(GAS_BUDGET_PER_REQUEST_MIST)
+                .saturating_add(GAS_BUDGET_BASE_MIST),
+        );
+
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
             anyhow::bail!(
