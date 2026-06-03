@@ -14,6 +14,8 @@ use fastcrypto_tbls::threshold_schnorr::reed_solomon::RSDecoder;
 use fastcrypto_tbls::threshold_schnorr::signing::aggregate_signatures;
 use fastcrypto_tbls::threshold_schnorr::signing::finalize_schnorr_signature;
 use fastcrypto_tbls::threshold_schnorr::signing::generate_partial_signatures;
+use futures::stream::FuturesUnordered;
+use futures::stream::StreamExt;
 use hashi_types::committee::Committee;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -25,7 +27,7 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 
 use crate::communication::P2PChannel;
-use crate::communication::send_to_many;
+use crate::communication::with_timeout_and_retry;
 use crate::metrics::MPC_LABEL_SIGNING;
 use crate::metrics::Metrics;
 use crate::mpc::types::GetPartialSignaturesRequest;
@@ -33,6 +35,8 @@ use crate::mpc::types::GetPartialSignaturesResponse;
 use crate::mpc::types::PartialSigningOutput;
 use crate::mpc::types::SigningError;
 use crate::mpc::types::SigningResult;
+
+const EVALS_PER_RS_CORRECTION: usize = 2;
 
 /// A single contiguous batch of presignatures.
 struct PresigBatch {
@@ -391,6 +395,7 @@ impl SigningManager {
                 &request,
                 &mut all_partial_sigs,
                 &mut remaining_peers,
+                threshold as usize,
             )
             .await;
         }
@@ -509,7 +514,15 @@ async fn recover_signature_with_reed_solomon(
                 threshold: params.threshold,
             });
         }
-        collect_from_peers(p2p_channel, request, all_partial_sigs, remaining_peers).await;
+        let target = all_partial_sigs.len() + EVALS_PER_RS_CORRECTION;
+        collect_from_peers(
+            p2p_channel,
+            request,
+            all_partial_sigs,
+            remaining_peers,
+            target,
+        )
+        .await;
     }
 }
 
@@ -537,23 +550,37 @@ fn aggregate_signatures_with_recovery(
     )
 }
 
+/// Poll `remaining_peers` for partial signatures into `all_partial_sigs`,
+/// returning as soon as `target` evals are collected and dropping the
+/// still-in-flight peers.
 async fn collect_from_peers(
     p2p_channel: &impl P2PChannel,
     request: &GetPartialSignaturesRequest,
     all_partial_sigs: &mut Vec<Eval<S>>,
     remaining_peers: &mut HashSet<Address>,
+    target: usize,
 ) {
-    let results = send_to_many(
-        remaining_peers.iter().copied(),
-        request.clone(),
-        |addr, req| async move { p2p_channel.get_partial_signatures(&addr, &req).await },
-    )
-    .await;
-    for (addr, result) in results {
+    let mut in_flight: FuturesUnordered<_> = remaining_peers
+        .iter()
+        .copied()
+        .map(|addr| {
+            let req = request.clone();
+            async move {
+                let result =
+                    with_timeout_and_retry(|| p2p_channel.get_partial_signatures(&addr, &req))
+                        .await;
+                (addr, result)
+            }
+        })
+        .collect();
+    while let Some((addr, result)) = in_flight.next().await {
         match result {
             Ok(response) => {
                 remaining_peers.remove(&addr);
                 all_partial_sigs.extend(response.partial_sigs);
+                if all_partial_sigs.len() >= target {
+                    break;
+                }
             }
             Err(e) => {
                 tracing::info!("Failed to get partial signatures from {}: {}", addr, e);
@@ -739,6 +766,58 @@ mod tests {
             );
         }
         CannedP2PChannel { responses }
+    }
+
+    struct HangingP2PChannel {
+        responses: HashMap<Address, GetPartialSignaturesResponse>,
+        hanging: HashSet<Address>,
+    }
+
+    #[async_trait::async_trait]
+    impl P2PChannel for HangingP2PChannel {
+        async fn send_messages(
+            &self,
+            _: &Address,
+            _: &SendMessagesRequest,
+        ) -> ChannelResult<SendMessagesResponse> {
+            unimplemented!()
+        }
+        async fn retrieve_messages(
+            &self,
+            _: &Address,
+            _: &RetrieveMessagesRequest,
+        ) -> ChannelResult<RetrieveMessagesResponse> {
+            unimplemented!()
+        }
+        async fn complain(
+            &self,
+            _: &Address,
+            _: &ComplainRequest,
+        ) -> ChannelResult<ComplaintResponse> {
+            unimplemented!()
+        }
+        async fn get_public_mpc_output(
+            &self,
+            _: &Address,
+            _: &GetPublicMpcOutputRequest,
+        ) -> ChannelResult<GetPublicMpcOutputResponse> {
+            unimplemented!()
+        }
+        async fn get_partial_signatures(
+            &self,
+            party: &Address,
+            _request: &GetPartialSignaturesRequest,
+        ) -> ChannelResult<GetPartialSignaturesResponse> {
+            if self.hanging.contains(party) {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                return Err(ChannelError::RequestFailed("hung".into()));
+            }
+            self.responses
+                .get(party)
+                .cloned()
+                .map(Ok)
+                .unwrap_or_else(|| Err(ChannelError::ClientNotFound(*party)))
+        }
     }
 
     struct SigningTestSetup {
@@ -1299,6 +1378,51 @@ mod tests {
             &test_metrics(),
         )
         .await
+        .unwrap();
+
+        verify_schnorr(&setup.verifying_key, message, &sig);
+    }
+
+    #[tokio::test]
+    async fn test_sign_early_exits_at_threshold_ignoring_hung_peers() {
+        let setup = SigningTestSetup::new(7);
+        let message = b"hung-peers";
+        let beacon = S::zero();
+        let req_id = test_request_id();
+        let (_, all_sigs) = setup.prepare_all(message, &beacon, req_id, 0, Some(0));
+
+        let mut responses = HashMap::new();
+        responses.insert(
+            test_address(1),
+            GetPartialSignaturesResponse {
+                partial_sigs: all_sigs[1].clone(),
+            },
+        );
+        responses.insert(
+            test_address(2),
+            GetPartialSignaturesResponse {
+                partial_sigs: all_sigs[2].clone(),
+            },
+        );
+        let hanging: HashSet<Address> = [3usize, 4, 5, 6].into_iter().map(test_address).collect();
+        let p2p = HangingP2PChannel { responses, hanging };
+
+        let sig = tokio::time::timeout(
+            Duration::from_secs(5),
+            SigningManager::sign(
+                &setup.managers[0],
+                &p2p,
+                req_id,
+                message,
+                0,
+                &beacon,
+                None,
+                Duration::from_secs(30),
+                &test_metrics(),
+            ),
+        )
+        .await
+        .expect("sign blocked on a hung peer instead of early-exiting at threshold")
         .unwrap();
 
         verify_schnorr(&setup.verifying_key, message, &sig);
