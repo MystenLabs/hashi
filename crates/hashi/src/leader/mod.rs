@@ -12,6 +12,7 @@ pub(crate) use retry::RetryPolicy;
 use crate::Hashi;
 use crate::config::ForceRunAsLeader;
 use crate::deposits::DepositError;
+use crate::grpc::BoxedChannel;
 use crate::leader::retry::GlobalRetryTracker;
 use crate::leader::retry::RetryTracker;
 use crate::onchain::types::DepositRequest;
@@ -22,8 +23,10 @@ use fastcrypto::bls12381::min_pk::BLS12381Signature;
 use fastcrypto::traits::ToFromBytes;
 use futures::future::OptionFuture;
 use hashi_types::committee::MemberSignature;
+use hashi_types::proto::bridge_service_client::BridgeServiceClient;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use sui_futures::service::Service;
@@ -34,6 +37,7 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 use tracing::trace;
+use tracing::warn;
 use x509_parser::nom::AsBytes;
 
 const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
@@ -42,6 +46,23 @@ const LEADER_TASK_TIMEOUT: Duration = Duration::from_secs(60);
 /// Result of a withdrawal broadcast task: `Some(spent_utxo_ids)` when the
 /// withdrawal was confirmed on Sui, `None` when it was not yet ready.
 type WithdrawalBroadcastResult = anyhow::Result<Option<Vec<crate::onchain::types::UtxoId>>>;
+
+/// Whether a failed peer RPC is worth retrying. Under sustained load a peer's
+/// HTTP/2 server tears the whole multiplexed connection down — `GoAway`
+/// (surfaced as `Internal`), broken pipe (`Unknown`), or the usual
+/// `Unavailable` — failing every in-flight request to that peer at once. The
+/// peer signing RPCs are idempotent, so retrying these transport-class codes is
+/// safe and lets the request land on a fresh connection.
+fn is_retriable_transport(status: &tonic::Status) -> bool {
+    matches!(
+        status.code(),
+        tonic::Code::Unavailable
+            | tonic::Code::Unknown
+            | tonic::Code::Internal
+            | tonic::Code::Cancelled
+            | tonic::Code::DeadlineExceeded
+    )
+}
 
 pub(crate) struct LeaderService {
     inner: Arc<Hashi>,
@@ -97,6 +118,45 @@ impl LeaderService {
             guardian_committee_reconcile_task: None,
             last_guardian_reconcile_epoch: None,
         }
+    }
+
+    /// Invoke a peer's bridge-service signing RPC, retrying on transient
+    /// transport failures. `call` is handed a freshly-fetched client each
+    /// attempt so the retry reconnects (tonic reconnects lazily) rather than
+    /// reusing the connection the peer just tore down. Returns `None` once
+    /// attempts are exhausted or on a non-transport error.
+    async fn call_peer_with_retry<Resp, F, Fut>(
+        inner: &Arc<Hashi>,
+        validator: Address,
+        what: &str,
+        mut call: F,
+    ) -> Option<tonic::Response<Resp>>
+    where
+        F: FnMut(BridgeServiceClient<BoxedChannel>) -> Fut,
+        Fut: Future<Output = Result<tonic::Response<Resp>, tonic::Status>>,
+    {
+        const MAX_ATTEMPTS: u32 = 3;
+        for attempt in 1..=MAX_ATTEMPTS {
+            let Some(client) = inner.onchain_state().bridge_service_client(&validator) else {
+                error!("Cannot find bridge-service client for validator: {validator:?}");
+                return None;
+            };
+            match call(client).await {
+                Ok(response) => return Some(response),
+                Err(status) if attempt < MAX_ATTEMPTS && is_retriable_transport(&status) => {
+                    warn!(
+                        "Failed to get {what} from {validator} (attempt {attempt}/{MAX_ATTEMPTS}): \
+                         {status}; retrying on a fresh connection"
+                    );
+                    tokio::time::sleep(Duration::from_millis(50 * u64::from(attempt))).await;
+                }
+                Err(status) => {
+                    error!("Failed to get {what} from {validator}: {status}");
+                    return None;
+                }
+            }
+        }
+        None
     }
 
     /// Start the leader service and return a `Service` for lifecycle management.
@@ -310,4 +370,42 @@ fn parse_member_signature(
             .as_bytes(),
     )?;
     Ok(MemberSignature::new(epoch, address, signature))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_retriable_transport;
+    use tonic::Code;
+    use tonic::Status;
+
+    #[test]
+    fn classifies_transport_errors_as_retriable() {
+        // A peer tearing the connection down surfaces as these codes: GoAway ->
+        // Internal, broken pipe -> Unknown, plus the usual transient codes.
+        for code in [
+            Code::Unavailable,
+            Code::Unknown,
+            Code::Internal,
+            Code::Cancelled,
+            Code::DeadlineExceeded,
+        ] {
+            assert!(
+                is_retriable_transport(&Status::new(code, "boom")),
+                "{code:?} should be retried"
+            );
+        }
+        // Genuine application rejections from the peer must not be retried.
+        for code in [
+            Code::InvalidArgument,
+            Code::FailedPrecondition,
+            Code::PermissionDenied,
+            Code::NotFound,
+            Code::AlreadyExists,
+        ] {
+            assert!(
+                !is_retriable_transport(&Status::new(code, "nope")),
+                "{code:?} should not be retried"
+            );
+        }
+    }
 }

@@ -124,6 +124,14 @@ impl HttpService {
 
         let server_handle = Arc::new(
             sui_http::Builder::new()
+                // Recycle peer connections via a graceful max-age drain: a
+                // long-lived multiplexed HTTP/2 connection accumulates state that
+                // trips a connection-level GoAway(PROTOCOL_ERROR) under sustained
+                // load, failing every in-flight request to that peer at once.
+                .config(
+                    sui_http::Config::default()
+                        .max_connection_age(std::time::Duration::from_secs(120)),
+                )
                 .tls_config(tls_config)
                 .serve(self.inner.config.listen_address(), router)
                 .unwrap(),

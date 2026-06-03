@@ -231,24 +231,16 @@ impl LeaderService {
         let validator_address = member.validator_address();
         trace!("Requesting guardian withdrawal signature");
 
-        let mut rpc_client = inner
-            .onchain_state()
-            .bridge_service_client(&validator_address)
-            .or_else(|| {
-                error!(
-                    "Cannot find client for validator address: {:?}",
-                    validator_address
-                );
-                None
-            })?;
-
-        let response = rpc_client
-            .sign_guardian_withdrawal_request(proto_request.clone())
-            .await
-            .inspect_err(|e| {
-                error!("Failed to get guardian withdrawal signature from {validator_address}: {e}");
-            })
-            .ok()?;
+        let response = Self::call_peer_with_retry(
+            inner,
+            validator_address,
+            "guardian withdrawal signature",
+            move |mut client| {
+                let request = proto_request.clone();
+                async move { client.sign_guardian_withdrawal_request(request).await }
+            },
+        )
+        .await?;
 
         response
             .into_inner()

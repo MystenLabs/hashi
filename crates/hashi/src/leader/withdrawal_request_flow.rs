@@ -314,27 +314,16 @@ impl LeaderService {
         let validator_address = member.validator_address();
         trace!("Requesting withdrawal request approval signature");
 
-        let mut rpc_client = inner
-            .onchain_state()
-            .bridge_service_client(&validator_address)
-            .or_else(|| {
-                error!(
-                    "Cannot find client for validator address: {:?}",
-                    validator_address
-                );
-                None
-            })?;
-
-        let response = rpc_client
-            .sign_withdrawal_request_approval(proto_request.clone())
-            .await
-            .inspect_err(|e| {
-                error!(
-                    "Failed to get withdrawal request approval signature from {}: {e}",
-                    validator_address
-                );
-            })
-            .ok()?;
+        let response = Self::call_peer_with_retry(
+            inner,
+            validator_address,
+            "withdrawal request approval signature",
+            move |mut client| {
+                let request = proto_request.clone();
+                async move { client.sign_withdrawal_request_approval(request).await }
+            },
+        )
+        .await?;
 
         trace!(
             "Retrieved withdrawal request approval signature from {}",
@@ -739,27 +728,16 @@ impl LeaderService {
         let validator_address = member.validator_address();
         trace!("Requesting withdrawal tx commitment signature");
 
-        let mut rpc_client = inner
-            .onchain_state()
-            .bridge_service_client(&validator_address)
-            .or_else(|| {
-                error!(
-                    "Cannot find client for validator address: {:?}",
-                    validator_address
-                );
-                None
-            })?;
-
-        let response = rpc_client
-            .sign_withdrawal_tx_construction(proto_request.clone())
-            .await
-            .inspect_err(|e| {
-                error!(
-                    "Failed to get withdrawal approval signature from {}: {e}",
-                    validator_address
-                );
-            })
-            .ok()?;
+        let response = Self::call_peer_with_retry(
+            inner,
+            validator_address,
+            "withdrawal tx commitment signature",
+            move |mut client| {
+                let request = proto_request.clone();
+                async move { client.sign_withdrawal_tx_construction(request).await }
+            },
+        )
+        .await?;
 
         trace!(
             "Retrieved withdrawal approval signature from {}",
