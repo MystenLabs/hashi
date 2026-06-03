@@ -130,16 +130,23 @@ impl LocalLimiter {
         *self.state.write().unwrap() = state;
     }
 
-    /// Snap to the guardian's `state`, but only at a matching `next_seq` so a
-    /// racing `apply_consume` is never clobbered. Returns whether it reconciled.
+    /// Snap the mirror to the guardian's `state` on genuine drift, only at a matching
+    /// `next_seq` (so a racing `apply_consume` isn't clobbered). A pure refill-timing
+    /// difference — same bucket line, different snapshot instant — isn't drift (equal
+    /// projected capacity at a common time); clobbering it would stall the refill.
     pub fn reconcile_token_drift(&self, state: LimiterState) -> bool {
         let mut guard = self.state.write().unwrap();
-        if guard.next_seq == state.next_seq && *guard != state {
-            *guard = state;
-            true
-        } else {
-            false
+        if guard.next_seq != state.next_seq {
+            return false;
         }
+        let common = guard.last_updated_at.max(state.last_updated_at);
+        if project_capacity(&self.config, &guard, common)
+            == project_capacity(&self.config, &state, common)
+        {
+            return false;
+        }
+        *guard = state;
+        true
     }
 }
 
@@ -429,8 +436,36 @@ mod tests {
         let ahead = make_limiter(0, 900, 8);
         assert!(!ahead.reconcile_token_drift(guardian));
         assert_eq!(ahead.snapshot().next_seq, 8);
-        // Behind by seq (in-flight lag) → left to the stall/eager paths.
+        // Behind by seq (in-flight lag) → left to the stall-gated tick.
         let behind = make_limiter(0, 900, 6);
         assert!(!behind.reconcile_token_drift(guardian));
+    }
+
+    #[test]
+    fn reconcile_token_drift_ignores_refill_timing_on_the_same_line() {
+        // Same refill line, snapshotted 100s apart (rate 1_000/s): not drift —
+        // clobbering it resets the refill baseline each cycle and wedges forever.
+        let guardian = LimiterState {
+            num_tokens_available: 500_000,
+            last_updated_at: 1_000,
+            next_seq: 7,
+        };
+        let mirror = make_limiter(600_000, 1_100, 7); // 500_000 + 100 * 1_000
+        assert!(!mirror.reconcile_token_drift(guardian));
+        assert_eq!(mirror.snapshot().num_tokens_available, 600_000);
+        assert_eq!(mirror.snapshot().last_updated_at, 1_100);
+    }
+
+    #[test]
+    fn reconcile_token_drift_still_snaps_genuine_divergence() {
+        // Different refill lines at the same seq = real drift → still snaps.
+        let guardian = LimiterState {
+            num_tokens_available: 925_600,
+            last_updated_at: 838,
+            next_seq: 7,
+        };
+        let mirror = make_limiter(600_000, 1_100, 7);
+        assert!(mirror.reconcile_token_drift(guardian));
+        assert_eq!(mirror.snapshot(), guardian);
     }
 }
