@@ -13,12 +13,9 @@ use hashi::config::Config;
 use hashi::onchain::OnchainState;
 
 mod bootstrap_guardian;
-mod dump_utxos;
 mod fetch_guardian_info;
 mod generate_master_key;
 mod key_recovery;
-mod sweep_utxos;
-mod utxo_csv;
 
 #[derive(Parser)]
 #[command(name = "internal-tools", about = "Internal operator tools for Hashi")]
@@ -51,11 +48,6 @@ enum Commands {
         #[command(flatten)]
         args: key_recovery::Args,
     },
-    DumpUtxos {
-        #[command(flatten)]
-        config: ConfigArgs,
-    },
-    SweepUtxos(sweep_utxos::Args),
     BootstrapGuardian {
         #[command(flatten)]
         config: ConfigArgs,
@@ -82,7 +74,6 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::SweepUtxos(args) => sweep_utxos::run(args).await,
         Commands::KeyRecovery { config, args } => {
             let cfg = config.load()?;
             let sui_rpc = cfg
@@ -100,19 +91,6 @@ async fn main() -> anyhow::Result<()> {
                     .await
                     .context("failed to connect to Sui RPC")?;
             key_recovery::run(args, &onchain_state, chain_id).await
-        }
-        Commands::DumpUtxos { config } => {
-            let cfg = config.load()?;
-            let sui_rpc = cfg
-                .sui_rpc
-                .as_deref()
-                .ok_or_else(|| anyhow!("config missing sui-rpc"))?;
-            println!("Connecting to Sui RPC: {sui_rpc}");
-            let (onchain_state, _watcher) =
-                OnchainState::new(sui_rpc, cfg.hashi_ids(), None, None, None)
-                    .await
-                    .context("failed to connect to Sui RPC")?;
-            dump_utxos::run(&onchain_state)
         }
         Commands::BootstrapGuardian { config, args } => {
             let cfg = config.load()?;
