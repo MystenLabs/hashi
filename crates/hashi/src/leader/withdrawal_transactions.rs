@@ -445,27 +445,16 @@ impl LeaderService {
         let validator_address = member.validator_address();
         trace!("Requesting withdrawal tx signing signature");
 
-        let mut rpc_client = inner
-            .onchain_state()
-            .bridge_service_client(&validator_address)
-            .or_else(|| {
-                error!(
-                    "Cannot find client for validator address: {:?}",
-                    validator_address
-                );
-                None
-            })?;
-
-        let response = rpc_client
-            .sign_withdrawal_tx_signing(proto_request.clone())
-            .await
-            .inspect_err(|e| {
-                error!(
-                    "Failed to get withdrawal tx signing signature from {}: {e}",
-                    validator_address
-                );
-            })
-            .ok()?;
+        let response = Self::call_peer_with_retry(
+            inner,
+            validator_address,
+            "withdrawal tx signing signature",
+            move |mut client| {
+                let request = proto_request.clone();
+                async move { client.sign_withdrawal_tx_signing(request).await }
+            },
+        )
+        .await?;
 
         trace!(
             "Retrieved withdrawal tx signing signature from {}",
@@ -804,29 +793,19 @@ impl LeaderService {
         let validator_address = member.validator_address();
         trace!("Requesting withdrawal confirmation signature");
 
-        let mut rpc_client = inner
-            .onchain_state()
-            .bridge_service_client(&validator_address)
-            .or_else(|| {
-                error!(
-                    "Cannot find client for validator address: {:?}",
-                    validator_address
-                );
-                None
-            })?;
-
-        let response = rpc_client
-            .sign_withdrawal_confirmation(SignWithdrawalConfirmationRequest {
-                withdrawal_txn_id: withdrawal_txn_id.as_bytes().to_vec().into(),
-            })
-            .await
-            .inspect_err(|e| {
-                error!(
-                    "Failed to get withdrawal confirmation signature from {}: {e}",
-                    validator_address
-                );
-            })
-            .ok()?;
+        let proto_request = SignWithdrawalConfirmationRequest {
+            withdrawal_txn_id: withdrawal_txn_id.as_bytes().to_vec().into(),
+        };
+        let response = Self::call_peer_with_retry(
+            inner,
+            validator_address,
+            "withdrawal confirmation signature",
+            move |mut client| {
+                let request = proto_request.clone();
+                async move { client.sign_withdrawal_confirmation(request).await }
+            },
+        )
+        .await?;
 
         trace!(
             "Retrieved withdrawal confirmation signature from {}",
