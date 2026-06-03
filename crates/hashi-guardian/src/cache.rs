@@ -4,15 +4,20 @@
 //! Temporary in-process response cache for the guardian's `StandardWithdrawal`
 //! RPC. Lives on the throwaway `siddharth/guardian-response-cache` branch and is
 //! not intended for merge — the Nitro design pulls this layer out into an
-//! out-of-enclave proxy.
+//! out-of-enclave proxy, which must preserve the idempotency below.
 //!
-//! Hashi today has no recovery path when guardian returns "seq mismatch": any
-//! transient gRPC failure that advances guardian's `next_seq` before hashi
-//! observes the response leaves the wid permanently stuck. Caching the response
-//! keyed by `(wid, seq)` lets a same-seq retry hit the cache and recover; a
-//! bumped-seq retry (after a hashi restart that re-bootstraps the local limiter
-//! from guardian) correctly misses and re-issues the upstream call, keeping the
-//! guardian and local limiter in lock-step.
+//! The guardian debits the bucket and advances `next_seq` when it processes a
+//! `StandardWithdrawal`, before hashi has durably signed the withdrawal on-chain.
+//! If hashi retries the same withdrawal at a *different* seq — e.g. its local
+//! limiter mirror reconciled forward to the guardian's advanced `next_seq` while
+//! the signed event was still pending — re-consuming would drain the bucket and
+//! burn a seq for a withdrawal that was already signed.
+//!
+//! So the cache is keyed by `wid`, not `(wid, seq)`: a withdrawal consumes the
+//! limiter once, and any retry (at any seq) replays the stored response without
+//! re-consuming. Safe because a `wid`'s `WithdrawalTransaction` has immutable
+//! inputs/outputs once committed (only signatures change), so its enclave
+//! signatures are stable, and the response carries no seq.
 
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::proto;
@@ -25,7 +30,9 @@ use tonic::Status;
 use tracing::info;
 
 struct CacheEntry {
-    seq: u64,
+    /// The seq the guardian consumed this wid at. Kept for observability only —
+    /// the cache is keyed by `wid`, so lookups ignore the requester's seq.
+    consumed_seq: u64,
     response: proto::SignedStandardWithdrawalResponse,
 }
 
@@ -48,26 +55,27 @@ impl<S> CachingGuardianGrpc<S> {
     fn try_hit(
         &self,
         wid: &WithdrawalID,
-        seq: u64,
-    ) -> Option<proto::SignedStandardWithdrawalResponse> {
+    ) -> Option<(u64, proto::SignedStandardWithdrawalResponse)> {
         self.cache
             .lock()
             .expect("cache mutex poisoned")
             .get(wid)
-            .filter(|entry| entry.seq == seq)
-            .map(|entry| entry.response.clone())
+            .map(|entry| (entry.consumed_seq, entry.response.clone()))
     }
 
     fn store(
         &self,
         wid: WithdrawalID,
-        seq: u64,
+        consumed_seq: u64,
         response: proto::SignedStandardWithdrawalResponse,
     ) {
-        self.cache
-            .lock()
-            .expect("cache mutex poisoned")
-            .insert(wid, CacheEntry { seq, response });
+        self.cache.lock().expect("cache mutex poisoned").insert(
+            wid,
+            CacheEntry {
+                consumed_seq,
+                response,
+            },
+        );
     }
 }
 
@@ -121,8 +129,13 @@ where
         let key = extract_wid_and_seq(request.get_ref());
 
         if let Some((wid, seq)) = key {
-            if let Some(cached) = self.try_hit(&wid, seq) {
-                info!(%wid, seq, "Cache hit; returning stored StandardWithdrawal response");
+            if let Some((consumed_seq, cached)) = self.try_hit(&wid) {
+                info!(
+                    %wid,
+                    requested_seq = seq,
+                    consumed_seq,
+                    "Cache hit; replaying stored StandardWithdrawal response (idempotent by wid)"
+                );
                 return Ok(Response::new(cached));
             }
         }
@@ -285,24 +298,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bumped_seq_for_same_wid_misses_and_re_forwards() {
+    async fn bumped_seq_for_same_wid_is_idempotent() {
+        // A retry of the same wid at a *different* seq (e.g. the local limiter
+        // mirror reconciled forward to the guardian's advanced next_seq) must
+        // replay the cached response without re-consuming the guardian limiter —
+        // otherwise the bucket drains for a withdrawal that was already signed.
         let (stub, count) = StubGuardian::ok();
         let cache = CachingGuardianGrpc::new(stub);
 
-        cache
+        let r1 = cache
             .standard_withdrawal(mock_request([0xaa; 32], 0))
             .await
-            .unwrap();
-        cache
+            .unwrap()
+            .into_inner();
+        let r2 = cache
             .standard_withdrawal(mock_request([0xaa; 32], 1))
             .await
-            .unwrap();
+            .unwrap()
+            .into_inner();
 
         assert_eq!(
             count.load(Ordering::SeqCst),
-            2,
-            "different seq must not be served from cache"
+            1,
+            "same wid at a bumped seq must hit the cache, not re-consume"
         );
+        assert_eq!(r1, r2, "bumped-seq retry must replay the same response");
     }
 
     #[tokio::test]
