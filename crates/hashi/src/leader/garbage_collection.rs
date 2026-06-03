@@ -29,6 +29,11 @@ const MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC: usize = 500;
 const MAX_PROPOSAL_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 7; // 7 days
 const PROPOSAL_DELETE_DELAY_MS: u64 = 1000 * 60 * 60 * 24; // 1 day
 
+// Cap how many proposals we delete per GC so the `delete_expired` PTB stays within Sui's
+// 1024-command-per-PTB ceiling. A larger backlog drains over successive checkpoints, oldest first.
+// Mirrors `MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC`.
+const MAX_PROPOSAL_DELETIONS_PER_GC: usize = 500;
+
 impl LeaderService {
     /// Check for and delete expired deposit requests.
     /// Deposit requests are sorted by timestamp and deleted if they are older than
@@ -114,10 +119,12 @@ impl LeaderService {
             return;
         }
 
-        // Find all expired proposals (older than 7 days)
+        // Find all expired proposals (older than 7 days), capped per GC so the
+        // resulting PTB stays within Sui's transaction limits.
         let expired_proposals: Vec<_> = proposals
             .iter()
             .filter(|p| checkpoint_timestamp_ms > p.timestamp_ms + MAX_PROPOSAL_AGE_MS)
+            .take(MAX_PROPOSAL_DELETIONS_PER_GC)
             .cloned()
             .collect();
 
