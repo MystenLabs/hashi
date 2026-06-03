@@ -7,7 +7,6 @@
 
 use super::BitcoinSignature;
 use super::Ciphertext;
-use crate::move_types::CommitteeSignature;
 use super::CommitteeTransitionRequest;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
@@ -45,6 +44,7 @@ use super::bitcoin_utils::InputUTXOWire;
 use super::bitcoin_utils::InternalOutputUTXO;
 use super::bitcoin_utils::OutputUTXOWire;
 use super::bitcoin_utils::TxUTXOsWire;
+use crate::move_types::CommitteeSignature;
 use crate::pgp::PgpPublicCert;
 use crate::proto as pb;
 use bitcoin::Address as BitcoinAddress;
