@@ -671,7 +671,7 @@ impl AddressValidation<StandardWithdrawalRequestWire> for StandardWithdrawalRequ
         let inputs = utxos
             .inputs
             .into_iter()
-            .map(|utxo| InputUTXO::from_wire(utxo, network))
+            .map(InputUTXO::from_wire)
             .collect::<Result<Vec<_>, _>>()?;
 
         let outputs = utxos

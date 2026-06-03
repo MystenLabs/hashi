@@ -60,7 +60,7 @@ pub fn derive_hashi_child_pubkey(
     hashi_master_g: &HashiMasterG,
     hashi_derivation_path: &DerivationPath,
 ) -> BitcoinPubkey {
-    let derived = derive_verifying_key(hashi_master_g, hashi_derivation_path);
+    let derived = derive_verifying_key(hashi_master_g, &hashi_derivation_path.into_inner());
     BitcoinPubkey::from_slice(&derived.to_byte_array()).expect("derived schnorr key is x-only")
 }
 
@@ -251,8 +251,12 @@ mod bitcoin_tests {
         let enclave_pk = enclave_keypair.x_only_public_key().0;
         let hashi_pk = hashi_keypair.x_only_public_key().0;
 
-        let (address, control_block, tap_script) =
-            create_taproot_artifacts_for_test(&enclave_pk, &hashi_pk, &[0u8; 32], Regtest);
+        let (address, control_block, tap_script) = create_taproot_artifacts_for_test(
+            &enclave_pk,
+            &hashi_pk,
+            &DerivationPath::ZERO,
+            Regtest,
+        );
         println!("\n=== 2-of-2 Multisig Address ===");
         println!("Address: {}", address);
         println!("Enclave pubkey: {}", enclave_pk);
@@ -271,17 +275,9 @@ mod bitcoin_tests {
             vout: 1,
         };
         let hashi_master_g = hashi_master_g_from_xonly(&hashi_pk);
-        let (_, leaf_hash) = compute_taproot_artifacts(&enclave_pk, &hashi_master_g, &[0u8; 32]);
 
         let input_amount = Amount::from_sat(100000000); // 1.0 BTC
-        let input_utxo = InputUTXO::new(
-            out_point,
-            input_amount,
-            address.as_unchecked().clone(),
-            leaf_hash,
-            Regtest,
-        )
-        .unwrap();
+        let input_utxo = InputUTXO::new(out_point, input_amount, DerivationPath::ZERO).unwrap();
 
         // C) Enclave signs the transaction.
         let tx_info = TxUTXOs::new(
@@ -294,7 +290,10 @@ mod bitcoin_tests {
                     Regtest,
                 )
                 .unwrap(),
-                OutputUTXO::new_internal([0; 32], input_amount - Amount::from_sat(1000)),
+                OutputUTXO::new_internal(
+                    DerivationPath::ZERO,
+                    input_amount - Amount::from_sat(1000),
+                ),
             ],
         )
         .unwrap();
@@ -368,8 +367,11 @@ mod bitcoin_tests {
         );
 
         // The production 2-of-2 leaf must embed the MPC-signed child.
-        let (leaf_script, _, _) =
-            two_of_two_taproot_script_path_spend_artifacts(&enclave_pubkey, &raw_g, &path);
+        let (leaf_script, _, _) = two_of_two_taproot_script_path_spend_artifacts(
+            &enclave_pubkey,
+            &raw_g,
+            &DerivationPath::from(path),
+        );
         let script = leaf_script.as_bytes();
         assert!(
             script.windows(32).any(|w| w == mpc_child.as_slice()),
@@ -408,7 +410,7 @@ mod bitcoin_tests {
 
         struct Case {
             label: &'static str,
-            path: [u8; 32],
+            path: DerivationPath,
             expected_derived: &'static str,
             expected_addr_regtest: &'static str,
             expected_addr_signet: &'static str,
@@ -423,7 +425,7 @@ mod bitcoin_tests {
         let cases = [
             Case {
                 label: "zero path",
-                path: [0u8; 32],
+                path: DerivationPath::ZERO,
                 expected_derived: "80583e4abd7e73b0868a44e24dd05379375f1c3a85c4c1329bb0572df8577985",
                 expected_addr_regtest: "bcrt1p0y0fqatuhy4rwt5ac99z7wse6u8zqzu73jmk0rls57uulnl7q4mq0pk06r",
                 expected_addr_signet: "tb1p0y0fqatuhy4rwt5ac99z7wse6u8zqzu73jmk0rls57uulnl7q4mqzcuf0e",
@@ -439,7 +441,7 @@ mod bitcoin_tests {
             },
             Case {
                 label: "path = [1u8; 32]",
-                path: [1u8; 32],
+                path: DerivationPath::from([1u8; 32]),
                 expected_derived: "1b79f716fb1f7beba697f012edcf7b81a96ceac2920b181bd217c9cc017ac7fb",
                 expected_addr_regtest: "bcrt1pftf88nkuljl4rlsd4xqyq7sy0fzjedws5egf7nuyq4lkkj3hdz2sdfq4a0",
                 expected_addr_signet: "tb1pftf88nkuljl4rlsd4xqyq7sy0fzjedws5egf7nuyq4lkkj3hdz2sqs2ng4",
@@ -455,7 +457,7 @@ mod bitcoin_tests {
             },
             Case {
                 label: "path = 0xab..00..cd",
-                path: path_ab_cd,
+                path: DerivationPath::from(path_ab_cd),
                 expected_derived: "1403322badfd7823bebf81e9c5ff74f32f856348ac0f5abe33130cc4b6a14c84",
                 expected_addr_regtest: "bcrt1pe82wsztzxt97jwkx6wcls257xaycfxw7up4k0ju7r6rsf07zxdlsyg9dfv",
                 expected_addr_signet: "tb1pe82wsztzxt97jwkx6wcls257xaycfxw7up4k0ju7r6rsf07zxdlsf30tuk",
@@ -542,7 +544,7 @@ mod bitcoin_tests {
         let (enclave_keypair, _) = gen_keypair_and_address(Some(TEST_ENCLAVE_BTC_SK), Regtest);
         let enclave_pk = enclave_keypair.x_only_public_key().0;
 
-        let path = [1u8; 32];
+        let path = DerivationPath::from([1u8; 32]);
         const EXPECTED_DERIVED: &str =
             "d6305db510d6cb87554c942aaaffa3ff277366c2a04b8e64f633cceebd05f937";
         const EXPECTED_ADDR_REGTEST: &str =

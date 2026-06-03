@@ -14,8 +14,11 @@ pub use utxo::*;
 
 use bitcoin::secp256k1::All;
 use bitcoin::secp256k1::Secp256k1;
-use fastcrypto_tbls::threshold_schnorr::Address as SuiAddress;
 use std::sync::LazyLock;
 
 pub static BTC_LIB: LazyLock<Secp256k1<All>> = LazyLock::new(Secp256k1::new);
-pub type DerivationPath = SuiAddress;
+
+/// A Hashi key-derivation path: the 32-byte Sui address of the deposit
+/// recipient. Converted to fastcrypto's raw `[u8; 32]` form only at the
+/// `derive_verifying_key` boundary (see `taproot::derive_hashi_child_pubkey`).
+pub type DerivationPath = sui_sdk_types::Address;

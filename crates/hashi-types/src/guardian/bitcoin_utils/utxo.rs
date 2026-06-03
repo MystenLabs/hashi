@@ -38,14 +38,11 @@ use std::collections::HashSet;
 //    Core Data Structures
 // ---------------------------------
 
-/// (Hashi+Guardian)-owned input UTXO
-/// TODO: Should we take derivation path as input instead of address & leaf_hash? Investigate later.
-#[derive(Serialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct InputUTXO {
     outpoint: OutPoint,
     amount: Amount,
-    address: BitcoinAddress<NetworkChecked>,
-    leaf_hash: TapLeafHash,
+    derivation_path: DerivationPath,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq)]
@@ -104,37 +101,23 @@ fn validate_address_for_network(
 ///
 /// All inputs are expected to be P2TR (Pay-to-Taproot) since spending is done via taproot script path.
 impl InputUTXO {
-    /// Constructs a new `InputUTXO` and validates all invariants.
     pub fn new(
         outpoint: OutPoint,
         amount: Amount,
-        address: BitcoinAddress<NetworkUnchecked>,
-        leaf_hash: TapLeafHash,
-        network: Network,
+        derivation_path: DerivationPath,
     ) -> GuardianResult<Self> {
-        // TODO: Validate amount > 0.
-        let address = validate_address_for_network(&address, network)?;
-
-        if !address.script_pubkey().is_p2tr() {
-            return Err(InvalidInputs("input address is not p2tr".to_string()));
+        if amount == Amount::ZERO {
+            return Err(InvalidInputs("input amount must be > 0".into()));
         }
-
         Ok(Self {
             outpoint,
             amount,
-            address,
-            leaf_hash,
+            derivation_path,
         })
     }
 
-    pub fn from_wire(input: InputUTXOWire, network: Network) -> GuardianResult<Self> {
-        Self::new(
-            input.outpoint,
-            input.amount,
-            input.address,
-            input.leaf_hash,
-            network,
-        )
+    pub fn from_wire(input: InputUTXOWire) -> GuardianResult<Self> {
+        Self::new(input.outpoint, input.amount, input.derivation_path)
     }
 
     /// Returns a `TxIn` for this UTXO with placeholder witness data.
@@ -152,12 +135,21 @@ impl InputUTXO {
         }
     }
 
-    /// Returns the previous output as a `TxOut` (for sighash computation).
-    pub fn prevout(&self) -> TxOut {
-        TxOut {
-            value: self.amount,
-            script_pubkey: self.address.script_pubkey(),
-        }
+    /// Prevout `TxOut` and tap leaf hash for sighash, derived from the path.
+    fn prevout_and_leaf_hash(
+        &self,
+        enclave_pubkey: &BitcoinPubkey,
+        hashi_master_g: &HashiMasterG,
+    ) -> (TxOut, TapLeafHash) {
+        let (script_pubkey, leaf_hash) =
+            compute_taproot_artifacts(enclave_pubkey, hashi_master_g, &self.derivation_path);
+        (
+            TxOut {
+                value: self.amount,
+                script_pubkey,
+            },
+            leaf_hash,
+        )
     }
 }
 
@@ -169,7 +161,7 @@ impl InternalOutputUTXO {
         }
     }
 
-    pub fn derivation_path_bytes(&self) -> DerivationPath {
+    pub fn derivation_path(&self) -> DerivationPath {
         self.derivation_path
     }
     pub fn amount(&self) -> Amount {
@@ -184,7 +176,9 @@ impl ExternalOutputUTXO {
         amount: Amount,
         network: Network,
     ) -> GuardianResult<Self> {
-        // TODO: Validate amount > 0
+        if amount == Amount::ZERO {
+            return Err(InvalidInputs("output amount must be > 0".into()));
+        }
         let address = validate_address_for_network(&address, network)?;
         Ok(Self { address, amount })
     }
@@ -373,19 +367,27 @@ impl TxUTXOs {
         hashi_master_g: &HashiMasterG,
     ) -> (Vec<Message>, Txid) {
         let tx = self.unsigned_tx(enclave_pubkey, hashi_master_g);
-        let prevouts: Vec<TxOut> = self.inputs.iter().map(|input| input.prevout()).collect();
-
-        let messages = self
+        // Derive each input's prevout + tap leaf hash from its path.
+        let artifacts: Vec<(TxOut, TapLeafHash)> = self
             .inputs
             .iter()
+            .map(|input| input.prevout_and_leaf_hash(enclave_pubkey, hashi_master_g))
+            .collect();
+        let prevouts: Vec<TxOut> = artifacts
+            .iter()
+            .map(|(prevout, _)| prevout.clone())
+            .collect();
+
+        let messages = artifacts
+            .iter()
             .enumerate()
-            .map(|(index, input)| {
+            .map(|(index, (_, leaf_hash))| {
                 let mut sighasher = SighashCache::new(tx.clone());
                 let sighash = sighasher
                     .taproot_script_spend_signature_hash(
                         index,
                         &Prevouts::All(&prevouts),
-                        input.leaf_hash,
+                        *leaf_hash,
                         TapSighashType::Default,
                     )
                     .expect("sighash failed unexpectedly");
@@ -445,13 +447,13 @@ pub fn construct_tx(inputs: Vec<TxIn>, outputs: Vec<TxOut>) -> Transaction {
 //    Serialize / Deserialize
 // ---------------------------------
 
-/// Copy of bitcoin_utils::InputUTXO with unchecked address
+/// Copy of bitcoin_utils::InputUTXO. Kept distinct from the domain type so
+/// `TxUTXOsWire` stays a uniform wire shape alongside the output wire types.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputUTXOWire {
     pub outpoint: OutPoint,
     pub amount: Amount,
-    pub address: BitcoinAddress<NetworkUnchecked>,
-    pub leaf_hash: TapLeafHash,
+    pub derivation_path: DerivationPath,
 }
 
 impl From<InputUTXO> for InputUTXOWire {
@@ -459,8 +461,7 @@ impl From<InputUTXO> for InputUTXOWire {
         Self {
             outpoint: input.outpoint,
             amount: input.amount,
-            address: input.address.into_unchecked(),
-            leaf_hash: input.leaf_hash,
+            derivation_path: input.derivation_path,
         }
     }
 }

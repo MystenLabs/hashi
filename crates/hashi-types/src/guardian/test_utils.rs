@@ -45,7 +45,6 @@ use bitcoin::key::UntweakedPublicKey;
 use bitcoin::secp256k1::Keypair;
 use bitcoin::secp256k1::Message;
 use bitcoin::secp256k1::SecretKey;
-use bitcoin::taproot::TapLeafHash;
 use ed25519_consensus::SigningKey;
 use std::num::NonZeroU16;
 use sui_sdk_types::Address as SuiAddress;
@@ -271,22 +270,15 @@ impl StandardWithdrawalRequest {
 
         let txid = bitcoin::Txid::from_slice(&[9u8; 32]).expect("valid txid bytes");
         let outpoint = bitcoin::OutPoint { txid, vout: 0 };
-        let leaf_hash = TapLeafHash::from_slice(&[7u8; 32]).expect("valid leaf hash bytes");
 
-        let input = InputUTXO::new(
-            outpoint,
-            Amount::from_sat(10_000),
-            addr_unchecked.clone(),
-            leaf_hash,
-            network,
-        )
-        .expect("valid InputUTXO");
+        let input = InputUTXO::new(outpoint, Amount::from_sat(10_000), [7u8; 32].into())
+            .expect("valid InputUTXO");
 
         let output_external =
             OutputUTXO::new_external(addr_unchecked, Amount::from_sat(9_000), network)
                 .expect("valid external output");
 
-        let output_internal = OutputUTXO::new_internal([42u8; 32], Amount::from_sat(500));
+        let output_internal = OutputUTXO::new_internal([42u8; 32].into(), Amount::from_sat(500));
 
         let utxos = TxUTXOs::new(vec![input], vec![output_external, output_internal])
             .expect("valid TxUTXOs");
