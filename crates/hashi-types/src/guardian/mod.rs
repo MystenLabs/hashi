@@ -328,7 +328,7 @@ impl SetupNewKeyRequest {
 
 impl OperatorInitRequest {
     /// Build a ceremony-mode request (S3 only).
-    pub fn new_ceremony(s3_config: S3Config) -> Self {
+    pub fn new_ceremony_mode(s3_config: S3Config) -> Self {
         Self {
             s3_config,
             state: None,

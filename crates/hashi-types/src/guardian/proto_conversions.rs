@@ -142,7 +142,7 @@ impl TryFrom<pb::OperatorInitRequest> for OperatorInitRequest {
         // `state` present ⇔ withdraw mode; absent ⇔ ceremony (S3 only).
         match req.state.map(WithdrawModeConfig::try_from).transpose()? {
             Some(state) => Ok(OperatorInitRequest::new_withdraw_mode(s3_config, state)),
-            None => Ok(OperatorInitRequest::new_ceremony(s3_config)),
+            None => Ok(OperatorInitRequest::new_ceremony_mode(s3_config)),
         }
     }
 }
