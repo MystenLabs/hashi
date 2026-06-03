@@ -277,7 +277,7 @@ mod bitcoin_tests {
         let hashi_master_g = hashi_master_g_from_xonly(&hashi_pk);
 
         let input_amount = Amount::from_sat(100000000); // 1.0 BTC
-        let input_utxo = InputUTXO::new(out_point, input_amount, DerivationPath::ZERO).unwrap();
+        let input_utxo = InputUTXO::new(out_point, input_amount, DerivationPath::ZERO);
 
         // C) Enclave signs the transaction.
         let tx_info = TxUTXOs::new(

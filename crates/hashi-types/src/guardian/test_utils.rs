@@ -271,8 +271,7 @@ impl StandardWithdrawalRequest {
         let txid = bitcoin::Txid::from_slice(&[9u8; 32]).expect("valid txid bytes");
         let outpoint = bitcoin::OutPoint { txid, vout: 0 };
 
-        let input = InputUTXO::new(outpoint, Amount::from_sat(10_000), [7u8; 32].into())
-            .expect("valid InputUTXO");
+        let input = InputUTXO::new(outpoint, Amount::from_sat(10_000), [7u8; 32].into());
 
         let output_external =
             OutputUTXO::new_external(addr_unchecked, Amount::from_sat(9_000), network)

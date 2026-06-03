@@ -1499,7 +1499,7 @@ pub fn build_guardian_withdrawal_request(
 
     let network = hashi.config.bitcoin_network();
 
-    let inputs = txn
+    let inputs: Vec<_> = txn
         .inputs
         .iter()
         .map(|utxo| {
@@ -1511,9 +1511,8 @@ pub fn build_guardian_withdrawal_request(
             let derivation_path = utxo.derivation_path.unwrap_or(Address::ZERO);
 
             InputUTXO::new(outpoint, Amount::from_sat(utxo.amount), derivation_path)
-                .map_err(|e| anyhow!("Failed to build guardian InputUTXO: {e}"))
         })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+        .collect();
 
     // First N outputs are external payouts; any trailing output is internal change.
     let all_outputs = txn.all_outputs();

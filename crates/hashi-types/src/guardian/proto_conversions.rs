@@ -41,7 +41,7 @@ use super::StandardWithdrawalResponse;
 use super::WithdrawModeConfig;
 use super::bitcoin_utils::DerivationPath;
 use super::bitcoin_utils::ExternalOutputUTXOWire;
-use super::bitcoin_utils::InputUTXOWire;
+use super::bitcoin_utils::InputUTXO;
 use super::bitcoin_utils::InternalOutputUTXO;
 use super::bitcoin_utils::OutputUTXOWire;
 use super::bitcoin_utils::TxUTXOsWire;
@@ -946,7 +946,7 @@ fn pb_to_tx_utxos_wire(utxos_pb: pb::TxUtxos) -> GuardianResult<TxUTXOsWire> {
     let inputs = utxos_pb
         .inputs
         .into_iter()
-        .map(pb_to_input_utxo_wire)
+        .map(pb_to_input_utxo)
         .collect::<GuardianResult<Vec<_>>>()?;
 
     let outputs = utxos_pb
@@ -958,7 +958,7 @@ fn pb_to_tx_utxos_wire(utxos_pb: pb::TxUtxos) -> GuardianResult<TxUTXOsWire> {
     Ok(TxUTXOsWire { inputs, outputs })
 }
 
-fn pb_to_input_utxo_wire(input_pb: pb::InputUtxo) -> GuardianResult<InputUTXOWire> {
+fn pb_to_input_utxo(input_pb: pb::InputUtxo) -> GuardianResult<InputUTXO> {
     let outpoint_pb = input_pb.outpoint.ok_or_else(|| missing("outpoint"))?;
     let txid_bytes = outpoint_pb.txid.ok_or_else(|| missing("txid"))?;
     let vout = outpoint_pb.vout.ok_or_else(|| missing("vout"))?;
@@ -975,11 +975,7 @@ fn pb_to_input_utxo_wire(input_pb: pb::InputUtxo) -> GuardianResult<InputUTXOWir
     let derivation_path = DerivationPath::from_bytes(path_bytes.as_ref())
         .map_err(|_| InvalidInputs("invalid derivation_path: expected 32 bytes".into()))?;
 
-    Ok(InputUTXOWire {
-        outpoint,
-        amount: Amount::from_sat(amount),
-        derivation_path,
-    })
+    Ok(InputUTXO::new(outpoint, Amount::from_sat(amount), derivation_path))
 }
 
 fn pb_to_output_utxo_wire(output_pb: pb::OutputUtxo) -> GuardianResult<OutputUTXOWire> {
@@ -1026,11 +1022,7 @@ pub fn standard_withdrawal_request_wire_to_pb(
 
 fn tx_utxos_wire_to_pb(utxos: TxUTXOsWire) -> pb::TxUtxos {
     pb::TxUtxos {
-        inputs: utxos
-            .inputs
-            .into_iter()
-            .map(input_utxo_wire_to_pb)
-            .collect(),
+        inputs: utxos.inputs.into_iter().map(input_utxo_to_pb).collect(),
         outputs: utxos
             .outputs
             .into_iter()
@@ -1039,14 +1031,14 @@ fn tx_utxos_wire_to_pb(utxos: TxUTXOsWire) -> pb::TxUtxos {
     }
 }
 
-fn input_utxo_wire_to_pb(input: InputUTXOWire) -> pb::InputUtxo {
+fn input_utxo_to_pb(input: InputUTXO) -> pb::InputUtxo {
     pb::InputUtxo {
         outpoint: Some(pb::UtxoId {
-            txid: Some(input.outpoint.txid.as_byte_array().to_vec().into()),
-            vout: Some(input.outpoint.vout),
+            txid: Some(input.outpoint().txid.as_byte_array().to_vec().into()),
+            vout: Some(input.outpoint().vout),
         }),
-        amount: Some(input.amount.to_sat()),
-        derivation_path: Some(input.derivation_path.into_inner().to_vec().into()),
+        amount: Some(input.amount().to_sat()),
+        derivation_path: Some(input.derivation_path().into_inner().to_vec().into()),
     }
 }
 

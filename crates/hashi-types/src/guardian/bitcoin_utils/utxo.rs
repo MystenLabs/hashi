@@ -101,23 +101,24 @@ fn validate_address_for_network(
 ///
 /// All inputs are expected to be P2TR (Pay-to-Taproot) since spending is done via taproot script path.
 impl InputUTXO {
-    pub fn new(
-        outpoint: OutPoint,
-        amount: Amount,
-        derivation_path: DerivationPath,
-    ) -> GuardianResult<Self> {
-        if amount == Amount::ZERO {
-            return Err(InvalidInputs("input amount must be > 0".into()));
-        }
-        Ok(Self {
+    pub fn new(outpoint: OutPoint, amount: Amount, derivation_path: DerivationPath) -> Self {
+        Self {
             outpoint,
             amount,
             derivation_path,
-        })
+        }
     }
 
-    pub fn from_wire(input: InputUTXOWire) -> GuardianResult<Self> {
-        Self::new(input.outpoint, input.amount, input.derivation_path)
+    pub fn outpoint(&self) -> OutPoint {
+        self.outpoint
+    }
+
+    pub fn amount(&self) -> Amount {
+        self.amount
+    }
+
+    pub fn derivation_path(&self) -> DerivationPath {
+        self.derivation_path
     }
 
     /// Returns a `TxIn` for this UTXO with placeholder witness data.
@@ -176,9 +177,6 @@ impl ExternalOutputUTXO {
         amount: Amount,
         network: Network,
     ) -> GuardianResult<Self> {
-        if amount == Amount::ZERO {
-            return Err(InvalidInputs("output amount must be > 0".into()));
-        }
         let address = validate_address_for_network(&address, network)?;
         Ok(Self { address, amount })
     }
@@ -262,6 +260,21 @@ impl TxUTXOs {
         }
         if outputs.is_empty() {
             return Err(InvalidInputs("output utxos must not be empty".into()));
+        }
+
+        // Reject zero amounts on both sides: a 0-value input is meaningless and a
+        // 0-value output is invalid on Bitcoin. This is the single gate every UTXO
+        // set passes through (locally built or parsed from the wire), so per-UTXO
+        // constructors don't repeat it.
+        for utxo in &inputs {
+            if utxo.amount == Amount::ZERO {
+                return Err(InvalidInputs("input amount must be > 0".into()));
+            }
+        }
+        for utxo in &outputs {
+            if utxo.amount() == Amount::ZERO {
+                return Err(InvalidInputs("output amount must be > 0".into()));
+            }
         }
 
         // Disallow duplicate inputs (same txid,vout), which would result in an invalid transaction.
@@ -447,25 +460,6 @@ pub fn construct_tx(inputs: Vec<TxIn>, outputs: Vec<TxOut>) -> Transaction {
 //    Serialize / Deserialize
 // ---------------------------------
 
-/// Copy of bitcoin_utils::InputUTXO. Kept distinct from the domain type so
-/// `TxUTXOsWire` stays a uniform wire shape alongside the output wire types.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InputUTXOWire {
-    pub outpoint: OutPoint,
-    pub amount: Amount,
-    pub derivation_path: DerivationPath,
-}
-
-impl From<InputUTXO> for InputUTXOWire {
-    fn from(input: InputUTXO) -> Self {
-        Self {
-            outpoint: input.outpoint,
-            amount: input.amount,
-            derivation_path: input.derivation_path,
-        }
-    }
-}
-
 /// Copy of bitcoin_utils::ExternalOutputUTXO with unchecked address
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd)]
 pub struct ExternalOutputUTXOWire {
@@ -500,11 +494,13 @@ impl From<OutputUTXO> for OutputUTXOWire {
     }
 }
 
-/// Copy of bitcoin_utils::TxUTXOs with unchecked address
+/// Copy of bitcoin_utils::TxUTXOs with unchecked output addresses. Inputs carry
+/// no checked address, so the domain `InputUTXO` is reused directly (same as
+/// `OutputUTXOWire::Internal`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxUTXOsWire {
     /// Inputs: internal
-    pub inputs: Vec<InputUTXOWire>,
+    pub inputs: Vec<InputUTXO>,
     /// Outputs: either external or internal
     pub outputs: Vec<OutputUTXOWire>,
 }
@@ -512,7 +508,7 @@ pub struct TxUTXOsWire {
 impl From<TxUTXOs> for TxUTXOsWire {
     fn from(utxos: TxUTXOs) -> Self {
         Self {
-            inputs: utxos.inputs.into_iter().map(Into::into).collect(),
+            inputs: utxos.inputs,
             outputs: utxos.outputs.into_iter().map(Into::into).collect(),
         }
     }
