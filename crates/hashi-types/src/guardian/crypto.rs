@@ -3,14 +3,9 @@
 
 use super::GuardianError::InvalidInputs;
 use super::GuardianResult;
-use super::GuardianSigned;
-use super::SigningIntent;
-use super::UnixMillis;
 use super::bitcoin_utils::BTC_LIB;
 use crate::pgp::PgpPublicCert;
 use crate::pgp::encrypt_armored;
-use ed25519_consensus::SigningKey;
-use ed25519_consensus::VerificationKey;
 use hpke::Deserializable;
 use hpke::Kem;
 use hpke::Serializable;
@@ -508,37 +503,6 @@ pub fn decrypt_verify_shares(
         )));
     }
     Ok(shares)
-}
-
-// ---------------------------------
-//    Signing utilities
-// ---------------------------------
-
-/// Methods for `Signed<T>` wrapper - signing and verification
-impl<T: Serialize + SigningIntent> GuardianSigned<T> {
-    /// Create a new signed payload (used by enclave)
-    /// Includes intent byte for domain separation to prevent cross-type signature attacks
-    pub fn new(data: T, signing_key: &SigningKey, timestamp_ms: UnixMillis) -> Self {
-        let tuple = (T::INTENT, &data, timestamp_ms);
-        let signing_payload = bcs::to_bytes(&tuple).expect("serialization should not fail");
-        let signature = signing_key.sign(&signing_payload);
-        Self {
-            data,
-            timestamp_ms,
-            signature,
-        }
-    }
-
-    /// Verify signature and extract payload
-    /// Checks intent byte to ensure signature is for the correct type
-    pub fn verify(self, pub_key: &VerificationKey) -> GuardianResult<T> {
-        let tuple = (T::INTENT, &self.data, self.timestamp_ms);
-        let msg_bytes = bcs::to_bytes(&tuple).expect("serialization should not fail");
-        pub_key
-            .verify(&self.signature, &msg_bytes)
-            .map_err(|_| InvalidInputs("signature invalid".into()))?;
-        Ok(self.data)
-    }
 }
 
 pub fn fingerprint(sk: &k256::SecretKey) -> CompressedPoint {

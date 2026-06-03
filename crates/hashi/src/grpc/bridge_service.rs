@@ -137,7 +137,7 @@ impl BridgeService for HttpService {
         }))
     }
 
-    /// Validate and BLS-sign a `CommitteeTransition` for the guardian.
+    /// Validate and BLS-sign a `CommitteeTransitionRequest` for the guardian.
     #[tracing::instrument(
         level = "info",
         skip_all,

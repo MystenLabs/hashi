@@ -1847,7 +1847,7 @@ pub mod guardian_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Standard withdrawal: request immediate withdrawal signature.
+        /// Standard withdrawal: request withdrawal signature.
         pub async fn standard_withdrawal(
             &mut self,
             request: impl tonic::IntoRequest<super::SignedStandardWithdrawalRequest>,
@@ -1966,7 +1966,7 @@ pub mod guardian_service_server {
             tonic::Response<super::ProvisionerInitResponse>,
             tonic::Status,
         >;
-        /// Standard withdrawal: request immediate withdrawal signature.
+        /// Standard withdrawal: request withdrawal signature.
         async fn standard_withdrawal(
             &self,
             request: tonic::Request<super::SignedStandardWithdrawalRequest>,

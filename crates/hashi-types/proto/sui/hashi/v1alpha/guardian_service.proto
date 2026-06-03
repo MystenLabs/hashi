@@ -25,7 +25,7 @@ service GuardianService {
   // Provisioner initialization: submit encrypted share and readiness info.
   rpc ProvisionerInit(ProvisionerInitRequest) returns (ProvisionerInitResponse);
 
-  // Standard withdrawal: request immediate withdrawal signature.
+  // Standard withdrawal: request withdrawal signature.
   rpc StandardWithdrawal(SignedStandardWithdrawalRequest) returns (SignedStandardWithdrawalResponse);
 
   // Advance the guardian's committee one epoch (signed by the outgoing committee). Idempotent.
