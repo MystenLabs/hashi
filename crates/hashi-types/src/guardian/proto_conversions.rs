@@ -975,7 +975,11 @@ fn pb_to_input_utxo(input_pb: pb::InputUtxo) -> GuardianResult<InputUTXO> {
     let derivation_path = DerivationPath::from_bytes(path_bytes.as_ref())
         .map_err(|_| InvalidInputs("invalid derivation_path: expected 32 bytes".into()))?;
 
-    Ok(InputUTXO::new(outpoint, Amount::from_sat(amount), derivation_path))
+    Ok(InputUTXO::new(
+        outpoint,
+        Amount::from_sat(amount),
+        derivation_path,
+    ))
 }
 
 fn pb_to_output_utxo_wire(output_pb: pb::OutputUtxo) -> GuardianResult<OutputUTXOWire> {

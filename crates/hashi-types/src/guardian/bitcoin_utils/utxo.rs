@@ -38,6 +38,7 @@ use std::collections::HashSet;
 //    Core Data Structures
 // ---------------------------------
 
+/// (Hashi+Guardian)-owned input UTXO
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct InputUTXO {
     outpoint: OutPoint,
