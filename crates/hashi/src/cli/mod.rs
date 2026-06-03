@@ -432,6 +432,10 @@ pub enum WithdrawCommands {
         /// Bitcoin address to receive the withdrawal
         #[clap(long)]
         btc_address: String,
+
+        /// Submit this many identical requests, batched into PTBs
+        #[clap(long, default_value_t = 1)]
+        count: usize,
     },
 
     /// Cancel a pending withdrawal request

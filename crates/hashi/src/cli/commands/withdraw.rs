@@ -23,7 +23,8 @@ pub async fn run(action: WithdrawCommands, config: &CliConfig, tx_opts: &TxOptio
         WithdrawCommands::Request {
             amount,
             btc_address,
-        } => request(config, tx_opts, amount, &btc_address).await,
+            count,
+        } => request(config, tx_opts, amount, &btc_address, count).await,
         WithdrawCommands::Cancel { request_id } => cancel(config, tx_opts, &request_id).await,
         WithdrawCommands::Status { request_id } => status(config, &request_id).await,
         WithdrawCommands::List {
@@ -45,8 +46,10 @@ async fn request(
     _tx_opts: &TxOptions,
     amount: u64,
     btc_address: &str,
+    count: usize,
 ) -> Result<()> {
     config.validate()?;
+    anyhow::ensure!(count >= 1, "--count must be at least 1");
 
     let hashi_ids = crate::config::HashiIds {
         package_id: config.package_id(),
@@ -68,19 +71,49 @@ async fn request(
         .context("Withdrawal address does not match the configured Bitcoin network")?;
     let destination_bytes = witness_program_from_address(&btc_addr)?;
 
-    print_info(&format!("Withdrawal amount: {} sats", amount));
-    print_info(&format!("BTC destination: {}", btc_address));
-
     let client = sui_rpc::Client::new(&config.sui_rpc_url)?;
     let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
 
-    print_info("Submitting withdrawal request on Sui...");
+    if count == 1 {
+        print_info(&format!("Withdrawal amount: {} sats", amount));
+        print_info(&format!("BTC destination: {}", btc_address));
+        print_info("Submitting withdrawal request on Sui...");
 
-    let request_id = executor
-        .execute_create_withdrawal_request(amount, destination_bytes)
-        .await?;
+        let request_id = executor
+            .execute_create_withdrawal_request(amount, destination_bytes)
+            .await?;
 
-    print_success(&format!("Withdrawal request created: {}", request_id));
+        print_success(&format!("Withdrawal request created: {}", request_id));
+        return Ok(());
+    }
+
+    // ~3 PTB commands per request (split + call) vs the 1024 command cap.
+    const CHUNK_SIZE: usize = 250;
+
+    print_info(&format!(
+        "Submitting {} withdrawal requests of {} sats to {} ({} per PTB)...",
+        count, amount, btc_address, CHUNK_SIZE
+    ));
+
+    let total_chunks = count.div_ceil(CHUNK_SIZE);
+    let mut chunk_idx = 0usize;
+    let mut submitted = 0usize;
+    let mut remaining = count;
+    while remaining > 0 {
+        chunk_idx += 1;
+        let this_batch = remaining.min(CHUNK_SIZE);
+        print_info(&format!(
+            "Batch {}/{} ({} requests)...",
+            chunk_idx, total_chunks, this_batch
+        ));
+        let ids = executor
+            .execute_create_withdrawal_requests_batch(amount, destination_bytes.clone(), this_batch)
+            .await?;
+        submitted += ids.len();
+        remaining -= this_batch;
+    }
+
+    print_success(&format!("Created {} withdrawal requests", submitted));
 
     Ok(())
 }

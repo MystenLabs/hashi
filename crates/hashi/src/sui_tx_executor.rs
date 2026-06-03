@@ -848,6 +848,102 @@ impl SuiTxExecutor {
         anyhow::bail!("WithdrawalRequestedEvent not found in transaction events")
     }
 
+    /// Batched analogue of [`Self::execute_create_withdrawal_request`]: packs
+    /// `count` identical requests into a single PTB.
+    #[tracing::instrument(level = "info", skip_all, fields(count = count))]
+    pub async fn execute_create_withdrawal_requests_batch(
+        &mut self,
+        withdrawal_amount_sats: u64,
+        destination_bytes: Vec<u8>,
+        count: usize,
+    ) -> anyhow::Result<Vec<Address>> {
+        anyhow::ensure!(count > 0, "count must be greater than zero");
+        let total_sats = withdrawal_amount_sats as u128 * count as u128;
+        anyhow::ensure!(
+            total_sats <= u64::MAX as u128,
+            "withdrawal batch total overflows u64"
+        );
+        let total_sats = total_sats as u64;
+
+        let mut builder = TransactionBuilder::new();
+
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let clock_arg = builder.object(
+            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
+
+        let btc_type = StructTag::new(
+            self.hashi_ids.package_id,
+            Identifier::from_static("btc"),
+            Identifier::from_static("BTC"),
+            vec![],
+        );
+
+        // One balance-withdraw reservation for the whole batch (Sui caps these
+        // at 10 per tx), split into a Balance<BTC> per request.
+        let reserved = builder.intent(BalanceIntent::new(btc_type.clone(), total_sats));
+        let amount_arg = builder.pure(&withdrawal_amount_sats);
+        let destination_arg = builder.pure(&destination_bytes);
+
+        for i in 0..count {
+            // Last request takes the remainder, leaving no zero balance behind.
+            let btc_arg = if i + 1 < count {
+                builder.move_call(
+                    Function::new(
+                        Address::TWO,
+                        Identifier::from_static("balance"),
+                        Identifier::from_static("split"),
+                    )
+                    .with_type_args(vec![btc_type.clone().into()]),
+                    vec![reserved, amount_arg],
+                )
+            } else {
+                reserved
+            };
+
+            builder.move_call(
+                Function::new(
+                    self.hashi_ids.package_id,
+                    Identifier::from_static("withdraw"),
+                    Identifier::from_static("request_withdrawal"),
+                ),
+                vec![hashi_arg, clock_arg, btc_arg, destination_arg],
+            );
+        }
+
+        let response = self.execute(builder).await?;
+
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "Batch withdrawal request transaction failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+
+        let mut request_ids = Vec::with_capacity(count);
+        for event in response.transaction().events().events() {
+            if event.contents().name().contains("WithdrawalRequestedEvent") {
+                let event_data = WithdrawalRequestedEvent::from_bcs(event.contents().value())?;
+                request_ids.push(event_data.request_id);
+            }
+        }
+
+        anyhow::ensure!(
+            request_ids.len() == count,
+            "Expected {} WithdrawalRequestedEvents but found {}",
+            count,
+            request_ids.len(),
+        );
+
+        Ok(request_ids)
+    }
+
     #[tracing::instrument(level = "info", skip_all)]
     pub async fn execute_start_reconfig(&mut self) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
