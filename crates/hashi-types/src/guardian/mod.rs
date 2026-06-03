@@ -240,9 +240,9 @@ pub struct RotateKpsRequest {
 /// ones that agree on it. Old/new (`n`, `t`) may differ.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RotateKpsState {
-    /// Armored OpenPGP certs for the new KP set, sorted to a canonical order
+    /// OpenPGP certs for the new KP set, sorted to a canonical order
     /// (see `RotateKpsState::new`). Length equals `new_params.num_shares()`.
-    new_kp_pgp_certs: Vec<String>,
+    new_kp_pgp_certs: Vec<PgpPublicCert>,
     new_params: SecretSharingParams,
 }
 
@@ -485,7 +485,7 @@ impl ProvisionerInitRequest {
 
 impl RotateKpsState {
     pub fn new(
-        new_kp_pgp_certs: Vec<String>,
+        new_kp_pgp_certs: Vec<PgpPublicCert>,
         new_num_shares: usize,
         new_threshold: usize,
     ) -> GuardianResult<Self> {
@@ -513,7 +513,7 @@ impl RotateKpsState {
         })
     }
 
-    pub fn new_kp_pgp_certs(&self) -> &[String] {
+    pub fn new_kp_pgp_certs(&self) -> &[PgpPublicCert] {
         &self.new_kp_pgp_certs
     }
 
@@ -521,7 +521,7 @@ impl RotateKpsState {
         &self.new_params
     }
 
-    pub fn into_parts(self) -> (Vec<String>, SecretSharingParams) {
+    pub fn into_parts(self) -> (Vec<PgpPublicCert>, SecretSharingParams) {
         (self.new_kp_pgp_certs, self.new_params)
     }
 
@@ -718,7 +718,7 @@ mod tests {
 
     #[test]
     fn rotate_kps_state_new_rejects_wrong_cert_count() {
-        let mut certs = test_utils::mock_pgp_certs_armored(5);
+        let mut certs = test_utils::mock_pgp_certs(5);
         certs.pop();
         assert!(matches!(
             RotateKpsState::new(certs, 5, 3).unwrap_err(),
@@ -728,7 +728,7 @@ mod tests {
 
     #[test]
     fn rotate_kps_state_new_rejects_duplicate_certs() {
-        let mut certs = test_utils::mock_pgp_certs_armored(5);
+        let mut certs = test_utils::mock_pgp_certs(5);
         certs[1] = certs[0].clone();
         assert!(matches!(
             RotateKpsState::new(certs, 5, 3).unwrap_err(),
@@ -738,8 +738,8 @@ mod tests {
 
     #[test]
     fn rotate_kps_state_digest_is_order_independent() {
-        let certs = test_utils::mock_pgp_certs_armored(5);
-        let reversed: Vec<String> = certs.iter().rev().cloned().collect();
+        let certs = test_utils::mock_pgp_certs(5);
+        let reversed: Vec<PgpPublicCert> = certs.iter().rev().cloned().collect();
         let a = RotateKpsState::new(certs, 5, 3).unwrap();
         let b = RotateKpsState::new(reversed, 5, 3).unwrap();
         // Same set, different input order ⇒ identical canonical form and digest.

@@ -21,6 +21,7 @@ use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
+use std::cmp::Ordering;
 use std::fmt;
 use std::io;
 use std::io::Read;
@@ -34,7 +35,7 @@ use std::sync::LazyLock;
 
 static POLICY: LazyLock<StandardPolicy> = LazyLock::new(StandardPolicy::new);
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct PgpPublicCert {
     armored: String,
     cert: openpgp::Cert,
@@ -56,6 +57,28 @@ impl PgpPublicCert {
 impl fmt::Display for PgpPublicCert {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.cert.fingerprint())
+    }
+}
+
+// `armored` fully determines `cert`, so all comparisons key off it alone.
+// (`Cert` is only `PartialEq`, so `Eq`/`Ord` can't be derived anyway.)
+impl PartialEq for PgpPublicCert {
+    fn eq(&self, other: &Self) -> bool {
+        self.armored == other.armored
+    }
+}
+
+impl Eq for PgpPublicCert {}
+
+impl Ord for PgpPublicCert {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.armored.cmp(&other.armored)
+    }
+}
+
+impl PartialOrd for PgpPublicCert {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 

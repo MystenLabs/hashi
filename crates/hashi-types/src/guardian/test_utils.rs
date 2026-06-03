@@ -26,7 +26,7 @@ use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
 use super::WithdrawModeConfig;
 use super::WithdrawalID;
-use crate::pgp::test_utils::mock_pgp_certs;
+pub use crate::pgp::test_utils::mock_pgp_certs;
 pub use crate::pgp::test_utils::mock_pgp_certs_armored;
 
 use super::bitcoin_utils::BTC_LIB;

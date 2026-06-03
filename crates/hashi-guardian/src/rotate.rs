@@ -9,7 +9,6 @@ use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::*;
-use hashi_types::pgp::PgpPublicCert;
 use std::sync::Arc;
 use tracing::info;
 
@@ -68,14 +67,10 @@ async fn finalize_rotation(
     let k256_sk =
         combine_shares(old_shares, old_instance.threshold()).expect("threshold shares reach");
 
-    let (new_kp_pgp_certs, new_params) = state.into_parts();
+    let (new_certs, new_params) = state.into_parts();
     let n = new_params.num_shares();
     let t = new_params.threshold();
     info!("Re-splitting for {n} new KPs (threshold: {t}).");
-    let new_certs = new_kp_pgp_certs
-        .into_iter()
-        .map(|cert| PgpPublicCert::new(cert).map_err(|e| InvalidInputs(e.to_string())))
-        .collect::<GuardianResult<Vec<_>>>()?;
 
     // Confine the !Send `ThreadRng` to a sync scope so the surrounding async
     // future stays Send.
@@ -107,7 +102,7 @@ mod tests {
     use crate::test_utils::CapturedPuts;
     use crate::OperatorInitTestArgs;
     use hashi_types::guardian::crypto::split_secret;
-    use hashi_types::guardian::test_utils::mock_pgp_certs_armored;
+    use hashi_types::guardian::test_utils::mock_pgp_certs;
     use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::LogRecord;
     use k256::SecretKey;
@@ -132,7 +127,7 @@ mod tests {
     }
 
     fn build_state() -> RotateKpsState {
-        RotateKpsState::new(mock_pgp_certs_armored(TEST_N), TEST_N, TEST_T).unwrap()
+        RotateKpsState::new(mock_pgp_certs(TEST_N), TEST_N, TEST_T).unwrap()
     }
 
     /// Bundle one submission per share, all bound to `state.digest()` as AAD —
@@ -243,7 +238,7 @@ mod tests {
     async fn happy_path_asymmetric_n_t() {
         // Old (n=5, t=3); rotate to new (n=3, t=2).
         let (_sk, shares, captures, enclave) = setup_rotation_enclave().await;
-        let state = RotateKpsState::new(mock_pgp_certs_armored(3), 3, 2).unwrap();
+        let state = RotateKpsState::new(mock_pgp_certs(3), 3, 2).unwrap();
         let req = build_request(&shares[..TEST_T], &enclave, state);
         let response_shares = rotate_and_verify(&enclave, req).await;
         assert_rotation_output(&captures, &response_shares, 3, 2);

@@ -201,7 +201,12 @@ impl TryFrom<pb::RotateKpsRequest> for RotateKpsRequest {
             .ok_or_else(|| missing("new_num_shares"))? as usize;
         let new_threshold = req.new_threshold.ok_or_else(|| missing("new_threshold"))? as usize;
 
-        let state = RotateKpsState::new(req.new_kp_pgp_certs, new_num_shares, new_threshold)?;
+        let new_kp_pgp_certs = req
+            .new_kp_pgp_certs
+            .into_iter()
+            .map(|cert| PgpPublicCert::new(cert).map_err(|e| InvalidInputs(e.to_string())))
+            .collect::<GuardianResult<Vec<_>>>()?;
+        let state = RotateKpsState::new(new_kp_pgp_certs, new_num_shares, new_threshold)?;
 
         let old_instance = pb_to_secret_sharing_instance(
             req.old_instance.ok_or_else(|| missing("old_instance"))?,
@@ -482,7 +487,10 @@ pub fn rotate_kps_request_to_pb(r: RotateKpsRequest) -> pb::RotateKpsRequest {
             .into_iter()
             .map(guardian_encrypted_share_to_pb)
             .collect(),
-        new_kp_pgp_certs,
+        new_kp_pgp_certs: new_kp_pgp_certs
+            .into_iter()
+            .map(|cert| cert.armored().to_string())
+            .collect(),
         new_num_shares: Some(new_params.num_shares() as u32),
         new_threshold: Some(new_params.threshold() as u32),
         old_instance: Some(secret_sharing_instance_to_pb(&old_instance)),
