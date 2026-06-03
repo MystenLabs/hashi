@@ -61,7 +61,7 @@ impl LeaderService {
         self.withdrawal_approval_retry_tracker
             .prune(&unapproved_ids);
 
-        let to_process: Vec<_> = unapproved
+        let mut to_process: Vec<_> = unapproved
             .into_iter()
             .filter(|r| {
                 !self
@@ -81,6 +81,24 @@ impl LeaderService {
 
         if to_process.is_empty() {
             return;
+        }
+
+        // Cap how many requests we approve this checkpoint. Each approval adds
+        // two commands and several pure arguments to the `approve_request`
+        // PTB, so approving a large backlog (tens of thousands of requests) in
+        // one transaction overflows Sui's 4 MiB transaction message limit and
+        // its 1024-command-per-PTB ceiling, and the whole batch is rejected.
+        // The excess stays queued and is approved oldest first over later
+        // checkpoints.
+        let max_batch = self.inner.config.withdrawal_approval_max_batch_size();
+        if to_process.len() > max_batch {
+            info!(
+                eligible = to_process.len(),
+                max_batch,
+                "Withdrawal approval backlog exceeds per-PTB cap; \
+                 approving the oldest {max_batch} this checkpoint"
+            );
+            to_process.truncate(max_batch);
         }
 
         let inner = self.inner.clone();

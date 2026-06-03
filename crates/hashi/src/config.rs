@@ -12,6 +12,20 @@ use crate::constants::SUI_MAINNET_CHAIN_ID;
 
 const DEFAULT_WITHDRAWAL_SIGNING_CONCURRENCY: usize = 25;
 
+/// Default cap on the number of withdrawal requests the leader approves in a
+/// single `approve_request` PTB. A larger backlog drains over successive
+/// checkpoints, oldest first, rather than overflowing one transaction.
+const DEFAULT_WITHDRAWAL_APPROVAL_BATCH_SIZE: usize = 200;
+
+/// Hard upper bound on the per-PTB approval count.
+///
+/// Each approval contributes two PTB commands (one
+/// `committee::new_committee_signature`, one `withdraw::approve_request`) plus
+/// several pure arguments, so this keeps a batch well under Sui's
+/// 1024-command-per-PTB ceiling and far under the 4 MiB transaction message
+/// limit.
+const MAX_WITHDRAWAL_APPROVALS_PER_PTB: usize = 400;
+
 /// Load an Ed25519 private key from a file path or inline PEM string.
 ///
 /// Supported formats:
@@ -168,6 +182,15 @@ pub struct Config {
     /// Defaults to 70 (the algorithm's hard upper bound).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdrawal_max_batch_size: Option<usize>,
+
+    /// Maximum number of withdrawal requests the leader approves in a single
+    /// `approve_request` PTB. Bounds the transaction size so a large approval
+    /// backlog cannot overflow Sui's 4 MiB transaction message limit; the
+    /// remaining backlog drains over successive checkpoints, oldest first.
+    ///
+    /// Defaults to 200 and is clamped to 400 (the per-PTB hard ceiling).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdrawal_approval_max_batch_size: Option<usize>,
 
     /// Max number of withdrawal-tx inputs whose MPC signatures the signer
     /// will collect in parallel within a single `sign_withdrawal_transaction`
@@ -378,6 +401,12 @@ impl Config {
             .min(crate::utxo_pool::CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS)
     }
 
+    pub fn withdrawal_approval_max_batch_size(&self) -> usize {
+        self.withdrawal_approval_max_batch_size
+            .unwrap_or(DEFAULT_WITHDRAWAL_APPROVAL_BATCH_SIZE)
+            .clamp(1, MAX_WITHDRAWAL_APPROVALS_PER_PTB)
+    }
+
     pub fn withdrawal_signing_concurrency(&self) -> usize {
         self.withdrawal_signing_concurrency
             .unwrap_or(DEFAULT_WITHDRAWAL_SIGNING_CONCURRENCY)
@@ -528,5 +557,35 @@ mod tests {
             config.withdrawal_max_batch_size(),
             crate::utxo_pool::CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
         );
+    }
+
+    #[test]
+    fn test_withdrawal_approval_max_batch_size_defaults() {
+        let config = Config::default();
+        assert_eq!(
+            config.withdrawal_approval_max_batch_size(),
+            DEFAULT_WITHDRAWAL_APPROVAL_BATCH_SIZE
+        );
+    }
+
+    #[test]
+    fn test_withdrawal_approval_max_batch_size_clamps_to_ceiling() {
+        let config = Config {
+            withdrawal_approval_max_batch_size: Some(30_000),
+            ..Config::default()
+        };
+        assert_eq!(
+            config.withdrawal_approval_max_batch_size(),
+            MAX_WITHDRAWAL_APPROVALS_PER_PTB
+        );
+    }
+
+    #[test]
+    fn test_withdrawal_approval_max_batch_size_clamps_to_at_least_one() {
+        let config = Config {
+            withdrawal_approval_max_batch_size: Some(0),
+            ..Config::default()
+        };
+        assert_eq!(config.withdrawal_approval_max_batch_size(), 1);
     }
 }
