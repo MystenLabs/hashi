@@ -24,6 +24,7 @@ toml.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+bcs.workspace = true
 reqwest.workspace = true
 futures.workspace = true
 csv = "1"
