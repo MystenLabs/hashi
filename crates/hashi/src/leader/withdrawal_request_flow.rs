@@ -31,7 +31,7 @@ use tracing::info;
 use tracing::trace;
 use tracing::warn;
 
-const WITHDRAWAL_APPROVAL_PTB_BATCH_SIZE: usize = 400;
+const WITHDRAWAL_APPROVAL_PTB_BATCH_SIZE: usize = 200;
 
 impl LeaderService {
     // ========================================================================
