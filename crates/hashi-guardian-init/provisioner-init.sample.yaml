@@ -1,16 +1,17 @@
-# Sample configuration for `hashi-monitor provisioner-init`.
+# Sample configuration for the `provisioner-init` tool.
 #
 # Run with:
-#   cargo run -p hashi-monitor -- provisioner-init --config provisioner-init.sample.yaml
+#   cargo run -p hashi-guardian-init -- --config provisioner-init.sample.yaml
 
 # Key Provisioner's secret share (32-byte k256 scalar, hex-encoded).
 share:
   id: 1
   value_hex: "0000000000000000000000000000000000000000000000000000000000000001"
 
-# If set, the built ProvisionerInitRequest is submitted to this guardian gRPC
-# endpoint after local checks pass. Omit (or comment out) for a dry run.
-# guardian_endpoint: "http://localhost:50051"
+# If set, this KP's encrypted share is submitted to the relay after local
+# checks pass. The relay collects T-of-N shares before forwarding them to the
+# guardian in one ProvisionerInit call. Omit for a dry run (checks only).
+# relay_endpoint: "http://localhost:50051"
 
 # S3 credentials and bucket the guardian writes its logs to.
 s3:
@@ -47,5 +48,7 @@ limiter_config:
   refill_rate: 1000
   max_bucket_capacity: 100000000
 
-# Hashi BTC master x-only pubkey (32-byte hex).
-hashi_btc_master_pubkey: "0000000000000000000000000000000000000000000000000000000000000001"
+# MPC committee verifying key G, as hex of its `bcs(G)` encoding (the same
+# `bcs(G)` read from on-chain `CommitteeSet.mpc_public_key`). NOT the
+# guardian's own BTC key.
+hashi_btc_master_pubkey_hex: "0000000000000000000000000000000000000000000000000000000000000001"
