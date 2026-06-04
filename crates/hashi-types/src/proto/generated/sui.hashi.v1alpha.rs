@@ -3413,12 +3413,10 @@ pub struct InputUtxo {
     /// Amount in satoshis.
     #[prost(uint64, optional, tag = "2")]
     pub amount: ::core::option::Option<u64>,
-    /// Bitcoin address.
-    #[prost(string, optional, tag = "3")]
-    pub address: ::core::option::Option<::prost::alloc::string::String>,
-    /// Taproot leaf hash (32 bytes).
-    #[prost(bytes = "bytes", optional, tag = "4")]
-    pub leaf_hash: ::core::option::Option<::prost::bytes::Bytes>,
+    /// Derivation path (Sui address format, 32 bytes). The spending address and
+    /// tap leaf hash are derived from it inside the enclave.
+    #[prost(bytes = "bytes", optional, tag = "3")]
+    pub derivation_path: ::core::option::Option<::prost::bytes::Bytes>,
 }
 /// Output UTXO (either external or internal).
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

@@ -1499,28 +1499,20 @@ pub fn build_guardian_withdrawal_request(
 
     let network = hashi.config.bitcoin_network();
 
-    let inputs = txn
+    let inputs: Vec<_> = txn
         .inputs
         .iter()
         .map(|utxo| {
-            let (_, _, leaf_hash) = hashi.deposit_spend_artifacts(utxo.derivation_path.as_ref())?;
-            let address = hashi.get_deposit_address(utxo.derivation_path.as_ref())?;
-
             let outpoint = bitcoin::OutPoint {
                 txid: utxo.id.txid.into(),
                 vout: utxo.id.vout,
             };
+            // `None` (change) maps to the all-zeros path, matching `path_bytes_or_zero`.
+            let derivation_path = utxo.derivation_path.unwrap_or(Address::ZERO);
 
-            InputUTXO::new(
-                outpoint,
-                Amount::from_sat(utxo.amount),
-                address.into_unchecked(),
-                leaf_hash,
-                network,
-            )
-            .map_err(|e| anyhow!("Failed to build guardian InputUTXO: {e}"))
+            InputUTXO::new(outpoint, Amount::from_sat(utxo.amount), derivation_path)
         })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+        .collect();
 
     // First N outputs are external payouts; any trailing output is internal change.
     let all_outputs = txn.all_outputs();
@@ -1540,9 +1532,8 @@ pub fn build_guardian_withdrawal_request(
                 )
                 .map_err(|e| anyhow!("Failed to build guardian external OutputUTXO: {e}"))
             } else {
-                let derivation_path = [0u8; 32];
                 Ok(OutputUTXO::new_internal(
-                    derivation_path,
+                    sui_sdk_types::Address::ZERO,
                     Amount::from_sat(output.amount),
                 ))
             }

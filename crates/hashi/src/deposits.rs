@@ -39,7 +39,9 @@ pub fn derive_deposit_address(
     Ok(bitcoin_utils::two_of_two_taproot_script_path_address(
         guardian_btc_pubkey,
         mpc_key,
-        &path_bytes_or_zero(derivation_path),
+        &derivation_path
+            .copied()
+            .unwrap_or(sui_sdk_types::Address::ZERO),
         btc_network,
     ))
 }
@@ -238,11 +240,12 @@ impl Hashi {
     ) -> anyhow::Result<bitcoin::Address> {
         let mpc_g = self.mpc_master_g()?;
         let guardian_pubkey = self.require_guardian_btc_pubkey()?;
-        let path_bytes = path_bytes_or_zero(derivation_path);
         Ok(bitcoin_utils::two_of_two_taproot_script_path_address(
             &guardian_pubkey,
             &mpc_g,
-            &path_bytes,
+            &derivation_path
+                .copied()
+                .unwrap_or(sui_sdk_types::Address::ZERO),
             self.config.bitcoin_network(),
         ))
     }
@@ -264,7 +267,9 @@ impl Hashi {
             bitcoin_utils::two_of_two_taproot_script_path_spend_artifacts(
                 &guardian_pubkey,
                 &mpc_g,
-                &path_bytes_or_zero(derivation_path),
+                &derivation_path
+                    .copied()
+                    .unwrap_or(sui_sdk_types::Address::ZERO),
             ),
         )
     }

@@ -27,11 +27,9 @@ message InputUTXO {
   // Amount in satoshis.
   optional uint64 amount = 2;
 
-  // Bitcoin address.
-  optional string address = 3;
-
-  // Taproot leaf hash (32 bytes).
-  optional bytes leaf_hash = 4;
+  // Derivation path (Sui address format, 32 bytes). The spending address and
+  // tap leaf hash are derived from it inside the enclave.
+  optional bytes derivation_path = 3;
 }
 
 // Output UTXO (either external or internal).
