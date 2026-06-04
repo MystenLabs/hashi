@@ -31,7 +31,7 @@ pub use crate::pgp::test_utils::mock_pgp_certs_armored;
 
 use super::bitcoin_utils::BTC_LIB;
 use super::bitcoin_utils::InputUTXO;
-use super::bitcoin_utils::OutputUTXO;
+use super::bitcoin_utils::OutputUTXOWire;
 use super::bitcoin_utils::TxUTXOs;
 use super::bitcoin_utils::sign_btc_tx;
 use crate::committee::Bls12381PrivateKey;
@@ -273,13 +273,10 @@ impl StandardWithdrawalRequest {
 
         let input = InputUTXO::new(outpoint, Amount::from_sat(10_000), [7u8; 32].into());
 
-        let output_external =
-            OutputUTXO::new_external(addr_unchecked, Amount::from_sat(9_000), network)
-                .expect("valid external output");
+        let output_external = OutputUTXOWire::external(addr_unchecked, Amount::from_sat(9_000));
+        let output_internal = OutputUTXOWire::internal([42u8; 32].into(), Amount::from_sat(500));
 
-        let output_internal = OutputUTXO::new_internal([42u8; 32].into(), Amount::from_sat(500));
-
-        let utxos = TxUTXOs::new(vec![input], vec![output_external, output_internal])
+        let utxos = TxUTXOs::new(vec![input], vec![output_external, output_internal], network)
             .expect("valid TxUTXOs");
 
         StandardWithdrawalRequest::new(wid, utxos, 1_000_000, 0)

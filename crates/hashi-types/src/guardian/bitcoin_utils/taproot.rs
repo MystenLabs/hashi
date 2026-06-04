@@ -132,7 +132,7 @@ mod bitcoin_tests {
     use crate::guardian::BitcoinKeypair;
     use crate::guardian::bitcoin_utils::BTC_LIB;
     use crate::guardian::bitcoin_utils::InputUTXO;
-    use crate::guardian::bitcoin_utils::OutputUTXO;
+    use crate::guardian::bitcoin_utils::OutputUTXOWire;
     use crate::guardian::bitcoin_utils::TxUTXOs;
     use crate::guardian::bitcoin_utils::construct_tx;
     use crate::guardian::bitcoin_utils::sign_btc_tx;
@@ -284,17 +284,16 @@ mod bitcoin_tests {
             vec![input_utxo.clone()],
             vec![
                 // 100 sats sent externally; the rest (minus fee) returns as change.
-                OutputUTXO::new_external(
+                OutputUTXOWire::external(
                     dest_address.as_unchecked().clone(),
                     Amount::from_sat(100),
-                    Regtest,
-                )
-                .unwrap(),
-                OutputUTXO::new_internal(
+                ),
+                OutputUTXOWire::internal(
                     DerivationPath::ZERO,
                     input_amount - Amount::from_sat(1000),
                 ),
             ],
+            Regtest,
         )
         .unwrap();
 

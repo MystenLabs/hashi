@@ -46,9 +46,10 @@ pub struct InputUTXO {
     pub derivation_path: DerivationPath,
 }
 
-/// Output UTXOs belonging to users
+/// Output UTXO belonging to a user. Internal to `TxUTXOs`: the checked address
+/// is only ever produced by `TxUTXOs::new` after network validation.
 #[derive(Serialize, Debug, Clone, PartialEq)]
-pub struct ExternalOutputUTXO {
+struct ExternalOutputUTXO {
     /// Bitcoin address to withdraw to
     address: BitcoinAddress<NetworkChecked>,
     /// Amount in satoshis
@@ -72,11 +73,12 @@ pub struct InternalOutputUTXO {
     pub amount: Amount,
 }
 
-/// Withdrawal destination and amount.
+/// Withdrawal destination and amount. Internal to `TxUTXOs`; callers build the
+/// `OutputUTXOWire` form and let `TxUTXOs::new` validate and convert.
 /// External amounts count towards rate limits whereas internal amounts don't.
 /// Internal address is derived inside the enclave to ensure that it is actually internal.
 #[derive(Serialize, Debug, Clone, PartialEq)]
-pub enum OutputUTXO {
+enum OutputUTXO {
     External(ExternalOutputUTXO),
     Internal(InternalOutputUTXO),
 }
@@ -178,19 +180,15 @@ impl InternalOutputUTXO {
     }
 }
 
-impl ExternalOutputUTXO {
-    /// Constructs a new `ExternalOutputUTXO` and validates the address for the network.
-    pub fn new(
-        address: BitcoinAddress<NetworkUnchecked>,
-        amount: Amount,
-        network: Network,
-    ) -> GuardianResult<Self> {
-        let address = validate_address_for_network(&address, network)?;
-        Ok(Self { address, amount })
+impl OutputUTXOWire {
+    /// External payout to a user-provided (unchecked) address.
+    pub fn external(address: BitcoinAddress<NetworkUnchecked>, amount: Amount) -> Self {
+        OutputUTXOWire::External(ExternalOutputUTXOWire { address, amount })
     }
 
-    pub fn from_wire(input: ExternalOutputUTXOWire, network: Network) -> GuardianResult<Self> {
-        Self::new(input.address, input.amount, network)
+    /// Internal change output, derived inside the enclave from `derivation_path`.
+    pub fn internal(derivation_path: DerivationPath, amount: Amount) -> Self {
+        OutputUTXOWire::Internal(InternalOutputUTXO::new(derivation_path, amount))
     }
 }
 
@@ -198,36 +196,8 @@ impl ExternalOutputUTXO {
 ///
 /// Outputs can be **external** (to a user-provided address) or **internal** (change, derived inside enclave).
 impl OutputUTXO {
-    /// Constructs a new `OutputUTXO::External` variant.
-    pub fn new_external(
-        address: BitcoinAddress<NetworkUnchecked>,
-        amount: Amount,
-        network: Network,
-    ) -> GuardianResult<Self> {
-        Ok(OutputUTXO::External(ExternalOutputUTXO::new(
-            address, amount, network,
-        )?))
-    }
-
-    /// Constructs a new `OutputUTXO::Internal` variant.
-    pub fn new_internal(derivation_path: DerivationPath, amount: Amount) -> Self {
-        OutputUTXO::Internal(InternalOutputUTXO {
-            derivation_path,
-            amount,
-        })
-    }
-
-    pub fn from_wire(output: OutputUTXOWire, network: Network) -> GuardianResult<Self> {
-        Ok(match output {
-            OutputUTXOWire::External(external) => {
-                OutputUTXO::External(ExternalOutputUTXO::from_wire(external, network)?)
-            }
-            OutputUTXOWire::Internal(internal) => OutputUTXO::Internal(internal),
-        })
-    }
-
     /// Returns the output amount in satoshis.
-    pub fn amount(&self) -> Amount {
+    fn amount(&self) -> Amount {
         match self {
             OutputUTXO::External(ExternalOutputUTXO { amount, .. }) => *amount,
             OutputUTXO::Internal(InternalOutputUTXO { amount, .. }) => *amount,
@@ -240,7 +210,7 @@ impl OutputUTXO {
     /// Internal outputs derive their child key from this raw G — using only
     /// the x-only/even-y projection would silently produce a different child
     /// key for half of all MPC vks, breaking the 2-of-2 leaf script.
-    pub fn to_txout(&self, enclave_pubkey: &BitcoinPubkey, hashi_master_g: &HashiMasterG) -> TxOut {
+    fn to_txout(&self, enclave_pubkey: &BitcoinPubkey, hashi_master_g: &HashiMasterG) -> TxOut {
         match self {
             OutputUTXO::External(ExternalOutputUTXO { address, amount }) => TxOut {
                 value: *amount,
@@ -262,8 +232,15 @@ impl OutputUTXO {
 }
 
 impl TxUTXOs {
-    /// Constructs a new `TxUTXOs` and validates all invariants.
-    pub fn new(inputs: Vec<InputUTXO>, outputs: Vec<OutputUTXO>) -> GuardianResult<Self> {
+    /// Constructs a `TxUTXOs`, validating every invariant in one place: external
+    /// output addresses must be valid for `network`, amounts must be non-zero,
+    /// inputs must be unique, and fees must be positive. The single gate for both
+    /// locally-built and wire-parsed UTXO sets.
+    pub fn new(
+        inputs: Vec<InputUTXO>,
+        outputs: Vec<OutputUTXOWire>,
+        network: Network,
+    ) -> GuardianResult<Self> {
         if inputs.is_empty() {
             return Err(InvalidInputs("input utxos must not be empty".into()));
         }
@@ -271,10 +248,22 @@ impl TxUTXOs {
             return Err(InvalidInputs("output utxos must not be empty".into()));
         }
 
+        // Validate each external address against the network, turning untrusted
+        // unchecked addresses into checked ones. Internal outputs carry no address.
+        let mut checked = Vec::with_capacity(outputs.len());
+        for output in outputs {
+            checked.push(match output {
+                OutputUTXOWire::External(ext) => OutputUTXO::External(ExternalOutputUTXO {
+                    address: validate_address_for_network(&ext.address, network)?,
+                    amount: ext.amount,
+                }),
+                OutputUTXOWire::Internal(int) => OutputUTXO::Internal(int),
+            });
+        }
+        let outputs = checked;
+
         // Reject zero amounts on both sides: a 0-value input is meaningless and a
-        // 0-value output is invalid on Bitcoin. This is the single gate every UTXO
-        // set passes through (locally built or parsed from the wire), so per-UTXO
-        // constructors don't repeat it.
+        // 0-value output is invalid on Bitcoin.
         for utxo in &inputs {
             if utxo.amount == Amount::ZERO {
                 return Err(InvalidInputs("input amount must be > 0".into()));
