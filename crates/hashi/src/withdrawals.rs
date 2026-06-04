@@ -919,15 +919,7 @@ impl Hashi {
     ) -> anyhow::Result<bitcoin::Transaction> {
         let inputs: Vec<bitcoin::TxIn> = selected_utxos
             .iter()
-            .map(|utxo| bitcoin::TxIn {
-                previous_output: bitcoin::OutPoint {
-                    txid: utxo.id.txid.into(),
-                    vout: utxo.id.vout,
-                },
-                script_sig: bitcoin::ScriptBuf::default(),
-                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: bitcoin::Witness::default(),
-            })
+            .map(|utxo| bitcoin_utils::InputUTXO::from(utxo).txin())
             .collect();
 
         let tx_outputs: Vec<bitcoin::TxOut> = outputs
@@ -1484,20 +1476,7 @@ pub fn build_guardian_withdrawal_request(
 
     let network = hashi.config.bitcoin_network();
 
-    let inputs: Vec<_> = txn
-        .inputs
-        .iter()
-        .map(|utxo| {
-            let outpoint = bitcoin::OutPoint {
-                txid: utxo.id.txid.into(),
-                vout: utxo.id.vout,
-            };
-            // `None` (change) maps to the all-zeros path, matching `path_bytes_or_zero`.
-            let derivation_path = utxo.derivation_path.unwrap_or(Address::ZERO);
-
-            InputUTXO::new(outpoint, Amount::from_sat(utxo.amount), derivation_path)
-        })
-        .collect();
+    let inputs: Vec<_> = txn.inputs.iter().map(InputUTXO::from).collect();
 
     // First N outputs are external payouts; any trailing output is internal change.
     let all_outputs = txn.all_outputs();

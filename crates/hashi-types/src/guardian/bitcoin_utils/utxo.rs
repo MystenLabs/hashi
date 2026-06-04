@@ -169,6 +169,20 @@ impl InputUTXO {
     }
 }
 
+impl From<&crate::move_types::Utxo> for InputUTXO {
+    /// A `None` derivation path (change) maps to the all-zeros path.
+    fn from(u: &crate::move_types::Utxo) -> Self {
+        InputUTXO::new(
+            OutPoint {
+                txid: u.id.txid.into(),
+                vout: u.id.vout,
+            },
+            Amount::from_sat(u.amount),
+            u.derivation_path.unwrap_or(DerivationPath::ZERO),
+        )
+    }
+}
+
 impl InternalOutputUTXO {
     pub fn new(derivation_path: DerivationPath, amount: Amount) -> Self {
         Self {
