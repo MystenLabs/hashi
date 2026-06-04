@@ -25,7 +25,6 @@ pub use time_utils::now_timestamp_ms;
 pub use time_utils::now_timestamp_secs;
 pub use time_utils::unix_millis_to_seconds;
 
-use self::bitcoin_utils::OutputUTXO;
 use self::bitcoin_utils::TxUTXOs;
 use self::bitcoin_utils::TxUTXOsWire;
 use self::errors::GuardianError::*;
@@ -664,20 +663,9 @@ impl AddressValidation<StandardWithdrawalRequestWire> for StandardWithdrawalRequ
         value: StandardWithdrawalRequestWire,
         network: Network,
     ) -> GuardianResult<Self> {
-        let utxos = value.utxos;
-        // Inputs carry no checked address, so they're already the domain type;
-        // only outputs need address validation. `TxUTXOs::new` validates amounts.
-        let inputs = utxos.inputs;
-
-        let outputs = utxos
-            .outputs
-            .into_iter()
-            .map(|utxo| OutputUTXO::from_wire(utxo, network))
-            .collect::<Result<Vec<_>, _>>()?;
-
         Ok(Self {
             wid: value.wid,
-            utxos: TxUTXOs::new(inputs, outputs)?,
+            utxos: TxUTXOs::new(value.utxos.inputs, value.utxos.outputs, network)?,
             timestamp_secs: value.timestamp_secs,
             seq: value.seq,
         })

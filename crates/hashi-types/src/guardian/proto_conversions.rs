@@ -1046,11 +1046,11 @@ fn tx_utxos_wire_to_pb(utxos: TxUTXOsWire) -> pb::TxUtxos {
 fn input_utxo_to_pb(input: InputUTXO) -> pb::InputUtxo {
     pb::InputUtxo {
         outpoint: Some(pb::UtxoId {
-            txid: Some(input.outpoint().txid.as_byte_array().to_vec().into()),
-            vout: Some(input.outpoint().vout),
+            txid: Some(input.outpoint.txid.as_byte_array().to_vec().into()),
+            vout: Some(input.outpoint.vout),
         }),
-        amount: Some(input.amount().to_sat()),
-        derivation_path: Some(input.derivation_path().into_inner().to_vec().into()),
+        amount: Some(input.amount.to_sat()),
+        derivation_path: Some(input.derivation_path.into_inner().to_vec().into()),
     }
 }
 
@@ -1064,8 +1064,8 @@ fn output_utxo_wire_to_pb(output: OutputUTXOWire) -> pb::OutputUtxo {
         }
         OutputUTXOWire::Internal(int) => {
             pb::output_utxo::Output::Internal(pb::InternalOutputUtxo {
-                derivation_path: Some(int.derivation_path().into_inner().to_vec().into()),
-                amount: Some(int.amount().to_sat()),
+                derivation_path: Some(int.derivation_path.into_inner().to_vec().into()),
+                amount: Some(int.amount.to_sat()),
             })
         }
     };

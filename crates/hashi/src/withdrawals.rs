@@ -9,10 +9,6 @@ use bitcoin::TxOut;
 use bitcoin::Weight;
 use bitcoin::blockdata::script::witness_program::WitnessProgram;
 use bitcoin::blockdata::script::witness_version::WitnessVersion;
-use bitcoin::hashes::Hash;
-use bitcoin::sighash::Prevouts;
-use bitcoin::sighash::SighashCache;
-use bitcoin::sighash::TapSighashType;
 use bitcoin::taproot::TapLeafHash;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
@@ -904,22 +900,11 @@ impl Hashi {
             .map(|(_, leaf_hash)| *leaf_hash)
             .collect::<Vec<TapLeafHash>>();
 
-        (0..inputs.len())
-            .map(|input_index| {
-                let mut sighasher = SighashCache::new(unsigned_tx);
-                let sighash = sighasher
-                    .taproot_script_spend_signature_hash(
-                        input_index,
-                        &Prevouts::All(&prevouts),
-                        leaf_hashes[input_index],
-                        TapSighashType::Default,
-                    )
-                    .map_err(|e| {
-                        anyhow!("Failed to construct taproot script spend sighash: {e}")
-                    })?;
-                Ok(*sighash.as_byte_array())
-            })
-            .collect()
+        Ok(bitcoin_utils::taproot_script_spend_sighashes(
+            unsigned_tx,
+            &prevouts,
+            &leaf_hashes,
+        ))
     }
 
     // --- UTXO selection and tx crafting ---
@@ -934,15 +919,7 @@ impl Hashi {
     ) -> anyhow::Result<bitcoin::Transaction> {
         let inputs: Vec<bitcoin::TxIn> = selected_utxos
             .iter()
-            .map(|utxo| bitcoin::TxIn {
-                previous_output: bitcoin::OutPoint {
-                    txid: utxo.id.txid.into(),
-                    vout: utxo.id.vout,
-                },
-                script_sig: bitcoin::ScriptBuf::default(),
-                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: bitcoin::Witness::default(),
-            })
+            .map(|utxo| bitcoin_utils::InputUTXO::from(utxo).txin())
             .collect();
 
         let tx_outputs: Vec<bitcoin::TxOut> = outputs
@@ -1494,25 +1471,12 @@ pub fn build_guardian_withdrawal_request(
     seq: u64,
 ) -> anyhow::Result<hashi_types::guardian::StandardWithdrawalRequest> {
     use hashi_types::guardian::bitcoin_utils::InputUTXO;
-    use hashi_types::guardian::bitcoin_utils::OutputUTXO;
+    use hashi_types::guardian::bitcoin_utils::OutputUTXOWire;
     use hashi_types::guardian::bitcoin_utils::TxUTXOs;
 
     let network = hashi.config.bitcoin_network();
 
-    let inputs: Vec<_> = txn
-        .inputs
-        .iter()
-        .map(|utxo| {
-            let outpoint = bitcoin::OutPoint {
-                txid: utxo.id.txid.into(),
-                vout: utxo.id.vout,
-            };
-            // `None` (change) maps to the all-zeros path, matching `path_bytes_or_zero`.
-            let derivation_path = utxo.derivation_path.unwrap_or(Address::ZERO);
-
-            InputUTXO::new(outpoint, Amount::from_sat(utxo.amount), derivation_path)
-        })
-        .collect();
+    let inputs: Vec<_> = txn.inputs.iter().map(InputUTXO::from).collect();
 
     // First N outputs are external payouts; any trailing output is internal change.
     let all_outputs = txn.all_outputs();
@@ -1525,14 +1489,12 @@ pub fn build_guardian_withdrawal_request(
                 let script_pubkey = script_pubkey_from_raw_address(&output.bitcoin_address)?;
                 let address = BitcoinAddress::from_script(&script_pubkey, network)
                     .map_err(|e| anyhow!("Cannot derive address from output script: {e}"))?;
-                OutputUTXO::new_external(
+                Ok(OutputUTXOWire::external(
                     address.into_unchecked(),
                     Amount::from_sat(output.amount),
-                    network,
-                )
-                .map_err(|e| anyhow!("Failed to build guardian external OutputUTXO: {e}"))
+                ))
             } else {
-                Ok(OutputUTXO::new_internal(
+                Ok(OutputUTXOWire::internal(
                     sui_sdk_types::Address::ZERO,
                     Amount::from_sat(output.amount),
                 ))
@@ -1540,7 +1502,7 @@ pub fn build_guardian_withdrawal_request(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let utxos = TxUTXOs::new(inputs, outputs)
+    let utxos = TxUTXOs::new(inputs, outputs, network)
         .map_err(|e| anyhow!("Failed to build guardian TxUTXOs: {e}"))?;
 
     // The on-chain `WithdrawalTransaction` UID doubles as the guardian-side `wid`.
