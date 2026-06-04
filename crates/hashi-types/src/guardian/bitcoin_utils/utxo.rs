@@ -41,11 +41,12 @@ use std::collections::HashSet;
 /// (Hashi+Guardian)-owned input UTXO
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct InputUTXO {
-    outpoint: OutPoint,
-    amount: Amount,
-    derivation_path: DerivationPath,
+    pub outpoint: OutPoint,
+    pub amount: Amount,
+    pub derivation_path: DerivationPath,
 }
 
+/// Output UTXOs belonging to users
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct ExternalOutputUTXO {
     /// Bitcoin address to withdraw to
@@ -54,12 +55,21 @@ pub struct ExternalOutputUTXO {
     amount: Amount,
 }
 
+/// Copy of bitcoin_utils::ExternalOutputUTXO with unchecked address
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalOutputUTXOWire {
+    /// Bitcoin address to withdraw to
+    pub address: BitcoinAddress<NetworkUnchecked>,
+    /// Amount in satoshis
+    pub amount: Amount,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct InternalOutputUTXO {
     /// The derivation path
-    derivation_path: DerivationPath,
+    pub derivation_path: DerivationPath,
     /// Amount in satoshis
-    amount: Amount,
+    pub amount: Amount,
 }
 
 /// Withdrawal destination and amount.
@@ -71,6 +81,13 @@ pub enum OutputUTXO {
     Internal(InternalOutputUTXO),
 }
 
+/// Copy of bitcoin_utils::OutputUTXO with unchecked address
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum OutputUTXOWire {
+    External(ExternalOutputUTXOWire),
+    Internal(InternalOutputUTXO),
+}
+
 /// All the UTXOs associated with a withdrawal transaction
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct TxUTXOs {
@@ -78,6 +95,15 @@ pub struct TxUTXOs {
     inputs: Vec<InputUTXO>,
     /// Outputs: either external or internal
     outputs: Vec<OutputUTXO>,
+}
+
+/// Copy of bitcoin_utils::TxUTXOs with unchecked output addresses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxUTXOsWire {
+    /// Inputs: internal
+    pub inputs: Vec<InputUTXO>,
+    /// Outputs: either external or internal
+    pub outputs: Vec<OutputUTXOWire>,
 }
 
 // ---------------------------------
@@ -108,18 +134,6 @@ impl InputUTXO {
             amount,
             derivation_path,
         }
-    }
-
-    pub fn outpoint(&self) -> OutPoint {
-        self.outpoint
-    }
-
-    pub fn amount(&self) -> Amount {
-        self.amount
-    }
-
-    pub fn derivation_path(&self) -> DerivationPath {
-        self.derivation_path
     }
 
     /// Returns a `TxIn` for this UTXO with placeholder witness data.
@@ -162,13 +176,6 @@ impl InternalOutputUTXO {
             amount,
         }
     }
-
-    pub fn derivation_path(&self) -> DerivationPath {
-        self.derivation_path
-    }
-    pub fn amount(&self) -> Amount {
-        self.amount
-    }
 }
 
 impl ExternalOutputUTXO {
@@ -186,6 +193,7 @@ impl ExternalOutputUTXO {
         Self::new(input.address, input.amount, network)
     }
 }
+
 /// Represents an output destination for a withdrawal.
 ///
 /// Outputs can be **external** (to a user-provided address) or **internal** (change, derived inside enclave).
@@ -297,16 +305,6 @@ impl TxUTXOs {
         Ok(tx_info)
     }
 
-    /// Returns a reference to the inputs.
-    pub fn get_inputs(&self) -> &[InputUTXO] {
-        &self.inputs
-    }
-
-    /// Returns a reference to the outputs.
-    pub fn get_outputs(&self) -> &[OutputUTXO] {
-        &self.outputs
-    }
-
     /// Constructs all outputs (both external and internal).
     ///
     /// For `External` outputs, uses the user-provided address. For `Internal` outputs,
@@ -322,30 +320,9 @@ impl TxUTXOs {
             .collect()
     }
 
-    pub fn external_outs(&self) -> Vec<&ExternalOutputUTXO> {
-        self.outputs
-            .iter()
-            .filter_map(|utxo| match utxo {
-                OutputUTXO::External(x) => Some(x),
-                OutputUTXO::Internal(_) => None,
-            })
-            .collect::<Vec<_>>()
-    }
-
-    pub fn external_out_amount(&self) -> Amount {
-        self.outputs
-            .iter()
-            .filter_map(|utxo| match utxo {
-                OutputUTXO::External(x) => Some(x.amount),
-                OutputUTXO::Internal(_) => None,
-            })
-            .sum()
-    }
-
     /// BTC that leaves the pool when this txn broadcasts: `inputs - change`,
-    /// equivalent to `external_out_amount + miner_fee`. The amount that
-    /// consumes the rate-limiter (miner fee leaves the pool too; change
-    /// flows back).
+    /// equivalent to `external outputs + miner_fee`. The amount that consumes
+    /// the rate-limiter (miner fee leaves the pool too; change flows back).
     pub fn gross_outflow_amount(&self) -> Amount {
         let inputs: Amount = self.inputs.iter().map(|i| i.amount).sum();
         let internal: Amount = self
@@ -461,15 +438,6 @@ pub fn construct_tx(inputs: Vec<TxIn>, outputs: Vec<TxOut>) -> Transaction {
 //    Serialize / Deserialize
 // ---------------------------------
 
-/// Copy of bitcoin_utils::ExternalOutputUTXO with unchecked address
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Ord, PartialOrd)]
-pub struct ExternalOutputUTXOWire {
-    /// Bitcoin address to withdraw to
-    pub address: BitcoinAddress<NetworkUnchecked>,
-    /// Amount in satoshis
-    pub amount: Amount,
-}
-
 impl From<ExternalOutputUTXO> for ExternalOutputUTXOWire {
     fn from(o: ExternalOutputUTXO) -> Self {
         Self {
@@ -479,13 +447,6 @@ impl From<ExternalOutputUTXO> for ExternalOutputUTXOWire {
     }
 }
 
-/// Copy of bitcoin_utils::OutputUTXO with unchecked address
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum OutputUTXOWire {
-    External(ExternalOutputUTXOWire),
-    Internal(InternalOutputUTXO),
-}
-
 impl From<OutputUTXO> for OutputUTXOWire {
     fn from(o: OutputUTXO) -> Self {
         match o {
@@ -493,17 +454,6 @@ impl From<OutputUTXO> for OutputUTXOWire {
             OutputUTXO::Internal(o) => OutputUTXOWire::Internal(o),
         }
     }
-}
-
-/// Copy of bitcoin_utils::TxUTXOs with unchecked output addresses. Inputs carry
-/// no checked address, so the domain `InputUTXO` is reused directly (same as
-/// `OutputUTXOWire::Internal`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TxUTXOsWire {
-    /// Inputs: internal
-    pub inputs: Vec<InputUTXO>,
-    /// Outputs: either external or internal
-    pub outputs: Vec<OutputUTXOWire>,
 }
 
 impl From<TxUTXOs> for TxUTXOsWire {
