@@ -2966,27 +2966,42 @@ dependencies = [
 ]
 
 [[package]]
-name = "hashi-monitor"
+name = "hashi-guardian-init"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "bcs",
  "bitcoin",
  "clap",
- "corepc-client",
- "e2e-tests",
  "hashi-guardian",
  "hashi-types",
  "hex",
  "hpke",
- "jsonrpc",
  "k256",
  "rand 0.8.5",
  "serde",
  "serde_yaml",
- "tempfile",
  "tokio",
  "tonic",
+ "tracing",
+]
+
+[[package]]
+name = "hashi-monitor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bitcoin",
+ "clap",
+ "corepc-client",
+ "e2e-tests",
+ "hashi-guardian",
+ "hashi-types",
+ "jsonrpc",
+ "serde",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
  "tracing",
  "tracing-subscriber",
 ]

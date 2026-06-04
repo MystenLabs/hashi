@@ -21,7 +21,7 @@ use hpke::Deserializable;
 use rand::thread_rng;
 use tracing::info;
 
-use crate::provisioner::config::GuardianConfig;
+use crate::provisioner_init::config::GuardianConfig;
 
 pub use config::ProvisionerConfig;
 
