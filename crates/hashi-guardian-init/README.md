@@ -24,7 +24,7 @@ A one-shot flow run by a key provisioner (IOP-225 checks A–E). It:
 ### Usage
 
 ```bash
-cargo run -p hashi-guardian-init -- --config provisioner-init.sample.yaml
+cargo run -p hashi-guardian-init -- provisioner --config provisioner-init.sample.yaml
 ```
 
 ### Config
