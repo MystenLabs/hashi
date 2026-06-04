@@ -11,7 +11,9 @@ pub(crate) use retry::RetryPolicy;
 
 use crate::Hashi;
 use crate::config::ForceRunAsLeader;
-use crate::deposits::DepositError;
+use crate::deposits::ApprovedDepositError;
+use crate::deposits::ApprovedDepositErrorKind;
+use crate::deposits::UnapprovedDepositError;
 use crate::grpc::BoxedChannel;
 use crate::leader::retry::GlobalRetryTracker;
 use crate::leader::retry::RetryTracker;
@@ -66,13 +68,11 @@ fn is_retriable_transport(status: &tonic::Status) -> bool {
 
 pub(crate) struct LeaderService {
     inner: Arc<Hashi>,
-    withdrawal_approval_retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
-    withdrawal_commitment_retry_tracker: GlobalRetryTracker<WithdrawalCommitmentErrorKind>,
-    deposit_tasks: JoinSet<(Address, Result<(), DepositError>)>,
-    pending_deposit_requests: Vec<DepositRequest>,
+    unapproved_deposit_tasks: JoinSet<(Address, Result<(), UnapprovedDepositError>)>,
+    approved_deposit_tasks: JoinSet<(Address, Result<(), ApprovedDepositError>)>,
+    pending_unapproved_deposit_requests: Vec<DepositRequest>,
     never_retry_deposit_ids: HashSet<Address>,
     inflight_deposits: HashSet<Address>,
-    delayed_deposit_processing_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     withdrawal_approval_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     withdrawal_commitment_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     withdrawal_signing_tasks: JoinSet<(Address, anyhow::Result<()>)>,
@@ -80,6 +80,9 @@ pub(crate) struct LeaderService {
     withdrawal_broadcast_tasks: JoinSet<(Address, WithdrawalBroadcastResult)>,
     inflight_withdrawal_broadcasts: HashSet<Address>,
     stuck_withdrawal_warned: HashSet<Address>,
+    approved_deposit_retry_tracker: RetryTracker<ApprovedDepositErrorKind>,
+    withdrawal_approval_retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
+    withdrawal_commitment_retry_tracker: GlobalRetryTracker<WithdrawalCommitmentErrorKind>,
     deposit_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     proposal_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     pending_utxo_cleanups: VecDeque<garbage_collection::PendingUtxoCleanup>,
@@ -98,11 +101,11 @@ impl LeaderService {
             inner: hashi,
             withdrawal_approval_retry_tracker: RetryTracker::new(),
             withdrawal_commitment_retry_tracker: GlobalRetryTracker::new(),
-            deposit_tasks: JoinSet::new(),
-            pending_deposit_requests: Vec::new(),
+            unapproved_deposit_tasks: JoinSet::new(),
+            approved_deposit_tasks: JoinSet::new(),
+            pending_unapproved_deposit_requests: Vec::new(),
             never_retry_deposit_ids: HashSet::new(),
             inflight_deposits: HashSet::new(),
-            delayed_deposit_processing_task: None,
             withdrawal_approval_task: None,
             withdrawal_commitment_task: None,
             withdrawal_signing_tasks: JoinSet::new(),
@@ -110,6 +113,7 @@ impl LeaderService {
             withdrawal_broadcast_tasks: JoinSet::new(),
             inflight_withdrawal_broadcasts: HashSet::new(),
             stuck_withdrawal_warned: HashSet::new(),
+            approved_deposit_retry_tracker: RetryTracker::new(),
             deposit_gc_task: None,
             proposal_gc_task: None,
             pending_utxo_cleanups: VecDeque::new(),
@@ -207,44 +211,34 @@ impl LeaderService {
                     self.process_approved_withdrawal_requests(checkpoint_timestamp_ms);
                     self.process_unsigned_withdrawal_txns();
                     self.process_signed_withdrawal_txns();
+                    self.check_delete_expired_deposit_requests(checkpoint_timestamp_ms);
                     self.check_delete_proposals(checkpoint_timestamp_ms);
                     self.check_cleanup_spent_utxos();
-
-                    if !self.pending_deposit_requests.is_empty() {
-                        self.process_deposit_requests();
-                    }
+                    self.process_approved_deposit_requests();
                 }
                 wait_result = btc_block_rx.changed() => {
                     if let Err(e) = wait_result {
                         error!("Error waiting for Bitcoin block height change: {e}");
                         break;
                     }
+
                     let block_height = *btc_block_rx.borrow_and_update();
-                    let (checkpoint_height, checkpoint_timestamp_ms) = {
-                        let checkpoint_info = checkpoint_rx.borrow();
-                        (checkpoint_info.height, checkpoint_info.timestamp_ms)
-                    };
+                    let checkpoint_height = checkpoint_rx.borrow().height;
 
-                    // We want to unconditionally reload deposits, even if we aren't the leader to
-                    // avoid only the leader being able to reload the moment a block is seen.
-                    self.reload_pending_deposit_requests();
-                    // Approved deposits may only become confirmable after the configured
-                    // Bitcoin deposit time-delay elapses, without another Bitcoin block.
-                    self.schedule_delayed_deposit_processing();
-
-                    if !self.is_current_leader(checkpoint_height) {
-                        continue;
+                    if self.is_current_leader(checkpoint_height) {
+                        self.process_deposits_on_bitcoin_block(block_height);
                     }
-
-                    debug!("New Bitcoin block {block_height}: processing deposit requests");
-
-                    self.check_delete_expired_deposit_requests(checkpoint_timestamp_ms);
-                    self.process_deposit_requests();
                 }
-                Some(result) = self.deposit_tasks.join_next() => {
-                    self.handle_completed_deposit_task(result);
-                    while let Some(result) = self.deposit_tasks.try_join_next() {
-                        self.handle_completed_deposit_task(result);
+                Some(result) = self.unapproved_deposit_tasks.join_next() => {
+                    self.handle_completed_unapproved_deposit_task(result);
+                    while let Some(result) = self.unapproved_deposit_tasks.try_join_next() {
+                        self.handle_completed_unapproved_deposit_task(result);
+                    }
+                }
+                Some(result) = self.approved_deposit_tasks.join_next() => {
+                    self.handle_completed_approved_deposit_task(result);
+                    while let Some(result) = self.approved_deposit_tasks.try_join_next() {
+                        self.handle_completed_approved_deposit_task(result);
                     }
                 }
                 Some(result) = self.withdrawal_signing_tasks.join_next() => {
@@ -260,10 +254,6 @@ impl LeaderService {
                 Some(result) = OptionFuture::from(self.withdrawal_commitment_task.as_mut()) => {
                     self.withdrawal_commitment_task = None;
                     Self::log_task_result("withdrawal_commitment", result);
-                }
-                Some(result) = OptionFuture::from(self.delayed_deposit_processing_task.as_mut()) => {
-                    let checkpoint_height = checkpoint_rx.borrow().height;
-                    self.handle_delayed_deposit_processing(result, checkpoint_height);
                 }
                 Some(result) = OptionFuture::from(self.deposit_gc_task.as_mut()) => {
                     self.deposit_gc_task = None;
