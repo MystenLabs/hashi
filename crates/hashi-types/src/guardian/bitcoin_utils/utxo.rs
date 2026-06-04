@@ -11,7 +11,7 @@
 
 use super::BTC_LIB;
 use super::DerivationPath;
-use super::taproot::compute_taproot_artifacts;
+use super::taproot::taproot_script_pubkey_and_leaf_hash;
 use super::taproot::taproot_script_spend_sighashes;
 use crate::guardian::BitcoinAddress;
 use crate::guardian::BitcoinKeypair;
@@ -157,8 +157,11 @@ impl InputUTXO {
         enclave_pubkey: &BitcoinPubkey,
         hashi_master_g: &HashiMasterG,
     ) -> (TxOut, TapLeafHash) {
-        let (script_pubkey, leaf_hash) =
-            compute_taproot_artifacts(enclave_pubkey, hashi_master_g, &self.derivation_path);
+        let (script_pubkey, leaf_hash) = taproot_script_pubkey_and_leaf_hash(
+            enclave_pubkey,
+            hashi_master_g,
+            &self.derivation_path,
+        );
         (
             TxOut {
                 value: self.amount,
@@ -228,8 +231,11 @@ impl OutputUTXO {
                 derivation_path,
                 amount,
             }) => {
-                let scripts =
-                    compute_taproot_artifacts(enclave_pubkey, hashi_master_g, derivation_path);
+                let scripts = taproot_script_pubkey_and_leaf_hash(
+                    enclave_pubkey,
+                    hashi_master_g,
+                    derivation_path,
+                );
                 TxOut {
                     value: *amount,
                     script_pubkey: scripts.0,

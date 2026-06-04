@@ -36,7 +36,7 @@ pub fn derive_deposit_address(
     derivation_path: Option<&sui_sdk_types::Address>,
     btc_network: bitcoin::Network,
 ) -> anyhow::Result<bitcoin::Address> {
-    Ok(bitcoin_utils::two_of_two_taproot_script_path_address(
+    Ok(bitcoin_utils::taproot_address(
         guardian_btc_pubkey,
         mpc_key,
         &derivation_path
@@ -240,7 +240,7 @@ impl Hashi {
     ) -> anyhow::Result<bitcoin::Address> {
         let mpc_g = self.mpc_master_g()?;
         let guardian_pubkey = self.require_guardian_btc_pubkey()?;
-        Ok(bitcoin_utils::two_of_two_taproot_script_path_address(
+        Ok(bitcoin_utils::taproot_address(
             &guardian_pubkey,
             &mpc_g,
             &derivation_path
@@ -263,15 +263,13 @@ impl Hashi {
     )> {
         let mpc_g = self.mpc_master_g()?;
         let guardian_pubkey = self.require_guardian_btc_pubkey()?;
-        Ok(
-            bitcoin_utils::two_of_two_taproot_script_path_spend_artifacts(
-                &guardian_pubkey,
-                &mpc_g,
-                &derivation_path
-                    .copied()
-                    .unwrap_or(sui_sdk_types::Address::ZERO),
-            ),
-        )
+        Ok(bitcoin_utils::taproot_witness_artifacts(
+            &guardian_pubkey,
+            &mpc_g,
+            &derivation_path
+                .copied()
+                .unwrap_or(sui_sdk_types::Address::ZERO),
+        ))
     }
 
     /// Raw MPC verifying key (`G`) with y-parity preserved. Prefers the

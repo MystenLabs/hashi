@@ -21,20 +21,27 @@ use fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key;
 use miniscript::Descriptor;
 use miniscript::descriptor::Tr;
 use std::str::FromStr;
+use std::sync::LazyLock;
+
+/// Fixed nothing-up-my-sleeve (NUMS) point used as the taproot internal key. Copied from BIP-341.
+static NUMS_INTERNAL_KEY: LazyLock<BitcoinPubkey> = LazyLock::new(|| {
+    BitcoinPubkey::from_str("50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0")
+        .expect("valid nums key")
+});
 
 /// Creates a taproot descriptor for the given enclave and hashi keys with a 2-of-2 multi_a script.
 /// Taproot addresses are constructed as follows:
 /// 1. Derive a child hashi pubkey from the derivation path
 /// 2. Create a 2-of-2 tapscript with the enclave key and derived hashi key
 /// 3. Place the tapscript as the sole leaf with a NUMS internal key
-pub fn compute_taproot_descriptor(
+fn compute_taproot_descriptor(
     enclave_pubkey: &BitcoinPubkey,
     hashi_master_g: &HashiMasterG,
     hashi_derivation_path: &DerivationPath,
 ) -> Tr<BitcoinPubkey> {
     let derived_hashi_pubkey = derive_hashi_child_pubkey(hashi_master_g, hashi_derivation_path);
 
-    let internal = nums_internal_key();
+    let internal = *NUMS_INTERNAL_KEY;
 
     // Taproot descriptor with one leaf: 2-of-2 checksigadd-style multisig
     // Descriptor docs: https://github.com/bitcoin/bitcoin/blob/master/doc/descriptors.md
@@ -54,10 +61,8 @@ pub fn compute_taproot_descriptor(
 /// `hashi_master_g` must be the raw MPC verifying key with y-parity preserved:
 /// `derive_verifying_key` consumes the full `G`, so the x-only/even-y projection
 /// would derive a different child for ~half of all vks and break the 2-of-2 leaf
-/// script. The returned x-only key is exactly what the MPC protocol signs
-/// against. This is the module's canonical statement of the raw-`G` requirement;
-/// other sites point here rather than restating it.
-pub fn derive_hashi_child_pubkey(
+/// script. The returned x-only key is exactly what the MPC protocol signs against.
+fn derive_hashi_child_pubkey(
     hashi_master_g: &HashiMasterG,
     hashi_derivation_path: &DerivationPath,
 ) -> BitcoinPubkey {
@@ -65,14 +70,8 @@ pub fn derive_hashi_child_pubkey(
     BitcoinPubkey::from_slice(&derived.to_byte_array()).expect("derived schnorr key is x-only")
 }
 
-// Use a fixed nothing-up-my-sleeve (NUMS) point as the internal key. Copied from BIP-341.
-pub fn nums_internal_key() -> BitcoinPubkey {
-    BitcoinPubkey::from_str("50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0")
-        .expect("valid nums key")
-}
-
-/// Computes both the address and leaf script for a given derivation path and network.
-pub(super) fn compute_taproot_artifacts(
+/// scriptPubKey and tap leaf hash for the 2-of-2 output at `derivation_path`.
+pub(super) fn taproot_script_pubkey_and_leaf_hash(
     enclave_pubkey: &BitcoinPubkey,
     hashi_master_g: &HashiMasterG,
     hashi_derivation_path: &DerivationPath,
@@ -90,7 +89,7 @@ pub(super) fn compute_taproot_artifacts(
 }
 
 /// Deposit address for `tr(NUMS, multi_a(2, enclave, derived_hashi))`.
-pub fn two_of_two_taproot_script_path_address(
+pub fn taproot_address(
     enclave_pubkey: &BitcoinPubkey,
     hashi_master_g: &HashiMasterG,
     hashi_derivation_path: &DerivationPath,
@@ -101,7 +100,7 @@ pub fn two_of_two_taproot_script_path_address(
 }
 
 /// Spend artifacts for `tr(NUMS, multi_a(2, enclave, derived_hashi))`.
-pub fn two_of_two_taproot_script_path_spend_artifacts(
+pub fn taproot_witness_artifacts(
     enclave_pubkey: &BitcoinPubkey,
     hashi_master_g: &HashiMasterG,
     hashi_derivation_path: &DerivationPath,
@@ -224,17 +223,14 @@ mod bitcoin_tests {
         network: Network,
     ) -> (BitcoinAddress, ControlBlock, ScriptBuf) {
         let hashi_master_g = hashi_master_g_from_xonly(hashi_master_pubkey);
-        let addr = two_of_two_taproot_script_path_address(
+        let addr = taproot_address(
             enclave_pubkey,
             &hashi_master_g,
             hashi_derivation_path,
             network,
         );
-        let (tap_script, control_block, _) = two_of_two_taproot_script_path_spend_artifacts(
-            enclave_pubkey,
-            &hashi_master_g,
-            hashi_derivation_path,
-        );
+        let (tap_script, control_block, _) =
+            taproot_witness_artifacts(enclave_pubkey, &hashi_master_g, hashi_derivation_path);
         (addr, control_block, tap_script)
     }
 
@@ -392,11 +388,8 @@ mod bitcoin_tests {
         );
 
         // The production 2-of-2 leaf must embed the MPC-signed child.
-        let (leaf_script, _, _) = two_of_two_taproot_script_path_spend_artifacts(
-            &enclave_pubkey,
-            &raw_g,
-            &DerivationPath::from(path),
-        );
+        let (leaf_script, _, _) =
+            taproot_witness_artifacts(&enclave_pubkey, &raw_g, &DerivationPath::from(path));
         let script = leaf_script.as_bytes();
         assert!(
             script.windows(32).any(|w| w == mpc_child.as_slice()),
@@ -507,8 +500,7 @@ mod bitcoin_tests {
                 c.label,
             );
 
-            let addr_regtest =
-                two_of_two_taproot_script_path_address(&enclave_pk, &master_g, &c.path, Regtest);
+            let addr_regtest = taproot_address(&enclave_pk, &master_g, &c.path, Regtest);
             assert_eq!(
                 addr_regtest.to_string(),
                 c.expected_addr_regtest,
@@ -516,12 +508,7 @@ mod bitcoin_tests {
                 c.label,
             );
 
-            let addr_signet = two_of_two_taproot_script_path_address(
-                &enclave_pk,
-                &master_g,
-                &c.path,
-                Network::Signet,
-            );
+            let addr_signet = taproot_address(&enclave_pk, &master_g, &c.path, Network::Signet);
             assert_eq!(
                 addr_signet.to_string(),
                 c.expected_addr_signet,
@@ -530,7 +517,7 @@ mod bitcoin_tests {
             );
 
             let (script, _control_block, leaf_hash) =
-                two_of_two_taproot_script_path_spend_artifacts(&enclave_pk, &master_g, &c.path);
+                taproot_witness_artifacts(&enclave_pk, &master_g, &c.path);
             assert_eq!(script.as_bytes().len(), 70, "leaf script must be 70 bytes");
             assert_eq!(
                 script.as_bytes().as_hex().to_string(),
@@ -590,16 +577,14 @@ mod bitcoin_tests {
         let derived = derive_hashi_child_pubkey(&master_g, &path);
         assert_eq!(derived.serialize().as_hex().to_string(), EXPECTED_DERIVED);
 
-        let addr_regtest =
-            two_of_two_taproot_script_path_address(&enclave_pk, &master_g, &path, Regtest);
+        let addr_regtest = taproot_address(&enclave_pk, &master_g, &path, Regtest);
         assert_eq!(addr_regtest.to_string(), EXPECTED_ADDR_REGTEST);
 
-        let addr_signet =
-            two_of_two_taproot_script_path_address(&enclave_pk, &master_g, &path, Network::Signet);
+        let addr_signet = taproot_address(&enclave_pk, &master_g, &path, Network::Signet);
         assert_eq!(addr_signet.to_string(), EXPECTED_ADDR_SIGNET);
 
         let (script, _control_block, leaf_hash) =
-            two_of_two_taproot_script_path_spend_artifacts(&enclave_pk, &master_g, &path);
+            taproot_witness_artifacts(&enclave_pk, &master_g, &path);
         assert_eq!(script.as_bytes().len(), 70);
         assert_eq!(script.as_bytes().as_hex().to_string(), EXPECTED_LEAF_SCRIPT);
         assert_eq!(leaf_hash.to_string(), EXPECTED_TAP_LEAF_HASH);
