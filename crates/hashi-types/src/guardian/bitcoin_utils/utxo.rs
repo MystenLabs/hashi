@@ -4,8 +4,12 @@
 //! UTXO and transaction types for guardian withdrawals.
 //!
 //! Two classes of types exist here:
-//! - Types with checked addresses that implement Serialize but not Deserialize
-//! - Wire types with unchecked addresses that implement both Serialize and Deserialize
+//! - Domain types with checked addresses that implement Serialize but not Deserialize
+//! - `*Wire` types with unchecked addresses that implement both Serialize and Deserialize
+//!
+//! Untrusted input arrives as the `*Wire` form; `TxUTXOs::new` is the single gate
+//! that validates it (address-network, amounts, duplicates, fees) and converts it
+//! into the checked domain types.
 //!
 //! Internal-output addresses are derived via `super::taproot`.
 
@@ -220,7 +224,7 @@ impl OutputUTXO {
     }
 
     /// Builds the `TxOut`: external uses the checked address, internal derives
-    /// its taproot script via `taproot::derive_hashi_child_pubkey`.
+    /// its taproot script via `super::taproot`.
     fn to_txout(&self, enclave_pubkey: &BitcoinPubkey, hashi_master_g: &HashiMasterG) -> TxOut {
         match self {
             OutputUTXO::External(ExternalOutputUTXO { address, amount }) => TxOut {
@@ -378,11 +382,11 @@ impl TxUTXOs {
     }
 
     fn assert_positive_fees(&self) -> GuardianResult<()> {
-        let input_sum = self.inputs.iter().map(|utxo| utxo.amount).sum::<Amount>();
-        let output_sum = self.outputs.iter().map(|utxo| utxo.amount()).sum();
+        let input_sum: Amount = self.inputs.iter().map(|utxo| utxo.amount).sum();
+        let output_sum: Amount = self.outputs.iter().map(|utxo| utxo.amount()).sum();
         if input_sum <= output_sum {
             return Err(InvalidInputs(format!(
-                "fees must be positive: input_sum={} output_sum={}",
+                "fees must be greater than zero: input_sum={} output_sum={}",
                 input_sum, output_sum
             )));
         }

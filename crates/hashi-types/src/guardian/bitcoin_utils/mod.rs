@@ -20,5 +20,5 @@ pub static BTC_LIB: LazyLock<Secp256k1<All>> = LazyLock::new(Secp256k1::new);
 
 /// A Hashi key-derivation path: the 32-byte Sui address of the deposit
 /// recipient. Converted to fastcrypto's raw `[u8; 32]` form only at the
-/// `derive_verifying_key` boundary (see `taproot::derive_hashi_child_pubkey`).
+/// `derive_verifying_key` boundary in `taproot`.
 pub type DerivationPath = sui_sdk_types::Address;
