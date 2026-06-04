@@ -3,8 +3,12 @@
 
 use clap::Parser;
 use clap::Subcommand;
-use hashi_guardian_init::provisioner_init;
 use std::path::PathBuf;
+
+mod config;
+mod heartbeat_checks;
+mod limiter_recovery;
+mod provisioner;
 
 #[derive(Parser)]
 #[command(name = "hashi-guardian-init")]
@@ -34,8 +38,8 @@ async fn main() -> anyhow::Result<()> {
 
     match Cli::parse().command {
         Command::Provisioner { config } => {
-            let cfg = provisioner_init::ProvisionerConfig::load_yaml(&config)?;
-            provisioner_init::run(cfg).await?;
+            let cfg = provisioner::ProvisionerConfig::load_yaml(&config)?;
+            provisioner::run(cfg).await?;
         }
     }
     Ok(())
