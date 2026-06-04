@@ -76,6 +76,11 @@ struct SigningEpochConfig {
     refill_divisor: usize,
 }
 
+enum CacheOrPresig {
+    Cached(G, Vec<Eval<S>>),
+    Presig((Vec<S>, G)),
+}
+
 struct SigningPoolState {
     /// Active presig batches, ordered by `start_index`. Older batches are
     /// retained until all their presigs have been consumed so that
@@ -239,7 +244,10 @@ impl SigningManager {
         let address = config.address;
         let committee = config.committee.clone();
         let verifying_key = config.verifying_key;
-        let (public_nonce, partial_sigs) = {
+        // Splitting the lock is safe because a given `sui_request_id` is never signed concurrently
+        // on a node (distinct id per withdrawal input, retries sequential), and the presig is already
+        // removed from the pool under the first lock section.
+        let taken = {
             let mut state = self.state.write().unwrap();
             if let Some(existing) = state.partial_signing_outputs.get(&sui_request_id) {
                 tracing::info!(
@@ -247,7 +255,7 @@ impl SigningManager {
                      reusing cached partial sigs (batch_index={})",
                     state.batches.last().map_or(0, |b| b.batch_index),
                 );
-                (existing.public_nonce, existing.partial_sigs.clone())
+                CacheOrPresig::Cached(existing.public_nonce, existing.partial_sigs.clone())
             } else {
                 // Find the batch containing this presig index, advancing
                 // into the next batch if needed.
@@ -312,21 +320,6 @@ impl SigningManager {
                      batch_index={used_batch_index}, \
                      position={target_position})",
                 );
-                let _timer = metrics
-                    .mpc_sign_partial_gen_duration_seconds
-                    .with_label_values(&[MPC_LABEL_SIGNING])
-                    .start_timer();
-                let result = generate_partial_signatures(
-                    message,
-                    presig,
-                    beacon_value,
-                    &config.key_shares,
-                    &config.verifying_key,
-                    derivation_address,
-                )
-                .map_err(|e| SigningError::CryptoError(e.to_string()))?;
-                drop(_timer);
-
                 // Trigger refill based on the latest batch's consumption.
                 if let Some(latest) = state.batches.last() {
                     let remaining = latest.remaining();
@@ -335,15 +328,40 @@ impl SigningManager {
                         let _ = self.refill_tx.send(latest.batch_index + 1);
                     }
                 }
-
                 // Prune fully-consumed batches, but always keep the last
                 // one so its `end_index()` can anchor the next batch's
                 // start.
                 while state.batches.len() > 1 && state.batches[0].is_fully_consumed() {
                     state.batches.remove(0);
                 }
-
-                state.partial_signing_outputs.insert(
+                CacheOrPresig::Presig(presig)
+            }
+        }; // state write lock released
+        let (public_nonce, partial_sigs) = match taken {
+            CacheOrPresig::Cached(nonce, sigs) => (nonce, sigs),
+            CacheOrPresig::Presig(presig) => {
+                let _timer = metrics
+                    .mpc_sign_partial_gen_duration_seconds
+                    .with_label_values(&[MPC_LABEL_SIGNING])
+                    .start_timer();
+                let config = self.config.clone();
+                let message = message.to_vec();
+                let beacon_value = *beacon_value;
+                let derivation_address = derivation_address.copied();
+                let result = super::spawn_blocking(move || {
+                    generate_partial_signatures(
+                        &message,
+                        presig,
+                        &beacon_value,
+                        &config.key_shares,
+                        &config.verifying_key,
+                        derivation_address.as_ref(),
+                    )
+                })
+                .await
+                .map_err(|e| SigningError::CryptoError(e.to_string()))?;
+                drop(_timer);
+                self.state.write().unwrap().partial_signing_outputs.insert(
                     sui_request_id,
                     PartialSigningOutput {
                         public_nonce: result.0,
@@ -352,7 +370,7 @@ impl SigningManager {
                 );
                 result
             }
-        }; // state write lock released
+        };
         let first_sig_label = match partial_sigs.first() {
             Some(first) => format!(
                 "first_partial_sig_index={}, first_partial_sig_value={:?}",
@@ -412,15 +430,25 @@ impl SigningManager {
             .mpc_sign_aggregation_duration_seconds
             .with_label_values(&[MPC_LABEL_SIGNING])
             .start_timer();
-        let result = match aggregate_signatures(
-            params.message,
-            params.public_nonce,
-            params.beacon_value,
-            &all_partial_sigs,
-            params.threshold,
-            params.verifying_key,
-            params.derivation_address,
-        ) {
+        let agg_sigs = all_partial_sigs.clone();
+        let agg_message = message.to_vec();
+        let agg_nonce = public_nonce;
+        let agg_beacon = *beacon_value;
+        let agg_vk = verifying_key;
+        let agg_deriv = derivation_address.copied();
+        let agg_result = super::spawn_blocking(move || {
+            aggregate_signatures(
+                &agg_message,
+                &agg_nonce,
+                &agg_beacon,
+                &agg_sigs,
+                threshold,
+                &agg_vk,
+                agg_deriv.as_ref(),
+            )
+        })
+        .await;
+        let result = match agg_result {
             Ok(sig) => Ok(sig),
             Err(FastCryptoError::InvalidSignature) => {
                 tracing::info!(
@@ -480,15 +508,26 @@ async fn recover_signature_with_reed_solomon(
             .saturating_sub(params.threshold as usize))
             / 2;
         if rs_correction_capacity >= 1 {
-            match aggregate_signatures_with_recovery(
-                params.message,
-                params.public_nonce,
-                params.beacon_value,
-                all_partial_sigs,
-                params.threshold,
-                params.verifying_key,
-                params.derivation_address,
-            ) {
+            let rec_sigs = all_partial_sigs.clone();
+            let rec_message = params.message.to_vec();
+            let rec_nonce = *params.public_nonce;
+            let rec_beacon = *params.beacon_value;
+            let rec_threshold = params.threshold;
+            let rec_vk = *params.verifying_key;
+            let rec_deriv = params.derivation_address.copied();
+            let rec_result = super::spawn_blocking(move || {
+                aggregate_signatures_with_recovery(
+                    &rec_message,
+                    &rec_nonce,
+                    &rec_beacon,
+                    &rec_sigs,
+                    rec_threshold,
+                    &rec_vk,
+                    rec_deriv.as_ref(),
+                )
+            })
+            .await;
+            match rec_result {
                 Ok(sig) => return Ok(sig),
                 Err(FastCryptoError::TooManyErrors(max)) => {
                     tracing::info!(
