@@ -208,7 +208,7 @@ impl LeaderService {
                 }
                 self.process_unapproved_deposit_requests();
             }
-            Err(err) if err.is_panic() => error!("deposit task panicked: {err}"),
+            Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
             Err(err) => error!("deposit task failed to join: {err}"),
         }
     }
@@ -243,7 +243,7 @@ impl LeaderService {
                     }
                 }
             }
-            Err(err) if err.is_panic() => error!("deposit task panicked: {err}"),
+            Err(err) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
             Err(err) => error!("deposit task failed to join: {err}"),
         }
     }
