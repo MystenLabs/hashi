@@ -8,17 +8,15 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_mins(1);
 pub const HEARTBEAT_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 pub const MAX_HEARTBEAT_FAILURES_INTERVAL: Duration = Duration::from_mins(5);
 
+pub mod attestation;
 pub mod cache;
-pub mod committee_update;
+pub mod ceremony_mode;
 pub mod enclave;
-pub mod getters;
-pub mod heartbeat;
-pub mod init;
-pub mod rotate;
+pub mod info;
+pub mod operator_init;
 pub mod rpc;
 pub mod s3_logger; // used by the monitor
-pub mod setup;
-pub mod withdraw;
+pub mod withdraw_mode;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;

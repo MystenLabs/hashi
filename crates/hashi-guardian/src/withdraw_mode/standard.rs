@@ -1,6 +1,8 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::verify_hashi_cert;
+use crate::enclave::LimiterGuard;
 use crate::Enclave;
 use bitcoin::Txid;
 use hashi_types::committee::certificate_threshold;
@@ -11,15 +13,12 @@ use hashi_types::guardian::GuardianError::InternalError;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::GuardianSigned;
-use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::HashiSigned;
-use hashi_types::guardian::RateLimiter;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalResponse;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::WithdrawalLogMessage;
-use serde::Serialize;
 use std::sync::Arc;
 use tracing::error;
 use tracing::info;
@@ -127,49 +126,6 @@ async fn normal_withdrawal_inner(
     Ok((txid, response, limiter_guard))
 }
 
-/// RAII guard that holds the limiter mutex via an owned guard.
-/// Reverts on drop unless committed.
-pub struct LimiterGuard {
-    guard: tokio::sync::OwnedMutexGuard<RateLimiter>,
-    committed: bool,
-}
-
-impl LimiterGuard {
-    pub(crate) fn new(guard: tokio::sync::OwnedMutexGuard<RateLimiter>) -> Self {
-        Self {
-            guard,
-            committed: false,
-        }
-    }
-
-    /// Mark this withdrawal as successful. Prevents revert on drop.
-    pub fn commit(mut self) {
-        self.committed = true;
-    }
-
-    pub fn state(&self) -> &hashi_types::guardian::LimiterState {
-        self.guard.state()
-    }
-}
-
-impl Drop for LimiterGuard {
-    fn drop(&mut self) {
-        if !self.committed {
-            self.guard.revert();
-        }
-    }
-}
-
-pub fn verify_hashi_cert<T: Serialize>(
-    committee: Arc<HashiCommittee>,
-    threshold: u64,
-    signed_request: &HashiSigned<T>,
-) -> GuardianResult<()> {
-    committee
-        .verify_signature_and_weight(signed_request, threshold)
-        .map_err(|e| InvalidInputs(format!("signature verification failed {:?}", e)))
-}
-
 async fn log_withdrawal_success(
     enclave: &Enclave,
     wid: WithdrawalID,
@@ -216,6 +172,7 @@ mod tests {
     use bitcoin::Network;
     use hashi_types::guardian::test_utils::create_btc_keypair;
     use hashi_types::guardian::BitcoinPubkey;
+    use hashi_types::guardian::HashiCommittee;
     use hashi_types::guardian::HashiMasterG;
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;

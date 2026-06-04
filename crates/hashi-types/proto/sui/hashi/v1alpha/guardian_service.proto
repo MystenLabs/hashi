@@ -44,17 +44,8 @@ message GetGuardianInfoResponse {
   // Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
   SignedGuardianInfo signed_info = 3;
 
-  // Current rate limiter state (if initialized).
-  LimiterState limiter_state = 4;
-
-  // Immutable limiter configuration (if initialized).
-  LimiterConfig limiter_config = 5;
-
-  // Current committee epoch (if initialized). Drives `UpdateCommittee` catch-up.
-  optional uint64 current_committee_epoch = 6;
-
   // Encrypted shares from the latest ceremony (empty if none yet).
-  repeated KPEncryptedShare encrypted_shares = 7;
+  repeated KPEncryptedShare encrypted_shares = 4;
 }
 
 // Guardian-signed wrapper around `GuardianInfoData`.
@@ -88,6 +79,15 @@ message GuardianInfoData {
 
   // Digest of the operator-supplied WithdrawModeState (32 bytes, if set).
   optional bytes state_hash = 6;
+
+  // Current rate limiter state (if initialized).
+  LimiterState limiter_state = 7;
+
+  // Immutable limiter configuration (if initialized).
+  LimiterConfig limiter_config = 8;
+
+  // Current committee epoch (if initialized). Drives `UpdateCommittee` catch-up.
+  optional uint64 current_committee_epoch = 9;
 }
 
 // Public description of the current BTC key's secret-sharing scheme.

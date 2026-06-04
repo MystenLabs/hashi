@@ -201,7 +201,12 @@ impl TryFrom<pb::RotateKpsRequest> for RotateKpsRequest {
             .ok_or_else(|| missing("new_num_shares"))? as usize;
         let new_threshold = req.new_threshold.ok_or_else(|| missing("new_threshold"))? as usize;
 
-        let state = RotateKpsState::new(req.new_kp_pgp_certs, new_num_shares, new_threshold)?;
+        let new_kp_pgp_certs = req
+            .new_kp_pgp_certs
+            .into_iter()
+            .map(|cert| PgpPublicCert::new(cert).map_err(|e| InvalidInputs(e.to_string())))
+            .collect::<GuardianResult<Vec<_>>>()?;
+        let state = RotateKpsState::new(new_kp_pgp_certs, new_num_shares, new_threshold)?;
 
         let old_instance = pb_to_secret_sharing_instance(
             req.old_instance.ok_or_else(|| missing("old_instance"))?,
@@ -305,9 +310,6 @@ impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
         let signed_info_pb = resp.signed_info.ok_or_else(|| missing("signed_info"))?;
         let signed_info = pb_to_signed_guardian_info(signed_info_pb)?;
 
-        let limiter_state = resp.limiter_state.map(pb_to_limiter_state).transpose()?;
-        let limiter_config = resp.limiter_config.map(pb_to_limiter_config).transpose()?;
-
         let encrypted_shares = resp
             .encrypted_shares
             .into_iter()
@@ -318,9 +320,6 @@ impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
             attestation: attestation.to_vec(),
             signing_pub_key,
             signed_info,
-            limiter_state,
-            limiter_config,
-            current_committee_epoch: resp.current_committee_epoch,
             encrypted_shares,
         })
     }
@@ -482,7 +481,10 @@ pub fn rotate_kps_request_to_pb(r: RotateKpsRequest) -> pb::RotateKpsRequest {
             .into_iter()
             .map(guardian_encrypted_share_to_pb)
             .collect(),
-        new_kp_pgp_certs,
+        new_kp_pgp_certs: new_kp_pgp_certs
+            .into_iter()
+            .map(|cert| cert.armored().to_string())
+            .collect(),
         new_num_shares: Some(new_params.num_shares() as u32),
         new_threshold: Some(new_params.threshold() as u32),
         old_instance: Some(secret_sharing_instance_to_pb(&old_instance)),
@@ -494,9 +496,6 @@ pub fn get_guardian_info_response_to_pb(r: GetGuardianInfoResponse) -> pb::GetGu
         attestation: Some(r.attestation.into()),
         signing_pub_key: Some(r.signing_pub_key.to_bytes().to_vec().into()),
         signed_info: Some(signed_guardian_info_to_pb(r.signed_info)),
-        limiter_state: r.limiter_state.map(limiter_state_to_pb),
-        limiter_config: r.limiter_config.map(limiter_config_to_pb),
-        current_committee_epoch: r.current_committee_epoch,
         encrypted_shares: r
             .encrypted_shares
             .into_iter()
@@ -624,6 +623,9 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
         })
         .transpose()?;
 
+    let limiter_state = data.limiter_state.map(pb_to_limiter_state).transpose()?;
+    let limiter_config = data.limiter_config.map(pb_to_limiter_config).transpose()?;
+
     Ok(GuardianInfo {
         secret_sharing_instance,
         bucket_info,
@@ -631,6 +633,9 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
         state_hash,
         server_version,
         enclave_btc_pubkey,
+        limiter_state,
+        limiter_config,
+        current_committee_epoch: data.current_committee_epoch,
     })
 }
 
@@ -647,6 +652,9 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
         enclave_btc_pubkey: info
             .enclave_btc_pubkey
             .map(|pk| pk.serialize().to_vec().into()),
+        limiter_state: info.limiter_state.map(limiter_state_to_pb),
+        limiter_config: info.limiter_config.map(limiter_config_to_pb),
+        current_committee_epoch: info.current_committee_epoch,
     }
 }
 
@@ -1169,6 +1177,9 @@ mod tests {
             state_hash: None,
             server_version: "v1".to_string(),
             enclave_btc_pubkey: Some(pk),
+            limiter_state: None,
+            limiter_config: None,
+            current_committee_epoch: None,
         };
         let pb = guardian_info_data_to_pb(info.clone());
         let back = pb_to_guardian_info_data(pb).unwrap();
