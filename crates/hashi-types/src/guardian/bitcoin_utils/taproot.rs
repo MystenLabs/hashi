@@ -24,12 +24,6 @@ use std::str::FromStr;
 /// 1. Derive a child hashi pubkey from the derivation path
 /// 2. Create a 2-of-2 tapscript with the enclave key and derived hashi key
 /// 3. Place the tapscript as the sole leaf with a NUMS internal key
-///
-/// `hashi_master_g` is the raw MPC verifying key — the same `G` point that
-/// `fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key`
-/// consumes inside MPC signing. Passing the x-only projection here would
-/// silently force an even-y parent and produce a derived child that doesn't
-/// match the MPC signature for ~half of all vks.
 pub fn compute_taproot_descriptor(
     enclave_pubkey: &BitcoinPubkey,
     hashi_master_g: &HashiMasterG,
@@ -52,10 +46,14 @@ pub fn compute_taproot_descriptor(
     }
 }
 
-/// Derive the hashi child pubkey at `derivation_path` from the raw MPC
-/// verifying key `G` point. The result is the same x-only key that the MPC
-/// signing protocol produces signatures against, so the leaf script will
-/// agree with the on-chain signed witness.
+/// Derives the hashi child pubkey at `derivation_path` from `hashi_master_g`.
+///
+/// `hashi_master_g` must be the raw MPC verifying key with y-parity preserved:
+/// `derive_verifying_key` consumes the full `G`, so the x-only/even-y projection
+/// would derive a different child for ~half of all vks and break the 2-of-2 leaf
+/// script. The returned x-only key is exactly what the MPC protocol signs
+/// against. This is the module's canonical statement of the raw-`G` requirement;
+/// other sites point here rather than restating it.
 pub fn derive_hashi_child_pubkey(
     hashi_master_g: &HashiMasterG,
     hashi_derivation_path: &DerivationPath,

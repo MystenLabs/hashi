@@ -56,7 +56,7 @@ struct ExternalOutputUTXO {
     amount: Amount,
 }
 
-/// Copy of bitcoin_utils::ExternalOutputUTXO with unchecked address
+/// Copy of ExternalOutputUTXO with unchecked address
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalOutputUTXOWire {
     /// Bitcoin address to withdraw to
@@ -83,7 +83,7 @@ enum OutputUTXO {
     Internal(InternalOutputUTXO),
 }
 
-/// Copy of bitcoin_utils::OutputUTXO with unchecked address
+/// Copy of OutputUTXO with unchecked address
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OutputUTXOWire {
     External(ExternalOutputUTXOWire),
@@ -99,7 +99,7 @@ pub struct TxUTXOs {
     outputs: Vec<OutputUTXO>,
 }
 
-/// Copy of bitcoin_utils::TxUTXOs with unchecked output addresses.
+/// Copy of TxUTXOs with unchecked output addresses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxUTXOsWire {
     /// Inputs: internal
@@ -204,12 +204,8 @@ impl OutputUTXO {
         }
     }
 
-    /// Constructs a `TxOut` for this output.
-    ///
-    /// `hashi_master_g` is the raw MPC verifying key (with y-parity preserved).
-    /// Internal outputs derive their child key from this raw G — using only
-    /// the x-only/even-y projection would silently produce a different child
-    /// key for half of all MPC vks, breaking the 2-of-2 leaf script.
+    /// Builds the `TxOut`: external uses the checked address, internal derives
+    /// its taproot script via `taproot::derive_hashi_child_pubkey`.
     fn to_txout(&self, enclave_pubkey: &BitcoinPubkey, hashi_master_g: &HashiMasterG) -> TxOut {
         match self {
             OutputUTXO::External(ExternalOutputUTXO { address, amount }) => TxOut {
@@ -358,11 +354,13 @@ impl TxUTXOs {
             .map(|(prevout, _)| prevout.clone())
             .collect();
 
+        // One cache, reused across inputs: the whole-tx sighash components are
+        // input-independent, so building it once avoids rehashing.
+        let mut sighasher = SighashCache::new(&tx);
         let messages = artifacts
             .iter()
             .enumerate()
             .map(|(index, (_, leaf_hash))| {
-                let mut sighasher = SighashCache::new(tx.clone());
                 let sighash = sighasher
                     .taproot_script_spend_signature_hash(
                         index,
