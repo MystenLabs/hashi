@@ -26,9 +26,9 @@
 //! S3 read-after-write consistency guarantees that all writes of the old session
 //! are completed.
 
-use crate::rpc::guardian::GuardianLogDir;
-use crate::rpc::guardian::GuardianPollerCore;
 use hashi_guardian::s3_logger::S3Logger;
+use hashi_guardian::s3_reader::GuardianLogDir;
+use hashi_guardian::s3_reader::GuardianPollerCore;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::S3_DIR_WITHDRAW;
