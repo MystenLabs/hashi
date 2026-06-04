@@ -3,7 +3,6 @@
 
 use super::LEADER_TASK_TIMEOUT;
 use super::LeaderService;
-use super::WithdrawalBroadcastResult;
 use super::parse_member_signature;
 use crate::Hashi;
 use crate::btc_monitor::monitor::TxStatus;
@@ -11,6 +10,8 @@ use crate::leader::garbage_collection::PendingUtxoCleanup;
 use crate::onchain::types::UtxoId;
 use crate::onchain::types::WithdrawalTransaction;
 use crate::sui_tx_executor::SuiTxExecutor;
+use crate::withdrawals::WithdrawalBroadcastError;
+use crate::withdrawals::WithdrawalBroadcastErrorKind;
 use crate::withdrawals::WithdrawalTxSigning;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto::serde_helpers::ToFromByteArray;
@@ -33,11 +34,20 @@ use tracing::info;
 use tracing::trace;
 use tracing::warn;
 
+pub(super) enum WithdrawalBroadcastOutcome {
+    ConfirmedOnSui { utxo_ids: Vec<UtxoId> },
+    WaitForNextBitcoinBlock,
+}
+
+pub(super) type WithdrawalBroadcastResult =
+    Result<WithdrawalBroadcastOutcome, WithdrawalBroadcastError>;
+
 impl LeaderService {
     // ========================================================================
     // Step 3: MPC sign withdrawal transactions and store signatures on-chain
     // ========================================================================
 
+    /// Starts bounded background tasks for unsigned withdrawal transactions that need MPC signing.
     pub(super) fn process_unsigned_withdrawal_txns(&mut self) {
         debug!("Entering process_unsigned_withdrawal_txns");
         if self.is_reconfiguring() {
@@ -92,6 +102,7 @@ impl LeaderService {
         }
     }
 
+    /// Removes completed signing tasks from the inflight set and logs their result.
     pub(super) fn handle_completed_withdrawal_signing_task(
         &mut self,
         result: Result<(Address, anyhow::Result<()>), tokio::task::JoinError>,
@@ -101,11 +112,13 @@ impl LeaderService {
                 self.inflight_withdrawal_signings.remove(&withdrawal_id);
                 Ok(inner)
             }
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
             Err(e) => Err(e),
         };
         Self::log_task_result("withdrawal_signing", mapped);
     }
 
+    /// Collects MPC and guardian signatures for one unsigned withdrawal and stores them on-chain.
     #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id))]
     async fn process_unsigned_withdrawal_txn(
         inner: Arc<Hashi>,
@@ -318,6 +331,7 @@ impl LeaderService {
         Ok(())
     }
 
+    /// Requests withdrawal transaction signatures from committee members until one complete set succeeds.
     async fn collect_withdrawal_tx_signatures(
         inner: &Arc<Hashi>,
         withdrawal_txn_id: &Address,
@@ -359,6 +373,7 @@ impl LeaderService {
         }
     }
 
+    /// Opens a streaming signing RPC to one committee member and validates one signature per input.
     #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
     async fn request_withdrawal_tx_signature(
         inner: &Arc<Hashi>,
@@ -436,6 +451,7 @@ impl LeaderService {
         })
     }
 
+    /// Requests a committee member's BLS signature over the on-chain withdrawal signing message.
     #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
     async fn request_withdrawal_tx_signing_signature(
         inner: &Arc<Hashi>,
@@ -475,6 +491,7 @@ impl LeaderService {
             .ok()
     }
 
+    /// Submits the signed withdrawal transaction witnesses and committee certificate to Sui.
     async fn submit_sign_withdrawal(
         inner: &Arc<Hashi>,
         withdrawal_id: &Address,
@@ -501,6 +518,8 @@ impl LeaderService {
     // Step 4-5: Broadcast signed tx and confirm on-chain
     // ========================================================================
 
+    /// Runs per-checkpoint signed-withdrawal work: normal status checks plus
+    /// draining BTC-block-triggered retry checks.
     pub(super) fn process_signed_withdrawal_txns(&mut self) {
         debug!("Entering process_signed_withdrawal_txns");
         let mut withdrawal_txns = self.inner.onchain_state().withdrawal_txns();
@@ -510,13 +529,24 @@ impl LeaderService {
         let pending_ids: Vec<Address> = withdrawal_txns.iter().map(|p| p.id).collect();
         self.inflight_withdrawal_broadcasts
             .retain(|id| pending_ids.contains(id));
+        self.withdrawals_waiting_for_btc_block
+            .retain(|id| pending_ids.contains(id));
+        self.pending_btc_block_withdrawal_checks
+            .retain(|id| pending_ids.contains(id));
+        self.withdrawal_broadcast_retry_tracker.prune(&pending_ids);
 
         let max_concurrent = self.inner.config.max_concurrent_leader_job_tasks();
+        let checkpoint_timestamp_ms = self.inner.onchain_state().latest_checkpoint_timestamp_ms();
         for txn in withdrawal_txns {
             if self.withdrawal_broadcast_tasks.len() >= max_concurrent {
                 break;
             }
-            if self.inflight_withdrawal_broadcasts.contains(&txn.id) {
+            if self.withdrawals_waiting_for_btc_block.contains(&txn.id)
+                || self.is_withdrawal_broadcast_queued_or_inflight(&txn.id)
+                || self
+                    .withdrawal_broadcast_retry_tracker
+                    .should_skip(&txn.id, checkpoint_timestamp_ms)
+            {
                 continue;
             }
 
@@ -533,8 +563,78 @@ impl LeaderService {
 
                 let result = match result {
                     Ok(result) => result,
-                    Err(_) => Err(anyhow::anyhow!(
-                        "withdrawal broadcast for {txn_id} timed out after {LEADER_TASK_TIMEOUT:?}"
+                    Err(_) => Err(WithdrawalBroadcastError::new(
+                        WithdrawalBroadcastErrorKind::TaskFailed,
+                        anyhow::anyhow!(
+                            "withdrawal broadcast for {txn_id} timed out after {LEADER_TASK_TIMEOUT:?}"
+                        ),
+                    )),
+                };
+
+                (txn_id, result)
+            });
+        }
+
+        self.process_pending_btc_block_withdrawal_checks();
+    }
+
+    /// Moves withdrawals that were parked until Bitcoin advanced into the active BTC-block check queue.
+    pub(super) fn schedule_withdrawal_checks_for_btc_block(&mut self) {
+        let waiting = std::mem::take(&mut self.withdrawals_waiting_for_btc_block);
+        let eligible: Vec<_> = waiting
+            .into_iter()
+            .filter(|withdrawal_id| !self.is_withdrawal_broadcast_queued_or_inflight(withdrawal_id))
+            .collect();
+        self.pending_btc_block_withdrawal_checks.extend(eligible);
+    }
+
+    /// Drains the BTC-block-triggered withdrawal check queue into its separate bounded task pool.
+    fn process_pending_btc_block_withdrawal_checks(&mut self) {
+        let mut withdrawal_txns = self.inner.onchain_state().withdrawal_txns();
+        withdrawal_txns.retain(|p| p.signatures.is_some());
+        withdrawal_txns.sort_by_key(|p| p.timestamp_ms);
+
+        let pending_ids: Vec<Address> = withdrawal_txns.iter().map(|p| p.id).collect();
+        self.inflight_withdrawal_btc_block_checks
+            .retain(|id| pending_ids.contains(id));
+        self.pending_btc_block_withdrawal_checks
+            .retain(|id| pending_ids.contains(id));
+        self.withdrawal_broadcast_retry_tracker.prune(&pending_ids);
+
+        let max_concurrent = self.inner.config.max_concurrent_leader_job_tasks();
+        let checkpoint_timestamp_ms = self.inner.onchain_state().latest_checkpoint_timestamp_ms();
+        for txn in withdrawal_txns {
+            if self.withdrawal_btc_block_check_tasks.len() >= max_concurrent {
+                break;
+            }
+            if !self.pending_btc_block_withdrawal_checks.contains(&txn.id)
+                || self.is_withdrawal_broadcast_inflight(&txn.id)
+                || self
+                    .withdrawal_broadcast_retry_tracker
+                    .should_skip(&txn.id, checkpoint_timestamp_ms)
+            {
+                continue;
+            }
+
+            self.pending_btc_block_withdrawal_checks.remove(&txn.id);
+            let txn_id = txn.id;
+            let inner = self.inner.clone();
+
+            self.inflight_withdrawal_btc_block_checks.insert(txn_id);
+            self.withdrawal_btc_block_check_tasks.spawn(async move {
+                let result = tokio::time::timeout(
+                    LEADER_TASK_TIMEOUT,
+                    Self::handle_signed_withdrawal(inner, txn),
+                )
+                .await;
+
+                let result = match result {
+                    Ok(result) => result,
+                    Err(_) => Err(WithdrawalBroadcastError::new(
+                        WithdrawalBroadcastErrorKind::TaskFailed,
+                        anyhow::anyhow!(
+                            "withdrawal broadcast for {txn_id} timed out after {LEADER_TASK_TIMEOUT:?}"
+                        ),
                     )),
                 };
 
@@ -543,6 +643,7 @@ impl LeaderService {
         }
     }
 
+    /// Handles completion of a normal checkpoint-triggered signed-withdrawal status task.
     pub(super) fn handle_completed_withdrawal_broadcast_task(
         &mut self,
         result: Result<(Address, WithdrawalBroadcastResult), tokio::task::JoinError>,
@@ -550,23 +651,80 @@ impl LeaderService {
         let mapped = match result {
             Ok((withdrawal_id, inner)) => {
                 self.inflight_withdrawal_broadcasts.remove(&withdrawal_id);
-                if let Ok(Some(utxo_ids)) = &inner {
-                    self.pending_utxo_cleanups.push_back(PendingUtxoCleanup {
-                        utxo_ids: utxo_ids.clone(),
-                    });
-                }
-                Ok(inner.map(|_| ()))
+                Ok(self.handle_withdrawal_broadcast_result(withdrawal_id, inner))
             }
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
             Err(e) => Err(e),
         };
         Self::log_task_result("withdrawal_broadcast", mapped);
     }
 
-    /// Check BTC tx status, broadcast/re-broadcast if needed, confirm when
+    /// Handles completion of a BTC-block-triggered signed-withdrawal status task.
+    pub(super) fn handle_completed_withdrawal_btc_block_check_task(
+        &mut self,
+        result: Result<(Address, WithdrawalBroadcastResult), tokio::task::JoinError>,
+    ) {
+        let mapped = match result {
+            Ok((withdrawal_id, inner)) => {
+                self.inflight_withdrawal_btc_block_checks
+                    .remove(&withdrawal_id);
+                Ok(self.handle_withdrawal_broadcast_result(withdrawal_id, inner))
+            }
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => Err(e),
+        };
+        Self::log_task_result("withdrawal_btc_block_check", mapped);
+    }
+
+    /// Applies a signed-withdrawal task outcome to leader scheduler state.
+    fn handle_withdrawal_broadcast_result(
+        &mut self,
+        withdrawal_id: Address,
+        result: WithdrawalBroadcastResult,
+    ) -> anyhow::Result<()> {
+        match result {
+            Ok(WithdrawalBroadcastOutcome::ConfirmedOnSui { utxo_ids }) => {
+                self.withdrawal_broadcast_retry_tracker
+                    .clear(&withdrawal_id);
+                self.pending_utxo_cleanups
+                    .push_back(PendingUtxoCleanup { utxo_ids });
+            }
+            Ok(WithdrawalBroadcastOutcome::WaitForNextBitcoinBlock) => {
+                self.withdrawal_broadcast_retry_tracker
+                    .clear(&withdrawal_id);
+                self.withdrawals_waiting_for_btc_block.insert(withdrawal_id);
+            }
+            Err(err) => {
+                self.withdrawal_broadcast_retry_tracker.record_failure(
+                    err.kind(),
+                    withdrawal_id,
+                    self.inner.onchain_state().latest_checkpoint_timestamp_ms(),
+                );
+                return Err(err.into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns whether a signed withdrawal is queued or running in any broadcast/status path.
+    fn is_withdrawal_broadcast_queued_or_inflight(&self, withdrawal_id: &Address) -> bool {
+        self.pending_btc_block_withdrawal_checks
+            .contains(withdrawal_id)
+            || self.is_withdrawal_broadcast_inflight(withdrawal_id)
+    }
+
+    /// Returns whether a signed withdrawal is running in any broadcast/status task pool.
+    fn is_withdrawal_broadcast_inflight(&self, withdrawal_id: &Address) -> bool {
+        self.inflight_withdrawal_broadcasts.contains(withdrawal_id)
+            || self
+                .inflight_withdrawal_btc_block_checks
+                .contains(withdrawal_id)
+    }
+
+    /// Checks BTC tx status, broadcasts or re-broadcasts if needed, and confirms on Sui when
     /// enough BTC confirmations are reached.
     ///
-    /// Returns `Some(utxo_ids)` when the withdrawal was confirmed on Sui,
-    /// signalling that UTXO cleanup should be scheduled.
+    /// Returns the next scheduler action after the status check completes.
     #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id, bitcoin_txid))]
     async fn handle_signed_withdrawal(
         inner: Arc<Hashi>,
@@ -585,8 +743,15 @@ impl LeaderService {
                     "Withdrawal tx confirmed, proceeding to on-chain confirmation"
                 );
                 let utxo_ids: Vec<UtxoId> = txn.inputs.iter().map(|u| u.id).collect();
-                Self::confirm_withdrawal_on_sui(&inner, &txn).await?;
-                return Ok(Some(utxo_ids));
+                Self::confirm_withdrawal_on_sui(&inner, &txn)
+                    .await
+                    .map_err(|e| {
+                        WithdrawalBroadcastError::new(
+                            WithdrawalBroadcastErrorKind::SuiConfirmation,
+                            e,
+                        )
+                    })?;
+                return Ok(WithdrawalBroadcastOutcome::ConfirmedOnSui { utxo_ids });
             }
             Ok(TxStatus::Confirmed { confirmations }) => {
                 debug!(
@@ -598,47 +763,47 @@ impl LeaderService {
                 debug!("Withdrawal tx in mempool, waiting for confirmations");
             }
             Ok(TxStatus::NotFound) => {
-                Self::rebuild_and_broadcast_withdrawal_btc_tx(&inner, &txn, txid).await;
+                Self::rebuild_and_broadcast_withdrawal_btc_tx(&inner, &txn, txid)
+                    .await
+                    .map_err(|e| {
+                        WithdrawalBroadcastError::new(WithdrawalBroadcastErrorKind::BitcoinRpc, e)
+                    })?;
             }
             Err(e) => {
-                anyhow::bail!(
-                    "failed to query transaction status for withdrawal transaction {}: {e}",
-                    txn.id
-                );
+                return Err(WithdrawalBroadcastError::new(
+                    WithdrawalBroadcastErrorKind::BitcoinRpc,
+                    anyhow::anyhow!(
+                        "failed to query transaction status for withdrawal transaction {}: {e}",
+                        txn.id
+                    ),
+                ));
             }
         }
-        Ok(None)
+        Ok(WithdrawalBroadcastOutcome::WaitForNextBitcoinBlock)
     }
 
-    /// Rebuild a fully signed Bitcoin transaction from on-chain WithdrawalTransaction
+    /// Rebuilds a fully signed Bitcoin transaction from on-chain WithdrawalTransaction
     /// data (stored witness signatures) and broadcast it to the Bitcoin network.
     #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id, bitcoin_txid = %txid))]
     async fn rebuild_and_broadcast_withdrawal_btc_tx(
         inner: &Arc<Hashi>,
         txn: &WithdrawalTransaction,
         txid: bitcoin::Txid,
-    ) {
+    ) -> anyhow::Result<()> {
         warn!("Withdrawal tx not found, re-broadcasting from on-chain signatures");
 
-        let tx = match Self::rebuild_signed_tx_from_onchain(inner, txn) {
-            Ok(tx) => tx,
-            Err(e) => {
-                error!("Failed to rebuild signed withdrawal tx: {e}");
-                return;
-            }
-        };
+        let tx = Self::rebuild_signed_tx_from_onchain(inner, txn)
+            .inspect_err(|e| error!("Failed to rebuild signed withdrawal tx: {e}"))?;
 
-        match inner.btc_monitor().broadcast_transaction(tx).await {
-            Ok(()) => {
-                info!("Re-broadcast withdrawal tx");
-            }
-            Err(e) => {
-                error!("Failed to re-broadcast withdrawal tx: {e}");
-            }
-        }
+        inner
+            .btc_monitor()
+            .broadcast_transaction(tx)
+            .await
+            .inspect(|()| info!("Re-broadcast withdrawal tx"))
+            .inspect_err(|e| error!("Failed to re-broadcast withdrawal tx: {e}"))
     }
 
-    /// Rebuild a fully signed Bitcoin transaction from on-chain
+    /// Rebuilds a fully signed Bitcoin transaction from on-chain
     /// `WithdrawalTransaction` data and broadcast-ready 2-of-2 witness.
     ///
     /// Witness layout per input (BIP342 multi_a, verified against
@@ -702,6 +867,7 @@ impl LeaderService {
         Ok(tx)
     }
 
+    /// Collects a confirmation certificate and submits the finalized withdrawal to Sui.
     #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id))]
     async fn confirm_withdrawal_on_sui(
         inner: &Arc<Hashi>,
@@ -736,6 +902,7 @@ impl LeaderService {
         Ok(())
     }
 
+    /// Collects enough committee signatures to certify that a withdrawal can be confirmed.
     #[tracing::instrument(level = "debug", skip_all, fields(withdrawal_txn_id = %withdrawal_txn_id))]
     async fn collect_withdrawal_confirmation_signature(
         inner: &Arc<Hashi>,
@@ -784,6 +951,7 @@ impl LeaderService {
         Ok(aggregator.finish()?.into_parts().0)
     }
 
+    /// Requests one committee member's BLS signature over a withdrawal confirmation message.
     #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
     async fn request_withdrawal_confirmation_signature(
         inner: &Arc<Hashi>,
@@ -826,6 +994,7 @@ impl LeaderService {
             .ok()
     }
 
+    /// Submits the withdrawal confirmation certificate to Sui.
     async fn submit_confirm_withdrawal(
         inner: &Arc<Hashi>,
         withdrawal_txn_id: &Address,
@@ -845,6 +1014,7 @@ impl LeaderService {
 }
 
 impl WithdrawalTxSigning {
+    /// Converts the withdrawal signing message into the bridge-service protobuf request type.
     fn to_proto(&self) -> SignWithdrawalTxSigningRequest {
         SignWithdrawalTxSigningRequest {
             withdrawal_id: self.withdrawal_id.as_bytes().to_vec().into(),

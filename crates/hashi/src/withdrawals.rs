@@ -1254,6 +1254,45 @@ impl WithdrawalCommitmentError {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum WithdrawalBroadcastErrorKind {
+    BitcoinRpc,
+    SuiConfirmation,
+    TaskFailed,
+}
+
+impl RetryPolicy for WithdrawalBroadcastErrorKind {
+    fn retry_base_delay_ms(self) -> u64 {
+        30 * 1000
+    }
+
+    fn max_delay_ms(self) -> u64 {
+        10 * 60 * 1000
+    }
+
+    fn max_retries(self) -> u32 {
+        u32::MAX
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("{kind:?}: {source}")]
+pub struct WithdrawalBroadcastError {
+    kind: WithdrawalBroadcastErrorKind,
+    #[source]
+    source: anyhow::Error,
+}
+
+impl WithdrawalBroadcastError {
+    pub fn new(kind: WithdrawalBroadcastErrorKind, source: anyhow::Error) -> Self {
+        Self { kind, source }
+    }
+
+    pub fn kind(&self) -> WithdrawalBroadcastErrorKind {
+        self.kind
+    }
+}
+
 pub fn witness_program_from_address(address: &BitcoinAddress) -> anyhow::Result<Vec<u8>> {
     let script = address.script_pubkey();
     let bytes = script.as_bytes();

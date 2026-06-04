@@ -17,8 +17,10 @@ use crate::deposits::UnapprovedDepositError;
 use crate::grpc::BoxedChannel;
 use crate::leader::retry::GlobalRetryTracker;
 use crate::leader::retry::RetryTracker;
+use crate::leader::withdrawal_transactions::WithdrawalBroadcastResult;
 use crate::onchain::types::DepositRequest;
 use crate::withdrawals::WithdrawalApprovalErrorKind;
+use crate::withdrawals::WithdrawalBroadcastErrorKind;
 use crate::withdrawals::WithdrawalCommitmentErrorKind;
 
 use fastcrypto::bls12381::min_pk::BLS12381Signature;
@@ -45,49 +47,69 @@ use x509_parser::nom::AsBytes;
 const NUM_CONSECUTIVE_LEADER_CHECKPOINTS: u64 = 100;
 const LEADER_TASK_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Result of a withdrawal broadcast task: `Some(spent_utxo_ids)` when the
-/// withdrawal was confirmed on Sui, `None` when it was not yet ready.
-type WithdrawalBroadcastResult = anyhow::Result<Option<Vec<crate::onchain::types::UtxoId>>>;
-
-/// Whether a failed peer RPC is worth retrying. Under sustained load a peer's
-/// HTTP/2 server tears the whole multiplexed connection down — `GoAway`
-/// (surfaced as `Internal`), broken pipe (`Unknown`), or the usual
-/// `Unavailable` — failing every in-flight request to that peer at once. The
-/// peer signing RPCs are idempotent, so retrying these transport-class codes is
-/// safe and lets the request land on a fresh connection.
-fn is_retriable_transport(status: &tonic::Status) -> bool {
-    matches!(
-        status.code(),
-        tonic::Code::Unavailable
-            | tonic::Code::Unknown
-            | tonic::Code::Internal
-            | tonic::Code::Cancelled
-            | tonic::Code::DeadlineExceeded
-    )
-}
-
 pub(crate) struct LeaderService {
+    // Shared application state and external service clients used by leader jobs.
     inner: Arc<Hashi>,
+
+    // Background tasks currently approving Bitcoin deposits.
     unapproved_deposit_tasks: JoinSet<(Address, Result<(), UnapprovedDepositError>)>,
+    // Background tasks currently confirming approved Bitcoin deposits.
     approved_deposit_tasks: JoinSet<(Address, Result<(), ApprovedDepositError>)>,
+    // Deposit requests loaded from Bitcoin/on-chain state and waiting for approval processing.
     pending_unapproved_deposit_requests: Vec<DepositRequest>,
+    // Deposit IDs that should not be retried by this leader process.
     never_retry_deposit_ids: HashSet<Address>,
+    // Deposit IDs currently running in either deposit task pool.
     inflight_deposits: HashSet<Address>,
-    withdrawal_approval_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
-    withdrawal_commitment_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
-    withdrawal_signing_tasks: JoinSet<(Address, anyhow::Result<()>)>,
-    inflight_withdrawal_signings: HashSet<Address>,
-    withdrawal_broadcast_tasks: JoinSet<(Address, WithdrawalBroadcastResult)>,
-    inflight_withdrawal_broadcasts: HashSet<Address>,
-    stuck_withdrawal_warned: HashSet<Address>,
-    approved_deposit_retry_tracker: RetryTracker<ApprovedDepositErrorKind>,
-    withdrawal_approval_retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
-    withdrawal_commitment_retry_tracker: GlobalRetryTracker<WithdrawalCommitmentErrorKind>,
+    // Singleton task that deletes expired or spent deposit-related on-chain state.
     deposit_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
+
+    // Singleton task that batches withdrawal request approval work.
+    withdrawal_approval_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
+    // Per-withdrawal retry state for collecting withdrawal approval signatures.
+    withdrawal_approval_retry_tracker: RetryTracker<WithdrawalApprovalErrorKind>,
+    // Singleton task that commits approved withdrawal requests into withdrawal txns.
+    withdrawal_commitment_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
+    // Global retry state for committing approved withdrawal requests into withdrawal txns.
+    withdrawal_commitment_retry_tracker: GlobalRetryTracker<WithdrawalCommitmentErrorKind>,
+
+    // Background tasks currently signing unsigned withdrawal transactions.
+    withdrawal_signing_tasks: JoinSet<(Address, anyhow::Result<()>)>,
+    // Withdrawal transaction IDs currently running in the signing task pool.
+    inflight_withdrawal_signings: HashSet<Address>,
+
+    // Normal checkpoint-triggered signed-withdrawal broadcast/status tasks.
+    withdrawal_broadcast_tasks: JoinSet<(Address, WithdrawalBroadcastResult)>,
+    // Withdrawal transaction IDs currently running in the normal broadcast task pool.
+    inflight_withdrawal_broadcasts: HashSet<Address>,
+    // Signed withdrawals parked until Bitcoin advances because they are in the
+    // mempool or confirmed below threshold.
+    withdrawals_waiting_for_btc_block: HashSet<Address>,
+    // Parked withdrawals made eligible again by a new Bitcoin block.
+    pending_btc_block_withdrawal_checks: HashSet<Address>,
+    // Separate task pool for Bitcoin-block-triggered status checks so normal
+    // checkpoint-triggered checks cannot starve them or be starved by them.
+    withdrawal_btc_block_check_tasks: JoinSet<(Address, WithdrawalBroadcastResult)>,
+    // Withdrawal IDs currently running in the Bitcoin-block-triggered task pool.
+    inflight_withdrawal_btc_block_checks: HashSet<Address>,
+    // Withdrawal IDs that have already emitted the stuck-withdrawal warning.
+    stuck_withdrawal_warned: HashSet<Address>,
+    // Per-deposit retry state for approved deposit confirmations.
+    approved_deposit_retry_tracker: RetryTracker<ApprovedDepositErrorKind>,
+    // Per-withdrawal retry state for signed withdrawal broadcast/status errors.
+    withdrawal_broadcast_retry_tracker: RetryTracker<WithdrawalBroadcastErrorKind>,
+
+    // Singleton task that deletes stale governance proposals.
     proposal_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
+
+    // UTXO cleanup requests discovered after withdrawals are confirmed on Sui.
     pending_utxo_cleanups: VecDeque<garbage_collection::PendingUtxoCleanup>,
+    // Singleton task that cleans up spent withdrawal input UTXOs on-chain.
     utxo_cleanup_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
+    // Forces a fresh scan for UTXO cleanup work after cleanup state changes.
     utxo_cleanup_scan_needed: bool,
+
+    // Singleton task that reconciles the guardian committee with the on-chain committee.
     guardian_committee_reconcile_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
     // Last hashi epoch we triggered a guardian-committee reconcile for, so
     // we only kick a new task when the chain advances (not every checkpoint).
@@ -100,6 +122,7 @@ impl LeaderService {
         Self {
             inner: hashi,
             withdrawal_approval_retry_tracker: RetryTracker::new(),
+            withdrawal_broadcast_retry_tracker: RetryTracker::new(),
             withdrawal_commitment_retry_tracker: GlobalRetryTracker::new(),
             unapproved_deposit_tasks: JoinSet::new(),
             approved_deposit_tasks: JoinSet::new(),
@@ -112,6 +135,10 @@ impl LeaderService {
             inflight_withdrawal_signings: HashSet::new(),
             withdrawal_broadcast_tasks: JoinSet::new(),
             inflight_withdrawal_broadcasts: HashSet::new(),
+            withdrawals_waiting_for_btc_block: HashSet::new(),
+            pending_btc_block_withdrawal_checks: HashSet::new(),
+            withdrawal_btc_block_check_tasks: JoinSet::new(),
+            inflight_withdrawal_btc_block_checks: HashSet::new(),
             stuck_withdrawal_warned: HashSet::new(),
             approved_deposit_retry_tracker: RetryTracker::new(),
             deposit_gc_task: None,
@@ -225,6 +252,8 @@ impl LeaderService {
                     let block_height = *btc_block_rx.borrow_and_update();
                     let checkpoint_height = checkpoint_rx.borrow().height;
 
+                    self.schedule_withdrawal_checks_for_btc_block();
+
                     if self.is_current_leader(checkpoint_height) {
                         self.process_deposits_on_bitcoin_block(block_height);
                     }
@@ -246,6 +275,9 @@ impl LeaderService {
                 }
                 Some(result) = self.withdrawal_broadcast_tasks.join_next() => {
                     self.handle_completed_withdrawal_broadcast_task(result);
+                }
+                Some(result) = self.withdrawal_btc_block_check_tasks.join_next() => {
+                    self.handle_completed_withdrawal_btc_block_check_task(result);
                 }
                 Some(result) = OptionFuture::from(self.withdrawal_approval_task.as_mut()) => {
                     self.withdrawal_approval_task = None;
@@ -360,6 +392,23 @@ fn parse_member_signature(
             .as_bytes(),
     )?;
     Ok(MemberSignature::new(epoch, address, signature))
+}
+
+/// Whether a failed peer RPC is worth retrying. Under sustained load a peer's
+/// HTTP/2 server tears the whole multiplexed connection down — `GoAway`
+/// (surfaced as `Internal`), broken pipe (`Unknown`), or the usual
+/// `Unavailable` — failing every in-flight request to that peer at once. The
+/// peer signing RPCs are idempotent, so retrying these transport-class codes is
+/// safe and lets the request land on a fresh connection.
+fn is_retriable_transport(status: &tonic::Status) -> bool {
+    matches!(
+        status.code(),
+        tonic::Code::Unavailable
+            | tonic::Code::Unknown
+            | tonic::Code::Internal
+            | tonic::Code::Cancelled
+            | tonic::Code::DeadlineExceeded
+    )
 }
 
 #[cfg(test)]
