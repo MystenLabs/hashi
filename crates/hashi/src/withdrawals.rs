@@ -9,10 +9,6 @@ use bitcoin::TxOut;
 use bitcoin::Weight;
 use bitcoin::blockdata::script::witness_program::WitnessProgram;
 use bitcoin::blockdata::script::witness_version::WitnessVersion;
-use bitcoin::hashes::Hash;
-use bitcoin::sighash::Prevouts;
-use bitcoin::sighash::SighashCache;
-use bitcoin::sighash::TapSighashType;
 use bitcoin::taproot::TapLeafHash;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
@@ -904,22 +900,11 @@ impl Hashi {
             .map(|(_, leaf_hash)| *leaf_hash)
             .collect::<Vec<TapLeafHash>>();
 
-        (0..inputs.len())
-            .map(|input_index| {
-                let mut sighasher = SighashCache::new(unsigned_tx);
-                let sighash = sighasher
-                    .taproot_script_spend_signature_hash(
-                        input_index,
-                        &Prevouts::All(&prevouts),
-                        leaf_hashes[input_index],
-                        TapSighashType::Default,
-                    )
-                    .map_err(|e| {
-                        anyhow!("Failed to construct taproot script spend sighash: {e}")
-                    })?;
-                Ok(*sighash.as_byte_array())
-            })
-            .collect()
+        Ok(bitcoin_utils::taproot_script_spend_sighashes(
+            unsigned_tx,
+            &prevouts,
+            &leaf_hashes,
+        ))
     }
 
     // --- UTXO selection and tx crafting ---

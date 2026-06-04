@@ -12,6 +12,7 @@
 use super::BTC_LIB;
 use super::DerivationPath;
 use super::taproot::compute_taproot_artifacts;
+use super::taproot::taproot_script_spend_sighashes;
 use crate::guardian::BitcoinAddress;
 use crate::guardian::BitcoinKeypair;
 use crate::guardian::BitcoinPubkey;
@@ -22,10 +23,7 @@ use crate::guardian::HashiMasterG;
 use bitcoin::absolute::LockTime;
 use bitcoin::address::NetworkChecked;
 use bitcoin::address::NetworkUnchecked;
-use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::Message;
-use bitcoin::sighash::Prevouts;
-use bitcoin::sighash::SighashCache;
 use bitcoin::taproot::Signature;
 use bitcoin::taproot::TapLeafHash;
 use bitcoin::transaction::Version;
@@ -349,29 +347,13 @@ impl TxUTXOs {
             .iter()
             .map(|input| input.prevout_and_leaf_hash(enclave_pubkey, hashi_master_g))
             .collect();
-        let prevouts: Vec<TxOut> = artifacts
-            .iter()
-            .map(|(prevout, _)| prevout.clone())
-            .collect();
+        let prevouts: Vec<TxOut> = artifacts.iter().map(|(p, _)| p.clone()).collect();
+        let leaf_hashes: Vec<TapLeafHash> = artifacts.iter().map(|(_, h)| *h).collect();
 
-        // One cache, reused across inputs: the whole-tx sighash components are
-        // input-independent, so building it once avoids rehashing.
-        let mut sighasher = SighashCache::new(&tx);
-        let messages = artifacts
-            .iter()
-            .enumerate()
-            .map(|(index, (_, leaf_hash))| {
-                let sighash = sighasher
-                    .taproot_script_spend_signature_hash(
-                        index,
-                        &Prevouts::All(&prevouts),
-                        *leaf_hash,
-                        TapSighashType::Default,
-                    )
-                    .expect("sighash failed unexpectedly");
-                Message::from_digest(*sighash.as_byte_array())
-            })
-            .collect::<Vec<Message>>();
+        let messages = taproot_script_spend_sighashes(&tx, &prevouts, &leaf_hashes)
+            .into_iter()
+            .map(Message::from_digest)
+            .collect();
         (messages, tx.compute_txid())
     }
 

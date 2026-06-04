@@ -9,6 +9,9 @@ use super::DerivationPath;
 use crate::guardian::BitcoinAddress;
 use crate::guardian::BitcoinPubkey;
 use crate::guardian::HashiMasterG;
+use bitcoin::hashes::Hash;
+use bitcoin::sighash::Prevouts;
+use bitcoin::sighash::SighashCache;
 use bitcoin::taproot::ControlBlock;
 use bitcoin::taproot::LeafVersion;
 use bitcoin::taproot::TapLeafHash;
@@ -122,6 +125,31 @@ pub fn two_of_two_taproot_script_path_spend_artifacts(
     let leaf_hash = TapLeafHash::from_script(&tap_script, LeafVersion::TapScript);
 
     (tap_script, control_block, leaf_hash)
+}
+
+/// Per-input taproot script-spend sighashes for an unsigned tx. `prevouts` and
+/// `leaf_hashes` run parallel to `tx.input`. Builds one `SighashCache` and reuses
+/// it across inputs, since the whole-tx components are input-independent.
+pub fn taproot_script_spend_sighashes(
+    tx: &Transaction,
+    prevouts: &[TxOut],
+    leaf_hashes: &[TapLeafHash],
+) -> Vec<[u8; 32]> {
+    let prevouts = Prevouts::All(prevouts);
+    let mut sighasher = SighashCache::new(tx);
+    (0..tx.input.len())
+        .map(|index| {
+            let sighash = sighasher
+                .taproot_script_spend_signature_hash(
+                    index,
+                    &prevouts,
+                    leaf_hashes[index],
+                    TapSighashType::Default,
+                )
+                .expect("taproot script-spend sighash failed");
+            *sighash.as_byte_array()
+        })
+        .collect()
 }
 
 #[cfg(test)]
