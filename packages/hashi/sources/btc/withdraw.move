@@ -57,6 +57,14 @@ public struct WithdrawalSignedMessage has copy, drop, store {
     guardian_signatures: vector<vector<u8>>,
 }
 
+// MESSAGE STEP 3 (incremental): one cert per out-of-order chunk of MPC
+// signatures, binding exactly the input indices and signature bytes written.
+public struct MpcInputSignaturesMessage has copy, drop, store {
+    withdrawal_id: address,
+    indices: vector<u64>,
+    signatures: vector<vector<u8>>,
+}
+
 // MESSAGE STEP 4
 public struct WithdrawalConfirmationMessage has copy, drop, store {
     withdrawal_id: address,
@@ -89,6 +97,14 @@ public(package) fun new_withdrawal_signed_message(
         signatures,
         guardian_signatures,
     }
+}
+
+public(package) fun new_mpc_input_signatures_message(
+    withdrawal_id: address,
+    indices: vector<u64>,
+    signatures: vector<vector<u8>>,
+): MpcInputSignaturesMessage {
+    MpcInputSignaturesMessage { withdrawal_id, indices, signatures }
 }
 
 public(package) fun new_withdrawal_confirmation_message(
@@ -237,33 +253,73 @@ entry fun commit_withdrawal_tx(
     hashi.bitcoin_mut().withdrawal_queue_mut().insert_withdrawal_txn(withdrawal_txn);
 }
 
-entry fun allocate_presigs_for_withdrawal_txn(
-    hashi: &mut Hashi,
-    withdrawal_id: address,
-    _ctx: &mut TxContext,
-) {
+/// Reassign fresh presignatures to the still-unsigned inputs of a withdrawal
+/// whose signing batch is from a previous epoch. Only the pending tail is
+/// re-presigned; already-collected signatures are final and epoch-independent.
+///
+/// Intentionally NOT gated on `assert_not_reconfiguring`: this is the
+/// post-reconfiguration recovery step. It carries no committee cert because it
+/// only reassigns nonce material and is bounded to once-per-withdrawal-per-epoch
+/// by the `mpc_signing` stale-epoch guard. By design it carries no committee
+/// cert: it authorizes no signatures, only re-points pending presig indices.
+entry fun reallocate_presigs(hashi: &mut Hashi, withdrawal_id: address) {
     hashi.config().assert_version_enabled();
-    let epoch = hashi.committee_set().epoch();
-    let num_inputs = hashi.bitcoin().withdrawal_queue().withdrawal_txn_num_inputs(withdrawal_id);
-    let presig_start_index = hashi.allocate_presigs(num_inputs);
+    let current_epoch = hashi.committee_set().epoch();
+    let pending = hashi.bitcoin().withdrawal_queue().withdrawal_txn_pending_count(withdrawal_id);
+    let new_base = hashi.allocate_presigs(pending);
     hashi
         .bitcoin_mut()
         .withdrawal_queue_mut()
-        .reassign_presigs_for_withdrawal_txn(withdrawal_id, presig_start_index, epoch);
+        .reallocate_presigs_for_withdrawal_txn(withdrawal_id, new_base, current_epoch, pending);
 }
 
-entry fun sign_withdrawal(
+/// Record a chunk of completed per-input MPC signatures into the withdrawal's
+/// signing batch (out-of-order, first-writer-wins). Cert-gated over exactly the
+/// `(withdrawal_id, indices, signatures)` written, by the current committee.
+/// Repeated across checkpoints/leaders until every input is signed; the leader
+/// may bundle a final chunk + `finalize_withdrawal` in one PTB for small txns.
+entry fun commit_input_signatures(
+    hashi: &mut Hashi,
+    withdrawal_id: address,
+    indices: vector<u64>,
+    signatures: vector<vector<u8>>,
+    cert: CommitteeSignature,
+) {
+    hashi.config().assert_version_enabled();
+    hashi.assert_unpaused();
+    hashi.assert_not_reconfiguring();
+
+    let approval = MpcInputSignaturesMessage { withdrawal_id, indices, signatures };
+    hashi.verify(approval, cert);
+    let MpcInputSignaturesMessage { indices, signatures, .. } = approval;
+
+    hashi
+        .bitcoin_mut()
+        .withdrawal_queue_mut()
+        .record_input_signatures(withdrawal_id, indices, signatures);
+}
+
+/// Finalize a withdrawal once all MPC signatures are in: attach the one-shot
+/// guardian signatures and flip the broadcast gate. The cert binds the full MPC
+/// signature set (read from the batch) together with the guardian signatures, so
+/// a malicious leader cannot pair valid MPC sigs with garbage guardian sigs.
+entry fun finalize_withdrawal(
     hashi: &mut Hashi,
     withdrawal_id: address,
     request_ids: vector<address>,
-    signatures: vector<vector<u8>>,
     guardian_signatures: vector<vector<u8>>,
     cert: CommitteeSignature,
 ) {
     hashi.config().assert_version_enabled();
     hashi.assert_unpaused();
-    // Do not allow signing of withdrawals during a reconfiguration.
     hashi.assert_not_reconfiguring();
+
+    // Reconstruct the completed MPC set from the batch so the committee signs
+    // over the exact bytes the contract will broadcast.
+    let signatures = hashi
+        .bitcoin()
+        .withdrawal_queue()
+        .withdrawal_txn_mpc_signatures(withdrawal_id);
 
     let approval = WithdrawalSignedMessage {
         withdrawal_id,
@@ -271,18 +327,11 @@ entry fun sign_withdrawal(
         signatures,
         guardian_signatures,
     };
-
     hashi.verify(approval, cert);
-
-    let WithdrawalSignedMessage {
-        withdrawal_id,
-        signatures,
-        guardian_signatures,
-        ..,
-    } = approval;
+    let WithdrawalSignedMessage { request_ids, guardian_signatures, .. } = approval;
 
     let queue = hashi.bitcoin_mut().withdrawal_queue_mut();
-    queue.sign_withdrawal_txn(withdrawal_id, signatures, guardian_signatures);
+    queue.finalize_withdrawal_txn(withdrawal_id, guardian_signatures);
     queue.update_requests_signed(&request_ids);
 }
 

@@ -306,6 +306,70 @@ pub struct CommittedRequestInfo {
     pub bitcoin_address: Vec<u8>,
 }
 
+/// Rust version of the Move hashi::mpc_signing::InputSig enum. Variant order
+/// MUST match Move (Pending = 0, Signed = 1) for BCS.
+#[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
+pub enum InputSig {
+    /// Awaiting signature; holds the presignature index (valid in the batch's epoch).
+    Pending(u64),
+    /// Completed per-input MPC Schnorr signature bytes.
+    Signed(Vec<u8>),
+}
+
+/// Rust version of the Move hashi::mpc_signing::SigningBatch type. Field order
+/// MUST match Move exactly (BCS-decoded, positional).
+#[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct SigningBatch {
+    pub signatures: Vec<InputSig>,
+    /// Number of `Signed` slots (cardinality, not an in-order prefix).
+    pub signed_count: u64,
+    /// Epoch the `Pending` presig indices belong to.
+    pub epoch: u64,
+}
+
+impl SigningBatch {
+    pub fn num_inputs(&self) -> usize {
+        self.signatures.len()
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.signed_count as usize == self.signatures.len()
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.signatures.len() - self.signed_count as usize
+    }
+
+    /// Indices of inputs still awaiting an MPC signature (the resume set).
+    pub fn unsigned_indices(&self) -> Vec<u64> {
+        self.signatures
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| matches!(s, InputSig::Pending(_)).then_some(i as u64))
+            .collect()
+    }
+
+    /// Presig index assigned to input `i`, or `None` if it is already signed
+    /// or out of range.
+    pub fn pending_index(&self, i: usize) -> Option<u64> {
+        match self.signatures.get(i) {
+            Some(InputSig::Pending(idx)) => Some(*idx),
+            _ => None,
+        }
+    }
+
+    /// Dense per-input MPC signatures, or `None` if any input is unsigned.
+    pub fn dense_signatures(&self) -> Option<Vec<Vec<u8>>> {
+        self.signatures
+            .iter()
+            .map(|s| match s {
+                InputSig::Signed(b) => Some(b.clone()),
+                InputSig::Pending(_) => None,
+            })
+            .collect()
+    }
+}
+
 /// Rust version of the Move hashi::withdrawal_queue::WithdrawalTransaction type.
 ///
 /// Field order MUST match the Move struct exactly — these are BCS-decoded
@@ -320,13 +384,13 @@ pub struct WithdrawalTransaction {
     pub change_output: Option<OutputUtxo>,
     pub timestamp_ms: u64,
     pub randomness: Vec<u8>,
-    /// Per-input Schnorr signatures from the MPC committee.
-    pub signatures: Option<Vec<Vec<u8>>>,
-    /// Per-input Schnorr signatures from the guardian enclave. Together
-    /// with `signatures`, forms the 2-of-2 taproot witness on broadcast.
+    /// Per-input MPC signatures, accumulated incrementally and out-of-order.
+    pub signing: SigningBatch,
+    /// Per-input guardian enclave signatures, written once at finalize.
+    /// Together with the MPC signatures, forms the 2-of-2 taproot witness.
     pub guardian_signatures: Option<Vec<Vec<u8>>>,
-    pub presig_start_index: u64,
-    pub epoch: u64,
+    /// Set true exactly once at finalize; the broadcast gate.
+    pub fully_signed: bool,
 }
 
 impl WithdrawalTransaction {
@@ -336,6 +400,26 @@ impl WithdrawalTransaction {
             outputs.push(change.clone());
         }
         outputs
+    }
+
+    /// Whether the 2-of-2 witness is fully assembled and the txn is broadcast-ready.
+    pub fn is_fully_signed(&self) -> bool {
+        self.fully_signed
+    }
+
+    /// Dense per-input MPC signatures, available only once fully signed (the
+    /// state the broadcast/rebuild path operates on).
+    pub fn mpc_signatures(&self) -> Option<Vec<Vec<u8>>> {
+        if self.fully_signed {
+            self.signing.dense_signatures()
+        } else {
+            None
+        }
+    }
+
+    /// The epoch the current (pending) presig indices belong to.
+    pub fn signing_epoch(&self) -> u64 {
+        self.signing.epoch
     }
 }
 
@@ -569,6 +653,7 @@ pub enum HashiEvent {
     WithdrawalApprovedEvent(WithdrawalApprovedEvent),
     WithdrawalPickedForProcessingEvent(WithdrawalPickedForProcessingEvent),
     WithdrawalSignedEvent(WithdrawalSignedEvent),
+    WithdrawalInputsSignedEvent(WithdrawalInputsSignedEvent),
     WithdrawalPresigsReassignedEvent(WithdrawalPresigsReassignedEvent),
     WithdrawalConfirmedEvent(WithdrawalConfirmedEvent),
     UtxoSpentEvent(UtxoSpentEvent),
@@ -632,6 +717,9 @@ impl HashiEvent {
             }
             WithdrawalSignedEvent::MODULE_NAME => {
                 WithdrawalSignedEvent::from_bcs(bcs.value())?.into()
+            }
+            WithdrawalInputsSignedEvent::MODULE_NAME => {
+                WithdrawalInputsSignedEvent::from_bcs(bcs.value())?.into()
             }
             WithdrawalPresigsReassignedEvent::MODULE_NAME => {
                 WithdrawalPresigsReassignedEvent::from_bcs(bcs.value())?.into()
@@ -1105,6 +1193,26 @@ impl MoveType for WithdrawalSignedEvent {
 impl From<WithdrawalSignedEvent> for HashiEvent {
     fn from(value: WithdrawalSignedEvent) -> Self {
         Self::WithdrawalSignedEvent(value)
+    }
+}
+
+/// Emitted on each incremental chunk write so the watcher can track signing
+/// progress (signed_count / num_inputs); the per-input state lives on the object.
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct WithdrawalInputsSignedEvent {
+    pub withdrawal_txn_id: Address,
+    pub signed_count: u64,
+    pub num_inputs: u64,
+}
+
+impl MoveType for WithdrawalInputsSignedEvent {
+    const MODULE: &'static str = "withdrawal_queue";
+    const NAME: &'static str = "WithdrawalInputsSignedEvent";
+}
+
+impl From<WithdrawalInputsSignedEvent> for HashiEvent {
+    fn from(value: WithdrawalInputsSignedEvent) -> Self {
+        Self::WithdrawalInputsSignedEvent(value)
     }
 }
 

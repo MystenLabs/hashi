@@ -239,10 +239,12 @@ fun test_sign_withdrawal_txn() {
 
     let pending_id = setup_withdrawal_txn(&mut queue, &clock, 50_000, @0xBEEF, ctx);
 
-    // Sign the pending withdrawal via mutable borrow
-    let test_signatures = vector[x"DEADBEEF", x"CAFEBABE"];
-    let test_guardian_signatures = vector[x"AAAAAAAA", x"BBBBBBBB"];
-    queue.sign_withdrawal_txn(pending_id, test_signatures, test_guardian_signatures);
+    // Record the (single) input's MPC signature, then finalize with the
+    // one-shot guardian signature.
+    queue.record_input_signatures(pending_id, vector[0], vector[x"DEADBEEF"]);
+    assert!(!queue.withdrawal_txn_is_fully_signed(pending_id));
+    queue.finalize_withdrawal_txn(pending_id, vector[x"AAAAAAAA"]);
+    assert!(queue.withdrawal_txn_is_fully_signed(pending_id));
 
     // Remove and destroy
     let pending = queue.remove_withdrawal_txn(pending_id);
@@ -284,8 +286,9 @@ fun test_full_withdrawal_queue_lifecycle() {
     btc_balance.destroy_for_testing();
     queue.insert_withdrawal_txn(pending);
 
-    // Step 4: Sign — mutate pending withdrawal in place
-    queue.sign_withdrawal_txn(pending_id, vector[x"AA", x"BB"], vector[x"CC", x"DD"]);
+    // Step 4: Sign — record the input's MPC signature, then finalize.
+    queue.record_input_signatures(pending_id, vector[0], vector[x"AA"]);
+    queue.finalize_withdrawal_txn(pending_id, vector[x"CC"]);
 
     // Step 5: Confirm — remove and destroy
     let pending = queue.remove_withdrawal_txn(pending_id);
