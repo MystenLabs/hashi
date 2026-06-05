@@ -1,10 +1,10 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use hashi_guardian::s3_logger::S3Logger;
-use hashi_guardian::s3_reader::GuardianLogDir;
-use hashi_guardian::s3_reader::GuardianPollerCore;
+use hashi_guardian::s3_reader::GuardianReader;
+use hashi_guardian::s3_reader::heartbeat_cursor;
 use hashi_types::guardian::LogMessage;
+use hashi_types::guardian::SessionID;
 use hashi_types::guardian::VerifiedLogRecord;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use hashi_types::guardian::time_utils::now_timestamp_secs;
@@ -30,7 +30,7 @@ const OTHER_SESSION_QUIET_PERIOD: Duration = Duration::from_mins(10);
 #[derive(Debug, Clone)]
 pub struct GuardianSessionInfo {
     /// Session identifier derived from the guardian signing key.
-    pub session_id: String,
+    pub session_id: SessionID,
     /// Earliest heartbeat timestamp observed for this session.
     pub first_heartbeat: UnixSeconds,
     /// Latest heartbeat timestamp observed for this session.
@@ -40,8 +40,8 @@ pub struct GuardianSessionInfo {
 /// Implements check A of IOP-225.
 ///
 /// Returns the selected live session id if all invariants pass.
-pub async fn heartbeat_audit(s3_client: &S3Logger) -> anyhow::Result<String> {
-    let recent_heartbeats = read_recent_heartbeats(s3_client).await?;
+pub async fn heartbeat_audit(reader: &mut GuardianReader) -> anyhow::Result<SessionID> {
+    let recent_heartbeats = read_recent_heartbeats(reader).await?;
     let summary = summarize_heartbeats_by_session(recent_heartbeats)?;
     let now = now_timestamp_secs();
     select_live_session(
@@ -52,18 +52,16 @@ pub async fn heartbeat_audit(s3_client: &S3Logger) -> anyhow::Result<String> {
     )
 }
 
-async fn read_recent_heartbeats(s3_client: &S3Logger) -> anyhow::Result<Vec<VerifiedLogRecord>> {
+async fn read_recent_heartbeats(
+    reader: &mut GuardianReader,
+) -> anyhow::Result<Vec<VerifiedLogRecord>> {
     // Read from the current and next hour-scoped prefixes to cover clock-boundary cases.
     let one_hour_ago = now_timestamp_secs().saturating_sub(60 * 60);
-    let mut poller = GuardianPollerCore::from_s3_client(
-        s3_client.clone(),
-        one_hour_ago,
-        GuardianLogDir::Heartbeat,
-    );
+    let mut cursor = heartbeat_cursor(one_hour_ago);
     let mut logs = Vec::new();
-    logs.extend(poller.read_cur_dir().await?);
-    poller.advance_cursor();
-    logs.extend(poller.read_cur_dir().await?);
+    logs.extend(reader.read_dir(&cursor).await?);
+    cursor = cursor.next_dir();
+    logs.extend(reader.read_dir(&cursor).await?);
     Ok(logs)
 }
 
@@ -109,7 +107,7 @@ fn select_live_session(
     now: UnixSeconds,
     live_session_max_age_secs: UnixSeconds,
     other_session_quiet_secs: UnixSeconds,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<SessionID> {
     let mut summary = summary.to_vec();
 
     summary.sort_by_key(|s| s.last_heartbeat);

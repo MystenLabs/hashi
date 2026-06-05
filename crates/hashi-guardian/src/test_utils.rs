@@ -4,7 +4,7 @@
 //! Helpers for constructing enclaves at various init stages.
 
 use crate::enclave::Enclave;
-use crate::s3_logger::S3Logger;
+use crate::s3_client::GuardianS3Client;
 use bitcoin::secp256k1::Keypair;
 use bitcoin::secp256k1::Secp256k1;
 use bitcoin::secp256k1::SecretKey;
@@ -14,7 +14,7 @@ use rand::RngCore;
 use std::sync::Arc;
 
 /// Mock S3 logger that returns success for every PutObject call.
-pub fn mock_logger() -> S3Logger {
+pub fn mock_logger() -> GuardianS3Client {
     use aws_sdk_s3::operation::put_object::PutObjectOutput;
     use aws_sdk_s3::Client;
     use aws_smithy_mocks::mock;
@@ -24,7 +24,7 @@ pub fn mock_logger() -> S3Logger {
 
     let put_ok = mock!(Client::put_object).then_output(|| PutObjectOutput::builder().build());
     let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
-    S3Logger::from_client_for_tests(S3Config::mock_for_testing(), client)
+    GuardianS3Client::from_client_for_tests(S3Config::mock_for_testing(), client)
 }
 
 /// Captured `(key, body)` pairs from a `mock_logger_capturing()` logger.
@@ -38,7 +38,7 @@ pub type CapturedPuts = Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
 /// `withdraw`, and `heartbeat` tests to use this — they currently rely on
 /// in-process side effects and the response payload, leaving the on-S3 log
 /// shape unverified.
-pub fn mock_logger_capturing() -> (S3Logger, CapturedPuts) {
+pub fn mock_logger_capturing() -> (GuardianS3Client, CapturedPuts) {
     use aws_sdk_s3::operation::put_object::PutObjectOutput;
     use aws_sdk_s3::Client;
     use aws_smithy_mocks::mock;
@@ -62,7 +62,7 @@ pub fn mock_logger_capturing() -> (S3Logger, CapturedPuts) {
         })
         .then_output(|| PutObjectOutput::builder().build());
     let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_ok]);
-    let logger = S3Logger::from_client_for_tests(S3Config::mock_for_testing(), client);
+    let logger = GuardianS3Client::from_client_for_tests(S3Config::mock_for_testing(), client);
     (logger, captures)
 }
 
@@ -75,7 +75,7 @@ pub fn mock_logger_capturing() -> (S3Logger, CapturedPuts) {
 /// smithy-mocks API doesn't surface the request inside `then_output`). This
 /// is sound under a single-threaded async runtime — each S3 call's predicate
 /// runs immediately before its output factory.
-pub fn mock_logger_with_layout(keys: impl IntoIterator<Item = String>) -> S3Logger {
+pub fn mock_logger_with_layout(keys: impl IntoIterator<Item = String>) -> GuardianS3Client {
     use aws_sdk_s3::operation::list_object_versions::ListObjectVersionsOutput;
     use aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output;
     use aws_sdk_s3::operation::put_object::PutObjectOutput;
@@ -154,14 +154,14 @@ pub fn mock_logger_with_layout(keys: impl IntoIterator<Item = String>) -> S3Logg
         RuleMode::MatchAny,
         &[&list_v2, &list_versions, &put_ok]
     );
-    S3Logger::from_client_for_tests(S3Config::mock_for_testing(), client)
+    GuardianS3Client::from_client_for_tests(S3Config::mock_for_testing(), client)
 }
 
 /// Args for building a withdraw-mode test enclave. The withdraw-mode params
 /// (committee, limiter, BTC master pubkey, secret-sharing instance, network) all
 /// live in `config`; `s3_logger` is the only separate field.
 pub struct OperatorInitTestArgs {
-    pub s3_logger: S3Logger,
+    pub s3_logger: GuardianS3Client,
     pub config: WithdrawModeConfig,
 }
 
@@ -193,7 +193,7 @@ impl OperatorInitTestArgs {
         self
     }
 
-    pub fn with_s3_logger(mut self, s3_logger: S3Logger) -> Self {
+    pub fn with_s3_logger(mut self, s3_logger: GuardianS3Client) -> Self {
         self.s3_logger = s3_logger;
         self
     }

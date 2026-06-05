@@ -23,7 +23,7 @@ use std::sync::RwLock;
 use std::time::Duration;
 use tracing::info;
 
-use crate::s3_logger::S3Logger;
+use crate::s3_client::GuardianS3Client;
 use hashi_types::committee::Committee as HashiCommittee;
 
 /// Enclave's config & state
@@ -48,7 +48,7 @@ pub struct EnclaveConfig {
     /// Ephemeral keypair (set on boot)
     eph_keys: EphemeralKeyPairs,
     /// S3 client & config (set in operator_init)
-    s3_logger: OnceLock<S3Logger>,
+    s3_logger: OnceLock<GuardianS3Client>,
     /// Enclave BTC private key (set in provisioner_init)
     enclave_btc_keypair: OnceLock<Keypair>,
     /// BTC network: mainnet, testnet, regtest (set in operator_init)
@@ -177,13 +177,13 @@ impl EnclaveConfig {
     // S3 Logger
     // ========================================================================
 
-    pub fn s3_logger(&self) -> GuardianResult<&S3Logger> {
+    pub fn s3_logger(&self) -> GuardianResult<&GuardianS3Client> {
         self.s3_logger
             .get()
             .ok_or(InvalidInputs("S3 logger is not initialized".into()))
     }
 
-    pub fn set_s3_logger(&self, logger: S3Logger) -> GuardianResult<()> {
+    pub fn set_s3_logger(&self, logger: GuardianS3Client) -> GuardianResult<()> {
         self.s3_logger
             .set(logger)
             .map_err(|_| InvalidInputs("S3 logger already set".into()))
@@ -486,7 +486,7 @@ impl Enclave {
     // ========================================================================
 
     /// A unique session ID for the current enclave session.
-    pub fn s3_session_id(&self) -> String {
+    pub fn s3_session_id(&self) -> SessionID {
         session_id_from_signing_pubkey(&self.signing_pubkey())
     }
 

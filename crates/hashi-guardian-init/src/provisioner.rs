@@ -2,16 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Context;
-use hashi_guardian::s3_logger::S3Logger;
+use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianEncryptedShare;
-use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::WithdrawModeState;
 use hashi_types::guardian::session_id_from_signing_pubkey;
-use hashi_types::guardian::verify_enclave_attestation;
 use hashi_types::proto as pb;
 use hpke::Deserializable;
 use rand::thread_rng;
@@ -24,16 +22,17 @@ use crate::limiter_recovery;
 pub use crate::config::ProvisionerConfig;
 
 pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
-    let s3_client = S3Logger::new_checked(&cfg.s3)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+    // One reader for the whole run: it owns the S3 client and the trusted-key
+    // cache, so each session's attestation is verified once whichever check
+    // reads that session first.
+    let mut reader = GuardianReader::new(&cfg.s3).await?;
 
     // 1. Check no past enclave's heartbeats remain & gather the latest enclave's session id.
-    let session_id = heartbeat_checks::heartbeat_audit(&s3_client).await?;
+    let session_id = heartbeat_checks::heartbeat_audit(&mut reader).await?;
     info!(session_id, "heartbeat checks passed for selected session");
 
     // 2. Check that enclave's config is as expected (valid attestation, expected s3 bucket & share commitments)
-    let guardian_info = get_guardian_info_from_s3(&s3_client, &session_id).await?;
+    let guardian_info = reader.get_info(&session_id).await?;
     let expected_guardian_config = cfg.expected_guardian_config()?;
     expected_guardian_config.ensure_matches_info(&guardian_info)?;
     info!(session_id, "init checks passed for selected session");
@@ -42,7 +41,7 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
     // withdrawal logs we recover from them; otherwise (first deployment, or a
     // rotation where the prior enclave processed no withdrawals) we initialize
     // from genesis.
-    let limiter_state = match limiter_recovery::recover_limiter_state(s3_client.clone()).await? {
+    let limiter_state = match limiter_recovery::recover_limiter_state(&mut reader).await? {
         Some(mut recovered) => {
             // Cap to the current config's bucket capacity in case max capacity
             // was lowered across the rotation. (Raising is fine — refill will
@@ -105,23 +104,6 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
         .await?;
     }
     Ok(())
-}
-
-/// Implements check B of IOP-225.
-pub async fn get_guardian_info_from_s3(
-    s3_client: &S3Logger,
-    session_id: &str,
-) -> anyhow::Result<GuardianInfo> {
-    let (attestation, signing_pubkey) = s3_client
-        .get_attestation(session_id)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
-    verify_enclave_attestation(attestation).map_err(|e| anyhow::anyhow!(e))?;
-
-    s3_client
-        .get_guardian_info(session_id, &signing_pubkey)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Run the relay-side pre-checks for this KP's share. The relay fronts the

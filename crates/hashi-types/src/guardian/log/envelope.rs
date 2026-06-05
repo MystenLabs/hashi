@@ -17,6 +17,7 @@ use crate::guardian::GuardianResult;
 use crate::guardian::GuardianSignKeyPair;
 use crate::guardian::GuardianSignature;
 use crate::guardian::GuardianSigned;
+use crate::guardian::SessionID;
 use crate::guardian::UnixMillis;
 use crate::guardian::now_timestamp_ms;
 use serde::Deserialize;
@@ -26,7 +27,7 @@ use std::time::Duration;
 /// Canonical log record written to S3.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LogRecord {
-    pub session_id: String,
+    pub session_id: SessionID,
     pub timestamp_ms: UnixMillis,
     pub message: LogMessage,
     /// Present for signed logs; omitted for unsigned logs (currently only OIAttestationUnsigned).
@@ -36,13 +37,17 @@ pub struct LogRecord {
 /// A verified log record where message authenticity has been checked.
 #[derive(Debug)]
 pub struct VerifiedLogRecord {
-    pub session_id: String,
+    pub session_id: SessionID,
     pub timestamp_ms: UnixMillis,
     pub message: LogMessage,
 }
 
 impl LogRecord {
-    pub fn new(session_id: String, message: LogMessage, signing_key: &GuardianSignKeyPair) -> Self {
+    pub fn new(
+        session_id: SessionID,
+        message: LogMessage,
+        signing_key: &GuardianSignKeyPair,
+    ) -> Self {
         let timestamp_ms = now_timestamp_ms();
         if message.is_allowed_unsigned() {
             Self::unsigned(session_id, message, timestamp_ms)
@@ -70,7 +75,7 @@ impl LogRecord {
     }
 
     fn signed(
-        session_id: String,
+        session_id: SessionID,
         message: LogMessage,
         signing_key: &GuardianSignKeyPair,
         timestamp_ms: UnixMillis,
@@ -84,7 +89,7 @@ impl LogRecord {
         }
     }
 
-    fn unsigned(session_id: String, message: LogMessage, timestamp_ms: UnixMillis) -> Self {
+    fn unsigned(session_id: SessionID, message: LogMessage, timestamp_ms: UnixMillis) -> Self {
         assert!(
             message.is_allowed_unsigned(),
             "message must be Init(OIAttestationUnsigned)"

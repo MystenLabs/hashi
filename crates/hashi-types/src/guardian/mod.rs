@@ -63,7 +63,7 @@ pub const SESSION_ID_HEX_LEN: usize = 16;
 /// Canonical guardian session ID — a short prefix of the hex-encoded signing
 /// public key. Used as a per-session tag in S3 object keys; full pubkey
 /// verification still happens via the signed log payload.
-pub fn session_id_from_signing_pubkey(signing_pub_key: &GuardianPubKey) -> String {
+pub fn session_id_from_signing_pubkey(signing_pub_key: &GuardianPubKey) -> SessionID {
     let mut s = ::hex::encode(signing_pub_key.as_bytes());
     s.truncate(SESSION_ID_HEX_LEN);
     s
@@ -257,6 +257,10 @@ pub struct RotateKpsResponse {
 pub type WithdrawalID = sui_sdk_types::Address;
 
 pub type Attestation = Vec<u8>;
+
+/// Guardian session identifier — a short prefix of the hex-encoded signing
+/// pubkey (see [`session_id_from_signing_pubkey`]). Tags per-session S3 objects.
+pub type SessionID = String;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct S3Config {

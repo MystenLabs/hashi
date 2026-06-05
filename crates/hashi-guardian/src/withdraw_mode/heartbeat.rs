@@ -99,7 +99,7 @@ impl HeartbeatWriter {
 mod tests {
     use super::*;
 
-    use crate::s3_logger::S3Logger;
+    use crate::s3_client::GuardianS3Client;
     use crate::OperatorInitTestArgs;
     use aws_sdk_s3::operation::put_object::PutObjectOutput;
     use aws_sdk_s3::Client;
@@ -108,11 +108,11 @@ mod tests {
     use aws_smithy_mocks::RuleMode;
     use hashi_types::guardian::S3Config;
 
-    fn mk_s3_logger(client: Client) -> S3Logger {
-        S3Logger::from_client_for_tests(S3Config::mock_for_testing(), client)
+    fn mk_s3_logger(client: Client) -> GuardianS3Client {
+        GuardianS3Client::from_client_for_tests(S3Config::mock_for_testing(), client)
     }
 
-    async fn mk_operator_initialized_enclave(s3_logger: S3Logger) -> Arc<Enclave> {
+    async fn mk_operator_initialized_enclave(s3_logger: GuardianS3Client) -> Arc<Enclave> {
         Enclave::create_operator_initialized_with(
             OperatorInitTestArgs::default().with_s3_logger(s3_logger),
         )
