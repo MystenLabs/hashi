@@ -16,6 +16,7 @@ pub mod info;
 pub mod operator_init;
 pub mod rpc;
 pub mod s3_logger; // used by the monitor
+pub mod s3_reader; // verified read layer; used by the monitor + init tooling
 pub mod withdraw_mode;
 
 #[cfg(any(test, feature = "test-utils"))]
