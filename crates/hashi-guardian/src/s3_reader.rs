@@ -14,15 +14,22 @@ use crate::s3_client::GuardianS3Client;
 use anyhow::Context;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::time_utils::UnixSeconds;
+use hashi_types::guardian::CeremonyLogMessage;
+use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::InitLogMessage;
+use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::S3Config;
+use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::VerifiedLogRecord;
+use hashi_types::guardian::S3_DIR_CEREMONY;
+use hashi_types::guardian::S3_DIR_COMMITTEE_UPDATE;
 use hashi_types::guardian::S3_DIR_HEARTBEAT;
 use hashi_types::guardian::S3_DIR_WITHDRAW;
+use hashi_types::move_types::Committee;
 use std::collections::HashMap;
 
 /// Open an hour-scoped cursor at `start` over the `withdraw/` stream. Advance/
@@ -102,6 +109,57 @@ impl GuardianReader {
             })
             .with_context(|| format!("expected OIGuardianInfo at {key}"))
     }
+
+    /// The latest secret-sharing instance from `ceremony/` — the max-`sharing_seq`
+    /// (lex-last) entry, attestation- and signature-verified. `None` if no ceremony
+    /// has been logged yet. Written from initial setup onward, so present whenever a
+    /// key exists.
+    pub async fn read_latest_ceremony_instance(
+        &mut self,
+    ) -> anyhow::Result<Option<SecretSharingInstance>> {
+        let keys = self
+            .s3
+            .list_all_keys_in_dir(&format!("{}/", S3_DIR_CEREMONY))
+            .await?;
+        let Some(key) = pick_latest_key(keys, S3_DIR_CEREMONY) else {
+            return Ok(None);
+        };
+        let record: LogRecord = self.s3.get_object(&key).await?;
+        let record = self.cache.verify_record(&self.s3, record).await?;
+        let LogMessage::Ceremony(msg) = record.message else {
+            anyhow::bail!("expected a ceremony log at {key}");
+        };
+        Ok(Some(match *msg {
+            CeremonyLogMessage::NewKey { instance } => instance,
+            CeremonyLogMessage::Rotate { new_instance, .. } => new_instance,
+        }))
+    }
+
+    /// The latest applied committee from `committee-update/` — the lex-last
+    /// non-`failure-` (i.e. highest-epoch Success) entry, attestation- and
+    /// signature-verified. `None` if no committee update has been logged (e.g. a
+    /// fresh deployment whose committee still only exists in the operator's boot
+    /// config).
+    pub async fn read_latest_committee(&mut self) -> anyhow::Result<Option<Committee>> {
+        let keys = self
+            .s3
+            .list_all_keys_in_dir(&format!("{}/", S3_DIR_COMMITTEE_UPDATE))
+            .await?;
+        let Some(key) = pick_latest_key(keys, S3_DIR_COMMITTEE_UPDATE) else {
+            return Ok(None);
+        };
+        let record: LogRecord = self.s3.get_object(&key).await?;
+        let record = self.cache.verify_record(&self.s3, record).await?;
+        let LogMessage::CommitteeUpdate(msg) = record.message else {
+            anyhow::bail!("expected a committee-update log at {key}");
+        };
+        match *msg {
+            CommitteeUpdateLogMessage::Success { new_committee, .. } => Ok(Some(new_committee)),
+            CommitteeUpdateLogMessage::Failure { .. } => {
+                anyhow::bail!("lex-last non-failure key resolved to a Failure log at {key}")
+            }
+        }
+    }
 }
 
 /// Enclave signing pubkeys trusted after their attestation was verified once,
@@ -139,5 +197,59 @@ impl GuardianSessionKeyCache {
         record
             .verify(signing_pubkey)
             .with_context(|| "failed to verify guardian enclave signature")
+    }
+}
+
+/// Pick the lex-greatest key, skipping any whose name starts with `<dir>/failure-`.
+/// Keys are zero-padded (ceremony `sharing_seq`, committee `epoch`), so the lex-max
+/// non-failure key is the latest successful entry.
+fn pick_latest_key(keys: Vec<String>, dir: &str) -> Option<String> {
+    let failure_prefix = format!("{dir}/failure-");
+    keys.into_iter()
+        .filter(|k| !k.starts_with(&failure_prefix))
+        .max()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn success_key(epoch: u64) -> String {
+        format!("{S3_DIR_COMMITTEE_UPDATE}/{epoch:020}-sess.json")
+    }
+    fn failure_key(epoch: u64) -> String {
+        format!("{S3_DIR_COMMITTEE_UPDATE}/failure-{epoch:020}-sess-abcd1234.json")
+    }
+
+    #[test]
+    fn pick_latest_key_none_when_empty() {
+        assert_eq!(pick_latest_key(vec![], S3_DIR_COMMITTEE_UPDATE), None);
+    }
+
+    #[test]
+    fn pick_latest_key_takes_lex_max() {
+        let keys = vec![success_key(3), success_key(7), success_key(5)];
+        assert_eq!(
+            pick_latest_key(keys, S3_DIR_COMMITTEE_UPDATE),
+            Some(success_key(7))
+        );
+    }
+
+    #[test]
+    fn pick_latest_key_skips_higher_failure() {
+        // A later-epoch failure (lex-greater than any success) must not win.
+        let keys = vec![success_key(5), failure_key(9)];
+        assert_eq!(
+            pick_latest_key(keys, S3_DIR_COMMITTEE_UPDATE),
+            Some(success_key(5))
+        );
+    }
+
+    #[test]
+    fn pick_latest_key_none_when_all_failures() {
+        assert_eq!(
+            pick_latest_key(vec![failure_key(9)], S3_DIR_COMMITTEE_UPDATE),
+            None
+        );
     }
 }

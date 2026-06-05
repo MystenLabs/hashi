@@ -31,9 +31,18 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
     let session_id = heartbeat_checks::heartbeat_audit(&mut reader).await?;
     info!(session_id, "heartbeat checks passed for selected session");
 
-    // 2. Check that enclave's config is as expected (valid attestation, expected s3 bucket & share commitments)
+    // 2. Check that the enclave's config is as expected: valid attestation,
+    // expected S3 bucket, and share commitments matching the authoritative
+    // `ceremony/` log (written from initial key setup onward).
     let guardian_info = reader.get_info(&session_id).await?;
-    let expected_guardian_config = cfg.expected_guardian_config()?;
+    let instance = reader
+        .read_latest_ceremony_instance()
+        .await?
+        .context("no ceremony log found in S3; key setup has not run")?;
+    let expected_guardian_config = GuardianConfig {
+        bucket_info: cfg.s3.bucket_info.clone(),
+        share_commitments: instance.commitments().clone(),
+    };
     expected_guardian_config.ensure_matches_info(&guardian_info)?;
     info!(session_id, "init checks passed for selected session");
 
@@ -58,13 +67,33 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
     };
 
     // Recompute the init state the operator booted the enclave with; its digest is
-    // the state_hash we bind as the share's AAD. `master_g` is the MPC committee `G`
+    // the state_hash we bind as the share's AAD. The committee comes from the
+    // latest signed `committee-update/` log; before any update exists (genesis) we
+    // fall back to the trusted local value. `master_g` is the MPC committee `G`
     // (see config doc), NOT the guardian's own BTC key.
     let master_g = cfg.mpc_master_g()?;
-    let committee = cfg.hashi_committee.try_into()?;
-    let expected_state =
-        WithdrawModeState::new(committee, cfg.limiter_config, limiter_state, master_g)
-            .map_err(|e| anyhow::anyhow!(e))?;
+    let committee = match reader.read_latest_committee().await? {
+        Some(scraped) => scraped,
+        None => cfg
+            .hashi_committee_genesis
+            .clone()
+            .context("no committee-update log in S3 and no hashi_committee_genesis in config")?,
+    };
+    if let Some(enclave_epoch) = guardian_info.current_committee_epoch {
+        anyhow::ensure!(
+            committee.epoch == enclave_epoch,
+            "committee epoch mismatch: sourced epoch {}, enclave reports {}",
+            committee.epoch,
+            enclave_epoch
+        );
+    }
+    let expected_state = WithdrawModeState::new(
+        committee.try_into()?,
+        cfg.limiter_config,
+        limiter_state,
+        master_g,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     let state_hash = expected_state.digest();
 
     // Fail fast (IOP-225 step D): the enclave must have been booted with the

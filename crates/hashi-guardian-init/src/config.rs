@@ -10,9 +10,7 @@ use hashi_types::guardian::S3Config;
 use hashi_types::guardian::Share;
 use hashi_types::guardian::ShareCommitments;
 use hashi_types::guardian::ShareID;
-use hashi_types::guardian::proto_conversions::pb_share_commitments_to_domain;
 use hashi_types::move_types::Committee as CommitteeRepr;
-use hashi_types::proto as pb;
 use k256::FieldBytes;
 use k256::Scalar;
 use k256::elliptic_curve::PrimeField;
@@ -70,22 +68,17 @@ pub struct ProvisionerConfig {
 
     /// Config
     pub s3: S3Config,
-    pub share_commitments: Vec<ShareCommitmentInput>,
 
-    /// Expected WithdrawModeState (operator-supplied; the KP recomputes its digest)
-    // Current Hashi committee
-    pub hashi_committee: CommitteeRepr,
+    /// Genesis committee — required only at genesis, when `committee-update/` is
+    /// still empty; omit it once any update has been logged (it's scraped from
+    /// there after). Stands in for the authoritative on-chain `CommitteeSet`
+    /// until the tool reads chain directly. Validated via the `state_hash` match.
+    pub hashi_committee_genesis: Option<CommitteeRepr>,
     // Limiter config
     pub limiter_config: LimiterConfig,
     /// MPC committee `G` (on-chain `CommitteeSet.mpc_public_key`) as hex of `bcs(G)`;
     /// the derivation master (NOT the guardian's own key). Must match operator init.
     pub hashi_btc_master_pubkey_hex: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ShareCommitmentInput {
-    pub id: u16,
-    pub digest_hex: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -110,23 +103,6 @@ impl ProvisionerConfig {
         })
     }
 
-    pub fn expected_guardian_config(&self) -> anyhow::Result<GuardianConfig> {
-        let pb_commitments = self
-            .share_commitments
-            .iter()
-            .map(ShareCommitmentInput::to_pb)
-            .collect::<Vec<_>>();
-
-        // Domain validation checks
-        let share_commitments =
-            pb_share_commitments_to_domain(&pb_commitments).map_err(|e| anyhow::anyhow!(e))?;
-
-        Ok(GuardianConfig {
-            bucket_info: self.s3.bucket_info.clone(),
-            share_commitments,
-        })
-    }
-
     /// The MPC committee verifying key `G`, decoded from `hashi_btc_master_pubkey_hex`.
     pub fn mpc_master_g(&self) -> anyhow::Result<HashiMasterG> {
         decode_master_g_hex(&self.hashi_btc_master_pubkey_hex)
@@ -139,17 +115,6 @@ fn decode_master_g_hex(hex_str: &str) -> anyhow::Result<HashiMasterG> {
     let bytes = hex::decode(hex_str.trim_start_matches("0x"))
         .context("hashi_btc_master_pubkey_hex is not valid hex")?;
     bcs::from_bytes(&bytes).context("decode MPC verifying key G from bcs(G)")
-}
-
-impl ShareCommitmentInput {
-    fn to_pb(&self) -> pb::GuardianShareCommitment {
-        pb::GuardianShareCommitment {
-            id: Some(pb::GuardianShareId {
-                id: Some(self.id.into()),
-            }),
-            digest_hex: Some(self.digest_hex.clone()),
-        }
-    }
 }
 
 impl ShareInput {
