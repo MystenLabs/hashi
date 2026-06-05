@@ -3,7 +3,13 @@
 
 module hashi::withdrawal_queue;
 
-use hashi::{btc::BTC, btc_config, config::Config, mpc_signing::{Self, SigningBatch}, utxo::{Utxo, UtxoId}};
+use hashi::{
+    btc::BTC,
+    btc_config,
+    config::Config,
+    mpc_signing::{Self, SigningBatch},
+    utxo::{Utxo, UtxoId}
+};
 use sui::{balance::Balance, clock::Clock, object_bag::ObjectBag};
 
 use fun btc_config::worst_case_network_fee as Config.worst_case_network_fee;
