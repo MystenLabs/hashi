@@ -1013,9 +1013,13 @@ impl SuiTxExecutor {
         skip_all,
         fields(withdrawal_txn_id = %withdrawal_id),
     )]
-    pub async fn execute_allocate_presigs_for_withdrawal_txn(
+    /// Execute `withdraw::reallocate_presigs` to reassign fresh presignatures to
+    /// the still-pending inputs of a withdrawal whose signing batch is from a
+    /// previous epoch. No committee cert (matches the contract: it only reassigns
+    /// nonce material and is bounded once-per-withdrawal-per-epoch on chain).
+    pub async fn execute_reallocate_presigs(
         &mut self,
-        withdrawal_id: Address,
+        withdrawal_id: &Address,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
         let hashi_arg = builder.object(
@@ -1023,19 +1027,19 @@ impl SuiTxExecutor {
                 .as_shared()
                 .with_mutable(true),
         );
-        let withdrawal_id_arg = builder.pure(&withdrawal_id);
+        let withdrawal_id_arg = builder.pure(withdrawal_id);
         builder.move_call(
             Function::new(
                 self.hashi_ids.package_id,
                 Identifier::from_static("withdraw"),
-                Identifier::from_static("allocate_presigs_for_withdrawal_txn"),
+                Identifier::from_static("reallocate_presigs"),
             ),
             vec![hashi_arg, withdrawal_id_arg],
         );
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
             anyhow::bail!(
-                "allocate_presigs_for_withdrawal_txn transaction failed: {:?}",
+                "reallocate_presigs transaction failed: {:?}",
                 response.transaction().effects().status()
             );
         }
@@ -1315,27 +1319,80 @@ impl SuiTxExecutor {
         Ok(())
     }
 
-    /// Execute `withdraw::sign_withdrawal` to store witness signatures on-chain.
+    /// Execute `withdraw::commit_input_signatures` to durably record one chunk of
+    /// out-of-order per-input MPC signatures on-chain. Cert is over
+    /// `MpcInputSignaturesMessage { withdrawal_id, indices, signatures }`.
     ///
-    /// Sui limits each pure argument to 16 KiB. With many inputs (up to 500),
-    /// the BCS-encoded `Vec<Vec<u8>>` of signatures can exceed that limit. To
-    /// handle this, the signatures are split into chunks that each fit within
-    /// the pure-arg budget and stitched back together via
-    /// `0x1::vector::append` calls in the PTB.
+    /// Sui limits each pure argument to 16 KiB; the `Vec<Vec<u8>>` of signatures
+    /// is split into chunks that each fit the pure-arg budget and stitched back
+    /// via `0x1::vector::append` in the PTB.
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(
-            withdrawal_txn_id = %withdrawal_id,
-            request_count = request_ids.len(),
-            input_count = signatures.len(),
-        ),
+        fields(withdrawal_txn_id = %withdrawal_id, chunk_size = indices.len()),
     )]
-    pub async fn execute_sign_withdrawal(
+    pub async fn execute_commit_input_signatures(
+        &mut self,
+        withdrawal_id: &Address,
+        indices: &[u64],
+        signatures: &[Vec<u8>],
+        cert: &CommitteeSignature,
+    ) -> anyhow::Result<u64> {
+        let mut builder = TransactionBuilder::new();
+
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let withdrawal_id_arg = builder.pure(withdrawal_id);
+        let indices_vec = indices.to_vec();
+        let indices_arg = builder.pure(&indices_vec);
+        let signatures_arg = build_chunked_vec_vec_u8_arg(&mut builder, signatures);
+        let cert_arg = build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, cert);
+
+        builder.move_call(
+            Function::new(
+                self.hashi_ids.package_id,
+                Identifier::from_static("withdraw"),
+                Identifier::from_static("commit_input_signatures"),
+            ),
+            vec![
+                hashi_arg,
+                withdrawal_id_arg,
+                indices_arg,
+                signatures_arg,
+                cert_arg,
+            ],
+        );
+
+        let response = self.execute(builder).await?;
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "commit_input_signatures failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+        let checkpoint = response
+            .transaction()
+            .checkpoint_opt()
+            .ok_or_else(|| anyhow::anyhow!("commit_input_signatures response missing checkpoint"))?;
+        Ok(checkpoint)
+    }
+
+    /// Execute `withdraw::finalize_withdrawal` to attach the one-shot guardian
+    /// signatures and flip the broadcast gate once every input is MPC-signed.
+    /// Cert is over `WithdrawalSignedMessage { withdrawal_id, request_ids,
+    /// signatures (read from the batch on-chain), guardian_signatures }`.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(withdrawal_txn_id = %withdrawal_id, request_count = request_ids.len()),
+    )]
+    pub async fn execute_finalize_withdrawal(
         &mut self,
         withdrawal_id: &Address,
         request_ids: &[Address],
-        signatures: &[Vec<u8>],
         guardian_signatures: &[Vec<u8>],
         cert: &CommitteeSignature,
     ) -> anyhow::Result<u64> {
@@ -1349,7 +1406,6 @@ impl SuiTxExecutor {
         let withdrawal_id_arg = builder.pure(withdrawal_id);
         let request_ids_vec = request_ids.to_vec();
         let request_ids_arg = builder.pure(&request_ids_vec);
-        let signatures_arg = build_chunked_vec_vec_u8_arg(&mut builder, signatures);
         let guardian_signatures_arg =
             build_chunked_vec_vec_u8_arg(&mut builder, guardian_signatures);
         let cert_arg = build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, cert);
@@ -1358,13 +1414,12 @@ impl SuiTxExecutor {
             Function::new(
                 self.hashi_ids.package_id,
                 Identifier::from_static("withdraw"),
-                Identifier::from_static("sign_withdrawal"),
+                Identifier::from_static("finalize_withdrawal"),
             ),
             vec![
                 hashi_arg,
                 withdrawal_id_arg,
                 request_ids_arg,
-                signatures_arg,
                 guardian_signatures_arg,
                 cert_arg,
             ],
@@ -1373,15 +1428,14 @@ impl SuiTxExecutor {
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
             anyhow::bail!(
-                "sign_withdrawal failed: {:?}",
+                "finalize_withdrawal failed: {:?}",
                 response.transaction().effects().status()
             );
         }
-        // `execute_transaction_and_wait_for_checkpoint` guarantees this is set.
         let checkpoint = response
             .transaction()
             .checkpoint_opt()
-            .ok_or_else(|| anyhow::anyhow!("sign_withdrawal response missing checkpoint"))?;
+            .ok_or_else(|| anyhow::anyhow!("finalize_withdrawal response missing checkpoint"))?;
         Ok(checkpoint)
     }
 

@@ -9,6 +9,7 @@ use futures::StreamExt;
 use hashi_types::move_types::AbortReconfig;
 use hashi_types::move_types::BurnEvent;
 use hashi_types::move_types::HashiEvent;
+use hashi_types::move_types::InputSig;
 use hashi_types::move_types::MintEvent;
 use sui_rpc::Client;
 use sui_rpc::field::FieldMask;
@@ -465,9 +466,18 @@ async fn handle_events(
                         .withdrawal_txns
                         .get_mut(&event.withdrawal_txn_id)
                     {
-                        Some(txn) if txn.signatures.is_none() => {
-                            txn.signatures = Some(event.signatures.clone());
+                        Some(txn) if !txn.fully_signed => {
+                            // Reflect the finalized 2-of-2 witness in-memory: mark
+                            // every input Signed, attach guardian sigs, flip the gate.
+                            txn.signing.signatures = event
+                                .signatures
+                                .iter()
+                                .cloned()
+                                .map(InputSig::Signed)
+                                .collect();
+                            txn.signing.signed_count = event.signatures.len() as u64;
                             txn.guardian_signatures = Some(event.guardian_signatures.clone());
+                            txn.fully_signed = true;
                             let amount_sats = withdrawal_limiter_consumption_amount(txn);
                             let timestamp_secs = checkpoint_timestamp_ms / 1000;
                             let pick_to_sign =
@@ -540,6 +550,33 @@ async fn handle_events(
                     }
                 }
             }
+            HashiEvent::WithdrawalInputsSignedEvent(event) => {
+                tracing::info!(
+                    withdrawal_txn_id = %event.withdrawal_txn_id,
+                    signed_count = event.signed_count,
+                    num_inputs = event.num_inputs,
+                    "Withdrawal input signatures committed on-chain",
+                );
+                // The committed per-input signatures live on the object; refresh
+                // the local mirror so the next leader tick resumes from the
+                // up-to-date unsigned set.
+                match super::fetch_withdrawal_txn(client, event.withdrawal_txn_id).await {
+                    Ok(txn) => {
+                        state
+                            .state_mut()
+                            .hashi
+                            .withdrawal_queue
+                            .withdrawal_txns
+                            .insert(txn.id, txn);
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            withdrawal_txn_id = %event.withdrawal_txn_id,
+                            "Failed to refresh withdrawal signing batch: {e}",
+                        );
+                    }
+                }
+            }
             HashiEvent::WithdrawalPresigsReassignedEvent(event) => {
                 tracing::info!(
                     withdrawal_txn_id = %event.withdrawal_txn_id,
@@ -547,15 +584,22 @@ async fn handle_events(
                     presig_start_index = event.presig_start_index,
                     "Withdrawal presigs reassigned on-chain",
                 );
-                let mut state = state.state_mut();
-                if let Some(txn) = state
-                    .hashi
-                    .withdrawal_queue
-                    .withdrawal_txns
-                    .get_mut(&event.withdrawal_txn_id)
-                {
-                    txn.epoch = event.epoch;
-                    txn.presig_start_index = event.presig_start_index;
+                // Per-input presig indices changed in the batch; refresh from chain.
+                match super::fetch_withdrawal_txn(client, event.withdrawal_txn_id).await {
+                    Ok(txn) => {
+                        state
+                            .state_mut()
+                            .hashi
+                            .withdrawal_queue
+                            .withdrawal_txns
+                            .insert(txn.id, txn);
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            withdrawal_txn_id = %event.withdrawal_txn_id,
+                            "Failed to refresh withdrawal transaction: {e}",
+                        );
+                    }
                 }
             }
             HashiEvent::WithdrawalConfirmedEvent(event) => {

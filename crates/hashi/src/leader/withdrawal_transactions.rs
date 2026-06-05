@@ -10,6 +10,7 @@ use crate::leader::garbage_collection::PendingUtxoCleanup;
 use crate::onchain::types::UtxoId;
 use crate::onchain::types::WithdrawalTransaction;
 use crate::sui_tx_executor::SuiTxExecutor;
+use crate::withdrawals::MpcInputSignaturesMessage;
 use crate::withdrawals::WithdrawalBroadcastError;
 use crate::withdrawals::WithdrawalBroadcastErrorKind;
 use crate::withdrawals::WithdrawalTxSigning;
@@ -21,6 +22,7 @@ use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::certificate_threshold;
+use hashi_types::proto::SignMpcInputSignaturesRequest;
 use hashi_types::proto::SignWithdrawalConfirmationRequest;
 use hashi_types::proto::SignWithdrawalTransactionRequest;
 use hashi_types::proto::SignWithdrawalTxSigningRequest;
@@ -33,6 +35,15 @@ use tracing::error;
 use tracing::info;
 use tracing::trace;
 use tracing::warn;
+
+/// Number of per-input MPC signatures written to chain in one
+/// `commit_input_signatures` PTB. This is the on-chain write batch size `M`:
+/// it bounds the durability granularity (work lost on a crash) against the
+/// number of PTBs per withdrawal.
+// TODO(tuning): conservative default; measure PTB command/gas cost of
+// commit_input_signatures(M) (sigs are ~64B each) and scale up. Should also be
+// decoupled from the MPC batch-per-peer collection size.
+const MPC_SIGNING_CHUNK_SIZE: usize = 16;
 
 pub(super) enum WithdrawalBroadcastOutcome {
     ConfirmedOnSui { utxo_ids: Vec<UtxoId> },
@@ -56,7 +67,7 @@ impl LeaderService {
         }
 
         let mut withdrawal_txns = self.inner.onchain_state().withdrawal_txns();
-        withdrawal_txns.retain(|p| p.signatures.is_none());
+        withdrawal_txns.retain(|p| !p.fully_signed);
         withdrawal_txns.sort_by_key(|p| p.timestamp_ms);
 
         let pending_ids: Vec<Address> = withdrawal_txns.iter().map(|p| p.id).collect();
@@ -118,30 +129,44 @@ impl LeaderService {
         Self::log_task_result("withdrawal_signing", mapped);
     }
 
-    /// Collects MPC and guardian signatures for one unsigned withdrawal and stores them on-chain.
+    /// Drives one withdrawal's signing forward by one step: reallocate stale
+    /// presigs, record the next chunk(s) of MPC signatures, or — once every input
+    /// is MPC-signed — finalize with the one-shot guardian signatures. Each chunk
+    /// is durable on-chain, so timeouts / rotation / restart resume from on-chain
+    /// state rather than restarting from scratch.
     #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id))]
     async fn process_unsigned_withdrawal_txn(
         inner: Arc<Hashi>,
         txn: WithdrawalTransaction,
     ) -> anyhow::Result<()> {
-        // If the withdrawal transaction is from a previous epoch, reassign its presig
-        // indices from the new epoch's counter before signing.
-        // TODO: Batch multiple stale-epoch withdrawals into a single PTB.
+        // Stale-epoch presigs: reassign only the unsigned tail to the current
+        // epoch, then retry next checkpoint. Completed signatures are
+        // epoch-independent and are left untouched.
         let current_epoch = inner.onchain_state().epoch();
-        if txn.epoch != current_epoch {
+        if txn.signing.epoch != current_epoch {
             info!(
-                "Withdrawal transaction from epoch {} (current {}), reassigning presig indices",
-                txn.epoch, current_epoch,
+                "Withdrawal signing batch from epoch {} (current {}); reallocating pending presigs",
+                txn.signing.epoch, current_epoch,
             );
             let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
-            executor
-                .execute_allocate_presigs_for_withdrawal_txn(txn.id)
-                .await?;
-            info!("Presig indices reassigned, will sign on next checkpoint");
-            // Return and let the next checkpoint iteration pick up the updated state.
+            executor.execute_reallocate_presigs(&txn.id).await?;
+            info!("Pending presigs reallocated; will sign on next checkpoint");
             return Ok(());
         }
-        info!("MPC signing withdrawal transaction");
+
+        let members = inner
+            .onchain_state()
+            .current_committee_members()
+            .expect("No current committee members");
+
+        // If any input is still unsigned, collect and commit the next chunk(s).
+        let unsigned = txn.signing.unsigned_indices();
+        if !unsigned.is_empty() {
+            return Self::sign_withdrawal_chunks(&inner, &txn, &members, unsigned).await;
+        }
+
+        // Every input is MPC-signed: finalize with the guardian (one shot).
+        info!("All inputs MPC-signed; finalizing withdrawal with guardian");
 
         // Fresh per-attempt timestamp from the leader's current checkpoint;
         // using `txn.timestamp_ms` lets stuck batches age past the per-node
@@ -181,30 +206,14 @@ impl LeaderService {
             None
         };
 
-        let members = inner
-            .onchain_state()
-            .current_committee_members()
-            .expect("No current committee members");
-
-        // 1. Request signed withdrawal tx witnesses from committee members.
-        // MPC signing requires all threshold members to participate simultaneously
-        // via P2P, so we must fan out requests in parallel.
-        let signatures_by_input = Self::collect_withdrawal_tx_signatures(
-            &inner,
-            &txn.id,
-            expected_limiter_seq,
-            timestamp_secs,
-            txn.inputs.len(),
-            &members,
-        )
-        .await
-        .ok_or_else(|| anyhow::anyhow!("Failed to collect MPC signatures for {:?}", txn.id))?;
-
-        // 2. Extract raw signature bytes for on-chain storage
-        let witness_signatures: Vec<Vec<u8>> = signatures_by_input
-            .iter()
-            .map(|s| s.to_byte_array().to_vec())
-            .collect();
+        // 1-2. The full per-input MPC set is already durable on-chain (committed
+        // incrementally in prior chunks); read it back to bind it at finalize.
+        let witness_signatures = txn.signing.dense_signatures().ok_or_else(|| {
+            anyhow::anyhow!(
+                "withdrawal {} reported complete but has unsigned inputs",
+                txn.id
+            )
+        })?;
 
         // 3. Post-MPC: forward to guardian for the enclave signature. Reuses
         // the `timestamp_secs` from the pre-MPC validate so the BLS-signed
@@ -281,13 +290,13 @@ impl LeaderService {
 
         let signed = aggregator.finish()?;
 
-        // 5. Submit sign_withdrawal to Sui (writes signatures on-chain).
-        // Broadcast + confirm happens via process_signed_withdrawal_txns on the next tick.
-        let included_checkpoint_seq = Self::submit_sign_withdrawal(
+        // 5. Submit finalize_withdrawal to Sui (attaches guardian sigs, flips the
+        // broadcast gate). Broadcast + confirm happen via
+        // process_signed_withdrawal_txns on a later tick.
+        let included_checkpoint_seq = Self::submit_finalize_withdrawal(
             &inner,
             &txn.id,
             &txn.request_ids.clone(),
-            &witness_signatures,
             &guardian_signatures,
             signed.committee_signature(),
         )
@@ -296,14 +305,14 @@ impl LeaderService {
             inner
                 .metrics
                 .sui_tx_submissions_total
-                .with_label_values(&["sign_withdrawal", "success"])
+                .with_label_values(&["finalize_withdrawal", "success"])
                 .inc();
         })
         .inspect_err(|_| {
             inner
                 .metrics
                 .sui_tx_submissions_total
-                .with_label_values(&["sign_withdrawal", "failure"])
+                .with_label_values(&["finalize_withdrawal", "failure"])
                 .inc();
         })?;
 
@@ -331,15 +340,151 @@ impl LeaderService {
         Ok(())
     }
 
-    /// Requests withdrawal transaction signatures from committee members until one complete set succeeds.
+    /// Collects MPC signatures for the still-unsigned inputs and commits them in
+    /// cert-gated chunks of up to `MPC_SIGNING_CHUNK_SIZE`. Each chunk is durable
+    /// on-chain (`commit_input_signatures`); the next checkpoint resumes from
+    /// on-chain state, so a single failing input or a leader change only costs
+    /// the in-flight chunk, never the whole withdrawal.
+    async fn sign_withdrawal_chunks(
+        inner: &Arc<Hashi>,
+        txn: &WithdrawalTransaction,
+        members: &[CommitteeMember],
+        unsigned: Vec<u64>,
+    ) -> anyhow::Result<()> {
+        let timestamp_secs = inner.onchain_state().latest_checkpoint_timestamp_ms() / 1000;
+
+        // Validate-only limiter pre-check: capacity is consumed once at finalize
+        // (via the guardian), not per chunk. Fail fast so we don't waste MPC.
+        let expected_limiter_seq = if let Some(limiter) = inner.local_limiter() {
+            let amount_sats = crate::withdrawals::withdrawal_limiter_consumption_amount(txn);
+            let next_seq = limiter.next_seq();
+            let result = limiter.validate_consume(next_seq, timestamp_secs, amount_sats);
+            inner.metrics.record_limiter_validate(
+                &result,
+                crate::metrics::GUARDIAN_LIMITER_CALLSITE_LEADER_PRE_MPC,
+            );
+            if let Err(e) = result {
+                warn!(withdrawal_txn_id = %txn.id, "Leader limiter rejected withdrawal; retry next checkpoint: {e}");
+                return Ok(());
+            }
+            Some(next_seq)
+        } else {
+            None
+        };
+
+        info!(unsigned = unsigned.len(), "Collecting MPC signatures for unsigned inputs");
+        let sigs_by_index = Self::collect_withdrawal_tx_signatures(
+            inner,
+            &txn.id,
+            expected_limiter_seq,
+            timestamp_secs,
+            &unsigned,
+            members,
+        )
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Failed to collect MPC signatures for {:?}", txn.id))?;
+
+        let committee = inner
+            .onchain_state()
+            .current_committee()
+            .expect("No current committee");
+        let required_weight = certificate_threshold(committee.total_weight());
+
+        // TODO(tuning): MPC_SIGNING_CHUNK_SIZE (M) is the on-chain write batch —
+        // it trades durability granularity against PTB count. Measure the PTB
+        // command/gas cost of commit_input_signatures(M) and scale up.
+        let mut last_checkpoint = 0u64;
+        for chunk in sigs_by_index.chunks(MPC_SIGNING_CHUNK_SIZE) {
+            let indices: Vec<u64> = chunk.iter().map(|(i, _)| *i).collect();
+            let signatures: Vec<Vec<u8>> = chunk
+                .iter()
+                .map(|(_, sig)| sig.to_byte_array().to_vec())
+                .collect();
+
+            let signed_message = MpcInputSignaturesMessage {
+                withdrawal_id: txn.id,
+                indices: indices.clone(),
+                signatures: signatures.clone(),
+            };
+            let proto_request = signed_message.to_proto();
+
+            let mut sig_tasks = JoinSet::new();
+            for member in members {
+                let inner = inner.clone();
+                let proto_request = proto_request.clone();
+                let member = member.clone();
+                sig_tasks.spawn(async move {
+                    Self::request_mpc_input_signatures_signature(&inner, proto_request, &member).await
+                });
+            }
+            let mut aggregator = BlsSignatureAggregator::new(&committee, signed_message.clone());
+            while let Some(result) = sig_tasks.join_next().await {
+                let Ok(Some(sig)) = result else { continue };
+                if let Err(e) = aggregator.add_signature(sig) {
+                    error!(withdrawal_txn_id = %txn.id, "Failed to add chunk cert signature: {e}");
+                }
+                if aggregator.weight() >= required_weight {
+                    break;
+                }
+            }
+            if aggregator.weight() < required_weight {
+                anyhow::bail!(
+                    "Insufficient signatures for commit_input_signatures: weight {} < {required_weight}",
+                    aggregator.weight()
+                );
+            }
+            let signed = aggregator.finish()?;
+
+            last_checkpoint = Self::submit_commit_input_signatures(
+                inner,
+                &txn.id,
+                &indices,
+                &signatures,
+                signed.committee_signature(),
+            )
+            .await
+            .inspect(|_| {
+                inner
+                    .metrics
+                    .sui_tx_submissions_total
+                    .with_label_values(&["commit_input_signatures", "success"])
+                    .inc();
+            })
+            .inspect_err(|_| {
+                inner
+                    .metrics
+                    .sui_tx_submissions_total
+                    .with_label_values(&["commit_input_signatures", "failure"])
+                    .inc();
+            })?;
+        }
+
+        // Wait for our watcher to observe the last committed chunk so the next
+        // tick resumes from fresh on-chain state (and doesn't re-sign it).
+        const VISIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
+        if last_checkpoint > 0
+            && tokio::time::timeout(
+                VISIBILITY_TIMEOUT,
+                inner.onchain_state().wait_until_checkpoint(last_checkpoint),
+            )
+            .await
+            .is_err()
+        {
+            warn!(withdrawal_txn_id = %txn.id, "Timeout waiting for watcher to reach the committed chunk checkpoint");
+        }
+        Ok(())
+    }
+
+    /// Requests MPC signatures for the given input indices from committee members
+    /// until one member returns the complete set.
     async fn collect_withdrawal_tx_signatures(
         inner: &Arc<Hashi>,
         withdrawal_txn_id: &Address,
         expected_limiter_seq: Option<u64>,
         timestamp_secs: u64,
-        expected_input_count: usize,
+        expected_indices: &[u64],
         members: &[CommitteeMember],
-    ) -> Option<Vec<SchnorrSignature>> {
+    ) -> Option<Vec<(u64, SchnorrSignature)>> {
         let futures: Vec<_> = members
             .iter()
             .map(|member| {
@@ -348,7 +493,7 @@ impl LeaderService {
                     withdrawal_txn_id,
                     expected_limiter_seq,
                     timestamp_secs,
-                    expected_input_count,
+                    expected_indices,
                     member,
                 )
             })
@@ -373,16 +518,19 @@ impl LeaderService {
         }
     }
 
-    /// Opens a streaming signing RPC to one committee member and validates one signature per input.
+    /// Opens a streaming signing RPC to one committee member and collects exactly
+    /// the requested input indices' MPC signatures (out-of-order allowed). The
+    /// member signs only its still-unsigned inputs, so the returned set is the
+    /// requested unsigned subset.
     #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
     async fn request_withdrawal_tx_signature(
         inner: &Arc<Hashi>,
         withdrawal_txn_id: &Address,
         expected_limiter_seq: Option<u64>,
         timestamp_secs: u64,
-        expected_input_count: usize,
+        expected_indices: &[u64],
         member: &CommitteeMember,
-    ) -> anyhow::Result<Vec<SchnorrSignature>> {
+    ) -> anyhow::Result<Vec<(u64, SchnorrSignature)>> {
         let validator_address = member.validator_address();
         trace!("Requesting withdrawal tx signature");
 
@@ -411,21 +559,23 @@ impl LeaderService {
                 )
             })?
             .into_inner();
-        let mut by_index: Vec<Option<SchnorrSignature>> =
-            (0..expected_input_count).map(|_| None).collect();
-        let mut received = 0usize;
+
+        let expected: std::collections::BTreeSet<u64> =
+            expected_indices.iter().copied().collect();
+        let mut collected: std::collections::BTreeMap<u64, SchnorrSignature> =
+            std::collections::BTreeMap::new();
         while let Some(partial) = stream
             .message()
             .await
             .map_err(|e| anyhow::anyhow!("stream error from {validator_address}: {e}"))?
         {
-            let idx = partial.input_index as usize;
-            let slot = by_index.get_mut(idx).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Withdrawal tx signature stream from {validator_address} returned out-of-range input_index {idx} (expected < {expected_input_count})",
-                )
-            })?;
-            if slot.is_some() {
+            let idx = partial.input_index as u64;
+            if !expected.contains(&idx) {
+                anyhow::bail!(
+                    "Withdrawal tx signature stream from {validator_address} returned unexpected input_index {idx}",
+                );
+            }
+            if collected.contains_key(&idx) {
                 anyhow::bail!(
                     "Withdrawal tx signature stream from {validator_address} returned duplicate input_index {idx}",
                 );
@@ -435,20 +585,16 @@ impl LeaderService {
             })?;
             let sig = SchnorrSignature::from_byte_array(&bytes)
                 .map_err(|e| anyhow::anyhow!("Invalid signature from {validator_address}: {e}"))?;
-            *slot = Some(sig);
-            received += 1;
+            collected.insert(idx, sig);
         }
-        trace!("Retrieved {received} withdrawal tx signatures from {validator_address}",);
-        if received != expected_input_count {
+        if collected.len() != expected.len() {
             anyhow::bail!(
-                "Withdrawal tx signature stream from {validator_address} returned {received} partials, expected {expected_input_count}",
+                "Withdrawal tx signature stream from {validator_address} returned {} sigs, expected {}",
+                collected.len(),
+                expected.len(),
             );
         }
-        by_index.into_iter().collect::<Option<Vec<_>>>().ok_or_else(|| {
-            anyhow::anyhow!(
-                "internal invariant violated: count matched but slot was empty (from {validator_address})",
-            )
-        })
+        Ok(collected.into_iter().collect())
     }
 
     /// Requests a committee member's BLS signature over the on-chain withdrawal signing message.
@@ -491,26 +637,73 @@ impl LeaderService {
             .ok()
     }
 
-    /// Submits the signed withdrawal transaction witnesses and committee certificate to Sui.
-    async fn submit_sign_withdrawal(
+    /// Requests a committee member's BLS signature over one MPC-signature chunk.
+    #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
+    async fn request_mpc_input_signatures_signature(
+        inner: &Arc<Hashi>,
+        proto_request: SignMpcInputSignaturesRequest,
+        member: &CommitteeMember,
+    ) -> Option<MemberSignature> {
+        let validator_address = member.validator_address();
+        trace!("Requesting MPC input signatures chunk signature");
+
+        let response = Self::call_peer_with_retry(
+            inner,
+            validator_address,
+            "mpc input signatures signature",
+            move |mut client| {
+                let request = proto_request.clone();
+                async move { client.sign_mpc_input_signatures(request).await }
+            },
+        )
+        .await?;
+
+        response
+            .into_inner()
+            .member_signature
+            .ok_or_else(|| anyhow::anyhow!("No member_signature in response"))
+            .and_then(parse_member_signature)
+            .inspect_err(|e| {
+                error!(
+                    "Failed to parse member signature from chunk response from {}: {e}",
+                    validator_address
+                );
+            })
+            .ok()
+    }
+
+    /// Submits one durable chunk of per-input MPC signatures to Sui.
+    async fn submit_commit_input_signatures(
+        inner: &Arc<Hashi>,
+        withdrawal_id: &Address,
+        indices: &[u64],
+        signatures: &[Vec<u8>],
+        cert: &CommitteeSignature,
+    ) -> anyhow::Result<u64> {
+        info!(
+            "Submitting commit_input_signatures for {:?} ({} inputs)",
+            withdrawal_id,
+            indices.len()
+        );
+        let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
+        executor
+            .execute_commit_input_signatures(withdrawal_id, indices, signatures, cert)
+            .await
+    }
+
+    /// Submits the finalize step (guardian sigs + broadcast gate) to Sui.
+    async fn submit_finalize_withdrawal(
         inner: &Arc<Hashi>,
         withdrawal_id: &Address,
         request_ids: &[Address],
-        signatures: &[Vec<u8>],
         guardian_signatures: &[Vec<u8>],
         cert: &CommitteeSignature,
     ) -> anyhow::Result<u64> {
-        info!("Submitting sign_withdrawal for {:?}", withdrawal_id);
+        info!("Submitting finalize_withdrawal for {:?}", withdrawal_id);
 
         let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
         executor
-            .execute_sign_withdrawal(
-                withdrawal_id,
-                request_ids,
-                signatures,
-                guardian_signatures,
-                cert,
-            )
+            .execute_finalize_withdrawal(withdrawal_id, request_ids, guardian_signatures, cert)
             .await
     }
 
@@ -523,7 +716,7 @@ impl LeaderService {
     pub(super) fn process_signed_withdrawal_txns(&mut self) {
         debug!("Entering process_signed_withdrawal_txns");
         let mut withdrawal_txns = self.inner.onchain_state().withdrawal_txns();
-        withdrawal_txns.retain(|p| p.signatures.is_some());
+        withdrawal_txns.retain(|p| p.fully_signed);
         withdrawal_txns.sort_by_key(|p| p.timestamp_ms);
 
         let pending_ids: Vec<Address> = withdrawal_txns.iter().map(|p| p.id).collect();
@@ -591,7 +784,7 @@ impl LeaderService {
     /// Drains the BTC-block-triggered withdrawal check queue into its separate bounded task pool.
     fn process_pending_btc_block_withdrawal_checks(&mut self) {
         let mut withdrawal_txns = self.inner.onchain_state().withdrawal_txns();
-        withdrawal_txns.retain(|p| p.signatures.is_some());
+        withdrawal_txns.retain(|p| p.fully_signed);
         withdrawal_txns.sort_by_key(|p| p.timestamp_ms);
 
         let pending_ids: Vec<Address> = withdrawal_txns.iter().map(|p| p.id).collect();
@@ -817,9 +1010,8 @@ impl LeaderService {
         txn: &WithdrawalTransaction,
     ) -> anyhow::Result<bitcoin::Transaction> {
         let raw_sigs = txn
-            .signatures
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No MPC signatures on withdrawal transaction"))?;
+            .mpc_signatures()
+            .ok_or_else(|| anyhow::anyhow!("Withdrawal transaction is not fully signed"))?;
         let raw_guardian_sigs = txn
             .guardian_signatures
             .as_ref()
@@ -1033,6 +1225,17 @@ impl WithdrawalTxSigning {
                 .iter()
                 .map(|sig| sig.clone().into())
                 .collect(),
+        }
+    }
+}
+
+impl MpcInputSignaturesMessage {
+    /// Converts the chunk message into the bridge-service protobuf request type.
+    fn to_proto(&self) -> SignMpcInputSignaturesRequest {
+        SignMpcInputSignaturesRequest {
+            withdrawal_id: self.withdrawal_id.as_bytes().to_vec().into(),
+            indices: self.indices.clone(),
+            signatures: self.signatures.iter().map(|sig| sig.clone().into()).collect(),
         }
     }
 }
