@@ -18,9 +18,8 @@ use aws_sdk_s3::types::ObjectLockEnabled;
 use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::Client as S3Client;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
-use hashi_types::guardian::Attestation;
+use hashi_types::guardian::verify_enclave_attestation;
 use hashi_types::guardian::GuardianError::S3Error;
-use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::InitLogMessage;
@@ -32,14 +31,14 @@ use tracing::info;
 const MAX_RETRY_ATTEMPTS: u32 = 5;
 
 #[derive(Clone)]
-pub struct S3Logger {
+pub struct GuardianS3Client {
     /// S3 config: bucket name, region, API keys
     config: S3Config,
     /// S3 client
     client: S3Client,
 }
 
-impl S3Logger {
+impl GuardianS3Client {
     // ========================================================================
     // Constructors
     // ========================================================================
@@ -84,7 +83,7 @@ impl S3Logger {
         Ok(logger)
     }
 
-    /// Construct an `S3Logger` from an already-configured S3 client.
+    /// Construct an `GuardianS3Client` from an already-configured S3 client.
     /// This is intended for unit tests that use a mock S3 Client.
     /// This is not put behind cfg(test) as tests in the enclave crate also use it.
     pub fn from_client_for_tests(config: S3Config, client: S3Client) -> Self {
@@ -497,12 +496,20 @@ impl S3Logger {
         }
     }
 
-    pub async fn get_attestation(
+    /// Fetch the session's attestation record, verify it, and return the trusted
+    /// enclave signing pubkey. No caller needs the raw attestation bytes.
+    ///
+    /// TODO(check C): take `expected_pcrs` and verify the attestation's PCRs
+    /// against it (`verify_enclave_attestation` is a no-op today), and return the
+    /// pubkey anchored in the attestation's `user_data` rather than the
+    /// separately-logged `signing_public_key`.
+    pub async fn get_verified_enclave_pubkey(
         &self,
         session_id: &str,
-    ) -> GuardianResult<(Attestation, GuardianPubKey)> {
+    ) -> GuardianResult<GuardianPubKey> {
         let key = InitLogMessage::attestation_object_key(session_id);
-        self.get_verified_log_record(&key, session_id, None)
+        let (attestation, signing_public_key) = self
+            .get_verified_log_record(&key, session_id, None)
             .await?
             .message
             .into_init_log()
@@ -513,24 +520,9 @@ impl S3Logger {
                 } => Some((attestation, signing_public_key)),
                 _ => None,
             })
-            .ok_or_else(|| S3Error(format!("expected OIAttestationUnsigned at key {}", key)))
-    }
-
-    pub async fn get_guardian_info(
-        &self,
-        session_id: &str,
-        signing_pubkey: &GuardianPubKey,
-    ) -> GuardianResult<GuardianInfo> {
-        let key = InitLogMessage::guardian_info_object_key(session_id);
-        self.get_verified_log_record(&key, session_id, Some(signing_pubkey))
-            .await?
-            .message
-            .into_init_log()
-            .and_then(|x| match x {
-                InitLogMessage::OIGuardianInfo(info) => Some(info),
-                _ => None,
-            })
-            .ok_or_else(|| S3Error(format!("expected OIGuardianInfo at key {}", key)))
+            .ok_or_else(|| S3Error(format!("expected OIAttestationUnsigned at key {}", key)))?;
+        verify_enclave_attestation(attestation)?;
+        Ok(signing_public_key)
     }
 }
 
@@ -543,7 +535,7 @@ mod tests {
     use aws_smithy_mocks::mock_client;
     use aws_smithy_mocks::RuleMode;
 
-    fn mk_logger_with_client(client: Client) -> S3Logger {
+    fn mk_logger_with_client(client: Client) -> GuardianS3Client {
         let config = S3Config {
             access_key: "test-access-key".to_string(),
             secret_key: "test-secret-key".to_string(),
@@ -552,7 +544,7 @@ mod tests {
                 region: "us-east-1".to_string(),
             },
         };
-        S3Logger::from_client_for_tests(config, client)
+        GuardianS3Client::from_client_for_tests(config, client)
     }
 
     #[derive(Serialize)]

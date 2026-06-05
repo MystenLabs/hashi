@@ -15,8 +15,8 @@
 //! — we read it and one bucket back (sub-hour clock-skew defense across hour
 //! boundaries) and take the max-seq Success across both.
 //!
-//! Note we deliberately don't apply `GuardianPollerCore::writes_completed`'s
-//! `DIR_WRITES_COMPLETION_DELAY` gate when reading the found bucket. That
+//! Note we deliberately don't apply the auditor's `write_completion_time`
+//! (`DIR_WRITES_COMPLETION_DELAY`) gate when reading the found bucket. That
 //! gate exists for the polling/auditor case where the source might still be
 //! writing; if we used it here, an enclave that died late in an hour would
 //! have its final-hour bucket treated as not-yet-complete, and recovery would
@@ -26,9 +26,8 @@
 //! S3 read-after-write consistency guarantees that all writes of the old session
 //! are completed.
 
-use hashi_guardian::s3_logger::S3Logger;
-use hashi_guardian::s3_reader::GuardianLogDir;
-use hashi_guardian::s3_reader::GuardianPollerCore;
+use hashi_guardian::s3_client::GuardianS3Client;
+use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::S3_DIR_WITHDRAW;
@@ -41,23 +40,19 @@ use tracing::info;
 /// `withdraw/` if one exists; returns `None` if no Success log exists
 /// anywhere — either a first deployment or a rotation where the prior
 /// enclave processed no withdrawals. Caller falls back to genesis on `None`.
-pub async fn recover_limiter_state(s3_client: S3Logger) -> anyhow::Result<Option<LimiterState>> {
-    let Some(bucket) = find_latest_success_bucket(&s3_client).await? else {
+pub async fn recover_limiter_state(
+    reader: &mut GuardianReader,
+) -> anyhow::Result<Option<LimiterState>> {
+    let Some(mut cursor) = find_latest_success_bucket(reader.s3()).await? else {
         return Ok(None);
     };
-
-    let mut poller = GuardianPollerCore::from_s3_client(
-        s3_client,
-        bucket.to_unix_seconds(),
-        GuardianLogDir::Withdraw,
-    );
 
     // Read the found bucket + one bucket back, then take max-seq across both.
     // The peek-back defends against sub-hour clock skew that may have placed
     // a higher-seq log in the prior hour bucket.
-    let hit = bucket_max_post_state(poller.read_cur_dir().await?);
-    poller.retreat_cursor();
-    let peek = bucket_max_post_state(poller.read_cur_dir().await?);
+    let hit = bucket_max_post_state(reader.read_dir(&cursor).await?);
+    cursor = cursor.prev_dir();
+    let peek = bucket_max_post_state(reader.read_dir(&cursor).await?);
     let best = [hit, peek].into_iter().flatten().max_by_key(|s| s.next_seq);
 
     if let Some(ref state) = best {
@@ -75,7 +70,7 @@ pub async fn recover_limiter_state(s3_client: S3Logger) -> anyhow::Result<Option
 /// `success-*` key, by descending the YYYY/MM/DD/HH tree in lex-greatest
 /// order at each level. Returns `None` if no Success log exists anywhere.
 async fn find_latest_success_bucket(
-    s3_client: &S3Logger,
+    s3_client: &GuardianS3Client,
 ) -> anyhow::Result<Option<S3HourScopedDirectory>> {
     let root = format!("{}/", S3_DIR_WITHDRAW);
     let years = list_subdirs_desc(s3_client, &root).await?;
@@ -96,7 +91,10 @@ async fn find_latest_success_bucket(
     Ok(None)
 }
 
-async fn list_subdirs_desc(s3_client: &S3Logger, prefix: &str) -> anyhow::Result<Vec<String>> {
+async fn list_subdirs_desc(
+    s3_client: &GuardianS3Client,
+    prefix: &str,
+) -> anyhow::Result<Vec<String>> {
     let mut subs = s3_client
         .list_common_prefixes(prefix)
         .await
@@ -105,7 +103,10 @@ async fn list_subdirs_desc(s3_client: &S3Logger, prefix: &str) -> anyhow::Result
     Ok(subs)
 }
 
-async fn hour_bucket_has_success(s3_client: &S3Logger, bucket: &str) -> anyhow::Result<bool> {
+async fn hour_bucket_has_success(
+    s3_client: &GuardianS3Client,
+    bucket: &str,
+) -> anyhow::Result<bool> {
     let keys = s3_client
         .list_all_keys_in_dir(&format!("{bucket}success-"))
         .await

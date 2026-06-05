@@ -8,7 +8,7 @@
 
 use crate::attestation::get_attestation;
 use crate::Enclave;
-use crate::S3Logger;
+use crate::GuardianS3Client;
 use hashi_types::guardian::InitLogMessage::OIAttestationUnsigned;
 use hashi_types::guardian::InitLogMessage::OIGuardianInfo;
 use hashi_types::guardian::*;
@@ -114,7 +114,7 @@ pub async fn operator_init(
     request.validate(enclave.mode())?;
 
     let (s3_config, state) = request.into_parts();
-    let logger = S3Logger::new_checked(&s3_config).await?;
+    let logger = GuardianS3Client::new_checked(&s3_config).await?;
     info!("S3 connectivity check complete.");
 
     // Build the withdraw-mode install bundle (incl. the rate limiter, the last
@@ -135,7 +135,7 @@ pub async fn operator_init(
 /// (attestation, S3 logging) panic on failure rather than return.
 async fn commit_operator_init(
     enclave: &Enclave,
-    logger: S3Logger,
+    logger: GuardianS3Client,
     withdraw: Option<WithdrawInstall>,
 ) {
     info!("Storing S3 configuration.");
