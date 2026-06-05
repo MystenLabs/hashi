@@ -3,7 +3,7 @@
 
 use super::GuardianError::InvalidInputs;
 use super::GuardianResult;
-use super::bitcoin_utils::BTC_LIB;
+use crate::bitcoin::BTC_LIB;
 use crate::pgp::PgpPublicCert;
 use crate::pgp::encrypt_armored;
 use hpke::Deserializable;

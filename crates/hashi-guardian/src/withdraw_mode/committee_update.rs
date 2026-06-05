@@ -126,13 +126,14 @@ mod tests {
     use crate::test_utils::create_fully_initialized_enclave;
     use crate::test_utils::FullyInitializedArgs;
     use bitcoin::Network;
+    use hashi_types::bitcoin::create_btc_keypair_for_test;
+    use hashi_types::bitcoin::hashi_master_g_from_btc_xonly_for_test;
     use hashi_types::committee::Bls12381PrivateKey;
     use hashi_types::committee::BlsSignatureAggregator;
     use hashi_types::committee::EncryptionPublicKey;
     use hashi_types::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
     use hashi_types::committee::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
     use hashi_types::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
-    use hashi_types::guardian::test_utils::create_btc_keypair;
     use hashi_types::guardian::HashiCommitteeMember;
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
@@ -183,11 +184,8 @@ mod tests {
     }
 
     async fn enclave_at_epoch(epoch: u64) -> Arc<Enclave> {
-        let kp = create_btc_keypair(&[1u8; 32]);
-        let master_pubkey = hashi_types::guardian::HashiMasterG::with_even_y_from_x_be_bytes(
-            &kp.x_only_public_key().0.serialize(),
-        )
-        .expect("valid x coordinate");
+        let kp = create_btc_keypair_for_test(&[1u8; 32]);
+        let master_pubkey = hashi_master_g_from_btc_xonly_for_test(&kp.x_only_public_key().0);
         create_fully_initialized_enclave(FullyInitializedArgs {
             network: Network::Regtest,
             committee: committee_at(epoch),

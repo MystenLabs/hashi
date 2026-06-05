@@ -1,7 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod bitcoin_utils;
 pub mod crypto;
 pub mod errors;
 pub mod log;
@@ -25,19 +24,17 @@ pub use time_utils::now_timestamp_ms;
 pub use time_utils::now_timestamp_secs;
 pub use time_utils::unix_millis_to_seconds;
 
-use self::bitcoin_utils::TxUTXOs;
-use self::bitcoin_utils::TxUTXOsWire;
 use self::errors::GuardianError::*;
+use crate::bitcoin::BitcoinPubkey;
+use crate::bitcoin::BitcoinSignature;
+use crate::bitcoin::HashiMasterG;
+use crate::bitcoin::TxUTXOs;
+use crate::bitcoin::TxUTXOsWire;
 pub use crate::committee::Committee as HashiCommittee;
 pub use crate::committee::CommitteeMember as HashiCommitteeMember;
 pub use crate::committee::SignedMessage as HashiSigned;
 use crate::pgp::PgpPublicCert;
-pub use bitcoin::Address as BitcoinAddress;
-pub use bitcoin::secp256k1::Keypair as BitcoinKeypair;
-pub use bitcoin::secp256k1::XOnlyPublicKey as BitcoinPubkey;
-pub use bitcoin::taproot::Signature as BitcoinSignature;
-
-use bitcoin::*;
+use bitcoin::Network;
 use blake2::Blake2b;
 use blake2::Digest;
 use blake2::digest::consts::U32;
@@ -46,7 +43,6 @@ pub use ed25519_consensus::Signature as GuardianSignature;
 pub use ed25519_consensus::SigningKey as GuardianSignKeyPair;
 pub use ed25519_consensus::VerificationKey as GuardianPubKey;
 pub use errors::*;
-pub use fastcrypto_tbls::threshold_schnorr::G as HashiMasterG;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
@@ -669,7 +665,8 @@ impl AddressValidation<StandardWithdrawalRequestWire> for StandardWithdrawalRequ
     ) -> GuardianResult<Self> {
         Ok(Self {
             wid: value.wid,
-            utxos: TxUTXOs::new(value.utxos.inputs, value.utxos.outputs, network)?,
+            utxos: TxUTXOs::new(value.utxos.inputs, value.utxos.outputs, network)
+                .map_err(|e| InvalidInputs(e.to_string()))?,
             timestamp_secs: value.timestamp_secs,
             seq: value.seq,
         })

@@ -10,10 +10,12 @@
 use bitcoin::secp256k1::Keypair;
 use bitcoin::Network;
 use bitcoin::Txid;
-use hashi_types::guardian::bitcoin_utils::sign_btc_tx;
-use hashi_types::guardian::bitcoin_utils::TxUTXOs;
+use hashi_types::bitcoin::sign_btc_tx;
+use hashi_types::bitcoin::BitcoinPubkey;
+use hashi_types::bitcoin::BitcoinSignature;
+use hashi_types::bitcoin::HashiMasterG;
+use hashi_types::bitcoin::TxUTXOs;
 use hashi_types::guardian::GuardianError::InvalidInputs;
-use hashi_types::guardian::HashiMasterG;
 use hashi_types::guardian::*;
 use hpke::Serializable;
 use serde::Serialize;

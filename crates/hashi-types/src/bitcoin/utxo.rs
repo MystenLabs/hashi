@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! UTXO and transaction types for guardian withdrawals.
+//! UTXO and transaction types for Hashi Bitcoin withdrawals.
 //!
 //! Two classes of types exist here:
 //! - Domain types with checked addresses that implement Serialize but not Deserialize
@@ -14,16 +14,26 @@
 //! Internal-output addresses are derived via `super::taproot`.
 
 use super::BTC_LIB;
+use super::BitcoinAddress;
+use super::BitcoinKeypair;
+use super::BitcoinPubkey;
+use super::BitcoinSignature;
 use super::DerivationPath;
+use super::HashiMasterG;
 use super::taproot::taproot_script_pubkey_and_leaf_hash;
 use super::taproot::taproot_script_spend_sighashes;
-use crate::guardian::BitcoinAddress;
-use crate::guardian::BitcoinKeypair;
-use crate::guardian::BitcoinPubkey;
-use crate::guardian::BitcoinSignature;
-use crate::guardian::GuardianError::InvalidInputs;
-use crate::guardian::GuardianResult;
-use crate::guardian::HashiMasterG;
+use anyhow::anyhow;
+use bitcoin::Amount;
+use bitcoin::Network;
+use bitcoin::OutPoint;
+use bitcoin::ScriptBuf;
+use bitcoin::Sequence;
+use bitcoin::TapSighashType;
+use bitcoin::Transaction;
+use bitcoin::TxIn;
+use bitcoin::TxOut;
+use bitcoin::Txid;
+use bitcoin::Witness;
 use bitcoin::absolute::LockTime;
 use bitcoin::address::NetworkChecked;
 use bitcoin::address::NetworkUnchecked;
@@ -31,7 +41,6 @@ use bitcoin::secp256k1::Message;
 use bitcoin::taproot::Signature;
 use bitcoin::taproot::TapLeafHash;
 use bitcoin::transaction::Version;
-use bitcoin::*;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -40,7 +49,7 @@ use std::collections::HashSet;
 //    Core Data Structures
 // ---------------------------------
 
-/// (Hashi+Guardian)-owned input UTXO
+/// Bridge-owned input UTXO.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct InputUTXO {
     pub outpoint: OutPoint,
@@ -113,20 +122,6 @@ pub struct TxUTXOsWire {
 // ---------------------------------
 //    Implementations
 // ---------------------------------
-
-/// Validates that an unchecked address is valid for `network` and returns a checked address.
-fn validate_address_for_network(
-    address: &BitcoinAddress<NetworkUnchecked>,
-    network: Network,
-) -> GuardianResult<BitcoinAddress<NetworkChecked>> {
-    // Prefer the library's checked conversion to avoid accidentally assuming correctness.
-    address.clone().require_network(network).map_err(|_| {
-        InvalidInputs(format!(
-            "invalid address {:?} for network {}",
-            address, network
-        ))
-    })
-}
 
 /// Represents an input to be spent.
 ///
@@ -249,6 +244,18 @@ impl OutputUTXO {
     }
 }
 
+/// Validates that an unchecked address is valid for `network` and returns a checked address.
+fn validate_address_for_network(
+    address: &BitcoinAddress<NetworkUnchecked>,
+    network: Network,
+) -> anyhow::Result<BitcoinAddress<NetworkChecked>> {
+    // Prefer the library's checked conversion to avoid accidentally assuming correctness.
+    address
+        .clone()
+        .require_network(network)
+        .map_err(|_| anyhow!("invalid address {:?} for network {}", address, network))
+}
+
 impl TxUTXOs {
     /// Constructs a `TxUTXOs`, validating every invariant in one place: external
     /// output addresses must be valid for `network`, amounts must be non-zero,
@@ -258,12 +265,12 @@ impl TxUTXOs {
         inputs: Vec<InputUTXO>,
         outputs: Vec<OutputUTXOWire>,
         network: Network,
-    ) -> GuardianResult<Self> {
+    ) -> anyhow::Result<Self> {
         if inputs.is_empty() {
-            return Err(InvalidInputs("input utxos must not be empty".into()));
+            anyhow::bail!("input utxos must not be empty");
         }
         if outputs.is_empty() {
-            return Err(InvalidInputs("output utxos must not be empty".into()));
+            anyhow::bail!("output utxos must not be empty");
         }
 
         // Validate each external address against the network, turning untrusted
@@ -284,12 +291,12 @@ impl TxUTXOs {
         // 0-value output is invalid on Bitcoin.
         for utxo in &inputs {
             if utxo.amount == Amount::ZERO {
-                return Err(InvalidInputs("input amount must be > 0".into()));
+                anyhow::bail!("input amount must be > 0");
             }
         }
         for utxo in &outputs {
             if utxo.amount() == Amount::ZERO {
-                return Err(InvalidInputs("output amount must be > 0".into()));
+                anyhow::bail!("output amount must be > 0");
             }
         }
 
@@ -297,10 +304,7 @@ impl TxUTXOs {
         let mut seen_inputs: HashSet<OutPoint> = HashSet::with_capacity(inputs.len());
         for utxo in &inputs {
             if !seen_inputs.insert(utxo.outpoint) {
-                return Err(InvalidInputs(format!(
-                    "duplicate input outpoint: {}",
-                    utxo.outpoint
-                )));
+                anyhow::bail!("duplicate input outpoint: {}", utxo.outpoint);
             }
         }
 
@@ -381,14 +385,15 @@ impl TxUTXOs {
         (messages, tx.compute_txid())
     }
 
-    fn assert_positive_fees(&self) -> GuardianResult<()> {
+    fn assert_positive_fees(&self) -> anyhow::Result<()> {
         let input_sum: Amount = self.inputs.iter().map(|utxo| utxo.amount).sum();
         let output_sum: Amount = self.outputs.iter().map(|utxo| utxo.amount()).sum();
         if input_sum <= output_sum {
-            return Err(InvalidInputs(format!(
+            anyhow::bail!(
                 "fees must be greater than zero: input_sum={} output_sum={}",
-                input_sum, output_sum
-            )));
+                input_sum,
+                output_sum
+            );
         }
         Ok(())
     }

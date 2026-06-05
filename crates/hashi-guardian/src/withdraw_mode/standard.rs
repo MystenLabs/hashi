@@ -170,21 +170,13 @@ mod tests {
     use super::*;
     use crate::OperatorInitTestArgs;
     use bitcoin::Network;
-    use hashi_types::guardian::test_utils::create_btc_keypair;
-    use hashi_types::guardian::BitcoinPubkey;
+    use hashi_types::bitcoin::create_btc_keypair_for_test;
+    use hashi_types::bitcoin::hashi_master_g_from_btc_xonly_for_test;
     use hashi_types::guardian::HashiCommittee;
-    use hashi_types::guardian::HashiMasterG;
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::StandardWithdrawalRequest;
     use hashi_types::guardian::WithdrawModeConfig;
-
-    /// Tests build their fake "hashi master" from a `bitcoin::Keypair`. The
-    /// bitcoin-lib keypair always signs against the even-y projection of its
-    /// pubkey, so reconstruct the `G` point with even-y so derivations agree.
-    fn hashi_master_g_from_btc_xonly(pubkey: &BitcoinPubkey) -> HashiMasterG {
-        HashiMasterG::with_even_y_from_x_be_bytes(&pubkey.serialize()).expect("valid x coordinate")
-    }
 
     /// Sets up an enclave with a single committee and token bucket limiter.
     async fn setup_fully_initialized_enclave(
@@ -192,9 +184,9 @@ mod tests {
         committee: HashiCommittee,
         max_bucket_capacity_sats: u64,
     ) -> Arc<Enclave> {
-        let hashi_kp = create_btc_keypair(&[6u8; 32]);
+        let hashi_kp = create_btc_keypair_for_test(&[6u8; 32]);
         let hashi_btc_master_pubkey =
-            hashi_master_g_from_btc_xonly(&hashi_kp.x_only_public_key().0);
+            hashi_master_g_from_btc_xonly_for_test(&hashi_kp.x_only_public_key().0);
 
         let refill_rate = 0; // no refill in tests unless specified
         let limiter_config = LimiterConfig {
@@ -219,7 +211,7 @@ mod tests {
         // The reconstructed BTC keypair (set by provisioner_init in production).
         enclave
             .config
-            .set_btc_keypair(create_btc_keypair(&[8u8; 32]))
+            .set_btc_keypair(create_btc_keypair_for_test(&[8u8; 32]))
             .unwrap();
 
         enclave

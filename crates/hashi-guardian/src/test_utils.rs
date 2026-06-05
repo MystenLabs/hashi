@@ -9,6 +9,8 @@ use bitcoin::secp256k1::Keypair;
 use bitcoin::secp256k1::Secp256k1;
 use bitcoin::secp256k1::SecretKey;
 use bitcoin::Network;
+use hashi_types::bitcoin::BitcoinPubkey;
+use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::guardian::*;
 use rand::RngCore;
 use std::sync::Arc;

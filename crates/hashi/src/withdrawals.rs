@@ -2,13 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::anyhow;
-use bitcoin::Address as BitcoinAddress;
 use bitcoin::Amount;
 use bitcoin::FeeRate;
 use bitcoin::TxOut;
 use bitcoin::Weight;
-use bitcoin::blockdata::script::witness_program::WitnessProgram;
-use bitcoin::blockdata::script::witness_version::WitnessVersion;
 use bitcoin::taproot::TapLeafHash;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
@@ -18,8 +15,8 @@ use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::S;
 use futures::stream::StreamExt;
+use hashi_types::bitcoin as hashi_bitcoin;
 use hashi_types::bitcoin_txid::BitcoinTxid;
-use hashi_types::guardian::bitcoin_utils;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -72,22 +69,6 @@ const WITHDRAWAL_COMMIT_RUNTIME_OBJECT_BUDGET: usize = 922;
 const WITHDRAWAL_COMMIT_FIXED_RUNTIME_OBJECTS: usize = 12;
 const WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_REQUEST: usize = 3;
 const WITHDRAWAL_COMMIT_RUNTIME_OBJECTS_PER_INPUT: usize = 1;
-
-/// Full input weight (WU) for a 2-of-2 taproot script-path spend.
-/// TXIN_BASE_WEIGHT (164 WU) + satisfaction (234 WU) = 398 WU (100 vB).
-/// Used in fee validation where we calculate weight directly without
-/// going through Candidate::new().
-const SCRIPT_PATH_2OF2_TXIN_WEIGHT: u64 = 164 + 234;
-
-/// Non-witness fixed overhead for a segwit transaction:
-/// nVersion(4×4) + nLockTime(4×4) = 32 WU, plus the segwit marker/flag (2 WU).
-const TX_FIXED_WEIGHT_WU: u64 = 34;
-
-/// P2TR output weight: TXOUT_BASE(36) + OP_1 OP_PUSHBYTES_32 <32 bytes>(136) = 172 WU.
-const P2TR_OUTPUT_WEIGHT_WU: u64 = 172;
-
-/// P2WPKH output weight: TXOUT_BASE(36) + OP_0 OP_PUSHBYTES_20 <20 bytes>(88) = 124 WU.
-const P2WPKH_OUTPUT_WEIGHT_WU: u64 = 124;
 
 fn safe_withdrawal_commit_max_inputs(request_count: usize, configured_max_inputs: usize) -> usize {
     let request_objects =
@@ -338,7 +319,8 @@ impl Hashi {
         // 5. Verify change output (if present) goes to hashi root pubkey
         if output_count == request_count + 1 {
             let change_output = &approval.outputs[request_count];
-            let expected_address = witness_program_from_address(&self.get_deposit_address(None)?)?;
+            let expected_address =
+                hashi_bitcoin::witness_program_from_address(&self.get_deposit_address(None)?)?;
             anyhow::ensure!(
                 change_output.bitcoin_address == expected_address,
                 "Change output does not go to hashi root pubkey"
@@ -363,15 +345,16 @@ impl Hashi {
         {
             // Estimate transaction weight.
             let num_inputs = selected_utxos.len() as u64;
-            let input_weight = SCRIPT_PATH_2OF2_TXIN_WEIGHT * num_inputs;
+            let input_weight = hashi_bitcoin::SCRIPT_PATH_2OF2_TXIN_WEIGHT * num_inputs;
             let output_weight: u64 = approval
                 .outputs
                 .iter()
-                .map(|o| output_weight_for_address(&o.bitcoin_address))
+                .map(|o| hashi_bitcoin::output_weight_for_witness_program(&o.bitcoin_address))
                 .collect::<anyhow::Result<Vec<_>>>()?
                 .iter()
                 .sum();
-            let tx_weight = Weight::from_wu(TX_FIXED_WEIGHT_WU + input_weight + output_weight);
+            let tx_weight =
+                Weight::from_wu(hashi_bitcoin::TX_FIXED_WEIGHT_WU + input_weight + output_weight);
 
             let min_fee_rate = FeeRate::from_sat_per_vb_unchecked(1);
 
@@ -900,7 +883,7 @@ impl Hashi {
             .map(|(_, leaf_hash)| *leaf_hash)
             .collect::<Vec<TapLeafHash>>();
 
-        Ok(bitcoin_utils::taproot_script_spend_sighashes(
+        Ok(hashi_bitcoin::taproot_script_spend_sighashes(
             unsigned_tx,
             &prevouts,
             &leaf_hashes,
@@ -919,14 +902,15 @@ impl Hashi {
     ) -> anyhow::Result<bitcoin::Transaction> {
         let inputs: Vec<bitcoin::TxIn> = selected_utxos
             .iter()
-            .map(|utxo| bitcoin_utils::InputUTXO::from(utxo).txin())
+            .map(|utxo| hashi_bitcoin::InputUTXO::from(utxo).txin())
             .collect();
 
         let tx_outputs: Vec<bitcoin::TxOut> = outputs
             .iter()
             .map(|output| {
-                let script_pubkey = script_pubkey_from_raw_address(&output.bitcoin_address)
-                    .expect("invalid bitcoin address in output");
+                let script_pubkey =
+                    hashi_bitcoin::script_pubkey_from_witness_program(&output.bitcoin_address)
+                        .expect("invalid bitcoin address in output");
                 bitcoin::TxOut {
                     value: bitcoin::Amount::from_sat(output.amount),
                     script_pubkey,
@@ -934,7 +918,7 @@ impl Hashi {
             })
             .collect();
 
-        Ok(bitcoin_utils::construct_tx(inputs, tx_outputs))
+        Ok(hashi_bitcoin::construct_tx(inputs, tx_outputs))
     }
 
     /// Build a withdrawal commitment for a batch of approved requests: select
@@ -1067,7 +1051,7 @@ impl Hashi {
         if let Some(change_amount) = result.change {
             outputs.push(OutputUtxo {
                 amount: change_amount,
-                bitcoin_address: witness_program_from_address(&change_address)
+                bitcoin_address: hashi_bitcoin::witness_program_from_address(&change_address)
                     .map_err(WithdrawalCommitmentError::BtcTxBuildFailed)?,
             });
         }
@@ -1116,9 +1100,11 @@ impl Hashi {
         let source_tx_hash = request.sui_tx_digest.to_string();
 
         // Destination: Bitcoin address (raw witness bytes -> bech32 string)
-        let destination_address = self
-            .bitcoin_address_string_from_raw(&request.bitcoin_address)
-            .map_err(WithdrawalApprovalError::NeverRetry)?;
+        let destination_address = hashi_bitcoin::address_string_from_witness_program(
+            &request.bitcoin_address,
+            self.config.bitcoin_network(),
+        )
+        .map_err(WithdrawalApprovalError::NeverRetry)?;
 
         let approved = screener
             .approve_withdrawal(
@@ -1139,21 +1125,6 @@ impl Hashi {
         }
 
         Ok(())
-    }
-
-    /// Convert raw witness program bytes to a human-readable Bitcoin address string.
-    fn bitcoin_address_string_from_raw(&self, address_bytes: &[u8]) -> anyhow::Result<String> {
-        let version = match address_bytes.len() {
-            32 => WitnessVersion::V1,
-            20 => WitnessVersion::V0,
-            len => anyhow::bail!("Unsupported bitcoin address length: {len}"),
-        };
-        let program = WitnessProgram::new(version, address_bytes)
-            .map_err(|e| anyhow!("Invalid witness program: {e}"))?;
-        let script = bitcoin::ScriptBuf::new_witness_program(&program);
-        let address = bitcoin::Address::from_script(&script, self.config.bitcoin_network())
-            .map_err(|e| anyhow!("Failed to convert script to address: {e}"))?;
-        Ok(address.to_string())
     }
 }
 
@@ -1290,24 +1261,6 @@ impl WithdrawalBroadcastError {
 
     pub fn kind(&self) -> WithdrawalBroadcastErrorKind {
         self.kind
-    }
-}
-
-pub fn witness_program_from_address(address: &BitcoinAddress) -> anyhow::Result<Vec<u8>> {
-    let script = address.script_pubkey();
-    let bytes = script.as_bytes();
-    match bytes {
-        [0x00, 0x14, rest @ ..] if rest.len() == 20 => Ok(rest.to_vec()),
-        [0x51, 0x20, rest @ ..] if rest.len() == 32 => Ok(rest.to_vec()),
-        _ => anyhow::bail!("Unsupported script pubkey for withdrawal output: {script}"),
-    }
-}
-
-fn output_weight_for_address(bitcoin_address: &[u8]) -> anyhow::Result<u64> {
-    match bitcoin_address.len() {
-        32 => Ok(P2TR_OUTPUT_WEIGHT_WU),
-        20 => Ok(P2WPKH_OUTPUT_WEIGHT_WU),
-        len => anyhow::bail!("Unsupported bitcoin address length: {len}"),
     }
 }
 
@@ -1488,19 +1441,6 @@ fn build_ancestor_chain(
     chain
 }
 
-/// Convert raw bitcoin address bytes (witness program) to a `ScriptBuf`.
-/// 32-byte addresses are P2TR (witness v1), 20-byte addresses are P2WPKH (witness v0).
-fn script_pubkey_from_raw_address(address_bytes: &[u8]) -> anyhow::Result<bitcoin::ScriptBuf> {
-    let version = match address_bytes.len() {
-        32 => WitnessVersion::V1,
-        20 => WitnessVersion::V0,
-        len => anyhow::bail!("Unsupported bitcoin address length: {len}"),
-    };
-    let program = WitnessProgram::new(version, address_bytes)
-        .map_err(|e| anyhow!("Invalid witness program: {e}"))?;
-    Ok(bitcoin::ScriptBuf::new_witness_program(&program))
-}
-
 /// Deterministic from on-chain state and the leader-supplied
 /// `(timestamp_secs, seq)`, so every validator reconstructs the same request.
 pub fn build_guardian_withdrawal_request(
@@ -1509,9 +1449,9 @@ pub fn build_guardian_withdrawal_request(
     timestamp_secs: u64,
     seq: u64,
 ) -> anyhow::Result<hashi_types::guardian::StandardWithdrawalRequest> {
-    use hashi_types::guardian::bitcoin_utils::InputUTXO;
-    use hashi_types::guardian::bitcoin_utils::OutputUTXOWire;
-    use hashi_types::guardian::bitcoin_utils::TxUTXOs;
+    use hashi_types::bitcoin::InputUTXO;
+    use hashi_types::bitcoin::OutputUTXOWire;
+    use hashi_types::bitcoin::TxUTXOs;
 
     let network = hashi.config.bitcoin_network();
 
@@ -1525,9 +1465,11 @@ pub fn build_guardian_withdrawal_request(
         .enumerate()
         .map(|(i, output)| {
             if i < num_requests {
-                let script_pubkey = script_pubkey_from_raw_address(&output.bitcoin_address)?;
-                let address = BitcoinAddress::from_script(&script_pubkey, network)
-                    .map_err(|e| anyhow!("Cannot derive address from output script: {e}"))?;
+                let script_pubkey =
+                    hashi_bitcoin::script_pubkey_from_witness_program(&output.bitcoin_address)?;
+                let address =
+                    hashi_bitcoin::BitcoinAddress::from_script(&script_pubkey, network)
+                        .map_err(|e| anyhow!("Cannot derive address from output script: {e}"))?;
                 Ok(OutputUTXOWire::external(
                     address.into_unchecked(),
                     Amount::from_sat(output.amount),
