@@ -646,7 +646,7 @@ impl GuardianInfo {
             self.current_committee_epoch
                 .ok_or(InvalidInputs("missing current committee epoch".into()))?,
             self.mpc_master_g
-                .ok_or(InvalidInputs("missing mpc master pubkey".into()))?,
+                .ok_or(InvalidInputs("missing mpc master g".into()))?,
         ))
     }
 }

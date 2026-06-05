@@ -628,11 +628,11 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
     let limiter_state = data.limiter_state.map(pb_to_limiter_state).transpose()?;
     let limiter_config = data.limiter_config.map(pb_to_limiter_config).transpose()?;
 
-    let mpc_master_pubkey = data
-        .mpc_master_pubkey
+    let mpc_master_g = data
+        .mpc_master_g
         .map(|b| {
             bcs::from_bytes(b.as_ref())
-                .map_err(|e| InvalidInputs(format!("invalid mpc_master_pubkey: {e}")))
+                .map_err(|e| InvalidInputs(format!("invalid mpc_master_g: {e}")))
         })
         .transpose()?;
 
@@ -646,7 +646,7 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
         limiter_state,
         limiter_config,
         current_committee_epoch: data.current_committee_epoch,
-        mpc_master_g: mpc_master_pubkey,
+        mpc_master_g,
     })
 }
 
@@ -666,7 +666,7 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
         limiter_state: info.limiter_state.map(limiter_state_to_pb),
         limiter_config: info.limiter_config.map(limiter_config_to_pb),
         current_committee_epoch: info.current_committee_epoch,
-        mpc_master_pubkey: info
+        mpc_master_g: info
             .mpc_master_g
             .map(|g| bcs::to_bytes(&g).expect("serialize MPC master G").into()),
     }

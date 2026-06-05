@@ -1308,7 +1308,7 @@ pub struct GuardianInfoData {
     /// MPC committee verifying key `G` as `bcs(G)` (the derivation master, NOT the
     /// guardian's own BTC key). Set after operator_init.
     #[prost(bytes = "bytes", optional, tag = "10")]
-    pub mpc_master_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
+    pub mpc_master_g: ::core::option::Option<::prost::bytes::Bytes>,
 }
 /// Public description of the current BTC key's secret-sharing scheme.
 /// `commitments.len() == num_shares` and `2 <= threshold <= num_shares`.

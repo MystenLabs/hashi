@@ -93,7 +93,7 @@ message GuardianInfoData {
 
   // MPC committee verifying key `G` as `bcs(G)` (the derivation master, NOT the
   // guardian's own BTC key). Set after operator_init.
-  optional bytes mpc_master_pubkey = 10;
+  optional bytes mpc_master_g = 10;
 }
 
 // Public description of the current BTC key's secret-sharing scheme.

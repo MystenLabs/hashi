@@ -41,7 +41,7 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
         enclave_bucket_info,
         enclave_enc_pubkey_bytes,
         enclave_state_hash,
-        _enclave_server_version,
+        _enclave_git_revision,
         enclave_btc_pubkey,
         enclave_limiter_state,
         enclave_limiter_config,
@@ -118,7 +118,6 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
     // latest signed `committee-update/` log; before any update exists (genesis) we
     // fall back to the trusted local value. `master_g` is the MPC committee `G`
     // (see config doc), NOT the guardian's own BTC key.
-    let master_g = cfg.mpc_master_g()?;
     let committee = match reader.read_latest_committee().await? {
         Some(scraped) => scraped,
         None => cfg

@@ -50,6 +50,9 @@ COPY --from=user-linux-nitro /linux.config .
 FROM base AS build
 ARG BUCKET_NAME
 ARG AWS_REGION=us-east-1
+ARG GIT_REVISION
+RUN [ -n "$GIT_REVISION" ] || { echo "GIT_REVISION build-arg must be set"; exit 1; }
+ENV GIT_REVISION=${GIT_REVISION}
 COPY crates /crates
 COPY Cargo.toml /Cargo.toml
 COPY Cargo.lock /Cargo.lock
