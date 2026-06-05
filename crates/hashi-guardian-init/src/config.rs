@@ -3,7 +3,6 @@
 
 use anyhow::Context;
 use hashi_types::bitcoin::HashiMasterG;
-use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::Share;
