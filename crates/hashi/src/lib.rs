@@ -62,7 +62,7 @@ pub struct Hashi {
     screener_client: OnceLock<Option<grpc::screener_client::ScreenerClient>>,
     guardian_client: OnceLock<Option<grpc::guardian_client::GuardianClient>>,
     guardian_signing_pubkey: OnceLock<Option<hashi_types::guardian::GuardianPubKey>>,
-    guardian_btc_pubkey: OnceLock<Option<hashi_types::guardian::BitcoinPubkey>>,
+    guardian_btc_pubkey: OnceLock<Option<hashi_types::bitcoin::BitcoinPubkey>>,
     local_limiter: OnceLock<Arc<guardian_limiter::LocalLimiter>>,
     /// `(seq, wid)` of the last guardian-finalized withdrawal, for pacing.
     guardian_last_finalized: RwLock<Option<(u64, sui_sdk_types::Address)>>,
@@ -247,7 +247,7 @@ impl Hashi {
             .and_then(|opt| opt.as_ref())
     }
 
-    pub fn guardian_btc_pubkey(&self) -> Option<&hashi_types::guardian::BitcoinPubkey> {
+    pub fn guardian_btc_pubkey(&self) -> Option<&hashi_types::bitcoin::BitcoinPubkey> {
         self.guardian_btc_pubkey.get().and_then(|opt| opt.as_ref())
     }
 
@@ -881,7 +881,7 @@ impl Hashi {
     /// the live key in `guardian_btc_pubkey` on first successful match.
     fn verify_and_pin_guardian_btc_pubkey(
         &self,
-        live: Option<hashi_types::guardian::BitcoinPubkey>,
+        live: Option<hashi_types::bitcoin::BitcoinPubkey>,
     ) -> bool {
         let expected = self.onchain_state().guardian_btc_public_key();
         if !verify_btc_pub_key_matches(live.as_ref(), expected.as_deref(), &self.metrics) {
@@ -1098,7 +1098,7 @@ fn verify_signing_pub_key_matches(
 /// case: when the on-chain key is `Some` but the live guardian doesn't
 /// return one — the deploy must have come from a guardian that did.
 fn verify_btc_pub_key_matches(
-    live: Option<&hashi_types::guardian::BitcoinPubkey>,
+    live: Option<&hashi_types::bitcoin::BitcoinPubkey>,
     expected: Option<&[u8]>,
     metrics: &metrics::Metrics,
 ) -> bool {
@@ -1491,8 +1491,8 @@ mod test {
 
     // --- guardian /info BTC pubkey verification ---
 
-    fn random_btc_pubkey() -> hashi_types::guardian::BitcoinPubkey {
-        let kp = hashi_types::guardian::test_utils::create_btc_keypair(&[42u8; 32]);
+    fn random_btc_pubkey() -> hashi_types::bitcoin::BitcoinPubkey {
+        let kp = hashi_types::bitcoin::create_btc_keypair_for_test(&[42u8; 32]);
         kp.x_only_public_key().0
     }
 

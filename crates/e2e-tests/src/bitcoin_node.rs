@@ -3,13 +3,13 @@
 
 use anyhow::Result;
 use anyhow::anyhow;
-use bitcoin::Address;
 use bitcoin::Amount;
 use bitcoin::BlockHash;
 use bitcoin::Txid;
 use corepc_client::client_sync::Auth;
 use corepc_client::client_sync::v29::Client;
 use hashi::config::get_available_port;
+use hashi_types::bitcoin::BitcoinAddress;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
@@ -163,7 +163,7 @@ impl BitcoinNodeHandle {
         Ok(blocks)
     }
 
-    pub fn send_to_address(&self, address: &Address, amount: Amount) -> Result<Txid> {
+    pub fn send_to_address(&self, address: &BitcoinAddress, amount: Amount) -> Result<Txid> {
         let txid = self
             .rpc_client
             .send_to_address(address, amount)?
@@ -183,7 +183,7 @@ impl BitcoinNodeHandle {
             .0)
     }
 
-    pub fn get_new_address(&self) -> Result<Address> {
+    pub fn get_new_address(&self) -> Result<BitcoinAddress> {
         let address = self.rpc_client.new_address()?;
         Ok(address)
     }

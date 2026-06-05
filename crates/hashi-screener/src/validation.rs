@@ -3,9 +3,9 @@
 
 use std::str::FromStr;
 
-use bitcoin::Address as BitcoinAddress;
 use bitcoin::Txid;
 use bitcoin::address::NetworkUnchecked;
+use hashi_types::bitcoin::BitcoinAddress;
 use sui_sdk_types::Address as SuiAddress;
 use sui_sdk_types::Digest;
 

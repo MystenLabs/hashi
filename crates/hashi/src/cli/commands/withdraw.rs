@@ -5,8 +5,11 @@
 
 use anyhow::Context;
 use anyhow::Result;
+use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::Hash;
 use colored::Colorize;
+use hashi_types::bitcoin::BitcoinAddress;
+use hashi_types::bitcoin::witness_program_from_address;
 
 use crate::cli::OutputFormat;
 use crate::cli::TxOptions;
@@ -16,7 +19,6 @@ use crate::cli::config::CliConfig;
 use crate::cli::print_info;
 use crate::cli::print_success;
 use crate::cli::types::display;
-use crate::withdrawals::witness_program_from_address;
 
 pub async fn run(action: WithdrawCommands, config: &CliConfig, tx_opts: &TxOptions) -> Result<()> {
     match action {
@@ -64,7 +66,7 @@ async fn request(
     let btc_network = crate::btc_monitor::config::parse_btc_network(
         config.bitcoin.as_ref().and_then(|b| b.network.as_deref()),
     )?;
-    let btc_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
+    let btc_addr: BitcoinAddress<NetworkUnchecked> =
         btc_address.parse().context("Invalid Bitcoin address")?;
     let btc_addr = btc_addr
         .require_network(btc_network)

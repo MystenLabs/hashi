@@ -29,11 +29,16 @@ use super::WithdrawalID;
 pub use crate::pgp::test_utils::mock_pgp_certs;
 pub use crate::pgp::test_utils::mock_pgp_certs_armored;
 
-use super::bitcoin_utils::BTC_LIB;
-use super::bitcoin_utils::InputUTXO;
-use super::bitcoin_utils::OutputUTXOWire;
-use super::bitcoin_utils::TxUTXOs;
-use super::bitcoin_utils::sign_btc_tx;
+use crate::bitcoin::BTC_LIB;
+use crate::bitcoin::BitcoinAddress;
+use crate::bitcoin::BitcoinKeypair;
+use crate::bitcoin::HashiMasterG;
+use crate::bitcoin::InputUTXO;
+use crate::bitcoin::OutputUTXOWire;
+use crate::bitcoin::TxUTXOs;
+use crate::bitcoin::create_btc_keypair_for_test;
+use crate::bitcoin::hashi_master_g_from_btc_xonly_for_test;
+use crate::bitcoin::sign_btc_tx;
 use crate::committee::Bls12381PrivateKey;
 use crate::committee::BlsSignatureAggregator;
 use crate::committee::EncryptionPrivateKey;
@@ -42,9 +47,7 @@ use bitcoin::Amount;
 use bitcoin::Network;
 use bitcoin::hashes::Hash as _;
 use bitcoin::key::UntweakedPublicKey;
-use bitcoin::secp256k1::Keypair;
 use bitcoin::secp256k1::Message;
-use bitcoin::secp256k1::SecretKey;
 use ed25519_consensus::SigningKey;
 use std::num::NonZeroU16;
 use sui_sdk_types::Address as SuiAddress;
@@ -67,11 +70,6 @@ const TEST_SIGNER_ADDRESS: SuiAddress = SuiAddress::new([1u8; 32]);
 
 /// Deterministic committee signing key material used across tests.
 const TEST_HASHI_BLS_SK_BYTES: [u8; Bls12381PrivateKey::LENGTH] = [9u8; Bls12381PrivateKey::LENGTH];
-
-pub fn create_btc_keypair(sk: &[u8; 32]) -> Keypair {
-    let secret_key = SecretKey::from_slice(sk).expect("valid secret key");
-    Keypair::from_secret_key(&BTC_LIB, &secret_key)
-}
 
 impl GetGuardianInfoResponse {
     pub fn mock_for_testing() -> Self {
@@ -210,7 +208,7 @@ impl WithdrawModeConfig {
         limiter_config: LimiterConfig,
         limiter_state: LimiterState,
         committee: HashiCommittee,
-        hashi_btc_master_pubkey: super::HashiMasterG,
+        hashi_btc_master_pubkey: HashiMasterG,
         network: super::Network,
     ) -> Self {
         WithdrawModeConfig::new(
@@ -224,17 +222,16 @@ impl WithdrawModeConfig {
         .expect("valid WithdrawModeConfig")
     }
 
-    pub fn mock_for_testing(kp: Option<Keypair>) -> Self {
-        let kp = kp.unwrap_or(create_btc_keypair(&[1u8; 32]));
+    pub fn mock_for_testing(kp: Option<BitcoinKeypair>) -> Self {
+        let kp = kp.unwrap_or(create_btc_keypair_for_test(&[1u8; 32]));
         let max_capacity = 1000;
 
         // Convert the bitcoin-lib keypair's x-only pubkey to a raw `G` point.
         // The bitcoin Keypair always signs against its even-y projection, so
-        // building `G` from the x-only bytes via `with_even_y_from_x_be_bytes`
-        // gives the parent that matches what the keypair signs against.
-        let x_bytes = kp.x_only_public_key().0.serialize();
+        // Building `G` from the x-only bytes with even-y gives the parent that
+        // matches what the keypair signs against.
         let hashi_btc_master_pubkey =
-            super::HashiMasterG::with_even_y_from_x_be_bytes(&x_bytes).expect("valid x coordinate");
+            hashi_master_g_from_btc_xonly_for_test(&kp.x_only_public_key().0);
 
         WithdrawModeConfig::new(
             mock_committee_with_one_member(0),
@@ -263,10 +260,10 @@ fn dummy_secret_sharing_instance() -> SecretSharingInstance {
 
 impl StandardWithdrawalRequest {
     fn mock_for_testing(network: Network, wid: WithdrawalID) -> Self {
-        let kp = create_btc_keypair(&[2u8; 32]);
+        let kp = create_btc_keypair_for_test(&[2u8; 32]);
         let (internal_key, _) = UntweakedPublicKey::from_keypair(&kp);
         let addr_unchecked =
-            bitcoin::Address::p2tr(&BTC_LIB, internal_key, None, network).into_unchecked();
+            BitcoinAddress::p2tr(&BTC_LIB, internal_key, None, network).into_unchecked();
 
         let txid = bitcoin::Txid::from_slice(&[9u8; 32]).expect("valid txid bytes");
         let outpoint = bitcoin::OutPoint { txid, vout: 0 };
@@ -351,7 +348,7 @@ impl StandardWithdrawalRequest {
 
 impl GuardianSigned<StandardWithdrawalResponse> {
     pub fn mock_for_testing() -> Self {
-        let kp = create_btc_keypair(&[3u8; 32]);
+        let kp = create_btc_keypair_for_test(&[3u8; 32]);
         let msg = Message::from_digest([5u8; 32]);
         let enclave_signatures = sign_btc_tx(&[msg], &kp);
 

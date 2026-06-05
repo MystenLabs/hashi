@@ -13,6 +13,7 @@ use clap::Parser;
 use clap::Subcommand;
 use colored::Colorize;
 use e2e_tests::TestNetworksBuilder;
+use hashi_types::bitcoin::BitcoinAddress;
 use serde::Deserialize;
 use serde::Serialize;
 use std::path::Path;
@@ -598,7 +599,7 @@ fn cmd_keygen(action: KeygenCommands) -> Result<()> {
             }
 
             let address =
-                bitcoin::Address::p2wpkh(&bitcoin::CompressedPublicKey(public_key), btc_network);
+                BitcoinAddress::p2wpkh(&bitcoin::CompressedPublicKey(public_key), btc_network);
 
             print_success(&format!(
                 "Private key (WIF) written to {}",
@@ -719,7 +720,7 @@ fn cmd_faucet_btc(address: &str, blocks: u64, data_dir: &Path) -> Result<()> {
         anyhow::bail!("Localnet process is not running.");
     }
 
-    let btc_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
+    let btc_addr: BitcoinAddress<bitcoin::address::NetworkUnchecked> =
         address.parse().context("Invalid Bitcoin address")?;
     let btc_addr = btc_addr
         .require_network(bitcoin::Network::Regtest)

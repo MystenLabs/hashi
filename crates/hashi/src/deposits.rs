@@ -15,7 +15,7 @@ use fastcrypto::groups::secp256k1::ProjectivePoint;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::G;
-use hashi_types::guardian::bitcoin_utils;
+use hashi_types::bitcoin as hashi_bitcoin;
 use hashi_types::proto::MemberSignature;
 use thiserror::Error;
 
@@ -36,8 +36,8 @@ pub fn derive_deposit_address(
     guardian_btc_pubkey: &XOnlyPublicKey,
     derivation_path: Option<&sui_sdk_types::Address>,
     btc_network: bitcoin::Network,
-) -> anyhow::Result<bitcoin::Address> {
-    Ok(bitcoin_utils::taproot_address(
+) -> anyhow::Result<hashi_bitcoin::BitcoinAddress> {
+    Ok(hashi_bitcoin::taproot_address(
         guardian_btc_pubkey,
         mpc_key,
         &derivation_path
@@ -220,14 +220,15 @@ impl Hashi {
         script_pubkey: &ScriptBuf,
         deposit_request: &DepositRequest,
     ) -> Result<(), UnapprovedDepositError> {
-        let deposit_address =
-            bitcoin::Address::from_script(script_pubkey, self.config.bitcoin_network()).map_err(
-                |e| {
-                    UnapprovedDepositError::DepositDataMismatch(anyhow!(
-                        "Failed to extract address from script_pubkey: {e}"
-                    ))
-                },
-            )?;
+        let deposit_address = hashi_bitcoin::BitcoinAddress::from_script(
+            script_pubkey,
+            self.config.bitcoin_network(),
+        )
+        .map_err(|e| {
+            UnapprovedDepositError::DepositDataMismatch(anyhow!(
+                "Failed to extract address from script_pubkey: {e}"
+            ))
+        })?;
         let expected_address = self
             .get_deposit_address(deposit_request.utxo.derivation_path.as_ref())
             .map_err(UnapprovedDepositError::DepositDataMismatch)?;
@@ -244,10 +245,10 @@ impl Hashi {
     pub fn get_deposit_address(
         &self,
         derivation_path: Option<&sui_sdk_types::Address>,
-    ) -> anyhow::Result<bitcoin::Address> {
+    ) -> anyhow::Result<hashi_bitcoin::BitcoinAddress> {
         let mpc_g = self.mpc_master_g()?;
         let guardian_pubkey = self.require_guardian_btc_pubkey()?;
-        Ok(bitcoin_utils::taproot_address(
+        Ok(hashi_bitcoin::taproot_address(
             &guardian_pubkey,
             &mpc_g,
             &derivation_path
@@ -270,7 +271,7 @@ impl Hashi {
     )> {
         let mpc_g = self.mpc_master_g()?;
         let guardian_pubkey = self.require_guardian_btc_pubkey()?;
-        Ok(bitcoin_utils::taproot_witness_artifacts(
+        Ok(hashi_bitcoin::taproot_witness_artifacts(
             &guardian_pubkey,
             &mpc_g,
             &derivation_path

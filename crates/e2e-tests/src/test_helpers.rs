@@ -14,6 +14,7 @@ use bitcoin::Amount;
 use bitcoin::Txid;
 use futures::StreamExt;
 use hashi::sui_tx_executor::SuiTxExecutor;
+use hashi_types::bitcoin::BitcoinAddress;
 use hashi_types::move_types::DepositConfirmedEvent;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -124,7 +125,7 @@ pub async fn wait_for_deposit_confirmation(
 pub fn lookup_vout(
     networks: &TestNetworks,
     txid: Txid,
-    address: bitcoin::Address,
+    address: BitcoinAddress,
     amount: u64,
 ) -> Result<usize> {
     let tx = networks
