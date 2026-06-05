@@ -1,24 +1,24 @@
 [package]
-name = "hashi-monitor"
+name = "hashi-guardian-init"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 anyhow.workspace = true
-bitcoin.workspace = true
-corepc-client.workspace = true
-jsonrpc.workspace = true
+bcs.workspace = true
 clap.workspace = true
 hashi-types = { path = "../hashi-types" }
-# guardian imported for s3 logger
 hashi-guardian = { path = "../hashi-guardian" }
+hex.workspace = true
+hpke.workspace = true
+k256.workspace = true
+rand.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true
+tonic.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [dev-dependencies]
-e2e-tests = { path = "../e2e-tests" }
+bitcoin.workspace = true
 hashi-guardian = { path = "../hashi-guardian", features = ["test-utils"] }
-tempfile.workspace = true

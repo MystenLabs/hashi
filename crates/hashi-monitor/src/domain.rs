@@ -22,6 +22,8 @@ use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use serde::Deserialize;
 
+// TODO: duplicate of `hashi_types::guardian::time_utils::now_timestamp_secs`;
+// remove and migrate the remaining monitor callers.
 pub fn now_unix_seconds() -> UnixSeconds {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

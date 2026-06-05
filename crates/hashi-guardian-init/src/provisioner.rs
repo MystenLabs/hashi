@@ -1,10 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-mod config;
-mod heartbeat_checks;
-mod limiter_recovery;
-
 use anyhow::Context;
 use hashi_guardian::s3_logger::S3Logger;
 use hashi_types::guardian::EncPubKey;
@@ -21,9 +17,11 @@ use hpke::Deserializable;
 use rand::thread_rng;
 use tracing::info;
 
-use crate::provisioner::config::GuardianConfig;
+use crate::config::GuardianConfig;
+use crate::heartbeat_checks;
+use crate::limiter_recovery;
 
-pub use config::ProvisionerConfig;
+pub use crate::config::ProvisionerConfig;
 
 pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
     let s3_client = S3Logger::new_checked(&cfg.s3)

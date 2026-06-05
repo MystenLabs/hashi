@@ -41,12 +41,6 @@ enum Command {
         #[arg(long)]
         start: u64,
     },
-    /// Run provisioner-init checks against guardian S3 logs and optionally submit ProvisionerInit.
-    ProvisionerInit {
-        /// Path to provisioner-init YAML config file.
-        #[arg(long)]
-        config: PathBuf,
-    },
 }
 
 #[tokio::main]
@@ -72,10 +66,6 @@ async fn main() -> anyhow::Result<()> {
             let cfg = hashi_monitor::config::Config::load_yaml(&config)?;
             let mut auditor = hashi_monitor::audit::ContinuousAuditor::new(&cfg, start).await?;
             auditor.run().await?;
-        }
-        Command::ProvisionerInit { config } => {
-            let cfg = hashi_monitor::provisioner::ProvisionerConfig::load_yaml(&config)?;
-            hashi_monitor::provisioner::run(cfg).await?;
         }
     }
 

@@ -1,13 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::domain::now_unix_seconds;
 use hashi_guardian::s3_logger::S3Logger;
 use hashi_guardian::s3_reader::GuardianLogDir;
 use hashi_guardian::s3_reader::GuardianPollerCore;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::VerifiedLogRecord;
 use hashi_types::guardian::time_utils::UnixSeconds;
+use hashi_types::guardian::time_utils::now_timestamp_secs;
 use hashi_types::guardian::time_utils::unix_millis_to_seconds;
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -43,7 +43,7 @@ pub struct GuardianSessionInfo {
 pub async fn heartbeat_audit(s3_client: &S3Logger) -> anyhow::Result<String> {
     let recent_heartbeats = read_recent_heartbeats(s3_client).await?;
     let summary = summarize_heartbeats_by_session(recent_heartbeats)?;
-    let now = now_unix_seconds();
+    let now = now_timestamp_secs();
     select_live_session(
         &summary,
         now,
@@ -54,7 +54,7 @@ pub async fn heartbeat_audit(s3_client: &S3Logger) -> anyhow::Result<String> {
 
 async fn read_recent_heartbeats(s3_client: &S3Logger) -> anyhow::Result<Vec<VerifiedLogRecord>> {
     // Read from the current and next hour-scoped prefixes to cover clock-boundary cases.
-    let one_hour_ago = now_unix_seconds().saturating_sub(60 * 60);
+    let one_hour_ago = now_timestamp_secs().saturating_sub(60 * 60);
     let mut poller = GuardianPollerCore::from_s3_client(
         s3_client.clone(),
         one_hour_ago,
