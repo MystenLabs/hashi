@@ -651,9 +651,32 @@ impl GetGuardianInfoResponse {
     /// attestation anchors `signing_pub_key`, and `signed_info` must be signed by
     /// it. Self-contained so any caller (KP init, hashi nodes) can turn an
     /// untrusted response into a trusted `GuardianInfo` in one call.
-    pub fn verify(&self) -> GuardianResult<GuardianInfo> {
-        verify_enclave_attestation(&self.attestation, &self.signing_pub_key)?;
+    pub fn verify(&self, expected_pcrs: &ExpectedPcrs) -> GuardianResult<GuardianInfo> {
+        verify_enclave_attestation(&self.attestation, &self.signing_pub_key, expected_pcrs)?;
         self.signed_info.clone().verify(&self.signing_pub_key)
+    }
+}
+
+/// Known-good Nitro measurement an attestation is pinned to. Construction
+/// mandates PCR0 — the hash of the whole enclave image (EIF), which uniquely
+/// identifies the build — so a pinning policy can never omit it.
+///
+/// TODO: holds only a single PCR0, so it can't accept the two valid measurements
+/// that briefly coexist during a software upgrade (old + new image), nor pin
+/// additional PCRs. A `commit -> PCRs` allowlist keyed on `untrusted_git_revision`
+/// is the follow-up.
+#[derive(Debug, Clone)]
+pub struct ExpectedPcrs {
+    pcr0: Vec<u8>,
+}
+
+impl ExpectedPcrs {
+    pub fn new(pcr0: Vec<u8>) -> Self {
+        Self { pcr0 }
+    }
+
+    pub fn pcr0(&self) -> &[u8] {
+        &self.pcr0
     }
 }
 
@@ -664,15 +687,14 @@ impl GetGuardianInfoResponse {
 /// In non-enclave dev/test builds the enclave emits a mock document, so this is a
 /// no-op, mirroring [`crate`]'s `get_attestation` `non-enclave-dev` stub. Real
 /// verification runs only in enclave (prod) builds.
-///
-/// TODO(check C): pin the document's PCRs against an expected set.
 pub fn verify_enclave_attestation(
     attestation: &[u8],
     signing_pubkey: &GuardianPubKey,
+    expected_pcrs: &ExpectedPcrs,
 ) -> GuardianResult<()> {
     #[cfg(any(test, feature = "non-enclave-dev"))]
     {
-        let _ = (attestation, signing_pubkey);
+        let _ = (attestation, signing_pubkey, expected_pcrs);
         return Ok(());
     }
     #[cfg(not(any(test, feature = "non-enclave-dev")))]
@@ -692,6 +714,13 @@ pub fn verify_enclave_attestation(
         if attested != signing_pubkey.to_bytes() {
             return Err(InvalidInputs(
                 "attestation public_key does not match the session signing pubkey".into(),
+            ));
+        }
+
+        // Pin PCR0 (the whole EIF image hash).
+        if doc.pcr_map.get(&0).map(Vec::as_slice) != Some(expected_pcrs.pcr0()) {
+            return Err(InvalidInputs(
+                "attestation PCR0 does not match the expected enclave image".into(),
             ));
         }
         Ok(())
