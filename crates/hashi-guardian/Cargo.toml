@@ -35,7 +35,8 @@ aws-smithy-mocks = "0.1"
 
 [features]
 # Stubs out the AWS Nitro NSM attestation call so the guardian can run
-# outside a Nitro enclave. Do not enable for prod builds.
-non-enclave-dev = []
+# outside a Nitro enclave. Do not enable for prod builds. Also stubs the
+# off-enclave verifier so it accepts the mock document.
+non-enclave-dev = ["hashi-types/non-enclave-dev"]
 # Exposes `test_utils` to external crates.
 test-utils = ["dep:aws-smithy-mocks", "aws-sdk-s3/test-util"]

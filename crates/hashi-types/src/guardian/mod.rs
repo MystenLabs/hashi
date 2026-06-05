@@ -657,13 +657,45 @@ impl GetGuardianInfoResponse {
     }
 }
 
-/// TODO(check C): verify the Nitro attestation (COSE signature + AWS cert chain)
-/// and that `signing_pubkey` is the key anchored in its `user_data`. No-op today.
+/// Verify a Nitro attestation document (COSE signature + AWS cert chain to the
+/// Nitro root + freshness) and that it commits to `signing_pubkey` — the enclave
+/// binds its signing key as the document's `public_key`.
+///
+/// In non-enclave dev/test builds the enclave emits a mock document, so this is a
+/// no-op, mirroring [`crate`]'s `get_attestation` `non-enclave-dev` stub. Real
+/// verification runs only in enclave (prod) builds.
+///
+/// TODO(check C): pin the document's PCRs against an expected set.
 pub fn verify_enclave_attestation(
-    _attestation: &[u8],
-    _signing_pubkey: &GuardianPubKey,
+    attestation: &[u8],
+    signing_pubkey: &GuardianPubKey,
 ) -> GuardianResult<()> {
-    Ok(())
+    #[cfg(any(test, feature = "non-enclave-dev"))]
+    {
+        let _ = (attestation, signing_pubkey);
+        return Ok(());
+    }
+    #[cfg(not(any(test, feature = "non-enclave-dev")))]
+    {
+        use fastcrypto::nitro_attestation::parse_nitro_attestation;
+        use fastcrypto::nitro_attestation::verify_nitro_attestation;
+
+        let (signature, signed_message, doc) =
+            parse_nitro_attestation(attestation, true, true, true)
+                .map_err(|e| InvalidInputs(format!("attestation parse failed: {e}")))?;
+        verify_nitro_attestation(&signature, &signed_message, &doc, now_timestamp_ms())
+            .map_err(|e| InvalidInputs(format!("attestation verification failed: {e}")))?;
+
+        let attested = doc
+            .public_key
+            .ok_or_else(|| InvalidInputs("attestation has no public_key".into()))?;
+        if attested != signing_pubkey.to_bytes() {
+            return Err(InvalidInputs(
+                "attestation public_key does not match the session signing pubkey".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------
