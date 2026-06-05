@@ -605,9 +605,9 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
         .ok_or_else(|| missing("encryption_pubkey"))?
         .to_vec();
 
-    let server_version = data
-        .server_version
-        .ok_or_else(|| missing("server_version"))?;
+    let untrusted_git_revision = data
+        .untrusted_git_revision
+        .ok_or_else(|| missing("untrusted_git_revision"))?;
 
     let state_hash = data
         .state_hash
@@ -628,16 +628,25 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
     let limiter_state = data.limiter_state.map(pb_to_limiter_state).transpose()?;
     let limiter_config = data.limiter_config.map(pb_to_limiter_config).transpose()?;
 
+    let mpc_master_pubkey = data
+        .mpc_master_pubkey
+        .map(|b| {
+            bcs::from_bytes(b.as_ref())
+                .map_err(|e| InvalidInputs(format!("invalid mpc_master_pubkey: {e}")))
+        })
+        .transpose()?;
+
     Ok(GuardianInfo {
         secret_sharing_instance,
         bucket_info,
         encryption_pubkey,
         state_hash,
-        server_version,
+        untrusted_git_revision,
         enclave_btc_pubkey,
         limiter_state,
         limiter_config,
         current_committee_epoch: data.current_committee_epoch,
+        mpc_master_g: mpc_master_pubkey,
     })
 }
 
@@ -650,13 +659,16 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
         bucket_info: info.bucket_info.map(s3_bucket_info_to_pb),
         encryption_pubkey: Some(info.encryption_pubkey.into()),
         state_hash: info.state_hash.map(|h| h.to_vec().into()),
-        server_version: Some(info.server_version),
+        untrusted_git_revision: Some(info.untrusted_git_revision),
         enclave_btc_pubkey: info
             .enclave_btc_pubkey
             .map(|pk| pk.serialize().to_vec().into()),
         limiter_state: info.limiter_state.map(limiter_state_to_pb),
         limiter_config: info.limiter_config.map(limiter_config_to_pb),
         current_committee_epoch: info.current_committee_epoch,
+        mpc_master_pubkey: info
+            .mpc_master_g
+            .map(|g| bcs::to_bytes(&g).expect("serialize MPC master G").into()),
     }
 }
 
@@ -1177,11 +1189,12 @@ mod tests {
             bucket_info: None,
             encryption_pubkey: vec![0u8; 32],
             state_hash: None,
-            server_version: "v1".to_string(),
+            untrusted_git_revision: "unknown".to_string(),
             enclave_btc_pubkey: Some(pk),
             limiter_state: None,
             limiter_config: None,
             current_committee_epoch: None,
+            mpc_master_g: None,
         };
         let pb = guardian_info_data_to_pb(info.clone());
         let back = pb_to_guardian_info_data(pb).unwrap();

@@ -1284,9 +1284,11 @@ pub struct GuardianInfoData {
     /// Guardian encryption public key (32 bytes).
     #[prost(bytes = "bytes", optional, tag = "3")]
     pub encryption_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
-    /// Server version.
+    /// Git revision of the guardian build. Untrusted (enclave-self-reported);
+    /// KP tooling verifies by reproducibly building at this revision and matching
+    /// the resulting PCRs against the session's attestation PCRs.
     #[prost(string, optional, tag = "4")]
-    pub server_version: ::core::option::Option<::prost::alloc::string::String>,
+    pub untrusted_git_revision: ::core::option::Option<::prost::alloc::string::String>,
     /// X-only Bitcoin pubkey of the enclave's BTC signing key (32 bytes).
     /// Absent before `provisioner_init` has set the keypair.
     #[prost(bytes = "bytes", optional, tag = "5")]
@@ -1303,6 +1305,10 @@ pub struct GuardianInfoData {
     /// Current committee epoch (if initialized). Drives `UpdateCommittee` catch-up.
     #[prost(uint64, optional, tag = "9")]
     pub current_committee_epoch: ::core::option::Option<u64>,
+    /// MPC committee verifying key `G` as `bcs(G)` (the derivation master, NOT the
+    /// guardian's own BTC key). Set after operator_init.
+    #[prost(bytes = "bytes", optional, tag = "10")]
+    pub mpc_master_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
 }
 /// Public description of the current BTC key's secret-sharing scheme.
 /// `commitments.len() == num_shares` and `2 <= threshold <= num_shares`.

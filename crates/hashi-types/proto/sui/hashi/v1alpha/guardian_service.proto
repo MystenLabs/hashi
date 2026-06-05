@@ -70,8 +70,10 @@ message GuardianInfoData {
   // Guardian encryption public key (32 bytes).
   optional bytes encryption_pubkey = 3;
 
-  // Server version.
-  optional string server_version = 4;
+  // Git revision of the guardian build. Untrusted (enclave-self-reported);
+  // KP tooling verifies by reproducibly building at this revision and matching
+  // the resulting PCRs against the session's attestation PCRs.
+  optional string untrusted_git_revision = 4;
 
   // X-only Bitcoin pubkey of the enclave's BTC signing key (32 bytes).
   // Absent before `provisioner_init` has set the keypair.
@@ -88,6 +90,10 @@ message GuardianInfoData {
 
   // Current committee epoch (if initialized). Drives `UpdateCommittee` catch-up.
   optional uint64 current_committee_epoch = 9;
+
+  // MPC committee verifying key `G` as `bcs(G)` (the derivation master, NOT the
+  // guardian's own BTC key). Set after operator_init.
+  optional bytes mpc_master_pubkey = 10;
 }
 
 // Public description of the current BTC key's secret-sharing scheme.

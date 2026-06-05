@@ -113,9 +113,10 @@ pub struct GuardianInfo {
     /// Digest of the operator-supplied `WithdrawModeState` (set after operator_init).
     /// KPs recompute it from their verified sources and match to confirm config.
     pub state_hash: Option<[u8; 32]>,
-    /// Server version
-    /// TODO: Replace with hashi ServerVersion to include crate SHA and version
-    pub server_version: String,
+    /// Git revision of the guardian build. Untrusted (enclave-self-reported);
+    /// verified out-of-band by reproducibly building at this revision and matching
+    /// PCRs against the session's attestation.
+    pub untrusted_git_revision: String,
     /// Enclave BTC signing pubkey (x-only). Absent before `provisioner_init`.
     pub enclave_btc_pubkey: Option<BitcoinPubkey>,
     /// Current rate limiter state (if initialized).
@@ -124,10 +125,11 @@ pub struct GuardianInfo {
     pub limiter_config: Option<LimiterConfig>,
     /// Current committee epoch (if initialized). Drives `UpdateCommittee` catch-up.
     pub current_committee_epoch: Option<u64>,
-    // TODO: also report the MPC master `G` so KPs can verify it directly; today
-    // only the `state_hash` digest covers it (and `master_g` mismatches can't be
-    // pinpointed). The full committee could follow, but it's large to return on
-    // every GetGuardianInfo.
+    /// MPC committee verifying key `G` (the derivation master, NOT the guardian's
+    /// own BTC key). Set after operator_init; lets KPs verify it directly.
+    pub mpc_master_g: Option<HashiMasterG>,
+    // TODO: report the full committee too, so its membership is directly
+    // verifiable (today only the `state_hash` digest covers it); it's large, though.
 }
 
 // ---------------------------------------
@@ -625,6 +627,7 @@ impl GuardianInfo {
         LimiterState,
         LimiterConfig,
         u64,
+        HashiMasterG,
     )> {
         Ok((
             self.secret_sharing_instance
@@ -634,7 +637,7 @@ impl GuardianInfo {
             self.encryption_pubkey,
             self.state_hash
                 .ok_or(InvalidInputs("missing state hash".into()))?,
-            self.server_version,
+            self.untrusted_git_revision,
             self.enclave_btc_pubkey,
             self.limiter_state
                 .ok_or(InvalidInputs("missing limiter state".into()))?,
@@ -642,6 +645,8 @@ impl GuardianInfo {
                 .ok_or(InvalidInputs("missing limiter config".into()))?,
             self.current_committee_epoch
                 .ok_or(InvalidInputs("missing current committee epoch".into()))?,
+            self.mpc_master_g
+                .ok_or(InvalidInputs("missing mpc master pubkey".into()))?,
         ))
     }
 }

@@ -26,6 +26,7 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
     // cache, so each session's attestation is verified once whichever check
     // reads that session first.
     let mut reader = GuardianReader::new(&cfg.s3).await?;
+    let master_g = cfg.mpc_master_g()?;
 
     // 1. Check no past enclave's heartbeats remain & gather the latest enclave's session id.
     let session_id = heartbeat_checks::heartbeat_audit(&mut reader).await?;
@@ -45,6 +46,7 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
         enclave_limiter_state,
         enclave_limiter_config,
         enclave_current_committee_epoch,
+        enclave_mpc_master_g,
     ) = guardian_info
         .clone()
         .into_parts()
@@ -64,6 +66,12 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
     anyhow::ensure!(
         enclave_btc_pubkey.is_none(),
         "Guardian has a BTC pubkey => provisioner init over"
+    );
+    anyhow::ensure!(
+        master_g == enclave_mpc_master_g,
+        "MPC master g mismatch: expected {:?}, got {:?}",
+        master_g,
+        enclave_mpc_master_g
     );
 
     let instance = reader
