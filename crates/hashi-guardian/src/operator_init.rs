@@ -9,6 +9,7 @@
 use crate::attestation::get_attestation;
 use crate::Enclave;
 use crate::GuardianS3Client;
+use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::guardian::InitLogMessage::OIAttestationUnsigned;
 use hashi_types::guardian::InitLogMessage::OIGuardianInfo;
 use hashi_types::guardian::*;

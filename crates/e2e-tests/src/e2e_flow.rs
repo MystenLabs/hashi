@@ -10,6 +10,7 @@ mod tests {
 
     use futures::StreamExt;
     use hashi::sui_tx_executor::SuiTxExecutor;
+    use hashi_types::bitcoin::BitcoinAddress;
     use hashi_types::move_types::WithdrawalConfirmedEvent;
     use hashi_types::move_types::WithdrawalPickedForProcessingEvent;
     use hashi_types::move_types::WithdrawalSignedEvent;
@@ -215,7 +216,7 @@ mod tests {
         Err(anyhow!("Checkpoint subscription ended unexpectedly"))
     }
 
-    fn extract_witness_program(address: &bitcoin::Address) -> Result<Vec<u8>> {
+    fn extract_witness_program(address: &BitcoinAddress) -> Result<Vec<u8>> {
         let script = address.script_pubkey();
         let bytes = script.as_bytes();
         match bytes {
@@ -233,7 +234,7 @@ mod tests {
     async fn wait_for_withdrawal_tx_success(
         bitcoin_node: &crate::BitcoinNodeHandle,
         txid: &Txid,
-        destination: &bitcoin::Address,
+        destination: &BitcoinAddress,
         max_amount: Amount,
         min_amount: Amount,
         timeout: Duration,

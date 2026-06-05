@@ -18,9 +18,9 @@
 //! and by `sum(request.amounts) + cpfp_deficit` when ancestor boosting is
 //! needed.
 
-use bitcoin::Address as BitcoinAddress;
 use bitcoin::FeeRate;
 use bitcoin::Weight;
+use hashi_types::bitcoin::BitcoinAddress;
 use sui_sdk_types::Address;
 use thiserror::Error;
 

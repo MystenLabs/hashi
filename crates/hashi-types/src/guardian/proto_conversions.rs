@@ -5,7 +5,6 @@
 //    Protobuf RPC conversions
 // ---------------------------------
 
-use super::BitcoinSignature;
 use super::Ciphertext;
 use super::CommitteeTransitionRequest;
 use super::GetGuardianInfoResponse;
@@ -39,16 +38,19 @@ use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalRequestWire;
 use super::StandardWithdrawalResponse;
 use super::WithdrawModeConfig;
-use super::bitcoin_utils::DerivationPath;
-use super::bitcoin_utils::ExternalOutputUTXOWire;
-use super::bitcoin_utils::InputUTXO;
-use super::bitcoin_utils::InternalOutputUTXO;
-use super::bitcoin_utils::OutputUTXOWire;
-use super::bitcoin_utils::TxUTXOsWire;
+use crate::bitcoin::BitcoinAddress;
+use crate::bitcoin::BitcoinPubkey;
+use crate::bitcoin::BitcoinSignature;
+use crate::bitcoin::DerivationPath;
+use crate::bitcoin::ExternalOutputUTXOWire;
+use crate::bitcoin::HashiMasterG;
+use crate::bitcoin::InputUTXO;
+use crate::bitcoin::InternalOutputUTXO;
+use crate::bitcoin::OutputUTXOWire;
+use crate::bitcoin::TxUTXOsWire;
 use crate::move_types::CommitteeSignature;
 use crate::pgp::PgpPublicCert;
 use crate::proto as pb;
-use bitcoin::Address as BitcoinAddress;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::Txid;
@@ -273,7 +275,7 @@ impl TryFrom<pb::WithdrawModeConfig> for WithdrawModeConfig {
                 master_pk_bytes.len()
             ))
         })?;
-        let hashi_btc_master_pubkey = super::HashiMasterG::from_byte_array(&master_pk_bytes_arr)
+        let hashi_btc_master_pubkey = HashiMasterG::from_byte_array(&master_pk_bytes_arr)
             .map_err(|e| InvalidInputs(format!("invalid hashi_btc_master_pubkey: {e:?}")))?;
 
         let secret_sharing_instance = pb_to_secret_sharing_instance(
@@ -618,7 +620,7 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
     let enclave_btc_pubkey = data
         .enclave_btc_pubkey
         .map(|bytes| {
-            super::BitcoinPubkey::from_slice(bytes.as_ref())
+            BitcoinPubkey::from_slice(bytes.as_ref())
                 .map_err(|e| InvalidInputs(format!("invalid enclave_btc_pubkey: {e}")))
         })
         .transpose()?;
@@ -1166,8 +1168,8 @@ mod tests {
 
     #[test]
     fn guardian_info_data_with_enclave_btc_pubkey_round_trip() {
-        use super::super::test_utils::create_btc_keypair;
-        let kp = create_btc_keypair(&[7u8; 32]);
+        use crate::bitcoin::create_btc_keypair_for_test;
+        let kp = create_btc_keypair_for_test(&[7u8; 32]);
         let pk = kp.x_only_public_key().0;
 
         let info = GuardianInfo {

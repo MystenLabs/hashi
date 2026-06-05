@@ -8,6 +8,7 @@ use anyhow::Result;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::XOnlyPublicKey;
 use colored::Colorize;
+use hashi_types::bitcoin::BitcoinAddress;
 
 use crate::cli::DepositCommands;
 use crate::cli::OutputFormat;
@@ -64,7 +65,7 @@ pub fn cli_derive_deposit_address(
     guardian_btc_pubkey_bytes: &[u8],
     recipient: Option<&sui_sdk_types::Address>,
     btc_network: bitcoin::Network,
-) -> Result<bitcoin::Address> {
+) -> Result<BitcoinAddress> {
     use fastcrypto::groups::secp256k1::ProjectivePoint;
     use fastcrypto::serde_helpers::ToFromByteArray;
 

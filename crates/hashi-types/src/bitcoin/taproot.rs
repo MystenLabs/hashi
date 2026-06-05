@@ -5,17 +5,21 @@
 //! (enclave + Hashi) deposit/withdrawal scheme. The UTXO/transaction types that
 //! consume these live in `super::utxo`.
 
+use super::BitcoinAddress;
+use super::BitcoinPubkey;
 use super::DerivationPath;
-use crate::guardian::BitcoinAddress;
-use crate::guardian::BitcoinPubkey;
-use crate::guardian::HashiMasterG;
+use super::HashiMasterG;
+use bitcoin::Network;
+use bitcoin::ScriptBuf;
+use bitcoin::TapSighashType;
+use bitcoin::Transaction;
+use bitcoin::TxOut;
 use bitcoin::hashes::Hash;
 use bitcoin::sighash::Prevouts;
 use bitcoin::sighash::SighashCache;
 use bitcoin::taproot::ControlBlock;
 use bitcoin::taproot::LeafVersion;
 use bitcoin::taproot::TapLeafHash;
-use bitcoin::*;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key;
 use miniscript::Descriptor;
@@ -28,47 +32,6 @@ static NUMS_INTERNAL_KEY: LazyLock<BitcoinPubkey> = LazyLock::new(|| {
     BitcoinPubkey::from_str("50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0")
         .expect("valid nums key")
 });
-
-/// Creates a taproot descriptor for the given enclave and hashi keys with a 2-of-2 multi_a script.
-/// Taproot addresses are constructed as follows:
-/// 1. Derive a child hashi pubkey from the derivation path
-/// 2. Create a 2-of-2 tapscript with the enclave key and derived hashi key
-/// 3. Place the tapscript as the sole leaf with a NUMS internal key
-fn compute_taproot_descriptor(
-    enclave_pubkey: &BitcoinPubkey,
-    hashi_master_g: &HashiMasterG,
-    hashi_derivation_path: &DerivationPath,
-) -> Tr<BitcoinPubkey> {
-    let derived_hashi_pubkey = derive_hashi_child_pubkey(hashi_master_g, hashi_derivation_path);
-
-    let internal = *NUMS_INTERNAL_KEY;
-
-    // Taproot descriptor with one leaf: 2-of-2 checksigadd-style multisig
-    // Descriptor docs: https://github.com/bitcoin/bitcoin/blob/master/doc/descriptors.md
-    let desc_str = format!(
-        "tr({},multi_a(2,{},{}))",
-        internal, enclave_pubkey, derived_hashi_pubkey
-    );
-
-    match Descriptor::<BitcoinPubkey>::from_str(&desc_str).expect("valid descriptor") {
-        Descriptor::Tr(tr) => tr,
-        _ => panic!("unexpected descriptor"),
-    }
-}
-
-/// Derives the hashi child pubkey at `derivation_path` from `hashi_master_g`.
-///
-/// `hashi_master_g` must be the raw MPC verifying key with y-parity preserved:
-/// `derive_verifying_key` consumes the full `G`, so the x-only/even-y projection
-/// would derive a different child for ~half of all vks and break the 2-of-2 leaf
-/// script. The returned x-only key is exactly what the MPC protocol signs against.
-fn derive_hashi_child_pubkey(
-    hashi_master_g: &HashiMasterG,
-    hashi_derivation_path: &DerivationPath,
-) -> BitcoinPubkey {
-    let derived = derive_verifying_key(hashi_master_g, &hashi_derivation_path.into_inner());
-    BitcoinPubkey::from_slice(&derived.to_byte_array()).expect("derived schnorr key is x-only")
-}
 
 /// scriptPubKey and tap leaf hash for the 2-of-2 output at `derivation_path`.
 pub(super) fn taproot_script_pubkey_and_leaf_hash(
@@ -151,18 +114,64 @@ pub fn taproot_script_spend_sighashes(
         .collect()
 }
 
+/// Creates a taproot descriptor for the given enclave and hashi keys with a 2-of-2 multi_a script.
+/// Taproot addresses are constructed as follows:
+/// 1. Derive a child hashi pubkey from the derivation path
+/// 2. Create a 2-of-2 tapscript with the enclave key and derived hashi key
+/// 3. Place the tapscript as the sole leaf with a NUMS internal key
+fn compute_taproot_descriptor(
+    enclave_pubkey: &BitcoinPubkey,
+    hashi_master_g: &HashiMasterG,
+    hashi_derivation_path: &DerivationPath,
+) -> Tr<BitcoinPubkey> {
+    let derived_hashi_pubkey = derive_hashi_child_pubkey(hashi_master_g, hashi_derivation_path);
+
+    let internal = *NUMS_INTERNAL_KEY;
+
+    // Taproot descriptor with one leaf: 2-of-2 checksigadd-style multisig
+    // Descriptor docs: https://github.com/bitcoin/bitcoin/blob/master/doc/descriptors.md
+    let desc_str = format!(
+        "tr({},multi_a(2,{},{}))",
+        internal, enclave_pubkey, derived_hashi_pubkey
+    );
+
+    match Descriptor::<BitcoinPubkey>::from_str(&desc_str).expect("valid descriptor") {
+        Descriptor::Tr(tr) => tr,
+        _ => panic!("unexpected descriptor"),
+    }
+}
+
+/// Derives the hashi child pubkey at `derivation_path` from `hashi_master_g`.
+///
+/// `hashi_master_g` must be the raw MPC verifying key with y-parity preserved:
+/// `derive_verifying_key` consumes the full `G`, so the x-only/even-y projection
+/// would derive a different child for ~half of all vks and break the 2-of-2 leaf
+/// script. The returned x-only key is exactly what the MPC protocol signs against.
+fn derive_hashi_child_pubkey(
+    hashi_master_g: &HashiMasterG,
+    hashi_derivation_path: &DerivationPath,
+) -> BitcoinPubkey {
+    let derived = derive_verifying_key(hashi_master_g, &hashi_derivation_path.into_inner());
+    BitcoinPubkey::from_slice(&derived.to_byte_array()).expect("derived schnorr key is x-only")
+}
+
 #[cfg(test)]
 mod bitcoin_tests {
     use super::*;
-    use crate::guardian::BitcoinKeypair;
-    use crate::guardian::bitcoin_utils::BTC_LIB;
-    use crate::guardian::bitcoin_utils::InputUTXO;
-    use crate::guardian::bitcoin_utils::OutputUTXOWire;
-    use crate::guardian::bitcoin_utils::TxUTXOs;
-    use crate::guardian::bitcoin_utils::construct_tx;
-    use crate::guardian::bitcoin_utils::sign_btc_tx;
-    use crate::guardian::test_utils::create_btc_keypair;
+    use crate::bitcoin::BTC_LIB;
+    use crate::bitcoin::BitcoinKeypair;
+    use crate::bitcoin::InputUTXO;
+    use crate::bitcoin::OutputUTXOWire;
+    use crate::bitcoin::TxUTXOs;
+    use crate::bitcoin::construct_tx;
+    use crate::bitcoin::create_btc_keypair_for_test;
+    use crate::bitcoin::hashi_master_g_from_btc_xonly_for_test;
+    use crate::bitcoin::sign_btc_tx;
+    use bitcoin::Amount;
     use bitcoin::Network::Regtest;
+    use bitcoin::OutPoint;
+    use bitcoin::Witness;
+    use bitcoin::consensus;
     use bitcoin::key::UntweakedPublicKey;
     use bitcoin::taproot::ControlBlock;
     use bitcoin::taproot::Signature;
@@ -181,7 +190,7 @@ mod bitcoin_tests {
             rand::Rng::fill(&mut rng, &mut bytes);
             bytes
         });
-        let keypair = create_btc_keypair(&bytes);
+        let keypair = create_btc_keypair_for_test(&bytes);
         let (internal_key, _) = UntweakedPublicKey::from_keypair(&keypair);
         let address = BitcoinAddress::p2tr(&BTC_LIB, internal_key, None, network);
         (keypair, address)
@@ -208,21 +217,13 @@ mod bitcoin_tests {
         Witness::from_slice(&witness_elements)
     }
 
-    /// Convert a bitcoin-lib x-only key into the even-y `G` point. The
-    /// bitcoin-lib `Keypair` always signs against the even-y projection of
-    /// its master pubkey, so the descriptor derivation must use the same
-    /// parent to agree.
-    fn hashi_master_g_from_xonly(pubkey: &BitcoinPubkey) -> HashiMasterG {
-        HashiMasterG::with_even_y_from_x_be_bytes(&pubkey.serialize()).expect("valid x coordinate")
-    }
-
     fn create_taproot_artifacts_for_test(
         enclave_pubkey: &BitcoinPubkey,
         hashi_master_pubkey: &BitcoinPubkey,
         hashi_derivation_path: &DerivationPath,
         network: Network,
     ) -> (BitcoinAddress, ControlBlock, ScriptBuf) {
-        let hashi_master_g = hashi_master_g_from_xonly(hashi_master_pubkey);
+        let hashi_master_g = hashi_master_g_from_btc_xonly_for_test(hashi_master_pubkey);
         let addr = taproot_address(
             enclave_pubkey,
             &hashi_master_g,
@@ -296,7 +297,7 @@ mod bitcoin_tests {
                 .unwrap(),
             vout: 1,
         };
-        let hashi_master_g = hashi_master_g_from_xonly(&hashi_pk);
+        let hashi_master_g = hashi_master_g_from_btc_xonly_for_test(&hashi_pk);
 
         let input_amount = Amount::from_sat(100000000); // 1.0 BTC
         let input_utxo = InputUTXO::new(out_point, input_amount, DerivationPath::ZERO);
@@ -370,7 +371,9 @@ mod bitcoin_tests {
             }
         };
 
-        let enclave_pubkey = create_btc_keypair(&[7u8; 32]).x_only_public_key().0;
+        let enclave_pubkey = create_btc_keypair_for_test(&[7u8; 32])
+            .x_only_public_key()
+            .0;
         let path = [42u8; 32];
 
         // The child key the MPC actually produces signatures against.
@@ -404,7 +407,7 @@ mod bitcoin_tests {
     // Cross-language vectors shared with the hashi-ts-sdk (bitcoin.test.ts):
     // both sides must derive the same (child, address, leaf script, tap-leaf
     // hash) or deposit addresses silently diverge. Even-y master forced via
-    // `hashi_master_g_from_xonly`; odd-y is the companion test below.
+    // `hashi_master_g_from_btc_xonly_for_test`; odd-y is the companion test below.
     #[test]
     fn cross_lang_2of2_test_vectors() {
         use bitcoin::hex::DisplayHex;
@@ -413,7 +416,7 @@ mod bitcoin_tests {
         let (hashi_keypair, _) = gen_keypair_and_address(Some(TEST_HASHI_BTC_SK), Regtest);
         let enclave_pk = enclave_keypair.x_only_public_key().0;
         let hashi_master_pk = hashi_keypair.x_only_public_key().0;
-        let master_g = hashi_master_g_from_xonly(&hashi_master_pk);
+        let master_g = hashi_master_g_from_btc_xonly_for_test(&hashi_master_pk);
 
         // Sanity check that the well-known SKs map to the x-only pubkeys
         // the TS test hardcodes.
