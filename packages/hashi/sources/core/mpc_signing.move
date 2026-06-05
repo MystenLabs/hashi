@@ -45,7 +45,7 @@ const EAllocationMismatch: vector<u8> = b"allocated presig count does not match 
 const ENotComplete: vector<u8> = b"signing batch is not fully signed";
 
 /// Per-input signing slot.
-public enum InputSig has store, drop {
+public enum InputSig has drop, store {
     /// Awaiting signature; holds the presignature index this input will
     /// consume, valid within the owning batch's `epoch`.
     Pending(u64),

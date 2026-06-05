@@ -372,7 +372,10 @@ impl LeaderService {
             None
         };
 
-        info!(unsigned = unsigned.len(), "Collecting MPC signatures for unsigned inputs");
+        info!(
+            unsigned = unsigned.len(),
+            "Collecting MPC signatures for unsigned inputs"
+        );
         let sigs_by_index = Self::collect_withdrawal_tx_signatures(
             inner,
             &txn.id,
@@ -414,7 +417,8 @@ impl LeaderService {
                 let proto_request = proto_request.clone();
                 let member = member.clone();
                 sig_tasks.spawn(async move {
-                    Self::request_mpc_input_signatures_signature(&inner, proto_request, &member).await
+                    Self::request_mpc_input_signatures_signature(&inner, proto_request, &member)
+                        .await
                 });
             }
             let mut aggregator = BlsSignatureAggregator::new(&committee, signed_message.clone());
@@ -560,8 +564,7 @@ impl LeaderService {
             })?
             .into_inner();
 
-        let expected: std::collections::BTreeSet<u64> =
-            expected_indices.iter().copied().collect();
+        let expected: std::collections::BTreeSet<u64> = expected_indices.iter().copied().collect();
         let mut collected: std::collections::BTreeMap<u64, SchnorrSignature> =
             std::collections::BTreeMap::new();
         while let Some(partial) = stream
@@ -1235,7 +1238,11 @@ impl MpcInputSignaturesMessage {
         SignMpcInputSignaturesRequest {
             withdrawal_id: self.withdrawal_id.as_bytes().to_vec().into(),
             indices: self.indices.clone(),
-            signatures: self.signatures.iter().map(|sig| sig.clone().into()).collect(),
+            signatures: self
+                .signatures
+                .iter()
+                .map(|sig| sig.clone().into())
+                .collect(),
         }
     }
 }

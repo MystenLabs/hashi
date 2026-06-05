@@ -1395,10 +1395,9 @@ impl SuiTxExecutor {
                 response.transaction().effects().status()
             );
         }
-        let checkpoint = response
-            .transaction()
-            .checkpoint_opt()
-            .ok_or_else(|| anyhow::anyhow!("commit_input_signatures response missing checkpoint"))?;
+        let checkpoint = response.transaction().checkpoint_opt().ok_or_else(|| {
+            anyhow::anyhow!("commit_input_signatures response missing checkpoint")
+        })?;
         Ok(checkpoint)
     }
 
