@@ -21,17 +21,10 @@ s3:
     bucket: "hashi-guardian-logs"
     region: "us-east-1"
 
-# Expected share commitments for the guardian set, as published during
-# OperatorInit. digest_hex is the 32-byte commitment digest in hex.
-share_commitments:
-  - id: 1
-    digest_hex: "0000000000000000000000000000000000000000000000000000000000000000"
-  - id: 2
-    digest_hex: "0000000000000000000000000000000000000000000000000000000000000000"
-
-# Current on-chain Hashi committee snapshot. public_key / encryption_public_key
-# are raw byte sequences (BLS pubkey and HPKE pubkey respectively).
-hashi_committee:
+# Genesis committee — required ONLY at genesis (before any `committee-update/`
+# log exists); omit this whole block once an update has been logged, since the
+# committee is then scraped from that signed log.
+hashi_committee_genesis:
   epoch: 0
   members:
     - validator_address: "0x0000000000000000000000000000000000000000000000000000000000000000"

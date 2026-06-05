@@ -6,6 +6,7 @@ use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianEncryptedShare;
+use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::WithdrawModeState;
@@ -15,7 +16,6 @@ use hpke::Deserializable;
 use rand::thread_rng;
 use tracing::info;
 
-use crate::config::GuardianConfig;
 use crate::heartbeat_checks;
 use crate::limiter_recovery;
 
@@ -31,10 +31,52 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
     let session_id = heartbeat_checks::heartbeat_audit(&mut reader).await?;
     info!(session_id, "heartbeat checks passed for selected session");
 
-    // 2. Check that enclave's config is as expected (valid attestation, expected s3 bucket & share commitments)
+    // 2. Check that the enclave's config is as expected: valid attestation,
+    // expected S3 bucket, and share commitments matching the authoritative
+    // `ceremony/` log (written from initial key setup onward).
     let guardian_info = reader.get_info(&session_id).await?;
-    let expected_guardian_config = cfg.expected_guardian_config()?;
-    expected_guardian_config.ensure_matches_info(&guardian_info)?;
+    let (
+        enclave_ss_instance,
+        enclave_bucket_info,
+        enclave_enc_pubkey_bytes,
+        enclave_state_hash,
+        _enclave_server_version,
+        enclave_btc_pubkey,
+        enclave_limiter_state,
+        enclave_limiter_config,
+        enclave_current_committee_epoch,
+    ) = guardian_info
+        .clone()
+        .into_parts()
+        .context("Guardian info has missing fields")?;
+    anyhow::ensure!(
+        cfg.s3.bucket_info == enclave_bucket_info,
+        "Guardian bucket info mismatch: expected {:?}, got {:?}",
+        cfg.s3.bucket_info,
+        enclave_bucket_info
+    );
+    anyhow::ensure!(
+        cfg.limiter_config == enclave_limiter_config,
+        "Guardian limiter config mismatch: expected {:?}, got {:?}",
+        cfg.limiter_config,
+        enclave_limiter_config
+    );
+    anyhow::ensure!(
+        enclave_btc_pubkey.is_none(),
+        "Guardian has a BTC pubkey => provisioner init over"
+    );
+
+    let instance = reader
+        .read_latest_ceremony_instance()
+        .await?
+        .context("no ceremony log found in S3; key setup has not run")?;
+    anyhow::ensure!(
+        instance == enclave_ss_instance,
+        "Enclave secret sharing instance mismatch: expected {:?}, got {:?}",
+        instance,
+        enclave_ss_instance
+    );
+
     info!(session_id, "init checks passed for selected session");
 
     // 3. Source the initial limiter state. If a prior enclave left Success
@@ -56,29 +98,50 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
             LimiterState::genesis(&cfg.limiter_config)
         }
     };
+    anyhow::ensure!(
+        limiter_state == enclave_limiter_state,
+        "limiter state mismatch: expected {:?}, got {:?}",
+        limiter_state,
+        enclave_limiter_state
+    );
 
     // Recompute the init state the operator booted the enclave with; its digest is
-    // the state_hash we bind as the share's AAD. `master_g` is the MPC committee `G`
+    // the state_hash we bind as the share's AAD. The committee comes from the
+    // latest signed `committee-update/` log; before any update exists (genesis) we
+    // fall back to the trusted local value. `master_g` is the MPC committee `G`
     // (see config doc), NOT the guardian's own BTC key.
     let master_g = cfg.mpc_master_g()?;
-    let committee = cfg.hashi_committee.try_into()?;
-    let expected_state =
-        WithdrawModeState::new(committee, cfg.limiter_config, limiter_state, master_g)
-            .map_err(|e| anyhow::anyhow!(e))?;
-    let state_hash = expected_state.digest();
+    let committee = match reader.read_latest_committee().await? {
+        Some(scraped) => scraped,
+        None => cfg
+            .hashi_committee_genesis
+            .clone()
+            .context("no committee-update log in S3 and no hashi_committee_genesis in config")?,
+    };
+    anyhow::ensure!(
+        committee.epoch == enclave_current_committee_epoch,
+        "committee epoch mismatch: expected {}, got {}",
+        committee.epoch,
+        enclave_current_committee_epoch
+    );
+    let expected_state = WithdrawModeState::new(
+        committee.try_into()?,
+        cfg.limiter_config,
+        limiter_state,
+        master_g,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
 
-    // Fail fast (IOP-225 step D): the enclave must have been booted with the
-    // state we expect, else our share won't decrypt under its state_hash AAD.
-    let enclave_state_hash = guardian_info
-        .state_hash
-        .context("guardian info is missing state_hash")?;
+    let state_hash = expected_state.digest();
     anyhow::ensure!(
         state_hash == enclave_state_hash,
-        "state_hash mismatch: enclave booted with a different init state"
+        "state_hash mismatch: expected {}, got {}",
+        hex::encode(state_hash),
+        hex::encode(enclave_state_hash)
     );
 
     let guardian_pub_key =
-        EncPubKey::from_bytes(&guardian_info.encryption_pubkey).map_err(|e| anyhow::anyhow!(e))?;
+        EncPubKey::from_bytes(&enclave_enc_pubkey_bytes).map_err(|e| anyhow::anyhow!(e))?;
     let encrypted_share = ProvisionerInitRequest::build_from_share(
         &cfg.share.to_domain()?,
         &guardian_pub_key,
@@ -95,13 +158,8 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
     // Send this KP's single share to the relay, which collects T-of-N shares
     // before forwarding them to the guardian in one ProvisionerInit call.
     if let Some(endpoint) = cfg.relay_endpoint {
-        submit_provisioner_init_to_relay(
-            &endpoint,
-            &session_id,
-            &expected_guardian_config,
-            encrypted_share,
-        )
-        .await?;
+        submit_provisioner_init_to_relay(&endpoint, &session_id, guardian_info, encrypted_share)
+            .await?;
     }
     Ok(())
 }
@@ -116,7 +174,7 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
 async fn submit_provisioner_init_to_relay(
     endpoint: &str,
     expected_session_id: &str,
-    expected_guardian_config: &GuardianConfig,
+    expected_guardian_info: GuardianInfo,
     encrypted_share: GuardianEncryptedShare,
 ) -> anyhow::Result<()> {
     let mut client =
@@ -124,7 +182,7 @@ async fn submit_provisioner_init_to_relay(
             .await
             .with_context(|| format!("failed to connect to relay endpoint {endpoint}"))?;
 
-    prechecks(&mut client, expected_session_id, expected_guardian_config)
+    prechecks(&mut client, expected_session_id, expected_guardian_info)
         .await
         .with_context(|| "relay endpoint pre-check failed")?;
 
@@ -138,7 +196,7 @@ async fn submit_provisioner_init_to_relay(
 async fn prechecks(
     client: &mut pb::guardian_service_client::GuardianServiceClient<tonic::transport::Channel>,
     expected_session_id: &str,
-    expected_guardian_config: &GuardianConfig,
+    expected_guardian_info: GuardianInfo,
 ) -> anyhow::Result<()> {
     let resp_pb = client
         .get_guardian_info(pb::GetGuardianInfoRequest {})
@@ -149,21 +207,22 @@ async fn prechecks(
     let resp = <GetGuardianInfoResponse as TryFrom<pb::GetGuardianInfoResponse>>::try_from(resp_pb)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-    let signing_pub_key = resp.signing_pub_key;
-    let actual_session_id = session_id_from_signing_pubkey(&signing_pub_key);
+    // Attestation-anchored, signature-verified GuardianInfo in one call.
+    let info = resp.verify().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    let actual_session_id = session_id_from_signing_pubkey(&resp.signing_pub_key);
     anyhow::ensure!(
         actual_session_id == expected_session_id,
         "relay endpoint session mismatch: expected {}, got {}",
         expected_session_id,
         actual_session_id
     );
-
-    let info = resp
-        .signed_info
-        .verify(&signing_pub_key)
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-    expected_guardian_config.ensure_matches_info(&info)?;
+    anyhow::ensure!(
+        info == expected_guardian_info,
+        "relay endpoint GuardianInfo mismatch: expected {:?}, got {:?}",
+        expected_guardian_info,
+        info
+    );
 
     Ok(())
 }
