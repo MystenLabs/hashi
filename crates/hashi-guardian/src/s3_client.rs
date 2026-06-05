@@ -466,8 +466,8 @@ impl GuardianS3Client {
         })
     }
 
-    /// Caller must ensure that the object has unexpired compliance-mode object lock.
-    pub async fn get_object<T: DeserializeOwned>(&self, key: &str) -> GuardianResult<T> {
+    /// Caller must ensure that the object has unexpired compliance-mode object lock. (TODO: Investigate what this means)
+    pub async fn get_log_record(&self, key: &str) -> GuardianResult<LogRecord> {
         let keys = self.ensure_no_duplicates_or_deletions(key).await?;
         if keys.len() != 1 || keys[0] != key {
             return Err(S3Error(format!(
@@ -476,7 +476,7 @@ impl GuardianS3Client {
             )));
         }
 
-        self.get_object_unsafe::<T>(key).await
+        self.get_object_unsafe::<LogRecord>(key).await
     }
 
     /// Note: Callers must set signing_pubkey to None only for unsigned messages.
@@ -486,7 +486,7 @@ impl GuardianS3Client {
         expected_session_id: &str,
         signing_pubkey: Option<&GuardianPubKey>,
     ) -> GuardianResult<VerifiedLogRecord> {
-        let log = self.get_object::<LogRecord>(key).await?;
+        let log = self.get_log_record(key).await?;
         if log.session_id != expected_session_id {
             return Err(S3Error(format!("log session_id mismatch for key {}", key)));
         }
@@ -521,7 +521,7 @@ impl GuardianS3Client {
                 _ => None,
             })
             .ok_or_else(|| S3Error(format!("expected OIAttestationUnsigned at key {}", key)))?;
-        verify_enclave_attestation(attestation)?;
+        verify_enclave_attestation(&attestation, &signing_public_key)?;
         Ok(signing_public_key)
     }
 }

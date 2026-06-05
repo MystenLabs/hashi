@@ -50,7 +50,7 @@ pub fn heartbeat_cursor(start: UnixSeconds) -> S3HourScopedDirectory {
 /// through a run.
 pub struct GuardianReader {
     s3: GuardianS3Client,
-    cache: GuardianSessionKeyCache,
+    pubkey_cache: GuardianSessionKeyCache,
 }
 
 impl GuardianReader {
@@ -65,7 +65,7 @@ impl GuardianReader {
     pub fn from_s3_client(s3: GuardianS3Client) -> Self {
         Self {
             s3,
-            cache: GuardianSessionKeyCache::default(),
+            pubkey_cache: GuardianSessionKeyCache::default(),
         }
     }
 
@@ -88,7 +88,7 @@ impl GuardianReader {
 
         let mut out = Vec::with_capacity(all_logs.len());
         for log in all_logs {
-            out.push(self.cache.verify_record(&self.s3, log).await?);
+            out.push(self.pubkey_cache.verify_record(&self.s3, log).await?);
         }
         Ok(out)
     }
@@ -97,8 +97,8 @@ impl GuardianReader {
     /// operator-init). Implements check B of IOP-225.
     pub async fn get_info(&mut self, session_id: &str) -> anyhow::Result<GuardianInfo> {
         let key = InitLogMessage::guardian_info_object_key(session_id);
-        let record: LogRecord = self.s3.get_object(&key).await?;
-        self.cache
+        let record = self.s3.get_log_record(&key).await?;
+        self.pubkey_cache
             .verify_record(&self.s3, record)
             .await?
             .message
@@ -124,8 +124,8 @@ impl GuardianReader {
         let Some(key) = pick_latest_key(keys, S3_DIR_CEREMONY) else {
             return Ok(None);
         };
-        let record: LogRecord = self.s3.get_object(&key).await?;
-        let record = self.cache.verify_record(&self.s3, record).await?;
+        let record = self.s3.get_log_record(&key).await?;
+        let record = self.pubkey_cache.verify_record(&self.s3, record).await?;
         let LogMessage::Ceremony(msg) = record.message else {
             anyhow::bail!("expected a ceremony log at {key}");
         };
@@ -148,8 +148,8 @@ impl GuardianReader {
         let Some(key) = pick_latest_key(keys, S3_DIR_COMMITTEE_UPDATE) else {
             return Ok(None);
         };
-        let record: LogRecord = self.s3.get_object(&key).await?;
-        let record = self.cache.verify_record(&self.s3, record).await?;
+        let record = self.s3.get_log_record(&key).await?;
+        let record = self.pubkey_cache.verify_record(&self.s3, record).await?;
         let LogMessage::CommitteeUpdate(msg) = record.message else {
             anyhow::bail!("expected a committee-update log at {key}");
         };

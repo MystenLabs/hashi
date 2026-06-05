@@ -2,13 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Context;
-use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::HashiMasterG;
 use hashi_types::guardian::LimiterConfig;
-use hashi_types::guardian::S3BucketInfo;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::Share;
-use hashi_types::guardian::ShareCommitments;
 use hashi_types::guardian::ShareID;
 use hashi_types::move_types::Committee as CommitteeRepr;
 use k256::FieldBytes;
@@ -17,46 +14,6 @@ use k256::elliptic_curve::PrimeField;
 use serde::Deserialize;
 use std::num::NonZeroU16;
 use std::path::Path;
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct GuardianConfig {
-    pub bucket_info: S3BucketInfo,
-    pub share_commitments: ShareCommitments,
-}
-
-impl GuardianConfig {
-    fn from_guardian_info(info: &GuardianInfo) -> anyhow::Result<Self> {
-        let bucket_info = info.bucket_info.clone().ok_or_else(|| {
-            anyhow::anyhow!("guardian info missing bucket_info; operator_init may be incomplete")
-        })?;
-        // TODO: also verify num_shares and threshold against KP-side expected values.
-        let share_commitments = info
-            .secret_sharing_instance
-            .as_ref()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "guardian info missing secret_sharing_instance; operator_init may be incomplete"
-                )
-            })?
-            .commitments()
-            .clone();
-        Ok(Self {
-            bucket_info,
-            share_commitments,
-        })
-    }
-
-    pub fn ensure_matches_info(&self, info: &GuardianInfo) -> anyhow::Result<()> {
-        let actual = Self::from_guardian_info(info)?;
-        anyhow::ensure!(
-            actual == *self,
-            "guardian config mismatch: expected {:?}, got {:?}",
-            self,
-            actual
-        );
-        Ok(())
-    }
-}
 
 #[derive(Deserialize)]
 pub struct ProvisionerConfig {

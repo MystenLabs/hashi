@@ -128,6 +128,10 @@ pub struct GuardianInfo {
     pub limiter_config: Option<LimiterConfig>,
     /// Current committee epoch (if initialized). Drives `UpdateCommittee` catch-up.
     pub current_committee_epoch: Option<u64>,
+    // TODO: also report the MPC master `G` so KPs can verify it directly; today
+    // only the `state_hash` digest covers it (and `master_g` mismatches can't be
+    // pinpointed). The full committee could follow, but it's large to return on
+    // every GetGuardianInfo.
 }
 
 // ---------------------------------------
@@ -607,8 +611,62 @@ impl StandardWithdrawalRequest {
     }
 }
 
-pub fn verify_enclave_attestation(_attestation: Attestation) -> GuardianResult<()> {
-    // TODO: Implement me
+impl GuardianInfo {
+    /// Destructure an operator-initialized `GuardianInfo`, erroring if any field
+    /// set at operator-init is absent. `enclave_btc_pubkey` stays `Option` — it
+    /// is only set later, at `provisioner_init`.
+    // Returns every info field by design; a tuple alias wouldn't read any clearer.
+    #[allow(clippy::type_complexity)]
+    pub fn into_parts(
+        self,
+    ) -> GuardianResult<(
+        SecretSharingInstance,
+        S3BucketInfo,
+        EncPubKeyBytes,
+        [u8; 32],
+        String,
+        Option<BitcoinPubkey>,
+        LimiterState,
+        LimiterConfig,
+        u64,
+    )> {
+        Ok((
+            self.secret_sharing_instance
+                .ok_or(InvalidInputs("missing secret sharing instance".into()))?,
+            self.bucket_info
+                .ok_or(InvalidInputs("missing bucket info".into()))?,
+            self.encryption_pubkey,
+            self.state_hash
+                .ok_or(InvalidInputs("missing state hash".into()))?,
+            self.server_version,
+            self.enclave_btc_pubkey,
+            self.limiter_state
+                .ok_or(InvalidInputs("missing limiter state".into()))?,
+            self.limiter_config
+                .ok_or(InvalidInputs("missing limiter config".into()))?,
+            self.current_committee_epoch
+                .ok_or(InvalidInputs("missing current committee epoch".into()))?,
+        ))
+    }
+}
+
+impl GetGuardianInfoResponse {
+    /// Verify the response end to end and return the trusted `GuardianInfo`: the
+    /// attestation anchors `signing_pub_key`, and `signed_info` must be signed by
+    /// it. Self-contained so any caller (KP init, hashi nodes) can turn an
+    /// untrusted response into a trusted `GuardianInfo` in one call.
+    pub fn verify(&self) -> GuardianResult<GuardianInfo> {
+        verify_enclave_attestation(&self.attestation, &self.signing_pub_key)?;
+        self.signed_info.clone().verify(&self.signing_pub_key)
+    }
+}
+
+/// TODO(check C): verify the Nitro attestation (COSE signature + AWS cert chain)
+/// and that `signing_pubkey` is the key anchored in its `user_data`. No-op today.
+pub fn verify_enclave_attestation(
+    _attestation: &[u8],
+    _signing_pubkey: &GuardianPubKey,
+) -> GuardianResult<()> {
     Ok(())
 }
 
