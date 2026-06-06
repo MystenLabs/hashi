@@ -39,11 +39,15 @@ use tracing::warn;
 /// Number of per-input MPC signatures written to chain in one
 /// `commit_input_signatures` PTB. This is the on-chain write batch size `M`:
 /// it bounds the durability granularity (work lost on a crash) against the
-/// number of PTBs per withdrawal.
-// TODO(tuning): conservative default; measure PTB command/gas cost of
-// commit_input_signatures(M) (sigs are ~64B each) and scale up. Should also be
-// decoupled from the MPC batch-per-peer collection size.
-const MPC_SIGNING_CHUNK_SIZE: usize = 16;
+/// number of PTBs per withdrawal (and thus the per-leader-task wall-clock).
+///
+/// 128 keeps a typical/max-size withdrawal to a handful of commit PTBs that
+/// finish well inside `LEADER_TASK_TIMEOUT`, while still chunking genuinely huge
+/// withdrawals for resumable durability. 128 × 64B sigs = 8 KiB, within Sui's
+/// 16 KiB pure-arg limit.
+// TODO(tuning): revisit with PTB gas numbers at scale; can be decoupled from the
+// MPC batch-per-peer collection size.
+const MPC_SIGNING_CHUNK_SIZE: usize = 128;
 
 pub(super) enum WithdrawalBroadcastOutcome {
     ConfirmedOnSui { utxo_ids: Vec<UtxoId> },
