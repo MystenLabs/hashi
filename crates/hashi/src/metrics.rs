@@ -957,11 +957,15 @@ impl Metrics {
             .requests()
             .values()
             .partition::<Vec<_>, _>(|r| r.status.is_requested());
+        // TODO(tuning): with incremental signing a withdrawal is now "signing"
+        // (some inputs done, not finalized) for a multi-checkpoint window. Split
+        // `pending` into pending/signing (via `w.signing.signed_count`) for
+        // operator visibility before rollout.
         let (signed, pending): (Vec<_>, Vec<_>) = hashi
             .withdrawal_queue
             .withdrawal_txns()
             .values()
-            .partition(|w| w.signatures.is_some());
+            .partition(|w| w.fully_signed);
         self.withdrawal_queue_size
             .with_label_values(&["requested"])
             .set(requested.len() as i64);

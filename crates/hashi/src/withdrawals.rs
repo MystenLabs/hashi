@@ -124,6 +124,17 @@ pub struct WithdrawalTxSigning {
     pub guardian_signatures: Vec<Vec<u8>>,
 }
 
+/// The data validators BLS-sign over for one incremental chunk of per-input MPC
+/// signatures (the step-3 chunk certificate). BCS must match Move
+/// `hashi::withdraw::MpcInputSignaturesMessage` exactly: `(withdrawal_id,
+/// indices, signatures)`.
+#[derive(Clone, Debug, serde_derive::Serialize)]
+pub struct MpcInputSignaturesMessage {
+    pub withdrawal_id: Address,
+    pub indices: Vec<u64>,
+    pub signatures: Vec<Vec<u8>>,
+}
+
 #[derive(Clone, Debug, serde_derive::Serialize)]
 pub struct WithdrawalConfirmation {
     pub withdrawal_id: Address,
@@ -479,8 +490,8 @@ impl Hashi {
             })?;
 
         anyhow::ensure!(
-            txn.signatures.is_none(),
-            "WithdrawalTransaction {} is already signed",
+            !txn.fully_signed,
+            "WithdrawalTransaction {} is already finalized",
             message.withdrawal_id
         );
 
@@ -553,6 +564,75 @@ impl Hashi {
                 .map_err(|e| {
                     anyhow!("Guardian signature verification failed for input {i}: {e}")
                 })?;
+        }
+
+        self.sign_message_proto(message)
+    }
+
+    /// Validate and BLS-sign one incremental chunk of per-input MPC signatures
+    /// (`MpcInputSignaturesMessage`). Each `(index, signature)` is verified
+    /// against that input's sighash before the member signs the chunk cert, so a
+    /// leader cannot obtain a cert over signatures the committee hasn't checked.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(withdrawal_id = %message.withdrawal_id, chunk_size = message.indices.len()),
+    )]
+    pub fn validate_and_sign_mpc_input_signatures(
+        &self,
+        message: &MpcInputSignaturesMessage,
+    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
+        let txn = self
+            .onchain_state()
+            .withdrawal_txn(&message.withdrawal_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "WithdrawalTransaction {} not found on-chain",
+                    message.withdrawal_id
+                )
+            })?;
+
+        anyhow::ensure!(
+            !txn.fully_signed,
+            "WithdrawalTransaction {} is already finalized",
+            message.withdrawal_id
+        );
+        anyhow::ensure!(
+            message.indices.len() == message.signatures.len(),
+            "Chunk indices ({}) and signatures ({}) length mismatch for WithdrawalTransaction {}",
+            message.indices.len(),
+            message.signatures.len(),
+            message.withdrawal_id
+        );
+
+        let tx = self.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
+        let signing_messages = self.withdrawal_signing_messages(&tx, &txn.inputs)?;
+
+        for (chunk_pos, (&input_index, mpc_sig_bytes)) in message
+            .indices
+            .iter()
+            .zip(message.signatures.iter())
+            .enumerate()
+        {
+            let i = input_index as usize;
+            anyhow::ensure!(
+                i < txn.inputs.len(),
+                "Chunk input index {i} out of range ({}) for WithdrawalTransaction {}",
+                txn.inputs.len(),
+                message.withdrawal_id
+            );
+            let sighash = &signing_messages[i];
+            let mpc_arr: &[u8; 64] = mpc_sig_bytes.as_slice().try_into().map_err(|_| {
+                anyhow!("MPC signature at chunk position {chunk_pos} (input {i}) is not 64 bytes")
+            })?;
+            let mpc_sig = SchnorrSignature::from_byte_array(mpc_arr)
+                .map_err(|e| anyhow!("Invalid MPC Schnorr signature at input {i}: {e}"))?;
+            let input_pubkey = self.deposit_pubkey(txn.inputs[i].derivation_path.as_ref())?;
+            let mpc_schnorr_pk = SchnorrPublicKey::from_byte_array(&input_pubkey.serialize())
+                .map_err(|e| anyhow!("Failed to convert mpc pubkey for input {i}: {e}"))?;
+            mpc_schnorr_pk
+                .verify(sighash, &mpc_sig)
+                .map_err(|e| anyhow!("MPC signature verification failed for input {i}: {e}"))?;
         }
 
         self.sign_message_proto(message)
@@ -717,13 +797,13 @@ impl Hashi {
     ) -> anyhow::Result<()> {
         let onchain_state = self.onchain_state().clone();
         let epoch = onchain_state.epoch();
-        if txn.epoch != epoch {
+        if txn.signing.epoch != epoch {
             anyhow::bail!(
-                "Stale presig assignment: pending withdrawal {} has epoch {}, current is {}. \
-                 Either the leader hasn't called allocate_presigs_for_withdrawal_txn yet, \
+                "Stale presig assignment: pending withdrawal {} has signing epoch {}, current is {}. \
+                 Either the leader hasn't called reallocate_presigs yet, \
                  or this node's on-chain state is behind.",
                 txn.id,
-                txn.epoch,
+                txn.signing.epoch,
                 epoch,
             );
         }
@@ -774,7 +854,10 @@ impl Hashi {
         let beacon_ref = &beacon;
         let metrics_ref = &*self.metrics;
         let txn_id = txn.id;
-        let presig_start = txn.presig_start_index;
+        // Per-input presig index is read off the on-chain signing batch slot, so
+        // out-of-order / resume works and the index is always the current-epoch
+        // one assigned by `commit`/`reallocate`. Already-signed inputs are skipped.
+        let signing = &txn.signing;
         let inputs = &txn.inputs;
         let sink_ref = &sink;
         // Run the per-input MPC signs concurrently (bounded by `concurrency`).
@@ -791,8 +874,12 @@ impl Hashi {
                         crate::deposits::path_bytes_or_zero(input.derivation_path.as_ref())
                     })
                     .expect("input_index iterated from signing_messages.len() == txn.inputs.len()");
+                // Skip inputs already signed in a prior chunk/leader (resume):
+                // their slot holds the signature, not a presig index.
+                let Some(global_presig_index) = signing.pending_index(input_index) else {
+                    return;
+                };
                 let sign_start = std::time::Instant::now();
-                let global_presig_index = presig_start + input_index as u64;
                 let sign_result = signing_manager_ref
                     .sign(
                         p2p_channel_ref,
@@ -1529,6 +1616,7 @@ mod tests {
         withdrawal_outputs: Vec<u64>,
         change: Option<u64>,
     ) -> WithdrawalTransaction {
+        let num_inputs = inputs.len() as u64;
         WithdrawalTransaction {
             id: Address::ZERO,
             txid: BitcoinTxid::ZERO,
@@ -1538,10 +1626,15 @@ mod tests {
             change_output: change.map(output),
             timestamp_ms: 0,
             randomness: vec![],
-            signatures: None,
+            signing: hashi_types::move_types::SigningBatch {
+                signatures: (0..num_inputs)
+                    .map(hashi_types::move_types::InputSig::Pending)
+                    .collect(),
+                signed_count: 0,
+                epoch: 0,
+            },
             guardian_signatures: None,
-            presig_start_index: 0,
-            epoch: 0,
+            fully_signed: false,
         }
     }
 

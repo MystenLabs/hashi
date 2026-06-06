@@ -3,7 +3,13 @@
 
 module hashi::withdrawal_queue;
 
-use hashi::{btc::BTC, btc_config, config::Config, utxo::{Utxo, UtxoId}};
+use hashi::{
+    btc::BTC,
+    btc_config,
+    config::Config,
+    mpc_signing::{Self, SigningBatch},
+    utxo::{Utxo, UtxoId}
+};
 use sui::{balance::Balance, clock::Clock, object_bag::ObjectBag};
 
 use fun btc_config::worst_case_network_fee as Config.worst_case_network_fee;
@@ -24,6 +30,11 @@ const EInputsBelowOutputs: vector<u8> = b"Total input amount is less than total 
 #[error]
 const EOutputCountMismatch: vector<u8> =
     b"Output count must equal request count or request count + 1 (change)";
+#[error]
+const EWithdrawalAlreadyFinalized: vector<u8> = b"Withdrawal transaction is already fully signed";
+#[error]
+const EWithdrawalNotFullySigned: vector<u8> =
+    b"Withdrawal transaction is missing one or more MPC signatures";
 
 // ======== Status Enum ========
 
@@ -88,17 +99,17 @@ public struct WithdrawalTransaction has key, store {
     change_output: Option<OutputUtxo>,
     timestamp_ms: u64,
     randomness: vector<u8>,
-    /// Per-input Schnorr signatures from the MPC committee. Populated by
-    /// `sign_withdrawal` once both the MPC and the guardian have signed.
-    signatures: Option<vector<vector<u8>>>,
-    /// Per-input Schnorr signatures from the guardian enclave. Same length
-    /// as `signatures`; together they form the 2-of-2 taproot witness.
-    /// Populated by `sign_withdrawal` alongside `signatures`.
+    /// Per-input MPC committee signatures, accumulated incrementally and
+    /// out-of-order across checkpoints/leaders/epochs. Owns the presignature
+    /// bookkeeping (see `hashi::mpc_signing`).
+    signing: SigningBatch,
+    /// Per-input Schnorr signatures from the guardian enclave. Same length as
+    /// the MPC signatures; together they form the 2-of-2 taproot witness.
+    /// Written once at `finalize_withdrawal` (the guardian signs in one shot).
     guardian_signatures: Option<vector<vector<u8>>>,
-    /// Global presignature start index assigned at construction time.
-    /// Input `i` uses presig at index `presig_start_index + i`.
-    presig_start_index: u64,
-    epoch: u64,
+    /// Set true exactly once at `finalize_withdrawal`, when every input has both
+    /// an MPC and a guardian signature. This is the single broadcast gate.
+    fully_signed: bool,
 }
 
 public struct OutputUtxo has copy, drop, store {
@@ -342,6 +353,9 @@ public(package) fun new_withdrawal_txn(
         option::none()
     };
 
+    // Contiguously assign presig indices: input `i` uses `presig_start_index + i`.
+    let signing = mpc_signing::new(inputs.length(), presig_start_index, epoch);
+
     WithdrawalTransaction {
         id: object::new(ctx),
         txid,
@@ -351,10 +365,9 @@ public(package) fun new_withdrawal_txn(
         change_output,
         timestamp_ms: clock.timestamp_ms(),
         randomness,
-        signatures: option::none(),
+        signing,
         guardian_signatures: option::none(),
-        presig_start_index,
-        epoch,
+        fully_signed: false,
     }
 }
 
@@ -387,34 +400,96 @@ public(package) fun insert_confirmed_txn(
     self.confirmed_txns.add(txn.id.to_address(), txn);
 }
 
-public(package) fun sign_withdrawal_txn(
+/// Record a chunk of completed per-input MPC signatures into the batch
+/// (out-of-order, first-writer-wins). Caller must cert-gate the write.
+public(package) fun record_input_signatures(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
+    indices: vector<u64>,
     signatures: vector<vector<u8>>,
+) {
+    let txn: &mut WithdrawalTransaction = self.withdrawal_txns.borrow_mut(withdrawal_id);
+    assert!(!txn.fully_signed, EWithdrawalAlreadyFinalized);
+    txn.signing.record(indices, signatures);
+    sui::event::emit(WithdrawalInputsSignedEvent {
+        withdrawal_txn_id: withdrawal_id,
+        signed_count: txn.signing.signed_count(),
+        num_inputs: txn.signing.num_inputs(),
+    });
+}
+
+/// Finalize a fully-MPC-signed withdrawal: attach the one-shot guardian
+/// signatures, flip the broadcast gate, and emit the terminal signed event.
+/// Caller must cert-gate this over the bound (MPC + guardian) message.
+public(package) fun finalize_withdrawal_txn(
+    self: &mut WithdrawalRequestQueue,
+    withdrawal_id: address,
     guardian_signatures: vector<vector<u8>>,
 ) {
     let txn: &mut WithdrawalTransaction = self.withdrawal_txns.borrow_mut(withdrawal_id);
-    txn.signatures = option::some(signatures);
+    assert!(!txn.fully_signed, EWithdrawalAlreadyFinalized);
+    assert!(txn.signing.is_complete(), EWithdrawalNotFullySigned);
     txn.guardian_signatures = option::some(guardian_signatures);
+    txn.fully_signed = true;
     emit_withdrawal_signed(txn);
 }
 
-/// Reassign presig indices for a withdrawal transaction from a previous epoch.
-public(package) fun reassign_presigs_for_withdrawal_txn(
+/// Reassign fresh presig indices to the still-pending inputs of a stale-epoch
+/// withdrawal. `new_base` must be the start of a freshly allocated block of size
+/// `allocated_count`, which must equal the txn's pending count, in `current_epoch`.
+public(package) fun reallocate_presigs_for_withdrawal_txn(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
-    presig_start_index: u64,
+    new_base: u64,
     current_epoch: u64,
+    allocated_count: u64,
 ) {
     let txn: &mut WithdrawalTransaction = self.withdrawal_txns.borrow_mut(withdrawal_id);
-    assert!(txn.epoch != current_epoch);
-    txn.presig_start_index = presig_start_index;
-    txn.epoch = current_epoch;
+    txn.signing.reallocate(new_base, current_epoch, allocated_count);
     sui::event::emit(WithdrawalPresigsReassignedEvent {
         withdrawal_txn_id: withdrawal_id,
         epoch: current_epoch,
-        presig_start_index,
+        presig_start_index: new_base,
     });
+}
+
+// ======== WithdrawalTransaction signing views (drive the leader/watcher) ========
+
+/// Number of inputs still awaiting an MPC signature (what must be re-presigned
+/// on a stale-epoch reallocation).
+public(package) fun withdrawal_txn_pending_count(
+    self: &WithdrawalRequestQueue,
+    withdrawal_id: address,
+): u64 {
+    let txn: &WithdrawalTransaction = self.withdrawal_txns.borrow(withdrawal_id);
+    txn.signing.pending_count()
+}
+
+/// Epoch the pending presig indices belong to (stale if != current committee epoch).
+public(package) fun withdrawal_txn_signing_epoch(
+    self: &WithdrawalRequestQueue,
+    withdrawal_id: address,
+): u64 {
+    let txn: &WithdrawalTransaction = self.withdrawal_txns.borrow(withdrawal_id);
+    txn.signing.epoch()
+}
+
+/// Dense per-input MPC signature vector. Aborts unless every input is signed;
+/// used to build the finalize binding message.
+public(package) fun withdrawal_txn_mpc_signatures(
+    self: &WithdrawalRequestQueue,
+    withdrawal_id: address,
+): vector<vector<u8>> {
+    let txn: &WithdrawalTransaction = self.withdrawal_txns.borrow(withdrawal_id);
+    txn.signing.to_signatures()
+}
+
+public(package) fun withdrawal_txn_is_fully_signed(
+    self: &WithdrawalRequestQueue,
+    withdrawal_id: address,
+): bool {
+    let txn: &WithdrawalTransaction = self.withdrawal_txns.borrow(withdrawal_id);
+    txn.fully_signed
 }
 
 public(package) fun withdrawal_txn_num_inputs(
@@ -537,7 +612,7 @@ public(package) fun emit_withdrawal_signed(self: &WithdrawalTransaction) {
     sui::event::emit(WithdrawalSignedEvent {
         withdrawal_txn_id: self.id.to_address(),
         request_ids: self.request_ids,
-        signatures: *self.signatures.borrow(),
+        signatures: self.signing.to_signatures(),
         guardian_signatures: *self.guardian_signatures.borrow(),
     });
 }
@@ -594,6 +669,15 @@ public struct WithdrawalPickedForProcessingEvent has copy, drop {
     randomness: vector<u8>,
 }
 
+/// Emitted on each incremental chunk write so the watcher can track signing
+/// progress (X / N) and the next leader can resume; the per-input state itself
+/// lives on the object.
+public struct WithdrawalInputsSignedEvent has copy, drop {
+    withdrawal_txn_id: address,
+    signed_count: u64,
+    num_inputs: u64,
+}
+
 public struct WithdrawalSignedEvent has copy, drop {
     withdrawal_txn_id: address,
     request_ids: vector<address>,
@@ -637,6 +721,7 @@ public(package) fun new_withdrawal_txn_for_testing(
     clock: &sui::clock::Clock,
     ctx: &mut TxContext,
 ): WithdrawalTransaction {
+    let num_inputs = inputs.length();
     WithdrawalTransaction {
         id: object::new(ctx),
         txid,
@@ -646,9 +731,8 @@ public(package) fun new_withdrawal_txn_for_testing(
         change_output,
         timestamp_ms: clock.timestamp_ms(),
         randomness: vector[0, 0, 0, 0],
-        signatures: option::none(),
+        signing: mpc_signing::new(num_inputs, 0, 0),
         guardian_signatures: option::none(),
-        presig_start_index: 0,
-        epoch: 0,
+        fully_signed: false,
     }
 }
