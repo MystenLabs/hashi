@@ -12,6 +12,7 @@ pub mod attestation;
 pub mod cache;
 pub mod ceremony_mode;
 pub mod enclave;
+pub mod eph_keys;
 pub mod info;
 pub mod operator_init;
 pub mod rpc;
