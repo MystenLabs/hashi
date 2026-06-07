@@ -192,6 +192,9 @@ pub struct Monitor {
     client_tx: tokio::sync::mpsc::Sender<MonitorMessage>,
     requester: kyoto::Requester,
     tip: Option<HeaderCheckpoint>,
+    /// Checkpoint Kyoto anchors to when (re)building its node. Resolved once at
+    /// startup so restarts don't re-resolve it. See [`Monitor::resolve_start_checkpoint`].
+    start_checkpoint: HeaderCheckpoint,
     block_height_tx: tokio::sync::watch::Sender<u32>,
     pending_deposits: Vec<PendingDeposit>,
     pending_deposit_workers: JoinSet<()>,
@@ -213,17 +216,14 @@ where
 }
 
 impl Monitor {
-    fn build_kyoto_node(config: &MonitorConfig) -> (kyoto::Node, kyoto::Client) {
-        let checkpoint = match config.network {
-            bitcoin::Network::Bitcoin if config.start_height > 709_631 => {
-                kyoto::HeaderCheckpoint::taproot_activation()
-            }
-            bitcoin::Network::Bitcoin if config.start_height > 481_823 => {
-                kyoto::HeaderCheckpoint::segwit_activation()
-            }
-            network => kyoto::HeaderCheckpoint::from_genesis(network),
-        };
-
+    /// Build a Kyoto node anchored at `checkpoint`. Kyoto validates
+    /// proof-of-work and tracks the chain forward from the checkpoint, so
+    /// anchoring near the heights hashi cares about avoids replaying earlier
+    /// history on every build.
+    fn build_kyoto_node(
+        config: &MonitorConfig,
+        checkpoint: HeaderCheckpoint,
+    ) -> (kyoto::Node, kyoto::Client) {
         let mut builder = kyoto::Builder::new(config.network)
             .add_peers(config.trusted_peers.iter().cloned())
             // Only connect to the configured trusted peers. Prevents Kyoto from
@@ -238,6 +238,67 @@ impl Monitor {
         }
 
         builder.build()
+    }
+
+    /// Resolve the checkpoint Kyoto should anchor to.
+    ///
+    /// Kyoto is a stateless light client: every node it builds re-syncs the
+    /// chain forward from its checkpoint. Anchoring at genesis makes each
+    /// (re)build replay the entire header and filter history — hundreds of
+    /// thousands of blocks on a long-lived network. hashi never cares about
+    /// deposits before `start_height`, so we anchor there instead.
+    ///
+    /// Mainnet keeps the well-known soft-fork activation checkpoints (immutable
+    /// trust anchors that don't depend on bitcoind). Other networks anchor at
+    /// `start_height`, fetching that block's hash from bitcoind; if it can't be
+    /// resolved we fall back to genesis, which is never worse than before.
+    async fn resolve_start_checkpoint(
+        bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
+        config: &MonitorConfig,
+    ) -> HeaderCheckpoint {
+        match config.network {
+            bitcoin::Network::Bitcoin if config.start_height > 709_631 => {
+                HeaderCheckpoint::taproot_activation()
+            }
+            bitcoin::Network::Bitcoin if config.start_height > 481_823 => {
+                HeaderCheckpoint::segwit_activation()
+            }
+            network => Self::checkpoint_at_height(bitcoind_rpc, config.start_height, network).await,
+        }
+    }
+
+    /// Build a checkpoint at `height` from the block hash reported by bitcoind,
+    /// retrying a few times before falling back to the genesis checkpoint.
+    async fn checkpoint_at_height(
+        bitcoind_rpc: &Arc<corepc_client::client_sync::v29::Client>,
+        height: u32,
+        network: bitcoin::Network,
+    ) -> HeaderCheckpoint {
+        const MAX_ATTEMPTS: u32 = 5;
+        const RETRY_DELAY: Duration = Duration::from_secs(2);
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            match btc_rpc_call(bitcoind_rpc, move |rpc| rpc.get_block_hash(height as u64)).await {
+                Ok(raw) => match raw.into_model() {
+                    Ok(model) => {
+                        info!("Anchoring Kyoto at start height {height} ({})", model.0);
+                        return HeaderCheckpoint::new(height, model.0);
+                    }
+                    Err(e) => error!("Failed to parse getblockhash({height}) response: {e}"),
+                },
+                Err(e) => warn!(
+                    "Failed to fetch block hash at start height {height} \
+                     (attempt {attempt}/{MAX_ATTEMPTS}): {e}"
+                ),
+            }
+            tokio::time::sleep(RETRY_DELAY).await;
+        }
+
+        warn!(
+            "Could not resolve a checkpoint at start height {height}; falling back to genesis. \
+             Kyoto will sync the entire chain from genesis."
+        );
+        HeaderCheckpoint::from_genesis(network)
     }
 
     /// Run a BTC monitor with the given configuration.
@@ -256,8 +317,9 @@ impl Monitor {
             async move {
                 let bitcoind_rpc = Arc::new(bitcoind_rpc);
 
-                // Build initial Kyoto node.
-                let (kyoto_node, kyoto_client) = Self::build_kyoto_node(&config);
+                // Resolve the chain anchor once, then build the initial Kyoto node.
+                let start_checkpoint = Self::resolve_start_checkpoint(&bitcoind_rpc, &config).await;
+                let (kyoto_node, kyoto_client) = Self::build_kyoto_node(&config, start_checkpoint);
 
                 let mut monitor = Monitor {
                     config,
@@ -266,6 +328,7 @@ impl Monitor {
                     requester: kyoto_client.requester.clone(),
                     client_tx,
                     tip: None,
+                    start_checkpoint,
                     block_height_tx,
                     pending_deposits: vec![],
                     pending_deposit_workers: JoinSet::new(),
@@ -350,7 +413,8 @@ impl Monitor {
 
             tokio::time::sleep(next_restart_delay()).await;
 
-            let (new_node, new_client) = Self::build_kyoto_node(&self.config);
+            let (new_node, new_client) =
+                Self::build_kyoto_node(&self.config, self.start_checkpoint);
             current_node = new_node;
             current_client = new_client;
             self.requester = current_client.requester.clone();
@@ -1324,7 +1388,10 @@ mod tests {
         cache.put_tx_block(txid, block_info);
         let (client_tx, _client_rx) = tokio::sync::mpsc::channel(10);
         let mut result_rxs = Vec::new();
-        let (_, kyoto_client) = Monitor::build_kyoto_node(&MonitorConfig::default());
+        let (_, kyoto_client) = Monitor::build_kyoto_node(
+            &MonitorConfig::default(),
+            HeaderCheckpoint::from_genesis(bitcoin::Network::Bitcoin),
+        );
 
         for vout in [0, 1] {
             let (pending_deposit, result_rx) =
@@ -1345,6 +1412,36 @@ mod tests {
         }
 
         assert_eq!(cache_requests(&metrics, "tx_block", "hit"), 2);
+    }
+
+    #[tokio::test]
+    async fn resolve_start_checkpoint_uses_mainnet_activation_anchors() {
+        // Mainnet keeps the hard-coded soft-fork anchors and never touches the
+        // RPC, so a dummy client suffices. Non-mainnet checkpoint resolution
+        // hits bitcoind and is covered by the e2e suite.
+        let rpc = Arc::new(corepc_client::client_sync::v29::Client::new(
+            "http://127.0.0.1:1",
+        ));
+
+        let above_taproot = MonitorConfig {
+            network: bitcoin::Network::Bitcoin,
+            start_height: 800_000,
+            ..MonitorConfig::default()
+        };
+        assert_eq!(
+            Monitor::resolve_start_checkpoint(&rpc, &above_taproot).await,
+            HeaderCheckpoint::taproot_activation(),
+        );
+
+        let between_segwit_and_taproot = MonitorConfig {
+            network: bitcoin::Network::Bitcoin,
+            start_height: 500_000,
+            ..MonitorConfig::default()
+        };
+        assert_eq!(
+            Monitor::resolve_start_checkpoint(&rpc, &between_segwit_and_taproot).await,
+            HeaderCheckpoint::segwit_activation(),
+        );
     }
 
     #[test]
