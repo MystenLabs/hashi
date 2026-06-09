@@ -79,3 +79,24 @@ participate in the hand-off protocol. This design makes that assumption,
 because of the challenges of enforcing tight coupling, and an economic
 mechanism can be added later to motivate older committee members to
 participate in the hand-off process.
+
+## Committee hand-off
+
+At each epoch boundary, the active committee transitions from the outgoing set
+of members to the incoming set. The guardian service exposes an `UpdateCommittee`
+RPC that implements this hand-off.
+
+The hand-off process works as follows:
+
+1. The outgoing committee produces a `SignedCommitteeTransition`, which contains
+   the new committee information along with a threshold signature from the
+   outgoing committee. The threshold signature must represent at least `2f+1`
+   stake-weighted members of the outgoing committee.
+2. A caller submits the `SignedCommitteeTransition` to the guardian service
+   through the `UpdateCommittee` RPC.
+3. The guardian verifies the outgoing committee's threshold signature against
+   the currently active committee to confirm that a quorum of outgoing members
+   approved the transition.
+4. Upon successful verification, the guardian swaps its in-memory committee to
+   the new committee and logs the transition to S3 for auditability and
+   recovery.

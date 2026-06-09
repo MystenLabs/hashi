@@ -9,4 +9,17 @@ Hashi uses a withdrawal guardian: a second signatory on the managed Bitcoin
 deposits. All deposits are spendable only with a 2-of-2 multisig where the
 guardian is one party and the Hashi MPC committee is the other.
 
-Additional details about the guardian integration are added before Testnet.
+Because the guardian co-signs withdrawals with the MPC committee, it must track which committee is currently active. At each epoch boundary, the guardian receives a committee transition message so it knows which committee to expect for subsequent signing requests.
+
+## Guardian service API
+
+### UpdateCommittee
+
+The `UpdateCommittee` RPC handles committee handoff at epoch boundaries.
+
+- **Request:** A `SignedCommitteeTransition` containing the new committee definition and a threshold signature from the outgoing committee.
+- **Verification:** The guardian verifies the outgoing committee's threshold signature to ensure the transition is authorized.
+- **Effect:** On successful verification, the guardian swaps its in-memory committee to the new committee.
+- **Audit log:** The signed transition is persisted to S3 for auditability and disaster recovery.
+
+This ensures the guardian always knows which committee it should expect to co-sign withdrawals with, and that committee transitions are cryptographically authorized by the prior committee.
