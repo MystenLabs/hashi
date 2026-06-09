@@ -9,4 +9,32 @@ Hashi uses a withdrawal guardian: a second signatory on the managed Bitcoin
 deposits. All deposits are spendable only with a 2-of-2 multisig where the
 guardian is one party and the Hashi MPC committee is the other.
 
+## Building the guardian enclave
+
+When building the guardian enclave container image, you must provide the `GIT_REVISION` build-arg. The build fails if this argument is not set.
+
+### Using the Makefile
+
+When you build through the `Makefile`, `GIT_REVISION` defaults to the output of `git describe` if you do not explicitly set it. You can override it by passing the variable directly:
+
+```
+$ make GIT_REVISION=<your-revision>
+```
+
+### Using Docker directly
+
+If you build the container image with Docker directly, pass `GIT_REVISION` as a build-arg:
+
+```
+$ docker build --build-arg GIT_REVISION=$(git describe) .
+```
+
+### CI environments
+
+In CI environments such as GitHub Actions, set `GIT_REVISION` to the appropriate commit SHA. For example, in a GitHub Actions workflow you can pass `github.sha`:
+
+```
+$ docker build --build-arg GIT_REVISION=${{ github.sha }} .
+```
+
 Additional details about the guardian integration are added before Testnet.
