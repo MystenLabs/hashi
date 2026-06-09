@@ -711,6 +711,9 @@ pub fn verify_enclave_attestation(
         use fastcrypto::nitro_attestation::parse_nitro_attestation;
         use fastcrypto::nitro_attestation::verify_nitro_attestation;
 
+        // Bools: (is_upgraded_parsing, include_all_nonzero_pcrs,
+        // always_include_required_pcrs). The last keeps PCR0 in `pcr_map` even if
+        // zero, so the pin below can't be bypassed by a missing entry.
         let (signature, signed_message, doc) =
             parse_nitro_attestation(attestation, true, true, true)
                 .map_err(|e| InvalidInputs(format!("attestation parse failed: {e}")))?;
