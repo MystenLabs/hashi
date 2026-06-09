@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::anyhow;
 use corepc_client::client_sync::Auth;
-use hashi_types::guardian::ExpectedPcr;
+use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::S3Config;
 use serde::Deserialize;
 
@@ -138,9 +138,9 @@ impl Config {
     }
 
     /// The expected guardian enclave measurement, decoded from `expected_pcr0`.
-    pub fn expected_pcr(&self) -> anyhow::Result<ExpectedPcr> {
+    pub fn build_pcrs(&self) -> anyhow::Result<BuildPcrs> {
         let pcr0 = hex::decode(self.expected_pcr0.trim_start_matches("0x"))
             .context("expected_pcr0 is not valid hex")?;
-        Ok(ExpectedPcr::new(pcr0))
+        Ok(BuildPcrs::new(pcr0))
     }
 }
