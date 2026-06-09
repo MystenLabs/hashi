@@ -382,6 +382,7 @@ mod tests {
             .expect("valid intra-event delays"),
             clock_skew: 10,
             guardian: S3Config::mock_for_testing(),
+            expected_pcr0: String::new(),
             sui: SuiConfig {
                 rpc_url: "http://sui".to_string(),
             },

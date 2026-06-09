@@ -695,7 +695,7 @@ pub fn verify_enclave_attestation(
     #[cfg(any(test, feature = "non-enclave-dev"))]
     {
         let _ = (attestation, signing_pubkey, expected_pcrs);
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(any(test, feature = "non-enclave-dev")))]
     {
