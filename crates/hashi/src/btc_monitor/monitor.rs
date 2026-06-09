@@ -192,6 +192,10 @@ pub struct Monitor {
     client_tx: tokio::sync::mpsc::Sender<MonitorMessage>,
     requester: kyoto::Requester,
     tip: Option<HeaderCheckpoint>,
+    /// Whether Kyoto has finished its initial filter sync. While `false` the
+    /// node is replaying historical headers, so per-block side effects (deposit
+    /// processing, block-height notifications, info logging) are suppressed.
+    synced: bool,
     block_height_tx: tokio::sync::watch::Sender<u32>,
     pending_deposits: Vec<PendingDeposit>,
     pending_deposit_workers: JoinSet<()>,
@@ -266,6 +270,7 @@ impl Monitor {
                     requester: kyoto_client.requester.clone(),
                     client_tx,
                     tip: None,
+                    synced: false,
                     block_height_tx,
                     pending_deposits: vec![],
                     pending_deposit_workers: JoinSet::new(),
@@ -343,6 +348,7 @@ impl Monitor {
                 }
             }
 
+            self.synced = false;
             self.metrics.kyoto_restarts.inc();
             self.metrics.kyoto_connected_peers.set(0);
             self.metrics.kyoto_synced.set(0);
@@ -477,11 +483,6 @@ impl Monitor {
     fn process_chain_update(&mut self, changes: kyoto::chain::BlockHeaderChanges) {
         match changes {
             kyoto::chain::BlockHeaderChanges::Connected(indexed_header) => {
-                info!(
-                    "New block header at height {} ({})",
-                    indexed_header.height,
-                    indexed_header.block_hash()
-                );
                 self.metrics.kyoto_blocks_received.inc();
                 self.metrics
                     .kyoto_best_height
@@ -490,8 +491,28 @@ impl Monitor {
                     indexed_header.height,
                     indexed_header.block_hash(),
                 ));
-                let _ = self.block_height_tx.send(indexed_header.height);
-                self.process_pending_deposits();
+                // During the initial sync Kyoto replays a Connected event per
+                // historical header. Acting on each one would re-run deposit
+                // processing (here and, via the block-height watch, in the
+                // leader) and log a line for every block. Until we're synced,
+                // just track the tip; FiltersSynced drives processing once the
+                // catch-up completes, and each new block afterwards re-syncs to
+                // emit another FiltersSynced.
+                if self.synced {
+                    info!(
+                        "New block header at height {} ({})",
+                        indexed_header.height,
+                        indexed_header.block_hash()
+                    );
+                    let _ = self.block_height_tx.send(indexed_header.height);
+                    self.process_pending_deposits();
+                } else {
+                    debug!(
+                        "Catching up: connected header at height {} ({})",
+                        indexed_header.height,
+                        indexed_header.block_hash()
+                    );
+                }
             }
             kyoto::chain::BlockHeaderChanges::Reorganized {
                 accepted,
@@ -534,6 +555,7 @@ impl Monitor {
             tip.hash,
             sync_update.recent_history.len()
         );
+        self.synced = true;
         self.metrics.kyoto_synced.set(1);
         self.metrics.kyoto_best_height.set(tip.height as i64);
         self.metrics.kyoto_sync_percent.set(100);
