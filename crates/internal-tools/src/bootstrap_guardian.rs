@@ -34,7 +34,6 @@ use hashi_types::guardian::crypto::commit_share;
 use hashi_types::guardian::crypto::split_secret;
 use hashi_types::guardian::proto_conversions::provisioner_init_request_to_pb;
 use hashi_types::guardian::proto_conversions::withdraw_mode_config_to_pb;
-use hashi_types::guardian::session_id_from_signing_pubkey;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use hpke::Deserializable;
@@ -178,7 +177,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .into_inner();
     let resp = GetGuardianInfoResponse::try_from(info_pb)
         .map_err(|e| anyhow!("decode GetGuardianInfoResponse: {e:?}"))?;
-    let session_id = session_id_from_signing_pubkey(&resp.signing_pub_key);
+    let signer = hex::encode(resp.signing_pub_key.as_bytes());
 
     // Verify the enclave's own signature on the info — without this the
     // `encryption_pubkey` below would be unauthenticated and a buggy or
@@ -197,7 +196,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
     let info = resp
         .signed_info
         .verify(&resp.signing_pub_key)
-        .map_err(|e| anyhow!("verify GuardianInfo signature (session={session_id}): {e:?}"))?;
+        .map_err(|e| anyhow!("verify GuardianInfo signature (signer={signer}): {e:?}"))?;
 
     // Match against what we just sent in OperatorInit. Catches a stale or
     // wrong enclave echoing back a different config than the one we set up.
@@ -230,8 +229,8 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
     );
 
     let enc_pubkey = EncPubKey::from_bytes(&info.encryption_pubkey)
-        .map_err(|e| anyhow!("decode guardian encryption pubkey (session={session_id}): {e:?}"))?;
-    tracing::info!(session_id = %session_id, "guardian info verified");
+        .map_err(|e| anyhow!("decode guardian encryption pubkey (signer={signer}): {e:?}"))?;
+    tracing::info!(signer = %signer, "guardian info verified");
 
     tracing::info!("submitting ProvisionerInit with {t} shares");
     let encrypted_shares = material
@@ -249,10 +248,10 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .await
         .context("ProvisionerInit RPC failed")?;
 
-    // Pin: confirm we're still talking to the same enclave session we set up.
-    // If the guardian restarted between OperatorInit and now, the new session
-    // would have a different signing key — and the shares we just submitted
-    // would belong to a session that no longer exists.
+    // Pin: confirm the enclave we just provisioned reached the intended end
+    // state. The signing key can't prove that (it persists across restarts),
+    // so check the reconstructed BTC key matches our master pubkey — a restart
+    // anywhere in the flow wipes enclave memory and fails this.
     let post_resp_pb = client
         .get_guardian_info(pb::GetGuardianInfoRequest {})
         .await
@@ -260,15 +259,31 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .into_inner();
     let post_resp = GetGuardianInfoResponse::try_from(post_resp_pb)
         .map_err(|e| anyhow!("decode post-ProvisionerInit GetGuardianInfoResponse: {e:?}"))?;
-    let post_session_id = session_id_from_signing_pubkey(&post_resp.signing_pub_key);
     anyhow::ensure!(
-        post_session_id == session_id,
-        "guardian session changed mid-bootstrap: started {session_id}, now {post_session_id} \
-         (enclave likely restarted; rerun bootstrap)"
+        post_resp.signing_pub_key.as_bytes() == resp.signing_pub_key.as_bytes(),
+        "guardian signing key changed mid-bootstrap: started {signer}, now {} \
+         (enclave restarted with fresh keys; rerun bootstrap)",
+        hex::encode(post_resp.signing_pub_key.as_bytes()),
+    );
+    let post_info = post_resp
+        .signed_info
+        .verify(&post_resp.signing_pub_key)
+        .map_err(|e| anyhow!("verify post-ProvisionerInit GuardianInfo signature: {e:?}"))?;
+    let enclave_btc_pubkey = post_info.enclave_btc_pubkey.ok_or_else(|| {
+        anyhow!(
+            "guardian has no BTC key after ProvisionerInit \
+             (enclave likely restarted mid-bootstrap; rerun bootstrap)"
+        )
+    })?;
+    anyhow::ensure!(
+        enclave_btc_pubkey == material.master_pubkey,
+        "guardian reconstructed BTC pubkey {enclave_btc_pubkey} does not match \
+         the provisioned master {}",
+        material.master_pubkey,
     );
 
     println!("Guardian fully initialized.");
-    println!("  session_id:               {session_id}");
+    println!("  signing pubkey:           {signer}");
     println!(
         "  master pubkey:            {}",
         hex::encode(material.master_pubkey.serialize())

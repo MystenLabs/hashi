@@ -4,6 +4,9 @@
 //! Ephemeral keypair load/persist. In `non-enclave-dev` builds the guardian
 //! persists its keypair to `GUARDIAN_EPH_KEY_PATH` (when set) so a redeploy keeps
 //! the same signing pubkey; the enclave build always generates fresh keys.
+//!
+//! Only the keypair persists; the S3 `session_id` stays fresh per boot so a
+//! restart never rewrites a prior boot's log keys.
 
 use anyhow::Result;
 use hashi_types::guardian::GuardianEncKeyPair;
@@ -101,7 +104,8 @@ mod persist {
             enc_sk: hex::encode(encryption.to_secret_bytes()),
             enc_pk: hex::encode(encryption.public_key_bytes()),
         };
-        if let Some(parent) = path.parent() {
+        // `parent()` is `Some("")` for a bare relative filename; skip the mkdir.
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }

@@ -49,6 +49,8 @@ pub struct EnclaveConfig {
     mode: EnclaveMode,
     /// Ephemeral keypair (set on boot)
     eph_keys: EphemeralKeyPairs,
+    /// Per-boot random session tag for S3 log keys (set on boot).
+    session_id: SessionID,
     /// S3 client & config (set in operator_init)
     s3_logger: OnceLock<GuardianS3Client>,
     /// Enclave BTC private key (set in provisioner_init)
@@ -114,6 +116,7 @@ impl EnclaveConfig {
                 signing_keys,
                 encryption_keys,
             },
+            session_id: random_session_id(&mut rand::thread_rng()),
             s3_logger: OnceLock::new(),
             enclave_btc_keypair: OnceLock::new(),
             btc_network: OnceLock::new(),
@@ -487,9 +490,9 @@ impl Enclave {
     // S3 Logging
     // ========================================================================
 
-    /// A unique session ID for the current enclave session.
+    /// A unique session ID for the current enclave session (fresh every boot).
     pub fn s3_session_id(&self) -> SessionID {
-        session_id_from_signing_pubkey(&self.signing_pubkey())
+        self.config.session_id.clone()
     }
 
     async fn write_log(&self, message: LogMessage) -> GuardianResult<()> {
@@ -571,5 +574,31 @@ impl Enclave {
             .state_hash
             .set(hash)
             .map_err(|_| InvalidInputs("State hash already set".into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A keypair persisted across boots must still yield distinct session ids.
+    #[test]
+    fn same_keypair_gets_fresh_session_id_per_boot() {
+        let mut rng = rand::thread_rng();
+        let signing = GuardianSignKeyPair::new(&mut rng);
+        let encryption = GuardianEncKeyPair::random(&mut rng);
+        // Reload the encryption key the way a persisted boot would.
+        let encryption_reloaded = GuardianEncKeyPair::from_bytes(
+            &encryption.to_secret_bytes(),
+            &encryption.public_key_bytes(),
+        )
+        .unwrap();
+
+        let a = Enclave::new(signing.clone(), encryption, EnclaveMode::Withdraw);
+        let b = Enclave::new(signing, encryption_reloaded, EnclaveMode::Withdraw);
+
+        assert_eq!(a.signing_pubkey(), b.signing_pubkey());
+        assert_ne!(a.s3_session_id(), b.s3_session_id());
+        assert_eq!(a.s3_session_id().len(), SESSION_ID_HEX_LEN);
     }
 }

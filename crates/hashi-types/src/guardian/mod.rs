@@ -51,18 +51,17 @@ use serde::Serialize;
 //          Constants
 // ---------------------------------
 
-/// Length of the session ID prefix (hex chars) used in S3 keys. 16 hex =
-/// 64 bits of the signing pubkey, comfortably below any collision risk for
-/// realistic session counts.
+/// Length of the session ID (hex chars) used in S3 keys. 16 hex = 64 random
+/// bits, comfortably below any collision risk for realistic session counts.
 pub const SESSION_ID_HEX_LEN: usize = 16;
 
-/// Canonical guardian session ID — a short prefix of the hex-encoded signing
-/// public key. Used as a per-session tag in S3 object keys; full pubkey
-/// verification still happens via the signed log payload.
-pub fn session_id_from_signing_pubkey(signing_pub_key: &GuardianPubKey) -> SessionID {
-    let mut s = ::hex::encode(signing_pub_key.as_bytes());
-    s.truncate(SESSION_ID_HEX_LEN);
-    s
+/// Canonical guardian session ID — `SESSION_ID_HEX_LEN` random hex chars
+/// sampled fresh at enclave boot. Not derived from the signing key (which can
+/// persist across restarts): each boot must write under fresh S3 log keys.
+pub fn random_session_id(rng: &mut (impl CryptoRng + RngCore)) -> SessionID {
+    let mut bytes = [0u8; SESSION_ID_HEX_LEN / 2];
+    rng.fill_bytes(&mut bytes);
+    ::hex::encode(bytes)
 }
 
 /// Which flows an enclave serves, fixed at boot. A `Ceremony` enclave runs
@@ -258,8 +257,8 @@ pub type WithdrawalID = sui_sdk_types::Address;
 
 pub type Attestation = Vec<u8>;
 
-/// Guardian session identifier — a short prefix of the hex-encoded signing
-/// pubkey (see [`session_id_from_signing_pubkey`]). Tags per-session S3 objects.
+/// Guardian session identifier — a random per-boot tag (see
+/// [`random_session_id`]). Tags per-session S3 objects.
 pub type SessionID = String;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -757,6 +756,16 @@ impl From<&WithdrawModeState> for WithdrawModeStateRepr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn random_session_id_is_fresh_per_draw() {
+        let mut rng = rand::thread_rng();
+        let a = random_session_id(&mut rng);
+        let b = random_session_id(&mut rng);
+        assert_eq!(a.len(), SESSION_ID_HEX_LEN);
+        assert_eq!(b.len(), SESSION_ID_HEX_LEN);
+        assert_ne!(a, b);
+    }
 
     #[test]
     fn rotate_kps_state_new_rejects_wrong_cert_count() {
