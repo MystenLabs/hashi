@@ -26,7 +26,8 @@ jobs:
         working-directory: docker/hashi-guardian
         env:
           BUCKET_NAME: ${{ inputs.bucket_name || 'guardian-test-bucket' }}
-        run: make BUCKET_NAME=$BUCKET_NAME
+          GIT_REVISION: ${{ github.sha }}
+        run: make BUCKET_NAME=$BUCKET_NAME GIT_REVISION=$GIT_REVISION
 
       - name: Print PCRs
         working-directory: docker/hashi-guardian

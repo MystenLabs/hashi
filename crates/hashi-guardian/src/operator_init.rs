@@ -164,7 +164,7 @@ async fn commit_operator_init(
 
     // 2) Share commitments help KPs confirm that the right private key will be constructed.
     enclave
-        .log_init(OIGuardianInfo(enclave.info().await))
+        .log_init(OIGuardianInfo(Box::new(enclave.info().await)))
         .await
         .expect("Unable to log GuardianInfo");
 

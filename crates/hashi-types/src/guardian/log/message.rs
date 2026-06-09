@@ -76,8 +76,9 @@ pub enum InitLogMessage {
         signing_public_key: GuardianPubKey,
     },
     /// Signed GuardianInfo logged in /operator_init (secret-sharing instance,
-    /// state_hash, encryption/BTC pubkeys).
-    OIGuardianInfo(GuardianInfo),
+    /// state_hash, encryption/BTC pubkeys). Boxed: much larger than the other
+    /// variants (`clippy::large_enum_variant`).
+    OIGuardianInfo(Box<GuardianInfo>),
     /// Threshold reached — enclave fully initialized (happens once). Records the
     /// ids of the shares that were combined.
     PIEnclaveFullyInitialized { share_ids: Vec<ShareID> },

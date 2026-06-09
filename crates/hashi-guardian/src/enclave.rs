@@ -474,12 +474,13 @@ impl Enclave {
                 .map(|l| l.bucket_info().clone()),
             encryption_pubkey: self.encryption_public_key().to_bytes().to_vec(),
             state_hash: self.state_hash().copied(),
-            // TODO: Change it
-            server_version: "v1".to_string(),
+            // Injected at build time (docker/CI); defaults outside a real build.
+            untrusted_git_revision: option_env!("GIT_REVISION").unwrap_or("unknown").to_string(),
             enclave_btc_pubkey: self.config.enclave_btc_pubkey().ok(),
             limiter_state: self.state.limiter_state().await,
             limiter_config: self.state.limiter_config().await,
             current_committee_epoch: self.state.get_committee().ok().map(|c| c.epoch()),
+            mpc_master_g: self.config.hashi_btc_master_pubkey.get().cloned(),
         }
     }
 

@@ -104,7 +104,7 @@ impl GuardianReader {
             .message
             .into_init_log()
             .and_then(|x| match x {
-                InitLogMessage::OIGuardianInfo(info) => Some(info),
+                InitLogMessage::OIGuardianInfo(info) => Some(*info),
                 _ => None,
             })
             .with_context(|| format!("expected OIGuardianInfo at {key}"))
