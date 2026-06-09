@@ -16,7 +16,7 @@ use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
-use hashi_types::guardian::ExpectedPcrs;
+use hashi_types::guardian::ExpectedPcr;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::InitLogMessage;
@@ -55,18 +55,18 @@ pub struct GuardianReader {
 }
 
 impl GuardianReader {
-    pub async fn new(config: &S3Config, expected_pcrs: ExpectedPcrs) -> anyhow::Result<Self> {
+    pub async fn new(config: &S3Config, expected_pcr: ExpectedPcr) -> anyhow::Result<Self> {
         let s3 = GuardianS3Client::new_checked(config)
             .await
             .map_err(|e| anyhow::anyhow!(e))
             .context("failed to verify guardian S3 connectivity")?;
-        Ok(Self::from_s3_client(s3, expected_pcrs))
+        Ok(Self::from_s3_client(s3, expected_pcr))
     }
 
-    pub fn from_s3_client(s3: GuardianS3Client, expected_pcrs: ExpectedPcrs) -> Self {
+    pub fn from_s3_client(s3: GuardianS3Client, expected_pcr: ExpectedPcr) -> Self {
         Self {
             s3,
-            pubkey_cache: GuardianSessionKeyCache::new(expected_pcrs),
+            pubkey_cache: GuardianSessionKeyCache::new(expected_pcr),
         }
     }
 
@@ -165,21 +165,21 @@ impl GuardianReader {
 
 /// Enclave signing pubkeys trusted after their attestation was verified once,
 /// keyed by session. Internal to [`GuardianReader`]; pins every session's
-/// attestation against `expected_pcrs`.
+/// attestation against `expected_pcr`.
 ///
-/// TODO(check C): make `expected_pcrs` a `commit -> ExpectedPcrs` map resolved
+/// TODO(check C): make `expected_pcr` a `commit -> ExpectedPcr` map resolved
 /// per session from its `/info`-reported `untrusted_git_revision`, instead of a
 /// single flat set.
 struct GuardianSessionKeyCache {
     keys: HashMap<SessionID, GuardianPubKey>,
-    expected_pcrs: ExpectedPcrs,
+    expected_pcr: ExpectedPcr,
 }
 
 impl GuardianSessionKeyCache {
-    fn new(expected_pcrs: ExpectedPcrs) -> Self {
+    fn new(expected_pcr: ExpectedPcr) -> Self {
         Self {
             keys: HashMap::new(),
-            expected_pcrs,
+            expected_pcr,
         }
     }
 
@@ -191,7 +191,7 @@ impl GuardianSessionKeyCache {
     ) -> anyhow::Result<&GuardianPubKey> {
         if !self.keys.contains_key(session_id) {
             let pubkey = s3
-                .get_verified_enclave_pubkey(session_id, &self.expected_pcrs)
+                .get_verified_enclave_pubkey(session_id, &self.expected_pcr)
                 .await?;
             self.keys.insert(session_id.to_string(), pubkey);
         }

@@ -656,8 +656,8 @@ impl GetGuardianInfoResponse {
     /// attestation anchors `signing_pub_key`, and `signed_info` must be signed by
     /// it. Self-contained so any caller (KP init, hashi nodes) can turn an
     /// untrusted response into a trusted `GuardianInfo` in one call.
-    pub fn verify(&self, expected_pcrs: &ExpectedPcrs) -> GuardianResult<GuardianInfo> {
-        verify_enclave_attestation(&self.attestation, &self.signing_pub_key, expected_pcrs)?;
+    pub fn verify(&self, expected_pcr: &ExpectedPcr) -> GuardianResult<GuardianInfo> {
+        verify_enclave_attestation(&self.attestation, &self.signing_pub_key, expected_pcr)?;
         self.signed_info.clone().verify(&self.signing_pub_key)
     }
 }
@@ -675,11 +675,11 @@ impl GetGuardianInfoResponse {
 /// additional PCRs. A `commit -> PCRs` allowlist keyed on `untrusted_git_revision`
 /// is the follow-up.
 #[derive(Debug, Clone)]
-pub struct ExpectedPcrs {
+pub struct ExpectedPcr {
     pcr0: Vec<u8>,
 }
 
-impl ExpectedPcrs {
+impl ExpectedPcr {
     pub fn new(pcr0: Vec<u8>) -> Self {
         Self { pcr0 }
     }
@@ -699,11 +699,11 @@ impl ExpectedPcrs {
 pub fn verify_enclave_attestation(
     attestation: &[u8],
     signing_pubkey: &GuardianPubKey,
-    expected_pcrs: &ExpectedPcrs,
+    expected_pcr: &ExpectedPcr,
 ) -> GuardianResult<()> {
     #[cfg(any(test, feature = "non-enclave-dev"))]
     {
-        let _ = (attestation, signing_pubkey, expected_pcrs);
+        let _ = (attestation, signing_pubkey, expected_pcr);
         Ok(())
     }
     #[cfg(not(any(test, feature = "non-enclave-dev")))]
@@ -727,7 +727,7 @@ pub fn verify_enclave_attestation(
         }
 
         // Pin PCR0 (the whole EIF image hash).
-        if doc.pcr_map.get(&0).map(Vec::as_slice) != Some(expected_pcrs.pcr0()) {
+        if doc.pcr_map.get(&0).map(Vec::as_slice) != Some(expected_pcr.pcr0()) {
             return Err(InvalidInputs(
                 "attestation PCR0 does not match the expected enclave image".into(),
             ));
