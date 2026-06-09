@@ -9,4 +9,17 @@ Hashi uses a withdrawal guardian: a second signatory on the managed Bitcoin
 deposits. All deposits are spendable only with a 2-of-2 multisig where the
 guardian is one party and the Hashi MPC committee is the other.
 
-Additional details about the guardian integration are added before Testnet.
+## Guardian initialization
+
+The guardian provisioner is initialized using the standalone `hashi-guardian-init` binary:
+
+```sh
+cargo run -p hashi-guardian-init -- provisioner --config <path-to-config>
+```
+
+The configuration file includes the following fields (among others):
+
+- **relay_endpoint:** the endpoint of the relay service.
+- **hashi_btc_master_pubkey_hex:** the hex-encoded master public key for Hashi BTC.
+
+Refer to the sample configuration file in the `hashi-guardian-init` crate for a complete example.
