@@ -9,4 +9,21 @@ Hashi uses a withdrawal guardian: a second signatory on the managed Bitcoin
 deposits. All deposits are spendable only with a 2-of-2 multisig where the
 guardian is one party and the Hashi MPC committee is the other.
 
-Additional details about the guardian integration are added before Testnet.
+## Committee transition signing
+
+When a Sui epoch transition occurs, the Hashi committee membership can change. The guardian must update its view of the active committee so that the 2-of-2 multisig remains valid for new deposits and withdrawals. To coordinate this update, Hashi provides the `SignCommitteeTransition` RPC.
+
+The `SignCommitteeTransition` RPC allows peers to sign committee transition messages using their historical epoch BLS keys rather than only their current-epoch keys. This is necessary because the outgoing committee must attest to the handoff before the new committee takes over. By signing with the BLS key that was active during the relevant epoch, each peer proves it was a legitimate member of the committee at the time of the transition.
+
+The signed transition message tells the guardian which committee is now authorized to co-sign withdrawals, ensuring the guardian and the on-chain state stay in sync.
+
+## Guardian committee handoff
+
+The leader node drives the guardian committee handoff process. When the leader detects an epoch change on the Sui network, it initiates the following flow:
+
+1. The leader identifies the new committee membership for the incoming epoch.
+2. The leader requests signatures from outgoing committee members through the `SignCommitteeTransition` RPC. Each member signs with the BLS key it held during the prior epoch.
+3. The leader collects the signed transition messages and submits them to the guardian.
+4. The guardian verifies the signatures against the known committee for that epoch and updates its internal state to recognize the new committee.
+
+After the handoff completes, the guardian accepts co-signing requests only from the newly active committee. This mechanism ensures that the guardian's view of the authorized committee always matches the on-chain epoch, preserving the security of the 2-of-2 multisig model even across committee rotations.
