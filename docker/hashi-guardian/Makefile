@@ -1,6 +1,7 @@
 REGISTRY := local
 BUCKET_NAME ?= guardian-test-bucket
 AWS_REGION ?= us-east-1
+GIT_REVISION ?= $(shell git -C ../.. describe --always --exclude '*' --dirty --abbrev=8)
 
 .DEFAULT_GOAL :=
 .PHONY: default
@@ -19,6 +20,7 @@ out/nitro.eif: $(shell git ls-files ../../crates/hashi-guardian ../../crates/has
 		--output type=local,rewrite-timestamp=true,dest=out \
 		--build-arg BUCKET_NAME=$(BUCKET_NAME) \
 		--build-arg AWS_REGION=$(AWS_REGION) \
+		--build-arg GIT_REVISION=$(GIT_REVISION) \
 		-f Containerfile \
 		../..
 

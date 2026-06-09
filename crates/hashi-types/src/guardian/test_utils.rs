@@ -84,11 +84,12 @@ impl GetGuardianInfoResponse {
             }),
             encryption_pubkey: vec![0u8; 32],
             state_hash: None,
-            server_version: "v1".to_string(),
+            untrusted_git_revision: "unknown".to_string(),
             enclave_btc_pubkey: None,
             limiter_state: None,
             limiter_config: None,
             current_committee_epoch: None,
+            mpc_master_g: None,
         };
 
         GetGuardianInfoResponse {
