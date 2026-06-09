@@ -666,6 +666,10 @@ impl GetGuardianInfoResponse {
 /// mandates PCR0 — the hash of the whole enclave image (EIF), which uniquely
 /// identifies the build — so a pinning policy can never omit it.
 ///
+/// We record only PCR0: in a StageX (reproducible, single-binary) build it is
+/// the only measurement that carries signal — the others (kernel, bootloader,
+/// IAM role) are constant or irrelevant for our pinning.
+///
 /// TODO: holds only a single PCR0, so it can't accept the two valid measurements
 /// that briefly coexist during a software upgrade (old + new image), nor pin
 /// additional PCRs. A `commit -> PCRs` allowlist keyed on `untrusted_git_revision`
