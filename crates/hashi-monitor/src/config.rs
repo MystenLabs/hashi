@@ -4,13 +4,10 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use std::collections::BTreeMap;
-use std::collections::HashMap;
-
 use anyhow::Context;
 use anyhow::anyhow;
 use corepc_client::client_sync::Auth;
-use hashi_types::guardian::BuildPcrs;
+use hashi_types::guardian::BuildPcrsConfig;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::S3Config;
 use serde::Deserialize;
@@ -28,9 +25,11 @@ pub struct Config {
     pub clock_skew: u64,
 
     pub guardian: S3Config,
-    /// Acceptable guardian enclave builds: git revision -> PCR0 (hex). Each
-    /// session's attestation is pinned to the entry naming its reported build.
-    pub expected_builds: BTreeMap<String, String>,
+    /// The guardian enclave build we expect: git revision + PCR0 (hex). Each
+    /// session's attestation is pinned to it.
+    pub expected_build: BuildPcrsConfig,
+    /// The outgoing build during an upgrade window; omit otherwise.
+    pub prev_build: Option<BuildPcrsConfig>,
     pub sui: SuiConfig,
     pub btc: BtcConfig,
 }
@@ -141,17 +140,14 @@ impl Config {
         self.next_event_delays.get_delay(source)
     }
 
-    /// The PCR allowlist, decoded from `expected_builds`.
+    /// The PCR allowlist, decoded from `expected_build` (+ optional `prev_build`).
     pub fn pcr_allowlist(&self) -> anyhow::Result<PcrAllowlist> {
-        let builds = self
-            .expected_builds
-            .iter()
-            .map(|(rev, pcr0_hex)| {
-                let pcr0 = hex::decode(pcr0_hex.trim_start_matches("0x"))
-                    .with_context(|| format!("expected_builds[{rev}] is not valid hex"))?;
-                Ok((rev.clone(), BuildPcrs::new(pcr0)))
-            })
-            .collect::<anyhow::Result<HashMap<_, _>>>()?;
-        PcrAllowlist::new(builds).map_err(|e| anyhow::anyhow!(e))
+        Ok(PcrAllowlist::new(
+            self.expected_build.to_build_pcrs()?,
+            self.prev_build
+                .as_ref()
+                .map(BuildPcrsConfig::to_build_pcrs)
+                .transpose()?,
+        ))
     }
 }

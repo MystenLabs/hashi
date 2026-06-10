@@ -3,7 +3,7 @@
 
 use anyhow::Context;
 use hashi_types::bitcoin::HashiMasterG;
-use hashi_types::guardian::BuildPcrs;
+use hashi_types::guardian::BuildPcrsConfig;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::S3Config;
@@ -14,8 +14,6 @@ use k256::FieldBytes;
 use k256::Scalar;
 use k256::elliptic_curve::PrimeField;
 use serde::Deserialize;
-use std::collections::BTreeMap;
-use std::collections::HashMap;
 use std::num::NonZeroU16;
 use std::path::Path;
 
@@ -41,10 +39,12 @@ pub struct ProvisionerConfig {
     /// the derivation master (NOT the guardian's own key). Must match operator init.
     pub hashi_btc_master_pubkey_hex: String,
 
-    /// Acceptable enclave builds: git revision -> PCR0 (hex). A session's
-    /// attestation is pinned to the entry named by its reported build. At least one
-    /// is required (listing two lets an upgrade's old+new images both verify).
-    pub expected_builds: BTreeMap<String, String>,
+    /// The enclave build we expect: git revision + PCR0 (hex). A session's
+    /// attestation is pinned to it.
+    pub expected_build: BuildPcrsConfig,
+    /// The outgoing build during an upgrade window, so its still-running sessions
+    /// verify until they rotate. Omit outside an upgrade.
+    pub prev_build: Option<BuildPcrsConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -74,18 +74,15 @@ impl ProvisionerConfig {
         decode_master_g_hex(&self.hashi_btc_master_pubkey_hex)
     }
 
-    /// The PCR allowlist, decoded from `expected_builds`.
+    /// The PCR allowlist, decoded from `expected_build` (+ optional `prev_build`).
     pub fn pcr_allowlist(&self) -> anyhow::Result<PcrAllowlist> {
-        let builds = self
-            .expected_builds
-            .iter()
-            .map(|(rev, pcr0_hex)| {
-                let pcr0 = hex::decode(pcr0_hex.trim_start_matches("0x"))
-                    .with_context(|| format!("expected_builds[{rev}] is not valid hex"))?;
-                Ok((rev.clone(), BuildPcrs::new(pcr0)))
-            })
-            .collect::<anyhow::Result<HashMap<_, _>>>()?;
-        PcrAllowlist::new(builds).map_err(|e| anyhow::anyhow!(e))
+        Ok(PcrAllowlist::new(
+            self.expected_build.to_build_pcrs()?,
+            self.prev_build
+                .as_ref()
+                .map(BuildPcrsConfig::to_build_pcrs)
+                .transpose()?,
+        ))
     }
 }
 

@@ -47,7 +47,6 @@ use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::HashMap;
 // ---------------------------------
 //          Constants
 // ---------------------------------
@@ -679,24 +678,22 @@ pub struct EnclaveIdentity {
     pub info: GuardianInfo,
 }
 
-/// One enclave build's known-good Nitro measurement. Construction mandates PCR0 —
-/// the hash of the whole enclave image (EIF), which uniquely identifies the build —
-/// so a pinning policy can never omit it.
+/// One enclave build: its git revision and known-good Nitro measurement. A build is
+/// identified by its revision and pinned by PCR0 — the hash of the whole enclave
+/// image (EIF), which uniquely identifies the build.
 ///
 /// We record only PCR0: in a StageX (reproducible, single-binary) build it is the
 /// only measurement that carries signal — the others (kernel, bootloader, IAM role)
 /// are constant or irrelevant for our pinning.
-///
-/// Multiple builds are accepted via [`PcrAllowlist`] (e.g. old + new across an
-/// upgrade); this is one entry.
 #[derive(Debug, Clone)]
 pub struct BuildPcrs {
+    git_revision: String,
     pcr0: Vec<u8>,
 }
 
 impl BuildPcrs {
-    pub fn new(pcr0: Vec<u8>) -> Self {
-        Self { pcr0 }
+    pub fn new(git_revision: String, pcr0: Vec<u8>) -> Self {
+        Self { git_revision, pcr0 }
     }
 
     pub fn pcr0(&self) -> &[u8] {
@@ -704,32 +701,62 @@ impl BuildPcrs {
     }
 }
 
-/// Acceptable enclave builds, each build's [`BuildPcrs`] keyed by its git revision.
-/// An attestation is pinned to the entry named by the session's signature-verified
-/// `untrusted_git_revision`; a revision not on the list is rejected — we don't know
-/// its measurements, so we can't trust it.
+/// Builds an attestation may pin to: the one we expect, plus an optional outgoing
+/// build during an upgrade window. An attestation is matched to whichever entry
+/// names its signature-verified `untrusted_git_revision`; a revision matching
+/// neither is rejected — we don't know its measurements, so we can't trust it.
+///
+/// At most two by construction: one in steady state (restart, or upgrade to a new
+/// config), two while an upgrade's old and new images briefly coexist. Capping at
+/// two makes allowlist rot impossible — a retired, possibly-broken PCR can't
+/// linger across upgrades.
 #[derive(Debug, Clone)]
 pub struct PcrAllowlist {
-    builds: HashMap<String, BuildPcrs>,
+    expected_build: BuildPcrs,
+    prev_build: Option<BuildPcrs>,
 }
 
 impl PcrAllowlist {
-    /// Errors on an empty allowlist: pinning is mandatory, so a reader with no
-    /// acceptable builds is a misconfiguration.
-    pub fn new(builds: HashMap<String, BuildPcrs>) -> GuardianResult<Self> {
-        if builds.is_empty() {
-            return Err(InvalidInputs("PCR allowlist is empty".into()));
+    pub fn new(expected_build: BuildPcrs, prev_build: Option<BuildPcrs>) -> Self {
+        Self {
+            expected_build,
+            prev_build,
         }
-        Ok(Self { builds })
     }
 
-    /// The expected `BuildPcrs` for `git_revision`, or an error if it isn't allowed.
+    /// The `BuildPcrs` whose revision is `git_revision`, or an error if neither is.
     pub fn resolve(&self, git_revision: &str) -> GuardianResult<&BuildPcrs> {
-        self.builds.get(git_revision).ok_or_else(|| {
+        if self.expected_build.git_revision == git_revision {
+            return Ok(&self.expected_build);
+        }
+        if let Some(prev) = &self.prev_build
+            && prev.git_revision == git_revision
+        {
+            return Ok(prev);
+        }
+        Err(InvalidInputs(format!(
+            "enclave reports build '{git_revision}' not in the allowlist"
+        )))
+    }
+}
+
+/// Config form of [`BuildPcrs`]: git revision + PCR0 as hex. Decoded via
+/// [`BuildPcrsConfig::to_build_pcrs`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct BuildPcrsConfig {
+    pub git_revision: String,
+    pub pcr0: String,
+}
+
+impl BuildPcrsConfig {
+    pub fn to_build_pcrs(&self) -> GuardianResult<BuildPcrs> {
+        let pcr0 = ::hex::decode(self.pcr0.trim_start_matches("0x")).map_err(|e| {
             InvalidInputs(format!(
-                "enclave reports build '{git_revision}' not in the PCR allowlist"
+                "build '{}' pcr0 is not valid hex: {e}",
+                self.git_revision
             ))
-        })
+        })?;
+        Ok(BuildPcrs::new(self.git_revision.clone(), pcr0))
     }
 }
 

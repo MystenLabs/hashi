@@ -3001,7 +3001,6 @@ dependencies = [
  "e2e-tests",
  "hashi-guardian",
  "hashi-types",
- "hex",
  "jsonrpc",
  "serde",
  "serde_yaml",

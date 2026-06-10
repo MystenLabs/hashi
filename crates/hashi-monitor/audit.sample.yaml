@@ -11,10 +11,15 @@ next_event_delays:
 guardian:
   s3_bucket: "hashi-guardian-logs"
 
-# Acceptable guardian enclave builds: git revision -> PCR0 (hex). Each session's
-# attestation the auditor reads is pinned to the entry naming its reported build.
-expected_builds:
-  "0000000000000000000000000000000000000000": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+# The guardian enclave build we expect: git revision + PCR0 (hex). Each session's
+# attestation the auditor reads is pinned to it.
+expected_build:
+  git_revision: "0000000000000000000000000000000000000000"
+  pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+# During an upgrade, also set the outgoing build; remove it once complete.
+# prev_build:
+#   git_revision: "1111111111111111111111111111111111111111"
+#   pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
 
 sui:
   rpc_url: "https://fullnode.testnet.sui.io:443"

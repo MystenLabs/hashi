@@ -46,9 +46,14 @@ limiter_config:
 # guardian's own BTC key.
 hashi_btc_master_pubkey_hex: "0000000000000000000000000000000000000000000000000000000000000001"
 
-# Acceptable enclave builds: git revision -> PCR0 (hex) from that build's
-# reproducible image. A session's attestation is pinned to the entry naming its
-# reported revision. List two to let an upgrade's old+new images both verify.
-# At least one is required (unused in non-Nitro dev, where verification is a no-op).
-expected_builds:
-  "0000000000000000000000000000000000000000": "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+# The enclave build we expect: git revision + PCR0 (hex) from its reproducible
+# image. A session's attestation is pinned to it. (Unused in non-Nitro dev, where
+# verification is a no-op, but still required.)
+expected_build:
+  git_revision: "0000000000000000000000000000000000000000"
+  pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+# During an upgrade, also set the outgoing build so its still-running sessions
+# verify until they rotate; remove it once the upgrade completes.
+# prev_build:
+#   git_revision: "1111111111111111111111111111111111111111"
+#   pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
