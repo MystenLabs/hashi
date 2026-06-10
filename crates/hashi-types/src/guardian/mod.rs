@@ -653,10 +653,11 @@ impl GuardianInfo {
 
 impl GetGuardianInfoResponse {
     /// Verify the response end to end and return the trusted `GuardianInfo`: the
-    /// attestation anchors `signing_pub_key`, `signed_info` must be signed by it,
-    /// and the attestation's PCR0 must match the `allowlist` entry for the
-    /// (signature-verified) reported build. Self-contained so any caller (KP init,
-    /// hashi nodes) can turn an untrusted response into a trusted `GuardianInfo`.
+    /// attestation anchors `signing_pub_key`, `signed_info` must be signed by it, and
+    /// the attestation's PCR0 must match the `allowlist`'s expected build (this is the
+    /// live enclave, so the outgoing `prev_build` is not accepted). Self-contained so
+    /// any caller (KP init, hashi nodes) can turn an untrusted response into a trusted
+    /// `GuardianInfo`.
     pub fn verify(&self, allowlist: &PcrAllowlist) -> GuardianResult<GuardianInfo> {
         let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
         verify_enclave_attestation(
@@ -664,6 +665,7 @@ impl GetGuardianInfoResponse {
             &self.signing_pub_key,
             allowlist,
             &info.untrusted_git_revision,
+            AttestationSource::LiveEnclave,
         )?;
         Ok(info)
     }
@@ -724,20 +726,37 @@ impl PcrAllowlist {
         }
     }
 
-    /// The `BuildPcrs` whose revision is `git_revision`, or an error if neither is.
-    pub fn resolve(&self, git_revision: &str) -> GuardianResult<&BuildPcrs> {
+    /// The `BuildPcrs` whose revision is `git_revision`. The expected build is
+    /// always eligible; `prev_build` only for a [`AttestationSource::HistoricalLog`]
+    /// (an attestation from the live enclave must be the expected build).
+    pub fn resolve(
+        &self,
+        git_revision: &str,
+        source: AttestationSource,
+    ) -> GuardianResult<&BuildPcrs> {
         if self.expected_build.git_revision == git_revision {
             return Ok(&self.expected_build);
         }
-        if let Some(prev) = &self.prev_build
+        if matches!(source, AttestationSource::HistoricalLog)
+            && let Some(prev) = &self.prev_build
             && prev.git_revision == git_revision
         {
             return Ok(prev);
         }
         Err(InvalidInputs(format!(
-            "enclave reports build '{git_revision}' not in the allowlist"
+            "enclave reports build '{git_revision}' not acceptable for {source:?}"
         )))
     }
+}
+
+/// Where an attestation came from, which decides whether the outgoing `prev_build`
+/// is acceptable for it.
+#[derive(Debug, Clone, Copy)]
+pub enum AttestationSource {
+    /// The live enclave we provision or query now — must run the expected build.
+    LiveEnclave,
+    /// A historical S3 log — may come from the outgoing build during an upgrade.
+    HistoricalLog,
 }
 
 /// Config form of [`BuildPcrs`]: git revision + PCR0 as hex. Decoded via
@@ -763,7 +782,8 @@ impl BuildPcrsConfig {
 /// Verify a Nitro attestation document (COSE signature + AWS cert chain to the
 /// Nitro root + freshness), that it commits to `signing_pubkey` — the enclave binds
 /// its signing key as the document's `public_key` — and that its PCR0 matches the
-/// `allowlist` entry for `git_revision` (the session's reported build).
+/// `allowlist` entry for `git_revision` (the reported build), with `source` deciding
+/// whether the outgoing `prev_build` is eligible.
 ///
 /// In non-enclave dev/test builds the enclave emits a mock document, so the whole
 /// check (including the allowlist lookup) is a no-op, mirroring [`crate`]'s
@@ -774,10 +794,11 @@ pub fn verify_enclave_attestation(
     signing_pubkey: &GuardianPubKey,
     allowlist: &PcrAllowlist,
     git_revision: &str,
+    source: AttestationSource,
 ) -> GuardianResult<()> {
     #[cfg(any(test, feature = "non-enclave-dev"))]
     {
-        let _ = (attestation, signing_pubkey, allowlist, git_revision);
+        let _ = (attestation, signing_pubkey, allowlist, git_revision, source);
         Ok(())
     }
     #[cfg(not(any(test, feature = "non-enclave-dev")))]
@@ -805,7 +826,7 @@ pub fn verify_enclave_attestation(
 
         // Pin PCR0 (the whole EIF image hash) to the allowlist entry for the build
         // the (signature-verified) info reports.
-        let build_pcrs = allowlist.resolve(git_revision)?;
+        let build_pcrs = allowlist.resolve(git_revision, source)?;
         if doc.pcr_map.get(&0).map(Vec::as_slice) != Some(build_pcrs.pcr0()) {
             return Err(InvalidInputs(
                 "attestation PCR0 does not match the expected enclave image".into(),

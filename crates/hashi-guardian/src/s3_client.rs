@@ -19,6 +19,7 @@ use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::Client as S3Client;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::verify_enclave_attestation;
+use hashi_types::guardian::AttestationSource;
 use hashi_types::guardian::EnclaveIdentity;
 use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianPubKey;
@@ -537,12 +538,14 @@ impl GuardianS3Client {
             })
             .ok_or_else(|| S3Error(format!("expected OIGuardianInfo at key {info_key}")))?;
 
-        // 3. Anchor the pubkey and pin PCR0 to the allowlist entry for the reported build.
+        // 3. Anchor the pubkey and pin PCR0 to the allowlist entry for the reported
+        //    build. These are historical logs, so the outgoing prev_build is eligible.
         verify_enclave_attestation(
             &attestation,
             &signing_pubkey,
             allowlist,
             &info.untrusted_git_revision,
+            AttestationSource::HistoricalLog,
         )?;
 
         Ok(EnclaveIdentity {
