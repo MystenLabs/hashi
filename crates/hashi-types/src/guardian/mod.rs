@@ -47,6 +47,7 @@ use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::HashMap;
 // ---------------------------------
 //          Constants
 // ---------------------------------
@@ -653,27 +654,41 @@ impl GuardianInfo {
 
 impl GetGuardianInfoResponse {
     /// Verify the response end to end and return the trusted `GuardianInfo`: the
-    /// attestation anchors `signing_pub_key`, and `signed_info` must be signed by
-    /// it. Self-contained so any caller (KP init, hashi nodes) can turn an
-    /// untrusted response into a trusted `GuardianInfo` in one call.
-    pub fn verify(&self, build_pcrs: &BuildPcrs) -> GuardianResult<GuardianInfo> {
-        verify_enclave_attestation(&self.attestation, &self.signing_pub_key, build_pcrs)?;
-        self.signed_info.clone().verify(&self.signing_pub_key)
+    /// attestation anchors `signing_pub_key`, `signed_info` must be signed by it,
+    /// and the attestation's PCR0 must match the `allowlist` entry for the
+    /// (signature-verified) reported build. Self-contained so any caller (KP init,
+    /// hashi nodes) can turn an untrusted response into a trusted `GuardianInfo`.
+    pub fn verify(&self, allowlist: &PcrAllowlist) -> GuardianResult<GuardianInfo> {
+        let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
+        verify_enclave_attestation(
+            &self.attestation,
+            &self.signing_pub_key,
+            allowlist,
+            &info.untrusted_git_revision,
+        )?;
+        Ok(info)
     }
 }
 
-/// Known-good Nitro measurement an attestation is pinned to. Construction
-/// mandates PCR0 — the hash of the whole enclave image (EIF), which uniquely
-/// identifies the build — so a pinning policy can never omit it.
+/// A session's verified enclave identity: the attestation-anchored signing pubkey
+/// and the signed `GuardianInfo` it vouches for. The S3 read layer resolves this
+/// once per session.
+#[derive(Debug, Clone)]
+pub struct EnclaveIdentity {
+    pub signing_pubkey: GuardianPubKey,
+    pub info: GuardianInfo,
+}
+
+/// One enclave build's known-good Nitro measurement. Construction mandates PCR0 —
+/// the hash of the whole enclave image (EIF), which uniquely identifies the build —
+/// so a pinning policy can never omit it.
 ///
-/// We record only PCR0: in a StageX (reproducible, single-binary) build it is
-/// the only measurement that carries signal — the others (kernel, bootloader,
-/// IAM role) are constant or irrelevant for our pinning.
+/// We record only PCR0: in a StageX (reproducible, single-binary) build it is the
+/// only measurement that carries signal — the others (kernel, bootloader, IAM role)
+/// are constant or irrelevant for our pinning.
 ///
-/// TODO: holds only a single PCR0, so it can't accept the two valid measurements
-/// that briefly coexist during a software upgrade (old + new image), nor pin
-/// additional PCRs. A `commit -> PCRs` allowlist keyed on `untrusted_git_revision`
-/// is the follow-up.
+/// Multiple builds are accepted via [`PcrAllowlist`] (e.g. old + new across an
+/// upgrade); this is one entry.
 #[derive(Debug, Clone)]
 pub struct BuildPcrs {
     pcr0: Vec<u8>,
@@ -689,21 +704,53 @@ impl BuildPcrs {
     }
 }
 
+/// Acceptable enclave builds, each build's [`BuildPcrs`] keyed by its git revision.
+/// An attestation is pinned to the entry named by the session's signature-verified
+/// `untrusted_git_revision`; a revision not on the list is rejected — we don't know
+/// its measurements, so we can't trust it.
+#[derive(Debug, Clone)]
+pub struct PcrAllowlist {
+    builds: HashMap<String, BuildPcrs>,
+}
+
+impl PcrAllowlist {
+    /// Errors on an empty allowlist: pinning is mandatory, so a reader with no
+    /// acceptable builds is a misconfiguration.
+    pub fn new(builds: HashMap<String, BuildPcrs>) -> GuardianResult<Self> {
+        if builds.is_empty() {
+            return Err(InvalidInputs("PCR allowlist is empty".into()));
+        }
+        Ok(Self { builds })
+    }
+
+    /// The expected `BuildPcrs` for `git_revision`, or an error if it isn't allowed.
+    pub fn resolve(&self, git_revision: &str) -> GuardianResult<&BuildPcrs> {
+        self.builds.get(git_revision).ok_or_else(|| {
+            InvalidInputs(format!(
+                "enclave reports build '{git_revision}' not in the PCR allowlist"
+            ))
+        })
+    }
+}
+
 /// Verify a Nitro attestation document (COSE signature + AWS cert chain to the
-/// Nitro root + freshness) and that it commits to `signing_pubkey` — the enclave
-/// binds its signing key as the document's `public_key`.
+/// Nitro root + freshness), that it commits to `signing_pubkey` — the enclave binds
+/// its signing key as the document's `public_key` — and that its PCR0 matches the
+/// `allowlist` entry for `git_revision` (the session's reported build).
 ///
-/// In non-enclave dev/test builds the enclave emits a mock document, so this is a
-/// no-op, mirroring [`crate`]'s `get_attestation` `non-enclave-dev` stub. Real
-/// verification runs only in enclave (prod) builds.
+/// In non-enclave dev/test builds the enclave emits a mock document, so the whole
+/// check (including the allowlist lookup) is a no-op, mirroring [`crate`]'s
+/// `get_attestation` `non-enclave-dev` stub. Real verification runs only in enclave
+/// (prod) builds.
 pub fn verify_enclave_attestation(
     attestation: &[u8],
     signing_pubkey: &GuardianPubKey,
-    build_pcrs: &BuildPcrs,
+    allowlist: &PcrAllowlist,
+    git_revision: &str,
 ) -> GuardianResult<()> {
     #[cfg(any(test, feature = "non-enclave-dev"))]
     {
-        let _ = (attestation, signing_pubkey, build_pcrs);
+        let _ = (attestation, signing_pubkey, allowlist, git_revision);
         Ok(())
     }
     #[cfg(not(any(test, feature = "non-enclave-dev")))]
@@ -729,7 +776,9 @@ pub fn verify_enclave_attestation(
             ));
         }
 
-        // Pin PCR0 (the whole EIF image hash).
+        // Pin PCR0 (the whole EIF image hash) to the allowlist entry for the build
+        // the (signature-verified) info reports.
+        let build_pcrs = allowlist.resolve(git_revision)?;
         if doc.pcr_map.get(&0).map(Vec::as_slice) != Some(build_pcrs.pcr0()) {
             return Err(InvalidInputs(
                 "attestation PCR0 does not match the expected enclave image".into(),

@@ -68,7 +68,7 @@ impl GuardianWithdrawalsPoller {
     // Note: Throws an error if there is a S3 connectivity issue
     pub async fn new(config: &Config, start: UnixSeconds) -> anyhow::Result<Self> {
         Ok(Self {
-            reader: GuardianReader::new(&config.guardian, config.build_pcrs()?).await?,
+            reader: GuardianReader::new(&config.guardian, config.pcr_allowlist()?).await?,
             cursor: withdraw_cursor(start),
         })
     }

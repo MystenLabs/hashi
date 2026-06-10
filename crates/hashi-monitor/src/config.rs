@@ -4,10 +4,14 @@
 use std::path::Path;
 use std::path::PathBuf;
 
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+
 use anyhow::Context;
 use anyhow::anyhow;
 use corepc_client::client_sync::Auth;
 use hashi_types::guardian::BuildPcrs;
+use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::S3Config;
 use serde::Deserialize;
 
@@ -24,9 +28,9 @@ pub struct Config {
     pub clock_skew: u64,
 
     pub guardian: S3Config,
-    /// Expected guardian enclave-image measurement: PCR0 as hex, pinned against
-    /// every session's attestation the auditor reads.
-    pub expected_pcr0: String,
+    /// Acceptable guardian enclave builds: git revision -> PCR0 (hex). Each
+    /// session's attestation is pinned to the entry naming its reported build.
+    pub expected_builds: BTreeMap<String, String>,
     pub sui: SuiConfig,
     pub btc: BtcConfig,
 }
@@ -137,10 +141,17 @@ impl Config {
         self.next_event_delays.get_delay(source)
     }
 
-    /// The expected guardian enclave measurement, decoded from `expected_pcr0`.
-    pub fn build_pcrs(&self) -> anyhow::Result<BuildPcrs> {
-        let pcr0 = hex::decode(self.expected_pcr0.trim_start_matches("0x"))
-            .context("expected_pcr0 is not valid hex")?;
-        Ok(BuildPcrs::new(pcr0))
+    /// The PCR allowlist, decoded from `expected_builds`.
+    pub fn pcr_allowlist(&self) -> anyhow::Result<PcrAllowlist> {
+        let builds = self
+            .expected_builds
+            .iter()
+            .map(|(rev, pcr0_hex)| {
+                let pcr0 = hex::decode(pcr0_hex.trim_start_matches("0x"))
+                    .with_context(|| format!("expected_builds[{rev}] is not valid hex"))?;
+                Ok((rev.clone(), BuildPcrs::new(pcr0)))
+            })
+            .collect::<anyhow::Result<HashMap<_, _>>>()?;
+        PcrAllowlist::new(builds).map_err(|e| anyhow::anyhow!(e))
     }
 }

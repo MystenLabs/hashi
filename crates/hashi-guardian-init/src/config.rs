@@ -5,6 +5,7 @@ use anyhow::Context;
 use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::LimiterConfig;
+use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::Share;
 use hashi_types::guardian::ShareID;
@@ -13,6 +14,8 @@ use k256::FieldBytes;
 use k256::Scalar;
 use k256::elliptic_curve::PrimeField;
 use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::num::NonZeroU16;
 use std::path::Path;
 
@@ -38,10 +41,10 @@ pub struct ProvisionerConfig {
     /// the derivation master (NOT the guardian's own key). Must match operator init.
     pub hashi_btc_master_pubkey_hex: String,
 
-    /// Expected enclave-image measurement: PCR0 as hex, pinned against every
-    /// session's attestation. Required (a value is needed even in non-Nitro dev,
-    /// where verification is a no-op).
-    pub expected_pcr0: String,
+    /// Acceptable enclave builds: git revision -> PCR0 (hex). A session's
+    /// attestation is pinned to the entry named by its reported build. At least one
+    /// is required (listing two lets an upgrade's old+new images both verify).
+    pub expected_builds: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -71,11 +74,18 @@ impl ProvisionerConfig {
         decode_master_g_hex(&self.hashi_btc_master_pubkey_hex)
     }
 
-    /// The expected enclave measurement, decoded from `expected_pcr0`.
-    pub fn build_pcrs(&self) -> anyhow::Result<BuildPcrs> {
-        let pcr0 = hex::decode(self.expected_pcr0.trim_start_matches("0x"))
-            .context("expected_pcr0 is not valid hex")?;
-        Ok(BuildPcrs::new(pcr0))
+    /// The PCR allowlist, decoded from `expected_builds`.
+    pub fn pcr_allowlist(&self) -> anyhow::Result<PcrAllowlist> {
+        let builds = self
+            .expected_builds
+            .iter()
+            .map(|(rev, pcr0_hex)| {
+                let pcr0 = hex::decode(pcr0_hex.trim_start_matches("0x"))
+                    .with_context(|| format!("expected_builds[{rev}] is not valid hex"))?;
+                Ok((rev.clone(), BuildPcrs::new(pcr0)))
+            })
+            .collect::<anyhow::Result<HashMap<_, _>>>()?;
+        PcrAllowlist::new(builds).map_err(|e| anyhow::anyhow!(e))
     }
 }
 
