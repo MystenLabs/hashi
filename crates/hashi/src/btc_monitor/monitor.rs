@@ -231,6 +231,11 @@ impl Monitor {
             // If all peers disconnect, the node exits with NoReachablePeers
             // and the supervision loop rebuilds it.
             .whitelist_only()
+            // Kyoto silently rotates connections after max_connection_time
+            // (default 2h), and with whitelist_only each rotation consumes a
+            // whitelist entry — the node dies within a few rotations. Our peers
+            // are our own trusted bitcoin-core nodes; never rotate on the clock.
+            .maximum_connection_time(Duration::MAX)
             .chain_state(kyoto::ChainState::Checkpoint(checkpoint));
 
         if let Some(data_dir) = &config.data_dir {
