@@ -3,12 +3,12 @@
 
 use anyhow::Context;
 use hashi_guardian::s3_reader::GuardianReader;
-use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianEncryptedShare;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::LimiterState;
+use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::WithdrawModeState;
 use hashi_types::guardian::session_id_from_signing_pubkey;
@@ -26,8 +26,8 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
     // One reader for the whole run: it owns the S3 client and the trusted-key
     // cache, so each session's attestation is verified once whichever check
     // reads that session first.
-    let build_pcrs = cfg.build_pcrs()?;
-    let mut reader = GuardianReader::new(&cfg.s3, build_pcrs.clone()).await?;
+    let allowlist = cfg.pcr_allowlist()?;
+    let mut reader = GuardianReader::new(&cfg.s3, allowlist.clone()).await?;
     let master_g = cfg.mpc_master_g()?;
 
     // 1. Check no past enclave's heartbeats remain & gather the latest enclave's session id.
@@ -172,7 +172,7 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
             &session_id,
             guardian_info,
             encrypted_share,
-            &build_pcrs,
+            &allowlist,
         )
         .await?;
     }
@@ -191,7 +191,7 @@ async fn submit_provisioner_init_to_relay(
     expected_session_id: &str,
     expected_guardian_info: GuardianInfo,
     encrypted_share: GuardianEncryptedShare,
-    build_pcrs: &BuildPcrs,
+    allowlist: &PcrAllowlist,
 ) -> anyhow::Result<()> {
     let mut client =
         pb::guardian_service_client::GuardianServiceClient::connect(endpoint.to_string())
@@ -202,7 +202,7 @@ async fn submit_provisioner_init_to_relay(
         &mut client,
         expected_session_id,
         expected_guardian_info,
-        build_pcrs,
+        allowlist,
     )
     .await
     .with_context(|| "relay endpoint pre-check failed")?;
@@ -218,7 +218,7 @@ async fn prechecks(
     client: &mut pb::guardian_service_client::GuardianServiceClient<tonic::transport::Channel>,
     expected_session_id: &str,
     expected_guardian_info: GuardianInfo,
-    build_pcrs: &BuildPcrs,
+    allowlist: &PcrAllowlist,
 ) -> anyhow::Result<()> {
     let resp_pb = client
         .get_guardian_info(pb::GetGuardianInfoRequest {})
@@ -231,7 +231,7 @@ async fn prechecks(
 
     // Attestation-anchored, signature-verified GuardianInfo in one call.
     let info = resp
-        .verify(build_pcrs)
+        .verify(allowlist)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
     let actual_session_id = session_id_from_signing_pubkey(&resp.signing_pub_key);
