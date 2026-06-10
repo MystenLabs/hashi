@@ -242,6 +242,22 @@ impl GuardianEncKeyPair {
     pub fn public_key(&self) -> &EncPubKey {
         &self.pk
     }
+
+    pub fn to_secret_bytes(&self) -> Vec<u8> {
+        self.sk.to_bytes().to_vec()
+    }
+
+    pub fn public_key_bytes(&self) -> Vec<u8> {
+        self.pk.to_bytes().to_vec()
+    }
+
+    pub fn from_bytes(sk: &[u8], pk: &[u8]) -> GuardianResult<Self> {
+        let sk = EncSecKey::from_bytes(sk)
+            .map_err(|e| InvalidInputs(format!("invalid encryption secret key: {e}")))?;
+        let pk = EncPubKey::from_bytes(pk)
+            .map_err(|e| InvalidInputs(format!("invalid encryption public key: {e}")))?;
+        Ok(Self { sk, pk })
+    }
 }
 
 pub fn to_scalar(id: ShareID) -> Scalar {
@@ -531,6 +547,24 @@ mod tests {
         assert!(
             decrypt(&ciphertext, keypair.secret_key(), wrong_aad)
                 .is_err_and(|x| matches!(x, InvalidInputs(_)))
+        );
+    }
+
+    #[test]
+    fn enc_keypair_byte_roundtrip() {
+        let kp = GuardianEncKeyPair::random(&mut rand::thread_rng());
+        let restored =
+            GuardianEncKeyPair::from_bytes(&kp.to_secret_bytes(), &kp.public_key_bytes()).unwrap();
+        assert_eq!(kp.to_secret_bytes(), restored.to_secret_bytes());
+        assert_eq!(kp.public_key_bytes(), restored.public_key_bytes());
+
+        // The restored secret key still opens ciphertext sealed to the pubkey.
+        let aad = Some(&[7u8; 32]);
+        let msg = b"roundtrip";
+        let ciphertext = encrypt(msg, kp.public_key(), aad, &mut rand::thread_rng()).unwrap();
+        assert_eq!(
+            decrypt(&ciphertext, restored.secret_key(), aad).unwrap(),
+            msg
         );
     }
 

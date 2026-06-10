@@ -10,8 +10,6 @@ use hashi_guardian::HEARTBEAT_INTERVAL;
 use hashi_guardian::HEARTBEAT_RETRY_INTERVAL;
 use hashi_guardian::MAX_HEARTBEAT_FAILURES_INTERVAL;
 use hashi_types::guardian::EnclaveMode;
-use hashi_types::guardian::GuardianEncKeyPair;
-use hashi_types::guardian::GuardianSignKeyPair;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
 use std::sync::Arc;
 use tonic::transport::Server;
@@ -50,8 +48,7 @@ async fn main() -> Result<()> {
     }
 
     let mut rng = rand::thread_rng();
-    let signing_keys = GuardianSignKeyPair::new(&mut rng);
-    let encryption_keys = GuardianEncKeyPair::random(&mut rng);
+    let (signing_keys, encryption_keys) = hashi_guardian::eph_keys::load_or_create(&mut rng)?;
     let enclave = Arc::new(Enclave::new(signing_keys, encryption_keys, mode));
 
     // TEMP (do not merge): wrap the gRPC handler in an in-process `(wid, seq)`

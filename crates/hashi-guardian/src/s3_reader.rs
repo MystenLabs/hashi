@@ -93,6 +93,15 @@ impl GuardianReader {
         Ok(out)
     }
 
+    /// The session's attestation-verified signing pubkey (cached after the
+    /// first load). Binds a live endpoint to a session selected from S3.
+    pub async fn verified_pubkey(&mut self, session_id: &str) -> anyhow::Result<GuardianPubKey> {
+        self.pubkey_cache
+            .get_or_load_pubkey(&self.s3, session_id)
+            .await
+            .copied()
+    }
+
     /// Read and verify a session's signed `OIGuardianInfo` log (written at
     /// operator-init). Implements check B of IOP-225.
     pub async fn get_info(&mut self, session_id: &str) -> anyhow::Result<GuardianInfo> {

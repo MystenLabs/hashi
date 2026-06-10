@@ -16,7 +16,7 @@ Canonical key layout:
 
 Where:
 
-- `session_id` is the first 16 hex chars of the enclave ephemeral signing pubkey (lowercase). Acts as a short per-session tag in keys; full pubkey verification still happens via the signed log payload (`SESSION_ID_HEX_LEN` in `hashi-types`).
+- `session_id` is 16 random hex chars sampled fresh at enclave boot (`random_session_id` / `SESSION_ID_HEX_LEN` in `hashi-types`). Acts as a short per-boot tag in keys; not derived from the signing key (which can persist across restarts) so no key is ever written twice. Pubkey verification still happens via the signed log payload.
 - `init_suffix` is a semantic label (`oi-attestation-unsigned`, `oi-guardian-info`, `pi-enclave-fully-initialized`).
 - `counter` is a zero-padded decimal sequence number (used in heartbeats only).
 - `seq` (in `withdraw/`) is the zero-padded limiter sequence number consumed by the withdrawal.
