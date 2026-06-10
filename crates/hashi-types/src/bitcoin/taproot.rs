@@ -1,9 +1,9 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Taproot descriptor, address, and child-key derivation for the 2-of-2
-//! (enclave + Hashi) deposit/withdrawal scheme. The UTXO/transaction types that
-//! consume these live in `super::utxo`.
+//! Taproot descriptor, address, and child-key derivation for Hashi-controlled
+//! Bitcoin UTXOs. The UTXO/transaction types that consume these live in
+//! `super::utxo`.
 
 use super::BitcoinAddress;
 use super::BitcoinPubkey;
@@ -11,14 +11,15 @@ use super::DerivationPath;
 use super::HashiMasterG;
 use bitcoin::Network;
 use bitcoin::ScriptBuf;
+use bitcoin::Sequence;
 use bitcoin::TapSighashType;
 use bitcoin::Transaction;
 use bitcoin::TxOut;
 use bitcoin::hashes::Hash;
+use bitcoin::relative;
 use bitcoin::sighash::Prevouts;
 use bitcoin::sighash::SighashCache;
 use bitcoin::taproot::ControlBlock;
-use bitcoin::taproot::LeafVersion;
 use bitcoin::taproot::TapLeafHash;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key;
@@ -33,25 +34,41 @@ static NUMS_INTERNAL_KEY: LazyLock<BitcoinPubkey> = LazyLock::new(|| {
         .expect("valid nums key")
 });
 
-/// scriptPubKey and tap leaf hash for the 2-of-2 output at `derivation_path`.
+/// Initial MPC-only recovery delay for Hashi-controlled UTXOs.
+///
+/// WARNING: this value is part of the taproot script, so changing it changes
+/// deposit/change addresses. Future governance-controlled changes need a
+/// policy/versioning and grace-period mechanism so deposits broadcast under the
+/// previous delay are still accepted and spendable.
+pub const HASHI_MPC_RECOVERY_DELAY_SECONDS: u32 = 60 * 24 * 60 * 60;
+
+/// Leaf indices into the taproot tree built by [`compute_taproot_descriptor`].
+/// These must match the leaf order in its descriptor string.
+const IMMEDIATE_2OF2_LEAF_INDEX: usize = 0;
+const MPC_RECOVERY_LEAF_INDEX: usize = 1;
+
+/// scriptPubKey and immediate 2-of-2 tap leaf hash for the output at
+/// `derivation_path`.
 pub(super) fn taproot_script_pubkey_and_leaf_hash(
     enclave_pubkey: &BitcoinPubkey,
     hashi_master_g: &HashiMasterG,
     hashi_derivation_path: &DerivationPath,
 ) -> (ScriptBuf, TapLeafHash) {
     let desc = compute_taproot_descriptor(enclave_pubkey, hashi_master_g, hashi_derivation_path);
-
     let address_script = desc.script_pubkey();
-    let item = desc
+
+    // Keep the named index visible here instead of using .next()
+    #[allow(clippy::iter_nth_zero)]
+    let leaf_hash = desc
         .leaves()
-        .next()
-        .expect("tap tree should have at least one leaf");
-    let leaf_hash = item.compute_tap_leaf_hash();
+        .nth(IMMEDIATE_2OF2_LEAF_INDEX)
+        .expect("tap tree should have the immediate 2-of-2 leaf")
+        .compute_tap_leaf_hash();
 
     (address_script, leaf_hash)
 }
 
-/// Deposit address for `tr(NUMS, multi_a(2, enclave, derived_hashi))`.
+/// Deposit address for the Hashi taproot tree.
 pub fn taproot_address(
     enclave_pubkey: &BitcoinPubkey,
     hashi_master_g: &HashiMasterG,
@@ -62,29 +79,43 @@ pub fn taproot_address(
         .address(network)
 }
 
-/// Spend artifacts for `tr(NUMS, multi_a(2, enclave, derived_hashi))`.
+/// Immediate 2-of-2 spend artifacts for the Hashi taproot tree.
 pub fn taproot_witness_artifacts(
     enclave_pubkey: &BitcoinPubkey,
     hashi_master_g: &HashiMasterG,
     hashi_derivation_path: &DerivationPath,
 ) -> (ScriptBuf, ControlBlock, TapLeafHash) {
     let desc = compute_taproot_descriptor(enclave_pubkey, hashi_master_g, hashi_derivation_path);
+    taproot_witness_artifacts_at_leaf(&desc, IMMEDIATE_2OF2_LEAF_INDEX)
+}
 
-    let tap_tree = desc.tap_tree().expect("descriptor should have a tap tree");
-    let leaf = tap_tree
+/// Delayed MPC-only recovery spend artifacts for the Hashi taproot tree.
+pub fn taproot_mpc_recovery_witness_artifacts(
+    enclave_pubkey: &BitcoinPubkey,
+    hashi_master_g: &HashiMasterG,
+    hashi_derivation_path: &DerivationPath,
+) -> (ScriptBuf, ControlBlock, TapLeafHash) {
+    let desc = compute_taproot_descriptor(enclave_pubkey, hashi_master_g, hashi_derivation_path);
+    taproot_witness_artifacts_at_leaf(&desc, MPC_RECOVERY_LEAF_INDEX)
+}
+
+fn taproot_witness_artifacts_at_leaf(
+    desc: &Tr<BitcoinPubkey>,
+    leaf_index: usize,
+) -> (ScriptBuf, ControlBlock, TapLeafHash) {
+    let leaf = desc
         .leaves()
-        .next()
-        .expect("tap tree should have at least one leaf");
+        .nth(leaf_index)
+        .expect("tap tree should have requested leaf");
     let tap_script = leaf.compute_script();
+    let leaf_hash = leaf.compute_tap_leaf_hash();
 
     let control_block = desc
         .spend_info()
         .leaves()
-        .next()
-        .expect("spend info should have at least one leaf")
+        .nth(leaf_index)
+        .expect("spend info should have requested leaf")
         .into_control_block();
-
-    let leaf_hash = TapLeafHash::from_script(&tap_script, LeafVersion::TapScript);
 
     (tap_script, control_block, leaf_hash)
 }
@@ -114,11 +145,14 @@ pub fn taproot_script_spend_sighashes(
         .collect()
 }
 
-/// Creates a taproot descriptor for the given enclave and hashi keys with a 2-of-2 multi_a script.
-/// Taproot addresses are constructed as follows:
-/// 1. Derive a child hashi pubkey from the derivation path
-/// 2. Create a 2-of-2 tapscript with the enclave key and derived hashi key
-/// 3. Place the tapscript as the sole leaf with a NUMS internal key
+/// Creates a taproot descriptor for the Hashi taproot tree:
+///
+/// - Immediate 2-of-2 leaf: guardian/enclave + derived Hashi MPC child key.
+/// - Delayed recovery leaf: after `HASHI_MPC_RECOVERY_DELAY_SECONDS`, derived
+///   Hashi MPC child key only.
+///
+/// Both leaves are committed under a NUMS internal key, disabling meaningful key
+/// path spends.
 fn compute_taproot_descriptor(
     enclave_pubkey: &BitcoinPubkey,
     hashi_master_g: &HashiMasterG,
@@ -127,18 +161,26 @@ fn compute_taproot_descriptor(
     let derived_hashi_pubkey = derive_hashi_child_pubkey(hashi_master_g, hashi_derivation_path);
 
     let internal = *NUMS_INTERNAL_KEY;
+    let recovery_delay = mpc_recovery_delay_sequence().to_consensus_u32();
 
-    // Taproot descriptor with one leaf: 2-of-2 checksigadd-style multisig
-    // Descriptor docs: https://github.com/bitcoin/bitcoin/blob/master/doc/descriptors.md
     let desc_str = format!(
-        "tr({},multi_a(2,{},{}))",
-        internal, enclave_pubkey, derived_hashi_pubkey
+        "tr({},{{multi_a(2,{},{}),and_v(v:older({}),pk({}))}})",
+        internal, enclave_pubkey, derived_hashi_pubkey, recovery_delay, derived_hashi_pubkey,
     );
 
     match Descriptor::<BitcoinPubkey>::from_str(&desc_str).expect("valid descriptor") {
         Descriptor::Tr(tr) => tr,
         _ => panic!("unexpected descriptor"),
     }
+}
+
+/// BIP68 sequence encoding the [`HASHI_MPC_RECOVERY_DELAY_SECONDS`] relative
+/// timelock. Used both in the recovery leaf's `older(...)` and as the input
+/// sequence of any transaction spending through that leaf.
+pub fn mpc_recovery_delay_sequence() -> Sequence {
+    relative::LockTime::from_seconds_ceil(HASHI_MPC_RECOVERY_DELAY_SECONDS)
+        .expect("60 days fits in BIP68 time-based relative locktime")
+        .to_sequence()
 }
 
 /// Derives the hashi child pubkey at `derivation_path` from `hashi_master_g`.
@@ -255,6 +297,17 @@ mod bitcoin_tests {
         assert_eq!(
             hashi_pk, reconstructed_pk,
             "Round-trip conversion should preserve the key"
+        );
+    }
+
+    #[test]
+    fn mpc_recovery_delay_is_time_based_csv() {
+        let sequence = mpc_recovery_delay_sequence();
+        assert_eq!(sequence.to_consensus_u32(), (1 << 22) | 10_125);
+        assert!(
+            bitcoin::relative::LockTime::from_sequence(sequence)
+                .expect("sequence should encode a relative locktime")
+                .is_block_time()
         );
     }
 
@@ -448,8 +501,8 @@ mod bitcoin_tests {
                 label: "zero path",
                 path: DerivationPath::ZERO,
                 expected_derived: "80583e4abd7e73b0868a44e24dd05379375f1c3a85c4c1329bb0572df8577985",
-                expected_addr_regtest: "bcrt1p0y0fqatuhy4rwt5ac99z7wse6u8zqzu73jmk0rls57uulnl7q4mq0pk06r",
-                expected_addr_signet: "tb1p0y0fqatuhy4rwt5ac99z7wse6u8zqzu73jmk0rls57uulnl7q4mqzcuf0e",
+                expected_addr_regtest: "bcrt1p674xfkudr0myzu3jpschmc4wx9xjllf5wyqt4x8y48jnd099dchs0ww4kp",
+                expected_addr_signet: "tb1p674xfkudr0myzu3jpschmc4wx9xjllf5wyqt4x8y48jnd099dchszhynrm",
                 expected_leaf_script: concat!(
                     "20",
                     "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
@@ -464,8 +517,8 @@ mod bitcoin_tests {
                 label: "path = [1u8; 32]",
                 path: DerivationPath::from([1u8; 32]),
                 expected_derived: "1b79f716fb1f7beba697f012edcf7b81a96ceac2920b181bd217c9cc017ac7fb",
-                expected_addr_regtest: "bcrt1pftf88nkuljl4rlsd4xqyq7sy0fzjedws5egf7nuyq4lkkj3hdz2sdfq4a0",
-                expected_addr_signet: "tb1pftf88nkuljl4rlsd4xqyq7sy0fzjedws5egf7nuyq4lkkj3hdz2sqs2ng4",
+                expected_addr_regtest: "bcrt1plf0jem4745f5yhu4x3q226q4f34jw6nxysyqvyxjxem0gugqrxnsn6mjae",
+                expected_addr_signet: "tb1plf0jem4745f5yhu4x3q226q4f34jw6nxysyqvyxjxem0gugqrxns7r35gr",
                 expected_leaf_script: concat!(
                     "20",
                     "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
@@ -480,8 +533,8 @@ mod bitcoin_tests {
                 label: "path = 0xab..00..cd",
                 path: DerivationPath::from(path_ab_cd),
                 expected_derived: "1403322badfd7823bebf81e9c5ff74f32f856348ac0f5abe33130cc4b6a14c84",
-                expected_addr_regtest: "bcrt1pe82wsztzxt97jwkx6wcls257xaycfxw7up4k0ju7r6rsf07zxdlsyg9dfv",
-                expected_addr_signet: "tb1pe82wsztzxt97jwkx6wcls257xaycfxw7up4k0ju7r6rsf07zxdlsf30tuk",
+                expected_addr_regtest: "bcrt1p2zdq5arv2k7cec0jwstrt3twsnvrze66q4eaqujr4aykuzzu7wwq893cha",
+                expected_addr_signet: "tb1p2zdq5arv2k7cec0jwstrt3twsnvrze66q4eaqujr4aykuzzu7wwq2um7z8",
                 expected_leaf_script: concat!(
                     "20",
                     "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
@@ -519,8 +572,9 @@ mod bitcoin_tests {
                 c.label,
             );
 
-            let (script, _control_block, leaf_hash) =
+            let (script, control_block, leaf_hash) =
                 taproot_witness_artifacts(&enclave_pk, &master_g, &c.path);
+            assert_eq!(control_block.serialize().len(), 65);
             assert_eq!(script.as_bytes().len(), 70, "leaf script must be 70 bytes");
             assert_eq!(
                 script.as_bytes().as_hex().to_string(),
@@ -563,9 +617,9 @@ mod bitcoin_tests {
         const EXPECTED_DERIVED: &str =
             "d6305db510d6cb87554c942aaaffa3ff277366c2a04b8e64f633cceebd05f937";
         const EXPECTED_ADDR_REGTEST: &str =
-            "bcrt1pcpxn30jztmndchw204yr2hjzpy6eqq3k8lauehq2nf2wduu3yzcs2uprtq";
+            "bcrt1p09kjf0dz6a4qmdvwqydp902zxz4tr0rp60pe4nl7y4y8vfakf7zsv6mzk8";
         const EXPECTED_ADDR_SIGNET: &str =
-            "tb1pcpxn30jztmndchw204yr2hjzpy6eqq3k8lauehq2nf2wduu3yzcs89t976";
+            "tb1p09kjf0dz6a4qmdvwqydp902zxz4tr0rp60pe4nl7y4y8vfakf7zspr3yra";
         const EXPECTED_LEAF_SCRIPT: &str = concat!(
             "20",
             "1b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
@@ -586,8 +640,9 @@ mod bitcoin_tests {
         let addr_signet = taproot_address(&enclave_pk, &master_g, &path, Network::Signet);
         assert_eq!(addr_signet.to_string(), EXPECTED_ADDR_SIGNET);
 
-        let (script, _control_block, leaf_hash) =
+        let (script, control_block, leaf_hash) =
             taproot_witness_artifacts(&enclave_pk, &master_g, &path);
+        assert_eq!(control_block.serialize().len(), 65);
         assert_eq!(script.as_bytes().len(), 70);
         assert_eq!(script.as_bytes().as_hex().to_string(), EXPECTED_LEAF_SCRIPT);
         assert_eq!(leaf_hash.to_string(), EXPECTED_TAP_LEAF_HASH);
