@@ -4,7 +4,7 @@
 //! Generate a fresh BTC master keypair for the guardian. The pubkey is
 //! pinned on-chain at publish time via `hashi publish
 //! --guardian-btc-public-key`; the secret is fed back to
-//! `bootstrap-guardian --master-secret-hex` after DKG so the shares it
+//! `dev-bootstrap --master-secret-hex` after DKG so the shares it
 //! splits cover the *same* key already on chain.
 
 use anyhow::Result;

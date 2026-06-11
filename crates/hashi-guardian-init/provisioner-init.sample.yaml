@@ -1,7 +1,7 @@
-# Sample configuration for the `provisioner-init` tool.
+# Sample configuration for the `provision` command.
 #
 # Run with:
-#   cargo run -p hashi-guardian-init -- provisioner --config provisioner-init.sample.yaml
+#   cargo run -p hashi-guardian-init -- provision --config provisioner-init.sample.yaml
 
 # Key Provisioner's secret share (32-byte k256 scalar, hex-encoded).
 share:

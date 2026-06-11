@@ -12,9 +12,6 @@ use clap::Subcommand;
 use hashi::config::Config;
 use hashi::onchain::OnchainState;
 
-mod bootstrap_guardian;
-mod fetch_guardian_info;
-mod generate_master_key;
 mod key_recovery;
 
 #[derive(Parser)]
@@ -48,23 +45,6 @@ enum Commands {
         #[command(flatten)]
         args: key_recovery::Args,
     },
-    BootstrapGuardian {
-        #[command(flatten)]
-        config: ConfigArgs,
-        #[command(flatten)]
-        args: bootstrap_guardian::Args,
-    },
-    FetchGuardianInfo {
-        #[command(flatten)]
-        args: fetch_guardian_info::Args,
-    },
-    /// Generate a fresh BTC master keypair for the guardian. Used by the
-    /// deploy workflow: pin the pubkey on-chain via `hashi publish`, then
-    /// hand the secret to `bootstrap-guardian --master-secret-hex`.
-    GenerateMasterKey {
-        #[command(flatten)]
-        args: generate_master_key::Args,
-    },
 }
 
 #[tokio::main]
@@ -92,20 +72,5 @@ async fn main() -> anyhow::Result<()> {
                     .context("failed to connect to Sui RPC")?;
             key_recovery::run(args, &onchain_state, chain_id).await
         }
-        Commands::BootstrapGuardian { config, args } => {
-            let cfg = config.load()?;
-            let sui_rpc = cfg
-                .sui_rpc
-                .as_deref()
-                .ok_or_else(|| anyhow!("config missing sui-rpc"))?;
-            println!("Connecting to Sui RPC: {sui_rpc}");
-            let (onchain_state, _watcher) =
-                OnchainState::new(sui_rpc, cfg.hashi_ids(), None, None, None)
-                    .await
-                    .context("failed to connect to Sui RPC")?;
-            bootstrap_guardian::run(args, &onchain_state).await
-        }
-        Commands::FetchGuardianInfo { args } => fetch_guardian_info::run(args).await,
-        Commands::GenerateMasterKey { args } => generate_master_key::run(args),
     }
 }

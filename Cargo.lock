@@ -2973,6 +2973,8 @@ dependencies = [
  "bcs",
  "bitcoin",
  "clap",
+ "fastcrypto",
+ "hashi",
  "hashi-guardian",
  "hashi-types",
  "hex",
@@ -2982,6 +2984,7 @@ dependencies = [
  "serde",
  "serde_yaml",
  "tokio",
+ "toml",
  "tonic",
  "tracing",
 ]
@@ -3522,16 +3525,12 @@ name = "internal-tools"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "bcs",
- "bitcoin",
  "clap",
  "fastcrypto",
  "fastcrypto-tbls",
  "hashi",
  "hashi-types",
  "hex",
- "hpke",
- "k256",
  "rand 0.8.5",
  "sui-sdk-types",
  "tokio",
