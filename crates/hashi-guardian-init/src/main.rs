@@ -26,6 +26,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Production guardian key ceremony commands.
+    Ceremony {
+        #[command(subcommand)]
+        command: CeremonyCommand,
+    },
     /// Run a key provisioner's init checks against guardian S3 logs and emit its share.
     Provision {
         /// Path to provisioner-init YAML config file.
@@ -37,6 +42,14 @@ enum Command {
         #[command(subcommand)]
         command: ToolsCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum CeremonyCommand {
+    /// Run the one-time production guardian key ceremony and upload encrypted KP shares.
+    Run,
+    /// Verify this KP can fetch and decrypt its encrypted ceremony share.
+    Verify,
 }
 
 #[derive(Subcommand)]
@@ -84,6 +97,18 @@ async fn main() -> anyhow::Result<()> {
     hashi::init_crypto_provider();
 
     match Cli::parse().command {
+        Command::Ceremony { command } => match command {
+            CeremonyCommand::Run => {
+                // Run the initial guardian key ceremony, encrypt each KP share to its public key,
+                // and upload the ceremony artifacts.
+                todo!()
+            }
+            CeremonyCommand::Verify => {
+                // Fetch this KP's encrypted ceremony artifact and verify it can be decrypted before
+                // provisioning is needed.
+                todo!()
+            }
+        },
         Command::Provision { config } => {
             let cfg = provisioner::ProvisionerConfig::load_yaml(&config)?;
             provisioner::run(cfg).await?;
