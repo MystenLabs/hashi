@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["taproot_address","taproot_script_spend_sighashes","taproot_witness_artifacts"]};
