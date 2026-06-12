@@ -18,6 +18,7 @@ use hashi_types::guardian::proto_conversions::signed_committee_transition_to_pb;
 use hashi_types::guardian::proto_conversions::signed_standard_withdrawal_request_to_pb;
 use hashi_types::proto::SignCommitteeTransitionRequest;
 use hashi_types::proto::SignGuardianWithdrawalRequestRequest;
+use hashi_types::proto::UpdateCommitteeChainRequest;
 use std::sync::Arc;
 use tokio::task::JoinSet;
 use tokio_util::task::AbortOnDropHandle;
@@ -259,17 +260,14 @@ impl LeaderService {
     // Guardian: committee handoff (post-rotation)
     // ========================================================================
 
-    /// Walk the guardian forward one epoch at a time until it matches the chain.
+    /// Replay stored guardian handoffs until the guardian matches the chain.
     async fn reconcile_guardian_committee(inner: &Arc<Hashi>) -> anyhow::Result<()> {
         let Some(guardian) = inner.guardian_client() else {
             return Ok(());
         };
 
-        const MAX_TRANSITIONS_PER_RECONCILE: usize = 8;
-
-        // Seed `guardian_epoch` once from `GetGuardianInfo`; subsequent
-        // iterations reuse `current_committee_epoch` from `UpdateCommittee`
-        // and skip the extra round-trip.
+        // Seed `guardian_epoch` once from `GetGuardianInfo`, then build the
+        // full stored handoff chain and submit it to the guardian in one RPC.
         let info = inner.fetch_verified_guardian_info().await?;
         let Some(mut guardian_epoch) = info.current_committee_epoch else {
             // ProvisionerInit hasn't run yet; the bootstrap CLI seeds it.
@@ -280,8 +278,11 @@ impl LeaderService {
             .guardian_current_committee_epoch
             .set(guardian_epoch as i64);
 
-        for _ in 0..MAX_TRANSITIONS_PER_RECONCILE {
-            let hashi_epoch = inner.onchain_state().epoch();
+        let hashi_epoch = inner.onchain_state().epoch();
+        let initial_guardian_epoch = guardian_epoch;
+        let mut transitions = Vec::new();
+        let mut final_to_epoch = guardian_epoch;
+        loop {
             if guardian_epoch > hashi_epoch {
                 // The guardian only advances via certs that hashi signs, so
                 // it should never run ahead of the hashi chain. If we see
@@ -293,53 +294,64 @@ impl LeaderService {
                 return Ok(());
             }
             if guardian_epoch == hashi_epoch {
-                return Ok(());
+                break;
             }
 
             let from_epoch = guardian_epoch;
             info!(
                 from_epoch,
-                hashi_epoch, "Driving guardian committee handoff"
+                hashi_epoch, "Queueing stored guardian committee handoff"
             );
-            let signed = Self::collect_committee_transition_signatures(inner, from_epoch).await?;
+            let signed = inner
+                .onchain_state()
+                .guardian_handoff(from_epoch)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "missing on-chain guardian handoff for epoch {from_epoch}; cannot advance guardian"
+                    )
+                })?;
             let to_epoch = signed.message().new_committee.epoch;
-            let proto = signed_committee_transition_to_pb(&signed);
-
-            let resp = guardian.update_committee(proto).await.map_err(|status| {
-                anyhow::anyhow!("UpdateCommittee failed: {}", status.message())
-            })?;
-            let new_guardian_epoch = resp.current_committee_epoch.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "UpdateCommittee response missing current_committee_epoch \
-                     after sending {from_epoch}->{to_epoch}"
-                )
-            })?;
-            inner
-                .metrics
-                .guardian_current_committee_epoch
-                .set(new_guardian_epoch as i64);
-            info!(
-                from_epoch,
-                to_epoch = new_guardian_epoch,
-                "Advanced guardian committee"
-            );
-
-            // Bail out instead of looping if the guardian didn't advance.
-            if new_guardian_epoch <= from_epoch {
-                anyhow::bail!(
-                    "guardian failed to advance: still at {new_guardian_epoch} after sending {from_epoch}->{to_epoch}"
-                );
+            if to_epoch <= from_epoch {
+                anyhow::bail!("stored guardian handoff did not advance: {from_epoch}->{to_epoch}");
             }
-            guardian_epoch = new_guardian_epoch;
+            transitions.push(signed_committee_transition_to_pb(&signed));
+            final_to_epoch = to_epoch;
+            guardian_epoch = to_epoch;
         }
-        warn!(
-            "reconcile_guardian_committee hit MAX_TRANSITIONS_PER_RECONCILE; \
-             next leader tick will continue"
+
+        if transitions.is_empty() {
+            return Ok(());
+        }
+
+        let resp = guardian
+            .update_committee_chain(UpdateCommitteeChainRequest { transitions })
+            .await
+            .map_err(|status| {
+                anyhow::anyhow!("UpdateCommitteeChain failed: {}", status.message())
+            })?;
+        let new_guardian_epoch = resp.current_committee_epoch.ok_or_else(|| {
+            anyhow::anyhow!("UpdateCommitteeChain response missing current_committee_epoch")
+        })?;
+        inner
+            .metrics
+            .guardian_current_committee_epoch
+            .set(new_guardian_epoch as i64);
+        info!(
+            from_epoch = initial_guardian_epoch,
+            to_epoch = new_guardian_epoch,
+            "Advanced guardian committee"
         );
+
+        if new_guardian_epoch < final_to_epoch {
+            anyhow::bail!(
+                "guardian failed to advance to {final_to_epoch}: ended at {new_guardian_epoch}"
+            );
+        }
+
         Ok(())
     }
 
-    async fn collect_committee_transition_signatures(
+    pub(crate) async fn collect_committee_transition_signatures(
         inner: &Arc<Hashi>,
         from_epoch: u64,
     ) -> anyhow::Result<SignedMessage<CommitteeTransitionRequest>> {

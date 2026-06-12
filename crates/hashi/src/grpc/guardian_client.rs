@@ -132,4 +132,15 @@ impl GuardianClient {
             .await?;
         Ok(response.into_inner())
     }
+
+    pub async fn update_committee_chain(
+        &self,
+        request: hashi_types::proto::UpdateCommitteeChainRequest,
+    ) -> Result<hashi_types::proto::UpdateCommitteeResponse, tonic::Status> {
+        let response = self
+            .guardian_service_client()
+            .update_committee_chain(request)
+            .await?;
+        Ok(response.into_inner())
+    }
 }

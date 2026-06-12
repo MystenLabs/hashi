@@ -889,6 +889,27 @@ impl MpcService {
                 }
             }
         };
+        let from_epoch = self.inner.onchain_state().epoch();
+        let guardian_handoff = loop {
+            if self.get_pending_epoch_change() != Some(epoch) {
+                return Err(anyhow::anyhow!("epoch {} no longer pending", epoch));
+            }
+            match crate::leader::LeaderService::collect_committee_transition_signatures(
+                &self.inner,
+                from_epoch,
+            )
+            .await
+            {
+                Ok(handoff) => break handoff,
+                Err(e) => {
+                    warn!(
+                        from_epoch,
+                        "Guardian handoff signature collection failed: {e}, retrying..."
+                    );
+                    self.sleep_if_still_pending(epoch).await;
+                }
+            }
+        };
         loop {
             if self.get_pending_epoch_change() != Some(epoch) {
                 return Err(anyhow::anyhow!("epoch {} no longer pending", epoch));
@@ -897,7 +918,11 @@ impl MpcService {
                 let mut executor =
                     crate::sui_tx_executor::SuiTxExecutor::from_hashi(self.inner.clone())?;
                 executor
-                    .execute_end_reconfig(&mpc_public_key, cert.committee_signature())
+                    .execute_end_reconfig(
+                        &mpc_public_key,
+                        cert.committee_signature(),
+                        guardian_handoff.committee_signature(),
+                    )
                     .await
             };
             match result.await {
