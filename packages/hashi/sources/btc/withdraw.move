@@ -32,6 +32,8 @@ const ECooldownNotElapsed: vector<u8> = b"Cancellation cooldown has not elapsed"
 const ECannotCancelProcessingWithdrawal: vector<u8> =
     b"Cannot cancel a withdrawal that is already being processed";
 
+const PROTOCOL_SCHNORR: u8 = 0;
+
 // MESSAGE STEP 1
 public struct RequestApprovalMessage has copy, drop, store {
     request_id: address,
@@ -186,7 +188,10 @@ entry fun commit_withdrawal_tx(
     let request_infos = hashi.bitcoin().withdrawal_queue().extract_request_infos(&request_ids);
 
     // Allocate presigs from core counter
-    let presig_start_index = hashi.allocate_presigs(inputs.length());
+    let presig_start_index = hashi.allocate_presigs(
+        PROTOCOL_SCHNORR,
+        inputs.length(),
+    );
 
     let mut rng = sui::random::new_generator(r, ctx);
     let randomness = rng.generate_bytes(32);
@@ -245,7 +250,10 @@ entry fun allocate_presigs_for_withdrawal_txn(
     hashi.config().assert_version_enabled();
     let epoch = hashi.committee_set().epoch();
     let num_inputs = hashi.bitcoin().withdrawal_queue().withdrawal_txn_num_inputs(withdrawal_id);
-    let presig_start_index = hashi.allocate_presigs(num_inputs);
+    let presig_start_index = hashi.allocate_presigs(
+        PROTOCOL_SCHNORR,
+        num_inputs,
+    );
     hashi
         .bitcoin_mut()
         .withdrawal_queue_mut()

@@ -14,7 +14,7 @@ use hashi::{
     treasury::Treasury
 };
 use std::string::String;
-use sui::{bag::{Self, Bag}, dynamic_field as df};
+use sui::{bag::{Self, Bag}, dynamic_field as df, vec_map::{Self, VecMap}};
 
 #[error]
 const ESystemPaused: vector<u8> = b"System is currently paused";
@@ -31,11 +31,10 @@ public struct Hashi has key {
     config: Config,
     treasury: Treasury,
     proposals: Proposals,
-    /// TOB certificates by (epoch, batch_index) -> EpochCertsV1
+    /// TOB certificates by (protocol_id, epoch, batch_index) -> EpochCertsV1
     tob: Bag,
-    /// Number of presignatures consumed in the current epoch.
-    /// Used by recovering nodes to derive `(batch_index, index_in_batch)`.
-    num_consumed_presigs: u64,
+    /// Per-protocol presignature counters for the current epoch.
+    num_consumed_presigs: VecMap<u8, u64>,
 }
 
 #[allow(unused_function)]
@@ -52,7 +51,7 @@ fun init(ctx: &mut TxContext) {
         treasury: hashi::treasury::create(ctx),
         proposals: proposals::create(ctx),
         tob: bag::new(ctx),
-        num_consumed_presigs: 0,
+        num_consumed_presigs: vec_map::empty(),
     };
 
     df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
@@ -215,18 +214,28 @@ public(package) fun epoch_certs(
     self.tob.borrow_mut(key)
 }
 
-public(package) fun num_consumed_presigs(self: &Hashi): u64 {
-    self.num_consumed_presigs
+public(package) fun num_consumed_presigs(self: &Hashi, protocol_id: u8): u64 {
+    if (self.num_consumed_presigs.contains(&protocol_id)) {
+        *self.num_consumed_presigs.get(&protocol_id)
+    } else {
+        0
+    }
 }
 
-public(package) fun allocate_presigs(self: &mut Hashi, count: u64): u64 {
-    let start = self.num_consumed_presigs;
-    self.num_consumed_presigs = self.num_consumed_presigs + count;
-    start
+public(package) fun allocate_presigs(self: &mut Hashi, protocol_id: u8, count: u64): u64 {
+    if (self.num_consumed_presigs.contains(&protocol_id)) {
+        let current = self.num_consumed_presigs.get_mut(&protocol_id);
+        let start = *current;
+        *current = start + count;
+        start
+    } else {
+        self.num_consumed_presigs.insert(protocol_id, count);
+        0
+    }
 }
 
 public(package) fun reset_num_consumed_presigs(self: &mut Hashi) {
-    self.num_consumed_presigs = 0;
+    self.num_consumed_presigs = vec_map::empty();
 }
 
 // ======== Test-only Functions ========
@@ -248,7 +257,7 @@ public fun create_for_testing(
         treasury,
         proposals,
         tob,
-        num_consumed_presigs: 0,
+        num_consumed_presigs: vec_map::empty(),
     };
     df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
     hashi

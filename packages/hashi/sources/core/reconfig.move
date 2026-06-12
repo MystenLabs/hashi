@@ -5,6 +5,7 @@
 module hashi::reconfig;
 
 use hashi::{committee::CommitteeSignature, hashi::Hashi};
+use sui::vec_map::VecMap;
 
 const ENotReconfiguring: u64 = 0;
 
@@ -12,8 +13,8 @@ const ENotReconfiguring: u64 = 0;
 public struct ReconfigCompletionMessage has copy, drop, store {
     /// The epoch of the new committee.
     epoch: u64,
-    /// The MPC committee's threshold public key.
-    mpc_public_key: vector<u8>,
+    /// Per-protocol MPC threshold public keys.
+    protocol_keys: VecMap<u8, vector<u8>>,
 }
 
 entry fun start_reconfig(
@@ -41,7 +42,7 @@ entry fun start_reconfig(
 
 entry fun end_reconfig(
     self: &mut Hashi,
-    mpc_public_key: vector<u8>,
+    protocol_keys: VecMap<u8, vector<u8>>,
     cert: CommitteeSignature,
     ctx: &TxContext,
 ) {
@@ -49,11 +50,11 @@ entry fun end_reconfig(
     assert!(self.committee_set().is_reconfiguring(), ENotReconfiguring);
     let next_epoch = self.committee_set().pending_epoch_change().destroy_some();
     let next_committee = self.committee_set().get_committee(next_epoch);
-    let message = ReconfigCompletionMessage { epoch: next_epoch, mpc_public_key };
+    let message = ReconfigCompletionMessage { epoch: next_epoch, protocol_keys };
     self.verify_with_committee(next_committee, message, cert);
     self.reset_num_consumed_presigs();
-    let epoch = self.committee_set_mut().end_reconfig(mpc_public_key, ctx);
-    sui::event::emit(EndReconfigEvent { epoch, mpc_public_key });
+    let epoch = self.committee_set_mut().end_reconfig(protocol_keys, ctx);
+    sui::event::emit(EndReconfigEvent { epoch, protocol_keys });
 }
 
 public struct StartReconfigEvent has copy, drop {
@@ -62,6 +63,6 @@ public struct StartReconfigEvent has copy, drop {
 
 public struct EndReconfigEvent has copy, drop {
     epoch: u64,
-    /// The MPC committee's threshold public key.
-    mpc_public_key: vector<u8>,
+    /// Per-protocol MPC threshold public keys.
+    protocol_keys: VecMap<u8, vector<u8>>,
 }

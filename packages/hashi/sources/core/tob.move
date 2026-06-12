@@ -12,30 +12,31 @@ const EWrongEpoch: u64 = 0;
 const ETooEarlyToDestroy: u64 = 1;
 
 public enum ProtocolType has copy, drop, store {
-    Dkg,
-    KeyRotation,
-    NonceGeneration,
+    Dkg { protocol_id: u8 },
+    KeyRotation { protocol_id: u8 },
+    NonceGeneration { protocol_id: u8 },
 }
 
-public fun protocol_type_dkg(): ProtocolType {
-    ProtocolType::Dkg
+public fun protocol_type_dkg(protocol_id: u8): ProtocolType {
+    ProtocolType::Dkg { protocol_id }
 }
 
-public fun protocol_type_key_rotation(): ProtocolType {
-    ProtocolType::KeyRotation
+public fun protocol_type_key_rotation(protocol_id: u8): ProtocolType {
+    ProtocolType::KeyRotation { protocol_id }
 }
 
-public fun protocol_type_nonce_generation(): ProtocolType {
-    ProtocolType::NonceGeneration
+public fun protocol_type_nonce_generation(protocol_id: u8): ProtocolType {
+    ProtocolType::NonceGeneration { protocol_id }
 }
 
 public struct TobKey has copy, drop, store {
+    protocol_id: u8,
     epoch: u64,
     batch_index: Option<u32>,
 }
 
-public fun tob_key(epoch: u64, batch_index: Option<u32>): TobKey {
-    TobKey { epoch, batch_index }
+public fun tob_key(protocol_id: u8, epoch: u64, batch_index: Option<u32>): TobKey {
+    TobKey { protocol_id, epoch, batch_index }
 }
 
 public fun epoch(self: &TobKey): u64 {
