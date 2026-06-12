@@ -6,7 +6,9 @@ edition = "2024"
 [dependencies]
 anyhow.workspace = true
 bcs.workspace = true
+bitcoin.workspace = true
 clap.workspace = true
+hashi = { path = "../hashi" }
 hashi-types = { path = "../hashi-types" }
 hashi-guardian = { path = "../hashi-guardian" }
 hex.workspace = true
@@ -16,9 +18,10 @@ rand.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true
+toml.workspace = true
 tonic.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-bitcoin.workspace = true
+fastcrypto.workspace = true
 hashi-guardian = { path = "../hashi-guardian", features = ["test-utils"] }
