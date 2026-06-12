@@ -788,7 +788,8 @@ impl Hashi {
                 let derivation_address = inputs
                     .get(input_index)
                     .map(|input| {
-                        crate::deposits::path_bytes_or_zero(input.derivation_path.as_ref())
+                        crate::deposits::normalized_derivation_path(input.derivation_path.as_ref())
+                            .into_inner()
                     })
                     .expect("input_index iterated from signing_messages.len() == txn.inputs.len()");
                 let sign_start = std::time::Instant::now();
