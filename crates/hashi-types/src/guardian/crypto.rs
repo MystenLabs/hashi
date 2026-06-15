@@ -100,6 +100,10 @@ pub struct GuardianEncryptedShare {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct KPEncryptedShare {
     pub id: ShareID,
+    /// Fingerprint of the recipient PGP cert this share is encrypted to. An
+    /// explicit, signed label so a KP can find their share by their own
+    /// fingerprint instead of by positional index.
+    pub recipient_fingerprint: String,
     pub armored_ciphertext: String,
 }
 
@@ -453,6 +457,7 @@ pub fn split_and_encrypt_for_kps<R: CryptoRng + RngCore>(
 pub fn encrypt_share_for_provisioner(share: &Share, cert: &PgpPublicCert) -> KPEncryptedShare {
     KPEncryptedShare {
         id: share.id,
+        recipient_fingerprint: cert.fingerprint(),
         armored_ciphertext: encrypt_armored(&share.value.to_bytes(), cert)
             .expect("PgpPublicCert validation ensures OpenPGP encryption works"),
     }

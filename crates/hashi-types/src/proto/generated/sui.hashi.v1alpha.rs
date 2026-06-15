@@ -1376,6 +1376,9 @@ pub struct KpEncryptedShare {
     pub id: ::core::option::Option<GuardianShareId>,
     #[prost(string, optional, tag = "2")]
     pub armored_ciphertext: ::core::option::Option<::prost::alloc::string::String>,
+    /// Fingerprint of the recipient PGP cert this share is encrypted to.
+    #[prost(string, optional, tag = "3")]
+    pub recipient_fingerprint: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Commitment to a secret share.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
