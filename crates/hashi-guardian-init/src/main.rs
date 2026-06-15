@@ -8,6 +8,7 @@ use hashi::config::Config;
 use hashi::onchain::OnchainState;
 use std::path::PathBuf;
 
+mod ceremony;
 mod config;
 mod dev_bootstrap;
 mod fetch_info;
@@ -47,7 +48,11 @@ enum Command {
 #[derive(Subcommand)]
 enum CeremonyCommand {
     /// Run the one-time production guardian key ceremony and upload encrypted KP shares.
-    Run,
+    Run {
+        /// Path to ceremony-run YAML config file.
+        #[arg(long)]
+        config: PathBuf,
+    },
     /// Verify this KP can fetch and decrypt its encrypted ceremony share.
     Verify,
 }
@@ -98,10 +103,9 @@ async fn main() -> anyhow::Result<()> {
 
     match Cli::parse().command {
         Command::Ceremony { command } => match command {
-            CeremonyCommand::Run => {
-                // Run the initial guardian key ceremony, encrypt each KP share to its public key,
-                // and upload the ceremony artifacts.
-                todo!()
+            CeremonyCommand::Run { config } => {
+                let cfg = ceremony::CeremonyRunConfig::load_yaml(&config)?;
+                ceremony::run(cfg).await?;
             }
             CeremonyCommand::Verify => {
                 // Fetch this KP's encrypted ceremony artifact and verify it can be decrypted before

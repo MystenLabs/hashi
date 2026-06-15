@@ -1,0 +1,41 @@
+# Sample configuration for the `ceremony run` command.
+#
+# Run with:
+#   cargo run -p hashi-guardian-init -- ceremony run --config ceremony-run.sample.yaml
+
+# gRPC endpoint of the ceremony-mode guardian (CEREMONY_MODE=true).
+guardian_endpoint: "http://localhost:3000"
+
+# Secret-sharing parameters. `num_shares` MUST equal `kp_pgp_cert_paths.len()`.
+num_shares: 5
+threshold: 3
+
+# S3 config for the guardian's log bucket. Passed to operator_init so the
+# guardian can write its init/ + ceremony/ logs. Must have object-lock enabled.
+guardian_s3:
+  access_key: "AKIA..."
+  secret_key: "..."
+  bucket_info:
+    bucket: "hashi-guardian-logs"
+    region: "us-east-1"
+
+# S3 config for the ceremony artifacts bucket (object-lock DISABLED, so the
+# uploaded encrypted shares can be deleted if ever needed). Integrity of the
+# artifact comes from the guardian's signature, not S3 immutability.
+artifact_s3:
+  access_key: "AKIA..."
+  secret_key: "..."
+  bucket_info:
+    bucket: "hashi-ceremony-artifacts"
+    region: "us-east-1"
+
+# Paths to each KP's armored OpenPGP public cert (the cert generated on the
+# yubikey, exported with `gpg --armor --export <keyid>`). Each share is labeled
+# with its recipient cert's fingerprint, so a KP finds their share by
+# fingerprint at `ceremony verify` time — independent of the order here.
+kp_pgp_cert_paths:
+  - /path/to/kp1.asc
+  - /path/to/kp2.asc
+  - /path/to/kp3.asc
+  - /path/to/kp4.asc
+  - /path/to/kp5.asc
