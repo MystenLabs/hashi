@@ -73,8 +73,8 @@ pub enum SpendPath {
     ///
     /// Witness items:
     ///   items_count(1) + sig1_len(1) + sig1(64) + sig2_len(1) + sig2(64)
-    ///     + script_len(1) + script(68) + control_block_len(1) + control_block(33)
-    ///   = 234 WU
+    ///     + script_len(1) + script(70) + control_block_len(1) + control_block(65)
+    ///   = 268 WU
     TaprootScriptPath2of2,
 
     /// Taproot key-path spend (single x-only Schnorr signature).
@@ -91,7 +91,7 @@ impl SpendPath {
     /// Returns the witness-only satisfaction weight.
     pub fn satisfaction_weight(&self) -> Weight {
         match self {
-            SpendPath::TaprootScriptPath2of2 => Weight::from_wu(234),
+            SpendPath::TaprootScriptPath2of2 => Weight::from_wu(268),
             SpendPath::TaprootKeyPath => Weight::from_wu(66),
             SpendPath::Custom(w) => *w,
         }

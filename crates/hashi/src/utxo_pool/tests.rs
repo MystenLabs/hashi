@@ -1624,7 +1624,7 @@ fn test_withdrawal_output_at_dust_boundary_p2tr() {
     // A P2TR withdrawal output exactly at the dust threshold (330 sat)
     // should succeed.
     let utxos = vec![confirmed_utxo(1, 1_000_000)];
-    let req = make_request(1, 1_310, 0);
+    let req = make_request(1, 1_353, 0);
     let result = select_coins(&utxos, &[req], &default_params(), default_fee_rate())
         .expect("output at dust boundary should succeed");
     assert!(

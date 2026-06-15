@@ -19,34 +19,6 @@ use hashi_types::bitcoin as hashi_bitcoin;
 use hashi_types::proto::MemberSignature;
 use thiserror::Error;
 
-pub(crate) fn path_bytes_or_zero(derivation_path: Option<&sui_sdk_types::Address>) -> [u8; 32] {
-    derivation_path.map(|p| p.into_inner()).unwrap_or([0u8; 32])
-}
-
-/// `tr(NUMS, multi_a(2, guardian_btc_pubkey, derive(mpc_pubkey, path)))`.
-/// `path = None` (change address) maps to a zero-byte path so deposit
-/// and withdrawal sides agree on the leaf key without a special case.
-///
-/// `mpc_key` is the raw MPC verifying key (`G`). The derivation is taken
-/// directly against this point — using only the x-only projection would
-/// silently force the parent to even-y and produce a different child key
-/// for ~half of all MPC vks, breaking the 2-of-2 leaf script.
-pub fn derive_deposit_address(
-    mpc_key: &ProjectivePoint,
-    guardian_btc_pubkey: &XOnlyPublicKey,
-    derivation_path: Option<&sui_sdk_types::Address>,
-    btc_network: bitcoin::Network,
-) -> anyhow::Result<hashi_bitcoin::BitcoinAddress> {
-    Ok(hashi_bitcoin::taproot_address(
-        guardian_btc_pubkey,
-        mpc_key,
-        &derivation_path
-            .copied()
-            .unwrap_or(sui_sdk_types::Address::ZERO),
-        btc_network,
-    ))
-}
-
 impl Hashi {
     #[tracing::instrument(level = "info", skip_all, fields(deposit_id = %deposit_request.id))]
     pub async fn validate_and_sign_deposit_confirmation(
@@ -248,14 +220,12 @@ impl Hashi {
     ) -> anyhow::Result<hashi_bitcoin::BitcoinAddress> {
         let mpc_g = self.mpc_master_g()?;
         let guardian_pubkey = self.require_guardian_btc_pubkey()?;
-        Ok(hashi_bitcoin::taproot_address(
-            &guardian_pubkey,
+        derive_deposit_address(
             &mpc_g,
-            &derivation_path
-                .copied()
-                .unwrap_or(sui_sdk_types::Address::ZERO),
+            &guardian_pubkey,
+            derivation_path,
             self.config.bitcoin_network(),
-        ))
+        )
     }
 
     /// 2-of-2 taproot leaf artifacts (script, control block, leaf hash)
@@ -271,12 +241,10 @@ impl Hashi {
     )> {
         let mpc_g = self.mpc_master_g()?;
         let guardian_pubkey = self.require_guardian_btc_pubkey()?;
-        Ok(hashi_bitcoin::taproot_witness_artifacts(
+        Ok(hashi_bitcoin::taproot_2of2_witness_artifacts(
             &guardian_pubkey,
             &mpc_g,
-            &derivation_path
-                .copied()
-                .unwrap_or(sui_sdk_types::Address::ZERO),
+            &normalized_derivation_path(derivation_path),
         ))
     }
 
@@ -304,9 +272,10 @@ impl Hashi {
             .map(Ok)
             .unwrap_or_else(|| self.onchain_verifying_key_g())
             .context("MPC public key not available yet")?;
+        let derivation_path = normalized_derivation_path(derivation_path).into_inner();
         let derived = fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(
             &verifying_key,
-            &path_bytes_or_zero(derivation_path),
+            &derivation_path,
         );
         XOnlyPublicKey::from_slice(&derived.to_byte_array()).context("valid 32-byte x-only key")
     }
@@ -371,6 +340,39 @@ impl Hashi {
             signature: Some(signature_bytes),
         })
     }
+}
+
+/// `tr(NUMS, {multi_a(2, guardian_btc_pubkey, h), and_v(v:older(delay), pk(h))})`
+/// where `h = derive(mpc_pubkey, path)`: an immediate guardian+MPC 2-of-2 leaf,
+/// plus an MPC-only recovery leaf spendable after
+/// `HASHI_MPC_RECOVERY_DELAY_SECONDS`.
+/// `path = None` (change address) maps to a zero-byte path so deposit
+/// and withdrawal sides agree on the leaf key without a special case.
+///
+/// `mpc_key` is the raw MPC verifying key (`G`). The derivation is taken
+/// directly against this point — using only the x-only projection would
+/// silently force the parent to even-y and produce a different child key
+/// for ~half of all MPC vks, breaking the 2-of-2 leaf script.
+pub fn derive_deposit_address(
+    mpc_key: &ProjectivePoint,
+    guardian_btc_pubkey: &XOnlyPublicKey,
+    derivation_path: Option<&sui_sdk_types::Address>,
+    btc_network: bitcoin::Network,
+) -> anyhow::Result<hashi_bitcoin::BitcoinAddress> {
+    Ok(hashi_bitcoin::taproot_address(
+        guardian_btc_pubkey,
+        mpc_key,
+        &normalized_derivation_path(derivation_path),
+        btc_network,
+    ))
+}
+
+pub(crate) fn normalized_derivation_path(
+    derivation_path: Option<&sui_sdk_types::Address>,
+) -> sui_sdk_types::Address {
+    derivation_path
+        .copied()
+        .unwrap_or(sui_sdk_types::Address::ZERO)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

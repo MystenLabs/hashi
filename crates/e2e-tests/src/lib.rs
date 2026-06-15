@@ -588,6 +588,12 @@ impl Default for TestNetworksBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context;
+    use bitcoin::Amount;
+    use bitcoin::OutPoint;
+    use bitcoin::TxIn;
+    use bitcoin::TxOut;
+    use bitcoin::Witness;
     use fastcrypto::groups::GroupElement;
     use fastcrypto::groups::Scalar;
     use fastcrypto::serde_helpers::ToFromByteArray;
@@ -876,6 +882,7 @@ mod tests {
         epoch: u64,
         sui_request_id: sui_sdk_types::Address,
         global_presig_index: u64,
+        derivation_address: Option<[u8; 32]>,
     ) -> Vec<
         hashi::mpc::types::SigningResult<fastcrypto::groups::secp256k1::schnorr::SchnorrSignature>,
     > {
@@ -904,7 +911,7 @@ mod tests {
                             &message,
                             global_presig_index,
                             &beacon,
-                            None,
+                            derivation_address.as_ref(),
                             SIGNING_TIMEOUT,
                             &metrics,
                         )
@@ -921,7 +928,7 @@ mod tests {
                 fastcrypto::groups::secp256k1::schnorr::SchnorrSignature,
             >,
         >,
-    ) {
+    ) -> fastcrypto::groups::secp256k1::schnorr::SchnorrSignature {
         let mut signatures = Vec::new();
         for (i, result) in results.into_iter().enumerate() {
             let sig = result.unwrap_or_else(|e| panic!("Node {i} signing failed: {e}"));
@@ -935,6 +942,10 @@ mod tests {
                 "Node {i} signature differs from node 0"
             );
         }
+        signatures
+            .into_iter()
+            .next()
+            .expect("MPC signing returned no signatures")
     }
 
     async fn run_signing_test(num_nodes: usize, corrupt_node_indices: &[usize]) -> Result<()> {
@@ -970,9 +981,227 @@ mod tests {
 
         let message: &[u8] = b"Hello, Hashi signing!";
         let request_id = sui_sdk_types::Address::ZERO;
-        let results = sign_on_all_nodes(nodes, message, epoch, request_id, 0).await;
+        let results = sign_on_all_nodes(nodes, message, epoch, request_id, 0, None).await;
         assert_all_signatures_match(results);
 
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_mpc_recovery_spend_before_and_after_csv_delay() -> Result<()> {
+        crate::test_helpers::init_test_logging();
+
+        // Start a full localnet and wait until all Hashi nodes can participate
+        // in MPC signing for the current epoch.
+        let test_networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+
+        let epoch = nodes[0]
+            .current_epoch()
+            .context("Hashi epoch not available")?;
+        wait_for_signing_manager(nodes, epoch, DKG_TIMEOUT).await?;
+
+        // Create a real Hashi-controlled Bitcoin UTXO by funding a deposit
+        // address derived for a test Sui address.
+        let hashi = nodes[0].hashi().clone();
+        let derivation_path = test_networks
+            .sui_network
+            .user_keys
+            .first()
+            .context("test network has no Sui user keys")?
+            .public_key()
+            .derive_address();
+        let deposit_address = hashi.get_deposit_address(Some(&derivation_path))?;
+        let deposit_amount = Amount::from_sat(100_000);
+        let miner_fee = Amount::from_sat(1_000);
+
+        tracing::info!(%deposit_address, "Funding Hashi-controlled deposit address");
+        let funding_txid = test_networks
+            .bitcoin_node()
+            .send_to_address(&deposit_address, deposit_amount)?;
+        test_networks.bitcoin_node().generate_blocks(10)?;
+        let vout = crate::test_helpers::lookup_vout(
+            &test_networks,
+            funding_txid,
+            deposit_address.clone(),
+            deposit_amount.to_sat(),
+        )?;
+
+        // Build a raw Bitcoin transaction that attempts to spend the deposit
+        // through the delayed MPC-only recovery path.
+        let destination = test_networks.bitcoin_node().get_new_address()?;
+        let destination_balance_before = test_networks
+            .bitcoin_node()
+            .rpc_client()
+            .get_received_by_address(&destination)?
+            .into_model()?
+            .0;
+        let mut recovery_tx = hashi_types::bitcoin::construct_tx(
+            vec![TxIn {
+                previous_output: OutPoint {
+                    txid: funding_txid,
+                    vout: vout as u32,
+                },
+                script_sig: bitcoin::ScriptBuf::new(),
+                sequence: hashi_types::bitcoin::taproot::mpc_recovery_delay_sequence(),
+                witness: Witness::new(),
+            }],
+            vec![TxOut {
+                value: deposit_amount - miner_fee,
+                script_pubkey: destination.script_pubkey(),
+            }],
+        );
+
+        // Fetch the delayed MPC-only recovery leaf artifacts used for sighash
+        // and witness construction.
+        let guardian_pubkey = hashi
+            .guardian_btc_pubkey()
+            .copied()
+            .context("guardian BTC pubkey not pinned")?;
+        let mpc_master_g = hashi
+            .signing_verifying_key()
+            .context("MPC signing verifying key not available")?;
+        let (recovery_script, recovery_control_block, recovery_leaf_hash) =
+            hashi_types::bitcoin::taproot::taproot_mpc_recovery_witness_artifacts(
+                &guardian_pubkey,
+                &mpc_master_g,
+                &derivation_path,
+            );
+
+        // Compute the sighash for the recovery leaf and sign it with the real
+        // MPC protocol using the same derivation path as the deposit address.
+        let prevout = TxOut {
+            value: deposit_amount,
+            script_pubkey: deposit_address.script_pubkey(),
+        };
+        let sighash = hashi_types::bitcoin::taproot_script_spend_sighashes(
+            &recovery_tx,
+            &[prevout],
+            &[recovery_leaf_hash],
+        )[0];
+        let derivation_address = derivation_path.into_inner();
+        // The signing request id just needs to be unique and agreed on by all
+        // nodes; a random one keeps it independent of the message being signed.
+        let mut request_id_bytes = [0u8; 32];
+        rand::Rng::fill(&mut rand::thread_rng(), &mut request_id_bytes);
+        let results = sign_on_all_nodes(
+            nodes,
+            &sighash,
+            epoch,
+            sui_sdk_types::Address::new(request_id_bytes),
+            0,
+            Some(derivation_address),
+        )
+        .await;
+        let mpc_signature = assert_all_signatures_match(results);
+
+        // Attach the delayed-path witness: one MPC signature plus the recovery
+        // script and control block. There is deliberately no guardian signature.
+        let mut witness = Witness::new();
+        witness.push(mpc_signature.to_byte_array());
+        witness.push(recovery_script.to_bytes());
+        witness.push(recovery_control_block.serialize());
+        recovery_tx.input[0].witness = witness;
+
+        // Before the relative CSV delay has elapsed, Bitcoin should reject the
+        // otherwise valid recovery spend as non-final.
+        let before = test_networks
+            .bitcoin_node()
+            .rpc_client()
+            .test_mempool_accept(&[recovery_tx.clone()])?
+            .into_model()?
+            .results;
+        assert_eq!(before.len(), 1);
+        assert!(
+            !before[0].allowed,
+            "recovery spend should not be accepted before CSV delay"
+        );
+        tracing::info!(
+            reject_reason = ?before[0].reject_reason,
+            "Recovery spend rejected before CSV delay"
+        );
+
+        // Advance regtest median-time-past beyond the 60-day CSV delay. Mock
+        // time alone is not enough; mining moves the chain MTP forward. The 2h
+        // margin covers MTP lagging the mocked wall clock, since it is the
+        // median of the last 11 block timestamps.
+        let tip_hash = test_networks
+            .bitcoin_node()
+            .rpc_client()
+            .best_block_hash()?;
+        let tip_header = test_networks
+            .bitcoin_node()
+            .rpc_client()
+            .get_block_header_verbose(&tip_hash)?;
+        let future_time = tip_header.median_time
+            + hashi_types::bitcoin::taproot::HASHI_MPC_RECOVERY_DELAY_SECONDS as i64
+            + 2 * 60 * 60;
+        test_networks
+            .bitcoin_node()
+            .rpc_client()
+            .call::<serde_json::Value>("setmocktime", &[serde_json::json!(future_time)])?;
+        test_networks.bitcoin_node().generate_blocks(20)?;
+
+        // After the delay, the exact same recovery transaction should be valid
+        // for the mempool.
+        let after = test_networks
+            .bitcoin_node()
+            .rpc_client()
+            .test_mempool_accept(&[recovery_tx.clone()])?
+            .into_model()?
+            .results;
+        assert_eq!(after.len(), 1);
+        assert!(
+            after[0].allowed,
+            "recovery spend should be accepted after CSV delay; reject_reason={:?}",
+            after[0].reject_reason
+        );
+
+        // Broadcast, mine, and confirm the recovery spend, then verify it paid
+        // the expected destination output.
+        let recovery_txid = test_networks
+            .bitcoin_node()
+            .rpc_client()
+            .send_raw_transaction(&recovery_tx)?
+            .into_model()?
+            .0;
+        test_networks.bitcoin_node().generate_blocks(1)?;
+        test_networks
+            .bitcoin_node()
+            .wait_for_transaction(&recovery_txid, std::time::Duration::from_secs(30))
+            .await?;
+
+        let confirmed_tx = test_networks
+            .bitcoin_node()
+            .rpc_client()
+            .get_raw_transaction(recovery_txid)
+            .and_then(|r| r.transaction().map_err(Into::into))?;
+        let expected_recovery_amount = deposit_amount - miner_fee;
+        assert!(confirmed_tx.output.iter().any(|output| {
+            output.value == expected_recovery_amount
+                && output.script_pubkey == destination.script_pubkey()
+        }));
+        let destination_balance_after = test_networks
+            .bitcoin_node()
+            .rpc_client()
+            .get_received_by_address(&destination)?
+            .into_model()?
+            .0;
+        assert_eq!(
+            destination_balance_after - destination_balance_before,
+            expected_recovery_amount,
+            "destination address balance should increase by the recovered amount"
+        );
+
+        tracing::info!(%recovery_txid, "MPC recovery spend e2e test passed");
         Ok(())
     }
 
@@ -1541,6 +1770,7 @@ mod tests {
             epoch,
             request_id,
             0,
+            None,
         )
         .await;
         assert_all_signatures_match(results);
@@ -1769,7 +1999,7 @@ mod tests {
             bytes[..8].copy_from_slice(&(i as u64).to_be_bytes());
             let request_id = sui_sdk_types::Address::new(bytes);
             let results =
-                sign_on_all_nodes(nodes, b"refill test", epoch, request_id, i as u64).await;
+                sign_on_all_nodes(nodes, b"refill test", epoch, request_id, i as u64, None).await;
             assert_all_signatures_match(results);
 
             // After crossing the refill threshold, wait for the refill to
@@ -1824,7 +2054,7 @@ mod tests {
         // 2. Sign to verify nonce generation presigs (built via in-memory complaint recovery) work
         let epoch = nodes[0].hashi().onchain_state().epoch();
         let request_id = sui_sdk_types::Address::ZERO;
-        let results = sign_on_all_nodes(nodes, b"complaint test", epoch, request_id, 0).await;
+        let results = sign_on_all_nodes(nodes, b"complaint test", epoch, request_id, 0, None).await;
         assert_all_signatures_match(results);
 
         // 3. First rotation — reconstruct_previous_output hits corrupted DKG
@@ -1888,7 +2118,7 @@ mod tests {
         let nodes = test_networks.hashi_network().nodes();
         let epoch = nodes[0].hashi().onchain_state().epoch();
         let request_id = sui_sdk_types::Address::ZERO;
-        let results = sign_on_all_nodes(nodes, b"post-restart", epoch, request_id, 0).await;
+        let results = sign_on_all_nodes(nodes, b"post-restart", epoch, request_id, 0, None).await;
         assert_all_signatures_match(results);
 
         Ok(())
