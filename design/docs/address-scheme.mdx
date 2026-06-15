@@ -33,8 +33,10 @@ where:
 - `h = derive(H, d)` is the child public key derived from `H` using
   derivation path `d` (the depositor's Sui address).
 - `g` is the guardian's fixed public key.
-- `delay` is the 60-day relative timelock, encoded as a BIP-68 time-based
-  sequence value.
+- `delay` is the 60-day relative timelock, encoded as the BIP-68 sequence
+  `0x0040278D` (`4_204_429`): the time-based type bit (`1 << 22`) OR'd with
+  `10_125` (= `ceil(60 * 24 * 60 * 60 / 512)`, the count of 512-second units
+  in 60 days).
 - `i` is the NUMS (nothing-up-my-sleeve) internal key defined in BIP-341
   (`50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0`)
   with no known private key, ensuring all spends occur through the script path.

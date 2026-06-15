@@ -80,7 +80,7 @@ pub fn taproot_address(
 }
 
 /// Immediate 2-of-2 spend artifacts for the Hashi taproot tree.
-pub fn taproot_witness_artifacts(
+pub fn taproot_2of2_witness_artifacts(
     enclave_pubkey: &BitcoinPubkey,
     hashi_master_g: &HashiMasterG,
     hashi_derivation_path: &DerivationPath,
@@ -151,8 +151,8 @@ pub fn taproot_script_spend_sighashes(
 /// - Delayed recovery leaf: after `HASHI_MPC_RECOVERY_DELAY_SECONDS`, derived
 ///   Hashi MPC child key only.
 ///
-/// Both leaves are committed under a NUMS internal key, disabling meaningful key
-/// path spends.
+/// Both leaves are committed under a NUMS internal key, disabling meaningful
+/// key path spends.
 fn compute_taproot_descriptor(
     enclave_pubkey: &BitcoinPubkey,
     hashi_master_g: &HashiMasterG,
@@ -163,6 +163,9 @@ fn compute_taproot_descriptor(
     let internal = *NUMS_INTERNAL_KEY;
     let recovery_delay = mpc_recovery_delay_sequence().to_consensus_u32();
 
+    // Taproot descriptor with two leaves: immediate 2-of-2 checksigadd-style
+    // multisig, plus delayed MPC-only recovery.
+    // Descriptor docs: https://github.com/bitcoin/bitcoin/blob/master/doc/descriptors.md
     let desc_str = format!(
         "tr({},{{multi_a(2,{},{}),and_v(v:older({}),pk({}))}})",
         internal, enclave_pubkey, derived_hashi_pubkey, recovery_delay, derived_hashi_pubkey,
@@ -273,7 +276,7 @@ mod bitcoin_tests {
             network,
         );
         let (tap_script, control_block, _) =
-            taproot_witness_artifacts(enclave_pubkey, &hashi_master_g, hashi_derivation_path);
+            taproot_2of2_witness_artifacts(enclave_pubkey, &hashi_master_g, hashi_derivation_path);
         (addr, control_block, tap_script)
     }
 
@@ -303,6 +306,11 @@ mod bitcoin_tests {
     #[test]
     fn mpc_recovery_delay_is_time_based_csv() {
         let sequence = mpc_recovery_delay_sequence();
+        // BIP-68 time-based encoding of the 60-day recovery delay: type bit
+        // (1 << 22) OR ceil(60 * 24 * 60 * 60 / 512) = 10_125, i.e.
+        // 0x0040278D = 4_204_429. This literal is baked into every
+        // deposit/change address's recovery leaf; changing it changes all
+        // addresses.
         assert_eq!(sequence.to_consensus_u32(), (1 << 22) | 10_125);
         assert!(
             bitcoin::relative::LockTime::from_sequence(sequence)
@@ -445,7 +453,7 @@ mod bitcoin_tests {
 
         // The production 2-of-2 leaf must embed the MPC-signed child.
         let (leaf_script, _, _) =
-            taproot_witness_artifacts(&enclave_pubkey, &raw_g, &DerivationPath::from(path));
+            taproot_2of2_witness_artifacts(&enclave_pubkey, &raw_g, &DerivationPath::from(path));
         let script = leaf_script.as_bytes();
         assert!(
             script.windows(32).any(|w| w == mpc_child.as_slice()),
@@ -573,7 +581,7 @@ mod bitcoin_tests {
             );
 
             let (script, control_block, leaf_hash) =
-                taproot_witness_artifacts(&enclave_pk, &master_g, &c.path);
+                taproot_2of2_witness_artifacts(&enclave_pk, &master_g, &c.path);
             assert_eq!(control_block.serialize().len(), 65);
             assert_eq!(script.as_bytes().len(), 70, "leaf script must be 70 bytes");
             assert_eq!(
@@ -641,7 +649,7 @@ mod bitcoin_tests {
         assert_eq!(addr_signet.to_string(), EXPECTED_ADDR_SIGNET);
 
         let (script, control_block, leaf_hash) =
-            taproot_witness_artifacts(&enclave_pk, &master_g, &path);
+            taproot_2of2_witness_artifacts(&enclave_pk, &master_g, &path);
         assert_eq!(control_block.serialize().len(), 65);
         assert_eq!(script.as_bytes().len(), 70);
         assert_eq!(script.as_bytes().as_hex().to_string(), EXPECTED_LEAF_SCRIPT);

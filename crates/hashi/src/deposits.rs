@@ -241,7 +241,7 @@ impl Hashi {
     )> {
         let mpc_g = self.mpc_master_g()?;
         let guardian_pubkey = self.require_guardian_btc_pubkey()?;
-        Ok(hashi_bitcoin::taproot_witness_artifacts(
+        Ok(hashi_bitcoin::taproot_2of2_witness_artifacts(
             &guardian_pubkey,
             &mpc_g,
             &normalized_derivation_path(derivation_path),
