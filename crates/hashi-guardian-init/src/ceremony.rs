@@ -16,6 +16,8 @@
 //! [`SetupNewKey`]: hashi_types::guardian::SetupNewKeyRequest
 //! [`SetupNewKeyResponse`]: hashi_types::guardian::SetupNewKeyResponse
 
+use std::io::Read;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -33,17 +35,24 @@ use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::S3_DIR_CEREMONY;
 use hashi_types::guardian::S3Config;
+use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::SetupNewKeyRequest;
 use hashi_types::guardian::SetupNewKeyResponse;
+use hashi_types::guardian::Share;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
 use hashi_types::guardian::proto_conversions::setup_new_key_request_to_pb;
 use hashi_types::guardian::session_id_from_signing_pubkey;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::cert_owns_key_handle;
+use hashi_types::pgp::decrypt_with_gpg;
 use hashi_types::pgp::pgp_message_recipients;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
+use k256::FieldBytes;
+use k256::Scalar;
+use k256::elliptic_curve::PrimeField;
 use serde::Deserialize;
+use tempfile::NamedTempFile;
 use tracing::info;
 
 /// S3 object key prefix for ceremony artifacts in the artifacts bucket.
@@ -81,6 +90,37 @@ impl CeremonyRunConfig {
             .with_context(|| format!("failed to read ceremony-run config at {}", path.display()))?;
         serde_yaml::from_slice(&bytes)
             .with_context(|| format!("failed to parse ceremony-run yaml at {}", path.display()))
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CeremonyVerifyConfig {
+    /// Path to this KP's armored OpenPGP public cert (the one they exported and
+    /// gave to the operator at `run` time). Used to derive the fingerprint that
+    /// finds this KP's share in the artifact, and to confirm the share's
+    /// ciphertext is genuinely encrypted to this cert before decrypting.
+    pub kp_pgp_cert_path: PathBuf,
+    /// S3 config for the guardian's log bucket (object-lock enabled). Read to
+    /// fetch the session's attestation + `ceremony/` audit log.
+    pub guardian_s3: S3Config,
+    /// S3 config for the ceremony artifacts bucket (object-lock disabled).
+    /// Read to download this session's signed `SetupNewKeyResponse`.
+    pub artifact_s3: S3Config,
+    /// Optional gpg homedir for the yubikey-backed agent. Defaults to gpg's
+    /// default (`~/.gnupg`) when unset.
+    pub gpg_homedir: Option<PathBuf>,
+}
+
+impl CeremonyVerifyConfig {
+    pub fn load_yaml(path: &Path) -> Result<Self> {
+        let bytes = std::fs::read(path).with_context(|| {
+            format!(
+                "failed to read ceremony-verify config at {}",
+                path.display()
+            )
+        })?;
+        serde_yaml::from_slice(&bytes)
+            .with_context(|| format!("failed to parse ceremony-verify yaml at {}", path.display()))
     }
 }
 
@@ -240,21 +280,208 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
     Ok(())
 }
 
+/// Verify this KP can fetch and decrypt its ceremony share.
+///
+/// Trust is anchored entirely to the guardian's S3 attestation log (unlike
+/// `run`, which talks to the live guardian over gRPC): the signing pubkey is
+/// loaded via `get_verified_enclave_pubkey`, and both the downloaded artifact
+/// and the `ceremony/` audit entry are verified under it. Each step is logged.
+///
+/// Security: only the share's **ciphertext** is written to disk (a `NamedTempFile`
+/// that is deleted on drop); the decrypted 32-byte scalar lives only in the
+/// in-memory `Scalar`. `gpg --decrypt` streams its plaintext over a pipe — it is
+/// never given an `--output` path.
+pub async fn verify(cfg: CeremonyVerifyConfig) -> Result<()> {
+    // Load this KP's cert. Its fingerprint finds our share in the artifact, and
+    // the cert itself lets us confirm the ciphertext is genuinely encrypted to
+    // us before we touch the yubikey.
+    let cert_armored = std::fs::read_to_string(&cfg.kp_pgp_cert_path)
+        .with_context(|| format!("read KP cert at {}", cfg.kp_pgp_cert_path.display()))?;
+    let kp_cert = PgpPublicCert::new(cert_armored)
+        .with_context(|| format!("invalid PGP cert at {}", cfg.kp_pgp_cert_path.display()))?;
+    let want_fp = kp_cert.fingerprint();
+    info!(fingerprint = %want_fp, "verifying ceremony share");
+
+    // 1. Discover the latest ceremony artifact and parse its session_id +
+    //    sharing_seq from the key.
+    let artifact_client = GuardianS3Client::new(&cfg.artifact_s3).await;
+    let artifact_keys = artifact_client
+        .list_all_keys_in_dir(&format!("{ARTIFACT_DIR}/"))
+        .await
+        .context("list ceremony artifacts")?;
+    ensure!(
+        !artifact_keys.is_empty(),
+        "no ceremony artifacts found in bucket {}",
+        cfg.artifact_s3.bucket_name()
+    );
+    let artifact_key = artifact_keys
+        .into_iter()
+        .max()
+        .expect("artifact keys is non-empty");
+    let (sharing_seq, session_id) = parse_artifact_key(&artifact_key)?;
+    info!(
+        artifact_key = %artifact_key,
+        sharing_seq,
+        session_id = %session_id,
+        "selected latest ceremony artifact"
+    );
+
+    // 2. Load the session's attested signing pubkey from the guardian log
+    //    bucket (reads + verifies the attestation — TODO check C).
+    let guardian_client = GuardianS3Client::new_checked(&cfg.guardian_s3)
+        .await
+        .context("connect to guardian log bucket")?;
+    let signing_pub_key = guardian_client
+        .get_verified_enclave_pubkey(&session_id)
+        .await?;
+    info!(session_id = %session_id, "attestation-anchored signing pubkey loaded");
+
+    // 3. Download the artifact.
+    let signed_resp = artifact_client
+        .get_at_key::<GuardianSigned<SetupNewKeyResponse>>(&artifact_key)
+        .await?;
+    info!("downloaded ceremony artifact");
+
+    // 4. Verify its signature under the attested pubkey, and sanity-check shape.
+    let n = signed_resp.data.encrypted_shares.len();
+    let response = signed_resp
+        .clone()
+        .verify(&signing_pub_key)
+        .map_err(|e| anyhow!("verify ceremony artifact signature: {e:?}"))?;
+    verify_response_shape(&response, n)?;
+    info!("ceremony artifact signature + shape verified");
+
+    // 5. Cross-check the artifact's commitments against the guardian's
+    //    ceremony/ audit log (binds the deletable artifact to the immutable,
+    //    attested audit record).
+    let instance = read_session_ceremony_instance(
+        &guardian_client,
+        &session_id,
+        sharing_seq,
+        &signing_pub_key,
+    )
+    .await?;
+    ensure!(
+        *instance.commitments() == response.share_commitments,
+        "ceremony artifact commitments differ from the ceremony/ log commitments"
+    );
+    info!("artifact commitments match the ceremony/ log");
+
+    // 6. Find this KP's share by exact fingerprint match (both sides derive
+    //    from PgpPublicCert::fingerprint over the same key, so they're
+    //    canonical and identical — no normalization needed). The matched share
+    //    carries its own crypto `id`.
+    let share = response
+        .encrypted_shares
+        .iter()
+        .find(|s| s.recipient_fingerprint == want_fp)
+        .ok_or_else(|| {
+            anyhow!(
+                "no share in the ceremony artifact is labeled for this KP's fingerprint \
+                 {want_fp} (labeled fingerprints: {:?})",
+                response
+                    .encrypted_shares
+                    .iter()
+                    .map(|s| s.recipient_fingerprint.clone())
+                    .collect::<Vec<_>>()
+            )
+        })?;
+    info!(
+        share_id = share.id.get(),
+        fingerprint = %share.recipient_fingerprint,
+        "found this KP's encrypted share"
+    );
+
+    // 6b. Defense-in-depth: confirm the ciphertext is actually encrypted to
+    //     this cert (parses the PGP recipients without decrypting). Catches a
+    //     mislabeled or substituted ciphertext before we touch the yubikey.
+    let recipients = pgp_message_recipients(&share.armored_ciphertext)
+        .with_context(|| format!("parse PGP recipients for share id {}", share.id.get()))?;
+    ensure!(
+        !recipients.is_empty(),
+        "share id {} has no PGP recipients",
+        share.id.get()
+    );
+    for handle in &recipients {
+        ensure!(
+            cert_owns_key_handle(&kp_cert, handle),
+            "share id {} (labeled {want_fp}) is encrypted to key {handle}, which is not \
+             in this KP's cert",
+            share.id.get()
+        );
+    }
+    info!(
+        recipient_count = recipients.len(),
+        "confirmed ciphertext is encrypted to this KP's cert"
+    );
+    let share_id = share.id;
+
+    // 7. Decrypt the share with the yubikey via gpg. Only the CIPHERTEXT is
+    //    written to the temp file; the decrypted bytes stream over gpg's stdout
+    //    pipe into memory and never touch disk.
+    let mut ciphertext_file = NamedTempFile::new().context("create temp file for ciphertext")?;
+    ciphertext_file
+        .write_all(share.armored_ciphertext.as_bytes())
+        .context("write ciphertext to temp file")?;
+    let mut decryptor = decrypt_with_gpg(ciphertext_file.path(), cfg.gpg_homedir.as_deref())?;
+    let mut plaintext = Vec::with_capacity(32);
+    decryptor
+        .read_to_end(&mut plaintext)
+        .context("read decrypted share from gpg")?;
+    // `ciphertext_file` drops here, unlinking the ciphertext temp file.
+    drop(ciphertext_file);
+
+    let scalar_bytes: [u8; 32] = plaintext
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("decrypted share is {} bytes, expected 32", plaintext.len()))?;
+    let scalar = Option::<Scalar>::from(Scalar::from_repr(FieldBytes::from(scalar_bytes)))
+        .ok_or_else(|| anyhow!("decrypted share is not a valid secp256k1 scalar"))?;
+    info!("decrypted share via yubikey (plaintext stayed in memory)");
+
+    // 8. Verify the decrypted share's commitment is in the set — proves the
+    //    bytes we decrypted are a valid share of the guardian's BTC key.
+    let reconstructed = Share {
+        id: share_id,
+        value: scalar,
+    };
+    response
+        .share_commitments
+        .verify_share(&reconstructed)
+        .map_err(|e| anyhow!("decrypted share does not match its commitment: {e:?}"))?;
+    info!(
+        share_id = share_id.get(),
+        "decrypted share matches its commitment"
+    );
+
+    // 9. Summary.
+    let expected_commitment = response
+        .share_commitments
+        .iter()
+        .find(|c| c.id == share_id)
+        .expect("share verified above so its commitment exists");
+    println!("Ceremony share verified.");
+    println!("  session_id:    {session_id}");
+    println!("  share_id:      {}", share_id.get());
+    println!("  sharing_seq:   {sharing_seq}");
+    println!("  fingerprint:   {want_fp}");
+    println!(
+        "  commitment:    {}",
+        hex::encode(&expected_commitment.digest)
+    );
+    Ok(())
+}
+
 /// Load and validate each KP's armored OpenPGP cert, logging the fingerprint +
 /// assigned share id for each. Returns the certs in config order.
 fn load_kp_certs(paths: &[PathBuf]) -> Result<Vec<PgpPublicCert>> {
     let mut certs = Vec::with_capacity(paths.len());
-    for (i, path) in paths.iter().enumerate() {
+    for path in paths {
         let armored = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read KP cert at {}", path.display()))?;
         let cert = PgpPublicCert::new(armored)
             .with_context(|| format!("invalid PGP cert at {}", path.display()))?;
-        info!(
-            share_id = i + 1,
-            fingerprint = %cert,
-            path = %path.display(),
-            "loaded KP cert"
-        );
+        info!(fingerprint = %cert, path = %path.display(), "loaded KP cert");
         certs.push(cert);
     }
     Ok(certs)
@@ -305,57 +532,101 @@ fn verify_response_shape(response: &SetupNewKeyResponse, n: usize) -> Result<()>
 /// and confirm every recipient key belongs to the share's expected cert. Catches
 /// a guardian that encrypted a share to the wrong cert — or to an extra/attacker
 /// key alongside the right one.
+/// For each encrypted share, confirm (a) its `recipient_fingerprint` label
+/// names one of the operator-supplied certs, and (b) the ciphertext is actually
+/// encrypted only to that cert (parsed via PKESK without decrypting). Catches a
+/// guardian that mislabeled a share or encrypted it to the wrong/extra key.
+///
+/// Identity is by fingerprint, not positional index — a share is matched to its
+/// cert by `recipient_fingerprint`, independent of ordering.
 fn verify_encrypted_share_recipients(
     response: &SetupNewKeyResponse,
     certs: &[PgpPublicCert],
 ) -> Result<()> {
+    let by_fingerprint: std::collections::HashMap<String, &PgpPublicCert> =
+        certs.iter().map(|c| (c.fingerprint(), c)).collect();
+    ensure!(
+        by_fingerprint.len() == certs.len(),
+        "duplicate fingerprints among the supplied KP certs"
+    );
+
     for share in &response.encrypted_shares {
-        let id = share.id.get() as usize;
-        ensure!(
-            (1..=certs.len()).contains(&id),
-            "share id {id} is outside 1..={}",
-            certs.len()
-        );
-        let expected_cert = &certs[id - 1];
+        let expected_cert = by_fingerprint
+            .get(&share.recipient_fingerprint)
+            .with_context(|| {
+                format!(
+                    "share id {} is labeled for fingerprint {}, which is not among the \
+                     operator-supplied KP certs",
+                    share.id.get(),
+                    share.recipient_fingerprint
+                )
+            })?;
         let recipients = pgp_message_recipients(&share.armored_ciphertext)
-            .with_context(|| format!("parse PGP recipients for share id {id}"))?;
+            .with_context(|| format!("parse PGP recipients for share id {}", share.id.get()))?;
         ensure!(
             !recipients.is_empty(),
-            "share id {id} has no PGP recipients"
+            "share id {} has no PGP recipients",
+            share.id.get()
         );
         for handle in &recipients {
             ensure!(
                 cert_owns_key_handle(expected_cert, handle),
-                "share id {id} is encrypted to key {handle}, which is not in the \
-                 expected cert (fingerprint {})",
-                expected_cert
+                "share id {} (labeled {}) is encrypted to key {handle}, which is not in \
+                 that cert",
+                share.id.get(),
+                share.recipient_fingerprint
             );
         }
         info!(
-            share_id = id,
-            fingerprint = %expected_cert,
+            share_id = share.id.get(),
+            fingerprint = %share.recipient_fingerprint,
             recipient_count = recipients.len(),
-            "verified share is encrypted only to its expected cert"
+            "verified share is encrypted only to its labeled cert"
         );
     }
     info!(
-        "all {} shares encrypted to their expected certs",
-        certs.len()
+        "all {} shares encrypted to their labeled certs",
+        response.encrypted_shares.len()
     );
     Ok(())
 }
 
-/// Read THIS session's `ceremony/` entry by its exact key and confirm the
-/// logged `SecretSharingInstance` (commitments / n / t / sharing_seq) matches
-/// what we requested and what came back in the `SetupNewKeyResponse`.
+/// Read + verify THIS session's `ceremony/` entry by its exact key, returning
+/// the logged `SecretSharingInstance`. Shared by `run` (which cross-checks the
+/// response against it) and `verify` (which cross-checks the downloaded
+/// artifact against it).
 ///
 /// Reading by the exact key (`ceremony/{sharing_seq:020}-{session_id}.json`)
 /// avoids the multi-session ambiguity of `read_latest_ceremony_instance`, which
 /// takes the lex-greatest key across *all* sessions — wrong when a log bucket
-/// already holds a prior session's ceremony entry. The record is verified under
-/// `signing_pub_key` (the key we pinned at step 5), which is consistent with the
-/// current trust model; the attestation gate (TODO check C) composes here once
-/// implemented.
+/// already holds a prior session's ceremony entry. The record's `session_id` is
+/// asserted to match, and the signature is verified under `signing_pub_key`
+/// (whatever the caller already anchored: the live guardian's gRPC-sourced key
+/// for `run`; the attestation-anchored key for `verify`).
+async fn read_session_ceremony_instance(
+    s3: &GuardianS3Client,
+    session_id: &str,
+    sharing_seq: u64,
+    signing_pub_key: &GuardianPubKey,
+) -> Result<SecretSharingInstance> {
+    let ceremony_key = format!("{S3_DIR_CEREMONY}/{sharing_seq:020}-{session_id}.json");
+    info!(key = %ceremony_key, "reading guardian ceremony/ log");
+    let verified = s3
+        .get_verified_log_record(&ceremony_key, session_id, Some(signing_pub_key))
+        .await
+        .map_err(|e| anyhow!("verify ceremony log at {ceremony_key}: {e:?}"))?;
+    let LogMessage::Ceremony(msg) = verified.message else {
+        bail!("expected a Ceremony log at {ceremony_key}");
+    };
+    let CeremonyLogMessage::NewKey { instance } = *msg else {
+        bail!("expected a CeremonyLogMessage::NewKey at {ceremony_key}");
+    };
+    Ok(instance)
+}
+
+/// For `run`: confirm the logged `SecretSharingInstance` (commitments / n / t /
+/// sharing_seq) matches what we requested and what came back in the
+/// `SetupNewKeyResponse`.
 async fn verify_ceremony_log(
     guardian_s3: &S3Config,
     session_id: &str,
@@ -365,23 +636,11 @@ async fn verify_ceremony_log(
     t: usize,
     response: &SetupNewKeyResponse,
 ) -> Result<()> {
-    let ceremony_key = format!("{S3_DIR_CEREMONY}/{sharing_seq:020}-{session_id}.json");
-    info!(key = %ceremony_key, "reading guardian ceremony/ log to cross-check");
-
     let s3 = GuardianS3Client::new_checked(guardian_s3)
         .await
         .context("connect to guardian log bucket")?;
-    let record = s3.get_log_record(&ceremony_key).await?;
-    let verified = record
-        .verify(signing_pub_key)
-        .map_err(|e| anyhow!("verify ceremony log signature at {ceremony_key}: {e:?}"))?;
-
-    let LogMessage::Ceremony(msg) = verified.message else {
-        bail!("expected a Ceremony log at {ceremony_key}");
-    };
-    let CeremonyLogMessage::NewKey { instance } = *msg else {
-        bail!("expected a CeremonyLogMessage::NewKey at {ceremony_key}");
-    };
+    let instance =
+        read_session_ceremony_instance(&s3, session_id, sharing_seq, signing_pub_key).await?;
 
     ensure!(
         *instance.commitments() == response.share_commitments,
@@ -412,6 +671,23 @@ async fn verify_ceremony_log(
 /// `ceremony-artifacts/{sharing_seq:020}-{session_id}.json`.
 fn artifact_object_key(sharing_seq: u64, session_id: &str) -> String {
     format!("{ARTIFACT_DIR}/{sharing_seq:020}-{session_id}.json")
+}
+
+/// Parse `ceremony-artifacts/{sharing_seq:020}-{session_id}.json` back into
+/// `(sharing_seq, session_id)`. Inverse of [`artifact_object_key`].
+fn parse_artifact_key(key: &str) -> Result<(u64, String)> {
+    let prefix = format!("{ARTIFACT_DIR}/");
+    let name = key
+        .strip_prefix(&prefix)
+        .and_then(|s| s.strip_suffix(".json"))
+        .ok_or_else(|| anyhow!("not a ceremony artifact key: {key}"))?;
+    let (seq_str, session_id) = name
+        .split_once('-')
+        .ok_or_else(|| anyhow!("malformed ceremony artifact key (no '-'): {key}"))?;
+    let sharing_seq = seq_str
+        .parse::<u64>()
+        .with_context(|| format!("malformed sharing_seq in artifact key: {key}"))?;
+    Ok((sharing_seq, session_id.to_string()))
 }
 
 fn print_summary(
@@ -449,6 +725,7 @@ mod tests {
     fn share(id: u16) -> KPEncryptedShare {
         KPEncryptedShare {
             id: NonZeroU16::new(id).unwrap(),
+            recipient_fingerprint: format!("DUMMY FINGERPRINT {id}"),
             armored_ciphertext: "dummy".into(),
         }
     }
@@ -519,5 +796,26 @@ mod tests {
         let resp = response(&[1, 2, 3], &[1, 2, 4]);
         let err = verify_response_shape(&resp, 3).unwrap_err();
         assert!(format!("{err}").contains("commitment ids"), "{err}");
+    }
+
+    #[test]
+    fn parse_artifact_key_round_trips_object_key() {
+        for (seq, session) in [(0u64, "deadbeef"), (1u64, "abc123"), (42u64, "feed")] {
+            let key = artifact_object_key(seq, session);
+            let (parsed_seq, parsed_session) = parse_artifact_key(&key).unwrap();
+            assert_eq!(parsed_seq, seq);
+            assert_eq!(parsed_session, session);
+        }
+    }
+
+    #[test]
+    fn parse_artifact_key_rejects_wrong_prefix_and_suffix() {
+        // Missing the ceremony-artifacts/ prefix.
+        assert!(parse_artifact_key("00000000000000000000-abc.json").is_err());
+        // Wrong suffix.
+        assert!(parse_artifact_key("ceremony-artifacts/00000000000000000000-abc.bin").is_err());
+        // Non-numeric sharing_seq.
+        let err = parse_artifact_key("ceremony-artifacts/notaseq-abc.json").unwrap_err();
+        assert!(format!("{err}").contains("sharing_seq"), "{err}");
     }
 }

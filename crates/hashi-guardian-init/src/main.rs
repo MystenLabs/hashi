@@ -54,7 +54,11 @@ enum CeremonyCommand {
         config: PathBuf,
     },
     /// Verify this KP can fetch and decrypt its encrypted ceremony share.
-    Verify,
+    Verify {
+        /// Path to ceremony-verify YAML config file.
+        #[arg(long)]
+        config: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -107,10 +111,9 @@ async fn main() -> anyhow::Result<()> {
                 let cfg = ceremony::CeremonyRunConfig::load_yaml(&config)?;
                 ceremony::run(cfg).await?;
             }
-            CeremonyCommand::Verify => {
-                // Fetch this KP's encrypted ceremony artifact and verify it can be decrypted before
-                // provisioning is needed.
-                todo!()
+            CeremonyCommand::Verify { config } => {
+                let cfg = ceremony::CeremonyVerifyConfig::load_yaml(&config)?;
+                ceremony::verify(cfg).await?;
             }
         },
         Command::Provision { config } => {

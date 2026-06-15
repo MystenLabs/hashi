@@ -1,0 +1,34 @@
+# Sample configuration for the `ceremony verify` command (run by each KP).
+#
+# Run with:
+#   cargo run -p hashi-guardian-init -- ceremony verify --config ceremony-verify.sample.yaml
+
+# Path to this KP's armored OpenPGP public cert — the one they exported (e.g.
+# `gpg --armor --export <keyid>`) and gave to the operator at `ceremony run`
+# time. verify derives the fingerprint to find this KP's share in the artifact,
+# and confirms the ciphertext is genuinely encrypted to this cert before
+# decrypting with the yubikey.
+kp_pgp_cert_path: /path/to/kp3.asc
+
+# S3 config for the guardian's log bucket (object-lock enabled). Read to fetch
+# the session's attestation and ceremony/ audit log.
+guardian_s3:
+  access_key: "AKIA..."
+  secret_key: "..."
+  bucket_info:
+    bucket: "hashi-guardian-logs"
+    region: "us-east-1"
+
+# S3 config for the ceremony artifacts bucket (object-lock disabled). Read to
+# download this session's signed SetupNewKeyResponse.
+artifact_s3:
+  access_key: "AKIA..."
+  secret_key: "..."
+  bucket_info:
+    bucket: "hashi-ceremony-artifacts"
+    region: "us-east-1"
+
+# Optional gpg homedir for the yubikey-backed gpg agent. Defaults to gpg's
+# default (~/.gnupg) when omitted. Set this only if your yubikey's agent uses a
+# non-default homedir.
+# gpg_homedir: /home/kp3/.gnupg
