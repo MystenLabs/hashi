@@ -36,19 +36,6 @@ use tracing::info;
 use tracing::trace;
 use tracing::warn;
 
-/// Number of per-input MPC signatures written to chain in one
-/// `commit_input_signatures` PTB. This is the on-chain write batch size `M`:
-/// it bounds the durability granularity (work lost on a crash) against the
-/// number of PTBs per withdrawal (and thus the per-leader-task wall-clock).
-///
-/// 128 keeps a typical/max-size withdrawal to a handful of commit PTBs that
-/// finish well inside `LEADER_TASK_TIMEOUT`, while still chunking genuinely huge
-/// withdrawals for resumable durability. 128 × 64B sigs = 8 KiB, within Sui's
-/// 16 KiB pure-arg limit.
-// TODO(tuning): revisit with PTB gas numbers at scale; can be decoupled from the
-// MPC batch-per-peer collection size.
-const MPC_SIGNING_CHUNK_SIZE: usize = 128;
-
 pub(super) enum WithdrawalBroadcastOutcome {
     ConfirmedOnSui { utxo_ids: Vec<UtxoId> },
     WaitForNextBitcoinBlock,
@@ -345,7 +332,7 @@ impl LeaderService {
     }
 
     /// Collects MPC signatures for the still-unsigned inputs and commits them in
-    /// cert-gated chunks of up to `MPC_SIGNING_CHUNK_SIZE`. Each chunk is durable
+    /// cert-gated chunks of up to `Config::mpc_signing_chunk_size`. Each chunk is durable
     /// on-chain (`commit_input_signatures`); the next checkpoint resumes from
     /// on-chain state, so a single failing input or a leader change only costs
     /// the in-flight chunk, never the whole withdrawal.
@@ -397,11 +384,12 @@ impl LeaderService {
             .expect("No current committee");
         let required_weight = certificate_threshold(committee.total_weight());
 
-        // TODO(tuning): MPC_SIGNING_CHUNK_SIZE (M) is the on-chain write batch —
-        // it trades durability granularity against PTB count. Measure the PTB
-        // command/gas cost of commit_input_signatures(M) and scale up.
+        // `M` (mpc_signing_chunk_size) is the on-chain write batch: it trades
+        // durability granularity against PTB count, bounded above by Sui's 16 KiB
+        // pure-arg limit. Off-chain config; see `Config::mpc_signing_chunk_size`.
+        let chunk_size = inner.config.mpc_signing_chunk_size();
         let mut last_checkpoint = 0u64;
-        for chunk in sigs_by_index.chunks(MPC_SIGNING_CHUNK_SIZE) {
+        for chunk in sigs_by_index.chunks(chunk_size) {
             let indices: Vec<u64> = chunk.iter().map(|(i, _)| *i).collect();
             let signatures: Vec<Vec<u8>> = chunk
                 .iter()
