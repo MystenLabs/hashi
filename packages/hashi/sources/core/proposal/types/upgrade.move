@@ -27,13 +27,22 @@ public struct Upgrade has copy, drop, store {
 
 public fun propose(
     hashi: &mut Hashi,
+    validator_address: address,
     digest: vector<u8>,
     metadata: VecMap<String, String>,
     clock: &Clock,
     ctx: &mut TxContext,
 ): ID {
     hashi.config().assert_version_enabled();
-    proposal::create(hashi, Upgrade { digest }, THRESHOLD_BPS, metadata, clock, ctx)
+    proposal::create(
+        hashi,
+        validator_address,
+        Upgrade { digest },
+        THRESHOLD_BPS,
+        metadata,
+        clock,
+        ctx,
+    )
 }
 
 /// Executes an approved upgrade proposal.

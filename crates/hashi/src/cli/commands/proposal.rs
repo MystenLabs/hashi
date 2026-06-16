@@ -244,7 +244,7 @@ pub async fn vote(
 
     // Infer the type tag from the on-chain proposal type
     let type_arg = get_proposal_type_arg(client.hashi_ids().package_id, &proposal.proposal_type)?;
-    let tx = client.build_vote_transaction(proposal_addr, type_arg);
+    let tx = client.build_vote_transaction(proposal_addr, type_arg)?;
 
     print_info(&format!(
         "Transaction: proposal::vote<{}> on {}",
@@ -350,7 +350,7 @@ pub async fn remove_vote(config: &CliConfig, proposal_id: &str, tx_opts: &TxOpti
 
     // Infer the type tag from the on-chain proposal type
     let type_arg = get_proposal_type_arg(client.hashi_ids().package_id, &proposal.proposal_type)?;
-    let tx = client.build_remove_vote_transaction(proposal_addr, type_arg);
+    let tx = client.build_remove_vote_transaction(proposal_addr, type_arg)?;
 
     print_info(&format!(
         "Transaction: proposal::remove_vote<{}> on {}",
@@ -468,7 +468,7 @@ pub async fn create_upgrade_proposal(
     let tx = client.build_create_proposal_transaction(CreateProposalParams::Upgrade {
         digest: digest_bytes,
         metadata,
-    });
+    })?;
 
     print_info("Transaction: upgrade::propose");
     let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
@@ -501,7 +501,7 @@ pub async fn create_update_config_proposal(
         key: key.to_string(),
         value,
         metadata,
-    });
+    })?;
 
     print_info("Transaction: update_config::propose");
     let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
@@ -561,7 +561,7 @@ pub async fn create_update_mpc_config_proposal(
         max_faulty_bps,
         weight_reduction_allowed_delta,
         metadata,
-    });
+    })?;
 
     let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
     print_created_proposal_id(response.as_ref());
@@ -609,7 +609,7 @@ pub async fn create_enable_version_proposal(
     let tx = client.build_create_proposal_transaction(CreateProposalParams::EnableVersion {
         version,
         metadata,
-    });
+    })?;
 
     print_info("Transaction: enable_version::propose");
     let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
@@ -636,7 +636,7 @@ pub async fn create_disable_version_proposal(
     let tx = client.build_create_proposal_transaction(CreateProposalParams::DisableVersion {
         version,
         metadata,
-    });
+    })?;
 
     print_info("Transaction: disable_version::propose");
     let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
@@ -660,8 +660,10 @@ pub async fn create_abort_reconfig_proposal(
     }
 
     let mut client = HashiClient::new(config).await?;
-    let tx = client
-        .build_create_proposal_transaction(CreateProposalParams::AbortReconfig { epoch, metadata });
+    let tx = client.build_create_proposal_transaction(CreateProposalParams::AbortReconfig {
+        epoch,
+        metadata,
+    })?;
 
     print_info("Transaction: abort_reconfig::propose");
     let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
@@ -699,7 +701,7 @@ pub async fn create_update_guardian_proposal(
         url: url.to_string(),
         public_key,
         metadata,
-    });
+    })?;
 
     print_info("Transaction: update_guardian::propose");
     let response = execute_or_simulate(&mut client, tx, tx_opts).await?;

@@ -212,6 +212,7 @@ public fun sign_certificate(
 /// Creates a deposit minimum update proposal and returns its ID.
 public fun create_deposit_minimum_proposal(
     hashi: &mut Hashi,
+    validator_address: address,
     minimum: u64,
     clock: &Clock,
     ctx: &mut TxContext,
@@ -221,46 +222,50 @@ public fun create_deposit_minimum_proposal(
         b"bitcoin_deposit_minimum".to_string(),
         config_value::new_u64(minimum),
     );
-    update_config::propose(hashi, entries, vec_map::empty(), clock, ctx)
+    update_config::propose(hashi, validator_address, entries, vec_map::empty(), clock, ctx)
 }
 
 /// Creates an enable version proposal and returns its ID
 public fun create_enable_version_proposal(
     hashi: &mut Hashi,
+    validator_address: address,
     version: u64,
     clock: &Clock,
     ctx: &mut TxContext,
 ): ID {
-    enable_version::propose(hashi, version, vec_map::empty(), clock, ctx)
+    enable_version::propose(hashi, validator_address, version, vec_map::empty(), clock, ctx)
 }
 
 /// Creates a disable version proposal and returns its ID
 public fun create_disable_version_proposal(
     hashi: &mut Hashi,
+    validator_address: address,
     version: u64,
     clock: &Clock,
     ctx: &mut TxContext,
 ): ID {
-    disable_version::propose(hashi, version, vec_map::empty(), clock, ctx)
+    disable_version::propose(hashi, validator_address, version, vec_map::empty(), clock, ctx)
 }
 
 /// Creates an emergency pause/unpause proposal and returns its ID
 public fun create_emergency_pause_proposal(
     hashi: &mut Hashi,
+    validator_address: address,
     pause: bool,
     clock: &Clock,
     ctx: &mut TxContext,
 ): ID {
     let metadata = vec_map::empty();
-    emergency_pause::propose(hashi, pause, metadata, clock, ctx)
+    emergency_pause::propose(hashi, validator_address, pause, metadata, clock, ctx)
 }
 
 /// Creates an abort reconfig proposal and returns its ID
 public fun create_abort_reconfig_proposal(
     hashi: &mut Hashi,
+    validator_address: address,
     epoch: u64,
     clock: &Clock,
     ctx: &mut TxContext,
 ): ID {
-    abort_reconfig::propose(hashi, epoch, vec_map::empty(), clock, ctx)
+    abort_reconfig::propose(hashi, validator_address, epoch, vec_map::empty(), clock, ctx)
 }

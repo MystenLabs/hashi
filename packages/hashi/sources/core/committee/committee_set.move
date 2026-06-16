@@ -14,6 +14,14 @@ use sui::{
 };
 
 //
+// Errors
+//
+
+#[error(code = 0)]
+const ENotValidator: vector<u8> =
+    b"Only the validator's own Sui key may rotate the operator address";
+
+//
 // CommitteeSet
 //
 
@@ -44,6 +52,25 @@ fun member(self: &CommitteeSet, validator_address: address): &MemberInfo {
 
 public(package) fun has_member(self: &CommitteeSet, validator_address: address): bool {
     self.members.contains_with_type<_, MemberInfo>(validator_address)
+}
+
+/// Returns true if `sender` is authorized to act on behalf of the member
+/// registered under `validator_address` — that is, `sender` is either the
+/// validator's own Sui address or the operator address it has delegated to.
+/// Returns false if no such member exists.
+///
+/// The validator's own key always retains authority, so it can serve as a
+/// backup if the operator key is lost.
+public(package) fun member_authorized(
+    self: &CommitteeSet,
+    validator_address: address,
+    sender: address,
+): bool {
+    if (!self.has_member(validator_address)) {
+        return false
+    };
+    let member = self.member(validator_address);
+    sender == member.validator_address || sender == member.operator_address
 }
 
 fun member_mut(self: &mut CommitteeSet, validator_address: address): &mut MemberInfo {
@@ -202,7 +229,12 @@ public(package) fun set_next_epoch_encryption_public_key(
     member.next_epoch_encryption_public_key = next_epoch_encryption_public_key;
 }
 
-/// Set the operator_address of the member.
+/// Set the operator_address of the member (delegate operations to an operator
+/// key, or rotate it).
+///
+/// Only the validator's own Sui key may do this, so a compromised operator key
+/// cannot lock the validator out by re-delegating to an attacker-controlled
+/// address; the validator key always remains in control of the delegation.
 public(package) fun set_operator_address(
     self: &mut CommitteeSet,
     validator_address: address,
@@ -210,7 +242,7 @@ public(package) fun set_operator_address(
     ctx: &TxContext,
 ) {
     let member = self.member_mut(validator_address);
-    member.assert_update_permitted(ctx);
+    assert!(ctx.sender() == member.validator_address, ENotValidator);
     member.operator_address = operator_address;
 }
 

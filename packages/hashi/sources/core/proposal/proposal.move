@@ -41,21 +41,27 @@ const EProposalAlreadyExecuted: vector<u8> = b"Proposal already executed";
 
 public(package) fun create<T: store>(
     hashi: &mut Hashi,
+    validator_address: address,
     data: T,
     quorum_threshold_bps: u64,
     metadata: VecMap<String, String>,
     clock: &Clock,
     ctx: &mut TxContext,
 ): ID {
-    // only voters can create proposal
-    assert!(hashi.committee_set().has_member(ctx.sender()), EUnauthorizedCaller);
+    // The caller must be the committee member `validator_address`, or the
+    // operator key it has delegated to. The vote is recorded under
+    // `validator_address` so quorum weight is computed correctly.
+    assert!(
+        hashi.committee_set().member_authorized(validator_address, ctx.sender()),
+        EUnauthorizedCaller,
+    );
 
-    let votes = vector[ctx.sender()];
+    let votes = vector[validator_address];
     let timestamp_ms = clock.timestamp_ms();
 
     let proposal = Proposal {
         id: object::new(ctx),
-        creator: ctx.sender(),
+        creator: validator_address,
         votes,
         quorum_threshold_bps,
         timestamp_ms,
@@ -98,32 +104,52 @@ public(package) fun execute<T: copy + drop + store>(
     data
 }
 
-public fun vote<T: store>(hashi: &mut Hashi, proposal_id: ID, clock: &Clock, ctx: &mut TxContext) {
-    assert!(hashi.committee_set().has_member(ctx.sender()), EUnauthorizedCaller);
+public fun vote<T: store>(
+    hashi: &mut Hashi,
+    validator_address: address,
+    proposal_id: ID,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    assert!(
+        hashi.committee_set().member_authorized(validator_address, ctx.sender()),
+        EUnauthorizedCaller,
+    );
 
     let proposal: &mut Proposal<T> = hashi.proposals_mut().active_mut().borrow_mut(proposal_id);
 
-    assert!(!proposal.votes.contains(&ctx.sender()), EVoteAlreadyCounted);
+    assert!(!proposal.votes.contains(&validator_address), EVoteAlreadyCounted);
     assert!(!proposal.is_expired(clock), EProposalExpired);
 
-    proposal.votes.push_back(ctx.sender());
+    proposal.votes.push_back(validator_address);
 
-    proposal_events::emit_vote_cast_event<T>(proposal_id, ctx.sender());
+    proposal_events::emit_vote_cast_event<T>(proposal_id, validator_address);
     if (proposal.quorum_reached(hashi)) {
         proposal_events::emit_quorum_reached_event<T>(proposal_id);
     }
 }
 
-public fun remove_vote<T: store>(hashi: &mut Hashi, proposal_id: ID, ctx: &mut TxContext) {
-    assert!(hashi.committee_set().has_member(ctx.sender()), EUnauthorizedCaller);
+public fun remove_vote<T: store>(
+    hashi: &mut Hashi,
+    validator_address: address,
+    proposal_id: ID,
+    ctx: &mut TxContext,
+) {
+    assert!(
+        hashi.committee_set().member_authorized(validator_address, ctx.sender()),
+        EUnauthorizedCaller,
+    );
 
     let proposal: &mut Proposal<T> = hashi.proposals_mut().active_mut().borrow_mut(proposal_id);
-    let index = proposal.votes.find_index!(|v| v == &ctx.sender()).destroy_or!(abort ENoVoteFound);
+    let index = proposal
+        .votes
+        .find_index!(|v| v == &validator_address)
+        .destroy_or!(abort ENoVoteFound);
 
     proposal.votes.remove(index);
     proposal_events::emit_vote_removed_event<T>(
         proposal.id.to_inner(),
-        ctx.sender(),
+        validator_address,
     );
 }
 
