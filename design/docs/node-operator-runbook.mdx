@@ -4,13 +4,31 @@ description: How Sui validators join the Hashi committee — prerequisites, conf
 keywords: [ operator, node, runbook, validator, committee, configuration, genesis, governance ]
 ---
 
-This runbook is for **Sui validators joining the Hashi committee** on testnet. It covers prerequisites, configuration, genesis, ongoing operations, and governance. Mainnet-specific differences are noted where applicable.
+This runbook is for **Sui validators joining the Hashi committee**. It covers prerequisites, configuration, genesis, ongoing operations, and governance.
 
 Hashi is a Sui-native **asset orchestration protocol** that secures and manages native BTC for use on Sui through threshold cryptography. Committee members run the `hashi` service alongside their Sui validator to participate in MPC threshold Schnorr signing for Bitcoin custody. The committee collectively manages a Bitcoin master key — no single validator ever holds the full key.
 
-**Hashi Testnet** pairs **Sui Testnet** with **Bitcoin Signet**.
+This is a **living document**. Hashi launches on testnet first; mainnet parameters are filled into the [Networks](#networks) table below as they are finalized. Wherever the runbook shows a network-specific value, use the column for your **target network** — the worked examples use Testnet.
 
 This document assumes familiarity with Sui validator operations, Linux system administration, and basic Bitcoin infrastructure.
+
+## Networks
+
+Hashi is network-specific: the Sui chain, the Bitcoin chain, and their endpoints all differ per deployment. The runbook's examples use **Testnet** (Sui Testnet + Bitcoin Signet); for any other network, substitute the values from this table. Adding a network later is just a matter of filling in a column here.
+
+| Parameter | Testnet (current) | Mainnet |
+|-----------|-------------------|---------|
+| Sui network | Testnet | Mainnet |
+| `sui-chain-id` | `69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD` | `4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S` |
+| Sui public fullnode | `https://fullnode.testnet.sui.io:443` | `https://fullnode.mainnet.sui.io:443` |
+| Bitcoin network | Signet | Mainnet |
+| `bitcoin-chain-id` (genesis block hash) | `00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6` | `000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f` |
+| `[bitcoin].network` | `signet` | `mainnet` |
+| Bitcoin RPC port (default) | 38332 | 8332 |
+| Bitcoin P2P port (default) | 38333 | 8333 |
+| `package-id` / `hashi-object-id` | _provided at launch_ | _TBD_ |
+
+> A self-hosted Sui fullnode is reached at its RPC port (default `http://127.0.0.1:9000`) on any network. Note that Hashi's built-in default for `bitcoin-rpc` is `http://localhost:8332` (the mainnet port), so on Signet you must set the port explicitly.
 
 ## 1. Prerequisites
 
@@ -33,13 +51,13 @@ In general the requirements for running a Hashi node are **low** compared with t
 
 A Hashi node depends on two external services that you provide:
 
-- **Bitcoin Signet node** — reachable on **both** P2P (port `38333`) and JSON-RPC (port `38332`), running as a **full archival node** with:
+- **Bitcoin node** for your target network — reachable on **both** P2P and JSON-RPC (default ports per the [Networks](#networks) table; Signet uses 38333 / 38332), running as a **full archival node** with:
   - `txindex=1` (Hashi calls `getrawtransaction` on arbitrary deposit txids)
   - `blockfilterindex=1` + `peerblockfilters=1` (BIP-157/158 compact block filter serving for the embedded light client)
   - `server=1` plus RPC auth
-- **Sui Testnet fullnode with gRPC enabled** — as a Sui validator you already operate a fullnode; ensure its gRPC v2 API is enabled.
+- **Sui fullnode with gRPC enabled** — as a Sui validator you already operate one; ensure its gRPC v2 API is enabled.
 
-See [1.4](#14-sui-rpc) and [1.5](#15-bitcoin-signet-node) for details.
+See [1.4](#14-sui-rpc) and [1.5](#15-bitcoin-node) for details.
 
 ### 1.3 Software Dependencies
 
@@ -71,9 +89,9 @@ Hashi connects to Sui over the **gRPC v2 API (gRPC over HTTP/2)** — **not** JS
 
 As a Sui validator you already run a fullnode — point Hashi at it and confirm gRPC is enabled in the fullnode config. The node verifies the endpoint's reported chain ID matches `sui-chain-id` at startup and refuses to start on mismatch.
 
-Testnet `sui-chain-id`: `69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD`
+Set `sui-chain-id` and `sui-rpc` to match your target network — see the [Networks](#networks) table.
 
-### 1.5 Bitcoin Signet Node
+### 1.5 Bitcoin Node
 
 Hashi talks to Bitcoin over **two independent channels**, both of which must be reachable:
 
@@ -86,7 +104,7 @@ The **P2P / BIP-157** channel (the embedded light client's compact-filter sync) 
 
 **RPC methods Hashi calls** (so you can scope RPC permissions): `getrawtransaction` (verbose), `sendrawtransaction`, `estimatesmartfee`, `gettxout`, `getblockchaininfo`, `getblockheader` (verbose). Hashi targets **Bitcoin Core v29**.
 
-**`bitcoin.conf` (Signet) — run as an archival, non-pruned node:**
+**`bitcoin.conf` — run as an archival, non-pruned node** (Signet shown; for another network use its ports and network flag from the [Networks](#networks) table):
 
 ```ini
 # Hashi Testnet — Bitcoin SIGNET serving node
@@ -249,9 +267,8 @@ endpoint-url = "https://your-hashi-node.example.com:443"
 
 # ── Sui (gRPC v2) ─────────────────────────────────────────────────────
 
-# Sui chain ID — genesis checkpoint digest (Base58)
-# Testnet: "69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD"
-# Mainnet: "4btiuiMPvEENsttpZC7CZ53DruC3MAgfznDbASZ7DR6S"
+# Sui chain ID — genesis checkpoint digest (Base58). Use your network's value
+# from the Networks table; the example below is Testnet.
 sui-chain-id = "69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD"
 
 # Sui gRPC endpoint. Public fullnode (TLS:443) or self-hosted (plaintext gRPC:9000)
@@ -263,12 +280,10 @@ sui-rpc = "https://fullnode.testnet.sui.io:443"
 package-id = "0x<package-id>"
 hashi-object-id = "0x<hashi-object-id>"
 
-# ── Bitcoin (Signet) ──────────────────────────────────────────────────
+# ── Bitcoin ───────────────────────────────────────────────────────────
 
-# Bitcoin chain ID — genesis block hash
-# Signet:   "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6"
-# Testnet4: "00000000da84f2bafbbc53dee25a72ae507ff4914b867c565be350b0da8bf043"
-# Mainnet:  "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+# Bitcoin chain ID — genesis block hash. Use your network's value from the
+# Networks table; the example below is Signet (Testnet).
 bitcoin-chain-id = "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6"
 
 # Bitcoin Core RPC endpoint (Hashi default is http://localhost:8332 — override for Signet)
@@ -393,8 +408,8 @@ The port is configurable via `listen-address`. It must be publicly reachable at 
 | Destination | Port | Protocol | Purpose |
 |-------------|------|----------|---------|
 | Sui fullnode | 443 (public) / 9000 (self-hosted) | gRPC over HTTP/2 | Chain state, checkpoint subscription, tx submission |
-| Bitcoin RPC | 38332 (Signet) | HTTP/JSON-RPC | Tx lookup, fee estimation, UTXO checks, **withdrawal broadcast** |
-| Bitcoin P2P | 38333 (Signet) | TCP | Kyoto BIP-157 light client (headers, filters, blocks) |
+| Bitcoin RPC | per network (38332 on Signet) | HTTP/JSON-RPC | Tx lookup, fee estimation, UTXO checks, **withdrawal broadcast** |
+| Bitcoin P2P | per network (38333 on Signet) | TCP | Kyoto BIP-157 light client (headers, filters, blocks) |
 | Peer validators | 443 | TLS 1.3 + gRPC | Outbound connections to other committee members |
 
 > - **Sui:** the connection is HTTP/2 gRPC. HTTP/1.1-only proxies (or anything that strips HTTP/2) will break the checkpoint subscription.
