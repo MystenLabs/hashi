@@ -38,12 +38,17 @@ In general the requirements for running a Hashi node are **low** compared with t
 
 | Resource | Recommendation |
 |----------|---------------|
-| **CPU** | 2 cores |
-| **Memory** | 1 GB |
+| **CPU** | 3 cores |
+| **Memory** | 2 GB |
 | **Storage** | 10 GB persistent |
 | **Network** | 1 Gbps NIC / link |
 
-> **Bandwidth note.** Provision a 1 Gbps link, but note that **sustained** throughput is far lower — the headroom is to absorb short **bursts up to ~1 Gbps** during MPC protocol rounds (DKG, key rotation, presigning, signing), not steady-state traffic, and not individual deposit/withdrawal transactions. Burst bandwidth is something we are actively working to reduce and is expected to come down significantly. Egress can be a meaningful cost for operators, so size for the burst ceiling while expecting low average usage.
+> **Sizing notes** (preliminary — derived from June test runs and to be re-validated after recent fixes):
+>
+> - **CPU**: 3 cores for headroom, mainly the parallel-signing burst on the leader.
+> - **Memory**: 2 GB is comfortable headroom; steady-state is well under this (a one-off ~3.7 GB spike was a since-identified bug, not normal load).
+> - **Network**: ~66 Mbps ingress / ~40 Mbps egress with the default MPC `(t, f)` parameters; a higher-throughput ("hybrid") configuration likely needs considerably more, so provision a **1 Gbps** link for headroom. Bandwidth tracks MPC protocol rounds (DKG, key rotation, presigning, signing), not individual deposit/withdrawal transactions; egress can be a meaningful cost, and we are actively working to reduce it.
+> - **Storage**: peaks around 1 GB; 10 GB is generous but fine.
 >
 > These figures reflect testnet observations and may be revised for mainnet.
 
