@@ -71,6 +71,9 @@ use crate::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 fn pb_to_kp_encrypted_share(pb: pb::KpEncryptedShare) -> GuardianResult<KPEncryptedShare> {
     Ok(KPEncryptedShare {
         id: pb_to_share_id(pb.id)?,
+        recipient_fingerprint: pb
+            .recipient_fingerprint
+            .ok_or_else(|| missing("recipient_fingerprint"))?,
         armored_ciphertext: pb
             .armored_ciphertext
             .ok_or_else(|| missing("armored_ciphertext"))?,
@@ -794,6 +797,7 @@ pub fn kp_encrypted_share_to_pb(s: KPEncryptedShare) -> pb::KpEncryptedShare {
     pb::KpEncryptedShare {
         id: Some(share_id_to_pb(s.id)),
         armored_ciphertext: Some(s.armored_ciphertext),
+        recipient_fingerprint: Some(s.recipient_fingerprint),
     }
 }
 

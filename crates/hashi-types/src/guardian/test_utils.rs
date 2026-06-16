@@ -121,6 +121,7 @@ fn dummy_encrypted_shares() -> Vec<KPEncryptedShare> {
     (0..TEST_N)
         .map(|i| KPEncryptedShare {
             id: NonZeroU16::new((i + 1) as u16).unwrap(),
+            recipient_fingerprint: format!("DUMMY FINGERPRINT {i}"),
             armored_ciphertext: "-----BEGIN PGP MESSAGE-----\n\n-----END PGP MESSAGE-----".into(),
         })
         .collect()

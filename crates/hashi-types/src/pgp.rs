@@ -52,6 +52,12 @@ impl PgpPublicCert {
     pub fn armored(&self) -> &str {
         &self.armored
     }
+
+    /// The cert's primary fingerprint, as uppercase hex with spaces (the same
+    /// form `gpg --fingerprint` prints and `Cert::fingerprint`'s Display).
+    pub fn fingerprint(&self) -> String {
+        self.cert.fingerprint().to_string()
+    }
 }
 
 impl fmt::Display for PgpPublicCert {
