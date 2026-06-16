@@ -9,7 +9,9 @@ use anyhow::Context;
 use ed25519_dalek::pkcs8::EncodePrivateKey;
 use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
 use prometheus::Encoder;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 /// SNI/DNS name in the client cert; sui-proxy's TLS verifier checks this.
 /// Mirrors `sui_tls::SUI_VALIDATOR_SERVER_NAME` — inlined to avoid a sui-tls dep.
