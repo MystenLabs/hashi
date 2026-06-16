@@ -71,7 +71,7 @@ pub struct CeremonyRunConfig {
     pub num_shares: usize,
     /// Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
     pub threshold: usize,
-    /// S3 config for the guardian's log bucket. Passed to [`OperatorInit`] so the
+    /// S3 config for the guardian's log bucket. Passed to `operator_init` so the
     /// guardian can write its `init/` + `ceremony/` logs. Must have object-lock
     /// enabled.
     pub guardian_s3: S3Config,

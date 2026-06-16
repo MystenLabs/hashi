@@ -165,7 +165,7 @@ impl GuardianS3Client {
 
     /// Write a JSON value at `key` WITHOUT object-lock metadata.
     ///
-    /// Counterpart to [`Self::write_at_key`] for buckets that intentionally
+    /// Variant of the object-locking write path for buckets that intentionally
     /// have object lock disabled (e.g. the ceremony-artifacts bucket, so
     /// encrypted shares can be deleted if ever needed). Integrity comes from the
     /// payload's own application-layer signature, not S3 immutability.
