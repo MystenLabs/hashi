@@ -466,6 +466,43 @@ impl GuardianS3Client {
         })
     }
 
+    /// Plain point read + deserialize, with no object-lock assertion and no
+    /// version/deletion check. For objects whose integrity comes from their own
+    /// signature rather than S3 immutability (e.g. `shares/`, which carry only a
+    /// short lock that is expected to expire). A tampered object fails the
+    /// caller's signature check; a purged one surfaces as a get error.
+    pub async fn get_object_no_lock<T: DeserializeOwned>(&self, key: &str) -> GuardianResult<T> {
+        let response = self
+            .client
+            .get_object()
+            .bucket(self.config.bucket_name())
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| {
+                S3Error(format!(
+                    "Failed to get object {}: {}",
+                    key,
+                    DisplayErrorContext(&e)
+                ))
+            })?;
+
+        let bytes = response.body.collect().await.map_err(|e| {
+            S3Error(format!(
+                "Failed to read object body for key {}: {}",
+                key,
+                DisplayErrorContext(&e)
+            ))
+        })?;
+
+        serde_json::from_slice::<T>(&bytes.into_bytes()).map_err(|e| {
+            S3Error(format!(
+                "Failed to deserialize object {} into target type: {}",
+                key, e
+            ))
+        })
+    }
+
     /// Caller must ensure that the object has unexpired compliance-mode object lock. (TODO: Investigate what this means)
     pub async fn get_log_record(&self, key: &str) -> GuardianResult<LogRecord> {
         let keys = self.ensure_no_duplicates_or_deletions(key).await?;

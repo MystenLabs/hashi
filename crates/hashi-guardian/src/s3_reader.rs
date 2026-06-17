@@ -153,13 +153,18 @@ impl GuardianReader {
     /// Read + verify the encrypted shares at `shares/{seq}-{session}.json`. Point
     /// read by exact key (recovery anchors on the ceremony instance's seq), so a
     /// purged older `shares/` object never blocks reading the current one.
+    ///
+    /// Uses the lock-agnostic read: shares carry only a short lock that is
+    /// expected to expire, and their integrity is the enclave signature checked
+    /// below — not S3 immutability — so the immutable-log lock assertion in
+    /// `get_log_record` doesn't apply.
     pub async fn read_shares(
         &mut self,
         session_id: &str,
         sharing_seq: u64,
     ) -> anyhow::Result<Vec<KPEncryptedShare>> {
         let key = format!("{}/{:020}-{}.json", S3_DIR_SHARES, sharing_seq, session_id);
-        let record = self.s3.get_log_record(&key).await?;
+        let record: LogRecord = self.s3.get_object_no_lock(&key).await?;
         let record = self.pubkey_cache.verify_record(&self.s3, record).await?;
         let LogMessage::Shares(msg) = record.message else {
             anyhow::bail!("expected a shares log at {key}");
