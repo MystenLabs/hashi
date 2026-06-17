@@ -524,6 +524,20 @@ impl Enclave {
         self.write_log(LogMessage::Ceremony(Box::new(state))).await
     }
 
+    /// Persist the ceremony's encrypted shares to `shares/` for recovery. Keyed
+    /// by `sharing_seq` so it pairs with the matching `ceremony/` instance.
+    pub async fn log_shares(
+        &self,
+        sharing_seq: u64,
+        encrypted_shares: Vec<KPEncryptedShare>,
+    ) -> GuardianResult<()> {
+        self.write_log(LogMessage::Shares(Box::new(SharesLogMessage {
+            sharing_seq,
+            encrypted_shares,
+        })))
+        .await
+    }
+
     // ========================================================================
     // Scratchpad (Initialization-only data)
     // ========================================================================

@@ -453,6 +453,17 @@ pub fn split_and_encrypt_for_kps<R: CryptoRng + RngCore>(
     (encrypted_shares, commitments)
 }
 
+/// Recipient PGP fingerprints ordered by share id — the roster committed into
+/// the `ceremony/` log so a KP can check the full recipient set.
+pub fn recipient_roster(shares: &[KPEncryptedShare]) -> Vec<String> {
+    let mut shares: Vec<&KPEncryptedShare> = shares.iter().collect();
+    shares.sort_by_key(|s| s.id);
+    shares
+        .iter()
+        .map(|s| s.recipient_fingerprint.clone())
+        .collect()
+}
+
 /// Encrypt a share for delivery to a key provisioner using OpenPGP ASCII armor.
 pub fn encrypt_share_for_provisioner(share: &Share, cert: &PgpPublicCert) -> KPEncryptedShare {
     KPEncryptedShare {

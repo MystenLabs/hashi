@@ -22,12 +22,17 @@ use std::time::Duration;
 /// TODO: Uniform 7 days is a coarse placeholder. Revisit per-log-type
 /// against the SLO we actually want to defend — heartbeats could be shorter,
 /// ceremony/withdraws likely want years.
+const ONE_DAY: Duration = Duration::from_secs(24 * 60 * 60);
 const ONE_WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub const S3_OBJECT_LOCK_DURATION_INIT: Duration = ONE_WEEK;
 pub const S3_OBJECT_LOCK_DURATION_WITHDRAW: Duration = ONE_WEEK;
 pub const S3_OBJECT_LOCK_DURATION_HEARTBEAT: Duration = ONE_WEEK;
 pub const S3_OBJECT_LOCK_DURATION_CEREMONY: Duration = ONE_WEEK;
 pub const S3_OBJECT_LOCK_DURATION_COMMITTEE_UPDATE: Duration = ONE_WEEK;
+/// Shares carry their own enclave signature, so the lock isn't for integrity —
+/// it only guarantees a window in which the operator can't purge them before KPs
+/// fetch. Short on purpose; they stay readable after expiry until deleted.
+pub const S3_OBJECT_LOCK_DURATION_SHARES: Duration = ONE_DAY;
 
 /// S3 sub-prefixes used for guardian log streams.
 /// See `crates/hashi-guardian/README.md` for canonical key layout.
@@ -35,4 +40,5 @@ pub const S3_DIR_INIT: &str = "init";
 pub const S3_DIR_WITHDRAW: &str = "withdraw";
 pub const S3_DIR_HEARTBEAT: &str = "heartbeat";
 pub const S3_DIR_CEREMONY: &str = "ceremony";
+pub const S3_DIR_SHARES: &str = "shares";
 pub const S3_DIR_COMMITTEE_UPDATE: &str = "committee-update";

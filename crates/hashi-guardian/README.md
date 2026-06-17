@@ -11,6 +11,7 @@ Canonical key layout:
 - `withdraw/{yyyy}/{mm}/{dd}/{hh}/success-{seq:020}-{session_id}-wid{wid}.json`
 - `withdraw/{yyyy}/{mm}/{dd}/{hh}/failure-{session_id}-wid{wid}-{rand8}.json`
 - `ceremony/{sharing_seq:020}-{session_id}.json`
+- `shares/{sharing_seq:020}-{session_id}.json`
 - `committee-update/{new_epoch:020}-{session_id}.json`
 - `committee-update/failure-{proposed_epoch:020}-{session_id}-{rand8}.json`
 
@@ -29,7 +30,8 @@ Where:
 - `init` logs are per-session and deterministic by semantic message kind.
 - `heartbeat` logs are hour-partitioned and strictly ordered per session.
 - `withdraw` logs are hour-partitioned. Successes are seq-sorted within a bucket so the KP rotating in the next enclave can recover limiter state by reading the lexicographically last success key.
-- `ceremony` logs are flat (not date-partitioned). Each entry is a `CeremonyLogMessage` — `NewKey { instance }` written by `setup_new_key` (genesis, `sharing_seq=0`) or `Rotate { old_instance, new_instance }` written by `rotate_kps` (each rotation, `sharing_seq=prev+1`). A rotation records the `old_instance` it consumed so the chain is auditable from the log alone (each entry's `old_instance` should match the prior entry's instance). KPs read the lexicographically last entry to learn the current authoritative instance (commitments + N + T). The log does not carry the encrypted shares; KPs fetch their ciphertexts from the `setup_new_key` / `rotate_kps` response or from `get_guardian_info`, decrypt them, and verify the result against the instance's per-share commitments.
+- `ceremony` logs are flat (not date-partitioned). Each entry is a `CeremonyLogMessage` — `NewKey { instance }` written by `setup_new_key` (genesis, `sharing_seq=0`) or `Rotate { old_instance, new_instance }` written by `rotate_kps` (each rotation, `sharing_seq=prev+1`). A rotation records the `old_instance` it consumed so the chain is auditable from the log alone (each entry's `old_instance` should match the prior entry's instance). KPs read the lexicographically last entry to learn the current authoritative instance (commitments + N + T). The log does not carry the encrypted shares (those live in `shares/`); it does commit the recipient roster (per-share fingerprints) so a KP can check the full recipient set against the immutable record.
+- `shares` logs are flat and carry the ceremony's encrypted shares (the ciphertexts `ceremony/` omits), keyed by the same `sharing_seq` so each pairs with its `ceremony/` instance. Written by `setup_new_key` (`sharing_seq=0`) and each `rotate_kps`. Persisted purely for recovery liveness — a KP who lost their share point-reads `shares/{sharing_seq:020}-{session_id}.json`, verifies its enclave signature, and checks the decrypted share against the instance's commitments. Integrity is the signature, not S3 immutability, so these get only a short object lock (a fetch-window guarantee) and stay readable until purged.
 - `committee-update` logs are flat (not date-partitioned). Successes are epoch-sorted; failures lead with `failure-` so all successes sort first — the lex-last non-`failure-` key is the latest successfully-applied epoch.
 
 ## Why this layout
