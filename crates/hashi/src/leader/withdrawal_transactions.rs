@@ -180,6 +180,16 @@ impl LeaderService {
                 );
                 return Ok(());
             }
+            // TODO(guardian-seq-durability): the guardian advances next_seq at
+            // finalize-request, but the mirror only advances on the on-chain
+            // WithdrawalSignedEvent, so over the multi-checkpoint signing window the
+            // mirror can lag by several seqs. A leader with a stale/empty
+            // `guardian_last_finalized` (e.g. just rotated in) can slip past the
+            // should_defer check below and present a stale seq -> guardian rejects ->
+            // retry. Latency, not safety (guardian is source of truth; the reconcile
+            // loop self-heals). Likely fine as-is; if PTN shows it matters (watch
+            // guardian_finalize_deferred_total), one idea worth exploring would be
+            // seeding the defer-gate from authoritative state on election.
             // Pace guardian finalize on the local limiter to avoid reusing a consumed seq.
             if inner.guardian_client().is_some()
                 && inner.guardian_should_defer_finalize(next_seq, txn.id)
