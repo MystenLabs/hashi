@@ -974,7 +974,7 @@ impl Metrics {
             .withdrawal_queue
             .withdrawal_txns()
             .values()
-            .partition(|w| w.fully_signed);
+            .partition(|w| w.is_fully_signed());
         self.withdrawal_queue_size
             .with_label_values(&["requested"])
             .set(requested.len() as i64);

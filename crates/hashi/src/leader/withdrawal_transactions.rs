@@ -58,7 +58,7 @@ impl LeaderService {
         }
 
         let mut withdrawal_txns = self.inner.onchain_state().withdrawal_txns();
-        withdrawal_txns.retain(|p| !p.fully_signed);
+        withdrawal_txns.retain(|p| !p.is_fully_signed());
         withdrawal_txns.sort_by_key(|p| p.timestamp_ms);
 
         let pending_ids: Vec<Address> = withdrawal_txns.iter().map(|p| p.id).collect();
@@ -721,7 +721,7 @@ impl LeaderService {
     pub(super) fn process_signed_withdrawal_txns(&mut self) {
         debug!("Entering process_signed_withdrawal_txns");
         let mut withdrawal_txns = self.inner.onchain_state().withdrawal_txns();
-        withdrawal_txns.retain(|p| p.fully_signed);
+        withdrawal_txns.retain(|p| p.is_fully_signed());
         withdrawal_txns.sort_by_key(|p| p.timestamp_ms);
 
         let pending_ids: Vec<Address> = withdrawal_txns.iter().map(|p| p.id).collect();
@@ -789,7 +789,7 @@ impl LeaderService {
     /// Drains the BTC-block-triggered withdrawal check queue into its separate bounded task pool.
     fn process_pending_btc_block_withdrawal_checks(&mut self) {
         let mut withdrawal_txns = self.inner.onchain_state().withdrawal_txns();
-        withdrawal_txns.retain(|p| p.fully_signed);
+        withdrawal_txns.retain(|p| p.is_fully_signed());
         withdrawal_txns.sort_by_key(|p| p.timestamp_ms);
 
         let pending_ids: Vec<Address> = withdrawal_txns.iter().map(|p| p.id).collect();

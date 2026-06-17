@@ -321,8 +321,6 @@ pub enum InputSig {
 #[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct SigningBatch {
     pub signatures: Vec<InputSig>,
-    /// Number of `Signed` slots (cardinality, not an in-order prefix).
-    pub signed_count: u64,
     /// Epoch the `Pending` presig indices belong to.
     pub epoch: u64,
 }
@@ -333,11 +331,16 @@ impl SigningBatch {
     }
 
     pub fn is_complete(&self) -> bool {
-        self.signed_count as usize == self.signatures.len()
+        self.signatures
+            .iter()
+            .all(|s| matches!(s, InputSig::Signed(_)))
     }
 
     pub fn pending_count(&self) -> usize {
-        self.signatures.len() - self.signed_count as usize
+        self.signatures
+            .iter()
+            .filter(|s| matches!(s, InputSig::Pending(_)))
+            .count()
     }
 
     /// Indices of inputs still awaiting an MPC signature (the resume set).
@@ -389,8 +392,6 @@ pub struct WithdrawalTransaction {
     /// Per-input guardian enclave signatures, written once at finalize.
     /// Together with the MPC signatures, forms the 2-of-2 taproot witness.
     pub guardian_signatures: Option<Vec<Vec<u8>>>,
-    /// Set true exactly once at finalize; the broadcast gate.
-    pub fully_signed: bool,
 }
 
 impl WithdrawalTransaction {
@@ -404,13 +405,13 @@ impl WithdrawalTransaction {
 
     /// Whether the 2-of-2 witness is fully assembled and the txn is broadcast-ready.
     pub fn is_fully_signed(&self) -> bool {
-        self.fully_signed
+        self.signing.is_complete() && self.guardian_signatures.is_some()
     }
 
     /// Dense per-input MPC signatures, available only once fully signed (the
     /// state the broadcast/rebuild path operates on).
     pub fn mpc_signatures(&self) -> Option<Vec<Vec<u8>>> {
-        if self.fully_signed {
+        if self.is_fully_signed() {
             self.signing.dense_signatures()
         } else {
             None

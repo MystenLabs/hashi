@@ -489,7 +489,7 @@ impl Hashi {
             })?;
 
         anyhow::ensure!(
-            !txn.fully_signed,
+            !txn.is_fully_signed(),
             "WithdrawalTransaction {} is already finalized",
             message.withdrawal_id
         );
@@ -592,7 +592,7 @@ impl Hashi {
             })?;
 
         anyhow::ensure!(
-            !txn.fully_signed,
+            !txn.is_fully_signed(),
             "WithdrawalTransaction {} is already finalized",
             message.withdrawal_id
         );
@@ -1637,11 +1637,9 @@ mod tests {
                 signatures: (0..num_inputs)
                     .map(hashi_types::move_types::InputSig::Pending)
                     .collect(),
-                signed_count: 0,
                 epoch: 0,
             },
             guardian_signatures: None,
-            fully_signed: false,
         }
     }
 

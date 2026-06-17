@@ -301,7 +301,7 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
         let txid = bitcoin::Txid::from_byte_array(txid_bytes);
         // TODO(tuning): surface incremental progress (signed_count/num_inputs)
         // as a distinct "Signing (X/N)" state for the multi-checkpoint window.
-        let is_signed = pw.fully_signed;
+        let is_signed = pw.is_fully_signed();
         let step = if is_signed { 4 } else { 3 };
         let status_label = if is_signed {
             "Signed".green()
@@ -366,7 +366,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
 
     let requests = client.fetch_withdrawal_requests();
     let pending = client.fetch_withdrawal_txns();
-    let signed_count = pending.iter().filter(|pw| pw.fully_signed).count();
+    let signed_count = pending.iter().filter(|pw| pw.is_fully_signed()).count();
     let committed_count = pending.len() - signed_count;
 
     match output_format {
@@ -391,7 +391,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                     let txid = bitcoin::Txid::from_byte_array(txid_bytes);
                     serde_json::json!({
                         "txid": txid.to_string(),
-                        "status": if pw.fully_signed { "signed" } else { "committed" },
+                        "status": if pw.is_fully_signed() { "signed" } else { "committed" },
                         "request_count": pw.request_ids.len(),
                     })
                 })
@@ -450,7 +450,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                     for pw in &pending {
                         let txid_bytes: [u8; 32] = pw.id.into();
                         let txid = bitcoin::Txid::from_byte_array(txid_bytes);
-                        let status = if pw.fully_signed {
+                        let status = if pw.is_fully_signed() {
                             "Signed"
                         } else {
                             "Committed"

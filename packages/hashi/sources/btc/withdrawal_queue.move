@@ -107,9 +107,6 @@ public struct WithdrawalTransaction has key, store {
     /// the MPC signatures; together they form the 2-of-2 taproot witness.
     /// Written once at `finalize_withdrawal` (the guardian signs in one shot).
     guardian_signatures: Option<vector<vector<u8>>>,
-    /// Set true exactly once at `finalize_withdrawal`, when every input has both
-    /// an MPC and a guardian signature. This is the single broadcast gate.
-    fully_signed: bool,
 }
 
 public struct OutputUtxo has copy, drop, store {
@@ -367,7 +364,6 @@ public(package) fun new_withdrawal_txn(
         randomness,
         signing,
         guardian_signatures: option::none(),
-        fully_signed: false,
     }
 }
 
@@ -409,7 +405,7 @@ public(package) fun record_input_signatures(
     signatures: vector<vector<u8>>,
 ) {
     let txn: &mut WithdrawalTransaction = self.withdrawal_txns.borrow_mut(withdrawal_id);
-    assert!(!txn.fully_signed, EWithdrawalAlreadyFinalized);
+    assert!(!txn.txn_fully_signed(), EWithdrawalAlreadyFinalized);
     txn.signing.record(indices, signatures);
     sui::event::emit(WithdrawalInputsSignedEvent {
         withdrawal_txn_id: withdrawal_id,
@@ -427,10 +423,9 @@ public(package) fun finalize_withdrawal_txn(
     guardian_signatures: vector<vector<u8>>,
 ) {
     let txn: &mut WithdrawalTransaction = self.withdrawal_txns.borrow_mut(withdrawal_id);
-    assert!(!txn.fully_signed, EWithdrawalAlreadyFinalized);
+    assert!(!txn.txn_fully_signed(), EWithdrawalAlreadyFinalized);
     assert!(txn.signing.is_complete(), EWithdrawalNotFullySigned);
     txn.guardian_signatures = option::some(guardian_signatures);
-    txn.fully_signed = true;
     emit_withdrawal_signed(txn);
 }
 
@@ -484,12 +479,19 @@ public(package) fun withdrawal_txn_mpc_signatures(
     txn.signing.to_signatures()
 }
 
+/// Derived broadcast gate: every input has an MPC signature and the one-shot
+/// guardian signatures are attached. Not stored — computed from `signing` and
+/// `guardian_signatures` so it can't fall out of sync.
+fun txn_fully_signed(txn: &WithdrawalTransaction): bool {
+    txn.signing.is_complete() && txn.guardian_signatures.is_some()
+}
+
 public(package) fun withdrawal_txn_is_fully_signed(
     self: &WithdrawalRequestQueue,
     withdrawal_id: address,
 ): bool {
     let txn: &WithdrawalTransaction = self.withdrawal_txns.borrow(withdrawal_id);
-    txn.fully_signed
+    txn.txn_fully_signed()
 }
 
 public(package) fun withdrawal_txn_num_inputs(
@@ -733,6 +735,5 @@ public(package) fun new_withdrawal_txn_for_testing(
         randomness: vector[0, 0, 0, 0],
         signing: mpc_signing::new(num_inputs, 0, 0),
         guardian_signatures: option::none(),
-        fully_signed: false,
     }
 }

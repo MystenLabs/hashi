@@ -466,18 +466,17 @@ async fn handle_events(
                         .withdrawal_txns
                         .get_mut(&event.withdrawal_txn_id)
                     {
-                        Some(txn) if !txn.fully_signed => {
+                        Some(txn) if !txn.is_fully_signed() => {
                             // Reflect the finalized 2-of-2 witness in-memory: mark
-                            // every input Signed, attach guardian sigs, flip the gate.
+                            // every input Signed and attach guardian sigs — together
+                            // those make `is_fully_signed()` derive true.
                             txn.signing.signatures = event
                                 .signatures
                                 .iter()
                                 .cloned()
                                 .map(InputSig::Signed)
                                 .collect();
-                            txn.signing.signed_count = event.signatures.len() as u64;
                             txn.guardian_signatures = Some(event.guardian_signatures.clone());
-                            txn.fully_signed = true;
                             let amount_sats = withdrawal_limiter_consumption_amount(txn);
                             let timestamp_secs = checkpoint_timestamp_ms / 1000;
                             let pick_to_sign =

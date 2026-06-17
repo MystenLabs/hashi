@@ -257,15 +257,15 @@ entry fun commit_withdrawal_tx(
 /// whose signing batch is from a previous epoch. Only the pending tail is
 /// re-presigned; already-collected signatures are final and epoch-independent.
 ///
-/// Paused-gated like commit/finalize, but intentionally NOT gated on
-/// `assert_not_reconfiguring`: this is the post-reconfiguration recovery step.
-/// It carries no committee cert because it only reassigns nonce material and is
-/// bounded to once-per-withdrawal-per-epoch by the `mpc_signing` stale-epoch
-/// guard. By design it carries no committee cert: it authorizes no signatures,
-/// only re-points pending presig indices.
+/// Gated like commit/finalize (version-enabled, unpaused, not-reconfiguring): an
+/// in-progress reconfiguration settles first, then this runs afterward to recover
+/// the now-stale batch. Carries no committee cert: it authorizes no signatures,
+/// only re-points pending presig indices, bounded to once-per-withdrawal-per-epoch
+/// by the `mpc_signing` stale-epoch guard.
 entry fun reallocate_presigs(hashi: &mut Hashi, withdrawal_id: address) {
     hashi.config().assert_version_enabled();
     hashi.assert_unpaused();
+    hashi.assert_not_reconfiguring();
     let current_epoch = hashi.committee_set().epoch();
     let pending = hashi.bitcoin().withdrawal_queue().withdrawal_txn_pending_count(withdrawal_id);
     let new_base = hashi.allocate_presigs(pending);

@@ -59,14 +59,17 @@ public enum InputSig has drop, store {
 public struct SigningBatch has store {
     /// One slot per input; same length/order as the withdrawal's inputs.
     signatures: vector<InputSig>,
-    /// Number of `Signed` slots — a cardinality, NOT an in-order prefix.
-    signed_count: u64,
     /// Epoch the `Pending` presignature indices belong to.
     epoch: u64,
 }
 
 // ======== Constructors ========
 
+// TODO(presig-allocation-centralization): `new` and `reallocate` take a
+// pre-allocated `presig_base`/`new_base` from the caller (hashi::allocate_presigs),
+// so allocation and reassignment live across call sites. A follow-up could thread
+// an &mut to the consumed-presig counter through here to centralize it in one
+// place. Left as-is for now (see PR #667 review).
 /// Create a batch for `num_inputs`, contiguously assigning presignature
 /// indices so that input `i` uses `presig_base + i`.
 public(package) fun new(num_inputs: u64, presig_base: u64, epoch: u64): SigningBatch {
@@ -77,7 +80,7 @@ public(package) fun new(num_inputs: u64, presig_base: u64, epoch: u64): SigningB
         signatures.push_back(InputSig::Pending(presig_base + i));
         i = i + 1;
     };
-    SigningBatch { signatures, signed_count: 0, epoch }
+    SigningBatch { signatures, epoch }
 }
 
 // ======== Mutation ========
@@ -85,7 +88,7 @@ public(package) fun new(num_inputs: u64, presig_base: u64, epoch: u64): SigningB
 /// Fill the given slots with completed signatures. First-writer-wins applies
 /// both within a call and across calls: a slot that is already `Signed` is left
 /// untouched, so retries, duplicate indices, and briefly overlapping leaders
-/// are all idempotent. `signed_count` is bumped only on a fresh fill.
+/// are all idempotent.
 ///
 /// Intentionally epoch-agnostic: a completed aggregated signature validates
 /// against the stable committee group key forever, so it may be recorded under
@@ -108,7 +111,6 @@ public(package) fun record(
         assert!(i < len, EIndexOutOfRange);
         if (self.signatures.borrow(i).is_pending()) {
             *self.signatures.borrow_mut(i) = InputSig::Signed(*sigs.borrow(k));
-            self.signed_count = self.signed_count + 1;
         };
         k = k + 1;
     };
@@ -149,16 +151,29 @@ public(package) fun reallocate(
 /// Number of still-`Pending` slots (the count that must be re-presigned on a
 /// stale-epoch `reallocate`).
 public(package) fun pending_count(self: &SigningBatch): u64 {
-    self.signatures.length() - self.signed_count
+    self.signatures.length() - self.signed_count()
 }
 
 /// True once every input has a signature.
 public(package) fun is_complete(self: &SigningBatch): bool {
-    self.signed_count == self.signatures.length()
+    self.signed_count() == self.signatures.length()
 }
 
+/// Number of `Signed` slots. Derived by counting (not stored) so it can never
+/// fall out of sync with `signatures`: it is load-bearing for `reallocate`'s
+/// presig allocation, where an over-count would under-allocate the pending block
+/// and let the monotonic allocator hand a live index to another batch (reuse).
 public(package) fun signed_count(self: &SigningBatch): u64 {
-    self.signed_count
+    let len = self.signatures.length();
+    let mut count = 0;
+    let mut i = 0;
+    while (i < len) {
+        if (!self.signatures.borrow(i).is_pending()) {
+            count = count + 1;
+        };
+        i = i + 1;
+    };
+    count
 }
 
 public(package) fun num_inputs(self: &SigningBatch): u64 {
@@ -214,5 +229,5 @@ fun is_pending(self: &InputSig): bool {
 
 #[test_only]
 public(package) fun destroy_for_testing(self: SigningBatch) {
-    let SigningBatch { signatures: _, signed_count: _, epoch: _ } = self;
+    let SigningBatch { signatures: _, epoch: _ } = self;
 }
