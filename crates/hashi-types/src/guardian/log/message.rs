@@ -17,6 +17,7 @@ use crate::guardian::GuardianError;
 use crate::guardian::GuardianInfo;
 use crate::guardian::GuardianPubKey;
 use crate::guardian::KPEncryptedShare;
+use crate::guardian::KPFingerprint;
 use crate::guardian::LimiterState;
 use crate::guardian::SecretSharingInstance;
 use crate::guardian::ShareID;
@@ -51,6 +52,14 @@ pub struct SharesLogMessage {
     pub encrypted_shares: Vec<KPEncryptedShare>,
 }
 
+impl SharesLogMessage {
+    /// `shares/{sharing_seq:020}-{session_id}.json` — the object key a reader
+    /// fetches for `(session_id, sharing_seq)`.
+    pub fn object_key(session_id: &str, sharing_seq: u64) -> String {
+        super::seq_scoped_object_key(S3_DIR_SHARES, sharing_seq, session_id)
+    }
+}
+
 /// The authoritative share state, written to `ceremony/` after each ceremony.
 /// Carries the instance (commitments + n/t/seq) plus the recipient roster; the
 /// ciphertexts live in `shares/`. A rotation records the `old_instance` it
@@ -63,14 +72,14 @@ pub enum CeremonyLogMessage {
         /// Recipient fingerprints ordered by share id; lets a KP check the full
         /// roster against the agreed set from the immutable log, not just the
         /// operator-served shares.
-        roster: Vec<String>,
+        roster: Vec<KPFingerprint>,
     },
     /// Key rotation (`rotate_kps`) from `old_instance` to `new_instance`.
     Rotate {
         old_instance: SecretSharingInstance,
         new_instance: SecretSharingInstance,
         /// Recipient fingerprints for `new_instance`; see [`Self::NewKey`].
-        roster: Vec<String>,
+        roster: Vec<KPFingerprint>,
     },
 }
 
@@ -81,6 +90,12 @@ impl CeremonyLogMessage {
             CeremonyLogMessage::NewKey { instance, .. } => instance.sharing_seq(),
             CeremonyLogMessage::Rotate { new_instance, .. } => new_instance.sharing_seq(),
         }
+    }
+
+    /// `ceremony/{sharing_seq:020}-{session_id}.json` — the object key a reader
+    /// fetches for `(session_id, sharing_seq)`.
+    pub fn object_key(session_id: &str, sharing_seq: u64) -> String {
+        super::seq_scoped_object_key(S3_DIR_CEREMONY, sharing_seq, session_id)
     }
 }
 

@@ -41,6 +41,10 @@ pub struct PgpPublicCert {
     cert: openpgp::Cert,
 }
 
+/// A PGP certificate's primary fingerprint (uppercase hex). A cert's stable
+/// identity; in the guardian/roster context it's aliased as `KPFingerprint`.
+pub type Fingerprint = String;
+
 impl PgpPublicCert {
     pub fn new(armored: String) -> Result<Self> {
         let cert =
@@ -55,7 +59,7 @@ impl PgpPublicCert {
 
     /// The cert's primary fingerprint, as uppercase hex with spaces (the same
     /// form `gpg --fingerprint` prints and `Cert::fingerprint`'s Display).
-    pub fn fingerprint(&self) -> String {
+    pub fn fingerprint(&self) -> Fingerprint {
         self.cert.fingerprint().to_string()
     }
 }

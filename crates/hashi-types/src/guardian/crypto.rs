@@ -97,13 +97,18 @@ pub struct GuardianEncryptedShare {
     pub ciphertext: Ciphertext,
 }
 
+/// A key-provisioner's PGP fingerprint ([`crate::pgp::Fingerprint`] in the
+/// guardian/roster context). Labels an encrypted share and is the per-share
+/// identity in a ceremony roster.
+pub type KPFingerprint = crate::pgp::Fingerprint;
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct KPEncryptedShare {
     pub id: ShareID,
     /// Fingerprint of the recipient PGP cert this share is encrypted to. An
     /// explicit, signed label so a KP can find their share by their own
     /// fingerprint instead of by positional index.
-    pub recipient_fingerprint: String,
+    pub recipient_fingerprint: KPFingerprint,
     pub armored_ciphertext: String,
 }
 
@@ -455,7 +460,7 @@ pub fn split_and_encrypt_for_kps<R: CryptoRng + RngCore>(
 
 /// Recipient PGP fingerprints ordered by share id — the roster committed into
 /// the `ceremony/` log so a KP can check the full recipient set.
-pub fn recipient_roster(shares: &[KPEncryptedShare]) -> Vec<String> {
+pub fn recipient_roster(shares: &[KPEncryptedShare]) -> Vec<KPFingerprint> {
     let mut shares: Vec<&KPEncryptedShare> = shares.iter().collect();
     shares.sort_by_key(|s| s.id);
     shares
