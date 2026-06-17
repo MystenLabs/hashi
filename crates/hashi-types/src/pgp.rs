@@ -165,6 +165,51 @@ where
         .context("OpenPGP literal data setup failed")
 }
 
+/// Recipient key handles found in an armored OpenPGP message's PKESK packets,
+/// parsed WITHOUT decrypting. One entry per recipient encryption key. Use to
+/// confirm a ciphertext is addressed to the expected cert without holding its
+/// secret key (e.g. a yubikey-bound key, which can't be inspected in memory).
+///
+/// Rejects anonymous/hidden recipients: if the recipient key handle is omitted,
+/// callers cannot prove the ciphertext is addressed only to the expected cert.
+pub fn pgp_message_recipients(armored: &str) -> Result<Vec<openpgp::KeyHandle>> {
+    use openpgp::parse::PacketParser;
+    use openpgp::parse::PacketParserResult;
+    use openpgp::parse::Parse;
+
+    let mut handles = Vec::new();
+    let mut ppr =
+        PacketParser::from_bytes(armored.as_bytes()).context("invalid OpenPGP message")?;
+    while let PacketParserResult::Some(pp) = ppr {
+        // `recurse` extracts the current packet (owned) and yields the next
+        // parser result; it also descends into nested structures. For an
+        // encrypted message the PKESKs sit at the top level and the SEIP body
+        // is opaque (still ciphertext), so only the recipients are visible.
+        let (packet, next_ppr) = pp.recurse().context("parsing OpenPGP packet stream")?;
+        if let openpgp::Packet::PKESK(pkesk) = packet {
+            let handle = pkesk
+                .recipient()
+                .ok_or_else(|| anyhow::anyhow!("OpenPGP message has an anonymous recipient"))?;
+            handles.push(handle);
+        }
+        ppr = next_ppr;
+    }
+    Ok(handles)
+}
+
+/// True if `cert` owns `handle` — i.e. `handle` aliases one of the cert's
+/// (primary or sub) keys. Handles the KeyID-vs-Fingerprint suffix matching so a
+/// PKESK's 8-byte KeyID matches a cert key's full fingerprint.
+pub fn cert_owns_key_handle(cert: &PgpPublicCert, handle: &openpgp::KeyHandle) -> bool {
+    cert.cert
+        .keys()
+        .any(|k| key_handles_alias(&k.key().key_handle(), handle))
+}
+
+fn key_handles_alias(a: &openpgp::KeyHandle, b: &openpgp::KeyHandle) -> bool {
+    a.aliases(b) || b.aliases(a)
+}
+
 pub fn decrypt_with_secret_key<R>(input: R, secret_key: &[u8]) -> Result<impl io::Read + use<R>>
 where
     R: Read + Send + Sync + 'static,
@@ -524,6 +569,38 @@ mod tests {
         io::copy(&mut decryptor, &mut decrypted).unwrap();
 
         assert_eq!(plaintext, decrypted.as_slice());
+    }
+
+    #[test]
+    fn pgp_message_recipients_reports_expected_cert() {
+        let (public, _secret) = test_utils::mock_pgp_keypair();
+        let cert = PgpPublicCert::new(public).unwrap();
+        let ciphertext = encrypt_armored(b"share bytes", &cert).unwrap();
+
+        let recipients = pgp_message_recipients(&ciphertext).unwrap();
+        assert!(
+            !recipients.is_empty(),
+            "should report at least one recipient"
+        );
+        assert!(
+            recipients.iter().all(|h| cert_owns_key_handle(&cert, h)),
+            "all recipients should belong to the cert"
+        );
+    }
+
+    #[test]
+    fn cert_owns_key_handle_rejects_unrelated_cert() {
+        let (public_a, _) = test_utils::mock_pgp_keypair();
+        let (public_b, _) = test_utils::mock_pgp_keypair();
+        let cert_a = PgpPublicCert::new(public_a).unwrap();
+        let cert_b = PgpPublicCert::new(public_b).unwrap();
+
+        let ciphertext = encrypt_armored(b"x", &cert_a).unwrap();
+        let recipients = pgp_message_recipients(&ciphertext).unwrap();
+        assert!(
+            recipients.iter().all(|h| !cert_owns_key_handle(&cert_b, h)),
+            "cert_b must not own cert_a's recipients"
+        );
     }
 
     #[test]

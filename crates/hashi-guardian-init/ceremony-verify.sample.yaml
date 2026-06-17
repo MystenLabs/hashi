@@ -1,0 +1,49 @@
+# Sample configuration for the `ceremony verify` command (run by each KP for
+# setup or rotation shares).
+#
+# Run with:
+#   cargo run -p hashi-guardian-init -- ceremony verify --config ceremony-verify.sample.yaml
+
+# Path to this KP's armored OpenPGP public cert — the one they exported (e.g.
+# `gpg --armor --export <keyid>`) and gave to the operator at `ceremony run`
+# time. verify derives the fingerprint to find this KP's share in shares/,
+# and confirms the ciphertext is genuinely encrypted to this cert before
+# decrypting with the yubikey.
+kp_pgp_cert_path: /path/to/kp3.asc
+
+# Expected secret-sharing parameters from the ceremony plan.
+num_shares: 5
+threshold: 3
+
+# Paths to every KP's armored OpenPGP public cert from the expected ceremony
+# roster. Each cert must appear exactly once. verify uses this full roster to
+# confirm every encrypted share is encrypted only to its labeled KP cert.
+kp_pgp_cert_paths:
+  - /path/to/kp1.asc
+  - /path/to/kp2.asc
+  - /path/to/kp3.asc
+  - /path/to/kp4.asc
+  - /path/to/kp5.asc
+
+# Expected secret-sharing sequence. verify discovers the latest ceremony session
+# from S3 and fails if its sharing_seq does not match this value. Use 0 for
+# genesis setup, or N+1 for a rotation from prior sequence N.
+sharing_seq: 0
+
+# PCR attestation verification is not configured here yet; the underlying
+# attestation check is pending the attestation PR and is currently a no-op.
+
+# S3 config for the guardian's log bucket (object-lock enabled). Read to
+# discover the latest ceremony session, fetch its attestation, ceremony/ audit
+# log, and shares/ recovery log.
+guardian_s3:
+  access_key: "AKIA..."
+  secret_key: "..."
+  bucket_info:
+    bucket: "hashi-guardian-logs"
+    region: "us-east-1"
+
+# Optional gpg homedir for the yubikey-backed gpg agent. Defaults to gpg's
+# default (~/.gnupg) when omitted. Set this only if your yubikey's agent uses a
+# non-default homedir.
+# gpg_homedir: /home/kp3/.gnupg

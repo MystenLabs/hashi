@@ -12,8 +12,8 @@ use tracing::info;
 
 /// Set up a new BTC key. Flow:
 ///     1. KPs send their OpenPGP certificates to the operator
-///     2. Operator calls setup_new_key (and optionally returns its response to all KPs)
-///     3. KPs fetch the setup_new_key response from `ceremony/` in S3
+///     2. Operator calls setup_new_key
+///     3. KPs fetch commitments/roster from `ceremony/` and ciphertexts from `shares/`
 pub async fn setup_new_key(
     enclave: Arc<Enclave>,
     request: SetupNewKeyRequest,

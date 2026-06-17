@@ -305,6 +305,7 @@ impl SetupNewKeyRequest {
                 pgp_certs.len()
             )));
         }
+        ensure_unique_pgp_cert_fingerprints(&pgp_certs)?;
         Ok(Self {
             key_provisioner_pgp_certs: pgp_certs,
             params,
@@ -326,6 +327,19 @@ impl SetupNewKeyRequest {
     pub fn threshold(&self) -> usize {
         self.params.threshold()
     }
+}
+
+fn ensure_unique_pgp_cert_fingerprints(pgp_certs: &[PgpPublicCert]) -> GuardianResult<()> {
+    let mut seen = std::collections::HashSet::with_capacity(pgp_certs.len());
+    for cert in pgp_certs {
+        let fingerprint = cert.fingerprint();
+        if !seen.insert(fingerprint.clone()) {
+            return Err(InvalidInputs(format!(
+                "duplicate OpenPGP certificate fingerprint {fingerprint}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl OperatorInitRequest {
@@ -499,16 +513,11 @@ impl RotateKpsState {
                 new_kp_pgp_certs.len()
             )));
         }
+        ensure_unique_pgp_cert_fingerprints(&new_kp_pgp_certs)?;
         // Sort to a canonical order so the serialized state's digest (which all
-        // T old KPs must agree on) is independent of submission order. Sorting
-        // also makes duplicates adjacent.
+        // T old KPs must agree on) is independent of submission order.
         let mut new_kp_pgp_certs = new_kp_pgp_certs;
         new_kp_pgp_certs.sort();
-        for pair in new_kp_pgp_certs.windows(2) {
-            if pair[0] == pair[1] {
-                return Err(InvalidInputs("duplicate new KP cert".into()));
-            }
-        }
         Ok(Self {
             new_kp_pgp_certs,
             new_params,
@@ -781,6 +790,16 @@ mod tests {
             RotateKpsState::new(certs, 5, 3).unwrap_err(),
             InvalidInputs(_)
         ));
+    }
+
+    #[test]
+    fn setup_new_key_request_rejects_duplicate_cert_fingerprints() {
+        let mut certs = test_utils::mock_pgp_certs(5);
+        certs[1] = certs[0].clone();
+        let err = SetupNewKeyRequest::new(certs, 5, 3).unwrap_err();
+        assert!(
+            matches!(err, InvalidInputs(msg) if msg.contains("duplicate OpenPGP certificate fingerprint"))
+        );
     }
 
     #[test]

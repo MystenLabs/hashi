@@ -1,9 +1,69 @@
 # hashi-guardian-init
 
 Off-enclave tooling that initializes a guardian. It reads the guardian's S3 logs
-via `hashi_guardian::s3_reader`, verifies the attested enclave, and emits the
-artifacts that drive initialization. It also houses guardian helper tooling and
-dev-only shortcuts.
+via `hashi_guardian::s3_reader`, verifies the attested enclave, and drives the
+initialization flows. It also houses guardian helper tooling and dev-only
+shortcuts.
+
+## ceremony
+
+The production guardian key ceremony — genesis setup (`run`, run once by the
+operator) and per-KP verification (`verify`, run by each key provisioner for
+setup or rotation shares).
+
+This replaces the `tools dev-bootstrap` shortcut used in dev. Each KP generates
+a PGP key on a yubikey and exports the public cert to the operator; the rest of
+the flow is these two commands.
+
+One S3 bucket is involved: the guardian's **log bucket** (object-lock enabled).
+The guardian writes its `init/` attestation, `ceremony/` audit log, and `shares/`
+encrypted-share recovery log here. Both commands read it.
+
+### ceremony run (operator)
+
+Drives a fresh **ceremony-mode** guardian through the one-time genesis BTC key
+setup (`sharing_seq = 0`). It connects over gRPC and: `operator_init` (ceremony mode, S3-only) →
+`setup_new_key` → verifies the response signature and shape → confirms each
+encrypted share is addressed only to its labeled KP cert (PKESK recipients,
+parsed without decrypting) → cross-checks the guardian's `ceremony/` audit log
+and `shares/` recovery log.
+
+Each share is labeled with its recipient cert's `recipient_fingerprint`, so a KP
+finds their share by fingerprint (not positional index).
+
+```bash
+cargo run -p hashi-guardian-init -- ceremony run --config ceremony-run.sample.yaml
+```
+
+Config: see [`ceremony-run.sample.yaml`](ceremony-run.sample.yaml) — the guardian
+endpoint, `n`/`t`, guardian S3 config, and the KP cert paths.
+
+### ceremony verify (each KP)
+
+Confirms a KP can fetch and decrypt their setup or rotation ceremony share for
+an expected `sharing_seq` (`0` for genesis setup, `N + 1` for a rotation from
+prior sequence `N`). Trust is anchored to the guardian's S3 attestation log (no
+gRPC to the live guardian): it discovers the latest ceremony session from S3,
+checks its `sharing_seq` matches the expected value, loads that session's
+attested signing pubkey, verifies its `ceremony/` audit log and `shares/`
+recovery log against the expected `sharing_seq` and `n`/`t`, confirms every
+encrypted share is addressed only to its labeled KP cert, finds the share labeled
+for this KP's cert fingerprint, decrypts via the yubikey (`gpg --decrypt`), and
+verifies the decrypted share against its commitment.
+
+PCR attestation verification is not configured here yet; the underlying
+attestation check is pending the attestation PR and is currently a no-op.
+
+Only the share's **ciphertext** is written to disk (a temp file, deleted on
+drop); the decrypted scalar lives only in memory.
+
+```bash
+cargo run -p hashi-guardian-init -- ceremony verify --config ceremony-verify.sample.yaml
+```
+
+Config: see [`ceremony-verify.sample.yaml`](ceremony-verify.sample.yaml) — the
+KP's cert path, expected `sharing_seq` and `n`/`t`, full KP cert roster, guardian
+S3 config, and an optional gpg homedir.
 
 ## provision
 
