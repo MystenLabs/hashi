@@ -14,6 +14,10 @@ use sui::{
 };
 
 //
+// Errors
+//
+
+//
 // CommitteeSet
 //
 
@@ -44,6 +48,21 @@ fun member(self: &CommitteeSet, validator_address: address): &MemberInfo {
 
 public(package) fun has_member(self: &CommitteeSet, validator_address: address): bool {
     self.members.contains_with_type<_, MemberInfo>(validator_address)
+}
+
+/// Returns true if the transaction sender is authorized to act on behalf of the
+/// member registered under `validator_address` — that is, the sender is either
+/// the validator's own Sui address or the operator address it has delegated to.
+/// Returns false if no such member exists.
+///
+/// The validator's own key always retains authority, so it can serve as a
+/// backup if the operator key is lost.
+public(package) fun member_authorized(
+    self: &CommitteeSet,
+    validator_address: address,
+    ctx: &TxContext,
+): bool {
+    self.has_member(validator_address) && self.member(validator_address).is_authorized(ctx)
 }
 
 fun member_mut(self: &mut CommitteeSet, validator_address: address): &mut MemberInfo {
@@ -136,8 +155,15 @@ public(package) fun new_member(
     committee_set.insert_member(member);
 }
 
-fun assert_update_permitted(self: &MemberInfo, ctx: &TxContext) {
-    assert!(ctx.sender() == self.validator_address || ctx.sender() == self.operator_address);
+/// True if the tx sender is authorized to act for this member — its validator
+/// key or its delegated operator key. The validator key always retains authority.
+fun is_authorized(self: &MemberInfo, ctx: &TxContext): bool {
+    let sender = ctx.sender();
+    sender == self.validator_address || sender == self.operator_address
+}
+
+fun assert_authorized(self: &MemberInfo, ctx: &TxContext) {
+    assert!(self.is_authorized(ctx));
 }
 
 /// Set the public key of the member.
@@ -156,7 +182,7 @@ public(package) fun set_next_epoch_public_key(
     );
 
     let member = self.member_mut(validator_address);
-    member.assert_update_permitted(ctx);
+    member.assert_authorized(ctx);
 
     member.next_epoch_public_key = next_epoch_public_key;
 }
@@ -169,7 +195,7 @@ public(package) fun set_endpoint_url(
     ctx: &TxContext,
 ) {
     let member = self.member_mut(validator_address);
-    member.assert_update_permitted(ctx);
+    member.assert_authorized(ctx);
 
     member.endpoint_url = endpoint_url;
 }
@@ -184,7 +210,7 @@ public(package) fun set_tls_public_key(
     assert!(tls_public_key.length() == 32);
 
     let member = self.member_mut(validator_address);
-    member.assert_update_permitted(ctx);
+    member.assert_authorized(ctx);
     member.tls_public_key = tls_public_key;
 }
 
@@ -198,11 +224,16 @@ public(package) fun set_next_epoch_encryption_public_key(
     assert!(next_epoch_encryption_public_key.length() == 32);
 
     let member = self.member_mut(validator_address);
-    member.assert_update_permitted(ctx);
+    member.assert_authorized(ctx);
     member.next_epoch_encryption_public_key = next_epoch_encryption_public_key;
 }
 
-/// Set the operator_address of the member.
+/// Set the operator_address of the member (delegate operations to an operator
+/// key, or rotate it).
+///
+/// Authorized for the validator's own key or its current operator key. The
+/// validator key always retains authority, so it can recover the delegation even
+/// if the operator key is lost.
 public(package) fun set_operator_address(
     self: &mut CommitteeSet,
     validator_address: address,
@@ -210,7 +241,7 @@ public(package) fun set_operator_address(
     ctx: &TxContext,
 ) {
     let member = self.member_mut(validator_address);
-    member.assert_update_permitted(ctx);
+    member.assert_authorized(ctx);
     member.operator_address = operator_address;
 }
 

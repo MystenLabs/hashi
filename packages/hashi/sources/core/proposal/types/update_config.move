@@ -21,6 +21,7 @@ public struct UpdateConfig has copy, drop, store {
 
 public fun propose(
     hashi: &mut Hashi,
+    validator_address: address,
     entries: VecMap<String, Value>,
     metadata: VecMap<String, String>,
     clock: &Clock,
@@ -28,7 +29,15 @@ public fun propose(
 ): ID {
     hashi.config().assert_version_enabled();
     assert!(!entries.is_empty(), ENoEntriesProvided);
-    proposal::create(hashi, UpdateConfig { entries }, THRESHOLD_BPS, metadata, clock, ctx)
+    proposal::create(
+        hashi,
+        validator_address,
+        UpdateConfig { entries },
+        THRESHOLD_BPS,
+        metadata,
+        clock,
+        ctx,
+    )
 }
 
 public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {

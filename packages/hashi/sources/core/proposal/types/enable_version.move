@@ -15,13 +15,22 @@ public struct EnableVersion has copy, drop, store {
 
 public fun propose(
     hashi: &mut Hashi,
+    validator_address: address,
     version: u64,
     metadata: VecMap<String, String>,
     clock: &Clock,
     ctx: &mut TxContext,
 ): ID {
     hashi.config().assert_version_enabled();
-    proposal::create(hashi, EnableVersion { version }, THRESHOLD_BPS, metadata, clock, ctx)
+    proposal::create(
+        hashi,
+        validator_address,
+        EnableVersion { version },
+        THRESHOLD_BPS,
+        metadata,
+        clock,
+        ctx,
+    )
 }
 
 public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
