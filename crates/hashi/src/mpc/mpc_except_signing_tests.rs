@@ -5555,7 +5555,7 @@ impl RotationTestSetup {
         self.certificates.values().cloned().collect()
     }
 
-    /// Returns the subset of dealer addresses that `reconstruct_from_dkg_certificates`
+    /// Returns the subset of dealer addresses that `reconstruct_previous_dkg_output`
     /// would use (sorted order, stopping at threshold weight).
     /// This matches `run_as_party` behavior during live DKG.
     fn threshold_dealer_addresses(&self) -> Vec<Address> {
@@ -7838,11 +7838,11 @@ fn test_party_restart_uses_stored_rotation_messages() {
     );
 }
 
-/// Tests that `reconstruct_from_dkg_certificates` uses the previous committee's
+/// Tests that `reconstruct_previous_dkg_output` uses the previous committee's
 /// parameters (nodes, party_id, threshold) to decrypt DKG messages, not the target
 /// committee's.
 #[test]
-fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
+fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
     let mut rng = rand::thread_rng();
 
     // Previous committee: 5 members with weights [3, 2, 4, 1, 2]
@@ -7975,7 +7975,7 @@ fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
     // if previous committee parameters were not used for decryption.
     let reconstructed = unwrap_reconstruction_success(
         manager
-            .reconstruct_from_dkg_certificates(&certificates, &HashMap::new())
+            .reconstruct_previous_dkg_output(&certificates, &HashMap::new())
             .unwrap(),
     );
 
@@ -7996,7 +7996,7 @@ fn test_reconstruct_from_dkg_certificates_with_shifted_party_ids() {
 }
 
 #[test]
-fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
+fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
     let mut rng = rand::thread_rng();
 
     // 5 members with weight 3 each. Total=15, threshold=ceil(15/3)=5.
@@ -8140,7 +8140,7 @@ fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
     // and produces key_threshold.
     let reconstructed = unwrap_reconstruction_success(
         manager
-            .reconstruct_from_dkg_certificates(&certificates, &HashMap::new())
+            .reconstruct_previous_dkg_output(&certificates, &HashMap::new())
             .unwrap(),
     );
 
@@ -8155,7 +8155,7 @@ fn test_reconstruct_from_dkg_certificates_stops_at_threshold() {
 }
 
 #[test]
-fn test_reconstruct_from_dkg_certificates_uses_previous_encryption_key() {
+fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
     let mut rng = rand::thread_rng();
 
     let weights = [3u16, 3, 3, 3, 3];
@@ -8268,7 +8268,7 @@ fn test_reconstruct_from_dkg_certificates_uses_previous_encryption_key() {
     .unwrap();
     let reconstructed = unwrap_reconstruction_success(
         manager_with_prev
-            .reconstruct_from_dkg_certificates(&certificates, &HashMap::new())
+            .reconstruct_previous_dkg_output(&certificates, &HashMap::new())
             .unwrap(),
     );
     assert_eq!(
@@ -8295,13 +8295,274 @@ fn test_reconstruct_from_dkg_certificates_uses_previous_encryption_key() {
     )
     .unwrap();
     let result =
-        manager_without_prev.reconstruct_from_dkg_certificates(&certificates, &HashMap::new());
+        manager_without_prev.reconstruct_previous_dkg_output(&certificates, &HashMap::new());
     let Err(err) = result else {
         panic!("missing previous_encryption_key must error, got Ok");
     };
     assert!(
         matches!(&err, MpcError::InvalidConfig(msg) if msg.contains("previous encryption key")),
         "expected InvalidConfig about previous encryption key, got: {err:?}",
+    );
+}
+
+#[test]
+fn test_recover_current_dkg() {
+    let mut rng = rand::thread_rng();
+    let weights = [3u16, 3, 3, 3, 3];
+    let setup = TestSetup::with_weights(&weights);
+    let epoch = setup.epoch();
+
+    let dealer_indices: Vec<usize> = vec![0, 1, 2, 3];
+    let dealer_managers: Vec<_> = dealer_indices
+        .iter()
+        .map(|&i| setup.create_manager(i))
+        .collect();
+    let dealer_messages: Vec<Messages> = dealer_managers
+        .iter()
+        .map(|dm| Messages::Dkg(dm.create_dealer_message(&mut rng)))
+        .collect();
+
+    let target_index = 4usize;
+    let mut target_manager = setup.create_manager(target_index);
+    for (i, msg) in dealer_messages.iter().enumerate() {
+        receive_dealer_messages(&mut target_manager, msg, setup.address(dealer_indices[i]))
+            .unwrap();
+    }
+    let expected_public_key = target_manager
+        .complete_dkg([setup.address(0), setup.address(1)].into_iter())
+        .unwrap()
+        .public_key;
+
+    let committee = setup.committee();
+    let certificates: Vec<CertificateV1> = dealer_messages
+        .iter()
+        .enumerate()
+        .map(|(i, msg)| {
+            let dealer_addr = setup.address(dealer_indices[i]);
+            let sigs: Vec<MemberSignature> = [0usize, 1]
+                .iter()
+                .map(|&s| {
+                    setup.signing_keys[s].sign(
+                        epoch,
+                        setup.address(s),
+                        &DealerMessagesHash {
+                            dealer_address: dealer_addr,
+                            messages_hash: compute_messages_hash(msg),
+                        },
+                    )
+                })
+                .collect();
+            CertificateV1::Dkg(create_test_certificate(committee, msg, dealer_addr, sigs).unwrap())
+        })
+        .collect();
+
+    let target_committee = Committee::new(
+        committee.members().to_vec(),
+        epoch,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
+    );
+    let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+    let mut committees = BTreeMap::new();
+    committees.insert(epoch, target_committee);
+    committee_set.set_epoch(epoch).set_committees(committees);
+
+    let build_store = |src_for: &dyn Fn(usize) -> usize| {
+        let mut s = InMemoryPublicMessagesStore::new();
+        for i in 0..dealer_messages.len() {
+            let dealer_addr = setup.address(dealer_indices[i]);
+            let Messages::Dkg(inner) = &dealer_messages[src_for(i)] else {
+                unreachable!()
+            };
+            s.store_dealer_message(epoch, &dealer_addr, inner).unwrap();
+        }
+        s
+    };
+    let make_manager = |store: Box<dyn PublicMessagesStore>| {
+        MpcManager::new(
+            setup.address(target_index),
+            &committee_set,
+            epoch,
+            SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::Dkg),
+            setup.encryption_keys[target_index].clone(),
+            None, // genesis: no previous encryption key
+            setup.signing_keys[target_index].clone(),
+            store,
+            TEST_CHAIN_ID,
+            None,
+            TEST_BATCH_SIZE_PER_WEIGHT,
+            None,
+            &test_metrics(),
+        )
+        .unwrap()
+    };
+    let identity = |i: usize| i;
+    let onchain_key = bcs::to_bytes(&expected_public_key).unwrap();
+    let req = GetPublicMpcOutputRequest { epoch };
+
+    let mgr = Arc::new(RwLock::new(make_manager(Box::new(build_store(&identity)))));
+    let MpcOutputRecoveryOutcome::Recovered(output) =
+        MpcManager::reconstruct_current_dkg_output(&mgr, &certificates, &onchain_key)
+    else {
+        panic!("expected Recovered from clean local DKG messages");
+    };
+    assert_eq!(output.public_key, expected_public_key);
+    assert!(
+        mgr.read()
+            .unwrap()
+            .handle_get_public_mpc_output_request(&req)
+            .is_ok(),
+        "Recovered must commit current_output (served for the current epoch)"
+    );
+
+    // vk mismatch (reconstruction disagrees with on-chain) → Suspicious; never committed.
+    let mut wrong_key = onchain_key.clone();
+    wrong_key[0] ^= 0xff;
+    let mgr = Arc::new(RwLock::new(make_manager(Box::new(build_store(&identity)))));
+    assert!(matches!(
+        MpcManager::reconstruct_current_dkg_output(&mgr, &certificates, &wrong_key),
+        MpcOutputRecoveryOutcome::Suspicious(_)
+    ));
+    assert!(
+        mgr.read()
+            .unwrap()
+            .handle_get_public_mpc_output_request(&req)
+            .is_err(),
+        "Suspicious must not commit current_output"
+    );
+
+    // Hash mismatch (a stored message diverges from its certified hash) → Suspicious.
+    let swap0 = |i: usize| if i == 0 { 1 } else { i };
+    let mgr = Arc::new(RwLock::new(make_manager(Box::new(build_store(&swap0)))));
+    assert!(matches!(
+        MpcManager::reconstruct_current_dkg_output(&mgr, &certificates, &onchain_key),
+        MpcOutputRecoveryOutcome::Suspicious(_)
+    ));
+
+    // Missing local messages → NotApplicable (fall through to live).
+    let mgr = Arc::new(RwLock::new(make_manager(Box::new(
+        InMemoryPublicMessagesStore::new(),
+    ))));
+    assert!(matches!(
+        MpcManager::reconstruct_current_dkg_output(&mgr, &certificates, &onchain_key),
+        MpcOutputRecoveryOutcome::NotApplicable
+    ));
+
+    // No authenticated on-chain key yet → NotApplicable.
+    let mgr = Arc::new(RwLock::new(make_manager(Box::new(build_store(&identity)))));
+    assert!(matches!(
+        MpcManager::reconstruct_current_dkg_output(&mgr, &certificates, &[]),
+        MpcOutputRecoveryOutcome::NotApplicable
+    ));
+}
+
+#[test]
+fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::with_weights(&[3u16, 3, 3, 3, 3]);
+    let epoch = setup.epoch();
+    let target_index = 4usize;
+
+    // Dealer 0 deals a cheating message that corrupts the target's (party 4) share but is
+    // otherwise well-formed; the committee certifies it, and only the victim detects the
+    // bad share on decrypt. Dealers 1..4 are honest. The cheater is first so it is always
+    // processed (before the threshold weight is reached and the loop stops).
+    let dealer_indices = [0usize, 1, 2, 3];
+    let dealer_messages: Vec<Messages> = dealer_indices
+        .iter()
+        .map(|&i| {
+            if i == 0 {
+                Messages::Dkg(create_cheating_message(
+                    &setup,
+                    0,
+                    target_index as u16,
+                    &mut rng,
+                ))
+            } else {
+                Messages::Dkg(setup.create_manager(i).create_dealer_message(&mut rng))
+            }
+        })
+        .collect();
+
+    let committee = setup.committee();
+    let certificates: Vec<CertificateV1> = dealer_messages
+        .iter()
+        .enumerate()
+        .map(|(i, msg)| {
+            let dealer_addr = setup.address(dealer_indices[i]);
+            let sigs: Vec<MemberSignature> = [0usize, 1]
+                .iter()
+                .map(|&s| {
+                    setup.signing_keys[s].sign(
+                        epoch,
+                        setup.address(s),
+                        &DealerMessagesHash {
+                            dealer_address: dealer_addr,
+                            messages_hash: compute_messages_hash(msg),
+                        },
+                    )
+                })
+                .collect();
+            CertificateV1::Dkg(create_test_certificate(committee, msg, dealer_addr, sigs).unwrap())
+        })
+        .collect();
+
+    let target_committee = Committee::new(
+        committee.members().to_vec(),
+        epoch,
+        TEST_THRESHOLD_IN_BASIS_POINTS,
+        TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        TEST_MAX_FAULTY_IN_BASIS_POINTS,
+    );
+    let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+    let mut committees = BTreeMap::new();
+    committees.insert(epoch, target_committee);
+    committee_set.set_epoch(epoch).set_committees(committees);
+
+    let mut store = InMemoryPublicMessagesStore::new();
+    for (i, msg) in dealer_messages.iter().enumerate() {
+        let Messages::Dkg(inner) = msg else {
+            unreachable!()
+        };
+        store
+            .store_dealer_message(epoch, &setup.address(dealer_indices[i]), inner)
+            .unwrap();
+    }
+
+    let manager = MpcManager::new(
+        setup.address(target_index),
+        &committee_set,
+        epoch,
+        SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::Dkg),
+        setup.encryption_keys[target_index].clone(),
+        None,
+        setup.signing_keys[target_index].clone(),
+        Box::new(store),
+        TEST_CHAIN_ID,
+        None,
+        TEST_BATCH_SIZE_PER_WEIGHT,
+        None,
+        &test_metrics(),
+    )
+    .unwrap();
+    let mgr = Arc::new(RwLock::new(manager));
+
+    let onchain_key = vec![0u8; 33];
+    assert!(
+        matches!(
+            MpcManager::reconstruct_current_dkg_output(&mgr, &certificates, &onchain_key),
+            MpcOutputRecoveryOutcome::NotApplicable
+        ),
+        "a certified dealer whose message decrypts to a complaint must be NotApplicable \
+         (fall through to the live path), not Suspicious"
+    );
+    assert!(
+        mgr.read()
+            .unwrap()
+            .handle_get_public_mpc_output_request(&GetPublicMpcOutputRequest { epoch })
+            .is_err(),
+        "declining recovery must not commit current_output"
     );
 }
 

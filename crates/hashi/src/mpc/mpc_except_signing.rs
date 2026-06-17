@@ -20,6 +20,7 @@ use crate::mpc::types::DealerCertificate;
 pub use crate::mpc::types::DealerFlowData;
 use crate::mpc::types::DealerMessagesHash;
 pub use crate::mpc::types::DealerOutputsKey;
+use crate::mpc::types::DkgReconstructionContext;
 pub use crate::mpc::types::EncryptionGroupElement;
 pub use crate::mpc::types::GetPublicMpcOutputRequest;
 pub use crate::mpc::types::GetPublicMpcOutputResponse;
@@ -29,6 +30,7 @@ pub use crate::mpc::types::Messages;
 use crate::mpc::types::MpcConfig;
 pub use crate::mpc::types::MpcError;
 pub use crate::mpc::types::MpcOutput;
+use crate::mpc::types::MpcOutputRecoveryOutcome;
 pub use crate::mpc::types::MpcResult;
 pub use crate::mpc::types::NonceMessage;
 pub use crate::mpc::types::NonceReconstructionOutcome;
@@ -610,7 +612,10 @@ impl MpcManager {
             tracing::error!("Dealer phase failed: {}. Continuing as party only.", e);
         }
         let output = Self::run_dkg_as_party(mpc_manager, p2p_channel, tob_channel, metrics).await?;
-        mpc_manager.write().unwrap().current_output = Some(output.clone());
+        mpc_manager
+            .write()
+            .unwrap()
+            .set_current_output(output.clone());
         Ok(output)
     }
 
@@ -712,7 +717,10 @@ impl MpcManager {
             metrics,
         )
         .await?;
-        mpc_manager.write().unwrap().current_output = Some(output.clone());
+        mpc_manager
+            .write()
+            .unwrap()
+            .set_current_output(output.clone());
         Ok(output)
     }
 
@@ -2935,7 +2943,7 @@ impl MpcManager {
     ) -> MpcResult<ReconstructionOutcome> {
         match certificates.first() {
             Some(CertificateV1::Dkg(_)) | None => {
-                self.reconstruct_from_dkg_certificates(certificates, complaint_cache)
+                self.reconstruct_previous_dkg_output(certificates, complaint_cache)
             }
             Some(CertificateV1::Rotation(_)) => {
                 self.reconstruct_from_rotation_certificates(certificates, complaint_cache)
@@ -2948,15 +2956,15 @@ impl MpcManager {
         }
     }
 
-    fn reconstruct_from_dkg_certificates(
+    fn reconstruct_previous_dkg_output(
         &self,
         certificates: &[CertificateV1],
         complaint_cache: &HashMap<DealerOutputsKey, avss::PartialOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
-        let previous_committee = self.previous_committee.clone().ok_or_else(|| {
+        let committee = self.previous_committee.as_ref().ok_or_else(|| {
             MpcError::InvalidConfig("DKG reconstruction requires previous committee".into())
         })?;
-        let previous_nodes = self.previous_nodes.clone().ok_or_else(|| {
+        let nodes = self.previous_nodes.as_ref().ok_or_else(|| {
             MpcError::InvalidConfig("DKG reconstruction requires previous nodes".into())
         })?;
         let output_threshold = self.previous_reconfig_output_threshold.ok_or_else(|| {
@@ -2964,17 +2972,83 @@ impl MpcManager {
                 "DKG reconstruction requires previous reconfig's output threshold".into(),
             )
         })?;
-        let previous_party_id = previous_committee.index_of(&self.address).ok_or_else(|| {
+        let party_id = committee.index_of(&self.address).ok_or_else(|| {
             MpcError::InvalidConfig("This node is not in the previous committee".into())
-        })? as u16;
-        let source_session_id =
-            SessionId::new(&self.chain_id, self.previous_epoch, &ProtocolType::Dkg);
+        })? as PartyId;
+        let encryption_key = self.previous_encryption_key.as_ref().ok_or_else(|| {
+            MpcError::InvalidConfig("DKG reconstruction requires previous encryption key".into())
+        })?;
+        let context = DkgReconstructionContext {
+            committee,
+            nodes,
+            party_id,
+            encryption_key,
+            output_threshold,
+            epoch: self.previous_epoch,
+        };
+        self.reconstruct_dkg_output(&context, certificates, complaint_cache)
+    }
+
+    pub fn reconstruct_current_dkg_output(
+        mpc_manager: &Arc<RwLock<Self>>,
+        certificates: &[CertificateV1],
+        onchain_mpc_key: &[u8],
+    ) -> MpcOutputRecoveryOutcome {
+        if onchain_mpc_key.is_empty() {
+            return MpcOutputRecoveryOutcome::NotApplicable;
+        }
+        let candidate = {
+            let mgr = mpc_manager.read().unwrap();
+            let context = DkgReconstructionContext {
+                committee: &mgr.committee,
+                nodes: &mgr.mpc_config.nodes,
+                party_id: mgr.party_id,
+                encryption_key: &mgr.encryption_key,
+                output_threshold: mgr.mpc_config.threshold,
+                epoch: mgr.mpc_config.epoch,
+            };
+            match mgr.reconstruct_dkg_output(&context, certificates, &HashMap::new()) {
+                Ok(ReconstructionOutcome::Success(output)) => output,
+                Ok(ReconstructionOutcome::NeedsDkgComplaintRecovery { .. })
+                | Ok(ReconstructionOutcome::NeedsRotationComplaintRecovery { .. }) => {
+                    return MpcOutputRecoveryOutcome::NotApplicable;
+                }
+                Err(MpcError::StorageError(_)) | Err(MpcError::NotEnoughApprovals { .. }) => {
+                    return MpcOutputRecoveryOutcome::NotApplicable;
+                }
+                Err(MpcError::ProtocolFailed(msg)) => {
+                    return MpcOutputRecoveryOutcome::Suspicious(msg);
+                }
+                Err(_) => return MpcOutputRecoveryOutcome::NotApplicable,
+            }
+        };
+        let candidate_key =
+            bcs::to_bytes(&candidate.public_key).expect(EXPECT_SERIALIZATION_SUCCESS);
+        if candidate_key != onchain_mpc_key {
+            return MpcOutputRecoveryOutcome::Suspicious(
+                "reconstructed key does not match the on-chain key".into(),
+            );
+        }
+        mpc_manager
+            .write()
+            .unwrap()
+            .set_current_output(candidate.clone());
+        MpcOutputRecoveryOutcome::Recovered(candidate)
+    }
+
+    fn reconstruct_dkg_output(
+        &self,
+        context: &DkgReconstructionContext<'_>,
+        certificates: &[CertificateV1],
+        complaint_cache: &HashMap<DealerOutputsKey, avss::PartialOutput>,
+    ) -> MpcResult<ReconstructionOutcome> {
+        let source_session_id = SessionId::new(&self.chain_id, context.epoch, &ProtocolType::Dkg);
         let mut outputs: HashMap<PartyId, avss::PartialOutput> = HashMap::new();
         let mut dealer_weight_sum = 0u32;
         for cert in certificates {
             // This matches the behavior of `run_as_party` during DKG, which also
             // stops at threshold.
-            if dealer_weight_sum >= output_threshold as u32 {
+            if dealer_weight_sum >= context.output_threshold as u32 {
                 break;
             }
             let CertificateV1::Dkg(dkg_cert) = cert else {
@@ -2984,10 +3058,9 @@ impl MpcManager {
             };
             let msg = dkg_cert.message();
             let dealer_address = msg.dealer_address;
-            let previous_epoch = self.previous_epoch;
             let message = self
                 .public_messages_store
-                .get_dealer_message(previous_epoch, &dealer_address)
+                .get_dealer_message(context.epoch, &dealer_address)
                 .map_err(|e| MpcError::StorageError(e.to_string()))?
                 .ok_or_else(|| {
                     MpcError::StorageError(format!(
@@ -3003,32 +3076,28 @@ impl MpcManager {
                     dealer_address
                 )));
             }
-            let dealer_party_id = previous_committee
+            let dealer_party_id = context
+                .committee
                 .index_of(&dealer_address)
-                .expect("certified dealer must be in previous committee")
-                as u16;
+                .expect("certified dealer must be in committee")
+                as PartyId;
             let session_id = source_session_id
                 .dealer_session_id(&dealer_address)
                 .to_vec();
             if let Some(output) = complaint_cache.get(&DealerOutputsKey::Dkg(dealer_address)) {
                 outputs.insert(dealer_party_id, output.clone());
-                let dealer_weight = previous_nodes
+                let dealer_weight = context
+                    .nodes
                     .weight_of(dealer_party_id)
                     .expect("party_id must be valid");
                 dealer_weight_sum += dealer_weight as u32;
                 continue;
             }
-            let previous_encryption_key =
-                self.previous_encryption_key.as_ref().ok_or_else(|| {
-                    MpcError::InvalidConfig(
-                        "DKG reconstruction requires previous encryption key".into(),
-                    )
-                })?;
             match process_avss_message(
-                previous_encryption_key,
-                previous_nodes.clone(),
-                previous_party_id,
-                output_threshold,
+                context.encryption_key,
+                context.nodes.clone(),
+                context.party_id,
+                context.output_threshold,
                 session_id,
                 &message,
                 None,
@@ -3044,29 +3113,32 @@ impl MpcManager {
                     });
                 }
             }
-            let dealer_weight = previous_nodes
+            let dealer_weight = context
+                .nodes
                 .weight_of(dealer_party_id)
                 .expect("party_id must be valid");
             dealer_weight_sum += dealer_weight as u32;
         }
-        if dealer_weight_sum < output_threshold as u32 {
+        if dealer_weight_sum < context.output_threshold as u32 {
             return Err(MpcError::NotEnoughApprovals {
-                needed: output_threshold as usize,
+                needed: context.output_threshold as usize,
                 got: dealer_weight_sum as usize,
             });
         }
         let dealer_ids: Vec<_> = outputs.keys().copied().collect();
         tracing::info!(
-            "reconstruct_from_dkg_certificates: {} dealers (party_ids={:?}), \
-             dealer_weight_sum={dealer_weight_sum}, threshold={output_threshold}",
+            "reconstruct_dkg (epoch={}): {} dealers (party_ids={:?}), \
+             dealer_weight_sum={dealer_weight_sum}, threshold={}",
+            context.epoch,
             dealer_ids.len(),
             dealer_ids,
+            context.output_threshold,
         );
         let combined_output =
-            avss::ReceiverOutput::complete_dkg(output_threshold, &previous_nodes, outputs)
+            avss::ReceiverOutput::complete_dkg(context.output_threshold, context.nodes, outputs)
                 .expect(EXPECT_THRESHOLD_MET);
         tracing::info!(
-            "reconstruct_from_dkg_certificates: result vk={}",
+            "reconstruct_dkg: result vk={}",
             hex::encode(combined_output.vk.to_byte_array()),
         );
         Ok(ReconstructionOutcome::Success(MpcOutput {
@@ -3077,7 +3149,7 @@ impl MpcManager {
                 .into_iter()
                 .map(|c| (c.index, c.value))
                 .collect(),
-            threshold: output_threshold,
+            threshold: context.output_threshold,
         }))
     }
 
@@ -3883,6 +3955,10 @@ impl MpcManager {
             return Nodes::new(node_list).unwrap();
         }
         nodes.clone()
+    }
+
+    fn set_current_output(&mut self, output: MpcOutput) {
+        self.current_output = Some(output);
     }
 }
 
