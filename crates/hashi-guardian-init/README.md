@@ -43,12 +43,13 @@ endpoint, `n`/`t`, guardian S3 config, and the KP cert paths.
 Confirms a KP can fetch and decrypt their setup or rotation ceremony share for
 an expected `sharing_seq` (`0` for genesis setup, `N + 1` for a rotation from
 prior sequence `N`). Trust is anchored to the guardian's S3 attestation log (no
-gRPC to the live guardian): it loads the configured session's attested signing
-pubkey, verifies that session's `ceremony/` audit log and `shares/` recovery log
-against the expected `sharing_seq` and `n`/`t`, confirms every encrypted share is
-addressed only to its labeled KP cert, finds the share labeled for this KP's cert
-fingerprint, decrypts via the yubikey (`gpg --decrypt`), and verifies the
-decrypted share against its commitment.
+gRPC to the live guardian): it discovers the latest ceremony session from S3,
+checks its `sharing_seq` matches the expected value, loads that session's
+attested signing pubkey, verifies its `ceremony/` audit log and `shares/`
+recovery log against the expected `sharing_seq` and `n`/`t`, confirms every
+encrypted share is addressed only to its labeled KP cert, finds the share labeled
+for this KP's cert fingerprint, decrypts via the yubikey (`gpg --decrypt`), and
+verifies the decrypted share against its commitment.
 
 PCR attestation verification is not configured here yet; the underlying
 attestation check is pending the attestation PR and is currently a no-op.
@@ -61,8 +62,8 @@ cargo run -p hashi-guardian-init -- ceremony verify --config ceremony-verify.sam
 ```
 
 Config: see [`ceremony-verify.sample.yaml`](ceremony-verify.sample.yaml) — the
-KP's cert path, expected `sharing_seq` and `n`/`t`, full KP cert roster, session
-id, guardian S3 config, and an optional gpg homedir.
+KP's cert path, expected `sharing_seq` and `n`/`t`, full KP cert roster, guardian
+S3 config, and an optional gpg homedir.
 
 ## provision
 

@@ -24,6 +24,7 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::ensure;
 use hashi_guardian::s3_client::GuardianS3Client;
+use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianPubKey;
@@ -57,20 +58,24 @@ use tempfile::NamedTempFile;
 use tracing::info;
 
 #[derive(Deserialize)]
-pub struct CeremonyRunConfig {
-    /// gRPC endpoint of the ceremony-mode guardian.
-    pub guardian_endpoint: String,
+pub struct CeremonyCommonConfig {
     /// Total number of shares. Must equal `kp_pgp_cert_paths.len()`.
     pub num_shares: usize,
     /// Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
     pub threshold: usize,
-    /// S3 config for the guardian's log bucket. Passed to `operator_init` so the
-    /// guardian can write its `init/` + `ceremony/` logs. Must have object-lock
-    /// enabled.
+    /// S3 config for the guardian's log bucket (object-lock enabled).
     pub guardian_s3: S3Config,
     /// Paths to each KP's armored OpenPGP public cert. Order matters: the cert
     /// at index `i` (0-based) is assigned share id `i + 1`.
     pub kp_pgp_cert_paths: Vec<PathBuf>,
+}
+
+#[derive(Deserialize)]
+pub struct CeremonyRunConfig {
+    #[serde(flatten)]
+    pub common: CeremonyCommonConfig,
+    /// gRPC endpoint of the ceremony-mode guardian.
+    pub guardian_endpoint: String,
 }
 
 impl CeremonyRunConfig {
@@ -84,29 +89,16 @@ impl CeremonyRunConfig {
 
 #[derive(Deserialize)]
 pub struct CeremonyVerifyConfig {
+    #[serde(flatten)]
+    pub common: CeremonyCommonConfig,
     /// Path to this KP's armored OpenPGP public cert (the one they exported and
     /// gave to the operator at `run` time). Used to derive the fingerprint that
     /// finds this KP's share in `shares/`, and to confirm the share's ciphertext
     /// is genuinely encrypted to this cert before decrypting.
     pub kp_pgp_cert_path: PathBuf,
-    /// Total number of shares expected for this ceremony.
-    pub num_shares: usize,
-    /// Reconstruction threshold expected for this ceremony.
-    pub threshold: usize,
-    /// Paths to all KP armored OpenPGP public certs from the ceremony. Used to
-    /// verify every encrypted share is addressed only to its labeled cert.
-    pub kp_pgp_cert_paths: Vec<PathBuf>,
-    /// Session id for the ceremony-mode guardian that wrote the expected logs.
-    /// Used to read this ceremony's exact `ceremony/` and `shares/` logs instead
-    /// of guessing from S3 listing order.
-    pub session_id: String,
     /// Expected secret-sharing sequence. Use 0 for genesis setup, or N+1 for a
     /// rotation from prior sequence N.
     pub sharing_seq: u64,
-    /// S3 config for the guardian's log bucket (object-lock enabled). Read to
-    /// fetch the session's attestation, `ceremony/` audit log, and `shares/`
-    /// recovery log.
-    pub guardian_s3: S3Config,
     /// Optional gpg homedir for the yubikey-backed agent. Defaults to gpg's
     /// default (`~/.gnupg`) when unset.
     pub gpg_homedir: Option<PathBuf>,
@@ -131,20 +123,25 @@ impl CeremonyVerifyConfig {
 /// `tracing` so the operator can follow exactly what is happening.
 pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
     info!(
-        num_shares = cfg.num_shares,
-        threshold = cfg.threshold,
-        cert_count = cfg.kp_pgp_cert_paths.len(),
+        num_shares = cfg.common.num_shares,
+        threshold = cfg.common.threshold,
+        cert_count = cfg.common.kp_pgp_cert_paths.len(),
         "running guardian key ceremony"
     );
 
     // 1. Validate config-level sharing params up front (also re-validated by
     //    SetupNewKeyRequest::new).
-    validate_sharing_config(cfg.num_shares, cfg.threshold, cfg.kp_pgp_cert_paths.len())?;
+    validate_sharing_config(
+        cfg.common.num_shares,
+        cfg.common.threshold,
+        cfg.common.kp_pgp_cert_paths.len(),
+    )?;
 
     // 2. Load + validate each KP's PGP cert.
-    let certs = load_kp_certs(&cfg.kp_pgp_cert_paths)?;
-    let setup_req = SetupNewKeyRequest::new(certs.clone(), cfg.num_shares, cfg.threshold)
-        .map_err(|e| anyhow!("build SetupNewKeyRequest: {e:?}"))?;
+    let certs = load_kp_certs(&cfg.common.kp_pgp_cert_paths)?;
+    let setup_req =
+        SetupNewKeyRequest::new(certs.clone(), cfg.common.num_shares, cfg.common.threshold)
+            .map_err(|e| anyhow!("build SetupNewKeyRequest: {e:?}"))?;
 
     // 3. Connect to the ceremony-mode guardian.
     info!(endpoint = %cfg.guardian_endpoint, "connecting to guardian");
@@ -155,12 +152,12 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
 
     // 4. operator_init (ceremony mode: S3 config only, no WithdrawModeConfig).
     info!(
-        bucket = cfg.guardian_s3.bucket_name(),
-        region = cfg.guardian_s3.region(),
+        bucket = cfg.common.guardian_s3.bucket_name(),
+        region = cfg.common.guardian_s3.region(),
         "calling OperatorInit (ceremony mode)"
     );
     let oi_req = operator_init_request_to_pb(OperatorInitRequest::new_ceremony_mode(
-        cfg.guardian_s3.clone(),
+        cfg.common.guardian_s3.clone(),
     ))
     .map_err(|e| anyhow!("encode OperatorInitRequest: {e:?}"))?;
     client
@@ -192,7 +189,7 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
         .map_err(|e| anyhow!("verify GuardianInfo signature (session={session_id}): {e:?}"))?;
     info!(session_id = %session_id, "guardian info signature verified; session pinned");
 
-    let guardian_client = GuardianS3Client::new_checked(&cfg.guardian_s3)
+    let guardian_client = GuardianS3Client::new_checked(&cfg.common.guardian_s3)
         .await
         .context("connect to guardian log bucket")?;
     let attested_signing_pub_key = guardian_client
@@ -205,7 +202,11 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
     info!(session_id = %session_id, "guardian S3 attestation matches gRPC signing key");
 
     // 6. setup_new_key.
-    info!(n = cfg.num_shares, t = cfg.threshold, "calling SetupNewKey");
+    info!(
+        n = cfg.common.num_shares,
+        t = cfg.common.threshold,
+        "calling SetupNewKey"
+    );
     let signed_resp_pb = client
         .setup_new_key(setup_new_key_request_to_pb(setup_req))
         .await
@@ -214,8 +215,8 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
     let signed_resp = GuardianSigned::<SetupNewKeyResponse>::try_from(signed_resp_pb)
         .map_err(|e| anyhow!("decode SignedSetupNewKeyResponse: {e:?}"))?;
     info!(
-        n = cfg.num_shares,
-        t = cfg.threshold,
+        n = cfg.common.num_shares,
+        t = cfg.common.threshold,
         encrypted_share_count = signed_resp.data.encrypted_shares.len(),
         "setup_new_key response received"
     );
@@ -226,7 +227,7 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
         .clone()
         .verify(&signing_pub_key)
         .map_err(|e| anyhow!("verify SetupNewKeyResponse signature: {e:?}"))?;
-    verify_response_shape(&response, cfg.num_shares)?;
+    verify_response_shape(&response, cfg.common.num_shares)?;
 
     // 8. Inspect each encrypted share's PGP recipients WITHOUT decrypting, and
     //    confirm every share is addressed only to its expected cert.
@@ -240,8 +241,8 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
         &session_id,
         sharing_seq,
         &signing_pub_key,
-        cfg.num_shares,
-        cfg.threshold,
+        cfg.common.num_shares,
+        cfg.common.threshold,
     )
     .await?;
     ensure!(
@@ -272,9 +273,13 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
 /// in-memory `Scalar`. `gpg --decrypt` streams its plaintext over a pipe — it is
 /// never given an `--output` path.
 pub async fn verify(cfg: CeremonyVerifyConfig) -> Result<()> {
-    validate_sharing_config(cfg.num_shares, cfg.threshold, cfg.kp_pgp_cert_paths.len())?;
+    validate_sharing_config(
+        cfg.common.num_shares,
+        cfg.common.threshold,
+        cfg.common.kp_pgp_cert_paths.len(),
+    )?;
 
-    let certs = load_kp_certs(&cfg.kp_pgp_cert_paths)?;
+    let certs = load_kp_certs(&cfg.common.kp_pgp_cert_paths)?;
 
     // Load this KP's cert. Its fingerprint finds our share in `shares/`, and
     // the cert itself lets us confirm the ciphertext is genuinely encrypted to
@@ -286,18 +291,30 @@ pub async fn verify(cfg: CeremonyVerifyConfig) -> Result<()> {
     let want_fp = kp_cert.fingerprint();
     info!(fingerprint = %want_fp, "verifying ceremony share");
 
-    // 1. Read the exact ceremony session requested by the KP.
-    let session_id = cfg.session_id;
+    // 1. Discover the latest ceremony session and ensure it is the sequence the
+    //    KP intended to verify.
     let sharing_seq = cfg.sharing_seq;
+    let mut reader = GuardianReader::new(&cfg.common.guardian_s3)
+        .await
+        .context("connect to guardian log bucket")?;
+    let (session_id, latest_instance) = reader
+        .read_latest_ceremony()
+        .await?
+        .ok_or_else(|| anyhow!("no ceremony logs found in guardian S3 bucket"))?;
+    ensure!(
+        latest_instance.sharing_seq() == sharing_seq,
+        "latest ceremony sharing_seq ({}) differs from expected ({sharing_seq})",
+        latest_instance.sharing_seq()
+    );
     info!(
         sharing_seq,
         session_id = %session_id,
-        "verifying requested ceremony session"
+        "discovered latest ceremony session"
     );
 
     // 2. Load the session's attested signing pubkey from the guardian log
     //    bucket (reads + verifies the attestation — TODO check C).
-    let guardian_client = GuardianS3Client::new_checked(&cfg.guardian_s3)
+    let guardian_client = GuardianS3Client::new_checked(&cfg.common.guardian_s3)
         .await
         .context("connect to guardian log bucket")?;
     let signing_pub_key = guardian_client
@@ -311,8 +328,8 @@ pub async fn verify(cfg: CeremonyVerifyConfig) -> Result<()> {
         &session_id,
         sharing_seq,
         &signing_pub_key,
-        cfg.num_shares,
-        cfg.threshold,
+        cfg.common.num_shares,
+        cfg.common.threshold,
     )
     .await?;
     verify_encrypted_share_recipients(&state.response, &certs)?;
@@ -345,31 +362,9 @@ pub async fn verify(cfg: CeremonyVerifyConfig) -> Result<()> {
         "found this KP's encrypted share"
     );
 
-    // 5. Defense-in-depth: confirm the ciphertext is actually encrypted to
-    //     this cert (parses the PGP recipients without decrypting). Catches a
-    //     mislabeled or substituted ciphertext before we touch the yubikey.
-    let recipients = pgp_message_recipients(&share.armored_ciphertext)
-        .with_context(|| format!("parse PGP recipients for share id {}", share.id.get()))?;
-    ensure!(
-        !recipients.is_empty(),
-        "share id {} has no PGP recipients",
-        share.id.get()
-    );
-    for handle in &recipients {
-        ensure!(
-            cert_owns_key_handle(&kp_cert, handle),
-            "share id {} (labeled {want_fp}) is encrypted to key {handle}, which is not \
-             in this KP's cert",
-            share.id.get()
-        );
-    }
-    info!(
-        recipient_count = recipients.len(),
-        "confirmed ciphertext is encrypted to this KP's cert"
-    );
     let share_id = share.id;
 
-    // 6. Decrypt the share with the yubikey via gpg. Only the CIPHERTEXT is
+    // 5. Decrypt the share with the yubikey via gpg. Only the CIPHERTEXT is
     //    written to the temp file; the decrypted bytes stream over gpg's stdout
     //    pipe into memory and never touch disk.
     let mut ciphertext_file = NamedTempFile::new().context("create temp file for ciphertext")?;
@@ -392,7 +387,7 @@ pub async fn verify(cfg: CeremonyVerifyConfig) -> Result<()> {
         .ok_or_else(|| anyhow!("decrypted share is not a valid secp256k1 scalar"))?;
     info!("decrypted share via yubikey (plaintext stayed in memory)");
 
-    // 7. Verify the decrypted share's commitment is in the set — proves the
+    // 6. Verify the decrypted share's commitment is in the set — proves the
     //    bytes we decrypted are a valid share of the guardian's BTC key.
     let reconstructed = Share {
         id: share_id,
@@ -408,7 +403,7 @@ pub async fn verify(cfg: CeremonyVerifyConfig) -> Result<()> {
         "decrypted share matches its commitment"
     );
 
-    // 8. Summary.
+    // 7. Summary.
     let expected_commitment = state
         .response
         .share_commitments
