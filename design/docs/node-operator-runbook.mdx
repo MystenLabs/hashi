@@ -629,7 +629,7 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 
 ### 7.1 How proposals work
 
-- Any committee member can create a proposal. Quorum is stake-weighted, and the required threshold depends on the proposal type: most actions need **2/3 of committee weight**, but package-version changes (Upgrade, EnableVersion, DisableVersion) require a **unanimous 100%**. See the threshold column in [7.2](#72-proposal-types).
+- Any committee member can create a proposal. Quorum is stake-weighted: most proposals require **2/3 of committee weight**, while an emergency pause uses a lower threshold (5%) so the committee can halt the protocol quickly (resuming again requires 2/3). See the threshold column in [7.2](#72-proposal-types).
 - Votes can be added/removed before execution. Once quorum is reached, any committee member can execute.
 - The `--execute` flag on `vote` auto-executes if your vote reaches quorum (except for Upgrade proposals).
 - Proposals carry optional `-m key=value` metadata for human context.
@@ -642,11 +642,14 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 |------|-----------|---------|-----------|
 | **UpdateConfig** | 2/3 | Change protocol parameters | `key` and type-prefixed `value` |
 | **UpdateMpcConfig** | 2/3 | Change MPC threshold/faulty/delta | `--threshold-bps`, `--max-faulty-bps`, `--weight-reduction-allowed-delta` |
-| **Upgrade** | 100% (unanimous) | Publish a new package version | `--package-path` or `--digest` |
-| **EnableVersion** | 100% (unanimous) | Re-enable a disabled package version | `version` number |
-| **DisableVersion** | 100% (unanimous) | Disable a package version | `version` number (cannot disable active version) |
+| **Upgrade** | 2/3 | Publish a new package version | `--package-path` or `--digest` |
+| **EnableVersion** | 2/3 | Re-enable a disabled package version | `version` number |
+| **DisableVersion** | 2/3 | Disable a package version | `version` number (cannot disable active version) |
 | **AbortReconfig** | 2/3 | Abort a stuck reconfiguration | `--epoch` of pending reconfig |
 | **UpdateGuardian** | 2/3 | Change guardian endpoint and key | `--url`, `--public-key` |
+| **EmergencyPause** | 5% to pause, 2/3 to unpause | Quickly pause or resume the protocol in an emergency | n/a |
+
+> EmergencyPause uses a deliberately low threshold so a small fraction of committee weight can halt the protocol fast; resuming requires the normal 2/3. It is not part of the standard `proposal create` CLI.
 
 **Configurable protocol parameters:**
 
