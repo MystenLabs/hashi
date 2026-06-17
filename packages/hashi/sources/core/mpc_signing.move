@@ -45,7 +45,7 @@ const EAllocationMismatch: vector<u8> = b"allocated presig count does not match 
 const ENotComplete: vector<u8> = b"signing batch is not fully signed";
 
 /// Per-input signing slot.
-public enum InputSig has drop, store {
+public enum MpcSig has drop, store {
     /// Awaiting signature; holds the presignature index this input will
     /// consume, valid within the owning batch's `epoch`.
     Pending(u64),
@@ -58,7 +58,7 @@ public enum InputSig has drop, store {
 /// `WithdrawalTransaction`.
 public struct SigningBatch has store {
     /// One slot per input; same length/order as the withdrawal's inputs.
-    signatures: vector<InputSig>,
+    signatures: vector<MpcSig>,
     /// Epoch the `Pending` presignature indices belong to.
     epoch: u64,
 }
@@ -77,7 +77,7 @@ public(package) fun new(num_inputs: u64, presig_base: u64, epoch: u64): SigningB
     let mut signatures = vector[];
     let mut i = 0;
     while (i < num_inputs) {
-        signatures.push_back(InputSig::Pending(presig_base + i));
+        signatures.push_back(MpcSig::Pending(presig_base + i));
         i = i + 1;
     };
     SigningBatch { signatures, epoch }
@@ -110,7 +110,7 @@ public(package) fun record(
         let i = *indices.borrow(k);
         assert!(i < len, EIndexOutOfRange);
         if (self.signatures.borrow(i).is_pending()) {
-            *self.signatures.borrow_mut(i) = InputSig::Signed(*sigs.borrow(k));
+            *self.signatures.borrow_mut(i) = MpcSig::Signed(*sigs.borrow(k));
         };
         k = k + 1;
     };
@@ -138,7 +138,7 @@ public(package) fun reallocate(
     let mut j = 0;
     while (i < len) {
         if (self.signatures.borrow(i).is_pending()) {
-            *self.signatures.borrow_mut(i) = InputSig::Pending(new_base + j);
+            *self.signatures.borrow_mut(i) = MpcSig::Pending(new_base + j);
             j = j + 1;
         };
         i = i + 1;
@@ -194,8 +194,8 @@ public(package) fun is_signed(self: &SigningBatch, i: u64): bool {
 public(package) fun pending_index(self: &SigningBatch, i: u64): Option<u64> {
     assert!(i < self.signatures.length(), EIndexOutOfRange);
     match (self.signatures.borrow(i)) {
-        InputSig::Pending(idx) => option::some(*idx),
-        InputSig::Signed(_) => option::none(),
+        MpcSig::Pending(idx) => option::some(*idx),
+        MpcSig::Signed(_) => option::none(),
     }
 }
 
@@ -208,8 +208,8 @@ public(package) fun to_signatures(self: &SigningBatch): vector<vector<u8>> {
     let mut i = 0;
     while (i < len) {
         match (self.signatures.borrow(i)) {
-            InputSig::Signed(sig) => out.push_back(*sig),
-            InputSig::Pending(_) => abort ENotComplete,
+            MpcSig::Signed(sig) => out.push_back(*sig),
+            MpcSig::Pending(_) => abort ENotComplete,
         };
         i = i + 1;
     };
@@ -218,10 +218,10 @@ public(package) fun to_signatures(self: &SigningBatch): vector<vector<u8>> {
 
 // ======== Internal ========
 
-fun is_pending(self: &InputSig): bool {
+fun is_pending(self: &MpcSig): bool {
     match (self) {
-        InputSig::Pending(_) => true,
-        InputSig::Signed(_) => false,
+        MpcSig::Pending(_) => true,
+        MpcSig::Signed(_) => false,
     }
 }
 

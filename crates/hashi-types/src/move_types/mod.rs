@@ -306,10 +306,10 @@ pub struct CommittedRequestInfo {
     pub bitcoin_address: Vec<u8>,
 }
 
-/// Rust version of the Move hashi::mpc_signing::InputSig enum. Variant order
+/// Rust version of the Move hashi::mpc_signing::MpcSig enum. Variant order
 /// MUST match Move (Pending = 0, Signed = 1) for BCS.
 #[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
-pub enum InputSig {
+pub enum MpcSig {
     /// Awaiting signature; holds the presignature index (valid in the batch's epoch).
     Pending(u64),
     /// Completed per-input MPC Schnorr signature bytes.
@@ -320,7 +320,7 @@ pub enum InputSig {
 /// MUST match Move exactly (BCS-decoded, positional).
 #[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct SigningBatch {
-    pub signatures: Vec<InputSig>,
+    pub signatures: Vec<MpcSig>,
     /// Epoch the `Pending` presig indices belong to.
     pub epoch: u64,
 }
@@ -333,13 +333,13 @@ impl SigningBatch {
     pub fn is_complete(&self) -> bool {
         self.signatures
             .iter()
-            .all(|s| matches!(s, InputSig::Signed(_)))
+            .all(|s| matches!(s, MpcSig::Signed(_)))
     }
 
     pub fn pending_count(&self) -> usize {
         self.signatures
             .iter()
-            .filter(|s| matches!(s, InputSig::Pending(_)))
+            .filter(|s| matches!(s, MpcSig::Pending(_)))
             .count()
     }
 
@@ -348,7 +348,7 @@ impl SigningBatch {
         self.signatures
             .iter()
             .enumerate()
-            .filter_map(|(i, s)| matches!(s, InputSig::Pending(_)).then_some(i as u64))
+            .filter_map(|(i, s)| matches!(s, MpcSig::Pending(_)).then_some(i as u64))
             .collect()
     }
 
@@ -356,7 +356,7 @@ impl SigningBatch {
     /// or out of range.
     pub fn pending_index(&self, i: usize) -> Option<u64> {
         match self.signatures.get(i) {
-            Some(InputSig::Pending(idx)) => Some(*idx),
+            Some(MpcSig::Pending(idx)) => Some(*idx),
             _ => None,
         }
     }
@@ -366,8 +366,8 @@ impl SigningBatch {
         self.signatures
             .iter()
             .map(|s| match s {
-                InputSig::Signed(b) => Some(b.clone()),
-                InputSig::Pending(_) => None,
+                MpcSig::Signed(b) => Some(b.clone()),
+                MpcSig::Pending(_) => None,
             })
             .collect()
     }

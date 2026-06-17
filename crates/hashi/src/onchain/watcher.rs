@@ -9,8 +9,8 @@ use futures::StreamExt;
 use hashi_types::move_types::AbortReconfig;
 use hashi_types::move_types::BurnEvent;
 use hashi_types::move_types::HashiEvent;
-use hashi_types::move_types::InputSig;
 use hashi_types::move_types::MintEvent;
+use hashi_types::move_types::MpcSig;
 use sui_rpc::Client;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
@@ -474,7 +474,7 @@ async fn handle_events(
                                 .signatures
                                 .iter()
                                 .cloned()
-                                .map(InputSig::Signed)
+                                .map(MpcSig::Signed)
                                 .collect();
                             txn.guardian_signatures = Some(event.guardian_signatures.clone());
                             let amount_sats = withdrawal_limiter_consumption_amount(txn);

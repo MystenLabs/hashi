@@ -1635,7 +1635,7 @@ mod tests {
             randomness: vec![],
             signing: hashi_types::move_types::SigningBatch {
                 signatures: (0..num_inputs)
-                    .map(hashi_types::move_types::InputSig::Pending)
+                    .map(hashi_types::move_types::MpcSig::Pending)
                     .collect(),
                 epoch: 0,
             },
