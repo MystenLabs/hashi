@@ -165,10 +165,23 @@ impl GuardianReader {
     ) -> anyhow::Result<Vec<KPEncryptedShare>> {
         let key = format!("{}/{:020}-{}.json", S3_DIR_SHARES, sharing_seq, session_id);
         let record: LogRecord = self.s3.get_object_no_lock(&key).await?;
+        if record.session_id != session_id {
+            anyhow::bail!(
+                "session id mismatch at {key}: expected {session_id}, got {}",
+                record.session_id
+            );
+        }
         let record = self.pubkey_cache.verify_record(&self.s3, record).await?;
         let LogMessage::Shares(msg) = record.message else {
             anyhow::bail!("expected a shares log at {key}");
         };
+        if msg.sharing_seq != sharing_seq {
+            anyhow::bail!(
+                "sharing_seq mismatch: {} != {}",
+                msg.sharing_seq,
+                sharing_seq
+            );
+        }
         Ok(msg.encrypted_shares)
     }
 
