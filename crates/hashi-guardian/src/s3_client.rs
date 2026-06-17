@@ -503,7 +503,11 @@ impl GuardianS3Client {
         })
     }
 
-    /// Caller must ensure that the object has unexpired compliance-mode object lock. (TODO: Investigate what this means)
+    /// Reads an immutable-log object, asserting its Compliance lock metadata is
+    /// present but not that it is unexpired.
+    /// TODO: also reject when `retain_until <= now` — once the lock lapses the
+    /// version check below no longer detects tampering (see
+    /// `ensure_no_duplicates_or_deletions`).
     pub async fn get_log_record(&self, key: &str) -> GuardianResult<LogRecord> {
         let keys = self.ensure_no_duplicates_or_deletions(key).await?;
         if keys.len() != 1 || keys[0] != key {
