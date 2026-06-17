@@ -1,4 +1,5 @@
-# Sample configuration for the `ceremony verify` command (run by each KP).
+# Sample configuration for the `ceremony verify` command (run by each KP for
+# setup or rotation shares).
 #
 # Run with:
 #   cargo run -p hashi-guardian-init -- ceremony verify --config ceremony-verify.sample.yaml
@@ -10,8 +11,29 @@
 # decrypting with the yubikey.
 kp_pgp_cert_path: /path/to/kp3.asc
 
-# Session id printed by `ceremony run`.
-session_id: "<session-id-from-ceremony-run>"
+# Expected secret-sharing parameters from the ceremony plan.
+num_shares: 5
+threshold: 3
+
+# Paths to every KP's armored OpenPGP public cert from the expected ceremony
+# roster. Each cert must appear exactly once. verify uses this full roster to
+# confirm every encrypted share is encrypted only to its labeled KP cert.
+kp_pgp_cert_paths:
+  - /path/to/kp1.asc
+  - /path/to/kp2.asc
+  - /path/to/kp3.asc
+  - /path/to/kp4.asc
+  - /path/to/kp5.asc
+
+# Session id for the ceremony-mode guardian that wrote the expected logs.
+session_id: "<ceremony-session-id>"
+
+# Expected secret-sharing sequence. Use 0 for genesis setup, or N+1 for a
+# rotation from prior sequence N.
+sharing_seq: 0
+
+# PCR attestation verification is not configured here yet; the underlying
+# attestation check is pending the attestation PR and is currently a no-op.
 
 # S3 config for the guardian's log bucket (object-lock enabled). Read to fetch
 # the session's attestation, ceremony/ audit log, and shares/ recovery log.

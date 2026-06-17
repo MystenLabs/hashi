@@ -169,6 +169,9 @@ where
 /// parsed WITHOUT decrypting. One entry per recipient encryption key. Use to
 /// confirm a ciphertext is addressed to the expected cert without holding its
 /// secret key (e.g. a yubikey-bound key, which can't be inspected in memory).
+///
+/// Rejects anonymous/hidden recipients: if the recipient key handle is omitted,
+/// callers cannot prove the ciphertext is addressed only to the expected cert.
 pub fn pgp_message_recipients(armored: &str) -> Result<Vec<openpgp::KeyHandle>> {
     use openpgp::parse::PacketParser;
     use openpgp::parse::PacketParserResult;
@@ -183,9 +186,10 @@ pub fn pgp_message_recipients(armored: &str) -> Result<Vec<openpgp::KeyHandle>> 
         // encrypted message the PKESKs sit at the top level and the SEIP body
         // is opaque (still ciphertext), so only the recipients are visible.
         let (packet, next_ppr) = pp.recurse().context("parsing OpenPGP packet stream")?;
-        if let openpgp::Packet::PKESK(pkesk) = packet
-            && let Some(handle) = pkesk.recipient()
-        {
+        if let openpgp::Packet::PKESK(pkesk) = packet {
+            let handle = pkesk
+                .recipient()
+                .ok_or_else(|| anyhow::anyhow!("OpenPGP message has an anonymous recipient"))?;
             handles.push(handle);
         }
         ppr = next_ppr;

@@ -1,9 +1,10 @@
-# Sample configuration for the `ceremony run` command.
+# Sample configuration for the genesis `ceremony run` command.
 #
 # Run with:
 #   cargo run -p hashi-guardian-init -- ceremony run --config ceremony-run.sample.yaml
 
-# gRPC endpoint of the ceremony-mode guardian (CEREMONY_MODE=true).
+# gRPC endpoint of the ceremony-mode guardian (CEREMONY_MODE=true). This command
+# runs setup_new_key and always creates sharing_seq 0.
 guardian_endpoint: "http://localhost:3000"
 
 # Secret-sharing parameters. `num_shares` MUST equal `kp_pgp_cert_paths.len()`.
@@ -11,7 +12,8 @@ num_shares: 5
 threshold: 3
 
 # S3 config for the guardian's log bucket. Passed to operator_init so the
-# guardian can write its init/, ceremony/, and shares/ logs. Must have object-lock enabled.
+# guardian can write its init/, ceremony/, and shares/ logs. Must have
+# object-lock enabled.
 guardian_s3:
   access_key: "AKIA..."
   secret_key: "..."
