@@ -47,13 +47,13 @@ enum Command {
 
 #[derive(Subcommand)]
 enum CeremonyCommand {
-    /// Run the one-time production guardian key ceremony and upload encrypted KP shares.
+    /// Run the one-time production guardian key ceremony.
     Run {
         /// Path to ceremony-run YAML config file.
         #[arg(long)]
         config: PathBuf,
     },
-    /// Verify this KP can fetch and decrypt its encrypted ceremony share.
+    /// Verify this KP can fetch and decrypt its encrypted ceremony share from guardian S3.
     Verify {
         /// Path to ceremony-verify YAML config file.
         #[arg(long)]
