@@ -32,6 +32,15 @@ const sidebars = {
         'withdraw',
       ],
     },
+    {
+      type: 'category',
+      label: 'Operators',
+      collapsed: false,
+      items: [
+        'node-operator-runbook',
+        'node-backup',
+      ],
+    },
   ],
 };
 
