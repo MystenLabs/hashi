@@ -51,10 +51,7 @@ public(package) fun create<T: store>(
     // The caller must be the committee member `validator_address`, or the
     // operator key it has delegated to. The vote is recorded under
     // `validator_address` so quorum weight is computed correctly.
-    assert!(
-        hashi.committee_set().member_authorized(validator_address, ctx.sender()),
-        EUnauthorizedCaller,
-    );
+    assert!(hashi.committee_set().member_authorized(validator_address, ctx), EUnauthorizedCaller);
 
     let votes = vector[validator_address];
     let timestamp_ms = clock.timestamp_ms();
@@ -111,10 +108,7 @@ public fun vote<T: store>(
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
-    assert!(
-        hashi.committee_set().member_authorized(validator_address, ctx.sender()),
-        EUnauthorizedCaller,
-    );
+    assert!(hashi.committee_set().member_authorized(validator_address, ctx), EUnauthorizedCaller);
 
     let proposal: &mut Proposal<T> = hashi.proposals_mut().active_mut().borrow_mut(proposal_id);
 
@@ -135,10 +129,7 @@ public fun remove_vote<T: store>(
     proposal_id: ID,
     ctx: &mut TxContext,
 ) {
-    assert!(
-        hashi.committee_set().member_authorized(validator_address, ctx.sender()),
-        EUnauthorizedCaller,
-    );
+    assert!(hashi.committee_set().member_authorized(validator_address, ctx), EUnauthorizedCaller);
 
     let proposal: &mut Proposal<T> = hashi.proposals_mut().active_mut().borrow_mut(proposal_id);
     let index = proposal
