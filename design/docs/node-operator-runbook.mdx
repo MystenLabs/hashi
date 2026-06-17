@@ -8,7 +8,7 @@ This runbook is for **Sui validators joining the Hashi committee**. It covers pr
 
 Hashi is a Sui-native **asset orchestration protocol** that secures and manages native BTC for use on Sui through threshold cryptography. Committee members run the `hashi` service alongside their Sui validator to participate in MPC threshold Schnorr signing for Bitcoin custody. The committee collectively manages a Bitcoin master key, and no single validator ever holds the full key.
 
-This is a **living document**. Hashi launches on Testnet first. This document fills Mainnet parameters into the [Networks](#networks) table below as the team finalizes them. Wherever the runbook shows a network-specific value, use the column for your **target network** (the worked examples use Testnet).
+This is a **living document**. Hashi launches on Testnet first. This document adds Mainnet parameters to the [Networks](#networks) table below as the team finalizes them. Wherever the runbook shows a network-specific value, use the column for your **target network** (the worked examples use Testnet).
 
 This document assumes familiarity with Sui validator operations, Linux system administration, and basic Bitcoin infrastructure.
 
@@ -46,8 +46,8 @@ The requirements for running a Hashi node are **low** compared with those of a S
 > **Sizing notes** (preliminary, derived from June test runs and pending revalidation after recent fixes):
 >
 > - **CPU**: 3 cores for headroom, mainly the parallel-signing burst on the leader.
-> - **Memory**: 2 GB is comfortable headroom; steady-state is well under this (a one-off ~3.7 GB spike was a since-identified bug, not normal load).
-> - **Network**: ~66 Mbps ingress / ~40 Mbps egress with the default MPC `(t, f)` parameters; a higher-throughput ("hybrid") configuration likely needs considerably more, so provision a **1 Gbps** link for headroom. Bandwidth tracks MPC protocol rounds (DKG, key rotation, presigning, signing), not individual deposit/withdrawal transactions; egress can be a meaningful cost, and this is actively being reduced.
+> - **Memory**: 2 GB is comfortable headroom; steady-state is well under this (a one-off ~3.7 GB spike came from a since-identified bug, not normal load).
+> - **Network**: ~66 Mbps ingress / ~40 Mbps egress with the default MPC `(t, f)` parameters; a higher-throughput ("hybrid") configuration likely needs considerably more, so provision a **1 Gbps** link for headroom. Bandwidth tracks MPC protocol rounds (DKG, key rotation, presigning, signing), not individual deposit/withdrawal transactions; egress can be a meaningful cost, and the team is actively reducing this.
 > - **Storage**: peaks around 1 GB; 10 GB is generous but fine.
 >
 > These figures reflect Testnet observations and might change for Mainnet.
@@ -62,18 +62,23 @@ A Hashi node depends on two external services that you provide:
   - `server=1` plus RPC auth
 - **Sui fullnode with gRPC enabled**. As a Sui validator you already operate one; ensure its gRPC v2 API is enabled.
 
+> Run both dependencies on separate infrastructure from the Hashi node, not colocated on the same host, so a fault or compromise in one does not cascade to the others.
+
 See [1.4](#14-sui-rpc) and [1.5](#15-bitcoin-node) for details.
 
 ### 1.3 Software dependencies
 
-**Hashi binary.** Build from source or use the container image:
+**Hashi binary.** Build the Linux x86-64 binary with the deterministic Docker build. It compiles in a pinned, reproducible environment, extracts the binary, and writes its sha256:
 
 ```bash
-# Build from source (requires the repo's Rust toolchain)
-cargo build --release -p hashi
+# Reproducible build (requires Docker); writes out/hashi and out/hashi.sha256
+bash docker/hashi/build.sh --no-cache
+```
 
-# Or build the container image
-docker build -f docker/hashi/Containerfile -t hashi .
+The build pins its base images, sets `SOURCE_DATE_EPOCH=0`, links statically, and compiles `--frozen` with networking disabled, so it is bit-for-bit reproducible. CI confirms the same binary hash across runners. Each release publishes the sha256 of these deterministic binaries, so you can reproduce the build yourself and confirm your binary matches the published checksum:
+
+```bash
+sha256sum -c out/hashi.sha256
 ```
 
 **Backup tooling.** Node backups are **OpenPGP** (Sequoia). To generate a backup key and decrypt backups you need an OpenPGP toolchain:
@@ -85,12 +90,12 @@ See the [Hashi Node Backups](node-backup) guide for the full key-generation proc
 
 ### 1.4 Sui RPC
 
-Hashi connects to Sui over the **gRPC v2 API (gRPC over HTTP/2)**, **not** JSON-RPC. The fullnode must expose the `sui.rpc.v2` services, including the **streaming `SubscriptionService`** (`subscribe_checkpoints`) the node uses to follow the chain. A fullnode serving only JSON-RPC does not work.
+Hashi connects to Sui over the **gRPC v2 API (gRPC over HTTP/2)**, **not** JSON-RPC. The fullnode must expose the `sui.rpc.v2` services, including the **streaming `SubscriptionService`** (`subscribe_checkpoints`) the node uses to follow the chain. A fullnode that serves only JSON-RPC does not work.
 
 | Setup | `sui-rpc` value | Transport |
 |-------|----------------|-----------|
 | Public Sui Foundation fullnode | `https://fullnode.testnet.sui.io:443` | gRPC over TLS (443) |
-| Self-hosted fullnode (co-located) | `http://127.0.0.1:9000` | plaintext gRPC/h2c (default 9000) |
+| Self-hosted fullnode (separate host) | `http://<fullnode-host>:9000` | plaintext gRPC/h2c (default 9000) |
 
 As a Sui validator you already run a fullnode, so point Hashi at it and confirm gRPC is enabled in the fullnode config. The node verifies the endpoint's reported chain ID matches `sui-chain-id` at startup and refuses to start on mismatch.
 
@@ -163,24 +168,26 @@ bitcoin-cli -signet getnetworkinfo                        # NODE_COMPACT_FILTERS
 
 | Key | Algorithm | Provisioning | Purpose |
 |-----|-----------|-------------|---------|
-| **Sui validator account key** | Ed25519 | Existing (Sui validator) | Authorizes initial Hashi **registration**. See [2.3](#23-registration-must-be-signed-by-the-account-key). |
-| **TLS private key** | Ed25519 | Reuse Sui validator TLS key | Peer-to-peer authentication through a self-signed cert. Public key registered onchain. |
+| **Sui validator account key** | Any Sui scheme (Ed25519, multisig, secp256k1, zkLogin) | Existing (Sui validator) | Authorizes initial Hashi **registration**. See [2.3](#23-registration-must-be-signed-by-the-account-key). |
+| **TLS private key** | Ed25519 | Generate fresh (dedicated) | Peer-to-peer authentication through a self-signed cert. The node registers the public key onchain. |
 | **Operator private key** | Ed25519 | Generate fresh | Signs the node's day-to-day Sui transactions (cert submission, governance, metadata). See [2.4](#24-operator-key-day-to-day-signing). |
 | **BLS12-381 key** | BLS12-381 | Auto-generated at startup | MPC protocol participation. Stored in local DB. |
 | **Encryption key** | ECIES | Auto-generated at startup | Encrypts MPC share exchange between validators. Stored in local DB. |
 | **Backup key** | OpenPGP (Sequoia) | Operator-generated (file or YubiKey) | Encrypts automatic epoch backups. Strongly recommended. |
 
-### 2.2 TLS key (reuse from Sui validator)
+### 2.2 TLS key (dedicated)
 
-Reuse the Ed25519 TLS key from your Sui validator infrastructure. This key authenticates your Hashi node to other committee members; the corresponding public key is registered onchain during registration. Set `tls-private-key` to a PKCS#8 PEM/DER file path or an inline PEM string.
+Generate a fresh Ed25519 TLS key dedicated to your Hashi node, separate from your Sui validator's TLS key, for clean separation of concerns. This key authenticates your Hashi node to other committee members, and the node registers the corresponding public key onchain during registration. Set `tls-private-key` to a PKCS#8 PEM/DER file path or an inline PEM string.
 
 ```toml
 tls-private-key = "/path/to/tls-private-key.pem"
 ```
 
+> A planned enhancement is for the node to generate its TLS key on startup, removing this manual step.
+
 ### 2.3 Registration must be signed by the account key
 
-Your **Sui validator account key must sign and broadcast the initial registration transaction.** Onchain, `validator::register` sets the member's `validator_address = ctx.sender()` and asserts the sender is in the Sui active validator set, so no operator key can substitute for this first transaction.
+Your **Sui validator account key must sign and broadcast the initial registration transaction.** Onchain, `validator::register` sets the member's `validator_address = ctx.sender()` and asserts the sender is in the Sui active validator set, so no operator key can substitute for this first transaction. Registration places no constraint on the account's key scheme (Ed25519, multisig, secp256k1, or zkLogin all work); it requires only that the sender is an active Sui validator.
 
 Because that key is typically in cold storage or a hardware wallet, use the **offline signing flow**: `hashi register --print-only` builds the unsigned transaction and prints it as base64 **without needing any private key**. Sign it externally with the account key and broadcast.
 
@@ -431,7 +438,7 @@ Not exposed externally by default. Scrape from localhost or through a reverse pr
 ### 4.4 TLS
 
 - Hashi uses **TLS 1.3 exclusively** with Ed25519 self-signed certificates.
-- The TLS public key is registered onchain, so peers verify certificates against the onchain registry, with no certificate authority needed.
+- The TLS public key is registered onchain, so peers verify certificates against the onchain registry, with no certificate authority requirement.
 - The node auto-generates certificates from the `tls-private-key` at startup.
 
 ---
@@ -475,7 +482,7 @@ The node starts the gRPC+TLS server, connects to Sui (gRPC) and Bitcoin (RPC + P
 
 ### 5.5 Step 4: DKG (automatic)
 
-Once **95% of total Sui validator stake** has registered with Hashi, the first node to detect this submits `start_reconfig`. All registered validators then run DKG concurrently. **No operator action needed**; monitor logs for `start_reconfig`, `DKG started`, `DKG completed`. DKG times out after 600 s per attempt and retries up to 3 times.
+Once **95% of total Sui validator stake** has registered with Hashi, the first node to detect this submits `start_reconfig`. All registered validators then run DKG concurrently. **No operator action needed**; monitor logs for `start_reconfig`, `DKG started`, `DKG completed`. DKG times out after 600 s per attempt and retries until it succeeds or a newer epoch supersedes it.
 
 ### 5.6 Step 5: end reconfig (automatic)
 
@@ -622,7 +629,7 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 
 ### 7.1 How proposals work
 
-- Any committee member can create a proposal; proposals require **2/3 of committee weight** (stake-weighted) to reach quorum.
+- Any committee member can create a proposal. Quorum is stake-weighted, and the required threshold depends on the proposal type: most actions need **2/3 of committee weight**, but package-version changes (Upgrade, EnableVersion, DisableVersion) require a **unanimous 100%**. See the threshold column in [7.2](#72-proposal-types).
 - Votes can be added/removed before execution. Once quorum is reached, any committee member can execute.
 - The `--execute` flag on `vote` auto-executes if your vote reaches quorum (except for Upgrade proposals).
 - Proposals carry optional `-m key=value` metadata for human context.
@@ -631,15 +638,15 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 
 ### 7.2 Proposal types
 
-| Type | Purpose | Parameters |
-|------|---------|-----------|
-| **UpdateConfig** | Change protocol parameters | `key` and type-prefixed `value` |
-| **UpdateMpcConfig** | Change MPC threshold/faulty/delta | `--threshold-bps`, `--max-faulty-bps`, `--weight-reduction-allowed-delta` |
-| **Upgrade** | Publish a new package version | `--package-path` or `--digest` |
-| **EnableVersion** | Re-enable a disabled package version | `version` number |
-| **DisableVersion** | Disable a package version | `version` number (cannot disable active version) |
-| **AbortReconfig** | Abort a stuck reconfiguration | `--epoch` of pending reconfig |
-| **UpdateGuardian** | Change guardian endpoint and key | `--url`, `--public-key` |
+| Type | Threshold | Purpose | Parameters |
+|------|-----------|---------|-----------|
+| **UpdateConfig** | 2/3 | Change protocol parameters | `key` and type-prefixed `value` |
+| **UpdateMpcConfig** | 2/3 | Change MPC threshold/faulty/delta | `--threshold-bps`, `--max-faulty-bps`, `--weight-reduction-allowed-delta` |
+| **Upgrade** | 100% (unanimous) | Publish a new package version | `--package-path` or `--digest` |
+| **EnableVersion** | 100% (unanimous) | Re-enable a disabled package version | `version` number |
+| **DisableVersion** | 100% (unanimous) | Disable a package version | `version` number (cannot disable active version) |
+| **AbortReconfig** | 2/3 | Abort a stuck reconfiguration | `--epoch` of pending reconfig |
+| **UpdateGuardian** | 2/3 | Change guardian endpoint and key | `--url`, `--public-key` |
 
 **Configurable protocol parameters:**
 
@@ -647,7 +654,7 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 |-----|------|---------|-------------|
 | `bitcoin_deposit_minimum` | u64 | 30,000 sats | Minimum deposit amount (floor: 546 sats) |
 | `bitcoin_withdrawal_minimum` | u64 | 30,000 sats | Minimum withdrawal amount (floor: 547 sats) |
-| `bitcoin_confirmation_threshold` | u64 | 6 blocks | Confirmations required before deposit is final |
+| `bitcoin_confirmation_threshold` | u64 | 6 blocks | Confirmations required before the deposit becomes final |
 | `bitcoin_deposit_time_delay_ms` | u64 | **600,000 ms (10 min)** | Delay between deposit approval and confirmation (fraud window) |
 | `withdrawal_cancellation_cooldown_ms` | u64 | 3,600,000 ms (1 hr) | Cooldown before a withdrawal can be cancelled |
 | `paused` | bool | false | Pause all deposit/withdrawal processing |
@@ -735,7 +742,7 @@ curl -s http://localhost:9180/metrics | grep hashi_
 | `hashi_mpc_sign_failures_total` increasing | Warning | Investigate MPC protocol errors in logs. |
 | `up == 0` (Prometheus target down) | Critical | Node is down. Restart and check logs. |
 
-> **Coming soon:** A metrics **push** service for centralized collection. Details are added here when available.
+> **Coming soon:** A metrics **push** service for centralized collection. Details follow once it lands.
 
 ---
 
