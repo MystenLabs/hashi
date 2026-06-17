@@ -149,6 +149,8 @@ message GuardianEncryptedShare {
 message KPEncryptedShare {
   GuardianShareID id = 1;
   optional string armored_ciphertext = 2;
+  // Fingerprint of the recipient PGP cert this share is encrypted to.
+  optional string recipient_fingerprint = 3;
 }
 
 // Commitment to a secret share.

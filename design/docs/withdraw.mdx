@@ -161,12 +161,6 @@ Signing is a two-step process matching the 2-of-2 Taproot script (see
 Both signatures are combined into the taproot script-path witness for each
 input.
 
-:::info
-
-On `devnet`, no guardian is configured. Only the MPC signature is used.
-
-:::
-
 The signed transaction is committed onchain by calling
 `hashi::withdraw::sign_withdrawal`:
 

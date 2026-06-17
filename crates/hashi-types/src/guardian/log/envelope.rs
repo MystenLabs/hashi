@@ -9,6 +9,7 @@ use super::S3_OBJECT_LOCK_DURATION_CEREMONY;
 use super::S3_OBJECT_LOCK_DURATION_COMMITTEE_UPDATE;
 use super::S3_OBJECT_LOCK_DURATION_HEARTBEAT;
 use super::S3_OBJECT_LOCK_DURATION_INIT;
+use super::S3_OBJECT_LOCK_DURATION_SHARES;
 use super::S3_OBJECT_LOCK_DURATION_WITHDRAW;
 use super::message::LogMessage;
 use crate::guardian::GuardianError::InvalidInputs;
@@ -70,6 +71,7 @@ impl LogRecord {
             LogMessage::Heartbeat { .. } => S3_OBJECT_LOCK_DURATION_HEARTBEAT,
             LogMessage::Withdrawal(..) => S3_OBJECT_LOCK_DURATION_WITHDRAW,
             LogMessage::Ceremony(..) => S3_OBJECT_LOCK_DURATION_CEREMONY,
+            LogMessage::Shares(..) => S3_OBJECT_LOCK_DURATION_SHARES,
             LogMessage::CommitteeUpdate(..) => S3_OBJECT_LOCK_DURATION_COMMITTEE_UPDATE,
         }
     }
@@ -198,6 +200,29 @@ mod tests {
             log.object_key(),
             "heartbeat/2023/11/14/22/session-b-00000000000000000042.json"
         );
+    }
+
+    #[test]
+    fn object_key_and_lock_for_shares() {
+        use crate::guardian::SharesLogMessage;
+
+        let session_id = "session-d".to_string();
+        let signing_key = GuardianSignKeyPair::from([10u8; 32]);
+        let mut log = LogRecord::new(
+            session_id,
+            LogMessage::Shares(Box::new(SharesLogMessage {
+                sharing_seq: 7,
+                encrypted_shares: vec![],
+            })),
+            &signing_key,
+        );
+        set_timestamp(&mut log, 1_700_000_000_000);
+
+        assert_eq!(
+            log.object_key(),
+            "shares/00000000000000000007-session-d.json"
+        );
+        assert_eq!(log.object_lock_duration(), S3_OBJECT_LOCK_DURATION_SHARES);
     }
 
     #[test]

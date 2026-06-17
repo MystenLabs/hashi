@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use kyoto::FeeRate;
-use kyoto::HeaderCheckpoint;
+use kyoto::HashCheckpoint;
 use kyoto::Warning;
 use lru::LruCache;
 use rand::Rng;
@@ -68,7 +68,7 @@ struct CachedDepositEntry {
 }
 
 struct DepositLookupCache {
-    tx_blocks: LruCache<bitcoin::Txid, HeaderCheckpoint>,
+    tx_blocks: LruCache<bitcoin::Txid, HashCheckpoint>,
     block_heights: LruCache<bitcoin::BlockHash, u32>,
     transactions: LruCache<bitcoin::Txid, Arc<bitcoin::Transaction>>,
 }
@@ -118,13 +118,13 @@ impl SharedDepositLookupCache {
         self.lock().clear();
     }
 
-    fn get_tx_block(&self, txid: &bitcoin::Txid) -> Option<HeaderCheckpoint> {
+    fn get_tx_block(&self, txid: &bitcoin::Txid) -> Option<HashCheckpoint> {
         let result = self.lock().tx_blocks.get(txid).copied();
         self.record_request("tx_block", result.is_some());
         result
     }
 
-    fn put_tx_block(&self, txid: bitcoin::Txid, block_info: HeaderCheckpoint) {
+    fn put_tx_block(&self, txid: bitcoin::Txid, block_info: HashCheckpoint) {
         self.lock().tx_blocks.put(txid, block_info);
     }
 
@@ -191,7 +191,7 @@ pub struct Monitor {
     bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
     client_tx: tokio::sync::mpsc::Sender<MonitorMessage>,
     requester: kyoto::Requester,
-    tip: Option<HeaderCheckpoint>,
+    tip: Option<HashCheckpoint>,
     block_height_tx: tokio::sync::watch::Sender<u32>,
     pending_deposits: Vec<PendingDeposit>,
     pending_deposit_workers: JoinSet<()>,
@@ -216,12 +216,12 @@ impl Monitor {
     fn build_kyoto_node(config: &MonitorConfig) -> (kyoto::Node, kyoto::Client) {
         let checkpoint = match config.network {
             bitcoin::Network::Bitcoin if config.start_height > 709_631 => {
-                kyoto::HeaderCheckpoint::taproot_activation()
+                kyoto::HashCheckpoint::taproot_activation()
             }
             bitcoin::Network::Bitcoin if config.start_height > 481_823 => {
-                kyoto::HeaderCheckpoint::segwit_activation()
+                kyoto::HashCheckpoint::segwit_activation()
             }
-            network => kyoto::HeaderCheckpoint::from_genesis(network),
+            network => kyoto::HashCheckpoint::from_genesis(network),
         };
 
         let mut builder = kyoto::Builder::new(config.network)
@@ -486,7 +486,7 @@ impl Monitor {
                 self.metrics
                     .kyoto_best_height
                     .set(indexed_header.height as i64);
-                self.tip = Some(kyoto::HeaderCheckpoint::new(
+                self.tip = Some(kyoto::HashCheckpoint::new(
                     indexed_header.height,
                     indexed_header.block_hash(),
                 ));
@@ -505,7 +505,7 @@ impl Monitor {
                 self.metrics.kyoto_reorgs.inc();
                 self.deposit_lookup_cache.clear();
                 if let Some(new_tip) = accepted.last() {
-                    self.tip = Some(kyoto::HeaderCheckpoint::new(
+                    self.tip = Some(kyoto::HashCheckpoint::new(
                         new_tip.height,
                         new_tip.block_hash(),
                     ));
@@ -780,7 +780,7 @@ impl Monitor {
     }
 
     async fn process_pending_deposit(
-        tip: HeaderCheckpoint,
+        tip: HashCheckpoint,
         confirmation_threshold: u32,
         bitcoind_rpc: Arc<corepc_client::client_sync::v29::Client>,
         requester: kyoto::Requester,
@@ -871,7 +871,7 @@ impl Monitor {
                     height
                 }
             };
-            let block_info = kyoto::HeaderCheckpoint {
+            let block_info = kyoto::HashCheckpoint {
                 height,
                 hash: block_hash,
             };
@@ -1280,7 +1280,7 @@ mod tests {
     fn deposit_lookup_cache_records_and_clears_entries() {
         let txid = make_outpoint(1).txid;
         let block_hash = block_hash(2);
-        let block_info = HeaderCheckpoint::new(42, block_hash);
+        let block_info = HashCheckpoint::new(42, block_hash);
         let metrics = Arc::new(fresh_metrics());
         let cache = SharedDepositLookupCache::new(metrics.clone());
 
@@ -1304,7 +1304,7 @@ mod tests {
     fn deposit_lookup_cache_invalidates_tx_entries_only() {
         let txid = make_outpoint(1).txid;
         let block_hash = block_hash(2);
-        let block_info = HeaderCheckpoint::new(42, block_hash);
+        let block_info = HashCheckpoint::new(42, block_hash);
         let cache = SharedDepositLookupCache::new(Arc::new(fresh_metrics()));
 
         cache.put_tx_block(txid, block_info);
@@ -1320,7 +1320,7 @@ mod tests {
         let metrics = Arc::new(fresh_metrics());
         let cache = SharedDepositLookupCache::new(metrics.clone());
         let txid = make_outpoint(1).txid;
-        let block_info = HeaderCheckpoint::new(42, block_hash(2));
+        let block_info = HashCheckpoint::new(42, block_hash(2));
         cache.put_tx_block(txid, block_info);
         let (client_tx, _client_rx) = tokio::sync::mpsc::channel(10);
         let mut result_rxs = Vec::new();
@@ -1331,7 +1331,7 @@ mod tests {
                 pending_deposit_for(bitcoin::OutPoint { txid, vout });
             result_rxs.push(result_rx);
             Monitor::process_pending_deposit(
-                HeaderCheckpoint::new(50, block_hash(3)),
+                HashCheckpoint::new(50, block_hash(3)),
                 100,
                 Arc::new(corepc_client::client_sync::v29::Client::new(
                     "http://127.0.0.1:1",

@@ -80,8 +80,10 @@ fun submit_cert_internal(
     ctx: &mut TxContext,
 ) {
     hashi.config().assert_version_enabled();
-    assert!(ctx.sender() == dealer);
-    assert!(hashi.committee_set().has_member(dealer));
+    // The dealer's own validator key, or the operator key it has delegated to,
+    // may submit the dealer's certificate. `member_authorized` also enforces
+    // that the dealer is a registered committee member.
+    assert!(hashi.committee_set().member_authorized(dealer, ctx));
     let pending = hashi.committee_set().pending_epoch_change();
     assert!(epoch == hashi.committee_set().epoch() || pending.contains(&epoch));
     let epoch_certs = hashi.epoch_certs(key, protocol_type, ctx);

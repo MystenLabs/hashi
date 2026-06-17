@@ -16,6 +16,7 @@ public struct UpdateGuardian has copy, drop, store {
 
 public fun propose(
     hashi: &mut Hashi,
+    validator_address: address,
     url: String,
     public_key: vector<u8>,
     metadata: VecMap<String, String>,
@@ -26,6 +27,7 @@ public fun propose(
     config::assert_valid_guardian_public_key(&public_key);
     proposal::create(
         hashi,
+        validator_address,
         UpdateGuardian { url, public_key },
         THRESHOLD_BPS,
         metadata,

@@ -38,6 +38,7 @@ fun test_single_key_update_via_multikey_propose() {
 
     let proposal_id = update_config::propose(
         &mut hashi,
+        VOTER1,
         entries,
         vec_map::empty(),
         &clock,
@@ -67,6 +68,7 @@ fun test_multi_key_update_applies_atomically() {
 
     let proposal_id = update_config::propose(
         &mut hashi,
+        VOTER1,
         entries,
         vec_map::empty(),
         &clock,
@@ -98,6 +100,7 @@ fun test_mixed_domain_multi_key_update() {
 
     let proposal_id = update_config::propose(
         &mut hashi,
+        VOTER1,
         entries,
         vec_map::empty(),
         &clock,
@@ -122,6 +125,7 @@ fun test_empty_entries_aborts_at_propose() {
 
     let _ = update_config::propose(
         &mut hashi,
+        VOTER1,
         vec_map::empty(),
         vec_map::empty(),
         &clock,
@@ -145,6 +149,7 @@ fun test_unknown_key_aborts_at_execute() {
 
     let proposal_id = update_config::propose(
         &mut hashi,
+        VOTER1,
         entries,
         vec_map::empty(),
         &clock,
@@ -170,6 +175,7 @@ fun test_wrong_value_type_aborts_at_execute() {
 
     let proposal_id = update_config::propose(
         &mut hashi,
+        VOTER1,
         entries,
         vec_map::empty(),
         &clock,
@@ -194,6 +200,7 @@ fun test_propose_vote_execute_through_quorum() {
 
     let proposal_id = update_config::propose(
         &mut hashi,
+        VOTER1,
         entries,
         vec_map::empty(),
         &clock,
@@ -201,10 +208,22 @@ fun test_propose_vote_execute_through_quorum() {
     );
 
     let ctx2 = &mut test_utils::new_tx_context(VOTER2, 0);
-    hashi::proposal::vote<update_config::UpdateConfig>(&mut hashi, proposal_id, &clock, ctx2);
+    hashi::proposal::vote<update_config::UpdateConfig>(
+        &mut hashi,
+        VOTER2,
+        proposal_id,
+        &clock,
+        ctx2,
+    );
 
     let ctx3 = &mut test_utils::new_tx_context(VOTER3, 0);
-    hashi::proposal::vote<update_config::UpdateConfig>(&mut hashi, proposal_id, &clock, ctx3);
+    hashi::proposal::vote<update_config::UpdateConfig>(
+        &mut hashi,
+        VOTER3,
+        proposal_id,
+        &clock,
+        ctx3,
+    );
 
     update_config::execute(&mut hashi, proposal_id, &clock);
 

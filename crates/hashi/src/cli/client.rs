@@ -18,7 +18,6 @@ use crate::sui_tx_executor::SuiTxExecutor;
 use anyhow::Context;
 use anyhow::Result;
 use hashi_types::move_types::ConfigValue;
-use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionResponse;
 use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
 use sui_sdk_types::StructTag;
@@ -154,41 +153,29 @@ impl HashiClient {
         self.executor.is_some()
     }
 
-    /// Execute a transaction built with `TransactionBuilder`.
+    /// Finalize `builder` according to `tx_opts`: serialize it unsigned,
+    /// dry-run it, or sign and submit it.
     ///
-    /// Returns an error if no keypair is configured.
-    pub async fn execute(
-        &mut self,
+    /// A keypair is required only for [`TxMode::Execute`](crate::sui_tx_executor::TxMode);
+    /// the serialize and dry-run paths build with just the sender address
+    /// (explicit `--sender`, or the keypair's address when one is configured).
+    pub async fn finalize_tx(
+        &self,
         builder: TransactionBuilder,
-    ) -> Result<ExecuteTransactionResponse> {
-        let executor = self
-            .executor
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("Cannot execute transactions: no keypair configured"))?;
-
-        executor.execute(builder).await
-    }
-
-    /// Simulate a transaction (dry-run) without executing it.
-    ///
-    /// Returns the estimated gas budget on success.
-    /// This performs the same steps as execute but stops before signing/submitting.
-    pub async fn simulate(&mut self, mut builder: TransactionBuilder) -> Result<SimulationResult> {
-        let executor = self.executor.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("Cannot simulate transactions: no keypair configured")
-        })?;
-
-        let sender = executor.sender();
-        builder.set_sender(sender);
-
-        // Build the transaction - this internally does a dry-run for gas estimation
-        let transaction = builder.build(&mut self.onchain_state.client()).await?;
-
-        Ok(SimulationResult {
-            sender,
-            gas_budget: transaction.gas_payment.budget,
-            gas_price: transaction.gas_payment.price,
-        })
+        tx_opts: &crate::cli::TxOptions,
+    ) -> Result<crate::sui_tx_executor::TxOutcome> {
+        let signer = self.executor.as_ref().map(|e| e.signer());
+        let mut client = self.onchain_state.client();
+        crate::sui_tx_executor::finalize(
+            &mut client,
+            signer,
+            builder,
+            tx_opts.sender,
+            &tx_opts.gas_overrides(),
+            tx_opts.mode(),
+            std::time::Duration::from_secs(10),
+        )
+        .await
     }
 
     // ========================================================================
@@ -379,25 +366,52 @@ impl HashiClient {
     // Transaction builders (proposal/governance)
     // ========================================================================
 
+    /// Resolve the committee member (validator address) the signer is acting for:
+    /// the signer's own address if it is a validator member, otherwise the member
+    /// that has delegated its operator address to the signer.
+    fn resolve_validator_address(&self) -> anyhow::Result<Address> {
+        let sender = self
+            .executor
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Cannot resolve validator: no keypair configured"))?
+            .sender();
+        let members = self.fetch_committee_members();
+        members
+            .iter()
+            .find(|m| *m.validator_address() == sender || *m.operator_address() == sender)
+            .map(|m| *m.validator_address())
+            .ok_or_else(|| {
+                anyhow::anyhow!("signer {sender} is not a committee member or delegated operator")
+            })
+    }
+
     /// Build a vote transaction for a proposal.
     ///
-    /// Calls: `proposal::vote<T>(hashi, proposal_id, clock, ctx)`
+    /// Calls: `proposal::vote<T>(hashi, validator_address, proposal_id, clock)`
     pub fn build_vote_transaction(
         &self,
         proposal_id: Address,
         type_arg: TypeTag,
-    ) -> TransactionBuilder {
-        build_vote_transaction(self.hashi_ids, proposal_id, type_arg)
+    ) -> anyhow::Result<TransactionBuilder> {
+        let validator_address = self.resolve_validator_address()?;
+        Ok(build_vote_transaction(
+            self.hashi_ids,
+            validator_address,
+            proposal_id,
+            type_arg,
+        ))
     }
 
     /// Build a remove_vote transaction for a proposal.
     ///
-    /// Calls: `proposal::remove_vote<T>(hashi, proposal_id, ctx)`
+    /// Calls: `proposal::remove_vote<T>(hashi, validator_address, proposal_id)`
     pub fn build_remove_vote_transaction(
         &self,
         proposal_id: Address,
         type_arg: TypeTag,
-    ) -> TransactionBuilder {
+    ) -> anyhow::Result<TransactionBuilder> {
+        let validator_address = self.resolve_validator_address()?;
+
         let mut builder = TransactionBuilder::new();
 
         let hashi_arg = builder.object(
@@ -405,6 +419,7 @@ impl HashiClient {
                 .as_shared()
                 .with_mutable(true),
         );
+        let validator_address_arg = builder.pure(&validator_address);
         let proposal_id_arg = builder.pure(&proposal_id);
 
         builder.move_call(
@@ -414,18 +429,23 @@ impl HashiClient {
                 Identifier::from_static("remove_vote"),
             )
             .with_type_args(vec![type_arg]),
-            vec![hashi_arg, proposal_id_arg],
+            vec![hashi_arg, validator_address_arg, proposal_id_arg],
         );
 
-        builder
+        Ok(builder)
     }
 
     /// Build a proposal creation transaction.
     pub fn build_create_proposal_transaction(
         &self,
         params: CreateProposalParams,
-    ) -> TransactionBuilder {
-        build_create_proposal_transaction(self.hashi_ids, params)
+    ) -> anyhow::Result<TransactionBuilder> {
+        let validator_address = self.resolve_validator_address()?;
+        Ok(build_create_proposal_transaction(
+            self.hashi_ids,
+            validator_address,
+            params,
+        ))
     }
 
     /// Build a transaction to execute a proposal that has reached quorum.
@@ -488,6 +508,7 @@ impl HashiClient {
 /// This is a standalone function so it can be reused outside `HashiClient` (e.g. in tests).
 pub fn build_create_proposal_transaction(
     hashi_ids: HashiIds,
+    validator_address: Address,
     params: CreateProposalParams,
 ) -> TransactionBuilder {
     let mut builder = TransactionBuilder::new();
@@ -502,6 +523,7 @@ pub fn build_create_proposal_transaction(
             .as_shared()
             .with_mutable(false),
     );
+    let validator_address_arg = builder.pure(&validator_address);
 
     match params {
         CreateProposalParams::Upgrade { digest, metadata } => {
@@ -513,7 +535,13 @@ pub fn build_create_proposal_transaction(
                     Identifier::from_static("upgrade"),
                     Identifier::from_static("propose"),
                 ),
-                vec![hashi_arg, digest_arg, metadata_arg, clock_arg],
+                vec![
+                    hashi_arg,
+                    validator_address_arg,
+                    digest_arg,
+                    metadata_arg,
+                    clock_arg,
+                ],
             );
         }
         CreateProposalParams::UpdateConfig {
@@ -530,7 +558,13 @@ pub fn build_create_proposal_transaction(
                     Identifier::from_static("update_config"),
                     Identifier::from_static("propose"),
                 ),
-                vec![hashi_arg, entries_arg, metadata_arg, clock_arg],
+                vec![
+                    hashi_arg,
+                    validator_address_arg,
+                    entries_arg,
+                    metadata_arg,
+                    clock_arg,
+                ],
             );
         }
         CreateProposalParams::UpdateMpcConfig {
@@ -558,7 +592,13 @@ pub fn build_create_proposal_transaction(
                     Identifier::from_static("update_config"),
                     Identifier::from_static("propose"),
                 ),
-                vec![hashi_arg, entries_arg, metadata_arg, clock_arg],
+                vec![
+                    hashi_arg,
+                    validator_address_arg,
+                    entries_arg,
+                    metadata_arg,
+                    clock_arg,
+                ],
             );
         }
         CreateProposalParams::EnableVersion { version, metadata } => {
@@ -570,7 +610,13 @@ pub fn build_create_proposal_transaction(
                     Identifier::from_static("enable_version"),
                     Identifier::from_static("propose"),
                 ),
-                vec![hashi_arg, version_arg, metadata_arg, clock_arg],
+                vec![
+                    hashi_arg,
+                    validator_address_arg,
+                    version_arg,
+                    metadata_arg,
+                    clock_arg,
+                ],
             );
         }
         CreateProposalParams::DisableVersion { version, metadata } => {
@@ -582,7 +628,13 @@ pub fn build_create_proposal_transaction(
                     Identifier::from_static("disable_version"),
                     Identifier::from_static("propose"),
                 ),
-                vec![hashi_arg, version_arg, metadata_arg, clock_arg],
+                vec![
+                    hashi_arg,
+                    validator_address_arg,
+                    version_arg,
+                    metadata_arg,
+                    clock_arg,
+                ],
             );
         }
         CreateProposalParams::AbortReconfig { epoch, metadata } => {
@@ -594,7 +646,13 @@ pub fn build_create_proposal_transaction(
                     Identifier::from_static("abort_reconfig"),
                     Identifier::from_static("propose"),
                 ),
-                vec![hashi_arg, epoch_arg, metadata_arg, clock_arg],
+                vec![
+                    hashi_arg,
+                    validator_address_arg,
+                    epoch_arg,
+                    metadata_arg,
+                    clock_arg,
+                ],
             );
         }
         CreateProposalParams::UpdateGuardian {
@@ -611,7 +669,14 @@ pub fn build_create_proposal_transaction(
                     Identifier::from_static("update_guardian"),
                     Identifier::from_static("propose"),
                 ),
-                vec![hashi_arg, url_arg, public_key_arg, metadata_arg, clock_arg],
+                vec![
+                    hashi_arg,
+                    validator_address_arg,
+                    url_arg,
+                    public_key_arg,
+                    metadata_arg,
+                    clock_arg,
+                ],
             );
         }
     }
@@ -742,6 +807,7 @@ fn build_metadata(
 /// committee member.
 pub fn build_vote_transaction(
     hashi_ids: HashiIds,
+    validator_address: Address,
     proposal_id: Address,
     type_arg: TypeTag,
 ) -> TransactionBuilder {
@@ -751,6 +817,7 @@ pub fn build_vote_transaction(
             .as_shared()
             .with_mutable(true),
     );
+    let validator_address_arg = builder.pure(&validator_address);
     let proposal_id_arg = builder.pure(&proposal_id);
     let clock_arg = builder.object(
         ObjectInput::new(SUI_CLOCK_OBJECT_ID)
@@ -765,7 +832,7 @@ pub fn build_vote_transaction(
             Identifier::from_static("vote"),
         )
         .with_type_args(vec![type_arg]),
-        vec![hashi_arg, proposal_id_arg, clock_arg],
+        vec![hashi_arg, validator_address_arg, proposal_id_arg, clock_arg],
     );
 
     builder

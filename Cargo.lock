@@ -1077,9 +1077,9 @@ dependencies = [
 
 [[package]]
 name = "bip157"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d021edf7317620df07c81006b17c9358e208e10477a4645543f6b9817ab85a95"
+checksum = "b0baddc6c57202ec7bb76d2232aa243f8f529c4450bb873d55349f4d55ce94a2"
 dependencies = [
  "bip324",
  "bitcoin",
@@ -2930,11 +2930,13 @@ dependencies = [
  "rand 0.8.5",
  "rand_core 0.6.4",
  "rcgen",
+ "reqwest",
  "rust-embed",
  "rustls 0.23.37",
  "serde",
  "serde_derive",
  "serde_json",
+ "snap",
  "sui-crypto",
  "sui-futures",
  "sui-http",
@@ -2997,6 +2999,8 @@ dependencies = [
  "bcs",
  "bitcoin",
  "clap",
+ "fastcrypto",
+ "hashi",
  "hashi-guardian",
  "hashi-types",
  "hex",
@@ -3006,6 +3010,7 @@ dependencies = [
  "serde",
  "serde_yaml",
  "tokio",
+ "toml",
  "tonic",
  "tracing",
 ]
@@ -3556,16 +3561,12 @@ name = "internal-tools"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "bcs",
- "bitcoin",
  "clap",
  "fastcrypto",
  "fastcrypto-tbls",
  "hashi",
  "hashi-types",
  "hex",
- "hpke",
- "k256",
  "rand 0.8.5",
  "sui-sdk-types",
  "tokio",
@@ -5839,6 +5840,12 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+
+[[package]]
+name = "snap"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
 
 [[package]]
 name = "socket2"

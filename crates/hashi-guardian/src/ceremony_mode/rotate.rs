@@ -4,6 +4,7 @@
 use crate::Enclave;
 use hashi_types::guardian::crypto::combine_shares;
 use hashi_types::guardian::crypto::decrypt_verify_shares;
+use hashi_types::guardian::crypto::recipient_roster;
 use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::GuardianError::InvalidInputs;
@@ -81,15 +82,22 @@ async fn finalize_rotation(
 
     let new_sharing_seq = old_instance.sharing_seq() + 1;
     let new_instance = SecretSharingInstance::new(share_commitments, n, t, new_sharing_seq)?;
-    info!("Writing CeremonyLogMessage sharing_seq={new_sharing_seq} to ceremony/.");
+    info!("Persisting rotation sharing_seq={new_sharing_seq} to shares/ + ceremony/.");
+    enclave
+        .log_shares(new_sharing_seq, encrypted_shares.clone())
+        .await?;
+
     enclave
         .log_ceremony(CeremonyLogMessage::Rotate {
             old_instance: old_instance.clone(),
             new_instance,
+            roster: recipient_roster(&encrypted_shares),
         })
         .await?;
 
-    enclave.set_latest_encrypted_shares(encrypted_shares.clone())?;
+    enclave
+        .set_latest_encrypted_shares(encrypted_shares.clone())
+        .expect("set_latest_encrypted_shares should work if ceremony_complete=false");
 
     info!("Rotation complete.");
     Ok(enclave.sign(RotateKpsResponse { encrypted_shares }))
@@ -213,6 +221,7 @@ mod tests {
         let CeremonyLogMessage::Rotate {
             old_instance,
             new_instance,
+            roster,
         } = *ceremony
         else {
             panic!("expected Rotate variant");
@@ -224,6 +233,26 @@ mod tests {
         assert_eq!(new_instance.sharing_seq(), 1);
         assert_eq!(new_instance.num_shares(), new_n);
         assert_eq!(new_instance.threshold(), new_t);
+        // Roster commits one recipient fingerprint per new share.
+        assert_eq!(roster.len(), new_n);
+
+        // The new shares are persisted to shares/ keyed by the new sharing_seq.
+        let shares_logs: Vec<_> = captured
+            .iter()
+            .filter(|(k, _)| k.starts_with("shares/"))
+            .collect();
+        assert_eq!(shares_logs.len(), 1, "expected one shares/ log");
+        let (shares_key, shares_body) = shares_logs[0];
+        assert!(
+            shares_key.starts_with("shares/00000000000000000001-"),
+            "expected sharing_seq=1, got key {shares_key}"
+        );
+        let shares_record: LogRecord = serde_json::from_slice(shares_body).unwrap();
+        let LogMessage::Shares(shares) = shares_record.message else {
+            panic!("expected Shares variant");
+        };
+        assert_eq!(shares.sharing_seq, 1);
+        assert_eq!(shares.encrypted_shares.len(), new_n);
     }
 
     #[tokio::test]

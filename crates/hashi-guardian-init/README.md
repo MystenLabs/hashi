@@ -2,10 +2,10 @@
 
 Off-enclave tooling that initializes a guardian. It reads the guardian's S3 logs
 via `hashi_guardian::s3_reader`, verifies the attested enclave, and emits the
-artifacts that drive initialization. Today it houses the key-provisioner flow;
-the operator init flow will move here too.
+artifacts that drive initialization. It also houses guardian helper tooling and
+dev-only shortcuts.
 
-## provisioner-init
+## provision
 
 A one-shot flow run by a key provisioner (IOP-225 checks A–E). It:
 
@@ -27,7 +27,7 @@ A one-shot flow run by a key provisioner (IOP-225 checks A–E). It:
 ### Usage
 
 ```bash
-cargo run -p hashi-guardian-init -- provisioner --config provisioner-init.sample.yaml
+cargo run -p hashi-guardian-init -- provision --config provisioner-init.sample.yaml
 ```
 
 ### Config
@@ -40,3 +40,17 @@ session's attestation. The secret-sharing instance and (post-genesis) the
 committee are scraped from S3, not configured.
 `hashi_committee_genesis` is needed only at genesis; omit it once a
 `committee-update/` log exists. Omit `relay_endpoint` for a dry run.
+
+## tools
+
+Guardian helper tooling lives under `tools`:
+
+```bash
+cargo run -p hashi-guardian-init -- tools dev-bootstrap --config <node-config.toml> ...
+cargo run -p hashi-guardian-init -- tools fetch-info --endpoint <guardian-endpoint>
+cargo run -p hashi-guardian-init -- tools generate-master-key
+```
+
+`dev-bootstrap` is a centralized dev shortcut for driving a guardian through
+bootstrap. `fetch-info` prints deployed guardian public keys. `generate-master-key`
+creates the BTC master keypair used by the dev bootstrap flow.

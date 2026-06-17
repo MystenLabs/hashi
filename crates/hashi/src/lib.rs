@@ -25,6 +25,7 @@ pub mod grpc;
 pub mod guardian_limiter;
 pub mod leader;
 pub mod metrics;
+pub mod metrics_push;
 pub mod mpc;
 pub mod onchain;
 pub mod publish;

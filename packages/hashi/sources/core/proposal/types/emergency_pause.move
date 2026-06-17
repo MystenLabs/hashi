@@ -17,6 +17,7 @@ public struct EmergencyPause has copy, drop, store {
 
 public fun propose(
     hashi: &mut Hashi,
+    validator_address: address,
     pause: bool,
     metadata: VecMap<String, String>,
     clock: &Clock,
@@ -28,7 +29,15 @@ public fun propose(
     } else {
         hashi.config().emergency_unpause_threshold_bps()
     };
-    proposal::create(hashi, EmergencyPause { pause }, threshold, metadata, clock, ctx)
+    proposal::create(
+        hashi,
+        validator_address,
+        EmergencyPause { pause },
+        threshold,
+        metadata,
+        clock,
+        ctx,
+    )
 }
 
 public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {

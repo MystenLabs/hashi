@@ -28,6 +28,7 @@ fun test_emergency_pause_basic() {
     // Create emergency pause proposal
     let proposal_id = test_utils::create_emergency_pause_proposal(
         &mut hashi,
+        VOTER1,
         true,
         &clock,
         ctx,
@@ -58,6 +59,7 @@ fun test_unpause_basic() {
     // First, pause the system
     let pause_id = test_utils::create_emergency_pause_proposal(
         &mut hashi,
+        VOTER1,
         true,
         &clock,
         ctx,
@@ -68,6 +70,7 @@ fun test_unpause_basic() {
     // Now propose unpause
     let unpause_id = test_utils::create_emergency_pause_proposal(
         &mut hashi,
+        VOTER1,
         false,
         &clock,
         ctx,

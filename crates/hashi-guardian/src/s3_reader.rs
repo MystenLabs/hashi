@@ -20,6 +20,7 @@ use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::InitLogMessage;
+use hashi_types::guardian::KPEncryptedShare;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::S3Config;
@@ -29,6 +30,7 @@ use hashi_types::guardian::VerifiedLogRecord;
 use hashi_types::guardian::S3_DIR_CEREMONY;
 use hashi_types::guardian::S3_DIR_COMMITTEE_UPDATE;
 use hashi_types::guardian::S3_DIR_HEARTBEAT;
+use hashi_types::guardian::S3_DIR_SHARES;
 use hashi_types::guardian::S3_DIR_WITHDRAW;
 use hashi_types::move_types::Committee;
 use std::collections::HashMap;
@@ -118,6 +120,17 @@ impl GuardianReader {
     pub async fn read_latest_ceremony_instance(
         &mut self,
     ) -> anyhow::Result<Option<SecretSharingInstance>> {
+        Ok(self
+            .read_latest_ceremony()
+            .await?
+            .map(|(_, instance)| instance))
+    }
+
+    /// Like [`Self::read_latest_ceremony_instance`], but also returns the writing
+    /// session id — needed to locate the matching `shares/` object for recovery.
+    pub async fn read_latest_ceremony(
+        &mut self,
+    ) -> anyhow::Result<Option<(SessionID, SecretSharingInstance)>> {
         let keys = self
             .s3
             .list_all_keys_in_dir(&format!("{}/", S3_DIR_CEREMONY))
@@ -127,13 +140,50 @@ impl GuardianReader {
         };
         let record = self.s3.get_log_record(&key).await?;
         let record = self.pubkey_cache.verify_record(&self.s3, record).await?;
+        let session_id = record.session_id.clone();
         let LogMessage::Ceremony(msg) = record.message else {
             anyhow::bail!("expected a ceremony log at {key}");
         };
-        Ok(Some(match *msg {
-            CeremonyLogMessage::NewKey { instance } => instance,
+        let instance = match *msg {
+            CeremonyLogMessage::NewKey { instance, .. } => instance,
             CeremonyLogMessage::Rotate { new_instance, .. } => new_instance,
-        }))
+        };
+        Ok(Some((session_id, instance)))
+    }
+
+    /// Read + verify the encrypted shares at `shares/{seq}-{session}.json`. Point
+    /// read by exact key (recovery anchors on the ceremony instance's seq), so a
+    /// purged older `shares/` object never blocks reading the current one.
+    ///
+    /// Uses the lock-agnostic read: shares carry only a short lock that is
+    /// expected to expire, and their integrity is the enclave signature checked
+    /// below — not S3 immutability — so the immutable-log lock assertion in
+    /// `get_log_record` doesn't apply.
+    pub async fn read_shares(
+        &mut self,
+        session_id: &str,
+        sharing_seq: u64,
+    ) -> anyhow::Result<Vec<KPEncryptedShare>> {
+        let key = format!("{}/{:020}-{}.json", S3_DIR_SHARES, sharing_seq, session_id);
+        let record: LogRecord = self.s3.get_object_no_lock(&key).await?;
+        if record.session_id != session_id {
+            anyhow::bail!(
+                "session id mismatch at {key}: expected {session_id}, got {}",
+                record.session_id
+            );
+        }
+        let record = self.pubkey_cache.verify_record(&self.s3, record).await?;
+        let LogMessage::Shares(msg) = record.message else {
+            anyhow::bail!("expected a shares log at {key}");
+        };
+        if msg.sharing_seq != sharing_seq {
+            anyhow::bail!(
+                "sharing_seq mismatch: {} != {}",
+                msg.sharing_seq,
+                sharing_seq
+            );
+        }
+        Ok(msg.encrypted_shares)
     }
 
     /// The latest applied committee from `committee-update/` — the lex-last

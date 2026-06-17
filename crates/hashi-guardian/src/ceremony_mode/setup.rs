@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::Enclave;
+use hashi_types::guardian::crypto::recipient_roster;
 use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::*;
@@ -57,13 +58,19 @@ pub async fn setup_new_key(
     let ss_instance = SecretSharingInstance::new(share_commitments.clone(), n, t, 0)
         .expect("(n, t) validated by SetupNewKeyRequest; commitments produced with matching count");
 
+    info!("Persisting setup sharing_seq=0 to shares/ + ceremony/.");
+    enclave.log_shares(0, encrypted_shares.clone()).await?;
+
     enclave
         .log_ceremony(CeremonyLogMessage::NewKey {
             instance: ss_instance,
+            roster: recipient_roster(&encrypted_shares),
         })
         .await?;
 
-    enclave.set_latest_encrypted_shares(encrypted_shares.clone())?;
+    enclave
+        .set_latest_encrypted_shares(encrypted_shares.clone())
+        .expect("set_latest_encrypted_shares should work if ceremony_complete=false");
 
     let response = enclave.sign(SetupNewKeyResponse {
         encrypted_shares,
@@ -71,6 +78,7 @@ pub async fn setup_new_key(
     });
 
     *ceremony_complete = true;
+    info!("Setup complete.");
     Ok(response)
 }
 
@@ -130,11 +138,35 @@ mod tests {
         let LogMessage::Ceremony(ceremony) = record.message else {
             panic!("expected Ceremony variant");
         };
-        let CeremonyLogMessage::NewKey { instance } = *ceremony else {
+        let CeremonyLogMessage::NewKey { instance, roster } = *ceremony else {
             panic!("expected NewKey variant");
         };
         assert_eq!(instance.sharing_seq(), 0);
         assert_eq!(instance.num_shares(), TEST_N);
         assert_eq!(instance.threshold(), TEST_T);
+        // The roster commits one recipient fingerprint per share.
+        assert_eq!(roster.len(), TEST_N);
+
+        // The encrypted shares are persisted to shares/ keyed by sharing_seq,
+        // and carry the ciphertexts the ceremony log omits.
+        let shares_logs: Vec<_> = captured
+            .iter()
+            .filter(|(k, _)| k.starts_with("shares/"))
+            .collect();
+        assert_eq!(shares_logs.len(), 1, "expected one shares/ log");
+        let (shares_key, shares_body) = shares_logs[0];
+        assert_eq!(
+            *shares_key,
+            format!("shares/{:020}-{}.json", 0, enclave.s3_session_id())
+        );
+        let shares_record: LogRecord = serde_json::from_slice(shares_body).unwrap();
+        let LogMessage::Shares(shares) = shares_record.message else {
+            panic!("expected Shares variant");
+        };
+        assert_eq!(shares.sharing_seq, 0);
+        assert_eq!(shares.encrypted_shares.len(), TEST_N);
+        assert!(std::str::from_utf8(shares_body)
+            .unwrap()
+            .contains("BEGIN PGP MESSAGE"));
     }
 }

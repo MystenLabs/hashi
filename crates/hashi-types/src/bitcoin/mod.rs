@@ -14,9 +14,9 @@ pub use bitcoin::secp256k1::Keypair as BitcoinKeypair;
 pub use bitcoin::secp256k1::XOnlyPublicKey as BitcoinPubkey;
 pub use bitcoin::taproot::Signature as BitcoinSignature;
 pub use fastcrypto_tbls::threshold_schnorr::G as HashiMasterG;
+pub use taproot::taproot_2of2_witness_artifacts;
 pub use taproot::taproot_address;
 pub use taproot::taproot_script_spend_sighashes;
-pub use taproot::taproot_witness_artifacts;
 pub use utxo::ExternalOutputUTXOWire;
 pub use utxo::InputUTXO;
 pub use utxo::InternalOutputUTXO;
@@ -76,9 +76,9 @@ pub fn address_string_from_witness_program(
     Ok(address.to_string())
 }
 
-/// Full input weight (WU) for a 2-of-2 taproot script-path spend.
-/// TXIN_BASE_WEIGHT (164 WU) + satisfaction (234 WU) = 398 WU (100 vB).
-pub const SCRIPT_PATH_2OF2_TXIN_WEIGHT: u64 = 164 + 234;
+/// Full input weight (WU) for an immediate 2-of-2 taproot script-path spend.
+/// TXIN_BASE_WEIGHT (164 WU) + satisfaction (268 WU) = 432 WU (108 vB).
+pub const SCRIPT_PATH_2OF2_TXIN_WEIGHT: u64 = 164 + 268;
 
 /// Non-witness fixed overhead for a segwit transaction:
 /// nVersion(4x4) + nLockTime(4x4) = 32 WU, plus the segwit marker/flag (2 WU).

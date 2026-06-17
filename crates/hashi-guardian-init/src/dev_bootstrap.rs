@@ -345,7 +345,7 @@ fn required_env(name: &str) -> Result<String> {
 fn decode_mpc_master_g(mpc_public_key: &[u8]) -> Result<HashiMasterG> {
     anyhow::ensure!(
         !mpc_public_key.is_empty(),
-        "on-chain mpc_public_key is empty (is DKG / end_reconfig complete?)"
+        "on-chain mpc_public_key is empty (DKG / end_reconfig may not have completed yet)"
     );
     bcs::from_bytes(mpc_public_key).map_err(|e| anyhow!("decode on-chain MPC verifying key G: {e}"))
 }

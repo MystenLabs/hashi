@@ -1371,8 +1371,10 @@ mod tests {
         use hashi::cli::client::CreateProposalParams;
         use hashi::cli::client::build_create_proposal_transaction;
 
+        let validator_address = executor.sender();
         let builder = build_create_proposal_transaction(
             hashi_ids,
+            validator_address,
             CreateProposalParams::UpdateConfig {
                 key: "bitcoin_deposit_minimum".to_string(),
                 value: hashi_types::move_types::ConfigValue::U64(25_000),

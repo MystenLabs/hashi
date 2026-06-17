@@ -23,6 +23,7 @@ public struct AbortReconfig has copy, drop, store {
 
 public fun propose(
     hashi: &mut Hashi,
+    validator_address: address,
     epoch: u64,
     metadata: VecMap<String, String>,
     clock: &Clock,
@@ -34,7 +35,15 @@ public fun propose(
         hashi.committee_set().pending_epoch_change().destroy_some() == epoch,
         EWrongReconfigEpoch,
     );
-    proposal::create(hashi, AbortReconfig { epoch }, THRESHOLD_BPS, metadata, clock, ctx)
+    proposal::create(
+        hashi,
+        validator_address,
+        AbortReconfig { epoch },
+        THRESHOLD_BPS,
+        metadata,
+        clock,
+        ctx,
+    )
 }
 
 public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock, ctx: &TxContext) {
