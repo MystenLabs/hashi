@@ -9,12 +9,14 @@ use super::S3_DIR_CEREMONY;
 use super::S3_DIR_COMMITTEE_UPDATE;
 use super::S3_DIR_HEARTBEAT;
 use super::S3_DIR_INIT;
+use super::S3_DIR_SHARES;
 use super::S3_DIR_WITHDRAW;
 use crate::committee::CommitteeSignature;
 use crate::guardian::Attestation;
 use crate::guardian::GuardianError;
 use crate::guardian::GuardianInfo;
 use crate::guardian::GuardianPubKey;
+use crate::guardian::KPEncryptedShare;
 use crate::guardian::LimiterState;
 use crate::guardian::SecretSharingInstance;
 use crate::guardian::ShareID;
@@ -36,21 +38,39 @@ pub enum LogMessage {
     Init(Box<InitLogMessage>),
     Withdrawal(Box<WithdrawalLogMessage>),
     Ceremony(Box<CeremonyLogMessage>),
+    Shares(Box<SharesLogMessage>),
     CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
 }
 
+/// Encrypted KP shares persisted for recovery, written to `shares/` after each
+/// ceremony. Keyed by `sharing_seq` so it pairs with the matching `ceremony/`
+/// instance; carries the ciphertexts the `ceremony/` log deliberately omits.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SharesLogMessage {
+    pub sharing_seq: u64,
+    pub encrypted_shares: Vec<KPEncryptedShare>,
+}
+
 /// The authoritative share state, written to `ceremony/` after each ceremony.
-/// Carries only instances (commitments + n/t/seq); ciphertexts are delivered
-/// out-of-band and verified against the commitments. A rotation records the
-/// `old_instance` it consumed so the chain is auditable from the log alone.
+/// Carries the instance (commitments + n/t/seq) plus the recipient roster; the
+/// ciphertexts live in `shares/`. A rotation records the `old_instance` it
+/// consumed so the chain is auditable from the log alone.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum CeremonyLogMessage {
     /// Initial key setup (`setup_new_key`); `instance` has `sharing_seq` 0.
-    NewKey { instance: SecretSharingInstance },
+    NewKey {
+        instance: SecretSharingInstance,
+        /// Recipient fingerprints ordered by share id; lets a KP check the full
+        /// roster against the agreed set from the immutable log, not just the
+        /// operator-served shares.
+        roster: Vec<String>,
+    },
     /// Key rotation (`rotate_kps`) from `old_instance` to `new_instance`.
     Rotate {
         old_instance: SecretSharingInstance,
         new_instance: SecretSharingInstance,
+        /// Recipient fingerprints for `new_instance`; see [`Self::NewKey`].
+        roster: Vec<String>,
     },
 }
 
@@ -58,7 +78,7 @@ impl CeremonyLogMessage {
     /// The resulting instance's `sharing_seq` — used as the `ceremony/` object key.
     pub fn sharing_seq(&self) -> u64 {
         match self {
-            CeremonyLogMessage::NewKey { instance } => instance.sharing_seq(),
+            CeremonyLogMessage::NewKey { instance, .. } => instance.sharing_seq(),
             CeremonyLogMessage::Rotate { new_instance, .. } => new_instance.sharing_seq(),
         }
     }
@@ -241,6 +261,7 @@ impl LogMessage {
                     .to_string()
             }
             LogMessage::Ceremony(..) => format!("{}/", S3_DIR_CEREMONY),
+            LogMessage::Shares(..) => format!("{}/", S3_DIR_SHARES),
             LogMessage::CommitteeUpdate(..) => format!("{}/", S3_DIR_COMMITTEE_UPDATE),
         }
     }
@@ -252,6 +273,7 @@ impl LogMessage {
             LogMessage::Heartbeat { seq } => format!("{}-{:020}.json", prefix, seq),
             LogMessage::Withdrawal(withdrawal_message) => withdrawal_message.log_name(prefix),
             LogMessage::Ceremony(ss) => format!("{:020}-{}.json", ss.sharing_seq(), prefix),
+            LogMessage::Shares(s) => format!("{:020}-{}.json", s.sharing_seq, prefix),
             LogMessage::CommitteeUpdate(committee_message) => committee_message.log_name(prefix),
         }
     }
