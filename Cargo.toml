@@ -87,6 +87,9 @@ bin-version = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be
 prometheus-closure-metric = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
 sui-futures = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
 
+# Metrics push
+snap = "1"
+
 [profile.dev.package.blst]
 opt-level = 2
 [profile.dev.package.fastcrypto]
