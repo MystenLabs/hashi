@@ -58,6 +58,8 @@ pub async fn setup_new_key(
     let ss_instance = SecretSharingInstance::new(share_commitments.clone(), n, t, 0)
         .expect("(n, t) validated by SetupNewKeyRequest; commitments produced with matching count");
 
+    enclave.log_shares(0, encrypted_shares.clone()).await?;
+
     enclave
         .log_ceremony(CeremonyLogMessage::NewKey {
             instance: ss_instance,
@@ -65,9 +67,9 @@ pub async fn setup_new_key(
         })
         .await?;
 
-    enclave.log_shares(0, encrypted_shares.clone()).await?;
-
-    enclave.set_latest_encrypted_shares(encrypted_shares.clone())?;
+    enclave
+        .set_latest_encrypted_shares(encrypted_shares.clone())
+        .expect("set_latest_encrypted_shares should work if ceremony_complete=false");
 
     let response = enclave.sign(SetupNewKeyResponse {
         encrypted_shares,

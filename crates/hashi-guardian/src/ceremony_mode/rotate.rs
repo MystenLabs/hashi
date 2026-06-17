@@ -82,7 +82,11 @@ async fn finalize_rotation(
 
     let new_sharing_seq = old_instance.sharing_seq() + 1;
     let new_instance = SecretSharingInstance::new(share_commitments, n, t, new_sharing_seq)?;
-    info!("Writing CeremonyLogMessage sharing_seq={new_sharing_seq} to ceremony/.");
+    info!("Persisting rotation sharing_seq={new_sharing_seq} to shares/ + ceremony/.");
+    enclave
+        .log_shares(new_sharing_seq, encrypted_shares.clone())
+        .await?;
+
     enclave
         .log_ceremony(CeremonyLogMessage::Rotate {
             old_instance: old_instance.clone(),
@@ -92,10 +96,8 @@ async fn finalize_rotation(
         .await?;
 
     enclave
-        .log_shares(new_sharing_seq, encrypted_shares.clone())
-        .await?;
-
-    enclave.set_latest_encrypted_shares(encrypted_shares.clone())?;
+        .set_latest_encrypted_shares(encrypted_shares.clone())
+        .expect("set_latest_encrypted_shares should work if ceremony_complete=false");
 
     info!("Rotation complete.");
     Ok(enclave.sign(RotateKpsResponse { encrypted_shares }))
