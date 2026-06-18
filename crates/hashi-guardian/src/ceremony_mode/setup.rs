@@ -64,7 +64,7 @@ pub async fn setup_new_key(
     enclave
         .log_ceremony(CeremonyLogMessage::NewKey {
             instance: ss_instance.clone(),
-            roster: recipient_roster(&encrypted_shares),
+            roster: recipient_roster(encrypted_shares.as_slice()),
         })
         .await?;
 
@@ -73,7 +73,7 @@ pub async fn setup_new_key(
         .expect("set_latest_encrypted_shares should work if ceremony_complete=false");
 
     let response = enclave.sign(SetupNewKeyResponse {
-        encrypted_shares: KPEncryptedShares::new(encrypted_shares)?,
+        encrypted_shares,
         secret_sharing_instance: ss_instance,
     });
 

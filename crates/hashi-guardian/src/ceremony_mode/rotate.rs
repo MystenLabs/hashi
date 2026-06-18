@@ -91,7 +91,7 @@ async fn finalize_rotation(
         .log_ceremony(CeremonyLogMessage::Rotate {
             old_instance: old_instance.clone(),
             new_instance,
-            roster: recipient_roster(&encrypted_shares),
+            roster: recipient_roster(encrypted_shares.as_slice()),
         })
         .await?;
 
@@ -100,9 +100,7 @@ async fn finalize_rotation(
         .expect("set_latest_encrypted_shares should work if ceremony_complete=false");
 
     info!("Rotation complete.");
-    Ok(enclave.sign(RotateKpsResponse {
-        encrypted_shares: KPEncryptedShares::new(encrypted_shares)?,
-    }))
+    Ok(enclave.sign(RotateKpsResponse { encrypted_shares }))
 }
 
 #[cfg(test)]

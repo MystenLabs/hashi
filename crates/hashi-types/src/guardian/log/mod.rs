@@ -44,8 +44,8 @@ pub const S3_DIR_SHARES: &str = "shares";
 pub const S3_DIR_COMMITTEE_UPDATE: &str = "committee-update";
 
 /// Single definition of the flat, sequence-scoped key layout
-/// (`{dir}/{sharing_seq:020}-{session_id}.json`) behind the per-stream
-/// [`CeremonyLogMessage::object_key`] / [`SharesLogMessage::object_key`] helpers.
+/// (`{dir}/{sharing_seq:020}-{session_id}.json`) behind the
+/// [`SharesLogMessage::object_key`] helper.
 pub(crate) fn seq_scoped_object_key(dir: &str, sharing_seq: u64, session_id: &str) -> String {
     format!("{dir}/{sharing_seq:020}-{session_id}.json")
 }

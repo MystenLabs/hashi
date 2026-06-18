@@ -326,6 +326,7 @@ impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
             .into_iter()
             .map(pb_to_kp_encrypted_share)
             .collect::<GuardianResult<Vec<_>>>()?;
+        let encrypted_shares = KPEncryptedShares::new(encrypted_shares)?;
 
         Ok(GetGuardianInfoResponse {
             attestation: attestation.to_vec(),
@@ -510,6 +511,7 @@ pub fn get_guardian_info_response_to_pb(r: GetGuardianInfoResponse) -> pb::GetGu
         signed_info: Some(signed_guardian_info_to_pb(r.signed_info)),
         encrypted_shares: r
             .encrypted_shares
+            .into_vec()
             .into_iter()
             .map(kp_encrypted_share_to_pb)
             .collect(),

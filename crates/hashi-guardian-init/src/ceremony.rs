@@ -458,7 +458,6 @@ impl VerifiedCeremonyState {
         let encrypted_shares = reader
             .read_shares(&session_id, instance.sharing_seq())
             .await?;
-        let encrypted_shares = KPEncryptedShares::new(encrypted_shares)?;
         let state = Self {
             session_id,
             encrypted_shares,
@@ -505,13 +504,16 @@ impl VerifiedCeremonyState {
     /// Confirm the agreed `ceremony/` roster matches the recipient fingerprints
     /// on the `shares/` ciphertexts.
     fn ensure_roster_matches(&self, roster: &[KPFingerprint]) -> Result<()> {
-        let got: Vec<KPFingerprint> = self
+        let mut got: Vec<KPFingerprint> = self
             .encrypted_shares
             .iter()
             .map(|s| s.recipient_fingerprint.clone())
             .collect();
+        got.sort_unstable();
+        let mut want = roster.to_vec();
+        want.sort_unstable();
         ensure!(
-            roster == got.as_slice(),
+            want == got,
             "ceremony/ roster differs from shares/ recipient fingerprints"
         );
         Ok(())

@@ -16,7 +16,7 @@ use crate::guardian::Attestation;
 use crate::guardian::GuardianError;
 use crate::guardian::GuardianInfo;
 use crate::guardian::GuardianPubKey;
-use crate::guardian::KPEncryptedShare;
+use crate::guardian::KPEncryptedShares;
 use crate::guardian::KPFingerprint;
 use crate::guardian::LimiterState;
 use crate::guardian::SecretSharingInstance;
@@ -49,7 +49,7 @@ pub enum LogMessage {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SharesLogMessage {
     pub sharing_seq: u64,
-    pub encrypted_shares: Vec<KPEncryptedShare>,
+    pub encrypted_shares: KPEncryptedShares,
 }
 
 impl SharesLogMessage {
@@ -90,12 +90,6 @@ impl CeremonyLogMessage {
             CeremonyLogMessage::NewKey { instance, .. } => instance.sharing_seq(),
             CeremonyLogMessage::Rotate { new_instance, .. } => new_instance.sharing_seq(),
         }
-    }
-
-    /// `ceremony/{sharing_seq:020}-{session_id}.json` — the object key a reader
-    /// fetches for `(session_id, sharing_seq)`.
-    pub fn object_key(session_id: &str, sharing_seq: u64) -> String {
-        super::seq_scoped_object_key(S3_DIR_CEREMONY, sharing_seq, session_id)
     }
 }
 

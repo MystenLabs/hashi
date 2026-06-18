@@ -493,7 +493,7 @@ pub fn split_and_encrypt_for_kps<R: CryptoRng + RngCore>(
     kp_certs: &[PgpPublicCert],
     params: &SecretSharingParams,
     rng: &mut R,
-) -> (Vec<KPEncryptedShare>, ShareCommitments) {
+) -> (KPEncryptedShares, ShareCommitments) {
     assert_eq!(
         kp_certs.len(),
         params.num_shares(),
@@ -507,6 +507,8 @@ pub fn split_and_encrypt_for_kps<R: CryptoRng + RngCore>(
         encrypted_shares.push(encrypt_share_for_provisioner(share, cert));
         commitments.push(commit_share(share));
     }
+    let encrypted_shares = KPEncryptedShares::new(encrypted_shares)
+        .expect("split_secret produces share ids exactly 1..=n");
     let commitments =
         ShareCommitments::new(commitments).expect("share IDs 1..=n are unique by construction");
     (encrypted_shares, commitments)

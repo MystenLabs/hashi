@@ -19,7 +19,7 @@ use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::InitLogMessage;
-use hashi_types::guardian::KPEncryptedShare;
+use hashi_types::guardian::KPEncryptedShares;
 use hashi_types::guardian::KPFingerprint;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::LogRecord;
@@ -142,34 +142,8 @@ impl GuardianReader {
         Ok(Some(self.read_ceremony_record(&key).await?))
     }
 
-    /// Read + verify a specific session's `ceremony/` entry by exact key,
-    /// returning its resulting instance and recipient roster. Unlike
-    /// [`Self::read_latest_ceremony`] (lex-max across all sessions), this pins a
-    /// known `(session, sharing_seq)` — used when the caller already knows which
-    /// session it wants (e.g. the operator's just-created one).
-    pub async fn read_ceremony_at(
-        &mut self,
-        session_id: &str,
-        sharing_seq: u64,
-    ) -> anyhow::Result<(SecretSharingInstance, Vec<KPFingerprint>)> {
-        let key = CeremonyLogMessage::object_key(session_id, sharing_seq);
-        let (got_session, instance, roster) = self.read_ceremony_record(&key).await?;
-        anyhow::ensure!(
-            got_session == session_id,
-            "ceremony session mismatch at {key}: got {got_session}"
-        );
-        anyhow::ensure!(
-            instance.sharing_seq() == sharing_seq,
-            "ceremony log at {key} has sharing_seq {}",
-            instance.sharing_seq()
-        );
-        Ok((instance, roster))
-    }
-
     /// Read + verify the `ceremony/` record at `key`, returning its writing
-    /// session, resulting instance, and roster. Shared by the lex-max
-    /// ([`Self::read_latest_ceremony`]) and exact-key ([`Self::read_ceremony_at`])
-    /// reads.
+    /// session, resulting instance, and roster.
     async fn read_ceremony_record(
         &mut self,
         key: &str,
@@ -206,7 +180,7 @@ impl GuardianReader {
         &mut self,
         session_id: &str,
         sharing_seq: u64,
-    ) -> anyhow::Result<Vec<KPEncryptedShare>> {
+    ) -> anyhow::Result<KPEncryptedShares> {
         let key = SharesLogMessage::object_key(session_id, sharing_seq);
         let record: LogRecord = self.s3.get_object_no_lock(&key).await?;
         if record.session_id != session_id {

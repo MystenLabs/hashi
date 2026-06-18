@@ -98,7 +98,7 @@ pub struct GetGuardianInfoResponse {
     pub signed_info: GuardianSigned<GuardianInfo>,
     /// Encrypted shares from the ceremony (empty in non-ceremony mode); KPs
     /// fetch their share here and verify it against the instance commitments.
-    pub encrypted_shares: Vec<KPEncryptedShare>,
+    pub encrypted_shares: KPEncryptedShares,
 }
 
 /// TODO: Add network?
