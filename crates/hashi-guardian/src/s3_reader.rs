@@ -19,17 +19,18 @@ use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::InitLogMessage;
-use hashi_types::guardian::KPEncryptedShare;
+use hashi_types::guardian::KPEncryptedShares;
+use hashi_types::guardian::KPFingerprint;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::SessionID;
+use hashi_types::guardian::SharesLogMessage;
 use hashi_types::guardian::VerifiedLogRecord;
 use hashi_types::guardian::S3_DIR_CEREMONY;
 use hashi_types::guardian::S3_DIR_COMMITTEE_UPDATE;
 use hashi_types::guardian::S3_DIR_HEARTBEAT;
-use hashi_types::guardian::S3_DIR_SHARES;
 use hashi_types::guardian::S3_DIR_WITHDRAW;
 use hashi_types::move_types::Committee;
 use std::collections::HashMap;
@@ -122,14 +123,15 @@ impl GuardianReader {
         Ok(self
             .read_latest_ceremony()
             .await?
-            .map(|(_, instance)| instance))
+            .map(|(_, instance, _)| instance))
     }
 
     /// Like [`Self::read_latest_ceremony_instance`], but also returns the writing
-    /// session id — needed to locate the matching `shares/` object for recovery.
+    /// session id and recipient roster — needed to locate the matching `shares/`
+    /// object and to check the roster against the agreed KP set.
     pub async fn read_latest_ceremony(
         &mut self,
-    ) -> anyhow::Result<Option<(SessionID, SecretSharingInstance)>> {
+    ) -> anyhow::Result<Option<(SessionID, SecretSharingInstance, Vec<KPFingerprint>)>> {
         let keys = self
             .s3
             .list_all_keys_in_dir(&format!("{}/", S3_DIR_CEREMONY))
@@ -137,17 +139,33 @@ impl GuardianReader {
         let Some(key) = pick_latest_key(keys, S3_DIR_CEREMONY) else {
             return Ok(None);
         };
-        let record = self.s3.get_log_record(&key).await?;
+        Ok(Some(self.read_ceremony_record(&key).await?))
+    }
+
+    /// Read + verify the `ceremony/` record at `key`, returning its writing
+    /// session, resulting instance, and roster.
+    async fn read_ceremony_record(
+        &mut self,
+        key: &str,
+    ) -> anyhow::Result<(SessionID, SecretSharingInstance, Vec<KPFingerprint>)> {
+        let record = self.s3.get_log_record(key).await?;
         let record = self.pubkey_cache.verify_record(&self.s3, record).await?;
         let session_id = record.session_id.clone();
         let LogMessage::Ceremony(msg) = record.message else {
             anyhow::bail!("expected a ceremony log at {key}");
         };
-        let instance = match *msg {
-            CeremonyLogMessage::NewKey { instance, .. } => instance,
-            CeremonyLogMessage::Rotate { new_instance, .. } => new_instance,
-        };
-        Ok(Some((session_id, instance)))
+        let (instance, roster) = ceremony_instance_and_roster(*msg, key)?;
+        Ok((session_id, instance, roster))
+    }
+
+    /// The session's attestation-verified signing pubkey, loaded once via the
+    /// cache (later reads of the same session reuse it). Lets callers anchor a
+    /// cross-check on the attested key without a second attestation pass.
+    pub async fn verified_pubkey(&mut self, session_id: &str) -> anyhow::Result<GuardianPubKey> {
+        Ok(*self
+            .pubkey_cache
+            .get_or_load_pubkey(&self.s3, session_id)
+            .await?)
     }
 
     /// Read + verify the encrypted shares at `shares/{seq}-{session}.json`. Point
@@ -162,8 +180,8 @@ impl GuardianReader {
         &mut self,
         session_id: &str,
         sharing_seq: u64,
-    ) -> anyhow::Result<Vec<KPEncryptedShare>> {
-        let key = format!("{}/{:020}-{}.json", S3_DIR_SHARES, sharing_seq, session_id);
+    ) -> anyhow::Result<KPEncryptedShares> {
+        let key = SharesLogMessage::object_key(session_id, sharing_seq);
         let record: LogRecord = self.s3.get_object_no_lock(&key).await?;
         if record.session_id != session_id {
             anyhow::bail!(
@@ -248,6 +266,35 @@ impl GuardianSessionKeyCache {
             .verify(signing_pubkey)
             .with_context(|| "failed to verify guardian enclave signature")
     }
+}
+
+/// The resulting instance + recipient roster from a ceremony message: `NewKey`
+/// yields its instance; `Rotate` yields `new_instance`, asserting the rotation
+/// bumps `sharing_seq` by exactly one over the consumed `old_instance`.
+fn ceremony_instance_and_roster(
+    msg: CeremonyLogMessage,
+    key: &str,
+) -> anyhow::Result<(SecretSharingInstance, Vec<KPFingerprint>)> {
+    Ok(match msg {
+        CeremonyLogMessage::NewKey { instance, roster } => (instance, roster),
+        CeremonyLogMessage::Rotate {
+            old_instance,
+            new_instance,
+            roster,
+        } => {
+            let expected = old_instance
+                .sharing_seq()
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("Rotate old sharing_seq is u64::MAX at {key}"))?;
+            anyhow::ensure!(
+                new_instance.sharing_seq() == expected,
+                "Rotate ceremony log at {key} has non-contiguous sharing_seq: old={}, new={}",
+                old_instance.sharing_seq(),
+                new_instance.sharing_seq()
+            );
+            (new_instance, roster)
+        }
+    })
 }
 
 /// Pick the lex-greatest key, skipping any whose name starts with `<dir>/failure-`.

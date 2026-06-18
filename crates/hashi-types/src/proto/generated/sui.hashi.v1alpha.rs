@@ -1393,8 +1393,8 @@ pub struct GuardianShareCommitment {
 pub struct SetupNewKeyResponseData {
     #[prost(message, repeated, tag = "1")]
     pub encrypted_shares: ::prost::alloc::vec::Vec<KpEncryptedShare>,
-    #[prost(message, repeated, tag = "2")]
-    pub share_commitments: ::prost::alloc::vec::Vec<GuardianShareCommitment>,
+    #[prost(message, optional, tag = "2")]
+    pub secret_sharing_instance: ::core::option::Option<SecretSharingInstance>,
 }
 /// Application-layer signed response.
 #[derive(Clone, PartialEq, ::prost::Message)]

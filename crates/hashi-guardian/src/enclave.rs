@@ -94,7 +94,7 @@ pub struct Scratchpad {
     pub ceremony_complete: tokio::sync::Mutex<bool>,
     /// Encrypted shares produced by the ceremony (`setup_new_key` or
     /// `rotate_kps`), served to KPs from `get_guardian_info`. Set once.
-    pub latest_encrypted_shares: OnceLock<Vec<KPEncryptedShare>>,
+    pub latest_encrypted_shares: OnceLock<KPEncryptedShares>,
 }
 
 pub struct EphemeralKeyPairs {
@@ -529,7 +529,7 @@ impl Enclave {
     pub async fn log_shares(
         &self,
         sharing_seq: u64,
-        encrypted_shares: Vec<KPEncryptedShare>,
+        encrypted_shares: KPEncryptedShares,
     ) -> GuardianResult<()> {
         self.write_log(LogMessage::Shares(Box::new(SharesLogMessage {
             sharing_seq,
@@ -561,7 +561,7 @@ impl Enclave {
 
     /// Stash the ceremony's encrypted shares for KPs to fetch via
     /// `get_guardian_info`. One ceremony per enclave, so this is set once.
-    pub fn set_latest_encrypted_shares(&self, shares: Vec<KPEncryptedShare>) -> GuardianResult<()> {
+    pub fn set_latest_encrypted_shares(&self, shares: KPEncryptedShares) -> GuardianResult<()> {
         self.scratchpad
             .latest_encrypted_shares
             .set(shares)
@@ -569,12 +569,12 @@ impl Enclave {
     }
 
     /// Encrypted shares from the ceremony, or empty if none has run.
-    pub fn latest_encrypted_shares(&self) -> Vec<KPEncryptedShare> {
+    pub fn latest_encrypted_shares(&self) -> KPEncryptedShares {
         self.scratchpad
             .latest_encrypted_shares
             .get()
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_else(|| KPEncryptedShares::new(vec![]).expect("empty share list is valid"))
     }
 
     pub fn state_hash(&self) -> Option<&[u8; 32]> {

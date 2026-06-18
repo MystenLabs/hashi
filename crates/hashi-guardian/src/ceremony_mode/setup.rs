@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::Enclave;
-use hashi_types::guardian::crypto::recipient_roster;
 use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::*;
@@ -63,8 +62,8 @@ pub async fn setup_new_key(
 
     enclave
         .log_ceremony(CeremonyLogMessage::NewKey {
-            instance: ss_instance,
-            roster: recipient_roster(&encrypted_shares),
+            instance: ss_instance.clone(),
+            roster: encrypted_shares.recipient_roster(),
         })
         .await?;
 
@@ -74,7 +73,7 @@ pub async fn setup_new_key(
 
     let response = enclave.sign(SetupNewKeyResponse {
         encrypted_shares,
-        share_commitments,
+        secret_sharing_instance: ss_instance,
     });
 
     *ceremony_complete = true;
@@ -112,8 +111,14 @@ mod tests {
 
         // Response still carries the armored ciphertexts.
         assert_eq!(validated_resp.encrypted_shares.len(), TEST_N);
-        assert_eq!(validated_resp.share_commitments.len(), TEST_N);
-        for enc_share in &validated_resp.encrypted_shares {
+        assert_eq!(validated_resp.secret_sharing_instance.num_shares(), TEST_N);
+        assert_eq!(validated_resp.secret_sharing_instance.threshold(), TEST_T);
+        assert_eq!(validated_resp.secret_sharing_instance.sharing_seq(), 0);
+        assert_eq!(
+            validated_resp.secret_sharing_instance.commitments().len(),
+            TEST_N
+        );
+        for enc_share in validated_resp.encrypted_shares.iter() {
             assert!(enc_share
                 .armored_ciphertext
                 .starts_with("-----BEGIN PGP MESSAGE-----"));
