@@ -6903,7 +6903,7 @@ async fn test_prepare_previous_output_retrieves_missing_rotation_messages() {
     let epoch = rotation_setup.setup.epoch();
 
     // Override session ID to KeyRotation so rotation messages match
-    // what reconstruct_from_rotation_certificates expects.
+    // what reconstruct_previous_rotation_output expects.
     let rotation_session_id = SessionId::new(TEST_CHAIN_ID, epoch, &ProtocolType::KeyRotation);
 
     // Create rotation dealers with KeyRotation session ID.
@@ -8566,10 +8566,10 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
     );
 }
 
-/// Tests that `reconstruct_from_rotation_certificates` uses the previous committee's
+/// Tests that `reconstruct_previous_rotation_output` uses the previous committee's
 /// parameters to decrypt rotation messages.
 #[test]
-fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
+fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
     let mut rng = rand::thread_rng();
 
     // Step 1: Complete DKG at epoch 100 with 5 members, weights [3, 2, 4, 1, 2]
@@ -8800,7 +8800,7 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
     // This would panic with index-out-of-bounds if previous committee parameters were not used for decryption.
     let reconstructed = unwrap_reconstruction_success(
         manager
-            .reconstruct_from_rotation_certificates(&rotation_certificates, &HashMap::new())
+            .reconstruct_previous_rotation_output(&rotation_certificates, &HashMap::new())
             .unwrap(),
     );
 
@@ -8812,6 +8812,354 @@ fn test_reconstruct_from_rotation_certificates_with_shifted_party_ids() {
     assert!(
         !reconstructed.key_shares.shares.is_empty(),
         "Should have key shares from rotation reconstruction"
+    );
+}
+
+#[test]
+fn test_recover_current_rotation() {
+    let mut rng = rand::thread_rng();
+
+    // Epoch 100: DKG with 5 members, weights [3, 2, 4, 1, 2]; dealers 0, 1, 4.
+    let rotation_setup = RotationTestSetup::new();
+    let dkg_epoch = rotation_setup.setup.epoch();
+    let rotation_epoch = dkg_epoch + 1;
+    let dkg_outputs: Vec<MpcOutput> = (0..5)
+        .map(|i| rotation_setup.create_receiver_with_completed_dkg(i).1)
+        .collect();
+    let expected_public_key = dkg_outputs[0].public_key;
+
+    // Committee set with epochs 100 (DKG) and 101 (rotation), same 5 members.
+    let members: Vec<_> = rotation_setup.setup.committee().members().to_vec();
+    let committee_at = |epoch| {
+        Committee::new(
+            members.clone(),
+            epoch,
+            TEST_THRESHOLD_IN_BASIS_POINTS,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            TEST_MAX_FAULTY_IN_BASIS_POINTS,
+        )
+    };
+    let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+    let mut committees = BTreeMap::new();
+    committees.insert(dkg_epoch, committee_at(dkg_epoch));
+    committees.insert(rotation_epoch, committee_at(rotation_epoch));
+    committee_set
+        .set_epoch(dkg_epoch)
+        .set_pending_epoch_change(Some(rotation_epoch))
+        .set_committees(committees);
+
+    // Epoch 101 rotation: dealers 0, 1, 4 reshare their epoch-100 shares; build certs.
+    let rotation_dealer_indices = [0usize, 1, 4];
+    let mut rotation_certificates = Vec::new();
+    let mut rotation_messages_by_dealer: Vec<(Address, RotationMessages)> = Vec::new();
+    let new_rotation_manager = |idx: usize| {
+        let mut m = MpcManager::new(
+            rotation_setup.setup.address(idx),
+            &committee_set,
+            rotation_epoch,
+            SessionId::new(TEST_CHAIN_ID, rotation_epoch, &ProtocolType::KeyRotation),
+            rotation_setup.setup.encryption_keys[idx].clone(),
+            Some(rotation_setup.setup.encryption_keys[idx].clone()),
+            rotation_setup.setup.signing_keys[idx].clone(),
+            Box::new(InMemoryPublicMessagesStore::new()),
+            TEST_CHAIN_ID,
+            None,
+            TEST_BATCH_SIZE_PER_WEIGHT,
+            None,
+            &test_metrics(),
+        )
+        .unwrap();
+        m.previous_output = Some(dkg_outputs[idx].clone());
+        m
+    };
+    for &dealer_idx in &rotation_dealer_indices {
+        let dealer_addr = rotation_setup.setup.address(dealer_idx);
+        let mut dealer_manager = new_rotation_manager(dealer_idx);
+        let msgs = dealer_manager.create_rotation_messages(&dkg_outputs[dealer_idx], &mut rng);
+        let rotation_messages = Messages::Rotation(msgs.clone());
+
+        let own_sig = dealer_manager
+            .try_sign_rotation_messages(&dkg_outputs[dealer_idx], dealer_addr, &rotation_messages)
+            .unwrap();
+        let other_idx = if dealer_idx == 0 { 1 } else { 0 };
+        let other_addr = rotation_setup.setup.address(other_idx);
+        let mut other_manager = new_rotation_manager(other_idx);
+        let other_sig = other_manager
+            .try_sign_rotation_messages(&dkg_outputs[other_idx], dealer_addr, &rotation_messages)
+            .unwrap();
+
+        let committee_for_cert = committee_set.committees().get(&rotation_epoch).unwrap();
+        let cert = create_rotation_test_certificate(
+            committee_for_cert,
+            &rotation_messages,
+            dealer_addr,
+            vec![
+                MemberSignature::new(rotation_epoch, dealer_addr, own_sig),
+                MemberSignature::new(rotation_epoch, other_addr, other_sig),
+            ],
+        )
+        .unwrap();
+        rotation_certificates.push(CertificateV1::Rotation(cert));
+        rotation_messages_by_dealer.push((dealer_addr, msgs));
+    }
+
+    // Receiver = member 3, recovering at epoch 101. Its store holds both the epoch-101
+    // rotation messages (for current_output) and the epoch-100 DKG messages (for
+    // previous_output); the InMemory store keys by dealer, with separate maps per type.
+    let receiver_index = 3usize;
+    let build_store = || {
+        let mut store = InMemoryPublicMessagesStore::new();
+        for (dealer_addr, msgs) in &rotation_messages_by_dealer {
+            store
+                .store_rotation_messages(rotation_epoch, dealer_addr, msgs)
+                .unwrap();
+        }
+        for (i, message) in rotation_setup.dealer_messages.iter().enumerate() {
+            let dealer_addr = rotation_setup
+                .setup
+                .address(rotation_setup.dealer_indices[i]);
+            let Messages::Dkg(inner) = message else {
+                unreachable!()
+            };
+            store
+                .store_dealer_message(dkg_epoch, &dealer_addr, inner)
+                .unwrap();
+        }
+        store
+    };
+    let make_manager = |store: Box<dyn PublicMessagesStore>| {
+        MpcManager::new(
+            rotation_setup.setup.address(receiver_index),
+            &committee_set,
+            rotation_epoch,
+            SessionId::new(TEST_CHAIN_ID, rotation_epoch, &ProtocolType::KeyRotation),
+            rotation_setup.setup.encryption_keys[receiver_index].clone(),
+            Some(rotation_setup.setup.encryption_keys[receiver_index].clone()),
+            rotation_setup.setup.signing_keys[receiver_index].clone(),
+            store,
+            TEST_CHAIN_ID,
+            None,
+            TEST_BATCH_SIZE_PER_WEIGHT,
+            None,
+            &test_metrics(),
+        )
+        .unwrap()
+    };
+    let dkg_certs = rotation_setup.certificates();
+    let onchain_key = bcs::to_bytes(&expected_public_key).unwrap();
+    let current_req = GetPublicMpcOutputRequest {
+        epoch: rotation_epoch,
+    };
+    let previous_req = GetPublicMpcOutputRequest { epoch: dkg_epoch };
+
+    // Recovered: both outputs reconstructed (key preserved across the rotation) and
+    // committed — current_output for the rotation epoch, previous_output for epoch N-1.
+    let mgr = Arc::new(RwLock::new(make_manager(Box::new(build_store()))));
+    let MpcOutputRecoveryOutcome::Recovered(output) =
+        MpcManager::reconstruct_current_rotation_output(
+            &mgr,
+            &rotation_certificates,
+            &dkg_certs,
+            &onchain_key,
+        )
+    else {
+        panic!("expected Recovered from clean local rotation + previous DKG messages");
+    };
+    assert_eq!(
+        output.public_key, expected_public_key,
+        "rotation must preserve the key"
+    );
+    assert!(
+        mgr.read()
+            .unwrap()
+            .handle_get_public_mpc_output_request(&current_req)
+            .is_ok(),
+        "current_output must be committed for the rotation epoch"
+    );
+    assert!(
+        mgr.read()
+            .unwrap()
+            .handle_get_public_mpc_output_request(&previous_req)
+            .is_ok(),
+        "previous_output must be committed (epoch N-1 key for new-member bootstrap)"
+    );
+
+    // Wrong on-chain key → Suspicious; neither output committed.
+    let mut wrong_key = onchain_key.clone();
+    wrong_key[0] ^= 0xff;
+    let mgr = Arc::new(RwLock::new(make_manager(Box::new(build_store()))));
+    assert!(matches!(
+        MpcManager::reconstruct_current_rotation_output(
+            &mgr,
+            &rotation_certificates,
+            &dkg_certs,
+            &wrong_key
+        ),
+        MpcOutputRecoveryOutcome::Suspicious(_)
+    ));
+    assert!(
+        mgr.read()
+            .unwrap()
+            .handle_get_public_mpc_output_request(&current_req)
+            .is_err(),
+        "Suspicious must not commit current_output"
+    );
+
+    // No authenticated on-chain key yet → NotApplicable.
+    let mgr = Arc::new(RwLock::new(make_manager(Box::new(build_store()))));
+    assert!(matches!(
+        MpcManager::reconstruct_current_rotation_output(
+            &mgr,
+            &rotation_certificates,
+            &dkg_certs,
+            &[]
+        ),
+        MpcOutputRecoveryOutcome::NotApplicable
+    ));
+}
+
+#[test]
+fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() {
+    let mut rng = rand::thread_rng();
+    let rotation_setup = RotationTestSetup::new();
+    let dkg_epoch = rotation_setup.setup.epoch();
+    let rotation_epoch = dkg_epoch + 1;
+    let dkg_outputs: Vec<MpcOutput> = (0..5)
+        .map(|i| rotation_setup.create_receiver_with_completed_dkg(i).1)
+        .collect();
+
+    let members: Vec<_> = rotation_setup.setup.committee().members().to_vec();
+    let committee_at = |epoch| {
+        Committee::new(
+            members.clone(),
+            epoch,
+            TEST_THRESHOLD_IN_BASIS_POINTS,
+            TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            TEST_MAX_FAULTY_IN_BASIS_POINTS,
+        )
+    };
+    let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
+    let mut committees = BTreeMap::new();
+    committees.insert(dkg_epoch, committee_at(dkg_epoch));
+    committees.insert(rotation_epoch, committee_at(rotation_epoch));
+    committee_set
+        .set_epoch(dkg_epoch)
+        .set_pending_epoch_change(Some(rotation_epoch))
+        .set_committees(committees);
+
+    let new_rotation_manager = |idx: usize| {
+        let mut m = MpcManager::new(
+            rotation_setup.setup.address(idx),
+            &committee_set,
+            rotation_epoch,
+            SessionId::new(TEST_CHAIN_ID, rotation_epoch, &ProtocolType::KeyRotation),
+            rotation_setup.setup.encryption_keys[idx].clone(),
+            Some(rotation_setup.setup.encryption_keys[idx].clone()),
+            rotation_setup.setup.signing_keys[idx].clone(),
+            Box::new(InMemoryPublicMessagesStore::new()),
+            TEST_CHAIN_ID,
+            None,
+            TEST_BATCH_SIZE_PER_WEIGHT,
+            None,
+            &test_metrics(),
+        )
+        .unwrap();
+        m.previous_output = Some(dkg_outputs[idx].clone());
+        m
+    };
+
+    // Dealer 0 reshares but corrupts the reshare destined for the recovering node
+    // (member 3); the committee still certifies it (only the victim detects the bad share).
+    let dealer_idx = 0usize;
+    let receiver_index = 3usize;
+    let dealer_addr = rotation_setup.setup.address(dealer_idx);
+    let receiver_addr = rotation_setup.setup.address(receiver_index);
+    let receiver_party_id = committee_at(rotation_epoch)
+        .index_of(&receiver_addr)
+        .unwrap() as u16;
+    let base_session_id = SessionId::new(TEST_CHAIN_ID, rotation_epoch, &ProtocolType::KeyRotation);
+
+    let mut dealer_manager = new_rotation_manager(dealer_idx);
+    let honest_msgs = dealer_manager.create_rotation_messages(&dkg_outputs[dealer_idx], &mut rng);
+    let first_share_index = *honest_msgs.keys().next().unwrap();
+    let share_value = dkg_outputs[dealer_idx]
+        .key_shares
+        .shares
+        .iter()
+        .find(|s| s.index == first_share_index)
+        .map(|s| s.value)
+        .unwrap();
+    let (cheating_share_index, cheating_message) = create_cheating_rotation_message(
+        &rotation_setup.setup,
+        &base_session_id,
+        &dealer_addr,
+        share_value,
+        first_share_index,
+        receiver_party_id,
+        &mut rng,
+    );
+    let mut cheating_map = honest_msgs.clone();
+    cheating_map.insert(cheating_share_index, cheating_message);
+    let cheating_messages = Messages::Rotation(cheating_map.clone());
+
+    // Certify the cheating messages with two non-victim validators (their own shares verify).
+    let own_sig = dealer_manager
+        .try_sign_rotation_messages(&dkg_outputs[dealer_idx], dealer_addr, &cheating_messages)
+        .unwrap();
+    let signer_idx = 1usize;
+    let signer_addr = rotation_setup.setup.address(signer_idx);
+    let mut signer = new_rotation_manager(signer_idx);
+    let signer_sig = signer
+        .try_sign_rotation_messages(&dkg_outputs[signer_idx], dealer_addr, &cheating_messages)
+        .unwrap();
+    let cert = create_rotation_test_certificate(
+        committee_set.committees().get(&rotation_epoch).unwrap(),
+        &cheating_messages,
+        dealer_addr,
+        vec![
+            MemberSignature::new(rotation_epoch, dealer_addr, own_sig),
+            MemberSignature::new(rotation_epoch, signer_addr, signer_sig),
+        ],
+    )
+    .unwrap();
+
+    // Receiver (member 3) at epoch 101 with the certified-but-cheating rotation messages.
+    let mut store = InMemoryPublicMessagesStore::new();
+    store
+        .store_rotation_messages(rotation_epoch, &dealer_addr, &cheating_map)
+        .unwrap();
+    let manager = MpcManager::new(
+        receiver_addr,
+        &committee_set,
+        rotation_epoch,
+        base_session_id,
+        rotation_setup.setup.encryption_keys[receiver_index].clone(),
+        Some(rotation_setup.setup.encryption_keys[receiver_index].clone()),
+        rotation_setup.setup.signing_keys[receiver_index].clone(),
+        Box::new(store),
+        TEST_CHAIN_ID,
+        None,
+        TEST_BATCH_SIZE_PER_WEIGHT,
+        None,
+        &test_metrics(),
+    )
+    .unwrap();
+    let mgr = Arc::new(RwLock::new(manager));
+
+    // The complaint surfaces during the current-output reconstruction (before previous), so
+    // previous certs are unused; a non-empty on-chain key avoids the empty-key early return.
+    assert!(
+        matches!(
+            MpcManager::reconstruct_current_rotation_output(
+                &mgr,
+                &[CertificateV1::Rotation(cert)],
+                &[],
+                &[0u8; 33]
+            ),
+            MpcOutputRecoveryOutcome::NotApplicable
+        ),
+        "a certified rotation dealer whose reshare decrypts to a complaint must be \
+         NotApplicable (fall through to the live path), not Suspicious"
     );
 }
 
@@ -8945,7 +9293,7 @@ fn create_cheating_nonce_message(
     let eval_points: Vec<_> = (1..=config.threshold)
         .map(|i| {
             let idx = ShareIndex::new(i).unwrap();
-            fastcrypto_tbls::types::IndexedValue {
+            IndexedValue {
                 index: idx,
                 value: response_evals[idx],
             }

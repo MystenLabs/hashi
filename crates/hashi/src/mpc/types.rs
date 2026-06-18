@@ -226,6 +226,15 @@ pub(crate) struct DkgReconstructionContext<'a> {
     pub epoch: u64,
 }
 
+pub(crate) struct RotationReconstructionContext<'a> {
+    pub nodes: &'a Nodes<EncryptionGroupElement>,
+    pub party_id: PartyId,
+    pub encryption_key: &'a PrivateKey<EncryptionGroupElement>,
+    pub output_threshold: u16,
+    pub input_threshold: u16,
+    pub epoch: u64,
+}
+
 #[allow(clippy::large_enum_variant)]
 pub enum NonceReconstructionOutcome {
     Success(Vec<batch_avss::ReceiverOutput>),
