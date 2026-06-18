@@ -913,7 +913,7 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 CreateProposalCommands::EmergencyPause { unpause, metadata } => {
                     commands::proposal::create_emergency_pause_proposal(
                         &config,
-                        !unpause,
+                        unpause,
                         parse_metadata(metadata.metadata),
                         &tx_opts,
                     )
