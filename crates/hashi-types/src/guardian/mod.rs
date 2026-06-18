@@ -689,6 +689,17 @@ impl BuildPcrs {
     }
 }
 
+/// Deserialize from a hex string (optional `0x` prefix) — the form config files
+/// pin PCR0 in.
+impl<'de> Deserialize<'de> for BuildPcrs {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let hex_str = String::deserialize(deserializer)?;
+        let pcr0 =
+            hex::decode(hex_str.trim_start_matches("0x")).map_err(serde::de::Error::custom)?;
+        Ok(Self { pcr0 })
+    }
+}
+
 /// Verify a Nitro attestation document (COSE signature + AWS cert chain to the
 /// Nitro root + freshness) and that it commits to `signing_pubkey` — the enclave
 /// binds its signing key as the document's `public_key`.

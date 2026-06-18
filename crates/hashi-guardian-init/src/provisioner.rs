@@ -26,7 +26,7 @@ pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
     // One reader for the whole run: it owns the S3 client and the trusted-key
     // cache, so each session's attestation is verified once whichever check
     // reads that session first.
-    let build_pcrs = cfg.build_pcrs()?;
+    let build_pcrs = cfg.expected_pcr0.clone();
     let mut reader = GuardianReader::new(&cfg.s3, build_pcrs.clone()).await?;
     let master_g = cfg.mpc_master_g()?;
 
