@@ -19,6 +19,7 @@ use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::Client as S3Client;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::verify_enclave_attestation;
+use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::GuardianResult;
@@ -519,21 +520,17 @@ impl GuardianS3Client {
         self.get_object_unsafe::<LogRecord>(key).await
     }
 
-    /// Fetch the session's attestation record, verify it, and return the trusted
-    /// enclave signing pubkey. No caller needs the raw attestation bytes.
+    /// Fetch the session's attestation record, verify it against `build_pcrs`,
+    /// and return the trusted enclave signing pubkey. Verification binds the
+    /// logged `signing_public_key` to the attestation's `public_key`, so the
+    /// returned key is attestation-anchored. No caller needs the raw bytes.
     ///
     /// `pub(crate)` so the only verified-pubkey path off-crate is
-    /// [`GuardianReader::verified_pubkey`], which caches the result (and is where
-    /// the `check C` attestation engine will live) — callers can't resolve it
-    /// outside the cache.
-    ///
-    /// TODO(check C): take `expected_pcrs` and verify the attestation's PCRs
-    /// against it (`verify_enclave_attestation` is a no-op today), and return the
-    /// pubkey anchored in the attestation's `user_data` rather than the
-    /// separately-logged `signing_public_key`.
+    /// [`GuardianReader::verified_pubkey`], which caches the result.
     pub(crate) async fn get_verified_enclave_pubkey(
         &self,
         session_id: &str,
+        build_pcrs: &BuildPcrs,
     ) -> GuardianResult<GuardianPubKey> {
         let key = InitLogMessage::attestation_object_key(session_id);
         let record = self.get_log_record(&key).await?;
@@ -554,7 +551,7 @@ impl GuardianS3Client {
                 _ => None,
             })
             .ok_or_else(|| S3Error(format!("expected OIAttestationUnsigned at key {}", key)))?;
-        verify_enclave_attestation(&attestation, &signing_public_key)?;
+        verify_enclave_attestation(&attestation, &signing_public_key, build_pcrs)?;
         Ok(signing_public_key)
     }
 }

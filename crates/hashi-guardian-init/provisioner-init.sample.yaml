@@ -45,3 +45,8 @@ limiter_config:
 # `bcs(G)` read from on-chain `CommitteeSet.mpc_public_key`). NOT the
 # guardian's own BTC key.
 hashi_btc_master_pubkey_hex: "0000000000000000000000000000000000000000000000000000000000000001"
+
+# Expected enclave-image measurement: PCR0 (hex) from the reproducible build of
+# the guardian revision being provisioned. Pinned against the session's
+# attestation. Required (unused in non-Nitro dev, where verification is a no-op).
+expected_pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"

@@ -14,6 +14,7 @@ use crate::s3_client::GuardianS3Client;
 use anyhow::Context;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::time_utils::UnixSeconds;
+use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GuardianInfo;
@@ -57,18 +58,18 @@ pub struct GuardianReader {
 }
 
 impl GuardianReader {
-    pub async fn new(config: &S3Config) -> anyhow::Result<Self> {
+    pub async fn new(config: &S3Config, build_pcrs: BuildPcrs) -> anyhow::Result<Self> {
         let s3 = GuardianS3Client::new_checked(config)
             .await
             .map_err(|e| anyhow::anyhow!(e))
             .context("failed to verify guardian S3 connectivity")?;
-        Ok(Self::from_s3_client(s3))
+        Ok(Self::from_s3_client(s3, build_pcrs))
     }
 
-    pub fn from_s3_client(s3: GuardianS3Client) -> Self {
+    pub fn from_s3_client(s3: GuardianS3Client, build_pcrs: BuildPcrs) -> Self {
         Self {
             s3,
-            pubkey_cache: GuardianSessionKeyCache::default(),
+            pubkey_cache: GuardianSessionKeyCache::new(build_pcrs),
         }
     }
 
@@ -231,17 +232,25 @@ impl GuardianReader {
 }
 
 /// Enclave signing pubkeys trusted after their attestation was verified once,
-/// keyed by session. Internal to [`GuardianReader`].
+/// keyed by session. Internal to [`GuardianReader`]; pins every session's
+/// attestation against `build_pcrs`.
 ///
-/// TODO(check C): make this the trust engine — construct it with a trusted
-/// `commit -> ExpectedPcrs` map and pin each session's attested PCRs against the
-/// entry for its `/info`-reported commit.
-#[derive(Default)]
+/// TODO(check C): make `build_pcrs` a `commit -> BuildPcrs` map resolved
+/// per session from its `/info`-reported `untrusted_git_revision`, instead of a
+/// single flat set.
 struct GuardianSessionKeyCache {
     keys: HashMap<SessionID, GuardianPubKey>,
+    build_pcrs: BuildPcrs,
 }
 
 impl GuardianSessionKeyCache {
+    fn new(build_pcrs: BuildPcrs) -> Self {
+        Self {
+            keys: HashMap::new(),
+            build_pcrs,
+        }
+    }
+
     /// The session's signing pubkey, verifying and caching its attestation on first use.
     async fn get_or_load_pubkey(
         &mut self,
@@ -249,7 +258,9 @@ impl GuardianSessionKeyCache {
         session_id: &str,
     ) -> anyhow::Result<&GuardianPubKey> {
         if !self.keys.contains_key(session_id) {
-            let pubkey = s3.get_verified_enclave_pubkey(session_id).await?;
+            let pubkey = s3
+                .get_verified_enclave_pubkey(session_id, &self.build_pcrs)
+                .await?;
             self.keys.insert(session_id.to_string(), pubkey);
         }
         Ok(&self.keys[session_id])

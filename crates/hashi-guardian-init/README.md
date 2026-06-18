@@ -93,10 +93,11 @@ cargo run -p hashi-guardian-init -- provision --config provisioner-init.sample.y
 ### Config
 
 See [`provisioner-init.sample.yaml`](provisioner-init.sample.yaml) for a complete
-`ProvisionerConfig` example: the KP's secret share, S3 config, limiter config, and
-the MPC committee verifying key `G` (`hashi_btc_master_pubkey_hex`). The
-secret-sharing instance and (post-genesis) the committee are scraped from S3,
-not configured.
+`ProvisionerConfig` example: the KP's secret share, S3 config, limiter config,
+the MPC committee verifying key `G` (`hashi_btc_master_pubkey_hex`), and the
+expected enclave-image measurement (`expected_pcr0`) pinned against each
+session's attestation. The secret-sharing instance and (post-genesis) the
+committee are scraped from S3, not configured.
 `hashi_committee_genesis` is needed only at genesis; omit it once a
 `committee-update/` log exists. Omit `relay_endpoint` for a dry run.
 

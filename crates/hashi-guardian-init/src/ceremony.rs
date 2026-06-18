@@ -23,6 +23,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::ensure;
 use hashi_guardian::s3_reader::GuardianReader;
+use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianSigned;
 use hashi_types::guardian::KPEncryptedShares;
@@ -62,6 +63,10 @@ pub struct CeremonyCommonConfig {
     /// Paths to each KP's armored OpenPGP public cert. Order matters: the cert
     /// at index `i` (0-based) is assigned share id `i + 1`.
     pub kp_pgp_cert_paths: Vec<PathBuf>,
+    /// Expected enclave-image measurement: PCR0 as hex, pinned against every
+    /// session's attestation. Required (a value is needed even in non-Nitro dev,
+    /// where verification is a no-op).
+    pub expected_pcr0: BuildPcrs,
 }
 
 impl CeremonyCommonConfig {
@@ -176,9 +181,9 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
     //    pin the session id. This binds `signing_pub_key` (and thus the session)
     //    before we trust the SetupNewKey response we'll verify against it below.
     //
-    //    NOTE: like dev_bootstrap, this authenticates the guardian's *internal*
-    //    consistency, not the enclave's hardware attestation — TODO(check C)
-    //    makes verify_enclave_attestation a no-op today.
+    //    NOTE: this authenticates only the guardian's *internal* consistency;
+    //    the enclave's hardware attestation is pinned just below, when the reader
+    //    verifies the session's attestation against `expected_pcr0`.
     info!("calling GetGuardianInfo");
     let info_pb = client
         .get_guardian_info(pb::GetGuardianInfoRequest {})
@@ -195,7 +200,7 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
         .map_err(|e| anyhow!("verify GuardianInfo signature (session={session_id}): {e:?}"))?;
     info!(session_id = %session_id, "guardian info signature verified; session pinned");
 
-    let mut reader = GuardianReader::new(&cfg.common.guardian_s3)
+    let mut reader = GuardianReader::new(&cfg.common.guardian_s3, cfg.common.expected_pcr0.clone())
         .await
         .context("connect to guardian log bucket")?;
     let attested_signing_pub_key = reader.verified_pubkey(&session_id).await?;
@@ -296,7 +301,7 @@ pub async fn verify(cfg: CeremonyVerifyConfig) -> Result<()> {
     // 1. Discover and verify the latest ceremony from the immutable log
     //    (attestation-verified once via the reader's session-key cache).
     let sharing_seq = cfg.sharing_seq;
-    let mut reader = GuardianReader::new(&cfg.common.guardian_s3)
+    let mut reader = GuardianReader::new(&cfg.common.guardian_s3, cfg.common.expected_pcr0.clone())
         .await
         .context("connect to guardian log bucket")?;
     let state = VerifiedCeremonyState::latest_from_s3(

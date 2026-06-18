@@ -78,9 +78,13 @@ tempfile = "3.23.0"
 jiff = "0.2"
 tar = "0.4"
 
-# fastcrypto
-fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "afa5a34372c95958d79c9dfadfbb5a421878bef5" }
-fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "afa5a34372c95958d79c9dfadfbb5a421878bef5" }
+# fastcrypto — pinned to the `nitro-attestation` branch tip (our prior base +
+# the AWS Nitro attestation module). The merged main tip can't be used yet: it
+# carries a breaking AVSS rework (fastcrypto #954, #974) that our MPC code isn't
+# migrated to.
+# TODO: move to a main rev once the #954/#974 AVSS changes are adopted here.
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "df9f17cddef5b07c61d37b93f4fc28d5a44f1f21" }
+fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "df9f17cddef5b07c61d37b93f4fc28d5a44f1f21" }
 
 # Sui monorepo deps
 bin-version = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
