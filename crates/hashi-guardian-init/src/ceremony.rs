@@ -25,7 +25,6 @@ use anyhow::ensure;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianSigned;
-use hashi_types::guardian::KPEncryptedShare;
 use hashi_types::guardian::KPEncryptedShares;
 use hashi_types::guardian::KPFingerprint;
 use hashi_types::guardian::OperatorInitRequest;
@@ -222,7 +221,7 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
     info!(
         n = cfg.common.num_shares,
         t = cfg.common.threshold,
-        signed_resp.data.encrypted_shares.len(),
+        encrypted_share_count = signed_resp.data.encrypted_shares.len(),
         "setup_new_key response received"
     );
 
