@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::Enclave;
-use hashi_types::guardian::crypto::recipient_roster;
 use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::*;
@@ -64,7 +63,7 @@ pub async fn setup_new_key(
     enclave
         .log_ceremony(CeremonyLogMessage::NewKey {
             instance: ss_instance.clone(),
-            roster: recipient_roster(encrypted_shares.as_slice()),
+            roster: encrypted_shares.recipient_roster(),
         })
         .await?;
 

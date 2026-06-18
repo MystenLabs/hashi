@@ -4,7 +4,6 @@
 use crate::Enclave;
 use hashi_types::guardian::crypto::combine_shares;
 use hashi_types::guardian::crypto::decrypt_verify_shares;
-use hashi_types::guardian::crypto::recipient_roster;
 use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::GuardianError::InvalidInputs;
@@ -91,7 +90,7 @@ async fn finalize_rotation(
         .log_ceremony(CeremonyLogMessage::Rotate {
             old_instance: old_instance.clone(),
             new_instance,
-            roster: recipient_roster(encrypted_shares.as_slice()),
+            roster: encrypted_shares.recipient_roster(),
         })
         .await?;
 

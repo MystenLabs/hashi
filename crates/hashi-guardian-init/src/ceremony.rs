@@ -504,16 +504,9 @@ impl VerifiedCeremonyState {
     /// Confirm the agreed `ceremony/` roster matches the recipient fingerprints
     /// on the `shares/` ciphertexts.
     fn ensure_roster_matches(&self, roster: &[KPFingerprint]) -> Result<()> {
-        let mut got: Vec<KPFingerprint> = self
-            .encrypted_shares
-            .iter()
-            .map(|s| s.recipient_fingerprint.clone())
-            .collect();
-        got.sort_unstable();
-        let mut want = roster.to_vec();
-        want.sort_unstable();
+        let got = self.encrypted_shares.recipient_roster();
         ensure!(
-            want == got,
+            roster == got.as_slice(),
             "ceremony/ roster differs from shares/ recipient fingerprints"
         );
         Ok(())
@@ -741,6 +734,29 @@ mod tests {
     fn kp_encrypted_shares_rejects_wrong_share_ids() {
         let err = KPEncryptedShares::new(vec![share(1), share(2), share(4)]).unwrap_err();
         assert!(format!("{err}").contains("share ids"), "{err}");
+    }
+
+    #[test]
+    fn verified_ceremony_state_matches_roster_by_share_id() {
+        let resp = response(&[3, 1, 2], &[1, 2, 3]);
+        let state = VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2)
+            .expect("valid state");
+        let roster = vec![
+            "DUMMY FINGERPRINT 1".to_string(),
+            "DUMMY FINGERPRINT 2".to_string(),
+            "DUMMY FINGERPRINT 3".to_string(),
+        ];
+        state
+            .ensure_roster_matches(&roster)
+            .expect("roster is ordered by share id");
+
+        let wrong_roster = vec![
+            "DUMMY FINGERPRINT 3".to_string(),
+            "DUMMY FINGERPRINT 2".to_string(),
+            "DUMMY FINGERPRINT 1".to_string(),
+        ];
+        let err = state.ensure_roster_matches(&wrong_roster).unwrap_err();
+        assert!(format!("{err}").contains("roster differs"), "{err}");
     }
 
     #[test]
