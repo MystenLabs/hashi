@@ -137,15 +137,6 @@ message SignWithdrawalTxConstructionResponse {
 message SignWithdrawalTransactionRequest {
   // The id of the WithdrawalTransaction on Sui (32 bytes).
   bytes withdrawal_txn_id = 1;
-
-  // Set when the leader's local guardian limiter is initialized. Each
-  // committee member validates this against its own limiter's `next_seq`
-  // before participating in MPC signing.
-  optional uint64 expected_limiter_seq = 2;
-
-  // Leader's checkpoint timestamp (unix seconds), bounded by each member
-  // against its own checkpoint clock. Absent from pre-upgrade leaders.
-  optional uint64 timestamp_secs = 3;
 }
 
 message SignWithdrawalTransactionPartial {
@@ -189,6 +180,15 @@ message SignWithdrawalTxSigningRequest {
   // the on-chain `guardian_btc_public_key` before BLS-signing the
   // certificate; the BLS cert binds both arrays.
   repeated bytes guardian_signatures = 4;
+
+  // Validation-only: the limiter sequence the leader validated against, so each
+  // committee member re-validates the rate limit once at finalize (the single
+  // committee-side limiter gate). NOT part of the BLS-signed message.
+  optional uint64 expected_limiter_seq = 5;
+
+  // Validation-only: leader's checkpoint timestamp (unix seconds) for the
+  // limiter projection, bounded by each member. NOT part of the signed message.
+  optional uint64 timestamp_secs = 6;
 }
 
 message SignWithdrawalTxSigningResponse {

@@ -215,8 +215,6 @@ impl BridgeService for HttpService {
         let req = request.get_ref();
         let withdrawal_txn_id = Address::from_bytes(&req.withdrawal_txn_id)
             .map_err(|e| Status::invalid_argument(format!("invalid withdrawal_txn_id: {e}")))?;
-        let expected_limiter_seq = req.expected_limiter_seq;
-        let timestamp_secs = req.timestamp_secs;
         tracing::Span::current().record(
             "withdrawal_txn_id",
             tracing::field::display(&withdrawal_txn_id),
@@ -227,12 +225,7 @@ impl BridgeService for HttpService {
         let inner = self.inner.clone();
         tokio::spawn(async move {
             if let Err(e) = inner
-                .validate_and_sign_withdrawal_tx(
-                    &withdrawal_txn_id,
-                    expected_limiter_seq,
-                    timestamp_secs,
-                    tx.clone(),
-                )
+                .validate_and_sign_withdrawal_tx(&withdrawal_txn_id, tx.clone())
                 .await
             {
                 tracing::error!("sign_withdrawal_transaction failed: {e}");
@@ -258,7 +251,10 @@ impl BridgeService for HttpService {
     ) -> Result<Response<SignWithdrawalTxSigningResponse>, Status> {
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
-        let message = parse_withdrawal_tx_signing(request.get_ref())
+        let req = request.get_ref();
+        let expected_limiter_seq = req.expected_limiter_seq;
+        let timestamp_secs = req.timestamp_secs;
+        let message = parse_withdrawal_tx_signing(req)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         tracing::Span::current().record(
             "withdrawal_id",
@@ -266,7 +262,7 @@ impl BridgeService for HttpService {
         );
         let member_signature = self
             .inner
-            .validate_and_sign_withdrawal_tx_signing(&message)
+            .validate_and_sign_withdrawal_tx_signing(&message, expected_limiter_seq, timestamp_secs)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         tracing::info!("Signed withdrawal tx signing");
         Ok(Response::new(SignWithdrawalTxSigningResponse {

@@ -477,6 +477,8 @@ impl Hashi {
     pub fn validate_and_sign_withdrawal_tx_signing(
         &self,
         message: &WithdrawalTxSigning,
+        expected_limiter_seq: Option<u64>,
+        timestamp_secs: Option<u64>,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
         let txn = self
             .onchain_state()
@@ -514,6 +516,52 @@ impl Hashi {
             txn.inputs.len(),
             message.withdrawal_id
         );
+
+        // Single committee-side rate-limit gate: signing is driven unconditionally,
+        // so the committee independently re-validates the limit once here, before
+        // certifying the finalize — refusing to sign blocks an over-limit broadcast
+        // even if the guardian co-signed. Validate-only: the watcher advances the
+        // limiter on `WithdrawalSignedEvent`, never from this path.
+        //
+        // TODO(guardian-seq-durability): this gate is necessarily *after* the
+        // guardian co-signed (the cert binds the guardian sigs), so a rejection
+        // here — which only happens when this mirror disagrees with the guardian
+        // (the defense-in-depth case) — leaves the guardian's seq consumed with no
+        // on-chain finalize, nudging that gap wider. It self-heals via the
+        // reconcile loop and fires only when catching a guardian/mirror divergence,
+        // so likely fine as-is; if it ever proves to matter, one option worth
+        // exploring would be a separate committee limiter check *before* the
+        // guardian co-signs (extra round-trip, but no consumed-but-not-finalized gap).
+        match (self.local_limiter(), expected_limiter_seq) {
+            (Some(limiter), Some(expected_seq)) => {
+                let amount_sats = withdrawal_limiter_consumption_amount(&txn);
+                // Leader's live checkpoint time (drift-bounded); pre-upgrade leaders omit it.
+                let timestamp_secs = match timestamp_secs {
+                    Some(ts) => {
+                        self.bound_leader_timestamp(ts)?;
+                        ts
+                    }
+                    None => txn.timestamp_ms / 1000,
+                };
+                let result = limiter.validate_consume(expected_seq, timestamp_secs, amount_sats);
+                self.metrics.record_limiter_validate(
+                    &result,
+                    crate::metrics::GUARDIAN_LIMITER_CALLSITE_FINALIZE_CERT,
+                );
+                result.map_err(|e| {
+                    anyhow!("Limiter rejected withdrawal {}: {e}", message.withdrawal_id)
+                })?;
+            }
+            (None, None) => {}
+            (Some(_), None) => anyhow::bail!(
+                "Local limiter is configured but finalize request for withdrawal {} lacks expected_limiter_seq",
+                message.withdrawal_id
+            ),
+            (None, Some(_)) => anyhow::bail!(
+                "Finalize request for withdrawal {} carries expected_limiter_seq but local limiter is not configured",
+                message.withdrawal_id
+            ),
+        }
 
         let tx = self.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
         let signing_messages = self.withdrawal_signing_messages(&tx, &txn.inputs)?;
@@ -734,21 +782,12 @@ impl Hashi {
     pub async fn validate_and_sign_withdrawal_tx(
         &self,
         withdrawal_txn_id: &Address,
-        expected_limiter_seq: Option<u64>,
-        timestamp_secs: Option<u64>,
         sink: tokio::sync::mpsc::Sender<
             Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
         >,
     ) -> anyhow::Result<()> {
         let (txn, unsigned_tx) = self.validate_withdrawal_signing(withdrawal_txn_id).await?;
-        self.mpc_sign_withdrawal_tx(
-            &txn,
-            &unsigned_tx,
-            expected_limiter_seq,
-            timestamp_secs,
-            sink,
-        )
-        .await
+        self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx, sink).await
     }
 
     pub async fn validate_withdrawal_signing(
@@ -788,8 +827,6 @@ impl Hashi {
         &self,
         txn: &WithdrawalTransaction,
         unsigned_tx: &bitcoin::Transaction,
-        expected_limiter_seq: Option<u64>,
-        timestamp_secs: Option<u64>,
         sink: tokio::sync::mpsc::Sender<
             Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
         >,
@@ -805,37 +842,6 @@ impl Hashi {
                 txn.signing.epoch,
                 epoch,
             );
-        }
-        // Validate-only: the watcher advances the limiter on
-        // `WithdrawalSignedEvent`, never from this path.
-        match (self.local_limiter(), expected_limiter_seq) {
-            (Some(limiter), Some(expected_seq)) => {
-                let amount_sats = withdrawal_limiter_consumption_amount(txn);
-                // Leader's live checkpoint time (drift-bounded) so a throttled
-                // batch becomes signable as it refills; pre-upgrade leaders omit it.
-                let timestamp_secs = match timestamp_secs {
-                    Some(ts) => {
-                        self.bound_leader_timestamp(ts)?;
-                        ts
-                    }
-                    None => txn.timestamp_ms / 1000,
-                };
-                let result = limiter.validate_consume(expected_seq, timestamp_secs, amount_sats);
-                self.metrics.record_limiter_validate(
-                    &result,
-                    crate::metrics::GUARDIAN_LIMITER_CALLSITE_MPC_SIGNING,
-                );
-                result.map_err(|e| anyhow!("Limiter rejected withdrawal {}: {e}", txn.id))?;
-            }
-            (None, None) => {}
-            (Some(_), None) => anyhow::bail!(
-                "Local limiter is configured but request for withdrawal {} lacks expected_limiter_seq",
-                txn.id
-            ),
-            (None, Some(_)) => anyhow::bail!(
-                "Request for withdrawal {} carries expected_limiter_seq but local limiter is not configured",
-                txn.id
-            ),
         }
         let p2p_channel =
             RpcP2PChannel::new(onchain_state, epoch, crate::metrics::MPC_LABEL_SIGNING);

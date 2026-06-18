@@ -113,15 +113,6 @@ pub struct SignWithdrawalTransactionRequest {
     /// The id of the WithdrawalTransaction on Sui (32 bytes).
     #[prost(bytes = "bytes", tag = "1")]
     pub withdrawal_txn_id: ::prost::bytes::Bytes,
-    /// Set when the leader's local guardian limiter is initialized. Each
-    /// committee member validates this against its own limiter's `next_seq`
-    /// before participating in MPC signing.
-    #[prost(uint64, optional, tag = "2")]
-    pub expected_limiter_seq: ::core::option::Option<u64>,
-    /// Leader's checkpoint timestamp (unix seconds), bounded by each member
-    /// against its own checkpoint clock. Absent from pre-upgrade leaders.
-    #[prost(uint64, optional, tag = "3")]
-    pub timestamp_secs: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignWithdrawalTransactionPartial {
@@ -169,6 +160,15 @@ pub struct SignWithdrawalTxSigningRequest {
     /// certificate; the BLS cert binds both arrays.
     #[prost(bytes = "bytes", repeated, tag = "4")]
     pub guardian_signatures: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
+    /// Validation-only: the limiter sequence the leader validated against, so each
+    /// committee member re-validates the rate limit once at finalize (the single
+    /// committee-side limiter gate). NOT part of the BLS-signed message.
+    #[prost(uint64, optional, tag = "5")]
+    pub expected_limiter_seq: ::core::option::Option<u64>,
+    /// Validation-only: leader's checkpoint timestamp (unix seconds) for the
+    /// limiter projection, bounded by each member. NOT part of the signed message.
+    #[prost(uint64, optional, tag = "6")]
+    pub timestamp_secs: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignWithdrawalTxSigningResponse {

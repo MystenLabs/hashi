@@ -1104,6 +1104,9 @@ pub const GUARDIAN_LIMITER_OUTCOME_NO_LIMITER: &str = "no_limiter";
 
 pub const GUARDIAN_LIMITER_CALLSITE_LEADER_PRE_MPC: &str = "leader_pre_mpc";
 pub const GUARDIAN_LIMITER_CALLSITE_MPC_SIGNING: &str = "mpc_signing";
+// Committee-side limiter re-validation at the finalize cert (the single
+// committee gate now that the per-pass MPC-signing check is removed).
+pub const GUARDIAN_LIMITER_CALLSITE_FINALIZE_CERT: &str = "finalize_cert";
 
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_SUCCESS: &str = "success";
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_RPC_FAILURE: &str = "rpc_failure";
@@ -1237,6 +1240,7 @@ mod tests {
         for callsite in [
             GUARDIAN_LIMITER_CALLSITE_LEADER_PRE_MPC,
             GUARDIAN_LIMITER_CALLSITE_MPC_SIGNING,
+            GUARDIAN_LIMITER_CALLSITE_FINALIZE_CERT,
         ] {
             metrics.record_limiter_validate(&Ok(()), callsite);
             metrics.record_limiter_validate(

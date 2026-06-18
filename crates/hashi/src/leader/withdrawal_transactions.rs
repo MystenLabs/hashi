@@ -260,7 +260,10 @@ impl LeaderService {
             .expect("No current committee");
 
         let required_weight = certificate_threshold(committee.total_weight());
-        let proto_request = signed_message.to_proto();
+        // Pass the limiter seq/timestamp the leader validated against (above) as
+        // validation-only fields so each committee member re-validates the rate
+        // limit once at the finalize cert. They are NOT part of the signed message.
+        let proto_request = signed_message.to_proto(expected_limiter_seq, timestamp_secs);
 
         let mut sig_tasks = JoinSet::new();
         for member in members {
@@ -352,41 +355,19 @@ impl LeaderService {
         members: &[CommitteeMember],
         unsigned: Vec<u64>,
     ) -> anyhow::Result<()> {
-        let timestamp_secs = inner.onchain_state().latest_checkpoint_timestamp_ms() / 1000;
-
-        // Validate-only limiter pre-check: capacity is consumed once at finalize
-        // (via the guardian), not per chunk. Fail fast so we don't waste MPC.
-        let expected_limiter_seq = if let Some(limiter) = inner.local_limiter() {
-            let amount_sats = crate::withdrawals::withdrawal_limiter_consumption_amount(txn);
-            let next_seq = limiter.next_seq();
-            let result = limiter.validate_consume(next_seq, timestamp_secs, amount_sats);
-            inner.metrics.record_limiter_validate(
-                &result,
-                crate::metrics::GUARDIAN_LIMITER_CALLSITE_LEADER_PRE_MPC,
-            );
-            if let Err(e) = result {
-                warn!(withdrawal_txn_id = %txn.id, "Leader limiter rejected withdrawal; retry next checkpoint: {e}");
-                return Ok(());
-            }
-            Some(next_seq)
-        } else {
-            None
-        };
-
+        // The rate limiter is no longer checked per signing pass — signing is
+        // driven unconditionally and the committee re-validates the limit once at
+        // the finalize cert (see `validate_and_sign_withdrawal_tx_signing`).
         info!(
             unsigned = unsigned.len(),
             "Collecting MPC signatures for unsigned inputs"
         );
-        let sigs_by_index = Self::collect_withdrawal_tx_signatures(
-            inner,
-            &txn.id,
-            expected_limiter_seq,
-            timestamp_secs,
-            &unsigned,
-            members,
-        )
-        .await
-        .ok_or_else(|| anyhow::anyhow!("Failed to collect MPC signatures for {:?}", txn.id))?;
+        let sigs_by_index =
+            Self::collect_withdrawal_tx_signatures(inner, &txn.id, &unsigned, members)
+                .await
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Failed to collect MPC signatures for {:?}", txn.id)
+                })?;
 
         let committee = inner
             .onchain_state()
@@ -486,8 +467,6 @@ impl LeaderService {
     async fn collect_withdrawal_tx_signatures(
         inner: &Arc<Hashi>,
         withdrawal_txn_id: &Address,
-        expected_limiter_seq: Option<u64>,
-        timestamp_secs: u64,
         expected_indices: &[u64],
         members: &[CommitteeMember],
     ) -> Option<Vec<(u64, SchnorrSignature)>> {
@@ -497,8 +476,6 @@ impl LeaderService {
                 Self::request_withdrawal_tx_signature(
                     inner,
                     withdrawal_txn_id,
-                    expected_limiter_seq,
-                    timestamp_secs,
                     expected_indices,
                     member,
                 )
@@ -532,8 +509,6 @@ impl LeaderService {
     async fn request_withdrawal_tx_signature(
         inner: &Arc<Hashi>,
         withdrawal_txn_id: &Address,
-        expected_limiter_seq: Option<u64>,
-        timestamp_secs: u64,
         expected_indices: &[u64],
         member: &CommitteeMember,
     ) -> anyhow::Result<Vec<(u64, SchnorrSignature)>> {
@@ -552,8 +527,6 @@ impl LeaderService {
 
         let proto_request = SignWithdrawalTransactionRequest {
             withdrawal_txn_id: withdrawal_txn_id.as_bytes().to_vec().into(),
-            expected_limiter_seq,
-            timestamp_secs: Some(timestamp_secs),
         };
 
         let mut stream = rpc_client
@@ -1212,7 +1185,15 @@ impl LeaderService {
 
 impl WithdrawalTxSigning {
     /// Converts the withdrawal signing message into the bridge-service protobuf request type.
-    fn to_proto(&self) -> SignWithdrawalTxSigningRequest {
+    ///
+    /// `expected_limiter_seq`/`timestamp_secs` are validation-only RPC fields —
+    /// committee members re-validate the rate limit at finalize against them. They
+    /// are deliberately NOT part of the BLS-signed message.
+    fn to_proto(
+        &self,
+        expected_limiter_seq: Option<u64>,
+        timestamp_secs: u64,
+    ) -> SignWithdrawalTxSigningRequest {
         SignWithdrawalTxSigningRequest {
             withdrawal_id: self.withdrawal_id.as_bytes().to_vec().into(),
             request_ids: self
@@ -1230,6 +1211,8 @@ impl WithdrawalTxSigning {
                 .iter()
                 .map(|sig| sig.clone().into())
                 .collect(),
+            expected_limiter_seq,
+            timestamp_secs: Some(timestamp_secs),
         }
     }
 }
