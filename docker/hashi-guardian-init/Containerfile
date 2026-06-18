@@ -1,0 +1,85 @@
+# syntax=docker/dockerfile:1
+
+# Off-enclave guardian init tooling (`hashi-guardian-init`).
+#
+# Phase-3, DEV-ONLY image. Built so an ad-hoc guardian pod restart between
+# deploys can self-heal in-cluster (sui-operations CronJob runs `tools
+# dev-recover`), instead of waiting for the next deploy's guardian-init. The
+# common deploy-triggered recovery does not use this image.
+#
+# Unlike docker/hashi-guardian-k8s/Containerfile (the guardian service, a
+# minimal core-filesystem runtime), the recovery tool shells out to `gpg` to
+# decrypt the ceremony's KP shares, so the runtime is a debian-slim with gnupg
+# installed. The binary itself is the same musl-static build as the siblings.
+
+FROM stagex/pallet-rust@sha256:84621c4c29330c8a969489671d46227a0a43f52cdae243f5b91e95781dbfe5ed AS pallet-rust
+FROM stagex/busybox@sha256:3d128909dbc8e7b6c4b8c3c31f4583f01a307907ea179934bb42c4ef056c7efd AS busybox
+
+#
+# Deps stage: fetch and compile external dependencies (cached until Cargo.toml/Cargo.lock change)
+#
+FROM pallet-rust AS deps
+
+# Shell needed by cc-based build scripts (blst, ring, etc.)
+COPY --from=busybox . /
+
+# Copy only manifests. hashi-guardian-init pulls in three local crates
+# (hashi, hashi-guardian, hashi-types); hashi/hashi-guardian each only
+# path-depend on hashi-types, so this is the full local graph.
+COPY Cargo.toml Cargo.lock /src/
+COPY crates/hashi-guardian-init/Cargo.toml /src/crates/hashi-guardian-init/Cargo.toml
+COPY crates/hashi/Cargo.toml /src/crates/hashi/Cargo.toml
+COPY crates/hashi-guardian/Cargo.toml /src/crates/hashi-guardian/Cargo.toml
+COPY crates/hashi-types/Cargo.toml /src/crates/hashi-types/Cargo.toml
+
+WORKDIR /src
+
+# Create stub source files so cargo can resolve and compile all external deps.
+# Each crate with a binary target needs a main.rs; libs need a lib.rs.
+RUN mkdir -p crates/hashi-guardian-init/src crates/hashi/src crates/hashi-guardian/src crates/hashi-types/src \
+ && echo 'fn main(){}' > crates/hashi-guardian-init/src/main.rs \
+ && echo 'fn main(){}' > crates/hashi/src/main.rs \
+ && touch crates/hashi/src/lib.rs \
+ && echo 'fn main(){}' > crates/hashi-guardian/src/main.rs \
+ && touch crates/hashi-guardian/src/lib.rs \
+ && touch crates/hashi-types/src/lib.rs
+
+ENV TARGET=x86_64-unknown-linux-musl
+ENV OPENSSL_STATIC=true
+ENV CARGO_INCREMENTAL=0
+ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static -C target-cpu=x86-64"
+
+RUN cargo fetch
+RUN --network=none cargo build --release --frozen --target "$TARGET" --bin hashi-guardian-init
+
+#
+# Build stage: compile with real source (only local crates recompile)
+#
+FROM deps AS build
+
+ARG GIT_REVISION=unknown
+ENV GIT_REVISION=${GIT_REVISION}
+
+COPY crates/hashi-guardian-init /src/crates/hashi-guardian-init
+COPY crates/hashi /src/crates/hashi
+COPY crates/hashi-guardian /src/crates/hashi-guardian
+COPY crates/hashi-types /src/crates/hashi-types
+
+# Touch source files to invalidate cargo's fingerprint cache for local crates
+RUN find crates/ -name "*.rs" -exec touch {} +
+
+RUN --network=none cargo build --release --frozen --target "$TARGET" --bin hashi-guardian-init
+
+#
+# Package stage: debian-slim runtime with gpg (needed to decrypt KP shares)
+#
+FROM debian:bookworm-slim
+
+# gnupg: dev-recover shells out to `gpg --decrypt` for the ceremony KP shares.
+# ca-certificates: TLS trust for the AWS S3 SDK and the Sui RPC client.
+RUN apt-get update && apt-get -y --no-install-recommends install \
+    gnupg ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /src/target/x86_64-unknown-linux-musl/release/hashi-guardian-init /usr/bin/hashi-guardian-init
+ENTRYPOINT ["/usr/bin/hashi-guardian-init"]
