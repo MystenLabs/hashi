@@ -31,3 +31,8 @@ kp_pgp_cert_paths:
   - /path/to/kp3.asc
   - /path/to/kp4.asc
   - /path/to/kp5.asc
+
+# Expected enclave-image measurement: PCR0 (hex) from the reproducible build of
+# the guardian revision being provisioned. Pinned against the session's
+# attestation. Required (unused in non-Nitro dev, where verification is a no-op).
+expected_pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
