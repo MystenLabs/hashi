@@ -62,7 +62,7 @@ pub struct Hashi {
     btc_monitor: OnceLock<crate::btc_monitor::monitor::MonitorClient>,
     screener_client: OnceLock<Option<grpc::screener_client::ScreenerClient>>,
     guardian_client: OnceLock<Option<grpc::guardian_client::GuardianClient>>,
-    guardian_signing_pubkey: OnceLock<Option<hashi_types::guardian::GuardianPubKey>>,
+    guardian_signing_pubkey: RwLock<Option<hashi_types::guardian::GuardianPubKey>>,
     guardian_btc_pubkey: OnceLock<Option<hashi_types::bitcoin::BitcoinPubkey>>,
     local_limiter: OnceLock<Arc<guardian_limiter::LocalLimiter>>,
     /// `(seq, wid)` of the last guardian-finalized withdrawal, for pacing.
@@ -94,7 +94,7 @@ impl Hashi {
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
-            guardian_signing_pubkey: OnceLock::new(),
+            guardian_signing_pubkey: RwLock::new(None),
             guardian_btc_pubkey: OnceLock::new(),
             local_limiter: OnceLock::new(),
             guardian_last_finalized: RwLock::new(None),
@@ -125,7 +125,7 @@ impl Hashi {
             btc_monitor: OnceLock::new(),
             screener_client: OnceLock::new(),
             guardian_client: OnceLock::new(),
-            guardian_signing_pubkey: OnceLock::new(),
+            guardian_signing_pubkey: RwLock::new(None),
             guardian_btc_pubkey: OnceLock::new(),
             local_limiter: OnceLock::new(),
             guardian_last_finalized: RwLock::new(None),
@@ -242,10 +242,8 @@ impl Hashi {
         self.guardian_client.get().and_then(|opt| opt.as_ref())
     }
 
-    pub fn guardian_signing_pubkey(&self) -> Option<&hashi_types::guardian::GuardianPubKey> {
-        self.guardian_signing_pubkey
-            .get()
-            .and_then(|opt| opt.as_ref())
+    pub fn guardian_signing_pubkey(&self) -> Option<hashi_types::guardian::GuardianPubKey> {
+        *self.guardian_signing_pubkey.read().unwrap()
     }
 
     pub fn guardian_btc_pubkey(&self) -> Option<&hashi_types::bitcoin::BitcoinPubkey> {
@@ -822,14 +820,10 @@ impl Hashi {
         }
     }
 
-    /// The guarded entry point for guardian `/info`: fetch, verify the signed
-    /// payload, pin the signing pubkey to on-chain, and return that verified
-    /// `GuardianInfo`. Callers must read guardian state only through this.
-    ///
-    /// TODO: Thread PCR config into Hashi nodes and use `verify` here so this
-    /// also authenticates the Nitro attestation/PCRs.
-    ///
-    /// Records the matching bootstrap-outcome metric on each failure.
+    /// The guarded entry point for guardian `/info`: fetch, verify the live
+    /// Nitro attestation against the on-chain enclave build (PCR0) plus the
+    /// signed payload, and return that verified `GuardianInfo`. Callers must
+    /// read guardian state only through this.
     async fn fetch_verified_guardian_info(
         &self,
     ) -> anyhow::Result<hashi_types::guardian::GuardianInfo> {
@@ -845,22 +839,24 @@ impl Hashi {
                 );
                 anyhow::anyhow!("parse GetGuardianInfoResponse: {e:?}")
             })?;
-        let verified = resp.verify_signed_info_without_attestation().map_err(|e| {
-            self.metrics.record_guardian_bootstrap_outcome(
-                metrics::GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID,
-            );
+        // Trust the guardian's rotating signing key via attestation against the
+        // on-chain build, not by pinning it; signature-only when none is pinned (dev).
+        let verified = match self.guardian_expected_build() {
+            Some(build) => resp.verify(&build),
+            None => resp.verify_signed_info_without_attestation(),
+        }
+        .map_err(|e| {
+            self.metrics
+                .record_guardian_bootstrap_outcome(metrics::GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID);
             tracing::error!(
                 error = ?e,
-                "FATAL: guardian /info signature invalid under its own \
-                 signing_pub_key; refusing to seed or reconcile local limiter",
+                "FATAL: guardian /info verification failed; refusing to seed or reconcile local limiter",
             );
-            anyhow::anyhow!("guardian signed_info signature invalid")
+            anyhow::anyhow!("guardian /info verification failed: {e:?}")
         })?;
-        let signing_pub_key = verified.signing_pub_key;
-        if !self.verify_guardian_signing_pubkey(&signing_pub_key) {
-            anyhow::bail!("guardian signing pubkey does not match on-chain");
-        }
-        let _ = self.guardian_signing_pubkey.set(Some(signing_pub_key));
+        // Refresh on every verified fetch so a rebooted guardian's new signing
+        // key is picked up (the limiter reconcile re-fetches periodically).
+        *self.guardian_signing_pubkey.write().unwrap() = Some(verified.signing_pub_key);
         Ok(verified.info)
     }
 
@@ -881,17 +877,20 @@ impl Hashi {
         Some((limiter, state))
     }
 
-    /// Read on each call: a chain that didn't publish the key at hashi
-    /// startup may bind `guardian_public_key` later via governance.
-    fn verify_guardian_signing_pubkey(
-        &self,
-        signing_pub_key: &hashi_types::guardian::GuardianPubKey,
-    ) -> bool {
-        let expected = self.onchain_state().guardian_public_key();
-        verify_signing_pub_key_matches(signing_pub_key, expected.as_deref(), &self.metrics)
+    /// The expected guardian enclave build from on-chain state. `None` until a
+    /// real build is pinned — a non-Nitro dev deploy leaves the git revision
+    /// empty — so `fetch_verified_guardian_info` then verifies signature-only.
+    /// Read on each call so a build bound later via governance is picked up.
+    fn guardian_expected_build(&self) -> Option<hashi_types::guardian::BuildPcrs> {
+        let git_revision = self.onchain_state().guardian_git_revision()?;
+        if git_revision.is_empty() {
+            return None;
+        }
+        let pcr0 = self.onchain_state().guardian_pcr0()?;
+        Some(hashi_types::guardian::BuildPcrs::new(&git_revision, pcr0))
     }
 
-    /// BTC-key analogue of [`Self::verify_guardian_signing_pubkey`]. Pins
+    /// BTC-key counterpart to the attestation-verified signing key. Pins
     /// the live key in `guardian_btc_pubkey` on first successful match.
     fn verify_and_pin_guardian_btc_pubkey(
         &self,
@@ -1064,29 +1063,7 @@ fn assert_test_only_config(sui_chain_id: &str, bitcoin_chain_id: &str, field_nam
     );
 }
 
-/// `expected = None` skips the check (pre-feature chains).
-fn verify_signing_pub_key_matches(
-    signing_pub_key: &hashi_types::guardian::GuardianPubKey,
-    expected: Option<&[u8]>,
-    metrics: &metrics::Metrics,
-) -> bool {
-    let Some(expected) = expected else {
-        return true;
-    };
-    if signing_pub_key.as_bytes().as_slice() == expected {
-        return true;
-    }
-    metrics.record_guardian_bootstrap_outcome(metrics::GUARDIAN_BOOTSTRAP_OUTCOME_KEY_MISMATCH);
-    tracing::error!(
-        on_chain = %hex::encode(expected),
-        from_info = %hex::encode(signing_pub_key.as_bytes()),
-        "FATAL: guardian /info signing_pub_key does not match on-chain \
-         guardian_public_key; refusing to seed or reconcile local limiter",
-    );
-    false
-}
-
-/// BTC-key analogue of [`verify_signing_pub_key_matches`]. Extra fatal
+/// BTC-key analogue of the guardian signing-key check. Extra fatal
 /// case: when the on-chain key is `Some` but the live guardian doesn't
 /// return one — the deploy must have come from a guardian that did.
 fn verify_btc_pub_key_matches(
@@ -1378,60 +1355,11 @@ mod test {
         //         }
     }
 
-    // --- guardian /info pubkey verification ---
+    // --- guardian /info verification helpers ---
 
     fn fresh_metrics() -> std::sync::Arc<crate::metrics::Metrics> {
         let registry = prometheus::Registry::new();
         std::sync::Arc::new(crate::metrics::Metrics::new(&registry))
-    }
-
-    fn key_mismatch_count(metrics: &crate::metrics::Metrics) -> u64 {
-        metrics
-            .guardian_bootstrap_outcomes_total
-            .with_label_values(&[crate::metrics::GUARDIAN_BOOTSTRAP_OUTCOME_KEY_MISMATCH])
-            .get()
-    }
-
-    fn random_signing_pubkey() -> hashi_types::guardian::GuardianPubKey {
-        let signing_key = hashi_types::guardian::GuardianSignKeyPair::new(rand::thread_rng());
-        signing_key.verification_key()
-    }
-
-    #[test]
-    fn verify_signing_pub_key_matches_passes_when_equal() {
-        let pubkey = random_signing_pubkey();
-        let expected = pubkey.as_bytes().to_vec();
-        let metrics = fresh_metrics();
-        assert!(crate::verify_signing_pub_key_matches(
-            &pubkey,
-            Some(&expected),
-            &metrics
-        ));
-        assert_eq!(key_mismatch_count(&metrics), 0);
-    }
-
-    #[test]
-    fn verify_signing_pub_key_matches_skips_when_expected_absent() {
-        let pubkey = random_signing_pubkey();
-        let metrics = fresh_metrics();
-        assert!(crate::verify_signing_pub_key_matches(
-            &pubkey, None, &metrics
-        ));
-        assert_eq!(key_mismatch_count(&metrics), 0);
-    }
-
-    #[test]
-    fn verify_signing_pub_key_matches_fails_on_mismatch() {
-        let live = random_signing_pubkey();
-        let mut wrong = live.as_bytes().to_vec();
-        wrong[0] ^= 0xff;
-        let metrics = fresh_metrics();
-        assert!(!crate::verify_signing_pub_key_matches(
-            &live,
-            Some(&wrong),
-            &metrics
-        ));
-        assert_eq!(key_mismatch_count(&metrics), 1);
     }
 
     // --- guardian /info BTC pubkey verification ---

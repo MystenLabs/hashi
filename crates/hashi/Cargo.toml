@@ -3,6 +3,11 @@ name = "hashi"
 version = "0.0.0"
 edition = "2024"
 
+[features]
+# Off-enclave (dev/CI) build: stubs guardian Nitro-attestation verification via
+# hashi-types (no NSM off-enclave). NEVER enable for a production node build.
+non-enclave-dev = ["hashi-types/non-enclave-dev"]
+
 [dependencies]
 sui-sdk-types.workspace = true
 sui-crypto.workspace = true

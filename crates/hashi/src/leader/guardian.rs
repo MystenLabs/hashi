@@ -116,7 +116,7 @@ impl LeaderService {
             })
             .map_err(|e| anyhow::anyhow!("Failed to parse guardian withdrawal response: {e}"))?;
         let response = signed_response
-            .verify(pubkey)
+            .verify(&pubkey)
             .inspect_err(|_| {
                 Self::record_guardian_rpc_outcome(
                     inner,

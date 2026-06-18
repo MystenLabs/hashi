@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2024"
 
 [dependencies]
-hashi = { path = "../hashi" }
+hashi = { path = "../hashi", features = ["non-enclave-dev"] }
 hashi-guardian = { path = "../hashi-guardian", features = [
     "test-utils",
     "non-enclave-dev",

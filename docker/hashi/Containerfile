@@ -30,8 +30,13 @@ ENV CARGO_INCREMENTAL=0
 ENV SOURCE_DATE_EPOCH=0
 ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static -C target-cpu=x86-64"
 
+# Optional cargo features for the node binary. `non-enclave-dev` (dev only) stubs
+# guardian attestation — a prod node MUST build without it. Empty default is
+# prod-safe; set in both stages so the deps cache stays feature-consistent.
+ARG CARGO_FEATURES=
+
 RUN cargo fetch
-RUN --network=none cargo build --release --frozen --target "$TARGET" --bin hashi
+RUN --network=none cargo build --release --frozen --target "$TARGET" --bin hashi ${CARGO_FEATURES:+--features ${CARGO_FEATURES}}
 
 #
 # Build stage: compile with real source (only local crates recompile)
@@ -40,6 +45,7 @@ FROM deps AS build
 
 ARG GIT_REVISION=unknown
 ENV GIT_REVISION=${GIT_REVISION}
+ARG CARGO_FEATURES=
 
 COPY crates/hashi /src/crates/hashi
 COPY crates/hashi-types /src/crates/hashi-types
@@ -47,7 +53,7 @@ COPY crates/hashi-types /src/crates/hashi-types
 # Touch source files to invalidate cargo's fingerprint cache for local crates
 RUN find crates/ -name "*.rs" -exec touch {} +
 
-RUN --network=none cargo build --release --frozen --target "$TARGET" --bin hashi
+RUN --network=none cargo build --release --frozen --target "$TARGET" --bin hashi ${CARGO_FEATURES:+--features ${CARGO_FEATURES}}
 
 #
 # Package stage: runtime image with debug tools
