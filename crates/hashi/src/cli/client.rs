@@ -63,6 +63,11 @@ pub enum CreateProposalParams {
         public_key: Vec<u8>,
         metadata: Vec<(String, String)>,
     },
+    EmergencyPause {
+        /// `true` proposes a pause; `false` proposes an unpause.
+        pause: bool,
+        metadata: Vec<(String, String)>,
+    },
 }
 
 /// Live on-chain proposal detail fields not cached by `OnchainState`.
@@ -674,6 +679,24 @@ pub fn build_create_proposal_transaction(
                     validator_address_arg,
                     url_arg,
                     public_key_arg,
+                    metadata_arg,
+                    clock_arg,
+                ],
+            );
+        }
+        CreateProposalParams::EmergencyPause { pause, metadata } => {
+            let pause_arg = builder.pure(&pause);
+            let metadata_arg = build_metadata(&mut builder, &metadata);
+            builder.move_call(
+                Function::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("emergency_pause"),
+                    Identifier::from_static("propose"),
+                ),
+                vec![
+                    hashi_arg,
+                    validator_address_arg,
+                    pause_arg,
                     metadata_arg,
                     clock_arg,
                 ],

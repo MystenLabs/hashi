@@ -274,6 +274,20 @@ pub enum CreateProposalCommands {
         #[clap(flatten)]
         metadata: MetadataArgs,
     },
+
+    /// Propose pausing the protocol (or unpausing it with `--unpause`).
+    ///
+    /// Pausing uses a deliberately low quorum (default 5% of committee
+    /// weight) so the committee can halt deposits/withdrawals fast in an
+    /// emergency; unpausing requires the normal 2/3 supermajority.
+    EmergencyPause {
+        /// Propose unpausing instead of pausing.
+        #[clap(long)]
+        unpause: bool,
+
+        #[clap(flatten)]
+        metadata: MetadataArgs,
+    },
 }
 
 /// Shared metadata arguments for proposal creation
@@ -891,6 +905,15 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                         &config,
                         &url,
                         &public_key,
+                        parse_metadata(metadata.metadata),
+                        &tx_opts,
+                    )
+                    .await?;
+                }
+                CreateProposalCommands::EmergencyPause { unpause, metadata } => {
+                    commands::proposal::create_emergency_pause_proposal(
+                        &config,
+                        unpause,
                         parse_metadata(metadata.metadata),
                         &tx_opts,
                     )

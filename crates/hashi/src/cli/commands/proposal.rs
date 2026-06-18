@@ -670,6 +670,41 @@ pub async fn create_update_guardian_proposal(
     Ok(())
 }
 
+/// Create an emergency pause (or, with `unpause == true`, unpause) proposal.
+///
+/// Pausing uses a deliberately low quorum (default 5%) so a small fraction of
+/// committee weight can halt the protocol quickly; unpausing requires the
+/// normal 2/3 supermajority. Both paths target `emergency_pause::propose`.
+pub async fn create_emergency_pause_proposal(
+    config: &CliConfig,
+    unpause: bool,
+    metadata: Vec<(String, String)>,
+    tx_opts: &TxOptions,
+) -> Result<()> {
+    let action = if unpause { "Unpause" } else { "Pause" };
+    let title = format!("Creating Emergency {action} Proposal:");
+    print_detail(&format!("\n{}", title.bold()));
+    print_detail(&format!("  Action: {action}"));
+    print_metadata(&metadata);
+
+    prompt_continue(
+        &format!("create this emergency {} proposal", action.to_lowercase()),
+        tx_opts,
+    )
+    .await?;
+
+    let mut client = HashiClient::new(config).await?;
+    let tx = client.build_create_proposal_transaction(CreateProposalParams::EmergencyPause {
+        pause: !unpause,
+        metadata,
+    })?;
+
+    print_info("Transaction: emergency_pause::propose");
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    print_created_proposal_id(response.as_ref());
+    Ok(())
+}
+
 // ============ Helper Functions ============
 
 fn print_proposal_detailed(

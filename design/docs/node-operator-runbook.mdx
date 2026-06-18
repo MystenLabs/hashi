@@ -571,6 +571,7 @@ hashi proposal create enable-version <version> [-m key=value]
 hashi proposal create disable-version <version> [-m key=value]
 hashi proposal create abort-reconfig [--epoch <N>] [-m key=value]
 hashi proposal create update-guardian [--url <url>] [--public-key <hex>] [-m key=value]
+hashi proposal create emergency-pause [--unpause] [-m key=value]
 ```
 
 Config values are type-prefixed: `u64:30000`, `bool:true`.
@@ -649,7 +650,7 @@ Builds, publishes, and initializes the Hashi Move package (including its onchain
 | **UpdateGuardian** | 2/3 | Change guardian endpoint and key | `--url`, `--public-key` |
 | **EmergencyPause** | 5% to pause, 2/3 to unpause | Quickly pause or resume the protocol in an emergency | n/a |
 
-> EmergencyPause uses a deliberately low threshold so a small fraction of committee weight can halt the protocol fast; resuming requires the normal 2/3. It is not part of the standard `proposal create` CLI.
+> EmergencyPause uses a deliberately low threshold so a small fraction of committee weight can halt the protocol fast; resuming requires the normal 2/3. Create it with `hashi proposal create emergency-pause` (add `--unpause` to propose resuming).
 
 **Configurable protocol parameters:**
 
