@@ -475,7 +475,8 @@ pub struct AbortReconfig {
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct UpdateGuardian {
     pub url: String,
-    pub public_key: Vec<u8>,
+    pub git_revision: String,
+    pub pcr0: Vec<u8>,
 }
 
 /// Rust version of the Move sui::vec_map::VecMap type.

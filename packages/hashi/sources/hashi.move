@@ -99,16 +99,17 @@ public(package) fun assert_not_reconfiguring(self: &Hashi) {
 // Function that needs to be called immediately after publishing to finalize
 // some input parameters, register BTC and the package's UpgradeCap.
 //
-// The guardian URL, signing key, and BTC key are all required: the
-// guardian is a load-bearing component of every deposit address (2-of-2
-// taproot leaf) and every withdrawal signature, so a deploy without
-// them would produce a non-functional bridge.
+// The guardian URL, expected enclave build (git revision + PCR0), and BTC
+// key are all required: the guardian is a load-bearing component of every
+// deposit address (2-of-2 taproot leaf) and every withdrawal signature, so
+// a deploy without them would produce a non-functional bridge.
 entry fun finish_publish(
     self: &mut Hashi,
     upgrade_cap: sui::package::UpgradeCap,
     bitcoin_chain_id: address,
     guardian_url: String,
-    guardian_public_key: vector<u8>,
+    guardian_git_revision: String,
+    guardian_pcr0: vector<u8>,
     guardian_btc_public_key: vector<u8>,
     bitcoin_confirmation_threshold: Option<u64>,
     bitcoin_deposit_time_delay_ms: Option<u64>,
@@ -124,7 +125,7 @@ entry fun finish_publish(
     self.config_mut().set_upgrade_cap(upgrade_cap);
     hashi::btc_config::set_bitcoin_chain_id(self.config_mut(), bitcoin_chain_id);
 
-    self.config_mut().set_guardian(guardian_url, guardian_public_key);
+    self.config_mut().set_guardian(guardian_url, guardian_git_revision, guardian_pcr0);
     self.config_mut().set_guardian_btc_public_key(guardian_btc_public_key);
 
     if (bitcoin_confirmation_threshold.is_some()) {

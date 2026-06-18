@@ -616,6 +616,20 @@ impl Config {
             _ => None,
         }
     }
+
+    pub fn guardian_pcr0(&self) -> Option<&[u8]> {
+        match self.config.get("guardian_pcr0") {
+            Some(ConfigValue::Bytes(v)) => Some(v.as_slice()),
+            _ => None,
+        }
+    }
+
+    pub fn guardian_git_revision(&self) -> Option<&str> {
+        match self.config.get("guardian_git_revision") {
+            Some(ConfigValue::String(v)) => Some(v.as_str()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug)]

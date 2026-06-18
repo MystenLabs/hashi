@@ -106,7 +106,10 @@ stderr: {}",
 /// guardian-less deploy can't produce spendable deposits.
 pub struct GuardianConfig {
     pub url: String,
-    pub public_key: Vec<u8>,
+    /// Git revision of the expected enclave build (human-readable build id, pinned with PCR0).
+    pub git_revision: String,
+    /// Expected enclave PCR0 (48 bytes, SHA-384); all-zero placeholder in non-Nitro dev.
+    pub pcr0: Vec<u8>,
     /// X-only BTC pubkey of the enclave (32 bytes).
     pub btc_public_key: Vec<u8>,
 }
@@ -226,7 +229,8 @@ pub async fn publish_and_init(
     let upgrade_cap_arg = builder.object(ObjectInput::new(upgrade_cap_id).as_owned());
     let bitcoin_chain_id_arg = builder.pure(&bitcoin_chain_id_addr);
     let guardian_url_arg = builder.pure(&guardian.url.as_str());
-    let guardian_public_key_arg = builder.pure(&guardian.public_key.as_slice());
+    let guardian_git_revision_arg = builder.pure(&guardian.git_revision.as_str());
+    let guardian_pcr0_arg = builder.pure(&guardian.pcr0.as_slice());
     let guardian_btc_public_key_arg = builder.pure(&guardian.btc_public_key.as_slice());
     let confirmation_threshold_arg = builder.pure(&bitcoin_overrides.confirmation_threshold);
     let deposit_time_delay_ms_arg = builder.pure(&bitcoin_overrides.deposit_time_delay_ms);
@@ -247,7 +251,8 @@ pub async fn publish_and_init(
             upgrade_cap_arg,
             bitcoin_chain_id_arg,
             guardian_url_arg,
-            guardian_public_key_arg,
+            guardian_git_revision_arg,
+            guardian_pcr0_arg,
             guardian_btc_public_key_arg,
             confirmation_threshold_arg,
             deposit_time_delay_ms_arg,

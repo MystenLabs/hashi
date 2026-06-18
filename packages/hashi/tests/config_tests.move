@@ -68,29 +68,32 @@ fun test_bitcoin_withdrawal_minimum_floors() {
 }
 
 #[test]
-fun test_set_guardian_stores_url_and_key() {
+fun test_set_guardian_stores_url_and_build() {
     let ctx = &mut test_utils::new_tx_context(@0x100, 0);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
 
     let url = string::utf8(b"http://guardian.example:3000");
-    let pk = vector::tabulate!(32, |i| (i as u8));
-    config::set_guardian(hashi.config_mut(), url, pk);
+    let git_revision = string::utf8(b"0000000000000000000000000000000000000000");
+    let pcr0 = vector::tabulate!(48, |i| (i as u8));
+    config::set_guardian(hashi.config_mut(), url, git_revision, pcr0);
 
     assert!(config::guardian_url(hashi.config()).borrow() == url);
-    let stored = config::guardian_public_key(hashi.config()).destroy_some();
-    assert!(stored.length() == 32);
+    assert!(config::guardian_git_revision(hashi.config()).borrow() == git_revision);
+    let stored = config::guardian_pcr0(hashi.config()).destroy_some();
+    assert!(stored.length() == 48);
 
     std::unit_test::destroy(hashi);
 }
 
-#[test, expected_failure(abort_code = ::hashi::config::EBadGuardianPublicKeyLength)]
-fun test_set_guardian_rejects_wrong_length_key() {
+#[test, expected_failure(abort_code = ::hashi::config::EBadGuardianPcr0Length)]
+fun test_set_guardian_rejects_wrong_length_pcr0() {
     let ctx = &mut test_utils::new_tx_context(@0x100, 0);
     let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1, VOTER2, VOTER3], ctx);
 
     let url = string::utf8(b"http://guardian.example:3000");
-    let bad_pk = vector::tabulate!(31, |i| (i as u8));
-    config::set_guardian(hashi.config_mut(), url, bad_pk);
+    let git_revision = string::utf8(b"deadbeef");
+    let bad_pcr0 = vector::tabulate!(47, |i| (i as u8));
+    config::set_guardian(hashi.config_mut(), url, git_revision, bad_pcr0);
 
     std::unit_test::destroy(hashi);
 }

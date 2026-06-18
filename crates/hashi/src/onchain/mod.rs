@@ -521,6 +521,22 @@ impl OnchainState {
             .map(<[u8]>::to_vec)
     }
 
+    pub fn guardian_pcr0(&self) -> Option<Vec<u8>> {
+        self.state()
+            .hashi()
+            .config
+            .guardian_pcr0()
+            .map(<[u8]>::to_vec)
+    }
+
+    pub fn guardian_git_revision(&self) -> Option<String> {
+        self.state()
+            .hashi()
+            .config
+            .guardian_git_revision()
+            .map(str::to_string)
+    }
+
     pub fn bridge_service_client(
         &self,
         validator: &Address,

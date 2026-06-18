@@ -261,15 +261,19 @@ pub enum CreateProposalCommands {
         metadata: MetadataArgs,
     },
 
-    /// Propose updating the guardian URL and public key
+    /// Propose updating the guardian URL and expected enclave build (PCR0)
     UpdateGuardian {
         /// The guardian gRPC endpoint URL
         #[clap(long)]
         url: String,
 
-        /// The guardian's signing public key (hex encoded)
+        /// Expected enclave build git revision (build identifier pinned with PCR0)
         #[clap(long)]
-        public_key: String,
+        git_revision: String,
+
+        /// Expected enclave PCR0, hex encoded (48 bytes, SHA-384)
+        #[clap(long)]
+        pcr0: String,
 
         #[clap(flatten)]
         metadata: MetadataArgs,
@@ -659,9 +663,15 @@ pub struct PublishOpts {
     #[clap(long)]
     pub guardian_url: String,
 
-    /// Guardian Ed25519 signing pubkey, hex-encoded (32 bytes).
+    /// Git revision of the expected enclave build (build id pinned with PCR0).
+    /// Optional — defaults to empty for non-Nitro dev.
     #[clap(long)]
-    pub guardian_public_key: String,
+    pub guardian_git_revision: Option<String>,
+
+    /// Expected enclave PCR0, hex-encoded (48 bytes, SHA-384).
+    /// Optional — defaults to all-zero for non-Nitro dev.
+    #[clap(long)]
+    pub guardian_pcr0: Option<String>,
 
     /// Guardian BTC pubkey, x-only hex-encoded (32 bytes). Published
     /// on-chain for 2-of-2 deposit address derivation.
@@ -898,13 +908,15 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                 }
                 CreateProposalCommands::UpdateGuardian {
                     url,
-                    public_key,
+                    git_revision,
+                    pcr0,
                     metadata,
                 } => {
                     commands::proposal::create_update_guardian_proposal(
                         &config,
                         &url,
-                        &public_key,
+                        &git_revision,
+                        &pcr0,
                         parse_metadata(metadata.metadata),
                         &tx_opts,
                     )
@@ -1198,18 +1210,23 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
     // Connect to RPC
     let mut client = sui_rpc::Client::new(&opts.sui_rpc_url)?;
 
-    // Guardian is required — all three flags must be present.
-    let public_key = hex::decode(
-        opts.guardian_public_key
-            .strip_prefix("0x")
-            .unwrap_or(&opts.guardian_public_key),
-    )
-    .context("Invalid hex for --guardian-public-key")?;
-    anyhow::ensure!(
-        public_key.len() == 32,
-        "--guardian-public-key must be 32 bytes (Ed25519), got {} bytes",
-        public_key.len(),
-    );
+    // Guardian: the BTC key is required (the immutable 2-of-2 anchor). The
+    // expected enclave build (git revision + PCR0) defaults to all-zero for
+    // non-Nitro dev, where node-side attestation is a compile-time no-op.
+    let git_revision = opts.guardian_git_revision.unwrap_or_default();
+    let pcr0 = match opts.guardian_pcr0.as_deref() {
+        Some(s) => {
+            let bytes = hex::decode(s.strip_prefix("0x").unwrap_or(s))
+                .context("Invalid hex for --guardian-pcr0")?;
+            anyhow::ensure!(
+                bytes.len() == 48,
+                "--guardian-pcr0 must be 48 bytes (SHA-384), got {} bytes",
+                bytes.len(),
+            );
+            bytes
+        }
+        None => vec![0u8; 48],
+    };
     let btc_public_key = hex::decode(
         opts.guardian_btc_public_key
             .strip_prefix("0x")
@@ -1223,7 +1240,8 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
     );
     let guardian = crate::publish::GuardianConfig {
         url: opts.guardian_url,
-        public_key,
+        git_revision,
+        pcr0,
         btc_public_key,
     };
 
