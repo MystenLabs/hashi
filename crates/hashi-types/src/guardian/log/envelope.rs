@@ -148,6 +148,7 @@ impl LogRecord {
 mod tests {
     use super::*;
     use crate::guardian::InitLogMessage;
+    use crate::guardian::KPEncryptedShares;
     use crate::guardian::LimiterState;
     use crate::guardian::StandardWithdrawalRequest;
     use crate::guardian::StandardWithdrawalRequestWire;
@@ -212,7 +213,7 @@ mod tests {
             session_id,
             LogMessage::Shares(Box::new(SharesLogMessage {
                 sharing_seq: 7,
-                encrypted_shares: vec![],
+                encrypted_shares: KPEncryptedShares::new(vec![]).unwrap(),
             })),
             &signing_key,
         );

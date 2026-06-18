@@ -98,12 +98,14 @@ pub struct GetGuardianInfoResponse {
     pub signed_info: GuardianSigned<GuardianInfo>,
     /// Encrypted shares from the ceremony (empty in non-ceremony mode); KPs
     /// fetch their share here and verify it against the instance commitments.
-    pub encrypted_shares: Vec<KPEncryptedShare>,
+    pub encrypted_shares: KPEncryptedShares,
 }
 
 /// TODO: Add network?
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct GuardianInfo {
+    // TODO: expose the enclave `EnclaveMode` here so clients can assert they
+    // are talking to a ceremony-mode or withdraw-mode guardian from signed info.
     /// Secret-sharing instance (if set). Used by KPs to check that the right key will be used.
     pub secret_sharing_instance: Option<SecretSharingInstance>,
     /// S3 bucket name (if set). Used by KPs to check S3 bucket info.
@@ -172,6 +174,9 @@ pub struct WithdrawModeState {
 /// only decrypts if the KP agreed on the operator-supplied state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProvisionerInitRequest {
+    // TODO: Wrap submitted guardian shares in a domain type that rejects
+    // duplicate share ids. Unlike KP output shares, submitted shares are a
+    // threshold batch and need not be contiguous 1..=n.
     encrypted_shares: Vec<GuardianEncryptedShare>,
 }
 
@@ -219,8 +224,8 @@ pub struct SetupNewKeyRequest {
 /// `EnclaveSigned<T>`
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SetupNewKeyResponse {
-    pub encrypted_shares: Vec<KPEncryptedShare>,
-    pub share_commitments: ShareCommitments,
+    pub encrypted_shares: KPEncryptedShares,
+    pub secret_sharing_instance: SecretSharingInstance,
 }
 
 /// Ceremony-mode rotation request, assembled by the operator from the current KPs'
@@ -228,6 +233,8 @@ pub struct SetupNewKeyResponse {
 /// rotation target `state`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RotateKpsRequest {
+    // TODO: Use the same unique-id wrapper as ProvisionerInitRequest once we
+    // centralize validation for submitted guardian share batches.
     encrypted_old_shares: Vec<GuardianEncryptedShare>,
     old_instance: SecretSharingInstance,
     state: RotateKpsState,
@@ -247,7 +254,7 @@ pub struct RotateKpsState {
 /// `EnclaveSigned<T>`. The new KP set's encrypted shares, returned by `rotate_kps`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RotateKpsResponse {
-    pub encrypted_shares: Vec<KPEncryptedShare>,
+    pub encrypted_shares: KPEncryptedShares,
 }
 
 // ---------------------------------
@@ -305,6 +312,7 @@ impl SetupNewKeyRequest {
                 pgp_certs.len()
             )));
         }
+        ensure_unique_pgp_cert_fingerprints(&pgp_certs)?;
         Ok(Self {
             key_provisioner_pgp_certs: pgp_certs,
             params,
@@ -326,6 +334,19 @@ impl SetupNewKeyRequest {
     pub fn threshold(&self) -> usize {
         self.params.threshold()
     }
+}
+
+fn ensure_unique_pgp_cert_fingerprints(pgp_certs: &[PgpPublicCert]) -> GuardianResult<()> {
+    let mut seen = std::collections::HashSet::with_capacity(pgp_certs.len());
+    for cert in pgp_certs {
+        let fingerprint = cert.fingerprint();
+        if !seen.insert(fingerprint.clone()) {
+            return Err(InvalidInputs(format!(
+                "duplicate OpenPGP certificate fingerprint {fingerprint}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl OperatorInitRequest {
@@ -499,16 +520,11 @@ impl RotateKpsState {
                 new_kp_pgp_certs.len()
             )));
         }
+        ensure_unique_pgp_cert_fingerprints(&new_kp_pgp_certs)?;
         // Sort to a canonical order so the serialized state's digest (which all
-        // T old KPs must agree on) is independent of submission order. Sorting
-        // also makes duplicates adjacent.
+        // T old KPs must agree on) is independent of submission order.
         let mut new_kp_pgp_certs = new_kp_pgp_certs;
         new_kp_pgp_certs.sort();
-        for pair in new_kp_pgp_certs.windows(2) {
-            if pair[0] == pair[1] {
-                return Err(InvalidInputs("duplicate new KP cert".into()));
-            }
-        }
         Ok(Self {
             new_kp_pgp_certs,
             new_params,
@@ -860,6 +876,16 @@ mod tests {
             RotateKpsState::new(certs, 5, 3).unwrap_err(),
             InvalidInputs(_)
         ));
+    }
+
+    #[test]
+    fn setup_new_key_request_rejects_duplicate_cert_fingerprints() {
+        let mut certs = test_utils::mock_pgp_certs(5);
+        certs[1] = certs[0].clone();
+        let err = SetupNewKeyRequest::new(certs, 5, 3).unwrap_err();
+        assert!(
+            matches!(err, InvalidInputs(msg) if msg.contains("duplicate OpenPGP certificate fingerprint"))
+        );
     }
 
     #[test]

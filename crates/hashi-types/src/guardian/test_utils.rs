@@ -10,6 +10,7 @@ use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
 use super::KPEncryptedShare;
+use super::KPEncryptedShares;
 use super::LimiterConfig;
 use super::LimiterState;
 use super::OperatorInitRequest;
@@ -117,21 +118,25 @@ fn dummy_commitments() -> ShareCommitments {
     ShareCommitments::new(commitments).unwrap()
 }
 
-fn dummy_encrypted_shares() -> Vec<KPEncryptedShare> {
-    (0..TEST_N)
-        .map(|i| KPEncryptedShare {
-            id: NonZeroU16::new((i + 1) as u16).unwrap(),
-            recipient_fingerprint: format!("DUMMY FINGERPRINT {i}"),
-            armored_ciphertext: "-----BEGIN PGP MESSAGE-----\n\n-----END PGP MESSAGE-----".into(),
-        })
-        .collect()
+fn dummy_encrypted_shares() -> KPEncryptedShares {
+    KPEncryptedShares::new(
+        (0..TEST_N)
+            .map(|i| KPEncryptedShare {
+                id: NonZeroU16::new((i + 1) as u16).unwrap(),
+                recipient_fingerprint: format!("DUMMY FINGERPRINT {i}"),
+                armored_ciphertext: "-----BEGIN PGP MESSAGE-----\n\n-----END PGP MESSAGE-----"
+                    .into(),
+            })
+            .collect(),
+    )
+    .unwrap()
 }
 
 impl GuardianSigned<SetupNewKeyResponse> {
     pub fn mock_for_testing() -> Self {
         let resp = SetupNewKeyResponse {
             encrypted_shares: dummy_encrypted_shares(),
-            share_commitments: dummy_commitments(),
+            secret_sharing_instance: dummy_secret_sharing_instance(),
         };
 
         let signing_kp = SigningKey::from([1u8; 32]);

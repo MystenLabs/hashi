@@ -8,6 +8,7 @@ use hashi::config::Config;
 use hashi::onchain::OnchainState;
 use std::path::PathBuf;
 
+mod ceremony;
 mod config;
 mod dev_bootstrap;
 mod fetch_info;
@@ -26,6 +27,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Production guardian key ceremony commands.
+    Ceremony {
+        #[command(subcommand)]
+        command: CeremonyCommand,
+    },
     /// Run a key provisioner's init checks against guardian S3 logs and emit its share.
     Provision {
         /// Path to provisioner-init YAML config file.
@@ -36,6 +42,22 @@ enum Command {
     Tools {
         #[command(subcommand)]
         command: ToolsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum CeremonyCommand {
+    /// Run the one-time production guardian key ceremony.
+    Run {
+        /// Path to ceremony-run YAML config file.
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Verify this KP can fetch and decrypt its encrypted ceremony share from guardian S3.
+    Verify {
+        /// Path to ceremony-verify YAML config file.
+        #[arg(long)]
+        config: PathBuf,
     },
 }
 
@@ -84,6 +106,16 @@ async fn main() -> anyhow::Result<()> {
     hashi::init_crypto_provider();
 
     match Cli::parse().command {
+        Command::Ceremony { command } => match command {
+            CeremonyCommand::Run { config } => {
+                let cfg = ceremony::CeremonyRunConfig::load_yaml(&config)?;
+                ceremony::run(cfg).await?;
+            }
+            CeremonyCommand::Verify { config } => {
+                let cfg = ceremony::CeremonyVerifyConfig::load_yaml(&config)?;
+                ceremony::verify(cfg).await?;
+            }
+        },
         Command::Provision { config } => {
             let cfg = provisioner::ProvisionerConfig::load_yaml(&config)?;
             provisioner::run(cfg).await?;

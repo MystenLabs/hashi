@@ -4,7 +4,6 @@
 use crate::Enclave;
 use hashi_types::guardian::crypto::combine_shares;
 use hashi_types::guardian::crypto::decrypt_verify_shares;
-use hashi_types::guardian::crypto::recipient_roster;
 use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::GuardianError::InvalidInputs;
@@ -91,7 +90,7 @@ async fn finalize_rotation(
         .log_ceremony(CeremonyLogMessage::Rotate {
             old_instance: old_instance.clone(),
             new_instance,
-            roster: recipient_roster(&encrypted_shares),
+            roster: encrypted_shares.recipient_roster(),
         })
         .await?;
 
@@ -163,10 +162,7 @@ mod tests {
     }
 
     /// Run one rotation and return its verified response shares.
-    async fn rotate_and_verify(
-        enclave: &Arc<Enclave>,
-        req: RotateKpsRequest,
-    ) -> Vec<KPEncryptedShare> {
+    async fn rotate_and_verify(enclave: &Arc<Enclave>, req: RotateKpsRequest) -> KPEncryptedShares {
         let signed = rotate_kps(enclave.clone(), req).await.expect("ok");
         signed
             .verify(&enclave.signing_pubkey())
@@ -260,7 +256,7 @@ mod tests {
         let (_sk, shares, captures, enclave) = setup_rotation_enclave().await;
         let req = build_request(&shares[..TEST_T], &enclave, build_state());
         let response_shares = rotate_and_verify(&enclave, req).await;
-        assert_rotation_output(&captures, &response_shares, TEST_N, TEST_T);
+        assert_rotation_output(&captures, response_shares.as_slice(), TEST_N, TEST_T);
     }
 
     #[tokio::test]
@@ -270,7 +266,7 @@ mod tests {
         let state = RotateKpsState::new(mock_pgp_certs(3), 3, 2).unwrap();
         let req = build_request(&shares[..TEST_T], &enclave, state);
         let response_shares = rotate_and_verify(&enclave, req).await;
-        assert_rotation_output(&captures, &response_shares, 3, 2);
+        assert_rotation_output(&captures, response_shares.as_slice(), 3, 2);
     }
 
     #[tokio::test]

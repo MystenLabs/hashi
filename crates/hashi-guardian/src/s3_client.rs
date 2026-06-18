@@ -24,7 +24,6 @@ use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::InitLogMessage;
-use hashi_types::guardian::VerifiedLogRecord;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tracing::info;
@@ -509,7 +508,7 @@ impl GuardianS3Client {
     /// TODO: also reject when `retain_until <= now` — once the lock lapses the
     /// version check below no longer detects tampering (see
     /// `ensure_no_duplicates_or_deletions`).
-    pub async fn get_log_record(&self, key: &str) -> GuardianResult<LogRecord> {
+    pub(crate) async fn get_log_record(&self, key: &str) -> GuardianResult<LogRecord> {
         let keys = self.ensure_no_duplicates_or_deletions(key).await?;
         if keys.len() != 1 || keys[0] != key {
             return Err(S3Error(format!(
@@ -521,36 +520,27 @@ impl GuardianS3Client {
         self.get_object_unsafe::<LogRecord>(key).await
     }
 
-    /// Note: Callers must set signing_pubkey to None only for unsigned messages.
-    pub async fn get_verified_log_record(
-        &self,
-        key: &str,
-        expected_session_id: &str,
-        signing_pubkey: Option<&GuardianPubKey>,
-    ) -> GuardianResult<VerifiedLogRecord> {
-        let log = self.get_log_record(key).await?;
-        if log.session_id != expected_session_id {
-            return Err(S3Error(format!("log session_id mismatch for key {}", key)));
-        }
-        match signing_pubkey {
-            Some(pk) => log.verify(pk),
-            None => log.verify_unsigned(),
-        }
-    }
-
     /// Fetch the session's attestation record, verify it against `build_pcrs`,
     /// and return the trusted enclave signing pubkey. Verification binds the
     /// logged `signing_public_key` to the attestation's `public_key`, so the
     /// returned key is attestation-anchored. No caller needs the raw bytes.
-    pub async fn get_verified_enclave_pubkey(
+    ///
+    /// `pub(crate)` so the only verified-pubkey path off-crate is
+    /// [`GuardianReader::verified_pubkey`], which caches the result.
+    pub(crate) async fn get_verified_enclave_pubkey(
         &self,
         session_id: &str,
         build_pcrs: &BuildPcrs,
     ) -> GuardianResult<GuardianPubKey> {
         let key = InitLogMessage::attestation_object_key(session_id);
-        let (attestation, signing_public_key) = self
-            .get_verified_log_record(&key, session_id, None)
-            .await?
+        let record = self.get_log_record(&key).await?;
+        if record.session_id != session_id {
+            return Err(S3Error(format!("log session_id mismatch for key {}", key)));
+        }
+        // The attestation record is unsigned — it's the bootstrap carrying the
+        // pubkey everything else is verified against — so verify it as unsigned.
+        let (attestation, signing_public_key) = record
+            .verify_unsigned()?
             .message
             .into_init_log()
             .and_then(|x| match x {
