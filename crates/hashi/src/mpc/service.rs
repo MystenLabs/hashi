@@ -279,8 +279,7 @@ impl MpcService {
         );
         let output = match protocol_type {
             Some(hashi_types::move_types::ProtocolType::KeyRotation) => {
-                self.setup_key_rotation(epoch)?;
-                self.run_key_rotation(epoch).await
+                self.recover_current_rotation(epoch, &onchain_mpc_key).await
             }
             _ => self.recover_current_dkg(epoch, &onchain_mpc_key).await,
         }?;
@@ -325,6 +324,63 @@ impl MpcService {
                 self.inner.metrics.mpc_recovery_suspicious_total.inc();
                 Err(anyhow::anyhow!(
                     "suspicious local DKG state for epoch {epoch}: {reason}"
+                ))
+            }
+        }
+    }
+
+    async fn recover_current_rotation(
+        &self,
+        epoch: u64,
+        onchain_mpc_key: &[u8],
+    ) -> anyhow::Result<MpcOutput> {
+        self.setup_key_rotation(epoch)?;
+        let onchain_state = self.inner.onchain_state().clone();
+        let mpc_manager = self
+            .inner
+            .mpc_manager()
+            .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized for rotation recovery"))?;
+        let previous_epoch = mpc_manager.read().unwrap().previous_epoch;
+        let current_certs: Vec<CertificateV1> = fetch_certificates(&onchain_state, epoch, None)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to fetch rotation certs for epoch {epoch}: {e}"))?
+            .into_iter()
+            .map(|(_, cert)| cert)
+            .collect();
+        let previous_certs: Vec<CertificateV1> =
+            fetch_certificates(&onchain_state, previous_epoch, None)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to fetch certs for previous epoch {previous_epoch}: {e}"
+                    )
+                })?
+                .into_iter()
+                .map(|(_, cert)| cert)
+                .collect();
+        match MpcManager::reconstruct_current_rotation_output(
+            &mpc_manager,
+            &current_certs,
+            &previous_certs,
+            onchain_mpc_key,
+        ) {
+            MpcOutputRecoveryOutcome::Recovered(output) => {
+                info!(
+                    "recover_current_rotation: recovered current epoch {epoch} and previous \
+                     {previous_epoch} from local rotation messages (no peers)"
+                );
+                Ok(output)
+            }
+            MpcOutputRecoveryOutcome::NotApplicable => self.run_key_rotation(epoch).await,
+            MpcOutputRecoveryOutcome::Suspicious(reason) => {
+                error!(
+                    "recover_current_rotation: local rotation state for epoch {epoch} contradicts \
+                     on-chain truth ({reason}); observing this epoch, will recover at the next \
+                     rotation"
+                );
+                self.inner.metrics.mpc_recovery_suspicious_total.inc();
+                Err(anyhow::anyhow!(
+                    "suspicious local rotation state for epoch {epoch}: {reason}"
                 ))
             }
         }

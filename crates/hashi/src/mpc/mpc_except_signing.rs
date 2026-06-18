@@ -42,6 +42,7 @@ pub use crate::mpc::types::RetrieveMessagesRequest;
 pub use crate::mpc::types::RetrieveMessagesResponse;
 use crate::mpc::types::RotationComplainContext;
 use crate::mpc::types::RotationMessages;
+use crate::mpc::types::RotationReconstructionContext;
 pub use crate::mpc::types::SendMessagesRequest;
 pub use crate::mpc::types::SendMessagesResponse;
 pub use crate::mpc::types::SessionId;
@@ -641,7 +642,7 @@ impl MpcManager {
         );
         {
             let mut mgr = mpc_manager.write().unwrap();
-            mgr.previous_output = Some(previous.clone());
+            mgr.set_previous_output(previous.clone());
             // Load rotation messages from DB for restart recovery.
             // For live rotation this is a no-op (no messages stored yet).
             for (dealer, message) in mgr
@@ -2946,7 +2947,7 @@ impl MpcManager {
                 self.reconstruct_previous_dkg_output(certificates, complaint_cache)
             }
             Some(CertificateV1::Rotation(_)) => {
-                self.reconstruct_from_rotation_certificates(certificates, complaint_cache)
+                self.reconstruct_previous_rotation_output(certificates, complaint_cache)
             }
             Some(CertificateV1::NonceGeneration { .. }) => {
                 unreachable!(
@@ -3007,19 +3008,13 @@ impl MpcManager {
                 output_threshold: mgr.mpc_config.threshold,
                 epoch: mgr.mpc_config.epoch,
             };
-            match mgr.reconstruct_dkg_output(&context, certificates, &HashMap::new()) {
-                Ok(ReconstructionOutcome::Success(output)) => output,
-                Ok(ReconstructionOutcome::NeedsDkgComplaintRecovery { .. })
-                | Ok(ReconstructionOutcome::NeedsRotationComplaintRecovery { .. }) => {
-                    return MpcOutputRecoveryOutcome::NotApplicable;
-                }
-                Err(MpcError::StorageError(_)) | Err(MpcError::NotEnoughApprovals { .. }) => {
-                    return MpcOutputRecoveryOutcome::NotApplicable;
-                }
-                Err(MpcError::ProtocolFailed(msg)) => {
-                    return MpcOutputRecoveryOutcome::Suspicious(msg);
-                }
-                Err(_) => return MpcOutputRecoveryOutcome::NotApplicable,
+            match Self::classify_reconstruction(mgr.reconstruct_dkg_output(
+                &context,
+                certificates,
+                &HashMap::new(),
+            )) {
+                Ok(output) => output,
+                Err(outcome) => return outcome,
             }
         };
         let candidate_key =
@@ -3034,6 +3029,82 @@ impl MpcManager {
             .unwrap()
             .set_current_output(candidate.clone());
         MpcOutputRecoveryOutcome::Recovered(candidate)
+    }
+
+    pub fn reconstruct_current_rotation_output(
+        mpc_manager: &Arc<RwLock<Self>>,
+        current_certificates: &[CertificateV1],
+        previous_certificates: &[CertificateV1],
+        onchain_mpc_key: &[u8],
+    ) -> MpcOutputRecoveryOutcome {
+        if onchain_mpc_key.is_empty() {
+            return MpcOutputRecoveryOutcome::NotApplicable;
+        }
+        let (current, previous) = {
+            let mgr = mpc_manager.read().unwrap();
+            let Some(input_threshold) = mgr.previous_reconfig_output_threshold else {
+                return MpcOutputRecoveryOutcome::NotApplicable;
+            };
+            let current_context = RotationReconstructionContext {
+                nodes: &mgr.mpc_config.nodes,
+                party_id: mgr.party_id,
+                encryption_key: &mgr.encryption_key,
+                output_threshold: mgr.mpc_config.threshold,
+                input_threshold,
+                epoch: mgr.mpc_config.epoch,
+            };
+            let current = match Self::classify_reconstruction(mgr.reconstruct_rotation_output(
+                &current_context,
+                current_certificates,
+                &HashMap::new(),
+            )) {
+                Ok(output) => output,
+                Err(outcome) => return outcome,
+            };
+            let previous = match Self::classify_reconstruction(
+                mgr.reconstruct_previous_output(previous_certificates, &HashMap::new()),
+            ) {
+                Ok(output) => output,
+                Err(outcome) => return outcome,
+            };
+            (current, previous)
+        };
+        let current_key = bcs::to_bytes(&current.public_key).expect(EXPECT_SERIALIZATION_SUCCESS);
+        if current_key != onchain_mpc_key {
+            return MpcOutputRecoveryOutcome::Suspicious(
+                "reconstructed current key does not match the on-chain key".into(),
+            );
+        }
+        let previous_key = bcs::to_bytes(&previous.public_key).expect(EXPECT_SERIALIZATION_SUCCESS);
+        if previous_key != onchain_mpc_key {
+            return MpcOutputRecoveryOutcome::Suspicious(
+                "reconstructed previous key does not match the on-chain key".into(),
+            );
+        }
+        {
+            let mut mgr = mpc_manager.write().unwrap();
+            mgr.set_current_output(current.clone());
+            mgr.set_previous_output(previous);
+        }
+        MpcOutputRecoveryOutcome::Recovered(current)
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn classify_reconstruction(
+        result: MpcResult<ReconstructionOutcome>,
+    ) -> Result<MpcOutput, MpcOutputRecoveryOutcome> {
+        match result {
+            Ok(ReconstructionOutcome::Success(output)) => Ok(output),
+            Ok(ReconstructionOutcome::NeedsDkgComplaintRecovery { .. })
+            | Ok(ReconstructionOutcome::NeedsRotationComplaintRecovery { .. }) => {
+                Err(MpcOutputRecoveryOutcome::NotApplicable)
+            }
+            Err(MpcError::StorageError(_)) | Err(MpcError::NotEnoughApprovals { .. }) => {
+                Err(MpcOutputRecoveryOutcome::NotApplicable)
+            }
+            Err(MpcError::ProtocolFailed(msg)) => Err(MpcOutputRecoveryOutcome::Suspicious(msg)),
+            Err(_) => Err(MpcOutputRecoveryOutcome::NotApplicable),
+        }
     }
 
     fn reconstruct_dkg_output(
@@ -3153,20 +3224,20 @@ impl MpcManager {
         }))
     }
 
-    fn reconstruct_from_rotation_certificates(
+    fn reconstruct_previous_rotation_output(
         &self,
         certificates: &[CertificateV1],
         complaint_cache: &HashMap<DealerOutputsKey, avss::PartialOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
-        let previous_nodes = self.previous_nodes.clone().ok_or_else(|| {
+        let nodes = self.previous_nodes.as_ref().ok_or_else(|| {
             MpcError::InvalidConfig("Rotation reconstruction requires previous nodes".into())
         })?;
-        let previous_committee = self.previous_committee.clone().ok_or_else(|| {
+        let committee = self.previous_committee.as_ref().ok_or_else(|| {
             MpcError::InvalidConfig("Rotation reconstruction requires previous committee".into())
         })?;
-        let previous_party_id = previous_committee.index_of(&self.address).ok_or_else(|| {
+        let party_id = committee.index_of(&self.address).ok_or_else(|| {
             MpcError::InvalidConfig("This node is not in the previous committee".into())
-        })? as u16;
+        })? as PartyId;
         let output_threshold = self.previous_reconfig_output_threshold.ok_or_else(|| {
             MpcError::InvalidConfig(
                 "Rotation reconstruction requires previous reconfig's output threshold".into(),
@@ -3179,11 +3250,30 @@ impl MpcManager {
                     .into(),
             )
         })?;
-        let source_session_id = SessionId::new(
-            &self.chain_id,
-            self.previous_epoch,
-            &ProtocolType::KeyRotation,
-        );
+        let encryption_key = self.previous_encryption_key.as_ref().ok_or_else(|| {
+            MpcError::InvalidConfig(
+                "Rotation reconstruction requires previous encryption key".into(),
+            )
+        })?;
+        let context = RotationReconstructionContext {
+            nodes,
+            party_id,
+            encryption_key,
+            output_threshold,
+            input_threshold,
+            epoch: self.previous_epoch,
+        };
+        self.reconstruct_rotation_output(&context, certificates, complaint_cache)
+    }
+
+    fn reconstruct_rotation_output(
+        &self,
+        context: &RotationReconstructionContext<'_>,
+        certificates: &[CertificateV1],
+        complaint_cache: &HashMap<DealerOutputsKey, avss::PartialOutput>,
+    ) -> MpcResult<ReconstructionOutcome> {
+        let source_session_id =
+            SessionId::new(&self.chain_id, context.epoch, &ProtocolType::KeyRotation);
         // Each dealer only rotates their own shares from the previous epoch, so share indices
         // are unique across dealers (no duplicates in `certified_share_indices`).
         let mut local_outputs: HashMap<ShareIndex, avss::PartialOutput> = HashMap::new();
@@ -3196,10 +3286,9 @@ impl MpcManager {
             };
             let msg = rotation_cert.message();
             let dealer_address = msg.dealer_address;
-            let previous_epoch = self.previous_epoch;
             let rotation_msgs = self
                 .public_messages_store
-                .get_rotation_messages(previous_epoch, &dealer_address)
+                .get_rotation_messages(context.epoch, &dealer_address)
                 .map_err(|e| MpcError::StorageError(e.to_string()))?
                 .ok_or_else(|| {
                     MpcError::StorageError(format!(
@@ -3219,7 +3308,7 @@ impl MpcManager {
                 if let Some(output) = complaint_cache.get(&DealerOutputsKey::Rotation(share_index))
                 {
                     tracing::info!(
-                        "reconstruct_from_rotation_certificates: complaint cache hit for \
+                        "reconstruct_rotation: complaint cache hit for \
                          dealer {:?} share_index={share_index}",
                         dealer_address,
                     );
@@ -3230,17 +3319,11 @@ impl MpcManager {
                 let session_id = source_session_id
                     .rotation_session_id(&dealer_address, share_index)
                     .to_vec();
-                let previous_encryption_key =
-                    self.previous_encryption_key.as_ref().ok_or_else(|| {
-                        MpcError::InvalidConfig(
-                            "Rotation reconstruction requires previous encryption key".into(),
-                        )
-                    })?;
                 match process_avss_message(
-                    previous_encryption_key,
-                    previous_nodes.clone(),
-                    previous_party_id,
-                    output_threshold,
+                    context.encryption_key,
+                    context.nodes.clone(),
+                    context.party_id,
+                    context.output_threshold,
                     session_id,
                     &message,
                     None,
@@ -3262,15 +3345,15 @@ impl MpcManager {
         }
         // Unlike normal flow which accumulates until threshold in a loop, reconstruction
         // receives all certificates at once. Check threshold for better error handling.
-        if certified_share_indices.len() < input_threshold as usize {
+        if certified_share_indices.len() < context.input_threshold as usize {
             return Err(MpcError::NotEnoughApprovals {
-                needed: input_threshold as usize,
+                needed: context.input_threshold as usize,
                 got: certified_share_indices.len(),
             });
         }
         let indexed_outputs: Vec<IndexedValue<avss::PartialOutput>> = certified_share_indices
             .iter()
-            .take(input_threshold as usize)
+            .take(context.input_threshold as usize)
             .map(|&share_index| {
                 let output = local_outputs.get(&share_index).ok_or_else(|| {
                     MpcError::ProtocolFailed(format!(
@@ -3286,20 +3369,23 @@ impl MpcManager {
             .collect::<Result<_, MpcError>>()?;
         let used_indices: Vec<_> = indexed_outputs.iter().map(|o| o.index).collect();
         tracing::info!(
-            "reconstruct_from_rotation_certificates: {} share_indices={:?}, \
-             output_threshold={output_threshold}, input_threshold={input_threshold}",
+            "reconstruct_rotation (epoch={}): {} share_indices={:?}, \
+             output_threshold={}, input_threshold={}",
+            context.epoch,
             used_indices.len(),
             used_indices,
+            context.output_threshold,
+            context.input_threshold,
         );
         let combined = avss::ReceiverOutput::complete_key_rotation(
-            input_threshold,
-            previous_party_id,
-            &previous_nodes,
+            context.input_threshold,
+            context.party_id,
+            context.nodes,
             &indexed_outputs,
         )
         .expect(EXPECT_THRESHOLD_MET);
         tracing::info!(
-            "reconstruct_from_rotation_certificates: result vk={}",
+            "reconstruct_rotation: result vk={}",
             hex::encode(combined.vk.to_byte_array()),
         );
         Ok(ReconstructionOutcome::Success(MpcOutput {
@@ -3310,7 +3396,7 @@ impl MpcManager {
                 .into_iter()
                 .map(|c| (c.index, c.value))
                 .collect(),
-            threshold: output_threshold,
+            threshold: context.output_threshold,
         }))
     }
 
@@ -3959,6 +4045,10 @@ impl MpcManager {
 
     fn set_current_output(&mut self, output: MpcOutput) {
         self.current_output = Some(output);
+    }
+
+    fn set_previous_output(&mut self, output: MpcOutput) {
+        self.previous_output = Some(output);
     }
 }
 

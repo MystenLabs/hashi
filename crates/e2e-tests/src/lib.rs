@@ -1438,15 +1438,6 @@ mod tests {
         const TEST_NUM_NODES: usize = 3;
         const RESTART_ITERATIONS: usize = 3;
 
-        tracing_subscriber::fmt()
-            .with_test_writer()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::from_default_env()
-                    .add_directive(tracing::Level::INFO.into()),
-            )
-            .try_init()
-            .ok();
-
         let mut test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)
             .build()
@@ -1462,11 +1453,6 @@ mod tests {
         for (i, result) in results.into_iter().enumerate() {
             result.unwrap_or_else(|e| panic!("Node {i} initial DKG failed: {e}"));
         }
-
-        let pk_before = get_mpc_key(test_networks.hashi_network().nodes());
-        let epoch_before = test_networks.hashi_network().nodes()[0]
-            .current_epoch()
-            .unwrap();
 
         // Verify all nodes are reachable via RPC before restart cycles
         for (i, node) in test_networks.hashi_network().nodes().iter().enumerate() {
@@ -1504,31 +1490,6 @@ mod tests {
                 });
             }
 
-            let nodes = test_networks.hashi_network().nodes();
-            let pk_after = get_mpc_key(nodes);
-            assert_eq!(
-                pk_after,
-                pk_before,
-                "node 0 recovered a different key after restart iteration {}",
-                iteration + 1
-            );
-            for (i, node) in nodes.iter().enumerate().skip(1) {
-                let node_pk = node.hashi().mpc_handle().unwrap().public_key().unwrap();
-                assert_eq!(
-                    node_pk,
-                    pk_before,
-                    "node {i} recovered a different key after restart iteration {}",
-                    iteration + 1
-                );
-            }
-            let epoch_after = nodes[0].current_epoch().unwrap();
-            assert_eq!(
-                epoch_after,
-                epoch_before,
-                "epoch advanced during restart recovery (iteration {}); local recovery should not need a rotation",
-                iteration + 1
-            );
-
             // Verify all nodes are reachable via RPC after restart
             for (i, node) in test_networks.hashi_network().nodes().iter().enumerate() {
                 let client = hashi::grpc::Client::new_no_auth(node.endpoint_url())?;
@@ -1546,6 +1507,150 @@ mod tests {
                 RESTART_ITERATIONS
             );
         }
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_dkg_recovery_after_simultaneous_restart() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+
+        let nodes = test_networks.hashi_network().nodes();
+        let futs: Vec<_> = nodes
+            .iter()
+            .map(|n| n.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        for (i, r) in futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .enumerate()
+        {
+            r.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+        let dkg_epoch = test_networks.hashi_network().nodes()[0]
+            .current_epoch()
+            .unwrap();
+        let pk_before = get_mpc_key(test_networks.hashi_network().nodes());
+
+        // Restart all nodes (still at the genesis DKG epoch).
+        test_networks.hashi_network_mut().restart().await?;
+
+        let nodes = test_networks.hashi_network().nodes();
+        let futs: Vec<_> = nodes
+            .iter()
+            .map(|n| n.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        for (i, r) in futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .enumerate()
+        {
+            r.unwrap_or_else(|e| panic!("Node {i} DKG recovery after restart failed: {e}"));
+        }
+        let nodes = test_networks.hashi_network().nodes();
+        let pk_after = get_mpc_key(nodes);
+        assert_eq!(pk_after, pk_before, "key changed across the restart");
+        for (i, node) in nodes.iter().enumerate().skip(1) {
+            let node_pk = node.hashi().mpc_handle().unwrap().public_key().unwrap();
+            assert_eq!(
+                node_pk, pk_before,
+                "node {i} recovered a different key after the restart"
+            );
+        }
+        assert_eq!(
+            nodes[0].current_epoch().unwrap(),
+            dkg_epoch,
+            "epoch advanced during restart recovery; local DKG recovery should not need a rotation"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_rotation_recovery_after_simultaneous_restart() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+
+        let nodes = test_networks.hashi_network().nodes();
+        let futs: Vec<_> = nodes
+            .iter()
+            .map(|n| n.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        for (i, r) in futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .enumerate()
+        {
+            r.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+        let dkg_epoch = test_networks.hashi_network().nodes()[0]
+            .current_epoch()
+            .unwrap();
+
+        let rotation_epoch =
+            force_rotate_and_assert_key_agreement(&mut test_networks, dkg_epoch + 1).await;
+        let pk_before = get_mpc_key(test_networks.hashi_network().nodes());
+
+        // Coordinate-restart al nodes in the rotation epoch.
+        test_networks.hashi_network_mut().restart().await?;
+
+        let nodes = test_networks.hashi_network().nodes();
+        let futs: Vec<_> = nodes
+            .iter()
+            .map(|n| n.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        for (i, r) in futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .enumerate()
+        {
+            r.unwrap_or_else(|e| panic!("Node {i} rotation recovery after restart failed: {e}"));
+        }
+        let nodes = test_networks.hashi_network().nodes();
+        let pk_after = get_mpc_key(nodes);
+        assert_eq!(
+            pk_after, pk_before,
+            "key changed across the coordinated restart in the rotation epoch"
+        );
+        for (i, node) in nodes.iter().enumerate().skip(1) {
+            let node_pk = node.hashi().mpc_handle().unwrap().public_key().unwrap();
+            assert_eq!(
+                node_pk, pk_before,
+                "node {i} recovered a different key after the coordinated restart"
+            );
+        }
+        assert_eq!(
+            nodes[0].current_epoch().unwrap(),
+            rotation_epoch,
+            "epoch advanced during restart recovery; local rotation recovery should not need a rotation"
+        );
 
         Ok(())
     }
