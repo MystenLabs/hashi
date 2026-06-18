@@ -11,6 +11,7 @@ use std::path::PathBuf;
 mod ceremony;
 mod config;
 mod dev_bootstrap;
+mod dev_recover;
 mod fetch_info;
 mod generate_master_key;
 mod heartbeat_checks;
@@ -69,6 +70,12 @@ enum ToolsCommand {
         config: ConfigArgs,
         #[command(flatten)]
         args: dev_bootstrap::Args,
+    },
+    /// Recover a restarted dev guardian's BTC key from its ceremony S3 shares,
+    /// or (`--print-master-pubkey`) just print the reconstructed master pubkey.
+    DevRecover {
+        #[command(flatten)]
+        args: dev_recover::Args,
     },
     /// Fetch deployed guardian public keys.
     FetchInfo {
@@ -134,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
                         .context("failed to connect to Sui RPC")?;
                 dev_bootstrap::run(args, &onchain_state).await?;
             }
+            ToolsCommand::DevRecover { args } => dev_recover::run(args).await?,
             ToolsCommand::FetchInfo { args } => fetch_info::run(args).await?,
             ToolsCommand::GenerateMasterKey { args } => generate_master_key::run(args)?,
         },

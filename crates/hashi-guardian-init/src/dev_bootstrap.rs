@@ -336,13 +336,13 @@ fn parse_master_secret(hex_str: &str) -> Result<k256::SecretKey> {
         .map_err(|e| anyhow!("--master-secret-hex is not a valid secp256k1 scalar: {e}"))
 }
 
-fn required_env(name: &str) -> Result<String> {
+pub(crate) fn required_env(name: &str) -> Result<String> {
     env::var(name).map_err(|_| anyhow!("required env var `{name}` is not set"))
 }
 
 /// Decode the on-chain MPC committee verifying key `G` (`mpc_public_key` = `bcs(G)`),
 /// matching `Hashi::onchain_verifying_key_g` — the point the guardian must derive from.
-fn decode_mpc_master_g(mpc_public_key: &[u8]) -> Result<HashiMasterG> {
+pub(crate) fn decode_mpc_master_g(mpc_public_key: &[u8]) -> Result<HashiMasterG> {
     anyhow::ensure!(
         !mpc_public_key.is_empty(),
         "on-chain mpc_public_key is empty (DKG / end_reconfig may not have completed yet)"
@@ -350,7 +350,7 @@ fn decode_mpc_master_g(mpc_public_key: &[u8]) -> Result<HashiMasterG> {
     bcs::from_bytes(mpc_public_key).map_err(|e| anyhow!("decode on-chain MPC verifying key G: {e}"))
 }
 
-fn parse_network(s: &str) -> Result<Network> {
+pub(crate) fn parse_network(s: &str) -> Result<Network> {
     match s.to_ascii_lowercase().as_str() {
         "mainnet" | "bitcoin" => Ok(Network::Bitcoin),
         "testnet" => Ok(Network::Testnet),
