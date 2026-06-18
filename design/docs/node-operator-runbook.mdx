@@ -86,7 +86,7 @@ sha256sum -c out/hashi.sha256
 - `gpg` + `gpg-agent`, for decrypting backups, including with a YubiKey (works over a forwarded `gpg-agent` socket so you can restore on a server using a YubiKey plugged into your laptop)
 - Optionally [Sequoia `sq`](https://sequoia-pgp.org/) (local keys) or [`oct` / openpgp-card-tools](https://gitlab.com/openpgp-card/openpgp-card) (YubiKey key generation)
 
-See the [Hashi Node Backups](node-backup) guide for the full key-generation procedure.
+See the [Hashi Node Backups](node-backup.mdx) guide for the full key-generation procedure.
 
 ### 1.4 Sui RPC
 
@@ -238,7 +238,7 @@ backup-pgp-cert = "/path/to/hashi-backup-cert.asc"   # armored OpenPGP public ce
 backup-dir = "/var/lib/hashi/backups"
 ```
 
-Key generation and restore are covered in the [Hashi Node Backups](node-backup) guide. Store the private key / YubiKey securely and separately from the backup files.
+Key generation and restore are covered in the [Hashi Node Backups](node-backup.mdx) guide. Store the private key / YubiKey securely and separately from the backup files.
 
 ---
 
@@ -783,7 +783,7 @@ After execution, the previous committee resumes; the system can trigger a new re
 
 ## 10. Backup and restore
 
-The full key-generation and restore procedures (including YubiKey setup with `oct` and decrypting over SSH) are in the [Hashi Node Backups](node-backup) guide. This section is a quick summary.
+The full key-generation and restore procedures (including YubiKey setup with `oct` and decrypting over SSH) are in the [Hashi Node Backups](node-backup.mdx) guide. This section is a quick summary.
 
 When `backup-pgp-cert` is configured, the node automatically writes an encrypted backup every epoch: it packs the DB (MPC key shares, signing/encryption keys), config, and referenced key files into a tar archive and wraps it as an ASCII-armored OpenPGP (Sequoia) message. Encrypted archives use the suffix `.tar.asc`; unencrypted archives use `.tar`. The node writes backups to `backup-dir` (default `/tmp`, so set a persistent path). Encryption needs only the public certificate, so the private key need not be present during normal operation.
 
