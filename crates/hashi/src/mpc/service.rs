@@ -28,6 +28,7 @@ use crate::mpc::MpcOutput;
 use crate::mpc::SigningManager;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::mpc::types::CertificateV1;
+use crate::mpc::types::MpcOutputRecoveryOutcome;
 use crate::mpc::types::ProtocolType;
 use crate::onchain::Notification;
 use fastcrypto_tbls::threshold_schnorr::G;
@@ -281,16 +282,52 @@ impl MpcService {
                 self.setup_key_rotation(epoch)?;
                 self.run_key_rotation(epoch).await
             }
-            _ => {
-                self.setup_initial_dkg(epoch)?;
-                self.run_dkg(epoch).await
-            }
+            _ => self.recover_current_dkg(epoch, &onchain_mpc_key).await,
         }?;
         info!(
             "recover_mpc_state: recovered vk={}",
             hex::encode(output.public_key.to_byte_array())
         );
         Ok(output)
+    }
+
+    async fn recover_current_dkg(
+        &self,
+        epoch: u64,
+        onchain_mpc_key: &[u8],
+    ) -> anyhow::Result<MpcOutput> {
+        self.setup_initial_dkg(epoch)?;
+        let onchain_state = self.inner.onchain_state().clone();
+        let certs: Vec<CertificateV1> = fetch_certificates(&onchain_state, epoch, None)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to fetch DKG certs for epoch {epoch}: {e}"))?
+            .into_iter()
+            .map(|(_, cert)| cert)
+            .collect();
+        let mpc_manager = self
+            .inner
+            .mpc_manager()
+            .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized for DKG recovery"))?;
+        match MpcManager::reconstruct_current_dkg_output(&mpc_manager, &certs, onchain_mpc_key) {
+            MpcOutputRecoveryOutcome::Recovered(output) => {
+                info!(
+                    "recover_current_dkg: recovered current epoch {epoch} from local DKG \
+                     messages (no peers)"
+                );
+                Ok(output)
+            }
+            MpcOutputRecoveryOutcome::NotApplicable => self.run_dkg(epoch).await,
+            MpcOutputRecoveryOutcome::Suspicious(reason) => {
+                error!(
+                    "recover_current_dkg: local DKG state for epoch {epoch} contradicts on-chain \
+                     truth ({reason}); observing this epoch, will recover at the next rotation"
+                );
+                self.inner.metrics.mpc_recovery_suspicious_total.inc();
+                Err(anyhow::anyhow!(
+                    "suspicious local DKG state for epoch {epoch}: {reason}"
+                ))
+            }
+        }
     }
 
     #[tracing::instrument(level = "info", skip_all, fields(target_epoch))]

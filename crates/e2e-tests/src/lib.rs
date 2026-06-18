@@ -1372,6 +1372,15 @@ mod tests {
     async fn test_dkg_recovery_after_restart() -> Result<()> {
         const TEST_NUM_NODES: usize = 4;
 
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
         let mut test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)
             .build()
@@ -1429,6 +1438,15 @@ mod tests {
         const TEST_NUM_NODES: usize = 3;
         const RESTART_ITERATIONS: usize = 3;
 
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
         let mut test_networks = TestNetworksBuilder::new()
             .with_nodes(TEST_NUM_NODES)
             .build()
@@ -1444,6 +1462,11 @@ mod tests {
         for (i, result) in results.into_iter().enumerate() {
             result.unwrap_or_else(|e| panic!("Node {i} initial DKG failed: {e}"));
         }
+
+        let pk_before = get_mpc_key(test_networks.hashi_network().nodes());
+        let epoch_before = test_networks.hashi_network().nodes()[0]
+            .current_epoch()
+            .unwrap();
 
         // Verify all nodes are reachable via RPC before restart cycles
         for (i, node) in test_networks.hashi_network().nodes().iter().enumerate() {
@@ -1480,6 +1503,31 @@ mod tests {
                     )
                 });
             }
+
+            let nodes = test_networks.hashi_network().nodes();
+            let pk_after = get_mpc_key(nodes);
+            assert_eq!(
+                pk_after,
+                pk_before,
+                "node 0 recovered a different key after restart iteration {}",
+                iteration + 1
+            );
+            for (i, node) in nodes.iter().enumerate().skip(1) {
+                let node_pk = node.hashi().mpc_handle().unwrap().public_key().unwrap();
+                assert_eq!(
+                    node_pk,
+                    pk_before,
+                    "node {i} recovered a different key after restart iteration {}",
+                    iteration + 1
+                );
+            }
+            let epoch_after = nodes[0].current_epoch().unwrap();
+            assert_eq!(
+                epoch_after,
+                epoch_before,
+                "epoch advanced during restart recovery (iteration {}); local recovery should not need a rotation",
+                iteration + 1
+            );
 
             // Verify all nodes are reachable via RPC after restart
             for (i, node) in test_networks.hashi_network().nodes().iter().enumerate() {

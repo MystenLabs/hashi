@@ -4,7 +4,9 @@
 //! Core types for the DKG protocol
 
 use fastcrypto::error::FastCryptoError;
+use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::nodes::Nodes;
+use fastcrypto_tbls::nodes::PartyId;
 use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::random_oracle::RandomOracle;
 use fastcrypto_tbls::threshold_schnorr::G;
@@ -207,6 +209,21 @@ pub enum ReconstructionOutcome {
         complaint: complaint::Complaint,
         message: avss::Message,
     },
+}
+
+pub enum MpcOutputRecoveryOutcome {
+    Recovered(MpcOutput),
+    NotApplicable,
+    Suspicious(String),
+}
+
+pub(crate) struct DkgReconstructionContext<'a> {
+    pub committee: &'a Committee,
+    pub nodes: &'a Nodes<EncryptionGroupElement>,
+    pub party_id: PartyId,
+    pub encryption_key: &'a PrivateKey<EncryptionGroupElement>,
+    pub output_threshold: u16,
+    pub epoch: u64,
 }
 
 #[allow(clippy::large_enum_variant)]

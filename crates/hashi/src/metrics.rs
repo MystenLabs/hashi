@@ -111,6 +111,8 @@ pub struct Metrics {
 
     pub mpc_sign_duration_seconds: HistogramVec,
     pub mpc_sign_failures_total: IntCounterVec,
+    /// Post-restart key recoveries that found suspicious local state
+    pub mpc_recovery_suspicious_total: IntCounter,
 
     // MPC profiling metrics
     pub mpc_reconfig_total_duration_seconds: HistogramVec,
@@ -658,6 +660,13 @@ impl Metrics {
                 "hashi_mpc_sign_failures_total",
                 "Total MPC signing failures by reason",
                 &["reason"],
+                registry,
+            )
+            .unwrap(),
+            mpc_recovery_suspicious_total: register_int_counter_with_registry!(
+                "hashi_mpc_recovery_suspicious_total",
+                "Post-restart key recoveries where local state contradicted the on-chain key \
+                 (suspicious) and the node observed the epoch",
                 registry,
             )
             .unwrap(),
