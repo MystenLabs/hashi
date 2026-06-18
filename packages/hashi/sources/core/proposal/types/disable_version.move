@@ -7,7 +7,7 @@ use hashi::{hashi::Hashi, proposal};
 use std::string::String;
 use sui::{clock::Clock, vec_map::VecMap};
 
-const THRESHOLD_BPS: u64 = 10000;
+const THRESHOLD_BPS: u64 = 6667;
 
 public struct DisableVersion has copy, drop, store {
     version: u64,

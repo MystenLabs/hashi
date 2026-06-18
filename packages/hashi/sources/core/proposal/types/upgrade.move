@@ -19,7 +19,7 @@ use hashi::{hashi::Hashi, proposal};
 use std::string::String;
 use sui::{clock::Clock, package::{UpgradeTicket, UpgradeReceipt}, vec_map::VecMap};
 
-const THRESHOLD_BPS: u64 = 10000;
+const THRESHOLD_BPS: u64 = 6667;
 
 public struct Upgrade has copy, drop, store {
     digest: vector<u8>,
