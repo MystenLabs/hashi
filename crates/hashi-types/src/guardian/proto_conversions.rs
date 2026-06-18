@@ -20,6 +20,7 @@ use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
 use super::KPEncryptedShare;
+use super::KPEncryptedShares;
 use super::LimiterConfig;
 use super::LimiterState;
 use super::OperatorInitRequest;
@@ -123,15 +124,19 @@ impl TryFrom<pb::SignedSetupNewKeyResponse> for GuardianSigned<SetupNewKeyRespon
             .into_iter()
             .map(pb_to_kp_encrypted_share)
             .collect::<GuardianResult<Vec<_>>>()?;
+        let encrypted_shares = KPEncryptedShares::new(encrypted_shares)?;
 
-        let share_commitments = pb_share_commitments_to_domain(&data.share_commitments)?;
+        let secret_sharing_instance = pb_to_secret_sharing_instance(
+            data.secret_sharing_instance
+                .ok_or_else(|| missing("secret_sharing_instance"))?,
+        )?;
 
         let timestamp_ms = resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?;
 
         Ok(GuardianSigned {
             data: SetupNewKeyResponse {
                 encrypted_shares,
-                share_commitments,
+                secret_sharing_instance,
             },
             timestamp_ms,
             signature,
@@ -239,6 +244,7 @@ impl TryFrom<pb::SignedRotateKpsResponse> for GuardianSigned<RotateKpsResponse> 
             .into_iter()
             .map(pb_to_kp_encrypted_share)
             .collect::<GuardianResult<Vec<_>>>()?;
+        let encrypted_shares = KPEncryptedShares::new(encrypted_shares)?;
 
         let timestamp_ms = resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?;
 
@@ -419,6 +425,7 @@ pub fn rotate_kps_response_signed_to_pb(
             encrypted_shares: s
                 .data
                 .encrypted_shares
+                .into_vec()
                 .into_iter()
                 .map(kp_encrypted_share_to_pb)
                 .collect(),
@@ -819,14 +826,11 @@ pub fn setup_new_key_response_to_pb(r: SetupNewKeyResponse) -> pb::SetupNewKeyRe
     pb::SetupNewKeyResponseData {
         encrypted_shares: r
             .encrypted_shares
+            .into_vec()
             .into_iter()
             .map(kp_encrypted_share_to_pb)
             .collect(),
-        share_commitments: r
-            .share_commitments
-            .into_iter()
-            .map(share_commitment_to_pb)
-            .collect(),
+        secret_sharing_instance: Some(secret_sharing_instance_to_pb(&r.secret_sharing_instance)),
     }
 }
 

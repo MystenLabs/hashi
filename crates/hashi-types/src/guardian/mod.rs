@@ -104,6 +104,8 @@ pub struct GetGuardianInfoResponse {
 /// TODO: Add network?
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct GuardianInfo {
+    // TODO: expose the enclave `EnclaveMode` here so clients can assert they
+    // are talking to a ceremony-mode or withdraw-mode guardian from signed info.
     /// Secret-sharing instance (if set). Used by KPs to check that the right key will be used.
     pub secret_sharing_instance: Option<SecretSharingInstance>,
     /// S3 bucket name (if set). Used by KPs to check S3 bucket info.
@@ -172,6 +174,9 @@ pub struct WithdrawModeState {
 /// only decrypts if the KP agreed on the operator-supplied state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProvisionerInitRequest {
+    // TODO: Wrap submitted guardian shares in a domain type that rejects
+    // duplicate share ids. Unlike KP output shares, submitted shares are a
+    // threshold batch and need not be contiguous 1..=n.
     encrypted_shares: Vec<GuardianEncryptedShare>,
 }
 
@@ -219,8 +224,8 @@ pub struct SetupNewKeyRequest {
 /// `EnclaveSigned<T>`
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SetupNewKeyResponse {
-    pub encrypted_shares: Vec<KPEncryptedShare>,
-    pub share_commitments: ShareCommitments,
+    pub encrypted_shares: KPEncryptedShares,
+    pub secret_sharing_instance: SecretSharingInstance,
 }
 
 /// Ceremony-mode rotation request, assembled by the operator from the current KPs'
@@ -228,6 +233,8 @@ pub struct SetupNewKeyResponse {
 /// rotation target `state`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RotateKpsRequest {
+    // TODO: Use the same unique-id wrapper as ProvisionerInitRequest once we
+    // centralize validation for submitted guardian share batches.
     encrypted_old_shares: Vec<GuardianEncryptedShare>,
     old_instance: SecretSharingInstance,
     state: RotateKpsState,
@@ -247,7 +254,7 @@ pub struct RotateKpsState {
 /// `EnclaveSigned<T>`. The new KP set's encrypted shares, returned by `rotate_kps`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RotateKpsResponse {
-    pub encrypted_shares: Vec<KPEncryptedShare>,
+    pub encrypted_shares: KPEncryptedShares,
 }
 
 // ---------------------------------

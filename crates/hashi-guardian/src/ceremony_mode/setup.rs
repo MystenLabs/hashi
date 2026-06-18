@@ -63,7 +63,7 @@ pub async fn setup_new_key(
 
     enclave
         .log_ceremony(CeremonyLogMessage::NewKey {
-            instance: ss_instance,
+            instance: ss_instance.clone(),
             roster: recipient_roster(&encrypted_shares),
         })
         .await?;
@@ -73,8 +73,8 @@ pub async fn setup_new_key(
         .expect("set_latest_encrypted_shares should work if ceremony_complete=false");
 
     let response = enclave.sign(SetupNewKeyResponse {
-        encrypted_shares,
-        share_commitments,
+        encrypted_shares: KPEncryptedShares::new(encrypted_shares)?,
+        secret_sharing_instance: ss_instance,
     });
 
     *ceremony_complete = true;
@@ -112,8 +112,14 @@ mod tests {
 
         // Response still carries the armored ciphertexts.
         assert_eq!(validated_resp.encrypted_shares.len(), TEST_N);
-        assert_eq!(validated_resp.share_commitments.len(), TEST_N);
-        for enc_share in &validated_resp.encrypted_shares {
+        assert_eq!(validated_resp.secret_sharing_instance.num_shares(), TEST_N);
+        assert_eq!(validated_resp.secret_sharing_instance.threshold(), TEST_T);
+        assert_eq!(validated_resp.secret_sharing_instance.sharing_seq(), 0);
+        assert_eq!(
+            validated_resp.secret_sharing_instance.commitments().len(),
+            TEST_N
+        );
+        for enc_share in validated_resp.encrypted_shares.iter() {
             assert!(enc_share
                 .armored_ciphertext
                 .starts_with("-----BEGIN PGP MESSAGE-----"));

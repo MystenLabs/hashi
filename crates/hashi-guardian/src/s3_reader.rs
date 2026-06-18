@@ -188,11 +188,10 @@ impl GuardianReader {
     /// cache (later reads of the same session reuse it). Lets callers anchor a
     /// cross-check on the attested key without a second attestation pass.
     pub async fn verified_pubkey(&mut self, session_id: &str) -> anyhow::Result<GuardianPubKey> {
-        Ok(self
+        Ok(*self
             .pubkey_cache
             .get_or_load_pubkey(&self.s3, session_id)
-            .await?
-            .clone())
+            .await?)
     }
 
     /// Read + verify the encrypted shares at `shares/{seq}-{session}.json`. Point

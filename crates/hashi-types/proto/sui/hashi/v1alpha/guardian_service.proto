@@ -162,7 +162,7 @@ message GuardianShareCommitment {
 // Unsigned response payload.
 message SetupNewKeyResponseData {
   repeated KPEncryptedShare encrypted_shares = 1;
-  repeated GuardianShareCommitment share_commitments = 2;
+  SecretSharingInstance secret_sharing_instance = 2;
 }
 
 // Application-layer signed response.

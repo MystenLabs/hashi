@@ -112,6 +112,52 @@ pub struct KPEncryptedShare {
     pub armored_ciphertext: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct KPEncryptedShares(Vec<KPEncryptedShare>);
+
+impl KPEncryptedShares {
+    pub fn new(shares: Vec<KPEncryptedShare>) -> GuardianResult<Self> {
+        if shares.len() > MAX_NUM_SHARES {
+            return Err(InvalidInputs(format!(
+                "{} encrypted shares must be at most u16::MAX",
+                shares.len()
+            )));
+        }
+
+        let mut ids: Vec<u16> = shares.iter().map(|s| s.id.get()).collect();
+        ids.sort_unstable();
+        let expected: Vec<u16> = (1..=shares.len() as u16).collect();
+        if ids != expected {
+            return Err(InvalidInputs(format!(
+                "encrypted share ids are not exactly 1..={}: got {ids:?}",
+                shares.len()
+            )));
+        }
+
+        Ok(Self(shares))
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &KPEncryptedShare> {
+        self.0.iter()
+    }
+
+    pub fn as_slice(&self) -> &[KPEncryptedShare] {
+        &self.0
+    }
+
+    pub fn into_vec(self) -> Vec<KPEncryptedShare> {
+        self.0
+    }
+}
+
 pub type DigestBytes = Vec<u8>;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -145,6 +191,14 @@ impl SecretSharingInstance {
                 "expected {} commitments, got {}",
                 params.num_shares(),
                 commitments.len()
+            )));
+        }
+        let commitment_ids: Vec<u16> = commitments.iter().map(|c| c.id.get()).collect();
+        let expected_ids: Vec<u16> = (1..=params.num_shares() as u16).collect();
+        if commitment_ids != expected_ids {
+            return Err(InvalidInputs(format!(
+                "commitment ids are not exactly 1..={}: got {commitment_ids:?}",
+                params.num_shares()
             )));
         }
         Ok(Self {
@@ -628,6 +682,18 @@ mod tests {
         );
     }
 
+    fn test_commitments(ids: &[u16]) -> ShareCommitments {
+        ShareCommitments::new(
+            ids.iter()
+                .map(|&id| ShareCommitment {
+                    id: NonZeroU16::new(id).unwrap(),
+                    digest: vec![id as u8],
+                })
+                .collect(),
+        )
+        .unwrap()
+    }
+
     // Parameterized test cases: covers minimum (n=t=2), small, default, and large.
     #[test]
     fn reconstruction_with_varying_share_count_2_2() {
@@ -699,6 +765,19 @@ mod tests {
         assert!(SecretSharingParams::new(5, 7).is_err());
         // num_shares > MAX_NUM_SHARES.
         assert!(SecretSharingParams::new(MAX_NUM_SHARES + 1, 3).is_err());
+    }
+
+    #[test]
+    fn secret_sharing_instance_accepts_exact_commitment_ids() {
+        SecretSharingInstance::new(test_commitments(&[1, 2, 3]), 3, 2, 0)
+            .expect("commitment ids exactly 1..=n should be accepted");
+    }
+
+    #[test]
+    fn secret_sharing_instance_rejects_non_contiguous_commitment_ids() {
+        let err = SecretSharingInstance::new(test_commitments(&[1, 2, 4]), 3, 2, 0)
+            .expect_err("commitment ids must be exactly 1..=n");
+        assert!(format!("{err}").contains("commitment ids"), "{err}");
     }
 
     // Test eval function with specific coefficients
