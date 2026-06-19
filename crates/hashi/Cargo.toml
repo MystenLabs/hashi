@@ -38,6 +38,7 @@ tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
 prometheus.workspace = true
+sysinfo.workspace = true
 tracing.workspace = true
 
 bin-version.workspace = true

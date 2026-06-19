@@ -14,6 +14,7 @@ use hashi_types::committee::EncryptionPublicKey;
 use sui_futures::service::Service;
 
 pub mod backup;
+pub mod bandwidth_metrics;
 pub mod btc_monitor;
 pub mod cli;
 pub mod communication;
@@ -749,6 +750,7 @@ impl Hashi {
         let backup_service = backup_service.start();
         let mpc_service = mpc_service.start();
         let guardian_bootstrap_service = self.clone().start_guardian_bootstrap();
+        let bandwidth_metrics_service = bandwidth_metrics::start(self.metrics.clone());
 
         let service = Service::new()
             .merge(onchain_service)
@@ -757,7 +759,8 @@ impl Hashi {
             .merge(leader_service)
             .merge(backup_service)
             .merge(mpc_service)
-            .merge(guardian_bootstrap_service);
+            .merge(guardian_bootstrap_service)
+            .merge(bandwidth_metrics_service);
 
         Ok(service)
     }

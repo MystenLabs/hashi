@@ -31,6 +31,10 @@ pub struct Metrics {
     pub(crate) mpc_bytes_sent_total: IntCounterVec,
     pub(crate) mpc_bytes_received_total: IntCounterVec,
 
+    // Host-level network metrics.
+    pub(crate) network_rx_bytes_total: IntCounter,
+    pub(crate) network_tx_bytes_total: IntCounter,
+
     pub screener_enabled: IntGauge,
 
     // Guardian / local-limiter metrics
@@ -265,6 +269,18 @@ impl Metrics {
                 "hashi_mpc_bytes_received_total",
                 "Total bytes received in MPC RPC bodies, labeled by MPC protocol",
                 &["protocol"],
+                registry,
+            )
+            .unwrap(),
+            network_rx_bytes_total: register_int_counter_with_registry!(
+                "hashi_network_rx_bytes_total",
+                "Total host-level network bytes received across non-loopback interfaces",
+                registry,
+            )
+            .unwrap(),
+            network_tx_bytes_total: register_int_counter_with_registry!(
+                "hashi_network_tx_bytes_total",
+                "Total host-level network bytes transmitted across non-loopback interfaces",
                 registry,
             )
             .unwrap(),
