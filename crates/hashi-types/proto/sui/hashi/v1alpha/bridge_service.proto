@@ -137,6 +137,10 @@ message SignWithdrawalTxConstructionResponse {
 message SignWithdrawalTransactionRequest {
   // The id of the WithdrawalTransaction on Sui (32 bytes).
   bytes withdrawal_txn_id = 1;
+
+  // Optional subset of transaction input indices to sign. Empty means "all
+  // currently unsigned inputs" for backward compatibility with older leaders.
+  repeated uint64 input_indices = 2;
 }
 
 message SignWithdrawalTransactionPartial {

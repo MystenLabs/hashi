@@ -219,13 +219,18 @@ impl BridgeService for HttpService {
             "withdrawal_txn_id",
             tracing::field::display(&withdrawal_txn_id),
         );
+        let requested_input_indices = req.input_indices.clone();
         tracing::info!("sign_withdrawal_transaction called");
         let concurrency = self.inner.config.withdrawal_signing_concurrency();
         let (tx, rx) = tokio::sync::mpsc::channel(concurrency);
         let inner = self.inner.clone();
         tokio::spawn(async move {
             if let Err(e) = inner
-                .validate_and_sign_withdrawal_tx(&withdrawal_txn_id, tx.clone())
+                .validate_and_sign_withdrawal_tx(
+                    &withdrawal_txn_id,
+                    &requested_input_indices,
+                    tx.clone(),
+                )
                 .await
             {
                 tracing::error!("sign_withdrawal_transaction failed: {e}");

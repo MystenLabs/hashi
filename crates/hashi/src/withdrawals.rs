@@ -17,6 +17,7 @@ use fastcrypto_tbls::threshold_schnorr::S;
 use hashi_types::bitcoin as hashi_bitcoin;
 use hashi_types::bitcoin_txid::BitcoinTxid;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::time::Duration;
 use sui_sdk_types::Address;
@@ -47,6 +48,40 @@ const FEE_RATE_TOLERANCE_MULTIPLIER: u64 = 5;
 /// Max drift between the leader-supplied `timestamp_secs` and the follower's
 /// own latest checkpoint timestamp before signing a guardian request.
 const GUARDIAN_TIMESTAMP_TOLERANCE_SECS: u64 = 600;
+
+fn select_withdrawal_signing_indices(
+    signing: &hashi_types::move_types::SigningBatch,
+    requested_input_indices: &[u64],
+) -> anyhow::Result<Vec<usize>> {
+    if requested_input_indices.is_empty() {
+        return Ok(signing
+            .unsigned_indices()
+            .into_iter()
+            .map(|i| i as usize)
+            .collect());
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut selected = Vec::with_capacity(requested_input_indices.len());
+    for &input_index in requested_input_indices {
+        if !seen.insert(input_index) {
+            anyhow::bail!("duplicate input index {input_index} in withdrawal signing request");
+        }
+        let i = usize::try_from(input_index)
+            .map_err(|_| anyhow!("input index {input_index} out of range"))?;
+        if i >= signing.num_inputs() {
+            anyhow::bail!(
+                "input index {input_index} out of range for withdrawal with {} inputs",
+                signing.num_inputs()
+            );
+        }
+        if signing.pending_index(i).is_none() {
+            anyhow::bail!("input index {input_index} is already signed");
+        }
+        selected.push(i);
+    }
+    Ok(selected)
+}
 
 /// BTC that leaves the pool when this txn broadcasts — the amount that
 /// consumes the guardian's limit. Equivalent to
@@ -782,12 +817,14 @@ impl Hashi {
     pub async fn validate_and_sign_withdrawal_tx(
         &self,
         withdrawal_txn_id: &Address,
+        requested_input_indices: &[u64],
         sink: tokio::sync::mpsc::Sender<
             Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
         >,
     ) -> anyhow::Result<()> {
         let (txn, unsigned_tx) = self.validate_withdrawal_signing(withdrawal_txn_id).await?;
-        self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx, sink).await
+        self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx, requested_input_indices, sink)
+            .await
     }
 
     pub async fn validate_withdrawal_signing(
@@ -827,6 +864,7 @@ impl Hashi {
         &self,
         txn: &WithdrawalTransaction,
         unsigned_tx: &bitcoin::Transaction,
+        requested_input_indices: &[u64],
         sink: tokio::sync::mpsc::Sender<
             Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
         >,
@@ -864,15 +902,18 @@ impl Hashi {
         let signing = &txn.signing;
         let inputs = &txn.inputs;
         let sink_ref = &sink;
-        let mut requests = Vec::with_capacity(signing_messages.len());
+        let selected_input_indices =
+            select_withdrawal_signing_indices(signing, requested_input_indices)?;
+        let mut requests = Vec::with_capacity(selected_input_indices.len());
         let mut index_by_id: HashMap<Address, usize> =
-            HashMap::with_capacity(signing_messages.len());
-        for (input_index, message) in signing_messages.into_iter().enumerate() {
-            // Skip inputs already signed in a prior chunk/leader (resume):
-            // their slot holds the signature, not a presig index.
-            let Some(global_presig_index) = signing.pending_index(input_index) else {
-                continue;
-            };
+            HashMap::with_capacity(selected_input_indices.len());
+        for input_index in selected_input_indices {
+            let message = signing_messages
+                .get(input_index)
+                .expect("validated input_index is in range for signing_messages");
+            let global_presig_index = signing
+                .pending_index(input_index)
+                .expect("validated input_index is pending");
             let signing_id = withdrawal_input_signing_id(&txn_id, input_index as u32);
             // Change UTXOs (`derivation_path = None`) ride the `[0; 32]` path
             // everywhere else (leaf script, `deposit_pubkey`). MPC must too —
@@ -884,7 +925,7 @@ impl Hashi {
                     crate::deposits::normalized_derivation_path(input.derivation_path.as_ref())
                         .into_inner()
                 })
-                .expect("input_index iterated from signing_messages.len() == txn.inputs.len()");
+                .expect("validated input_index is in range for txn.inputs");
             index_by_id.insert(signing_id, input_index);
             requests.push(crate::mpc::SignInput {
                 signing_id,
@@ -1647,6 +1688,74 @@ mod tests {
             },
             guardian_signatures: None,
         }
+    }
+
+    fn signing(
+        signatures: Vec<hashi_types::move_types::MpcSig>,
+    ) -> hashi_types::move_types::SigningBatch {
+        hashi_types::move_types::SigningBatch {
+            signatures,
+            epoch: 7,
+        }
+    }
+
+    #[test]
+    fn requested_signing_indices_empty_request_defaults_to_unsigned_inputs() {
+        let signing = signing(vec![
+            hashi_types::move_types::MpcSig::Pending(10),
+            hashi_types::move_types::MpcSig::Signed(vec![1; 64]),
+            hashi_types::move_types::MpcSig::Pending(12),
+        ]);
+
+        let selected = select_withdrawal_signing_indices(&signing, &[]).unwrap();
+
+        assert_eq!(selected, vec![0, 2]);
+    }
+
+    #[test]
+    fn requested_signing_indices_accepts_pending_subset() {
+        let signing = signing(vec![
+            hashi_types::move_types::MpcSig::Pending(10),
+            hashi_types::move_types::MpcSig::Signed(vec![1; 64]),
+            hashi_types::move_types::MpcSig::Pending(12),
+        ]);
+
+        let selected = select_withdrawal_signing_indices(&signing, &[2]).unwrap();
+
+        assert_eq!(selected, vec![2]);
+    }
+
+    #[test]
+    fn requested_signing_indices_rejects_duplicate_indices() {
+        let signing = signing(vec![
+            hashi_types::move_types::MpcSig::Pending(10),
+            hashi_types::move_types::MpcSig::Pending(11),
+        ]);
+
+        let err = select_withdrawal_signing_indices(&signing, &[1, 1]).unwrap_err();
+
+        assert!(err.to_string().contains("duplicate input index 1"));
+    }
+
+    #[test]
+    fn requested_signing_indices_rejects_already_signed_indices() {
+        let signing = signing(vec![
+            hashi_types::move_types::MpcSig::Pending(10),
+            hashi_types::move_types::MpcSig::Signed(vec![1; 64]),
+        ]);
+
+        let err = select_withdrawal_signing_indices(&signing, &[1]).unwrap_err();
+
+        assert!(err.to_string().contains("input index 1 is already signed"));
+    }
+
+    #[test]
+    fn requested_signing_indices_rejects_out_of_range_indices() {
+        let signing = signing(vec![hashi_types::move_types::MpcSig::Pending(10)]);
+
+        let err = select_withdrawal_signing_indices(&signing, &[1]).unwrap_err();
+
+        assert!(err.to_string().contains("input index 1 out of range"));
     }
 
     #[test]

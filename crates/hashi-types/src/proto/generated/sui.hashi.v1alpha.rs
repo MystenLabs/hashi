@@ -113,6 +113,10 @@ pub struct SignWithdrawalTransactionRequest {
     /// The id of the WithdrawalTransaction on Sui (32 bytes).
     #[prost(bytes = "bytes", tag = "1")]
     pub withdrawal_txn_id: ::prost::bytes::Bytes,
+    /// Optional subset of transaction input indices to sign. Empty means "all
+    /// currently unsigned inputs" for backward compatibility with older leaders.
+    #[prost(uint64, repeated, tag = "2")]
+    pub input_indices: ::prost::alloc::vec::Vec<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignWithdrawalTransactionPartial {

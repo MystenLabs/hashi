@@ -16,7 +16,6 @@ use crate::withdrawals::WithdrawalBroadcastErrorKind;
 use crate::withdrawals::WithdrawalTxSigning;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto::serde_helpers::ToFromByteArray;
-use futures::future::join_all;
 use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::CommitteeSignature;
@@ -26,6 +25,8 @@ use hashi_types::proto::SignMpcInputSignaturesRequest;
 use hashi_types::proto::SignWithdrawalConfirmationRequest;
 use hashi_types::proto::SignWithdrawalTransactionRequest;
 use hashi_types::proto::SignWithdrawalTxSigningRequest;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 use sui_sdk_types::Address;
@@ -43,6 +44,106 @@ pub(super) enum WithdrawalBroadcastOutcome {
 
 pub(super) type WithdrawalBroadcastResult =
     Result<WithdrawalBroadcastOutcome, WithdrawalBroadcastError>;
+
+fn should_reallocate_stale_presigs(
+    signing_epoch: u64,
+    current_epoch: u64,
+    unsigned: &[u64],
+) -> bool {
+    signing_epoch != current_epoch && !unsigned.is_empty()
+}
+
+fn next_signing_chunk(unsigned: &[u64], chunk_size: usize) -> Vec<u64> {
+    unsigned.iter().take(chunk_size.max(1)).copied().collect()
+}
+
+/// Outcome of feeding one streamed partial signature into
+/// [`ExpectedSignatureCollector::record`].
+#[derive(Debug, PartialEq, Eq)]
+enum CollectOutcome {
+    /// The index was not requested; nothing was recorded. Its signature is not
+    /// even parsed, so a malformed extra signature cannot fail the chunk.
+    Ignored,
+    /// A requested signature was recorded; more expected indices remain.
+    Recorded,
+    /// A requested signature was recorded and every expected index is now in
+    /// hand — the caller can stop reading the stream.
+    Complete,
+}
+
+/// Accumulates the MPC signatures for exactly the requested input indices as a
+/// committee member streams them back (order-independent).
+///
+/// Unrequested indices are ignored *before* their signature is parsed, so an
+/// old/buggy peer that signs extra inputs (possibly with malformed sigs) can
+/// neither fail nor stall the chunk: `record` reports [`CollectOutcome::Complete`]
+/// the moment the last requested index lands, letting the caller return without
+/// draining the stream to EOF.
+struct ExpectedSignatureCollector {
+    expected: BTreeSet<u64>,
+    collected: BTreeMap<u64, SchnorrSignature>,
+}
+
+impl ExpectedSignatureCollector {
+    fn new(expected_indices: &[u64]) -> Self {
+        Self {
+            expected: expected_indices.iter().copied().collect(),
+            collected: BTreeMap::new(),
+        }
+    }
+
+    /// Records one streamed `(idx, signature)` pair:
+    /// - unrequested `idx` -> [`CollectOutcome::Ignored`] (signature untouched);
+    /// - requested `idx` seen before -> error (duplicate);
+    /// - requested `idx` with a malformed/invalid signature -> error;
+    /// - requested `idx` recorded -> [`CollectOutcome::Recorded`], or
+    ///   [`CollectOutcome::Complete`] once all expected indices are present.
+    fn record(&mut self, idx: u64, signature: &[u8]) -> anyhow::Result<CollectOutcome> {
+        if !self.expected.contains(&idx) {
+            return Ok(CollectOutcome::Ignored);
+        }
+        if self.collected.contains_key(&idx) {
+            anyhow::bail!("returned duplicate input_index {idx}");
+        }
+        let bytes: [u8; 64] = signature.try_into().map_err(|_| {
+            anyhow::anyhow!("returned invalid signature length for input_index {idx}")
+        })?;
+        let sig = SchnorrSignature::from_byte_array(&bytes).map_err(|e| {
+            anyhow::anyhow!("returned invalid signature for input_index {idx}: {e}")
+        })?;
+        self.collected.insert(idx, sig);
+        if self.is_complete() {
+            Ok(CollectOutcome::Complete)
+        } else {
+            Ok(CollectOutcome::Recorded)
+        }
+    }
+
+    fn collected_count(&self) -> usize {
+        self.collected.len()
+    }
+
+    fn expected_count(&self) -> usize {
+        self.expected.len()
+    }
+
+    fn is_complete(&self) -> bool {
+        self.collected_count() == self.expected_count()
+    }
+
+    /// Consumes the collector once the stream is exhausted, returning the
+    /// requested signatures sorted by index, or erroring if some never arrived.
+    fn finish(self) -> anyhow::Result<Vec<(u64, SchnorrSignature)>> {
+        if !self.is_complete() {
+            anyhow::bail!(
+                "returned {} sigs, expected {}",
+                self.collected_count(),
+                self.expected_count(),
+            );
+        }
+        Ok(self.collected.into_iter().collect())
+    }
+}
 
 impl LeaderService {
     // ========================================================================
@@ -134,7 +235,8 @@ impl LeaderService {
         // epoch, then retry next checkpoint. Completed signatures are
         // epoch-independent and are left untouched.
         let current_epoch = inner.onchain_state().epoch();
-        if txn.signing.epoch != current_epoch {
+        let unsigned = txn.signing.unsigned_indices();
+        if should_reallocate_stale_presigs(txn.signing.epoch, current_epoch, &unsigned) {
             info!(
                 "Withdrawal signing batch from epoch {} (current {}); reallocating pending presigs",
                 txn.signing.epoch, current_epoch,
@@ -150,8 +252,7 @@ impl LeaderService {
             .current_committee_members()
             .expect("No current committee members");
 
-        // If any input is still unsigned, collect and commit the next chunk(s).
-        let unsigned = txn.signing.unsigned_indices();
+        // If any input is still unsigned, collect and commit the next chunk.
         if !unsigned.is_empty() {
             return Self::sign_withdrawal_chunks(&inner, &txn, &members, unsigned).await;
         }
@@ -358,12 +459,18 @@ impl LeaderService {
         // The rate limiter is no longer checked per signing pass — signing is
         // driven unconditionally and the committee re-validates the limit once at
         // the finalize cert (see `validate_and_sign_withdrawal_tx_signing`).
+        // `M` (mpc_signing_chunk_size) is both the collection unit and on-chain
+        // write batch here: collect one chunk, commit it immediately, then let a
+        // later tick resume from the durable on-chain state.
+        let chunk_size = inner.config.mpc_signing_chunk_size();
+        let chunk_indices = next_signing_chunk(&unsigned, chunk_size);
         info!(
             unsigned = unsigned.len(),
-            "Collecting MPC signatures for unsigned inputs"
+            chunk_size = chunk_indices.len(),
+            "Collecting MPC signatures for next unsigned input chunk"
         );
         let sigs_by_index =
-            Self::collect_withdrawal_tx_signatures(inner, &txn.id, &unsigned, members)
+            Self::collect_withdrawal_tx_signatures(inner, &txn.id, &chunk_indices, members)
                 .await
                 .ok_or_else(|| {
                     anyhow::anyhow!("Failed to collect MPC signatures for {:?}", txn.id)
@@ -375,10 +482,6 @@ impl LeaderService {
             .expect("No current committee");
         let required_weight = certificate_threshold(committee.total_weight());
 
-        // `M` (mpc_signing_chunk_size) is the on-chain write batch: it trades
-        // durability granularity against PTB count, bounded above by Sui's 16 KiB
-        // pure-arg limit. Off-chain config; see `Config::mpc_signing_chunk_size`.
-        let chunk_size = inner.config.mpc_signing_chunk_size();
         let mut last_checkpoint = 0u64;
         for chunk in sigs_by_index.chunks(chunk_size) {
             let indices: Vec<u64> = chunk.iter().map(|(i, _)| *i).collect();
@@ -470,35 +573,36 @@ impl LeaderService {
         expected_indices: &[u64],
         members: &[CommitteeMember],
     ) -> Option<Vec<(u64, SchnorrSignature)>> {
-        let futures: Vec<_> = members
-            .iter()
-            .map(|member| {
+        let mut sig_tasks = JoinSet::new();
+        for member in members {
+            let inner = inner.clone();
+            let withdrawal_txn_id = *withdrawal_txn_id;
+            let expected_indices = expected_indices.to_vec();
+            let member = member.clone();
+            sig_tasks.spawn(async move {
                 Self::request_withdrawal_tx_signature(
-                    inner,
-                    withdrawal_txn_id,
-                    expected_indices,
-                    member,
+                    &inner,
+                    &withdrawal_txn_id,
+                    &expected_indices,
+                    &member,
                 )
-            })
-            .collect();
-        let results = join_all(futures).await;
+                .await
+            });
+        }
 
-        let mut results = results.into_iter();
-        loop {
-            match results.next() {
-                Some(Ok(signatures)) => return Some(signatures),
-                Some(Err(e)) => {
-                    warn!("Could not get signatures from a node: {e}");
-                }
-                None => {
-                    error!(
-                        "Could not get mpc signatures for {:?}; stopping processing",
-                        withdrawal_txn_id
-                    );
-                    return None;
-                }
+        while let Some(result) = sig_tasks.join_next().await {
+            match result {
+                Ok(Ok(signatures)) => return Some(signatures),
+                Ok(Err(e)) => warn!("Could not get signatures from a node: {e}"),
+                Err(e) => warn!("Withdrawal tx signature task failed: {e}"),
             }
         }
+
+        error!(
+            "Could not get mpc signatures for {:?}; stopping processing",
+            withdrawal_txn_id
+        );
+        None
     }
 
     /// Opens a streaming signing RPC to one committee member and collects exactly
@@ -527,6 +631,7 @@ impl LeaderService {
 
         let proto_request = SignWithdrawalTransactionRequest {
             withdrawal_txn_id: withdrawal_txn_id.as_bytes().to_vec().into(),
+            input_indices: expected_indices.to_vec(),
         };
 
         let mut stream = rpc_client
@@ -539,40 +644,31 @@ impl LeaderService {
             })?
             .into_inner();
 
-        let expected: std::collections::BTreeSet<u64> = expected_indices.iter().copied().collect();
-        let mut collected: std::collections::BTreeMap<u64, SchnorrSignature> =
-            std::collections::BTreeMap::new();
+        let mut collector = ExpectedSignatureCollector::new(expected_indices);
         while let Some(partial) = stream
             .message()
             .await
             .map_err(|e| anyhow::anyhow!("stream error from {validator_address}: {e}"))?
         {
             let idx = partial.input_index as u64;
-            if !expected.contains(&idx) {
-                anyhow::bail!(
-                    "Withdrawal tx signature stream from {validator_address} returned unexpected input_index {idx}",
-                );
+            match collector
+                .record(idx, partial.signature.as_ref())
+                .map_err(|e| {
+                    anyhow::anyhow!("Withdrawal tx signature stream from {validator_address} {e}")
+                })? {
+                CollectOutcome::Ignored => trace!(
+                    "Withdrawal tx signature stream from {validator_address} returned extra input_index {idx}; ignoring"
+                ),
+                CollectOutcome::Recorded => {}
+                // Every requested index is in hand. Stop reading instead of
+                // draining to EOF, so a peer that keeps signing unrequested
+                // inputs can't stall this chunk.
+                CollectOutcome::Complete => break,
             }
-            if collected.contains_key(&idx) {
-                anyhow::bail!(
-                    "Withdrawal tx signature stream from {validator_address} returned duplicate input_index {idx}",
-                );
-            }
-            let bytes: [u8; 64] = partial.signature.as_ref().try_into().map_err(|_| {
-                anyhow::anyhow!("Invalid signature length from {validator_address}")
-            })?;
-            let sig = SchnorrSignature::from_byte_array(&bytes)
-                .map_err(|e| anyhow::anyhow!("Invalid signature from {validator_address}: {e}"))?;
-            collected.insert(idx, sig);
         }
-        if collected.len() != expected.len() {
-            anyhow::bail!(
-                "Withdrawal tx signature stream from {validator_address} returned {} sigs, expected {}",
-                collected.len(),
-                expected.len(),
-            );
-        }
-        Ok(collected.into_iter().collect())
+        collector.finish().map_err(|e| {
+            anyhow::anyhow!("Withdrawal tx signature stream from {validator_address} {e}")
+        })
     }
 
     /// Requests a committee member's BLS signature over the on-chain withdrawal signing message.
@@ -1229,5 +1325,129 @@ impl MpcInputSignaturesMessage {
                 .map(|sig| sig.clone().into())
                 .collect(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_presig_reallocation_requires_pending_inputs() {
+        assert!(should_reallocate_stale_presigs(5, 6, &[0]));
+        assert!(!should_reallocate_stale_presigs(5, 6, &[]));
+        assert!(!should_reallocate_stale_presigs(6, 6, &[0]));
+    }
+
+    #[test]
+    fn next_signing_chunk_is_capped_to_configured_size() {
+        assert_eq!(next_signing_chunk(&[0, 1, 2, 3], 2), vec![0, 1]);
+    }
+
+    #[test]
+    fn next_signing_chunk_treats_zero_size_as_one() {
+        assert_eq!(next_signing_chunk(&[7, 8], 0), vec![7]);
+    }
+
+    // Valid 64-byte BIP-340 Schnorr signatures lifted from fastcrypto's own
+    // secp256k1 test vectors; both parse cleanly via
+    // `SchnorrSignature::from_byte_array`, so they exercise the
+    // recorded/complete paths without standing up a live signer.
+    fn valid_sig_a() -> Vec<u8> {
+        hex::decode(
+            "403B12B0D8555A344175EA7EC746566303321E5DBFA8BE6F091635163ECA79A8\
+             585ED3E3170807E7C03B720FC54C7B23897FCBA0E9D0B4A06894CFD249F22367",
+        )
+        .unwrap()
+    }
+
+    fn valid_sig_b() -> Vec<u8> {
+        hex::decode(
+            "00000000000000000000003B78CE563F89A0ED9414F5AA28AD0D96D6795F9C637\
+             6AFB1548AF603B3EB45C9F8207DEE1060CB71C04E80F593060B07D28308D7F4",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn valid_sig_fixtures_parse() {
+        // Guard the fixtures themselves so a bad copy/paste surfaces here
+        // rather than as a confusing failure in the behavioural tests.
+        assert!(SchnorrSignature::from_byte_array(&valid_sig_a().try_into().unwrap()).is_ok());
+        assert!(SchnorrSignature::from_byte_array(&valid_sig_b().try_into().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn collector_ignores_unexpected_extra_index_before_parsing() {
+        let mut collector = ExpectedSignatureCollector::new(&[0, 1]);
+        // Unrequested index carrying deliberately malformed (too-short) bytes:
+        // it must be ignored *before* the signature is parsed, so the malformed
+        // extra can't fail the chunk.
+        assert_eq!(
+            collector.record(7, &[0u8; 3]).unwrap(),
+            CollectOutcome::Ignored
+        );
+        assert_eq!(collector.collected_count(), 0);
+        assert!(!collector.is_complete());
+    }
+
+    #[test]
+    fn collector_completes_on_last_expected_out_of_order() {
+        let mut collector = ExpectedSignatureCollector::new(&[0, 1, 2]);
+        assert_eq!(
+            collector.record(2, &valid_sig_a()).unwrap(),
+            CollectOutcome::Recorded
+        );
+        assert_eq!(
+            collector.record(0, &valid_sig_b()).unwrap(),
+            CollectOutcome::Recorded
+        );
+        // The final requested index arrives last and out of order, yet the
+        // collector reports Complete immediately — the caller can stop reading.
+        assert_eq!(
+            collector.record(1, &valid_sig_a()).unwrap(),
+            CollectOutcome::Complete
+        );
+        assert!(collector.is_complete());
+
+        let indices: Vec<u64> = collector
+            .finish()
+            .unwrap()
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn collector_errors_on_duplicate_expected_index() {
+        let mut collector = ExpectedSignatureCollector::new(&[0, 1]);
+        assert_eq!(
+            collector.record(0, &valid_sig_a()).unwrap(),
+            CollectOutcome::Recorded
+        );
+        let err = collector.record(0, &valid_sig_b()).unwrap_err().to_string();
+        assert!(err.contains("duplicate"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn collector_errors_on_malformed_expected_signature() {
+        let mut collector = ExpectedSignatureCollector::new(&[0]);
+        let err = collector.record(0, &[0u8; 10]).unwrap_err().to_string();
+        assert!(err.contains("invalid signature"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn collector_finish_errors_when_stream_ends_incomplete() {
+        let mut collector = ExpectedSignatureCollector::new(&[0, 1, 2]);
+        collector.record(0, &valid_sig_a()).unwrap();
+        // EOF before indices 1 and 2 arrived: finishing must error.
+        // Use `.err()` because the Ok type (Vec<(_, SchnorrSignature)>) isn't Debug.
+        let err = collector
+            .finish()
+            .err()
+            .expect("incomplete collector must error")
+            .to_string();
+        assert!(err.contains("expected 3"), "unexpected error: {err}");
     }
 }
