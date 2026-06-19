@@ -442,7 +442,7 @@ impl types::GetPartialSignaturesRequest {
     pub fn to_proto(&self, epoch: u64) -> proto::GetPartialSignaturesRequest {
         proto::GetPartialSignaturesRequest {
             epoch: Some(epoch),
-            sui_request_id: Some(self.sui_request_id.to_string()),
+            signing_ids: self.signing_ids.iter().map(|id| id.to_string()).collect(),
         }
     }
 }
@@ -451,11 +451,12 @@ impl TryFrom<&proto::GetPartialSignaturesRequest> for types::GetPartialSignature
     type Error = TryFromProtoError;
 
     fn try_from(value: &proto::GetPartialSignaturesRequest) -> Result<Self, Self::Error> {
-        let sui_request_id = parse_address(
-            required(value.sui_request_id.as_ref(), "sui_request_id")?,
-            "sui_request_id",
-        )?;
-        Ok(Self { sui_request_id })
+        let signing_ids = value
+            .signing_ids
+            .iter()
+            .map(|s| parse_address(s, "signing_ids"))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { signing_ids })
     }
 }
 
@@ -466,7 +467,11 @@ impl TryFrom<&proto::GetPartialSignaturesRequest> for types::GetPartialSignature
 impl From<&types::GetPartialSignaturesResponse> for proto::GetPartialSignaturesResponse {
     fn from(value: &types::GetPartialSignaturesResponse) -> Self {
         Self {
-            partial_sigs: Some(serialize_bcs(&value.partial_sigs)),
+            partial_sigs: value
+                .partial_sigs
+                .iter()
+                .map(|(id, sigs)| (id.to_string(), serialize_bcs(sigs)))
+                .collect(),
         }
     }
 }
@@ -475,10 +480,15 @@ impl TryFrom<&proto::GetPartialSignaturesResponse> for types::GetPartialSignatur
     type Error = TryFromProtoError;
 
     fn try_from(value: &proto::GetPartialSignaturesResponse) -> Result<Self, Self::Error> {
-        let partial_sigs = deserialize_bcs(
-            required(value.partial_sigs.as_ref(), "partial_sigs")?,
-            "partial_sigs",
-        )?;
+        let partial_sigs = value
+            .partial_sigs
+            .iter()
+            .map(|(id, bcs)| {
+                let id = parse_address(id, "partial_sigs key")?;
+                let sigs = deserialize_bcs(bcs, "partial_sigs")?;
+                Ok((id, sigs))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
         Ok(Self { partial_sigs })
     }
 }

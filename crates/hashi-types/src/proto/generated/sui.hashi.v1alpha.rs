@@ -2584,15 +2584,20 @@ pub struct GetPartialSignaturesRequest {
     /// The epoch for this MPC instance.
     #[prost(uint64, optional, tag = "1")]
     pub epoch: ::core::option::Option<u64>,
-    /// Hex-encoded Sui address identifying the withdrawal/deposit request.
-    #[prost(string, optional, tag = "2")]
-    pub sui_request_id: ::core::option::Option<::prost::alloc::string::String>,
+    /// Hex-encoded per-input signing-session ids to collect partials for.
+    #[prost(string, repeated, tag = "2")]
+    pub signing_ids: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetPartialSignaturesResponse {
-    /// Partial signatures.
-    #[prost(message, optional, tag = "1")]
-    pub partial_sigs: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
+    /// Partial signatures keyed by signing_id.
+    /// Only ids for which the peer has already computed its local partial are present;
+    /// an absent id means "not ready yet", not an error.
+    #[prost(map = "string, message", tag = "1")]
+    pub partial_sigs: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::sui_rpc::proto::sui::rpc::v2::Bcs,
+    >,
 }
 /// The type of MPC protocol phase.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
