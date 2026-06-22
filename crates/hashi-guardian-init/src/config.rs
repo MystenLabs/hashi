@@ -4,15 +4,10 @@
 use anyhow::Context;
 use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::guardian::LimiterConfig;
-use hashi_types::guardian::Share;
-use hashi_types::guardian::ShareID;
 use hashi_types::move_types::Committee as CommitteeRepr;
-use k256::FieldBytes;
-use k256::Scalar;
-use k256::elliptic_curve::PrimeField;
 use serde::Deserialize;
-use std::num::NonZeroU16;
 use std::path::Path;
+use std::path::PathBuf;
 
 use crate::kp_roster::KpRosterConfig;
 
@@ -20,11 +15,18 @@ use crate::kp_roster::KpRosterConfig;
 pub struct ProvisionConfig {
     #[serde(flatten)]
     pub common: KpRosterConfig,
-    /// The Key Provisioner's secret share.
-    pub share: ShareInput,
-    /// Relay endpoint the KP's encrypted share is forwarded to. The relay
-    /// collects T-of-N shares before submitting them to the guardian.
-    pub relay_endpoint: Option<String>,
+    /// Path to this KP's armored OpenPGP public cert (the one they exported
+    /// from their yubikey and gave to the operator at ceremony time). Used to
+    /// find this KP's share in `shares/` by fingerprint, and to confirm the
+    /// ciphertext is genuinely encrypted to this cert before decrypting.
+    pub kp_pgp_cert_path: PathBuf,
+    /// Optional gpg homedir for the yubikey-backed agent. Defaults to gpg's
+    /// default (`~/.gnupg`) when unset.
+    pub gpg_homedir: Option<PathBuf>,
+    /// Relay endpoint the KP's encrypted share is submitted to. The relay
+    /// collects T-of-N shares before forwarding them to the guardian in one
+    /// `ProvisionerInit` call.
+    pub relay_endpoint: String,
 
     /// Genesis committee — required only at genesis, when `committee-update/` is
     /// still empty; omit it once any update has been logged (it's scraped from
@@ -36,12 +38,6 @@ pub struct ProvisionConfig {
     /// MPC committee `G` (on-chain `CommitteeSet.mpc_public_key`) as hex of `bcs(G)`;
     /// the derivation master (NOT the guardian's own key). Must match operator init.
     pub hashi_btc_master_pubkey_hex: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ShareInput {
-    pub id: u16,
-    pub value_hex: String,
 }
 
 impl ProvisionConfig {
@@ -72,25 +68,6 @@ fn decode_master_g_hex(hex_str: &str) -> anyhow::Result<HashiMasterG> {
     let bytes = hex::decode(hex_str.trim_start_matches("0x"))
         .context("hashi_btc_master_pubkey_hex is not valid hex")?;
     bcs::from_bytes(&bytes).context("decode MPC verifying key G from bcs(G)")
-}
-
-impl ShareInput {
-    pub fn to_domain(&self) -> anyhow::Result<Share> {
-        let id =
-            NonZeroU16::new(self.id).ok_or_else(|| anyhow::anyhow!("share id must be non-zero"))?;
-        let bytes = hex::decode(&self.value_hex)
-            .with_context(|| format!("invalid share value hex for id={}", self.id))?;
-        let scalar_bytes: [u8; 32] = bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("share value must be 32 bytes"))?;
-        let scalar = Option::<Scalar>::from(Scalar::from_repr(FieldBytes::from(scalar_bytes)))
-            .ok_or_else(|| anyhow::anyhow!("invalid scalar in share value"))?;
-        Ok(Share {
-            id: ShareID::from(id),
-            value: scalar,
-        })
-    }
 }
 
 #[cfg(test)]

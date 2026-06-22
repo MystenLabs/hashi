@@ -1,6 +1,36 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+//! `provision` (per-KP recovery against a fresh withdraw-mode guardian).
+//!
+//! Run by a key provisioner when a new guardian instance is brought up to
+//! replace one that went down. The KP decrypts through their yubikey-backed gpg
+//! setup; plaintext never touches disk, but the raw share scalar is held in this
+//! process' memory long enough to verify and re-encrypt it. The flow:
+//!
+//! 1. Heartbeat audit (check A) selects the single live session.
+//! 2. The new guardian's signed `GuardianInfo` is fetched from its S3 `init/`
+//!    log and verified against the enclave attestation (check B). Bucket,
+//!    limiter config, `mpc_master_g`, and `enclave_btc_pubkey == None` are all
+//!    confirmed.
+//! 3. The authoritative `ceremony/` log is scraped for the secret-sharing
+//!    instance the new guardian was booted with; it must match.
+//! 4. Initial limiter state is recovered from the prior enclave's max-seq
+//!    Success withdrawal log (or genesis) and confirmed equal (check C).
+//! 5. The committee comes from the latest signed `committee-update/` log (or
+//!    genesis fallback); the `state_hash` is recomputed and confirmed (check D).
+//! 6. This KP's encrypted share is read from `shares/{seq}-{session}.json`
+//!    (attestation-anchored), every share's recipients are verified against
+//!    the roster, and this KP's share is located by fingerprint.
+//! 7. The share is decrypted via the yubikey (`gpg --decrypt` over a pipe;
+//!    plaintext stays in memory) and verified against its commitment.
+//! 8. The decrypted share is HPKE-encrypted to the new guardian's
+//!    `encryption_pubkey` (from its `GuardianInfo`), with `state_hash` as AAD,
+//!    producing a `GuardianEncryptedShare` ready for `provisioner_init`.
+//! 9. The share is submitted to the configured relay endpoint, which runs the
+//!    same pre-checks before forwarding it. Submission itself awaits the
+//!    relay's `single_provisioner_init` RPC (TODO).
+
 use anyhow::Context;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::BuildPcrs;
@@ -11,12 +41,17 @@ use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::WithdrawModeState;
+use hashi_types::pgp::PgpPublicCert;
+use hashi_types::pgp::load_certs;
 use hashi_types::proto as pb;
 use hpke::Deserializable;
 use rand::thread_rng;
 use tracing::info;
 
 use crate::heartbeat_checks;
+use crate::kp_roster::VerifiedCeremonyState;
+use crate::kp_roster::decrypt_share;
+use crate::kp_roster::ensure_cert_in_roster;
 use crate::limiter_recovery;
 
 pub use crate::config::ProvisionConfig;
@@ -24,27 +59,87 @@ pub use crate::config::ProvisionConfig;
 pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
     cfg.common.validate()?;
 
+    info!(
+        phase = "setup",
+        bucket = cfg.common.guardian_s3.bucket_name(),
+        region = cfg.common.guardian_s3.region(),
+        num_shares = cfg.common.num_shares,
+        threshold = cfg.common.threshold,
+        relay_endpoint = %cfg.relay_endpoint,
+        "running provision flow",
+    );
+
     // One reader for the whole run: it owns the S3 client and the trusted-key
     // cache, so each session's attestation is verified once whichever check
     // reads that session first.
+    info!(
+        phase = "s3 connect",
+        bucket = cfg.common.guardian_s3.bucket_name(),
+        region = cfg.common.guardian_s3.region(),
+        expected_pcr0 = hex::encode(cfg.common.expected_pcr0.pcr0()),
+        "connecting to guardian log bucket",
+    );
     let build_pcrs = cfg.common.expected_pcr0.clone();
-    let mut reader = GuardianReader::new(&cfg.common.guardian_s3, build_pcrs.clone()).await?;
+    let mut reader = GuardianReader::new(&cfg.common.guardian_s3, build_pcrs.clone())
+        .await
+        .context("connect to guardian log bucket")?;
+    info!(phase = "s3 connect", "connected to guardian log bucket");
+
     let master_g = cfg.mpc_master_g()?;
+    info!(phase = "setup", master_g = ?master_g, "decoded MPC master G");
 
-    // 1. Check no past enclave's heartbeats remain & gather the latest enclave's session id.
+    info!(
+        phase = "roster load",
+        cert_count = cfg.common.kp_pgp_cert_paths.len(),
+        "loading + validating full KP cert roster",
+    );
+    let certs = load_certs(&cfg.common.kp_pgp_cert_paths)?;
+    info!(
+        phase = "roster load",
+        cert_count = certs.len(),
+        "KP cert roster loaded"
+    );
+
+    let kp_cert = PgpPublicCert::new(
+        std::fs::read_to_string(&cfg.kp_pgp_cert_path)
+            .with_context(|| format!("read KP cert at {}", cfg.kp_pgp_cert_path.display()))?,
+    )
+    .with_context(|| format!("invalid PGP cert at {}", cfg.kp_pgp_cert_path.display()))?;
+    let want_fp = kp_cert.fingerprint();
+    info!(
+        phase = "setup",
+        fingerprint = %want_fp,
+        kp_cert_path = %cfg.kp_pgp_cert_path.display(),
+        "loaded this KP's cert",
+    );
+    ensure_cert_in_roster(&kp_cert, &certs)?;
+
+    // 1. Check A — no past enclave's heartbeats remain & gather the latest
+    //    enclave's session id.
+    info!(
+        phase = "heartbeat audit",
+        "auditing heartbeats to select the single live session",
+    );
     let session_id = heartbeat_checks::heartbeat_audit(&mut reader).await?;
-    info!(session_id, "heartbeat checks passed for selected session");
+    info!(
+        phase = "heartbeat audit",
+        session_id = %session_id,
+        "selected live session",
+    );
 
-    // 2. Check that the enclave's config is as expected: valid attestation,
-    // expected S3 bucket, and share commitments matching the authoritative
-    // `ceremony/` log (written from initial key setup onward).
+    // 2. Check B — fetch + verify the new guardian's signed `GuardianInfo`.
+    info!(
+        phase = "guardian info",
+        session_id = %session_id,
+        "fetching + verifying new guardian's signed GuardianInfo from S3",
+    );
     let guardian_info = reader.get_info(&session_id).await?;
     let (
         enclave_ss_instance,
         enclave_bucket_info,
         enclave_enc_pubkey_bytes,
         enclave_state_hash,
-        _enclave_git_revision,
+        enclave_git_revision,
         enclave_btc_pubkey,
         enclave_limiter_state,
         enclave_limiter_config,
@@ -54,6 +149,20 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         .clone()
         .into_parts()
         .context("Guardian info has missing fields")?;
+    info!(
+        phase = "guardian info",
+        session_id = %session_id,
+        bucket = %enclave_bucket_info.bucket,
+        region = %enclave_bucket_info.region,
+        enc_pubkey = hex::encode(&enclave_enc_pubkey_bytes),
+        state_hash = hex::encode(enclave_state_hash),
+        btc_pubkey_set = enclave_btc_pubkey.is_some(),
+        committee_epoch = enclave_current_committee_epoch,
+        limiter_refill_rate = enclave_limiter_config.refill_rate,
+        limiter_max_capacity = enclave_limiter_config.max_bucket_capacity,
+        untrusted_git_revision = %enclave_git_revision,
+        "guardian info fetched (git_revision is self-reported, untrusted — verified via PCR0 match); cross-checking against config",
+    );
     anyhow::ensure!(
         cfg.common.guardian_s3.bucket_info == enclave_bucket_info,
         "Guardian bucket info mismatch: expected {:?}, got {:?}",
@@ -76,24 +185,53 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         master_g,
         enclave_mpc_master_g
     );
-
-    let instance = reader
-        .read_latest_ceremony_instance()
-        .await?
-        .context("no ceremony log found in S3; key setup has not run")?;
-    anyhow::ensure!(
-        instance == enclave_ss_instance,
-        "Enclave secret sharing instance mismatch: expected {:?}, got {:?}",
-        instance,
-        enclave_ss_instance
+    info!(
+        phase = "guardian info",
+        session_id = %session_id,
+        "guardian info checks passed (bucket, limiter config, mpc_master_g, btc_pubkey=None)",
     );
 
-    info!(session_id, "init checks passed for selected session");
+    // 3. Confirm the new guardian was booted with the same secret-sharing
+    //    instance the authoritative `ceremony/` log records.
+    info!(
+        phase = "ceremony instance",
+        "scraping authoritative ceremony/ log for the secret-sharing instance",
+    );
+    let (ceremony_session, scraped_instance, roster) = reader
+        .read_latest_ceremony()
+        .await?
+        .context("no ceremony log found in S3; key setup has not run")?;
+    let sharing_seq = scraped_instance.sharing_seq();
+    info!(
+        phase = "ceremony instance",
+        ceremony_session = %ceremony_session,
+        sharing_seq,
+        n = scraped_instance.num_shares(),
+        t = scraped_instance.threshold(),
+        roster_len = roster.len(),
+        "scraped latest ceremony entry",
+    );
+    anyhow::ensure!(
+        scraped_instance == enclave_ss_instance,
+        "Enclave secret sharing instance mismatch: expected {:?}, got {:?}",
+        scraped_instance,
+        enclave_ss_instance
+    );
+    info!(
+        phase = "ceremony instance",
+        ceremony_session = %ceremony_session,
+        sharing_seq,
+        "ceremony instance matches enclave",
+    );
 
-    // 3. Source the initial limiter state. If a prior enclave left Success
-    // withdrawal logs we recover from them; otherwise (first deployment, or a
-    // rotation where the prior enclave processed no withdrawals) we initialize
-    // from genesis.
+    // 4. Check C — source the initial limiter state. If a prior enclave left
+    //    Success withdrawal logs we recover from them; otherwise (first
+    //    deployment, or a rotation where the prior enclave processed no
+    //    withdrawals) we initialize from genesis.
+    info!(
+        phase = "limiter recovery",
+        "recovering initial limiter state from prior enclave's withdraw logs",
+    );
     let limiter_state = match limiter_recovery::recover_limiter_state(&mut reader).await? {
         Some(mut recovered) => {
             // Cap to the current config's bucket capacity in case max capacity
@@ -102,10 +240,22 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
             recovered.num_tokens_available = recovered
                 .num_tokens_available
                 .min(cfg.limiter_config.max_bucket_capacity);
+            info!(
+                phase = "limiter recovery",
+                source = "recovered",
+                next_seq = recovered.next_seq,
+                num_tokens_available = recovered.num_tokens_available,
+                last_updated_at = recovered.last_updated_at,
+                "recovered limiter state from prior enclave's max-seq Success log",
+            );
             recovered
         }
         None => {
-            info!("no prior Success withdrawal logs found; initializing limiter from genesis");
+            info!(
+                phase = "limiter recovery",
+                source = "genesis",
+                "no prior Success withdrawal logs found; initializing limiter from genesis",
+            );
             LimiterState::genesis(&cfg.limiter_config)
         }
     };
@@ -115,18 +265,41 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         limiter_state,
         enclave_limiter_state
     );
+    info!(
+        phase = "limiter recovery",
+        next_seq = limiter_state.next_seq,
+        num_tokens_available = limiter_state.num_tokens_available,
+        "recovered limiter state matches enclave",
+    );
 
-    // Recompute the init state the operator booted the enclave with; its digest is
-    // the state_hash we bind as the share's AAD. The committee comes from the
-    // latest signed `committee-update/` log; before any update exists (genesis) we
-    // fall back to the trusted local value. `master_g` is the MPC committee `G`
-    // (see config doc), NOT the guardian's own BTC key.
+    // 5. Check D — recompute the init state the operator booted the enclave
+    //    with; its digest is the `state_hash` we bind as the share's AAD. The
+    //    committee comes from the latest signed `committee-update/` log; before
+    //    any update exists (genesis) we fall back to the trusted local value.
+    info!(
+        phase = "state hash",
+        "recomputing state_hash from committee + limiter + master_g",
+    );
     let committee = match reader.read_latest_committee().await? {
-        Some(scraped) => scraped,
-        None => cfg
-            .hashi_committee_genesis
-            .clone()
-            .context("no committee-update log in S3 and no hashi_committee_genesis in config")?,
+        Some(scraped) => {
+            info!(
+                phase = "state hash",
+                epoch = scraped.epoch,
+                source = "committee-update log",
+                "scraped latest committee-update log",
+            );
+            scraped
+        }
+        None => {
+            info!(
+                phase = "state hash",
+                source = "hashi_committee_genesis (config)",
+                "no committee-update log; falling back to genesis config",
+            );
+            cfg.hashi_committee_genesis
+                .clone()
+                .context("no committee-update log in S3 and no hashi_committee_genesis in config")?
+        }
     };
     anyhow::ensure!(
         committee.epoch == enclave_current_committee_epoch,
@@ -134,14 +307,13 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         committee.epoch,
         enclave_current_committee_epoch
     );
+    let committee_epoch = committee.epoch;
     let expected_state = WithdrawModeState::new(
         committee.try_into()?,
         cfg.limiter_config,
         limiter_state,
         master_g,
-    )
-    .map_err(|e| anyhow::anyhow!(e))?;
-
+    )?;
     let state_hash = expected_state.digest();
     anyhow::ensure!(
         state_hash == enclave_state_hash,
@@ -149,40 +321,149 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         hex::encode(state_hash),
         hex::encode(enclave_state_hash)
     );
+    info!(
+        phase = "state hash",
+        committee_epoch = committee_epoch,
+        state_hash = hex::encode(state_hash),
+        "recomputed state_hash matches enclave",
+    );
 
+    // 6. Check E — read + verify this KP's encrypted share. The ceremony state
+    //    is constructed directly from the S3 log reads above so we don't pay
+    //    for a second ceremony/ + shares/ walk.
+    info!(
+        phase = "share read",
+        ceremony_session = %ceremony_session,
+        sharing_seq,
+        "reading + verifying this KP's encrypted share from shares/",
+    );
+    let encrypted_shares = reader.read_shares(&ceremony_session, sharing_seq).await?;
+    let state = VerifiedCeremonyState::from_scraped(
+        ceremony_session.clone(),
+        scraped_instance.clone(),
+        encrypted_shares,
+        &roster,
+        sharing_seq,
+        cfg.common.num_shares,
+        cfg.common.threshold,
+    )?;
+    state.verify_encrypted_share_recipients(&certs)?;
+    info!(
+        phase = "share read",
+        share_count = state.encrypted_shares.len(),
+        roster_matches = true,
+        all_recipients_verified = true,
+        "shares/ log verified: every share is addressed only to its labeled KP cert",
+    );
+
+    // Find this KP's share by exact fingerprint match. Given the roster checks
+    // above, this should always succeed; keep the error for defensive clarity.
+    let kp_encrypted_share = state
+        .encrypted_shares
+        .iter()
+        .find(|s| s.recipient_fingerprint == want_fp)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no share in the shares/ log is labeled for this KP's fingerprint \
+                 {want_fp} (labeled fingerprints: {:?})",
+                state
+                    .encrypted_shares
+                    .iter()
+                    .map(|s| s.recipient_fingerprint.clone())
+                    .collect::<Vec<_>>()
+            )
+        })?;
+    info!(
+        phase = "share read",
+        share_id = kp_encrypted_share.id.get(),
+        fingerprint = %kp_encrypted_share.recipient_fingerprint,
+        "located this KP's encrypted share",
+    );
+
+    // 7. Decrypt via yubikey (gpg streams plaintext over a pipe — never hits
+    //    disk) and verify the decrypted share matches its commitment.
+    info!(
+        phase = "share decrypt",
+        share_id = kp_encrypted_share.id.get(),
+        gpg_homedir = ?cfg.gpg_homedir,
+        "decrypting share via yubikey (ciphertext piped via stdin; plaintext in memory)",
+    );
+    let decrypted = decrypt_share(kp_encrypted_share, cfg.gpg_homedir.as_deref())?;
+    state
+        .secret_sharing_instance
+        .commitments()
+        .verify_share(&decrypted)
+        .context("decrypted share does not match its commitment")?;
+    let expected_commitment = state
+        .secret_sharing_instance
+        .commitments()
+        .iter()
+        .find(|c| c.id == decrypted.id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "commitment for share id {} missing despite verify_share success",
+                decrypted.id
+            )
+        })?;
+    info!(
+        phase = "share decrypt",
+        share_id = decrypted.id.get(),
+        commitment = hex::encode(&expected_commitment.digest),
+        "decrypted share matches its commitment",
+    );
+
+    // 8. HPKE-encrypt the decrypted share to the new guardian's pubkey, binding
+    //    the verified `state_hash` as AAD.
+    info!(
+        phase = "share build",
+        share_id = decrypted.id.get(),
+        enc_pubkey = hex::encode(&enclave_enc_pubkey_bytes),
+        state_hash = hex::encode(state_hash),
+        "HPKE-encrypting share to new guardian's pubkey (state_hash AAD)",
+    );
     let guardian_pub_key =
-        EncPubKey::from_bytes(&enclave_enc_pubkey_bytes).map_err(|e| anyhow::anyhow!(e))?;
+        EncPubKey::from_bytes(&enclave_enc_pubkey_bytes).map_err(anyhow::Error::msg)?;
     let encrypted_share = ProvisionerInitRequest::build_from_share(
-        &cfg.share.to_domain()?,
+        &decrypted,
         &guardian_pub_key,
         state_hash,
         &mut thread_rng(),
     );
-    let share_id = encrypted_share.id.get();
     info!(
-        share_id,
-        state_hash = hex::encode(state_hash),
-        "built provisioner-init share"
+        phase = "share build",
+        share_id = encrypted_share.id.get(),
+        "built GuardianEncryptedShare ready for submission",
     );
 
-    // Send this KP's single share to the relay, which collects T-of-N shares
-    // before forwarding them to the guardian in one ProvisionerInit call.
-    if let Some(endpoint) = cfg.relay_endpoint {
-        submit_provisioner_init_to_relay(
-            &endpoint,
-            &session_id,
-            guardian_info,
-            encrypted_share,
-            &build_pcrs,
-        )
-        .await?;
-    }
+    // 9. Submit. The relay collects T-of-N shares before forwarding them to the
+    //    guardian in one `ProvisionerInit` call.
+    info!(
+        phase = "summary",
+        session_id = %session_id,
+        ceremony_session = %ceremony_session,
+        share_id = decrypted.id.get(),
+        fingerprint = %want_fp,
+        sharing_seq,
+        state_hash = hex::encode(state_hash),
+        enc_pubkey = hex::encode(&enclave_enc_pubkey_bytes),
+        relay_endpoint = %cfg.relay_endpoint,
+        "share built; submitting to relay",
+    );
+    submit_provisioner_init_to_relay(
+        &cfg.relay_endpoint,
+        &session_id,
+        guardian_info,
+        encrypted_share,
+        &build_pcrs,
+    )
+    .await?;
     Ok(())
 }
 
-/// Run the relay-side pre-checks for this KP's share. The relay fronts the
-/// guardian's `GetGuardianInfo`, so we verify it against the expected session
-/// and config before handing over the share.
+/// Submit this KP's share to the relay endpoint. The relay fronts the
+/// guardian's `GetGuardianInfo`, so we verify the relay's reported session +
+/// `GuardianInfo` against the values we already pinned from S3 before any
+/// further step.
 ///
 /// TODO: once the relay exposes `single_provisioner_init`, send `encrypted_share`
 /// to it here. The relay collects T-of-N shares before calling the guardian's
@@ -194,11 +475,23 @@ async fn submit_provisioner_init_to_relay(
     encrypted_share: GuardianEncryptedShare,
     build_pcrs: &BuildPcrs,
 ) -> anyhow::Result<()> {
+    info!(
+        phase = "relay submit",
+        endpoint = %endpoint,
+        "connecting to relay endpoint",
+    );
     let mut client =
         pb::guardian_service_client::GuardianServiceClient::connect(endpoint.to_string())
             .await
             .with_context(|| format!("failed to connect to relay endpoint {endpoint}"))?;
+    info!(phase = "relay submit", endpoint = %endpoint, "connected to relay");
 
+    info!(
+        phase = "relay submit",
+        endpoint = %endpoint,
+        expected_session_id = %expected_session_id,
+        "running relay-side prechecks (GetGuardianInfo + session pin + GuardianInfo match)",
+    );
     prechecks(
         &mut client,
         expected_session_id,
@@ -207,12 +500,13 @@ async fn submit_provisioner_init_to_relay(
     )
     .await
     .with_context(|| "relay endpoint pre-check failed")?;
-
     info!(
+        phase = "relay submit",
+        endpoint = %endpoint,
         share_id = encrypted_share.id.get(),
-        "relay prechecks passed; share submission awaits single_provisioner_init"
+        "relay prechecks passed; share submission awaits single_provisioner_init",
     );
-    Ok(())
+    todo!("submit encrypted_share via single_provisioner_init once the relay exposes it");
 }
 
 async fn prechecks(
@@ -227,16 +521,17 @@ async fn prechecks(
         .with_context(|| "GetGuardianInfo RPC failed")?
         .into_inner();
 
-    let resp = <GetGuardianInfoResponse as TryFrom<pb::GetGuardianInfoResponse>>::try_from(resp_pb)
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let resp = GetGuardianInfoResponse::try_from(resp_pb)?;
 
-    // Attestation-anchored, signature-verified GuardianInfo in one call.
-    let verified = resp
-        .verify(build_pcrs)
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    let info = verified.info;
-
+    let verified = resp.verify(build_pcrs)?;
     let actual_session_id = verified.session_id;
+    info!(
+        phase = "relay submit",
+        actual_session_id = %actual_session_id,
+        expected_session_id = %expected_session_id,
+        "relay returned GuardianInfo; verifying attestation + signature + session match",
+    );
+
     anyhow::ensure!(
         actual_session_id == expected_session_id,
         "relay endpoint session mismatch: expected {}, got {}",
@@ -244,10 +539,15 @@ async fn prechecks(
         actual_session_id
     );
     anyhow::ensure!(
-        info == expected_guardian_info,
+        verified.info == expected_guardian_info,
         "relay endpoint GuardianInfo mismatch: expected {:?}, got {:?}",
         expected_guardian_info,
-        info
+        verified.info
+    );
+    info!(
+        phase = "relay submit",
+        session_id = %actual_session_id,
+        "relay GuardianInfo matches expected (attestation, signature, session, fields)",
     );
 
     Ok(())

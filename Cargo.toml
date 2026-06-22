@@ -59,6 +59,7 @@ rcgen = "0.13"
 blst = { version = "0.3.13" }
 hpke = "0.12.0"
 k256 = "0.13"
+zeroize = "1.8"
 
 rand_core = { version = "0.6.4" }
 base64ct = { version = "1.6.0", features = ["alloc"] }
@@ -77,7 +78,6 @@ proptest = { version = "1.6.0", default-features = false, features = ["std"] }
 tempfile = "3.23.0"
 jiff = "0.2"
 tar = "0.4"
-zeroize = "1.8"
 
 # fastcrypto — pinned to the `nitro-attestation` branch tip (our prior base +
 # the AWS Nitro attestation module). The merged main tip can't be used yet: it
