@@ -19,13 +19,13 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use anyhow::ensure;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianSigned;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
 use hashi_types::guardian::SetupNewKeyResponse;
+use hashi_types::guardian::SharesLogMessage;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
 use hashi_types::guardian::proto_conversions::setup_new_key_request_to_pb;
 use hashi_types::pgp::PgpPublicCert;
@@ -93,10 +93,15 @@ impl CeremonyVerifyConfig {
 /// `tracing` so the operator can follow exactly what is happening.
 pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
     info!(
+        phase = "setup",
         num_shares = cfg.common.num_shares,
         threshold = cfg.common.threshold,
         cert_count = cfg.common.kp_pgp_cert_paths.len(),
-        "running guardian key ceremony"
+        bucket = cfg.common.guardian_s3.bucket_name(),
+        region = cfg.common.guardian_s3.region(),
+        endpoint = %cfg.guardian_endpoint,
+        expected_pcr0 = hex::encode(cfg.common.expected_pcr0.pcr0()),
+        "running guardian key ceremony",
     );
 
     // 1. Validate config-level sharing params up front (also re-validated by
@@ -104,23 +109,38 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
     cfg.common.validate()?;
 
     // 2. Load + validate each KP's PGP cert.
+    info!(
+        phase = "roster load",
+        cert_count = cfg.common.kp_pgp_cert_paths.len(),
+        "loading + validating full KP cert roster",
+    );
     let certs = load_certs(&cfg.common.kp_pgp_cert_paths)?;
+    info!(
+        phase = "roster load",
+        cert_count = certs.len(),
+        "KP cert roster loaded"
+    );
     let setup_req =
         SetupNewKeyRequest::new(certs.clone(), cfg.common.num_shares, cfg.common.threshold)
             .map_err(|e| anyhow!("build SetupNewKeyRequest: {e:?}"))?;
 
     // 3. Connect to the ceremony-mode guardian.
-    info!(endpoint = %cfg.guardian_endpoint, "connecting to guardian");
+    info!(
+        phase = "connect",
+        endpoint = %cfg.guardian_endpoint,
+        "connecting to ceremony-mode guardian",
+    );
     let mut client = GuardianServiceClient::connect(cfg.guardian_endpoint.clone())
         .await
         .with_context(|| format!("connect to guardian at {}", cfg.guardian_endpoint))?;
-    info!("connected to guardian");
+    info!(phase = "connect", endpoint = %cfg.guardian_endpoint, "connected to guardian");
 
     // 4. operator_init (ceremony mode: S3 config only, no WithdrawModeConfig).
     info!(
+        phase = "operator_init",
         bucket = cfg.common.guardian_s3.bucket_name(),
         region = cfg.common.guardian_s3.region(),
-        "calling OperatorInit (ceremony mode)"
+        "calling OperatorInit (ceremony mode: S3 config only)",
     );
     let oi_req = operator_init_request_to_pb(OperatorInitRequest::new_ceremony_mode(
         cfg.common.guardian_s3.clone(),
@@ -130,12 +150,15 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
         .operator_init(oi_req)
         .await
         .context("OperatorInit RPC failed")?;
-    info!("operator_init complete; guardian S3 logger installed");
+    info!(
+        phase = "operator_init",
+        "operator_init complete; guardian S3 logger installed"
+    );
 
     // 5. get_guardian_info -> verify attestation/PCRs and signed info -> pin the
     //    session id. This binds `signing_pub_key` (and thus the session) before
     //    we trust the SetupNewKey response we'll verify against it below.
-    info!("calling GetGuardianInfo");
+    info!(phase = "guardian info", "calling GetGuardianInfo");
     let info_pb = client
         .get_guardian_info(pb::GetGuardianInfoRequest {})
         .await
@@ -148,23 +171,38 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
         .map_err(|e| anyhow!("verify GuardianInfo attestation/signature: {e:?}"))?;
     let signing_pub_key = verified.signing_pub_key;
     let session_id = verified.session_id;
-    info!(session_id = %session_id, "guardian info attestation verified; session pinned");
+    info!(
+        phase = "guardian info",
+        session_id = %session_id,
+        signing_pubkey = hex::encode(signing_pub_key.as_bytes()),
+        "guardian info attestation and signature verified; session pinned",
+    );
 
+    info!(
+        phase = "attestation pin",
+        session_id = %session_id,
+        "connecting to guardian log bucket + verifying attestation against expected PCR0",
+    );
     let mut reader = GuardianReader::new(&cfg.common.guardian_s3, cfg.common.expected_pcr0.clone())
         .await
         .context("connect to guardian log bucket")?;
     let attested_signing_pub_key = reader.verified_pubkey(&session_id).await?;
-    ensure!(
+    anyhow::ensure!(
         attested_signing_pub_key == signing_pub_key,
         "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
     );
-    info!(session_id = %session_id, "guardian S3 attestation matches gRPC signing key");
+    info!(
+        phase = "attestation pin",
+        session_id = %session_id,
+        "guardian S3 attestation matches gRPC signing key",
+    );
 
     // 6. setup_new_key.
     info!(
+        phase = "setup_new_key",
         n = cfg.common.num_shares,
         t = cfg.common.threshold,
-        "calling SetupNewKey"
+        "calling SetupNewKey",
     );
     let signed_resp_pb = client
         .setup_new_key(setup_new_key_request_to_pb(setup_req))
@@ -174,10 +212,11 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
     let signed_resp = GuardianSigned::<SetupNewKeyResponse>::try_from(signed_resp_pb)
         .map_err(|e| anyhow!("decode SignedSetupNewKeyResponse: {e:?}"))?;
     info!(
+        phase = "setup_new_key",
         n = cfg.common.num_shares,
         t = cfg.common.threshold,
         encrypted_share_count = signed_resp.data.encrypted_shares.len(),
-        "setup_new_key response received"
+        "setup_new_key response received",
     );
 
     // 7. Verify the response signature under the pinned session's signing key,
@@ -195,13 +234,32 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
                 cfg.common.threshold,
             )
         })?;
+    info!(
+        phase = "setup_new_key",
+        session_id = %live.session_id,
+        sharing_seq = live.secret_sharing_instance.sharing_seq(),
+        "verified SetupNewKeyResponse signature + shape",
+    );
 
     // 8. Inspect each encrypted share's PGP recipients WITHOUT decrypting, and
     //    confirm every share is addressed only to its expected cert.
+    info!(
+        phase = "roster verify",
+        share_count = live.encrypted_shares.len(),
+        "verifying every returned share is addressed only to its labeled KP cert (without decrypting)",
+    );
     live.verify_encrypted_share_recipients(&certs)?;
+    info!(
+        phase = "roster verify",
+        "all returned shares verified against expected KP certs",
+    );
 
     // 9. Cross-check the latest guardian ceremony/ and shares/ logs.
     //    KPs will fetch the same shares/ object during ceremony verify.
+    info!(
+        phase = "log cross-check",
+        "cross-checking the latest guardian ceremony/ and shares/ logs",
+    );
     let logged = VerifiedCeremonyState::latest_from_s3(
         &mut reader,
         sharing_seq,
@@ -209,14 +267,36 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
         cfg.common.threshold,
     )
     .await?;
-    ensure!(
+    anyhow::ensure!(
         logged == live,
         "ceremony/ and shares/ logs differ from the SetupNewKeyResponse"
     );
-    info!("ceremony/ and shares/ logs match the SetupNewKeyResponse");
+    info!(
+        phase = "log cross-check",
+        "ceremony/ and shares/ logs match the SetupNewKeyResponse",
+    );
 
     // 10. Summary.
-    live.print_summary();
+    info!(
+        phase = "summary",
+        session_id = %live.session_id,
+        sharing_seq = live.secret_sharing_instance.sharing_seq(),
+        shares_key = %SharesLogMessage::object_key(
+            &live.session_id,
+            live.secret_sharing_instance.sharing_seq()
+        ),
+        n = live.secret_sharing_instance.num_shares(),
+        t = live.secret_sharing_instance.threshold(),
+        "guardian key ceremony complete",
+    );
+    for commitment in live.secret_sharing_instance.commitments().iter() {
+        info!(
+            phase = "summary",
+            share_id = commitment.id.get(),
+            commitment = hex::encode(&commitment.digest),
+            "share commitment",
+        );
+    }
 
     Ok(())
 }
@@ -235,7 +315,27 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
 pub async fn verify(cfg: CeremonyVerifyConfig) -> Result<()> {
     cfg.common.validate()?;
 
+    info!(
+        phase = "setup",
+        bucket = cfg.common.guardian_s3.bucket_name(),
+        region = cfg.common.guardian_s3.region(),
+        sharing_seq = cfg.sharing_seq,
+        num_shares = cfg.common.num_shares,
+        threshold = cfg.common.threshold,
+        "verifying ceremony share",
+    );
+
+    info!(
+        phase = "roster load",
+        cert_count = cfg.common.kp_pgp_cert_paths.len(),
+        "loading + validating full KP cert roster",
+    );
     let certs = load_certs(&cfg.common.kp_pgp_cert_paths)?;
+    info!(
+        phase = "roster load",
+        cert_count = certs.len(),
+        "KP cert roster loaded"
+    );
 
     // Load this KP's cert. Its fingerprint finds our share in `shares/`, and
     // the cert itself lets us confirm the ciphertext is genuinely encrypted to
@@ -245,15 +345,34 @@ pub async fn verify(cfg: CeremonyVerifyConfig) -> Result<()> {
     let kp_cert = PgpPublicCert::new(cert_armored)
         .with_context(|| format!("invalid PGP cert at {}", cfg.kp_pgp_cert_path.display()))?;
     let want_fp = kp_cert.fingerprint();
-    info!(fingerprint = %want_fp, "verifying ceremony share");
+    info!(
+        phase = "setup",
+        fingerprint = %want_fp,
+        kp_cert_path = %cfg.kp_pgp_cert_path.display(),
+        "loaded this KP's cert",
+    );
     ensure_cert_in_roster(&kp_cert, &certs)?;
 
     // 1. Discover and verify the latest ceremony from the immutable log
     //    (attestation-verified once via the reader's session-key cache).
+    info!(
+        phase = "s3 connect",
+        bucket = cfg.common.guardian_s3.bucket_name(),
+        region = cfg.common.guardian_s3.region(),
+        expected_pcr0 = hex::encode(cfg.common.expected_pcr0.pcr0()),
+        "connecting to guardian log bucket",
+    );
     let sharing_seq = cfg.sharing_seq;
     let mut reader = GuardianReader::new(&cfg.common.guardian_s3, cfg.common.expected_pcr0.clone())
         .await
         .context("connect to guardian log bucket")?;
+    info!(phase = "s3 connect", "connected to guardian log bucket");
+
+    info!(
+        phase = "ceremony scrape",
+        expected_sharing_seq = sharing_seq,
+        "scraping latest ceremony/ + shares/ logs (attestation-anchored)",
+    );
     let state = VerifiedCeremonyState::latest_from_s3(
         &mut reader,
         sharing_seq,
@@ -262,14 +381,26 @@ pub async fn verify(cfg: CeremonyVerifyConfig) -> Result<()> {
     )
     .await?;
     info!(
-        sharing_seq = state.secret_sharing_instance.sharing_seq(),
+        phase = "ceremony scrape",
         session_id = %state.session_id,
-        "discovered latest ceremony session"
+        sharing_seq = state.secret_sharing_instance.sharing_seq(),
+        n = state.secret_sharing_instance.num_shares(),
+        t = state.secret_sharing_instance.threshold(),
+        share_count = state.encrypted_shares.len(),
+        "discovered + validated latest ceremony session",
     );
 
     // 2. Confirm every share is addressed only to its labeled KP cert.
+    info!(
+        phase = "roster verify",
+        share_count = state.encrypted_shares.len(),
+        "verifying every share is addressed only to its labeled KP cert (without decrypting)",
+    );
     state.verify_encrypted_share_recipients(&certs)?;
-    info!("ceremony/ and shares/ logs verified against expected params and KP certs");
+    info!(
+        phase = "roster verify",
+        "ceremony/ and shares/ logs verified against expected params and KP certs",
+    );
 
     // 3. Find this KP's share by exact fingerprint match (both sides derive
     //    from PgpPublicCert::fingerprint over the same key, so they're
@@ -290,50 +421,67 @@ pub async fn verify(cfg: CeremonyVerifyConfig) -> Result<()> {
                     .collect::<Vec<_>>()
             )
         })?;
+    let share_id = share.id;
     info!(
-        share_id = share.id.get(),
+        phase = "share find",
+        share_id = share_id.get(),
         fingerprint = %share.recipient_fingerprint,
-        "found this KP's encrypted share"
+        "located this KP's encrypted share",
     );
 
-    let share_id = share.id;
-
     // 4. Decrypt the share with the yubikey via gpg. The ciphertext is piped
-    //    into gpg over stdin; decrypted bytes stream back into memory and are
-    //    zeroed after parsing.
+    //    into gpg over stdin; decrypted bytes stream back into memory.
+    info!(
+        phase = "share decrypt",
+        share_id = share_id.get(),
+        gpg_homedir = ?cfg.gpg_homedir,
+        "decrypting share via yubikey (ciphertext piped via stdin; plaintext in memory)",
+    );
     let reconstructed = decrypt_share(share, cfg.gpg_homedir.as_deref())?;
-    info!("decrypted share via yubikey (plaintext stayed in memory)");
+    info!(
+        phase = "share decrypt",
+        share_id = share_id.get(),
+        "decrypted share via yubikey",
+    );
 
     // 5. Verify the decrypted share's commitment is in the set — proves the
     //    bytes we decrypted are a valid share of the guardian's BTC key.
+    info!(
+        phase = "commitment verify",
+        share_id = share_id.get(),
+        "verifying decrypted share against its commitment",
+    );
     state
         .secret_sharing_instance
         .commitments()
         .verify_share(&reconstructed)
         .map_err(|e| anyhow!("decrypted share does not match its commitment: {e:?}"))?;
-    info!(
-        share_id = share_id.get(),
-        "decrypted share matches its commitment"
-    );
-
-    // 6. Summary.
     let expected_commitment = state
         .secret_sharing_instance
         .commitments()
         .iter()
         .find(|c| c.id == share_id)
-        .expect("share verified above so its commitment exists");
-    println!("Ceremony share verified.");
-    println!("  session_id:    {}", state.session_id);
-    println!("  share_id:      {}", share_id.get());
-    println!(
-        "  sharing_seq:   {}",
-        state.secret_sharing_instance.sharing_seq()
+        .ok_or_else(|| {
+            anyhow!(
+                "commitment for share id {} missing despite verify_share success",
+                share_id
+            )
+        })?;
+    info!(
+        phase = "commitment verify",
+        share_id = share_id.get(),
+        commitment = hex::encode(&expected_commitment.digest),
+        "decrypted share matches its commitment",
     );
-    println!("  fingerprint:   {want_fp}");
-    println!(
-        "  commitment:    {}",
-        hex::encode(&expected_commitment.digest)
+
+    info!(
+        phase = "summary",
+        session_id = %state.session_id,
+        share_id = share_id.get(),
+        sharing_seq = state.secret_sharing_instance.sharing_seq(),
+        fingerprint = %want_fp,
+        commitment = hex::encode(&expected_commitment.digest),
+        "ceremony share verified",
     );
     Ok(())
 }
