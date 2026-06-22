@@ -23,6 +23,7 @@ use super::KPEncryptedShare;
 use super::KPEncryptedShares;
 use super::LimiterConfig;
 use super::LimiterState;
+use super::NitroAttestation;
 use super::OperatorInitRequest;
 use super::ProvisionerInitRequest;
 use super::RotateKpsRequest;
@@ -328,12 +329,12 @@ impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
             .collect::<GuardianResult<Vec<_>>>()?;
         let encrypted_shares = KPEncryptedShares::new(encrypted_shares)?;
 
-        Ok(GetGuardianInfoResponse {
-            attestation: attestation.to_vec(),
+        Ok(GetGuardianInfoResponse::new(
+            NitroAttestation::new(attestation.to_vec()),
             signing_pub_key,
             signed_info,
             encrypted_shares,
-        })
+        ))
     }
 }
 
@@ -506,7 +507,7 @@ pub fn rotate_kps_request_to_pb(r: RotateKpsRequest) -> pb::RotateKpsRequest {
 
 pub fn get_guardian_info_response_to_pb(r: GetGuardianInfoResponse) -> pb::GetGuardianInfoResponse {
     pb::GetGuardianInfoResponse {
-        attestation: Some(r.attestation.into()),
+        attestation: Some(r.attestation.into_bytes().into()),
         signing_pub_key: Some(r.signing_pub_key.to_bytes().to_vec().into()),
         signed_info: Some(signed_guardian_info_to_pb(r.signed_info)),
         encrypted_shares: r

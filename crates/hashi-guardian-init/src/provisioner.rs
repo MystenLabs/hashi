@@ -11,7 +11,6 @@ use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::WithdrawModeState;
-use hashi_types::guardian::session_id_from_signing_pubkey;
 use hashi_types::proto as pb;
 use hpke::Deserializable;
 use rand::thread_rng;
@@ -230,11 +229,12 @@ async fn prechecks(
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
     // Attestation-anchored, signature-verified GuardianInfo in one call.
-    let info = resp
+    let verified = resp
         .verify(build_pcrs)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let info = verified.info;
 
-    let actual_session_id = session_id_from_signing_pubkey(&resp.signing_pub_key);
+    let actual_session_id = verified.session_id;
     anyhow::ensure!(
         actual_session_id == expected_session_id,
         "relay endpoint session mismatch: expected {}, got {}",

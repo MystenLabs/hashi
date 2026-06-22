@@ -18,7 +18,6 @@ use aws_sdk_s3::types::ObjectLockEnabled;
 use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::Client as S3Client;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
-use hashi_types::guardian::verify_enclave_attestation;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianPubKey;
@@ -551,7 +550,7 @@ impl GuardianS3Client {
                 _ => None,
             })
             .ok_or_else(|| S3Error(format!("expected OIAttestationUnsigned at key {}", key)))?;
-        verify_enclave_attestation(&attestation, &signing_public_key, build_pcrs)?;
+        attestation.verify(&signing_public_key, build_pcrs)?;
         Ok(signing_public_key)
     }
 }

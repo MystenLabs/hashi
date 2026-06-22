@@ -51,8 +51,10 @@ encrypted share is addressed only to its labeled KP cert, finds the share labele
 for this KP's cert fingerprint, decrypts via the yubikey (`gpg --decrypt`), and
 verifies the decrypted share against its commitment.
 
-PCR attestation verification is not configured here yet; the underlying
-attestation check is pending the attestation PR and is currently a no-op.
+The operator `run` command verifies live `/info` signed info and Nitro
+attestation against the configured PCR0 before trusting the session signing key.
+The KP `verify` command anchors trust to the S3 `init/` attestation log before
+verifying the ceremony and share logs under that attested session key.
 
 Only the share's **ciphertext** is written to disk (a temp file, deleted on
 drop); the decrypted scalar lives only in memory.

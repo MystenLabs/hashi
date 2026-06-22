@@ -822,11 +822,14 @@ impl Hashi {
         }
     }
 
-    /// The one trusted entry point for guardian `/info`: fetch, pin the signing
-    /// pubkey to on-chain, verify the signature, and return the *verified*
-    /// `GuardianInfo`. Callers must read guardian state only through this —
-    /// never `resp.signed_info.data` directly. Records the matching
-    /// bootstrap-outcome metric on each failure.
+    /// The guarded entry point for guardian `/info`: fetch, verify the signed
+    /// payload, pin the signing pubkey to on-chain, and return that verified
+    /// `GuardianInfo`. Callers must read guardian state only through this.
+    ///
+    /// TODO: Thread PCR config into Hashi nodes and use `verify` here so this
+    /// also authenticates the Nitro attestation/PCRs.
+    ///
+    /// Records the matching bootstrap-outcome metric on each failure.
     async fn fetch_verified_guardian_info(
         &self,
     ) -> anyhow::Result<hashi_types::guardian::GuardianInfo> {
@@ -842,13 +845,23 @@ impl Hashi {
                 );
                 anyhow::anyhow!("parse GetGuardianInfoResponse: {e:?}")
             })?;
-        let signing_pub_key = resp.signing_pub_key;
+        let verified = resp.verify_signed_info_without_attestation().map_err(|e| {
+            self.metrics.record_guardian_bootstrap_outcome(
+                metrics::GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID,
+            );
+            tracing::error!(
+                error = ?e,
+                "FATAL: guardian /info signature invalid under its own \
+                 signing_pub_key; refusing to seed or reconcile local limiter",
+            );
+            anyhow::anyhow!("guardian signed_info signature invalid")
+        })?;
+        let signing_pub_key = verified.signing_pub_key;
         if !self.verify_guardian_signing_pubkey(&signing_pub_key) {
             anyhow::bail!("guardian signing pubkey does not match on-chain");
         }
-        let info = verify_guardian_signed_info(resp.signed_info, &signing_pub_key, &self.metrics)?;
         let _ = self.guardian_signing_pubkey.set(Some(signing_pub_key));
-        Ok(info)
+        Ok(verified.info)
     }
 
     /// Fetch the guardian's authoritative `LimiterState` and the live local
@@ -1049,28 +1062,6 @@ fn assert_test_only_config(sui_chain_id: &str, bitcoin_chain_id: &str, field_nam
             && bitcoin_chain_id == constants::BITCOIN_REGTEST_CHAIN_ID,
         "{field_name} is only allowed on regtest"
     );
-}
-
-/// Verify the signature on the guardian's `/info` envelope under its
-/// own `signing_pub_key`. Caller is responsible for verifying that the
-/// pubkey itself matches on-chain first; this is the second leg of the
-/// trust chain (signed_info → enclave that holds the on-chain pubkey).
-fn verify_guardian_signed_info(
-    signed_info: hashi_types::guardian::GuardianSigned<hashi_types::guardian::GuardianInfo>,
-    signing_pub_key: &hashi_types::guardian::GuardianPubKey,
-    metrics: &metrics::Metrics,
-) -> anyhow::Result<hashi_types::guardian::GuardianInfo> {
-    signed_info.verify(signing_pub_key).map_err(|e| {
-        metrics.record_guardian_bootstrap_outcome(
-            metrics::GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID,
-        );
-        tracing::error!(
-            error = ?e,
-            "FATAL: guardian /info signed_info signature invalid under its own \
-             signing_pub_key; refusing to seed or reconcile local limiter",
-        );
-        anyhow::anyhow!("guardian signed_info signature invalid")
-    })
 }
 
 /// `expected = None` skips the check (pre-feature chains).
@@ -1401,13 +1392,6 @@ mod test {
             .get()
     }
 
-    fn signature_invalid_count(metrics: &crate::metrics::Metrics) -> u64 {
-        metrics
-            .guardian_bootstrap_outcomes_total
-            .with_label_values(&[crate::metrics::GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID])
-            .get()
-    }
-
     fn random_signing_pubkey() -> hashi_types::guardian::GuardianPubKey {
         let signing_key = hashi_types::guardian::GuardianSignKeyPair::new(rand::thread_rng());
         signing_key.verification_key()
@@ -1448,46 +1432,6 @@ mod test {
             &metrics
         ));
         assert_eq!(key_mismatch_count(&metrics), 1);
-    }
-
-    #[test]
-    fn verify_guardian_signed_info_passes_for_valid_signature() {
-        let resp = hashi_types::guardian::GetGuardianInfoResponse::mock_for_testing();
-        let metrics = fresh_metrics();
-        assert!(
-            crate::verify_guardian_signed_info(resp.signed_info, &resp.signing_pub_key, &metrics,)
-                .is_ok()
-        );
-        assert_eq!(signature_invalid_count(&metrics), 0);
-    }
-
-    #[test]
-    fn verify_guardian_signed_info_fails_when_pubkey_did_not_sign() {
-        // Mock signs with key A, exposes pub_key_A. Verify under pub_key_B
-        // (random) — must fail and bump the metric.
-        let resp = hashi_types::guardian::GetGuardianInfoResponse::mock_for_testing();
-        let wrong_pubkey = random_signing_pubkey();
-        let metrics = fresh_metrics();
-        assert!(
-            crate::verify_guardian_signed_info(resp.signed_info, &wrong_pubkey, &metrics,).is_err()
-        );
-        assert_eq!(signature_invalid_count(&metrics), 1);
-    }
-
-    #[test]
-    fn verify_guardian_signed_info_fails_when_signature_tampered() {
-        let mut resp = hashi_types::guardian::GetGuardianInfoResponse::mock_for_testing();
-        // Flip a byte of the signature so verification under the original
-        // pubkey now fails.
-        let mut sig_bytes: [u8; 64] = resp.signed_info.signature.to_bytes();
-        sig_bytes[0] ^= 0xff;
-        resp.signed_info.signature = hashi_types::guardian::GuardianSignature::from(sig_bytes);
-        let metrics = fresh_metrics();
-        assert!(
-            crate::verify_guardian_signed_info(resp.signed_info, &resp.signing_pub_key, &metrics,)
-                .is_err()
-        );
-        assert_eq!(signature_invalid_count(&metrics), 1);
     }
 
     // --- guardian /info BTC pubkey verification ---

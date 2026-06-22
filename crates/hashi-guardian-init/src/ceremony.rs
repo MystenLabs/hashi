@@ -38,7 +38,6 @@ use hashi_types::guardian::Share;
 use hashi_types::guardian::SharesLogMessage;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
 use hashi_types::guardian::proto_conversions::setup_new_key_request_to_pb;
-use hashi_types::guardian::session_id_from_signing_pubkey;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::cert_owns_key_handle;
 use hashi_types::pgp::decrypt_with_gpg;
@@ -64,8 +63,8 @@ pub struct CeremonyCommonConfig {
     /// at index `i` (0-based) is assigned share id `i + 1`.
     pub kp_pgp_cert_paths: Vec<PathBuf>,
     /// Expected enclave-image measurement: PCR0 as hex, pinned against every
-    /// session's attestation. Required (a value is needed even in non-Nitro dev,
-    /// where verification is a no-op).
+    /// session's attestation. Required even in non-Nitro dev, where the
+    /// attestation verifier is stubbed.
     pub expected_pcr0: BuildPcrs,
 }
 
@@ -177,13 +176,9 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
         .context("OperatorInit RPC failed")?;
     info!("operator_init complete; guardian S3 logger installed");
 
-    // 5. get_guardian_info → verify the enclave's self-signature on its info →
-    //    pin the session id. This binds `signing_pub_key` (and thus the session)
-    //    before we trust the SetupNewKey response we'll verify against it below.
-    //
-    //    NOTE: this authenticates only the guardian's *internal* consistency;
-    //    the enclave's hardware attestation is pinned just below, when the reader
-    //    verifies the session's attestation against `expected_pcr0`.
+    // 5. get_guardian_info → verify attestation/PCRs and signed info → pin the
+    //    session id. This binds `signing_pub_key` (and thus the session) before
+    //    we trust the SetupNewKey response we'll verify against it below.
     info!("calling GetGuardianInfo");
     let info_pb = client
         .get_guardian_info(pb::GetGuardianInfoRequest {})
@@ -192,13 +187,12 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
         .into_inner();
     let info_resp = GetGuardianInfoResponse::try_from(info_pb)
         .map_err(|e| anyhow!("decode GetGuardianInfoResponse: {e:?}"))?;
-    let signing_pub_key = info_resp.signing_pub_key;
-    let session_id = session_id_from_signing_pubkey(&signing_pub_key);
-    info_resp
-        .signed_info
-        .verify(&signing_pub_key)
-        .map_err(|e| anyhow!("verify GuardianInfo signature (session={session_id}): {e:?}"))?;
-    info!(session_id = %session_id, "guardian info signature verified; session pinned");
+    let verified = info_resp
+        .verify(&cfg.common.expected_pcr0)
+        .map_err(|e| anyhow!("verify GuardianInfo attestation/signature: {e:?}"))?;
+    let signing_pub_key = verified.signing_pub_key;
+    let session_id = verified.session_id;
+    info!(session_id = %session_id, "guardian info attestation verified; session pinned");
 
     let mut reader = GuardianReader::new(&cfg.common.guardian_s3, cfg.common.expected_pcr0.clone())
         .await
