@@ -254,8 +254,9 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .into_inner();
     let post_resp = GetGuardianInfoResponse::try_from(post_resp_pb)
         .map_err(|e| anyhow!("decode post-ProvisionerInit GetGuardianInfoResponse: {e:?}"))?;
+    // Same trust boundary as the initial `/info` read above: signature only
+    // until dev bootstrap accepts PCR config and can call `verify`.
     let post_session_id = post_resp
-        // TODO: Reuse dev bootstrap PCR config here and use `verify` for attestation/PCR checks.
         .verify_signed_info_without_attestation()
         .map_err(|e| anyhow!("verify post-ProvisionerInit GuardianInfo signature: {e:?}"))?
         .session_id;

@@ -822,9 +822,13 @@ impl Hashi {
         }
     }
 
-    /// The one trusted entry point for guardian `/info`: fetch, verify the
-    /// signature, pin the signing pubkey to on-chain, and return the *verified*
+    /// The guarded entry point for guardian `/info`: fetch, verify the signed
+    /// payload, pin the signing pubkey to on-chain, and return that verified
     /// `GuardianInfo`. Callers must read guardian state only through this.
+    ///
+    /// TODO: Thread PCR config into Hashi nodes and use `verify` here so this
+    /// also authenticates the Nitro attestation/PCRs.
+    ///
     /// Records the matching bootstrap-outcome metric on each failure.
     async fn fetch_verified_guardian_info(
         &self,
@@ -841,7 +845,6 @@ impl Hashi {
                 );
                 anyhow::anyhow!("parse GetGuardianInfoResponse: {e:?}")
             })?;
-        // TODO: Thread PCR config into Hashi nodes and use `verify` for attestation/PCR checks.
         let verified = resp.verify_signed_info_without_attestation().map_err(|e| {
             self.metrics.record_guardian_bootstrap_outcome(
                 metrics::GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID,

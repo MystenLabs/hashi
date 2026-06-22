@@ -63,8 +63,8 @@ pub struct CeremonyCommonConfig {
     /// at index `i` (0-based) is assigned share id `i + 1`.
     pub kp_pgp_cert_paths: Vec<PathBuf>,
     /// Expected enclave-image measurement: PCR0 as hex, pinned against every
-    /// session's attestation. Required (a value is needed even in non-Nitro dev,
-    /// where verification is a no-op).
+    /// session's attestation. Required even in non-Nitro dev, where the
+    /// attestation verifier is stubbed.
     pub expected_pcr0: BuildPcrs,
 }
 
