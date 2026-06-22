@@ -19,9 +19,9 @@ use tracing::info;
 use crate::heartbeat_checks;
 use crate::limiter_recovery;
 
-pub use crate::config::ProvisionerConfig;
+pub use crate::config::ProvisionConfig;
 
-pub async fn run(cfg: ProvisionerConfig) -> anyhow::Result<()> {
+pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
     // One reader for the whole run: it owns the S3 client and the trusted-key
     // cache, so each session's attestation is verified once whichever check
     // reads that session first.

@@ -17,7 +17,7 @@ use std::num::NonZeroU16;
 use std::path::Path;
 
 #[derive(Deserialize)]
-pub struct ProvisionerConfig {
+pub struct ProvisionConfig {
     /// The Key Provisioner's secret share.
     pub share: ShareInput,
     /// Relay endpoint the KP's encrypted share is forwarded to. The relay
@@ -50,7 +50,7 @@ pub struct ShareInput {
     pub value_hex: String,
 }
 
-impl ProvisionerConfig {
+impl ProvisionConfig {
     pub fn load_yaml(path: &Path) -> anyhow::Result<Self> {
         let bytes = std::fs::read(path).with_context(|| {
             format!(
