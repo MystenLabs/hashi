@@ -22,11 +22,13 @@ use crate::limiter_recovery;
 pub use crate::config::ProvisionConfig;
 
 pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
+    cfg.common.validate()?;
+
     // One reader for the whole run: it owns the S3 client and the trusted-key
     // cache, so each session's attestation is verified once whichever check
     // reads that session first.
-    let build_pcrs = cfg.expected_pcr0.clone();
-    let mut reader = GuardianReader::new(&cfg.s3, build_pcrs.clone()).await?;
+    let build_pcrs = cfg.common.expected_pcr0.clone();
+    let mut reader = GuardianReader::new(&cfg.common.guardian_s3, build_pcrs.clone()).await?;
     let master_g = cfg.mpc_master_g()?;
 
     // 1. Check no past enclave's heartbeats remain & gather the latest enclave's session id.
@@ -53,9 +55,9 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         .into_parts()
         .context("Guardian info has missing fields")?;
     anyhow::ensure!(
-        cfg.s3.bucket_info == enclave_bucket_info,
+        cfg.common.guardian_s3.bucket_info == enclave_bucket_info,
         "Guardian bucket info mismatch: expected {:?}, got {:?}",
-        cfg.s3.bucket_info,
+        cfg.common.guardian_s3.bucket_info,
         enclave_bucket_info
     );
     anyhow::ensure!(
