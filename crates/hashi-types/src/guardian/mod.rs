@@ -813,6 +813,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn get_guardian_info_verify_signed_info_passes_for_valid_signature() {
+        let resp = GetGuardianInfoResponse::mock_for_testing();
+        let verified = resp.verify_signed_info_without_attestation().unwrap();
+
+        assert_eq!(verified.signing_pub_key, resp.signing_pub_key);
+        assert_eq!(
+            verified.session_id,
+            session_id_from_signing_pubkey(&resp.signing_pub_key)
+        );
+        assert_eq!(verified.info, resp.signed_info.data);
+        assert_eq!(verified.encrypted_shares, resp.encrypted_shares);
+    }
+
+    #[test]
+    fn get_guardian_info_verify_signed_info_fails_when_pubkey_did_not_sign() {
+        let mut resp = GetGuardianInfoResponse::mock_for_testing();
+        let wrong_signing_key = GuardianSignKeyPair::new(rand::thread_rng());
+        resp.signing_pub_key = wrong_signing_key.verification_key();
+
+        assert!(matches!(
+            resp.verify_signed_info_without_attestation().unwrap_err(),
+            InvalidInputs(_)
+        ));
+    }
+
+    #[test]
+    fn get_guardian_info_verify_signed_info_fails_when_signature_tampered() {
+        let mut resp = GetGuardianInfoResponse::mock_for_testing();
+        let mut sig_bytes: [u8; 64] = resp.signed_info.signature.to_bytes();
+        sig_bytes[0] ^= 0xff;
+        resp.signed_info.signature = GuardianSignature::from(sig_bytes);
+
+        assert!(matches!(
+            resp.verify_signed_info_without_attestation().unwrap_err(),
+            InvalidInputs(_)
+        ));
+    }
+
+    #[test]
     fn rotate_kps_state_new_rejects_wrong_cert_count() {
         let mut certs = test_utils::mock_pgp_certs(5);
         certs.pop();
