@@ -2993,6 +2993,7 @@ dependencies = [
  "toml",
  "tonic",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

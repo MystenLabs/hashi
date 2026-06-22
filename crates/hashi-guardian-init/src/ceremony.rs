@@ -26,22 +26,18 @@ use hashi_types::guardian::GuardianSigned;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
 use hashi_types::guardian::SetupNewKeyResponse;
-use hashi_types::guardian::Share;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
 use hashi_types::guardian::proto_conversions::setup_new_key_request_to_pb;
 use hashi_types::pgp::PgpPublicCert;
-use hashi_types::pgp::decrypt_armored_via_gpg;
 use hashi_types::pgp::load_certs;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
-use k256::FieldBytes;
-use k256::Scalar;
-use k256::elliptic_curve::PrimeField;
 use serde::Deserialize;
 use tracing::info;
 
 use crate::kp_roster::KpRosterConfig;
 use crate::kp_roster::VerifiedCeremonyState;
+use crate::kp_roster::decrypt_share;
 use crate::kp_roster::ensure_cert_in_roster;
 
 #[derive(Deserialize)]
@@ -303,23 +299,13 @@ pub async fn verify(cfg: CeremonyVerifyConfig) -> Result<()> {
     let share_id = share.id;
 
     // 4. Decrypt the share with the yubikey via gpg. The ciphertext is piped
-    //    into gpg over stdin; decrypted bytes stream back into memory.
-    let plaintext = decrypt_armored_via_gpg(&share.armored_ciphertext, cfg.gpg_homedir.as_deref())?;
-
-    let scalar_bytes: [u8; 32] = plaintext
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow!("decrypted share is {} bytes, expected 32", plaintext.len()))?;
-    let scalar = Option::<Scalar>::from(Scalar::from_repr(FieldBytes::from(scalar_bytes)))
-        .ok_or_else(|| anyhow!("decrypted share is not a valid secp256k1 scalar"))?;
+    //    into gpg over stdin; decrypted bytes stream back into memory and are
+    //    zeroed after parsing.
+    let reconstructed = decrypt_share(share, cfg.gpg_homedir.as_deref())?;
     info!("decrypted share via yubikey (plaintext stayed in memory)");
 
     // 5. Verify the decrypted share's commitment is in the set — proves the
     //    bytes we decrypted are a valid share of the guardian's BTC key.
-    let reconstructed = Share {
-        id: share_id,
-        value: scalar,
-    };
     state
         .secret_sharing_instance
         .commitments()
