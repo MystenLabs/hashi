@@ -185,7 +185,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
     //
     // TODO: also authenticate `signing_pub_key` against the AWS Nitro
     // attestation once the guardian runs in an enclave. Today
-    // `hashi_types::guardian::verify_enclave_attestation` is a no-op, so a
+    // `hashi_types::guardian::NitroAttestation::verify` is a no-op, so a
     // malicious operator with their own signing key can pass all the
     // checks below (sign their own GuardianInfo, echo the bucket and
     // commitments we just submitted, return their own encryption key) and

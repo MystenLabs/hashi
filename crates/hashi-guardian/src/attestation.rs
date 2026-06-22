@@ -5,9 +5,9 @@
 //! Module hardware; the `non-enclave-dev` feature and `cfg(test)` route to a
 //! mock document instead.
 
-use hashi_types::guardian::Attestation;
 use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::GuardianResult;
+use hashi_types::guardian::NitroAttestation;
 
 #[cfg(not(any(test, feature = "non-enclave-dev")))]
 use hashi_types::guardian::GuardianError;
@@ -26,7 +26,7 @@ use tracing::info;
 
 /// Returns an attestation document committed to the enclave's signing public key.
 #[cfg(not(any(test, feature = "non-enclave-dev")))]
-pub fn get_attestation(signing_pk: &GuardianPubKey) -> GuardianResult<Attestation> {
+pub fn get_attestation(signing_pk: &GuardianPubKey) -> GuardianResult<NitroAttestation> {
     let signing_pk_bytes = signing_pk.to_bytes();
 
     info!("Initializing NSM driver.");
@@ -45,7 +45,7 @@ pub fn get_attestation(signing_pk: &GuardianPubKey) -> GuardianResult<Attestatio
         NsmResponse::Attestation { document } => {
             driver::nsm_exit(fd);
             info!("Attestation document generated ({} bytes).", document.len());
-            Ok(document)
+            Ok(NitroAttestation::new(document))
         }
         _ => {
             driver::nsm_exit(fd);
@@ -58,6 +58,8 @@ pub fn get_attestation(signing_pk: &GuardianPubKey) -> GuardianResult<Attestatio
 }
 
 #[cfg(any(test, feature = "non-enclave-dev"))]
-pub fn get_attestation(_: &GuardianPubKey) -> GuardianResult<Attestation> {
-    Ok(b"mock_attestation_document_hex".to_vec())
+pub fn get_attestation(_: &GuardianPubKey) -> GuardianResult<NitroAttestation> {
+    Ok(NitroAttestation::new(
+        b"mock_attestation_document_hex".to_vec(),
+    ))
 }

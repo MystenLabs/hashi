@@ -13,6 +13,7 @@ use super::KPEncryptedShare;
 use super::KPEncryptedShares;
 use super::LimiterConfig;
 use super::LimiterState;
+use super::NitroAttestation;
 use super::OperatorInitRequest;
 use super::ProvisionerInitRequest;
 use super::RotateKpsResponse;
@@ -94,7 +95,7 @@ impl GetGuardianInfoResponse {
         };
 
         GetGuardianInfoResponse::new(
-            "abcd".as_bytes().to_vec(),
+            NitroAttestation::new("abcd".as_bytes().to_vec()),
             signing_pub_key,
             GuardianSigned::new(info, &signing_key, 1234),
             dummy_encrypted_shares(),

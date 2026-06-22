@@ -12,13 +12,13 @@ use super::S3_DIR_INIT;
 use super::S3_DIR_SHARES;
 use super::S3_DIR_WITHDRAW;
 use crate::committee::CommitteeSignature;
-use crate::guardian::Attestation;
 use crate::guardian::GuardianError;
 use crate::guardian::GuardianInfo;
 use crate::guardian::GuardianPubKey;
 use crate::guardian::KPEncryptedShares;
 use crate::guardian::KPFingerprint;
 use crate::guardian::LimiterState;
+use crate::guardian::NitroAttestation;
 use crate::guardian::SecretSharingInstance;
 use crate::guardian::ShareID;
 use crate::guardian::StandardWithdrawalRequestWire;
@@ -101,7 +101,7 @@ impl CeremonyLogMessage {
 pub enum InitLogMessage {
     /// Attestation and signing public key posted in /operator_init
     OIAttestationUnsigned {
-        attestation: Attestation,
+        attestation: NitroAttestation,
         signing_public_key: GuardianPubKey,
     },
     /// Signed GuardianInfo logged in /operator_init (secret-sharing instance,

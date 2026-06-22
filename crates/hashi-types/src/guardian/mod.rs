@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod attestation;
 pub mod crypto;
 pub mod errors;
 pub mod log;
@@ -12,6 +13,8 @@ pub mod time_utils;
 pub mod limiter;
 pub mod s3_utils;
 
+pub use attestation::BuildPcrs;
+pub use attestation::NitroAttestation;
 pub use limiter::LimiterConfig;
 pub use limiter::LimiterState;
 pub use limiter::RateLimiter;
@@ -91,7 +94,7 @@ pub struct OperatorInitRequest {
 #[derive(Debug, PartialEq, Clone)]
 pub struct GetGuardianInfoResponse {
     /// AWS Nitro attestation
-    attestation: Attestation,
+    attestation: NitroAttestation,
     /// Signing pub key of the guardian
     signing_pub_key: GuardianPubKey,
     /// Signed guardian info
@@ -272,8 +275,6 @@ pub struct RotateKpsResponse {
 /// 32-byte UID of the on-chain `WithdrawalTransaction` Sui object.
 /// Used to correlate events across Sui, hashi nodes, and the guardian.
 pub type WithdrawalID = sui_sdk_types::Address;
-
-pub type Attestation = Vec<u8>;
 
 /// Guardian session identifier — a short prefix of the hex-encoded signing
 /// pubkey (see [`session_id_from_signing_pubkey`]). Tags per-session S3 objects.
@@ -677,7 +678,7 @@ impl GuardianInfo {
 
 impl GetGuardianInfoResponse {
     pub fn new(
-        attestation: Attestation,
+        attestation: NitroAttestation,
         signing_pub_key: GuardianPubKey,
         signed_info: GuardianSigned<GuardianInfo>,
         encrypted_shares: KPEncryptedShares,
@@ -694,11 +695,11 @@ impl GetGuardianInfoResponse {
     /// the attestation anchors `signing_pub_key`, and `signed_info` must be
     /// signed by it.
     pub fn verify(&self, build_pcrs: &BuildPcrs) -> GuardianResult<VerifiedGuardianInfo> {
-        verify_enclave_attestation(&self.attestation, &self.signing_pub_key, build_pcrs)?;
+        self.attestation.verify(&self.signing_pub_key, build_pcrs)?;
         let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
         Ok(VerifiedGuardianInfo {
             info,
-            signing_pub_key: self.signing_pub_key.clone(),
+            signing_pub_key: self.signing_pub_key,
             session_id: session_id_from_signing_pubkey(&self.signing_pub_key),
             encrypted_shares: self.encrypted_shares.clone(),
         })
@@ -712,98 +713,10 @@ impl GetGuardianInfoResponse {
         let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
         Ok(VerifiedGuardianInfo {
             info,
-            signing_pub_key: self.signing_pub_key.clone(),
+            signing_pub_key: self.signing_pub_key,
             session_id: session_id_from_signing_pubkey(&self.signing_pub_key),
             encrypted_shares: self.encrypted_shares.clone(),
         })
-    }
-}
-
-/// Known-good Nitro measurement an attestation is pinned to. Construction
-/// mandates PCR0 — the hash of the whole enclave image (EIF), which uniquely
-/// identifies the build — so a pinning policy can never omit it.
-///
-/// We record only PCR0: in a StageX (reproducible, single-binary) build it is
-/// the only measurement that carries signal — the others (kernel, bootloader,
-/// IAM role) are constant or irrelevant for our pinning.
-///
-/// TODO: holds only a single PCR0, so it can't accept the two valid measurements
-/// that briefly coexist during a software upgrade (old + new image), nor pin
-/// additional PCRs. A `commit -> PCRs` allowlist keyed on `untrusted_git_revision`
-/// is the follow-up.
-#[derive(Debug, Clone)]
-pub struct BuildPcrs {
-    pcr0: Vec<u8>,
-}
-
-impl BuildPcrs {
-    pub fn new(pcr0: Vec<u8>) -> Self {
-        Self { pcr0 }
-    }
-
-    pub fn pcr0(&self) -> &[u8] {
-        &self.pcr0
-    }
-}
-
-/// Deserialize from a hex string (optional `0x` prefix) — the form config files
-/// pin PCR0 in.
-impl<'de> Deserialize<'de> for BuildPcrs {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let hex_str = String::deserialize(deserializer)?;
-        let pcr0 =
-            hex::decode(hex_str.trim_start_matches("0x")).map_err(serde::de::Error::custom)?;
-        Ok(Self { pcr0 })
-    }
-}
-
-/// Verify a Nitro attestation document (COSE signature + AWS cert chain to the
-/// Nitro root + freshness) and that it commits to `signing_pubkey` — the enclave
-/// binds its signing key as the document's `public_key`.
-///
-/// In non-enclave dev/test builds the enclave emits a mock document, so this is a
-/// no-op, mirroring [`crate`]'s `get_attestation` `non-enclave-dev` stub. Real
-/// verification runs only in enclave (prod) builds.
-pub fn verify_enclave_attestation(
-    attestation: &[u8],
-    signing_pubkey: &GuardianPubKey,
-    build_pcrs: &BuildPcrs,
-) -> GuardianResult<()> {
-    #[cfg(any(test, feature = "non-enclave-dev"))]
-    {
-        let _ = (attestation, signing_pubkey, build_pcrs);
-        Ok(())
-    }
-    #[cfg(not(any(test, feature = "non-enclave-dev")))]
-    {
-        use fastcrypto::nitro_attestation::parse_nitro_attestation;
-        use fastcrypto::nitro_attestation::verify_nitro_attestation;
-
-        // Bools: (is_upgraded_parsing, include_all_nonzero_pcrs,
-        // always_include_required_pcrs). The last keeps PCR0 in `pcr_map` even if
-        // zero, so the pin below can't be bypassed by a missing entry.
-        let (signature, signed_message, doc) =
-            parse_nitro_attestation(attestation, true, true, true)
-                .map_err(|e| InvalidInputs(format!("attestation parse failed: {e}")))?;
-        verify_nitro_attestation(&signature, &signed_message, &doc, now_timestamp_ms())
-            .map_err(|e| InvalidInputs(format!("attestation verification failed: {e}")))?;
-
-        let attested = doc
-            .public_key
-            .ok_or_else(|| InvalidInputs("attestation has no public_key".into()))?;
-        if attested != signing_pubkey.to_bytes() {
-            return Err(InvalidInputs(
-                "attestation public_key does not match the session signing pubkey".into(),
-            ));
-        }
-
-        // Pin PCR0 (the whole EIF image hash).
-        if doc.pcr_map.get(&0).map(Vec::as_slice) != Some(build_pcrs.pcr0()) {
-            return Err(InvalidInputs(
-                "attestation PCR0 does not match the expected enclave image".into(),
-            ));
-        }
-        Ok(())
     }
 }
 

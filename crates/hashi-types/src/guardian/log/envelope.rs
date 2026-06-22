@@ -150,6 +150,7 @@ mod tests {
     use crate::guardian::InitLogMessage;
     use crate::guardian::KPEncryptedShares;
     use crate::guardian::LimiterState;
+    use crate::guardian::NitroAttestation;
     use crate::guardian::StandardWithdrawalRequest;
     use crate::guardian::StandardWithdrawalRequestWire;
     use crate::guardian::StandardWithdrawalResponse;
@@ -170,7 +171,7 @@ mod tests {
         let mut log = LogRecord::new(
             session_id.clone(),
             LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
-                attestation: vec![1, 2, 3],
+                attestation: NitroAttestation::new(vec![1, 2, 3]),
                 signing_public_key: signing_key.verification_key(),
             })),
             &signing_key,
