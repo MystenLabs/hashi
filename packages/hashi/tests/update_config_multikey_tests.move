@@ -24,6 +24,10 @@ fun mpc_allowed_delta_key(): std::string::String {
     b"mpc_weight_reduction_allowed_delta".to_string()
 }
 
+fun mpc_nonce_generation_protocol_key(): std::string::String {
+    b"mpc_nonce_generation_protocol".to_string()
+}
+
 #[test]
 fun test_single_key_update_via_multikey_propose() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
@@ -49,6 +53,36 @@ fun test_single_key_update_via_multikey_propose() {
     assert!(mpc_config::threshold_in_basis_points(hashi.config()) == 5200);
     assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == 3333);
     assert!(mpc_config::weight_reduction_allowed_delta(hashi.config()) == 800);
+    // Seeded by init_defaults and untouched by the update above.
+    assert!(mpc_config::nonce_generation_protocol(hashi.config()) == 0);
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+fun test_update_nonce_generation_protocol() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let voters = vector[VOTER1];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    assert!(mpc_config::nonce_generation_protocol(hashi.config()) == 0);
+
+    let mut entries = vec_map::empty();
+    entries.insert(mpc_nonce_generation_protocol_key(), config_value::new_u64(1));
+    let proposal_id = update_config::propose(
+        &mut hashi,
+        VOTER1,
+        entries,
+        vec_map::empty(),
+        &clock,
+        ctx,
+    );
+    update_config::execute(&mut hashi, proposal_id, &clock);
+
+    assert!(mpc_config::nonce_generation_protocol(hashi.config()) == 1);
+    assert!(mpc_config::threshold_in_basis_points(hashi.config()) == 3334);
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);

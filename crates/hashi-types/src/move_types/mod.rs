@@ -165,6 +165,8 @@ pub struct Committee {
     pub mpc_weight_reduction_allowed_delta: u64,
     /// MPC max faulty parties in basis points
     pub mpc_max_faulty_in_basis_points: u64,
+    /// Nonce-generation protocol: 0 = vanilla broadcast, 1 = AVID
+    pub mpc_nonce_generation_protocol: u64,
 }
 
 /// Rust version of the Move hashi::config::Config type.
@@ -1237,6 +1239,7 @@ impl From<&crate::committee::Committee> for Committee {
             mpc_threshold_in_basis_points: c.mpc_threshold_in_basis_points() as u64,
             mpc_weight_reduction_allowed_delta: c.mpc_weight_reduction_allowed_delta() as u64,
             mpc_max_faulty_in_basis_points: c.mpc_max_faulty_in_basis_points() as u64,
+            mpc_nonce_generation_protocol: c.mpc_nonce_generation_protocol() as u64,
         }
     }
 }
@@ -1259,6 +1262,24 @@ impl TryFrom<Committee> for crate::committee::Committee {
                 .expect("mpc_weight_reduction_allowed_delta exceeds u16::MAX"),
             u16::try_from(c.mpc_max_faulty_in_basis_points)
                 .expect("mpc_max_faulty_in_basis_points exceeds u16::MAX"),
+            u16::try_from(c.mpc_nonce_generation_protocol)
+                .expect("mpc_nonce_generation_protocol exceeds u16::MAX"),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn committee_nonce_generation_protocol_survives_bcs_round_trip() {
+        let committee = crate::committee::Committee::new(vec![], 5, 3334, 800, 3333, 1);
+        let move_committee = Committee::from(&committee);
+        let bytes = bcs::to_bytes(&move_committee).expect("serialize");
+        let decoded: Committee = bcs::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(decoded.mpc_nonce_generation_protocol, 1);
+        let back = crate::committee::Committee::try_from(decoded).expect("convert back");
+        assert_eq!(back.mpc_nonce_generation_protocol(), 1);
     }
 }

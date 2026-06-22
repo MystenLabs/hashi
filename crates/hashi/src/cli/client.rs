@@ -44,6 +44,7 @@ pub enum CreateProposalParams {
         threshold_bps: Option<u64>,
         max_faulty_bps: Option<u64>,
         weight_reduction_allowed_delta: Option<u64>,
+        nonce_generation_protocol: Option<u64>,
         metadata: Vec<(String, String)>,
     },
     EnableVersion {
@@ -576,6 +577,7 @@ pub fn build_create_proposal_transaction(
             threshold_bps,
             max_faulty_bps,
             weight_reduction_allowed_delta,
+            nonce_generation_protocol,
             metadata,
         } => {
             let entries: Vec<(String, ConfigValue)> = [
@@ -585,6 +587,7 @@ pub fn build_create_proposal_transaction(
                     "mpc_weight_reduction_allowed_delta",
                     weight_reduction_allowed_delta,
                 ),
+                ("mpc_nonce_generation_protocol", nonce_generation_protocol),
             ]
             .into_iter()
             .filter_map(|(k, v)| v.map(|v| (k.to_string(), ConfigValue::U64(v))))

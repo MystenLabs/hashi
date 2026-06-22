@@ -27,6 +27,7 @@ entry fun start_reconfig(
     let mpc_threshold_in_basis_points = hashi::mpc_config::threshold_in_basis_points(self.config());
     let mpc_weight_reduction_allowed_delta = hashi::mpc_config::weight_reduction_allowed_delta(self.config());
     let mpc_max_faulty_in_basis_points = hashi::mpc_config::max_faulty_in_basis_points(self.config());
+    let mpc_nonce_generation_protocol = hashi::mpc_config::nonce_generation_protocol(self.config());
     let epoch = self
         .committee_set_mut()
         .start_reconfig(
@@ -34,6 +35,7 @@ entry fun start_reconfig(
             mpc_threshold_in_basis_points,
             mpc_weight_reduction_allowed_delta,
             mpc_max_faulty_in_basis_points,
+            mpc_nonce_generation_protocol,
             ctx,
         );
     sui::event::emit(StartReconfigEvent { epoch });

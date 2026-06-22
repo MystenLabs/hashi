@@ -34,7 +34,7 @@ fun add_pending_committee_for_testing(hashi: &mut hashi::hashi::Hashi, epoch: u6
         committee::new_committee_member(VOTER2, public_key, encryption_key, 1),
         committee::new_committee_member(VOTER3, public_key, encryption_key, 1),
     ];
-    let pending_committee = committee::new_committee(epoch, members, 3334, 800, 3333);
+    let pending_committee = committee::new_committee(epoch, members, 3334, 800, 3333, 0);
     hashi.committee_set_mut().set_pending_reconfig_for_testing(pending_committee);
 }
 
