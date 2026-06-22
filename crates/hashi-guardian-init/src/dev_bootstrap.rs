@@ -183,17 +183,11 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
     // hostile endpoint could trick us into encrypting shares to a key it
     // controls.
     //
-    // TODO: also authenticate `signing_pub_key` against the AWS Nitro
-    // attestation once the guardian runs in an enclave. Today
-    // `hashi_types::guardian::NitroAttestation::verify` is a no-op, so a
-    // malicious operator with their own signing key can pass all the
-    // checks below (sign their own GuardianInfo, echo the bucket and
-    // commitments we just submitted, return their own encryption key) and
-    // capture `t` encrypted shares. The current deployment runs the
-    // guardian in a k8s cluster — the attestation gate lands when we move
-    // to Nitro.
+    // TODO: Thread PCR config into dev bootstrap and use `verify` here. Until
+    // then this call site skips attestation/PCR checks, so a malicious operator
+    // with their own signing key could sign matching GuardianInfo and return an
+    // encryption key it controls.
     let verified = resp
-        // TODO: Thread PCR config into dev bootstrap and use `verify` for attestation/PCR checks.
         .verify_signed_info_without_attestation()
         .map_err(|e| anyhow!("verify GuardianInfo signature: {e:?}"))?;
     let session_id = verified.session_id;

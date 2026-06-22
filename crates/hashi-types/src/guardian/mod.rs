@@ -696,13 +696,7 @@ impl GetGuardianInfoResponse {
     /// signed by it.
     pub fn verify(&self, build_pcrs: &BuildPcrs) -> GuardianResult<VerifiedGuardianInfo> {
         self.attestation.verify(&self.signing_pub_key, build_pcrs)?;
-        let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
-        Ok(VerifiedGuardianInfo {
-            info,
-            signing_pub_key: self.signing_pub_key,
-            session_id: session_id_from_signing_pubkey(&self.signing_pub_key),
-            encrypted_shares: self.encrypted_shares.clone(),
-        })
+        self.verify_signed_info_without_attestation()
     }
 
     /// Verify only the signed `GuardianInfo` payload.
@@ -824,6 +818,19 @@ mod tests {
         );
         assert_eq!(verified.info, resp.signed_info.data);
         assert_eq!(verified.encrypted_shares, resp.encrypted_shares);
+    }
+
+    #[test]
+    fn get_guardian_info_verify_uses_signed_info_verification() {
+        let mut resp = GetGuardianInfoResponse::mock_for_testing();
+        let mut sig_bytes: [u8; 64] = resp.signed_info.signature.to_bytes();
+        sig_bytes[0] ^= 0xff;
+        resp.signed_info.signature = GuardianSignature::from(sig_bytes);
+
+        assert!(matches!(
+            resp.verify(&BuildPcrs::new(vec![0])).unwrap_err(),
+            InvalidInputs(_)
+        ));
     }
 
     #[test]
