@@ -20,9 +20,6 @@ pub struct ProvisionConfig {
     /// find this KP's share in `shares/` by fingerprint, and to confirm the
     /// ciphertext is genuinely encrypted to this cert before decrypting.
     pub kp_pgp_cert_path: PathBuf,
-    /// Expected secret-sharing sequence. Use 0 if provisioning against the
-    /// genesis key, or N+1 after a rotation to sharing_seq N.
-    pub sharing_seq: u64,
     /// Optional gpg homedir for the yubikey-backed agent. Defaults to gpg's
     /// default (`~/.gnupg`) when unset.
     pub gpg_homedir: Option<PathBuf>,

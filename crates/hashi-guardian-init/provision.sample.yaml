@@ -23,10 +23,6 @@ kp_pgp_cert_paths:
   - /path/to/kp4.asc
   - /path/to/kp5.asc
 
-# Expected secret-sharing sequence. Use 0 if provisioning against the genesis
-# key, or N+1 after a rotation to sharing_seq N.
-sharing_seq: 0
-
 # Optional gpg homedir for the yubikey-backed gpg agent. Defaults to gpg's
 # default (~/.gnupg) when omitted. Set this only if your yubikey's agent uses a
 # non-default homedir.

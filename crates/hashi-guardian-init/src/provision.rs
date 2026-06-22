@@ -63,7 +63,6 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         phase = "setup",
         bucket = cfg.common.guardian_s3.bucket_name(),
         region = cfg.common.guardian_s3.region(),
-        sharing_seq = cfg.sharing_seq,
         num_shares = cfg.common.num_shares,
         threshold = cfg.common.threshold,
         relay_endpoint = %cfg.relay_endpoint,
@@ -202,10 +201,11 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         .read_latest_ceremony()
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;
+    let sharing_seq = scraped_instance.sharing_seq();
     info!(
         phase = "ceremony instance",
         ceremony_session = %ceremony_session,
-        sharing_seq = scraped_instance.sharing_seq(),
+        sharing_seq,
         n = scraped_instance.num_shares(),
         t = scraped_instance.threshold(),
         roster_len = roster.len(),
@@ -220,7 +220,7 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
     info!(
         phase = "ceremony instance",
         ceremony_session = %ceremony_session,
-        sharing_seq = scraped_instance.sharing_seq(),
+        sharing_seq,
         "ceremony instance matches enclave",
     );
 
@@ -334,18 +334,16 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
     info!(
         phase = "share read",
         ceremony_session = %ceremony_session,
-        sharing_seq = cfg.sharing_seq,
+        sharing_seq,
         "reading + verifying this KP's encrypted share from shares/",
     );
-    let encrypted_shares = reader
-        .read_shares(&ceremony_session, cfg.sharing_seq)
-        .await?;
+    let encrypted_shares = reader.read_shares(&ceremony_session, sharing_seq).await?;
     let state = VerifiedCeremonyState::from_scraped(
         ceremony_session.clone(),
         scraped_instance.clone(),
         encrypted_shares,
         &roster,
-        cfg.sharing_seq,
+        sharing_seq,
         cfg.common.num_shares,
         cfg.common.threshold,
     )?;
@@ -445,7 +443,7 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         ceremony_session = %ceremony_session,
         share_id = decrypted.id.get(),
         fingerprint = %want_fp,
-        sharing_seq = cfg.sharing_seq,
+        sharing_seq,
         state_hash = hex::encode(state_hash),
         enc_pubkey = hex::encode(&enclave_enc_pubkey_bytes),
         relay_endpoint = %cfg.relay_endpoint,
