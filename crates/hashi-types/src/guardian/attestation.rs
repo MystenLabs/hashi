@@ -3,13 +3,17 @@
 
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::BTreeSet;
 
+use super::GuardianInfo;
 use super::GuardianPubKey;
 use super::GuardianResult;
-#[cfg(not(any(test, feature = "non-enclave-dev")))]
 use super::errors::GuardianError::InvalidInputs;
 #[cfg(not(any(test, feature = "non-enclave-dev")))]
 use super::time_utils::now_timestamp_ms;
+
+/// Git commit revision reported by the enclave build.
+pub type GitRevision = String;
 
 /// Raw AWS Nitro attestation document bytes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -24,9 +28,13 @@ impl NitroAttestation {
         self.0
     }
 
-    /// Verify this Nitro attestation document (COSE signature + AWS cert chain
-    /// to the Nitro root + freshness), that it commits to `signing_pubkey`, and
-    /// that its PCR0 matches `build_pcrs`.
+    /// Verify this Nitro attestation document (COSE signature + AWS cert chain to the
+    /// Nitro root + freshness), that it commits to `signing_pubkey`, and that its
+    /// PCR0 matches `build_pcrs`.
+    ///
+    /// In non-enclave dev/test builds the enclave emits a mock document, so the
+    /// attestation check is a no-op, mirroring `get_attestation` `non-enclave-dev`
+    /// stub behavior. Real verification runs only in enclave builds.
     pub fn verify(
         &self,
         signing_pubkey: &GuardianPubKey,
@@ -71,26 +79,38 @@ impl NitroAttestation {
     }
 }
 
-/// Known-good Nitro measurement an attestation is pinned to. Construction
-/// mandates PCR0 - the hash of the whole enclave image (EIF), which uniquely
-/// identifies the build - so a pinning policy can never omit it.
+/// A session's verified guardian info: the attestation-anchored signing pubkey,
+/// the signed `GuardianInfo`, and the build PCRs proven by attestation.
+#[derive(Debug, Clone)]
+pub struct VerifiedSessionInfo {
+    pub signing_pubkey: GuardianPubKey,
+    pub info: GuardianInfo,
+    pub build_pcrs: BuildPcrs,
+}
+
+/// One enclave build: its git revision and known-good Nitro measurement. A build is
+/// identified by its revision and pinned by PCR0 - the hash of the whole enclave
+/// image (EIF), which uniquely identifies the build.
 ///
 /// We record only PCR0: in a StageX (reproducible, single-binary) build it is
-/// the only measurement that carries signal - the others (kernel, bootloader,
-/// IAM role) are constant or irrelevant for our pinning.
-///
-/// TODO: holds only a single PCR0, so it can't accept the two valid measurements
-/// that briefly coexist during a software upgrade (old + new image), nor pin
-/// additional PCRs. A `commit -> PCRs` allowlist keyed on `untrusted_git_revision`
-/// is the follow-up.
-#[derive(Debug, Clone)]
+/// the only measurement that carries signal - the others (kernel, bootloader, IAM
+/// role) are constant or irrelevant for our pinning.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildPcrs {
+    git_revision: GitRevision,
     pcr0: Vec<u8>,
 }
 
 impl BuildPcrs {
-    pub fn new(pcr0: Vec<u8>) -> Self {
-        Self { pcr0 }
+    pub fn new(git_revision: &str, pcr0: Vec<u8>) -> Self {
+        Self {
+            git_revision: git_revision.to_string(),
+            pcr0,
+        }
+    }
+
+    pub fn git_revision(&self) -> &str {
+        &self.git_revision
     }
 
     pub fn pcr0(&self) -> &[u8] {
@@ -98,13 +118,112 @@ impl BuildPcrs {
     }
 }
 
-/// Deserialize from a hex string (optional `0x` prefix) - the form config files
-/// pin PCR0 in.
+/// PCR pins for enclave builds that may appear in guardian attestations.
+/// Used by GuardianReader in s3_reader.rs.
+///
+/// `current_build` is the current/live build. `prev_builds` contains older
+/// builds that may still appear in persisted logs during an upgrade or replay.
+/// Verification matches the signature-verified `untrusted_git_revision` to one
+/// entry, then checks PCR0 against that entry. Callers use the resolved
+/// `BuildPcrs` to enforce the policy for their context.
+#[derive(Debug, Clone)]
+pub struct PcrAllowlist {
+    current_build: BuildPcrs,
+    prev_builds: Vec<BuildPcrs>,
+}
+
+impl PcrAllowlist {
+    pub fn new(
+        current_build: BuildPcrs,
+        prev_builds: impl IntoIterator<Item = BuildPcrs>,
+    ) -> GuardianResult<Self> {
+        let prev_builds = prev_builds.into_iter().collect::<Vec<_>>();
+        let mut seen = BTreeSet::new();
+        for build in std::iter::once(&current_build).chain(prev_builds.iter()) {
+            if !seen.insert(build.git_revision.clone()) {
+                return Err(InvalidInputs(format!(
+                    "duplicate PCR allowlist entry for build '{}'",
+                    build.git_revision
+                )));
+            }
+        }
+
+        Ok(Self {
+            current_build,
+            prev_builds,
+        })
+    }
+
+    pub fn current_build(&self) -> &BuildPcrs {
+        &self.current_build
+    }
+
+    pub fn prev_builds(&self) -> &[BuildPcrs] {
+        &self.prev_builds
+    }
+
+    /// The `BuildPcrs` whose revision is `git_revision`.
+    pub fn resolve(&self, git_revision: &str) -> GuardianResult<&BuildPcrs> {
+        if self.current_build.git_revision == git_revision {
+            return Ok(&self.current_build);
+        }
+        if let Some(prev_build) = self
+            .prev_builds
+            .iter()
+            .find(|build| build.git_revision == git_revision)
+        {
+            return Ok(prev_build);
+        }
+        Err(InvalidInputs(format!(
+            "enclave reports build '{git_revision}' not present in PCR allowlist"
+        )))
+    }
+
+    pub fn is_current_build(&self, build_pcrs: &BuildPcrs) -> bool {
+        self.current_build == *build_pcrs
+    }
+
+    pub fn require_current_build(&self, build_pcrs: &BuildPcrs) -> GuardianResult<()> {
+        if self.is_current_build(build_pcrs) {
+            Ok(())
+        } else {
+            Err(InvalidInputs(
+                "guardian attestation matched a non-current build, but current build is required"
+                    .into(),
+            ))
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for BuildPcrs {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let hex_str = String::deserialize(deserializer)?;
-        let pcr0 =
-            hex::decode(hex_str.trim_start_matches("0x")).map_err(serde::de::Error::custom)?;
-        Ok(Self { pcr0 })
+        #[derive(Deserialize)]
+        struct BuildPcrsWire {
+            git_revision: GitRevision,
+            pcr0: String,
+        }
+
+        let wire = BuildPcrsWire::deserialize(deserializer)?;
+        let pcr0 = hex::decode(wire.pcr0.trim_start_matches("0x")).map_err(|e| {
+            serde::de::Error::custom(format!(
+                "build '{}' pcr0 is not valid hex: {e}",
+                wire.git_revision
+            ))
+        })?;
+        Ok(BuildPcrs::new(&wire.git_revision, pcr0))
+    }
+}
+
+impl<'de> Deserialize<'de> for PcrAllowlist {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct PcrAllowlistWire {
+            current_build: BuildPcrs,
+            #[serde(default)]
+            prev_builds: Vec<BuildPcrs>,
+        }
+
+        let wire = PcrAllowlistWire::deserialize(deserializer)?;
+        PcrAllowlist::new(wire.current_build, wire.prev_builds).map_err(serde::de::Error::custom)
     }
 }

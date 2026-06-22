@@ -382,7 +382,11 @@ mod tests {
             .expect("valid intra-event delays"),
             clock_skew: 10,
             guardian: S3Config::mock_for_testing(),
-            expected_pcr0: String::new(),
+            pcr_allowlist: hashi_types::guardian::PcrAllowlist::new(
+                hashi_types::guardian::BuildPcrs::new("", vec![]),
+                vec![],
+            )
+            .expect("valid PCR allowlist"),
             sui: SuiConfig {
                 rpc_url: "http://sui".to_string(),
             },

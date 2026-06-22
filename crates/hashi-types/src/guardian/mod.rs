@@ -14,7 +14,10 @@ pub mod limiter;
 pub mod s3_utils;
 
 pub use attestation::BuildPcrs;
+pub use attestation::GitRevision;
 pub use attestation::NitroAttestation;
+pub use attestation::PcrAllowlist;
+pub use attestation::VerifiedSessionInfo;
 pub use limiter::LimiterConfig;
 pub use limiter::LimiterState;
 pub use limiter::RateLimiter;
@@ -129,7 +132,7 @@ pub struct GuardianInfo {
     /// Git revision of the guardian build. Untrusted (enclave-self-reported);
     /// verified out-of-band by reproducibly building at this revision and matching
     /// PCRs against the session's attestation.
-    pub untrusted_git_revision: String,
+    pub untrusted_git_revision: GitRevision,
     /// Enclave BTC signing pubkey (x-only). Absent before `provisioner_init`.
     pub enclave_btc_pubkey: Option<BitcoinPubkey>,
     /// Current rate limiter state (if initialized).
@@ -647,7 +650,7 @@ impl GuardianInfo {
         S3BucketInfo,
         EncPubKeyBytes,
         [u8; 32],
-        String,
+        GitRevision,
         Option<BitcoinPubkey>,
         LimiterState,
         LimiterConfig,
@@ -692,11 +695,26 @@ impl GetGuardianInfoResponse {
     }
 
     /// Verify the response end to end and return the trusted guardian payload:
-    /// the attestation anchors `signing_pub_key`, and `signed_info` must be
-    /// signed by it.
-    pub fn verify(&self, build_pcrs: &BuildPcrs) -> GuardianResult<VerifiedGuardianInfo> {
-        self.attestation.verify(&self.signing_pub_key, build_pcrs)?;
-        self.verify_signed_info_without_attestation()
+    /// the attestation anchors `signing_pub_key`, `signed_info` must be signed by
+    /// it, the signed git revision must match `expected_build`, and PCR0 must
+    /// match `expected_build`.
+    pub fn verify(&self, expected_build: &BuildPcrs) -> GuardianResult<VerifiedGuardianInfo> {
+        let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
+        if info.untrusted_git_revision != expected_build.git_revision() {
+            return Err(InvalidInputs(format!(
+                "guardian info reports build '{}', expected current build '{}'",
+                info.untrusted_git_revision,
+                expected_build.git_revision()
+            )));
+        }
+        self.attestation
+            .verify(&self.signing_pub_key, expected_build)?;
+        Ok(VerifiedGuardianInfo {
+            info,
+            signing_pub_key: self.signing_pub_key,
+            session_id: session_id_from_signing_pubkey(&self.signing_pub_key),
+            encrypted_shares: self.encrypted_shares.clone(),
+        })
     }
 
     /// Verify only the signed `GuardianInfo` payload.
@@ -828,7 +846,8 @@ mod tests {
         resp.signed_info.signature = GuardianSignature::from(sig_bytes);
 
         assert!(matches!(
-            resp.verify(&BuildPcrs::new(vec![0])).unwrap_err(),
+            resp.verify(&BuildPcrs::new("test-revision", vec![0]))
+                .unwrap_err(),
             InvalidInputs(_)
         ));
     }
@@ -886,6 +905,75 @@ mod tests {
         assert!(
             matches!(err, InvalidInputs(msg) if msg.contains("duplicate OpenPGP certificate fingerprint"))
         );
+    }
+
+    #[test]
+    fn pcr_allowlist_resolves_current_and_multiple_prev_builds() {
+        let allowlist = PcrAllowlist::new(
+            BuildPcrs::new("current", vec![0]),
+            vec![
+                BuildPcrs::new("prev-1", vec![1]),
+                BuildPcrs::new("prev-2", vec![2]),
+            ],
+        )
+        .unwrap();
+
+        let current_build = allowlist.resolve("current").unwrap();
+        assert_eq!(current_build.pcr0(), &[0]);
+        assert!(allowlist.is_current_build(current_build));
+        let prev_build = allowlist.resolve("prev-1").unwrap();
+        assert_eq!(prev_build.pcr0(), &[1]);
+        assert!(!allowlist.is_current_build(prev_build));
+        let prev2_build = allowlist.resolve("prev-2").unwrap();
+        assert_eq!(prev2_build.pcr0(), &[2]);
+    }
+
+    #[test]
+    fn pcr_allowlist_rejects_duplicate_build_revisions() {
+        let err = PcrAllowlist::new(
+            BuildPcrs::new("current", vec![0]),
+            vec![BuildPcrs::new("current", vec![1])],
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, InvalidInputs(msg) if msg.contains("duplicate PCR allowlist entry")));
+    }
+
+    #[test]
+    fn pcr_allowlist_deserializes_hex_wire_form() {
+        let allowlist: PcrAllowlist = serde_json::from_value(serde_json::json!({
+            "current_build": {
+                "git_revision": "current",
+                "pcr0": "0x00ff"
+            },
+            "prev_builds": [
+                {
+                    "git_revision": "prev",
+                    "pcr0": "01"
+                }
+            ]
+        }))
+        .unwrap();
+
+        let current_build = allowlist.resolve("current").unwrap();
+        assert_eq!(current_build.pcr0(), &[0x00, 0xff]);
+        let prev_build = allowlist.resolve("prev").unwrap();
+        assert_eq!(prev_build.pcr0(), &[0x01]);
+    }
+
+    #[test]
+    fn pcr_allowlist_requires_current_build() {
+        let allowlist = PcrAllowlist::new(
+            BuildPcrs::new("current", vec![0]),
+            vec![BuildPcrs::new("prev", vec![1])],
+        )
+        .unwrap();
+
+        let current_build = allowlist.resolve("current").unwrap();
+        allowlist.require_current_build(current_build).unwrap();
+
+        let prev_build = allowlist.resolve("prev").unwrap();
+        assert!(allowlist.require_current_build(prev_build).is_err());
     }
 
     #[test]

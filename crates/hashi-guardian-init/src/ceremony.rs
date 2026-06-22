@@ -19,6 +19,8 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use anyhow::ensure;
+use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianSigned;
@@ -100,7 +102,7 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
         bucket = cfg.common.guardian_s3.bucket_name(),
         region = cfg.common.guardian_s3.region(),
         endpoint = %cfg.guardian_endpoint,
-        expected_pcr0 = hex::encode(cfg.common.expected_pcr0.pcr0()),
+        current_pcr0 = hex::encode(cfg.common.pcr_allowlist.current_build().pcr0()),
         "running guardian key ceremony",
     );
 
@@ -166,8 +168,9 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
         .into_inner();
     let info_resp = GetGuardianInfoResponse::try_from(info_pb)
         .map_err(|e| anyhow!("decode GetGuardianInfoResponse: {e:?}"))?;
+    let allowlist = cfg.common.pcr_allowlist();
     let verified = info_resp
-        .verify(&cfg.common.expected_pcr0)
+        .verify(allowlist.current_build())
         .map_err(|e| anyhow!("verify GuardianInfo attestation/signature: {e:?}"))?;
     let signing_pub_key = verified.signing_pub_key;
     let session_id = verified.session_id;
@@ -181,13 +184,16 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
     info!(
         phase = "attestation pin",
         session_id = %session_id,
-        "connecting to guardian log bucket + verifying attestation against expected PCR0",
+        "connecting to guardian log bucket + verifying attestation against current build",
     );
-    let mut reader = GuardianReader::new(&cfg.common.guardian_s3, cfg.common.expected_pcr0.clone())
+    let mut reader = GuardianReader::new(&cfg.common.guardian_s3, allowlist)
         .await
         .context("connect to guardian log bucket")?;
-    let attested_signing_pub_key = reader.verified_pubkey(&session_id).await?;
-    anyhow::ensure!(
+    let verified_session = reader
+        .get_session_info(&session_id, BuildPolicy::Current)
+        .await?;
+    let attested_signing_pub_key = verified_session.signing_pubkey;
+    ensure!(
         attested_signing_pub_key == signing_pub_key,
         "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
     );
@@ -305,8 +311,8 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
 ///
 /// Trust is anchored entirely to the guardian's S3 attestation log (unlike
 /// `run`, which talks to the live guardian over gRPC): the `GuardianReader`
-/// resolves the session's attested signing pubkey once (cached), and both the
-/// `ceremony/` audit entry and `shares/` recovery entry are verified under it.
+/// resolves the session's attested signing pubkey through the reader cache, and
+/// both the `ceremony/` audit entry and `shares/` recovery entry are verified under it.
 /// Each step is logged.
 ///
 /// Security: the ciphertext is piped into `gpg --decrypt` over stdin and the
@@ -359,11 +365,11 @@ pub async fn verify(cfg: CeremonyVerifyConfig) -> Result<()> {
         phase = "s3 connect",
         bucket = cfg.common.guardian_s3.bucket_name(),
         region = cfg.common.guardian_s3.region(),
-        expected_pcr0 = hex::encode(cfg.common.expected_pcr0.pcr0()),
+        current_pcr0 = hex::encode(cfg.common.pcr_allowlist.current_build().pcr0()),
         "connecting to guardian log bucket",
     );
     let sharing_seq = cfg.sharing_seq;
-    let mut reader = GuardianReader::new(&cfg.common.guardian_s3, cfg.common.expected_pcr0.clone())
+    let mut reader = GuardianReader::new(&cfg.common.guardian_s3, cfg.common.pcr_allowlist())
         .await
         .context("connect to guardian log bucket")?;
     info!(phase = "s3 connect", "connected to guardian log bucket");

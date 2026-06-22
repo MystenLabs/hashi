@@ -7,6 +7,11 @@
 //! to stdout. Used by the deploy workflow to feed `hashi publish
 //! --guardian-public-key` / `--guardian-btc-public-key` so the keys get
 //! recorded on chain.
+//!
+//! TODO: Remove this bootstrap helper once deploy no longer records guardian
+//! keys by querying a live guardian. This command verifies the returned
+//! GuardianInfo signature, but it does not verify the guardian's Nitro
+//! attestation or PCRs.
 
 use anyhow::Context;
 use anyhow::Result;

@@ -134,6 +134,7 @@ mod tests {
     use bitcoin::Network;
     use bitcoin::Txid;
     use bitcoin::hashes::Hash;
+    use hashi_types::guardian::BuildPcrs;
     use hashi_types::guardian::GuardianError;
     use hashi_types::guardian::GuardianSigned;
     use hashi_types::guardian::StandardWithdrawalRequest;
@@ -146,6 +147,10 @@ mod tests {
             last_updated_at: 100,
             next_seq,
         }
+    }
+
+    fn build_pcrs() -> BuildPcrs {
+        BuildPcrs::new("current", vec![0])
     }
 
     fn success_log(next_seq: u64) -> VerifiedLogRecord {
@@ -162,6 +167,7 @@ mod tests {
             session_id: "test-session".to_string(),
             timestamp_ms: 0,
             message: LogMessage::Withdrawal(Box::new(msg)),
+            build_pcrs: build_pcrs(),
         }
     }
 
@@ -177,6 +183,7 @@ mod tests {
             session_id: "test-session".to_string(),
             timestamp_ms: 0,
             message: LogMessage::Withdrawal(Box::new(msg)),
+            build_pcrs: build_pcrs(),
         }
     }
 

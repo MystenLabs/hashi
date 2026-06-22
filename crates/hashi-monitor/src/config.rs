@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::anyhow;
 use corepc_client::client_sync::Auth;
-use hashi_types::guardian::BuildPcrs;
+use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::S3Config;
 use serde::Deserialize;
 
@@ -24,9 +24,8 @@ pub struct Config {
     pub clock_skew: u64,
 
     pub guardian: S3Config,
-    /// Expected guardian enclave-image measurement: PCR0 as hex, pinned against
-    /// every session's attestation the auditor reads.
-    pub expected_pcr0: String,
+    #[serde(flatten)]
+    pub pcr_allowlist: PcrAllowlist,
     pub sui: SuiConfig,
     pub btc: BtcConfig,
 }
@@ -137,10 +136,8 @@ impl Config {
         self.next_event_delays.get_delay(source)
     }
 
-    /// The expected guardian enclave measurement, decoded from `expected_pcr0`.
-    pub fn build_pcrs(&self) -> anyhow::Result<BuildPcrs> {
-        let pcr0 = hex::decode(self.expected_pcr0.trim_start_matches("0x"))
-            .context("expected_pcr0 is not valid hex")?;
-        Ok(BuildPcrs::new(pcr0))
+    /// The PCR allowlist decoded from `current_build` + `prev_builds`.
+    pub fn pcr_allowlist(&self) -> PcrAllowlist {
+        self.pcr_allowlist.clone()
     }
 }

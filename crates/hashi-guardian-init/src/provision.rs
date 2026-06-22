@@ -32,6 +32,7 @@
 //!    relay's `single_provisioner_init` RPC (TODO).
 
 use anyhow::Context;
+use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::EncPubKey;
@@ -76,11 +77,13 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         phase = "s3 connect",
         bucket = cfg.common.guardian_s3.bucket_name(),
         region = cfg.common.guardian_s3.region(),
-        expected_pcr0 = hex::encode(cfg.common.expected_pcr0.pcr0()),
+        current_git_revision = %cfg.common.pcr_allowlist.current_build().git_revision(),
+        current_pcr0 = hex::encode(cfg.common.pcr_allowlist.current_build().pcr0()),
+        prev_build_count = cfg.common.pcr_allowlist.prev_builds().len(),
         "connecting to guardian log bucket",
     );
-    let build_pcrs = cfg.common.expected_pcr0.clone();
-    let mut reader = GuardianReader::new(&cfg.common.guardian_s3, build_pcrs.clone())
+    let allowlist = cfg.common.pcr_allowlist();
+    let mut reader = GuardianReader::new(&cfg.common.guardian_s3, allowlist.clone())
         .await
         .context("connect to guardian log bucket")?;
     info!(phase = "s3 connect", "connected to guardian log bucket");
@@ -133,7 +136,10 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         session_id = %session_id,
         "fetching + verifying new guardian's signed GuardianInfo from S3",
     );
-    let guardian_info = reader.get_info(&session_id).await?;
+    let verified_session = reader
+        .get_session_info(&session_id, BuildPolicy::Current)
+        .await?;
+    let guardian_info = verified_session.info;
     let (
         enclave_ss_instance,
         enclave_bucket_info,
@@ -160,8 +166,14 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         committee_epoch = enclave_current_committee_epoch,
         limiter_refill_rate = enclave_limiter_config.refill_rate,
         limiter_max_capacity = enclave_limiter_config.max_bucket_capacity,
-        untrusted_git_revision = %enclave_git_revision,
-        "guardian info fetched (git_revision is self-reported, untrusted — verified via PCR0 match); cross-checking against config",
+        verified_git_revision = %enclave_git_revision,
+        "guardian info verified against current build; cross-checking against config",
+    );
+    anyhow::ensure!(
+        enclave_git_revision == allowlist.current_build().git_revision(),
+        "Guardian git revision mismatch: expected {}, got {}",
+        allowlist.current_build().git_revision(),
+        enclave_git_revision
     );
     anyhow::ensure!(
         cfg.common.guardian_s3.bucket_info == enclave_bucket_info,
@@ -198,7 +210,7 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         "scraping authoritative ceremony/ log for the secret-sharing instance",
     );
     let (ceremony_session, scraped_instance, roster) = reader
-        .read_latest_ceremony()
+        .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;
     let sharing_seq = scraped_instance.sharing_seq();
@@ -280,7 +292,10 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         phase = "state hash",
         "recomputing state_hash from committee + limiter + master_g",
     );
-    let committee = match reader.read_latest_committee().await? {
+    let committee = match reader
+        .read_latest_committee(BuildPolicy::AnyAllowlisted)
+        .await?
+    {
         Some(scraped) => {
             info!(
                 phase = "state hash",
@@ -337,7 +352,9 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         sharing_seq,
         "reading + verifying this KP's encrypted share from shares/",
     );
-    let encrypted_shares = reader.read_shares(&ceremony_session, sharing_seq).await?;
+    let encrypted_shares = reader
+        .read_shares(&ceremony_session, sharing_seq, BuildPolicy::AnyAllowlisted)
+        .await?;
     let state = VerifiedCeremonyState::from_scraped(
         ceremony_session.clone(),
         scraped_instance.clone(),
@@ -454,7 +471,7 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         &session_id,
         guardian_info,
         encrypted_share,
-        &build_pcrs,
+        allowlist.current_build(),
     )
     .await?;
     Ok(())
@@ -473,7 +490,7 @@ async fn submit_provisioner_init_to_relay(
     expected_session_id: &str,
     expected_guardian_info: GuardianInfo,
     encrypted_share: GuardianEncryptedShare,
-    build_pcrs: &BuildPcrs,
+    current_build: &BuildPcrs,
 ) -> anyhow::Result<()> {
     info!(
         phase = "relay submit",
@@ -496,7 +513,7 @@ async fn submit_provisioner_init_to_relay(
         &mut client,
         expected_session_id,
         expected_guardian_info,
-        build_pcrs,
+        current_build,
     )
     .await
     .with_context(|| "relay endpoint pre-check failed")?;
@@ -513,7 +530,7 @@ async fn prechecks(
     client: &mut pb::guardian_service_client::GuardianServiceClient<tonic::transport::Channel>,
     expected_session_id: &str,
     expected_guardian_info: GuardianInfo,
-    build_pcrs: &BuildPcrs,
+    current_build: &BuildPcrs,
 ) -> anyhow::Result<()> {
     let resp_pb = client
         .get_guardian_info(pb::GetGuardianInfoRequest {})
@@ -523,7 +540,7 @@ async fn prechecks(
 
     let resp = GetGuardianInfoResponse::try_from(resp_pb)?;
 
-    let verified = resp.verify(build_pcrs)?;
+    let verified = resp.verify(current_build)?;
     let actual_session_id = verified.session_id;
     info!(
         phase = "relay submit",

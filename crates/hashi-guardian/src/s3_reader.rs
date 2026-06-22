@@ -5,10 +5,11 @@
 //!
 //! The guardian writes its logs via [`GuardianS3Client`]; off-enclave readers
 //! (the monitor auditor, KP/operator init tooling) replay them here through a
-//! [`GuardianReader`], which owns the S3 client and the trusted-key cache so a
-//! session's attestation is verified once across every read. Streams are
-//! hour-partitioned (`withdraw/`/`heartbeat/`); [`withdraw_cursor`]/[`heartbeat_cursor`]
-//! open a cursor that the caller advances/retreats and feeds to [`GuardianReader::read_dir`].
+//! [`GuardianReader`], which owns the S3 client and a per-session info cache
+//! that records the build PCRs verified for each session. Streams are
+//! hour-partitioned (`withdraw/`/`heartbeat/`);
+//! [`withdraw_cursor`]/[`heartbeat_cursor`] open a cursor that the caller
+//! advances/retreats and feeds to [`GuardianReader::read_dir`].
 
 use crate::s3_client::GuardianS3Client;
 use anyhow::Context;
@@ -18,17 +19,18 @@ use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GuardianInfo;
-use hashi_types::guardian::GuardianPubKey;
-use hashi_types::guardian::InitLogMessage;
+use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::KPEncryptedShares;
 use hashi_types::guardian::KPFingerprint;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::LogRecord;
+use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::SharesLogMessage;
 use hashi_types::guardian::VerifiedLogRecord;
+use hashi_types::guardian::VerifiedSessionInfo;
 use hashi_types::guardian::S3_DIR_CEREMONY;
 use hashi_types::guardian::S3_DIR_COMMITTEE_UPDATE;
 use hashi_types::guardian::S3_DIR_HEARTBEAT;
@@ -48,28 +50,45 @@ pub fn heartbeat_cursor(start: UnixSeconds) -> S3HourScopedDirectory {
     S3HourScopedDirectory::new(S3_DIR_HEARTBEAT, start)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuildPolicy {
+    /// Accept only the configured current guardian build.
+    Current,
+    /// Accept either the configured current build or an explicitly allowlisted
+    /// previous build. This is for historical log reads, not live-session checks.
+    AnyAllowlisted,
+}
+
+impl BuildPolicy {
+    fn enforce(self, allowlist: &PcrAllowlist, build_pcrs: &BuildPcrs) -> GuardianResult<()> {
+        match self {
+            Self::Current => allowlist.require_current_build(build_pcrs),
+            Self::AnyAllowlisted => Ok(()),
+        }
+    }
+}
+
 /// Verified reader over the guardian's S3 logs. Owns the S3 client and a private
-/// session-key cache, so each session's (eventually expensive) attestation check
-/// happens at most once across every read. Thread a single `&mut GuardianReader`
-/// through a run.
+/// session cache. Thread a single `&mut GuardianReader` through a run so repeated
+/// reads can reuse session info and inspect the attested build.
 pub struct GuardianReader {
     s3: GuardianS3Client,
-    pubkey_cache: GuardianSessionKeyCache,
+    cache: GuardianSessionCache,
 }
 
 impl GuardianReader {
-    pub async fn new(config: &S3Config, build_pcrs: BuildPcrs) -> anyhow::Result<Self> {
+    pub async fn new(config: &S3Config, allowlist: PcrAllowlist) -> anyhow::Result<Self> {
         let s3 = GuardianS3Client::new_checked(config)
             .await
             .map_err(|e| anyhow::anyhow!(e))
             .context("failed to verify guardian S3 connectivity")?;
-        Ok(Self::from_s3_client(s3, build_pcrs))
+        Ok(Self::from_s3_client(s3, allowlist))
     }
 
-    pub fn from_s3_client(s3: GuardianS3Client, build_pcrs: BuildPcrs) -> Self {
+    pub fn from_s3_client(s3: GuardianS3Client, allowlist: PcrAllowlist) -> Self {
         Self {
             s3,
-            pubkey_cache: GuardianSessionKeyCache::new(build_pcrs),
+            cache: GuardianSessionCache::new(allowlist),
         }
     }
 
@@ -78,8 +97,25 @@ impl GuardianReader {
         &self.s3
     }
 
+    pub fn require_current_build(&self, build_pcrs: &BuildPcrs) -> GuardianResult<()> {
+        self.cache.allowlist.require_current_build(build_pcrs)
+    }
+
+    fn enforce_build_policy(
+        &self,
+        context: &str,
+        build_policy: BuildPolicy,
+        build_pcrs: &BuildPcrs,
+    ) -> anyhow::Result<()> {
+        build_policy
+            .enforce(&self.cache.allowlist, build_pcrs)
+            .map_err(|e| anyhow::anyhow!("{context} PCR check: {e:?}"))
+    }
+
     /// Read and verify every record in `dir`, resolving each writing session's
-    /// signing pubkey via the cache (loaded once per session).
+    /// signing pubkey via the cache. Batch readers can straddle upgrades, so
+    /// callers that need current-only semantics must inspect each returned
+    /// record's build PCRs with [`Self::require_current_build`].
     pub async fn read_dir(
         &mut self,
         dir: &S3HourScopedDirectory,
@@ -92,26 +128,35 @@ impl GuardianReader {
 
         let mut out = Vec::with_capacity(all_logs.len());
         for log in all_logs {
-            out.push(self.pubkey_cache.verify_record(&self.s3, log).await?);
+            out.push(self.cache.verify_record(&self.s3, log).await?);
         }
         Ok(out)
     }
 
-    /// Read and verify a session's signed `OIGuardianInfo` log (written at
-    /// operator-init). Implements check B of IOP-225.
-    pub async fn get_info(&mut self, session_id: &str) -> anyhow::Result<GuardianInfo> {
-        let key = InitLogMessage::guardian_info_object_key(session_id);
-        let record = self.s3.get_log_record(&key).await?;
-        self.pubkey_cache
-            .verify_record(&self.s3, record)
+    /// The session's verified guardian info. Served from the session cache, which
+    /// resolves the attestation + signed info on first touch and records the
+    /// verified build PCRs.
+    pub async fn get_session_info(
+        &mut self,
+        session_id: &str,
+        build_policy: BuildPolicy,
+    ) -> anyhow::Result<VerifiedSessionInfo> {
+        let session_info = self
+            .cache
+            .get_or_load_session_info(&self.s3, session_id)
             .await?
-            .message
-            .into_init_log()
-            .and_then(|x| match x {
-                InitLogMessage::OIGuardianInfo(info) => Some(*info),
-                _ => None,
-            })
-            .with_context(|| format!("expected OIGuardianInfo at {key}"))
+            .clone();
+        self.enforce_build_policy("session", build_policy, &session_info.build_pcrs)?;
+        Ok(session_info)
+    }
+
+    /// The session's verified `GuardianInfo`, discarding the verified build PCRs.
+    pub async fn get_info(
+        &mut self,
+        session_id: &str,
+        build_policy: BuildPolicy,
+    ) -> anyhow::Result<GuardianInfo> {
+        Ok(self.get_session_info(session_id, build_policy).await?.info)
     }
 
     /// The latest secret-sharing instance from `ceremony/` — the max-`sharing_seq`
@@ -120,18 +165,20 @@ impl GuardianReader {
     /// key exists.
     pub async fn read_latest_ceremony_instance(
         &mut self,
+        build_policy: BuildPolicy,
     ) -> anyhow::Result<Option<SecretSharingInstance>> {
         Ok(self
-            .read_latest_ceremony()
+            .read_latest_ceremony(build_policy)
             .await?
             .map(|(_, instance, _)| instance))
     }
 
     /// Like [`Self::read_latest_ceremony_instance`], but also returns the writing
-    /// session id and recipient roster — needed to locate the matching `shares/`
-    /// object and to check the roster against the agreed KP set.
+    /// session id and recipient roster. The session id locates the matching
+    /// `shares/` object; the roster is checked against the agreed KP set.
     pub async fn read_latest_ceremony(
         &mut self,
+        build_policy: BuildPolicy,
     ) -> anyhow::Result<Option<(SessionID, SecretSharingInstance, Vec<KPFingerprint>)>> {
         let keys = self
             .s3
@@ -140,7 +187,7 @@ impl GuardianReader {
         let Some(key) = pick_latest_key(keys, S3_DIR_CEREMONY) else {
             return Ok(None);
         };
-        Ok(Some(self.read_ceremony_record(&key).await?))
+        Ok(Some(self.read_ceremony_record(&key, build_policy).await?))
     }
 
     /// Read + verify the `ceremony/` record at `key`, returning its writing
@@ -148,25 +195,18 @@ impl GuardianReader {
     async fn read_ceremony_record(
         &mut self,
         key: &str,
+        build_policy: BuildPolicy,
     ) -> anyhow::Result<(SessionID, SecretSharingInstance, Vec<KPFingerprint>)> {
         let record = self.s3.get_log_record(key).await?;
-        let record = self.pubkey_cache.verify_record(&self.s3, record).await?;
+        let record = self.cache.verify_record(&self.s3, record).await?;
         let session_id = record.session_id.clone();
+        let build_pcrs = record.build_pcrs.clone();
+        self.enforce_build_policy("ceremony log", build_policy, &build_pcrs)?;
         let LogMessage::Ceremony(msg) = record.message else {
             anyhow::bail!("expected a ceremony log at {key}");
         };
         let (instance, roster) = ceremony_instance_and_roster(*msg, key)?;
         Ok((session_id, instance, roster))
-    }
-
-    /// The session's attestation-verified signing pubkey, loaded once via the
-    /// cache (later reads of the same session reuse it). Lets callers anchor a
-    /// cross-check on the attested key without a second attestation pass.
-    pub async fn verified_pubkey(&mut self, session_id: &str) -> anyhow::Result<GuardianPubKey> {
-        Ok(*self
-            .pubkey_cache
-            .get_or_load_pubkey(&self.s3, session_id)
-            .await?)
     }
 
     /// Read + verify the encrypted shares at `shares/{seq}-{session}.json`. Point
@@ -181,6 +221,7 @@ impl GuardianReader {
         &mut self,
         session_id: &str,
         sharing_seq: u64,
+        build_policy: BuildPolicy,
     ) -> anyhow::Result<KPEncryptedShares> {
         let key = SharesLogMessage::object_key(session_id, sharing_seq);
         let record: LogRecord = self.s3.get_object_no_lock(&key).await?;
@@ -190,7 +231,9 @@ impl GuardianReader {
                 record.session_id
             );
         }
-        let record = self.pubkey_cache.verify_record(&self.s3, record).await?;
+        let record = self.cache.verify_record(&self.s3, record).await?;
+        let build_pcrs = record.build_pcrs.clone();
+        self.enforce_build_policy("shares log", build_policy, &build_pcrs)?;
         let LogMessage::Shares(msg) = record.message else {
             anyhow::bail!("expected a shares log at {key}");
         };
@@ -209,7 +252,10 @@ impl GuardianReader {
     /// signature-verified. `None` if no committee update has been logged (e.g. a
     /// fresh deployment whose committee still only exists in the operator's boot
     /// config).
-    pub async fn read_latest_committee(&mut self) -> anyhow::Result<Option<Committee>> {
+    pub async fn read_latest_committee(
+        &mut self,
+        build_policy: BuildPolicy,
+    ) -> anyhow::Result<Option<Committee>> {
         let keys = self
             .s3
             .list_all_keys_in_dir(&format!("{}/", S3_DIR_COMMITTEE_UPDATE))
@@ -218,7 +264,8 @@ impl GuardianReader {
             return Ok(None);
         };
         let record = self.s3.get_log_record(&key).await?;
-        let record = self.pubkey_cache.verify_record(&self.s3, record).await?;
+        let record = self.cache.verify_record(&self.s3, record).await?;
+        self.enforce_build_policy("committee-update log", build_policy, &record.build_pcrs)?;
         let LogMessage::CommitteeUpdate(msg) = record.message else {
             anyhow::bail!("expected a committee-update log at {key}");
         };
@@ -231,39 +278,36 @@ impl GuardianReader {
     }
 }
 
-/// Enclave signing pubkeys trusted after their attestation was verified once,
-/// keyed by session. Internal to [`GuardianReader`]; pins every session's
-/// attestation against `build_pcrs`.
-///
-/// TODO(check C): make `build_pcrs` a `commit -> BuildPcrs` map resolved
-/// per session from its `/info`-reported `untrusted_git_revision`, instead of a
-/// single flat set.
-struct GuardianSessionKeyCache {
-    keys: HashMap<SessionID, GuardianPubKey>,
-    build_pcrs: BuildPcrs,
+/// Per-session [`VerifiedSessionInfo`] cache, internal to [`GuardianReader`]. The first
+/// touch of a session resolves and verifies its info (attestation + signed
+/// info, PCR0 pinned against `allowlist`); later reads reuse it and expose the
+/// verified build PCRs to callers.
+struct GuardianSessionCache {
+    sessions: HashMap<SessionID, VerifiedSessionInfo>,
+    allowlist: PcrAllowlist,
 }
 
-impl GuardianSessionKeyCache {
-    fn new(build_pcrs: BuildPcrs) -> Self {
+impl GuardianSessionCache {
+    fn new(allowlist: PcrAllowlist) -> Self {
         Self {
-            keys: HashMap::new(),
-            build_pcrs,
+            sessions: HashMap::new(),
+            allowlist,
         }
     }
 
-    /// The session's signing pubkey, verifying and caching its attestation on first use.
-    async fn get_or_load_pubkey(
+    /// The session's verified info, resolving and caching it on first use.
+    async fn get_or_load_session_info(
         &mut self,
         s3: &GuardianS3Client,
         session_id: &str,
-    ) -> anyhow::Result<&GuardianPubKey> {
-        if !self.keys.contains_key(session_id) {
-            let pubkey = s3
-                .get_verified_enclave_pubkey(session_id, &self.build_pcrs)
+    ) -> anyhow::Result<&VerifiedSessionInfo> {
+        if !self.sessions.contains_key(session_id) {
+            let session_info = s3
+                .get_verified_session_info(session_id, &self.allowlist)
                 .await?;
-            self.keys.insert(session_id.to_string(), pubkey);
+            self.sessions.insert(session_id.to_string(), session_info);
         }
-        Ok(&self.keys[session_id])
+        Ok(&self.sessions[session_id])
     }
 
     /// Verify `record`'s signature under its session's trusted pubkey.
@@ -272,9 +316,19 @@ impl GuardianSessionKeyCache {
         s3: &GuardianS3Client,
         record: LogRecord,
     ) -> anyhow::Result<VerifiedLogRecord> {
-        let signing_pubkey = self.get_or_load_pubkey(s3, &record.session_id).await?;
+        let session_info = self
+            .get_or_load_session_info(s3, &record.session_id)
+            .await?;
         record
-            .verify(signing_pubkey)
+            .verify(&session_info.signing_pubkey)
+            .map(|(session_id, timestamp_ms, message)| {
+                VerifiedLogRecord::new(
+                    session_id,
+                    timestamp_ms,
+                    message,
+                    session_info.build_pcrs.clone(),
+                )
+            })
             .with_context(|| "failed to verify guardian enclave signature")
     }
 }
