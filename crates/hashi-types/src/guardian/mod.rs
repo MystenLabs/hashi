@@ -696,7 +696,12 @@ impl GetGuardianInfoResponse {
     pub fn verify(&self, build_pcrs: &BuildPcrs) -> GuardianResult<VerifiedGuardianInfo> {
         verify_enclave_attestation(&self.attestation, &self.signing_pub_key, build_pcrs)?;
         let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
-        Ok(self.verified_info(info))
+        Ok(VerifiedGuardianInfo {
+            info,
+            signing_pub_key: self.signing_pub_key.clone(),
+            session_id: session_id_from_signing_pubkey(&self.signing_pub_key),
+            encrypted_shares: self.encrypted_shares.clone(),
+        })
     }
 
     /// Verify only the signed `GuardianInfo` payload.
@@ -705,16 +710,12 @@ impl GetGuardianInfoResponse {
     /// PCRs. Prefer [`Self::verify`] whenever the caller has PCR config.
     pub fn verify_signed_info_without_attestation(&self) -> GuardianResult<VerifiedGuardianInfo> {
         let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
-        Ok(self.verified_info(info))
-    }
-
-    fn verified_info(&self, info: GuardianInfo) -> VerifiedGuardianInfo {
-        VerifiedGuardianInfo {
+        Ok(VerifiedGuardianInfo {
             info,
             signing_pub_key: self.signing_pub_key.clone(),
             session_id: session_id_from_signing_pubkey(&self.signing_pub_key),
             encrypted_shares: self.encrypted_shares.clone(),
-        }
+        })
     }
 }
 
