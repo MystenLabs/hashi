@@ -15,10 +15,10 @@ pub async fn get_guardian_info(enclave: Arc<Enclave>) -> GuardianResult<GetGuard
 
     let signing_pub_key = enclave.signing_pubkey();
     let attestation = get_attestation(&signing_pub_key)?;
-    Ok(GetGuardianInfoResponse {
+    Ok(GetGuardianInfoResponse::from_raw_parts(
         attestation,
         signing_pub_key,
-        signed_info: enclave.sign(enclave.info().await),
-        encrypted_shares: enclave.latest_encrypted_shares(),
-    })
+        enclave.sign(enclave.info().await),
+        enclave.latest_encrypted_shares(),
+    ))
 }

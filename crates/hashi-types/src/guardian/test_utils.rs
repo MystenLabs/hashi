@@ -93,12 +93,12 @@ impl GetGuardianInfoResponse {
             mpc_master_g: None,
         };
 
-        GetGuardianInfoResponse {
-            attestation: "abcd".as_bytes().to_vec(),
+        GetGuardianInfoResponse::from_raw_parts(
+            "abcd".as_bytes().to_vec(),
             signing_pub_key,
-            signed_info: GuardianSigned::new(info, &signing_key, 1234),
-            encrypted_shares: dummy_encrypted_shares(),
-        }
+            GuardianSigned::new(info, &signing_key, 1234),
+            dummy_encrypted_shares(),
+        )
     }
 }
 

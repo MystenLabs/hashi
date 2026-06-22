@@ -328,12 +328,12 @@ impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
             .collect::<GuardianResult<Vec<_>>>()?;
         let encrypted_shares = KPEncryptedShares::new(encrypted_shares)?;
 
-        Ok(GetGuardianInfoResponse {
-            attestation: attestation.to_vec(),
+        Ok(GetGuardianInfoResponse::from_raw_parts(
+            attestation.to_vec(),
             signing_pub_key,
             signed_info,
             encrypted_shares,
-        })
+        ))
     }
 }
 

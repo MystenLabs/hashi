@@ -91,13 +91,21 @@ pub struct OperatorInitRequest {
 #[derive(Debug, PartialEq, Clone)]
 pub struct GetGuardianInfoResponse {
     /// AWS Nitro attestation
-    pub attestation: Attestation,
+    attestation: Attestation,
     /// Signing pub key of the guardian
-    pub signing_pub_key: GuardianPubKey,
+    signing_pub_key: GuardianPubKey,
     /// Signed guardian info
-    pub signed_info: GuardianSigned<GuardianInfo>,
+    signed_info: GuardianSigned<GuardianInfo>,
     /// Encrypted shares from the ceremony (empty in non-ceremony mode); KPs
     /// fetch their share here and verify it against the instance commitments.
+    encrypted_shares: KPEncryptedShares,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct VerifiedGuardianInfo {
+    pub info: GuardianInfo,
+    pub signing_pub_key: GuardianPubKey,
+    pub session_id: SessionID,
     pub encrypted_shares: KPEncryptedShares,
 }
 
@@ -668,13 +676,45 @@ impl GuardianInfo {
 }
 
 impl GetGuardianInfoResponse {
-    /// Verify the response end to end and return the trusted `GuardianInfo`: the
-    /// attestation anchors `signing_pub_key`, and `signed_info` must be signed by
-    /// it. Self-contained so any caller (KP init, hashi nodes) can turn an
-    /// untrusted response into a trusted `GuardianInfo` in one call.
-    pub fn verify(&self, build_pcrs: &BuildPcrs) -> GuardianResult<GuardianInfo> {
+    pub fn from_raw_parts(
+        attestation: Attestation,
+        signing_pub_key: GuardianPubKey,
+        signed_info: GuardianSigned<GuardianInfo>,
+        encrypted_shares: KPEncryptedShares,
+    ) -> Self {
+        Self {
+            attestation,
+            signing_pub_key,
+            signed_info,
+            encrypted_shares,
+        }
+    }
+
+    /// Verify the response end to end and return the trusted guardian payload:
+    /// the attestation anchors `signing_pub_key`, and `signed_info` must be
+    /// signed by it.
+    pub fn verify(&self, build_pcrs: &BuildPcrs) -> GuardianResult<VerifiedGuardianInfo> {
         verify_enclave_attestation(&self.attestation, &self.signing_pub_key, build_pcrs)?;
-        self.signed_info.clone().verify(&self.signing_pub_key)
+        let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
+        Ok(self.verified_info(info))
+    }
+
+    /// Verify only the signed `GuardianInfo` payload.
+    ///
+    /// This does not authenticate the enclave image, the Nitro attestation, or
+    /// PCRs. Prefer [`Self::verify`] whenever the caller has PCR config.
+    pub fn verify_signed_info_without_attestation(&self) -> GuardianResult<VerifiedGuardianInfo> {
+        let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
+        Ok(self.verified_info(info))
+    }
+
+    fn verified_info(&self, info: GuardianInfo) -> VerifiedGuardianInfo {
+        VerifiedGuardianInfo {
+            info,
+            signing_pub_key: self.signing_pub_key.clone(),
+            session_id: session_id_from_signing_pubkey(&self.signing_pub_key),
+            encrypted_shares: self.encrypted_shares.clone(),
+        }
     }
 }
 

@@ -45,14 +45,17 @@ pub async fn run(args: Args) -> Result<()> {
         .await
         .context("GetGuardianInfo RPC failed")?
         .into_inner();
-    let info = GetGuardianInfoResponse::try_from(resp)
+    let verified = GetGuardianInfoResponse::try_from(resp)
         .map_err(|e| anyhow!("decode GetGuardianInfoResponse: {e:?}"))?;
+    let verified = verified
+        .verify_signed_info_without_attestation()
+        .map_err(|e| anyhow!("verify GuardianInfo signature: {e:?}"))?;
     match args.field {
         Field::SigningPubKey => {
-            println!("{}", hex::encode(info.signing_pub_key.as_bytes()));
+            println!("{}", hex::encode(verified.signing_pub_key.as_bytes()));
         }
         Field::EnclaveBtcPubkey => {
-            let btc_pk = info.signed_info.data.enclave_btc_pubkey.ok_or_else(|| {
+            let btc_pk = verified.info.enclave_btc_pubkey.ok_or_else(|| {
                 anyhow!(
                     "guardian /info did not return enclave_btc_pubkey; \
                      provisioner_init may not have completed"

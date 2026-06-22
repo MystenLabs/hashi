@@ -34,7 +34,6 @@ use hashi_types::guardian::crypto::commit_share;
 use hashi_types::guardian::crypto::split_secret;
 use hashi_types::guardian::proto_conversions::provisioner_init_request_to_pb;
 use hashi_types::guardian::proto_conversions::withdraw_mode_config_to_pb;
-use hashi_types::guardian::session_id_from_signing_pubkey;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use hpke::Deserializable;
@@ -178,7 +177,6 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .into_inner();
     let resp = GetGuardianInfoResponse::try_from(info_pb)
         .map_err(|e| anyhow!("decode GetGuardianInfoResponse: {e:?}"))?;
-    let session_id = session_id_from_signing_pubkey(&resp.signing_pub_key);
 
     // Verify the enclave's own signature on the info — without this the
     // `encryption_pubkey` below would be unauthenticated and a buggy or
@@ -194,10 +192,11 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
     // capture `t` encrypted shares. The current deployment runs the
     // guardian in a k8s cluster — the attestation gate lands when we move
     // to Nitro.
-    let info = resp
-        .signed_info
-        .verify(&resp.signing_pub_key)
-        .map_err(|e| anyhow!("verify GuardianInfo signature (session={session_id}): {e:?}"))?;
+    let verified = resp
+        .verify_signed_info_without_attestation()
+        .map_err(|e| anyhow!("verify GuardianInfo signature: {e:?}"))?;
+    let session_id = verified.session_id;
+    let info = verified.info;
 
     // Match against what we just sent in OperatorInit. Catches a stale or
     // wrong enclave echoing back a different config than the one we set up.
@@ -260,7 +259,10 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .into_inner();
     let post_resp = GetGuardianInfoResponse::try_from(post_resp_pb)
         .map_err(|e| anyhow!("decode post-ProvisionerInit GetGuardianInfoResponse: {e:?}"))?;
-    let post_session_id = session_id_from_signing_pubkey(&post_resp.signing_pub_key);
+    let post_session_id = post_resp
+        .verify_signed_info_without_attestation()
+        .map_err(|e| anyhow!("verify post-ProvisionerInit GuardianInfo signature: {e:?}"))?
+        .session_id;
     anyhow::ensure!(
         post_session_id == session_id,
         "guardian session changed mid-bootstrap: started {session_id}, now {post_session_id} \
