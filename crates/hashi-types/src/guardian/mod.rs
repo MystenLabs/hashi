@@ -676,7 +676,7 @@ impl GuardianInfo {
 }
 
 impl GetGuardianInfoResponse {
-    pub fn from_raw_parts(
+    pub fn new(
         attestation: Attestation,
         signing_pub_key: GuardianPubKey,
         signed_info: GuardianSigned<GuardianInfo>,

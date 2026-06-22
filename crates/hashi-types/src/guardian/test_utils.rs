@@ -93,7 +93,7 @@ impl GetGuardianInfoResponse {
             mpc_master_g: None,
         };
 
-        GetGuardianInfoResponse::from_raw_parts(
+        GetGuardianInfoResponse::new(
             "abcd".as_bytes().to_vec(),
             signing_pub_key,
             GuardianSigned::new(info, &signing_key, 1234),
