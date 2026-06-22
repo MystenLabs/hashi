@@ -27,11 +27,13 @@ use std::io;
 use std::io::Read;
 use std::io::Write;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Child;
 use std::process::ChildStdout;
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::LazyLock;
+use tracing::info;
 
 static POLICY: LazyLock<StandardPolicy> = LazyLock::new(StandardPolicy::new);
 
@@ -109,6 +111,21 @@ impl<'de> Deserialize<'de> for PgpPublicCert {
         let armored = String::deserialize(deserializer)?;
         Self::new(armored).map_err(serde::de::Error::custom)
     }
+}
+
+/// Load and validate each armored OpenPGP cert at `paths`, logging the
+/// fingerprint + path of each. Returns the certs in input order.
+pub fn load_certs(paths: &[PathBuf]) -> Result<Vec<PgpPublicCert>> {
+    let mut certs = Vec::with_capacity(paths.len());
+    for path in paths {
+        let armored = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read PGP cert at {}", path.display()))?;
+        let cert = PgpPublicCert::new(armored)
+            .with_context(|| format!("invalid PGP cert at {}", path.display()))?;
+        info!(fingerprint = %cert, path = %path.display(), "loaded PGP cert");
+        certs.push(cert);
+    }
+    Ok(certs)
 }
 
 fn validate_pgp_cert(cert: &openpgp::Cert) -> Result<()> {
@@ -253,13 +270,80 @@ pub fn decrypt_with_gpg(backup: &Path, homedir: Option<&Path>) -> Result<impl io
     Ok(GpgDecryptReader {
         child,
         stdout,
+        writer: None,
         finished: false,
     })
+}
+
+/// Like [`decrypt_with_gpg`], but feeds `ciphertext` to gpg over its stdin
+/// instead of a file path. A background writer thread writes the ciphertext so
+/// reading decrypted bytes off stdout can proceed concurrently without
+/// deadlocking when the ciphertext exceeds the OS pipe buffer (~64 KB on
+/// Linux). The thread owns its `ChildStdin` and drops it on completion,
+/// signalling EOF to gpg. The reader joins the writer in `Drop` so it can't
+/// outlive it.
+pub fn decrypt_with_gpg_stdin(
+    ciphertext: &[u8],
+    homedir: Option<&Path>,
+) -> Result<impl io::Read + use<>> {
+    let mut command = Command::new("gpg");
+    command.arg("--decrypt").arg("--");
+    if let Some(homedir) = homedir {
+        command.env("GNUPGHOME", homedir);
+    }
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::inherit());
+    let mut child = command
+        .spawn()
+        .with_context(|| "Failed to run `gpg --decrypt`; is gpg installed and on PATH?")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to open gpg stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Failed to capture gpg stdout"))?;
+
+    // Copy the ciphertext onto the writer thread so the caller does not need to
+    // keep its buffer alive while gpg runs.
+    let ciphertext_owned = ciphertext.to_vec();
+    let writer = std::thread::Builder::new()
+        .name("gpg-stdin-writer".into())
+        .spawn(move || {
+            let _ = stdin.write_all(&ciphertext_owned);
+            // Drop stdin so gpg sees EOF and finishes its stdout stream.
+            drop(stdin);
+        })
+        .context("spawn gpg stdin writer thread")?;
+
+    Ok(GpgDecryptReader {
+        child,
+        stdout,
+        writer: Some(writer),
+        finished: false,
+    })
+}
+
+/// Decrypt an armored OpenPGP message string via `gpg --decrypt`, returning the
+/// plaintext bytes. The ciphertext is piped to gpg over its stdin (a background
+/// writer thread) and the plaintext streams back over gpg's stdout pipe into
+/// memory — nothing touches disk.
+pub fn decrypt_armored_via_gpg(armored: &str, homedir: Option<&Path>) -> Result<Vec<u8>> {
+    let mut decryptor = decrypt_with_gpg_stdin(armored.as_bytes(), homedir)?;
+    let mut plaintext = Vec::new();
+    decryptor
+        .read_to_end(&mut plaintext)
+        .context("read decrypted bytes from gpg")?;
+    Ok(plaintext)
 }
 
 struct GpgDecryptReader {
     child: Child,
     stdout: ChildStdout,
+    /// Writer thread feeding gpg's stdin, present only for the stdin variant.
+    writer: Option<std::thread::JoinHandle<()>>,
     finished: bool,
 }
 
@@ -282,9 +366,15 @@ impl Drop for GpgDecryptReader {
         if !self.finished {
             // The consumer stopped early (e.g. a tar/gzip parse error on
             // truncated output). Kill and reap gpg so it cannot linger writing
-            // into a pipe nobody is reading.
+            // into a pipe nobody is reading. This also unblocks the writer
+            // thread's `write_all` (gpg closing stdin returns EPIPE).
             let _ = self.child.kill();
             let _ = self.child.wait();
+        }
+        if let Some(writer) = self.writer.take() {
+            // Make sure the stdin writer has flushed or observed gpg closing
+            // its pipe before the reader is fully torn down.
+            let _ = writer.join();
         }
     }
 }
@@ -635,6 +725,22 @@ mod tests {
         let mut decrypted = Vec::new();
         io::copy(&mut decryptor, &mut decrypted).unwrap();
 
+        assert_eq!(plaintext, decrypted.as_slice());
+    }
+
+    #[test]
+    fn test_decrypt_armored_via_gpg() {
+        let homedir = temp_gnupg_home();
+        let (public, secret) = test_utils::mock_pgp_keypair();
+        let public_cert = PgpPublicCert::new(public).unwrap();
+        let plaintext = b"secret share bytes";
+        let ciphertext = encrypt_armored(plaintext, &public_cert).unwrap();
+
+        let secret_key_path = homedir.path().join("secret-key.asc");
+        fs::write(&secret_key_path, secret).unwrap();
+        test_utils::gpg_import_key(homedir.path(), &secret_key_path);
+
+        let decrypted = decrypt_armored_via_gpg(&ciphertext, Some(homedir.path())).unwrap();
         assert_eq!(plaintext, decrypted.as_slice());
     }
 }

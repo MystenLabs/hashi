@@ -13,8 +13,6 @@
 //! [`SetupNewKey`]: hashi_types::guardian::SetupNewKeyRequest
 //! [`SetupNewKeyResponse`]: hashi_types::guardian::SetupNewKeyResponse
 
-use std::io::Read;
-use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -40,7 +38,8 @@ use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
 use hashi_types::guardian::proto_conversions::setup_new_key_request_to_pb;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::cert_owns_key_handle;
-use hashi_types::pgp::decrypt_with_gpg;
+use hashi_types::pgp::decrypt_armored_via_gpg;
+use hashi_types::pgp::load_certs;
 use hashi_types::pgp::pgp_message_recipients;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
@@ -48,7 +47,6 @@ use k256::FieldBytes;
 use k256::Scalar;
 use k256::elliptic_curve::PrimeField;
 use serde::Deserialize;
-use tempfile::NamedTempFile;
 use tracing::info;
 
 #[derive(Deserialize)]
@@ -148,7 +146,7 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
     cfg.common.validate()?;
 
     // 2. Load + validate each KP's PGP cert.
-    let certs = load_kp_certs(&cfg.common.kp_pgp_cert_paths)?;
+    let certs = load_certs(&cfg.common.kp_pgp_cert_paths)?;
     let setup_req =
         SetupNewKeyRequest::new(certs.clone(), cfg.common.num_shares, cfg.common.threshold)
             .map_err(|e| anyhow!("build SetupNewKeyRequest: {e:?}"))?;
@@ -273,14 +271,13 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
 /// `ceremony/` audit entry and `shares/` recovery entry are verified under it.
 /// Each step is logged.
 ///
-/// Security: only the share's **ciphertext** is written to disk (a `NamedTempFile`
-/// that is deleted on drop); the decrypted 32-byte scalar lives only in the
-/// in-memory `Scalar`. `gpg --decrypt` streams its plaintext over a pipe — it is
-/// never given an `--output` path.
+/// Security: the ciphertext is piped into `gpg --decrypt` over stdin and the
+/// plaintext streams back over stdout; neither ciphertext nor plaintext is
+/// written to disk by this flow.
 pub async fn verify(cfg: CeremonyVerifyConfig) -> Result<()> {
     cfg.common.validate()?;
 
-    let certs = load_kp_certs(&cfg.common.kp_pgp_cert_paths)?;
+    let certs = load_certs(&cfg.common.kp_pgp_cert_paths)?;
 
     // Load this KP's cert. Its fingerprint finds our share in `shares/`, and
     // the cert itself lets us confirm the ciphertext is genuinely encrypted to
@@ -342,20 +339,9 @@ pub async fn verify(cfg: CeremonyVerifyConfig) -> Result<()> {
 
     let share_id = share.id;
 
-    // 4. Decrypt the share with the yubikey via gpg. Only the CIPHERTEXT is
-    //    written to the temp file; the decrypted bytes stream over gpg's stdout
-    //    pipe into memory and never touch disk.
-    let mut ciphertext_file = NamedTempFile::new().context("create temp file for ciphertext")?;
-    ciphertext_file
-        .write_all(share.armored_ciphertext.as_bytes())
-        .context("write ciphertext to temp file")?;
-    let mut decryptor = decrypt_with_gpg(ciphertext_file.path(), cfg.gpg_homedir.as_deref())?;
-    let mut plaintext = Vec::with_capacity(32);
-    decryptor
-        .read_to_end(&mut plaintext)
-        .context("read decrypted share from gpg")?;
-    // `ciphertext_file` drops here, unlinking the ciphertext temp file.
-    drop(ciphertext_file);
+    // 4. Decrypt the share with the yubikey via gpg. The ciphertext is piped
+    //    into gpg over stdin; decrypted bytes stream back into memory.
+    let plaintext = decrypt_armored_via_gpg(&share.armored_ciphertext, cfg.gpg_homedir.as_deref())?;
 
     let scalar_bytes: [u8; 32] = plaintext
         .as_slice()
@@ -401,21 +387,6 @@ pub async fn verify(cfg: CeremonyVerifyConfig) -> Result<()> {
         hex::encode(&expected_commitment.digest)
     );
     Ok(())
-}
-
-/// Load and validate each KP's armored OpenPGP cert, logging the fingerprint +
-/// assigned share id for each. Returns the certs in config order.
-fn load_kp_certs(paths: &[PathBuf]) -> Result<Vec<PgpPublicCert>> {
-    let mut certs = Vec::with_capacity(paths.len());
-    for path in paths {
-        let armored = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read KP cert at {}", path.display()))?;
-        let cert = PgpPublicCert::new(armored)
-            .with_context(|| format!("invalid PGP cert at {}", path.display()))?;
-        info!(fingerprint = %cert, path = %path.display(), "loaded KP cert");
-        certs.push(cert);
-    }
-    Ok(certs)
 }
 
 /// Validated ceremony state. It may come from the live `SetupNewKeyResponse` or
