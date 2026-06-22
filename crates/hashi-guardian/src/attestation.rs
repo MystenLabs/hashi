@@ -58,8 +58,9 @@ pub fn get_attestation(signing_pk: &GuardianPubKey) -> GuardianResult<NitroAttes
 }
 
 #[cfg(any(test, feature = "non-enclave-dev"))]
-pub fn get_attestation(_: &GuardianPubKey) -> GuardianResult<NitroAttestation> {
-    Ok(NitroAttestation::new(
-        b"mock_attestation_document_hex".to_vec(),
-    ))
+pub fn get_attestation(signing_pk: &GuardianPubKey) -> GuardianResult<NitroAttestation> {
+    // No NSM off-enclave to produce a real document, so emit a mock binding the
+    // signing key + an all-zero PCR0. A `non-enclave-dev` `verify` checks that
+    // binding (`verify_mock_attestation`) in place of the COSE signature.
+    Ok(NitroAttestation::mock(signing_pk, &[0u8; 48]))
 }

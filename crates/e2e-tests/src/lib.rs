@@ -253,7 +253,8 @@ impl TestNetworksBuilder {
         let guardian_btc_pubkey = guardian_harness.ensure_btc_pubkey()?;
         let guardian_config = hashi::publish::GuardianConfig {
             url: guardian_harness.endpoint().to_string(),
-            // Non-Nitro dev: attestation is a no-op, so an all-zero build is fine.
+            // Non-Nitro dev: no real enclave to attest, so leave the build
+            // unpinned (empty git revision) — the node verifies signature-only.
             git_revision: String::new(),
             pcr0: vec![0u8; 48],
             btc_public_key: guardian_btc_pubkey.serialize().to_vec(),
