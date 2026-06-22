@@ -193,6 +193,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
     // guardian in a k8s cluster — the attestation gate lands when we move
     // to Nitro.
     let verified = resp
+        // TODO: Thread PCR config into dev bootstrap and use `verify` for attestation/PCR checks.
         .verify_signed_info_without_attestation()
         .map_err(|e| anyhow!("verify GuardianInfo signature: {e:?}"))?;
     let session_id = verified.session_id;
@@ -260,6 +261,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
     let post_resp = GetGuardianInfoResponse::try_from(post_resp_pb)
         .map_err(|e| anyhow!("decode post-ProvisionerInit GetGuardianInfoResponse: {e:?}"))?;
     let post_session_id = post_resp
+        // TODO: Reuse dev bootstrap PCR config here and use `verify` for attestation/PCR checks.
         .verify_signed_info_without_attestation()
         .map_err(|e| anyhow!("verify post-ProvisionerInit GuardianInfo signature: {e:?}"))?
         .session_id;

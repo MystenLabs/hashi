@@ -841,6 +841,7 @@ impl Hashi {
                 );
                 anyhow::anyhow!("parse GetGuardianInfoResponse: {e:?}")
             })?;
+        // TODO: Thread PCR config into Hashi nodes and use `verify` for attestation/PCR checks.
         let verified = resp.verify_signed_info_without_attestation().map_err(|e| {
             self.metrics.record_guardian_bootstrap_outcome(
                 metrics::GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID,
