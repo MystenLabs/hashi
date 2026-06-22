@@ -3,6 +3,17 @@
 
 //! Shared KP-roster config + ceremony-state verification, used by both the
 //! `ceremony verify` and `provision` commands.
+//!
+//! Both commands need to:
+//! - load a roster of KP OpenPGP certs
+//! - discover the latest attested ceremony from S3
+//! - validate the ceremony's `secret_sharing_instance` against expected params
+//! - confirm every encrypted share in `shares/` is addressed only to its
+//!   labeled cert (without decrypting)
+//!
+//! `provision` additionally decrypts one share via the yubikey and re-encrypts
+//! it to a new guardian. The decryption helper lives here so both commands
+//! share the same gpg-streaming pattern.
 
 use std::ops::Deref;
 use std::path::Path;
@@ -21,7 +32,6 @@ use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::SecretSharingParams;
 use hashi_types::guardian::SetupNewKeyResponse;
 use hashi_types::guardian::Share;
-use hashi_types::guardian::SharesLogMessage;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::cert_owns_key_handle;
 use hashi_types::pgp::decrypt_armored_via_gpg;
@@ -35,7 +45,10 @@ use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
 /// Common KP-roster config: the sharing params, the guardian's S3 log bucket,
-/// the full KP cert roster, and the expected enclave measurement.
+/// the full KP cert roster, and the expected enclave measurement. Shared (via
+/// `#[serde(flatten)]`) by `ceremony run`, `ceremony verify`, and `provision` —
+/// every command that needs to discover and verify a ceremony against an
+/// expected KP set.
 #[derive(Deserialize)]
 pub struct KpRosterConfig {
     /// Total number of shares. Must equal `kp_pgp_cert_paths.len()`.
@@ -46,12 +59,12 @@ pub struct KpRosterConfig {
     pub guardian_s3: S3Config,
     /// Paths to each KP's armored OpenPGP public cert. Order matters for
     /// `ceremony run` (the cert at index `i` is assigned share id `i + 1`); for
-    /// read-only commands, shares are matched by fingerprint so order is
-    /// irrelevant.
+    /// the read-only commands (`ceremony verify`, `provision`), shares are
+    /// matched by fingerprint so order is irrelevant.
     pub kp_pgp_cert_paths: Vec<PathBuf>,
     /// Expected enclave-image measurement: PCR0 as hex, pinned against every
-    /// session's attestation. Required even in non-Nitro dev, where the
-    /// attestation verifier is stubbed.
+    /// session's attestation. Required (a value is needed even in non-Nitro dev,
+    /// where verification is a no-op).
     pub expected_pcr0: BuildPcrs,
 }
 
@@ -71,8 +84,9 @@ impl KpRosterConfig {
     }
 }
 
-/// Validated ceremony state. It may come from the live `SetupNewKeyResponse` or
-/// be reconstructed from the guardian's `ceremony/` + `shares/` logs.
+/// Validated ceremony state. May come from the live `SetupNewKeyResponse`
+/// (`ceremony run`) or be reconstructed from the guardian's `ceremony/` +
+/// `shares/` logs (`ceremony verify`, `provision`).
 #[derive(Debug, PartialEq)]
 pub struct VerifiedCeremonyState {
     pub session_id: String,
@@ -121,6 +135,9 @@ impl VerifiedCeremonyState {
         )
     }
 
+    /// Assemble + validate from parts already scraped from S3 (the ceremony
+    /// log and the shares log). Use instead of [`Self::latest_from_s3`] when the
+    /// caller has already read those objects and wants to avoid a second walk.
     pub fn from_scraped(
         session_id: String,
         secret_sharing_instance: SecretSharingInstance,
@@ -168,27 +185,29 @@ impl VerifiedCeremonyState {
             "expected {expected_n} encrypted shares, got {}",
             self.encrypted_shares.len()
         );
-        info!("ceremony state verified: {expected_n} shares, sharing_seq {expected_sharing_seq}");
         Ok(())
     }
 
     /// Confirm the agreed `ceremony/` roster matches the recipient fingerprints
-    /// on the `shares/` ciphertexts.
+    /// on the `shares/` ciphertexts. The roster is ordered by share id, so this
+    /// check preserves the ceremony log's share-id-to-KP binding.
     pub fn ensure_roster_matches(&self, roster: &[KPFingerprint]) -> Result<()> {
         let got = self.encrypted_shares.recipient_roster();
         anyhow::ensure!(
             roster == got.as_slice(),
-            "ceremony/ roster differs from shares/ recipient fingerprints"
+            "ceremony/ roster differs from shares/ recipient fingerprints: expected \
+             {roster:?}, got {got:?}"
         );
         Ok(())
     }
 
     /// For each encrypted share, confirm (a) its `recipient_fingerprint` label
-    /// names exactly one of the operator-supplied certs, and (b) the ciphertext is
-    /// actually encrypted only to that cert (parsed via PKESK without decrypting).
+    /// names exactly one of the operator-supplied certs, and (b) the ciphertext
+    /// is actually encrypted only to that cert (parsed via PKESK without
+    /// decrypting).
     ///
-    /// Identity is by fingerprint, not positional index: a share is matched to its
-    /// cert by `recipient_fingerprint`, independent of ordering.
+    /// Identity is by fingerprint, not positional index — a share is matched to
+    /// its cert by `recipient_fingerprint`, independent of ordering.
     pub fn verify_encrypted_share_recipients(&self, certs: &[PgpPublicCert]) -> Result<()> {
         let by_fingerprint: std::collections::HashMap<KPFingerprint, &PgpPublicCert> =
             certs.iter().map(|c| (c.fingerprint(), c)).collect();
@@ -252,30 +271,6 @@ impl VerifiedCeremonyState {
         );
         Ok(())
     }
-
-    pub fn print_summary(&self) {
-        println!("Guardian key ceremony complete.");
-        println!("  session_id:        {}", self.session_id);
-        println!(
-            "  sharing_seq:       {}",
-            self.secret_sharing_instance.sharing_seq()
-        );
-        println!(
-            "  shares key:        {}",
-            SharesLogMessage::object_key(
-                &self.session_id,
-                self.secret_sharing_instance.sharing_seq()
-            )
-        );
-        println!("  share commitments:");
-        for commitment in self.secret_sharing_instance.commitments().iter() {
-            println!(
-                "    id {:<5} {}",
-                commitment.id.get(),
-                hex::encode(&commitment.digest)
-            );
-        }
-    }
 }
 
 /// Confirm this KP's own cert is one of the operator-supplied roster certs.
@@ -291,14 +286,15 @@ pub fn ensure_cert_in_roster(kp_cert: &PgpPublicCert, certs: &[PgpPublicCert]) -
 
 /// Decrypt a KP's encrypted share via the yubikey-backed gpg agent, returning
 /// the share wrapped in a [`DecryptedShare`] that wipes its scalar on drop.
-/// Nothing touches disk: gpg reads the ciphertext from piped stdin and streams
-/// the plaintext over stdout into memory.
+/// Nothing touches disk: gpg reads the ciphertext from a piped stdin and
+/// streams the plaintext over its stdout pipe into memory.
 ///
-/// Zeroization scope: the gpg plaintext bytes, the intermediate scalar byte
-/// array, and the returned wrapper's inner [`Scalar`] are zeroed on drop.
-/// `k256::Scalar` is `Copy`, so the compiler may produce transient stack copies
-/// inside code this helper calls. The named locations this code owns are wiped
-/// deterministically.
+/// **Zeroization scope:** the gpg plaintext bytes, the intermediate scalar
+/// byte array, and the returned wrapper's inner [`Scalar`] are zeroed on drop.
+/// `k256::Scalar` is `Copy`, so the compiler may produce transient stack
+/// copies (e.g. inside `verify_share` / `build_from_share`) that this can't
+/// reach — those are wiped only when the process exits. The named locations
+/// this code owns are wiped deterministically.
 pub fn decrypt_share(share: &KPEncryptedShare, homedir: Option<&Path>) -> Result<DecryptedShare> {
     let plaintext = Zeroizing::new(decrypt_armored_via_gpg(&share.armored_ciphertext, homedir)?);
     let scalar = scalar_from_decrypted_plaintext(&plaintext)?;
@@ -310,7 +306,8 @@ pub fn decrypt_share(share: &KPEncryptedShare, homedir: Option<&Path>) -> Result
 
 /// Owning wrapper around a decrypted [`Share`] that wipes the scalar value on
 /// drop. Use `&*share` to access the inner [`Share`] for commitment
-/// verification. See [`decrypt_share`] for the zeroization scope.
+/// verification / re-encryption. See [`decrypt_share`] for the zeroization
+/// scope.
 pub struct DecryptedShare(Share);
 
 impl Deref for DecryptedShare {
@@ -327,9 +324,9 @@ impl Drop for DecryptedShare {
     }
 }
 
-/// Parse decrypted plaintext bytes into a secp256k1 scalar. Extracted from
-/// [`decrypt_share`] so byte-length and canonical-scalar checks are testable
-/// without invoking gpg.
+/// Parse the decrypted plaintext bytes into a secp256k1 scalar. Extracted from
+/// [`decrypt_share`] so the byte-length and canonical-scalar checks are
+/// unit-testable without invoking gpg.
 fn scalar_from_decrypted_plaintext(plaintext: &[u8]) -> Result<Scalar> {
     let src: &[u8; 32] = plaintext
         .try_into()
@@ -343,7 +340,6 @@ fn scalar_from_decrypted_plaintext(plaintext: &[u8]) -> Result<Scalar> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hashi_types::guardian::KPEncryptedShare;
     use hashi_types::guardian::ShareCommitment;
     use hashi_types::guardian::ShareCommitments;
     use hashi_types::pgp::encrypt_armored;
@@ -464,25 +460,37 @@ mod tests {
     }
 
     #[test]
-    fn verified_ceremony_state_matches_roster_by_share_id() {
+    fn verified_ceremony_state_matches_roster() {
+        // Shares arrive in arbitrary id order (`[3, 1, 2]`), but
+        // KPEncryptedShares normalizes them by share id. The ceremony roster is
+        // ordered by share id too, so a permutation must fail.
         let resp = response(&[3, 1, 2], &[1, 2, 3]);
         let state = VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2)
             .expect("valid state");
-        let roster = vec![
+        let canonical = vec![
             "DUMMY FINGERPRINT 1".to_string(),
             "DUMMY FINGERPRINT 2".to_string(),
             "DUMMY FINGERPRINT 3".to_string(),
         ];
-        state
-            .ensure_roster_matches(&roster)
-            .expect("roster is ordered by share id");
+        let reordered = vec![
+            "DUMMY FINGERPRINT 3".to_string(),
+            "DUMMY FINGERPRINT 1".to_string(),
+            "DUMMY FINGERPRINT 2".to_string(),
+        ];
 
-        let wrong_roster = vec![
-            "DUMMY FINGERPRINT 3".to_string(),
-            "DUMMY FINGERPRINT 2".to_string(),
+        state
+            .ensure_roster_matches(&canonical)
+            .expect("canonical roster matches");
+        let err = state.ensure_roster_matches(&reordered).unwrap_err();
+        assert!(format!("{err}").contains("roster differs"), "{err}");
+
+        // A genuinely different fingerprint set must still fail.
+        let different = vec![
             "DUMMY FINGERPRINT 1".to_string(),
+            "DUMMY FINGERPRINT 2".to_string(),
+            "DUMMY FINGERPRINT 9".to_string(),
         ];
-        let err = state.ensure_roster_matches(&wrong_roster).unwrap_err();
+        let err = state.ensure_roster_matches(&different).unwrap_err();
         assert!(format!("{err}").contains("roster differs"), "{err}");
     }
 
