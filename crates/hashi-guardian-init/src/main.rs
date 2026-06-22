@@ -15,7 +15,7 @@ mod fetch_info;
 mod generate_master_key;
 mod heartbeat_checks;
 mod limiter_recovery;
-mod provisioner;
+mod provision;
 
 #[derive(Parser)]
 #[command(name = "hashi-guardian-init")]
@@ -32,9 +32,9 @@ enum Command {
         #[command(subcommand)]
         command: CeremonyCommand,
     },
-    /// Run a key provisioner's init checks against guardian S3 logs and emit its share.
+    /// Run a key provisioner's init checks and submit its share to the relay.
     Provision {
-        /// Path to provisioner-init YAML config file.
+        /// Path to provision YAML config file.
         #[arg(long)]
         config: PathBuf,
     },
@@ -117,8 +117,8 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Command::Provision { config } => {
-            let cfg = provisioner::ProvisionerConfig::load_yaml(&config)?;
-            provisioner::run(cfg).await?;
+            let cfg = provision::ProvisionConfig::load_yaml(&config)?;
+            provision::run(cfg).await?;
         }
         Command::Tools { command } => match command {
             ToolsCommand::DevBootstrap { config, args } => {
