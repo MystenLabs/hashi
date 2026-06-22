@@ -4,6 +4,8 @@
 //! Shared KP-roster config + ceremony-state verification, used by both the
 //! `ceremony verify` and `provision` commands.
 
+use std::ops::Deref;
+use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -11,18 +13,26 @@ use anyhow::Result;
 use anyhow::anyhow;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::BuildPcrs;
+use hashi_types::guardian::KPEncryptedShare;
 use hashi_types::guardian::KPEncryptedShares;
 use hashi_types::guardian::KPFingerprint;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::SecretSharingParams;
 use hashi_types::guardian::SetupNewKeyResponse;
+use hashi_types::guardian::Share;
 use hashi_types::guardian::SharesLogMessage;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::cert_owns_key_handle;
+use hashi_types::pgp::decrypt_armored_via_gpg;
 use hashi_types::pgp::pgp_message_recipients;
+use k256::FieldBytes;
+use k256::Scalar;
+use k256::elliptic_curve::PrimeField;
 use serde::Deserialize;
 use tracing::info;
+use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 /// Common KP-roster config: the sharing params, the guardian's S3 log bucket,
 /// the full KP cert roster, and the expected enclave measurement.
@@ -279,6 +289,57 @@ pub fn ensure_cert_in_roster(kp_cert: &PgpPublicCert, certs: &[PgpPublicCert]) -
     Ok(())
 }
 
+/// Decrypt a KP's encrypted share via the yubikey-backed gpg agent, returning
+/// the share wrapped in a [`DecryptedShare`] that wipes its scalar on drop.
+/// Nothing touches disk: gpg reads the ciphertext from piped stdin and streams
+/// the plaintext over stdout into memory.
+///
+/// Zeroization scope: the gpg plaintext bytes, the intermediate scalar byte
+/// array, and the returned wrapper's inner [`Scalar`] are zeroed on drop.
+/// `k256::Scalar` is `Copy`, so the compiler may produce transient stack copies
+/// inside code this helper calls. The named locations this code owns are wiped
+/// deterministically.
+pub fn decrypt_share(share: &KPEncryptedShare, homedir: Option<&Path>) -> Result<DecryptedShare> {
+    let plaintext = Zeroizing::new(decrypt_armored_via_gpg(&share.armored_ciphertext, homedir)?);
+    let scalar = scalar_from_decrypted_plaintext(&plaintext)?;
+    Ok(DecryptedShare(Share {
+        id: share.id,
+        value: scalar,
+    }))
+}
+
+/// Owning wrapper around a decrypted [`Share`] that wipes the scalar value on
+/// drop. Use `&*share` to access the inner [`Share`] for commitment
+/// verification. See [`decrypt_share`] for the zeroization scope.
+pub struct DecryptedShare(Share);
+
+impl Deref for DecryptedShare {
+    type Target = Share;
+
+    fn deref(&self) -> &Share {
+        &self.0
+    }
+}
+
+impl Drop for DecryptedShare {
+    fn drop(&mut self) {
+        self.0.value.zeroize();
+    }
+}
+
+/// Parse decrypted plaintext bytes into a secp256k1 scalar. Extracted from
+/// [`decrypt_share`] so byte-length and canonical-scalar checks are testable
+/// without invoking gpg.
+fn scalar_from_decrypted_plaintext(plaintext: &[u8]) -> Result<Scalar> {
+    let src: &[u8; 32] = plaintext
+        .try_into()
+        .map_err(|_| anyhow!("decrypted share is {} bytes, expected 32", plaintext.len()))?;
+    let mut scalar_bytes = Zeroizing::new([0u8; 32]);
+    scalar_bytes.copy_from_slice(src);
+    Option::<Scalar>::from(Scalar::from_repr(FieldBytes::from(*scalar_bytes)))
+        .ok_or_else(|| anyhow!("decrypted share is not a valid secp256k1 scalar"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,5 +557,28 @@ mod tests {
             format!("{err}").contains("not among the configured"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn scalar_from_decrypted_plaintext_accepts_32_bytes() {
+        // Any non-zero, sub-curve-order byte pattern is a valid scalar.
+        let bytes = [1u8; 32];
+        scalar_from_decrypted_plaintext(&bytes).expect("32 bytes should parse to a scalar");
+    }
+
+    #[test]
+    fn scalar_from_decrypted_plaintext_rejects_wrong_length() {
+        assert!(scalar_from_decrypted_plaintext(&[1u8; 31]).is_err());
+        assert!(scalar_from_decrypted_plaintext(&[1u8; 33]).is_err());
+        assert!(scalar_from_decrypted_plaintext(&[]).is_err());
+    }
+
+    #[test]
+    fn scalar_from_decrypted_plaintext_rejects_non_canonical() {
+        // secp256k1 order n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141.
+        // A 32-byte value >= n is non-canonical and must be rejected.
+        let mut over_order = [0xFFu8; 32];
+        over_order[31] = 0x42; // > 0x41 (low byte of n)
+        assert!(scalar_from_decrypted_plaintext(&over_order).is_err());
     }
 }
