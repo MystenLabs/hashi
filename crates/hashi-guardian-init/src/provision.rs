@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Context;
+use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::EncPubKey;
@@ -24,27 +25,29 @@ pub use crate::config::ProvisionConfig;
 pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
     cfg.common.validate()?;
 
-    // One reader for the whole run: it owns the S3 client and the trusted-key
-    // cache, so each session's attestation is verified once whichever check
-    // reads that session first.
-    let build_pcrs = cfg.common.expected_pcr0.clone();
-    let mut reader = GuardianReader::new(&cfg.common.guardian_s3, build_pcrs.clone()).await?;
+    // One reader for the whole run: it owns the S3 client and a cache that
+    // reuses verified session info and exposes attested build revisions to the caller.
+    let allowlist = cfg.common.pcr_allowlist();
+    let mut reader = GuardianReader::new(&cfg.common.guardian_s3, allowlist.clone()).await?;
     let master_g = cfg.mpc_master_g()?;
 
     // 1. Check no past enclave's heartbeats remain & gather the latest enclave's session id.
     let session_id = heartbeat_checks::heartbeat_audit(&mut reader).await?;
     info!(session_id, "heartbeat checks passed for selected session");
 
-    // 2. Check that the enclave's config is as expected: valid attestation,
-    // expected S3 bucket, and share commitments matching the authoritative
-    // `ceremony/` log (written from initial key setup onward).
-    let guardian_info = reader.get_info(&session_id).await?;
+    // 2. Check that the enclave's config is as expected: current build, valid
+    // attestation, expected S3 bucket, and share commitments matching the
+    // authoritative `ceremony/` log (written from initial key setup onward).
+    let verified_session = reader
+        .get_session_info(&session_id, BuildPolicy::Current)
+        .await?;
+    let guardian_info = verified_session.info;
     let (
         enclave_ss_instance,
         enclave_bucket_info,
         enclave_enc_pubkey_bytes,
         enclave_state_hash,
-        _enclave_git_revision,
+        enclave_git_revision,
         enclave_btc_pubkey,
         enclave_limiter_state,
         enclave_limiter_config,
@@ -54,6 +57,12 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         .clone()
         .into_parts()
         .context("Guardian info has missing fields")?;
+    anyhow::ensure!(
+        enclave_git_revision == allowlist.current_build().git_revision(),
+        "Guardian git revision mismatch: expected {}, got {}",
+        allowlist.current_build().git_revision(),
+        enclave_git_revision
+    );
     anyhow::ensure!(
         cfg.common.guardian_s3.bucket_info == enclave_bucket_info,
         "Guardian bucket info mismatch: expected {:?}, got {:?}",
@@ -78,7 +87,7 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
     );
 
     let instance = reader
-        .read_latest_ceremony_instance()
+        .read_latest_ceremony_instance(BuildPolicy::AnyAllowlisted)
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;
     anyhow::ensure!(
@@ -121,7 +130,10 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
     // latest signed `committee-update/` log; before any update exists (genesis) we
     // fall back to the trusted local value. `master_g` is the MPC committee `G`
     // (see config doc), NOT the guardian's own BTC key.
-    let committee = match reader.read_latest_committee().await? {
+    let committee = match reader
+        .read_latest_committee(BuildPolicy::AnyAllowlisted)
+        .await?
+    {
         Some(scraped) => scraped,
         None => cfg
             .hashi_committee_genesis
@@ -173,7 +185,7 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
             &session_id,
             guardian_info,
             encrypted_share,
-            &build_pcrs,
+            allowlist.current_build(),
         )
         .await?;
     }
@@ -192,7 +204,7 @@ async fn submit_provisioner_init_to_relay(
     expected_session_id: &str,
     expected_guardian_info: GuardianInfo,
     encrypted_share: GuardianEncryptedShare,
-    build_pcrs: &BuildPcrs,
+    current_build: &BuildPcrs,
 ) -> anyhow::Result<()> {
     let mut client =
         pb::guardian_service_client::GuardianServiceClient::connect(endpoint.to_string())
@@ -203,7 +215,7 @@ async fn submit_provisioner_init_to_relay(
         &mut client,
         expected_session_id,
         expected_guardian_info,
-        build_pcrs,
+        current_build,
     )
     .await
     .with_context(|| "relay endpoint pre-check failed")?;
@@ -219,7 +231,7 @@ async fn prechecks(
     client: &mut pb::guardian_service_client::GuardianServiceClient<tonic::transport::Channel>,
     expected_session_id: &str,
     expected_guardian_info: GuardianInfo,
-    build_pcrs: &BuildPcrs,
+    current_build: &BuildPcrs,
 ) -> anyhow::Result<()> {
     let resp_pb = client
         .get_guardian_info(pb::GetGuardianInfoRequest {})
@@ -232,7 +244,7 @@ async fn prechecks(
 
     // Attestation-anchored, signature-verified GuardianInfo in one call.
     let verified = resp
-        .verify(build_pcrs)
+        .verify(current_build)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let info = verified.info;
 

@@ -68,7 +68,7 @@ impl GuardianWithdrawalsPoller {
     // Note: Throws an error if there is a S3 connectivity issue
     pub async fn new(config: &Config, start: UnixSeconds) -> anyhow::Result<Self> {
         Ok(Self {
-            reader: GuardianReader::new(&config.guardian, config.build_pcrs()?).await?,
+            reader: GuardianReader::new(&config.guardian, config.pcr_allowlist()).await?,
             cursor: withdraw_cursor(start),
         })
     }
@@ -85,6 +85,10 @@ impl GuardianWithdrawalsPoller {
         }
 
         let verified_logs = self.reader.read_dir(&self.cursor).await?;
+        // Withdrawal polling may replay historical buckets during an upgrade, so
+        // this caller accepts any record whose session build verifies against the
+        // configured allowlist. Add a cursor/cutoff policy here if tailing must
+        // require the current build after the upgrade window.
         let withdrawal_events = verified_logs
             .into_iter()
             .map(VerifiedWithdrawal::try_from)
