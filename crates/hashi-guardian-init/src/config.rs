@@ -3,9 +3,7 @@
 
 use anyhow::Context;
 use hashi_types::bitcoin::HashiMasterG;
-use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::LimiterConfig;
-use hashi_types::guardian::S3Config;
 use hashi_types::guardian::Share;
 use hashi_types::guardian::ShareID;
 use hashi_types::move_types::Committee as CommitteeRepr;
@@ -16,16 +14,17 @@ use serde::Deserialize;
 use std::num::NonZeroU16;
 use std::path::Path;
 
+use crate::kp_roster::KpRosterConfig;
+
 #[derive(Deserialize)]
 pub struct ProvisionConfig {
+    #[serde(flatten)]
+    pub common: KpRosterConfig,
     /// The Key Provisioner's secret share.
     pub share: ShareInput,
     /// Relay endpoint the KP's encrypted share is forwarded to. The relay
     /// collects T-of-N shares before submitting them to the guardian.
     pub relay_endpoint: Option<String>,
-
-    /// Config
-    pub s3: S3Config,
 
     /// Genesis committee — required only at genesis, when `committee-update/` is
     /// still empty; omit it once any update has been logged (it's scraped from
@@ -37,11 +36,6 @@ pub struct ProvisionConfig {
     /// MPC committee `G` (on-chain `CommitteeSet.mpc_public_key`) as hex of `bcs(G)`;
     /// the derivation master (NOT the guardian's own key). Must match operator init.
     pub hashi_btc_master_pubkey_hex: String,
-
-    /// Expected enclave-image measurement: PCR0 as hex, pinned against every
-    /// session's attestation. Required (a value is needed even in non-Nitro dev,
-    /// where verification is a no-op).
-    pub expected_pcr0: BuildPcrs,
 }
 
 #[derive(Debug, Clone, Deserialize)]

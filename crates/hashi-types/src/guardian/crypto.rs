@@ -815,6 +815,17 @@ mod tests {
     }
 
     #[test]
+    fn kp_encrypted_shares_rejects_wrong_share_ids() {
+        let err = KPEncryptedShares::new(vec![
+            test_kp_encrypted_share(1),
+            test_kp_encrypted_share(2),
+            test_kp_encrypted_share(4),
+        ])
+        .expect_err("ids [1, 2, 4] are not exactly 1..=n");
+        assert!(format!("{err}").contains("share ids"), "{err}");
+    }
+
+    #[test]
     fn kp_encrypted_shares_deserialize_through_validation() {
         let json = serde_json::to_string(&vec![
             test_kp_encrypted_share(2),

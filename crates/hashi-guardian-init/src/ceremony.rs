@@ -4,9 +4,9 @@
 //! Production guardian key ceremony commands.
 //!
 //! `ceremony run` drives a fresh ceremony-mode guardian through genesis BTC key setup:
-//! [`OperatorInit`] (ceremony mode, S3-only) → [`SetupNewKey`] → inspect each
+//! [`OperatorInit`] (ceremony mode, S3-only) -> [`SetupNewKey`] -> inspect each
 //! returned encrypted share to confirm it is addressed to the expected KP cert
-//! (without decrypting) → cross-check the guardian's `ceremony/` audit log and
+//! (without decrypting) -> cross-check the guardian's `ceremony/` audit log and
 //! `shares/` recovery log.
 //!
 //! [`OperatorInit`]: hashi_types::guardian::OperatorInitRequest
@@ -21,26 +21,17 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::ensure;
 use hashi_guardian::s3_reader::GuardianReader;
-use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianSigned;
-use hashi_types::guardian::KPEncryptedShares;
-use hashi_types::guardian::KPFingerprint;
 use hashi_types::guardian::OperatorInitRequest;
-use hashi_types::guardian::S3Config;
-use hashi_types::guardian::SecretSharingInstance;
-use hashi_types::guardian::SecretSharingParams;
 use hashi_types::guardian::SetupNewKeyRequest;
 use hashi_types::guardian::SetupNewKeyResponse;
 use hashi_types::guardian::Share;
-use hashi_types::guardian::SharesLogMessage;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
 use hashi_types::guardian::proto_conversions::setup_new_key_request_to_pb;
 use hashi_types::pgp::PgpPublicCert;
-use hashi_types::pgp::cert_owns_key_handle;
 use hashi_types::pgp::decrypt_armored_via_gpg;
 use hashi_types::pgp::load_certs;
-use hashi_types::pgp::pgp_message_recipients;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use k256::FieldBytes;
@@ -49,43 +40,14 @@ use k256::elliptic_curve::PrimeField;
 use serde::Deserialize;
 use tracing::info;
 
-#[derive(Deserialize)]
-pub struct CeremonyCommonConfig {
-    /// Total number of shares. Must equal `kp_pgp_cert_paths.len()`.
-    pub num_shares: usize,
-    /// Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
-    pub threshold: usize,
-    /// S3 config for the guardian's log bucket (object-lock enabled).
-    pub guardian_s3: S3Config,
-    /// Paths to each KP's armored OpenPGP public cert. Order matters: the cert
-    /// at index `i` (0-based) is assigned share id `i + 1`.
-    pub kp_pgp_cert_paths: Vec<PathBuf>,
-    /// Expected enclave-image measurement: PCR0 as hex, pinned against every
-    /// session's attestation. Required even in non-Nitro dev, where the
-    /// attestation verifier is stubbed.
-    pub expected_pcr0: BuildPcrs,
-}
-
-impl CeremonyCommonConfig {
-    fn validate(&self) -> Result<()> {
-        SecretSharingParams::new(self.num_shares, self.threshold)
-            .map_err(|e| anyhow!("invalid sharing params: {e:?}"))?;
-
-        let cert_count = self.kp_pgp_cert_paths.len();
-        ensure!(
-            self.num_shares == cert_count,
-            "num_shares ({}) must equal the number of KP certs ({cert_count})",
-            self.num_shares
-        );
-
-        Ok(())
-    }
-}
+use crate::kp_roster::KpRosterConfig;
+use crate::kp_roster::VerifiedCeremonyState;
+use crate::kp_roster::ensure_cert_in_roster;
 
 #[derive(Deserialize)]
 pub struct CeremonyRunConfig {
     #[serde(flatten)]
-    pub common: CeremonyCommonConfig,
+    pub common: KpRosterConfig,
     /// gRPC endpoint of the ceremony-mode guardian.
     pub guardian_endpoint: String,
 }
@@ -102,7 +64,7 @@ impl CeremonyRunConfig {
 #[derive(Deserialize)]
 pub struct CeremonyVerifyConfig {
     #[serde(flatten)]
-    pub common: CeremonyCommonConfig,
+    pub common: KpRosterConfig,
     /// Path to this KP's armored OpenPGP public cert (the one they exported and
     /// gave to the operator at `run` time). Used to derive the fingerprint that
     /// finds this KP's share in `shares/`, and to confirm the share's ciphertext
@@ -174,7 +136,7 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
         .context("OperatorInit RPC failed")?;
     info!("operator_init complete; guardian S3 logger installed");
 
-    // 5. get_guardian_info → verify attestation/PCRs and signed info → pin the
+    // 5. get_guardian_info -> verify attestation/PCRs and signed info -> pin the
     //    session id. This binds `signing_pub_key` (and thus the session) before
     //    we trust the SetupNewKey response we'll verify against it below.
     info!("calling GetGuardianInfo");
@@ -288,6 +250,7 @@ pub async fn verify(cfg: CeremonyVerifyConfig) -> Result<()> {
         .with_context(|| format!("invalid PGP cert at {}", cfg.kp_pgp_cert_path.display()))?;
     let want_fp = kp_cert.fingerprint();
     info!(fingerprint = %want_fp, "verifying ceremony share");
+    ensure_cert_in_roster(&kp_cert, &certs)?;
 
     // 1. Discover and verify the latest ceremony from the immutable log
     //    (attestation-verified once via the reader's session-key cache).
@@ -387,396 +350,4 @@ pub async fn verify(cfg: CeremonyVerifyConfig) -> Result<()> {
         hex::encode(&expected_commitment.digest)
     );
     Ok(())
-}
-
-/// Validated ceremony state. It may come from the live `SetupNewKeyResponse` or
-/// be reconstructed from the guardian's `ceremony/` + `shares/` logs.
-#[derive(Debug, PartialEq)]
-struct VerifiedCeremonyState {
-    session_id: String,
-    encrypted_shares: KPEncryptedShares,
-    secret_sharing_instance: SecretSharingInstance,
-}
-
-impl VerifiedCeremonyState {
-    fn from_response(
-        response: SetupNewKeyResponse,
-        session_id: String,
-        expected_sharing_seq: u64,
-        expected_n: usize,
-        expected_t: usize,
-    ) -> Result<Self> {
-        let state = Self {
-            session_id,
-            encrypted_shares: response.encrypted_shares,
-            secret_sharing_instance: response.secret_sharing_instance,
-        };
-        state.validate(expected_sharing_seq, expected_n, expected_t)?;
-        Ok(state)
-    }
-
-    async fn latest_from_s3(
-        reader: &mut GuardianReader,
-        expected_sharing_seq: u64,
-        expected_n: usize,
-        expected_t: usize,
-    ) -> Result<Self> {
-        let (session_id, instance, roster) = reader
-            .read_latest_ceremony()
-            .await?
-            .ok_or_else(|| anyhow!("no ceremony logs found in guardian S3 bucket"))?;
-        let encrypted_shares = reader
-            .read_shares(&session_id, instance.sharing_seq())
-            .await?;
-        let state = Self {
-            session_id,
-            encrypted_shares,
-            secret_sharing_instance: instance,
-        };
-
-        state.validate(expected_sharing_seq, expected_n, expected_t)?;
-        state.ensure_roster_matches(&roster)?;
-        Ok(state)
-    }
-
-    /// Confirm the state uses the expected ceremony instance and carries
-    /// exactly `expected_n` encrypted shares.
-    fn validate(
-        &self,
-        expected_sharing_seq: u64,
-        expected_n: usize,
-        expected_t: usize,
-    ) -> Result<()> {
-        ensure!(
-            self.secret_sharing_instance.sharing_seq() == expected_sharing_seq,
-            "ceremony sharing_seq ({}) differs from expected ({expected_sharing_seq})",
-            self.secret_sharing_instance.sharing_seq()
-        );
-        ensure!(
-            self.secret_sharing_instance.num_shares() == expected_n,
-            "ceremony num_shares ({}) differs from expected ({expected_n})",
-            self.secret_sharing_instance.num_shares()
-        );
-        ensure!(
-            self.secret_sharing_instance.threshold() == expected_t,
-            "ceremony threshold ({}) differs from expected ({expected_t})",
-            self.secret_sharing_instance.threshold()
-        );
-        ensure!(
-            self.encrypted_shares.len() == expected_n,
-            "expected {expected_n} encrypted shares, got {}",
-            self.encrypted_shares.len()
-        );
-        info!("ceremony state verified: {expected_n} shares, sharing_seq {expected_sharing_seq}");
-        Ok(())
-    }
-
-    /// Confirm the agreed `ceremony/` roster matches the recipient fingerprints
-    /// on the `shares/` ciphertexts.
-    fn ensure_roster_matches(&self, roster: &[KPFingerprint]) -> Result<()> {
-        let got = self.encrypted_shares.recipient_roster();
-        ensure!(
-            roster == got.as_slice(),
-            "ceremony/ roster differs from shares/ recipient fingerprints"
-        );
-        Ok(())
-    }
-
-    /// For each encrypted share, confirm (a) its `recipient_fingerprint` label
-    /// names exactly one of the operator-supplied certs, and (b) the ciphertext is
-    /// actually encrypted only to that cert (parsed via PKESK without decrypting).
-    ///
-    /// Identity is by fingerprint, not positional index — a share is matched to its
-    /// cert by `recipient_fingerprint`, independent of ordering.
-    fn verify_encrypted_share_recipients(&self, certs: &[PgpPublicCert]) -> Result<()> {
-        let by_fingerprint: std::collections::HashMap<KPFingerprint, &PgpPublicCert> =
-            certs.iter().map(|c| (c.fingerprint(), c)).collect();
-        ensure!(
-            by_fingerprint.len() == certs.len(),
-            "duplicate fingerprints among the supplied KP certs"
-        );
-
-        let mut expected_fingerprints: Vec<KPFingerprint> =
-            by_fingerprint.keys().cloned().collect();
-        expected_fingerprints.sort_unstable();
-        let mut labeled_fingerprints: Vec<KPFingerprint> = self
-            .encrypted_shares
-            .iter()
-            .map(|s| s.recipient_fingerprint.clone())
-            .collect();
-        labeled_fingerprints.sort_unstable();
-        ensure!(
-            labeled_fingerprints == expected_fingerprints,
-            "encrypted share recipient roster differs from expected KP certs: expected \
-             {expected_fingerprints:?}, got {labeled_fingerprints:?}"
-        );
-
-        for share in self.encrypted_shares.iter() {
-            let expected_cert = by_fingerprint
-                .get(&share.recipient_fingerprint)
-                .with_context(|| {
-                    format!(
-                        "share id {} is labeled for fingerprint {}, which is not among the \
-                             operator-supplied KP certs",
-                        share.id.get(),
-                        share.recipient_fingerprint
-                    )
-                })?;
-            let recipients = pgp_message_recipients(&share.armored_ciphertext)
-                .with_context(|| format!("parse PGP recipients for share id {}", share.id.get()))?;
-            ensure!(
-                !recipients.is_empty(),
-                "share id {} has no PGP recipients",
-                share.id.get()
-            );
-            for handle in &recipients {
-                ensure!(
-                    cert_owns_key_handle(expected_cert, handle),
-                    "share id {} (labeled {}) is encrypted to key {handle}, which is not in \
-                     that cert",
-                    share.id.get(),
-                    share.recipient_fingerprint
-                );
-            }
-            info!(
-                share_id = share.id.get(),
-                fingerprint = %share.recipient_fingerprint,
-                recipient_count = recipients.len(),
-                "verified share is encrypted only to its labeled cert"
-            );
-        }
-        info!(
-            "all {} shares encrypted to their labeled certs",
-            self.encrypted_shares.len()
-        );
-        Ok(())
-    }
-
-    fn print_summary(&self) {
-        println!("Guardian key ceremony complete.");
-        println!("  session_id:        {}", self.session_id);
-        println!(
-            "  sharing_seq:       {}",
-            self.secret_sharing_instance.sharing_seq()
-        );
-        println!(
-            "  shares key:        {}",
-            SharesLogMessage::object_key(
-                &self.session_id,
-                self.secret_sharing_instance.sharing_seq()
-            )
-        );
-        println!("  share commitments:");
-        for commitment in self.secret_sharing_instance.commitments().iter() {
-            println!(
-                "    id {:<5} {}",
-                commitment.id.get(),
-                hex::encode(&commitment.digest)
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use hashi_types::guardian::KPEncryptedShare;
-    use hashi_types::guardian::ShareCommitment;
-    use hashi_types::guardian::ShareCommitments;
-    use hashi_types::pgp::encrypt_armored;
-    use hashi_types::pgp::test_utils::mock_pgp_keypair;
-    use std::num::NonZeroU16;
-
-    fn share(id: u16) -> KPEncryptedShare {
-        KPEncryptedShare {
-            id: NonZeroU16::new(id).unwrap(),
-            recipient_fingerprint: format!("DUMMY FINGERPRINT {id}"),
-            armored_ciphertext: "dummy".into(),
-        }
-    }
-
-    fn commitments(ids: &[u16]) -> ShareCommitments {
-        let vec: Vec<ShareCommitment> = ids
-            .iter()
-            .map(|&i| ShareCommitment {
-                id: NonZeroU16::new(i).unwrap(),
-                digest: vec![i as u8],
-            })
-            .collect();
-        ShareCommitments::new(vec).unwrap()
-    }
-
-    fn response(shares: &[u16], commitment_ids: &[u16]) -> SetupNewKeyResponse {
-        response_with_instance(
-            shares,
-            SecretSharingInstance::new(commitments(commitment_ids), commitment_ids.len(), 2, 0)
-                .unwrap(),
-        )
-    }
-
-    fn response_with_instance(
-        shares: &[u16],
-        secret_sharing_instance: SecretSharingInstance,
-    ) -> SetupNewKeyResponse {
-        SetupNewKeyResponse {
-            encrypted_shares: KPEncryptedShares::new(shares.iter().map(|&i| share(i)).collect())
-                .unwrap(),
-            secret_sharing_instance,
-        }
-    }
-
-    fn mock_cert() -> PgpPublicCert {
-        let (public, _secret) = mock_pgp_keypair();
-        PgpPublicCert::new(public).unwrap()
-    }
-
-    fn encrypted_share(id: u16, cert: &PgpPublicCert) -> KPEncryptedShare {
-        KPEncryptedShare {
-            id: NonZeroU16::new(id).unwrap(),
-            recipient_fingerprint: cert.fingerprint(),
-            armored_ciphertext: encrypt_armored(&[id as u8; 32], cert).unwrap(),
-        }
-    }
-
-    fn encrypted_response(certs_by_share: &[&PgpPublicCert]) -> SetupNewKeyResponse {
-        let n = certs_by_share.len();
-        SetupNewKeyResponse {
-            encrypted_shares: KPEncryptedShares::new(
-                certs_by_share
-                    .iter()
-                    .enumerate()
-                    .map(|(i, cert)| encrypted_share((i + 1) as u16, cert))
-                    .collect(),
-            )
-            .unwrap(),
-            secret_sharing_instance: SecretSharingInstance::new(
-                commitments(&(1..=n as u16).collect::<Vec<_>>()),
-                n,
-                2,
-                0,
-            )
-            .unwrap(),
-        }
-    }
-
-    #[test]
-    fn verified_ceremony_state_accepts_well_formed() {
-        let resp = response(&[1, 2, 3], &[1, 2, 3]);
-        VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2)
-            .expect("well-formed response should pass");
-    }
-
-    #[test]
-    fn verified_ceremony_state_rejects_wrong_share_count() {
-        let resp = response(&[1, 2], &[1, 2, 3]);
-        let err =
-            VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2).unwrap_err();
-        assert!(format!("{err}").contains("encrypted shares"), "{err}");
-    }
-
-    #[test]
-    fn verified_ceremony_state_rejects_wrong_instance_num_shares() {
-        let resp = response(&[1, 2], &[1, 2]);
-        let err =
-            VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2).unwrap_err();
-        assert!(format!("{err}").contains("num_shares"), "{err}");
-    }
-
-    #[test]
-    fn verified_ceremony_state_rejects_wrong_instance_threshold() {
-        let instance = SecretSharingInstance::new(commitments(&[1, 2, 3]), 3, 3, 0).unwrap();
-        let resp = response_with_instance(&[1, 2, 3], instance);
-        let err =
-            VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2).unwrap_err();
-        assert!(format!("{err}").contains("threshold"), "{err}");
-    }
-
-    #[test]
-    fn verified_ceremony_state_rejects_wrong_instance_sharing_seq() {
-        let instance = SecretSharingInstance::new(commitments(&[1, 2, 3]), 3, 2, 1).unwrap();
-        let resp = response_with_instance(&[1, 2, 3], instance);
-        let err =
-            VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2).unwrap_err();
-        assert!(format!("{err}").contains("sharing_seq"), "{err}");
-    }
-
-    #[test]
-    fn kp_encrypted_shares_rejects_wrong_share_ids() {
-        let err = KPEncryptedShares::new(vec![share(1), share(2), share(4)]).unwrap_err();
-        assert!(format!("{err}").contains("share ids"), "{err}");
-    }
-
-    #[test]
-    fn verified_ceremony_state_matches_roster_by_share_id() {
-        let resp = response(&[3, 1, 2], &[1, 2, 3]);
-        let state = VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2)
-            .expect("valid state");
-        let roster = vec![
-            "DUMMY FINGERPRINT 1".to_string(),
-            "DUMMY FINGERPRINT 2".to_string(),
-            "DUMMY FINGERPRINT 3".to_string(),
-        ];
-        state
-            .ensure_roster_matches(&roster)
-            .expect("roster is ordered by share id");
-
-        let wrong_roster = vec![
-            "DUMMY FINGERPRINT 3".to_string(),
-            "DUMMY FINGERPRINT 2".to_string(),
-            "DUMMY FINGERPRINT 1".to_string(),
-        ];
-        let err = state.ensure_roster_matches(&wrong_roster).unwrap_err();
-        assert!(format!("{err}").contains("roster differs"), "{err}");
-    }
-
-    #[test]
-    fn verify_encrypted_share_recipients_accepts_reordered_expected_certs() {
-        let cert1 = mock_cert();
-        let cert2 = mock_cert();
-        let cert3 = mock_cert();
-        let resp = encrypted_response(&[&cert1, &cert2, &cert3]);
-        let state = VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2)
-            .expect("valid state");
-
-        state
-            .verify_encrypted_share_recipients(&[cert3, cert1, cert2])
-            .expect("recipient validation should be by fingerprint, not config order");
-    }
-
-    #[test]
-    fn verify_encrypted_share_recipients_rejects_duplicate_share_labels() {
-        let cert1 = mock_cert();
-        let cert2 = mock_cert();
-        let cert3 = mock_cert();
-        let resp = encrypted_response(&[&cert1, &cert1, &cert3]);
-        let state = VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2)
-            .expect("valid state");
-
-        let err = state
-            .verify_encrypted_share_recipients(&[cert1, cert2, cert3])
-            .unwrap_err();
-        assert!(
-            format!("{err}").contains("recipient roster differs"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn verify_encrypted_share_recipients_rejects_omitted_expected_cert() {
-        let cert1 = mock_cert();
-        let cert2 = mock_cert();
-        let cert3 = mock_cert();
-        let unexpected = mock_cert();
-        let resp = encrypted_response(&[&cert1, &cert2, &unexpected]);
-        let state = VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2)
-            .expect("valid state");
-
-        let err = state
-            .verify_encrypted_share_recipients(&[cert1, cert2, cert3])
-            .unwrap_err();
-        assert!(
-            format!("{err}").contains("recipient roster differs"),
-            "{err}"
-        );
-    }
 }
