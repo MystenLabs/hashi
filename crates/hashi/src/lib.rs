@@ -1060,29 +1060,6 @@ fn assert_test_only_config(sui_chain_id: &str, bitcoin_chain_id: &str, field_nam
     );
 }
 
-/// Verify the signature on the guardian's `/info` envelope under its
-/// own `signing_pub_key`. Caller is responsible for verifying that the
-/// pubkey itself matches on-chain first; this is the second leg of the
-/// trust chain (signed_info → enclave that holds the on-chain pubkey).
-#[cfg(test)]
-fn verify_guardian_signed_info(
-    signed_info: hashi_types::guardian::GuardianSigned<hashi_types::guardian::GuardianInfo>,
-    signing_pub_key: &hashi_types::guardian::GuardianPubKey,
-    metrics: &metrics::Metrics,
-) -> anyhow::Result<hashi_types::guardian::GuardianInfo> {
-    signed_info.verify(signing_pub_key).map_err(|e| {
-        metrics.record_guardian_bootstrap_outcome(
-            metrics::GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID,
-        );
-        tracing::error!(
-            error = ?e,
-            "FATAL: guardian /info signed_info signature invalid under its own \
-             signing_pub_key; refusing to seed or reconcile local limiter",
-        );
-        anyhow::anyhow!("guardian signed_info signature invalid")
-    })
-}
-
 /// `expected = None` skips the check (pre-feature chains).
 fn verify_signing_pub_key_matches(
     signing_pub_key: &hashi_types::guardian::GuardianPubKey,
@@ -1411,33 +1388,9 @@ mod test {
             .get()
     }
 
-    fn signature_invalid_count(metrics: &crate::metrics::Metrics) -> u64 {
-        metrics
-            .guardian_bootstrap_outcomes_total
-            .with_label_values(&[crate::metrics::GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID])
-            .get()
-    }
-
     fn random_signing_pubkey() -> hashi_types::guardian::GuardianPubKey {
         let signing_key = hashi_types::guardian::GuardianSignKeyPair::new(rand::thread_rng());
         signing_key.verification_key()
-    }
-
-    fn signed_guardian_info_for_test() -> (
-        hashi_types::guardian::GuardianSigned<hashi_types::guardian::GuardianInfo>,
-        hashi_types::guardian::GuardianPubKey,
-    ) {
-        let resp = hashi_types::guardian::GetGuardianInfoResponse::mock_for_testing();
-        let info = resp
-            .verify_signed_info_without_attestation()
-            .expect("mock /info must verify")
-            .info;
-        let signing_key = hashi_types::guardian::GuardianSignKeyPair::from([2u8; 32]);
-        let signing_pub_key = signing_key.verification_key();
-        (
-            hashi_types::guardian::GuardianSigned::new(info, &signing_key, 1234),
-            signing_pub_key,
-        )
     }
 
     #[test]
@@ -1475,42 +1428,6 @@ mod test {
             &metrics
         ));
         assert_eq!(key_mismatch_count(&metrics), 1);
-    }
-
-    #[test]
-    fn verify_guardian_signed_info_passes_for_valid_signature() {
-        let (signed_info, signing_pub_key) = signed_guardian_info_for_test();
-        let metrics = fresh_metrics();
-        assert!(
-            crate::verify_guardian_signed_info(signed_info, &signing_pub_key, &metrics,).is_ok()
-        );
-        assert_eq!(signature_invalid_count(&metrics), 0);
-    }
-
-    #[test]
-    fn verify_guardian_signed_info_fails_when_pubkey_did_not_sign() {
-        // Mock signs with key A, exposes pub_key_A. Verify under pub_key_B
-        // (random) — must fail and bump the metric.
-        let (signed_info, _) = signed_guardian_info_for_test();
-        let wrong_pubkey = random_signing_pubkey();
-        let metrics = fresh_metrics();
-        assert!(crate::verify_guardian_signed_info(signed_info, &wrong_pubkey, &metrics,).is_err());
-        assert_eq!(signature_invalid_count(&metrics), 1);
-    }
-
-    #[test]
-    fn verify_guardian_signed_info_fails_when_signature_tampered() {
-        let (mut signed_info, signing_pub_key) = signed_guardian_info_for_test();
-        // Flip a byte of the signature so verification under the original
-        // pubkey now fails.
-        let mut sig_bytes: [u8; 64] = signed_info.signature.to_bytes();
-        sig_bytes[0] ^= 0xff;
-        signed_info.signature = hashi_types::guardian::GuardianSignature::from(sig_bytes);
-        let metrics = fresh_metrics();
-        assert!(
-            crate::verify_guardian_signed_info(signed_info, &signing_pub_key, &metrics,).is_err()
-        );
-        assert_eq!(signature_invalid_count(&metrics), 1);
     }
 
     // --- guardian /info BTC pubkey verification ---
