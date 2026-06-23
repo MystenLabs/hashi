@@ -804,19 +804,20 @@ impl MpcService {
             }
             match self.submit_end_reconfig(target_epoch, &output).await {
                 Ok(()) => break,
-                Err(e) if is_non_retryable_reconfig_submission_error(&e) => {
-                    let msg = format!(
-                        "submit_end_reconfig for epoch {target_epoch} failed with non-retryable error: {e}"
-                    );
-                    error!("{msg}");
-                    panic!("{msg}");
-                }
                 Err(e) => {
-                    warn!(
-                        "submit_end_reconfig for epoch {} failed: {e}, retrying...",
-                        target_epoch
-                    );
-                    self.sleep_if_still_pending(target_epoch).await;
+                    if classify_reconfig_submission_error(&e).is_non_retryable() {
+                        let msg = format!(
+                            "submit_end_reconfig for epoch {target_epoch} failed with non-retryable error: {e}"
+                        );
+                        error!("{msg}");
+                        panic!("{msg}");
+                    } else {
+                        warn!(
+                            "submit_end_reconfig for epoch {} failed: {e}, retrying...",
+                            target_epoch
+                        );
+                        self.sleep_if_still_pending(target_epoch).await;
+                    }
                 }
             }
         }
@@ -1032,18 +1033,27 @@ impl MpcService {
                 };
                 match result.await {
                     Ok(()) => break,
-                    Err(e) if is_non_retryable_reconfig_submission_error(&e) => {
-                        anyhow::bail!(
-                            "submit_committee_handoff submission for epoch {epoch} failed with non-retryable error: {e}"
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            "submit_committee_handoff submission for epoch {} failed: {e}, retrying...",
-                            epoch
-                        );
-                        self.sleep_if_still_pending(epoch).await;
-                    }
+                    Err(e) => match classify_reconfig_submission_error(&e) {
+                        ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted => {
+                            warn!(
+                                "submit_committee_handoff submission for epoch {epoch} found handoff already submitted: {e}"
+                            );
+                            break;
+                        }
+                        ReconfigSubmissionErrorKind::NonRetryableMoveAbort
+                        | ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted => {
+                            anyhow::bail!(
+                                "submit_committee_handoff submission for epoch {epoch} failed with non-retryable error: {e}"
+                            );
+                        }
+                        ReconfigSubmissionErrorKind::NonMoveAbort => {
+                            warn!(
+                                "submit_committee_handoff submission for epoch {} failed: {e}, retrying...",
+                                epoch
+                            );
+                            self.sleep_if_still_pending(epoch).await;
+                        }
+                    },
                 }
             }
         }
@@ -1060,30 +1070,33 @@ impl MpcService {
             };
             match result.await {
                 Ok(()) => return Ok(()),
-                Err(e) if is_end_reconfig_not_reconfiguring_error(&e) => {
-                    warn!(
-                        "end_reconfig submission for epoch {epoch} found reconfig already completed; rescraping on-chain state: {e}"
-                    );
-                    self.inner.onchain_state().rescrape().await?;
-                    if self.get_pending_epoch_change() != Some(epoch) {
-                        return Ok(());
+                Err(e) => match classify_reconfig_submission_error(&e) {
+                    ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted => {
+                        warn!(
+                            "end_reconfig submission for epoch {epoch} found reconfig already completed; rescraping on-chain state: {e}"
+                        );
+                        self.inner.onchain_state().rescrape().await?;
+                        if self.get_pending_epoch_change() != Some(epoch) {
+                            return Ok(());
+                        }
+                        anyhow::bail!(
+                            "end_reconfig submission for epoch {epoch} failed with ENotReconfiguring, but epoch is still pending after rescrape: {e}"
+                        );
                     }
-                    anyhow::bail!(
-                        "end_reconfig submission for epoch {epoch} failed with ENotReconfiguring, but epoch is still pending after rescrape: {e}"
-                    );
-                }
-                Err(e) if is_non_retryable_reconfig_submission_error(&e) => {
-                    anyhow::bail!(
-                        "end_reconfig submission for epoch {epoch} failed with non-retryable error: {e}"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        "end_reconfig submission for epoch {} failed: {e}, retrying...",
-                        epoch
-                    );
-                    self.sleep_if_still_pending(epoch).await;
-                }
+                    ReconfigSubmissionErrorKind::NonRetryableMoveAbort
+                    | ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted => {
+                        anyhow::bail!(
+                            "end_reconfig submission for epoch {epoch} failed with non-retryable error: {e}"
+                        );
+                    }
+                    ReconfigSubmissionErrorKind::NonMoveAbort => {
+                        warn!(
+                            "end_reconfig submission for epoch {} failed: {e}, retrying...",
+                            epoch
+                        );
+                        self.sleep_if_still_pending(epoch).await;
+                    }
+                },
             }
         }
     }
@@ -1173,13 +1186,35 @@ impl MpcService {
     }
 }
 
-fn is_non_retryable_reconfig_submission_error(err: &anyhow::Error) -> bool {
-    let err = err.to_string().to_lowercase();
-    err.contains("move_abort") || err.contains("moveabort")
+enum ReconfigSubmissionErrorKind {
+    NonMoveAbort,
+    NonRetryableMoveAbort,
+    CommitteeHandoffAlreadySubmitted,
+    EndReconfigAlreadyCompleted,
 }
 
-fn is_end_reconfig_not_reconfiguring_error(err: &anyhow::Error) -> bool {
-    let err = err.to_string();
-    err.contains("function_name: Some(\"end_reconfig\")")
-        && (err.contains("abort_code: Some(0)") || err.contains("}, 0) in command"))
+impl ReconfigSubmissionErrorKind {
+    fn is_non_retryable(&self) -> bool {
+        !matches!(self, Self::NonMoveAbort)
+    }
+}
+
+fn classify_reconfig_submission_error(err: &anyhow::Error) -> ReconfigSubmissionErrorKind {
+    let err = err.to_string().to_lowercase();
+
+    if err.contains("function_name: some(\"set_pending_committee_handoff_cert\")") {
+        return ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted;
+    }
+
+    if err.contains("function_name: some(\"end_reconfig\")")
+        && (err.contains("abort_code: some(0)") || err.contains("}, 0) in command"))
+    {
+        return ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted;
+    }
+
+    if err.contains("move_abort") || err.contains("moveabort") {
+        return ReconfigSubmissionErrorKind::NonRetryableMoveAbort;
+    }
+
+    ReconfigSubmissionErrorKind::NonMoveAbort
 }
