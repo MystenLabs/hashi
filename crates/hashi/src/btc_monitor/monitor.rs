@@ -231,6 +231,7 @@ impl Monitor {
             // If all peers disconnect, the node exits with NoReachablePeers
             // and the supervision loop rebuilds it.
             .whitelist_only()
+            .maximum_connection_time(Duration::MAX)
             .chain_state(kyoto::ChainState::Checkpoint(checkpoint));
 
         if let Some(data_dir) = &config.data_dir {
