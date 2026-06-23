@@ -169,7 +169,7 @@ impl MpcManager {
         )?;
         let total_weight = nodes.total_weight();
         let nonce_generation_protocol =
-            NonceGenerationProtocol::from_onchain(committee.mpc_nonce_generation_protocol());
+            NonceGenerationProtocol::from_onchain(committee.mpc_nonce_generation_protocol())?;
         let mpc_config = MpcConfig::new(
             epoch,
             nodes,

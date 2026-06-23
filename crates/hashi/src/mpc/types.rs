@@ -48,21 +48,13 @@ pub enum NonceGenerationProtocol {
 }
 
 impl NonceGenerationProtocol {
-    // TODO(IOP-302): Remove the "other" branch once the on-chain value validation for MPC config params
-    // is restored (removed in PR #506).
-    pub fn from_onchain(value: u16) -> Self {
+    pub fn from_onchain(value: u16) -> MpcResult<Self> {
         match value {
-            0 => Self::Vanilla,
-            1 => Self::Avid,
-            other => {
-                let default = Self::default();
-                tracing::warn!(
-                    value = other,
-                    ?default,
-                    "unknown mpc_nonce_generation_protocol; using default"
-                );
-                default
-            }
+            0 => Ok(Self::Vanilla),
+            1 => Ok(Self::Avid),
+            other => Err(MpcError::InvalidConfig(format!(
+                "unknown mpc_nonce_generation_protocol: {other}"
+            ))),
         }
     }
 }
@@ -810,21 +802,15 @@ mod tests {
     #[test]
     fn test_nonce_generation_protocol_from_onchain() {
         assert_eq!(
-            NonceGenerationProtocol::from_onchain(0),
+            NonceGenerationProtocol::from_onchain(0).unwrap(),
             NonceGenerationProtocol::Vanilla
         );
         assert_eq!(
-            NonceGenerationProtocol::from_onchain(1),
+            NonceGenerationProtocol::from_onchain(1).unwrap(),
             NonceGenerationProtocol::Avid
         );
-        assert_eq!(
-            NonceGenerationProtocol::from_onchain(2),
-            NonceGenerationProtocol::default()
-        );
-        assert_eq!(
-            NonceGenerationProtocol::from_onchain(u16::MAX),
-            NonceGenerationProtocol::default()
-        );
+        assert!(NonceGenerationProtocol::from_onchain(2).is_err());
+        assert!(NonceGenerationProtocol::from_onchain(u16::MAX).is_err());
         assert_eq!(
             NonceGenerationProtocol::default(),
             NonceGenerationProtocol::Vanilla
