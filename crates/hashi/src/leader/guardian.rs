@@ -102,9 +102,6 @@ impl LeaderService {
             anyhow::anyhow!("Guardian rejected withdrawal: {}", status.message())
         })?;
 
-        let pubkey = inner
-            .guardian_signing_pubkey()
-            .expect("guardian signing pubkey set during bootstrap");
         let signed_response: GuardianSigned<StandardWithdrawalResponse> = response_pb
             .try_into()
             .inspect_err(|_| {
@@ -115,18 +112,10 @@ impl LeaderService {
                 );
             })
             .map_err(|e| anyhow::anyhow!("Failed to parse guardian withdrawal response: {e}"))?;
-        let response = signed_response
-            .verify(pubkey)
-            .inspect_err(|_| {
-                Self::record_guardian_rpc_outcome(
-                    inner,
-                    crate::metrics::GUARDIAN_RPC_OUTCOME_SIGNATURE_ERROR,
-                    rpc_elapsed,
-                );
-            })
-            .map_err(|e| {
-                anyhow::anyhow!("Guardian response signature verification failed: {e:?}")
-            })?;
+        // Authenticated by TLS; the per-input BTC witness signatures below only
+        // spend the 2-of-2 if they verify against the on-chain guardian BTC key
+        // (enforced by Bitcoin), so the response itself isn't signature-checked.
+        let response = signed_response.into_data_unchecked();
 
         anyhow::ensure!(
             response.enclave_signatures.len() == txn.inputs.len(),
@@ -270,7 +259,7 @@ impl LeaderService {
         // Seed `guardian_epoch` once from `GetGuardianInfo`; subsequent
         // iterations reuse `current_committee_epoch` from `UpdateCommittee`
         // and skip the extra round-trip.
-        let info = inner.fetch_verified_guardian_info().await?;
+        let info = inner.fetch_guardian_info_data().await?;
         let Some(mut guardian_epoch) = info.current_committee_epoch else {
             // ProvisionerInit hasn't run yet; the bootstrap CLI seeds it.
             return Ok(());

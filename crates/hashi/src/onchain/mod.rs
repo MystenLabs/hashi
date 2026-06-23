@@ -513,14 +513,6 @@ impl OnchainState {
             .map(str::to_string)
     }
 
-    pub fn guardian_public_key(&self) -> Option<Vec<u8>> {
-        self.state()
-            .hashi()
-            .config
-            .guardian_public_key()
-            .map(<[u8]>::to_vec)
-    }
-
     pub fn guardian_btc_public_key(&self) -> Option<Vec<u8>> {
         self.state()
             .hashi()
