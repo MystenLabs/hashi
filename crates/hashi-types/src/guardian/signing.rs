@@ -98,3 +98,12 @@ impl<T: Serialize + SigningIntent> GuardianSigned<T> {
         Ok(self.data)
     }
 }
+
+impl<T> GuardianSigned<T> {
+    /// Move out the payload WITHOUT verifying the signature. The node uses this
+    /// on guardian responses it has already authenticated over TLS; the ed25519
+    /// signing key is verified only by KPs/monitors on the S3 audit logs.
+    pub fn into_data_unchecked(self) -> T {
+        self.data
+    }
+}

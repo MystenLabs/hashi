@@ -730,6 +730,14 @@ impl GetGuardianInfoResponse {
             encrypted_shares: self.encrypted_shares.clone(),
         })
     }
+
+    /// Extract the guardian's self-reported `GuardianInfo` WITHOUT verifying the
+    /// signature or attestation. The node uses this after authenticating the
+    /// guardian over TLS; withdrawals are gated by the on-chain BTC key, and the
+    /// ed25519 signing key is verified only by KPs/monitors on the S3 audit logs.
+    pub fn into_info_unchecked(self) -> GuardianInfo {
+        self.signed_info.into_data_unchecked()
+    }
 }
 
 // ---------------------------------

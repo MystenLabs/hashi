@@ -1105,8 +1105,6 @@ pub const GUARDIAN_BOOTSTRAP_OUTCOME_SUCCESS: &str = "success";
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_RPC_FAILURE: &str = "rpc_failure";
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_PARSE_FAILURE: &str = "parse_failure";
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_NO_LIMITER_YET: &str = "no_limiter_yet";
-pub const GUARDIAN_BOOTSTRAP_OUTCOME_KEY_MISMATCH: &str = "key_mismatch";
-pub const GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID: &str = "signature_invalid";
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_BTC_KEY_MISMATCH: &str = "btc_key_mismatch";
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_BTC_KEY_MISSING_FROM_INFO: &str = "btc_key_missing_from_info";
 
@@ -1118,7 +1116,6 @@ pub const GUARDIAN_RPC_OUTCOME_SEQ_MISMATCH: &str = "seq_mismatch";
 pub const GUARDIAN_RPC_OUTCOME_RATE_LIMITED: &str = "rate_limited";
 pub const GUARDIAN_RPC_OUTCOME_UNAVAILABLE: &str = "unavailable";
 pub const GUARDIAN_RPC_OUTCOME_PARSE_ERROR: &str = "parse_error";
-pub const GUARDIAN_RPC_OUTCOME_SIGNATURE_ERROR: &str = "signature_error";
 
 fn limiter_outcome_label(
     result: &Result<(), crate::guardian_limiter::LocalLimiterError>,
@@ -1287,8 +1284,6 @@ mod tests {
             GUARDIAN_BOOTSTRAP_OUTCOME_RPC_FAILURE,
             GUARDIAN_BOOTSTRAP_OUTCOME_PARSE_FAILURE,
             GUARDIAN_BOOTSTRAP_OUTCOME_NO_LIMITER_YET,
-            GUARDIAN_BOOTSTRAP_OUTCOME_KEY_MISMATCH,
-            GUARDIAN_BOOTSTRAP_OUTCOME_SIGNATURE_INVALID,
             GUARDIAN_BOOTSTRAP_OUTCOME_BTC_KEY_MISMATCH,
             GUARDIAN_BOOTSTRAP_OUTCOME_BTC_KEY_MISSING_FROM_INFO,
         ] {
@@ -1305,7 +1300,6 @@ mod tests {
                 GUARDIAN_RPC_OUTCOME_RATE_LIMITED,
                 GUARDIAN_RPC_OUTCOME_UNAVAILABLE,
                 GUARDIAN_RPC_OUTCOME_PARSE_ERROR,
-                GUARDIAN_RPC_OUTCOME_SIGNATURE_ERROR,
             ] {
                 metrics.record_guardian_rpc(method, outcome, 0.1);
             }
