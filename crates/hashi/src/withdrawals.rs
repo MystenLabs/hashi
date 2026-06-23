@@ -14,7 +14,6 @@ use fastcrypto::hash::HashFunction;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::S;
-use futures::stream::StreamExt;
 use hashi_types::bitcoin as hashi_bitcoin;
 use hashi_types::bitcoin_txid::BitcoinTxid;
 use std::collections::BTreeMap;
@@ -768,7 +767,6 @@ impl Hashi {
         })?;
         let beacon = S::from_bytes_mod_order(&txn.randomness);
         let signing_messages = self.withdrawal_signing_messages(unsigned_tx, &txn.inputs)?;
-        let concurrency = self.config.withdrawal_signing_concurrency();
         let signing_manager_ref = &signing_manager;
         let p2p_channel_ref = &p2p_channel;
         let beacon_ref = &beacon;
@@ -777,36 +775,44 @@ impl Hashi {
         let presig_start = txn.presig_start_index;
         let inputs = &txn.inputs;
         let sink_ref = &sink;
-        // Run the per-input MPC signs concurrently (bounded by `concurrency`).
-        futures::stream::iter(signing_messages.into_iter().enumerate())
-            .map(|(input_index, message)| async move {
-                let request_id = withdrawal_input_signing_request_id(&txn_id, input_index as u32);
-                // Change UTXOs (`derivation_path = None`) ride the `[0; 32]`
-                // path everywhere else (leaf script, `deposit_pubkey`). MPC
-                // must too — passing `None` signs for master `G`, not the
-                // `derive(G, [0; 32])` child the 2-of-2 leaf binds.
-                let derivation_address = inputs
-                    .get(input_index)
-                    .map(|input| {
-                        crate::deposits::normalized_derivation_path(input.derivation_path.as_ref())
-                            .into_inner()
-                    })
-                    .expect("input_index iterated from signing_messages.len() == txn.inputs.len()");
-                let sign_start = std::time::Instant::now();
-                let global_presig_index = presig_start + input_index as u64;
-                let sign_result = signing_manager_ref
-                    .sign(
-                        p2p_channel_ref,
-                        request_id,
-                        &message,
-                        global_presig_index,
-                        beacon_ref,
-                        Some(&derivation_address),
-                        WITHDRAWAL_SIGNING_TIMEOUT,
-                        metrics_ref,
-                    )
-                    .await;
-                let sign_duration = sign_start.elapsed().as_secs_f64();
+        let mut requests = Vec::with_capacity(signing_messages.len());
+        let mut index_by_id: HashMap<Address, usize> =
+            HashMap::with_capacity(signing_messages.len());
+        for (input_index, message) in signing_messages.into_iter().enumerate() {
+            let signing_id = withdrawal_input_signing_id(&txn_id, input_index as u32);
+            // Change UTXOs (`derivation_path = None`) ride the `[0; 32]` path
+            // everywhere else (leaf script, `deposit_pubkey`). MPC must too —
+            // passing `None` signs for master `G`, not the `derive(G, [0; 32])`
+            // child the 2-of-2 leaf binds.
+            let derivation_address = inputs
+                .get(input_index)
+                .map(|input| {
+                    crate::deposits::normalized_derivation_path(input.derivation_path.as_ref())
+                        .into_inner()
+                })
+                .expect("input_index iterated from signing_messages.len() == txn.inputs.len()");
+            index_by_id.insert(signing_id, input_index);
+            requests.push(crate::mpc::SignInput {
+                signing_id,
+                message: message.to_vec(),
+                global_presig_index: presig_start + input_index as u64,
+                derivation_address: Some(derivation_address),
+            });
+        }
+        let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+        let batch_start = std::time::Instant::now();
+        let collect = signing_manager_ref.sign(
+            p2p_channel_ref,
+            requests,
+            beacon_ref,
+            WITHDRAWAL_SIGNING_TIMEOUT,
+            metrics_ref,
+            result_tx,
+        );
+        let forward = async {
+            while let Some((signing_id, sign_result)) = result_rx.recv().await {
+                let input_index = index_by_id[&signing_id];
+                let sign_duration = batch_start.elapsed().as_secs_f64();
                 match &sign_result {
                     Ok(_) => {
                         metrics_ref
@@ -848,10 +854,9 @@ impl Hashi {
                         ))
                     });
                 let _ = sink_ref.send(partial).await;
-            })
-            .buffer_unordered(concurrency)
-            .for_each(|()| std::future::ready(()))
-            .await;
+            }
+        };
+        tokio::join!(collect, forward);
         Ok(())
     }
 
@@ -1265,7 +1270,7 @@ impl WithdrawalBroadcastError {
     }
 }
 
-fn withdrawal_input_signing_request_id(withdrawal_txn_id: &Address, input_index: u32) -> Address {
+fn withdrawal_input_signing_id(withdrawal_txn_id: &Address, input_index: u32) -> Address {
     let bytes =
         bcs::to_bytes(&(withdrawal_txn_id, input_index)).expect("serialization should succeed");
     Address::new(Blake2b256::digest(&bytes).digest)

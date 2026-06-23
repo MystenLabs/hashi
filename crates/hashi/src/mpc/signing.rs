@@ -3,7 +3,6 @@
 
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
-use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::threshold_schnorr::Address as DerivationAddress;
 use fastcrypto_tbls::threshold_schnorr::G;
@@ -36,7 +35,8 @@ use crate::mpc::types::PartialSigningOutput;
 use crate::mpc::types::SigningError;
 use crate::mpc::types::SigningResult;
 
-const EVALS_PER_RS_CORRECTION: usize = 2;
+const PARTIAL_SIGS_COLLECTION_POLL_BACKOFF: Duration = Duration::from_millis(100);
+const PARTIAL_SIGS_COLLECTION_MAX_BACKOFF: Duration = Duration::from_secs(2);
 
 /// A single contiguous batch of presignatures.
 struct PresigBatch {
@@ -208,50 +208,158 @@ impl SigningManager {
         request: &GetPartialSignaturesRequest,
     ) -> SigningResult<GetPartialSignaturesResponse> {
         let state = self.state.read().unwrap();
-        let output = state
-            .partial_signing_outputs
-            .get(&request.sui_request_id)
-            .ok_or_else(|| {
-                SigningError::NotFound(format!(
-                    "Partial signing output for request {}",
-                    request.sui_request_id
-                ))
-            })?;
-        Ok(GetPartialSignaturesResponse {
-            partial_sigs: output.partial_sigs.clone(),
-        })
+        let partial_sigs = request
+            .signing_ids
+            .iter()
+            .filter_map(|id| {
+                state
+                    .partial_signing_outputs
+                    .get(id)
+                    .map(|output| (*id, output.partial_sigs.clone()))
+            })
+            .collect();
+        Ok(GetPartialSignaturesResponse { partial_sigs })
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[tracing::instrument(
-        level = "info",
-        skip_all,
-        fields(sui_request_id = %sui_request_id, global_presig_index),
-    )]
+    #[tracing::instrument(level = "info", skip_all, fields(num_inputs = inputs.len()))]
     pub async fn sign(
         &self,
         p2p_channel: &impl P2PChannel,
-        sui_request_id: Address,
+        inputs: Vec<SignInput>,
+        beacon_value: &S,
+        timeout: Duration,
+        metrics: &Metrics,
+        result_tx: tokio::sync::mpsc::UnboundedSender<(Address, SigningResult<SchnorrSignature>)>,
+    ) {
+        let threshold = self.config.threshold;
+        let verifying_key = self.config.verifying_key;
+        let self_address = self.config.address;
+        let all_peers: HashSet<Address> = self
+            .config
+            .committee
+            .members()
+            .iter()
+            .map(|m| m.validator_address())
+            .filter(|addr| *addr != self_address)
+            .collect();
+        let deadline = Instant::now() + timeout;
+        let mut pending: Vec<InputSigningState> = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            match self
+                .prepare_local_partial_signatures(
+                    input.signing_id,
+                    &input.message,
+                    input.global_presig_index,
+                    beacon_value,
+                    input.derivation_address.as_ref(),
+                    metrics,
+                )
+                .await
+            {
+                Ok((public_nonce, partials)) => pending.push(InputSigningState {
+                    signing_id: input.signing_id,
+                    message: input.message,
+                    public_nonce,
+                    derivation_address: input.derivation_address,
+                    partials,
+                    peers_remaining: all_peers.clone(),
+                }),
+                Err(e) => {
+                    let _ = result_tx.send((input.signing_id, Err(e)));
+                }
+            }
+        }
+        let _collection_timer = metrics
+            .mpc_sign_collection_duration_seconds
+            .with_label_values(&[MPC_LABEL_SIGNING])
+            .start_timer();
+        let mut backoff = PARTIAL_SIGS_COLLECTION_POLL_BACKOFF;
+        while !pending.is_empty() {
+            let mut i = 0;
+            while i < pending.len() {
+                let st = &pending[i];
+                let peers_exhausted = st.peers_remaining.is_empty();
+                if st.partials.len() < threshold as usize && !peers_exhausted {
+                    i += 1;
+                    continue;
+                }
+                let params = AggregationParams {
+                    message: &st.message,
+                    public_nonce: &st.public_nonce,
+                    beacon_value,
+                    threshold,
+                    verifying_key: &verifying_key,
+                    derivation_address: st.derivation_address.as_ref(),
+                };
+                match try_finalize_signature(&params, &st.partials, peers_exhausted, metrics).await
+                {
+                    FinalizeOutcome::NeedMore => i += 1,
+                    FinalizeOutcome::Done(sig) => {
+                        let st = pending.swap_remove(i);
+                        let _ = result_tx.send((st.signing_id, Ok(sig)));
+                    }
+                    FinalizeOutcome::Failed(e) => {
+                        let st = pending.swap_remove(i);
+                        let _ = result_tx.send((st.signing_id, Err(e)));
+                    }
+                }
+            }
+            if pending.is_empty() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                for st in pending.drain(..) {
+                    let _ = result_tx.send((
+                        st.signing_id,
+                        Err(SigningError::Timeout {
+                            collected: st.partials.len(),
+                            threshold,
+                        }),
+                    ));
+                }
+                break;
+            }
+            let progressed =
+                collect_partial_sigs_from_peers(p2p_channel, &mut pending, threshold).await;
+            if progressed {
+                backoff = PARTIAL_SIGS_COLLECTION_POLL_BACKOFF;
+            } else {
+                // Clamp to the remaining time so a backed-off round never
+                // overshoots the deadline before the next deadline check.
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                tokio::time::sleep(backoff.min(remaining)).await;
+                backoff = backoff
+                    .saturating_mul(2)
+                    .min(PARTIAL_SIGS_COLLECTION_MAX_BACKOFF);
+            }
+        }
+        drop(_collection_timer);
+    }
+
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(signing_id = %signing_id, global_presig_index),
+    )]
+    async fn prepare_local_partial_signatures(
+        &self,
+        signing_id: Address,
         message: &[u8],
         global_presig_index: u64,
         beacon_value: &S,
         derivation_address: Option<&DerivationAddress>,
-        timeout: Duration,
         metrics: &Metrics,
-    ) -> SigningResult<SchnorrSignature> {
+    ) -> SigningResult<(G, Vec<Eval<S>>)> {
         let config = &self.config;
-        let threshold = config.threshold;
-        let address = config.address;
-        let committee = config.committee.clone();
-        let verifying_key = config.verifying_key;
-        // Splitting the lock is safe because a given `sui_request_id` is never signed concurrently
+        // Splitting the lock is safe because a given `signing_id` is never signed concurrently
         // on a node (distinct id per withdrawal input, retries sequential), and the presig is already
         // removed from the pool under the first lock section.
         let taken = {
             let mut state = self.state.write().unwrap();
-            if let Some(existing) = state.partial_signing_outputs.get(&sui_request_id) {
+            if let Some(existing) = state.partial_signing_outputs.get(&signing_id) {
                 tracing::info!(
-                    "Cache hit for {sui_request_id} (global_presig_index={global_presig_index}), \
+                    "Cache hit for {signing_id} (global_presig_index={global_presig_index}), \
                      reusing cached partial sigs (batch_index={})",
                     state.batches.last().map_or(0, |b| b.batch_index),
                 );
@@ -315,7 +423,7 @@ impl SigningManager {
                     })?;
                 let used_batch_index = batch.batch_index;
                 tracing::info!(
-                    "Cache miss for {sui_request_id}, using presig \
+                    "Cache miss for {signing_id}, using presig \
                      (global_presig_index={global_presig_index}, \
                      batch_index={used_batch_index}, \
                      position={target_position})",
@@ -344,25 +452,18 @@ impl SigningManager {
                     .mpc_sign_partial_gen_duration_seconds
                     .with_label_values(&[MPC_LABEL_SIGNING])
                     .start_timer();
-                let config = self.config.clone();
-                let message = message.to_vec();
-                let beacon_value = *beacon_value;
-                let derivation_address = derivation_address.copied();
-                let result = super::spawn_blocking(move || {
-                    generate_partial_signatures(
-                        &message,
-                        presig,
-                        &beacon_value,
-                        &config.key_shares,
-                        &config.verifying_key,
-                        derivation_address.as_ref(),
-                    )
-                })
-                .await
+                let result = generate_partial_signatures(
+                    message,
+                    presig,
+                    beacon_value,
+                    &config.key_shares,
+                    &config.verifying_key,
+                    derivation_address,
+                )
                 .map_err(|e| SigningError::CryptoError(e.to_string()))?;
                 drop(_timer);
                 self.state.write().unwrap().partial_signing_outputs.insert(
-                    sui_request_id,
+                    signing_id,
                     PartialSigningOutput {
                         public_nonce: result.0,
                         partial_sigs: result.1.clone(),
@@ -371,117 +472,164 @@ impl SigningManager {
                 result
             }
         };
-        let first_sig_label = match partial_sigs.first() {
-            Some(first) => format!(
-                "first_partial_sig_index={}, first_partial_sig_value={:?}",
-                first.index, first.value,
-            ),
-            None => "no local partial sigs (w'=0)".to_string(),
-        };
-        tracing::info!(
-            "sign({sui_request_id}): public_nonce={public_nonce:?}, message_hash={}, \
-             verifying_key={}, {}",
-            hex::encode(message),
-            hex::encode(verifying_key.to_byte_array()),
-            first_sig_label,
-        );
-        let mut all_partial_sigs = partial_sigs;
-        let mut remaining_peers: HashSet<Address> = committee
-            .members()
-            .iter()
-            .map(|m| m.validator_address())
-            .filter(|addr| *addr != address)
-            .collect();
-        let request = GetPartialSignaturesRequest { sui_request_id };
-        let deadline = Instant::now() + timeout;
-        let _collection_timer = metrics
-            .mpc_sign_collection_duration_seconds
-            .with_label_values(&[MPC_LABEL_SIGNING])
-            .start_timer();
-        loop {
-            if all_partial_sigs.len() >= threshold as usize {
-                break;
-            }
-            if Instant::now() >= deadline {
-                return Err(SigningError::Timeout {
-                    collected: all_partial_sigs.len(),
-                    threshold,
-                });
-            }
-            collect_from_peers(
-                p2p_channel,
-                &request,
-                &mut all_partial_sigs,
-                &mut remaining_peers,
-                threshold as usize,
-            )
-            .await;
-        }
-        drop(_collection_timer);
-        let params = AggregationParams {
-            message,
-            public_nonce: &public_nonce,
-            beacon_value,
-            threshold,
-            verifying_key: &verifying_key,
-            derivation_address,
-        };
-        let _agg_timer = metrics
-            .mpc_sign_aggregation_duration_seconds
-            .with_label_values(&[MPC_LABEL_SIGNING])
-            .start_timer();
-        let agg_sigs = all_partial_sigs.clone();
-        let agg_message = message.to_vec();
-        let agg_nonce = public_nonce;
-        let agg_beacon = *beacon_value;
-        let agg_vk = verifying_key;
-        let agg_deriv = derivation_address.copied();
-        let agg_result = super::spawn_blocking(move || {
-            aggregate_signatures(
-                &agg_message,
-                &agg_nonce,
-                &agg_beacon,
-                &agg_sigs,
-                threshold,
-                &agg_vk,
-                agg_deriv.as_ref(),
-            )
-        })
-        .await;
-        let result = match agg_result {
-            Ok(sig) => Ok(sig),
-            Err(FastCryptoError::InvalidSignature) => {
-                tracing::info!(
-                    "Initial signature aggregation failed for {}, entering recovery",
-                    sui_request_id,
-                );
-                recover_signature_with_reed_solomon(
-                    p2p_channel,
-                    sui_request_id,
-                    &params,
-                    &request,
-                    deadline,
-                    &mut all_partial_sigs,
-                    &mut remaining_peers,
-                )
-                .await
-            }
-            Err(e) => Err(SigningError::CryptoError(e.to_string())),
-        };
-        drop(_agg_timer);
-        match &result {
-            Ok(_) => {}
-            Err(e) => {
-                tracing::error!(
-                    "Signing failed for {sui_request_id}: {e}, \
-                     presigs_remaining={}, batch_index={}",
-                    self.presignatures_remaining(),
-                    self.batch_index(),
-                );
-            }
-        }
-        result
+        Ok((public_nonce, partial_sigs))
     }
+}
+
+pub struct SignInput {
+    pub signing_id: Address,
+    pub message: Vec<u8>,
+    pub global_presig_index: u64,
+    pub derivation_address: Option<DerivationAddress>,
+}
+
+struct InputSigningState {
+    signing_id: Address,
+    message: Vec<u8>,
+    public_nonce: G,
+    derivation_address: Option<DerivationAddress>,
+    partials: Vec<Eval<S>>,
+    /// Peers not yet merged for this input
+    peers_remaining: HashSet<Address>,
+}
+
+enum FinalizeOutcome {
+    Done(SchnorrSignature),
+    NeedMore,
+    Failed(SigningError),
+}
+
+async fn try_finalize_signature(
+    params: &AggregationParams<'_>,
+    partials: &[Eval<S>],
+    peers_exhausted: bool,
+    metrics: &Metrics,
+) -> FinalizeOutcome {
+    let threshold = params.threshold;
+    let need_more_or_fail = |collected: usize| {
+        if peers_exhausted {
+            FinalizeOutcome::Failed(SigningError::TooManyInvalidSignatures {
+                collected,
+                threshold,
+            })
+        } else {
+            FinalizeOutcome::NeedMore
+        }
+    };
+    if partials.len() < threshold as usize {
+        return need_more_or_fail(partials.len());
+    }
+    let _timer = metrics
+        .mpc_sign_aggregation_duration_seconds
+        .with_label_values(&[MPC_LABEL_SIGNING])
+        .start_timer();
+    let message = params.message.to_vec();
+    let nonce = *params.public_nonce;
+    let beacon = *params.beacon_value;
+    let vk = *params.verifying_key;
+    let deriv = params.derivation_address.copied();
+    let sigs = partials.to_vec();
+    let agg = super::spawn_blocking(move || {
+        aggregate_signatures(
+            &message,
+            &nonce,
+            &beacon,
+            &sigs,
+            threshold,
+            &vk,
+            deriv.as_ref(),
+        )
+    })
+    .await;
+    match agg {
+        Ok(sig) => return FinalizeOutcome::Done(sig),
+        Err(FastCryptoError::InvalidSignature) => {} // fall through to RS recovery
+        Err(e) => return FinalizeOutcome::Failed(SigningError::CryptoError(e.to_string())),
+    }
+    if partials.len().saturating_sub(threshold as usize) / 2 < 1 {
+        return need_more_or_fail(partials.len());
+    }
+    let message = params.message.to_vec();
+    let nonce = *params.public_nonce;
+    let beacon = *params.beacon_value;
+    let vk = *params.verifying_key;
+    let deriv = params.derivation_address.copied();
+    let sigs = partials.to_vec();
+    let recovered = super::spawn_blocking(move || {
+        aggregate_signatures_with_recovery(
+            &message,
+            &nonce,
+            &beacon,
+            &sigs,
+            threshold,
+            &vk,
+            deriv.as_ref(),
+        )
+    })
+    .await;
+    match recovered {
+        Ok(sig) => FinalizeOutcome::Done(sig),
+        Err(FastCryptoError::TooManyErrors(_)) => need_more_or_fail(partials.len()),
+        Err(e) => FinalizeOutcome::Failed(SigningError::CryptoError(e.to_string())),
+    }
+}
+
+async fn collect_partial_sigs_from_peers(
+    p2p_channel: &impl P2PChannel,
+    pending: &mut [InputSigningState],
+    threshold: u16,
+) -> bool {
+    let mut peer_ids: HashMap<Address, Vec<Address>> = HashMap::new();
+    for st in pending.iter() {
+        for peer in &st.peers_remaining {
+            peer_ids.entry(*peer).or_default().push(st.signing_id);
+        }
+    }
+    if peer_ids.is_empty() {
+        return false;
+    }
+    let mut in_flight: FuturesUnordered<_> = peer_ids
+        .into_iter()
+        .map(|(peer, signing_ids)| {
+            let request = GetPartialSignaturesRequest { signing_ids };
+            async move {
+                let result =
+                    with_timeout_and_retry(|| p2p_channel.get_partial_signatures(&peer, &request))
+                        .await;
+                (peer, result)
+            }
+        })
+        .collect();
+    let index: HashMap<Address, usize> = pending
+        .iter()
+        .enumerate()
+        .map(|(i, st)| (st.signing_id, i))
+        .collect();
+    let mut progressed = false;
+    while let Some((peer, result)) = in_flight.next().await {
+        match result {
+            Ok(response) => {
+                for (signing_id, sigs) in response.partial_sigs {
+                    if let Some(&i) = index.get(&signing_id)
+                        && pending[i].peers_remaining.remove(&peer)
+                    {
+                        pending[i].partials.extend(sigs);
+                        progressed = true;
+                    }
+                }
+                if pending
+                    .iter()
+                    .all(|st| st.partials.len() >= threshold as usize)
+                {
+                    break;
+                }
+            }
+            Err(e) => {
+                tracing::info!("Batched get_partial_signatures from {peer} failed: {e}");
+            }
+        }
+    }
+    progressed
 }
 
 struct AggregationParams<'a> {
@@ -491,78 +639,6 @@ struct AggregationParams<'a> {
     threshold: u16,
     verifying_key: &'a G,
     derivation_address: Option<&'a DerivationAddress>,
-}
-
-async fn recover_signature_with_reed_solomon(
-    p2p_channel: &impl P2PChannel,
-    sui_request_id: Address,
-    params: &AggregationParams<'_>,
-    request: &GetPartialSignaturesRequest,
-    deadline: Instant,
-    all_partial_sigs: &mut Vec<Eval<S>>,
-    remaining_peers: &mut HashSet<Address>,
-) -> SigningResult<SchnorrSignature> {
-    loop {
-        let rs_correction_capacity = (all_partial_sigs
-            .len()
-            .saturating_sub(params.threshold as usize))
-            / 2;
-        if rs_correction_capacity >= 1 {
-            let rec_sigs = all_partial_sigs.clone();
-            let rec_message = params.message.to_vec();
-            let rec_nonce = *params.public_nonce;
-            let rec_beacon = *params.beacon_value;
-            let rec_threshold = params.threshold;
-            let rec_vk = *params.verifying_key;
-            let rec_deriv = params.derivation_address.copied();
-            let rec_result = super::spawn_blocking(move || {
-                aggregate_signatures_with_recovery(
-                    &rec_message,
-                    &rec_nonce,
-                    &rec_beacon,
-                    &rec_sigs,
-                    rec_threshold,
-                    &rec_vk,
-                    rec_deriv.as_ref(),
-                )
-            })
-            .await;
-            match rec_result {
-                Ok(sig) => return Ok(sig),
-                Err(FastCryptoError::TooManyErrors(max)) => {
-                    tracing::info!(
-                        "RS recovery failed for {}: too many errors (max correctable: {}), \
-                         collecting more sigs (have {})",
-                        sui_request_id,
-                        max,
-                        all_partial_sigs.len(),
-                    );
-                }
-                Err(e) => return Err(SigningError::CryptoError(e.to_string())),
-            }
-        }
-        if remaining_peers.is_empty() {
-            return Err(SigningError::TooManyInvalidSignatures {
-                collected: all_partial_sigs.len(),
-                threshold: params.threshold,
-            });
-        }
-        if Instant::now() >= deadline {
-            return Err(SigningError::Timeout {
-                collected: all_partial_sigs.len(),
-                threshold: params.threshold,
-            });
-        }
-        let target = all_partial_sigs.len() + EVALS_PER_RS_CORRECTION;
-        collect_from_peers(
-            p2p_channel,
-            request,
-            all_partial_sigs,
-            remaining_peers,
-            target,
-        )
-        .await;
-    }
 }
 
 fn aggregate_signatures_with_recovery(
@@ -587,45 +663,6 @@ fn aggregate_signatures_with_recovery(
         verifying_key,
         derivation_address,
     )
-}
-
-/// Poll `remaining_peers` for partial signatures into `all_partial_sigs`,
-/// returning as soon as `target` evals are collected and dropping the
-/// still-in-flight peers.
-async fn collect_from_peers(
-    p2p_channel: &impl P2PChannel,
-    request: &GetPartialSignaturesRequest,
-    all_partial_sigs: &mut Vec<Eval<S>>,
-    remaining_peers: &mut HashSet<Address>,
-    target: usize,
-) {
-    let mut in_flight: FuturesUnordered<_> = remaining_peers
-        .iter()
-        .copied()
-        .map(|addr| {
-            let req = request.clone();
-            async move {
-                let result =
-                    with_timeout_and_retry(|| p2p_channel.get_partial_signatures(&addr, &req))
-                        .await;
-                (addr, result)
-            }
-        })
-        .collect();
-    while let Some((addr, result)) = in_flight.next().await {
-        match result {
-            Ok(response) => {
-                remaining_peers.remove(&addr);
-                all_partial_sigs.extend(response.partial_sigs);
-                if all_partial_sigs.len() >= target {
-                    break;
-                }
-            }
-            Err(e) => {
-                tracing::info!("Failed to get partial signatures from {}: {}", addr, e);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -685,6 +722,43 @@ mod tests {
         managers: HashMap<Address, Arc<SigningManager>>,
     }
 
+    impl SigningManager {
+        #[allow(clippy::too_many_arguments)]
+        async fn sign_one(
+            &self,
+            p2p_channel: &impl P2PChannel,
+            signing_id: Address,
+            message: &[u8],
+            global_presig_index: u64,
+            beacon_value: &S,
+            derivation_address: Option<&DerivationAddress>,
+            timeout: Duration,
+            metrics: &Metrics,
+        ) -> SigningResult<SchnorrSignature> {
+            let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+            self.sign(
+                p2p_channel,
+                vec![SignInput {
+                    signing_id,
+                    message: message.to_vec(),
+                    global_presig_index,
+                    derivation_address: derivation_address.copied(),
+                }],
+                beacon_value,
+                timeout,
+                metrics,
+                result_tx,
+            )
+            .await;
+            match result_rx.recv().await {
+                Some((_, result)) => result,
+                None => Err(SigningError::CryptoError(
+                    "sign produced no result for the request".to_string(),
+                )),
+            }
+        }
+    }
+
     #[async_trait::async_trait]
     impl P2PChannel for MockSigningP2PChannel {
         async fn send_messages(
@@ -731,7 +805,7 @@ mod tests {
     }
 
     struct CannedP2PChannel {
-        responses: HashMap<Address, ChannelResult<GetPartialSignaturesResponse>>,
+        responses: HashMap<Address, ChannelResult<Vec<Eval<S>>>>,
     }
 
     #[async_trait::async_trait]
@@ -768,10 +842,16 @@ mod tests {
         async fn get_partial_signatures(
             &self,
             party: &Address,
-            _request: &GetPartialSignaturesRequest,
+            request: &GetPartialSignaturesRequest,
         ) -> ChannelResult<GetPartialSignaturesResponse> {
             match self.responses.get(party) {
-                Some(Ok(resp)) => Ok(resp.clone()),
+                Some(Ok(evals)) => Ok(GetPartialSignaturesResponse {
+                    partial_sigs: request
+                        .signing_ids
+                        .iter()
+                        .map(|id| (*id, evals.clone()))
+                        .collect(),
+                }),
                 Some(Err(_)) => Err(ChannelError::RequestFailed(format!(
                     "canned error for {}",
                     party
@@ -799,16 +879,13 @@ mod tests {
             } else {
                 peer_sigs.clone()
             };
-            responses.insert(
-                test_address(i),
-                Ok(GetPartialSignaturesResponse { partial_sigs: sigs }),
-            );
+            responses.insert(test_address(i), Ok(sigs));
         }
         CannedP2PChannel { responses }
     }
 
     struct HangingP2PChannel {
-        responses: HashMap<Address, GetPartialSignaturesResponse>,
+        responses: HashMap<Address, Vec<Eval<S>>>,
         hanging: HashSet<Address>,
     }
 
@@ -845,7 +922,7 @@ mod tests {
         async fn get_partial_signatures(
             &self,
             party: &Address,
-            _request: &GetPartialSignaturesRequest,
+            request: &GetPartialSignaturesRequest,
         ) -> ChannelResult<GetPartialSignaturesResponse> {
             if self.hanging.contains(party) {
                 tokio::time::sleep(Duration::from_secs(3600)).await;
@@ -853,7 +930,13 @@ mod tests {
             }
             self.responses
                 .get(party)
-                .cloned()
+                .map(|evals| GetPartialSignaturesResponse {
+                    partial_sigs: request
+                        .signing_ids
+                        .iter()
+                        .map(|id| (*id, evals.clone()))
+                        .collect(),
+                })
                 .map(Ok)
                 .unwrap_or_else(|| Err(ChannelError::ClientNotFound(*party)))
         }
@@ -1219,20 +1302,21 @@ mod tests {
 
         let resp = setup.managers[0]
             .handle_get_partial_signatures_request(&GetPartialSignaturesRequest {
-                sui_request_id: req_id,
+                signing_ids: vec![req_id],
             })
             .unwrap();
-        assert!(!resp.partial_sigs.is_empty());
+        assert!(resp.partial_sigs.contains_key(&req_id));
     }
 
     #[test]
-    fn test_handle_get_partial_signatures_not_found() {
+    fn test_handle_get_partial_signatures_absent_returns_empty() {
         let setup = SigningTestSetup::new(4);
-        let result =
-            setup.managers[0].handle_get_partial_signatures_request(&GetPartialSignaturesRequest {
-                sui_request_id: test_request_id(),
-            });
-        assert!(matches!(result, Err(SigningError::NotFound(_))));
+        let resp = setup.managers[0]
+            .handle_get_partial_signatures_request(&GetPartialSignaturesRequest {
+                signing_ids: vec![test_request_id()],
+            })
+            .unwrap();
+        assert!(resp.partial_sigs.is_empty());
     }
 
     #[tokio::test]
@@ -1246,7 +1330,7 @@ mod tests {
         setup.prepare_all(message, &beacon, req_id, 0, Some(0));
 
         let p2p = setup.mock_p2p_for(0);
-        let sig = SigningManager::sign(
+        let sig = SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             req_id,
@@ -1261,6 +1345,120 @@ mod tests {
         .unwrap();
 
         verify_schnorr(&setup.verifying_key, message, &sig);
+    }
+
+    #[tokio::test]
+    async fn test_sign_multi_input_all_succeed() {
+        let setup = SigningTestSetup::new(7); // n=7, t=3, f=2
+        let beacon = S::zero();
+        let inputs: Vec<(Address, Vec<u8>, u64)> = (0..3u8)
+            .map(|j| {
+                (
+                    Address::new([0xB0 + j; 32]),
+                    format!("input-{j}").into_bytes(),
+                    j as u64,
+                )
+            })
+            .collect();
+        for (sid, msg, pidx) in &inputs {
+            setup.prepare_all(msg, &beacon, *sid, *pidx, Some(0));
+        }
+        let requests: Vec<SignInput> = inputs
+            .iter()
+            .map(|(sid, msg, pidx)| SignInput {
+                signing_id: *sid,
+                message: msg.clone(),
+                global_presig_index: *pidx,
+                derivation_address: None,
+            })
+            .collect();
+
+        let p2p = setup.mock_p2p_for(0);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        setup.managers[0]
+            .sign(
+                &p2p,
+                requests,
+                &beacon,
+                Duration::from_secs(30),
+                &test_metrics(),
+                tx,
+            )
+            .await;
+
+        let mut results = HashMap::new();
+        while let Some((sid, res)) = rx.recv().await {
+            results.insert(sid, res);
+        }
+        assert_eq!(results.len(), inputs.len());
+        for (sid, msg, _) in &inputs {
+            let sig = results.get(sid).unwrap().as_ref().unwrap();
+            verify_schnorr(&setup.verifying_key, msg, sig);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sign_multi_input_one_fails_others_succeed() {
+        let setup = SigningTestSetup::new(7); // n=7, t=3, f=2
+        let beacon = S::zero();
+        let good: Vec<(Address, Vec<u8>, u64)> = (0..2u8)
+            .map(|j| {
+                (
+                    Address::new([0xB0 + j; 32]),
+                    format!("good-{j}").into_bytes(),
+                    j as u64,
+                )
+            })
+            .collect();
+        let bad_id = Address::new([0xBF; 32]);
+
+        for (sid, msg, pidx) in &good {
+            setup.prepare_all(msg, &beacon, *sid, *pidx, Some(0));
+        }
+        // Deliberately do NOT prepare peers for the bad input: they return no
+        // partial for it, so it can never reach threshold.
+
+        let mut requests: Vec<SignInput> = good
+            .iter()
+            .map(|(sid, msg, pidx)| SignInput {
+                signing_id: *sid,
+                message: msg.clone(),
+                global_presig_index: *pidx,
+                derivation_address: None,
+            })
+            .collect();
+        requests.push(SignInput {
+            signing_id: bad_id,
+            message: b"bad".to_vec(),
+            global_presig_index: 2,
+            derivation_address: None,
+        });
+
+        let p2p = setup.mock_p2p_for(0);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        setup.managers[0]
+            .sign(
+                &p2p,
+                requests,
+                &beacon,
+                Duration::from_secs(2),
+                &test_metrics(),
+                tx,
+            )
+            .await;
+
+        let mut results = HashMap::new();
+        while let Some((sid, res)) = rx.recv().await {
+            results.insert(sid, res);
+        }
+        for (sid, msg, _) in &good {
+            let sig = results.get(sid).unwrap().as_ref().unwrap();
+            verify_schnorr(&setup.verifying_key, msg, sig);
+        }
+        assert!(matches!(
+            results.get(&bad_id),
+            Some(Err(SigningError::Timeout { .. }))
+        ));
     }
 
     #[tokio::test]
@@ -1294,7 +1492,7 @@ mod tests {
             );
 
         let p2p = setup.mock_p2p_for(0);
-        let sig = SigningManager::sign(
+        let sig = SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             req_id,
@@ -1347,7 +1545,7 @@ mod tests {
 
         // Peers 3-6 are in the mock but have no stored sigs → NotFound → ChannelError
         let p2p = setup.mock_p2p_for(0);
-        let sig = SigningManager::sign(
+        let sig = SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             req_id,
@@ -1376,7 +1574,7 @@ mod tests {
         let (_, all_sigs) = setup.prepare_all(message, &beacon, req_id, 0, Some(0));
         let p2p = canned_p2p_with_corruptions(&all_sigs, &[1], &mut StdRng::seed_from_u64(999));
 
-        let sig = SigningManager::sign(
+        let sig = SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             req_id,
@@ -1405,7 +1603,7 @@ mod tests {
         let (_, all_sigs) = setup.prepare_all(message, &beacon, req_id, 0, Some(0));
         let p2p = canned_p2p_with_corruptions(&all_sigs, &[1, 2], &mut StdRng::seed_from_u64(888));
 
-        let sig = SigningManager::sign(
+        let sig = SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             req_id,
@@ -1431,24 +1629,14 @@ mod tests {
         let (_, all_sigs) = setup.prepare_all(message, &beacon, req_id, 0, Some(0));
 
         let mut responses = HashMap::new();
-        responses.insert(
-            test_address(1),
-            GetPartialSignaturesResponse {
-                partial_sigs: all_sigs[1].clone(),
-            },
-        );
-        responses.insert(
-            test_address(2),
-            GetPartialSignaturesResponse {
-                partial_sigs: all_sigs[2].clone(),
-            },
-        );
+        responses.insert(test_address(1), all_sigs[1].clone());
+        responses.insert(test_address(2), all_sigs[2].clone());
         let hanging: HashSet<Address> = [3usize, 4, 5, 6].into_iter().map(test_address).collect();
         let p2p = HangingP2PChannel { responses, hanging };
 
         let sig = tokio::time::timeout(
             Duration::from_secs(5),
-            SigningManager::sign(
+            SigningManager::sign_one(
                 &setup.managers[0],
                 &p2p,
                 req_id,
@@ -1483,7 +1671,7 @@ mod tests {
         let p2p =
             canned_p2p_with_corruptions(&all_sigs, &[1, 2, 3], &mut StdRng::seed_from_u64(777));
 
-        let result = SigningManager::sign(
+        let result = SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             req_id,
@@ -1520,7 +1708,7 @@ mod tests {
         }
         let p2p = CannedP2PChannel { responses };
 
-        let result = SigningManager::sign(
+        let result = SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             req_id,
@@ -1601,7 +1789,7 @@ mod tests {
         // Use the first global index of batch 1.
         setup.prepare_all(b"swap", &S::zero(), req_id, batch_size, Some(0));
         let p2p = setup.mock_p2p_for(0);
-        let sig = SigningManager::sign(
+        let sig = SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             req_id,
@@ -1627,7 +1815,7 @@ mod tests {
         setup.exhaust_pool();
 
         let p2p = setup.mock_p2p_for(0);
-        let result = SigningManager::sign(
+        let result = SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             Address::new([0xFF; 32]),
@@ -1653,7 +1841,7 @@ mod tests {
 
         // Request a presig index beyond the pool (no next_batch set).
         let p2p = setup.mock_p2p_for(0);
-        let result = SigningManager::sign(
+        let result = SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             Address::new([0xFF; 32]),
@@ -1716,7 +1904,7 @@ mod tests {
         setup.exhaust_pool();
 
         let p2p = setup.mock_p2p_for(0);
-        let result = SigningManager::sign(
+        let result = SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             Address::new([0xFF; 32]),
@@ -1746,7 +1934,7 @@ mod tests {
         for i in 0..pool_size {
             let req = Address::new([i as u8; 32]);
             setup.prepare_all(b"drain", &beacon, req, i as u64, Some(0));
-            let result = SigningManager::sign(
+            let result = SigningManager::sign_one(
                 &setup.managers[0],
                 &p2p,
                 req,
@@ -1771,7 +1959,7 @@ mod tests {
         assert_eq!(setup.managers[0].presignatures_remaining(), 0);
 
         // The next sign should return PoolExhausted, not panic.
-        let result = SigningManager::sign(
+        let result = SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             Address::new([0xFF; 32]),
@@ -1816,7 +2004,7 @@ mod tests {
         let req = Address::new([0x01; 32]);
         setup.prepare_all(b"old-batch", &beacon, req, 0, Some(0));
         let p2p = setup.mock_p2p_for(0);
-        let result = SigningManager::sign(
+        let result = SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             req,
@@ -1844,7 +2032,7 @@ mod tests {
         let req1 = Address::new([0x01; 32]);
         setup.prepare_all(b"msg1", &beacon, req1, 0, Some(0));
         let p2p = setup.mock_p2p_for(0);
-        let result1 = SigningManager::sign(
+        let result1 = SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             req1,
@@ -1861,7 +2049,7 @@ mod tests {
         // Second sign with same presig index 0 but different request ID.
         // Presig was already taken — should fail.
         let req2 = Address::new([0x02; 32]);
-        let result2 = SigningManager::sign(
+        let result2 = SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             req2,
@@ -1883,7 +2071,7 @@ mod tests {
 
         // Target index maps to batch 2, but manager is on batch 0 with no next_batch.
         let p2p = setup.mock_p2p_for(0);
-        let result = SigningManager::sign(
+        let result = SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             Address::new([0x01; 32]),
@@ -1912,7 +2100,7 @@ mod tests {
         // First sign — consumes one presig, caches partial sigs.
         setup.prepare_all(message, &beacon, req_id, 0, Some(0));
         let p2p = setup.mock_p2p_for(0);
-        let sig1 = SigningManager::sign(
+        let sig1 = SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             req_id,
@@ -1934,7 +2122,7 @@ mod tests {
         );
 
         // Second sign with SAME request_id — should reuse cached partial sigs.
-        let sig2 = SigningManager::sign(
+        let sig2 = SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             req_id,
@@ -1978,7 +2166,7 @@ mod tests {
         // First request.
         setup.prepare_all(b"msg1", &beacon, req1, 0, Some(0));
         let p2p = setup.mock_p2p_for(0);
-        SigningManager::sign(
+        SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             req1,
@@ -1994,7 +2182,7 @@ mod tests {
 
         // Second request with different ID.
         setup.prepare_all(b"msg2", &beacon, req2, 1, Some(0));
-        SigningManager::sign(
+        SigningManager::sign_one(
             &setup.managers[0],
             &p2p,
             req2,

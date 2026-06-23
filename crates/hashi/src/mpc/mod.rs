@@ -10,4 +10,5 @@ pub mod types;
 pub use mpc_except_signing::*;
 pub use service::MpcHandle;
 pub use service::MpcService;
+pub use signing::SignInput;
 pub use signing::SigningManager;

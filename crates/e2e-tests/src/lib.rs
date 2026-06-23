@@ -873,7 +873,6 @@ mod tests {
         vk
     }
 
-    /// Have all nodes call sign() concurrently, returning per-node results.
     async fn sign_on_all_nodes(
         nodes: &[HashiNodeHandle],
         message: &[u8],
@@ -884,7 +883,36 @@ mod tests {
     ) -> Vec<
         hashi::mpc::types::SigningResult<fastcrypto::groups::secp256k1::schnorr::SchnorrSignature>,
     > {
+        let mut per_input = sign_batch_on_all_nodes(
+            nodes,
+            epoch,
+            &[(
+                sui_request_id,
+                global_presig_index,
+                message.to_vec(),
+                derivation_address,
+            )],
+        )
+        .await;
+        per_input.pop().expect("one input requested")
+    }
+
+    /// One batch input: (signing_id, global_presig_index, message, derivation_address).
+    type SignInputSpec = (sui_sdk_types::Address, u64, Vec<u8>, Option<[u8; 32]>);
+
+    async fn sign_batch_on_all_nodes(
+        nodes: &[HashiNodeHandle],
+        epoch: u64,
+        inputs: &[SignInputSpec],
+    ) -> Vec<
+        Vec<
+            hashi::mpc::types::SigningResult<
+                fastcrypto::groups::secp256k1::schnorr::SchnorrSignature,
+            >,
+        >,
+    > {
         let beacon_value = S::rand(&mut rand::thread_rng());
+        let order: Vec<sui_sdk_types::Address> = inputs.iter().map(|(sid, _, _, _)| *sid).collect();
         let sign_futures: Vec<_> = nodes
             .iter()
             .map(|node| {
@@ -892,32 +920,64 @@ mod tests {
                     .hashi()
                     .signing_manager_for(epoch)
                     .unwrap_or_else(|| panic!("SigningManager not initialized for epoch {epoch}"));
-                let onchain_state = node.hashi().onchain_state().clone();
                 let p2p_channel = hashi::mpc::rpc::RpcP2PChannel::new(
-                    onchain_state,
+                    node.hashi().onchain_state().clone(),
                     epoch,
                     hashi::metrics::MPC_LABEL_SIGNING,
                 );
                 let beacon = beacon_value;
-                let message = message.to_vec();
                 let metrics = node.hashi().metrics.clone();
+                let requests: Vec<hashi::mpc::SignInput> = inputs
+                    .iter()
+                    .map(|(sid, pidx, msg, deriv)| hashi::mpc::SignInput {
+                        signing_id: *sid,
+                        message: msg.clone(),
+                        global_presig_index: *pidx,
+                        derivation_address: *deriv,
+                    })
+                    .collect();
+                let order = order.clone();
                 async move {
+                    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
                     signing_manager
                         .sign(
                             &p2p_channel,
-                            sui_request_id,
-                            &message,
-                            global_presig_index,
+                            requests,
                             &beacon,
-                            derivation_address.as_ref(),
                             SIGNING_TIMEOUT,
                             &metrics,
+                            tx,
                         )
-                        .await
+                        .await;
+                    let mut by_id = std::collections::HashMap::new();
+                    while let Some((sid, res)) = rx.recv().await {
+                        by_id.insert(sid, res);
+                    }
+                    order
+                        .into_iter()
+                        .map(|sid| {
+                            by_id.remove(&sid).unwrap_or_else(|| {
+                                Err(hashi::mpc::types::SigningError::CryptoError(
+                                    "sign produced no result for input".to_string(),
+                                ))
+                            })
+                        })
+                        .collect::<Vec<_>>()
                 }
             })
             .collect();
-        futures::future::join_all(sign_futures).await
+        // `[node][input]` -> `[input][node]` so each input's per-node results can
+        // be checked together.
+        let per_node = futures::future::join_all(sign_futures).await;
+        let mut per_input: Vec<Vec<_>> = (0..inputs.len())
+            .map(|_| Vec::with_capacity(nodes.len()))
+            .collect();
+        for node_results in per_node {
+            for (j, res) in node_results.into_iter().enumerate() {
+                per_input[j].push(res);
+            }
+        }
+        per_input
     }
 
     fn assert_all_signatures_match(
@@ -977,10 +1037,21 @@ mod tests {
             corrupt_signing_managers(nodes, &node_infos, &cfg, corrupt_node_indices);
         }
 
-        let message: &[u8] = b"Hello, Hashi signing!";
-        let request_id = sui_sdk_types::Address::ZERO;
-        let results = sign_on_all_nodes(nodes, message, epoch, request_id, 0, None).await;
-        assert_all_signatures_match(results);
+        let inputs: Vec<SignInputSpec> = (0..3u8)
+            .map(|j| {
+                (
+                    sui_sdk_types::Address::new([0xE0 + j; 32]),
+                    j as u64,
+                    format!("Hello, Hashi signing! {j}").into_bytes(),
+                    None,
+                )
+            })
+            .collect();
+        let per_input = sign_batch_on_all_nodes(nodes, epoch, &inputs).await;
+        assert_eq!(per_input.len(), inputs.len());
+        for input_results in per_input {
+            assert_all_signatures_match(input_results);
+        }
 
         Ok(())
     }

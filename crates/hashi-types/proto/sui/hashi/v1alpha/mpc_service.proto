@@ -153,11 +153,13 @@ message GetPartialSignaturesRequest {
   // The epoch for this MPC instance.
   optional uint64 epoch = 1;
 
-  // Hex-encoded Sui address identifying the withdrawal/deposit request.
-  optional string sui_request_id = 2;
+  // Hex-encoded per-input signing-session ids to collect partials for.
+  repeated string signing_ids = 2;
 }
 
 message GetPartialSignaturesResponse {
-  // Partial signatures.
-  optional sui.rpc.v2.Bcs partial_sigs = 1;
+  // Partial signatures keyed by signing_id.
+  // Only ids for which the peer has already computed its local partial are present;
+  // an absent id means "not ready yet", not an error.
+  map<string, sui.rpc.v2.Bcs> partial_sigs = 1;
 }

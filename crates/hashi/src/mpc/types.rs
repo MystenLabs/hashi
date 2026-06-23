@@ -533,12 +533,12 @@ pub struct PartialSigningOutput {
 
 #[derive(Clone, Debug)]
 pub struct GetPartialSignaturesRequest {
-    pub sui_request_id: Address,
+    pub signing_ids: Vec<Address>,
 }
 
 #[derive(Clone, Debug)]
 pub struct GetPartialSignaturesResponse {
-    pub partial_sigs: Vec<Eval<S>>,
+    pub partial_sigs: BTreeMap<Address, Vec<Eval<S>>>,
 }
 
 #[derive(Debug, thiserror::Error)]
