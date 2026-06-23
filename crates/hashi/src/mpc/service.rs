@@ -804,6 +804,13 @@ impl MpcService {
             }
             match self.submit_end_reconfig(target_epoch, &output).await {
                 Ok(()) => break,
+                Err(e) if is_non_retryable_reconfig_submission_error(&e) => {
+                    let msg = format!(
+                        "submit_end_reconfig for epoch {target_epoch} failed with non-retryable error: {e}"
+                    );
+                    error!("{msg}");
+                    panic!("{msg}");
+                }
                 Err(e) => {
                     warn!(
                         "submit_end_reconfig for epoch {} failed: {e}, retrying...",
@@ -1025,6 +1032,11 @@ impl MpcService {
                 };
                 match result.await {
                     Ok(()) => break,
+                    Err(e) if is_non_retryable_reconfig_submission_error(&e) => {
+                        anyhow::bail!(
+                            "submit_committee_handoff submission for epoch {epoch} failed with non-retryable error: {e}"
+                        );
+                    }
                     Err(e) => {
                         warn!(
                             "submit_committee_handoff submission for epoch {} failed: {e}, retrying...",
@@ -1048,6 +1060,23 @@ impl MpcService {
             };
             match result.await {
                 Ok(()) => return Ok(()),
+                Err(e) if is_end_reconfig_not_reconfiguring_error(&e) => {
+                    warn!(
+                        "end_reconfig submission for epoch {epoch} found reconfig already completed; rescraping on-chain state: {e}"
+                    );
+                    self.inner.onchain_state().rescrape().await?;
+                    if self.get_pending_epoch_change() != Some(epoch) {
+                        return Ok(());
+                    }
+                    anyhow::bail!(
+                        "end_reconfig submission for epoch {epoch} failed with ENotReconfiguring, but epoch is still pending after rescrape: {e}"
+                    );
+                }
+                Err(e) if is_non_retryable_reconfig_submission_error(&e) => {
+                    anyhow::bail!(
+                        "end_reconfig submission for epoch {epoch} failed with non-retryable error: {e}"
+                    );
+                }
                 Err(e) => {
                     warn!(
                         "end_reconfig submission for epoch {} failed: {e}, retrying...",
@@ -1142,4 +1171,15 @@ impl MpcService {
             .finish()
             .map_err(|e| anyhow::anyhow!("failed to finalize certificate: {e}"))
     }
+}
+
+fn is_non_retryable_reconfig_submission_error(err: &anyhow::Error) -> bool {
+    let err = err.to_string().to_lowercase();
+    err.contains("move_abort") || err.contains("moveabort")
+}
+
+fn is_end_reconfig_not_reconfiguring_error(err: &anyhow::Error) -> bool {
+    let err = err.to_string();
+    err.contains("function_name: Some(\"end_reconfig\")")
+        && (err.contains("abort_code: Some(0)") || err.contains("}, 0) in command"))
 }
