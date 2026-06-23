@@ -14,6 +14,7 @@ use crate::withdrawals::MpcInputSignaturesMessage;
 use crate::withdrawals::WithdrawalBroadcastError;
 use crate::withdrawals::WithdrawalBroadcastErrorKind;
 use crate::withdrawals::WithdrawalTxSigning;
+use fastcrypto::groups::secp256k1::schnorr::SchnorrPublicKey;
 use fastcrypto::groups::secp256k1::schnorr::SchnorrSignature;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use hashi_types::committee::BlsSignatureAggregator;
@@ -27,6 +28,7 @@ use hashi_types::proto::SignWithdrawalTransactionRequest;
 use hashi_types::proto::SignWithdrawalTxSigningRequest;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use sui_sdk_types::Address;
@@ -55,6 +57,47 @@ fn should_reallocate_stale_presigs(
 
 fn next_signing_chunk(unsigned: &[u64], chunk_size: usize) -> Vec<u64> {
     unsigned.iter().take(chunk_size.max(1)).copied().collect()
+}
+
+/// Derives the x-only verifying key the MPC signature for input `idx` must
+/// validate against (the master key derived by the input's path), mirroring the
+/// per-input check the committee re-runs at the commit cert
+/// (`validate_and_sign_mpc_input_signatures`).
+fn input_verifying_key(
+    inner: &Hashi,
+    txn: &WithdrawalTransaction,
+    idx: u64,
+) -> anyhow::Result<SchnorrPublicKey> {
+    let input = txn
+        .inputs
+        .get(idx as usize)
+        .ok_or_else(|| anyhow::anyhow!("input index {idx} out of range"))?;
+    let input_pubkey = inner.deposit_pubkey(input.derivation_path.as_ref())?;
+    SchnorrPublicKey::from_byte_array(&input_pubkey.serialize())
+        .map_err(|e| anyhow::anyhow!("invalid verifying key for input {idx}: {e}"))
+}
+
+/// Merge one member's returned `(input_index, sig)` pairs into `union`, keeping
+/// the first *valid* signature seen per index (`verify` gates each candidate, so
+/// a single bad/buggy member cannot poison the chunk's commit cert).
+/// Out-of-chunk and already-present indices are skipped. Returns `true` once
+/// `union` covers every expected index, so the caller can stop waiting on the
+/// remaining members.
+fn merge_into_union(
+    union: &mut BTreeMap<u64, SchnorrSignature>,
+    expected: &BTreeSet<u64>,
+    candidates: Vec<(u64, SchnorrSignature)>,
+    verify: impl Fn(u64, &SchnorrSignature) -> bool,
+) -> bool {
+    for (idx, sig) in candidates {
+        if !expected.contains(&idx) || union.contains_key(&idx) {
+            continue;
+        }
+        if verify(idx, &sig) {
+            union.insert(idx, sig);
+        }
+    }
+    union.len() == expected.len()
 }
 
 /// Outcome of feeding one streamed partial signature into
@@ -131,17 +174,13 @@ impl ExpectedSignatureCollector {
         self.collected_count() == self.expected_count()
     }
 
-    /// Consumes the collector once the stream is exhausted, returning the
-    /// requested signatures sorted by index, or erroring if some never arrived.
-    fn finish(self) -> anyhow::Result<Vec<(u64, SchnorrSignature)>> {
-        if !self.is_complete() {
-            anyhow::bail!(
-                "returned {} sigs, expected {}",
-                self.collected_count(),
-                self.expected_count(),
-            );
-        }
-        Ok(self.collected.into_iter().collect())
+    /// Consumes the collector when the stream is exhausted, returning whatever
+    /// requested signatures this member produced, sorted by index. The set may
+    /// be partial: the leader unions partials across members
+    /// (`collect_withdrawal_tx_signatures`), so a member that signed only part
+    /// of the chunk still contributes forward progress.
+    fn into_collected(self) -> Vec<(u64, SchnorrSignature)> {
+        self.collected.into_iter().collect()
     }
 }
 
@@ -469,12 +508,20 @@ impl LeaderService {
             chunk_size = chunk_indices.len(),
             "Collecting MPC signatures for next unsigned input chunk"
         );
-        let sigs_by_index =
-            Self::collect_withdrawal_tx_signatures(inner, &txn.id, &chunk_indices, members)
-                .await
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Failed to collect MPC signatures for {:?}", txn.id)
-                })?;
+        // Per-input sighashes the MPC signatures must verify against; used to
+        // gate each candidate before it is unioned into the chunk.
+        let unsigned_tx = inner.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
+        let signing_messages = inner.withdrawal_signing_messages(&unsigned_tx, &txn.inputs)?;
+
+        let sigs_by_index = Self::collect_withdrawal_tx_signatures(
+            inner,
+            txn,
+            &chunk_indices,
+            members,
+            &signing_messages,
+        )
+        .await
+        .ok_or_else(|| anyhow::anyhow!("Failed to collect MPC signatures for {:?}", txn.id))?;
 
         let committee = inner
             .onchain_state()
@@ -482,72 +529,71 @@ impl LeaderService {
             .expect("No current committee");
         let required_weight = certificate_threshold(committee.total_weight());
 
-        let mut last_checkpoint = 0u64;
-        for chunk in sigs_by_index.chunks(chunk_size) {
-            let indices: Vec<u64> = chunk.iter().map(|(i, _)| *i).collect();
-            let signatures: Vec<Vec<u8>> = chunk
-                .iter()
-                .map(|(_, sig)| sig.to_byte_array().to_vec())
-                .collect();
+        // The collect returns at most one chunk's worth of inputs (≤ M), unioned
+        // across members; commit whatever it gathered in a single cert-gated PTB.
+        // Any inputs not covered this tick resume from on-chain state next tick.
+        let indices: Vec<u64> = sigs_by_index.iter().map(|(i, _)| *i).collect();
+        let signatures: Vec<Vec<u8>> = sigs_by_index
+            .iter()
+            .map(|(_, sig)| sig.to_byte_array().to_vec())
+            .collect();
 
-            let signed_message = MpcInputSignaturesMessage {
-                withdrawal_id: txn.id,
-                indices: indices.clone(),
-                signatures: signatures.clone(),
-            };
-            let proto_request = signed_message.to_proto();
+        let signed_message = MpcInputSignaturesMessage {
+            withdrawal_id: txn.id,
+            indices: indices.clone(),
+            signatures: signatures.clone(),
+        };
+        let proto_request = signed_message.to_proto();
 
-            let mut sig_tasks = JoinSet::new();
-            for member in members {
-                let inner = inner.clone();
-                let proto_request = proto_request.clone();
-                let member = member.clone();
-                sig_tasks.spawn(async move {
-                    Self::request_mpc_input_signatures_signature(&inner, proto_request, &member)
-                        .await
-                });
-            }
-            let mut aggregator = BlsSignatureAggregator::new(&committee, signed_message.clone());
-            while let Some(result) = sig_tasks.join_next().await {
-                let Ok(Some(sig)) = result else { continue };
-                if let Err(e) = aggregator.add_signature(sig) {
-                    error!(withdrawal_txn_id = %txn.id, "Failed to add chunk cert signature: {e}");
-                }
-                if aggregator.weight() >= required_weight {
-                    break;
-                }
-            }
-            if aggregator.weight() < required_weight {
-                anyhow::bail!(
-                    "Insufficient signatures for commit_input_signatures: weight {} < {required_weight}",
-                    aggregator.weight()
-                );
-            }
-            let signed = aggregator.finish()?;
-
-            last_checkpoint = Self::submit_commit_input_signatures(
-                inner,
-                &txn.id,
-                &indices,
-                &signatures,
-                signed.committee_signature(),
-            )
-            .await
-            .inspect(|_| {
-                inner
-                    .metrics
-                    .sui_tx_submissions_total
-                    .with_label_values(&["commit_input_signatures", "success"])
-                    .inc();
-            })
-            .inspect_err(|_| {
-                inner
-                    .metrics
-                    .sui_tx_submissions_total
-                    .with_label_values(&["commit_input_signatures", "failure"])
-                    .inc();
-            })?;
+        let mut sig_tasks = JoinSet::new();
+        for member in members {
+            let inner = inner.clone();
+            let proto_request = proto_request.clone();
+            let member = member.clone();
+            sig_tasks.spawn(async move {
+                Self::request_mpc_input_signatures_signature(&inner, proto_request, &member).await
+            });
         }
+        let mut aggregator = BlsSignatureAggregator::new(&committee, signed_message.clone());
+        while let Some(result) = sig_tasks.join_next().await {
+            let Ok(Some(sig)) = result else { continue };
+            if let Err(e) = aggregator.add_signature(sig) {
+                error!(withdrawal_txn_id = %txn.id, "Failed to add chunk cert signature: {e}");
+            }
+            if aggregator.weight() >= required_weight {
+                break;
+            }
+        }
+        if aggregator.weight() < required_weight {
+            anyhow::bail!(
+                "Insufficient signatures for commit_input_signatures: weight {} < {required_weight}",
+                aggregator.weight()
+            );
+        }
+        let signed = aggregator.finish()?;
+
+        let last_checkpoint = Self::submit_commit_input_signatures(
+            inner,
+            &txn.id,
+            &indices,
+            &signatures,
+            signed.committee_signature(),
+        )
+        .await
+        .inspect(|_| {
+            inner
+                .metrics
+                .sui_tx_submissions_total
+                .with_label_values(&["commit_input_signatures", "success"])
+                .inc();
+        })
+        .inspect_err(|_| {
+            inner
+                .metrics
+                .sui_tx_submissions_total
+                .with_label_values(&["commit_input_signatures", "failure"])
+                .inc();
+        })?;
 
         // Wait for our watcher to observe the last committed chunk so the next
         // tick resumes from fresh on-chain state (and doesn't re-sign it).
@@ -565,18 +611,29 @@ impl LeaderService {
         Ok(())
     }
 
-    /// Requests MPC signatures for the given input indices from committee members
-    /// until one member returns the complete set.
+    /// Collects MPC signatures for the requested chunk by **unioning** partials
+    /// across committee members: each member contributes whatever of the chunk it
+    /// has signed, and the first *valid* signature seen per input is kept (any
+    /// member's aggregate signature for an input is interchangeable). This makes
+    /// forward progress under contention — when no single member has the whole
+    /// chunk yet — and is safe because the chain records per-input, out-of-order,
+    /// first-writer-wins.
+    ///
+    /// Each candidate is verified against its sighash before being unioned, so a
+    /// single bad/buggy member cannot poison the chunk's commit cert. Returns the
+    /// (possibly partial) union, or `None` if not a single valid signature was
+    /// collected (the next tick retries).
     async fn collect_withdrawal_tx_signatures(
         inner: &Arc<Hashi>,
-        withdrawal_txn_id: &Address,
+        txn: &WithdrawalTransaction,
         expected_indices: &[u64],
         members: &[CommitteeMember],
+        signing_messages: &[[u8; 32]],
     ) -> Option<Vec<(u64, SchnorrSignature)>> {
+        let withdrawal_txn_id = txn.id;
         let mut sig_tasks = JoinSet::new();
         for member in members {
             let inner = inner.clone();
-            let withdrawal_txn_id = *withdrawal_txn_id;
             let expected_indices = expected_indices.to_vec();
             let member = member.clone();
             sig_tasks.spawn(async move {
@@ -590,25 +647,63 @@ impl LeaderService {
             });
         }
 
-        while let Some(result) = sig_tasks.join_next().await {
-            match result {
-                Ok(Ok(signatures)) => return Some(signatures),
-                Ok(Err(e)) => warn!("Could not get signatures from a node: {e}"),
-                Err(e) => warn!("Withdrawal tx signature task failed: {e}"),
+        // Per-input verifying keys for the chunk, derived once. A missing key
+        // (derivation failed) means candidates for that index can't be verified
+        // and are dropped.
+        let mut verify_keys: HashMap<u64, SchnorrPublicKey> =
+            HashMap::with_capacity(expected_indices.len());
+        for &idx in expected_indices {
+            match input_verifying_key(inner, txn, idx) {
+                Ok(pk) => {
+                    verify_keys.insert(idx, pk);
+                }
+                Err(e) => {
+                    warn!(%withdrawal_txn_id, "Cannot derive verifying key for input {idx}: {e}")
+                }
             }
         }
 
-        error!(
-            "Could not get mpc signatures for {:?}; stopping processing",
-            withdrawal_txn_id
-        );
-        None
+        let expected: BTreeSet<u64> = expected_indices.iter().copied().collect();
+        let mut union: BTreeMap<u64, SchnorrSignature> = BTreeMap::new();
+        while let Some(result) = sig_tasks.join_next().await {
+            let candidates = match result {
+                Ok(Ok(sigs)) => sigs,
+                Ok(Err(e)) => {
+                    warn!("Could not get signatures from a node: {e}");
+                    continue;
+                }
+                Err(e) => {
+                    warn!("Withdrawal tx signature task failed: {e}");
+                    continue;
+                }
+            };
+            let complete = merge_into_union(&mut union, &expected, candidates, |idx, sig| {
+                match (verify_keys.get(&idx), signing_messages.get(idx as usize)) {
+                    (Some(pk), Some(msg)) => pk.verify(msg, sig).is_ok(),
+                    _ => false,
+                }
+            });
+            if complete {
+                // Whole chunk in hand; cancel the remaining members.
+                break;
+            }
+        }
+
+        if union.is_empty() {
+            error!(
+                "Could not collect any MPC signatures for {:?}; stopping processing",
+                withdrawal_txn_id
+            );
+            return None;
+        }
+        Some(union.into_iter().collect())
     }
 
-    /// Opens a streaming signing RPC to one committee member and collects exactly
-    /// the requested input indices' MPC signatures (out-of-order allowed). The
-    /// member signs only its still-unsigned inputs, so the returned set is the
-    /// requested unsigned subset.
+    /// Opens a streaming signing RPC to one committee member and collects that
+    /// member's MPC signatures for the requested input indices (out-of-order
+    /// allowed). The returned set may be partial — the member streams whatever of
+    /// the requested subset it has signed — and the caller unions partials across
+    /// members.
     #[tracing::instrument(level = "debug", skip_all, fields(validator = %member.validator_address()))]
     async fn request_withdrawal_tx_signature(
         inner: &Arc<Hashi>,
@@ -666,9 +761,7 @@ impl LeaderService {
                 CollectOutcome::Complete => break,
             }
         }
-        collector.finish().map_err(|e| {
-            anyhow::anyhow!("Withdrawal tx signature stream from {validator_address} {e}")
-        })
+        Ok(collector.into_collected())
     }
 
     /// Requests a committee member's BLS signature over the on-chain withdrawal signing message.
@@ -1411,8 +1504,7 @@ mod tests {
         assert!(collector.is_complete());
 
         let indices: Vec<u64> = collector
-            .finish()
-            .unwrap()
+            .into_collected()
             .into_iter()
             .map(|(i, _)| i)
             .collect();
@@ -1438,16 +1530,61 @@ mod tests {
     }
 
     #[test]
-    fn collector_finish_errors_when_stream_ends_incomplete() {
+    fn collector_into_collected_returns_partial_when_stream_ends_incomplete() {
         let mut collector = ExpectedSignatureCollector::new(&[0, 1, 2]);
         collector.record(0, &valid_sig_a()).unwrap();
-        // EOF before indices 1 and 2 arrived: finishing must error.
-        // Use `.err()` because the Ok type (Vec<(_, SchnorrSignature)>) isn't Debug.
-        let err = collector
-            .finish()
-            .err()
-            .expect("incomplete collector must error")
-            .to_string();
-        assert!(err.contains("expected 3"), "unexpected error: {err}");
+        // EOF before indices 1 and 2 arrived: the member contributes its partial
+        // set (just index 0); the leader unions it with other members' partials.
+        let indices: Vec<u64> = collector
+            .into_collected()
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(indices, vec![0]);
+    }
+
+    fn sig_a() -> SchnorrSignature {
+        SchnorrSignature::from_byte_array(&valid_sig_a().try_into().unwrap()).unwrap()
+    }
+
+    fn sig_b() -> SchnorrSignature {
+        SchnorrSignature::from_byte_array(&valid_sig_b().try_into().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn merge_into_union_keeps_first_valid_and_reports_complete() {
+        let expected: BTreeSet<u64> = [0, 1].into_iter().collect();
+        let mut union: BTreeMap<u64, SchnorrSignature> = BTreeMap::new();
+
+        // First member has only index 0 -> not complete yet.
+        let complete = merge_into_union(&mut union, &expected, vec![(0, sig_a())], |_, _| true);
+        assert!(!complete);
+        assert_eq!(union.keys().copied().collect::<Vec<_>>(), vec![0]);
+
+        // Second member re-sends 0 (kept from the first) and adds 1 -> completes.
+        let complete = merge_into_union(
+            &mut union,
+            &expected,
+            vec![(0, sig_b()), (1, sig_b())],
+            |_, _| true,
+        );
+        assert!(complete);
+        assert_eq!(union.keys().copied().collect::<Vec<_>>(), vec![0, 1]);
+    }
+
+    #[test]
+    fn merge_into_union_skips_invalid_and_out_of_chunk() {
+        let expected: BTreeSet<u64> = [0, 1].into_iter().collect();
+        let mut union: BTreeMap<u64, SchnorrSignature> = BTreeMap::new();
+
+        // idx 0 fails verification, idx 5 is out of chunk, idx 1 is valid.
+        let complete = merge_into_union(
+            &mut union,
+            &expected,
+            vec![(0, sig_a()), (5, sig_a()), (1, sig_a())],
+            |idx, _| idx != 0,
+        );
+        assert!(!complete);
+        assert_eq!(union.keys().copied().collect::<Vec<_>>(), vec![1]);
     }
 }
