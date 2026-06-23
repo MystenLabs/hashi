@@ -983,15 +983,15 @@ impl MpcService {
             }
         };
         let from_epoch = self.inner.onchain_state().epoch();
-        let has_current_committee = self
+        let requires_committee_handoff = !self
             .inner
             .onchain_state()
             .state()
             .hashi()
             .committees
-            .current_committee()
-            .is_some();
-        if has_current_committee {
+            .mpc_public_key()
+            .is_empty();
+        if requires_committee_handoff {
             let committee_handoff = loop {
                 if self.get_pending_epoch_change() != Some(epoch) {
                     return Err(anyhow::anyhow!("epoch {} no longer pending", epoch));
