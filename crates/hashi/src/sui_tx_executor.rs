@@ -192,6 +192,7 @@ use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionRequest;
 use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionResponse;
+use sui_rpc::proto::sui::rpc::v2::ExecutionStatus;
 use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
 use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
 use sui_rpc::proto::sui::rpc::v2::Object;
@@ -281,6 +282,19 @@ pub enum TxOutcome {
     },
     /// `SerializeUnsigned`: base64-encoded BCS `TransactionData` for external signing.
     Serialized(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{function} transaction failed: {status:?}")]
+pub(crate) struct TransactionExecutionError {
+    function: &'static str,
+    status: ExecutionStatus,
+}
+
+impl TransactionExecutionError {
+    pub(crate) fn status(&self) -> &ExecutionStatus {
+        &self.status
+    }
 }
 
 /// Set the sender and gas overrides on `builder`, then finish it according to
@@ -1021,11 +1035,13 @@ impl SuiTxExecutor {
             vec![hashi_arg, mpc_public_key_arg, mpc_cert_arg],
         );
         let response = self.execute(builder).await?;
-        if !response.transaction().effects().status().success() {
-            anyhow::bail!(
-                "end_reconfig transaction failed: {:?}",
-                response.transaction().effects().status()
-            );
+        let status = response.transaction().effects().status();
+        if !status.success() {
+            return Err(TransactionExecutionError {
+                function: "end_reconfig",
+                status: status.clone(),
+            }
+            .into());
         }
         Ok(())
     }
@@ -1055,11 +1071,13 @@ impl SuiTxExecutor {
             vec![hashi_arg, committee_handoff_cert_arg],
         );
         let response = self.execute(builder).await?;
-        if !response.transaction().effects().status().success() {
-            anyhow::bail!(
-                "submit_committee_handoff transaction failed: {:?}",
-                response.transaction().effects().status()
-            );
+        let status = response.transaction().effects().status();
+        if !status.success() {
+            return Err(TransactionExecutionError {
+                function: "submit_committee_handoff",
+                status: status.clone(),
+            }
+            .into());
         }
         Ok(())
     }
