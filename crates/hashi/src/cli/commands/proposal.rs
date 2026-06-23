@@ -635,24 +635,14 @@ pub async fn create_abort_reconfig_proposal(
 pub async fn create_update_guardian_proposal(
     config: &CliConfig,
     url: &str,
-    public_key_hex: &str,
     metadata: Vec<(String, String)>,
     tx_opts: &TxOptions,
 ) -> Result<()> {
-    let public_key = hex::decode(public_key_hex.strip_prefix("0x").unwrap_or(public_key_hex))
-        .context("Invalid hex for public key")?;
-    anyhow::ensure!(
-        public_key.len() == 32,
-        "--public-key must be 32 bytes (Ed25519), got {} bytes",
-        public_key.len(),
-    );
-
     print_detail(&format!(
         "\n{}",
         "Creating Update Guardian Proposal:".bold()
     ));
     print_detail(&format!("  URL:        {}", url));
-    print_detail(&format!("  Public Key: 0x{}", hex::encode(&public_key)));
     print_metadata(&metadata);
 
     prompt_continue("create this update guardian proposal", tx_opts).await?;
@@ -660,7 +650,6 @@ pub async fn create_update_guardian_proposal(
     let mut client = HashiClient::new(config).await?;
     let tx = client.build_create_proposal_transaction(CreateProposalParams::UpdateGuardian {
         url: url.to_string(),
-        public_key,
         metadata,
     })?;
 

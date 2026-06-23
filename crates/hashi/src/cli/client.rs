@@ -60,7 +60,6 @@ pub enum CreateProposalParams {
     },
     UpdateGuardian {
         url: String,
-        public_key: Vec<u8>,
         metadata: Vec<(String, String)>,
     },
     EmergencyPause {
@@ -660,13 +659,8 @@ pub fn build_create_proposal_transaction(
                 ],
             );
         }
-        CreateProposalParams::UpdateGuardian {
-            url,
-            public_key,
-            metadata,
-        } => {
+        CreateProposalParams::UpdateGuardian { url, metadata } => {
             let url_arg = builder.pure(&url);
-            let public_key_arg = builder.pure(&public_key);
             let metadata_arg = build_metadata(&mut builder, &metadata);
             builder.move_call(
                 Function::new(
@@ -678,7 +672,6 @@ pub fn build_create_proposal_transaction(
                     hashi_arg,
                     validator_address_arg,
                     url_arg,
-                    public_key_arg,
                     metadata_arg,
                     clock_arg,
                 ],
