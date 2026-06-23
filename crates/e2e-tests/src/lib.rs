@@ -253,11 +253,6 @@ impl TestNetworksBuilder {
         let guardian_btc_pubkey = guardian_harness.ensure_btc_pubkey()?;
         let guardian_config = hashi::publish::GuardianConfig {
             url: guardian_harness.endpoint().to_string(),
-            public_key: guardian_harness
-                .enclave()
-                .signing_pubkey()
-                .as_bytes()
-                .to_vec(),
             btc_public_key: guardian_btc_pubkey.serialize().to_vec(),
         };
         tracing::info!(

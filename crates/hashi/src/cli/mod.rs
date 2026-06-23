@@ -261,15 +261,11 @@ pub enum CreateProposalCommands {
         metadata: MetadataArgs,
     },
 
-    /// Propose updating the guardian URL and public key
+    /// Propose updating the guardian URL
     UpdateGuardian {
         /// The guardian gRPC endpoint URL
         #[clap(long)]
         url: String,
-
-        /// The guardian's signing public key (hex encoded)
-        #[clap(long)]
-        public_key: String,
 
         #[clap(flatten)]
         metadata: MetadataArgs,
@@ -659,10 +655,6 @@ pub struct PublishOpts {
     #[clap(long)]
     pub guardian_url: String,
 
-    /// Guardian Ed25519 signing pubkey, hex-encoded (32 bytes).
-    #[clap(long)]
-    pub guardian_public_key: String,
-
     /// Guardian BTC pubkey, x-only hex-encoded (32 bytes). Published
     /// on-chain for 2-of-2 deposit address derivation.
     #[clap(long)]
@@ -896,15 +888,10 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     )
                     .await?;
                 }
-                CreateProposalCommands::UpdateGuardian {
-                    url,
-                    public_key,
-                    metadata,
-                } => {
+                CreateProposalCommands::UpdateGuardian { url, metadata } => {
                     commands::proposal::create_update_guardian_proposal(
                         &config,
                         &url,
-                        &public_key,
                         parse_metadata(metadata.metadata),
                         &tx_opts,
                     )
@@ -1198,18 +1185,7 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
     // Connect to RPC
     let mut client = sui_rpc::Client::new(&opts.sui_rpc_url)?;
 
-    // Guardian is required — all three flags must be present.
-    let public_key = hex::decode(
-        opts.guardian_public_key
-            .strip_prefix("0x")
-            .unwrap_or(&opts.guardian_public_key),
-    )
-    .context("Invalid hex for --guardian-public-key")?;
-    anyhow::ensure!(
-        public_key.len() == 32,
-        "--guardian-public-key must be 32 bytes (Ed25519), got {} bytes",
-        public_key.len(),
-    );
+    // Guardian is required — both flags must be present.
     let btc_public_key = hex::decode(
         opts.guardian_btc_public_key
             .strip_prefix("0x")
@@ -1223,7 +1199,6 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
     );
     let guardian = crate::publish::GuardianConfig {
         url: opts.guardian_url,
-        public_key,
         btc_public_key,
     };
 
