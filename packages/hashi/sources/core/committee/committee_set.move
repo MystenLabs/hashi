@@ -310,6 +310,10 @@ public(package) fun epoch(self: &CommitteeSet): u64 {
     self.epoch
 }
 
+public(package) fun mpc_public_key(self: &CommitteeSet): &vector<u8> {
+    &self.mpc_public_key
+}
+
 // Verifies that the provided bls public key is valid and there is a valid
 // proof of possession.
 fun verify_bls_public_key(

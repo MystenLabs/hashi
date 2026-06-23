@@ -60,12 +60,15 @@ entry fun end_reconfig(
     let new_committee = *next_committee;
     let message = ReconfigCompletionMessage { epoch: next_epoch, mpc_public_key };
     self.verify_with_committee(next_committee, message, mpc_cert);
+    let is_initial_reconfig = self.committee_set().mpc_public_key().is_empty();
 
     self.reset_num_consumed_presigs();
     let (epoch, committee_handoff_cert) = self
         .committee_set_mut()
         .end_reconfig(mpc_public_key, ctx);
-    if (committee_handoff_cert.is_some()) {
+    if (is_initial_reconfig) {
+        committee_handoff_cert.destroy_none();
+    } else {
         self
             .committee_set_mut()
             .insert_committee_handoff(
@@ -73,8 +76,6 @@ entry fun end_reconfig(
                 new_committee,
                 committee_handoff_cert.destroy_some(),
             );
-    } else {
-        committee_handoff_cert.destroy_none();
     };
     sui::event::emit(EndReconfigEvent { from_epoch, epoch, mpc_public_key });
 }
@@ -151,7 +152,8 @@ fun test_end_reconfig_stores_committee_handoff() {
     let next_committee = pending_committee_for_testing(next_epoch);
     hashi.committee_set_mut().set_pending_reconfig_for_testing(next_committee);
 
-    let mpc_public_key = vector[];
+    let mpc_public_key = vector[1, 2, 3];
+    hashi.committee_set_mut().set_mpc_public_key_for_testing(mpc_public_key);
     let mpc_message = ReconfigCompletionMessage { epoch: next_epoch, mpc_public_key };
     let mpc_cert = test_utils::sign_certificate(
         next_epoch,
