@@ -299,12 +299,16 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
     {
         let txid_bytes: [u8; 32] = pw.id.into();
         let txid = bitcoin::Txid::from_byte_array(txid_bytes);
-        // TODO(tuning): surface incremental progress (signed_count/num_inputs)
-        // as a distinct "Signing (X/N)" state for the multi-checkpoint window.
         let is_signed = pw.is_fully_signed();
+        let signed_inputs = pw.signing.signed_count();
+        let num_inputs = pw.signing.num_inputs();
         let step = if is_signed { 4 } else { 3 };
+        // Distinguish the multi-checkpoint signing window: an in-progress txn
+        // shows "Signing (X/N)" rather than a flat "Committed".
         let status_label = if is_signed {
             "Signed".green()
+        } else if signed_inputs > 0 {
+            format!("Signing ({signed_inputs}/{num_inputs})").cyan()
         } else {
             "Committed".cyan()
         };

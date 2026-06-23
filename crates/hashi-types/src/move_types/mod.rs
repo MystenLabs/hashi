@@ -343,6 +343,14 @@ impl SigningBatch {
             .count()
     }
 
+    /// Number of inputs whose MPC signature is complete.
+    pub fn signed_count(&self) -> usize {
+        self.signatures
+            .iter()
+            .filter(|s| matches!(s, MpcSig::Signed(_)))
+            .count()
+    }
+
     /// Indices of inputs still awaiting an MPC signature (the resume set).
     pub fn unsigned_indices(&self) -> Vec<u64> {
         self.signatures

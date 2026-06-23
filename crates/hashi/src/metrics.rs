@@ -966,15 +966,23 @@ impl Metrics {
             .requests()
             .values()
             .partition::<Vec<_>, _>(|r| r.status.is_requested());
-        // TODO(tuning): with incremental signing a withdrawal is now "signing"
-        // (some inputs done, not finalized) for a multi-checkpoint window. Split
-        // `pending` into pending/signing (via `w.signing.signed_count`) for
-        // operator visibility before rollout.
-        let (signed, pending): (Vec<_>, Vec<_>) = hashi
-            .withdrawal_queue
-            .withdrawal_txns()
-            .values()
-            .partition(|w| w.is_fully_signed());
+        // Three on-chain withdrawal-txn states, distinguished for operator
+        // visibility now that signing spans a multi-checkpoint window:
+        //   signed  = fully signed (2-of-2 witness assembled), broadcast-ready
+        //   signing = some inputs MPC-signed but not yet finalized (in progress)
+        //   pending = committed on-chain but no inputs signed yet
+        let mut signed = Vec::new();
+        let mut signing = Vec::new();
+        let mut pending = Vec::new();
+        for w in hashi.withdrawal_queue.withdrawal_txns().values() {
+            if w.is_fully_signed() {
+                signed.push(w);
+            } else if w.signing.signed_count() > 0 {
+                signing.push(w);
+            } else {
+                pending.push(w);
+            }
+        }
         self.withdrawal_queue_size
             .with_label_values(&["requested"])
             .set(requested.len() as i64);
@@ -994,6 +1002,18 @@ impl Metrics {
             .with_label_values(&["pending", "BTC"])
             .set(
                 pending
+                    .iter()
+                    .flat_map(|w| &w.withdrawal_outputs)
+                    .map(|o| o.amount)
+                    .sum::<u64>() as i64,
+            );
+        self.withdrawal_queue_size
+            .with_label_values(&["signing"])
+            .set(signing.len() as i64);
+        self.withdrawal_queue_value
+            .with_label_values(&["signing", "BTC"])
+            .set(
+                signing
                     .iter()
                     .flat_map(|w| &w.withdrawal_outputs)
                     .map(|o| o.amount)
