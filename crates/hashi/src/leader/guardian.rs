@@ -293,10 +293,10 @@ impl LeaderService {
             );
             let signed = inner
                 .onchain_state()
-                .guardian_handoff(from_epoch)
+                .committee_handoff(from_epoch)
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "missing on-chain guardian handoff for epoch {from_epoch}; cannot advance guardian"
+                        "missing on-chain committee handoff for epoch {from_epoch}; cannot advance guardian"
                     )
                 })?;
             let to_epoch = signed.message().new_committee.epoch;

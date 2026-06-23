@@ -68,8 +68,8 @@ pub struct Hashi {
     guardian_last_finalized: RwLock<Option<(u64, sui_sdk_types::Address)>>,
     /// Reconfig completion signatures by epoch.
     reconfig_signatures: RwLock<HashMap<u64, Vec<u8>>>,
-    /// Guardian committee handoff member signatures by outgoing epoch.
-    guardian_handoff_signatures: RwLock<HashMap<u64, hashi_types::proto::MemberSignature>>,
+    /// Committee handoff member signatures by outgoing epoch.
+    committee_handoff_signatures: RwLock<HashMap<u64, hashi_types::proto::MemberSignature>>,
 }
 
 impl Hashi {
@@ -99,7 +99,7 @@ impl Hashi {
             local_limiter: OnceLock::new(),
             guardian_last_finalized: RwLock::new(None),
             reconfig_signatures: RwLock::new(HashMap::new()),
-            guardian_handoff_signatures: RwLock::new(HashMap::new()),
+            committee_handoff_signatures: RwLock::new(HashMap::new()),
         }))
     }
 
@@ -130,7 +130,7 @@ impl Hashi {
             local_limiter: OnceLock::new(),
             guardian_last_finalized: RwLock::new(None),
             reconfig_signatures: RwLock::new(HashMap::new()),
-            guardian_handoff_signatures: RwLock::new(HashMap::new()),
+            committee_handoff_signatures: RwLock::new(HashMap::new()),
         }))
     }
 
@@ -231,22 +231,22 @@ impl Hashi {
             .cloned()
     }
 
-    pub fn store_guardian_handoff_signature(
+    pub fn store_committee_handoff_signature(
         &self,
         from_epoch: u64,
         signature: hashi_types::proto::MemberSignature,
     ) {
-        self.guardian_handoff_signatures
+        self.committee_handoff_signatures
             .write()
             .unwrap()
             .insert(from_epoch, signature);
     }
 
-    pub fn get_guardian_handoff_signature(
+    pub fn get_committee_handoff_signature(
         &self,
         from_epoch: u64,
     ) -> Option<hashi_types::proto::MemberSignature> {
-        self.guardian_handoff_signatures
+        self.committee_handoff_signatures
             .read()
             .unwrap()
             .get(&from_epoch)

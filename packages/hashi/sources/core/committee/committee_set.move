@@ -26,9 +26,7 @@ public struct CommitteeSet has store {
     /// The current epoch.
     epoch: u64,
     committees: Bag,
-    guardian_handoffs: Bag,
-    //TODO do we want more info for this?
-    pending_epoch_change: Option<u64>,
+    pending_epoch_change: Option<PendingEpochChange>,
     /// The MPC committee's threshold public key.
     mpc_public_key: vector<u8>,
 }
@@ -38,13 +36,21 @@ public(package) fun create(ctx: &mut TxContext): CommitteeSet {
         members: sui::bag::new(ctx),
         epoch: 0,
         committees: sui::bag::new(ctx),
-        guardian_handoffs: sui::bag::new(ctx),
         pending_epoch_change: option::none(),
         mpc_public_key: std::vector::empty(),
     }
 }
 
-public struct GuardianCommitteeHandoff has store {
+public struct PendingEpochChange has copy, drop, store {
+    epoch: u64,
+    committee_handoff_cert: Option<committee::CommitteeSignature>,
+}
+
+public struct CommitteeHandoffKey has copy, drop, store {
+    epoch: u64,
+}
+
+public struct CommitteeHandoff has store {
     new_committee: Committee,
     cert: committee::CommitteeSignature,
 }
@@ -92,19 +98,24 @@ fun insert_committee(self: &mut CommitteeSet, committee: Committee) {
     self.committees.add(committee.epoch(), committee)
 }
 
-public(package) fun insert_guardian_handoff(
+public(package) fun insert_committee_handoff(
     self: &mut CommitteeSet,
     from_epoch: u64,
     new_committee: Committee,
     cert: committee::CommitteeSignature,
 ) {
-    assert!(!self.guardian_handoffs.contains_with_type<u64, GuardianCommitteeHandoff>(from_epoch));
-    self.guardian_handoffs.add(from_epoch, GuardianCommitteeHandoff { new_committee, cert })
+    let key = CommitteeHandoffKey { epoch: from_epoch };
+    assert!(!self.committees.contains_with_type<CommitteeHandoffKey, CommitteeHandoff>(key));
+    self.committees.add(key, CommitteeHandoff { new_committee, cert })
 }
 
 #[test_only]
-public fun has_guardian_handoff_for_testing(self: &CommitteeSet, from_epoch: u64): bool {
-    self.guardian_handoffs.contains_with_type<u64, GuardianCommitteeHandoff>(from_epoch)
+public fun has_committee_handoff_for_testing(self: &CommitteeSet, from_epoch: u64): bool {
+    self
+        .committees
+        .contains_with_type<CommitteeHandoffKey, CommitteeHandoff>(CommitteeHandoffKey {
+            epoch: from_epoch,
+        })
 }
 
 fun remove_committee(self: &mut CommitteeSet, epoch: u64): Committee {
@@ -401,7 +412,21 @@ public(package) fun is_reconfiguring(self: &CommitteeSet): bool {
 }
 
 public(package) fun pending_epoch_change(self: &CommitteeSet): Option<u64> {
-    self.pending_epoch_change
+    if (self.pending_epoch_change.is_some()) {
+        option::some(self.pending_epoch_change.borrow().epoch)
+    } else {
+        option::none()
+    }
+}
+
+public(package) fun set_pending_committee_handoff_cert(
+    self: &mut CommitteeSet,
+    cert: committee::CommitteeSignature,
+) {
+    let mut pending = self.pending_epoch_change.extract();
+    assert!(pending.committee_handoff_cert.is_none());
+    pending.committee_handoff_cert = option::some(cert);
+    self.pending_epoch_change = option::some(pending);
 }
 
 public(package) fun get_committee(self: &CommitteeSet, epoch: u64): &Committee {
@@ -446,7 +471,11 @@ public(package) fun start_reconfig(
     );
 
     let epoch = committee.epoch();
-    self.pending_epoch_change = option::some(epoch);
+    self.pending_epoch_change =
+        option::some(PendingEpochChange {
+            epoch,
+            committee_handoff_cert: option::none(),
+        });
     self.insert_committee(committee);
     epoch
 }
@@ -455,15 +484,19 @@ public(package) fun end_reconfig(
     self: &mut CommitteeSet,
     mpc_public_key: vector<u8>,
     _ctx: &TxContext,
-): u64 {
+): (u64, Option<committee::CommitteeSignature>) {
     assert!(self.is_reconfiguring());
-    let next_epoch = self.pending_epoch_change.extract();
+    let PendingEpochChange { epoch: next_epoch, committee_handoff_cert } = self
+        .pending_epoch_change
+        .extract();
     assert!(self.has_committee(next_epoch));
 
     // If the mpc_public_key is empty, then this is the initial reconfig where
     // DKG is run and we need to set the produced pubkey.
     if (self.mpc_public_key.is_empty()) {
         self.mpc_public_key = mpc_public_key;
+    } else {
+        assert!(committee_handoff_cert.is_some());
     };
 
     // On subsequent reconfigs where key resharing is performing instead of
@@ -471,12 +504,19 @@ public(package) fun end_reconfig(
     assert!(self.mpc_public_key == mpc_public_key);
 
     self.epoch = next_epoch;
-    next_epoch
+    (next_epoch, committee_handoff_cert)
 }
 
 public(package) fun abort_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u64 {
     assert!(self.is_reconfiguring());
-    let next_epoch = self.pending_epoch_change.extract();
+    let PendingEpochChange { epoch: next_epoch, committee_handoff_cert } = self
+        .pending_epoch_change
+        .extract();
+    if (committee_handoff_cert.is_some()) {
+        committee_handoff_cert.destroy_some();
+    } else {
+        committee_handoff_cert.destroy_none();
+    };
     self.remove_committee(next_epoch);
     next_epoch
 }
@@ -486,8 +526,17 @@ public fun set_pending_reconfig_for_testing(self: &mut CommitteeSet, committee: 
     let epoch = committee.epoch();
     assert!(!self.is_reconfiguring());
     assert!(!self.has_committee(epoch));
-    self.pending_epoch_change = option::some(epoch);
+    self.pending_epoch_change =
+        option::some(PendingEpochChange {
+            epoch,
+            committee_handoff_cert: option::none(),
+        });
     self.insert_committee(committee);
+}
+
+#[test_only]
+public fun set_mpc_public_key_for_testing(self: &mut CommitteeSet, mpc_public_key: vector<u8>) {
+    self.mpc_public_key = mpc_public_key;
 }
 
 // ======== Test-only Functions ========

@@ -71,11 +71,17 @@ pub struct CommitteeSet {
     /// The current epoch.
     pub epoch: u64,
     pub committees: Bag,
-    pub guardian_handoffs: Bag,
-    pub pending_epoch_change: Option<u64>,
+    pub pending_epoch_change: Option<PendingEpochChange>,
 
     /// The MPC committee's threshold public key.
     pub mpc_public_key: Vec<u8>,
+}
+
+/// Rust version of the Move hashi::committee_set::PendingEpochChange type.
+#[derive(Debug, Clone, serde_derive::Deserialize)]
+pub struct PendingEpochChange {
+    pub epoch: u64,
+    pub committee_handoff_cert: Option<CommitteeSignature>,
 }
 
 /// Rust version of the Move sui::bag::Bag type.
@@ -170,9 +176,15 @@ pub struct Committee {
     pub mpc_nonce_generation_protocol: u64,
 }
 
-/// Rust version of the Move hashi::committee_set::GuardianCommitteeHandoff type.
+/// Rust version of the Move hashi::committee_set::CommitteeHandoffKey type.
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
-pub struct GuardianCommitteeHandoff {
+pub struct CommitteeHandoffKey {
+    pub epoch: u64,
+}
+
+/// Rust version of the Move hashi::committee_set::CommitteeHandoff type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct CommitteeHandoff {
     pub new_committee: Committee,
     pub cert: CommitteeSignature,
 }
@@ -1311,7 +1323,6 @@ pub struct EndReconfigEvent {
     pub from_epoch: u64,
     pub epoch: u64,
     pub mpc_public_key: Vec<u8>,
-    pub guardian_handoff_cert: CommitteeSignature,
 }
 
 impl MoveType for EndReconfigEvent {

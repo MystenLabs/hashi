@@ -983,26 +983,58 @@ impl MpcService {
             }
         };
         let from_epoch = self.inner.onchain_state().epoch();
-        let guardian_handoff = loop {
-            if self.get_pending_epoch_change() != Some(epoch) {
-                return Err(anyhow::anyhow!("epoch {} no longer pending", epoch));
-            }
-            match crate::leader::LeaderService::collect_committee_transition_signatures(
-                &self.inner,
-                from_epoch,
-            )
-            .await
-            {
-                Ok(handoff) => break handoff,
-                Err(e) => {
-                    warn!(
-                        from_epoch,
-                        "Guardian handoff signature collection failed: {e}, retrying..."
-                    );
-                    self.sleep_if_still_pending(epoch).await;
+        let has_current_committee = self
+            .inner
+            .onchain_state()
+            .state()
+            .hashi()
+            .committees
+            .current_committee()
+            .is_some();
+        if has_current_committee {
+            let committee_handoff = loop {
+                if self.get_pending_epoch_change() != Some(epoch) {
+                    return Err(anyhow::anyhow!("epoch {} no longer pending", epoch));
+                }
+                match crate::leader::LeaderService::collect_committee_transition_signatures(
+                    &self.inner,
+                    from_epoch,
+                )
+                .await
+                {
+                    Ok(handoff) => break handoff,
+                    Err(e) => {
+                        warn!(
+                            from_epoch,
+                            "Committee handoff signature collection failed: {e}, retrying..."
+                        );
+                        self.sleep_if_still_pending(epoch).await;
+                    }
+                }
+            };
+            loop {
+                if self.get_pending_epoch_change() != Some(epoch) {
+                    return Err(anyhow::anyhow!("epoch {} no longer pending", epoch));
+                }
+                let result = async {
+                    let mut executor =
+                        crate::sui_tx_executor::SuiTxExecutor::from_hashi(self.inner.clone())?;
+                    executor
+                        .execute_submit_committee_handoff(committee_handoff.committee_signature())
+                        .await
+                };
+                match result.await {
+                    Ok(()) => break,
+                    Err(e) => {
+                        warn!(
+                            "submit_committee_handoff submission for epoch {} failed: {e}, retrying...",
+                            epoch
+                        );
+                        self.sleep_if_still_pending(epoch).await;
+                    }
                 }
             }
-        };
+        }
         loop {
             if self.get_pending_epoch_change() != Some(epoch) {
                 return Err(anyhow::anyhow!("epoch {} no longer pending", epoch));
@@ -1011,11 +1043,7 @@ impl MpcService {
                 let mut executor =
                     crate::sui_tx_executor::SuiTxExecutor::from_hashi(self.inner.clone())?;
                 executor
-                    .execute_end_reconfig(
-                        &mpc_public_key,
-                        cert.committee_signature(),
-                        guardian_handoff.committee_signature(),
-                    )
+                    .execute_end_reconfig(&mpc_public_key, cert.committee_signature())
                     .await
             };
             match result.await {

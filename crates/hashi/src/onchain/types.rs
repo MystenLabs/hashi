@@ -64,8 +64,7 @@ pub struct CommitteeSet {
     /// Id of the `Bag` containing the committee's per epoch
     committees_id: Address,
     committees: BTreeMap<u64, Committee>,
-    guardian_handoffs_id: Address,
-    guardian_handoffs: BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>>,
+    committee_handoffs: BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>>,
 
     tls_private_key: Option<ed25519_dalek::SigningKey>,
     grpc_max_decoding_message_size: Option<usize>,
@@ -104,8 +103,7 @@ impl fmt::Debug for CommitteeSet {
             )
             .field("committees_id", &self.committees_id)
             .field("committees", &self.committees)
-            .field("guardian_handoffs_id", &self.guardian_handoffs_id)
-            .field("guardian_handoffs", &self.guardian_handoffs.keys())
+            .field("committee_handoffs", &self.committee_handoffs.keys())
             .field("tls_private_key", &tls_private_key_display)
             .field(
                 "grpc_max_decoding_message_size",
@@ -127,8 +125,7 @@ impl CommitteeSet {
             mpc_public_key: Vec::new(),
             committees_id,
             committees: BTreeMap::new(),
-            guardian_handoffs_id: Address::ZERO,
-            guardian_handoffs: BTreeMap::new(),
+            committee_handoffs: BTreeMap::new(),
             tls_private_key: None,
             grpc_max_decoding_message_size: None,
             metrics: None,
@@ -152,18 +149,14 @@ impl CommitteeSet {
         &self.committees
     }
 
-    pub fn guardian_handoffs_id(&self) -> Address {
-        self.guardian_handoffs_id
+    pub fn committee_handoffs(&self) -> &BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>> {
+        &self.committee_handoffs
     }
 
-    pub fn guardian_handoffs(&self) -> &BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>> {
-        &self.guardian_handoffs
-    }
-
-    pub fn guardian_handoffs_mut(
+    pub fn committee_handoffs_mut(
         &mut self,
     ) -> &mut BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>> {
-        &mut self.guardian_handoffs
+        &mut self.committee_handoffs
     }
 
     pub fn committees_mut(&mut self) -> &mut BTreeMap<u64, Committee> {
@@ -340,16 +333,11 @@ impl CommitteeSet {
         self
     }
 
-    pub fn set_guardian_handoffs_id(&mut self, guardian_handoffs_id: Address) -> &mut Self {
-        self.guardian_handoffs_id = guardian_handoffs_id;
-        self
-    }
-
-    pub fn set_guardian_handoffs(
+    pub fn set_committee_handoffs(
         &mut self,
-        guardian_handoffs: BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>>,
+        committee_handoffs: BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>>,
     ) -> &mut Self {
-        self.guardian_handoffs = guardian_handoffs;
+        self.committee_handoffs = committee_handoffs;
         self
     }
 

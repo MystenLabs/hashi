@@ -1002,7 +1002,6 @@ impl SuiTxExecutor {
         &mut self,
         mpc_public_key: &[u8],
         mpc_cert: &CommitteeSignature,
-        guardian_handoff_cert: &CommitteeSignature,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
         let hashi_arg = builder.object(
@@ -1013,28 +1012,52 @@ impl SuiTxExecutor {
         let mpc_public_key_arg = builder.pure(&mpc_public_key.to_vec());
         let mpc_cert_arg =
             build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, mpc_cert);
-        let guardian_handoff_cert_arg = build_committee_signature_arg(
-            &mut builder,
-            self.hashi_ids.package_id,
-            guardian_handoff_cert,
-        );
         builder.move_call(
             Function::new(
                 self.hashi_ids.package_id,
                 Identifier::from_static("reconfig"),
                 Identifier::from_static("end_reconfig"),
             ),
-            vec![
-                hashi_arg,
-                mpc_public_key_arg,
-                mpc_cert_arg,
-                guardian_handoff_cert_arg,
-            ],
+            vec![hashi_arg, mpc_public_key_arg, mpc_cert_arg],
         );
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
             anyhow::bail!(
                 "end_reconfig transaction failed: {:?}",
+                response.transaction().effects().status()
+            );
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "info", skip_all)]
+    pub async fn execute_submit_committee_handoff(
+        &mut self,
+        committee_handoff_cert: &CommitteeSignature,
+    ) -> anyhow::Result<()> {
+        let mut builder = TransactionBuilder::new();
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let committee_handoff_cert_arg = build_committee_signature_arg(
+            &mut builder,
+            self.hashi_ids.package_id,
+            committee_handoff_cert,
+        );
+        builder.move_call(
+            Function::new(
+                self.hashi_ids.package_id,
+                Identifier::from_static("reconfig"),
+                Identifier::from_static("submit_committee_handoff"),
+            ),
+            vec![hashi_arg, committee_handoff_cert_arg],
+        );
+        let response = self.execute(builder).await?;
+        if !response.transaction().effects().status().success() {
+            anyhow::bail!(
+                "submit_committee_handoff transaction failed: {:?}",
                 response.transaction().effects().status()
             );
         }
