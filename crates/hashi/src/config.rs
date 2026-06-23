@@ -11,6 +11,7 @@ use sui_sdk_types::Address;
 use crate::constants::SUI_MAINNET_CHAIN_ID;
 
 const DEFAULT_WITHDRAWAL_SIGNING_CONCURRENCY: usize = 25;
+const DEFAULT_MPC_SIGNING_CHUNK_SIZE: usize = 64;
 
 /// Load an Ed25519 private key from a file path or inline PEM string.
 ///
@@ -176,6 +177,17 @@ pub struct Config {
     /// Defaults to 25.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdrawal_signing_concurrency: Option<usize>,
+
+    /// Number of per-input MPC signatures the leader writes to chain in one
+    /// `commit_input_signatures` PTB — the on-chain write batch size `M`. Trades
+    /// durability granularity (work lost on a leader crash) against the number of
+    /// commit PTBs per withdrawal. Purely a leader-side batching choice: the
+    /// contract certs over exactly the indices written, so any size is valid up
+    /// to Sui's 16 KiB pure-arg limit (~250 × 64B sigs).
+    ///
+    /// Defaults to 64.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mpc_signing_chunk_size: Option<usize>,
 
     /// Maximum number of mempool-only (0-confirmation) ancestors a UTXO may
     /// have and still be eligible as a coin-selection input. Constrains how
@@ -403,6 +415,12 @@ impl Config {
     pub fn withdrawal_signing_concurrency(&self) -> usize {
         self.withdrawal_signing_concurrency
             .unwrap_or(DEFAULT_WITHDRAWAL_SIGNING_CONCURRENCY)
+            .max(1)
+    }
+
+    pub fn mpc_signing_chunk_size(&self) -> usize {
+        self.mpc_signing_chunk_size
+            .unwrap_or(DEFAULT_MPC_SIGNING_CHUNK_SIZE)
             .max(1)
     }
 

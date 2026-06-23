@@ -17,6 +17,7 @@ use fastcrypto_tbls::threshold_schnorr::S;
 use hashi_types::bitcoin as hashi_bitcoin;
 use hashi_types::bitcoin_txid::BitcoinTxid;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::time::Duration;
 use sui_sdk_types::Address;
@@ -47,6 +48,40 @@ const FEE_RATE_TOLERANCE_MULTIPLIER: u64 = 5;
 /// Max drift between the leader-supplied `timestamp_secs` and the follower's
 /// own latest checkpoint timestamp before signing a guardian request.
 const GUARDIAN_TIMESTAMP_TOLERANCE_SECS: u64 = 600;
+
+fn select_withdrawal_signing_indices(
+    signing: &hashi_types::move_types::SigningBatch,
+    requested_input_indices: &[u64],
+) -> anyhow::Result<Vec<usize>> {
+    if requested_input_indices.is_empty() {
+        return Ok(signing
+            .unsigned_indices()
+            .into_iter()
+            .map(|i| i as usize)
+            .collect());
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut selected = Vec::with_capacity(requested_input_indices.len());
+    for &input_index in requested_input_indices {
+        if !seen.insert(input_index) {
+            anyhow::bail!("duplicate input index {input_index} in withdrawal signing request");
+        }
+        let i = usize::try_from(input_index)
+            .map_err(|_| anyhow!("input index {input_index} out of range"))?;
+        if i >= signing.num_inputs() {
+            anyhow::bail!(
+                "input index {input_index} out of range for withdrawal with {} inputs",
+                signing.num_inputs()
+            );
+        }
+        if signing.pending_index(i).is_none() {
+            anyhow::bail!("input index {input_index} is already signed");
+        }
+        selected.push(i);
+    }
+    Ok(selected)
+}
 
 /// BTC that leaves the pool when this txn broadcasts — the amount that
 /// consumes the guardian's limit. Equivalent to
@@ -121,6 +156,17 @@ pub struct WithdrawalTxSigning {
     pub request_ids: Vec<Address>,
     pub signatures: Vec<Vec<u8>>,
     pub guardian_signatures: Vec<Vec<u8>>,
+}
+
+/// The data validators BLS-sign over for one incremental chunk of per-input MPC
+/// signatures (the step-3 chunk certificate). BCS must match Move
+/// `hashi::withdraw::MpcInputSignaturesMessage` exactly: `(withdrawal_id,
+/// indices, signatures)`.
+#[derive(Clone, Debug, serde_derive::Serialize)]
+pub struct MpcInputSignaturesMessage {
+    pub withdrawal_id: Address,
+    pub indices: Vec<u64>,
+    pub signatures: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, serde_derive::Serialize)]
@@ -466,6 +512,8 @@ impl Hashi {
     pub fn validate_and_sign_withdrawal_tx_signing(
         &self,
         message: &WithdrawalTxSigning,
+        expected_limiter_seq: Option<u64>,
+        timestamp_secs: Option<u64>,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
         let txn = self
             .onchain_state()
@@ -478,8 +526,8 @@ impl Hashi {
             })?;
 
         anyhow::ensure!(
-            txn.signatures.is_none(),
-            "WithdrawalTransaction {} is already signed",
+            !txn.is_fully_signed(),
+            "WithdrawalTransaction {} is already finalized",
             message.withdrawal_id
         );
 
@@ -503,6 +551,52 @@ impl Hashi {
             txn.inputs.len(),
             message.withdrawal_id
         );
+
+        // Single committee-side rate-limit gate: signing is driven unconditionally,
+        // so the committee independently re-validates the limit once here, before
+        // certifying the finalize — refusing to sign blocks an over-limit broadcast
+        // even if the guardian co-signed. Validate-only: the watcher advances the
+        // limiter on `WithdrawalSignedEvent`, never from this path.
+        //
+        // TODO(guardian-seq-durability): this gate is necessarily *after* the
+        // guardian co-signed (the cert binds the guardian sigs), so a rejection
+        // here — which only happens when this mirror disagrees with the guardian
+        // (the defense-in-depth case) — leaves the guardian's seq consumed with no
+        // on-chain finalize, nudging that gap wider. It self-heals via the
+        // reconcile loop and fires only when catching a guardian/mirror divergence,
+        // so likely fine as-is; if it ever proves to matter, one option worth
+        // exploring would be a separate committee limiter check *before* the
+        // guardian co-signs (extra round-trip, but no consumed-but-not-finalized gap).
+        match (self.local_limiter(), expected_limiter_seq) {
+            (Some(limiter), Some(expected_seq)) => {
+                let amount_sats = withdrawal_limiter_consumption_amount(&txn);
+                // Leader's live checkpoint time (drift-bounded); pre-upgrade leaders omit it.
+                let timestamp_secs = match timestamp_secs {
+                    Some(ts) => {
+                        self.bound_leader_timestamp(ts)?;
+                        ts
+                    }
+                    None => txn.timestamp_ms / 1000,
+                };
+                let result = limiter.validate_consume(expected_seq, timestamp_secs, amount_sats);
+                self.metrics.record_limiter_validate(
+                    &result,
+                    crate::metrics::GUARDIAN_LIMITER_CALLSITE_FINALIZE_CERT,
+                );
+                result.map_err(|e| {
+                    anyhow!("Limiter rejected withdrawal {}: {e}", message.withdrawal_id)
+                })?;
+            }
+            (None, None) => {}
+            (Some(_), None) => anyhow::bail!(
+                "Local limiter is configured but finalize request for withdrawal {} lacks expected_limiter_seq",
+                message.withdrawal_id
+            ),
+            (None, Some(_)) => anyhow::bail!(
+                "Finalize request for withdrawal {} carries expected_limiter_seq but local limiter is not configured",
+                message.withdrawal_id
+            ),
+        }
 
         let tx = self.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
         let signing_messages = self.withdrawal_signing_messages(&tx, &txn.inputs)?;
@@ -552,6 +646,75 @@ impl Hashi {
                 .map_err(|e| {
                     anyhow!("Guardian signature verification failed for input {i}: {e}")
                 })?;
+        }
+
+        self.sign_message_proto(message)
+    }
+
+    /// Validate and BLS-sign one incremental chunk of per-input MPC signatures
+    /// (`MpcInputSignaturesMessage`). Each `(index, signature)` is verified
+    /// against that input's sighash before the member signs the chunk cert, so a
+    /// leader cannot obtain a cert over signatures the committee hasn't checked.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(withdrawal_id = %message.withdrawal_id, chunk_size = message.indices.len()),
+    )]
+    pub fn validate_and_sign_mpc_input_signatures(
+        &self,
+        message: &MpcInputSignaturesMessage,
+    ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
+        let txn = self
+            .onchain_state()
+            .withdrawal_txn(&message.withdrawal_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "WithdrawalTransaction {} not found on-chain",
+                    message.withdrawal_id
+                )
+            })?;
+
+        anyhow::ensure!(
+            !txn.is_fully_signed(),
+            "WithdrawalTransaction {} is already finalized",
+            message.withdrawal_id
+        );
+        anyhow::ensure!(
+            message.indices.len() == message.signatures.len(),
+            "Chunk indices ({}) and signatures ({}) length mismatch for WithdrawalTransaction {}",
+            message.indices.len(),
+            message.signatures.len(),
+            message.withdrawal_id
+        );
+
+        let tx = self.build_unsigned_withdrawal_tx(&txn.inputs, &txn.all_outputs())?;
+        let signing_messages = self.withdrawal_signing_messages(&tx, &txn.inputs)?;
+
+        for (chunk_pos, (&input_index, mpc_sig_bytes)) in message
+            .indices
+            .iter()
+            .zip(message.signatures.iter())
+            .enumerate()
+        {
+            let i = input_index as usize;
+            anyhow::ensure!(
+                i < txn.inputs.len(),
+                "Chunk input index {i} out of range ({}) for WithdrawalTransaction {}",
+                txn.inputs.len(),
+                message.withdrawal_id
+            );
+            let sighash = &signing_messages[i];
+            let mpc_arr: &[u8; 64] = mpc_sig_bytes.as_slice().try_into().map_err(|_| {
+                anyhow!("MPC signature at chunk position {chunk_pos} (input {i}) is not 64 bytes")
+            })?;
+            let mpc_sig = SchnorrSignature::from_byte_array(mpc_arr)
+                .map_err(|e| anyhow!("Invalid MPC Schnorr signature at input {i}: {e}"))?;
+            let input_pubkey = self.deposit_pubkey(txn.inputs[i].derivation_path.as_ref())?;
+            let mpc_schnorr_pk = SchnorrPublicKey::from_byte_array(&input_pubkey.serialize())
+                .map_err(|e| anyhow!("Failed to convert mpc pubkey for input {i}: {e}"))?;
+            mpc_schnorr_pk
+                .verify(sighash, &mpc_sig)
+                .map_err(|e| anyhow!("MPC signature verification failed for input {i}: {e}"))?;
         }
 
         self.sign_message_proto(message)
@@ -654,21 +817,14 @@ impl Hashi {
     pub async fn validate_and_sign_withdrawal_tx(
         &self,
         withdrawal_txn_id: &Address,
-        expected_limiter_seq: Option<u64>,
-        timestamp_secs: Option<u64>,
+        requested_input_indices: &[u64],
         sink: tokio::sync::mpsc::Sender<
             Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
         >,
     ) -> anyhow::Result<()> {
         let (txn, unsigned_tx) = self.validate_withdrawal_signing(withdrawal_txn_id).await?;
-        self.mpc_sign_withdrawal_tx(
-            &txn,
-            &unsigned_tx,
-            expected_limiter_seq,
-            timestamp_secs,
-            sink,
-        )
-        .await
+        self.mpc_sign_withdrawal_tx(&txn, &unsigned_tx, requested_input_indices, sink)
+            .await
     }
 
     pub async fn validate_withdrawal_signing(
@@ -708,54 +864,22 @@ impl Hashi {
         &self,
         txn: &WithdrawalTransaction,
         unsigned_tx: &bitcoin::Transaction,
-        expected_limiter_seq: Option<u64>,
-        timestamp_secs: Option<u64>,
+        requested_input_indices: &[u64],
         sink: tokio::sync::mpsc::Sender<
             Result<hashi_types::proto::SignWithdrawalTransactionPartial, tonic::Status>,
         >,
     ) -> anyhow::Result<()> {
         let onchain_state = self.onchain_state().clone();
         let epoch = onchain_state.epoch();
-        if txn.epoch != epoch {
+        if txn.signing.epoch != epoch {
             anyhow::bail!(
-                "Stale presig assignment: pending withdrawal {} has epoch {}, current is {}. \
-                 Either the leader hasn't called allocate_presigs_for_withdrawal_txn yet, \
+                "Stale presig assignment: pending withdrawal {} has signing epoch {}, current is {}. \
+                 Either the leader hasn't called reallocate_presigs yet, \
                  or this node's on-chain state is behind.",
                 txn.id,
-                txn.epoch,
+                txn.signing.epoch,
                 epoch,
             );
-        }
-        // Validate-only: the watcher advances the limiter on
-        // `WithdrawalSignedEvent`, never from this path.
-        match (self.local_limiter(), expected_limiter_seq) {
-            (Some(limiter), Some(expected_seq)) => {
-                let amount_sats = withdrawal_limiter_consumption_amount(txn);
-                // Leader's live checkpoint time (drift-bounded) so a throttled
-                // batch becomes signable as it refills; pre-upgrade leaders omit it.
-                let timestamp_secs = match timestamp_secs {
-                    Some(ts) => {
-                        self.bound_leader_timestamp(ts)?;
-                        ts
-                    }
-                    None => txn.timestamp_ms / 1000,
-                };
-                let result = limiter.validate_consume(expected_seq, timestamp_secs, amount_sats);
-                self.metrics.record_limiter_validate(
-                    &result,
-                    crate::metrics::GUARDIAN_LIMITER_CALLSITE_MPC_SIGNING,
-                );
-                result.map_err(|e| anyhow!("Limiter rejected withdrawal {}: {e}", txn.id))?;
-            }
-            (None, None) => {}
-            (Some(_), None) => anyhow::bail!(
-                "Local limiter is configured but request for withdrawal {} lacks expected_limiter_seq",
-                txn.id
-            ),
-            (None, Some(_)) => anyhow::bail!(
-                "Request for withdrawal {} carries expected_limiter_seq but local limiter is not configured",
-                txn.id
-            ),
         }
         let p2p_channel =
             RpcP2PChannel::new(onchain_state, epoch, crate::metrics::MPC_LABEL_SIGNING);
@@ -772,13 +896,24 @@ impl Hashi {
         let beacon_ref = &beacon;
         let metrics_ref = &*self.metrics;
         let txn_id = txn.id;
-        let presig_start = txn.presig_start_index;
+        // Per-input presig index is read off the on-chain signing batch slot, so
+        // out-of-order / resume works and the index is always the current-epoch
+        // one assigned by `commit`/`reallocate`. Already-signed inputs are skipped.
+        let signing = &txn.signing;
         let inputs = &txn.inputs;
         let sink_ref = &sink;
-        let mut requests = Vec::with_capacity(signing_messages.len());
+        let selected_input_indices =
+            select_withdrawal_signing_indices(signing, requested_input_indices)?;
+        let mut requests = Vec::with_capacity(selected_input_indices.len());
         let mut index_by_id: HashMap<Address, usize> =
-            HashMap::with_capacity(signing_messages.len());
-        for (input_index, message) in signing_messages.into_iter().enumerate() {
+            HashMap::with_capacity(selected_input_indices.len());
+        for input_index in selected_input_indices {
+            let message = signing_messages
+                .get(input_index)
+                .expect("validated input_index is in range for signing_messages");
+            let global_presig_index = signing
+                .pending_index(input_index)
+                .expect("validated input_index is pending");
             let signing_id = withdrawal_input_signing_id(&txn_id, input_index as u32);
             // Change UTXOs (`derivation_path = None`) ride the `[0; 32]` path
             // everywhere else (leaf script, `deposit_pubkey`). MPC must too —
@@ -790,12 +925,12 @@ impl Hashi {
                     crate::deposits::normalized_derivation_path(input.derivation_path.as_ref())
                         .into_inner()
                 })
-                .expect("input_index iterated from signing_messages.len() == txn.inputs.len()");
+                .expect("validated input_index is in range for txn.inputs");
             index_by_id.insert(signing_id, input_index);
             requests.push(crate::mpc::SignInput {
                 signing_id,
                 message: message.to_vec(),
-                global_presig_index: presig_start + input_index as u64,
+                global_presig_index,
                 derivation_address: Some(derivation_address),
             });
         }
@@ -1535,6 +1670,7 @@ mod tests {
         withdrawal_outputs: Vec<u64>,
         change: Option<u64>,
     ) -> WithdrawalTransaction {
+        let num_inputs = inputs.len() as u64;
         WithdrawalTransaction {
             id: Address::ZERO,
             txid: BitcoinTxid::ZERO,
@@ -1544,11 +1680,82 @@ mod tests {
             change_output: change.map(output),
             timestamp_ms: 0,
             randomness: vec![],
-            signatures: None,
+            signing: hashi_types::move_types::SigningBatch {
+                signatures: (0..num_inputs)
+                    .map(hashi_types::move_types::MpcSig::Pending)
+                    .collect(),
+                epoch: 0,
+            },
             guardian_signatures: None,
-            presig_start_index: 0,
-            epoch: 0,
         }
+    }
+
+    fn signing(
+        signatures: Vec<hashi_types::move_types::MpcSig>,
+    ) -> hashi_types::move_types::SigningBatch {
+        hashi_types::move_types::SigningBatch {
+            signatures,
+            epoch: 7,
+        }
+    }
+
+    #[test]
+    fn requested_signing_indices_empty_request_defaults_to_unsigned_inputs() {
+        let signing = signing(vec![
+            hashi_types::move_types::MpcSig::Pending(10),
+            hashi_types::move_types::MpcSig::Signed(vec![1; 64]),
+            hashi_types::move_types::MpcSig::Pending(12),
+        ]);
+
+        let selected = select_withdrawal_signing_indices(&signing, &[]).unwrap();
+
+        assert_eq!(selected, vec![0, 2]);
+    }
+
+    #[test]
+    fn requested_signing_indices_accepts_pending_subset() {
+        let signing = signing(vec![
+            hashi_types::move_types::MpcSig::Pending(10),
+            hashi_types::move_types::MpcSig::Signed(vec![1; 64]),
+            hashi_types::move_types::MpcSig::Pending(12),
+        ]);
+
+        let selected = select_withdrawal_signing_indices(&signing, &[2]).unwrap();
+
+        assert_eq!(selected, vec![2]);
+    }
+
+    #[test]
+    fn requested_signing_indices_rejects_duplicate_indices() {
+        let signing = signing(vec![
+            hashi_types::move_types::MpcSig::Pending(10),
+            hashi_types::move_types::MpcSig::Pending(11),
+        ]);
+
+        let err = select_withdrawal_signing_indices(&signing, &[1, 1]).unwrap_err();
+
+        assert!(err.to_string().contains("duplicate input index 1"));
+    }
+
+    #[test]
+    fn requested_signing_indices_rejects_already_signed_indices() {
+        let signing = signing(vec![
+            hashi_types::move_types::MpcSig::Pending(10),
+            hashi_types::move_types::MpcSig::Signed(vec![1; 64]),
+        ]);
+
+        let err = select_withdrawal_signing_indices(&signing, &[1]).unwrap_err();
+
+        assert!(err.to_string().contains("input index 1 is already signed"));
+    }
+
+    #[test]
+    fn requested_signing_indices_rejects_out_of_range_indices() {
+        let signing = signing(vec![hashi_types::move_types::MpcSig::Pending(10)]);
+
+        let err = select_withdrawal_signing_indices(&signing, &[1]).unwrap_err();
+
+        assert!(err.to_string().contains("input index 1 out of range"));
     }
 
     #[test]

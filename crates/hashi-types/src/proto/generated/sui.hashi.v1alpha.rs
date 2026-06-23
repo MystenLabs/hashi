@@ -113,15 +113,10 @@ pub struct SignWithdrawalTransactionRequest {
     /// The id of the WithdrawalTransaction on Sui (32 bytes).
     #[prost(bytes = "bytes", tag = "1")]
     pub withdrawal_txn_id: ::prost::bytes::Bytes,
-    /// Set when the leader's local guardian limiter is initialized. Each
-    /// committee member validates this against its own limiter's `next_seq`
-    /// before participating in MPC signing.
-    #[prost(uint64, optional, tag = "2")]
-    pub expected_limiter_seq: ::core::option::Option<u64>,
-    /// Leader's checkpoint timestamp (unix seconds), bounded by each member
-    /// against its own checkpoint clock. Absent from pre-upgrade leaders.
-    #[prost(uint64, optional, tag = "3")]
-    pub timestamp_secs: ::core::option::Option<u64>,
+    /// Optional subset of transaction input indices to sign. Empty means "all
+    /// currently unsigned inputs" for backward compatibility with older leaders.
+    #[prost(uint64, repeated, tag = "2")]
+    pub input_indices: ::prost::alloc::vec::Vec<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignWithdrawalTransactionPartial {
@@ -131,6 +126,25 @@ pub struct SignWithdrawalTransactionPartial {
     /// 64-byte aggregated MPC signature for the input.
     #[prost(bytes = "bytes", tag = "2")]
     pub signature: ::prost::bytes::Bytes,
+}
+/// Maps to crate::withdrawals::MpcInputSignaturesMessage
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignMpcInputSignaturesRequest {
+    /// The id of the WithdrawalTransaction on Sui (32 bytes).
+    #[prost(bytes = "bytes", tag = "1")]
+    pub withdrawal_id: ::prost::bytes::Bytes,
+    /// Input indices this chunk covers (out-of-order allowed).
+    #[prost(uint64, repeated, tag = "2")]
+    pub indices: ::prost::alloc::vec::Vec<u64>,
+    /// One MPC Schnorr signature per index in `indices` (64 bytes each).
+    /// Followers verify each against that input's sighash before BLS-signing.
+    #[prost(bytes = "bytes", repeated, tag = "3")]
+    pub signatures: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignMpcInputSignaturesResponse {
+    #[prost(message, optional, tag = "1")]
+    pub member_signature: ::core::option::Option<MemberSignature>,
 }
 /// Maps to crate::withdrawals::WithdrawalTxSigning
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -150,6 +164,15 @@ pub struct SignWithdrawalTxSigningRequest {
     /// certificate; the BLS cert binds both arrays.
     #[prost(bytes = "bytes", repeated, tag = "4")]
     pub guardian_signatures: ::prost::alloc::vec::Vec<::prost::bytes::Bytes>,
+    /// Validation-only: the limiter sequence the leader validated against, so each
+    /// committee member re-validates the rate limit once at finalize (the single
+    /// committee-side limiter gate). NOT part of the BLS-signed message.
+    #[prost(uint64, optional, tag = "5")]
+    pub expected_limiter_seq: ::core::option::Option<u64>,
+    /// Validation-only: leader's checkpoint timestamp (unix seconds) for the
+    /// limiter projection, bounded by each member. NOT part of the signed message.
+    #[prost(uint64, optional, tag = "6")]
+    pub timestamp_secs: ::core::option::Option<u64>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SignWithdrawalTxSigningResponse {
@@ -474,7 +497,39 @@ pub mod bridge_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Step 3: Sign the BLS certificate over the witness signatures for on-chain storage.
+        /// Step 3a (incremental): Sign the BLS certificate over one out-of-order chunk
+        /// of per-input MPC signatures, to be durably committed on-chain.
+        pub async fn sign_mpc_input_signatures(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SignMpcInputSignaturesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignMpcInputSignaturesResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.BridgeService/SignMpcInputSignatures",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.BridgeService",
+                        "SignMpcInputSignatures",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Step 3b: Sign the BLS certificate binding the full MPC set + guardian
+        /// signatures, to finalize and make the withdrawal broadcast-ready.
         pub async fn sign_withdrawal_tx_signing(
             &mut self,
             request: impl tonic::IntoRequest<super::SignWithdrawalTxSigningRequest>,
@@ -638,7 +693,17 @@ pub mod bridge_service_server {
             tonic::Response<super::SignGuardianWithdrawalRequestResponse>,
             tonic::Status,
         >;
-        /// Step 3: Sign the BLS certificate over the witness signatures for on-chain storage.
+        /// Step 3a (incremental): Sign the BLS certificate over one out-of-order chunk
+        /// of per-input MPC signatures, to be durably committed on-chain.
+        async fn sign_mpc_input_signatures(
+            &self,
+            request: tonic::Request<super::SignMpcInputSignaturesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignMpcInputSignaturesResponse>,
+            tonic::Status,
+        >;
+        /// Step 3b: Sign the BLS certificate binding the full MPC set + guardian
+        /// signatures, to finalize and make the withdrawal broadcast-ready.
         async fn sign_withdrawal_tx_signing(
             &self,
             request: tonic::Request<super::SignWithdrawalTxSigningRequest>,
@@ -1034,6 +1099,55 @@ pub mod bridge_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = SignGuardianWithdrawalRequestSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.BridgeService/SignMpcInputSignatures" => {
+                    #[allow(non_camel_case_types)]
+                    struct SignMpcInputSignaturesSvc<T: BridgeService>(pub Arc<T>);
+                    impl<
+                        T: BridgeService,
+                    > tonic::server::UnaryService<super::SignMpcInputSignaturesRequest>
+                    for SignMpcInputSignaturesSvc<T> {
+                        type Response = super::SignMpcInputSignaturesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SignMpcInputSignaturesRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as BridgeService>::sign_mpc_input_signatures(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SignMpcInputSignaturesSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

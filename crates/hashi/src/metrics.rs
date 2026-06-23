@@ -966,11 +966,15 @@ impl Metrics {
             .requests()
             .values()
             .partition::<Vec<_>, _>(|r| r.status.is_requested());
+        // TODO(tuning): with incremental signing a withdrawal is now "signing"
+        // (some inputs done, not finalized) for a multi-checkpoint window. Split
+        // `pending` into pending/signing (via `w.signing.signed_count`) for
+        // operator visibility before rollout.
         let (signed, pending): (Vec<_>, Vec<_>) = hashi
             .withdrawal_queue
             .withdrawal_txns()
             .values()
-            .partition(|w| w.signatures.is_some());
+            .partition(|w| w.is_fully_signed());
         self.withdrawal_queue_size
             .with_label_values(&["requested"])
             .set(requested.len() as i64);
@@ -1100,6 +1104,9 @@ pub const GUARDIAN_LIMITER_OUTCOME_NO_LIMITER: &str = "no_limiter";
 
 pub const GUARDIAN_LIMITER_CALLSITE_LEADER_PRE_MPC: &str = "leader_pre_mpc";
 pub const GUARDIAN_LIMITER_CALLSITE_MPC_SIGNING: &str = "mpc_signing";
+// Committee-side limiter re-validation at the finalize cert (the single
+// committee gate now that the per-pass MPC-signing check is removed).
+pub const GUARDIAN_LIMITER_CALLSITE_FINALIZE_CERT: &str = "finalize_cert";
 
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_SUCCESS: &str = "success";
 pub const GUARDIAN_BOOTSTRAP_OUTCOME_RPC_FAILURE: &str = "rpc_failure";
@@ -1233,6 +1240,7 @@ mod tests {
         for callsite in [
             GUARDIAN_LIMITER_CALLSITE_LEADER_PRE_MPC,
             GUARDIAN_LIMITER_CALLSITE_MPC_SIGNING,
+            GUARDIAN_LIMITER_CALLSITE_FINALIZE_CERT,
         ] {
             metrics.record_limiter_validate(&Ok(()), callsite);
             metrics.record_limiter_validate(

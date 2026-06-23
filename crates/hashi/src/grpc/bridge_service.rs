@@ -10,6 +10,7 @@ use crate::onchain::types::DepositRequest;
 use crate::onchain::types::OutputUtxo;
 use crate::onchain::types::Utxo;
 use crate::onchain::types::UtxoId;
+use crate::withdrawals::MpcInputSignaturesMessage;
 use crate::withdrawals::WithdrawalRequestApproval;
 use crate::withdrawals::WithdrawalTxCommitment;
 use crate::withdrawals::WithdrawalTxSigning;
@@ -22,6 +23,8 @@ use hashi_types::proto::SignDepositConfirmationRequest;
 use hashi_types::proto::SignDepositConfirmationResponse;
 use hashi_types::proto::SignGuardianWithdrawalRequestRequest;
 use hashi_types::proto::SignGuardianWithdrawalRequestResponse;
+use hashi_types::proto::SignMpcInputSignaturesRequest;
+use hashi_types::proto::SignMpcInputSignaturesResponse;
 use hashi_types::proto::SignWithdrawalConfirmationRequest;
 use hashi_types::proto::SignWithdrawalConfirmationResponse;
 use hashi_types::proto::SignWithdrawalRequestApprovalRequest;
@@ -212,12 +215,11 @@ impl BridgeService for HttpService {
         let req = request.get_ref();
         let withdrawal_txn_id = Address::from_bytes(&req.withdrawal_txn_id)
             .map_err(|e| Status::invalid_argument(format!("invalid withdrawal_txn_id: {e}")))?;
-        let expected_limiter_seq = req.expected_limiter_seq;
-        let timestamp_secs = req.timestamp_secs;
         tracing::Span::current().record(
             "withdrawal_txn_id",
             tracing::field::display(&withdrawal_txn_id),
         );
+        let requested_input_indices = req.input_indices.clone();
         tracing::info!("sign_withdrawal_transaction called");
         let concurrency = self.inner.config.withdrawal_signing_concurrency();
         let (tx, rx) = tokio::sync::mpsc::channel(concurrency);
@@ -226,8 +228,7 @@ impl BridgeService for HttpService {
             if let Err(e) = inner
                 .validate_and_sign_withdrawal_tx(
                     &withdrawal_txn_id,
-                    expected_limiter_seq,
-                    timestamp_secs,
+                    &requested_input_indices,
                     tx.clone(),
                 )
                 .await
@@ -255,7 +256,10 @@ impl BridgeService for HttpService {
     ) -> Result<Response<SignWithdrawalTxSigningResponse>, Status> {
         let caller = authenticate_caller(&request)?;
         tracing::Span::current().record("caller", tracing::field::display(&caller));
-        let message = parse_withdrawal_tx_signing(request.get_ref())
+        let req = request.get_ref();
+        let expected_limiter_seq = req.expected_limiter_seq;
+        let timestamp_secs = req.timestamp_secs;
+        let message = parse_withdrawal_tx_signing(req)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
         tracing::Span::current().record(
             "withdrawal_id",
@@ -263,10 +267,37 @@ impl BridgeService for HttpService {
         );
         let member_signature = self
             .inner
-            .validate_and_sign_withdrawal_tx_signing(&message)
+            .validate_and_sign_withdrawal_tx_signing(&message, expected_limiter_seq, timestamp_secs)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         tracing::info!("Signed withdrawal tx signing");
         Ok(Response::new(SignWithdrawalTxSigningResponse {
+            member_signature: Some(member_signature),
+        }))
+    }
+
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(withdrawal_id = tracing::field::Empty, caller = tracing::field::Empty),
+    )]
+    async fn sign_mpc_input_signatures(
+        &self,
+        request: Request<SignMpcInputSignaturesRequest>,
+    ) -> Result<Response<SignMpcInputSignaturesResponse>, Status> {
+        let caller = authenticate_caller(&request)?;
+        tracing::Span::current().record("caller", tracing::field::display(&caller));
+        let message = parse_mpc_input_signatures(request.get_ref())
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        tracing::Span::current().record(
+            "withdrawal_id",
+            tracing::field::display(&message.withdrawal_id),
+        );
+        let member_signature = self
+            .inner
+            .validate_and_sign_mpc_input_signatures(&message)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+        tracing::info!("Signed MPC input signatures chunk");
+        Ok(Response::new(SignMpcInputSignaturesResponse {
             member_signature: Some(member_signature),
         }))
     }
@@ -417,6 +448,23 @@ fn parse_withdrawal_tx_signing(
         request_ids,
         signatures,
         guardian_signatures,
+    })
+}
+
+fn parse_mpc_input_signatures(
+    request: &SignMpcInputSignaturesRequest,
+) -> anyhow::Result<MpcInputSignaturesMessage> {
+    let withdrawal_id = parse_address(&request.withdrawal_id)?;
+    let indices = request.indices.clone();
+    let signatures: Vec<Vec<u8>> = request
+        .signatures
+        .iter()
+        .map(|bytes| bytes.to_vec())
+        .collect();
+    Ok(MpcInputSignaturesMessage {
+        withdrawal_id,
+        indices,
+        signatures,
     })
 }
 

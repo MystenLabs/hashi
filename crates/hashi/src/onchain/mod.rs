@@ -426,7 +426,7 @@ impl OnchainState {
             .withdrawal_queue
             .withdrawal_txns()
             .values()
-            .any(|t| t.signatures.is_none())
+            .any(|t| !t.is_fully_signed())
     }
 
     pub fn spent_utxos_entries(&self) -> Vec<(types::UtxoId, u64)> {
