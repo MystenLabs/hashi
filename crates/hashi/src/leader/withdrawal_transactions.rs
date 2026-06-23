@@ -498,9 +498,12 @@ impl LeaderService {
         // The rate limiter is no longer checked per signing pass — signing is
         // driven unconditionally and the committee re-validates the limit once at
         // the finalize cert (see `validate_and_sign_withdrawal_tx_signing`).
-        // `M` (mpc_signing_chunk_size) is both the collection unit and on-chain
-        // write batch here: collect one chunk, commit it immediately, then let a
-        // later tick resume from the durable on-chain state.
+        // `M` (mpc_signing_chunk_size) sizes both the collection unit and the
+        // on-chain write batch here. They're separable in principle — the collect
+        // is window-bound (how much fits in one signing pass) and the commit is
+        // PTB-bound (Sui's 16 KiB pure-arg limit) — but one knob is enough for
+        // now: collect one chunk, commit it immediately, then let a later tick
+        // resume from the durable on-chain state.
         let chunk_size = inner.config.mpc_signing_chunk_size();
         let chunk_indices = next_signing_chunk(&unsigned, chunk_size);
         info!(
@@ -746,19 +749,21 @@ impl LeaderService {
             .map_err(|e| anyhow::anyhow!("stream error from {validator_address}: {e}"))?
         {
             let idx = partial.input_index as u64;
-            match collector
-                .record(idx, partial.signature.as_ref())
-                .map_err(|e| {
-                    anyhow::anyhow!("Withdrawal tx signature stream from {validator_address} {e}")
-                })? {
-                CollectOutcome::Ignored => trace!(
+            match collector.record(idx, partial.signature.as_ref()) {
+                Ok(CollectOutcome::Ignored) => trace!(
                     "Withdrawal tx signature stream from {validator_address} returned extra input_index {idx}; ignoring"
                 ),
-                CollectOutcome::Recorded => {}
+                Ok(CollectOutcome::Recorded) => {}
                 // Every requested index is in hand. Stop reading instead of
                 // draining to EOF, so a peer that keeps signing unrequested
                 // inputs can't stall this chunk.
-                CollectOutcome::Complete => break,
+                Ok(CollectOutcome::Complete) => break,
+                // Drop just this candidate (malformed length / duplicate index)
+                // and keep the member's other sigs — mirrors merge_into_union's
+                // per-candidate drop instead of failing the member's whole stream.
+                Err(e) => warn!(
+                    "Withdrawal tx signature stream from {validator_address}: dropping input_index {idx}: {e}"
+                ),
             }
         }
         Ok(collector.into_collected())
