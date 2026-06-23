@@ -4,6 +4,7 @@
 use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_credential_types::CredentialsBuilder;
 use aws_sdk_s3::error::DisplayErrorContext;
+use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::S3BucketInfo;
 use hashi_types::guardian::S3Config;
@@ -18,11 +19,12 @@ use aws_sdk_s3::types::ObjectLockEnabled;
 use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::Client as S3Client;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
-use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::InitLogMessage;
+use hashi_types::guardian::PcrAllowlist;
+use hashi_types::guardian::VerifiedSessionInfo;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tracing::info;
@@ -519,28 +521,39 @@ impl GuardianS3Client {
         self.get_object_unsafe::<LogRecord>(key).await
     }
 
-    /// Fetch the session's attestation record, verify it against `build_pcrs`,
-    /// and return the trusted enclave signing pubkey. Verification binds the
-    /// logged `signing_public_key` to the attestation's `public_key`, so the
-    /// returned key is attestation-anchored. No caller needs the raw bytes.
-    ///
-    /// `pub(crate)` so the only verified-pubkey path off-crate is
-    /// [`GuardianReader::verified_pubkey`], which caches the result.
-    pub(crate) async fn get_verified_enclave_pubkey(
+    /// Note: Callers must set signing_pubkey to None only for unsigned messages.
+    async fn get_verified_log_record(
         &self,
-        session_id: &str,
-        build_pcrs: &BuildPcrs,
-    ) -> GuardianResult<GuardianPubKey> {
-        let key = InitLogMessage::attestation_object_key(session_id);
-        let record = self.get_log_record(&key).await?;
-        if record.session_id != session_id {
+        key: &str,
+        expected_session_id: &str,
+        signing_pubkey: Option<&GuardianPubKey>,
+    ) -> GuardianResult<LogMessage> {
+        let log = self.get_log_record(key).await?;
+        if log.session_id != expected_session_id {
             return Err(S3Error(format!("log session_id mismatch for key {}", key)));
         }
-        // The attestation record is unsigned — it's the bootstrap carrying the
-        // pubkey everything else is verified against — so verify it as unsigned.
-        let (attestation, signing_public_key) = record
-            .verify_unsigned()?
-            .message
+        let (_, _, message) = match signing_pubkey {
+            Some(pk) => log.verify(pk),
+            None => log.verify_unsigned(),
+        }?;
+        Ok(message)
+    }
+
+    /// Resolve a session's [`VerifiedSessionInfo`]: read the AWS-self-signed
+    /// attestation (anchoring the signing pubkey), then the signed `GuardianInfo`,
+    /// and pin the attestation's PCR0 against the `allowlist` entry named by the
+    /// info's reported build. No caller needs the raw attestation bytes.
+    pub(crate) async fn get_verified_session_info(
+        &self,
+        session_id: &str,
+        allowlist: &PcrAllowlist,
+    ) -> GuardianResult<VerifiedSessionInfo> {
+        // 1. Attestation (unsigned: authenticated by AWS, not the enclave key) →
+        //    the signing pubkey it commits to.
+        let att_key = InitLogMessage::attestation_object_key(session_id);
+        let (attestation, signing_pubkey) = self
+            .get_verified_log_record(&att_key, session_id, None)
+            .await?
             .into_init_log()
             .and_then(|x| match x {
                 InitLogMessage::OIAttestationUnsigned {
@@ -549,9 +562,30 @@ impl GuardianS3Client {
                 } => Some((attestation, signing_public_key)),
                 _ => None,
             })
-            .ok_or_else(|| S3Error(format!("expected OIAttestationUnsigned at key {}", key)))?;
-        attestation.verify(&signing_public_key, build_pcrs)?;
-        Ok(signing_public_key)
+            .ok_or_else(|| S3Error(format!("expected OIAttestationUnsigned at key {att_key}")))?;
+
+        // 2. GuardianInfo, signature-verified under that pubkey → the reported build.
+        let info_key = InitLogMessage::guardian_info_object_key(session_id);
+        let info = self
+            .get_verified_log_record(&info_key, session_id, Some(&signing_pubkey))
+            .await?
+            .into_init_log()
+            .and_then(|x| match x {
+                InitLogMessage::OIGuardianInfo(info) => Some(*info),
+                _ => None,
+            })
+            .ok_or_else(|| S3Error(format!("expected OIGuardianInfo at key {info_key}")))?;
+
+        // 3. Anchor the pubkey and pin PCR0 to the allowlist entry for the
+        //    reported build.
+        let build_pcrs = allowlist.resolve(&info.untrusted_git_revision)?.clone();
+        attestation.verify(&signing_pubkey, &build_pcrs)?;
+
+        Ok(VerifiedSessionInfo {
+            signing_pubkey,
+            info,
+            build_pcrs,
+        })
     }
 }
 

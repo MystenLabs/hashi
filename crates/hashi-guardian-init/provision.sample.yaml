@@ -66,7 +66,15 @@ limiter_config:
 # guardian's own BTC key.
 hashi_btc_master_pubkey_hex: "0000000000000000000000000000000000000000000000000000000000000001"
 
-# Expected enclave-image measurement: PCR0 (hex) from the reproducible build of
-# the guardian revision being provisioned. Pinned against the session's
-# attestation. Required (unused in non-Nitro dev, where verification is a no-op).
-expected_pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+# Expected enclave build: git revision + PCR0 (hex). The live guardian must
+# report this revision, and its attestation PCR0 must match it.
+current_build:
+  git_revision: "0000000000000000000000000000000000000000"
+  pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+# Older still-trusted builds accepted only for historical S3 logs during an
+# upgrade window. Omit or leave empty outside an upgrade.
+prev_builds: []
+# prev_builds:
+#   - git_revision: "1111111111111111111111111111111111111111"
+#     pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"

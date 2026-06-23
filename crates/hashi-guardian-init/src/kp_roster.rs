@@ -22,11 +22,12 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
-use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::KPEncryptedShare;
 use hashi_types::guardian::KPEncryptedShares;
 use hashi_types::guardian::KPFingerprint;
+use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::SecretSharingParams;
@@ -45,7 +46,7 @@ use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
 /// Common KP-roster config: the sharing params, the guardian's S3 log bucket,
-/// the full KP cert roster, and the expected enclave measurement. Shared (via
+/// the full KP cert roster, and the PCR allowlist. Shared (via
 /// `#[serde(flatten)]`) by `ceremony run`, `ceremony verify`, and `provision` —
 /// every command that needs to discover and verify a ceremony against an
 /// expected KP set.
@@ -62,10 +63,8 @@ pub struct KpRosterConfig {
     /// the read-only commands (`ceremony verify`, `provision`), shares are
     /// matched by fingerprint so order is irrelevant.
     pub kp_pgp_cert_paths: Vec<PathBuf>,
-    /// Expected enclave-image measurement: PCR0 as hex, pinned against every
-    /// session's attestation. Required (a value is needed even in non-Nitro dev,
-    /// where verification is a no-op).
-    pub expected_pcr0: BuildPcrs,
+    #[serde(flatten)]
+    pub pcr_allowlist: PcrAllowlist,
 }
 
 impl KpRosterConfig {
@@ -81,6 +80,11 @@ impl KpRosterConfig {
         );
 
         Ok(())
+    }
+
+    /// The PCR allowlist decoded from `current_build` + `prev_builds`.
+    pub fn pcr_allowlist(&self) -> PcrAllowlist {
+        self.pcr_allowlist.clone()
     }
 }
 
@@ -117,12 +121,16 @@ impl VerifiedCeremonyState {
         expected_n: usize,
         expected_t: usize,
     ) -> Result<Self> {
+        // TODO: KP-begins discovery for rotations needs to read the latest
+        // historical ceremony with `BuildPolicy::AnyAllowlisted` to learn N.
+        // Keep this helper current-build-only for target verification, and add
+        // a separate discovery path there.
         let (session_id, instance, roster) = reader
-            .read_latest_ceremony()
+            .read_latest_ceremony(BuildPolicy::Current)
             .await?
             .ok_or_else(|| anyhow!("no ceremony logs found in guardian S3 bucket"))?;
         let encrypted_shares = reader
-            .read_shares(&session_id, instance.sharing_seq())
+            .read_shares(&session_id, instance.sharing_seq(), BuildPolicy::Current)
             .await?;
         Self::from_scraped(
             session_id,

@@ -42,18 +42,10 @@ pub struct ProvisionConfig {
 
 impl ProvisionConfig {
     pub fn load_yaml(path: &Path) -> anyhow::Result<Self> {
-        let bytes = std::fs::read(path).with_context(|| {
-            format!(
-                "failed to read provisioner-init config at {}",
-                path.display()
-            )
-        })?;
-        serde_yaml::from_slice(&bytes).with_context(|| {
-            format!(
-                "failed to parse provisioner-init yaml at {}",
-                path.display()
-            )
-        })
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("failed to read provision config at {}", path.display()))?;
+        serde_yaml::from_slice(&bytes)
+            .with_context(|| format!("failed to parse provision yaml at {}", path.display()))
     }
 
     /// The MPC committee verifying key `G`, decoded from `hashi_btc_master_pubkey_hex`.

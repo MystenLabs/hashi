@@ -12,6 +12,7 @@ use super::S3_OBJECT_LOCK_DURATION_INIT;
 use super::S3_OBJECT_LOCK_DURATION_SHARES;
 use super::S3_OBJECT_LOCK_DURATION_WITHDRAW;
 use super::message::LogMessage;
+use crate::guardian::BuildPcrs;
 use crate::guardian::GuardianError::InvalidInputs;
 use crate::guardian::GuardianPubKey;
 use crate::guardian::GuardianResult;
@@ -35,12 +36,30 @@ pub struct LogRecord {
     pub signature: Option<GuardianSignature>,
 }
 
-/// A verified log record where message authenticity has been checked.
+/// A log record whose message signature and writing session's attestation/PCRs
+/// have both been verified.
 #[derive(Debug)]
 pub struct VerifiedLogRecord {
     pub session_id: SessionID,
     pub timestamp_ms: UnixMillis,
     pub message: LogMessage,
+    pub build_pcrs: BuildPcrs,
+}
+
+impl VerifiedLogRecord {
+    pub fn new(
+        session_id: SessionID,
+        timestamp_ms: UnixMillis,
+        message: LogMessage,
+        build_pcrs: BuildPcrs,
+    ) -> Self {
+        Self {
+            session_id,
+            timestamp_ms,
+            message,
+            build_pcrs,
+        }
+    }
 }
 
 impl LogRecord {
@@ -104,7 +123,10 @@ impl LogRecord {
         }
     }
 
-    pub fn verify(self, pub_key: &GuardianPubKey) -> GuardianResult<VerifiedLogRecord> {
+    pub fn verify(
+        self,
+        pub_key: &GuardianPubKey,
+    ) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
         let session_id = self.session_id;
         let timestamp_ms = self.timestamp_ms;
         let message = self.message;
@@ -123,24 +145,16 @@ impl LogRecord {
             .verify(pub_key)?
         };
 
-        Ok(VerifiedLogRecord {
-            session_id,
-            timestamp_ms,
-            message,
-        })
+        Ok((session_id, timestamp_ms, message))
     }
 
-    pub fn verify_unsigned(self) -> GuardianResult<VerifiedLogRecord> {
+    pub fn verify_unsigned(self) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
         if !self.message.is_allowed_unsigned() {
             return Err(InvalidInputs(
                 "expected unsigned log record but message requires a signature".into(),
             ));
         }
-        Ok(VerifiedLogRecord {
-            session_id: self.session_id,
-            timestamp_ms: self.timestamp_ms,
-            message: self.message,
-        })
+        Ok((self.session_id, self.timestamp_ms, self.message))
     }
 }
 
