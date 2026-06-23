@@ -226,6 +226,18 @@ impl LeaderService {
                         info!(deposit_id = %deposit_id, "Deposit processed successfully");
                     }
                     Err(err) => {
+                        if !self.inner.onchain_state().has_deposit_request(&deposit_id) {
+                            self.approved_deposit_retry_tracker.clear(&deposit_id);
+                            info!(deposit_id = %deposit_id, "Deposit confirmation task failed after request left the queue");
+                            return;
+                        }
+
+                        if err.to_string().contains("checkpoint wait timed out") {
+                            self.approved_deposit_retry_tracker.clear(&deposit_id);
+                            warn!(deposit_id = %deposit_id, "Deposit confirmation checkpoint wait timed out; retrying without backoff");
+                            return;
+                        }
+
                         let kind = err.kind();
                         self.inner
                             .metrics

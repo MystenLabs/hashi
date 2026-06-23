@@ -382,6 +382,14 @@ impl OnchainState {
             .collect()
     }
 
+    pub fn has_deposit_request(&self, deposit_id: &Address) -> bool {
+        self.state()
+            .hashi()
+            .deposit_queue
+            .requests()
+            .contains_key(deposit_id)
+    }
+
     pub fn withdrawal_requests(&self) -> Vec<types::WithdrawalRequest> {
         self.state()
             .hashi()
