@@ -17,6 +17,10 @@ public struct ReconfigCompletionMessage has copy, drop, store {
     mpc_public_key: vector<u8>,
 }
 
+public struct CommitteeTransitionRequest has copy, drop, store {
+    new_committee: hashi::committee::Committee,
+}
+
 entry fun start_reconfig(
     self: &mut Hashi,
     sui_system: &sui_system::sui_system::SuiSystemState,
@@ -87,7 +91,8 @@ entry fun submit_committee_handoff(
     let next_epoch = self.committee_set().pending_epoch_change().destroy_some();
     let next_committee = self.committee_set().get_committee(next_epoch);
     let new_committee = *next_committee;
-    self.verify_with_committee(self.current_committee(), new_committee, committee_handoff_cert);
+    let message = CommitteeTransitionRequest { new_committee };
+    self.verify_with_committee(self.current_committee(), message, committee_handoff_cert);
     self.committee_set_mut().set_pending_committee_handoff_cert(committee_handoff_cert);
 }
 
@@ -155,7 +160,7 @@ fun test_end_reconfig_stores_committee_handoff() {
     );
     let committee_handoff_cert = test_utils::sign_certificate(
         0,
-        &cert_message(0, &next_committee),
+        &cert_message(0, &CommitteeTransitionRequest { new_committee: next_committee }),
         3,
     );
 
@@ -213,7 +218,7 @@ fun test_submit_committee_handoff_rejects_handoff_signed_by_wrong_committee() {
     );
     let committee_handoff_cert = test_utils::sign_certificate(
         next_epoch,
-        &cert_message(next_epoch, &next_committee),
+        &cert_message(next_epoch, &CommitteeTransitionRequest { new_committee: next_committee }),
         3,
     );
 

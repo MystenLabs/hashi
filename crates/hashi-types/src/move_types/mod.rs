@@ -1340,7 +1340,7 @@ impl From<&crate::committee::CommitteeMember> for CommitteeMember {
     fn from(m: &crate::committee::CommitteeMember) -> Self {
         Self {
             validator_address: m.validator_address(),
-            public_key: m.public_key().as_bytes().to_vec(),
+            public_key: bls_public_key_to_uncompressed_g1_bytes(m.public_key()),
             encryption_public_key: m.encryption_public_key().to_bcs().expect("should not fail"),
             weight: m.weight(),
         }
@@ -1351,8 +1351,7 @@ impl TryFrom<CommitteeMember> for crate::committee::CommitteeMember {
     type Error = anyhow::Error;
 
     fn try_from(m: CommitteeMember) -> Result<Self, Self::Error> {
-        let public_key = crate::committee::BLS12381PublicKey::from_bytes(&m.public_key)
-            .map_err(|e| anyhow::anyhow!("invalid public key {}", e))?;
+        let public_key = bls_public_key_from_uncompressed_g1_bytes(&m.public_key)?;
 
         let encryption_public_key =
             crate::committee::EncryptionPublicKey::from_bcs(&m.encryption_public_key)
@@ -1365,6 +1364,24 @@ impl TryFrom<CommitteeMember> for crate::committee::CommitteeMember {
             m.weight,
         ))
     }
+}
+
+fn bls_public_key_to_uncompressed_g1_bytes(
+    public_key: &crate::committee::BLS12381PublicKey,
+) -> Vec<u8> {
+    blst::min_pk::PublicKey::from_bytes(public_key.as_bytes())
+        .expect("valid BLS public key")
+        .serialize()
+        .to_vec()
+}
+
+fn bls_public_key_from_uncompressed_g1_bytes(
+    public_key: &[u8],
+) -> Result<crate::committee::BLS12381PublicKey, anyhow::Error> {
+    let public_key = blst::min_pk::PublicKey::deserialize(public_key)
+        .map_err(|e| anyhow::anyhow!("invalid public key {e:?}"))?;
+    crate::committee::BLS12381PublicKey::from_bytes(public_key.to_bytes().as_slice())
+        .map_err(|e| anyhow::anyhow!("invalid public key {e}"))
 }
 
 impl From<&crate::committee::Committee> for Committee {
