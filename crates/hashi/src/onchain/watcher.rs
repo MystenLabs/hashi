@@ -31,8 +31,14 @@ use crate::onchain::types::ProposalType;
 use crate::onchain::types::WithdrawalRequest;
 use crate::withdrawals::withdrawal_limiter_consumption_amount;
 
+/// Reconnect if the checkpoint stream goes silent this long. A half-open h2
+/// stream yields neither an item nor an error, so an unbounded read hangs — the
+/// SDK's keepalive only trips on a fully-dead connection, not a live one whose
+/// server silently stopped sending checkpoints.
+const CHECKPOINT_STREAM_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 #[tracing::instrument(name = "watcher", skip_all)]
-pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Arc<Metrics>>) {
+pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<Arc<Metrics>>) {
     let subscription_read_mask = FieldMask::from_paths([
         Checkpoint::path_builder().sequence_number(),
         Checkpoint::path_builder().summary().timestamp(),
@@ -54,6 +60,20 @@ pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Ar
     let mut rescrape_state = false;
 
     loop {
+        // Reconnect with a fresh client each iteration. Re-subscribing on the
+        // same channel can reuse a wedged h2 connection — the one whose stream
+        // just stalled — and silently hang again; a new client forces a clean
+        // connection. Reconnects are rare, so the extra setup cost is fine.
+        let mut client = match Client::new(&sui_rpc_url) {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::warn!("error creating Sui RPC client: {e}");
+                rescrape_state = true;
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+
         let mut subscription = match client
             .subscription_client()
             .subscribe_checkpoints(
@@ -95,17 +115,17 @@ pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Ar
                 }
             }
 
-            rescrape_state = false;
             // Rescrape gapped the event-driven limiter; trigger an eager reconcile.
             state.request_limiter_reconcile();
         }
 
-        while let Some(item) = subscription.next().await {
+        while let Ok(Some(item)) =
+            tokio::time::timeout(CHECKPOINT_STREAM_STALL_TIMEOUT, subscription.next()).await
+        {
             let checkpoint = match item {
                 Ok(checkpoint) => checkpoint,
                 Err(e) => {
                     tracing::warn!("error in checkpoint stream: {e}");
-                    rescrape_state = true;
                     break;
                 }
             };
@@ -160,6 +180,11 @@ pub async fn watcher(mut client: Client, state: OnchainState, metrics: Option<Ar
                 metrics.update_onchain_state(&state);
             }
         }
+
+        // The stream stalled, errored, or closed. Loop to rebuild the client,
+        // re-subscribe, and rescrape to recover any gap we missed.
+        tracing::warn!("checkpoint stream ended; reconnecting Sui client and rescraping");
+        rescrape_state = true;
     }
 }
 

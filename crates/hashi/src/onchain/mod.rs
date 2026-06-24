@@ -156,8 +156,10 @@ impl OnchainState {
         .pipe(Self);
 
         let watcher_state = state.clone();
+        // The watcher rebuilds its client on every reconnect, so hand it the URL.
+        let sui_rpc_url = sui_rpc_url.to_owned();
         let service = Service::new().spawn_aborting(async move {
-            watcher::watcher(client, watcher_state, metrics).await;
+            watcher::watcher(sui_rpc_url, watcher_state, metrics).await;
             Ok(())
         });
 
