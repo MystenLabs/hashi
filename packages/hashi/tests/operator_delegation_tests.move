@@ -30,27 +30,27 @@ fun test_member_authorized() {
     // one slot, so holding several at once would all observe the last sender.
 
     // The validator's own key is always authorized for itself.
-    let cv = &mut test_utils::new_tx_context(VALIDATOR1, 0);
+    let cv = &test_utils::new_tx_context(VALIDATOR1, 0);
     assert!(hashi.committee_set().member_authorized(VALIDATOR1, cv));
 
     // No operator delegated yet: operator and stranger are not authorized.
-    let co = &mut test_utils::new_tx_context(OPERATOR1, 0);
+    let co = &test_utils::new_tx_context(OPERATOR1, 0);
     assert!(!hashi.committee_set().member_authorized(VALIDATOR1, co));
-    let cs = &mut test_utils::new_tx_context(STRANGER, 0);
+    let cs = &test_utils::new_tx_context(STRANGER, 0);
     assert!(!hashi.committee_set().member_authorized(VALIDATOR1, cs));
 
     // A non-member validator address is never authorized.
-    let cs2 = &mut test_utils::new_tx_context(STRANGER, 0);
+    let cs2 = &test_utils::new_tx_context(STRANGER, 0);
     assert!(!hashi.committee_set().member_authorized(STRANGER, cs2));
 
     // VALIDATOR1 delegates to OPERATOR1.
-    let cd = &mut test_utils::new_tx_context(VALIDATOR1, 0);
+    let cd = &test_utils::new_tx_context(VALIDATOR1, 0);
     hashi.committee_set_mut().set_operator_address(VALIDATOR1, OPERATOR1, cd);
 
     // Now the operator is authorized, and the validator key still is too.
-    let co2 = &mut test_utils::new_tx_context(OPERATOR1, 0);
+    let co2 = &test_utils::new_tx_context(OPERATOR1, 0);
     assert!(hashi.committee_set().member_authorized(VALIDATOR1, co2));
-    let cv2 = &mut test_utils::new_tx_context(VALIDATOR1, 0);
+    let cv2 = &test_utils::new_tx_context(VALIDATOR1, 0);
     assert!(hashi.committee_set().member_authorized(VALIDATOR1, cv2));
 
     std::unit_test::destroy(hashi);
@@ -69,7 +69,7 @@ fun test_operator_can_create_and_vote() {
     let clock = clock::create_for_testing(ctx);
 
     // Delegate V1 -> OPERATOR1.
-    let ctx_v1 = &mut test_utils::new_tx_context(VALIDATOR1, 0);
+    let ctx_v1 = &test_utils::new_tx_context(VALIDATOR1, 0);
     hashi.committee_set_mut().set_operator_address(VALIDATOR1, OPERATOR1, ctx_v1);
 
     // OPERATOR1 creates a proposal on behalf of VALIDATOR1.
@@ -113,7 +113,7 @@ fun test_operator_and_validator_single_vote() {
     let clock = clock::create_for_testing(ctx);
 
     // Delegate V1 -> OPERATOR1.
-    let ctx_v1 = &mut test_utils::new_tx_context(VALIDATOR1, 0);
+    let ctx_v1 = &test_utils::new_tx_context(VALIDATOR1, 0);
     hashi.committee_set_mut().set_operator_address(VALIDATOR1, OPERATOR1, ctx_v1);
 
     // OPERATOR1 creates the proposal for VALIDATOR1 (auto-votes under VALIDATOR1).
@@ -148,7 +148,7 @@ fun test_set_operator_address_rejects_unauthorized() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
 
     // STRANGER is neither VALIDATOR1 nor its operator (none delegated) -> aborts.
-    let ctx_stranger = &mut test_utils::new_tx_context(STRANGER, 0);
+    let ctx_stranger = &test_utils::new_tx_context(STRANGER, 0);
     hashi.committee_set_mut().set_operator_address(VALIDATOR1, @0xBEEF, ctx_stranger);
 
     // Won't reach here.
@@ -165,17 +165,17 @@ fun test_operator_can_set_operator_address() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
 
     // VALIDATOR1 delegates to OPERATOR1.
-    let ctx_v1 = &mut test_utils::new_tx_context(VALIDATOR1, 0);
+    let ctx_v1 = &test_utils::new_tx_context(VALIDATOR1, 0);
     hashi.committee_set_mut().set_operator_address(VALIDATOR1, OPERATOR1, ctx_v1);
 
     // OPERATOR1 (the operator) re-points the operator address to @0xBEEF.
-    let ctx_op = &mut test_utils::new_tx_context(OPERATOR1, 0);
+    let ctx_op = &test_utils::new_tx_context(OPERATOR1, 0);
     hashi.committee_set_mut().set_operator_address(VALIDATOR1, @0xBEEF, ctx_op);
 
     // @0xBEEF is the authorized operator now; OPERATOR1 no longer is.
-    let ctx_beef = &mut test_utils::new_tx_context(@0xBEEF, 0);
+    let ctx_beef = &test_utils::new_tx_context(@0xBEEF, 0);
     assert!(hashi.committee_set().member_authorized(VALIDATOR1, ctx_beef));
-    let ctx_op2 = &mut test_utils::new_tx_context(OPERATOR1, 0);
+    let ctx_op2 = &test_utils::new_tx_context(OPERATOR1, 0);
     assert!(!hashi.committee_set().member_authorized(VALIDATOR1, ctx_op2));
 
     std::unit_test::destroy(hashi);
