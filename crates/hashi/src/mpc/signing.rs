@@ -971,7 +971,7 @@ mod tests {
                     )
                 })
                 .collect();
-            let committee = Committee::new(members, 100, 3334u16, 0u16, 3333u16);
+            let committee = Committee::new(members, 100, 3334u16, 0u16, 3333u16, 0);
 
             // Fake DKG
             let sk = S::rand(&mut rng);

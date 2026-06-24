@@ -323,6 +323,7 @@ fun new_committee_from_validator_set(
     mpc_threshold_in_basis_points: u64,
     mpc_weight_reduction_allowed_delta: u64,
     mpc_max_faulty_in_basis_points: u64,
+    mpc_nonce_generation_protocol: u64,
     ctx: &TxContext,
 ): Committee {
     let epoch = ctx.epoch();
@@ -369,6 +370,7 @@ fun new_committee_from_validator_set(
         mpc_threshold_in_basis_points,
         mpc_weight_reduction_allowed_delta,
         mpc_max_faulty_in_basis_points,
+        mpc_nonce_generation_protocol,
     )
 }
 
@@ -390,6 +392,7 @@ public(package) fun start_reconfig(
     mpc_threshold_in_basis_points: u64,
     mpc_weight_reduction_allowed_delta: u64,
     mpc_max_faulty_in_basis_points: u64,
+    mpc_nonce_generation_protocol: u64,
     ctx: &TxContext,
 ): u64 {
     // We can't trigger reconfig if we are already reconfiguring
@@ -406,6 +409,7 @@ public(package) fun start_reconfig(
         mpc_threshold_in_basis_points,
         mpc_weight_reduction_allowed_delta,
         mpc_max_faulty_in_basis_points,
+        mpc_nonce_generation_protocol,
         ctx,
     );
 

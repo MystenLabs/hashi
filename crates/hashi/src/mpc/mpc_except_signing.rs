@@ -32,6 +32,7 @@ pub use crate::mpc::types::MpcError;
 pub use crate::mpc::types::MpcOutput;
 use crate::mpc::types::MpcOutputRecoveryOutcome;
 pub use crate::mpc::types::MpcResult;
+use crate::mpc::types::NonceGenerationProtocol;
 pub use crate::mpc::types::NonceMessage;
 pub use crate::mpc::types::NonceReconstructionOutcome;
 pub use crate::mpc::types::ProtocolType;
@@ -167,7 +168,15 @@ impl MpcManager {
             chain_id,
         )?;
         let total_weight = nodes.total_weight();
-        let mpc_config = MpcConfig::new(epoch, nodes, threshold, max_faulty);
+        let nonce_generation_protocol =
+            NonceGenerationProtocol::from_onchain(committee.mpc_nonce_generation_protocol());
+        let mpc_config = MpcConfig::new(
+            epoch,
+            nodes,
+            threshold,
+            max_faulty,
+            nonce_generation_protocol,
+        );
         let party_id = committee
             .index_of(&address)
             .expect("address not in committee") as u16;

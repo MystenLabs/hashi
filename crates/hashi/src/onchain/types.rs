@@ -817,7 +817,7 @@ mod tests {
     use super::*;
 
     fn empty_committee(epoch: u64) -> Committee {
-        Committee::new(vec![], epoch, 10_000, 0, 5_000)
+        Committee::new(vec![], epoch, 10_000, 0, 5_000, 0)
     }
 
     fn set_with(epoch: u64, pending: Option<u64>, committee_epochs: &[u64]) -> CommitteeSet {

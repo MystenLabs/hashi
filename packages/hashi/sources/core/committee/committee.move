@@ -42,6 +42,9 @@ public struct Committee has copy, drop, store {
     mpc_weight_reduction_allowed_delta: u64,
     /// MPC max faulty parties in basis points
     mpc_max_faulty_in_basis_points: u64,
+    // TODO: Remove after switched to AVID.
+    /// Nonce-generation protocol: 0 = vanilla, 1 = AVID
+    mpc_nonce_generation_protocol: u64,
 }
 
 /// Constructor for committee.
@@ -51,6 +54,7 @@ public(package) fun new_committee(
     mpc_threshold_in_basis_points: u64,
     mpc_weight_reduction_allowed_delta: u64,
     mpc_max_faulty_in_basis_points: u64,
+    mpc_nonce_generation_protocol: u64,
 ): Committee {
     assert!(!members.is_empty());
 
@@ -69,6 +73,7 @@ public(package) fun new_committee(
         mpc_threshold_in_basis_points,
         mpc_weight_reduction_allowed_delta,
         mpc_max_faulty_in_basis_points,
+        mpc_nonce_generation_protocol,
     }
 }
 

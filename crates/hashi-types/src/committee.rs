@@ -33,6 +33,9 @@ pub const DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
 /// `mpc_config.move`.
 pub const DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS: u16 = 3333;
 
+/// Mirrors `VANILLA_NONCE_GENERATION_PROTOCOL` in `mpc_config.move`.
+pub const VANILLA_MPC_NONCE_GENERATION_PROTOCOL: u16 = 0;
+
 // TODO: Read threshold from on-chain config once it is made configurable.
 const THRESHOLD_NUMERATOR: u64 = 2;
 const THRESHOLD_DENOMINATOR: u64 = 3;
@@ -100,6 +103,7 @@ pub struct Committee {
     mpc_threshold_in_basis_points: u16,
     mpc_weight_reduction_allowed_delta: u16,
     mpc_max_faulty_in_basis_points: u16,
+    mpc_nonce_generation_protocol: u16,
 }
 
 #[derive(Clone, PartialEq)]
@@ -168,6 +172,7 @@ impl Committee {
         mpc_threshold_in_basis_points: u16,
         mpc_weight_reduction_allowed_delta: u16,
         mpc_max_faulty_in_basis_points: u16,
+        mpc_nonce_generation_protocol: u16,
     ) -> Self {
         let total_weight = members.iter().map(|member| member.weight).sum();
         let address_to_index = members
@@ -183,6 +188,7 @@ impl Committee {
             mpc_threshold_in_basis_points,
             mpc_weight_reduction_allowed_delta,
             mpc_max_faulty_in_basis_points,
+            mpc_nonce_generation_protocol,
         }
     }
 
@@ -209,6 +215,10 @@ impl Committee {
 
     pub fn mpc_max_faulty_in_basis_points(&self) -> u16 {
         self.mpc_max_faulty_in_basis_points
+    }
+
+    pub fn mpc_nonce_generation_protocol(&self) -> u16 {
+        self.mpc_nonce_generation_protocol
     }
 
     fn member(&self, address: &Address) -> Result<&CommitteeMember, SignatureError> {
@@ -769,6 +779,7 @@ mod test {
             TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
+            0,
         );
 
         let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
@@ -872,6 +883,7 @@ mod test {
             TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
+            0,
         );
 
         let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
@@ -917,6 +929,7 @@ mod test {
             TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
+            0,
         );
         assert!(
             certificate
@@ -952,6 +965,7 @@ mod test {
             TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
+            0,
         );
 
         // Reduced weights: different from committee weights
@@ -1041,6 +1055,7 @@ mod test {
             TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
+            0,
         );
 
         // Create a certificate via aggregator
@@ -1123,6 +1138,7 @@ mod test {
             TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
+            0,
         );
 
         let message = b"regression".to_vec();

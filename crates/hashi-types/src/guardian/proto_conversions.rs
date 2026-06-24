@@ -65,6 +65,7 @@ use std::str::FromStr;
 use crate::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
 use crate::committee::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
 use crate::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
+use crate::committee::VANILLA_MPC_NONCE_GENERATION_PROTOCOL;
 
 // --------------------------------------------
 //      Proto -> Domain (deserialization)
@@ -911,6 +912,7 @@ fn pb_to_hashi_committee(c: pb::Committee) -> GuardianResult<HashiCommittee> {
         mpc_threshold_in_basis_points,
         mpc_weight_reduction_allowed_delta,
         mpc_max_faulty_in_basis_points,
+        VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
     );
 
     if committee.total_weight() != total_weight {
@@ -1298,6 +1300,7 @@ mod tests {
         use crate::committee::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
         use crate::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
         use crate::committee::EncryptionPublicKey;
+        use crate::committee::VANILLA_MPC_NONCE_GENERATION_PROTOCOL;
         use rand::SeedableRng;
 
         let mut rng = rand::rngs::StdRng::seed_from_u64(0xCAFE);
@@ -1312,6 +1315,7 @@ mod tests {
             DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
             DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
             DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
+            VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
         );
         let new_committee = HashiCommittee::new(
             vec![member],
@@ -1319,6 +1323,7 @@ mod tests {
             DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
             DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
             DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
+            VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
         );
         let transition = CommitteeTransitionRequest {
             new_committee: crate::move_types::Committee::from(&new_committee),

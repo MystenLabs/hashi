@@ -479,6 +479,7 @@ pub async fn create_update_mpc_config_proposal(
     threshold_bps: Option<u64>,
     max_faulty_bps: Option<u64>,
     weight_reduction_allowed_delta: Option<u64>,
+    nonce_generation_protocol: Option<u64>,
     metadata: Vec<(String, String)>,
     tx_opts: &TxOptions,
 ) -> Result<()> {
@@ -501,18 +502,25 @@ pub async fn create_update_mpc_config_proposal(
             "--weight-reduction-allowed-delta must be in 0..={MAX_BPS}, got {d}"
         );
     }
+    if let Some(p) = nonce_generation_protocol {
+        anyhow::ensure!(
+            p <= 1,
+            "--nonce-generation-protocol must be 0 (vanilla) or 1 (avid), got {p}"
+        );
+    }
 
     let count = [
         threshold_bps,
         max_faulty_bps,
         weight_reduction_allowed_delta,
+        nonce_generation_protocol,
     ]
     .iter()
     .filter(|v| v.is_some())
     .count();
     if count == 0 {
         anyhow::bail!(
-            "must provide at least one of --threshold-bps, --max-faulty-bps, --weight-reduction-allowed-delta"
+            "must provide at least one of --threshold-bps, --max-faulty-bps, --weight-reduction-allowed-delta, --nonce-generation-protocol"
         );
     }
 
@@ -523,6 +531,7 @@ pub async fn create_update_mpc_config_proposal(
         threshold_bps,
         max_faulty_bps,
         weight_reduction_allowed_delta,
+        nonce_generation_protocol,
         metadata,
     })?;
 

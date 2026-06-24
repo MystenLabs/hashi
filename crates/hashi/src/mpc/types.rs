@@ -40,6 +40,33 @@ pub struct NonceMessage {
 const DOMAIN_HASHI: &str =
     "754526047e6e997e6c348e7c3491c57b79e22c3efab204b9f0e72c85249c5959::hashi";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NonceGenerationProtocol {
+    #[default]
+    Vanilla,
+    Avid,
+}
+
+impl NonceGenerationProtocol {
+    // TODO(IOP-302): Remove the "other" branch once the on-chain value validation for MPC config params
+    // is restored (removed in PR #506).
+    pub fn from_onchain(value: u16) -> Self {
+        match value {
+            0 => Self::Vanilla,
+            1 => Self::Avid,
+            other => {
+                let default = Self::default();
+                tracing::warn!(
+                    value = other,
+                    ?default,
+                    "unknown mpc_nonce_generation_protocol; using default"
+                );
+                default
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MpcConfig {
     pub epoch: u64,
@@ -48,6 +75,7 @@ pub struct MpcConfig {
     pub threshold: u16,
     /// Maximum number of faulty validators (f)
     pub max_faulty: u16,
+    pub nonce_generation_protocol: NonceGenerationProtocol,
 }
 
 impl MpcConfig {
@@ -56,12 +84,14 @@ impl MpcConfig {
         nodes: Nodes<EncryptionGroupElement>,
         threshold: u16,
         max_faulty: u16,
+        nonce_generation_protocol: NonceGenerationProtocol,
     ) -> Self {
         Self {
             epoch,
             nodes,
             threshold,
             max_faulty,
+            nonce_generation_protocol,
         }
     }
 }
@@ -702,7 +732,7 @@ mod tests {
                 )
             })
             .collect();
-        let committee = Committee::new(members, epoch, 3334u16, 0u16, 3333u16);
+        let committee = Committee::new(members, epoch, 3334u16, 0u16, 3333u16, 0);
 
         // Create a DealerMessagesHash
         let dealer_address = Address::new([0u8; 32]);
@@ -774,6 +804,30 @@ mod tests {
             err.to_string().contains("invalid messages_hash length"),
             "Error should mention invalid hash length: {}",
             err
+        );
+    }
+
+    #[test]
+    fn test_nonce_generation_protocol_from_onchain() {
+        assert_eq!(
+            NonceGenerationProtocol::from_onchain(0),
+            NonceGenerationProtocol::Vanilla
+        );
+        assert_eq!(
+            NonceGenerationProtocol::from_onchain(1),
+            NonceGenerationProtocol::Avid
+        );
+        assert_eq!(
+            NonceGenerationProtocol::from_onchain(2),
+            NonceGenerationProtocol::default()
+        );
+        assert_eq!(
+            NonceGenerationProtocol::from_onchain(u16::MAX),
+            NonceGenerationProtocol::default()
+        );
+        assert_eq!(
+            NonceGenerationProtocol::default(),
+            NonceGenerationProtocol::Vanilla
         );
     }
 }

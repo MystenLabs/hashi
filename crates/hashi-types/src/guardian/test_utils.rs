@@ -58,6 +58,7 @@ use sui_sdk_types::bcs::FromBcs;
 use crate::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
 use crate::committee::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
 use crate::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
+use crate::committee::VANILLA_MPC_NONCE_GENERATION_PROTOCOL;
 
 // Default secret-sharing params used by mock_for_testing helpers.
 const TEST_N: usize = 5;
@@ -208,6 +209,7 @@ fn mock_committee_with_one_member(epoch: u64) -> HashiCommittee {
         DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
         DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
         DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
+        VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
     )
 }
 

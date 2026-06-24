@@ -472,6 +472,7 @@ pub(crate) async fn apply_onchain_config_overrides(
                 threshold_bps: mpc_threshold_bps,
                 max_faulty_bps: mpc_max_faulty_bps,
                 weight_reduction_allowed_delta: mpc_weight_reduction_allowed_delta,
+                nonce_generation_protocol: None,
                 metadata: vec![],
             },
             update_config_type_tag.clone(),

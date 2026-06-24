@@ -1105,12 +1105,15 @@ fn convert_move_committee(c: move_types::Committee) -> Committee {
         .expect("mpc_weight_reduction_allowed_delta exceeds u16::MAX");
     let max_faulty_in_basis_points = u16::try_from(c.mpc_max_faulty_in_basis_points)
         .expect("mpc_max_faulty_in_basis_points exceeds u16::MAX");
+    let nonce_generation_protocol = u16::try_from(c.mpc_nonce_generation_protocol)
+        .expect("mpc_nonce_generation_protocol exceeds u16::MAX");
     Committee::new(
         members,
         c.epoch,
         threshold_in_basis_points,
         weight_reduction_allowed_delta,
         max_faulty_in_basis_points,
+        nonce_generation_protocol,
     )
 }
 
