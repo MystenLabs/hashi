@@ -127,7 +127,7 @@ fun pending_committee_for_testing(epoch: u64): hashi::committee::Committee {
         committee::new_committee_member(VOTER2, public_key, sk, 1),
         committee::new_committee_member(VOTER3, public_key, sk, 1),
     ];
-    committee::new_committee(epoch, members, 3334, 800, 3333)
+    committee::new_committee(epoch, members, 3334, 800, 3333, 0)
 }
 
 #[test_only]

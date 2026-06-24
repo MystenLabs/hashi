@@ -6,6 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use futures::future::join_all;
@@ -1018,15 +1019,19 @@ impl MpcService {
                         if self.get_pending_epoch_change() != Some(epoch) {
                             return Ok(());
                         }
-                        anyhow::bail!(
-                            "end_reconfig submission for epoch {epoch} failed with ENotReconfiguring, but epoch is still pending after rescrape: {e}"
-                        );
+                        Err(e).with_context(|| {
+                            format!(
+                                "end_reconfig submission for epoch {epoch} failed with ENotReconfiguring, but epoch is still pending after rescrape"
+                            )
+                        })?;
                     }
                     ReconfigSubmissionErrorKind::NonRetryableMoveAbort
                     | ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted => {
-                        anyhow::bail!(
-                            "end_reconfig submission for epoch {epoch} failed with non-retryable error: {e}"
-                        );
+                        Err(e).with_context(|| {
+                            format!(
+                                "end_reconfig submission for epoch {epoch} failed with non-retryable error"
+                            )
+                        })?;
                     }
                     ReconfigSubmissionErrorKind::NonMoveAbort => {
                         warn!(
@@ -1096,9 +1101,11 @@ impl MpcService {
                     }
                     ReconfigSubmissionErrorKind::NonRetryableMoveAbort
                     | ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted => {
-                        anyhow::bail!(
-                            "submit_committee_handoff submission for epoch {epoch} failed with non-retryable error: {e}"
-                        );
+                        Err(e).with_context(|| {
+                            format!(
+                                "submit_committee_handoff submission for epoch {epoch} failed with non-retryable error"
+                            )
+                        })?;
                     }
                     ReconfigSubmissionErrorKind::NonMoveAbort => {
                         warn!(
