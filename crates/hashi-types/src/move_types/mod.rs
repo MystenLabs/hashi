@@ -185,7 +185,7 @@ pub struct CommitteeHandoffKey {
 /// Rust version of the Move hashi::committee_set::CommitteeHandoff type.
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct CommitteeHandoff {
-    pub new_committee: Committee,
+    pub next_epoch: u64,
     pub cert: CommitteeSignature,
 }
 

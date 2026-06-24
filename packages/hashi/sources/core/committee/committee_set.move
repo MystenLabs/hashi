@@ -41,17 +41,30 @@ public(package) fun create(ctx: &mut TxContext): CommitteeSet {
     }
 }
 
+/// Reconfiguration state while a new committee is pending activation.
+///
+/// `epoch` is the next epoch that will become current when reconfig ends.
+/// For non-initial reconfigs, `committee_handoff_cert` is filled by the
+/// current committee before `end_reconfig` activates the pending committee.
 public struct PendingEpochChange has copy, drop, store {
     epoch: u64,
     committee_handoff_cert: Option<committee::CommitteeSignature>,
 }
 
+/// Key for a completed committee handoff certificate.
+///
+/// `epoch` is the source epoch of the handoff, i.e. the current epoch at the
+/// time the old committee signs the transition to the pending committee.
 public struct CommitteeHandoffKey has copy, drop, store {
     epoch: u64,
 }
 
+/// Certificate showing that an old committee approved the next committee.
+///
+/// Stored after `end_reconfig` for non-initial reconfigs so the new committee
+/// epoch can be associated with the old committee's transition signature.
 public struct CommitteeHandoff has store {
-    new_committee: Committee,
+    next_epoch: u64,
     cert: committee::CommitteeSignature,
 }
 
@@ -101,12 +114,12 @@ fun insert_committee(self: &mut CommitteeSet, committee: Committee) {
 public(package) fun insert_committee_handoff(
     self: &mut CommitteeSet,
     from_epoch: u64,
-    new_committee: Committee,
+    next_epoch: u64,
     cert: committee::CommitteeSignature,
 ) {
     let key = CommitteeHandoffKey { epoch: from_epoch };
     assert!(!self.committees.contains_with_type<CommitteeHandoffKey, CommitteeHandoff>(key));
-    self.committees.add(key, CommitteeHandoff { new_committee, cert })
+    self.committees.add(key, CommitteeHandoff { next_epoch, cert })
 }
 
 #[test_only]
