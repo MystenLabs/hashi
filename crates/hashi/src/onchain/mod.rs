@@ -42,6 +42,10 @@ use hashi_types::move_types;
 
 const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 
+/// Bounded so a huge queue isn't returned as one oversized page that overflows
+/// the gRPC decode limit; the SDK still pages through every entry.
+const SCRAPE_PAGE_SIZE: u32 = 1000;
+
 pub mod types;
 mod watcher;
 
@@ -121,7 +125,12 @@ impl OnchainState {
         grpc_max_decoding_message_size: Option<usize>,
         metrics: Option<Arc<crate::metrics::Metrics>>,
     ) -> Result<(Self, Service)> {
-        let client = Client::new(sui_rpc_url)?;
+        let mut client = Client::new(sui_rpc_url)?;
+        // The scrape client reads the full on-chain state (the largest
+        // responses), so it needs the decode limit too — not just `committees`.
+        if let Some(limit) = grpc_max_decoding_message_size {
+            client = client.with_max_decoding_message_size(limit);
+        }
 
         let (mut state, checkpoint) = State::scrape(client.clone(), ids).await?;
         if let Some(tls_private_key) = &tls_private_key {
@@ -170,6 +179,10 @@ impl OnchainState {
 
     pub fn subscribe(&self) -> broadcast::Receiver<Notification> {
         self.0.sender.subscribe()
+    }
+
+    pub(crate) fn grpc_max_decoding_message_size(&self) -> Option<usize> {
+        self.0.grpc_max_decoding_message_size
     }
 
     fn notify(&self, notification: Notification) {
@@ -580,7 +593,7 @@ impl OnchainState {
             .list_dynamic_fields(
                 ListDynamicFieldsRequest::default()
                     .with_parent(tob_id)
-                    .with_page_size(u32::MAX)
+                    .with_page_size(SCRAPE_PAGE_SIZE)
                     .with_read_mask(FieldMask::from_paths([
                         DynamicField::path_builder().name().finish(),
                         DynamicField::path_builder().value().finish(),
@@ -626,7 +639,7 @@ impl OnchainState {
             .list_dynamic_fields(
                 ListDynamicFieldsRequest::default()
                     .with_parent(epoch_certs.certs.id)
-                    .with_page_size(u32::MAX)
+                    .with_page_size(SCRAPE_PAGE_SIZE)
                     .with_read_mask(FieldMask::from_paths([
                         DynamicField::path_builder().name().finish(),
                         DynamicField::path_builder().value().finish(),
@@ -689,7 +702,7 @@ async fn scrape_package_versions(
 ) -> Result<BTreeMap<u64, Address>> {
     let package_versions: BTreeMap<u64, Address> = client
         .list_package_versions(
-            ListPackageVersionsRequest::new(&package_id).with_page_size(u32::MAX),
+            ListPackageVersionsRequest::new(&package_id).with_page_size(SCRAPE_PAGE_SIZE),
         )
         .and_then(|package_version| async move {
             let storage_id = package_version
@@ -861,7 +874,7 @@ async fn scrape_treasury(
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
                 .with_parent(treasury.objects.id)
-                .with_page_size(u32::MAX)
+                .with_page_size(SCRAPE_PAGE_SIZE)
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
                     DynamicField::path_builder().value().finish(),
@@ -933,7 +946,7 @@ async fn scrape_all_member_info(
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
                 .with_parent(member_info_id)
-                .with_page_size(u32::MAX)
+                .with_page_size(SCRAPE_PAGE_SIZE)
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
                     DynamicField::path_builder().value().finish(),
@@ -1039,7 +1052,7 @@ async fn scrape_committees(
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
                 .with_parent(committees_id)
-                .with_page_size(u32::MAX)
+                .with_page_size(SCRAPE_PAGE_SIZE)
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
                     DynamicField::path_builder().value().finish(),
@@ -1231,7 +1244,7 @@ async fn scrape_deposit_requests(
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
                 .with_parent(deposit_queue_id)
-                .with_page_size(u32::MAX)
+                .with_page_size(SCRAPE_PAGE_SIZE)
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
                     DynamicField::path_builder()
@@ -1287,7 +1300,7 @@ async fn scrape_withdrawal_requests(
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
                 .with_parent(requests_id)
-                .with_page_size(u32::MAX)
+                .with_page_size(SCRAPE_PAGE_SIZE)
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
                     DynamicField::path_builder()
@@ -1319,7 +1332,7 @@ async fn scrape_withdrawal_txns(
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
                 .with_parent(withdrawal_txns_id)
-                .with_page_size(u32::MAX)
+                .with_page_size(SCRAPE_PAGE_SIZE)
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
                     DynamicField::path_builder()
@@ -1392,7 +1405,7 @@ async fn scrape_utxo_records(
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
                 .with_parent(utxo_records_id)
-                .with_page_size(u32::MAX)
+                .with_page_size(SCRAPE_PAGE_SIZE)
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
                     DynamicField::path_builder().value().finish(),
@@ -1419,7 +1432,7 @@ async fn scrape_spent_utxos(
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
                 .with_parent(spent_utxos_id)
-                .with_page_size(u32::MAX)
+                .with_page_size(SCRAPE_PAGE_SIZE)
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
                     DynamicField::path_builder().value().finish(),
@@ -1474,7 +1487,7 @@ async fn scrape_proposal_bag(
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
                 .with_parent(bag.id)
-                .with_page_size(u32::MAX)
+                .with_page_size(SCRAPE_PAGE_SIZE)
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
                     DynamicField::path_builder().child_object().object_type(),
