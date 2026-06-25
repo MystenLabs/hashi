@@ -20,6 +20,7 @@ prost-types.workspace = true
 bytes.workspace = true
 
 # crypto deps
+blst.workspace = true
 fastcrypto.workspace = true
 fastcrypto-tbls.workspace = true
 

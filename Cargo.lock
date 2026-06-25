@@ -3051,6 +3051,7 @@ dependencies = [
  "bcs",
  "bitcoin",
  "blake2",
+ "blst",
  "bytes",
  "ed25519-consensus",
  "ed25519-dalek",

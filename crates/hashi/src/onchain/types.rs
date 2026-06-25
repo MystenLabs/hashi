@@ -18,6 +18,8 @@ use sui_sdk_types::TypeTag;
 use crate::grpc::Client;
 use hashi_types::committee::Committee;
 use hashi_types::committee::EncryptionPublicKey;
+use hashi_types::committee::SignedMessage;
+use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::utils::Base64;
 
 // Re-export types from hashi-types that are used as-is (identical to the
@@ -62,6 +64,7 @@ pub struct CommitteeSet {
     /// Id of the `Bag` containing the committee's per epoch
     committees_id: Address,
     committees: BTreeMap<u64, Committee>,
+    committee_handoffs: BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>>,
 
     tls_private_key: Option<ed25519_dalek::SigningKey>,
     grpc_max_decoding_message_size: Option<usize>,
@@ -100,6 +103,7 @@ impl fmt::Debug for CommitteeSet {
             )
             .field("committees_id", &self.committees_id)
             .field("committees", &self.committees)
+            .field("committee_handoffs", &self.committee_handoffs.keys())
             .field("tls_private_key", &tls_private_key_display)
             .field(
                 "grpc_max_decoding_message_size",
@@ -121,6 +125,7 @@ impl CommitteeSet {
             mpc_public_key: Vec::new(),
             committees_id,
             committees: BTreeMap::new(),
+            committee_handoffs: BTreeMap::new(),
             tls_private_key: None,
             grpc_max_decoding_message_size: None,
             metrics: None,
@@ -142,6 +147,16 @@ impl CommitteeSet {
 
     pub fn committees(&self) -> &BTreeMap<u64, Committee> {
         &self.committees
+    }
+
+    pub fn committee_handoffs(&self) -> &BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>> {
+        &self.committee_handoffs
+    }
+
+    pub fn committee_handoffs_mut(
+        &mut self,
+    ) -> &mut BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>> {
+        &mut self.committee_handoffs
     }
 
     pub fn committees_mut(&mut self) -> &mut BTreeMap<u64, Committee> {
@@ -315,6 +330,14 @@ impl CommitteeSet {
 
     pub fn set_committees(&mut self, committees: BTreeMap<u64, Committee>) -> &mut Self {
         self.committees = committees;
+        self
+    }
+
+    pub fn set_committee_handoffs(
+        &mut self,
+        committee_handoffs: BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>>,
+    ) -> &mut Self {
+        self.committee_handoffs = committee_handoffs;
         self
     }
 

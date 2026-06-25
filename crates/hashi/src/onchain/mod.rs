@@ -36,6 +36,8 @@ use crate::config::HashiIds;
 use crate::mpc::fallback_encryption_public_key;
 use hashi_types::committee::Committee;
 use hashi_types::committee::CommitteeMember;
+use hashi_types::committee::SignedMessage;
+use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::move_types;
 
 const BROADCAST_CHANNEL_CAPACITY: usize = 100;
@@ -299,6 +301,18 @@ impl OnchainState {
     /// Returns the current epoch.
     pub fn epoch(&self) -> u64 {
         self.state().hashi.committees.epoch()
+    }
+
+    pub fn committee_handoff(
+        &self,
+        from_epoch: u64,
+    ) -> Option<SignedMessage<CommitteeTransitionRequest>> {
+        self.state()
+            .hashi
+            .committees
+            .committee_handoffs()
+            .get(&from_epoch)
+            .cloned()
     }
 
     /// Returns the MPC public key bytes.
@@ -762,7 +776,7 @@ async fn scrape_hashi(
 
     let (
         member_info,
-        committees_per_epoch,
+        (committees_per_epoch, committee_handoffs),
         treasury,
         deposit_queue,
         withdrawal_queue,
@@ -782,10 +796,11 @@ async fn scrape_hashi(
         types::CommitteeSet::new(committees.members.id, committees.committees.id);
     committee_set
         .set_epoch(committees.epoch)
-        .set_pending_epoch_change(committees.pending_epoch_change)
+        .set_pending_epoch_change(committees.pending_epoch_change.map(|pending| pending.epoch))
         .set_mpc_public_key(committees.mpc_public_key)
         .set_members(member_info)
-        .set_committees(committees_per_epoch);
+        .set_committees(committees_per_epoch)
+        .set_committee_handoffs(committee_handoffs);
 
     Ok((
         checkpoint_info,
@@ -1016,8 +1031,11 @@ pub(crate) async fn scrape_member_info(
 async fn scrape_committees(
     client: Client,
     committees_id: Address,
-) -> Result<BTreeMap<u64, Committee>> {
-    let committees: BTreeMap<u64, Committee> = client
+) -> Result<(
+    BTreeMap<u64, Committee>,
+    BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>>,
+)> {
+    let entries: Vec<CommitteeBagEntry> = client
         .list_dynamic_fields(
             ListDynamicFieldsRequest::default()
                 .with_parent(committees_id)
@@ -1025,25 +1043,89 @@ async fn scrape_committees(
                 .with_read_mask(FieldMask::from_paths([
                     DynamicField::path_builder().name().finish(),
                     DynamicField::path_builder().value().finish(),
+                    DynamicField::path_builder().value_type(),
                 ])),
         )
         .and_then(|field| async move {
-            let committee: move_types::Committee = field
-                .value()
-                .deserialize()
-                .map_err(|e| tonic::Status::from_error(e.into()))?;
-
-            Ok(committee)
-        })
-        .map_ok(|move_committee| {
-            let epoch = move_committee.epoch;
-            let committee = convert_move_committee(move_committee);
-            (epoch, committee)
+            let value_type: TypeTag = field
+                .value_type_opt()
+                .ok_or_else(|| tonic::Status::internal("missing dynamic field value_type"))?
+                .parse()
+                .map_err(|e| tonic::Status::internal(format!("invalid value_type: {e}")))?;
+            let TypeTag::Struct(struct_tag) = &value_type else {
+                return Err(tonic::Status::internal(format!(
+                    "unexpected committee bag value type: {value_type:?}"
+                )));
+            };
+            match struct_tag.name().as_str() {
+                "Committee" => {
+                    let committee: move_types::Committee = field
+                        .value()
+                        .deserialize()
+                        .map_err(|e| tonic::Status::from_error(e.into()))?;
+                    Ok(CommitteeBagEntry::Committee(committee))
+                }
+                "CommitteeHandoff" => {
+                    let key: move_types::CommitteeHandoffKey = field
+                        .name()
+                        .deserialize()
+                        .map_err(|e| tonic::Status::from_error(e.into()))?;
+                    let handoff: move_types::CommitteeHandoff = field
+                        .value()
+                        .deserialize()
+                        .map_err(|e| tonic::Status::from_error(e.into()))?;
+                    Ok(CommitteeBagEntry::CommitteeHandoff(key.epoch, handoff))
+                }
+                _ => Err(tonic::Status::internal(format!(
+                    "unexpected committee bag value type: {value_type:?}"
+                ))),
+            }
         })
         .try_collect()
         .await?;
 
-    Ok(committees)
+    let mut move_committees = BTreeMap::new();
+    let mut raw_handoffs = BTreeMap::new();
+    for entry in entries {
+        match entry {
+            CommitteeBagEntry::Committee(move_committee) => {
+                let epoch = move_committee.epoch;
+                move_committees.insert(epoch, move_committee);
+            }
+            CommitteeBagEntry::CommitteeHandoff(from_epoch, handoff) => {
+                raw_handoffs.insert(from_epoch, handoff);
+            }
+        }
+    }
+
+    let handoffs = raw_handoffs
+        .into_iter()
+        .map(|(from_epoch, handoff)| {
+            let new_committee = move_committees
+                .get(&handoff.next_epoch)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "committee handoff for epoch {from_epoch} references missing committee {}",
+                        handoff.next_epoch
+                    )
+                })?
+                .clone();
+            let signed = convert_move_committee_handoff(handoff, new_committee)
+                .map_err(|e| anyhow!("invalid committee handoff for epoch {from_epoch}: {e}"))?;
+            Ok((from_epoch, signed))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let committees = move_committees
+        .into_iter()
+        .map(|(epoch, committee)| (epoch, convert_move_committee(committee)))
+        .collect();
+
+    Ok((committees, handoffs))
+}
+
+enum CommitteeBagEntry {
+    Committee(move_types::Committee),
+    CommitteeHandoff(u64, move_types::CommitteeHandoff),
 }
 
 async fn scrape_committee(
@@ -1117,6 +1199,20 @@ fn convert_move_committee(c: move_types::Committee) -> Committee {
         max_faulty_in_basis_points,
         nonce_generation_protocol,
     )
+}
+
+fn convert_move_committee_handoff(
+    handoff: move_types::CommitteeHandoff,
+    new_committee: move_types::Committee,
+) -> Result<SignedMessage<CommitteeTransitionRequest>> {
+    let transition = CommitteeTransitionRequest { new_committee };
+    SignedMessage::new(
+        handoff.cert.epoch,
+        transition,
+        &handoff.cert.signature,
+        &handoff.cert.signers_bitmap,
+    )
+    .map_err(|e| anyhow!("invalid committee handoff cert: {e}"))
 }
 
 fn convert_move_uncompressed_g1_pubkey(uncompressed_g1: &[u8]) -> BLS12381PublicKey {

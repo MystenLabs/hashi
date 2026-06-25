@@ -192,6 +192,7 @@ use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionRequest;
 use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionResponse;
+use sui_rpc::proto::sui::rpc::v2::ExecutionStatus;
 use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
 use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
 use sui_rpc::proto::sui::rpc::v2::Object;
@@ -281,6 +282,19 @@ pub enum TxOutcome {
     },
     /// `SerializeUnsigned`: base64-encoded BCS `TransactionData` for external signing.
     Serialized(String),
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{function} transaction failed: {status:?}")]
+pub(crate) struct TransactionExecutionError {
+    function: &'static str,
+    status: ExecutionStatus,
+}
+
+impl TransactionExecutionError {
+    pub(crate) fn status(&self) -> &ExecutionStatus {
+        &self.status
+    }
 }
 
 /// Set the sender and gas overrides on `builder`, then finish it according to
@@ -1001,7 +1015,7 @@ impl SuiTxExecutor {
     pub async fn execute_end_reconfig(
         &mut self,
         mpc_public_key: &[u8],
-        cert: &CommitteeSignature,
+        mpc_cert: &CommitteeSignature,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
         let hashi_arg = builder.object(
@@ -1010,21 +1024,60 @@ impl SuiTxExecutor {
                 .with_mutable(true),
         );
         let mpc_public_key_arg = builder.pure(&mpc_public_key.to_vec());
-        let cert_arg = build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, cert);
+        let mpc_cert_arg =
+            build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, mpc_cert);
         builder.move_call(
             Function::new(
                 self.hashi_ids.package_id,
                 Identifier::from_static("reconfig"),
                 Identifier::from_static("end_reconfig"),
             ),
-            vec![hashi_arg, mpc_public_key_arg, cert_arg],
+            vec![hashi_arg, mpc_public_key_arg, mpc_cert_arg],
         );
         let response = self.execute(builder).await?;
-        if !response.transaction().effects().status().success() {
-            anyhow::bail!(
-                "end_reconfig transaction failed: {:?}",
-                response.transaction().effects().status()
-            );
+        let status = response.transaction().effects().status();
+        if !status.success() {
+            return Err(TransactionExecutionError {
+                function: "end_reconfig",
+                status: status.clone(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "info", skip_all)]
+    pub async fn execute_submit_committee_handoff(
+        &mut self,
+        committee_handoff_cert: &CommitteeSignature,
+    ) -> anyhow::Result<()> {
+        let mut builder = TransactionBuilder::new();
+        let hashi_arg = builder.object(
+            ObjectInput::new(self.hashi_ids.hashi_object_id)
+                .as_shared()
+                .with_mutable(true),
+        );
+        let committee_handoff_cert_arg = build_committee_signature_arg(
+            &mut builder,
+            self.hashi_ids.package_id,
+            committee_handoff_cert,
+        );
+        builder.move_call(
+            Function::new(
+                self.hashi_ids.package_id,
+                Identifier::from_static("reconfig"),
+                Identifier::from_static("submit_committee_handoff"),
+            ),
+            vec![hashi_arg, committee_handoff_cert_arg],
+        );
+        let response = self.execute(builder).await?;
+        let status = response.transaction().effects().status();
+        if !status.success() {
+            return Err(TransactionExecutionError {
+                function: "submit_committee_handoff",
+                status: status.clone(),
+            }
+            .into());
         }
         Ok(())
     }
