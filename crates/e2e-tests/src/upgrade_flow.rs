@@ -31,7 +31,7 @@ use crate::sui_network::sui_binary;
 /// Prepare an upgrade package by copying the deployed source and patching it.
 ///
 /// 1. Copies `<test_dir>/packages/hashi` to `<test_dir>/packages/hashi-upgrade`
-/// 2. Bumps `PACKAGE_VERSION` from 1 to 2 in `config.move`
+/// 2. Bumps `PACKAGE_VERSION` from 1 to 2 in `versioning.move`
 /// 3. Sets `published-at` in `Move.toml` to the original package ID
 ///
 /// Returns the path to the patched package directory.
@@ -55,18 +55,18 @@ pub fn prepare_upgrade_package(test_dir: &Path, original_package_id: Address) ->
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Patch config.move: bump PACKAGE_VERSION from 1 to 2
-    let config_path = dst.join("sources/core/config/config.move");
-    let config_src = std::fs::read_to_string(&config_path)?;
-    let patched = config_src.replace(
+    // Patch versioning.move: bump PACKAGE_VERSION from 1 to 2
+    let versioning_path = dst.join("sources/core/versioning.move");
+    let versioning_src = std::fs::read_to_string(&versioning_path)?;
+    let patched = versioning_src.replace(
         "const PACKAGE_VERSION: u64 = 1;",
         "const PACKAGE_VERSION: u64 = 2;",
     );
     anyhow::ensure!(
-        patched != config_src,
-        "PACKAGE_VERSION replacement failed — pattern not found in config.move"
+        patched != versioning_src,
+        "PACKAGE_VERSION replacement failed — pattern not found in versioning.move"
     );
-    std::fs::write(&config_path, patched)?;
+    std::fs::write(&versioning_path, patched)?;
 
     // Patch Move.toml: add published-at
     let move_toml_path = dst.join("Move.toml");
