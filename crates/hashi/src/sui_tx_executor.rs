@@ -225,6 +225,9 @@ const DEFAULT_TIMEOUT_SECS: u64 = 10;
 /// Well-known Move stdlib package address (0x1)
 const MOVE_STDLIB_ADDRESS: Address = Address::from_static("0x1");
 
+/// Well-known Sui framework package address (0x2)
+const SUI_FRAMEWORK_ADDRESS: Address = Address::from_static("0x2");
+
 /// Well-known Sui Clock object address (0x6)
 pub const SUI_CLOCK_OBJECT_ID: Address = Address::from_static("0x6");
 const SUI_SYSTEM_STATE_OBJECT_ID: Address = Address::from_static("0x5");
@@ -1014,8 +1017,8 @@ impl SuiTxExecutor {
     #[tracing::instrument(level = "info", skip_all)]
     pub async fn execute_end_reconfig(
         &mut self,
-        mpc_public_key: &[u8],
-        mpc_cert: &CommitteeSignature,
+        protocol_keys: &[(u8, Vec<u8>)],
+        cert: &CommitteeSignature,
     ) -> anyhow::Result<()> {
         let mut builder = TransactionBuilder::new();
         let hashi_arg = builder.object(
@@ -1023,16 +1026,38 @@ impl SuiTxExecutor {
                 .as_shared()
                 .with_mutable(true),
         );
-        let mpc_public_key_arg = builder.pure(&mpc_public_key.to_vec());
-        let mpc_cert_arg =
-            build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, mpc_cert);
+        let u8_type = TypeTag::U8;
+        let vec_u8_type = TypeTag::Vector(Box::new(TypeTag::U8));
+        let map_arg = builder.move_call(
+            Function::new(
+                SUI_FRAMEWORK_ADDRESS,
+                Identifier::from_static("vec_map"),
+                Identifier::from_static("empty"),
+            )
+            .with_type_args(vec![u8_type.clone(), vec_u8_type.clone()]),
+            vec![],
+        );
+        for (protocol_id, key) in protocol_keys {
+            let id_arg = builder.pure(protocol_id);
+            let key_arg = builder.pure(key);
+            builder.move_call(
+                Function::new(
+                    SUI_FRAMEWORK_ADDRESS,
+                    Identifier::from_static("vec_map"),
+                    Identifier::from_static("insert"),
+                )
+                .with_type_args(vec![u8_type.clone(), vec_u8_type.clone()]),
+                vec![map_arg, id_arg, key_arg],
+            );
+        }
+        let cert_arg = build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, cert);
         builder.move_call(
             Function::new(
                 self.hashi_ids.package_id,
                 Identifier::from_static("reconfig"),
                 Identifier::from_static("end_reconfig"),
             ),
-            vec![hashi_arg, mpc_public_key_arg, mpc_cert_arg],
+            vec![hashi_arg, map_arg, cert_arg],
         );
         let response = self.execute(builder).await?;
         let status = response.transaction().effects().status();
@@ -1181,7 +1206,11 @@ impl SuiTxExecutor {
         skip_all,
         fields(cert_kind = tracing::field::Empty),
     )]
-    pub async fn execute_submit_certificate(&mut self, cert: &CertificateV1) -> anyhow::Result<()> {
+    pub async fn execute_submit_certificate(
+        &mut self,
+        protocol_id: u8,
+        cert: &CertificateV1,
+    ) -> anyhow::Result<()> {
         let (inner_cert, function_name, batch_index) = match cert {
             CertificateV1::Dkg(c) => (c, "submit_dkg_cert", None),
             CertificateV1::Rotation(c) => (c, "submit_rotation_cert", None),
@@ -1205,8 +1234,9 @@ impl SuiTxExecutor {
                 .as_shared()
                 .with_mutable(true),
         );
+        let protocol_id_arg = builder.pure(&protocol_id);
         let epoch_arg = builder.pure(&epoch);
-        let mut args = vec![hashi_arg, epoch_arg];
+        let mut args = vec![hashi_arg, protocol_id_arg, epoch_arg];
         if let Some(bi) = batch_index {
             args.push(builder.pure(&bi));
         }

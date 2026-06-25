@@ -10,7 +10,8 @@ use sui::{
     bag::Bag,
     bcs,
     bls12381::{UncompressedG1, bls12381_min_pk_verify, g1_from_bytes, g1_to_uncompressed_g1},
-    group_ops::Element
+    group_ops::Element,
+    vec_map::{Self, VecMap}
 };
 
 //
@@ -27,8 +28,8 @@ public struct CommitteeSet has store {
     epoch: u64,
     committees: Bag,
     pending_epoch_change: Option<PendingEpochChange>,
-    /// The MPC committee's threshold public key.
-    mpc_public_key: vector<u8>,
+    /// Per-protocol MPC threshold public keys.
+    mpc_public_keys: VecMap<u8, vector<u8>>,
 }
 
 public(package) fun create(ctx: &mut TxContext): CommitteeSet {
@@ -37,7 +38,7 @@ public(package) fun create(ctx: &mut TxContext): CommitteeSet {
         epoch: 0,
         committees: sui::bag::new(ctx),
         pending_epoch_change: option::none(),
-        mpc_public_key: std::vector::empty(),
+        mpc_public_keys: vec_map::empty(),
     }
 }
 
@@ -323,8 +324,8 @@ public(package) fun epoch(self: &CommitteeSet): u64 {
     self.epoch
 }
 
-public(package) fun mpc_public_key(self: &CommitteeSet): &vector<u8> {
-    &self.mpc_public_key
+public(package) fun mpc_public_keys(self: &CommitteeSet): &VecMap<u8, vector<u8>> {
+    &self.mpc_public_keys
 }
 
 // Verifies that the provided bls public key is valid and there is a valid
@@ -499,7 +500,7 @@ public(package) fun start_reconfig(
 
 public(package) fun end_reconfig(
     self: &mut CommitteeSet,
-    mpc_public_key: vector<u8>,
+    protocol_keys: VecMap<u8, vector<u8>>,
     _ctx: &TxContext,
 ): (u64, Option<committee::CommitteeSignature>) {
     assert!(self.is_reconfiguring());
@@ -508,17 +509,19 @@ public(package) fun end_reconfig(
         .extract();
     assert!(self.has_committee(next_epoch));
 
-    // If the mpc_public_key is empty, then this is the initial reconfig where
-    // DKG is run and we need to set the produced pubkey.
-    if (self.mpc_public_key.is_empty()) {
-        self.mpc_public_key = mpc_public_key;
-    } else {
+    // Initial reconfig (DKG) sets the per-protocol keys; subsequent reconfigs
+    // (resharing) keep them constant and require a committee handoff cert.
+    if (!self.mpc_public_keys.is_empty()) {
         assert!(committee_handoff_cert.is_some());
     };
-
-    // On subsequent reconfigs where key resharing is performing instead of
-    // DKG, we need to ensure that the pubkey remains constant
-    assert!(self.mpc_public_key == mpc_public_key);
+    let keys = protocol_keys.keys();
+    keys.do_ref!(|pid| {
+        let key = protocol_keys.get(pid);
+        if (!self.mpc_public_keys.contains(pid)) {
+            self.mpc_public_keys.insert(*pid, *key);
+        };
+        assert!(self.mpc_public_keys.get(pid) == key);
+    });
 
     self.epoch = next_epoch;
     (next_epoch, committee_handoff_cert)
@@ -552,8 +555,8 @@ public fun set_pending_reconfig_for_testing(self: &mut CommitteeSet, committee: 
 }
 
 #[test_only]
-public fun set_mpc_public_key_for_testing(self: &mut CommitteeSet, mpc_public_key: vector<u8>) {
-    self.mpc_public_key = mpc_public_key;
+public fun set_mpc_public_keys_for_testing(self: &mut CommitteeSet, keys: VecMap<u8, vector<u8>>) {
+    self.mpc_public_keys = keys;
 }
 
 // ======== Test-only Functions ========
