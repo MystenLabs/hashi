@@ -1,0 +1,8 @@
+target
+.git
+.github
+design
+packages
+out
+**/out
+**/node_modules

@@ -1,0 +1,149 @@
+# Copyright (c), Mysten Labs, Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Mac-local replica of the guardian's AWS Nitro topology. Each vsock hop is
+# replaced by a TCP hop between containers:
+#
+#   client -> proxy:3000 -> host:3000 -> enclave:3000 (guardian)
+#   guardian -> 127.0.0.6x:443 -> host:810x -> minio:9000   (S3 audit log)
+#
+# `make up` brings up everything except `bootstrap` (which needs a live on-chain
+# committee — see README). MinIO stands in for S3; the guardian runs the
+# non-enclave-dev binary (mock attestation), so this exercises the dataflow and
+# the proxy, NOT real PCR attestation.
+
+name: hashi-guardian-local
+
+x-build: &build
+  build:
+    context: ../..
+    dockerfile: docker/hashi-guardian-local/Dockerfile
+
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  bucket-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mc alias set local http://minio:9000 minioadmin minioadmin
+        if ! mc ls local/hashi-guardian-dev >/dev/null 2>&1; then
+          mc mb --with-lock local/hashi-guardian-dev
+          echo "Created hashi-guardian-dev with Object Lock enabled"
+        fi
+
+  # The EC2 parent host: bridges inbound (proxy -> enclave) and outbound
+  # (enclave -> S3), standing in for expose_enclave.sh + the nitro vsock-proxy
+  # daemons (scripts/user-data.sh).
+  host:
+    <<: *build
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        socat TCP4-LISTEN:3000,reuseaddr,fork TCP:enclave:3000 &
+        socat TCP4-LISTEN:8101,reuseaddr,fork TCP:minio:9000 &
+        socat TCP4-LISTEN:8102,reuseaddr,fork TCP:minio:9000 &
+        socat TCP4-LISTEN:8103,reuseaddr,fork TCP:minio:9000 &
+        wait
+    depends_on:
+      bucket-init:
+        condition: service_completed_successfully
+
+  # The Nitro enclave stand-in: the guardian behind run.local.sh's S3 forwarders.
+  enclave:
+    <<: *build
+    entrypoint: ["/bin/sh", "/run.local.sh"]
+    volumes:
+      - ./run.local.sh:/run.local.sh:ro
+    environment:
+      AWS_REGION: us-east-1
+      AWS_S3_BUCKET: hashi-guardian-dev
+      AWS_ENDPOINT_URL_S3: http://s3.us-east-1.amazonaws.com:443
+      RUST_LOG: ${RUST_LOG:-info}
+    depends_on:
+      host:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "socat -T2 OPEN:/dev/null TCP4:127.0.0.1:3000"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+
+  # The out-of-enclave proxy: the only port published to the host. Forwards to
+  # the guardian via the host bridge and holds the wid-keyed cache.
+  proxy:
+    <<: *build
+    command: ["/usr/bin/hashi-guardian-proxy"]
+    ports:
+      - "3000:3000"
+    environment:
+      GUARDIAN_BACKEND_URL: http://host:3000
+      PROXY_LISTEN_ADDR: 0.0.0.0:3000
+      RUST_LOG: ${RUST_LOG:-info}
+    depends_on:
+      enclave:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "socat -T2 OPEN:/dev/null TCP4:127.0.0.1:3000"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+
+  # One-shot provisioner: OperatorInit -> GetGuardianInfo -> ProvisionerInit.
+  # Reaches the guardian DIRECTLY via the host bridge (bypassing the proxy/cache
+  # — the faithful operator path). Profiled, so `make up` skips it; run via
+  # `make bootstrap`. Requires a live on-chain committee (see README).
+  bootstrap:
+    <<: *build
+    profiles: ["bootstrap"]
+    command:
+      - /usr/bin/hashi-guardian-init
+      - tools
+      - dev-bootstrap
+      - --config
+      - /config/node.local.toml
+    volumes:
+      - ./node.local.toml:/config/node.local.toml:ro
+    environment:
+      GUARDIAN_ENDPOINT: http://host:3000
+      AWS_REGION: us-east-1
+      AWS_S3_BUCKET: hashi-guardian-dev
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      HASHI_REFILL_RATE_SATS_PER_SEC: ${HASHI_REFILL_RATE_SATS_PER_SEC:-100000}
+      HASHI_MAX_BUCKET_CAPACITY_SATS: ${HASHI_MAX_BUCKET_CAPACITY_SATS:-1000000000}
+      BITCOIN_NETWORK: ${BITCOIN_NETWORK:-signet}
+      HASHI_MASTER_SECRET_HEX: ${HASHI_MASTER_SECRET_HEX:-}
+    depends_on:
+      enclave:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  minio-data:
