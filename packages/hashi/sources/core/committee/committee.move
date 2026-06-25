@@ -4,7 +4,7 @@
 #[allow(unused_const)]
 module hashi::committee;
 
-use hashi::config_store::ConfigStore;
+use hashi::config::Config;
 use sui::{
     bcs,
     bls12381::{Self, bls12381_min_pk_verify, UncompressedG1},
@@ -40,16 +40,16 @@ public struct Committee has copy, drop, store {
     /// The MPC parameters pinned for this epoch (threshold, weight-reduction
     /// delta, max-faulty bound, nonce-generation protocol), snapshotted from
     /// the governed config at reconfig time. Built by `mpc_config::pin` in a
-    /// fixed key order: this store is part of the signed committee bytes, so
+    /// fixed key order: this config is part of the signed committee bytes, so
     /// its BCS encoding must be deterministic and match the Rust mirror.
-    mpc: ConfigStore,
+    mpc: Config,
 }
 
 /// Constructor for committee.
 public(package) fun new_committee(
     epoch: u64,
     members: vector<CommitteeMember>,
-    mpc: ConfigStore,
+    mpc: Config,
 ): Committee {
     assert!(!members.is_empty());
 

@@ -27,7 +27,7 @@ public fun propose(
     clock: &Clock,
     ctx: &mut TxContext,
 ): ID {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     assert!(!entries.is_empty(), ENoEntriesProvided);
     proposal::create(
         hashi,
