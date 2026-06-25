@@ -445,7 +445,7 @@ async fn handle_events(
                 }
 
                 // Lock each input UTXO in the pool and insert the pending
-                // change UTXO (if any) so it is immediately selectable.
+                // change UTXOs (if any) so they are immediately selectable.
                 {
                     let mut state = state.state_mut();
                     for input in &event.inputs {
@@ -454,11 +454,13 @@ async fn handle_events(
                             record.locked_by = Some(event.withdrawal_txn_id);
                         }
                     }
-                    if let Some(ref change_output) = event.change_output {
-                        let change_vout = event.withdrawal_outputs.len() as u32;
+                    // Change outputs are the trailing outputs: change output `j`
+                    // sits at vout `withdrawal_outputs.len() + j`.
+                    let base_vout = event.withdrawal_outputs.len() as u32;
+                    for (j, change_output) in event.change_outputs.iter().enumerate() {
                         let change_utxo_id = super::types::UtxoId {
                             txid: event.txid,
-                            vout: change_vout,
+                            vout: base_vout + j as u32,
                         };
                         let change_utxo = super::types::Utxo {
                             id: change_utxo_id,
@@ -636,14 +638,15 @@ async fn handle_events(
                 let (sign_to_confirm_ms, total_ms) = {
                     let mut state = state.state_mut();
 
-                    // Promote the change UTXO from pending to confirmed by
-                    // clearing `produced_by`. The UTXO was already inserted at
+                    // Promote the change UTXOs from pending to confirmed by
+                    // clearing `produced_by`. The UTXOs were already inserted at
                     // commit time; input UTXOs are removed via UtxoSpentEvent.
-                    if let Some(change_utxo_id) = event.change_utxo_id
-                        && let Some(record) =
-                            state.hashi.utxo_pool.utxo_records.get_mut(&change_utxo_id)
-                    {
-                        record.produced_by = None;
+                    for change_utxo_id in &event.change_utxo_ids {
+                        if let Some(record) =
+                            state.hashi.utxo_pool.utxo_records.get_mut(change_utxo_id)
+                        {
+                            record.produced_by = None;
+                        }
                     }
 
                     let signed_at = state

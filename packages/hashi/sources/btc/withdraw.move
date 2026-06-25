@@ -164,7 +164,8 @@ entry fun approve_request(hashi: &mut Hashi, request_id: address, cert: Committe
 }
 
 // NOTE: request_ids and outputs must come presorted, so that request_ids[i] matches outputs[i].
-// If there is a change output, it must be the last one in outputs.
+// Any change outputs must be the trailing outputs in `outputs`, after the
+// per-request outputs.
 entry fun commit_withdrawal_tx(
     hashi: &mut Hashi,
     request_ids: vector<address>,
@@ -236,17 +237,12 @@ entry fun commit_withdrawal_tx(
     // Burn BTC balance
     hashi.treasury_mut().burn(btc_to_burn);
 
-    // Insert the pending change UTXO into the pool immediately so it can be
+    // Insert the pending change UTXOs into the pool immediately so they can be
     // selected by subsequent transactions before this one confirms on Bitcoin.
-    let change_utxo_opt = hashi::withdrawal_queue::build_change_utxo(&withdrawal_txn);
-    if (change_utxo_opt.is_some()) {
-        hashi
-            .bitcoin_mut()
-            .utxo_pool_mut()
-            .insert_pending(change_utxo_opt.destroy_some(), withdrawal_txn_id);
-    } else {
-        change_utxo_opt.destroy_none();
-    };
+    let change_utxos = hashi::withdrawal_queue::build_change_utxos(&withdrawal_txn);
+    change_utxos.do!(|change_utxo| {
+        hashi.bitcoin_mut().utxo_pool_mut().insert_pending(change_utxo, withdrawal_txn_id);
+    });
 
     withdrawal_txn.emit_withdrawal_picked_for_processing();
 
@@ -363,14 +359,13 @@ entry fun confirm_withdrawal(hashi: &mut Hashi, withdrawal_id: address, cert: Co
         hashi.bitcoin_mut().utxo_pool_mut().mark_spent(utxo.id(), epoch);
     });
 
-    // Promote the change UTXO from unconfirmed to confirmed. If the change was
-    // already locked by a subsequent withdrawal, only `produced_by` is cleared.
-    let change_id = txn.change_utxo_id();
-    if (change_id.is_some()) {
-        hashi.bitcoin_mut().utxo_pool_mut().confirm_pending(change_id.destroy_some());
-    } else {
-        change_id.destroy_none();
-    };
+    // Promote the change UTXOs from unconfirmed to confirmed. If a change UTXO
+    // was already locked by a subsequent withdrawal, only `produced_by` is
+    // cleared.
+    let change_ids = txn.change_utxo_ids();
+    change_ids.do!(|change_id| {
+        hashi.bitcoin_mut().utxo_pool_mut().confirm_pending(change_id);
+    });
 
     // Move the txn to the cold (historical) bag.
     hashi.bitcoin_mut().withdrawal_queue_mut().insert_confirmed_txn(txn);

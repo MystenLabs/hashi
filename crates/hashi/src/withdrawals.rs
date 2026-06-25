@@ -89,7 +89,7 @@ fn select_withdrawal_signing_indices(
 /// avoid relying on a separate fee field.
 pub(crate) fn withdrawal_limiter_consumption_amount(txn: &WithdrawalTransaction) -> u64 {
     let inputs: u64 = txn.inputs.iter().map(|u| u.amount).sum();
-    let change: u64 = txn.change_output.as_ref().map_or(0, |c| c.amount);
+    let change: u64 = txn.change_outputs.iter().map(|c| c.amount).sum();
     inputs.saturating_sub(change)
 }
 
@@ -305,14 +305,14 @@ impl Hashi {
 
         let selected_utxos: Vec<Utxo> = selected_records.iter().map(|r| r.utxo.clone()).collect();
 
-        // 3. Verify output count: one per request, plus at most one change output
+        // 3. Verify output count: one per request, followed by zero or more
+        //    trailing change outputs.
         let request_count = requests.len();
         let output_count = approval.outputs.len();
         anyhow::ensure!(
-            output_count == request_count || output_count == request_count + 1,
-            "Expected {} or {} outputs, got {}",
+            output_count >= request_count,
+            "Expected at least {} outputs (one per request), got {}",
             request_count,
-            request_count + 1,
             output_count
         );
 
@@ -361,21 +361,23 @@ impl Hashi {
             );
         }
 
-        // 5. Verify change output (if present) goes to hashi root pubkey
-        if output_count == request_count + 1 {
-            let change_output = &approval.outputs[request_count];
+        // 5. Verify every change output (the trailing outputs after the
+        //    per-request ones) goes to the hashi root pubkey and is above dust.
+        if output_count > request_count {
             let expected_address =
                 hashi_bitcoin::witness_program_from_address(&self.get_deposit_address(None)?)?;
-            anyhow::ensure!(
-                change_output.bitcoin_address == expected_address,
-                "Change output does not go to hashi root pubkey"
-            );
-            anyhow::ensure!(
-                change_output.amount >= utxo_pool::TR_DUST_RELAY_MIN_VALUE,
-                "Change output {} sats is below dust threshold {} sats",
-                change_output.amount,
-                utxo_pool::TR_DUST_RELAY_MIN_VALUE
-            );
+            for (j, change_output) in approval.outputs[request_count..].iter().enumerate() {
+                anyhow::ensure!(
+                    change_output.bitcoin_address == expected_address,
+                    "Change output {j} does not go to hashi root pubkey"
+                );
+                anyhow::ensure!(
+                    change_output.amount >= utxo_pool::TR_DUST_RELAY_MIN_VALUE,
+                    "Change output {j} ({} sats) is below dust threshold {} sats",
+                    change_output.amount,
+                    utxo_pool::TR_DUST_RELAY_MIN_VALUE
+                );
+            }
         }
 
         // 6. Validate fee is reasonable.
@@ -1674,7 +1676,7 @@ mod tests {
     fn make_txn(
         inputs: Vec<u64>,
         withdrawal_outputs: Vec<u64>,
-        change: Option<u64>,
+        change: Vec<u64>,
     ) -> WithdrawalTransaction {
         let num_inputs = inputs.len() as u64;
         WithdrawalTransaction {
@@ -1683,7 +1685,7 @@ mod tests {
             request_ids: vec![],
             inputs: inputs.into_iter().map(input).collect(),
             withdrawal_outputs: withdrawal_outputs.into_iter().map(output).collect(),
-            change_output: change.map(output),
+            change_outputs: change.into_iter().map(output).collect(),
             timestamp_ms: 0,
             randomness: vec![],
             signing: hashi_types::move_types::SigningBatch {
@@ -1767,21 +1769,21 @@ mod tests {
     #[test]
     fn consumption_amount_no_change() {
         // 1_000 input, 950 to user, 50 fee, no change.
-        let txn = make_txn(vec![1_000], vec![950], None);
+        let txn = make_txn(vec![1_000], vec![950], vec![]);
         assert_eq!(withdrawal_limiter_consumption_amount(&txn), 1_000);
     }
 
     #[test]
     fn consumption_amount_with_change() {
         // 10_000 input, 7_000 to user, 50 fee, 2_950 change.
-        let txn = make_txn(vec![10_000], vec![7_000], Some(2_950));
+        let txn = make_txn(vec![10_000], vec![7_000], vec![2_950]);
         assert_eq!(withdrawal_limiter_consumption_amount(&txn), 7_050);
     }
 
     #[test]
     fn consumption_amount_multi_input_multi_output() {
         // Two inputs: 6_000 + 4_000. Three users: 2_000 + 1_500 + 5_500. Fee 100, change 900.
-        let txn = make_txn(vec![6_000, 4_000], vec![2_000, 1_500, 5_500], Some(900));
+        let txn = make_txn(vec![6_000, 4_000], vec![2_000, 1_500, 5_500], vec![900]);
         let expected = 10_000 - 900; // inputs - change
         let by_outputs = 9_000 + 100; // user_outputs + fee
         assert_eq!(expected, by_outputs);
@@ -1789,8 +1791,18 @@ mod tests {
     }
 
     #[test]
+    fn consumption_amount_multiple_change() {
+        // 10_000 input, 3_000 to user, two change outputs (2_000 + 4_900), fee 100.
+        let txn = make_txn(vec![10_000], vec![3_000], vec![2_000, 4_900]);
+        let expected = 10_000 - 6_900; // inputs - total change
+        let by_outputs = 3_000 + 100; // user_output + fee
+        assert_eq!(expected, by_outputs);
+        assert_eq!(withdrawal_limiter_consumption_amount(&txn), expected);
+    }
+
+    #[test]
     fn consumption_amount_no_inputs_returns_zero() {
-        let txn = make_txn(vec![], vec![], None);
+        let txn = make_txn(vec![], vec![], vec![]);
         assert_eq!(withdrawal_limiter_consumption_amount(&txn), 0);
     }
 

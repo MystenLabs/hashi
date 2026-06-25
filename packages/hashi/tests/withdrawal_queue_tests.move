@@ -72,7 +72,7 @@ fun make_test_txn(
         request_ids,
         vector[test_utxo],
         vector[make_test_output(1)],
-        option::none(),
+        vector[],
         txid,
         clock,
         ctx,
@@ -96,7 +96,7 @@ fun approve_and_commit(
         vector[id],
         vector[test_utxo],
         vector[make_test_output(btc_amount)],
-        option::none(),
+        vector[],
         txid,
         clock,
         ctx,
@@ -124,7 +124,7 @@ fun setup_withdrawal_txn(
         vector[id],
         vector[test_utxo],
         vector[make_test_output(btc_amount)],
-        option::none(),
+        vector[],
         txid,
         clock,
         ctx,
@@ -223,8 +223,8 @@ fun test_withdrawal_txn_insert_and_remove() {
 
     // Remove and destroy — no change output expected
     let pending = queue.remove_withdrawal_txn(pending_id);
-    let change_id = pending.change_utxo_id();
-    change_id.destroy_none();
+    let change_ids = pending.change_utxo_ids();
+    assert!(change_ids.is_empty());
     std::unit_test::destroy(pending);
 
     clock.destroy_for_testing();
@@ -248,8 +248,8 @@ fun test_sign_withdrawal_txn() {
 
     // Remove and destroy
     let pending = queue.remove_withdrawal_txn(pending_id);
-    let change_id = pending.change_utxo_id();
-    change_id.destroy_none();
+    let change_ids = pending.change_utxo_ids();
+    assert!(change_ids.is_empty());
     std::unit_test::destroy(pending);
 
     clock.destroy_for_testing();
@@ -275,7 +275,7 @@ fun test_full_withdrawal_queue_lifecycle() {
         vector[request_id],
         vector[test_utxo],
         vector[make_test_output(30_000)],
-        option::none(),
+        vector[],
         @0xBBBB,
         &clock,
         ctx,
@@ -292,8 +292,8 @@ fun test_full_withdrawal_queue_lifecycle() {
 
     // Step 5: Confirm — remove and destroy
     let pending = queue.remove_withdrawal_txn(pending_id);
-    let change_id = pending.change_utxo_id();
-    change_id.destroy_none();
+    let change_ids = pending.change_utxo_ids();
+    assert!(change_ids.is_empty());
     std::unit_test::destroy(pending);
 
     clock.destroy_for_testing();
@@ -322,7 +322,7 @@ fun test_withdrawal_txn_with_change_output() {
         vector[request_id],
         vector[test_utxo],
         vector[make_test_output(btc_amount)],
-        option::some(change_output),
+        vector[change_output],
         txid,
         &clock,
         ctx,
@@ -330,14 +330,61 @@ fun test_withdrawal_txn_with_change_output() {
     let pending_id = pending.withdrawal_txn_id();
     queue.insert_withdrawal_txn(pending);
 
-    // Remove and destroy — should return a change UTXO ID.
+    // Remove and destroy — should return a single change UTXO ID.
     let pending = queue.remove_withdrawal_txn(pending_id);
-    let change_id = pending.change_utxo_id();
-    assert!(change_id.is_some());
+    let change_ids = pending.change_utxo_ids();
+    assert!(change_ids.length() == 1);
 
     // Change vout = number of user outputs = 1.
     let expected_utxo_id = utxo::utxo_id(txid, 1);
-    assert!(change_id.destroy_some() == expected_utxo_id);
+    assert!(change_ids[0] == expected_utxo_id);
+
+    std::unit_test::destroy(pending);
+    clock.destroy_for_testing();
+    std::unit_test::destroy(queue);
+}
+
+#[test]
+fun test_withdrawal_txn_with_multiple_change_outputs() {
+    let ctx = &mut test_utils::new_tx_context(REQUESTER, 0);
+    let mut queue = setup_queue(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    let btc_amount = 50_000u64;
+    let txid = @0xFEED;
+
+    let (request_id, _info) = approve_and_commit(&mut queue, &clock, btc_amount, ctx);
+    let test_utxo = utxo::utxo(utxo::utxo_id(txid, 0), 100_000, option::none());
+
+    // One user output followed by two trailing change outputs.
+    let pending = withdrawal_queue::new_withdrawal_txn_for_testing(
+        vector[request_id],
+        vector[test_utxo],
+        vector[make_test_output(btc_amount)],
+        vector[make_test_output(30_000), make_test_output(19_000)],
+        txid,
+        &clock,
+        ctx,
+    );
+    let pending_id = pending.withdrawal_txn_id();
+    queue.insert_withdrawal_txn(pending);
+
+    let pending = queue.remove_withdrawal_txn(pending_id);
+
+    // Two change UTXO IDs at vouts 1 and 2, after the single user output.
+    let change_ids = pending.change_utxo_ids();
+    assert!(change_ids.length() == 2);
+    assert!(change_ids[0] == utxo::utxo_id(txid, 1));
+    assert!(change_ids[1] == utxo::utxo_id(txid, 2));
+
+    // build_change_utxos mirrors the IDs and carries the per-output amounts,
+    // preserving on-chain order.
+    let change_utxos = pending.build_change_utxos();
+    assert!(change_utxos.length() == 2);
+    assert!(change_utxos[0].id() == utxo::utxo_id(txid, 1));
+    assert!(change_utxos[0].amount() == 30_000);
+    assert!(change_utxos[1].id() == utxo::utxo_id(txid, 2));
+    assert!(change_utxos[1].amount() == 19_000);
 
     std::unit_test::destroy(pending);
     clock.destroy_for_testing();
@@ -361,7 +408,7 @@ fun test_withdrawal_txn_without_change_output() {
         vector[request_id],
         vector[test_utxo],
         vector[make_test_output(btc_amount)],
-        option::none(),
+        vector[],
         txid,
         &clock,
         ctx,
@@ -369,11 +416,10 @@ fun test_withdrawal_txn_without_change_output() {
     let pending_id = pending.withdrawal_txn_id();
     queue.insert_withdrawal_txn(pending);
 
-    // Remove and destroy — should return None for the change UTXO ID.
+    // Remove and destroy — should return no change UTXO IDs.
     let pending = queue.remove_withdrawal_txn(pending_id);
-    let change_id = pending.change_utxo_id();
-    assert!(change_id.is_none());
-    change_id.destroy_none();
+    let change_ids = pending.change_utxo_ids();
+    assert!(change_ids.is_empty());
     std::unit_test::destroy(pending);
 
     clock.destroy_for_testing();

@@ -819,7 +819,7 @@ mod tests {
         );
 
         assert!(
-            picked1.change_output.is_some(),
+            !picked1.change_outputs.is_empty(),
             "Withdrawal 1 must produce a change UTXO for this test to be meaningful \
              (deposit={deposit_amount_sats}, withdrawal={withdrawal_amount_sats})"
         );
@@ -1744,11 +1744,11 @@ mod tests {
                 .await?;
         info!(
             withdrawal_txn_id = %picked1.withdrawal_txn_id,
-            has_change = %picked1.change_output.is_some(),
+            has_change = %(!picked1.change_outputs.is_empty()),
             "Withdrawal 1 picked"
         );
         assert!(
-            picked1.change_output.is_some(),
+            !picked1.change_outputs.is_empty(),
             "Withdrawal 1 should have produced a change output (deposit was large enough)"
         );
 
@@ -1846,11 +1846,11 @@ mod tests {
                 .await?;
         info!(
             withdrawal_txn_id = %picked_a.withdrawal_txn_id,
-            has_change = %picked_a.change_output.is_some(),
+            has_change = %(!picked_a.change_outputs.is_empty()),
             "Withdrawal A picked"
         );
         assert!(
-            picked_a.change_output.is_some(),
+            !picked_a.change_outputs.is_empty(),
             "Withdrawal A must produce change to chain into B"
         );
 
@@ -1870,11 +1870,11 @@ mod tests {
                 .await?;
         info!(
             withdrawal_txn_id = %picked_b.withdrawal_txn_id,
-            has_change = %picked_b.change_output.is_some(),
+            has_change = %(!picked_b.change_outputs.is_empty()),
             "Withdrawal B picked"
         );
         assert!(
-            picked_b.change_output.is_some(),
+            !picked_b.change_outputs.is_empty(),
             "Withdrawal B must produce change to chain into C"
         );
 
