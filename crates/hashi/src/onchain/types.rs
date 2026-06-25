@@ -46,7 +46,20 @@ pub struct Hashi {
     pub utxo_pool: UtxoPool,
     pub proposals: Proposals,
     pub tob_id: Address,
-    pub num_consumed_presigs: u64,
+    pub num_consumed_presigs: BTreeMap<u8, u64>,
+}
+
+impl Hashi {
+    pub fn num_consumed_presigs_for_protocol(&self, protocol_id: u8) -> u64 {
+        self.num_consumed_presigs
+            .get(&protocol_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn schnorr_consumed_presigs(&self) -> u64 {
+        self.num_consumed_presigs_for_protocol(0)
+    }
 }
 
 pub struct CommitteeSet {
@@ -58,8 +71,8 @@ pub struct CommitteeSet {
     epoch: u64,
     pending_epoch_change: Option<u64>,
 
-    /// The MPC committee's threshold public key.
-    mpc_public_key: Vec<u8>,
+    /// The MPC committee's threshold public keys, one per protocol.
+    mpc_public_keys: BTreeMap<u8, Vec<u8>>,
 
     /// Id of the `Bag` containing the committee's per epoch
     committees_id: Address,
@@ -97,10 +110,7 @@ impl fmt::Debug for CommitteeSet {
             .field("tls_public_key_to_address", &tls_key_map)
             .field("epoch", &self.epoch)
             .field("pending_epoch_change", &self.pending_epoch_change)
-            .field(
-                "mpc_public_key",
-                &Base64("MpcPublicKey", &self.mpc_public_key),
-            )
+            .field("mpc_public_keys", &self.mpc_public_keys)
             .field("committees_id", &self.committees_id)
             .field("committees", &self.committees)
             .field("committee_handoffs", &self.committee_handoffs.keys())
@@ -122,7 +132,7 @@ impl CommitteeSet {
             tls_public_key_to_address: BTreeMap::new(),
             epoch: 0,
             pending_epoch_change: None,
-            mpc_public_key: Vec::new(),
+            mpc_public_keys: BTreeMap::new(),
             committees_id,
             committees: BTreeMap::new(),
             committee_handoffs: BTreeMap::new(),
@@ -171,8 +181,16 @@ impl CommitteeSet {
         self.epoch
     }
 
+    pub fn mpc_public_keys(&self) -> &BTreeMap<u8, Vec<u8>> {
+        &self.mpc_public_keys
+    }
+
+    pub fn mpc_public_key_for_protocol(&self, protocol_id: u8) -> Option<&[u8]> {
+        self.mpc_public_keys.get(&protocol_id).map(|k| k.as_slice())
+    }
+
     pub fn mpc_public_key(&self) -> &[u8] {
-        &self.mpc_public_key
+        self.mpc_public_key_for_protocol(0).unwrap_or(&[])
     }
 
     pub fn pending_epoch_change(&self) -> Option<u64> {
@@ -322,9 +340,17 @@ impl CommitteeSet {
         self
     }
 
+    pub fn set_mpc_public_keys(&mut self, keys: BTreeMap<u8, Vec<u8>>) -> &mut Self {
+        assert!(self.mpc_public_keys.is_empty() || self.mpc_public_keys == keys);
+        self.mpc_public_keys = keys;
+        self
+    }
+
     pub fn set_mpc_public_key(&mut self, mpc_public_key: Vec<u8>) -> &mut Self {
-        assert!(self.mpc_public_key.is_empty() || self.mpc_public_key == mpc_public_key);
-        self.mpc_public_key = mpc_public_key;
+        if let Some(existing) = self.mpc_public_keys.get(&0) {
+            assert!(existing.is_empty() || *existing == mpc_public_key);
+        }
+        self.mpc_public_keys.insert(0, mpc_public_key);
         self
     }
 
