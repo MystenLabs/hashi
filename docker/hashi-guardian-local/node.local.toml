@@ -1,0 +1,11 @@
+# Node config read by `hashi-guardian-init tools dev-bootstrap` — only `sui-rpc`
+# and the `[hashi-ids]` table are used. Point these at a DEPLOYED hashi instance
+# whose committee/DKG is complete: a purely-local guardian cannot be
+# bootstrapped without on-chain committee + mpc_public_key state. Devnet is the
+# usual target. Fill these in from the live deployment before `make bootstrap`.
+
+sui-rpc = "https://fullnode.devnet.sui.io:443"
+
+[hashi-ids]
+package-id = "0x0000000000000000000000000000000000000000000000000000000000000000"
+hashi-object-id = "0x0000000000000000000000000000000000000000000000000000000000000000"
