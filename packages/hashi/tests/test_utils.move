@@ -128,10 +128,13 @@ public fun create_hashi_with_weighted_committee(
         ctx,
     );
 
-    // Create config with version enabled + BTC defaults + MPC defaults
+    // Create config with BTC defaults + MPC defaults
     let mut config = hashi::config::create();
     hashi::btc_config::init_defaults(&mut config);
-    hashi::mpc_config::init_defaults(config.store_mut());
+    hashi::mpc_config::init_defaults(&mut config);
+
+    // Create versioning (version gating + upgrade cap)
+    let versioning = hashi::versioning::create();
 
     // Create treasury
     let treasury = hashi::treasury::create(ctx);
@@ -145,6 +148,7 @@ public fun create_hashi_with_weighted_committee(
     hashi::hashi::create_for_testing(
         committee_set,
         config,
+        versioning,
         treasury,
         proposals,
         tob,

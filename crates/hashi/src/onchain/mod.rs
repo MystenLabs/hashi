@@ -750,6 +750,7 @@ async fn scrape_hashi(
         id,
         committees,
         config,
+        versioning,
         treasury,
         proposals,
         tob,
@@ -820,7 +821,7 @@ async fn scrape_hashi(
         types::Hashi {
             id,
             committees: committee_set,
-            config: convert_move_config(config),
+            config: convert_move_config(config, versioning),
             treasury,
             deposit_queue,
             withdrawal_queue,
@@ -850,16 +851,21 @@ pub(crate) async fn scrape_hashi_config(
             ))
             .await?;
 
-    let move_types::Hashi { config, .. } = response.get_ref().object().contents().deserialize()?;
+    let move_types::Hashi {
+        config, versioning, ..
+    } = response.get_ref().object().contents().deserialize()?;
 
-    Ok(convert_move_config(config))
+    Ok(convert_move_config(config, versioning))
 }
 
-fn convert_move_config(config: move_types::Config) -> types::Config {
+fn convert_move_config(
+    config: move_types::Config,
+    versioning: move_types::Versioning,
+) -> types::Config {
     types::Config {
         config: config.config.into_iter().collect(),
-        enabled_versions: config.enabled_versions.contents.into_iter().collect(),
-        upgrade_cap: config.upgrade_cap,
+        enabled_versions: versioning.enabled_versions.contents.into_iter().collect(),
+        upgrade_cap: versioning.upgrade_cap,
     }
 }
 

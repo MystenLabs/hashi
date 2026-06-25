@@ -44,7 +44,7 @@ public fun deposit(
     clock: &sui::clock::Clock,
     ctx: &mut TxContext,
 ) {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     // Check that the system isn't paused, but still allow users to request
     // deposits even when the system is reconfiguring.
     hashi.assert_unpaused();
@@ -91,7 +91,7 @@ entry fun approve_deposit(
     clock: &sui::clock::Clock,
     _ctx: &mut TxContext,
 ) {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     hashi.assert_unpaused();
     // Do not allow approval of deposits during a reconfiguration, this
     // delays the approval to be done by the next epoch's committee.
@@ -148,7 +148,7 @@ entry fun confirm_deposit(
     clock: &sui::clock::Clock,
     ctx: &mut TxContext,
 ) {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     hashi.assert_unpaused();
     // Do not allow confirmation of deposits during a reconfiguration, this
     // delays the confirmation to be done by the next epoch's committee.
@@ -205,7 +205,7 @@ public fun delete_expired_deposit(
     request_id: address,
     clock: &sui::clock::Clock,
 ) {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     hashi.bitcoin_mut().deposit_queue_mut().delete_expired(request_id, clock);
 
     sui::event::emit(ExpiredDepositDeletedEvent { request_id });

@@ -798,7 +798,7 @@ fun test_disable_version_proposal() {
 }
 
 #[test]
-#[expected_failure(abort_code = hashi::config::EDisableCurrentVersion)]
+#[expected_failure(abort_code = hashi::versioning::EDisableCurrentVersion)]
 /// Test that disabling the current package version fails (anti-bricking protection)
 fun test_disable_current_version_fails() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);

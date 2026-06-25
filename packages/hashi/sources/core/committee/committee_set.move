@@ -4,7 +4,7 @@
 #[allow(unused_function, unused_field)]
 module hashi::committee_set;
 
-use hashi::{committee::{Self, Committee}, config_store::ConfigStore};
+use hashi::{committee::{Self, Committee}, config::Config};
 use std::string::String;
 use sui::{
     bag::Bag,
@@ -370,7 +370,7 @@ fun verify_proof_of_possession(
 fun new_committee_from_validator_set(
     self: &CommitteeSet,
     sui_system: &sui_system::sui_system::SuiSystemState,
-    mpc: ConfigStore,
+    mpc: Config,
     ctx: &TxContext,
 ): Committee {
     let epoch = ctx.epoch();
@@ -447,7 +447,7 @@ public(package) fun get_committee(self: &CommitteeSet, epoch: u64): &Committee {
 public(package) fun start_reconfig(
     self: &mut CommitteeSet,
     sui_system: &sui_system::sui_system::SuiSystemState,
-    mpc: ConfigStore,
+    mpc: Config,
     ctx: &TxContext,
 ): u64 {
     // We can't trigger reconfig if we are already reconfiguring

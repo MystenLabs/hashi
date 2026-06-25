@@ -41,6 +41,7 @@ pub struct Hashi {
     pub id: Address,
     pub committees: CommitteeSet,
     pub config: Config,
+    pub versioning: Versioning,
     pub treasury: Treasury,
     pub proposals: Proposals,
     /// TOB certificates by (epoch, batch_index) -> EpochCertsV1
@@ -175,7 +176,7 @@ pub struct Committee {
     /// Total voting weight of the committee.
     pub total_weight: u64,
     /// Per-epoch MPC parameters pinned from the governed config. BCS-mirrors
-    /// the Move `ConfigStore` (a `VecMap<String, Value>`); the key order is
+    /// the Move `Config` (a `VecMap<String, Value>`); the key order is
     /// canonical (see the `KEY_MPC_*` consts) and load-bearing because these
     /// bytes are part of the signed committee handoff certificate. Read via the
     /// typed `mpc_*` accessors rather than indexing directly.
@@ -243,6 +244,11 @@ pub struct CommitteeHandoff {
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct Config {
     pub config: Vec<(String, ConfigValue)>,
+}
+
+/// Rust version of the Move hashi::versioning::Versioning type.
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct Versioning {
     pub enabled_versions: VecSet<u64>,
     pub upgrade_cap: Option<UpgradeCap>,
 }
