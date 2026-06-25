@@ -3,7 +3,7 @@
 
 module hashi::mpc_config;
 
-use hashi::{config::Config, config_value};
+use hashi::{config_store::{Self, ConfigStore}, config_value};
 
 const DEFAULT_THRESHOLD_IN_BASIS_POINTS: u64 = 3334;
 
@@ -36,35 +36,35 @@ public(package) fun is_valid_value(key: &std::string::String, value: &config_val
     }
 }
 
-public(package) fun threshold_in_basis_points(config: &Config): u64 {
+public(package) fun threshold_in_basis_points(config: &ConfigStore): u64 {
     config
         .try_get(KEY_THRESHOLD_IN_BASIS_POINTS)
         .map!(|v| v.as_u64())
         .destroy_or!(DEFAULT_THRESHOLD_IN_BASIS_POINTS)
 }
 
-public(package) fun weight_reduction_allowed_delta(config: &Config): u64 {
+public(package) fun weight_reduction_allowed_delta(config: &ConfigStore): u64 {
     config
         .try_get(KEY_WEIGHT_REDUCTION_ALLOWED_DELTA)
         .map!(|v| v.as_u64())
         .destroy_or!(DEFAULT_WEIGHT_REDUCTION_ALLOWED_DELTA)
 }
 
-public(package) fun max_faulty_in_basis_points(config: &Config): u64 {
+public(package) fun max_faulty_in_basis_points(config: &ConfigStore): u64 {
     config
         .try_get(KEY_MAX_FAULTY_IN_BASIS_POINTS)
         .map!(|v| v.as_u64())
         .destroy_or!(DEFAULT_MAX_FAULTY_IN_BASIS_POINTS)
 }
 
-public(package) fun nonce_generation_protocol(config: &Config): u64 {
+public(package) fun nonce_generation_protocol(config: &ConfigStore): u64 {
     config
         .try_get(KEY_NONCE_GENERATION_PROTOCOL)
         .map!(|v| v.as_u64())
         .destroy_or!(VANILLA_NONCE_GENERATION_PROTOCOL)
 }
 
-public(package) fun init_defaults(config: &mut Config) {
+public(package) fun init_defaults(config: &mut ConfigStore) {
     config.upsert(
         KEY_THRESHOLD_IN_BASIS_POINTS,
         config_value::new_u64(DEFAULT_THRESHOLD_IN_BASIS_POINTS),
@@ -81,4 +81,52 @@ public(package) fun init_defaults(config: &mut Config) {
         KEY_NONCE_GENERATION_PROTOCOL,
         config_value::new_u64(VANILLA_NONCE_GENERATION_PROTOCOL),
     );
+}
+
+/// Snapshot the MPC parameters from `config` into a fresh store to pin onto a
+/// `Committee` for the epoch. The full key set is always materialized (using
+/// defaults for absent keys) and inserted in a fixed canonical order, so the
+/// snapshot's BCS encoding is deterministic. The committee is signed, so the
+/// Rust mirror (`move_types::Committee`'s `From`) must build this map in the
+/// same order with the same keys.
+public(package) fun pin(config: &ConfigStore): ConfigStore {
+    let mut mpc = config_store::empty();
+    mpc.upsert(
+        KEY_THRESHOLD_IN_BASIS_POINTS,
+        config_value::new_u64(threshold_in_basis_points(config)),
+    );
+    mpc.upsert(
+        KEY_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        config_value::new_u64(weight_reduction_allowed_delta(config)),
+    );
+    mpc.upsert(
+        KEY_MAX_FAULTY_IN_BASIS_POINTS,
+        config_value::new_u64(max_faulty_in_basis_points(config)),
+    );
+    mpc.upsert(
+        KEY_NONCE_GENERATION_PROTOCOL,
+        config_value::new_u64(nonce_generation_protocol(config)),
+    );
+    mpc
+}
+
+#[test_only]
+/// Build a pinned MPC parameter store directly from explicit values, in the
+/// same canonical key order as `pin`. Used by tests that construct committees
+/// without a full governed config.
+public(package) fun new_for_testing(
+    threshold_in_basis_points: u64,
+    weight_reduction_allowed_delta: u64,
+    max_faulty_in_basis_points: u64,
+    nonce_generation_protocol: u64,
+): ConfigStore {
+    let mut mpc = config_store::empty();
+    mpc.upsert(KEY_THRESHOLD_IN_BASIS_POINTS, config_value::new_u64(threshold_in_basis_points));
+    mpc.upsert(
+        KEY_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        config_value::new_u64(weight_reduction_allowed_delta),
+    );
+    mpc.upsert(KEY_MAX_FAULTY_IN_BASIS_POINTS, config_value::new_u64(max_faulty_in_basis_points));
+    mpc.upsert(KEY_NONCE_GENERATION_PROTOCOL, config_value::new_u64(nonce_generation_protocol));
+    mpc
 }

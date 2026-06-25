@@ -1128,9 +1128,9 @@ fn move_committee_to_pb(c: &crate::move_types::Committee) -> pb::Committee {
             })
             .collect(),
         total_weight: Some(c.total_weight),
-        mpc_threshold_in_basis_points: Some(c.mpc_threshold_in_basis_points),
-        mpc_weight_reduction_allowed_delta: Some(c.mpc_weight_reduction_allowed_delta),
-        mpc_max_faulty_in_basis_points: Some(c.mpc_max_faulty_in_basis_points),
+        mpc_threshold_in_basis_points: Some(c.mpc_threshold_in_basis_points()),
+        mpc_weight_reduction_allowed_delta: Some(c.mpc_weight_reduction_allowed_delta()),
+        mpc_max_faulty_in_basis_points: Some(c.mpc_max_faulty_in_basis_points()),
     }
 }
 

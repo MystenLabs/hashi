@@ -46,7 +46,7 @@ fun init(ctx: &mut TxContext) {
         config: {
             let mut config = hashi::config::create();
             hashi::btc_config::init_defaults(&mut config);
-            hashi::mpc_config::init_defaults(&mut config);
+            hashi::mpc_config::init_defaults(config.store_mut());
             config
         },
         treasury: hashi::treasury::create(ctx),
