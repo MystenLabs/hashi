@@ -12,6 +12,9 @@ use crate::constants::SUI_MAINNET_CHAIN_ID;
 
 const DEFAULT_WITHDRAWAL_SIGNING_CONCURRENCY: usize = 25;
 const DEFAULT_MPC_SIGNING_CHUNK_SIZE: usize = 64;
+/// Tonic's 4 MiB default is too small to scrape a large on-chain state or
+/// receive large MPC round messages.
+pub(crate) const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 
 /// Load an Ed25519 private key from a file path or inline PEM string.
 ///
@@ -145,8 +148,9 @@ pub struct Config {
 
     /// Maximum gRPC decoding message size in bytes.
     ///
-    /// Defaults to 16 MiB if not specified. Tonic's built-in default is 4 MiB,
-    /// which is too small for large MPC round messages.
+    /// Defaults to 32 MiB if not specified. Tonic's built-in default is 4 MiB,
+    /// which is too small to scrape a large on-chain state or receive large MPC
+    /// round messages.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grpc_max_decoding_message_size: Option<usize>,
 
@@ -395,7 +399,7 @@ impl Config {
 
     pub fn grpc_max_decoding_message_size(&self) -> usize {
         self.grpc_max_decoding_message_size
-            .unwrap_or(16 * 1024 * 1024)
+            .unwrap_or(DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE)
     }
 
     pub fn max_concurrent_leader_job_tasks(&self) -> usize {

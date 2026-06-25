@@ -73,6 +73,11 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
                 continue;
             }
         };
+        // Same decode limit as the bootstrap scrape — this client does the
+        // reconnect rescrape, which reads the full (large) on-chain state.
+        if let Some(limit) = state.grpc_max_decoding_message_size() {
+            client = client.with_max_decoding_message_size(limit);
+        }
 
         let mut subscription = match client
             .subscription_client()
