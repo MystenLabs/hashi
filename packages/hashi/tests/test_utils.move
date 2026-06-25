@@ -110,7 +110,11 @@ public fun create_hashi_with_weighted_committee(
     };
 
     // Create the committee
-    let committee = committee::new_committee(ctx.epoch(), members, 3334, 800, 3333, 0);
+    let committee = committee::new_committee(
+        ctx.epoch(),
+        members,
+        hashi::mpc_config::new_for_testing(3334, 800, 3333, 0),
+    );
 
     let sk = bls_sk_for_testing();
     let pub_key = bls12381::g1_from_bytes(&bls_min_pk_from_sk(&sk));
@@ -127,7 +131,7 @@ public fun create_hashi_with_weighted_committee(
     // Create config with version enabled + BTC defaults + MPC defaults
     let mut config = hashi::config::create();
     hashi::btc_config::init_defaults(&mut config);
-    hashi::mpc_config::init_defaults(&mut config);
+    hashi::mpc_config::init_defaults(config.store_mut());
 
     // Create treasury
     let treasury = hashi::treasury::create(ctx);

@@ -4,6 +4,7 @@
 #[allow(unused_const)]
 module hashi::committee;
 
+use hashi::config_store::ConfigStore;
 use sui::{
     bcs,
     bls12381::{Self, bls12381_min_pk_verify, UncompressedG1},
@@ -36,25 +37,19 @@ public struct Committee has copy, drop, store {
     members: vector<CommitteeMember>,
     /// Total voting weight of the committee.
     total_weight: u64,
-    /// MPC threshold in basis points
-    mpc_threshold_in_basis_points: u64,
-    /// Allowed delta for weight reduction
-    mpc_weight_reduction_allowed_delta: u64,
-    /// MPC max faulty parties in basis points
-    mpc_max_faulty_in_basis_points: u64,
-    // TODO: Remove after switched to AVID.
-    /// Nonce-generation protocol: 0 = vanilla, 1 = AVID
-    mpc_nonce_generation_protocol: u64,
+    /// The MPC parameters pinned for this epoch (threshold, weight-reduction
+    /// delta, max-faulty bound, nonce-generation protocol), snapshotted from
+    /// the governed config at reconfig time. Built by `mpc_config::pin` in a
+    /// fixed key order: this store is part of the signed committee bytes, so
+    /// its BCS encoding must be deterministic and match the Rust mirror.
+    mpc: ConfigStore,
 }
 
 /// Constructor for committee.
 public(package) fun new_committee(
     epoch: u64,
     members: vector<CommitteeMember>,
-    mpc_threshold_in_basis_points: u64,
-    mpc_weight_reduction_allowed_delta: u64,
-    mpc_max_faulty_in_basis_points: u64,
-    mpc_nonce_generation_protocol: u64,
+    mpc: ConfigStore,
 ): Committee {
     assert!(!members.is_empty());
 
@@ -70,10 +65,7 @@ public(package) fun new_committee(
         members,
         total_weight,
         epoch,
-        mpc_threshold_in_basis_points,
-        mpc_weight_reduction_allowed_delta,
-        mpc_max_faulty_in_basis_points,
-        mpc_nonce_generation_protocol,
+        mpc,
     }
 }
 
