@@ -43,6 +43,11 @@ async fn main() -> Result<()> {
     health_reporter
         .set_serving::<GuardianServiceServer<CachingGuardianGrpc<Forwarding>>>()
         .await;
+    // An ALB gRPC health check queries the empty ("") service, so mark it
+    // serving too — otherwise the target group flaps the proxy as unhealthy.
+    health_reporter
+        .set_service_status("", tonic_health::ServingStatus::Serving)
+        .await;
 
     info!("gRPC proxy listening on {}.", config.listen_addr);
     Server::builder()
