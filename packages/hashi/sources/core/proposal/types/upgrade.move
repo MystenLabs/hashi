@@ -11,7 +11,7 @@
 ///    - Authorizes the upgrade using the stored `UpgradeCap`
 /// 4. `sui::package::upgrade(UpgradeTicket, ...)` -> `UpgradeReceipt`
 ///    - Performed by the Sui runtime during package publish transaction
-/// 5. `config::commit_upgrade(UpgradeReceipt)`
+/// 5. `versioning::commit_upgrade(UpgradeReceipt)`
 ///    - Commits the upgrade to the `UpgradeCap` and auto-enables the new version
 module hashi::upgrade;
 
@@ -33,7 +33,7 @@ public fun propose(
     clock: &Clock,
     ctx: &mut TxContext,
 ): ID {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     proposal::create(
         hashi,
         validator_address,
@@ -52,13 +52,13 @@ public fun propose(
 /// which must then be passed to `finalize_upgrade()` to finalize the upgrade.
 public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock): UpgradeTicket {
     let Upgrade { digest } = proposal::execute(hashi, proposal_id, clock);
-    hashi.config_mut().authorize_upgrade(digest)
+    hashi.versioning_mut().authorize_upgrade(digest)
 }
 
 public fun finalize_upgrade(hashi: &mut Hashi, receipt: UpgradeReceipt) {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     let upgrade_package = receipt.package();
-    hashi.config_mut().commit_upgrade(receipt);
-    let version = hashi.config().upgrade_cap().version();
+    hashi.versioning_mut().commit_upgrade(receipt);
+    let version = hashi.versioning().upgrade_cap().version();
     hashi::proposal_events::emit_package_upgraded_event(upgrade_package, version);
 }

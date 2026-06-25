@@ -35,7 +35,7 @@ fun test_single_key_update_via_multikey_propose() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let clock = clock::create_for_testing(ctx);
 
-    assert!(mpc_config::threshold_in_basis_points(hashi.config().store()) == 3334);
+    assert!(mpc_config::threshold_in_basis_points(hashi.config()) == 3334);
 
     let mut entries = vec_map::empty();
     entries.insert(mpc_threshold_key(), config_value::new_u64(5200));
@@ -50,11 +50,11 @@ fun test_single_key_update_via_multikey_propose() {
     );
     update_config::execute(&mut hashi, proposal_id, &clock);
 
-    assert!(mpc_config::threshold_in_basis_points(hashi.config().store()) == 5200);
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.config().store()) == 3333);
-    assert!(mpc_config::weight_reduction_allowed_delta(hashi.config().store()) == 800);
+    assert!(mpc_config::threshold_in_basis_points(hashi.config()) == 5200);
+    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == 3333);
+    assert!(mpc_config::weight_reduction_allowed_delta(hashi.config()) == 800);
     // Seeded by init_defaults and untouched by the update above.
-    assert!(mpc_config::nonce_generation_protocol(hashi.config().store()) == 0);
+    assert!(mpc_config::nonce_generation_protocol(hashi.config()) == 0);
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
@@ -67,7 +67,7 @@ fun test_update_nonce_generation_protocol() {
     let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
     let clock = clock::create_for_testing(ctx);
 
-    assert!(mpc_config::nonce_generation_protocol(hashi.config().store()) == 0);
+    assert!(mpc_config::nonce_generation_protocol(hashi.config()) == 0);
 
     let mut entries = vec_map::empty();
     entries.insert(mpc_nonce_generation_protocol_key(), config_value::new_u64(1));
@@ -81,8 +81,8 @@ fun test_update_nonce_generation_protocol() {
     );
     update_config::execute(&mut hashi, proposal_id, &clock);
 
-    assert!(mpc_config::nonce_generation_protocol(hashi.config().store()) == 1);
-    assert!(mpc_config::threshold_in_basis_points(hashi.config().store()) == 3334);
+    assert!(mpc_config::nonce_generation_protocol(hashi.config()) == 1);
+    assert!(mpc_config::threshold_in_basis_points(hashi.config()) == 3334);
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
@@ -110,9 +110,9 @@ fun test_multi_key_update_applies_atomically() {
     );
     update_config::execute(&mut hashi, proposal_id, &clock);
 
-    assert!(mpc_config::threshold_in_basis_points(hashi.config().store()) == 5200);
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.config().store()) == 2000);
-    assert!(mpc_config::weight_reduction_allowed_delta(hashi.config().store()) == 1500);
+    assert!(mpc_config::threshold_in_basis_points(hashi.config()) == 5200);
+    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == 2000);
+    assert!(mpc_config::weight_reduction_allowed_delta(hashi.config()) == 1500);
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
@@ -142,7 +142,7 @@ fun test_mixed_domain_multi_key_update() {
     );
     update_config::execute(&mut hashi, proposal_id, &clock);
 
-    assert!(mpc_config::threshold_in_basis_points(hashi.config().store()) == 5200);
+    assert!(mpc_config::threshold_in_basis_points(hashi.config()) == 5200);
     assert!(hashi::btc_config::bitcoin_deposit_minimum(hashi.config()) == 50_000);
 
     clock::destroy_for_testing(clock);
@@ -261,9 +261,9 @@ fun test_propose_vote_execute_through_quorum() {
 
     update_config::execute(&mut hashi, proposal_id, &clock);
 
-    assert!(mpc_config::threshold_in_basis_points(hashi.config().store()) == 5200);
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.config().store()) == 2000);
-    assert!(mpc_config::weight_reduction_allowed_delta(hashi.config().store()) == 800);
+    assert!(mpc_config::threshold_in_basis_points(hashi.config()) == 5200);
+    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == 2000);
+    assert!(mpc_config::weight_reduction_allowed_delta(hashi.config()) == 800);
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
@@ -342,7 +342,7 @@ fun test_accept_max_faulty_zero() {
     );
     update_config::execute(&mut hashi, proposal_id, &clock);
 
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.config().store()) == 0);
+    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == 0);
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
@@ -369,9 +369,9 @@ fun test_accept_upper_boundary_values() {
     );
     update_config::execute(&mut hashi, proposal_id, &clock);
 
-    assert!(mpc_config::threshold_in_basis_points(hashi.config().store()) == MAX_BPS);
-    assert!(mpc_config::max_faulty_in_basis_points(hashi.config().store()) == MAX_BPS);
-    assert!(mpc_config::weight_reduction_allowed_delta(hashi.config().store()) == MAX_BPS);
+    assert!(mpc_config::threshold_in_basis_points(hashi.config()) == MAX_BPS);
+    assert!(mpc_config::max_faulty_in_basis_points(hashi.config()) == MAX_BPS);
+    assert!(mpc_config::weight_reduction_allowed_delta(hashi.config()) == MAX_BPS);
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);

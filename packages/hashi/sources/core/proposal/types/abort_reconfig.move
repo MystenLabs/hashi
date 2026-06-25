@@ -29,7 +29,7 @@ public fun propose(
     clock: &Clock,
     ctx: &mut TxContext,
 ): ID {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     assert!(hashi.committee_set().is_reconfiguring(), ENotReconfiguring);
     assert!(
         hashi.committee_set().pending_epoch_change().destroy_some() == epoch,
@@ -48,7 +48,7 @@ public fun propose(
 
 public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock, ctx: &TxContext) {
     let AbortReconfig { epoch } = proposal::execute(hashi, proposal_id, clock);
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     assert!(hashi.committee_set().is_reconfiguring(), ENotReconfiguring);
     assert!(
         hashi.committee_set().pending_epoch_change().destroy_some() == epoch,

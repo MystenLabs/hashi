@@ -26,12 +26,12 @@ entry fun start_reconfig(
     sui_system: &sui_system::sui_system::SuiSystemState,
     ctx: &TxContext,
 ) {
-    self.config().assert_version_enabled();
+    self.versioning().assert_version_enabled();
     // Assert that we are not already reconfiguring
     assert!(!self.committee_set().is_reconfiguring());
     // Pin the current MPC parameters so they stay fixed for the new epoch even
     // if governance changes them mid-epoch.
-    let mpc = hashi::mpc_config::pin(self.config().store());
+    let mpc = hashi::mpc_config::pin(self.config());
     let epoch = self
         .committee_set_mut()
         .start_reconfig(
@@ -48,7 +48,7 @@ entry fun end_reconfig(
     mpc_cert: CommitteeSignature,
     ctx: &TxContext,
 ) {
-    self.config().assert_version_enabled();
+    self.versioning().assert_version_enabled();
     assert!(self.committee_set().is_reconfiguring(), ENotReconfiguring);
     let from_epoch = self.committee_set().epoch();
     let next_epoch = self.committee_set().pending_epoch_change().destroy_some();
@@ -80,7 +80,7 @@ entry fun submit_committee_handoff(
     committee_handoff_cert: CommitteeSignature,
     _ctx: &TxContext,
 ) {
-    self.config().assert_version_enabled();
+    self.versioning().assert_version_enabled();
     assert!(self.committee_set().is_reconfiguring(), ENotReconfiguring);
     assert!(!self.committee_set().mpc_public_key().is_empty(), EInitialReconfig);
     let next_epoch = self.committee_set().pending_epoch_change().destroy_some();
