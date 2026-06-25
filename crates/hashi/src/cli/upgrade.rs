@@ -33,13 +33,13 @@ use sui_transaction_builder::TransactionBuilder;
 
 /// Relative path (from a package root) to the Move source file declaring the
 /// `PACKAGE_VERSION` constant.
-const PACKAGE_VERSION_SOURCE: &str = "sources/core/config/config.move";
+const PACKAGE_VERSION_SOURCE: &str = "sources/core/versioning.move";
 
-/// Parse the `PACKAGE_VERSION` constant from `sources/core/config/config.move`
+/// Parse the `PACKAGE_VERSION` constant from `sources/core/versioning.move`
 /// in a package source tree.
 ///
-/// This is the version gate enforced by `config::assert_version_enabled`; it
-/// must be bumped in every upgrade or the new package will reject all entry
+/// This is the version gate enforced by `versioning::assert_version_enabled`;
+/// it must be bumped in every upgrade or the new package will reject all entry
 /// points guarded by that check.
 pub fn read_package_version(package_path: &Path) -> Result<u64> {
     let source_path = package_path.join(PACKAGE_VERSION_SOURCE);
