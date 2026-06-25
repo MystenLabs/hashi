@@ -4,12 +4,30 @@ on:
   workflow_dispatch:
     inputs:
       bucket_name:
-        description: 'S3 bucket name for the build'
+        description: 'S3 bucket baked into the build'
         required: true
-        default: 'guardian-test-bucket'
+        default: 'mysten-hashi-guardian-dev'
+      aws_region:
+        description: 'AWS region baked into the build'
+        required: true
+        default: 'us-west-2'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/hashi-guardian/**'
+      - 'crates/hashi-types/**'
+      - 'docker/hashi-guardian/**'
+      - 'Cargo.lock'
 
 permissions:
   contents: read
+
+# Build args that determine PCR0 (run.sh embeds the S3 endpoints at build time).
+# On push, default to the devnet deployment build args so the recorded PCR0
+# matches what the EC2 host builds and runs.
+env:
+  EIF_BUCKET: ${{ github.event.inputs.bucket_name || 'mysten-hashi-guardian-dev' }}
+  EIF_REGION: ${{ github.event.inputs.aws_region || 'us-west-2' }}
 
 jobs:
   build:
@@ -24,10 +42,7 @@ jobs:
 
       - name: Build enclave EIF
         working-directory: docker/hashi-guardian
-        env:
-          BUCKET_NAME: ${{ inputs.bucket_name || 'guardian-test-bucket' }}
-          GIT_REVISION: ${{ github.sha }}
-        run: make BUCKET_NAME=$BUCKET_NAME GIT_REVISION=$GIT_REVISION
+        run: make BUCKET_NAME="$EIF_BUCKET" AWS_REGION="$EIF_REGION" GIT_REVISION="${{ github.sha }}"
 
       - name: Print PCRs
         working-directory: docker/hashi-guardian
@@ -42,6 +57,10 @@ jobs:
   verify:
     needs: build
     runs-on: ubuntu-latest
+    outputs:
+      pcr0: ${{ steps.extract.outputs.pcr0 }}
+      pcr1: ${{ steps.extract.outputs.pcr1 }}
+      pcr2: ${{ steps.extract.outputs.pcr2 }}
     steps:
       - name: Download ubuntu-latest PCRs
         uses: actions/download-artifact@v4
@@ -55,40 +74,77 @@ jobs:
           name: nitro-pcrs-ubuntu-22.04
           path: pcrs-22
 
-      - name: Compare PCRs
-        id: compare
+      - name: Fail if PCRs differ across runners
         run: |
-          LATEST=$(cat pcrs-latest/nitro.pcrs)
-          OLDER=$(cat pcrs-22/nitro.pcrs)
-          if diff pcrs-latest/nitro.pcrs pcrs-22/nitro.pcrs > /dev/null; then
-            echo "match=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "match=false" >> "$GITHUB_OUTPUT"
+          if ! diff pcrs-latest/nitro.pcrs pcrs-22/nitro.pcrs > /dev/null; then
+            echo "PCRs differ across platforms!"
+            diff pcrs-latest/nitro.pcrs pcrs-22/nitro.pcrs
+            exit 1
           fi
-          # Extract individual PCR values
-          PCR0=$(awk '/PCR0/ {print $1}' pcrs-latest/nitro.pcrs)
-          PCR1=$(awk '/PCR1/ {print $1}' pcrs-latest/nitro.pcrs)
-          PCR2=$(awk '/PCR2/ {print $1}' pcrs-latest/nitro.pcrs)
-          echo "pcr0=$PCR0" >> "$GITHUB_OUTPUT"
-          echo "pcr1=$PCR1" >> "$GITHUB_OUTPUT"
-          echo "pcr2=$PCR2" >> "$GITHUB_OUTPUT"
 
-      - name: Print results
+      - name: Extract PCRs
+        id: extract
         run: |
-          echo "## Guardian Enclave PCR Measurements" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| PCR | Value |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|-----|-------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| PCR0 | \`${{ steps.compare.outputs.pcr0 }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| PCR1 | \`${{ steps.compare.outputs.pcr1 }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| PCR2 | \`${{ steps.compare.outputs.pcr2 }}\` |" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Cross-platform check**: ${{ steps.compare.outputs.match == 'true' && 'Reproducible' || 'MISMATCH' }} (ubuntu-latest vs ubuntu-22.04)" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Bucket**: \`${{ inputs.bucket_name }}\`" >> "$GITHUB_STEP_SUMMARY"
+          f=pcrs-latest/nitro.pcrs
+          pcr0=$(jq -r '.PCR0 // empty' "$f" 2>/dev/null || true)
+          pcr1=$(jq -r '.PCR1 // empty' "$f" 2>/dev/null || true)
+          pcr2=$(jq -r '.PCR2 // empty' "$f" 2>/dev/null || true)
+          # Fallback for a non-JSON pcrs file: PCRs are 96-hex (SHA-384), in order.
+          if [ -z "$pcr0" ]; then
+            mapfile -t P < <(grep -oiE '[a-f0-9]{96}' "$f")
+            pcr0=${P[0]}; pcr1=${P[1]}; pcr2=${P[2]}
+          fi
+          echo "pcr0=$pcr0" >> "$GITHUB_OUTPUT"
+          echo "pcr1=$pcr1" >> "$GITHUB_OUTPUT"
+          echo "pcr2=$pcr2" >> "$GITHUB_OUTPUT"
 
-      - name: Fail if PCRs differ
-        if: steps.compare.outputs.match != 'true'
+      - name: Summary
         run: |
-          echo "PCRs differ across platforms!"
-          diff pcrs-latest/nitro.pcrs pcrs-22/nitro.pcrs
-          exit 1
+          {
+            echo "## Guardian Enclave PCR Measurements"
+            echo ""
+            echo "| PCR | Value |"
+            echo "|-----|-------|"
+            echo "| PCR0 | \`${{ steps.extract.outputs.pcr0 }}\` |"
+            echo "| PCR1 | \`${{ steps.extract.outputs.pcr1 }}\` |"
+            echo "| PCR2 | \`${{ steps.extract.outputs.pcr2 }}\` |"
+            echo ""
+            echo "Reproducible across ubuntu-latest + ubuntu-22.04. Bucket \`$EIF_BUCKET\` / region \`$EIF_REGION\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Append the PCR0 -> commit mapping to MystenLabs/hashi-guardian-revision-history
+  # so a running enclave's attested PCR0 can be traced back to this exact source.
+  # Only records real builds from main; manual dispatch just builds + verifies.
+  record-provenance:
+    needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Append PCR0 -> commit to the revision-history repo
+        env:
+          GH_TOKEN: ${{ secrets.HASHI_GUARDIAN_REVISION_HISTORY_TOKEN }}
+          PCR0: ${{ needs.verify.outputs.pcr0 }}
+          PCR1: ${{ needs.verify.outputs.pcr1 }}
+          PCR2: ${{ needs.verify.outputs.pcr2 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "HASHI_GUARDIAN_REVISION_HISTORY_TOKEN not set; skipping provenance record." >&2
+            exit 0
+          fi
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/MystenLabs/hashi-guardian-revision-history.git" rev-history
+          cd rev-history
+          commit="${{ github.sha }}"
+          # Idempotent: skip if (commit, bucket, region) already recorded.
+          if grep -qP "\t${commit}\t.*\t${EIF_BUCKET}\t${EIF_REGION}$" pcr-history.tsv 2>/dev/null; then
+            echo "Already recorded for (${commit}, ${EIF_BUCKET}, ${EIF_REGION})."
+            exit 0
+          fi
+          printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$commit" "$PCR0" "$PCR1" "$PCR2" "$EIF_BUCKET" "$EIF_REGION" \
+            >> pcr-history.tsv
+          git config user.name "hashi-guardian-ci"
+          git config user.email "hashi-guardian-ci@users.noreply.github.com"
+          git add pcr-history.tsv
+          git commit -m "Record PCR0 for hashi@${commit:0:8} (${EIF_BUCKET}/${EIF_REGION})"
+          git push
