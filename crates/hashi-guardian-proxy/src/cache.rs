@@ -1,10 +1,10 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Temporary in-process response cache for the guardian's `StandardWithdrawal`
-//! RPC. Lives on the throwaway `siddharth/guardian-response-cache` branch and is
-//! not intended for merge — the Nitro design pulls this layer out into an
-//! out-of-enclave proxy, which must preserve the idempotency below.
+//! Wid-keyed response cache for the guardian's `StandardWithdrawal` RPC,
+//! running in the out-of-enclave `hashi-guardian-proxy`. Pulling this layer out
+//! of the enclave lets it be hardened or replaced independently of the signing
+//! oracle (the enclave now serves the bare `GuardianService`).
 //!
 //! The guardian debits the bucket and advances `next_seq` when it processes a
 //! `StandardWithdrawal`, before hashi has durably signed the withdrawal on-chain.
@@ -18,6 +18,11 @@
 //! re-consuming. Safe because a `wid`'s `WithdrawalTransaction` has immutable
 //! inputs/outputs once committed (only signatures change), so its enclave
 //! signatures are stable, and the response carries no seq.
+//!
+//! The cache is in-memory; on proxy restart an in-flight wid retried at a bumped
+//! seq re-consumes the enclave limiter (identical to the pre-extraction
+//! in-enclave behaviour, so no regression). A durable backend (e.g. DynamoDB) is
+//! a future hardening that externalizing this layer now makes possible.
 
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::proto;
