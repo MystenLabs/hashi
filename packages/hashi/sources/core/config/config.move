@@ -6,13 +6,9 @@
 /// fee parameters) lives in separate modules that use get/upsert.
 module hashi::config;
 
-use hashi::config_value::{Self, Value};
+use hashi::{config_store::{Self, ConfigStore}, config_value::{Self, Value}};
 use std::string::String;
-use sui::{
-    package::{Self, UpgradeCap, UpgradeTicket, UpgradeReceipt},
-    vec_map::{Self, VecMap},
-    vec_set::{Self, VecSet}
-};
+use sui::{package::{Self, UpgradeCap, UpgradeTicket, UpgradeReceipt}, vec_set::{Self, VecSet}};
 
 const PACKAGE_VERSION: u64 = 1;
 
@@ -35,43 +31,44 @@ const EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY: vector<u8> =
     b"governance_emergency_unpause_threshold_bps";
 
 public struct Config has store {
-    config: VecMap<String, Value>,
+    /// The general-purpose key-value store. Wrapping it in `ConfigStore` is
+    /// BCS-transparent, so this serializes identically to a bare `VecMap`.
+    store: ConfigStore,
     enabled_versions: VecSet<u64>,
     upgrade_cap: Option<UpgradeCap>,
+}
+
+/// Borrow the underlying key-value store. Lets modules that operate on a bare
+/// `ConfigStore` (e.g. a `Committee`'s pinned MPC params) share a single code
+/// path with the global config.
+public(package) fun store(self: &Config): &ConfigStore {
+    &self.store
+}
+
+public(package) fun store_mut(self: &mut Config): &mut ConfigStore {
+    &mut self.store
 }
 
 /// Read a config value by key. Exposed to other modules in the package
 /// (e.g. btc_config) so they can define domain-specific accessors.
 public(package) fun get(self: &Config, key: vector<u8>): Value {
-    *self.config.get(&key.to_string())
+    self.store.get(key)
 }
 
 public(package) fun try_get(self: &Config, key: vector<u8>): Option<Value> {
-    let key = key.to_string();
-    if (self.config.contains(&key)) {
-        option::some(*self.config.get(&key))
-    } else {
-        option::none()
-    }
+    self.store.try_get(key)
 }
 
 /// Insert or update a config value. Exposed to other modules in the package
 /// (e.g. btc_config) so they can define domain-specific setters.
 public(package) fun upsert(self: &mut Config, key: vector<u8>, value: Value) {
-    let key = key.to_string();
-
-    if (self.config.contains(&key)) {
-        self.config.remove(&key);
-    };
-
-    self.config.insert(key, value);
+    self.store.upsert(key, value)
 }
 
 /// Returns true when `key` exists in the config and `value` has the
 /// same type as the existing entry.
 public(package) fun is_valid_config_update(self: &Config, key: &String, value: &Value): bool {
-    if (!self.config.contains(key)) return false;
-    self.config.get(key).same_variant(value)
+    self.store.is_valid_update(key, value)
 }
 
 // ======== Core Accessors ========
@@ -167,7 +164,7 @@ public(package) fun upgrade_cap(self: &Config): &UpgradeCap {
 /// (e.g. BTC fees) are initialized separately via btc_config::init_defaults.
 public(package) fun create(): Config {
     let mut config = Config {
-        config: vec_map::empty(),
+        store: config_store::empty(),
         enabled_versions: vec_set::from_keys(vector[PACKAGE_VERSION]),
         upgrade_cap: option::none(),
     };
