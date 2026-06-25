@@ -414,7 +414,10 @@ pub struct WithdrawalTransaction {
     pub request_ids: Vec<Address>,
     pub inputs: Vec<Utxo>,
     pub withdrawal_outputs: Vec<OutputUtxo>,
-    pub change_output: Option<OutputUtxo>,
+    /// Change outputs back to the bridge, in BTC transaction order. These are
+    /// the trailing outputs: change output `j` sits at vout
+    /// `withdrawal_outputs.len() + j`. Empty when there is no change.
+    pub change_outputs: Vec<OutputUtxo>,
     pub timestamp_ms: u64,
     pub randomness: Vec<u8>,
     /// Per-input MPC signatures, accumulated incrementally and out-of-order.
@@ -427,9 +430,7 @@ pub struct WithdrawalTransaction {
 impl WithdrawalTransaction {
     pub fn all_outputs(&self) -> Vec<OutputUtxo> {
         let mut outputs = self.withdrawal_outputs.clone();
-        if let Some(ref change) = self.change_output {
-            outputs.push(change.clone());
-        }
+        outputs.extend(self.change_outputs.iter().cloned());
         outputs
     }
 
@@ -1189,7 +1190,9 @@ pub struct WithdrawalPickedForProcessingEvent {
     pub request_ids: Vec<Address>,
     pub inputs: Vec<Utxo>,
     pub withdrawal_outputs: Vec<OutputUtxo>,
-    pub change_output: Option<OutputUtxo>,
+    /// Change outputs back to the bridge, in BTC transaction order (trailing
+    /// outputs). Empty when there is no change.
+    pub change_outputs: Vec<OutputUtxo>,
     pub timestamp_ms: u64,
     pub randomness: Vec<u8>,
 }
@@ -1269,9 +1272,12 @@ impl From<WithdrawalPresigsReassignedEvent> for HashiEvent {
 pub struct WithdrawalConfirmedEvent {
     pub withdrawal_txn_id: Address,
     pub txid: BitcoinTxid,
-    pub change_utxo_id: Option<UtxoId>,
+    /// Change UTXO IDs promoted to confirmed, in vout order. Empty when there
+    /// is no change.
+    pub change_utxo_ids: Vec<UtxoId>,
     pub request_ids: Vec<Address>,
-    pub change_utxo_amount: Option<u64>,
+    /// Per-change-output amounts, parallel to `change_utxo_ids`.
+    pub change_utxo_amounts: Vec<u64>,
 }
 
 impl MoveType for WithdrawalConfirmedEvent {

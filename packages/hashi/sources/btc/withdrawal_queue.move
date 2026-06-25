@@ -29,7 +29,7 @@ const EMinerFeeExceedsMax: vector<u8> = b"Per-user miner fee exceeds worst-case 
 const EInputsBelowOutputs: vector<u8> = b"Total input amount is less than total output amount";
 #[error]
 const EOutputCountMismatch: vector<u8> =
-    b"Output count must equal request count or request count + 1 (change)";
+    b"Output count must be at least the request count (any extra outputs are change)";
 #[error]
 const EWithdrawalAlreadyFinalized: vector<u8> = b"Withdrawal transaction is already fully signed";
 #[error]
@@ -96,7 +96,11 @@ public struct WithdrawalTransaction has key, store {
     /// for event emission and fee accounting.
     inputs: vector<Utxo>,
     withdrawal_outputs: vector<OutputUtxo>,
-    change_output: Option<OutputUtxo>,
+    /// Change outputs back to the bridge, in BTC transaction order. These are
+    /// the trailing outputs of the transaction: change output `j` sits at vout
+    /// `withdrawal_outputs.length() + j`. Empty when the transaction has no
+    /// change.
+    change_outputs: vector<OutputUtxo>,
     timestamp_ms: u64,
     randomness: vector<u8>,
     /// Per-input MPC committee signatures, accumulated incrementally and
@@ -314,14 +318,12 @@ public(package) fun new_withdrawal_txn(
     assert!(input_amount >= output_amount, EInputsBelowOutputs);
     let miner_fee = input_amount - output_amount;
 
-    // Outputs must be either one-per-request, or one-per-request plus a single
-    // trailing change output.
+    // Outputs are one-per-request followed by zero or more trailing change
+    // outputs. The per-request outputs occupy indices `[0, request_count)`;
+    // any remaining outputs are change back to the bridge.
     let request_count = request_ids.length();
     let output_count = outputs.length();
-    assert!(
-        output_count == request_count || output_count == request_count + 1,
-        EOutputCountMismatch,
-    );
+    assert!(output_count >= request_count, EOutputCountMismatch);
 
     // Miner fee is split evenly across all withdrawal requests. Any remainder
     // (at most request_count - 1 sats) is a rounding bonus to the miner.
@@ -343,12 +345,14 @@ public(package) fun new_withdrawal_txn(
     // storing the pubkey on chain.
     // https://linear.app/mysten-labs/issue/IOP-226/dkg-commit-mpc-public-key-onchain-and-read-from-there
 
-    // Extract the trailing change output if present.
-    let change_output = if (output_count == request_count + 1) {
-        option::some(outputs.pop_back())
-    } else {
-        option::none()
-    };
+    // Split off the trailing change outputs (indices `[request_count,
+    // output_count)`), preserving their on-chain order so change output `j`
+    // keeps its vout `request_count + j`. `pop_back` yields them in reverse,
+    // so reverse the collected vector to restore transaction order.
+    let num_change = output_count - request_count;
+    let mut change_outputs = vector[];
+    num_change.do!(|_| change_outputs.push_back(outputs.pop_back()));
+    change_outputs.reverse();
 
     // Contiguously assign presig indices: input `i` uses `presig_start_index + i`.
     let signing = mpc_signing::new(inputs.length(), presig_start_index, epoch);
@@ -359,7 +363,7 @@ public(package) fun new_withdrawal_txn(
         request_ids,
         inputs,
         withdrawal_outputs: outputs,
-        change_output,
+        change_outputs,
         timestamp_ms: clock.timestamp_ms(),
         randomness,
         signing,
@@ -502,33 +506,35 @@ public(package) fun withdrawal_txn_num_inputs(
     txn.inputs.length()
 }
 
-/// Build the change UTXO from a withdrawal transaction's data.
+/// Build the change UTXOs from a withdrawal transaction's data.
 ///
-/// Returns the Utxo that corresponds to the change output, or None if there
-/// is no change output. Used by `commit_withdrawal_tx()` to insert the change
-/// UTXO into the pool immediately after the withdrawal transaction is created.
-public(package) fun build_change_utxo(self: &WithdrawalTransaction): Option<hashi::utxo::Utxo> {
-    if (self.change_output.is_some()) {
-        let change = self.change_output.borrow();
-        // Change output is always the last output in the BTC transaction.
-        let change_vout = (self.withdrawal_outputs.length() as u32);
-        let change_utxo_id = hashi::utxo::utxo_id(self.txid, change_vout);
-        option::some(hashi::utxo::utxo(change_utxo_id, change.amount, option::none()))
-    } else {
-        option::none()
-    }
+/// Returns one Utxo per change output, in vout order, or an empty vector if
+/// there are no change outputs. Used by `commit_withdrawal_tx()` to insert the
+/// change UTXOs into the pool immediately after the withdrawal transaction is
+/// created.
+///
+/// Change outputs are the trailing outputs of the BTC transaction: change
+/// output `j` sits at vout `withdrawal_outputs.length() + j`.
+public(package) fun build_change_utxos(self: &WithdrawalTransaction): vector<hashi::utxo::Utxo> {
+    let base_vout = (self.withdrawal_outputs.length() as u32);
+    let mut utxos = vector[];
+    self.change_outputs.length().do!(|j| {
+        let change = self.change_outputs.borrow(j);
+        let change_utxo_id = hashi::utxo::utxo_id(self.txid, base_vout + (j as u32));
+        utxos.push_back(hashi::utxo::utxo(change_utxo_id, change.amount, option::none()));
+    });
+    utxos
 }
 
-/// Compute the change UTXO ID for a withdrawal transaction, or None if there
-/// is no change output.
-public(package) fun change_utxo_id(self: &WithdrawalTransaction): Option<UtxoId> {
-    if (self.change_output.is_some()) {
-        // Change output is always the last output in the BTC transaction.
-        let change_vout = (self.withdrawal_outputs.length() as u32);
-        option::some(hashi::utxo::utxo_id(self.txid, change_vout))
-    } else {
-        option::none()
-    }
+/// Compute the change UTXO IDs for a withdrawal transaction, in vout order, or
+/// an empty vector if there are no change outputs.
+public(package) fun change_utxo_ids(self: &WithdrawalTransaction): vector<UtxoId> {
+    let base_vout = (self.withdrawal_outputs.length() as u32);
+    let mut ids = vector[];
+    self.change_outputs.length().do!(|j| {
+        ids.push_back(hashi::utxo::utxo_id(self.txid, base_vout + (j as u32)));
+    });
+    ids
 }
 
 // ======== Accessors ========
@@ -604,7 +610,7 @@ public(package) fun emit_withdrawal_picked_for_processing(self: &WithdrawalTrans
         request_ids: self.request_ids,
         inputs: self.inputs,
         withdrawal_outputs: self.withdrawal_outputs,
-        change_output: self.change_output,
+        change_outputs: self.change_outputs,
         timestamp_ms: self.timestamp_ms,
         randomness: self.randomness,
     });
@@ -620,20 +626,15 @@ public(package) fun emit_withdrawal_signed(self: &WithdrawalTransaction) {
 }
 
 public(package) fun emit_withdrawal_confirmed(self: &WithdrawalTransaction) {
-    let (change_utxo_id, change_utxo_amount) = if (self.change_output.is_some()) {
-        let change = self.change_output.borrow();
-        let change_vout = (self.withdrawal_outputs.length() as u32);
-        (option::some(hashi::utxo::utxo_id(self.txid, change_vout)), option::some(change.amount))
-    } else {
-        (option::none(), option::none())
-    };
+    let change_utxo_ids = self.change_utxo_ids();
+    let change_utxo_amounts = self.change_outputs.map_ref!(|change| change.amount);
 
     sui::event::emit(WithdrawalConfirmedEvent {
         withdrawal_txn_id: self.id.to_address(),
         txid: self.txid,
-        change_utxo_id,
+        change_utxo_ids,
         request_ids: self.request_ids,
-        change_utxo_amount,
+        change_utxo_amounts,
     });
 }
 
@@ -666,7 +667,7 @@ public struct WithdrawalPickedForProcessingEvent has copy, drop {
     request_ids: vector<address>,
     inputs: vector<Utxo>,
     withdrawal_outputs: vector<OutputUtxo>,
-    change_output: Option<OutputUtxo>,
+    change_outputs: vector<OutputUtxo>,
     timestamp_ms: u64,
     randomness: vector<u8>,
 }
@@ -700,9 +701,9 @@ public struct WithdrawalPresigsReassignedEvent has copy, drop {
 public struct WithdrawalConfirmedEvent has copy, drop {
     withdrawal_txn_id: address,
     txid: address,
-    change_utxo_id: Option<UtxoId>,
+    change_utxo_ids: vector<UtxoId>,
     request_ids: vector<address>,
-    change_utxo_amount: Option<u64>,
+    change_utxo_amounts: vector<u64>,
 }
 
 public struct WithdrawalCancelledEvent has copy, drop {
@@ -718,7 +719,7 @@ public(package) fun new_withdrawal_txn_for_testing(
     request_ids: vector<address>,
     inputs: vector<Utxo>,
     withdrawal_outputs: vector<OutputUtxo>,
-    change_output: Option<OutputUtxo>,
+    change_outputs: vector<OutputUtxo>,
     txid: address,
     clock: &sui::clock::Clock,
     ctx: &mut TxContext,
@@ -730,7 +731,7 @@ public(package) fun new_withdrawal_txn_for_testing(
         request_ids,
         inputs,
         withdrawal_outputs,
-        change_output,
+        change_outputs,
         timestamp_ms: clock.timestamp_ms(),
         randomness: vector[0, 0, 0, 0],
         signing: mpc_signing::new(num_inputs, 0, 0),
