@@ -36,6 +36,36 @@ message NonceMessage {
   optional sui.rpc.v2.Bcs message = 2;
 }
 
+message AvidNonceOptimisticMessage {
+  // Which nonce generation round within the epoch.
+  optional uint32 batch_index = 1;
+
+  // The shared commitment and this recipient's ciphertext.
+  optional sui.rpc.v2.Bcs message = 2;
+}
+
+message AvidNonceDispersalMessage {
+  // Which nonce generation round within the epoch.
+  optional uint32 batch_index = 1;
+
+  // The per-recipient authenticated shards.
+  optional sui.rpc.v2.Bcs dispersal = 2;
+
+  // The confirm certificate bound to this dispersal.
+  optional sui.rpc.v2.Bcs confirm_cert = 3;
+}
+
+message AvidNonceEchoMessage {
+  // Which nonce generation round within the epoch.
+  optional uint32 batch_index = 1;
+
+  // Hex-encoded Sui address of the dealer whose dispersal this echoes.
+  optional string dealer = 2;
+
+  // The disperser's echo for the recipient.
+  optional sui.rpc.v2.Bcs echo = 3;
+}
+
 message SendMessagesRequest {
   // The epoch for this MPC instance.
   optional uint64 epoch = 1;
@@ -49,6 +79,15 @@ message SendMessagesRequest {
 
     // For nonce generation: batch AVSS message with batch index.
     NonceMessage nonce_message = 4;
+
+    // For AVID nonce generation, optimistic phase.
+    AvidNonceOptimisticMessage avid_nonce_optimistic_message = 5;
+
+    // For AVID nonce generation, pessimistic phase.
+    AvidNonceDispersalMessage avid_nonce_dispersal_message = 6;
+
+    // For AVID nonce generation: a pushed echo.
+    AvidNonceEchoMessage avid_nonce_echo_message = 7;
   }
 }
 
@@ -77,6 +116,17 @@ message RetrieveMessagesRequest {
 
   // For nonce generation: the batch index.
   optional uint32 batch_index = 4;
+
+  // For AVID nonce generation: hex-encoded Sui address of the requesting recipient.
+  optional string recipient = 5;
+}
+
+message AvidNonceRetrievalMessage {
+  // The shared commitment.
+  optional sui.rpc.v2.Bcs common = 1;
+
+  // The voter's echo for the requester.
+  optional sui.rpc.v2.Bcs echo = 2;
 }
 
 message RetrieveMessagesResponse {
@@ -89,6 +139,9 @@ message RetrieveMessagesResponse {
 
     // For nonce generation: batch AVSS message with batch index.
     NonceMessage nonce_message = 3;
+
+    // For AVID nonce generation: catch-up commitment and echo.
+    AvidNonceRetrievalMessage avid_nonce_retrieval_message = 4;
   }
 }
 
