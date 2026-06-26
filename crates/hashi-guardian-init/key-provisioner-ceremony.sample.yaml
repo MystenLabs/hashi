@@ -25,11 +25,6 @@ kp_pgp_cert_paths:
   - /path/to/kp4.asc
   - /path/to/kp5.asc
 
-# Expected secret-sharing sequence. verify discovers the latest ceremony session
-# from S3 and fails if its sharing_seq does not match this value. Use 0 for
-# genesis setup, or N+1 for a rotation from prior sequence N.
-sharing_seq: 0
-
 # Expected enclave build: git revision + PCR0 (hex). The live guardian must
 # report this revision, and its attestation PCR0 must match it.
 current_build:

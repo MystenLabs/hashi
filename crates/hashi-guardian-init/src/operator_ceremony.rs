@@ -242,7 +242,6 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
     );
     let logged = VerifiedCeremonyState::latest_from_s3(
         &mut reader,
-        sharing_seq,
         cfg.common.num_shares,
         cfg.common.threshold,
     )

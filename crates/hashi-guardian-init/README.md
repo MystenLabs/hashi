@@ -48,13 +48,11 @@ the guardian endpoint, `n`/`t`, guardian S3 config, and the KP cert paths.
 
 ## key-provisioner ceremony
 
-Confirms a KP can fetch and decrypt their setup or rotation ceremony share for
-an expected `sharing_seq` (`0` for genesis setup, `N + 1` for a rotation from
-prior sequence `N`). Trust is anchored to the guardian's S3 attestation log (no
+Confirms a KP can fetch and decrypt their share from the latest setup or
+rotation ceremony. Trust is anchored to the guardian's S3 attestation log (no
 gRPC to the live guardian): it discovers the latest ceremony session from S3,
-checks its `sharing_seq` matches the expected value, loads that session's
-attested signing pubkey, verifies its `ceremony/` audit log and `shares/`
-recovery log against the expected `sharing_seq` and `n`/`t`, confirms every
+loads that session's attested signing pubkey, verifies its `ceremony/` audit log
+and `shares/` recovery log against the expected `n`/`t`, confirms every
 encrypted share is addressed only to its labeled KP cert, finds the share labeled
 for this KP's cert fingerprint, decrypts via the yubikey (`gpg --decrypt`), and
 verifies the decrypted share against its commitment.
@@ -74,7 +72,7 @@ cargo run -p hashi-guardian-init -- key-provisioner ceremony --config key-provis
 
 Config: see
 [`key-provisioner-ceremony.sample.yaml`](key-provisioner-ceremony.sample.yaml)
-— the KP's cert path, expected `sharing_seq` and `n`/`t`, full KP cert roster,
+— the KP's cert path, expected `n`/`t`, full KP cert roster,
 guardian S3 config.
 
 ## operator provision
@@ -146,7 +144,7 @@ cargo run -p hashi-guardian-init -- key-provisioner provision --config key-provi
 
 See [`key-provisioner-provision.sample.yaml`](key-provisioner-provision.sample.yaml) for a complete
 `ProvisionConfig` example: this KP's cert path, the full KP cert roster,
-expected `sharing_seq` and `n`/`t`, the guardian S3 config, limiter config, the
+expected `n`/`t`, the guardian S3 config, limiter config, the
 MPC committee verifying key `G` (`hashi_btc_master_pubkey_hex`), the PCR
 allowlist (`current_build` plus optional `prev_builds`) pinned against each
 session's attestation, and the relay endpoint the share is submitted to.

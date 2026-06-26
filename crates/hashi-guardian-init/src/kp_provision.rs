@@ -365,7 +365,6 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         scraped_instance.clone(),
         encrypted_shares,
         &roster,
-        sharing_seq,
         cfg.common.num_shares,
         cfg.common.threshold,
     )?;

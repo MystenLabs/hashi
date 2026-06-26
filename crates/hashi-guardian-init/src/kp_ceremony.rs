@@ -29,9 +29,6 @@ pub struct CeremonyConfig {
     /// fingerprint that finds this KP's share in `shares/`, and to confirm the
     /// share's ciphertext is genuinely encrypted to this cert before decrypting.
     pub kp_pgp_cert_path: PathBuf,
-    /// Expected secret-sharing sequence. Use 0 for genesis setup, or N+1 for a
-    /// rotation from prior sequence N.
-    pub sharing_seq: u64,
 }
 
 impl CeremonyConfig {
@@ -68,7 +65,6 @@ pub async fn run(cfg: CeremonyConfig) -> Result<()> {
         phase = "setup",
         bucket = cfg.common.guardian_s3.bucket_name(),
         region = cfg.common.guardian_s3.region(),
-        sharing_seq = cfg.sharing_seq,
         num_shares = cfg.common.num_shares,
         threshold = cfg.common.threshold,
         "verifying ceremony share",
@@ -111,7 +107,6 @@ pub async fn run(cfg: CeremonyConfig) -> Result<()> {
         current_pcr0 = hex::encode(cfg.common.pcr_allowlist.current_build().pcr0()),
         "connecting to guardian log bucket",
     );
-    let sharing_seq = cfg.sharing_seq;
     let mut reader = GuardianReader::new(&cfg.common.guardian_s3, cfg.common.pcr_allowlist())
         .await
         .context("connect to guardian log bucket")?;
@@ -119,12 +114,10 @@ pub async fn run(cfg: CeremonyConfig) -> Result<()> {
 
     info!(
         phase = "ceremony scrape",
-        expected_sharing_seq = sharing_seq,
         "scraping latest ceremony/ + shares/ logs (attestation-anchored)",
     );
     let state = VerifiedCeremonyState::latest_from_s3(
         &mut reader,
-        sharing_seq,
         cfg.common.num_shares,
         cfg.common.threshold,
     )
