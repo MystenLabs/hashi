@@ -18,7 +18,7 @@
 //! 4. Initial limiter state is recovered from the prior enclave's max-seq
 //!    Success withdrawal log (or genesis) and confirmed equal (check C).
 //! 5. The committee comes from the latest signed `committee-update/` log (or
-//!    genesis fallback); the `state_hash` is recomputed and confirmed (check D).
+//!    on-chain Hashi state); the `state_hash` is recomputed and confirmed (check D).
 //! 6. This KP's encrypted share is read from `shares/{seq}-{session}.json`
 //!    (attestation-anchored), every share's recipients are verified against
 //!    the roster, and this KP's share is located by fingerprint.
@@ -34,43 +34,37 @@
 use anyhow::Context;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
-use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianEncryptedShare;
 use hashi_types::guardian::GuardianInfo;
-use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::WithdrawModeState;
-use hashi_types::move_types::Committee as CommitteeRepr;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::load_certs;
 use hashi_types::proto as pb;
 use hpke::Deserializable;
 use rand::thread_rng;
-use serde::Deserialize;
-use std::path::Path;
-use std::path::PathBuf;
 use tracing::info;
 
+use crate::config::Config;
 use crate::heartbeat_checks;
-use crate::kp_roster::KpRosterConfig;
 use crate::kp_roster::VerifiedCeremonyState;
 use crate::kp_roster::decrypt_share;
 use crate::kp_roster::ensure_cert_in_roster;
 use crate::limiter_recovery;
 
-pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
-    cfg.common.validate()?;
+pub async fn run(cfg: Config) -> anyhow::Result<()> {
+    cfg.kp_roster.validate()?;
 
     info!(
         phase = "setup",
-        bucket = cfg.common.guardian_s3.bucket_name(),
-        region = cfg.common.guardian_s3.region(),
-        num_shares = cfg.common.num_shares,
-        threshold = cfg.common.threshold,
+        bucket = cfg.kp_roster.guardian_s3.bucket_name(),
+        region = cfg.kp_roster.guardian_s3.region(),
+        num_shares = cfg.kp_roster.num_shares,
+        threshold = cfg.kp_roster.threshold,
         relay_endpoint = %cfg.relay_endpoint,
         "running provision flow",
     );
@@ -80,44 +74,55 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
     // reads that session first.
     info!(
         phase = "s3 connect",
-        bucket = cfg.common.guardian_s3.bucket_name(),
-        region = cfg.common.guardian_s3.region(),
-        current_git_revision = %cfg.common.pcr_allowlist.current_build().git_revision(),
-        current_pcr0 = hex::encode(cfg.common.pcr_allowlist.current_build().pcr0()),
-        prev_build_count = cfg.common.pcr_allowlist.prev_builds().len(),
+        bucket = cfg.kp_roster.guardian_s3.bucket_name(),
+        region = cfg.kp_roster.guardian_s3.region(),
+        current_git_revision = %cfg.kp_roster.pcr_allowlist.current_build().git_revision(),
+        current_pcr0 = hex::encode(cfg.kp_roster.pcr_allowlist.current_build().pcr0()),
+        prev_build_count = cfg.kp_roster.pcr_allowlist.prev_builds().len(),
         "connecting to guardian log bucket",
     );
-    let allowlist = cfg.common.pcr_allowlist();
-    let mut reader = GuardianReader::new(&cfg.common.guardian_s3, allowlist.clone())
+    let allowlist = cfg.kp_roster.pcr_allowlist();
+    let mut reader = GuardianReader::new(&cfg.kp_roster.guardian_s3, allowlist.clone())
         .await
         .context("connect to guardian log bucket")?;
     info!(phase = "s3 connect", "connected to guardian log bucket");
 
-    let master_g = cfg.mpc_master_g()?;
-    info!(phase = "setup", master_g = ?master_g, "decoded MPC master G");
+    info!(
+        phase = "sui connect",
+        sui_rpc = %cfg.hashi.sui_rpc,
+        package_id = %cfg.hashi.hashi_ids.package_id,
+        hashi_object_id = %cfg.hashi.hashi_ids.hashi_object_id,
+        "connecting to Sui RPC for Hashi on-chain state",
+    );
+    let onchain_state = cfg.hashi.onchain_state().await?;
+    info!(phase = "sui connect", "connected to Sui RPC");
+
+    let master_g = onchain_state.onchain_verifying_key_g()?;
+    info!(phase = "setup", master_g = ?master_g, "fetched on-chain MPC master G");
 
     info!(
         phase = "roster load",
-        cert_count = cfg.common.kp_pgp_cert_paths.len(),
+        cert_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
         "loading + validating full KP cert roster",
     );
-    let certs = load_certs(&cfg.common.kp_pgp_cert_paths)?;
+    let certs = load_certs(&cfg.kp_roster.kp_pgp_cert_paths)?;
     info!(
         phase = "roster load",
         cert_count = certs.len(),
         "KP cert roster loaded"
     );
 
+    let kp_pgp_cert_path = cfg.require_kp_pgp_cert_path("key-provisioner provision")?;
     let kp_cert = PgpPublicCert::new(
-        std::fs::read_to_string(&cfg.kp_pgp_cert_path)
-            .with_context(|| format!("read KP cert at {}", cfg.kp_pgp_cert_path.display()))?,
+        std::fs::read_to_string(kp_pgp_cert_path)
+            .with_context(|| format!("read KP cert at {}", kp_pgp_cert_path.display()))?,
     )
-    .with_context(|| format!("invalid PGP cert at {}", cfg.kp_pgp_cert_path.display()))?;
+    .with_context(|| format!("invalid PGP cert at {}", kp_pgp_cert_path.display()))?;
     let want_fp = kp_cert.fingerprint();
     info!(
         phase = "setup",
         fingerprint = %want_fp,
-        kp_cert_path = %cfg.kp_pgp_cert_path.display(),
+        kp_cert_path = %kp_pgp_cert_path.display(),
         "loaded this KP's cert",
     );
     ensure_cert_in_roster(&kp_cert, &certs)?;
@@ -181,9 +186,9 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         enclave_git_revision
     );
     anyhow::ensure!(
-        cfg.common.guardian_s3.bucket_info == enclave_bucket_info,
+        cfg.kp_roster.guardian_s3.bucket_info == enclave_bucket_info,
         "Guardian bucket info mismatch: expected {:?}, got {:?}",
-        cfg.common.guardian_s3.bucket_info,
+        cfg.kp_roster.guardian_s3.bucket_info,
         enclave_bucket_info
     );
     anyhow::ensure!(
@@ -291,8 +296,8 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
 
     // 5. Check D — recompute the init state the operator booted the enclave
     //    with; its digest is the `state_hash` we bind as the share's AAD. The
-    //    committee comes from the latest signed `committee-update/` log; before
-    //    any update exists (genesis) we fall back to the trusted local value.
+    //    committee comes from the latest signed `committee-update/` log or,
+    //    before any update exists, from authoritative on-chain Hashi state.
     info!(
         phase = "state hash",
         "recomputing state_hash from committee + limiter + master_g",
@@ -308,32 +313,30 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
                 source = "committee-update log",
                 "scraped latest committee-update log",
             );
-            scraped
+            scraped.try_into()?
         }
         None => {
+            let committee = onchain_state
+                .current_committee()
+                .context("no current committee on chain (DKG not yet complete?)")?;
             info!(
                 phase = "state hash",
-                source = "hashi_committee_genesis (config)",
-                "no committee-update log; falling back to genesis config",
+                epoch = committee.epoch(),
+                source = "on-chain Hashi state",
+                "no committee-update log; falling back to on-chain current committee",
             );
-            cfg.hashi_committee_genesis
-                .clone()
-                .context("no committee-update log in S3 and no hashi_committee_genesis in config")?
+            committee
         }
     };
     anyhow::ensure!(
-        committee.epoch == enclave_current_committee_epoch,
+        committee.epoch() == enclave_current_committee_epoch,
         "committee epoch mismatch: expected {}, got {}",
-        committee.epoch,
+        committee.epoch(),
         enclave_current_committee_epoch
     );
-    let committee_epoch = committee.epoch;
-    let expected_state = WithdrawModeState::new(
-        committee.try_into()?,
-        cfg.limiter_config,
-        limiter_state,
-        master_g,
-    )?;
+    let committee_epoch = committee.epoch();
+    let expected_state =
+        WithdrawModeState::new(committee, cfg.limiter_config, limiter_state, master_g)?;
     let state_hash = expected_state.digest();
     anyhow::ensure!(
         state_hash == enclave_state_hash,
@@ -365,9 +368,8 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         scraped_instance.clone(),
         encrypted_shares,
         &roster,
-        sharing_seq,
-        cfg.common.num_shares,
-        cfg.common.threshold,
+        cfg.kp_roster.num_shares,
+        cfg.kp_roster.threshold,
     )?;
     state.verify_encrypted_share_recipients(&certs)?;
     info!(
@@ -407,10 +409,9 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
     info!(
         phase = "share decrypt",
         share_id = kp_encrypted_share.id.get(),
-        gpg_homedir = ?cfg.gpg_homedir,
         "decrypting share via yubikey (ciphertext piped via stdin; plaintext in memory)",
     );
-    let decrypted = decrypt_share(kp_encrypted_share, cfg.gpg_homedir.as_deref())?;
+    let decrypted = decrypt_share(kp_encrypted_share)?;
     state
         .secret_sharing_instance
         .commitments()
@@ -573,75 +574,4 @@ async fn prechecks(
     );
 
     Ok(())
-}
-
-#[derive(Deserialize)]
-pub struct ProvisionConfig {
-    #[serde(flatten)]
-    pub common: KpRosterConfig,
-    /// Path to this KP's armored OpenPGP public cert (the one they exported
-    /// from their yubikey and gave to the operator at ceremony time). Used to
-    /// find this KP's share in `shares/` by fingerprint, and to confirm the
-    /// ciphertext is genuinely encrypted to this cert before decrypting.
-    pub kp_pgp_cert_path: PathBuf,
-    /// Optional gpg homedir for the yubikey-backed agent. Defaults to gpg's
-    /// default (`~/.gnupg`) when unset.
-    pub gpg_homedir: Option<PathBuf>,
-    /// Relay endpoint the KP's encrypted share is submitted to. The relay
-    /// collects T-of-N shares before forwarding them to the guardian in one
-    /// `ProvisionerInit` call.
-    pub relay_endpoint: String,
-    /// Genesis committee — required only at genesis, when `committee-update/` is
-    /// still empty; omit it once any update has been logged (it's scraped from
-    /// there after). Stands in for the authoritative on-chain `CommitteeSet`
-    /// until the tool reads chain directly. Validated via the `state_hash` match.
-    pub hashi_committee_genesis: Option<CommitteeRepr>,
-    pub limiter_config: LimiterConfig,
-    /// MPC committee `G` (on-chain `CommitteeSet.mpc_public_key`) as hex of `bcs(G)`;
-    /// the derivation master (NOT the guardian's own key). Must match operator init.
-    pub hashi_btc_master_pubkey_hex: String,
-}
-
-impl ProvisionConfig {
-    pub fn load_yaml(path: &Path) -> anyhow::Result<Self> {
-        let bytes = std::fs::read(path).with_context(|| {
-            format!(
-                "failed to read key-provisioner provision config at {}",
-                path.display()
-            )
-        })?;
-        serde_yaml::from_slice(&bytes).with_context(|| {
-            format!(
-                "failed to parse key-provisioner provision yaml at {}",
-                path.display()
-            )
-        })
-    }
-
-    /// The MPC committee verifying key `G`, decoded from `hashi_btc_master_pubkey_hex`.
-    pub fn mpc_master_g(&self) -> anyhow::Result<HashiMasterG> {
-        decode_master_g_hex(&self.hashi_btc_master_pubkey_hex)
-    }
-}
-
-/// Decode the MPC committee verifying key `G` from hex of its `bcs(G)` encoding
-/// (the same `bcs(G)` `Hashi::onchain_verifying_key_g` reads from chain).
-fn decode_master_g_hex(hex_str: &str) -> anyhow::Result<HashiMasterG> {
-    let bytes = hex::decode(hex_str.trim_start_matches("0x"))
-        .context("hashi_btc_master_pubkey_hex is not valid hex")?;
-    bcs::from_bytes(&bytes).context("decode MPC verifying key G from bcs(G)")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn decode_master_g_hex_accepts_bcs_g_and_rejects_garbage() {
-        // hex of a real on-chain CommitteeSet.mpc_public_key (bcs(G), devnet).
-        let g_hex = "a6adc1f72da0e65df2dfb17820fe6dc26d42a84f5738a8b7cb1fa745626f818c00";
-        decode_master_g_hex(g_hex).expect("valid bcs(G) decodes");
-        assert!(decode_master_g_hex("nothex").is_err());
-        assert!(decode_master_g_hex("0011").is_err());
-    }
 }

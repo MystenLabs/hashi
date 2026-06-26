@@ -3,56 +3,18 @@
 
 //! `key-provisioner ceremony` verifies and decrypts this KP's ceremony share.
 
-use std::path::Path;
-use std::path::PathBuf;
-
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::load_certs;
-use serde::Deserialize;
 use tracing::info;
 
-use crate::kp_roster::KpRosterConfig;
+use crate::config::Config;
 use crate::kp_roster::VerifiedCeremonyState;
 use crate::kp_roster::decrypt_share;
 use crate::kp_roster::ensure_cert_in_roster;
-
-#[derive(Deserialize)]
-pub struct CeremonyConfig {
-    #[serde(flatten)]
-    pub common: KpRosterConfig,
-    /// Path to this KP's armored OpenPGP public cert (the one they exported and
-    /// gave to the operator at `operator ceremony` time). Used to derive the
-    /// fingerprint that finds this KP's share in `shares/`, and to confirm the
-    /// share's ciphertext is genuinely encrypted to this cert before decrypting.
-    pub kp_pgp_cert_path: PathBuf,
-    /// Expected secret-sharing sequence. Use 0 for genesis setup, or N+1 for a
-    /// rotation from prior sequence N.
-    pub sharing_seq: u64,
-    /// Optional gpg homedir for the yubikey-backed agent. Defaults to gpg's
-    /// default (`~/.gnupg`) when unset.
-    pub gpg_homedir: Option<PathBuf>,
-}
-
-impl CeremonyConfig {
-    pub fn load_yaml(path: &Path) -> Result<Self> {
-        let bytes = std::fs::read(path).with_context(|| {
-            format!(
-                "failed to read key-provisioner ceremony config at {}",
-                path.display()
-            )
-        })?;
-        serde_yaml::from_slice(&bytes).with_context(|| {
-            format!(
-                "failed to parse key-provisioner ceremony yaml at {}",
-                path.display()
-            )
-        })
-    }
-}
 
 /// Verify this KP can fetch and decrypt its ceremony share.
 ///
@@ -64,25 +26,27 @@ impl CeremonyConfig {
 /// Security: the ciphertext is piped into `gpg --decrypt` over stdin and the
 /// plaintext streams back over stdout; neither ciphertext nor plaintext is
 /// written to disk by this flow.
-pub async fn run(cfg: CeremonyConfig) -> Result<()> {
-    cfg.common.validate()?;
+pub async fn run(cfg: Config) -> Result<()> {
+    cfg.kp_roster.validate()?;
 
     info!(
         phase = "setup",
-        bucket = cfg.common.guardian_s3.bucket_name(),
-        region = cfg.common.guardian_s3.region(),
-        sharing_seq = cfg.sharing_seq,
-        num_shares = cfg.common.num_shares,
-        threshold = cfg.common.threshold,
+        bucket = cfg.kp_roster.guardian_s3.bucket_name(),
+        region = cfg.kp_roster.guardian_s3.region(),
+        num_shares = cfg.kp_roster.num_shares,
+        threshold = cfg.kp_roster.threshold,
+        sui_rpc = %cfg.hashi.sui_rpc,
+        package_id = %cfg.hashi.hashi_ids.package_id,
+        hashi_object_id = %cfg.hashi.hashi_ids.hashi_object_id,
         "verifying ceremony share",
     );
 
     info!(
         phase = "roster load",
-        cert_count = cfg.common.kp_pgp_cert_paths.len(),
+        cert_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
         "loading + validating full KP cert roster",
     );
-    let certs = load_certs(&cfg.common.kp_pgp_cert_paths)?;
+    let certs = load_certs(&cfg.kp_roster.kp_pgp_cert_paths)?;
     info!(
         phase = "roster load",
         cert_count = certs.len(),
@@ -92,15 +56,16 @@ pub async fn run(cfg: CeremonyConfig) -> Result<()> {
     // Load this KP's cert. Its fingerprint finds our share in `shares/`, and
     // the cert itself lets us confirm the ciphertext is genuinely encrypted to
     // us before we touch the yubikey.
-    let cert_armored = std::fs::read_to_string(&cfg.kp_pgp_cert_path)
-        .with_context(|| format!("read KP cert at {}", cfg.kp_pgp_cert_path.display()))?;
+    let kp_pgp_cert_path = cfg.require_kp_pgp_cert_path("key-provisioner ceremony")?;
+    let cert_armored = std::fs::read_to_string(kp_pgp_cert_path)
+        .with_context(|| format!("read KP cert at {}", kp_pgp_cert_path.display()))?;
     let kp_cert = PgpPublicCert::new(cert_armored)
-        .with_context(|| format!("invalid PGP cert at {}", cfg.kp_pgp_cert_path.display()))?;
+        .with_context(|| format!("invalid PGP cert at {}", kp_pgp_cert_path.display()))?;
     let want_fp = kp_cert.fingerprint();
     info!(
         phase = "setup",
         fingerprint = %want_fp,
-        kp_cert_path = %cfg.kp_pgp_cert_path.display(),
+        kp_cert_path = %kp_pgp_cert_path.display(),
         "loaded this KP's cert",
     );
     ensure_cert_in_roster(&kp_cert, &certs)?;
@@ -109,27 +74,24 @@ pub async fn run(cfg: CeremonyConfig) -> Result<()> {
     //    (attestation-verified once via the reader's session-key cache).
     info!(
         phase = "s3 connect",
-        bucket = cfg.common.guardian_s3.bucket_name(),
-        region = cfg.common.guardian_s3.region(),
-        current_pcr0 = hex::encode(cfg.common.pcr_allowlist.current_build().pcr0()),
+        bucket = cfg.kp_roster.guardian_s3.bucket_name(),
+        region = cfg.kp_roster.guardian_s3.region(),
+        current_pcr0 = hex::encode(cfg.kp_roster.pcr_allowlist.current_build().pcr0()),
         "connecting to guardian log bucket",
     );
-    let sharing_seq = cfg.sharing_seq;
-    let mut reader = GuardianReader::new(&cfg.common.guardian_s3, cfg.common.pcr_allowlist())
+    let mut reader = GuardianReader::new(&cfg.kp_roster.guardian_s3, cfg.kp_roster.pcr_allowlist())
         .await
         .context("connect to guardian log bucket")?;
     info!(phase = "s3 connect", "connected to guardian log bucket");
 
     info!(
         phase = "ceremony scrape",
-        expected_sharing_seq = sharing_seq,
         "scraping latest ceremony/ + shares/ logs (attestation-anchored)",
     );
     let state = VerifiedCeremonyState::latest_from_s3(
         &mut reader,
-        sharing_seq,
-        cfg.common.num_shares,
-        cfg.common.threshold,
+        cfg.kp_roster.num_shares,
+        cfg.kp_roster.threshold,
     )
     .await?;
     info!(
@@ -186,10 +148,9 @@ pub async fn run(cfg: CeremonyConfig) -> Result<()> {
     info!(
         phase = "share decrypt",
         share_id = share_id.get(),
-        gpg_homedir = ?cfg.gpg_homedir,
         "decrypting share via yubikey (ciphertext piped via stdin; plaintext in memory)",
     );
-    let reconstructed = decrypt_share(share, cfg.gpg_homedir.as_deref())?;
+    let reconstructed = decrypt_share(share)?;
     info!(
         phase = "share decrypt",
         share_id = share_id.get(),

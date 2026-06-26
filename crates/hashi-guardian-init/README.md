@@ -10,15 +10,17 @@ shortcuts.
 The production guardian initialization flow is split by actor:
 
 ```bash
-cargo run -p hashi-guardian-init -- operator ceremony --config operator-ceremony.sample.yaml
-cargo run -p hashi-guardian-init -- key-provisioner ceremony --config key-provisioner-ceremony.sample.yaml
-cargo run -p hashi-guardian-init -- operator provision --config operator-provision.sample.yaml
-cargo run -p hashi-guardian-init -- key-provisioner provision --config key-provisioner-provision.sample.yaml
+cargo run -p hashi-guardian-init -- operator ceremony --config guardian-init.sample.yaml
+cargo run -p hashi-guardian-init -- key-provisioner ceremony --config guardian-init.sample.yaml
+cargo run -p hashi-guardian-init -- operator provision --config guardian-init.sample.yaml
+cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-init.sample.yaml
 ```
 
 This will replace the `tools dev-bootstrap` shortcut used in dev. Each KP
 generates a PGP key on a yubikey and exports the public cert to the operator;
 the key ceremony and provisioning flow is then driven through these commands.
+All production commands read the same unified config file; see
+[`guardian-init.sample.yaml`](guardian-init.sample.yaml).
 
 ## operator ceremony
 
@@ -40,21 +42,19 @@ Each share is labeled with its recipient cert's `recipient_fingerprint`, so a KP
 finds their share by fingerprint (not positional index).
 
 ```bash
-cargo run -p hashi-guardian-init -- operator ceremony --config operator-ceremony.sample.yaml
+cargo run -p hashi-guardian-init -- operator ceremony --config guardian-init.sample.yaml
 ```
 
-Config: see [`operator-ceremony.sample.yaml`](operator-ceremony.sample.yaml) —
-the guardian endpoint, `n`/`t`, guardian S3 config, and the KP cert paths.
+Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
+command uses `guardian_endpoint`, `hashi`, and `kp_roster`.
 
 ## key-provisioner ceremony
 
-Confirms a KP can fetch and decrypt their setup or rotation ceremony share for
-an expected `sharing_seq` (`0` for genesis setup, `N + 1` for a rotation from
-prior sequence `N`). Trust is anchored to the guardian's S3 attestation log (no
+Confirms a KP can fetch and decrypt their share from the latest setup or
+rotation ceremony. Trust is anchored to the guardian's S3 attestation log (no
 gRPC to the live guardian): it discovers the latest ceremony session from S3,
-checks its `sharing_seq` matches the expected value, loads that session's
-attested signing pubkey, verifies its `ceremony/` audit log and `shares/`
-recovery log against the expected `sharing_seq` and `n`/`t`, confirms every
+loads that session's attested signing pubkey, verifies its `ceremony/` audit log
+and `shares/` recovery log against the expected `n`/`t`, confirms every
 encrypted share is addressed only to its labeled KP cert, finds the share labeled
 for this KP's cert fingerprint, decrypts via the yubikey (`gpg --decrypt`), and
 verifies the decrypted share against its commitment.
@@ -69,13 +69,11 @@ Only the share's **ciphertext** is written to disk (a temp file, deleted on
 drop); the decrypted scalar lives only in memory.
 
 ```bash
-cargo run -p hashi-guardian-init -- key-provisioner ceremony --config key-provisioner-ceremony.sample.yaml
+cargo run -p hashi-guardian-init -- key-provisioner ceremony --config guardian-init.sample.yaml
 ```
 
-Config: see
-[`key-provisioner-ceremony.sample.yaml`](key-provisioner-ceremony.sample.yaml)
-— the KP's cert path, expected `sharing_seq` and `n`/`t`, full KP cert roster,
-guardian S3 config, and an optional gpg homedir.
+Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
+command uses `kp_pgp_cert_path`, `hashi`, and `kp_roster`.
 
 ## operator provision
 
@@ -99,10 +97,10 @@ Eventually it will:
    shares.
 
 ```bash
-cargo run -p hashi-guardian-init -- operator provision --config operator-provision.sample.yaml
+cargo run -p hashi-guardian-init -- operator provision --config guardian-init.sample.yaml
 ```
 
-Config: see [`operator-provision.sample.yaml`](operator-provision.sample.yaml).
+Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml).
 
 ## key-provisioner provision
 
@@ -122,8 +120,8 @@ is held in this process' memory long enough to verify and re-encrypt it. It:
 4. Sources the initial `LimiterState` — recovered from the prior enclave's
    max-seq `Success` withdrawal log on rotation, or genesis on first deployment —
    and confirms it matches the enclave's (check C).
-5. Sources the committee (latest signed `committee-update/` log, or the genesis
-   config before any update exists), recomputes the `state_hash` the operator
+5. Sources the committee (latest signed `committee-update/` log, or on-chain
+   Hashi state before any update exists), recomputes the `state_hash` the operator
    booted the enclave with, and fails fast on mismatch (check D).
 6. Reads this KP's encrypted share from `shares/{seq}-{session}.json` (the
    ceremony's recovery log), verifies every share's recipients against the
@@ -141,19 +139,13 @@ is held in this process' memory long enough to verify and re-encrypt it. It:
    itself awaits the relay's `single_provisioner_init` RPC.
 
 ```bash
-cargo run -p hashi-guardian-init -- key-provisioner provision --config key-provisioner-provision.sample.yaml
+cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-init.sample.yaml
 ```
 
-See [`key-provisioner-provision.sample.yaml`](key-provisioner-provision.sample.yaml) for a complete
-`ProvisionConfig` example: this KP's cert path, the full KP cert roster,
-expected `sharing_seq` and `n`/`t`, the guardian S3 config, limiter config, the
-MPC committee verifying key `G` (`hashi_btc_master_pubkey_hex`), the PCR
-allowlist (`current_build` plus optional `prev_builds`) pinned against each
-session's attestation, the relay endpoint the share is submitted to, and an
-optional `gpg_homedir` for a yubikey-backed gpg agent that does not use gpg's
-default homedir.
-`hashi_committee_genesis` is needed only at genesis; omit it once a
-`committee-update/` log exists.
+See [`guardian-init.sample.yaml`](guardian-init.sample.yaml) for the unified
+config. This command uses `kp_pgp_cert_path`, `relay_endpoint`, `hashi`,
+`kp_roster`, and `limiter_config`. The committee and MPC committee verifying key
+`G` are fetched from on-chain Hashi state.
 
 ## tools
 

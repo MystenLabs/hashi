@@ -1,0 +1,63 @@
+# Sample configuration for hashi-guardian-init production commands.
+#
+# Reuse this same file for:
+#   cargo run -p hashi-guardian-init -- operator ceremony --config guardian-init.sample.yaml
+#   cargo run -p hashi-guardian-init -- operator provision --config guardian-init.sample.yaml
+#   cargo run -p hashi-guardian-init -- key-provisioner ceremony --config guardian-init.sample.yaml
+#   cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-init.sample.yaml
+
+# gRPC endpoint of the guardian. `operator ceremony` expects ceremony mode;
+# future `operator provision` will expect withdraw mode.
+guardian_endpoint: "http://localhost:3000"
+
+# Relay endpoint the KP's share is submitted to. Used by `key-provisioner provision`.
+relay_endpoint: "http://localhost:50051"
+
+# Path to this KP's armored OpenPGP public cert. Optional for operator commands;
+# required by key-provisioner commands.
+kp_pgp_cert_path: /path/to/kp3.asc
+
+hashi:
+  # Sui RPC URL used to fetch Hashi on-chain state.
+  sui_rpc: "https://fullnode.devnet.sui.io:443"
+  # Original published Hashi package id.
+  package_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
+  # Shared Hashi object id.
+  hashi_object_id: "0x0000000000000000000000000000000000000000000000000000000000000000"
+
+kp_roster:
+  # Secret-sharing parameters. `num_shares` MUST equal `kp_pgp_cert_paths.len()`.
+  num_shares: 5
+  threshold: 3
+
+  # S3 config for the guardian's log bucket. Must have object-lock enabled.
+  guardian_s3:
+    access_key: "AKIA..."
+    secret_key: "..."
+    bucket_info:
+      bucket: "hashi-guardian-logs"
+      region: "us-east-1"
+
+  # Paths to every KP's armored OpenPGP public cert from the expected ceremony roster.
+  kp_pgp_cert_paths:
+    - /path/to/kp1.asc
+    - /path/to/kp2.asc
+    - /path/to/kp3.asc
+    - /path/to/kp4.asc
+    - /path/to/kp5.asc
+
+  # Expected enclave build: git revision + PCR0 (hex).
+  current_build:
+    git_revision: "0000000000000000000000000000000000000000"
+    pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
+  # Older still-trusted builds accepted only for historical S3 logs during an upgrade window.
+  prev_builds: []
+  # prev_builds:
+  #   - git_revision: "1111111111111111111111111111111111111111"
+  #     pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+
+# Limiter parameters the withdraw-mode guardian will be initialized with.
+limiter_config:
+  refill_rate: 1000
+  max_bucket_capacity: 100000000

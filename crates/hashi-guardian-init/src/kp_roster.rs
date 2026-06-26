@@ -16,7 +16,6 @@
 //! share the same gpg-streaming pattern.
 
 use std::ops::Deref;
-use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -46,11 +45,8 @@ use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
 /// Common KP-roster config: the sharing params, the guardian's S3 log bucket,
-/// the full KP cert roster, and the PCR allowlist. Shared (via
-/// `#[serde(flatten)]`) by `operator ceremony`, `key-provisioner ceremony`, and
-/// `key-provisioner provision` —
-/// every command that needs to discover and verify a ceremony against an
-/// expected KP set.
+/// the full KP cert roster, and the PCR allowlist. Shared by every command that
+/// needs to discover and verify a ceremony against an expected KP set.
 #[derive(Deserialize)]
 pub struct KpRosterConfig {
     /// Total number of shares. Must equal `kp_pgp_cert_paths.len()`.
@@ -112,13 +108,17 @@ impl VerifiedCeremonyState {
             encrypted_shares: response.encrypted_shares,
             secret_sharing_instance: response.secret_sharing_instance,
         };
-        state.validate(expected_sharing_seq, expected_n, expected_t)?;
+        anyhow::ensure!(
+            state.secret_sharing_instance.sharing_seq() == expected_sharing_seq,
+            "ceremony sharing_seq ({}) differs from expected ({expected_sharing_seq})",
+            state.secret_sharing_instance.sharing_seq()
+        );
+        state.validate_shape(expected_n, expected_t)?;
         Ok(state)
     }
 
     pub async fn latest_from_s3(
         reader: &mut GuardianReader,
-        expected_sharing_seq: u64,
         expected_n: usize,
         expected_t: usize,
     ) -> Result<Self> {
@@ -138,7 +138,6 @@ impl VerifiedCeremonyState {
             instance,
             encrypted_shares,
             &roster,
-            expected_sharing_seq,
             expected_n,
             expected_t,
         )
@@ -152,7 +151,6 @@ impl VerifiedCeremonyState {
         secret_sharing_instance: SecretSharingInstance,
         encrypted_shares: KPEncryptedShares,
         roster: &[KPFingerprint],
-        expected_sharing_seq: u64,
         expected_n: usize,
         expected_t: usize,
     ) -> Result<Self> {
@@ -161,24 +159,14 @@ impl VerifiedCeremonyState {
             encrypted_shares,
             secret_sharing_instance,
         };
-        state.validate(expected_sharing_seq, expected_n, expected_t)?;
+        state.validate_shape(expected_n, expected_t)?;
         state.ensure_roster_matches(roster)?;
         Ok(state)
     }
 
-    /// Confirm the state uses the expected ceremony instance and carries
-    /// exactly `expected_n` encrypted shares.
-    pub fn validate(
-        &self,
-        expected_sharing_seq: u64,
-        expected_n: usize,
-        expected_t: usize,
-    ) -> Result<()> {
-        anyhow::ensure!(
-            self.secret_sharing_instance.sharing_seq() == expected_sharing_seq,
-            "ceremony sharing_seq ({}) differs from expected ({expected_sharing_seq})",
-            self.secret_sharing_instance.sharing_seq()
-        );
+    /// Confirm the state uses the expected sharing shape and carries exactly
+    /// `expected_n` encrypted shares.
+    pub fn validate_shape(&self, expected_n: usize, expected_t: usize) -> Result<()> {
         anyhow::ensure!(
             self.secret_sharing_instance.num_shares() == expected_n,
             "ceremony num_shares ({}) differs from expected ({expected_n})",
@@ -304,8 +292,8 @@ pub fn ensure_cert_in_roster(kp_cert: &PgpPublicCert, certs: &[PgpPublicCert]) -
 /// copies (e.g. inside `verify_share` / `build_from_share`) that this can't
 /// reach — those are wiped only when the process exits. The named locations
 /// this code owns are wiped deterministically.
-pub fn decrypt_share(share: &KPEncryptedShare, homedir: Option<&Path>) -> Result<DecryptedShare> {
-    let plaintext = Zeroizing::new(decrypt_armored_via_gpg(&share.armored_ciphertext, homedir)?);
+pub fn decrypt_share(share: &KPEncryptedShare) -> Result<DecryptedShare> {
+    let plaintext = Zeroizing::new(decrypt_armored_via_gpg(&share.armored_ciphertext, None)?);
     let scalar = scalar_from_decrypted_plaintext(&plaintext)?;
     Ok(DecryptedShare(Share {
         id: share.id,
