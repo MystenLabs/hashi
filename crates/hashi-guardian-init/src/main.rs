@@ -4,14 +4,14 @@
 use anyhow::Context;
 use clap::Parser;
 use clap::Subcommand;
-use hashi::config::Config;
+use hashi::config::Config as NodeConfig;
 use hashi::onchain::OnchainState;
 use std::path::PathBuf;
 
+mod config;
 mod dev_bootstrap;
 mod fetch_info;
 mod generate_master_key;
-mod hashi_onchain;
 mod heartbeat_checks;
 mod kp_ceremony;
 mod kp_provision;
@@ -108,7 +108,7 @@ struct ConfigArgs {
 }
 
 impl ConfigArgs {
-    fn load(&self) -> anyhow::Result<Config> {
+    fn load(&self) -> anyhow::Result<NodeConfig> {
         let s = std::fs::read_to_string(&self.config)
             .with_context(|| format!("failed to read config: {}", self.config.display()))?;
         toml::from_str(&s).context("failed to parse config TOML")
@@ -126,20 +126,21 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Operator { command } => match command {
             OperatorCommand::Ceremony { config } => {
-                let cfg = operator_ceremony::CeremonyRunConfig::load_yaml(&config)?;
+                let cfg = config::Config::load_yaml(&config)?;
                 operator_ceremony::run(cfg).await?;
             }
             OperatorCommand::Provision { config } => {
-                operator_provision::run(&config)?;
+                let cfg = config::Config::load_yaml(&config)?;
+                operator_provision::run(cfg)?;
             }
         },
         Command::KeyProvisioner { command } => match command {
             KeyProvisionerCommand::Ceremony { config } => {
-                let cfg = kp_ceremony::CeremonyConfig::load_yaml(&config)?;
+                let cfg = config::Config::load_yaml(&config)?;
                 kp_ceremony::run(cfg).await?;
             }
             KeyProvisionerCommand::Provision { config } => {
-                let cfg = kp_provision::ProvisionConfig::load_yaml(&config)?;
+                let cfg = config::Config::load_yaml(&config)?;
                 kp_provision::run(cfg).await?;
             }
         },

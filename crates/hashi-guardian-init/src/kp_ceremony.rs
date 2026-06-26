@@ -3,51 +3,18 @@
 
 //! `key-provisioner ceremony` verifies and decrypts this KP's ceremony share.
 
-use std::path::Path;
-use std::path::PathBuf;
-
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::load_certs;
-use serde::Deserialize;
 use tracing::info;
 
-use crate::hashi_onchain::HashiOnchainConfig;
-use crate::kp_roster::KpRosterConfig;
+use crate::config::Config;
 use crate::kp_roster::VerifiedCeremonyState;
 use crate::kp_roster::decrypt_share;
 use crate::kp_roster::ensure_cert_in_roster;
-
-#[derive(Deserialize)]
-pub struct CeremonyConfig {
-    pub hashi: HashiOnchainConfig,
-    pub kp_roster: KpRosterConfig,
-    /// Path to this KP's armored OpenPGP public cert (the one they exported and
-    /// gave to the operator at `operator ceremony` time). Used to derive the
-    /// fingerprint that finds this KP's share in `shares/`, and to confirm the
-    /// share's ciphertext is genuinely encrypted to this cert before decrypting.
-    pub kp_pgp_cert_path: PathBuf,
-}
-
-impl CeremonyConfig {
-    pub fn load_yaml(path: &Path) -> Result<Self> {
-        let bytes = std::fs::read(path).with_context(|| {
-            format!(
-                "failed to read key-provisioner ceremony config at {}",
-                path.display()
-            )
-        })?;
-        serde_yaml::from_slice(&bytes).with_context(|| {
-            format!(
-                "failed to parse key-provisioner ceremony yaml at {}",
-                path.display()
-            )
-        })
-    }
-}
 
 /// Verify this KP can fetch and decrypt its ceremony share.
 ///
@@ -59,7 +26,7 @@ impl CeremonyConfig {
 /// Security: the ciphertext is piped into `gpg --decrypt` over stdin and the
 /// plaintext streams back over stdout; neither ciphertext nor plaintext is
 /// written to disk by this flow.
-pub async fn run(cfg: CeremonyConfig) -> Result<()> {
+pub async fn run(cfg: Config) -> Result<()> {
     cfg.kp_roster.validate()?;
 
     info!(
@@ -89,15 +56,16 @@ pub async fn run(cfg: CeremonyConfig) -> Result<()> {
     // Load this KP's cert. Its fingerprint finds our share in `shares/`, and
     // the cert itself lets us confirm the ciphertext is genuinely encrypted to
     // us before we touch the yubikey.
-    let cert_armored = std::fs::read_to_string(&cfg.kp_pgp_cert_path)
-        .with_context(|| format!("read KP cert at {}", cfg.kp_pgp_cert_path.display()))?;
+    let kp_pgp_cert_path = cfg.require_kp_pgp_cert_path("key-provisioner ceremony")?;
+    let cert_armored = std::fs::read_to_string(kp_pgp_cert_path)
+        .with_context(|| format!("read KP cert at {}", kp_pgp_cert_path.display()))?;
     let kp_cert = PgpPublicCert::new(cert_armored)
-        .with_context(|| format!("invalid PGP cert at {}", cfg.kp_pgp_cert_path.display()))?;
+        .with_context(|| format!("invalid PGP cert at {}", kp_pgp_cert_path.display()))?;
     let want_fp = kp_cert.fingerprint();
     info!(
         phase = "setup",
         fingerprint = %want_fp,
-        kp_cert_path = %cfg.kp_pgp_cert_path.display(),
+        kp_cert_path = %kp_pgp_cert_path.display(),
         "loaded this KP's cert",
     );
     ensure_cert_in_roster(&kp_cert, &certs)?;

@@ -198,6 +198,7 @@ impl PcrAllowlist {
 impl<'de> Deserialize<'de> for BuildPcrs {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
+        #[serde(rename_all = "kebab-case")]
         struct BuildPcrsWire {
             git_revision: GitRevision,
             pcr0: String,
@@ -217,6 +218,7 @@ impl<'de> Deserialize<'de> for BuildPcrs {
 impl<'de> Deserialize<'de> for PcrAllowlist {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
+        #[serde(rename_all = "kebab-case")]
         struct PcrAllowlistWire {
             current_build: BuildPcrs,
             #[serde(default)]

@@ -13,8 +13,6 @@
 //! [`SetupNewKey`]: hashi_types::guardian::SetupNewKeyRequest
 //! [`SetupNewKeyResponse`]: hashi_types::guardian::SetupNewKeyResponse
 
-use std::path::Path;
-
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
@@ -32,43 +30,16 @@ use hashi_types::guardian::proto_conversions::setup_new_key_request_to_pb;
 use hashi_types::pgp::load_certs;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
-use serde::Deserialize;
 use tracing::info;
 
-use crate::hashi_onchain::HashiOnchainConfig;
-use crate::kp_roster::KpRosterConfig;
+use crate::config::Config;
 use crate::kp_roster::VerifiedCeremonyState;
-
-#[derive(Deserialize)]
-pub struct CeremonyRunConfig {
-    pub hashi: HashiOnchainConfig,
-    pub kp_roster: KpRosterConfig,
-    /// gRPC endpoint of the ceremony-mode guardian.
-    pub guardian_endpoint: String,
-}
-
-impl CeremonyRunConfig {
-    pub fn load_yaml(path: &Path) -> Result<Self> {
-        let bytes = std::fs::read(path).with_context(|| {
-            format!(
-                "failed to read operator ceremony config at {}",
-                path.display()
-            )
-        })?;
-        serde_yaml::from_slice(&bytes).with_context(|| {
-            format!(
-                "failed to parse operator ceremony yaml at {}",
-                path.display()
-            )
-        })
-    }
-}
 
 /// Run the one-time production guardian key ceremony.
 ///
 /// See the module docs for the full step-by-step flow. Each step is logged via
 /// `tracing` so the operator can follow exactly what is happening.
-pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
+pub async fn run(cfg: Config) -> Result<()> {
     info!(
         phase = "setup",
         num_shares = cfg.kp_roster.num_shares,

@@ -39,7 +39,6 @@ use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianEncryptedShare;
 use hashi_types::guardian::GuardianInfo;
-use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::WithdrawModeState;
@@ -48,20 +47,16 @@ use hashi_types::pgp::load_certs;
 use hashi_types::proto as pb;
 use hpke::Deserializable;
 use rand::thread_rng;
-use serde::Deserialize;
-use std::path::Path;
-use std::path::PathBuf;
 use tracing::info;
 
-use crate::hashi_onchain::HashiOnchainConfig;
+use crate::config::Config;
 use crate::heartbeat_checks;
-use crate::kp_roster::KpRosterConfig;
 use crate::kp_roster::VerifiedCeremonyState;
 use crate::kp_roster::decrypt_share;
 use crate::kp_roster::ensure_cert_in_roster;
 use crate::limiter_recovery;
 
-pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
+pub async fn run(cfg: Config) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
 
     info!(
@@ -117,16 +112,17 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         "KP cert roster loaded"
     );
 
+    let kp_pgp_cert_path = cfg.require_kp_pgp_cert_path("key-provisioner provision")?;
     let kp_cert = PgpPublicCert::new(
-        std::fs::read_to_string(&cfg.kp_pgp_cert_path)
-            .with_context(|| format!("read KP cert at {}", cfg.kp_pgp_cert_path.display()))?,
+        std::fs::read_to_string(kp_pgp_cert_path)
+            .with_context(|| format!("read KP cert at {}", kp_pgp_cert_path.display()))?,
     )
-    .with_context(|| format!("invalid PGP cert at {}", cfg.kp_pgp_cert_path.display()))?;
+    .with_context(|| format!("invalid PGP cert at {}", kp_pgp_cert_path.display()))?;
     let want_fp = kp_cert.fingerprint();
     info!(
         phase = "setup",
         fingerprint = %want_fp,
-        kp_cert_path = %cfg.kp_pgp_cert_path.display(),
+        kp_cert_path = %kp_pgp_cert_path.display(),
         "loaded this KP's cert",
     );
     ensure_cert_in_roster(&kp_cert, &certs)?;
@@ -578,37 +574,4 @@ async fn prechecks(
     );
 
     Ok(())
-}
-
-#[derive(Deserialize)]
-pub struct ProvisionConfig {
-    pub hashi: HashiOnchainConfig,
-    pub kp_roster: KpRosterConfig,
-    /// Path to this KP's armored OpenPGP public cert (the one they exported
-    /// from their yubikey and gave to the operator at ceremony time). Used to
-    /// find this KP's share in `shares/` by fingerprint, and to confirm the
-    /// ciphertext is genuinely encrypted to this cert before decrypting.
-    pub kp_pgp_cert_path: PathBuf,
-    /// Relay endpoint the KP's encrypted share is submitted to. The relay
-    /// collects T-of-N shares before forwarding them to the guardian in one
-    /// `ProvisionerInit` call.
-    pub relay_endpoint: String,
-    pub limiter_config: LimiterConfig,
-}
-
-impl ProvisionConfig {
-    pub fn load_yaml(path: &Path) -> anyhow::Result<Self> {
-        let bytes = std::fs::read(path).with_context(|| {
-            format!(
-                "failed to read key-provisioner provision config at {}",
-                path.display()
-            )
-        })?;
-        serde_yaml::from_slice(&bytes).with_context(|| {
-            format!(
-                "failed to parse key-provisioner provision yaml at {}",
-                path.display()
-            )
-        })
-    }
 }
