@@ -97,6 +97,39 @@ fn summarize_heartbeats_by_session(
         .collect())
 }
 
+/// Enforces that no guardian session has emitted a heartbeat recently enough to
+/// still be considered active. Used before limiter recovery in `operator provision`,
+/// where the replacement guardian has not been operator-initialized yet and so
+/// there is intentionally no new live session to select.
+pub async fn ensure_all_sessions_quiet(reader: &mut GuardianReader) -> anyhow::Result<()> {
+    let recent_heartbeats = read_recent_heartbeats(reader).await?;
+    let summary = summarize_heartbeats_by_session(recent_heartbeats)?;
+    let now = now_timestamp_secs();
+
+    let active_sessions = summary
+        .iter()
+        .filter_map(|s| {
+            let age_secs = now.saturating_sub(s.last_heartbeat);
+            (age_secs < OTHER_SESSION_QUIET_PERIOD.as_secs())
+                .then(|| format!("{} ({}s ago)", s.session_id, age_secs))
+        })
+        .collect::<Vec<_>>();
+    if !active_sessions.is_empty() {
+        anyhow::bail!(
+            "sessions are still active within {}s: {}",
+            OTHER_SESSION_QUIET_PERIOD.as_secs(),
+            active_sessions.join(", ")
+        );
+    }
+
+    info!(
+        session_count = summary.len(),
+        quiet_period_secs = OTHER_SESSION_QUIET_PERIOD.as_secs(),
+        "all guardian sessions are quiet"
+    );
+    Ok(())
+}
+
 /// Checks that exactly one session is live and returns its ID.
 ///
 /// A session is considered live when its latest heartbeat is not older than
