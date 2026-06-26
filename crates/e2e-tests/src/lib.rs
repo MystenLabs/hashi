@@ -598,6 +598,7 @@ mod tests {
     use fastcrypto::serde_helpers::ToFromByteArray;
     use fastcrypto_tbls::polynomial::Poly;
     use fastcrypto_tbls::threshold_schnorr::G;
+    use fastcrypto_tbls::threshold_schnorr::Parameters;
     use fastcrypto_tbls::threshold_schnorr::S;
     use fastcrypto_tbls::threshold_schnorr::avss;
     use fastcrypto_tbls::threshold_schnorr::batch_avss;
@@ -726,7 +727,7 @@ mod tests {
         nonces_for_dealer: &[MockDealerNonces],
         share_ids: &[ShareIndex],
         batch_size_per_weight: u16,
-        f: usize,
+        params: Parameters,
     ) -> Presignatures {
         let receiver_outputs: Vec<batch_avss::ReceiverOutput> = nonces_for_dealer
             .iter()
@@ -750,7 +751,7 @@ mod tests {
                 }
             })
             .collect();
-        Presignatures::new(receiver_outputs, batch_size_per_weight, f).unwrap()
+        Presignatures::new(receiver_outputs, batch_size_per_weight, params).unwrap()
     }
 
     fn mock_shares(
@@ -849,7 +850,10 @@ mod tests {
                 &nonces_for_dealer,
                 &info.share_ids,
                 batch_size_per_weight,
-                cfg.max_faulty,
+                Parameters {
+                    t,
+                    f: cfg.max_faulty as u16,
+                },
             );
             let committee = {
                 let mpc_mgr = node.hashi().mpc_manager().unwrap();

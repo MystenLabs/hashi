@@ -102,7 +102,7 @@ impl MpcService for HttpService {
         &self,
         request: tonic::Request<ComplainRequest>,
     ) -> Result<tonic::Response<ComplainResponse>, Status> {
-        authenticate_caller(&request)?;
+        let caller = authenticate_caller(&request)?;
         let external_request = request.into_inner();
         let internal_request = types::ComplainRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -114,10 +114,11 @@ impl MpcService for HttpService {
                 mgr.previous_epoch,
                 internal_request.epoch,
             )?;
-            mgr.handle_complain_request(&internal_request).map_err(|e| {
-                tracing::warn!("complain failed: {e}");
-                mpc_error_to_status(e)
-            })
+            mgr.handle_complain_request(caller, &internal_request)
+                .map_err(|e| {
+                    tracing::warn!("complain failed: {e}");
+                    mpc_error_to_status(e)
+                })
         })
         .await?;
         Ok(tonic::Response::new(ComplainResponse::from(&response)))

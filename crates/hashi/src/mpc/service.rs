@@ -34,6 +34,7 @@ use crate::mpc::types::MpcOutputRecoveryOutcome;
 use crate::mpc::types::ProtocolType;
 use crate::onchain::Notification;
 use fastcrypto_tbls::threshold_schnorr::G;
+use fastcrypto_tbls::threshold_schnorr::Parameters;
 use fastcrypto_tbls::threshold_schnorr::presigning::Presignatures;
 use hashi_types::committee::BLS12381Signature;
 use hashi_types::committee::BlsSignatureAggregator;
@@ -460,18 +461,21 @@ impl MpcService {
         drop(_timer);
         let nonce_outputs =
             nonce_result.map_err(|e| anyhow::anyhow!("Nonce generation failed: {e}"))?;
-        let (batch_size_per_weight, f) = {
+        let (batch_size_per_weight, params) = {
             let mgr = mpc_manager.read().unwrap();
             (
                 mgr.batch_size_per_weight,
-                mgr.mpc_config.max_faulty as usize,
+                Parameters {
+                    t: mgr.mpc_config.threshold,
+                    f: mgr.mpc_config.max_faulty,
+                },
             )
         };
         let _timer = metrics
             .mpc_presig_conversion_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
             .start_timer();
-        let presignatures = Presignatures::new(nonce_outputs, batch_size_per_weight, f)
+        let presignatures = Presignatures::new(nonce_outputs, batch_size_per_weight, params)
             .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
         drop(_timer);
         Ok((committee, presignatures))
@@ -514,11 +518,14 @@ impl MpcService {
             .inner
             .mpc_manager()
             .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized"))?;
-        let (batch_size_per_weight, f) = {
+        let (batch_size_per_weight, params) = {
             let mgr = mpc_manager.read().unwrap();
             (
                 mgr.batch_size_per_weight,
-                mgr.mpc_config.max_faulty as usize,
+                Parameters {
+                    t: mgr.mpc_config.threshold,
+                    f: mgr.mpc_config.max_faulty,
+                },
             )
         };
         // Walk through batches to find the one containing `num_consumed`.
@@ -532,7 +539,7 @@ impl MpcService {
                     epoch,
                     batch_index,
                     batch_size_per_weight,
-                    f,
+                    params,
                 )
                 .await?;
             let size = presigs.len() as u64;
@@ -628,7 +635,7 @@ impl MpcService {
         epoch: u64,
         batch_index: u32,
         batch_size_per_weight: u16,
-        f: usize,
+        params: Parameters,
     ) -> anyhow::Result<Presignatures> {
         let onchain_state = self.inner.onchain_state().clone();
         let (_, certs) = onchain_state
@@ -657,7 +664,7 @@ impl MpcService {
                 "No valid nonce outputs after reconstruction for epoch {epoch} batch {batch_index}"
             ));
         }
-        Presignatures::new(outputs, batch_size_per_weight, f)
+        Presignatures::new(outputs, batch_size_per_weight, params)
             .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))
     }
 

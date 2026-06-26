@@ -280,7 +280,10 @@ impl types::ComplainRequest {
             epoch: Some(self.epoch),
             dealer: Some(self.dealer.to_string()),
             share_index: self.share_index.map(|idx| idx.get() as u32),
-            complaint: Some(serialize_bcs(&self.complaint)),
+            complaint: Some(match &self.complaint {
+                types::ProtocolComplaint::Avss(c) => serialize_bcs(c),
+                types::ProtocolComplaint::BatchedAvss(c) => serialize_bcs(c),
+            }),
             protocol_type: Some(mpc_protocol_type_to_proto(self.protocol_type) as i32),
             batch_index: self.batch_index,
         }
@@ -301,12 +304,17 @@ impl TryFrom<&proto::ComplainRequest> for types::ComplainRequest {
         } else {
             None
         };
-        let complaint: complaint::Complaint = deserialize_bcs(
-            required(value.complaint.as_ref(), "complaint")?,
-            "complaint",
-        )?;
         let protocol_type =
             mpc_protocol_type_from_proto(required(value.protocol_type, "protocol_type")?)?;
+        let complaint_bytes = required(value.complaint.as_ref(), "complaint")?;
+        let complaint = match protocol_type {
+            types::ProtocolTypeIndicator::Dkg | types::ProtocolTypeIndicator::KeyRotation => {
+                types::ProtocolComplaint::Avss(deserialize_bcs(complaint_bytes, "complaint")?)
+            }
+            types::ProtocolTypeIndicator::NonceGeneration => types::ProtocolComplaint::BatchedAvss(
+                deserialize_bcs(complaint_bytes, "complaint")?,
+            ),
+        };
         Ok(Self {
             dealer,
             share_index,
@@ -349,12 +357,12 @@ impl TryFrom<&proto::ComplainResponse> for types::ComplaintResponse {
         use proto::complain_response::Responses;
         match &value.responses {
             Some(Responses::DkgResponse(dkg_response)) => {
-                let response: complaint::ComplaintResponse<avss::SharesForNode> =
+                let response: avss::ComplaintResponse =
                     deserialize_bcs(dkg_response, "dkg_response")?;
                 Ok(types::ComplaintResponse::Dkg(response))
             }
             Some(Responses::RotationResponse(rotation_response)) => {
-                let response: complaint::ComplaintResponse<avss::SharesForNode> =
+                let response: avss::ComplaintResponse =
                     deserialize_bcs(rotation_response, "rotation_response")?;
                 Ok(types::ComplaintResponse::Rotation(response))
             }

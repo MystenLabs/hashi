@@ -19,7 +19,9 @@ use fastcrypto::groups::Scalar;
 use fastcrypto_tbls::ecies_v1::MultiRecipientEncryption;
 use fastcrypto_tbls::polynomial::Poly;
 use fastcrypto_tbls::random_oracle::RandomOracle;
+use fastcrypto_tbls::threshold_schnorr::Parameters;
 use fastcrypto_tbls::threshold_schnorr::avss;
+use fastcrypto_tbls::threshold_schnorr::complaint;
 use hashi_types::committee::Committee;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::EncryptionPublicKey;
@@ -427,9 +429,11 @@ impl P2PChannel for MockP2PChannel {
                 party
             ))
         })?;
-        let response = manager.handle_complain_request(request).map_err(|e| {
-            crate::communication::ChannelError::RequestFailed(format!("Handler failed: {}", e))
-        })?;
+        let response = manager
+            .handle_complain_request(self.current_sender, request)
+            .map_err(|e| {
+                crate::communication::ChannelError::RequestFailed(format!("Handler failed: {}", e))
+            })?;
         Ok(response)
     }
 
@@ -3696,13 +3700,13 @@ fn test_handle_complain_request_no_message_from_dealer() {
         dealer: dealer_address,
         share_index: None,
         batch_index: None,
-        complaint,
+        complaint: ProtocolComplaint::Avss(complaint),
         protocol_type: ProtocolTypeIndicator::Dkg,
         epoch: manager.mpc_config.epoch,
     };
 
     // Manager has no message from this dealer
-    let result = manager.handle_complain_request(&request);
+    let result = manager.handle_complain_request(setup.address(1), &request);
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -3730,7 +3734,7 @@ fn test_handle_complain_request_rederives_output_rejects_invalid_proof() {
         dealer: dealer_address,
         share_index: None,
         batch_index: None,
-        complaint,
+        complaint: ProtocolComplaint::Avss(complaint),
         protocol_type: ProtocolTypeIndicator::Dkg,
         epoch: manager.mpc_config.epoch,
     };
@@ -3739,7 +3743,7 @@ fn test_handle_complain_request_rederives_output_rejects_invalid_proof() {
     // from the message (cross-epoch fallback). The complaint proof was generated
     // with a wrong key and doesn't match the re-derived output, so
     // handle_complaint correctly rejects it.
-    let result = manager.handle_complain_request(&request);
+    let result = manager.handle_complain_request(setup.address(1), &request);
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), MpcError::CryptoError(_)));
 }
@@ -3760,16 +3764,20 @@ fn test_handle_complain_request_caches_response() {
     let receiver1 = avss::Receiver::new(
         config.nodes.clone(),
         1,
-        config.threshold,
+        Parameters {
+            t: config.threshold,
+            f: config.max_faulty,
+        },
         dealer_session_id.to_vec(),
         None,
         setup.encryption_keys[1].clone(),
-    );
+    )
+    .unwrap();
 
     let Messages::Dkg(inner_msg) = &cheating_message else {
         unreachable!()
     };
-    let result = receiver1.process_message(inner_msg);
+    let result = receiver1.process_message(inner_msg, &mut rand::thread_rng());
     let complaint = match result {
         Ok(avss::ProcessedMessage::Complaint(c)) => c,
         Ok(_) => panic!("Expected complaint but got valid shares"),
@@ -3788,13 +3796,15 @@ fn test_handle_complain_request_caches_response() {
         dealer: dealer_addr,
         share_index: None,
         batch_index: None,
-        complaint: complaint.clone(),
+        complaint: ProtocolComplaint::Avss(complaint.clone()),
         protocol_type: ProtocolTypeIndicator::Dkg,
         epoch: party2_manager.mpc_config.epoch,
     };
 
     // First call - should compute and cache
-    let response1 = party2_manager.handle_complain_request(&request).unwrap();
+    let response1 = party2_manager
+        .handle_complain_request(setup.address(1), &request)
+        .unwrap();
 
     // Verify cache contains the response
     assert_eq!(party2_manager.complaint_responses.len(), 1);
@@ -3807,7 +3817,9 @@ fn test_handle_complain_request_caches_response() {
     );
 
     // Second call - should return cached response
-    let response2 = party2_manager.handle_complain_request(&request).unwrap();
+    let response2 = party2_manager
+        .handle_complain_request(setup.address(1), &request)
+        .unwrap();
 
     // Verify responses are identical
     assert_eq!(
@@ -4161,11 +4173,11 @@ async fn test_recover_shares_via_complaint_insufficient_signers() {
 }
 
 #[tokio::test]
-async fn test_recover_shares_via_complaint_crypto_error() {
-    // This test triggers a genuine crypto error by providing complaint responses
-    // from parties whose IDs are not in the receiver's nodes configuration.
-    // When receiver.recover() calls total_weight_of() with invalid party IDs,
-    // it returns a FastCryptoError that gets wrapped as CryptoError.
+async fn test_recover_shares_via_complaint_rejects_responders_not_in_config() {
+    // Complaint responses from parties whose IDs are not in the receiver's nodes
+    // configuration cannot be verified (their shares can't be bound to a valid
+    // responder), so they are skipped before recovery. With no verifiable responses
+    // left, recovery fails with ProtocolFailed.
 
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
@@ -4212,13 +4224,17 @@ async fn test_recover_shares_via_complaint_crypto_error() {
         epoch: party_manager.mpc_config.epoch,
     };
 
-    let resp3 = mgr3.handle_complain_request(&request).unwrap();
-    let resp4 = mgr4.handle_complain_request(&request).unwrap();
+    let resp3 = mgr3
+        .handle_complain_request(setup.address(1), &request)
+        .unwrap();
+    let resp4 = mgr4
+        .handle_complain_request(setup.address(1), &request)
+        .unwrap();
 
     let responses = std::collections::HashMap::from([(addr3, resp3), (addr4, resp4)]);
 
-    // Modify party_manager's config to exclude parties 3 and 4
-    // This makes their responses invalid (party IDs not in the nodes list)
+    // Modify party_manager's config to exclude parties 3 and 4. Their responses can
+    // no longer be verified (party IDs not in the nodes list), so they are skipped.
     let config = setup.dkg_config();
     let smaller_nodes = fastcrypto_tbls::nodes::Nodes::new(
         config
@@ -4249,8 +4265,8 @@ async fn test_recover_shares_via_complaint_crypto_error() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
-        matches!(err, MpcError::CryptoError(_)),
-        "Expected CryptoError, got: {:?}",
+        matches!(err, MpcError::ProtocolFailed(_)),
+        "Expected ProtocolFailed (no verifiable responses), got: {:?}",
         err
     );
 }
@@ -4581,7 +4597,7 @@ fn create_complaint_for_dealer(
     party_id: u16,
     dealer_index: usize,
     rng: &mut impl fastcrypto::traits::AllowedRng,
-) -> complaint::Complaint {
+) -> avss::Complaint {
     // Get the DKG message
     let dealer_message = match dealer_messages {
         Messages::Dkg(msg) => msg,
@@ -4597,12 +4613,16 @@ fn create_complaint_for_dealer(
     let receiver = avss::Receiver::new(
         config.nodes.clone(),
         party_id,
-        config.threshold,
+        Parameters {
+            t: config.threshold,
+            f: config.max_faulty,
+        },
         dealer_session_id.to_vec(),
         None,
         wrong_key,
-    );
-    match receiver.process_message(dealer_message).unwrap() {
+    )
+    .unwrap();
+    match receiver.process_message(dealer_message, rng).unwrap() {
         avss::ProcessedMessage::Complaint(c) => c,
         _ => panic!("Expected complaint with wrong key"),
     }
@@ -4660,8 +4680,12 @@ fn create_cheating_message(
     let dealer = avss::Dealer::new(
         Some(secret), // Use same secret so commitment matches
         config.nodes.clone(),
-        config.threshold,
+        Parameters {
+            t: config.threshold,
+            f: config.max_faulty,
+        },
         dealer_session_id.to_vec(),
+        rng,
     )
     .unwrap();
     let template_message = dealer.create_message(rng);
@@ -4670,10 +4694,11 @@ fn create_cheating_message(
     let ciphertext_bytes = bcs::to_bytes(&corrupted_ciphertext).unwrap();
     let commitment_bytes = bcs::to_bytes(&commitment).unwrap();
 
-    // Manually construct the serialized Message (ciphertext, then commitment)
+    // Manually construct the serialized Message. Field order must match `avss::Message`:
+    // `feldman_commitment` then `ciphertext`.
     let mut combined = Vec::new();
-    combined.extend_from_slice(&ciphertext_bytes);
     combined.extend_from_slice(&commitment_bytes);
+    combined.extend_from_slice(&ciphertext_bytes);
 
     bcs::from_bytes::<avss::Message>(&combined).unwrap_or(template_message)
 }
@@ -4731,8 +4756,12 @@ fn create_cheating_rotation_message(
     let dealer = avss::Dealer::new(
         Some(share_value),
         config.nodes.clone(),
-        config.threshold,
+        Parameters {
+            t: config.threshold,
+            f: config.max_faulty,
+        },
         rotation_session_id.to_vec(),
+        rng,
     )
     .unwrap();
     let template_message = dealer.create_message(rng);
@@ -4741,10 +4770,11 @@ fn create_cheating_rotation_message(
     let ciphertext_bytes = bcs::to_bytes(&corrupted_ciphertext).unwrap();
     let commitment_bytes = bcs::to_bytes(&commitment).unwrap();
 
-    // Manually construct the serialized Message (ciphertext, then commitment)
+    // Manually construct the serialized Message. Field order must match `avss::Message`:
+    // `feldman_commitment` then `ciphertext`.
     let mut combined = Vec::new();
-    combined.extend_from_slice(&ciphertext_bytes);
     combined.extend_from_slice(&commitment_bytes);
+    combined.extend_from_slice(&ciphertext_bytes);
 
     let message = bcs::from_bytes::<avss::Message>(&combined).unwrap_or(template_message);
 
@@ -4754,7 +4784,7 @@ fn create_cheating_rotation_message(
 fn create_dealer_message_and_complaint(
     setup: &TestSetup,
     rng: &mut impl fastcrypto::traits::AllowedRng,
-) -> (Address, Messages, complaint::Complaint) {
+) -> (Address, Messages, avss::Complaint) {
     let dealer_address = setup.address(0);
     let dealer_manager = setup.create_manager(0);
     let dealer_message = Messages::Dkg(dealer_manager.create_dealer_message(rng));
@@ -4767,12 +4797,13 @@ fn setup_party_with_complaint(
     party_manager: &mut MpcManager,
     dealer_address: &Address,
     dealer_messages: &Messages,
-    complaint: complaint::Complaint,
+    complaint: avss::Complaint,
 ) {
     // DKG: complaints keyed by dealer address
-    party_manager
-        .complaints_to_process
-        .insert(ComplaintsToProcessKey::Dkg(*dealer_address), complaint);
+    party_manager.complaints_to_process.insert(
+        ComplaintsToProcessKey::Dkg(*dealer_address),
+        ProtocolComplaint::Avss(complaint),
+    );
     if let Messages::Dkg(msg) = dealer_messages {
         party_manager
             .current_dkg_messages
@@ -7098,19 +7129,26 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
     let receiver = avss::Receiver::new(
         receiver_manager.mpc_config.nodes.clone(),
         receiver_manager.party_id,
-        receiver_manager.mpc_config.threshold,
+        Parameters {
+            t: receiver_manager.mpc_config.threshold,
+            f: receiver_manager.mpc_config.max_faulty,
+        },
         session_id.to_vec(),
         None,
         receiver_manager.encryption_key.clone(),
-    );
-    let complaint = match receiver.process_message(&cheating_msg.1).unwrap() {
+    )
+    .unwrap();
+    let complaint = match receiver
+        .process_message(&cheating_msg.1, &mut rand::thread_rng())
+        .unwrap()
+    {
         avss::ProcessedMessage::Complaint(c) => c,
         _ => panic!("Expected complaint from corrupted share"),
     };
     // Rotation: complaints keyed by (dealer_addr, share_index)
     receiver_manager.complaints_to_process.insert(
         ComplaintsToProcessKey::Rotation(rotation_dealer_addr, share3_index),
-        complaint,
+        ProtocolComplaint::Avss(complaint),
     );
 
     let outputs_before = receiver_manager.dealer_outputs.len();
@@ -7235,12 +7273,19 @@ async fn test_recover_rotation_shares_via_complaint_success() {
     let receiver = avss::Receiver::new(
         test_manager.mpc_config.nodes.clone(),
         test_manager.party_id,
-        test_manager.mpc_config.threshold,
+        Parameters {
+            t: test_manager.mpc_config.threshold,
+            f: test_manager.mpc_config.max_faulty,
+        },
         session_id.to_vec(),
         None, // No expected commitment
         test_manager.encryption_key.clone(),
-    );
-    let valid_complaint = match receiver.process_message(&cheating_message).unwrap() {
+    )
+    .unwrap();
+    let valid_complaint = match receiver
+        .process_message(&cheating_message, &mut rand::thread_rng())
+        .unwrap()
+    {
         avss::ProcessedMessage::Complaint(c) => c,
         _ => panic!("Expected complaint from corrupted share"),
     };
@@ -7248,7 +7293,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
     // Insert the complaint (Rotation: keyed by (dealer_addr, share_index))
     test_manager.complaints_to_process.insert(
         ComplaintsToProcessKey::Rotation(dealer_addr, first_share_index),
-        valid_complaint,
+        ProtocolComplaint::Avss(valid_complaint),
     );
 
     // Create other managers who have the cheating messages and can respond to complaints
@@ -7406,12 +7451,19 @@ fn test_handle_complain_request_success() {
     let receiver = avss::Receiver::new(
         victim_manager.mpc_config.nodes.clone(),
         victim_manager.party_id,
-        victim_manager.mpc_config.threshold,
+        Parameters {
+            t: victim_manager.mpc_config.threshold,
+            f: victim_manager.mpc_config.max_faulty,
+        },
         session_id.to_vec(),
         commitment,
         victim_manager.encryption_key.clone(),
-    );
-    let complaint = match receiver.process_message(&cheating_message).unwrap() {
+    )
+    .unwrap();
+    let complaint = match receiver
+        .process_message(&cheating_message, &mut rand::thread_rng())
+        .unwrap()
+    {
         avss::ProcessedMessage::Complaint(c) => c,
         _ => panic!("Expected complaint from corrupted share"),
     };
@@ -7439,13 +7491,14 @@ fn test_handle_complain_request_success() {
         dealer: dealer_addr,
         share_index: Some(first_share_index),
         batch_index: None,
-        complaint,
+        complaint: ProtocolComplaint::Avss(complaint),
         protocol_type: ProtocolTypeIndicator::KeyRotation,
         epoch: responder_manager.mpc_config.epoch,
     };
 
     // Handle the complaint request
-    let result = responder_manager.handle_complain_request(&request);
+    let result = responder_manager
+        .handle_complain_request(rotation_setup.setup.address(victim_idx), &request);
 
     assert!(
         result.is_ok(),
@@ -7479,7 +7532,10 @@ fn test_handle_complain_request_success() {
             share_index: Some(other_share_index),
             ..request.clone()
         };
-        let mismatched_result = responder_manager.handle_complain_request(&mismatched_request);
+        let mismatched_result = responder_manager.handle_complain_request(
+            rotation_setup.setup.address(victim_idx),
+            &mismatched_request,
+        );
         assert!(
             mismatched_result.is_err(),
             "Complaint authored against share_index {first_share_index} must not validate \
@@ -9446,7 +9502,7 @@ fn retrieve_and_verify_hash(
 fn complain_and_assert_no_message(
     manager: &mut MpcManager,
     dealer_address: Address,
-    complaint: complaint::Complaint,
+    complaint: ProtocolComplaint,
     share_index: Option<ShareIndex>,
     batch_index: Option<u32>,
     protocol_type: ProtocolTypeIndicator,
@@ -9459,7 +9515,10 @@ fn complain_and_assert_no_message(
         protocol_type,
         epoch: manager.mpc_config.epoch,
     };
-    let result = manager.handle_complain_request(&request);
+    // The "No message from dealer" error fires before the accuser is resolved, so any
+    // committee member (here, the handling node itself) is an acceptable caller.
+    let caller = manager.address;
+    let result = manager.handle_complain_request(caller, &request);
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(matches!(err, MpcError::NotFound(_)));
@@ -9587,12 +9646,19 @@ fn test_handle_complain_request_rotation_no_message_from_dealer() {
     let avss_receiver = avss::Receiver::new(
         receiver.mpc_config.nodes.clone(),
         receiver.party_id,
-        receiver.mpc_config.threshold,
+        Parameters {
+            t: receiver.mpc_config.threshold,
+            f: receiver.mpc_config.max_faulty,
+        },
         session_id.to_vec(),
         commitment,
         wrong_key,
-    );
-    let complaint = match avss_receiver.process_message(msg).unwrap() {
+    )
+    .unwrap();
+    let complaint = match avss_receiver
+        .process_message(msg, &mut rand::thread_rng())
+        .unwrap()
+    {
         avss::ProcessedMessage::Complaint(c) => c,
         _ => panic!("Expected complaint with wrong key"),
     };
@@ -9600,7 +9666,7 @@ fn test_handle_complain_request_rotation_no_message_from_dealer() {
     complain_and_assert_no_message(
         &mut receiver,
         dealer_addr,
-        complaint,
+        ProtocolComplaint::Avss(complaint),
         Some(share_index),
         None,
         ProtocolTypeIndicator::KeyRotation,
@@ -9646,12 +9712,19 @@ fn test_handle_complain_request_rotation_rederives_output_rejects_invalid_proof(
     let avss_receiver = avss::Receiver::new(
         receiver.mpc_config.nodes.clone(),
         receiver.party_id,
-        receiver.mpc_config.threshold,
+        Parameters {
+            t: receiver.mpc_config.threshold,
+            f: receiver.mpc_config.max_faulty,
+        },
         session_id.to_vec(),
         commitment,
         wrong_key,
-    );
-    let complaint = match avss_receiver.process_message(msg).unwrap() {
+    )
+    .unwrap();
+    let complaint = match avss_receiver
+        .process_message(msg, &mut rand::thread_rng())
+        .unwrap()
+    {
         avss::ProcessedMessage::Complaint(c) => c,
         _ => panic!("Expected complaint with wrong key"),
     };
@@ -9660,14 +9733,15 @@ fn test_handle_complain_request_rotation_rederives_output_rejects_invalid_proof(
         dealer: dealer_addr,
         share_index: Some(share_index),
         batch_index: None,
-        complaint,
+        complaint: ProtocolComplaint::Avss(complaint),
         protocol_type: ProtocolTypeIndicator::KeyRotation,
         epoch: receiver.mpc_config.epoch,
     };
     // Handler re-derives the output from the message (cross-epoch fallback).
     // The complaint proof was generated with a wrong key and doesn't match
     // the re-derived output, so handle_complaint correctly rejects it.
-    let result = receiver.handle_complain_request(&request);
+    let result =
+        receiver.handle_complain_request(rotation_setup.setup.address(receiver_idx), &request);
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), MpcError::CryptoError(_)));
 }
@@ -9726,12 +9800,19 @@ fn test_handle_complain_request_rotation_caches_response() {
     let receiver = avss::Receiver::new(
         victim_manager.mpc_config.nodes.clone(),
         victim_manager.party_id,
-        victim_manager.mpc_config.threshold,
+        Parameters {
+            t: victim_manager.mpc_config.threshold,
+            f: victim_manager.mpc_config.max_faulty,
+        },
         session_id.to_vec(),
         commitment,
         victim_manager.encryption_key.clone(),
-    );
-    let complaint = match receiver.process_message(&cheating_message).unwrap() {
+    )
+    .unwrap();
+    let complaint = match receiver
+        .process_message(&cheating_message, &mut rand::thread_rng())
+        .unwrap()
+    {
         avss::ProcessedMessage::Complaint(c) => c,
         _ => panic!("Expected complaint from corrupted share"),
     };
@@ -9754,17 +9835,22 @@ fn test_handle_complain_request_rotation_caches_response() {
         dealer: dealer_addr,
         share_index: Some(first_share_index),
         batch_index: None,
-        complaint: complaint.clone(),
+        complaint: ProtocolComplaint::Avss(complaint.clone()),
         protocol_type: ProtocolTypeIndicator::KeyRotation,
         epoch: responder.mpc_config.epoch,
     };
+    let accuser = rotation_setup.setup.address(victim_idx);
 
     // First call computes and caches
-    let response1 = responder.handle_complain_request(&request).unwrap();
+    let response1 = responder
+        .handle_complain_request(accuser, &request)
+        .unwrap();
     assert_eq!(responder.complaint_responses.len(), 1);
 
     // Second call returns cached
-    let response2 = responder.handle_complain_request(&request).unwrap();
+    let response2 = responder
+        .handle_complain_request(accuser, &request)
+        .unwrap();
     assert_eq!(
         bcs::to_bytes(&response1).unwrap(),
         bcs::to_bytes(&response2).unwrap(),
@@ -9923,12 +10009,12 @@ fn test_handle_complain_request_nonce_missing_batch_index_rejected() {
         dealer: dealer_addr,
         share_index: None,
         batch_index: None, // <-- missing; should be rejected.
-        complaint,
+        complaint: ProtocolComplaint::BatchedAvss(complaint),
         protocol_type: ProtocolTypeIndicator::NonceGeneration,
         epoch: receiver.mpc_config.epoch,
     };
     let err = receiver
-        .handle_complain_request(&request)
+        .handle_complain_request(setup.address(0), &request)
         .expect_err("missing batch_index should be rejected");
     assert!(
         matches!(err, MpcError::InvalidMessage { .. }),
@@ -9969,7 +10055,7 @@ fn test_handle_complain_request_nonce_no_message_from_dealer() {
     complain_and_assert_no_message(
         &mut receiver,
         dealer_addr,
-        complaint,
+        ProtocolComplaint::BatchedAvss(complaint),
         None,
         Some(0),
         ProtocolTypeIndicator::NonceGeneration,
@@ -9997,14 +10083,14 @@ fn test_handle_complain_request_nonce_rederives_output_rejects_invalid_proof() {
         dealer: dealer_addr,
         share_index: None,
         batch_index: Some(0),
-        complaint,
+        complaint: ProtocolComplaint::BatchedAvss(complaint),
         protocol_type: ProtocolTypeIndicator::NonceGeneration,
         epoch: receiver.mpc_config.epoch,
     };
     // Handler re-derives the output from the message (fallback).
     // The complaint proof was generated with a wrong key and doesn't match
     // the re-derived output, so handle_complaint correctly rejects it.
-    let result = receiver.handle_complain_request(&request);
+    let result = receiver.handle_complain_request(setup.address(0), &request);
     assert!(result.is_err());
     assert!(matches!(result.unwrap_err(), MpcError::CryptoError(_)));
 }
@@ -10057,13 +10143,15 @@ fn test_handle_complain_request_nonce_caches_response() {
         dealer: dealer_addr,
         share_index: None,
         batch_index: Some(0),
-        complaint: complaint.clone(),
+        complaint: ProtocolComplaint::BatchedAvss(complaint.clone()),
         protocol_type: ProtocolTypeIndicator::NonceGeneration,
         epoch: party2.mpc_config.epoch,
     };
 
     // First call → computes and caches
-    let response1 = party2.handle_complain_request(&request).unwrap();
+    let response1 = party2
+        .handle_complain_request(setup.address(0), &request)
+        .unwrap();
     assert_eq!(party2.complaint_responses.len(), 1);
     assert!(
         party2
@@ -10075,7 +10163,9 @@ fn test_handle_complain_request_nonce_caches_response() {
     );
 
     // Second call → returns cached
-    let response2 = party2.handle_complain_request(&request).unwrap();
+    let response2 = party2
+        .handle_complain_request(setup.address(0), &request)
+        .unwrap();
     assert_eq!(
         bcs::to_bytes(&response1).unwrap(),
         bcs::to_bytes(&response2).unwrap(),
