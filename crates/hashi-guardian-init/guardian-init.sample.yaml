@@ -17,6 +17,15 @@ relay_endpoint: "http://localhost:50051"
 # required by key-provisioner commands.
 kp_pgp_cert_path: /path/to/kp3.asc
 
+# S3 config for the guardian's log bucket. Must have object-lock enabled.
+# If access_key and secret_key are omitted, guardian-init uses the default AWS
+# credential chain.
+guardian_s3:
+  bucket: "hashi-guardian-logs"
+  region: "us-east-1"
+  access_key:
+  secret_key:
+
 hashi:
   # Sui RPC URL used to fetch Hashi on-chain state.
   sui_rpc: "https://fullnode.devnet.sui.io:443"
@@ -29,14 +38,6 @@ kp_roster:
   # Secret-sharing parameters. `num_shares` MUST equal `kp_pgp_cert_paths.len()`.
   num_shares: 5
   threshold: 3
-
-  # S3 config for the guardian's log bucket. Must have object-lock enabled.
-  guardian_s3:
-    access_key: "AKIA..."
-    secret_key: "..."
-    bucket_info:
-      bucket: "hashi-guardian-logs"
-      region: "us-east-1"
 
   # Paths to every KP's armored OpenPGP public cert from the expected ceremony roster.
   kp_pgp_cert_paths:

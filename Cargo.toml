@@ -78,6 +78,9 @@ proptest = { version = "1.6.0", default-features = false, features = ["std"] }
 tempfile = "3.23.0"
 jiff = "0.2"
 tar = "0.4"
+aws-config = "1.1.7"
+aws-credential-types = "1"
+aws-sdk-s3 = "1.12.0"
 
 # fastcrypto — pinned to the `nitro-attestation` branch tip (our prior base +
 # the AWS Nitro attestation module). The merged main tip can't be used yet: it
