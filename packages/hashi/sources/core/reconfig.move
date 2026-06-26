@@ -26,21 +26,17 @@ entry fun start_reconfig(
     sui_system: &sui_system::sui_system::SuiSystemState,
     ctx: &TxContext,
 ) {
-    self.config().assert_version_enabled();
+    self.versioning().assert_version_enabled();
     // Assert that we are not already reconfiguring
     assert!(!self.committee_set().is_reconfiguring());
-    let mpc_threshold_in_basis_points = hashi::mpc_config::threshold_in_basis_points(self.config());
-    let mpc_weight_reduction_allowed_delta = hashi::mpc_config::weight_reduction_allowed_delta(self.config());
-    let mpc_max_faulty_in_basis_points = hashi::mpc_config::max_faulty_in_basis_points(self.config());
-    let mpc_nonce_generation_protocol = hashi::mpc_config::nonce_generation_protocol(self.config());
+    // Pin the current MPC parameters so they stay fixed for the new epoch even
+    // if governance changes them mid-epoch.
+    let mpc = hashi::mpc_config::pin(self.config());
     let epoch = self
         .committee_set_mut()
         .start_reconfig(
             sui_system,
-            mpc_threshold_in_basis_points,
-            mpc_weight_reduction_allowed_delta,
-            mpc_max_faulty_in_basis_points,
-            mpc_nonce_generation_protocol,
+            mpc,
             ctx,
         );
     sui::event::emit(StartReconfigEvent { epoch });
@@ -52,7 +48,7 @@ entry fun end_reconfig(
     mpc_cert: CommitteeSignature,
     ctx: &TxContext,
 ) {
-    self.config().assert_version_enabled();
+    self.versioning().assert_version_enabled();
     assert!(self.committee_set().is_reconfiguring(), ENotReconfiguring);
     let from_epoch = self.committee_set().epoch();
     let next_epoch = self.committee_set().pending_epoch_change().destroy_some();
@@ -84,7 +80,7 @@ entry fun submit_committee_handoff(
     committee_handoff_cert: CommitteeSignature,
     _ctx: &TxContext,
 ) {
-    self.config().assert_version_enabled();
+    self.versioning().assert_version_enabled();
     assert!(self.committee_set().is_reconfiguring(), ENotReconfiguring);
     assert!(!self.committee_set().mpc_public_key().is_empty(), EInitialReconfig);
     let next_epoch = self.committee_set().pending_epoch_change().destroy_some();
@@ -115,7 +111,7 @@ const VOTER3: address = @0x3;
 
 #[test_only]
 fun pending_committee_for_testing(epoch: u64): hashi::committee::Committee {
-    use hashi::{committee, test_utils};
+    use hashi::{committee, mpc_config, test_utils};
     use sui::bls12381;
 
     let sk = test_utils::bls_sk_for_testing();
@@ -127,7 +123,7 @@ fun pending_committee_for_testing(epoch: u64): hashi::committee::Committee {
         committee::new_committee_member(VOTER2, public_key, sk, 1),
         committee::new_committee_member(VOTER3, public_key, sk, 1),
     ];
-    committee::new_committee(epoch, members, 3334, 800, 3333, 0)
+    committee::new_committee(epoch, members, mpc_config::new_for_testing(3334, 800, 3333, 0))
 }
 
 #[test_only]

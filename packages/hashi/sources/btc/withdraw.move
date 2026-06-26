@@ -127,7 +127,7 @@ public fun request_withdrawal(
     bitcoin_address: vector<u8>,
     ctx: &mut TxContext,
 ) {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     hashi.assert_unpaused();
 
     assert!(btc.value() >= hashi.config().bitcoin_withdrawal_minimum(), EBelowMinimumWithdrawal);
@@ -154,7 +154,7 @@ public fun request_withdrawal(
 }
 
 entry fun approve_request(hashi: &mut Hashi, request_id: address, cert: CommitteeSignature) {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     hashi.assert_unpaused();
     hashi.assert_not_reconfiguring();
     hashi.verify(RequestApprovalMessage { request_id }, cert);
@@ -177,7 +177,7 @@ entry fun commit_withdrawal_tx(
     r: &Random,
     ctx: &mut TxContext,
 ) {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     hashi.assert_unpaused();
     // Do not allow scheduling of withdrawals during a reconfiguration.
     hashi.assert_not_reconfiguring();
@@ -259,7 +259,7 @@ entry fun commit_withdrawal_tx(
 /// only re-points pending presig indices, bounded to once-per-withdrawal-per-epoch
 /// by the `mpc_signing` stale-epoch guard.
 entry fun reallocate_presigs(hashi: &mut Hashi, withdrawal_id: address) {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     hashi.assert_unpaused();
     hashi.assert_not_reconfiguring();
     let current_epoch = hashi.committee_set().epoch();
@@ -283,7 +283,7 @@ entry fun commit_input_signatures(
     signatures: vector<vector<u8>>,
     cert: CommitteeSignature,
 ) {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     hashi.assert_unpaused();
     hashi.assert_not_reconfiguring();
 
@@ -308,7 +308,7 @@ entry fun finalize_withdrawal(
     guardian_signatures: vector<vector<u8>>,
     cert: CommitteeSignature,
 ) {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     hashi.assert_unpaused();
     hashi.assert_not_reconfiguring();
 
@@ -334,7 +334,7 @@ entry fun finalize_withdrawal(
 }
 
 entry fun confirm_withdrawal(hashi: &mut Hashi, withdrawal_id: address, cert: CommitteeSignature) {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     hashi.assert_unpaused();
     hashi.verify(WithdrawalConfirmationMessage { withdrawal_id }, cert);
 
@@ -376,7 +376,7 @@ entry fun confirm_withdrawal(hashi: &mut Hashi, withdrawal_id: address, cert: Co
 /// from the record's `spent_epoch` field (set by `mark_spent` during
 /// `confirm_withdrawal`). Callers pass the individual UTXO IDs to clean up.
 entry fun cleanup_spent_utxos(hashi: &mut Hashi, utxo_ids: vector<UtxoId>) {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     utxo_ids.do!(|utxo_id| {
         hashi.bitcoin_mut().utxo_pool_mut().cleanup_spent(utxo_id);
     });
@@ -394,7 +394,7 @@ public fun cancel_withdrawal(
     clock: &Clock,
     ctx: &mut TxContext,
 ): Balance<BTC> {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
 
     assert!(
         !hashi.bitcoin().withdrawal_queue().is_request_processing(request_id),

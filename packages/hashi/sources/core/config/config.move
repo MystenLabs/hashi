@@ -1,25 +1,22 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-/// Core configuration: versioning, pause state, upgrade management, and
-/// generic key-value config store. Chain-specific configuration (e.g. BTC
-/// fee parameters) lives in separate modules that use get/upsert.
+/// A general-purpose, typed key-value configuration store: a map from string
+/// keys to `config_value::Value`s, with domain-specific accessors layered on
+/// top (pause state, guardian, emergency thresholds). Chain-specific
+/// configuration (e.g. BTC fee parameters) lives in separate modules that use
+/// get/upsert.
+///
+/// `Config` has `copy, drop, store` and carries no policy of its own (no
+/// versioning, no upgrade authority — those live in `versioning`), so it can be
+/// embedded by value wherever a bag of settings is needed: it backs the
+/// package's global config and is also pinned per-epoch onto a `Committee`.
 module hashi::config;
 
 use hashi::config_value::{Self, Value};
 use std::string::String;
-use sui::{
-    package::{Self, UpgradeCap, UpgradeTicket, UpgradeReceipt},
-    vec_map::{Self, VecMap},
-    vec_set::{Self, VecSet}
-};
+use sui::vec_map::{Self, VecMap};
 
-const PACKAGE_VERSION: u64 = 1;
-
-#[error(code = 0)]
-const EVersionDisabled: vector<u8> = b"Version disabled";
-#[error(code = 1)]
-const EDisableCurrentVersion: vector<u8> = b"Cannot disable current version";
 #[error(code = 3)]
 const EBadGuardianBtcPublicKeyLength: vector<u8> = b"Guardian BTC public key must be 32 bytes";
 #[error(code = 4)]
@@ -34,10 +31,14 @@ const EMERGENCY_PAUSE_THRESHOLD_BPS_KEY: vector<u8> = b"governance_emergency_pau
 const EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY: vector<u8> =
     b"governance_emergency_unpause_threshold_bps";
 
-public struct Config has store {
+public struct Config has copy, drop, store {
     config: VecMap<String, Value>,
-    enabled_versions: VecSet<u64>,
-    upgrade_cap: Option<UpgradeCap>,
+}
+
+/// Create an empty store. Used to build a pinned snapshot (e.g. a `Committee`'s
+/// MPC parameters); the global config is built via `create`.
+public(package) fun empty(): Config {
+    Config { config: vec_map::empty() }
 }
 
 /// Read a config value by key. Exposed to other modules in the package
@@ -53,6 +54,11 @@ public(package) fun try_get(self: &Config, key: vector<u8>): Option<Value> {
     } else {
         option::none()
     }
+}
+
+/// Returns true if `key` is present.
+public(package) fun contains(self: &Config, key: vector<u8>): bool {
+    self.config.contains(&key.to_string())
 }
 
 /// Insert or update a config value. Exposed to other modules in the package
@@ -75,12 +81,6 @@ public(package) fun is_valid_config_update(self: &Config, key: &String, value: &
 }
 
 // ======== Core Accessors ========
-
-/// Assert that the package version is the current version.
-#[allow(implicit_const_copy)]
-public(package) fun assert_version_enabled(self: &Config) {
-    assert!(self.enabled_versions.contains(&PACKAGE_VERSION), EVersionDisabled);
-}
 
 public(package) fun paused(self: &Config): bool {
     self.get(PAUSED_KEY).as_bool()
@@ -125,52 +125,12 @@ public(package) fun emergency_unpause_threshold_bps(self: &Config): u64 {
     self.try_get(EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY).map!(|v| v.as_u64()).destroy_or!(6667)
 }
 
-// ======== Version Management ========
-
-public(package) fun disable_version(self: &mut Config, version: u64) {
-    assert!(version != PACKAGE_VERSION, EDisableCurrentVersion);
-    self.enabled_versions.remove(&version);
-}
-
-public(package) fun enable_version(self: &mut Config, version: u64) {
-    self.enabled_versions.insert(version);
-}
-
-// ======== Upgrade Management ========
-
-public(package) fun authorize_upgrade(self: &mut Config, digest: vector<u8>): UpgradeTicket {
-    let policy = sui::package::upgrade_policy(self.upgrade_cap.borrow());
-    sui::package::authorize_upgrade(
-        self.upgrade_cap.borrow_mut(),
-        policy,
-        digest,
-    )
-}
-
-public(package) fun commit_upgrade(self: &mut Config, receipt: UpgradeReceipt) {
-    package::commit_upgrade(self.upgrade_cap.borrow_mut(), receipt);
-    let version = self.upgrade_cap.borrow().version();
-    self.enabled_versions.insert(version);
-}
-
-public(package) fun set_upgrade_cap(self: &mut Config, upgrade_cap: UpgradeCap) {
-    self.upgrade_cap.fill(upgrade_cap);
-}
-
-public(package) fun upgrade_cap(self: &Config): &UpgradeCap {
-    self.upgrade_cap.borrow()
-}
-
 // ======== Constructor ========
 
-/// Create a Config with core defaults only. Chain-specific defaults
+/// Create the global config with core defaults only. Chain-specific defaults
 /// (e.g. BTC fees) are initialized separately via btc_config::init_defaults.
 public(package) fun create(): Config {
-    let mut config = Config {
-        config: vec_map::empty(),
-        enabled_versions: vec_set::from_keys(vector[PACKAGE_VERSION]),
-        upgrade_cap: option::none(),
-    };
+    let mut config = empty();
 
     // Core defaults
     config.upsert(PAUSED_KEY, config_value::new_bool(false));

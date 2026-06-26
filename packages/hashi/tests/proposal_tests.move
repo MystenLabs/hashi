@@ -8,6 +8,7 @@ module hashi::proposal_tests;
 use hashi::{
     abort_reconfig::AbortReconfig,
     committee,
+    mpc_config,
     proposal,
     test_utils,
     update_config::UpdateConfig
@@ -34,7 +35,11 @@ fun add_pending_committee_for_testing(hashi: &mut hashi::hashi::Hashi, epoch: u6
         committee::new_committee_member(VOTER2, public_key, encryption_key, 1),
         committee::new_committee_member(VOTER3, public_key, encryption_key, 1),
     ];
-    let pending_committee = committee::new_committee(epoch, members, 3334, 800, 3333, 0);
+    let pending_committee = committee::new_committee(
+        epoch,
+        members,
+        mpc_config::new_for_testing(3334, 800, 3333, 0),
+    );
     hashi.committee_set_mut().set_pending_reconfig_for_testing(pending_committee);
 }
 
@@ -793,7 +798,7 @@ fun test_disable_version_proposal() {
 }
 
 #[test]
-#[expected_failure(abort_code = hashi::config::EDisableCurrentVersion)]
+#[expected_failure(abort_code = hashi::versioning::EDisableCurrentVersion)]
 /// Test that disabling the current package version fails (anti-bricking protection)
 fun test_disable_current_version_fails() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);

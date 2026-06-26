@@ -750,6 +750,7 @@ async fn scrape_hashi(
         id,
         committees,
         config,
+        versioning,
         treasury,
         proposals,
         tob,
@@ -820,7 +821,7 @@ async fn scrape_hashi(
         types::Hashi {
             id,
             committees: committee_set,
-            config: convert_move_config(config),
+            config: convert_move_config(config, versioning),
             treasury,
             deposit_queue,
             withdrawal_queue,
@@ -850,16 +851,21 @@ pub(crate) async fn scrape_hashi_config(
             ))
             .await?;
 
-    let move_types::Hashi { config, .. } = response.get_ref().object().contents().deserialize()?;
+    let move_types::Hashi {
+        config, versioning, ..
+    } = response.get_ref().object().contents().deserialize()?;
 
-    Ok(convert_move_config(config))
+    Ok(convert_move_config(config, versioning))
 }
 
-fn convert_move_config(config: move_types::Config) -> types::Config {
+fn convert_move_config(
+    config: move_types::Config,
+    versioning: move_types::Versioning,
+) -> types::Config {
     types::Config {
         config: config.config.into_iter().collect(),
-        enabled_versions: config.enabled_versions.contents.into_iter().collect(),
-        upgrade_cap: config.upgrade_cap,
+        enabled_versions: versioning.enabled_versions.contents.into_iter().collect(),
+        upgrade_cap: versioning.upgrade_cap,
     }
 }
 
@@ -1191,19 +1197,21 @@ fn convert_move_committee_member(
 }
 
 fn convert_move_committee(c: move_types::Committee) -> Committee {
+    // Read the MPC params before moving `members` out of `c` (the typed
+    // accessors borrow all of `c`).
+    let threshold_in_basis_points = u16::try_from(c.mpc_threshold_in_basis_points())
+        .expect("mpc_threshold_in_basis_points exceeds u16::MAX");
+    let weight_reduction_allowed_delta = u16::try_from(c.mpc_weight_reduction_allowed_delta())
+        .expect("mpc_weight_reduction_allowed_delta exceeds u16::MAX");
+    let max_faulty_in_basis_points = u16::try_from(c.mpc_max_faulty_in_basis_points())
+        .expect("mpc_max_faulty_in_basis_points exceeds u16::MAX");
+    let nonce_generation_protocol = u16::try_from(c.mpc_nonce_generation_protocol())
+        .expect("mpc_nonce_generation_protocol exceeds u16::MAX");
     let members = c
         .members
         .into_iter()
         .map(convert_move_committee_member)
         .collect();
-    let threshold_in_basis_points = u16::try_from(c.mpc_threshold_in_basis_points)
-        .expect("mpc_threshold_in_basis_points exceeds u16::MAX");
-    let weight_reduction_allowed_delta = u16::try_from(c.mpc_weight_reduction_allowed_delta)
-        .expect("mpc_weight_reduction_allowed_delta exceeds u16::MAX");
-    let max_faulty_in_basis_points = u16::try_from(c.mpc_max_faulty_in_basis_points)
-        .expect("mpc_max_faulty_in_basis_points exceeds u16::MAX");
-    let nonce_generation_protocol = u16::try_from(c.mpc_nonce_generation_protocol)
-        .expect("mpc_nonce_generation_protocol exceeds u16::MAX");
     Committee::new(
         members,
         c.epoch,

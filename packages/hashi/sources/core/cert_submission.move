@@ -79,7 +79,7 @@ fun submit_cert_internal(
     cert: &CommitteeSignature,
     ctx: &mut TxContext,
 ) {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     // The dealer's own validator key, or the operator key it has delegated to,
     // may submit the dealer's certificate. `member_authorized` also enforces
     // that the dealer is a registered committee member.
@@ -97,7 +97,7 @@ fun submit_cert_internal(
 }
 
 entry fun destroy_all_certs(hashi: &mut Hashi, epoch: u64, batch_index: Option<u32>) {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     let key = hashi::tob::tob_key(epoch, batch_index);
     let current_epoch = hashi.committee_set().epoch();
     let epoch_certs: hashi::tob::EpochCertsV1 = hashi.tob_mut().remove(key);

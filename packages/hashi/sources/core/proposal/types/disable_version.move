@@ -21,7 +21,7 @@ public fun propose(
     clock: &Clock,
     ctx: &mut TxContext,
 ): ID {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
     proposal::create(
         hashi,
         validator_address,
@@ -35,5 +35,5 @@ public fun propose(
 
 public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
     let DisableVersion { version } = proposal::execute(hashi, proposal_id, clock);
-    hashi.config_mut().disable_version(version);
+    hashi.versioning_mut().disable_version(version);
 }

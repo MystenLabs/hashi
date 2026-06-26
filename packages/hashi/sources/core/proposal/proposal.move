@@ -77,7 +77,7 @@ public(package) fun execute<T: copy + drop + store>(
     proposal_id: ID,
     clock: &Clock,
 ): T {
-    hashi.config().assert_version_enabled();
+    hashi.versioning().assert_version_enabled();
 
     // Bag membership is the re-execution gate: an already-executed
     // proposal lives only in the executed bag. Check that explicitly so
