@@ -45,11 +45,8 @@ use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
 /// Common KP-roster config: the sharing params, the guardian's S3 log bucket,
-/// the full KP cert roster, and the PCR allowlist. Shared (via
-/// `#[serde(flatten)]`) by `operator ceremony`, `key-provisioner ceremony`, and
-/// `key-provisioner provision` —
-/// every command that needs to discover and verify a ceremony against an
-/// expected KP set.
+/// the full KP cert roster, and the PCR allowlist. Shared by every command that
+/// needs to discover and verify a ceremony against an expected KP set.
 #[derive(Deserialize)]
 pub struct KpRosterConfig {
     /// Total number of shares. Must equal `kp_pgp_cert_paths.len()`.

@@ -11,39 +11,40 @@
 # decrypting with the yubikey.
 kp_pgp_cert_path: /path/to/kp3.asc
 
-# Expected secret-sharing parameters from the ceremony plan.
-num_shares: 5
-threshold: 3
+kp_roster:
+  # Expected secret-sharing parameters from the ceremony plan.
+  num_shares: 5
+  threshold: 3
 
-# Paths to every KP's armored OpenPGP public cert from the expected ceremony
-# roster. Each cert must appear exactly once. verify uses this full roster to
-# confirm every encrypted share is encrypted only to its labeled KP cert.
-kp_pgp_cert_paths:
-  - /path/to/kp1.asc
-  - /path/to/kp2.asc
-  - /path/to/kp3.asc
-  - /path/to/kp4.asc
-  - /path/to/kp5.asc
+  # Paths to every KP's armored OpenPGP public cert from the expected ceremony
+  # roster. Each cert must appear exactly once. verify uses this full roster to
+  # confirm every encrypted share is encrypted only to its labeled KP cert.
+  kp_pgp_cert_paths:
+    - /path/to/kp1.asc
+    - /path/to/kp2.asc
+    - /path/to/kp3.asc
+    - /path/to/kp4.asc
+    - /path/to/kp5.asc
 
-# Expected enclave build: git revision + PCR0 (hex). The live guardian must
-# report this revision, and its attestation PCR0 must match it.
-current_build:
-  git_revision: "0000000000000000000000000000000000000000"
-  pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+  # Expected enclave build: git revision + PCR0 (hex). The live guardian must
+  # report this revision, and its attestation PCR0 must match it.
+  current_build:
+    git_revision: "0000000000000000000000000000000000000000"
+    pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 
-# Older still-trusted builds accepted only for historical S3 logs during an
-# upgrade window. Omit or leave empty outside an upgrade.
-prev_builds: []
-# prev_builds:
-#   - git_revision: "1111111111111111111111111111111111111111"
-#     pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+  # Older still-trusted builds accepted only for historical S3 logs during an
+  # upgrade window. Omit or leave empty outside an upgrade.
+  prev_builds: []
+  # prev_builds:
+  #   - git_revision: "1111111111111111111111111111111111111111"
+  #     pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
 
-# S3 config for the guardian's log bucket (object-lock enabled). Read to
-# discover the latest ceremony session, fetch its attestation, ceremony/ audit
-# log, and shares/ recovery log.
-guardian_s3:
-  access_key: "AKIA..."
-  secret_key: "..."
-  bucket_info:
-    bucket: "hashi-guardian-logs"
-    region: "us-east-1"
+  # S3 config for the guardian's log bucket (object-lock enabled). Read to
+  # discover the latest ceremony session, fetch its attestation, ceremony/ audit
+  # log, and shares/ recovery log.
+  guardian_s3:
+    access_key: "AKIA..."
+    secret_key: "..."
+    bucket_info:
+      bucket: "hashi-guardian-logs"
+      region: "us-east-1"

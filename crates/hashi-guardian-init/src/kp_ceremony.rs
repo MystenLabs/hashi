@@ -22,8 +22,7 @@ use crate::kp_roster::ensure_cert_in_roster;
 
 #[derive(Deserialize)]
 pub struct CeremonyConfig {
-    #[serde(flatten)]
-    pub common: KpRosterConfig,
+    pub kp_roster: KpRosterConfig,
     /// Path to this KP's armored OpenPGP public cert (the one they exported and
     /// gave to the operator at `operator ceremony` time). Used to derive the
     /// fingerprint that finds this KP's share in `shares/`, and to confirm the
@@ -59,23 +58,23 @@ impl CeremonyConfig {
 /// plaintext streams back over stdout; neither ciphertext nor plaintext is
 /// written to disk by this flow.
 pub async fn run(cfg: CeremonyConfig) -> Result<()> {
-    cfg.common.validate()?;
+    cfg.kp_roster.validate()?;
 
     info!(
         phase = "setup",
-        bucket = cfg.common.guardian_s3.bucket_name(),
-        region = cfg.common.guardian_s3.region(),
-        num_shares = cfg.common.num_shares,
-        threshold = cfg.common.threshold,
+        bucket = cfg.kp_roster.guardian_s3.bucket_name(),
+        region = cfg.kp_roster.guardian_s3.region(),
+        num_shares = cfg.kp_roster.num_shares,
+        threshold = cfg.kp_roster.threshold,
         "verifying ceremony share",
     );
 
     info!(
         phase = "roster load",
-        cert_count = cfg.common.kp_pgp_cert_paths.len(),
+        cert_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
         "loading + validating full KP cert roster",
     );
-    let certs = load_certs(&cfg.common.kp_pgp_cert_paths)?;
+    let certs = load_certs(&cfg.kp_roster.kp_pgp_cert_paths)?;
     info!(
         phase = "roster load",
         cert_count = certs.len(),
@@ -102,12 +101,12 @@ pub async fn run(cfg: CeremonyConfig) -> Result<()> {
     //    (attestation-verified once via the reader's session-key cache).
     info!(
         phase = "s3 connect",
-        bucket = cfg.common.guardian_s3.bucket_name(),
-        region = cfg.common.guardian_s3.region(),
-        current_pcr0 = hex::encode(cfg.common.pcr_allowlist.current_build().pcr0()),
+        bucket = cfg.kp_roster.guardian_s3.bucket_name(),
+        region = cfg.kp_roster.guardian_s3.region(),
+        current_pcr0 = hex::encode(cfg.kp_roster.pcr_allowlist.current_build().pcr0()),
         "connecting to guardian log bucket",
     );
-    let mut reader = GuardianReader::new(&cfg.common.guardian_s3, cfg.common.pcr_allowlist())
+    let mut reader = GuardianReader::new(&cfg.kp_roster.guardian_s3, cfg.kp_roster.pcr_allowlist())
         .await
         .context("connect to guardian log bucket")?;
     info!(phase = "s3 connect", "connected to guardian log bucket");
@@ -118,8 +117,8 @@ pub async fn run(cfg: CeremonyConfig) -> Result<()> {
     );
     let state = VerifiedCeremonyState::latest_from_s3(
         &mut reader,
-        cfg.common.num_shares,
-        cfg.common.threshold,
+        cfg.kp_roster.num_shares,
+        cfg.kp_roster.threshold,
     )
     .await?;
     info!(

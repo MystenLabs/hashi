@@ -40,8 +40,7 @@ use crate::kp_roster::VerifiedCeremonyState;
 
 #[derive(Deserialize)]
 pub struct CeremonyRunConfig {
-    #[serde(flatten)]
-    pub common: KpRosterConfig,
+    pub kp_roster: KpRosterConfig,
     /// gRPC endpoint of the ceremony-mode guardian.
     pub guardian_endpoint: String,
 }
@@ -70,35 +69,38 @@ impl CeremonyRunConfig {
 pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
     info!(
         phase = "setup",
-        num_shares = cfg.common.num_shares,
-        threshold = cfg.common.threshold,
-        cert_count = cfg.common.kp_pgp_cert_paths.len(),
-        bucket = cfg.common.guardian_s3.bucket_name(),
-        region = cfg.common.guardian_s3.region(),
+        num_shares = cfg.kp_roster.num_shares,
+        threshold = cfg.kp_roster.threshold,
+        cert_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
+        bucket = cfg.kp_roster.guardian_s3.bucket_name(),
+        region = cfg.kp_roster.guardian_s3.region(),
         endpoint = %cfg.guardian_endpoint,
-        current_pcr0 = hex::encode(cfg.common.pcr_allowlist.current_build().pcr0()),
+        current_pcr0 = hex::encode(cfg.kp_roster.pcr_allowlist.current_build().pcr0()),
         "running guardian key ceremony",
     );
 
     // 1. Validate config-level sharing params up front (also re-validated by
     //    SetupNewKeyRequest::new).
-    cfg.common.validate()?;
+    cfg.kp_roster.validate()?;
 
     // 2. Load + validate each KP's PGP cert.
     info!(
         phase = "roster load",
-        cert_count = cfg.common.kp_pgp_cert_paths.len(),
+        cert_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
         "loading + validating full KP cert roster",
     );
-    let certs = load_certs(&cfg.common.kp_pgp_cert_paths)?;
+    let certs = load_certs(&cfg.kp_roster.kp_pgp_cert_paths)?;
     info!(
         phase = "roster load",
         cert_count = certs.len(),
         "KP cert roster loaded"
     );
-    let setup_req =
-        SetupNewKeyRequest::new(certs.clone(), cfg.common.num_shares, cfg.common.threshold)
-            .map_err(|e| anyhow!("build SetupNewKeyRequest: {e:?}"))?;
+    let setup_req = SetupNewKeyRequest::new(
+        certs.clone(),
+        cfg.kp_roster.num_shares,
+        cfg.kp_roster.threshold,
+    )
+    .map_err(|e| anyhow!("build SetupNewKeyRequest: {e:?}"))?;
 
     // 3. Connect to the ceremony-mode guardian.
     info!(
@@ -114,12 +116,12 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
     // 4. operator_init (ceremony mode: S3 config only, no WithdrawModeConfig).
     info!(
         phase = "operator_init",
-        bucket = cfg.common.guardian_s3.bucket_name(),
-        region = cfg.common.guardian_s3.region(),
+        bucket = cfg.kp_roster.guardian_s3.bucket_name(),
+        region = cfg.kp_roster.guardian_s3.region(),
         "calling OperatorInit (ceremony mode: S3 config only)",
     );
     let oi_req = operator_init_request_to_pb(OperatorInitRequest::new_ceremony_mode(
-        cfg.common.guardian_s3.clone(),
+        cfg.kp_roster.guardian_s3.clone(),
     ))
     .map_err(|e| anyhow!("encode OperatorInitRequest: {e:?}"))?;
     client
@@ -142,7 +144,7 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
         .into_inner();
     let info_resp = GetGuardianInfoResponse::try_from(info_pb)
         .map_err(|e| anyhow!("decode GetGuardianInfoResponse: {e:?}"))?;
-    let allowlist = cfg.common.pcr_allowlist();
+    let allowlist = cfg.kp_roster.pcr_allowlist();
     let verified = info_resp
         .verify(allowlist.current_build())
         .map_err(|e| anyhow!("verify GuardianInfo attestation/signature: {e:?}"))?;
@@ -160,7 +162,7 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
         session_id = %session_id,
         "connecting to guardian log bucket + verifying attestation against current build",
     );
-    let mut reader = GuardianReader::new(&cfg.common.guardian_s3, allowlist)
+    let mut reader = GuardianReader::new(&cfg.kp_roster.guardian_s3, allowlist)
         .await
         .context("connect to guardian log bucket")?;
     let verified_session = reader
@@ -180,8 +182,8 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
     // 6. setup_new_key.
     info!(
         phase = "setup_new_key",
-        n = cfg.common.num_shares,
-        t = cfg.common.threshold,
+        n = cfg.kp_roster.num_shares,
+        t = cfg.kp_roster.threshold,
         "calling SetupNewKey",
     );
     let signed_resp_pb = client
@@ -193,8 +195,8 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
         .map_err(|e| anyhow!("decode SignedSetupNewKeyResponse: {e:?}"))?;
     info!(
         phase = "setup_new_key",
-        n = cfg.common.num_shares,
-        t = cfg.common.threshold,
+        n = cfg.kp_roster.num_shares,
+        t = cfg.kp_roster.threshold,
         encrypted_share_count = signed_resp.data.encrypted_shares.len(),
         "setup_new_key response received",
     );
@@ -210,8 +212,8 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
                 response,
                 session_id.clone(),
                 sharing_seq,
-                cfg.common.num_shares,
-                cfg.common.threshold,
+                cfg.kp_roster.num_shares,
+                cfg.kp_roster.threshold,
             )
         })?;
     info!(
@@ -242,8 +244,8 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
     );
     let logged = VerifiedCeremonyState::latest_from_s3(
         &mut reader,
-        cfg.common.num_shares,
-        cfg.common.threshold,
+        cfg.kp_roster.num_shares,
+        cfg.kp_roster.threshold,
     )
     .await?;
     anyhow::ensure!(

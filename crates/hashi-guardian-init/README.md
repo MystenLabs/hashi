@@ -44,7 +44,8 @@ cargo run -p hashi-guardian-init -- operator ceremony --config operator-ceremony
 ```
 
 Config: see [`operator-ceremony.sample.yaml`](operator-ceremony.sample.yaml) —
-the guardian endpoint, `n`/`t`, guardian S3 config, and the KP cert paths.
+the guardian endpoint plus `kp_roster` (`n`/`t`, guardian S3 config, KP cert
+paths, and PCR allowlist).
 
 ## key-provisioner ceremony
 
@@ -73,7 +74,8 @@ cargo run -p hashi-guardian-init -- key-provisioner ceremony --config key-provis
 Config: see
 [`key-provisioner-ceremony.sample.yaml`](key-provisioner-ceremony.sample.yaml)
 — the KP's cert path, expected `n`/`t`, full KP cert roster,
-guardian S3 config.
+guardian S3 config, and PCR allowlist. The shared ceremony fields live under
+`kp_roster`.
 
 ## operator provision
 
@@ -147,7 +149,8 @@ See [`key-provisioner-provision.sample.yaml`](key-provisioner-provision.sample.y
 expected `n`/`t`, the guardian S3 config, limiter config, the
 MPC committee verifying key `G` (`hashi_btc_master_pubkey_hex`), the PCR
 allowlist (`current_build` plus optional `prev_builds`) pinned against each
-session's attestation, and the relay endpoint the share is submitted to.
+session's attestation, and the relay endpoint the share is submitted to. The
+shared ceremony fields live under `kp_roster`.
 `hashi_committee_genesis` is needed only at genesis; omit it once a
 `committee-update/` log exists.
 

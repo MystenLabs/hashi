@@ -63,14 +63,14 @@ use crate::kp_roster::ensure_cert_in_roster;
 use crate::limiter_recovery;
 
 pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
-    cfg.common.validate()?;
+    cfg.kp_roster.validate()?;
 
     info!(
         phase = "setup",
-        bucket = cfg.common.guardian_s3.bucket_name(),
-        region = cfg.common.guardian_s3.region(),
-        num_shares = cfg.common.num_shares,
-        threshold = cfg.common.threshold,
+        bucket = cfg.kp_roster.guardian_s3.bucket_name(),
+        region = cfg.kp_roster.guardian_s3.region(),
+        num_shares = cfg.kp_roster.num_shares,
+        threshold = cfg.kp_roster.threshold,
         relay_endpoint = %cfg.relay_endpoint,
         "running provision flow",
     );
@@ -80,15 +80,15 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
     // reads that session first.
     info!(
         phase = "s3 connect",
-        bucket = cfg.common.guardian_s3.bucket_name(),
-        region = cfg.common.guardian_s3.region(),
-        current_git_revision = %cfg.common.pcr_allowlist.current_build().git_revision(),
-        current_pcr0 = hex::encode(cfg.common.pcr_allowlist.current_build().pcr0()),
-        prev_build_count = cfg.common.pcr_allowlist.prev_builds().len(),
+        bucket = cfg.kp_roster.guardian_s3.bucket_name(),
+        region = cfg.kp_roster.guardian_s3.region(),
+        current_git_revision = %cfg.kp_roster.pcr_allowlist.current_build().git_revision(),
+        current_pcr0 = hex::encode(cfg.kp_roster.pcr_allowlist.current_build().pcr0()),
+        prev_build_count = cfg.kp_roster.pcr_allowlist.prev_builds().len(),
         "connecting to guardian log bucket",
     );
-    let allowlist = cfg.common.pcr_allowlist();
-    let mut reader = GuardianReader::new(&cfg.common.guardian_s3, allowlist.clone())
+    let allowlist = cfg.kp_roster.pcr_allowlist();
+    let mut reader = GuardianReader::new(&cfg.kp_roster.guardian_s3, allowlist.clone())
         .await
         .context("connect to guardian log bucket")?;
     info!(phase = "s3 connect", "connected to guardian log bucket");
@@ -98,10 +98,10 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
 
     info!(
         phase = "roster load",
-        cert_count = cfg.common.kp_pgp_cert_paths.len(),
+        cert_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
         "loading + validating full KP cert roster",
     );
-    let certs = load_certs(&cfg.common.kp_pgp_cert_paths)?;
+    let certs = load_certs(&cfg.kp_roster.kp_pgp_cert_paths)?;
     info!(
         phase = "roster load",
         cert_count = certs.len(),
@@ -181,9 +181,9 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         enclave_git_revision
     );
     anyhow::ensure!(
-        cfg.common.guardian_s3.bucket_info == enclave_bucket_info,
+        cfg.kp_roster.guardian_s3.bucket_info == enclave_bucket_info,
         "Guardian bucket info mismatch: expected {:?}, got {:?}",
-        cfg.common.guardian_s3.bucket_info,
+        cfg.kp_roster.guardian_s3.bucket_info,
         enclave_bucket_info
     );
     anyhow::ensure!(
@@ -365,8 +365,8 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         scraped_instance.clone(),
         encrypted_shares,
         &roster,
-        cfg.common.num_shares,
-        cfg.common.threshold,
+        cfg.kp_roster.num_shares,
+        cfg.kp_roster.threshold,
     )?;
     state.verify_encrypted_share_recipients(&certs)?;
     info!(
@@ -575,8 +575,7 @@ async fn prechecks(
 
 #[derive(Deserialize)]
 pub struct ProvisionConfig {
-    #[serde(flatten)]
-    pub common: KpRosterConfig,
+    pub kp_roster: KpRosterConfig,
     /// Path to this KP's armored OpenPGP public cert (the one they exported
     /// from their yubikey and gave to the operator at ceremony time). Used to
     /// find this KP's share in `shares/` by fingerprint, and to confirm the
