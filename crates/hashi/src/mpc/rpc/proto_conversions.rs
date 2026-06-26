@@ -124,6 +124,14 @@ impl TryFrom<&proto::SendMessagesRequest> for types::SendMessagesRequest {
                     message,
                 })
             }
+            Some(Messages::AvidNonceOptimisticMessage(_))
+            | Some(Messages::AvidNonceDispersalMessage(_))
+            | Some(Messages::AvidNonceEchoMessage(_)) => {
+                return Err(TryFromProtoError::invalid(
+                    "messages",
+                    "AVID nonce-generation messages are not yet supported",
+                ));
+            }
             None => {
                 return Err(TryFromProtoError::missing("messages"));
             }
@@ -166,6 +174,7 @@ impl types::RetrieveMessagesRequest {
             dealer: Some(self.dealer.to_string()),
             protocol_type: Some(mpc_protocol_type_to_proto(self.protocol_type) as i32),
             batch_index: self.batch_index,
+            recipient: None,
         }
     }
 }
@@ -261,6 +270,12 @@ impl TryFrom<&proto::RetrieveMessagesResponse> for types::RetrieveMessagesRespon
                     batch_index,
                     message,
                 })
+            }
+            Some(Messages::AvidNonceRetrievalMessage(_)) => {
+                return Err(TryFromProtoError::invalid(
+                    "messages",
+                    "AVID nonce-generation retrieval is not yet supported",
+                ));
             }
             None => {
                 return Err(TryFromProtoError::missing("messages"));
