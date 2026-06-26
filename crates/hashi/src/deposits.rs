@@ -276,7 +276,8 @@ impl Hashi {
         let derived = fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(
             &verifying_key,
             &derivation_path,
-        );
+        )
+        .context("derive child verifying key")?;
         XOnlyPublicKey::from_slice(&derived.to_byte_array()).context("valid 32-byte x-only key")
     }
 

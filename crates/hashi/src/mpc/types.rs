@@ -222,13 +222,13 @@ pub enum ReconstructionOutcome {
     Success(MpcOutput),
     NeedsDkgComplaintRecovery {
         dealer_address: Address,
-        complaint: complaint::Complaint,
+        complaint: avss::Complaint,
         message: avss::Message,
     },
     NeedsRotationComplaintRecovery {
         dealer_address: Address,
         share_index: ShareIndex,
-        complaint: complaint::Complaint,
+        complaint: avss::Complaint,
         message: avss::Message,
     },
 }
@@ -245,6 +245,7 @@ pub(crate) struct DkgReconstructionContext<'a> {
     pub party_id: PartyId,
     pub encryption_key: &'a PrivateKey<EncryptionGroupElement>,
     pub output_threshold: u16,
+    pub output_max_faulty: u16,
     pub epoch: u64,
 }
 
@@ -253,6 +254,7 @@ pub(crate) struct RotationReconstructionContext<'a> {
     pub party_id: PartyId,
     pub encryption_key: &'a PrivateKey<EncryptionGroupElement>,
     pub output_threshold: u16,
+    pub output_max_faulty: u16,
     pub input_threshold: u16,
     pub epoch: u64,
 }
@@ -268,19 +270,25 @@ pub enum NonceReconstructionOutcome {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ProtocolComplaint {
+    Avss(avss::Complaint),
+    BatchedAvss(complaint::Complaint),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComplainRequest {
     pub dealer: Address,
     pub share_index: Option<ShareIndex>, // Only for key rotation
     pub batch_index: Option<u32>,        // Only for nonce generation
-    pub complaint: complaint::Complaint,
+    pub complaint: ProtocolComplaint,
     pub protocol_type: ProtocolTypeIndicator,
     pub epoch: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ComplaintResponse {
-    Dkg(complaint::ComplaintResponse<avss::SharesForNode>),
-    Rotation(complaint::ComplaintResponse<avss::SharesForNode>),
+    Dkg(avss::ComplaintResponse),
+    Rotation(avss::ComplaintResponse),
     NonceGeneration(complaint::ComplaintResponse<batch_avss::SharesForNode>),
 }
 

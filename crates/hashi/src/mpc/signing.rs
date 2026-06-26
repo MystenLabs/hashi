@@ -654,7 +654,7 @@ fn aggregate_signatures_with_recovery(
     let values: Vec<_> = partial_signatures.iter().map(|e| e.value).collect();
     let s = RSDecoder::new(indices, threshold as usize)
         .compute_message_polynomial(&values)?
-        .into_c0();
+        .c0();
     finalize_schnorr_signature(
         message,
         public_presig,
@@ -684,6 +684,7 @@ mod tests {
     use fastcrypto::serde_helpers::ToFromByteArray;
     use fastcrypto::traits::AllowedRng;
     use fastcrypto_tbls::polynomial::Poly;
+    use fastcrypto_tbls::threshold_schnorr::Parameters;
     use fastcrypto_tbls::threshold_schnorr::batch_avss;
     use fastcrypto_tbls::types::ShareIndex;
     use hashi_types::committee::CommitteeMember;
@@ -1023,7 +1024,8 @@ mod tests {
                         })
                         .collect();
                     let presignatures =
-                        Presignatures::new(outputs, batch_size_per_weight, f as usize).unwrap();
+                        Presignatures::new(outputs, batch_size_per_weight, Parameters { t, f })
+                            .unwrap();
                     let mgr = SigningManager::new(
                         test_address(i),
                         committee.clone(),
@@ -1168,8 +1170,15 @@ mod tests {
                         public_keys: nonces_for_dealer[j].0.clone(),
                     })
                     .collect();
-                let presignatures =
-                    Presignatures::new(outputs, batch_size_per_weight, self.f as usize).unwrap();
+                let presignatures = Presignatures::new(
+                    outputs,
+                    batch_size_per_weight,
+                    Parameters {
+                        t: self.t,
+                        f: self.f,
+                    },
+                )
+                .unwrap();
                 mgr.set_next_batch(presignatures);
             }
         }
@@ -1263,7 +1272,7 @@ mod tests {
                 })
                 .collect();
             let presigs: Vec<(Vec<S>, G)> =
-                Presignatures::new(outputs, batch_size_per_weight, f as usize)
+                Presignatures::new(outputs, batch_size_per_weight, Parameters { t, f })
                     .unwrap()
                     .collect();
             let (pn, sigs) = generate_partial_signatures(

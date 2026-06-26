@@ -696,8 +696,9 @@ pub(crate) mod tests {
         let dealer = avss::Dealer::new(
             None,
             nodes,
-            3, // threshold
+            fastcrypto_tbls::threshold_schnorr::Parameters { t: 3, f: 1 },
             b"test-session".to_vec(),
+            &mut rand::thread_rng(),
         )
         .unwrap();
         dealer.create_message(&mut rand::thread_rng())

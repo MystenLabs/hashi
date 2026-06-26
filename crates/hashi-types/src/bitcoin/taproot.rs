@@ -196,7 +196,8 @@ fn derive_hashi_child_pubkey(
     hashi_master_g: &HashiMasterG,
     hashi_derivation_path: &DerivationPath,
 ) -> BitcoinPubkey {
-    let derived = derive_verifying_key(hashi_master_g, &hashi_derivation_path.into_inner());
+    let derived = derive_verifying_key(hashi_master_g, &hashi_derivation_path.into_inner())
+        .expect("deriving a child verifying key from a valid master key should not fail");
     BitcoinPubkey::from_slice(&derived.to_byte_array()).expect("derived schnorr key is x-only")
 }
 
@@ -438,14 +439,18 @@ mod bitcoin_tests {
         let path = [42u8; 32];
 
         // The child key the MPC actually produces signatures against.
-        let mpc_child = derive_verifying_key(&raw_g, &path).to_byte_array();
+        let mpc_child = derive_verifying_key(&raw_g, &path)
+            .expect("derive child key")
+            .to_byte_array();
         // The child the old even-y-forcing code would have embedded instead.
         let raw_g_xonly = SchnorrPublicKey::try_from(&raw_g)
             .expect("valid schnorr key")
             .to_byte_array();
         let forced_even =
             HashiMasterG::with_even_y_from_x_be_bytes(&raw_g_xonly).expect("valid x coordinate");
-        let buggy_child = derive_verifying_key(&forced_even, &path).to_byte_array();
+        let buggy_child = derive_verifying_key(&forced_even, &path)
+            .expect("derive child key")
+            .to_byte_array();
         assert_ne!(
             buggy_child, mpc_child,
             "odd-y parent must change the child, else this test can't catch the regression"
