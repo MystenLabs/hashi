@@ -48,14 +48,12 @@ use zeroize::Zeroizing;
 /// the full KP cert roster, and the PCR allowlist. Shared by every command that
 /// needs to discover and verify a ceremony against an expected KP set.
 #[derive(Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub struct KpRosterConfig {
     /// Total number of shares. Must equal `kp_pgp_cert_paths.len()`.
     pub num_shares: usize,
     /// Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
     pub threshold: usize,
     /// S3 config for the guardian's log bucket (object-lock enabled).
-    #[serde(deserialize_with = "crate::config::deserialize_s3_config")]
     pub guardian_s3: S3Config,
     /// Paths to each KP's armored OpenPGP public cert. Order matters for
     /// `operator ceremony` (the cert at index `i` is assigned share id `i + 1`); for

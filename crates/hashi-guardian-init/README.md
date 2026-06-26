@@ -46,7 +46,7 @@ cargo run -p hashi-guardian-init -- operator ceremony --config guardian-init.sam
 ```
 
 Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
-command uses `guardian-endpoint`, `hashi`, and `kp-roster`.
+command uses `guardian_endpoint`, `hashi`, and `kp_roster`.
 
 ## key-provisioner ceremony
 
@@ -73,7 +73,7 @@ cargo run -p hashi-guardian-init -- key-provisioner ceremony --config guardian-i
 ```
 
 Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
-command uses `kp-pgp-cert-path`, `hashi`, and `kp-roster`.
+command uses `kp_pgp_cert_path`, `hashi`, and `kp_roster`.
 
 ## operator provision
 
@@ -143,8 +143,8 @@ cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-
 ```
 
 See [`guardian-init.sample.yaml`](guardian-init.sample.yaml) for the unified
-config. This command uses `kp-pgp-cert-path`, `relay-endpoint`, `hashi`,
-`kp-roster`, and `limiter-config`. The committee and MPC committee verifying key
+config. This command uses `kp_pgp_cert_path`, `relay_endpoint`, `hashi`,
+`kp_roster`, and `limiter_config`. The committee and MPC committee verifying key
 `G` are fetched from on-chain Hashi state.
 
 ## tools

@@ -8,19 +8,41 @@ use anyhow::Context;
 use hashi::config::HashiIds;
 use hashi::onchain::OnchainState;
 use hashi_types::guardian::LimiterConfig;
-use hashi_types::guardian::S3BucketInfo;
-use hashi_types::guardian::S3Config;
 use serde::Deserialize;
 
 use crate::kp_roster::KpRosterConfig;
 
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone)]
 pub struct HashiOnchainConfig {
     /// Sui RPC URL used to fetch Hashi on-chain state.
     pub sui_rpc: String,
-    #[serde(flatten)]
     pub hashi_ids: HashiIds,
+}
+
+impl<'de> Deserialize<'de> for HashiOnchainConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct HashiOnchainConfigWire {
+            sui_rpc: String,
+            package_id: String,
+            hashi_object_id: String,
+        }
+
+        let wire = HashiOnchainConfigWire::deserialize(deserializer)?;
+        Ok(Self {
+            sui_rpc: wire.sui_rpc,
+            hashi_ids: HashiIds {
+                package_id: wire.package_id.parse().map_err(serde::de::Error::custom)?,
+                hashi_object_id: wire
+                    .hashi_object_id
+                    .parse()
+                    .map_err(serde::de::Error::custom)?,
+            },
+        })
+    }
 }
 
 impl HashiOnchainConfig {
@@ -33,11 +55,9 @@ impl HashiOnchainConfig {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub struct Config {
     pub hashi: HashiOnchainConfig,
     pub kp_roster: KpRosterConfig,
-    #[serde(deserialize_with = "deserialize_limiter_config")]
     pub limiter_config: LimiterConfig,
     /// Relay endpoint the KP's encrypted share is submitted to.
     pub relay_endpoint: String,
@@ -46,54 +66,6 @@ pub struct Config {
     /// Path to this KP's armored OpenPGP public cert. Required by
     /// key-provisioner commands.
     pub kp_pgp_cert_path: Option<PathBuf>,
-}
-
-pub fn deserialize_s3_config<'de, D>(deserializer: D) -> Result<S3Config, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(rename_all = "kebab-case")]
-    struct S3ConfigWire {
-        access_key: String,
-        secret_key: String,
-        bucket_info: S3BucketInfoWire,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "kebab-case")]
-    struct S3BucketInfoWire {
-        bucket: String,
-        region: String,
-    }
-
-    let wire = S3ConfigWire::deserialize(deserializer)?;
-    Ok(S3Config {
-        access_key: wire.access_key,
-        secret_key: wire.secret_key,
-        bucket_info: S3BucketInfo {
-            bucket: wire.bucket_info.bucket,
-            region: wire.bucket_info.region,
-        },
-    })
-}
-
-fn deserialize_limiter_config<'de, D>(deserializer: D) -> Result<LimiterConfig, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(rename_all = "kebab-case")]
-    struct LimiterConfigWire {
-        refill_rate: u64,
-        max_bucket_capacity: u64,
-    }
-
-    let wire = LimiterConfigWire::deserialize(deserializer)?;
-    Ok(LimiterConfig {
-        refill_rate: wire.refill_rate,
-        max_bucket_capacity: wire.max_bucket_capacity,
-    })
 }
 
 impl Config {
