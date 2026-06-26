@@ -1,7 +1,7 @@
-# Sample configuration for the `provision` command.
+# Sample configuration for the `key-provisioner provision` command.
 #
 # Run with:
-#   cargo run -p hashi-guardian-init -- provision --config provision.sample.yaml
+#   cargo run -p hashi-guardian-init -- key-provisioner provision --config key-provisioner-provision.sample.yaml
 
 # Path to this KP's armored OpenPGP public cert — the one they exported (e.g.
 # `gpg --armor --export <keyid>`) from their yubikey at ceremony time. provision

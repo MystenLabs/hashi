@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Shared KP-roster config + ceremony-state verification, used by both the
-//! `ceremony verify` and `provision` commands.
+//! `key-provisioner ceremony` and `key-provisioner provision` commands.
 //!
 //! Both commands need to:
 //! - load a roster of KP OpenPGP certs
@@ -47,7 +47,8 @@ use zeroize::Zeroizing;
 
 /// Common KP-roster config: the sharing params, the guardian's S3 log bucket,
 /// the full KP cert roster, and the PCR allowlist. Shared (via
-/// `#[serde(flatten)]`) by `ceremony run`, `ceremony verify`, and `provision` —
+/// `#[serde(flatten)]`) by `operator ceremony`, `key-provisioner ceremony`, and
+/// `key-provisioner provision` —
 /// every command that needs to discover and verify a ceremony against an
 /// expected KP set.
 #[derive(Deserialize)]
@@ -59,8 +60,8 @@ pub struct KpRosterConfig {
     /// S3 config for the guardian's log bucket (object-lock enabled).
     pub guardian_s3: S3Config,
     /// Paths to each KP's armored OpenPGP public cert. Order matters for
-    /// `ceremony run` (the cert at index `i` is assigned share id `i + 1`); for
-    /// the read-only commands (`ceremony verify`, `provision`), shares are
+    /// `operator ceremony` (the cert at index `i` is assigned share id `i + 1`); for
+    /// the read-only commands (`key-provisioner ceremony`, `key-provisioner provision`), shares are
     /// matched by fingerprint so order is irrelevant.
     pub kp_pgp_cert_paths: Vec<PathBuf>,
     #[serde(flatten)]
@@ -89,8 +90,8 @@ impl KpRosterConfig {
 }
 
 /// Validated ceremony state. May come from the live `SetupNewKeyResponse`
-/// (`ceremony run`) or be reconstructed from the guardian's `ceremony/` +
-/// `shares/` logs (`ceremony verify`, `provision`).
+/// (`operator ceremony`) or be reconstructed from the guardian's `ceremony/` +
+/// `shares/` logs (`key-provisioner ceremony`, `key-provisioner provision`).
 #[derive(Debug, PartialEq)]
 pub struct VerifiedCeremonyState {
     pub session_id: String,

@@ -1,11 +1,11 @@
-# Sample configuration for the `ceremony verify` command (run by each KP for
+# Sample configuration for the `key-provisioner ceremony` command (run by each KP for
 # setup or rotation shares).
 #
 # Run with:
-#   cargo run -p hashi-guardian-init -- ceremony verify --config ceremony-verify.sample.yaml
+#   cargo run -p hashi-guardian-init -- key-provisioner ceremony --config key-provisioner-ceremony.sample.yaml
 
 # Path to this KP's armored OpenPGP public cert — the one they exported (e.g.
-# `gpg --armor --export <keyid>`) and gave to the operator at `ceremony run`
+# `gpg --armor --export <keyid>`) and gave to the operator at `operator ceremony`
 # time. verify derives the fingerprint to find this KP's share in shares/,
 # and confirms the ciphertext is genuinely encrypted to this cert before
 # decrypting with the yubikey.

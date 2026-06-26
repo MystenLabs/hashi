@@ -5,21 +5,29 @@ via `hashi_guardian::s3_reader`, verifies the attested enclave, and drives the
 initialization flows. It also houses guardian helper tooling and dev-only
 shortcuts.
 
-## ceremony
+## production flow
 
-The production guardian key ceremony — genesis setup (`run`, run once by the
-operator) and per-KP verification (`verify`, run by each key provisioner for
-setup or rotation shares).
+The production guardian initialization flow is split by actor:
 
-This replaces the `tools dev-bootstrap` shortcut used in dev. Each KP generates
-a PGP key on a yubikey and exports the public cert to the operator; the rest of
-the flow is these two commands.
+```bash
+cargo run -p hashi-guardian-init -- operator ceremony --config operator-ceremony.sample.yaml
+cargo run -p hashi-guardian-init -- key-provisioner ceremony --config key-provisioner-ceremony.sample.yaml
+cargo run -p hashi-guardian-init -- operator provision --config operator-provision.sample.yaml
+cargo run -p hashi-guardian-init -- key-provisioner provision --config key-provisioner-provision.sample.yaml
+```
+
+This will replace the `tools dev-bootstrap` shortcut used in dev. Each KP
+generates a PGP key on a yubikey and exports the public cert to the operator;
+the key ceremony and provisioning flow is then driven through these commands.
+
+## operator ceremony
+
+The production guardian key ceremony — genesis setup, run once by the operator.
 
 One S3 bucket is involved: the guardian's **log bucket** (object-lock enabled).
-The guardian writes its `init/` attestation, `ceremony/` audit log, and `shares/`
-encrypted-share recovery log here. Both commands read it.
-
-### ceremony run (operator)
+The guardian writes its `init/` attestation, `ceremony/` audit log, and
+`shares/` encrypted-share recovery log here. The operator and key provisioner
+ceremony commands both read it.
 
 Drives a fresh **ceremony-mode** guardian through the one-time genesis BTC key
 setup (`sharing_seq = 0`). It connects over gRPC and: `operator_init` (ceremony mode, S3-only) →
@@ -32,13 +40,13 @@ Each share is labeled with its recipient cert's `recipient_fingerprint`, so a KP
 finds their share by fingerprint (not positional index).
 
 ```bash
-cargo run -p hashi-guardian-init -- ceremony run --config ceremony-run.sample.yaml
+cargo run -p hashi-guardian-init -- operator ceremony --config operator-ceremony.sample.yaml
 ```
 
-Config: see [`ceremony-run.sample.yaml`](ceremony-run.sample.yaml) — the guardian
-endpoint, `n`/`t`, guardian S3 config, and the KP cert paths.
+Config: see [`operator-ceremony.sample.yaml`](operator-ceremony.sample.yaml) —
+the guardian endpoint, `n`/`t`, guardian S3 config, and the KP cert paths.
 
-### ceremony verify (each KP)
+## key-provisioner ceremony
 
 Confirms a KP can fetch and decrypt their setup or rotation ceremony share for
 an expected `sharing_seq` (`0` for genesis setup, `N + 1` for a rotation from
@@ -61,14 +69,42 @@ Only the share's **ciphertext** is written to disk (a temp file, deleted on
 drop); the decrypted scalar lives only in memory.
 
 ```bash
-cargo run -p hashi-guardian-init -- ceremony verify --config ceremony-verify.sample.yaml
+cargo run -p hashi-guardian-init -- key-provisioner ceremony --config key-provisioner-ceremony.sample.yaml
 ```
 
-Config: see [`ceremony-verify.sample.yaml`](ceremony-verify.sample.yaml) — the
-KP's cert path, expected `sharing_seq` and `n`/`t`, full KP cert roster, guardian
-S3 config, and an optional gpg homedir.
+Config: see
+[`key-provisioner-ceremony.sample.yaml`](key-provisioner-ceremony.sample.yaml)
+— the KP's cert path, expected `sharing_seq` and `n`/`t`, full KP cert roster,
+guardian S3 config, and an optional gpg homedir.
 
-## provision
+## operator provision
+
+Initializes a fresh **withdraw-mode** guardian with operator-supplied state.
+This is the missing production replacement for the withdraw-mode `OperatorInit`
+part currently covered by `tools dev-bootstrap`.
+
+This command is currently a stub and exits non-zero.
+
+Eventually it will:
+
+1. Read operator provision config.
+2. Fetch and verify the withdraw-mode guardian's `GetGuardianInfo`.
+3. Build the `WithdrawModeConfig` from guardian S3 config, limiter config,
+   current committee or genesis committee, MPC master `G`, secret-sharing
+   instance, Bitcoin network, and limiter state.
+4. Recover limiter state from prior guardian withdrawal logs, or use genesis
+   state for first deployment.
+5. Call withdraw-mode `OperatorInit`.
+6. Print the state hash that key provisioners must verify before submitting
+   shares.
+
+```bash
+cargo run -p hashi-guardian-init -- operator provision --config operator-provision.sample.yaml
+```
+
+Config: see [`operator-provision.sample.yaml`](operator-provision.sample.yaml).
+
+## key-provisioner provision
 
 A one-shot flow run by a key provisioner when a new guardian instance is
 brought up to replace one that went down. Each KP decrypts through their
@@ -104,15 +140,11 @@ is held in this process' memory long enough to verify and re-encrypt it. It:
    forwarding them to the guardian in one `ProvisionerInit` call; submission
    itself awaits the relay's `single_provisioner_init` RPC.
 
-### Usage
-
 ```bash
-cargo run -p hashi-guardian-init -- provision --config provision.sample.yaml
+cargo run -p hashi-guardian-init -- key-provisioner provision --config key-provisioner-provision.sample.yaml
 ```
 
-### Config
-
-See [`provision.sample.yaml`](provision.sample.yaml) for a complete
+See [`key-provisioner-provision.sample.yaml`](key-provisioner-provision.sample.yaml) for a complete
 `ProvisionConfig` example: this KP's cert path, the full KP cert roster,
 expected `sharing_seq` and `n`/`t`, the guardian S3 config, limiter config, the
 MPC committee verifying key `G` (`hashi_btc_master_pubkey_hex`), the PCR

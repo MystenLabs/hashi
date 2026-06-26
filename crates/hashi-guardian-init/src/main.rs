@@ -8,15 +8,16 @@ use hashi::config::Config;
 use hashi::onchain::OnchainState;
 use std::path::PathBuf;
 
-mod ceremony;
-mod config;
 mod dev_bootstrap;
 mod fetch_info;
 mod generate_master_key;
 mod heartbeat_checks;
+mod kp_ceremony;
+mod kp_provision;
 mod kp_roster;
 mod limiter_recovery;
-mod provision;
+mod operator_ceremony;
+mod operator_provision;
 
 #[derive(Parser)]
 #[command(name = "hashi-guardian-init")]
@@ -28,16 +29,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Production guardian key ceremony commands.
-    Ceremony {
+    /// Commands run by the guardian operator.
+    Operator {
         #[command(subcommand)]
-        command: CeremonyCommand,
+        command: OperatorCommand,
     },
-    /// Run a key provisioner's init checks and submit its share to the relay.
-    Provision {
-        /// Path to provision YAML config file.
-        #[arg(long)]
-        config: PathBuf,
+    /// Commands run by a key provisioner.
+    KeyProvisioner {
+        #[command(subcommand)]
+        command: KeyProvisionerCommand,
     },
     /// Guardian helper tooling and dev-only shortcuts.
     Tools {
@@ -47,16 +47,32 @@ enum Command {
 }
 
 #[derive(Subcommand)]
-enum CeremonyCommand {
+enum OperatorCommand {
     /// Run the one-time production guardian key ceremony.
-    Run {
-        /// Path to ceremony-run YAML config file.
+    Ceremony {
+        /// Path to operator ceremony YAML config file.
         #[arg(long)]
         config: PathBuf,
     },
+    /// Initialize a withdraw-mode guardian with operator-supplied state.
+    Provision {
+        /// Path to operator provision YAML config file.
+        #[arg(long)]
+        config: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum KeyProvisionerCommand {
     /// Verify this KP can fetch and decrypt its encrypted ceremony share from guardian S3.
-    Verify {
-        /// Path to ceremony-verify YAML config file.
+    Ceremony {
+        /// Path to key-provisioner ceremony YAML config file.
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Run a key provisioner's init checks and submit its share to the relay.
+    Provision {
+        /// Path to key-provisioner provision YAML config file.
         #[arg(long)]
         config: PathBuf,
     },
@@ -107,20 +123,25 @@ async fn main() -> anyhow::Result<()> {
     hashi::init_crypto_provider();
 
     match Cli::parse().command {
-        Command::Ceremony { command } => match command {
-            CeremonyCommand::Run { config } => {
-                let cfg = ceremony::CeremonyRunConfig::load_yaml(&config)?;
-                ceremony::run(cfg).await?;
+        Command::Operator { command } => match command {
+            OperatorCommand::Ceremony { config } => {
+                let cfg = operator_ceremony::CeremonyRunConfig::load_yaml(&config)?;
+                operator_ceremony::run(cfg).await?;
             }
-            CeremonyCommand::Verify { config } => {
-                let cfg = ceremony::CeremonyVerifyConfig::load_yaml(&config)?;
-                ceremony::verify(cfg).await?;
+            OperatorCommand::Provision { config } => {
+                operator_provision::run(&config)?;
             }
         },
-        Command::Provision { config } => {
-            let cfg = provision::ProvisionConfig::load_yaml(&config)?;
-            provision::run(cfg).await?;
-        }
+        Command::KeyProvisioner { command } => match command {
+            KeyProvisionerCommand::Ceremony { config } => {
+                let cfg = kp_ceremony::CeremonyConfig::load_yaml(&config)?;
+                kp_ceremony::run(cfg).await?;
+            }
+            KeyProvisionerCommand::Provision { config } => {
+                let cfg = kp_provision::ProvisionConfig::load_yaml(&config)?;
+                kp_provision::run(cfg).await?;
+            }
+        },
         Command::Tools { command } => match command {
             ToolsCommand::DevBootstrap { config, args } => {
                 let cfg = config.load()?;
