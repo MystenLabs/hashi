@@ -28,11 +28,12 @@ use crate::kp_roster::ensure_cert_in_roster;
 /// written to disk by this flow.
 pub async fn run(cfg: Config) -> Result<()> {
     cfg.kp_roster.validate()?;
+    let guardian_s3 = cfg.guardian_s3.resolve().await?;
 
     info!(
         phase = "setup",
-        bucket = cfg.kp_roster.guardian_s3.bucket_name(),
-        region = cfg.kp_roster.guardian_s3.region(),
+        bucket = guardian_s3.bucket_name(),
+        region = guardian_s3.region(),
         num_shares = cfg.kp_roster.num_shares,
         threshold = cfg.kp_roster.threshold,
         sui_rpc = %cfg.hashi.sui_rpc,
@@ -74,12 +75,12 @@ pub async fn run(cfg: Config) -> Result<()> {
     //    (attestation-verified once via the reader's session-key cache).
     info!(
         phase = "s3 connect",
-        bucket = cfg.kp_roster.guardian_s3.bucket_name(),
-        region = cfg.kp_roster.guardian_s3.region(),
+        bucket = guardian_s3.bucket_name(),
+        region = guardian_s3.region(),
         current_pcr0 = hex::encode(cfg.kp_roster.pcr_allowlist.current_build().pcr0()),
         "connecting to guardian log bucket",
     );
-    let mut reader = GuardianReader::new(&cfg.kp_roster.guardian_s3, cfg.kp_roster.pcr_allowlist())
+    let mut reader = GuardianReader::new(&guardian_s3, cfg.kp_roster.pcr_allowlist())
         .await
         .context("connect to guardian log bucket")?;
     info!(phase = "s3 connect", "connected to guardian log bucket");
