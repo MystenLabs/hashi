@@ -1,7 +1,7 @@
-# Sample configuration for the genesis `ceremony run` command.
+# Sample configuration for the genesis `operator ceremony` command.
 #
 # Run with:
-#   cargo run -p hashi-guardian-init -- ceremony run --config ceremony-run.sample.yaml
+#   cargo run -p hashi-guardian-init -- operator ceremony --config operator-ceremony.sample.yaml
 
 # gRPC endpoint of the ceremony-mode guardian (CEREMONY_MODE=true). This command
 # runs setup_new_key and always creates sharing_seq 0.
@@ -24,7 +24,7 @@ guardian_s3:
 # Paths to each KP's armored OpenPGP public cert (the cert generated on the
 # yubikey, exported with `gpg --armor --export <keyid>`). Each share is labeled
 # with its recipient cert's fingerprint, so a KP finds their share by
-# fingerprint at `ceremony verify` time — independent of the order here.
+# fingerprint at `key-provisioner ceremony` time — independent of the order here.
 kp_pgp_cert_paths:
   - /path/to/kp1.asc
   - /path/to/kp2.asc
