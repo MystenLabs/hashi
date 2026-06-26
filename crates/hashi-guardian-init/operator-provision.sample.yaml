@@ -10,6 +10,14 @@
 # gRPC endpoint of the withdraw-mode guardian (CEREMONY_MODE=false).
 guardian_endpoint: "http://localhost:3000"
 
+hashi:
+  # Sui RPC URL used to fetch Hashi on-chain state.
+  sui-rpc: "https://fullnode.devnet.sui.io:443"
+  # Original published Hashi package id.
+  package-id: "0x0000000000000000000000000000000000000000000000000000000000000000"
+  # Shared Hashi object id.
+  hashi-object-id: "0x0000000000000000000000000000000000000000000000000000000000000000"
+
 # S3 config for the guardian's log bucket (object-lock enabled).
 guardian_s3:
   access_key: "AKIA..."
@@ -18,5 +26,6 @@ guardian_s3:
     bucket: "hashi-guardian-logs"
     region: "us-east-1"
 
-# TODO: add limiter config, committee source, secret-sharing instance,
-# Bitcoin network, MPC master G, build allowlist, and state-hash output fields.
+# TODO: add limiter config, secret-sharing instance, Bitcoin network, build
+# allowlist, and state-hash output fields. Committee and MPC master G should be
+# fetched from the Hashi on-chain state above.

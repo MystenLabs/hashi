@@ -146,13 +146,11 @@ cargo run -p hashi-guardian-init -- key-provisioner provision --config key-provi
 
 See [`key-provisioner-provision.sample.yaml`](key-provisioner-provision.sample.yaml) for a complete
 `ProvisionConfig` example: this KP's cert path, the full KP cert roster,
-expected `n`/`t`, the guardian S3 config, limiter config, the
-MPC committee verifying key `G` (`hashi_btc_master_pubkey_hex`), the PCR
-allowlist (`current_build` plus optional `prev_builds`) pinned against each
-session's attestation, and the relay endpoint the share is submitted to. The
-shared ceremony fields live under `kp_roster`.
-`hashi_committee_genesis` is needed only at genesis; omit it once a
-`committee-update/` log exists.
+expected `n`/`t`, the guardian S3 config, Hashi on-chain connection info,
+limiter config, the PCR allowlist (`current_build` plus optional `prev_builds`)
+pinned against each session's attestation, and the relay endpoint the share is
+submitted to. The shared ceremony fields live under `kp_roster`. The committee
+and MPC committee verifying key `G` are fetched from on-chain Hashi state.
 
 ## tools
 

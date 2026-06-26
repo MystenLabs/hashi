@@ -18,7 +18,7 @@
 //! 4. Initial limiter state is recovered from the prior enclave's max-seq
 //!    Success withdrawal log (or genesis) and confirmed equal (check C).
 //! 5. The committee comes from the latest signed `committee-update/` log (or
-//!    genesis fallback); the `state_hash` is recomputed and confirmed (check D).
+//!    on-chain Hashi state); the `state_hash` is recomputed and confirmed (check D).
 //! 6. This KP's encrypted share is read from `shares/{seq}-{session}.json`
 //!    (attestation-anchored), every share's recipients are verified against
 //!    the roster, and this KP's share is located by fingerprint.
@@ -34,7 +34,6 @@
 use anyhow::Context;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
-use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GetGuardianInfoResponse;
@@ -44,7 +43,6 @@ use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::WithdrawModeState;
-use hashi_types::move_types::Committee as CommitteeRepr;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::load_certs;
 use hashi_types::proto as pb;
@@ -55,6 +53,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use tracing::info;
 
+use crate::hashi_onchain::HashiOnchainConfig;
 use crate::heartbeat_checks;
 use crate::kp_roster::KpRosterConfig;
 use crate::kp_roster::VerifiedCeremonyState;
@@ -93,8 +92,18 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
         .context("connect to guardian log bucket")?;
     info!(phase = "s3 connect", "connected to guardian log bucket");
 
-    let master_g = cfg.mpc_master_g()?;
-    info!(phase = "setup", master_g = ?master_g, "decoded MPC master G");
+    info!(
+        phase = "sui connect",
+        sui_rpc = %cfg.hashi.sui_rpc,
+        package_id = %cfg.hashi.hashi_ids.package_id,
+        hashi_object_id = %cfg.hashi.hashi_ids.hashi_object_id,
+        "connecting to Sui RPC for Hashi on-chain state",
+    );
+    let onchain_state = cfg.hashi.onchain_state().await?;
+    info!(phase = "sui connect", "connected to Sui RPC");
+
+    let master_g = onchain_state.onchain_verifying_key_g()?;
+    info!(phase = "setup", master_g = ?master_g, "fetched on-chain MPC master G");
 
     info!(
         phase = "roster load",
@@ -291,8 +300,8 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
 
     // 5. Check D — recompute the init state the operator booted the enclave
     //    with; its digest is the `state_hash` we bind as the share's AAD. The
-    //    committee comes from the latest signed `committee-update/` log; before
-    //    any update exists (genesis) we fall back to the trusted local value.
+    //    committee comes from the latest signed `committee-update/` log or,
+    //    before any update exists, from authoritative on-chain Hashi state.
     info!(
         phase = "state hash",
         "recomputing state_hash from committee + limiter + master_g",
@@ -308,32 +317,30 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
                 source = "committee-update log",
                 "scraped latest committee-update log",
             );
-            scraped
+            scraped.try_into()?
         }
         None => {
+            let committee = onchain_state
+                .current_committee()
+                .context("no current committee on chain (DKG not yet complete?)")?;
             info!(
                 phase = "state hash",
-                source = "hashi_committee_genesis (config)",
-                "no committee-update log; falling back to genesis config",
+                epoch = committee.epoch(),
+                source = "on-chain Hashi state",
+                "no committee-update log; falling back to on-chain current committee",
             );
-            cfg.hashi_committee_genesis
-                .clone()
-                .context("no committee-update log in S3 and no hashi_committee_genesis in config")?
+            committee
         }
     };
     anyhow::ensure!(
-        committee.epoch == enclave_current_committee_epoch,
+        committee.epoch() == enclave_current_committee_epoch,
         "committee epoch mismatch: expected {}, got {}",
-        committee.epoch,
+        committee.epoch(),
         enclave_current_committee_epoch
     );
-    let committee_epoch = committee.epoch;
-    let expected_state = WithdrawModeState::new(
-        committee.try_into()?,
-        cfg.limiter_config,
-        limiter_state,
-        master_g,
-    )?;
+    let committee_epoch = committee.epoch();
+    let expected_state =
+        WithdrawModeState::new(committee, cfg.limiter_config, limiter_state, master_g)?;
     let state_hash = expected_state.digest();
     anyhow::ensure!(
         state_hash == enclave_state_hash,
@@ -575,6 +582,7 @@ async fn prechecks(
 
 #[derive(Deserialize)]
 pub struct ProvisionConfig {
+    pub hashi: HashiOnchainConfig,
     pub kp_roster: KpRosterConfig,
     /// Path to this KP's armored OpenPGP public cert (the one they exported
     /// from their yubikey and gave to the operator at ceremony time). Used to
@@ -585,15 +593,7 @@ pub struct ProvisionConfig {
     /// collects T-of-N shares before forwarding them to the guardian in one
     /// `ProvisionerInit` call.
     pub relay_endpoint: String,
-    /// Genesis committee — required only at genesis, when `committee-update/` is
-    /// still empty; omit it once any update has been logged (it's scraped from
-    /// there after). Stands in for the authoritative on-chain `CommitteeSet`
-    /// until the tool reads chain directly. Validated via the `state_hash` match.
-    pub hashi_committee_genesis: Option<CommitteeRepr>,
     pub limiter_config: LimiterConfig,
-    /// MPC committee `G` (on-chain `CommitteeSet.mpc_public_key`) as hex of `bcs(G)`;
-    /// the derivation master (NOT the guardian's own key). Must match operator init.
-    pub hashi_btc_master_pubkey_hex: String,
 }
 
 impl ProvisionConfig {
@@ -610,32 +610,5 @@ impl ProvisionConfig {
                 path.display()
             )
         })
-    }
-
-    /// The MPC committee verifying key `G`, decoded from `hashi_btc_master_pubkey_hex`.
-    pub fn mpc_master_g(&self) -> anyhow::Result<HashiMasterG> {
-        decode_master_g_hex(&self.hashi_btc_master_pubkey_hex)
-    }
-}
-
-/// Decode the MPC committee verifying key `G` from hex of its `bcs(G)` encoding
-/// (the same `bcs(G)` `Hashi::onchain_verifying_key_g` reads from chain).
-fn decode_master_g_hex(hex_str: &str) -> anyhow::Result<HashiMasterG> {
-    let bytes = hex::decode(hex_str.trim_start_matches("0x"))
-        .context("hashi_btc_master_pubkey_hex is not valid hex")?;
-    bcs::from_bytes(&bytes).context("decode MPC verifying key G from bcs(G)")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn decode_master_g_hex_accepts_bcs_g_and_rejects_garbage() {
-        // hex of a real on-chain CommitteeSet.mpc_public_key (bcs(G), devnet).
-        let g_hex = "a6adc1f72da0e65df2dfb17820fe6dc26d42a84f5738a8b7cb1fa745626f818c00";
-        decode_master_g_hex(g_hex).expect("valid bcs(G) decodes");
-        assert!(decode_master_g_hex("nothex").is_err());
-        assert!(decode_master_g_hex("0011").is_err());
     }
 }

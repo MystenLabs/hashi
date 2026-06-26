@@ -11,6 +11,14 @@
 # decrypting with the yubikey.
 kp_pgp_cert_path: /path/to/kp3.asc
 
+hashi:
+  # Sui RPC URL used to fetch Hashi on-chain state.
+  sui-rpc: "https://fullnode.devnet.sui.io:443"
+  # Original published Hashi package id.
+  package-id: "0x0000000000000000000000000000000000000000000000000000000000000000"
+  # Shared Hashi object id.
+  hashi-object-id: "0x0000000000000000000000000000000000000000000000000000000000000000"
+
 kp_roster:
   # Expected secret-sharing parameters from the ceremony plan.
   num_shares: 5

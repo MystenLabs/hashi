@@ -11,6 +11,7 @@ use std::path::PathBuf;
 mod dev_bootstrap;
 mod fetch_info;
 mod generate_master_key;
+mod hashi_onchain;
 mod heartbeat_checks;
 mod kp_ceremony;
 mod kp_provision;

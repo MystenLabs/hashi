@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
@@ -34,6 +35,7 @@ use tokio::sync::watch;
 
 use crate::config::HashiIds;
 use crate::mpc::fallback_encryption_public_key;
+use fastcrypto_tbls::threshold_schnorr::G as HashiMasterG;
 use hashi_types::committee::Committee;
 use hashi_types::committee::CommitteeMember;
 use hashi_types::committee::SignedMessage;
@@ -331,6 +333,19 @@ impl OnchainState {
     /// Returns the MPC public key bytes.
     pub fn mpc_public_key(&self) -> Vec<u8> {
         self.state().hashi.committees.mpc_public_key().to_vec()
+    }
+
+    /// Deserialize the BCS-encoded MPC group element from on-chain state.
+    ///
+    /// The on-chain key is stored as `bcs::to_bytes(&G)` in the `CommitteeSet`
+    /// and is populated atomically with the `end_reconfig` event.
+    pub fn onchain_verifying_key_g(&self) -> Result<HashiMasterG> {
+        let bytes = self.mpc_public_key();
+        anyhow::ensure!(
+            !bytes.is_empty(),
+            "MPC public key not yet available on-chain"
+        );
+        bcs::from_bytes(&bytes).context("failed to deserialize on-chain MPC public key")
     }
 
     /// Returns all active (not-yet-executed) proposals.

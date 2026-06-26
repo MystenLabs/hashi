@@ -13,6 +13,14 @@ kp_pgp_cert_path: /path/to/kp3.asc
 # shares before forwarding them to the guardian in one ProvisionerInit call.
 relay_endpoint: "http://localhost:50051"
 
+hashi:
+  # Sui RPC URL used to fetch Hashi on-chain state.
+  sui-rpc: "https://fullnode.devnet.sui.io:443"
+  # Original published Hashi package id.
+  package-id: "0x0000000000000000000000000000000000000000000000000000000000000000"
+  # Shared Hashi object id.
+  hashi-object-id: "0x0000000000000000000000000000000000000000000000000000000000000000"
+
 kp_roster:
   # Expected secret-sharing parameters from the ceremony plan.
   num_shares: 5
@@ -49,28 +57,7 @@ kp_roster:
   #   - git_revision: "1111111111111111111111111111111111111111"
   #     pcr0: "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
 
-# Genesis committee — required ONLY at genesis (before any `committee-update/`
-# log exists); omit this whole block once an update has been logged, since the
-# committee is then scraped from that signed log.
-# TODO: replace the placeholder values below with the real genesis committee.
-hashi_committee_genesis:
-  epoch: 0
-  members:
-    - validator_address: "0x0000000000000000000000000000000000000000000000000000000000000000"
-      public_key: []           # BLS G1 pubkey bytes
-      encryption_public_key: [] # HPKE pubkey bytes
-      weight: 1
-  total_weight: 1
-  mpc_threshold_in_basis_points: 6700
-  mpc_weight_reduction_allowed_delta: 0
-  mpc_max_faulty_in_basis_points: 3300
-
 # Limiter parameters the enclave will be initialized with.
 limiter_config:
   refill_rate: 1000
   max_bucket_capacity: 100000000
-
-# MPC committee verifying key G, as hex of its `bcs(G)` encoding (the same
-# `bcs(G)` read from on-chain `CommitteeSet.mpc_public_key`). NOT the
-# guardian's own BTC key.
-hashi_btc_master_pubkey_hex: "0000000000000000000000000000000000000000000000000000000000000001"

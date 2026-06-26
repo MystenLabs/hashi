@@ -7,6 +7,14 @@
 # runs setup_new_key and always creates sharing_seq 0.
 guardian_endpoint: "http://localhost:3000"
 
+hashi:
+  # Sui RPC URL used to fetch Hashi on-chain state.
+  sui-rpc: "https://fullnode.devnet.sui.io:443"
+  # Original published Hashi package id.
+  package-id: "0x0000000000000000000000000000000000000000000000000000000000000000"
+  # Shared Hashi object id.
+  hashi-object-id: "0x0000000000000000000000000000000000000000000000000000000000000000"
+
 kp_roster:
   # Secret-sharing parameters. `num_shares` MUST equal `kp_pgp_cert_paths.len()`.
   num_shares: 5

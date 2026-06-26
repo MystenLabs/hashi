@@ -35,11 +35,13 @@ use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use serde::Deserialize;
 use tracing::info;
 
+use crate::hashi_onchain::HashiOnchainConfig;
 use crate::kp_roster::KpRosterConfig;
 use crate::kp_roster::VerifiedCeremonyState;
 
 #[derive(Deserialize)]
 pub struct CeremonyRunConfig {
+    pub hashi: HashiOnchainConfig,
     pub kp_roster: KpRosterConfig,
     /// gRPC endpoint of the ceremony-mode guardian.
     pub guardian_endpoint: String,
@@ -75,6 +77,9 @@ pub async fn run(cfg: CeremonyRunConfig) -> Result<()> {
         bucket = cfg.kp_roster.guardian_s3.bucket_name(),
         region = cfg.kp_roster.guardian_s3.region(),
         endpoint = %cfg.guardian_endpoint,
+        sui_rpc = %cfg.hashi.sui_rpc,
+        package_id = %cfg.hashi.hashi_ids.package_id,
+        hashi_object_id = %cfg.hashi.hashi_ids.hashi_object_id,
         current_pcr0 = hex::encode(cfg.kp_roster.pcr_allowlist.current_build().pcr0()),
         "running guardian key ceremony",
     );

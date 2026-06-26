@@ -15,6 +15,7 @@ use hashi_types::pgp::load_certs;
 use serde::Deserialize;
 use tracing::info;
 
+use crate::hashi_onchain::HashiOnchainConfig;
 use crate::kp_roster::KpRosterConfig;
 use crate::kp_roster::VerifiedCeremonyState;
 use crate::kp_roster::decrypt_share;
@@ -22,6 +23,7 @@ use crate::kp_roster::ensure_cert_in_roster;
 
 #[derive(Deserialize)]
 pub struct CeremonyConfig {
+    pub hashi: HashiOnchainConfig,
     pub kp_roster: KpRosterConfig,
     /// Path to this KP's armored OpenPGP public cert (the one they exported and
     /// gave to the operator at `operator ceremony` time). Used to derive the
@@ -66,6 +68,9 @@ pub async fn run(cfg: CeremonyConfig) -> Result<()> {
         region = cfg.kp_roster.guardian_s3.region(),
         num_shares = cfg.kp_roster.num_shares,
         threshold = cfg.kp_roster.threshold,
+        sui_rpc = %cfg.hashi.sui_rpc,
+        package_id = %cfg.hashi.hashi_ids.package_id,
+        hashi_object_id = %cfg.hashi.hashi_ids.hashi_object_id,
         "verifying ceremony share",
     );
 

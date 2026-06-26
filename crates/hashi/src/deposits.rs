@@ -254,7 +254,7 @@ impl Hashi {
     fn mpc_master_g(&self) -> anyhow::Result<G> {
         self.signing_verifying_key()
             .map(Ok)
-            .unwrap_or_else(|| self.onchain_verifying_key_g())
+            .unwrap_or_else(|| self.onchain_state().onchain_verifying_key_g())
             .context("MPC public key not available yet")
     }
 
@@ -270,7 +270,7 @@ impl Hashi {
         let verifying_key = self
             .signing_verifying_key()
             .map(Ok)
-            .unwrap_or_else(|| self.onchain_verifying_key_g())
+            .unwrap_or_else(|| self.onchain_state().onchain_verifying_key_g())
             .context("MPC public key not available yet")?;
         let derivation_path = normalized_derivation_path(derivation_path).into_inner();
         let derived = fastcrypto_tbls::threshold_schnorr::key_derivation::derive_verifying_key(
@@ -284,19 +284,6 @@ impl Hashi {
         self.guardian_btc_pubkey()
             .copied()
             .ok_or_else(|| anyhow!("Guardian BTC pubkey not yet pinned"))
-    }
-
-    /// Deserialize the BCS-encoded MPC group element from on-chain state.
-    ///
-    /// The on-chain key is stored as `bcs::to_bytes(&G)` in the `CommitteeSet`
-    /// and is populated atomically with the `end_reconfig` event.
-    pub fn onchain_verifying_key_g(&self) -> anyhow::Result<G> {
-        let bytes = self.onchain_state().mpc_public_key();
-        anyhow::ensure!(
-            !bytes.is_empty(),
-            "MPC public key not yet available on-chain"
-        );
-        bcs::from_bytes(&bytes).context("failed to deserialize on-chain MPC public key")
     }
 
     fn sign_deposit_confirmation(

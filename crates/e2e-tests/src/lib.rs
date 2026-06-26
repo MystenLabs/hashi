@@ -355,7 +355,7 @@ async fn finalize_guardian_harness(networks: &mut TestNetworks) -> Result<()> {
     // derivation matches the MPC's signing path. Using only the x-only
     // projection would force an even-y parent and silently disagree with
     // MPC sigs for half of all DKG outputs.
-    let master_pubkey = hashi.onchain_verifying_key_g()?;
+    let master_pubkey = hashi.onchain_state().onchain_verifying_key_g()?;
 
     let limiter_config = default_test_limiter_config();
     let limiter_state = LimiterState::genesis(&limiter_config);
