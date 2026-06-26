@@ -1,0 +1,29 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Source of the Rust file `crates/hashi-guardian/src/withdraw_mode/mod.rs`."><title>mod.rs - source</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-e56847b5.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="hashi_guardian" data-themes="" data-resource-suffix="" data-rustdoc-version="1.91.1 (ed61e7d7e 2025-11-07)" data-channel="1.91.1" data-search-js="search-e256b49e.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../../static.files/storage-e2aeef58.js"></script><script defer src="../../../static.files/src-script-813739b1.js"></script><script defer src="../../../src-files.js"></script><script defer src="../../../static.files/main-6dc2a7f3.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc src"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><nav class="sidebar"><div class="src-sidebar-title"><h2>Files</h2></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><section id="main-content" class="content"><div class="main-heading"><h1><div class="sub-heading">hashi_guardian/withdraw_mode/</div>mod.rs</h1><rustdoc-toolbar></rustdoc-toolbar></div><div class="example-wrap digits-2"><pre class="rust"><code><a href=#1 id=1 data-nosnippet>1</a><span class="comment">// Copyright (c) Mysten Labs, Inc.
+<a href=#2 id=2 data-nosnippet>2</a>// SPDX-License-Identifier: Apache-2.0
+<a href=#3 id=3 data-nosnippet>3</a>
+<a href=#4 id=4 data-nosnippet>4</a></span><span class="doccomment">//! Withdraw-mode flows (enabled when CEREMONY_MODE=false): standard withdrawal,
+<a href=#5 id=5 data-nosnippet>5</a>//! committee updates, provisioner init, and heartbeats. `verify_hashi_cert` is
+<a href=#6 id=6 data-nosnippet>6</a>//! the committee-certificate check shared by `standard` and `committee_update`.
+<a href=#7 id=7 data-nosnippet>7</a>
+<a href=#8 id=8 data-nosnippet>8</a></span><span class="kw">pub mod </span><a href="committee_update.rs.html#4-316">committee_update</a>;
+<a href=#9 id=9 data-nosnippet>9</a><span class="kw">pub mod </span><a href="heartbeat.rs.html#4-206">heartbeat</a>;
+<a href=#10 id=10 data-nosnippet>10</a><span class="kw">pub mod </span><a href="provisioner_init.rs.html#4-257">provisioner_init</a>;
+<a href=#11 id=11 data-nosnippet>11</a><span class="kw">pub mod </span><a href="standard.rs.html#4-281">standard</a>;
+<a href=#12 id=12 data-nosnippet>12</a>
+<a href=#13 id=13 data-nosnippet>13</a><span class="kw">use </span>hashi_types::guardian::GuardianError::InvalidInputs;
+<a href=#14 id=14 data-nosnippet>14</a><span class="kw">use </span>hashi_types::guardian::GuardianResult;
+<a href=#15 id=15 data-nosnippet>15</a><span class="kw">use </span>hashi_types::guardian::HashiCommittee;
+<a href=#16 id=16 data-nosnippet>16</a><span class="kw">use </span>hashi_types::guardian::HashiSigned;
+<a href=#17 id=17 data-nosnippet>17</a><span class="kw">use </span><a href="https://docs.rs/serde_derive/1.0.228/serde_derive/derive.Serialize.html">serde::Serialize</a>;
+<a href=#18 id=18 data-nosnippet>18</a><span class="kw">use </span><a href="https://doc.rust-lang.org/1.91.1/alloc/sync/struct.Arc.html">std::sync::Arc</a>;
+<a href=#19 id=19 data-nosnippet>19</a>
+<a href=#20 id=20 data-nosnippet>20</a><span class="doccomment">/// Verify the committee certificate on `signed_request` meets `threshold`.
+<a href=#21 id=21 data-nosnippet>21</a></span><span class="kw">pub fn </span><a href="../../../hashi_guardian/withdraw_mode/fn.verify_hashi_cert.html">verify_hashi_cert</a>&lt;T: <a href="https://docs.rs/serde_core/1.0.228/serde_core/ser/trait.Serialize.html">Serialize</a>&gt;(
+<a href=#22 id=22 data-nosnippet>22</a>    committee: <a href="https://doc.rust-lang.org/1.91.1/alloc/sync/struct.Arc.html">Arc</a>&lt;HashiCommittee&gt;,
+<a href=#23 id=23 data-nosnippet>23</a>    threshold: <a href="https://doc.rust-lang.org/1.91.1/std/primitive.u64.html">u64</a>,
+<a href=#24 id=24 data-nosnippet>24</a>    signed_request: <span class="kw-2">&amp;</span>HashiSigned&lt;T&gt;,
+<a href=#25 id=25 data-nosnippet>25</a>) -&gt; GuardianResult&lt;()&gt; {
+<a href=#26 id=26 data-nosnippet>26</a>    <a href="#22">committee</a>
+<a href=#27 id=27 data-nosnippet>27</a>        .verify_signature_and_weight(<a href="#24">signed_request</a>, <a href="#23">threshold</a>)
+<a href=#28 id=28 data-nosnippet>28</a>        .<a href="https://doc.rust-lang.org/1.91.1/core/result/enum.Result.html#method.map_err">map_err</a>(|e| InvalidInputs(<a class="macro" href="https://doc.rust-lang.org/1.91.1/alloc/macro.format.html">format!</a>(<span class="string">"signature verification failed {:?}"</span>, e)))
+<a href=#29 id=29 data-nosnippet>29</a>}</code></pre></div></section></main></body></html>

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["IntentType"],"struct":["GuardianSigned"],"trait":["SigningIntent"]};

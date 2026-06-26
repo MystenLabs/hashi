@@ -1,0 +1,33 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="`key-provisioner provision` (per-KP recovery against a fresh withdraw-mode guardian)."><title>hashi_guardian_init::kp_provision - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../static.files/rustdoc-e56847b5.css"><meta name="rustdoc-vars" data-root-path="../../" data-static-root-path="../../static.files/" data-current-crate="hashi_guardian_init" data-themes="" data-resource-suffix="" data-rustdoc-version="1.91.1 (ed61e7d7e 2025-11-07)" data-channel="1.91.1" data-search-js="search-e256b49e.js" data-stringdex-js="stringdex-c3e638e9.js" data-settings-js="settings-c38705f0.js" ><script src="../../static.files/storage-e2aeef58.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../static.files/main-6dc2a7f3.js"></script><noscript><link rel="stylesheet" href="../../static.files/noscript-263c88ec.css"></noscript><link rel="alternate icon" type="image/png" href="../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module kp_provision</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../hashi_guardian_init/index.html">hashi_<wbr>guardian_<wbr>init</a><span class="version">0.1.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module kp_<wbr>provision</a></h2><h3><a href="#functions">Module Items</a></h3><ul class="block"><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2 class="in-crate"><a href="../index.html">In crate hashi_<wbr>guardian_<wbr>init</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../index.html">hashi_guardian_init</a></div><h1>Module <span>kp_<wbr>provision</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../src/hashi_guardian_init/kp_provision.rs.html#4-577">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p><code>key-provisioner provision</code> (per-KP recovery against a fresh withdraw-mode guardian).</p>
+<p>Run by a key provisioner when a new guardian instance is brought up to
+replace one that went down. The KP decrypts through their yubikey-backed gpg
+setup; plaintext never touches disk, but the raw share scalar is held in this
+process’ memory long enough to verify and re-encrypt it. The flow:</p>
+<ol>
+<li>Heartbeat audit (check A) selects the single live session.</li>
+<li>The new guardian’s signed <code>GuardianInfo</code> is fetched from its S3 <code>init/</code>
+log and verified against the enclave attestation (check B). Bucket,
+limiter config, <code>mpc_master_g</code>, and <code>enclave_btc_pubkey == None</code> are all
+confirmed.</li>
+<li>The authoritative <code>ceremony/</code> log is scraped for the secret-sharing
+instance the new guardian was booted with; it must match.</li>
+<li>Initial limiter state is recovered from the prior enclave’s max-seq
+Success withdrawal log (or genesis) and confirmed equal (check C).</li>
+<li>The committee comes from the latest signed <code>committee-update/</code> log (or
+on-chain Hashi state); the <code>state_hash</code> is recomputed and confirmed (check D).</li>
+<li>This KP’s encrypted share is read from <code>shares/{seq}-{session}.json</code>
+(attestation-anchored), every share’s recipients are verified against
+the roster, and this KP’s share is located by fingerprint.</li>
+<li>The share is decrypted via the yubikey (<code>gpg --decrypt</code> over a pipe;
+plaintext stays in memory) and verified against its commitment.</li>
+<li>The decrypted share is HPKE-encrypted to the new guardian’s
+<code>encryption_pubkey</code> (from its <code>GuardianInfo</code>), with <code>state_hash</code> as AAD,
+producing a <code>GuardianEncryptedShare</code> ready for <code>provisioner_init</code>.</li>
+<li>The share is submitted to the configured relay endpoint, which runs the
+same pre-checks before forwarding it. Submission itself awaits the
+relay’s <code>single_provisioner_init</code> RPC (TODO).</li>
+</ol>
+</div></details><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.prechecks.html" title="fn hashi_guardian_init::kp_provision::prechecks">prechecks</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dt><a class="fn" href="fn.run.html" title="fn hashi_guardian_init::kp_provision::run">run</a></dt><dt><a class="fn" href="fn.submit_provisioner_init_to_relay.html" title="fn hashi_guardian_init::kp_provision::submit_provisioner_init_to_relay">submit_<wbr>provisioner_<wbr>init_<wbr>to_<wbr>relay</a><span title="Restricted Visibility">&nbsp;🔒</span> </dt><dd>Submit this KP’s share to the relay endpoint. The relay fronts the
+guardian’s <code>GetGuardianInfo</code>, so we verify the relay’s reported session +
+<code>GuardianInfo</code> against the values we already pinned from S3 before any
+further step.</dd></dl></section></div></main></body></html>
