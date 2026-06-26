@@ -86,26 +86,32 @@ Initializes a fresh **withdraw-mode** guardian with operator-supplied state.
 This is the missing production replacement for the withdraw-mode `OperatorInit`
 part currently covered by `tools dev-bootstrap`.
 
-This command is currently a stub and exits non-zero.
+It:
 
-Eventually it will:
-
-1. Read operator provision config.
-2. Fetch and verify the withdraw-mode guardian's `GetGuardianInfo`.
-3. Build the `WithdrawModeConfig` from guardian S3 config, limiter config,
-   current committee or genesis committee, MPC master `G`, secret-sharing
-   instance, Bitcoin network, and limiter state.
-4. Recover limiter state from prior guardian withdrawal logs, or use genesis
-   state for first deployment.
-5. Call withdraw-mode `OperatorInit`.
-6. Print the state hash that key provisioners must verify before submitting
+1. Fetches and verifies the fresh withdraw-mode guardian's live `GuardianInfo`
+   against the configured current build, and confirms it is not already
+   operator-initialized.
+2. Reads the latest attested ceremony from S3 and verifies its encrypted-share
+   recipients against the expected KP roster.
+3. Confirms all prior guardian sessions are quiet, then recovers limiter state
+   from prior withdrawal logs or uses genesis state for first deployment.
+4. Sources the committee from the latest signed `committee-update/` log, or from
+   on-chain Hashi state before any update exists.
+5. Builds the withdraw-mode `OperatorInit` state from guardian S3 config,
+   limiter config/state, committee, on-chain MPC master `G`, ceremony
+   secret-sharing instance, and configured Bitcoin network.
+6. Calls withdraw-mode `OperatorInit`, then verifies the live and S3-logged
+   `GuardianInfo` match the operator-supplied state.
+7. Prints the state hash that key provisioners must verify before submitting
    shares.
 
 ```bash
 cargo run -p hashi-guardian-init -- operator provision --config guardian-init.sample.yaml
 ```
 
-Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml).
+Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
+command uses `guardian_endpoint`, `guardian_s3`, `bitcoin_network`, `hashi`,
+`kp_roster`, and `limiter_config`.
 
 ## key-provisioner provision
 
