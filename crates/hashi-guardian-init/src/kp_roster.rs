@@ -16,7 +16,6 @@
 //! share the same gpg-streaming pattern.
 
 use std::ops::Deref;
-use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -304,8 +303,8 @@ pub fn ensure_cert_in_roster(kp_cert: &PgpPublicCert, certs: &[PgpPublicCert]) -
 /// copies (e.g. inside `verify_share` / `build_from_share`) that this can't
 /// reach — those are wiped only when the process exits. The named locations
 /// this code owns are wiped deterministically.
-pub fn decrypt_share(share: &KPEncryptedShare, homedir: Option<&Path>) -> Result<DecryptedShare> {
-    let plaintext = Zeroizing::new(decrypt_armored_via_gpg(&share.armored_ciphertext, homedir)?);
+pub fn decrypt_share(share: &KPEncryptedShare) -> Result<DecryptedShare> {
+    let plaintext = Zeroizing::new(decrypt_armored_via_gpg(&share.armored_ciphertext, None)?);
     let scalar = scalar_from_decrypted_plaintext(&plaintext)?;
     Ok(DecryptedShare(Share {
         id: share.id,

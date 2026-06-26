@@ -52,8 +52,3 @@ guardian_s3:
   bucket_info:
     bucket: "hashi-guardian-logs"
     region: "us-east-1"
-
-# Optional gpg homedir for the yubikey-backed gpg agent. Defaults to gpg's
-# default (~/.gnupg) when omitted. Set this only if your yubikey's agent uses a
-# non-default homedir.
-# gpg_homedir: /home/kp3/.gnupg

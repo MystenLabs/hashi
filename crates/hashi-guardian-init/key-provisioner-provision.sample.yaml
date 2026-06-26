@@ -23,11 +23,6 @@ kp_pgp_cert_paths:
   - /path/to/kp4.asc
   - /path/to/kp5.asc
 
-# Optional gpg homedir for the yubikey-backed gpg agent. Defaults to gpg's
-# default (~/.gnupg) when omitted. Set this only if your yubikey's agent uses a
-# non-default homedir.
-# gpg_homedir: /home/kp3/.gnupg
-
 # Relay endpoint the KP's share is submitted to. The relay collects T-of-N
 # shares before forwarding them to the guardian in one ProvisionerInit call.
 relay_endpoint: "http://localhost:50051"

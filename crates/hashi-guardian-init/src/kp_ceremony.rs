@@ -32,9 +32,6 @@ pub struct CeremonyConfig {
     /// Expected secret-sharing sequence. Use 0 for genesis setup, or N+1 for a
     /// rotation from prior sequence N.
     pub sharing_seq: u64,
-    /// Optional gpg homedir for the yubikey-backed agent. Defaults to gpg's
-    /// default (`~/.gnupg`) when unset.
-    pub gpg_homedir: Option<PathBuf>,
 }
 
 impl CeremonyConfig {
@@ -186,10 +183,9 @@ pub async fn run(cfg: CeremonyConfig) -> Result<()> {
     info!(
         phase = "share decrypt",
         share_id = share_id.get(),
-        gpg_homedir = ?cfg.gpg_homedir,
         "decrypting share via yubikey (ciphertext piped via stdin; plaintext in memory)",
     );
-    let reconstructed = decrypt_share(share, cfg.gpg_homedir.as_deref())?;
+    let reconstructed = decrypt_share(share)?;
     info!(
         phase = "share decrypt",
         share_id = share_id.get(),

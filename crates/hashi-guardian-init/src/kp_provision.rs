@@ -407,10 +407,9 @@ pub async fn run(cfg: ProvisionConfig) -> anyhow::Result<()> {
     info!(
         phase = "share decrypt",
         share_id = kp_encrypted_share.id.get(),
-        gpg_homedir = ?cfg.gpg_homedir,
         "decrypting share via yubikey (ciphertext piped via stdin; plaintext in memory)",
     );
-    let decrypted = decrypt_share(kp_encrypted_share, cfg.gpg_homedir.as_deref())?;
+    let decrypted = decrypt_share(kp_encrypted_share)?;
     state
         .secret_sharing_instance
         .commitments()
@@ -584,9 +583,6 @@ pub struct ProvisionConfig {
     /// find this KP's share in `shares/` by fingerprint, and to confirm the
     /// ciphertext is genuinely encrypted to this cert before decrypting.
     pub kp_pgp_cert_path: PathBuf,
-    /// Optional gpg homedir for the yubikey-backed agent. Defaults to gpg's
-    /// default (`~/.gnupg`) when unset.
-    pub gpg_homedir: Option<PathBuf>,
     /// Relay endpoint the KP's encrypted share is submitted to. The relay
     /// collects T-of-N shares before forwarding them to the guardian in one
     /// `ProvisionerInit` call.
