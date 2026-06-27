@@ -45,8 +45,8 @@ pub struct Hashi {
     pub proposals: Proposals,
     /// TOB certificates by (epoch, batch_index) -> EpochCertsV1
     pub tob: Bag,
-    /// Number of presignatures consumed in the current epoch.
-    pub num_consumed_presigs: u64,
+    /// Number of presignatures consumed in the current epoch, per protocol.
+    pub num_consumed_presigs: VecMap<u8, u64>,
 }
 
 /// Rust version of the Move hashi::bitcoin_state::BitcoinStateKey type.
@@ -73,8 +73,8 @@ pub struct CommitteeSet {
     pub committees: Bag,
     pub pending_epoch_change: Option<PendingEpochChange>,
 
-    /// The MPC committee's threshold public key.
-    pub mpc_public_key: Vec<u8>,
+    /// The MPC committee's threshold public keys, one per protocol.
+    pub mpc_public_keys: VecMap<u8, Vec<u8>>,
 }
 
 /// Rust version of the Move hashi::committee_set::PendingEpochChange type.
@@ -525,9 +525,9 @@ pub struct UtxoPool {
 /// Rust version of the Move hashi::tob::ProtocolType enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub enum ProtocolType {
-    Dkg,
-    KeyRotation,
-    NonceGeneration,
+    Dkg { protocol_id: u8 },
+    KeyRotation { protocol_id: u8 },
+    NonceGeneration { protocol_id: u8 },
 }
 
 /// Rust version of the Move struct `hashi::reconfig::ReconfigCompletionMessage`.
@@ -535,8 +535,8 @@ pub enum ProtocolType {
 pub struct ReconfigCompletionMessage {
     /// The epoch being transitioned to.
     pub epoch: u64,
-    /// The MPC committee's threshold public key.
-    pub mpc_public_key: Vec<u8>,
+    /// The MPC committee's threshold public keys, one per protocol.
+    pub protocol_keys: VecMap<u8, Vec<u8>>,
 }
 
 /// Rust version of the Move hashi::proposal::Proposal type.
@@ -1328,7 +1328,7 @@ impl From<StartReconfigEvent> for HashiEvent {
 pub struct EndReconfigEvent {
     pub from_epoch: u64,
     pub epoch: u64,
-    pub mpc_public_key: Vec<u8>,
+    pub protocol_keys: VecMap<u8, Vec<u8>>,
 }
 
 impl MoveType for EndReconfigEvent {

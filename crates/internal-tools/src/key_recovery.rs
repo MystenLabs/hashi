@@ -131,7 +131,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
         previous_committee.members().len()
     );
 
-    let raw_certs = fetch_certificates(onchain_state, previous_epoch, None)
+    let raw_certs = fetch_certificates(onchain_state, 0, previous_epoch, None)
         .await
         .map_err(|e| anyhow!("failed to fetch certificates: {e}"))?;
     let certificates: Vec<CertificateV1> = raw_certs.into_iter().map(|(_, cert)| cert).collect();

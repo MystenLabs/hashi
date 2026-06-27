@@ -7,18 +7,19 @@ use hashi::{committee::CommitteeSignature, hashi::Hashi, tob::ProtocolType};
 
 entry fun submit_dkg_cert(
     hashi: &mut Hashi,
+    protocol_id: u8,
     epoch: u64,
     dealer: address,
     messages_hash: vector<u8>,
     cert: CommitteeSignature,
     ctx: &mut TxContext,
 ) {
-    let key = hashi::tob::tob_key(epoch, option::none());
+    let key = hashi::tob::tob_key(protocol_id, epoch, option::none());
     submit_cert_internal(
         hashi,
         key,
         epoch,
-        hashi::tob::protocol_type_dkg(),
+        hashi::tob::protocol_type_dkg(protocol_id),
         dealer,
         messages_hash,
         &cert,
@@ -28,18 +29,19 @@ entry fun submit_dkg_cert(
 
 entry fun submit_rotation_cert(
     hashi: &mut Hashi,
+    protocol_id: u8,
     epoch: u64,
     dealer: address,
     messages_hash: vector<u8>,
     cert: CommitteeSignature,
     ctx: &mut TxContext,
 ) {
-    let key = hashi::tob::tob_key(epoch, option::none());
+    let key = hashi::tob::tob_key(protocol_id, epoch, option::none());
     submit_cert_internal(
         hashi,
         key,
         epoch,
-        hashi::tob::protocol_type_key_rotation(),
+        hashi::tob::protocol_type_key_rotation(protocol_id),
         dealer,
         messages_hash,
         &cert,
@@ -49,6 +51,7 @@ entry fun submit_rotation_cert(
 
 entry fun submit_nonce_cert(
     hashi: &mut Hashi,
+    protocol_id: u8,
     epoch: u64,
     batch_index: u32,
     dealer: address,
@@ -56,12 +59,12 @@ entry fun submit_nonce_cert(
     cert: CommitteeSignature,
     ctx: &mut TxContext,
 ) {
-    let key = hashi::tob::tob_key(epoch, option::some(batch_index));
+    let key = hashi::tob::tob_key(protocol_id, epoch, option::some(batch_index));
     submit_cert_internal(
         hashi,
         key,
         epoch,
-        hashi::tob::protocol_type_nonce_generation(),
+        hashi::tob::protocol_type_nonce_generation(protocol_id),
         dealer,
         messages_hash,
         &cert,
@@ -96,9 +99,14 @@ fun submit_cert_internal(
     );
 }
 
-entry fun destroy_all_certs(hashi: &mut Hashi, epoch: u64, batch_index: Option<u32>) {
+entry fun destroy_all_certs(
+    hashi: &mut Hashi,
+    protocol_id: u8,
+    epoch: u64,
+    batch_index: Option<u32>,
+) {
     hashi.config().assert_version_enabled();
-    let key = hashi::tob::tob_key(epoch, batch_index);
+    let key = hashi::tob::tob_key(protocol_id, epoch, batch_index);
     let current_epoch = hashi.committee_set().epoch();
     let epoch_certs: hashi::tob::EpochCertsV1 = hashi.tob_mut().remove(key);
     hashi::tob::destroy_all(epoch_certs, current_epoch);
