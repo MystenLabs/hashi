@@ -4,7 +4,10 @@ set -euo pipefail
 FALLBACK_VERSION="testnet-v1.63.1"
 
 echo "Detecting latest Sui testnet version with ubuntu binary..."
-SUI_VERSION=$(curl -s https://api.github.com/repos/MystenLabs/sui/releases |
+SUI_VERSION=$(curl -fsSL \
+    -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    https://api.github.com/repos/MystenLabs/sui/releases |
 	jq -r '.[] | select(.tag_name | startswith("testnet-")) |
          select(.assets[].name | contains("ubuntu-x86_64")) |
          .tag_name' | head -n 1)

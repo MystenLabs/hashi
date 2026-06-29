@@ -31,10 +31,14 @@ jobs:
         env:
           # Fallback version if auto-detection fails
           FALLBACK_VERSION: "29.1"
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           # Get latest Bitcoin Core version from GitHub API
           echo "Detecting latest Bitcoin Core version..."
-          BITCOIN_VERSION=$(curl -s https://api.github.com/repos/bitcoin/bitcoin/releases/latest | \
+          BITCOIN_VERSION=$(curl -fsSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/bitcoin/bitcoin/releases/latest | \
             sed -n 's/.*"tag_name": "v\([^"]*\)".*/\1/p' || echo "$FALLBACK_VERSION")
 
           # Validate version was detected
@@ -69,6 +73,8 @@ jobs:
           bitcoind --version
 
       - name: Install Sui Binary
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: .github/scripts/install-sui.sh
 
       - name: Run tests
