@@ -37,19 +37,17 @@ public struct Committee has copy, drop, store {
     members: vector<CommitteeMember>,
     /// Total voting weight of the committee.
     total_weight: u64,
-    /// The MPC parameters pinned for this epoch (threshold, weight-reduction
-    /// delta, max-faulty bound, nonce-generation protocol), snapshotted from
-    /// the governed config at reconfig time. Built by `mpc_config::pin` in a
-    /// fixed key order: this config is part of the signed committee bytes, so
-    /// its BCS encoding must be deterministic and match the Rust mirror.
-    mpc: Config,
+    /// The config pinned for this epoch (the MPC parameters: threshold,
+    /// weight-reduction delta, max-faulty bound, nonce-generation protocol),
+    /// snapshotted from the governed config at reconfig time.
+    config: Config,
 }
 
 /// Constructor for committee.
 public(package) fun new_committee(
     epoch: u64,
     members: vector<CommitteeMember>,
-    mpc: Config,
+    config: Config,
 ): Committee {
     assert!(!members.is_empty());
 
@@ -65,7 +63,7 @@ public(package) fun new_committee(
         members,
         total_weight,
         epoch,
-        mpc,
+        config,
     }
 }
 

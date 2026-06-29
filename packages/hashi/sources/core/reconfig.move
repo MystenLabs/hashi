@@ -31,12 +31,12 @@ entry fun start_reconfig(
     assert!(!self.committee_set().is_reconfiguring());
     // Pin the current MPC parameters so they stay fixed for the new epoch even
     // if governance changes them mid-epoch.
-    let mpc = hashi::mpc_config::pin(self.config());
+    let config = hashi::mpc_config::pin(self.config());
     let epoch = self
         .committee_set_mut()
         .start_reconfig(
             sui_system,
-            mpc,
+            config,
             ctx,
         );
     sui::event::emit(StartReconfigEvent { epoch });

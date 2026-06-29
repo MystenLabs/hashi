@@ -370,7 +370,7 @@ fun verify_proof_of_possession(
 fun new_committee_from_validator_set(
     self: &CommitteeSet,
     sui_system: &sui_system::sui_system::SuiSystemState,
-    mpc: Config,
+    config: Config,
     ctx: &TxContext,
 ): Committee {
     let epoch = ctx.epoch();
@@ -414,7 +414,7 @@ fun new_committee_from_validator_set(
     committee::new_committee(
         epoch,
         committee_members,
-        mpc,
+        config,
     )
 }
 
@@ -447,7 +447,7 @@ public(package) fun get_committee(self: &CommitteeSet, epoch: u64): &Committee {
 public(package) fun start_reconfig(
     self: &mut CommitteeSet,
     sui_system: &sui_system::sui_system::SuiSystemState,
-    mpc: Config,
+    config: Config,
     ctx: &TxContext,
 ): u64 {
     // We can't trigger reconfig if we are already reconfiguring
@@ -461,7 +461,7 @@ public(package) fun start_reconfig(
 
     let committee = self.new_committee_from_validator_set(
         sui_system,
-        mpc,
+        config,
         ctx,
     );
 
