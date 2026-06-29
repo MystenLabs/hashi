@@ -13,6 +13,10 @@ guardian_endpoint: "http://localhost:3000"
 # Relay endpoint the KP's share is submitted to. Used by `key-provisioner provision`.
 relay_endpoint: "http://localhost:50051"
 
+# Bitcoin network the withdraw-mode guardian validates withdrawal addresses for.
+# One of: mainnet, testnet, regtest, signet.
+bitcoin_network: "signet"
+
 # Path to this KP's armored OpenPGP public cert. Optional for operator commands;
 # required by key-provisioner commands.
 kp_pgp_cert_path: /path/to/kp3.asc

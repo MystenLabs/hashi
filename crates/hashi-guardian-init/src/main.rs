@@ -131,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
             }
             OperatorCommand::Provision { config } => {
                 let cfg = config::Config::load_yaml(&config)?;
-                operator_provision::run(cfg)?;
+                operator_provision::run(cfg).await?;
             }
         },
         Command::KeyProvisioner { command } => match command {
