@@ -40,13 +40,15 @@ use crate::kp_roster::VerifiedCeremonyState;
 /// See the module docs for the full step-by-step flow. Each step is logged via
 /// `tracing` so the operator can follow exactly what is happening.
 pub async fn run(cfg: Config) -> Result<()> {
+    let guardian_s3 = cfg.guardian_s3.resolve().await?;
+
     info!(
         phase = "setup",
         num_shares = cfg.kp_roster.num_shares,
         threshold = cfg.kp_roster.threshold,
         cert_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
-        bucket = cfg.kp_roster.guardian_s3.bucket_name(),
-        region = cfg.kp_roster.guardian_s3.region(),
+        bucket = guardian_s3.bucket_name(),
+        region = guardian_s3.region(),
         endpoint = %cfg.guardian_endpoint,
         sui_rpc = %cfg.hashi.sui_rpc,
         package_id = %cfg.hashi.hashi_ids.package_id,
@@ -92,14 +94,13 @@ pub async fn run(cfg: Config) -> Result<()> {
     // 4. operator_init (ceremony mode: S3 config only, no WithdrawModeConfig).
     info!(
         phase = "operator_init",
-        bucket = cfg.kp_roster.guardian_s3.bucket_name(),
-        region = cfg.kp_roster.guardian_s3.region(),
+        bucket = guardian_s3.bucket_name(),
+        region = guardian_s3.region(),
         "calling OperatorInit (ceremony mode: S3 config only)",
     );
-    let oi_req = operator_init_request_to_pb(OperatorInitRequest::new_ceremony_mode(
-        cfg.kp_roster.guardian_s3.clone(),
-    ))
-    .map_err(|e| anyhow!("encode OperatorInitRequest: {e:?}"))?;
+    let oi_req =
+        operator_init_request_to_pb(OperatorInitRequest::new_ceremony_mode(guardian_s3.clone()))
+            .map_err(|e| anyhow!("encode OperatorInitRequest: {e:?}"))?;
     client
         .operator_init(oi_req)
         .await
@@ -138,7 +139,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         session_id = %session_id,
         "connecting to guardian log bucket + verifying attestation against current build",
     );
-    let mut reader = GuardianReader::new(&cfg.kp_roster.guardian_s3, allowlist)
+    let mut reader = GuardianReader::new(&guardian_s3, allowlist)
         .await
         .context("connect to guardian log bucket")?;
     let verified_session = reader

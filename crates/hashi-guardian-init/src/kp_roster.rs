@@ -27,7 +27,6 @@ use hashi_types::guardian::KPEncryptedShare;
 use hashi_types::guardian::KPEncryptedShares;
 use hashi_types::guardian::KPFingerprint;
 use hashi_types::guardian::PcrAllowlist;
-use hashi_types::guardian::S3Config;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::SecretSharingParams;
 use hashi_types::guardian::SetupNewKeyResponse;
@@ -44,17 +43,15 @@ use tracing::info;
 use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
-/// Common KP-roster config: the sharing params, the guardian's S3 log bucket,
-/// the full KP cert roster, and the PCR allowlist. Shared by every command that
-/// needs to discover and verify a ceremony against an expected KP set.
+/// Common KP-roster config: the sharing params, the full KP cert roster, and the
+/// PCR allowlist. Shared by every command that needs to discover and verify a
+/// ceremony against an expected KP set.
 #[derive(Deserialize)]
 pub struct KpRosterConfig {
     /// Total number of shares. Must equal `kp_pgp_cert_paths.len()`.
     pub num_shares: usize,
     /// Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
     pub threshold: usize,
-    /// S3 config for the guardian's log bucket (object-lock enabled).
-    pub guardian_s3: S3Config,
     /// Paths to each KP's armored OpenPGP public cert. Order matters for
     /// `operator ceremony` (the cert at index `i` is assigned share id `i + 1`); for
     /// the read-only commands (`key-provisioner ceremony`, `key-provisioner provision`), shares are

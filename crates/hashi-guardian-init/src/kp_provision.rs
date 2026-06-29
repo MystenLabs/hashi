@@ -58,11 +58,12 @@ use crate::limiter_recovery;
 
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
+    let guardian_s3 = cfg.guardian_s3.resolve().await?;
 
     info!(
         phase = "setup",
-        bucket = cfg.kp_roster.guardian_s3.bucket_name(),
-        region = cfg.kp_roster.guardian_s3.region(),
+        bucket = guardian_s3.bucket_name(),
+        region = guardian_s3.region(),
         num_shares = cfg.kp_roster.num_shares,
         threshold = cfg.kp_roster.threshold,
         relay_endpoint = %cfg.relay_endpoint,
@@ -74,15 +75,15 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     // reads that session first.
     info!(
         phase = "s3 connect",
-        bucket = cfg.kp_roster.guardian_s3.bucket_name(),
-        region = cfg.kp_roster.guardian_s3.region(),
+        bucket = guardian_s3.bucket_name(),
+        region = guardian_s3.region(),
         current_git_revision = %cfg.kp_roster.pcr_allowlist.current_build().git_revision(),
         current_pcr0 = hex::encode(cfg.kp_roster.pcr_allowlist.current_build().pcr0()),
         prev_build_count = cfg.kp_roster.pcr_allowlist.prev_builds().len(),
         "connecting to guardian log bucket",
     );
     let allowlist = cfg.kp_roster.pcr_allowlist();
-    let mut reader = GuardianReader::new(&cfg.kp_roster.guardian_s3, allowlist.clone())
+    let mut reader = GuardianReader::new(&guardian_s3, allowlist.clone())
         .await
         .context("connect to guardian log bucket")?;
     info!(phase = "s3 connect", "connected to guardian log bucket");
@@ -186,9 +187,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         enclave_git_revision
     );
     anyhow::ensure!(
-        cfg.kp_roster.guardian_s3.bucket_info == enclave_bucket_info,
+        guardian_s3.bucket_info == enclave_bucket_info,
         "Guardian bucket info mismatch: expected {:?}, got {:?}",
-        cfg.kp_roster.guardian_s3.bucket_info,
+        guardian_s3.bucket_info,
         enclave_bucket_info
     );
     anyhow::ensure!(

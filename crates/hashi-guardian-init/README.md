@@ -22,6 +22,11 @@ the key ceremony and provisioning flow is then driven through these commands.
 All production commands read the same unified config file; see
 [`guardian-init.sample.yaml`](guardian-init.sample.yaml).
 
+The guardian init production config may omit `guardian_s3.access_key` and
+`guardian_s3.secret_key`; when both are omitted, the production commands use the
+AWS SDK default credential chain. The `tools dev-bootstrap` shortcut is
+unchanged and still reads AWS credentials from its required env vars.
+
 ## operator ceremony
 
 The production guardian key ceremony — genesis setup, run once by the operator.

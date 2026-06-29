@@ -23,9 +23,9 @@ nsm_api = { git = "https://github.com/aws/aws-nitro-enclaves-nsm-api.git/", rev 
 hpke.workspace = true
 
 # AWS dependencies
-aws-config = "1.1.7"
-aws-sdk-s3 = "1.12.0"
-aws-credential-types = "1"
+aws-config.workspace = true
+aws-sdk-s3.workspace = true
+aws-credential-types.workspace = true
 
 aws-smithy-mocks = { version = "0.1", optional = true }
 
