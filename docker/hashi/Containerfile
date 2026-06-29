@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM stagex/pallet-rust@sha256:84621c4c29330c8a969489671d46227a0a43f52cdae243f5b91e95781dbfe5ed AS pallet-rust
+FROM stagex/pallet-rust@sha256:abe9b95c93a5afa271f69fcd5eb18c8cd405fe5df6491a63c9418e3a170573dc AS pallet-rust
 FROM stagex/busybox@sha256:3d128909dbc8e7b6c4b8c3c31f4583f01a307907ea179934bb42c4ef056c7efd AS busybox
 #
 # Deps stage: fetch and compile external dependencies (cached until Cargo.toml/Cargo.lock change)
@@ -52,7 +52,7 @@ RUN --network=none cargo build --release --frozen --target "$TARGET" --bin hashi
 #
 # Package stage: runtime image with debug tools
 #
-FROM debian:bullseye-slim
+FROM library/debian@sha256:f18adf4e1d04b1d8ba48025b8e35003f4c748ddd3dd8e875fe4e7d9a9c0dec84
 
 RUN apt-get update && apt-get -y --no-install-recommends install \
     ca-certificates curl \
