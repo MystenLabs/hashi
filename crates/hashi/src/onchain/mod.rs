@@ -1219,7 +1219,7 @@ fn convert_move_committee(c: move_types::Committee) -> Committee {
         .collect();
     // Carry the pinned config verbatim so the rich committee re-serializes to
     // the exact on-chain bytes (used to verify the signed handoff cert).
-    Committee::with_mpc_config(members, c.epoch, c.mpc)
+    Committee::with_config(members, c.epoch, c.config)
 }
 
 fn convert_move_committee_handoff(

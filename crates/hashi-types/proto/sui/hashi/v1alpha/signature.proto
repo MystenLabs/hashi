@@ -10,7 +10,7 @@ message Committee {
   // committee. Carried verbatim so the committee's signed BCS bytes survive
   // this hop without reconstruction. Replaces the former flat mpc_* fields
   // (which dropped the nonce protocol and any future keys).
-  optional bytes mpc_config = 7;
+  optional bytes config = 7;
   reserved 4, 5, 6;
   reserved "mpc_threshold_in_basis_points";
   reserved "mpc_weight_reduction_allowed_delta";
