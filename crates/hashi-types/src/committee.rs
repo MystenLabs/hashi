@@ -424,7 +424,7 @@ impl CommitteeSignature {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignedMessage<T> {
     signature: CommitteeSignature,
     message: T,

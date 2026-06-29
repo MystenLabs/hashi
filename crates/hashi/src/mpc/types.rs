@@ -13,6 +13,7 @@ use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::S;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss;
+use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
 use fastcrypto_tbls::threshold_schnorr::complaint;
 use fastcrypto_tbls::types::ShareIndex;
 use hashi_types::committee::BLS12381Signature;
@@ -34,6 +35,28 @@ pub type RotationMessages = BTreeMap<ShareIndex, avss::Message>;
 pub struct NonceMessage {
     pub batch_index: u32,
     pub message: batch_avss::Message,
+}
+
+pub type AvidConfirmCertificate = SignedMessage<batch_avss_avid::AvssVote>;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AvidNonceMessage {
+    pub batch_index: u32,
+    pub kind: AvidNonceMessageKind,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
+pub enum AvidNonceMessageKind {
+    Optimistic(batch_avss_avid::AvssMessage),
+    Dispersal {
+        dispersal: batch_avss_avid::Dispersal,
+        confirm_cert: AvidConfirmCertificate,
+    },
+    Echo {
+        dealer: Address,
+        echo: batch_avss_avid::Echo,
+    },
 }
 
 // Domain separation constants for RandomOracle
@@ -175,6 +198,7 @@ pub enum Messages {
     Dkg(avss::Message),
     Rotation(RotationMessages),
     NonceGeneration(NonceMessage),
+    NonceGenerationAvid(AvidNonceMessage),
 }
 
 impl Messages {
@@ -183,6 +207,7 @@ impl Messages {
             Messages::Dkg(_) => ProtocolTypeIndicator::Dkg,
             Messages::Rotation(_) => ProtocolTypeIndicator::KeyRotation,
             Messages::NonceGeneration(_) => ProtocolTypeIndicator::NonceGeneration,
+            Messages::NonceGenerationAvid(_) => ProtocolTypeIndicator::NonceGeneration,
         }
     }
 }

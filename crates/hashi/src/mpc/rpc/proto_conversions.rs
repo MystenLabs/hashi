@@ -5,6 +5,7 @@ use crate::mpc::types;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss;
+use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
 use fastcrypto_tbls::threshold_schnorr::complaint;
 use fastcrypto_tbls::types::ShareIndex;
 use hashi_types::committee::BLS12381Signature;
@@ -72,6 +73,87 @@ fn rotation_messages_to_proto(
         .collect()
 }
 
+/// Convert a domain AVID nonce message to its grouped proto form.
+fn avid_nonce_message_to_proto(avid: &types::AvidNonceMessage) -> proto::AvidNonceMessage {
+    use proto::avid_nonce_message::Kind;
+    let kind = match &avid.kind {
+        types::AvidNonceMessageKind::Optimistic(message) => {
+            Kind::Optimistic(proto::AvidNonceOptimistic {
+                message: Some(serialize_bcs(message)),
+            })
+        }
+        types::AvidNonceMessageKind::Dispersal {
+            dispersal,
+            confirm_cert,
+        } => Kind::Dispersal(proto::AvidNonceDispersal {
+            dispersal: Some(serialize_bcs(dispersal)),
+            confirm_cert: Some(serialize_bcs(confirm_cert)),
+        }),
+        types::AvidNonceMessageKind::Echo { dealer, echo } => Kind::Echo(proto::AvidNonceEcho {
+            dealer: Some(dealer.to_string()),
+            echo: Some(serialize_bcs(echo)),
+        }),
+    };
+    proto::AvidNonceMessage {
+        batch_index: Some(avid.batch_index),
+        kind: Some(kind),
+    }
+}
+
+/// Parse a grouped proto AVID nonce message into its domain form.
+#[allow(clippy::result_large_err)]
+fn avid_nonce_message_from_proto(
+    avid: &proto::AvidNonceMessage,
+) -> Result<types::AvidNonceMessage, TryFromProtoError> {
+    use proto::avid_nonce_message::Kind;
+    let batch_index = required(avid.batch_index, "avid_nonce_message.batch_index")?;
+    let kind = match avid.kind.as_ref() {
+        Some(Kind::Optimistic(optimistic)) => {
+            let message: batch_avss_avid::AvssMessage = deserialize_bcs(
+                required(
+                    optimistic.message.as_ref(),
+                    "avid_nonce_message.optimistic.message",
+                )?,
+                "avid_nonce_message.optimistic.message",
+            )?;
+            types::AvidNonceMessageKind::Optimistic(message)
+        }
+        Some(Kind::Dispersal(dispersal_msg)) => {
+            let dispersal: batch_avss_avid::Dispersal = deserialize_bcs(
+                required(
+                    dispersal_msg.dispersal.as_ref(),
+                    "avid_nonce_message.dispersal.dispersal",
+                )?,
+                "avid_nonce_message.dispersal.dispersal",
+            )?;
+            let confirm_cert: types::AvidConfirmCertificate = deserialize_bcs(
+                required(
+                    dispersal_msg.confirm_cert.as_ref(),
+                    "avid_nonce_message.dispersal.confirm_cert",
+                )?,
+                "avid_nonce_message.dispersal.confirm_cert",
+            )?;
+            types::AvidNonceMessageKind::Dispersal {
+                dispersal,
+                confirm_cert,
+            }
+        }
+        Some(Kind::Echo(echo_msg)) => {
+            let dealer = parse_address(
+                required(echo_msg.dealer.as_ref(), "avid_nonce_message.echo.dealer")?,
+                "avid_nonce_message.echo.dealer",
+            )?;
+            let echo: batch_avss_avid::Echo = deserialize_bcs(
+                required(echo_msg.echo.as_ref(), "avid_nonce_message.echo.echo")?,
+                "avid_nonce_message.echo.echo",
+            )?;
+            types::AvidNonceMessageKind::Echo { dealer, echo }
+        }
+        None => return Err(TryFromProtoError::missing("avid_nonce_message.kind")),
+    };
+    Ok(types::AvidNonceMessage { batch_index, kind })
+}
+
 //
 // SendMessagesRequest
 //
@@ -91,6 +173,9 @@ impl types::SendMessagesRequest {
                     batch_index: Some(nonce.batch_index),
                     message: Some(serialize_bcs(&nonce.message)),
                 })
+            }
+            types::Messages::NonceGenerationAvid(avid) => {
+                Messages::AvidNonceMessage(avid_nonce_message_to_proto(avid))
             }
         };
         proto::SendMessagesRequest {
@@ -124,13 +209,8 @@ impl TryFrom<&proto::SendMessagesRequest> for types::SendMessagesRequest {
                     message,
                 })
             }
-            Some(Messages::AvidNonceOptimisticMessage(_))
-            | Some(Messages::AvidNonceDispersalMessage(_))
-            | Some(Messages::AvidNonceEchoMessage(_)) => {
-                return Err(TryFromProtoError::invalid(
-                    "messages",
-                    "AVID nonce-generation messages are not yet supported",
-                ));
+            Some(Messages::AvidNonceMessage(avid)) => {
+                types::Messages::NonceGenerationAvid(avid_nonce_message_from_proto(avid)?)
             }
             None => {
                 return Err(TryFromProtoError::missing("messages"));
@@ -174,7 +254,6 @@ impl types::RetrieveMessagesRequest {
             dealer: Some(self.dealer.to_string()),
             protocol_type: Some(mpc_protocol_type_to_proto(self.protocol_type) as i32),
             batch_index: self.batch_index,
-            recipient: None,
         }
     }
 }
@@ -239,6 +318,9 @@ impl From<&types::RetrieveMessagesResponse> for proto::RetrieveMessagesResponse 
                     batch_index: Some(nonce.batch_index),
                     message: Some(serialize_bcs(&nonce.message)),
                 })
+            }
+            types::Messages::NonceGenerationAvid(_) => {
+                unreachable!("AVID nonce generation send message in a RetrieveMessagesResponse")
             }
         };
         Self {
@@ -513,5 +595,148 @@ impl TryFrom<&proto::GetPartialSignaturesResponse> for types::GetPartialSignatur
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         Ok(Self { partial_sigs })
+    }
+}
+
+#[cfg(test)]
+mod avid_conversion_tests {
+    use super::*;
+    use crate::mpc::types;
+    use fastcrypto::hash::Blake2b256;
+    use fastcrypto::hash::HashFunction;
+    use fastcrypto_tbls::ecies_v1;
+    use fastcrypto_tbls::nodes::Node;
+    use fastcrypto_tbls::nodes::Nodes;
+    use fastcrypto_tbls::nodes::PartyId;
+    use fastcrypto_tbls::threshold_schnorr::Certificate;
+    use fastcrypto_tbls::threshold_schnorr::Parameters;
+    use hashi_types::committee::BLS12381AggregateSignature;
+    use hashi_types::committee::SignedMessage;
+    use std::collections::BTreeSet;
+
+    /// Minimal test [`Certificate`] over an `AvssVote`, mirroring fastcrypto's test cert.
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    struct StubAvssCert {
+        voters: BTreeSet<PartyId>,
+        vote: batch_avss_avid::AvssVote,
+    }
+
+    impl Certificate for StubAvssCert {
+        type Payload = batch_avss_avid::AvssVote;
+        fn signers(&self) -> &BTreeSet<PartyId> {
+            &self.voters
+        }
+        fn payload(&self) -> &batch_avss_avid::AvssVote {
+            &self.vote
+        }
+        fn verify(&self) -> fastcrypto::error::FastCryptoResult<()> {
+            Ok(())
+        }
+    }
+
+    /// Run a minimal AVID dealer/receiver flow to mint the three opaque fastcrypto
+    /// payloads — their innards are private, so they can only come from the protocol.
+    /// Parties `0..=7` confirm; pending recipients `{8, 9}` have weight `2 < f = 3`.
+    fn avid_artifacts() -> (
+        batch_avss_avid::AvssMessage,
+        batch_avss_avid::Dispersal,
+        batch_avss_avid::Echo,
+    ) {
+        let (t, f, n, batch) = (3u16, 3u16, 10u16, 3u16);
+        let mut rng = rand::thread_rng();
+        let sks: Vec<_> = (0..n)
+            .map(|_| ecies_v1::PrivateKey::<types::EncryptionGroupElement>::new(&mut rng))
+            .collect();
+        let nodes = Nodes::new(
+            sks.iter()
+                .enumerate()
+                .map(|(id, sk)| Node {
+                    id: id as u16,
+                    pk: ecies_v1::PublicKey::from_private_key(sk),
+                    weight: 1,
+                })
+                .collect(),
+        )
+        .unwrap();
+        let sid = b"avid conversion test".to_vec();
+        let params = Parameters { t, f };
+        let dealer =
+            batch_avss_avid::Dealer::new(nodes.clone(), 0, params, sid.clone(), batch).unwrap();
+        let (state, optimistic) = dealer.create_avss_messages(&mut rng).unwrap();
+        let cert = StubAvssCert {
+            voters: (0u16..=7).collect(),
+            vote: batch_avss_avid::AvssVote {
+                common_message_hash: state.common.hash(),
+            },
+        };
+        let messages = dealer.create_avid_messages(&state, cert).unwrap();
+        // Receiver 0 processes the message addressed to it (its shards verify against its
+        // own Merkle leaf), then echoes for a pending recipient.
+        let pending: PartyId = 8;
+        let avid_message = messages.message_for(0).unwrap();
+        let dispersal = avid_message.dispersal.clone();
+        let receiver =
+            batch_avss_avid::Receiver::new(nodes, 0, 0, params, sid, sks[0].clone(), batch)
+                .unwrap();
+        let verified_common = receiver
+            .verify_common_message(state.common.clone())
+            .unwrap();
+        let (echo_builder, _) = receiver
+            .process_avid_message(Some(&verified_common), avid_message)
+            .unwrap()
+            .unwrap();
+        let echo = echo_builder.create_echo(pending).unwrap();
+        (optimistic.get(&0).unwrap().clone(), dispersal, echo)
+    }
+
+    fn confirm_cert() -> types::AvidConfirmCertificate {
+        let vote = batch_avss_avid::AvssVote {
+            common_message_hash: Blake2b256::digest(b"confirm cert"),
+        };
+        let signature = BLS12381AggregateSignature::default();
+        SignedMessage::new(7, vote, signature.as_bytes(), &[1u8]).unwrap()
+    }
+
+    fn assert_round_trips(messages: types::Messages) {
+        let request = types::SendMessagesRequest { messages };
+        let proto = request.to_proto(7);
+        let back = types::SendMessagesRequest::try_from(&proto).unwrap();
+        assert_eq!(
+            bcs::to_bytes(&request.messages).unwrap(),
+            bcs::to_bytes(&back.messages).unwrap(),
+        );
+    }
+
+    fn avid_message(kind: types::AvidNonceMessageKind) -> types::Messages {
+        types::Messages::NonceGenerationAvid(types::AvidNonceMessage {
+            batch_index: 4,
+            kind,
+        })
+    }
+
+    #[test]
+    fn optimistic_message_round_trips() {
+        let (optimistic, _, _) = avid_artifacts();
+        assert_round_trips(avid_message(types::AvidNonceMessageKind::Optimistic(
+            optimistic,
+        )));
+    }
+
+    #[test]
+    fn dispersal_message_round_trips() {
+        let (_, dispersal, _) = avid_artifacts();
+        assert_round_trips(avid_message(types::AvidNonceMessageKind::Dispersal {
+            dispersal,
+            confirm_cert: confirm_cert(),
+        }));
+    }
+
+    #[test]
+    fn echo_message_round_trips() {
+        let (_, _, echo) = avid_artifacts();
+        assert_round_trips(avid_message(types::AvidNonceMessageKind::Echo {
+            dealer: Address::new([7u8; 32]),
+            echo,
+        }));
     }
 }

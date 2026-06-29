@@ -2651,36 +2651,47 @@ pub struct NonceMessage {
     pub message: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct AvidNonceOptimisticMessage {
+pub struct AvidNonceMessage {
     /// Which nonce generation round within the epoch.
     #[prost(uint32, optional, tag = "1")]
     pub batch_index: ::core::option::Option<u32>,
+    #[prost(oneof = "avid_nonce_message::Kind", tags = "2, 3, 4")]
+    pub kind: ::core::option::Option<avid_nonce_message::Kind>,
+}
+/// Nested message and enum types in `AvidNonceMessage`.
+pub mod avid_nonce_message {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Kind {
+        #[prost(message, tag = "2")]
+        Optimistic(super::AvidNonceOptimistic),
+        #[prost(message, tag = "3")]
+        Dispersal(super::AvidNonceDispersal),
+        #[prost(message, tag = "4")]
+        Echo(super::AvidNonceEcho),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AvidNonceOptimistic {
     /// The shared commitment and this recipient's ciphertext.
-    #[prost(message, optional, tag = "2")]
+    #[prost(message, optional, tag = "1")]
     pub message: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct AvidNonceDispersalMessage {
-    /// Which nonce generation round within the epoch.
-    #[prost(uint32, optional, tag = "1")]
-    pub batch_index: ::core::option::Option<u32>,
+pub struct AvidNonceDispersal {
     /// The per-recipient authenticated shards.
-    #[prost(message, optional, tag = "2")]
+    #[prost(message, optional, tag = "1")]
     pub dispersal: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
     /// The confirm certificate bound to this dispersal.
-    #[prost(message, optional, tag = "3")]
+    #[prost(message, optional, tag = "2")]
     pub confirm_cert: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct AvidNonceEchoMessage {
-    /// Which nonce generation round within the epoch.
-    #[prost(uint32, optional, tag = "1")]
-    pub batch_index: ::core::option::Option<u32>,
+pub struct AvidNonceEcho {
     /// Hex-encoded Sui address of the dealer whose dispersal this echoes.
-    #[prost(string, optional, tag = "2")]
+    #[prost(string, optional, tag = "1")]
     pub dealer: ::core::option::Option<::prost::alloc::string::String>,
-    /// The disperser's echo for the recipient.
-    #[prost(message, optional, tag = "3")]
+    /// The voter's echo for the recipient.
+    #[prost(message, optional, tag = "2")]
     pub echo: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -2688,7 +2699,7 @@ pub struct SendMessagesRequest {
     /// The epoch for this MPC instance.
     #[prost(uint64, optional, tag = "1")]
     pub epoch: ::core::option::Option<u64>,
-    #[prost(oneof = "send_messages_request::Messages", tags = "2, 3, 4, 5, 6, 7")]
+    #[prost(oneof = "send_messages_request::Messages", tags = "2, 3, 4, 5")]
     pub messages: ::core::option::Option<send_messages_request::Messages>,
 }
 /// Nested message and enum types in `SendMessagesRequest`.
@@ -2704,15 +2715,9 @@ pub mod send_messages_request {
         /// For nonce generation: batch AVSS message with batch index.
         #[prost(message, tag = "4")]
         NonceMessage(super::NonceMessage),
-        /// For AVID nonce generation, optimistic phase.
+        /// For AVID nonce generation.
         #[prost(message, tag = "5")]
-        AvidNonceOptimisticMessage(super::AvidNonceOptimisticMessage),
-        /// For AVID nonce generation, pessimistic phase.
-        #[prost(message, tag = "6")]
-        AvidNonceDispersalMessage(super::AvidNonceDispersalMessage),
-        /// For AVID nonce generation: a pushed echo.
-        #[prost(message, tag = "7")]
-        AvidNonceEchoMessage(super::AvidNonceEchoMessage),
+        AvidNonceMessage(super::AvidNonceMessage),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2735,9 +2740,6 @@ pub struct RetrieveMessagesRequest {
     /// For nonce generation: the batch index.
     #[prost(uint32, optional, tag = "4")]
     pub batch_index: ::core::option::Option<u32>,
-    /// For AVID nonce generation: hex-encoded Sui address of the requesting recipient.
-    #[prost(string, optional, tag = "5")]
-    pub recipient: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct AvidNonceRetrievalMessage {
