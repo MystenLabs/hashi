@@ -8,7 +8,7 @@ const sidebars = {
     {
       type: 'category',
       label: 'Design',
-      collapsed: false,
+      collapsed: true,
       items: [
         'committee',
         'governance-actions',
@@ -25,7 +25,7 @@ const sidebars = {
     {
       type: 'category',
       label: 'Flows',
-      collapsed: false,
+      collapsed: true,
       items: [
         'reconfiguration',
         'deposit',
@@ -35,10 +35,18 @@ const sidebars = {
     {
       type: 'category',
       label: 'Operators',
-      collapsed: false,
+      collapsed: true,
       items: [
         'node-operator-runbook',
         'node-backup',
+      ],
+    },
+    {
+      type: 'category',
+      label: 'SDKs',
+      collapsed: true,
+      items: [
+        'ts-sdk',
       ],
     },
   ],

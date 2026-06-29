@@ -49,6 +49,14 @@ const SECTIONS = [
     label: "Flows",
     items: ["reconfiguration", "deposit", "withdraw"],
   },
+  {
+    label: "Operators",
+    items: ["node-operator-runbook", "node-backup"],
+  },
+  {
+    label: "SDKs",
+    items: ["ts-sdk"],
+  },
 ];
 
 function readDoc(slug) {
