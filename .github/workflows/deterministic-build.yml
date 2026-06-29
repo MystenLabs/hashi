@@ -10,7 +10,7 @@ on:
       - 'docker/hashi-guardian-k8s/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - '.github/workflows/deterministic-build.yml'
+      - '.github/**'
   workflow_dispatch:
   schedule: [cron: "20 3 * * *"]
 
