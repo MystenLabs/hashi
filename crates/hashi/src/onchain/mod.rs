@@ -878,7 +878,7 @@ fn convert_move_config(
     versioning: move_types::Versioning,
 ) -> types::Config {
     types::Config {
-        config: config.config.into_iter().collect(),
+        config: config.into_entries().into_iter().collect(),
         enabled_versions: versioning.enabled_versions.contents.into_iter().collect(),
         upgrade_cap: versioning.upgrade_cap,
     }
@@ -1212,29 +1212,14 @@ fn convert_move_committee_member(
 }
 
 fn convert_move_committee(c: move_types::Committee) -> Committee {
-    // Read the MPC params before moving `members` out of `c` (the typed
-    // accessors borrow all of `c`).
-    let threshold_in_basis_points = u16::try_from(c.mpc_threshold_in_basis_points())
-        .expect("mpc_threshold_in_basis_points exceeds u16::MAX");
-    let weight_reduction_allowed_delta = u16::try_from(c.mpc_weight_reduction_allowed_delta())
-        .expect("mpc_weight_reduction_allowed_delta exceeds u16::MAX");
-    let max_faulty_in_basis_points = u16::try_from(c.mpc_max_faulty_in_basis_points())
-        .expect("mpc_max_faulty_in_basis_points exceeds u16::MAX");
-    let nonce_generation_protocol = u16::try_from(c.mpc_nonce_generation_protocol())
-        .expect("mpc_nonce_generation_protocol exceeds u16::MAX");
     let members = c
         .members
         .into_iter()
         .map(convert_move_committee_member)
         .collect();
-    Committee::new(
-        members,
-        c.epoch,
-        threshold_in_basis_points,
-        weight_reduction_allowed_delta,
-        max_faulty_in_basis_points,
-        nonce_generation_protocol,
-    )
+    // Carry the pinned config verbatim so the rich committee re-serializes to
+    // the exact on-chain bytes (used to verify the signed handoff cert).
+    Committee::with_mpc_config(members, c.epoch, c.mpc)
 }
 
 fn convert_move_committee_handoff(
@@ -1705,8 +1690,8 @@ mod tests {
     // silently turn honest onboarding into a node crash.
     #[test]
     fn test_convert_identity_element_key_does_not_panic() {
-        use fastcrypto::groups::bls12381::{G1Element, G1ElementUncompressed};
         use fastcrypto::groups::GroupElement;
+        use fastcrypto::groups::bls12381::{G1Element, G1ElementUncompressed};
 
         // Reproduce exactly what `g1_to_uncompressed_g1(g1_identity())` stores
         // on chain: the uncompressed serialization of the G1 point at infinity.

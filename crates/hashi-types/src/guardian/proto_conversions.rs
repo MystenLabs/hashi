@@ -62,10 +62,7 @@ use fastcrypto::serde_helpers::ToFromByteArray;
 use std::num::NonZeroU16;
 use std::str::FromStr;
 
-use crate::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
-use crate::committee::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
-use crate::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
-use crate::committee::VANILLA_MPC_NONCE_GENERATION_PROTOCOL;
+use crate::move_types::Config;
 
 // --------------------------------------------
 //      Proto -> Domain (deserialization)
@@ -894,26 +891,12 @@ fn pb_to_hashi_committee(c: pb::Committee) -> GuardianResult<HashiCommittee> {
 
     let total_weight = c.total_weight.ok_or_else(|| missing("total_weight"))?;
 
-    let mpc_threshold_in_basis_points = c
-        .mpc_threshold_in_basis_points
-        .map(|v| v as u16)
-        .unwrap_or(DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS);
-    let mpc_weight_reduction_allowed_delta = c
-        .mpc_weight_reduction_allowed_delta
-        .map(|v| v as u16)
-        .unwrap_or(DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA);
-    let mpc_max_faulty_in_basis_points = c
-        .mpc_max_faulty_in_basis_points
-        .map(|v| v as u16)
-        .unwrap_or(DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS);
-    let committee = HashiCommittee::new(
-        members,
-        epoch,
-        mpc_threshold_in_basis_points,
-        mpc_weight_reduction_allowed_delta,
-        mpc_max_faulty_in_basis_points,
-        VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
-    );
+    // The pinned config is carried verbatim as BCS bytes so the committee's
+    // signed bytes survive the wire without reconstruction.
+    let mpc_config_bytes = c.mpc_config.ok_or_else(|| missing("mpc_config"))?;
+    let mpc_config: Config = bcs::from_bytes(&mpc_config_bytes)
+        .map_err(|e| InvalidInputs(format!("invalid mpc_config: {e}")))?;
+    let committee = HashiCommittee::with_mpc_config(members, epoch, mpc_config);
 
     if committee.total_weight() != total_weight {
         return Err(InvalidInputs(format!(
@@ -934,9 +917,11 @@ fn hashi_committee_to_pb(c: HashiCommittee) -> pb::Committee {
             .map(|m| hashi_committee_member_to_pb(m.clone()))
             .collect(),
         total_weight: Some(c.total_weight()),
-        mpc_threshold_in_basis_points: Some(c.mpc_threshold_in_basis_points() as u64),
-        mpc_weight_reduction_allowed_delta: Some(c.mpc_weight_reduction_allowed_delta() as u64),
-        mpc_max_faulty_in_basis_points: Some(c.mpc_max_faulty_in_basis_points() as u64),
+        mpc_config: Some(
+            bcs::to_bytes(c.mpc_config())
+                .expect("Config serializes")
+                .into(),
+        ),
     }
 }
 
@@ -1128,9 +1113,7 @@ fn move_committee_to_pb(c: &crate::move_types::Committee) -> pb::Committee {
             })
             .collect(),
         total_weight: Some(c.total_weight),
-        mpc_threshold_in_basis_points: Some(c.mpc_threshold_in_basis_points()),
-        mpc_weight_reduction_allowed_delta: Some(c.mpc_weight_reduction_allowed_delta()),
-        mpc_max_faulty_in_basis_points: Some(c.mpc_max_faulty_in_basis_points()),
+        mpc_config: Some(bcs::to_bytes(&c.mpc).expect("Config serializes").into()),
     }
 }
 

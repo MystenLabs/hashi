@@ -6,9 +6,15 @@ message Committee {
   optional uint64 epoch = 1;
   repeated CommitteeMember members = 2;
   optional uint64 total_weight = 3;
-  optional uint64 mpc_threshold_in_basis_points = 4;
-  optional uint64 mpc_weight_reduction_allowed_delta = 5;
-  optional uint64 mpc_max_faulty_in_basis_points = 6;
+  // BCS-encoded VecMap<String, config_value::Value> pinned from the on-chain
+  // committee. Carried verbatim so the committee's signed BCS bytes survive
+  // this hop without reconstruction. Replaces the former flat mpc_* fields
+  // (which dropped the nonce protocol and any future keys).
+  optional bytes mpc_config = 7;
+  reserved 4, 5, 6;
+  reserved "mpc_threshold_in_basis_points";
+  reserved "mpc_weight_reduction_allowed_delta";
+  reserved "mpc_max_faulty_in_basis_points";
 }
 
 message CommitteeMember {
