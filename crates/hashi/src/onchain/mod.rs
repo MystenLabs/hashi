@@ -1693,4 +1693,36 @@ mod tests {
             fallback_encryption_public_key()
         )
     }
+
+    // The Move contract stores the BLS12-381 G1 identity element as a member's
+    // default `next_epoch_public_key` until a real key is registered (see
+    // `new_member` in committee_set.move), and the scrapers run
+    // `convert_move_uncompressed_g1_pubkey` on every member without filtering.
+    // The conversion must therefore accept the identity element without
+    // panicking: `blst` only rejects the point at infinity in
+    // `validate`/`key_validate`, neither of which this path calls. This test
+    // pins that behavior so swapping in a validating decoder later cannot
+    // silently turn honest onboarding into a node crash.
+    #[test]
+    fn test_convert_identity_element_key_does_not_panic() {
+        use fastcrypto::groups::bls12381::{G1Element, G1ElementUncompressed};
+        use fastcrypto::groups::GroupElement;
+
+        // Reproduce exactly what `g1_to_uncompressed_g1(g1_identity())` stores
+        // on chain: the uncompressed serialization of the G1 point at infinity.
+        let onchain_bytes = G1ElementUncompressed::from(&G1Element::zero()).into_byte_array();
+        assert_eq!(onchain_bytes.len(), 96);
+        assert_eq!(
+            onchain_bytes[0], 0x40,
+            "blst serializes the point at infinity with the infinity bit set"
+        );
+        assert!(onchain_bytes[1..].iter().all(|&b| b == 0));
+
+        // The conversion succeeds and yields the compressed encoding of the
+        // point at infinity (0xc0 followed by zeros).
+        let pubkey = convert_move_uncompressed_g1_pubkey(&onchain_bytes);
+        let mut expected = [0u8; 48];
+        expected[0] = 0xc0;
+        assert_eq!(pubkey.as_bytes(), expected.as_slice());
+    }
 }
