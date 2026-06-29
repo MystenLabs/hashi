@@ -1691,7 +1691,8 @@ mod tests {
     #[test]
     fn test_convert_identity_element_key_does_not_panic() {
         use fastcrypto::groups::GroupElement;
-        use fastcrypto::groups::bls12381::{G1Element, G1ElementUncompressed};
+        use fastcrypto::groups::bls12381::G1Element;
+        use fastcrypto::groups::bls12381::G1ElementUncompressed;
 
         // Reproduce exactly what `g1_to_uncompressed_g1(g1_identity())` stores
         // on chain: the uncompressed serialization of the G1 point at infinity.
