@@ -21,20 +21,14 @@ use serde::Serialize;
 use sui_crypto::SignatureError;
 use sui_sdk_types::Address;
 
-/// Default MPC threshold in basis points. Mirrors `DEFAULT_THRESHOLD_IN_BASIS_POINTS` in
-/// `mpc_config.move`.
-pub const DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS: u16 = 3334;
+use crate::move_types::Config;
 
-/// Default allowed delta for weight reduction. Mirrors `DEFAULT_WEIGHT_REDUCTION_ALLOWED_DELTA` in
-/// `mpc_config.move`.
-pub const DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
-
-/// Default MPC max faulty parties in basis points. Mirrors `DEFAULT_MAX_FAULTY_IN_BASIS_POINTS` in
-/// `mpc_config.move`.
-pub const DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS: u16 = 3333;
-
-/// Mirrors `VANILLA_NONCE_GENERATION_PROTOCOL` in `mpc_config.move`.
-pub const VANILLA_MPC_NONCE_GENERATION_PROTOCOL: u16 = 0;
+// Re-exported for callers that referenced these via `committee`; the single
+// source of truth is `crate::move_types`.
+pub use crate::move_types::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
+pub use crate::move_types::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
+pub use crate::move_types::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
+pub use crate::move_types::VANILLA_MPC_NONCE_GENERATION_PROTOCOL;
 
 // TODO: Read threshold from on-chain config once it is made configurable.
 const THRESHOLD_NUMERATOR: u64 = 2;
@@ -100,10 +94,10 @@ pub struct Committee {
     members: Vec<CommitteeMember>,
     address_to_index: HashMap<Address, usize>,
     total_weight: u64,
-    mpc_threshold_in_basis_points: u16,
-    mpc_weight_reduction_allowed_delta: u16,
-    mpc_max_faulty_in_basis_points: u16,
-    mpc_nonce_generation_protocol: u16,
+    /// The config pinned for this epoch (the MPC parameters), carried verbatim
+    /// from the on-chain committee so its signed BCS bytes never need
+    /// reconstruction. Read individual params via the `mpc_*` accessors.
+    mpc: Config,
 }
 
 #[derive(Clone, PartialEq)]
@@ -166,6 +160,10 @@ impl MemberSignature {
 }
 
 impl Committee {
+    /// Build a committee from typed MPC parameters, canonicalizing them into an
+    /// `MpcConfig`. For synthetic committees (tests, fallbacks); the scrape and
+    /// wire paths use [`Committee::with_mpc_config`] to carry the on-chain map
+    /// verbatim.
     pub fn new(
         members: Vec<CommitteeMember>,
         epoch: u64,
@@ -174,6 +172,22 @@ impl Committee {
         mpc_max_faulty_in_basis_points: u16,
         mpc_nonce_generation_protocol: u16,
     ) -> Self {
+        Self::with_mpc_config(
+            members,
+            epoch,
+            Config::from_mpc_params(
+                mpc_threshold_in_basis_points,
+                mpc_weight_reduction_allowed_delta,
+                mpc_max_faulty_in_basis_points,
+                mpc_nonce_generation_protocol,
+            ),
+        )
+    }
+
+    /// Build a committee carrying `mpc` verbatim. Used by the scrape and gRPC
+    /// paths so the committee's signed BCS bytes match the on-chain committee
+    /// exactly, without reconstructing the config from extracted fields.
+    pub fn with_mpc_config(members: Vec<CommitteeMember>, epoch: u64, mpc: Config) -> Self {
         let total_weight = members.iter().map(|member| member.weight).sum();
         let address_to_index = members
             .iter()
@@ -185,10 +199,7 @@ impl Committee {
             members,
             address_to_index,
             total_weight,
-            mpc_threshold_in_basis_points,
-            mpc_weight_reduction_allowed_delta,
-            mpc_max_faulty_in_basis_points,
-            mpc_nonce_generation_protocol,
+            mpc,
         }
     }
 
@@ -205,20 +216,26 @@ impl Committee {
         self.total_weight
     }
 
+    /// The pinned config (MPC parameters), in its verbatim on-chain
+    /// representation.
+    pub fn mpc_config(&self) -> &Config {
+        &self.mpc
+    }
+
     pub fn mpc_threshold_in_basis_points(&self) -> u16 {
-        self.mpc_threshold_in_basis_points
+        self.mpc.mpc_threshold_in_basis_points()
     }
 
     pub fn mpc_weight_reduction_allowed_delta(&self) -> u16 {
-        self.mpc_weight_reduction_allowed_delta
+        self.mpc.mpc_weight_reduction_allowed_delta()
     }
 
     pub fn mpc_max_faulty_in_basis_points(&self) -> u16 {
-        self.mpc_max_faulty_in_basis_points
+        self.mpc.mpc_max_faulty_in_basis_points()
     }
 
     pub fn mpc_nonce_generation_protocol(&self) -> u16 {
-        self.mpc_nonce_generation_protocol
+        self.mpc.mpc_nonce_generation_protocol()
     }
 
     fn member(&self, address: &Address) -> Result<&CommitteeMember, SignatureError> {

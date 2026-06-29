@@ -155,14 +155,6 @@ pub struct CommitteeMember {
     pub weight: u64,
 }
 
-/// Canonical key order for the per-epoch MPC parameter store pinned onto a
-/// `Committee`. This order is load-bearing: it determines the BCS bytes of the
-/// signed committee, so it MUST match Move's `mpc_config::pin`.
-const KEY_MPC_THRESHOLD_IN_BASIS_POINTS: &str = "mpc_threshold_in_basis_points";
-const KEY_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: &str = "mpc_weight_reduction_allowed_delta";
-const KEY_MPC_MAX_FAULTY_IN_BASIS_POINTS: &str = "mpc_max_faulty_in_basis_points";
-const KEY_MPC_NONCE_GENERATION_PROTOCOL: &str = "mpc_nonce_generation_protocol";
-
 /// This represents a BLS signing committee for a given epoch.
 ///
 /// Rust version of the Move hashi::committee::Committee type.
@@ -175,56 +167,11 @@ pub struct Committee {
     pub members: Vec<CommitteeMember>,
     /// Total voting weight of the committee.
     pub total_weight: u64,
-    /// Per-epoch MPC parameters pinned from the governed config. BCS-mirrors
-    /// the Move `Config` (a `VecMap<String, Value>`); the key order is
-    /// canonical (see the `KEY_MPC_*` consts) and load-bearing because these
-    /// bytes are part of the signed committee handoff certificate. Read via the
-    /// typed `mpc_*` accessors rather than indexing directly.
-    pub mpc: Vec<(String, ConfigValue)>,
-}
-
-impl Committee {
-    /// Read a `u64` MPC parameter by key, falling back to `default` if the key
-    /// is absent or not a `U64` (matches the Move accessors' default-on-absent
-    /// behavior; a committee pinned via `mpc_config::pin` always has all keys).
-    fn mpc_u64(&self, key: &str, default: u64) -> u64 {
-        self.mpc
-            .iter()
-            .find(|(k, _)| k == key)
-            .and_then(|(_, v)| match v {
-                ConfigValue::U64(n) => Some(*n),
-                _ => None,
-            })
-            .unwrap_or(default)
-    }
-
-    pub fn mpc_threshold_in_basis_points(&self) -> u64 {
-        self.mpc_u64(
-            KEY_MPC_THRESHOLD_IN_BASIS_POINTS,
-            crate::committee::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS as u64,
-        )
-    }
-
-    pub fn mpc_weight_reduction_allowed_delta(&self) -> u64 {
-        self.mpc_u64(
-            KEY_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
-            crate::committee::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA as u64,
-        )
-    }
-
-    pub fn mpc_max_faulty_in_basis_points(&self) -> u64 {
-        self.mpc_u64(
-            KEY_MPC_MAX_FAULTY_IN_BASIS_POINTS,
-            crate::committee::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS as u64,
-        )
-    }
-
-    pub fn mpc_nonce_generation_protocol(&self) -> u64 {
-        self.mpc_u64(
-            KEY_MPC_NONCE_GENERATION_PROTOCOL,
-            crate::committee::VANILLA_MPC_NONCE_GENERATION_PROTOCOL as u64,
-        )
-    }
+    /// The config pinned from the governed config at reconfig, BCS-mirroring the
+    /// Move `Committee.mpc: Config`. Carried verbatim end to end so the
+    /// committee's signed BCS bytes match the on-chain committee exactly; never
+    /// reconstructed from extracted fields.
+    pub mpc: Config,
 }
 
 /// Rust version of the Move hashi::committee_set::CommitteeHandoffKey type.
@@ -238,12 +185,6 @@ pub struct CommitteeHandoffKey {
 pub struct CommitteeHandoff {
     pub next_epoch: u64,
     pub cert: CommitteeSignature,
-}
-
-/// Rust version of the Move hashi::config::Config type.
-#[derive(Debug, serde_derive::Deserialize)]
-pub struct Config {
-    pub config: Vec<(String, ConfigValue)>,
 }
 
 /// Rust version of the Move hashi::versioning::Versioning type.
@@ -262,7 +203,8 @@ pub struct UpgradeCap {
     pub policy: u8,
 }
 
-/// Rust version of the Move hashi::config_value::Value type.
+/// Rust version of the Move hashi::config_value::Value type. Variant order MUST
+/// match Move (U64 = 0, …) for BCS.
 #[derive(Debug, Clone, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub enum ConfigValue {
     U64(u64),
@@ -270,7 +212,134 @@ pub enum ConfigValue {
     String(String),
     Bool(bool),
     Bytes(Vec<u8>),
-    // Dynamic(TypeName, vector<u8>)
+}
+
+/// MPC parameter keys, in the canonical order Move's `mpc_config::pin` writes
+/// them. Load-bearing for [`Config::from_mpc_params`].
+const KEY_MPC_THRESHOLD_IN_BASIS_POINTS: &str = "mpc_threshold_in_basis_points";
+const KEY_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: &str = "mpc_weight_reduction_allowed_delta";
+const KEY_MPC_MAX_FAULTY_IN_BASIS_POINTS: &str = "mpc_max_faulty_in_basis_points";
+const KEY_MPC_NONCE_GENERATION_PROTOCOL: &str = "mpc_nonce_generation_protocol";
+
+/// Default MPC threshold in basis points. Mirrors `DEFAULT_THRESHOLD_IN_BASIS_POINTS`
+/// in `mpc_config.move`.
+pub const DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS: u16 = 3334;
+/// Mirrors `DEFAULT_WEIGHT_REDUCTION_ALLOWED_DELTA` in `mpc_config.move`.
+pub const DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
+/// Mirrors `DEFAULT_MAX_FAULTY_IN_BASIS_POINTS` in `mpc_config.move`.
+pub const DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS: u16 = 3333;
+/// Mirrors `VANILLA_NONCE_GENERATION_PROTOCOL` in `mpc_config.move`.
+pub const VANILLA_MPC_NONCE_GENERATION_PROTOCOL: u16 = 0;
+
+/// Rust version of the Move hashi::config::Config type: a general-purpose,
+/// order-preserving key-value store (`VecMap<String, Value>`). Embedded both as
+/// the package's global config and as the per-epoch snapshot pinned onto a
+/// [`Committee`].
+///
+/// `#[serde(transparent)]` makes this serialize exactly as its inner entry
+/// vector, BCS-identical to the Move single-field `Config` struct. A committee's
+/// pinned config is carried verbatim end to end (scrape → rich committee → gRPC
+/// → re-serialize for signing) so its signed bytes match the on-chain committee
+/// without ever being reconstructed from extracted fields. Domain-typed
+/// accessors (the MPC parameters) are layered on, mirroring Move's `mpc_config`.
+#[derive(Debug, Clone, PartialEq, Default, serde_derive::Deserialize, serde_derive::Serialize)]
+#[serde(transparent)]
+pub struct Config(Vec<(String, ConfigValue)>);
+
+impl Config {
+    /// Wrap an entry list read verbatim from chain or the wire. The order is
+    /// preserved as given — do not sort or canonicalize here.
+    pub fn from_entries(entries: Vec<(String, ConfigValue)>) -> Self {
+        Self(entries)
+    }
+
+    /// The raw entries, in their on-chain order.
+    pub fn entries(&self) -> &[(String, ConfigValue)] {
+        &self.0
+    }
+
+    /// Consume into the raw entries.
+    pub fn into_entries(self) -> Vec<(String, ConfigValue)> {
+        self.0
+    }
+
+    /// Read a `u64` value by key, falling back to `default` if the key is absent
+    /// or not a `U64` (matches the Move accessors' default-on-absent behavior).
+    pub fn get_u64(&self, key: &str, default: u64) -> u64 {
+        self.0
+            .iter()
+            .find(|(k, _)| k == key)
+            .and_then(|(_, v)| match v {
+                ConfigValue::U64(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap_or(default)
+    }
+
+    // ===== MPC parameters (mirror Move's `mpc_config` accessors) =====
+
+    /// Build a config holding the MPC parameters, inserting the full key set in
+    /// the same fixed order as Move's `mpc_config::pin`. For synthetic
+    /// committees only (tests, fallbacks); the scrape/wire paths carry the
+    /// on-chain config verbatim via [`Config::from_entries`].
+    pub fn from_mpc_params(
+        threshold_in_basis_points: u16,
+        weight_reduction_allowed_delta: u16,
+        max_faulty_in_basis_points: u16,
+        nonce_generation_protocol: u16,
+    ) -> Self {
+        Self(vec![
+            (
+                KEY_MPC_THRESHOLD_IN_BASIS_POINTS.to_string(),
+                ConfigValue::U64(threshold_in_basis_points as u64),
+            ),
+            (
+                KEY_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA.to_string(),
+                ConfigValue::U64(weight_reduction_allowed_delta as u64),
+            ),
+            (
+                KEY_MPC_MAX_FAULTY_IN_BASIS_POINTS.to_string(),
+                ConfigValue::U64(max_faulty_in_basis_points as u64),
+            ),
+            (
+                KEY_MPC_NONCE_GENERATION_PROTOCOL.to_string(),
+                ConfigValue::U64(nonce_generation_protocol as u64),
+            ),
+        ])
+    }
+
+    pub fn mpc_threshold_in_basis_points(&self) -> u16 {
+        self.mpc_param(
+            KEY_MPC_THRESHOLD_IN_BASIS_POINTS,
+            DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS,
+        )
+    }
+
+    pub fn mpc_weight_reduction_allowed_delta(&self) -> u16 {
+        self.mpc_param(
+            KEY_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
+            DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        )
+    }
+
+    pub fn mpc_max_faulty_in_basis_points(&self) -> u16 {
+        self.mpc_param(
+            KEY_MPC_MAX_FAULTY_IN_BASIS_POINTS,
+            DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
+        )
+    }
+
+    pub fn mpc_nonce_generation_protocol(&self) -> u16 {
+        self.mpc_param(
+            KEY_MPC_NONCE_GENERATION_PROTOCOL,
+            VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
+        )
+    }
+
+    fn mpc_param(&self, key: &str, default: u16) -> u16 {
+        u16::try_from(self.get_u64(key, default as u64))
+            .unwrap_or_else(|_| panic!("MPC param {key} exceeds u16::MAX"))
+    }
 }
 
 /// Rust version of the Move sui::vec_set::VecSet type.
@@ -1448,31 +1517,13 @@ fn bls_public_key_from_uncompressed_g1_bytes(
 
 impl From<&crate::committee::Committee> for Committee {
     fn from(c: &crate::committee::Committee) -> Self {
-        // Insertion order is the canonical key order and must match Move's
-        // `mpc_config::pin`; it determines the signed committee's BCS bytes.
-        let mpc = vec![
-            (
-                KEY_MPC_THRESHOLD_IN_BASIS_POINTS.to_string(),
-                ConfigValue::U64(c.mpc_threshold_in_basis_points() as u64),
-            ),
-            (
-                KEY_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA.to_string(),
-                ConfigValue::U64(c.mpc_weight_reduction_allowed_delta() as u64),
-            ),
-            (
-                KEY_MPC_MAX_FAULTY_IN_BASIS_POINTS.to_string(),
-                ConfigValue::U64(c.mpc_max_faulty_in_basis_points() as u64),
-            ),
-            (
-                KEY_MPC_NONCE_GENERATION_PROTOCOL.to_string(),
-                ConfigValue::U64(c.mpc_nonce_generation_protocol() as u64),
-            ),
-        ];
         Self {
             epoch: c.epoch(),
             members: c.members().iter().map(Into::into).collect(),
             total_weight: c.total_weight(),
-            mpc,
+            // Carry the pinned MPC config verbatim — no reconstruction, so the
+            // serialized bytes match the on-chain committee exactly.
+            mpc: c.mpc_config().clone(),
         }
     }
 }
@@ -1481,28 +1532,13 @@ impl TryFrom<Committee> for crate::committee::Committee {
     type Error = anyhow::Error;
 
     fn try_from(c: Committee) -> Result<Self, Self::Error> {
-        // Read the MPC params before moving `members` out of `c` (the typed
-        // accessors borrow all of `c`).
-        let threshold_in_basis_points = u16::try_from(c.mpc_threshold_in_basis_points())
-            .expect("mpc_threshold_in_basis_points exceeds u16::MAX");
-        let weight_reduction_allowed_delta = u16::try_from(c.mpc_weight_reduction_allowed_delta())
-            .expect("mpc_weight_reduction_allowed_delta exceeds u16::MAX");
-        let max_faulty_in_basis_points = u16::try_from(c.mpc_max_faulty_in_basis_points())
-            .expect("mpc_max_faulty_in_basis_points exceeds u16::MAX");
-        let nonce_generation_protocol = u16::try_from(c.mpc_nonce_generation_protocol())
-            .expect("mpc_nonce_generation_protocol exceeds u16::MAX");
         let members = c
             .members
             .into_iter()
             .map(crate::committee::CommitteeMember::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(crate::committee::Committee::new(
-            members,
-            c.epoch,
-            threshold_in_basis_points,
-            weight_reduction_allowed_delta,
-            max_faulty_in_basis_points,
-            nonce_generation_protocol,
+        Ok(crate::committee::Committee::with_mpc_config(
+            members, c.epoch, c.mpc,
         ))
     }
 }
@@ -1512,35 +1548,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn committee_mpc_params_survive_bcs_round_trip() {
+    fn committee_mpc_config_carried_verbatim_through_bcs() {
         let committee = crate::committee::Committee::new(vec![], 5, 3334, 800, 3333, 1);
         let move_committee = Committee::from(&committee);
 
-        // The pinned MPC store must be in canonical key order: the signed
-        // committee bytes depend on it, and it must match Move's
-        // `mpc_config::pin`.
-        let keys: Vec<&str> = move_committee.mpc.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(
-            keys,
-            vec![
-                KEY_MPC_THRESHOLD_IN_BASIS_POINTS,
-                KEY_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
-                KEY_MPC_MAX_FAULTY_IN_BASIS_POINTS,
-                KEY_MPC_NONCE_GENERATION_PROTOCOL,
-            ],
-        );
-
+        // Round-trip the serialized committee and confirm the verbatim config
+        // survives byte-for-byte.
         let bytes = bcs::to_bytes(&move_committee).expect("serialize");
         let decoded: Committee = bcs::from_bytes(&bytes).expect("deserialize");
-        assert_eq!(decoded.mpc_threshold_in_basis_points(), 3334);
-        assert_eq!(decoded.mpc_weight_reduction_allowed_delta(), 800);
-        assert_eq!(decoded.mpc_max_faulty_in_basis_points(), 3333);
-        assert_eq!(decoded.mpc_nonce_generation_protocol(), 1);
+        assert_eq!(decoded.mpc, move_committee.mpc);
+        assert_eq!(decoded.mpc.mpc_threshold_in_basis_points(), 3334);
+        assert_eq!(decoded.mpc.mpc_weight_reduction_allowed_delta(), 800);
+        assert_eq!(decoded.mpc.mpc_max_faulty_in_basis_points(), 3333);
+        assert_eq!(decoded.mpc.mpc_nonce_generation_protocol(), 1);
 
         let back = crate::committee::Committee::try_from(decoded).expect("convert back");
-        assert_eq!(back.mpc_threshold_in_basis_points(), 3334);
-        assert_eq!(back.mpc_weight_reduction_allowed_delta(), 800);
-        assert_eq!(back.mpc_max_faulty_in_basis_points(), 3333);
-        assert_eq!(back.mpc_nonce_generation_protocol(), 1);
+        assert_eq!(back.mpc_config(), &move_committee.mpc);
+    }
+
+    /// Pins the exact BCS bytes of a committee's pinned config so a change to the
+    /// canonical key order, the `ConfigValue` encoding, or the entry set is
+    /// caught here rather than silently breaking handoff-cert verification.
+    /// The expected vector must equal what Move's `mpc_config::pin` produces.
+    #[test]
+    fn committee_mpc_config_bcs_is_pinned() {
+        let mpc = Config::from_mpc_params(3334, 800, 3333, 1);
+        let bytes = bcs::to_bytes(&mpc).expect("serialize");
+
+        // VecMap<String,Value> = ULEB128 len (4) then, per entry, ULEB128 key
+        // length, key bytes, 1-byte Value variant tag (U64 = 0), 8-byte LE u64.
+        let expected: Vec<u8> = {
+            let mut v = vec![4u8];
+            for (key, val) in [
+                ("mpc_threshold_in_basis_points", 3334u64),
+                ("mpc_weight_reduction_allowed_delta", 800),
+                ("mpc_max_faulty_in_basis_points", 3333),
+                ("mpc_nonce_generation_protocol", 1),
+            ] {
+                v.push(key.len() as u8);
+                v.extend_from_slice(key.as_bytes());
+                v.push(0); // ConfigValue::U64 tag
+                v.extend_from_slice(&val.to_le_bytes());
+            }
+            v
+        };
+        assert_eq!(bytes, expected);
+
+        // And the bytes decode back to the same entries.
+        let decoded: Config = bcs::from_bytes(&bytes).expect("deserialize");
+        assert_eq!(decoded, mpc);
+        assert!(matches!(decoded.entries()[0].1, ConfigValue::U64(3334)));
     }
 }
