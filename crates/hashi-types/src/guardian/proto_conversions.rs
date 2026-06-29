@@ -893,10 +893,10 @@ fn pb_to_hashi_committee(c: pb::Committee) -> GuardianResult<HashiCommittee> {
 
     // The pinned config is carried verbatim as BCS bytes so the committee's
     // signed bytes survive the wire without reconstruction.
-    let mpc_config_bytes = c.mpc_config.ok_or_else(|| missing("mpc_config"))?;
-    let mpc_config: Config = bcs::from_bytes(&mpc_config_bytes)
-        .map_err(|e| InvalidInputs(format!("invalid mpc_config: {e}")))?;
-    let committee = HashiCommittee::with_mpc_config(members, epoch, mpc_config);
+    let config_bytes = c.config.ok_or_else(|| missing("config"))?;
+    let config: Config = bcs::from_bytes(&config_bytes)
+        .map_err(|e| InvalidInputs(format!("invalid config: {e}")))?;
+    let committee = HashiCommittee::with_config(members, epoch, config);
 
     if committee.total_weight() != total_weight {
         return Err(InvalidInputs(format!(
@@ -917,11 +917,7 @@ fn hashi_committee_to_pb(c: HashiCommittee) -> pb::Committee {
             .map(|m| hashi_committee_member_to_pb(m.clone()))
             .collect(),
         total_weight: Some(c.total_weight()),
-        mpc_config: Some(
-            bcs::to_bytes(c.mpc_config())
-                .expect("Config serializes")
-                .into(),
-        ),
+        config: Some(bcs::to_bytes(c.config()).expect("Config serializes").into()),
     }
 }
 
@@ -1113,7 +1109,7 @@ fn move_committee_to_pb(c: &crate::move_types::Committee) -> pb::Committee {
             })
             .collect(),
         total_weight: Some(c.total_weight),
-        mpc_config: Some(bcs::to_bytes(&c.mpc).expect("Config serializes").into()),
+        config: Some(bcs::to_bytes(&c.config).expect("Config serializes").into()),
     }
 }
 

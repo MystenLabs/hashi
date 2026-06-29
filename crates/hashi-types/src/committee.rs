@@ -97,7 +97,7 @@ pub struct Committee {
     /// The config pinned for this epoch (the MPC parameters), carried verbatim
     /// from the on-chain committee so its signed BCS bytes never need
     /// reconstruction. Read individual params via the `mpc_*` accessors.
-    mpc: Config,
+    config: Config,
 }
 
 #[derive(Clone, PartialEq)]
@@ -160,9 +160,9 @@ impl MemberSignature {
 }
 
 impl Committee {
-    /// Build a committee from typed MPC parameters, canonicalizing them into an
-    /// `MpcConfig`. For synthetic committees (tests, fallbacks); the scrape and
-    /// wire paths use [`Committee::with_mpc_config`] to carry the on-chain map
+    /// Build a committee from typed MPC parameters, canonicalizing them into a
+    /// `Config`. For synthetic committees (tests, fallbacks); the scrape and
+    /// wire paths use [`Committee::with_config`] to carry the on-chain config
     /// verbatim.
     pub fn new(
         members: Vec<CommitteeMember>,
@@ -172,7 +172,7 @@ impl Committee {
         mpc_max_faulty_in_basis_points: u16,
         mpc_nonce_generation_protocol: u16,
     ) -> Self {
-        Self::with_mpc_config(
+        Self::with_config(
             members,
             epoch,
             Config::from_mpc_params(
@@ -184,10 +184,11 @@ impl Committee {
         )
     }
 
-    /// Build a committee carrying `mpc` verbatim. Used by the scrape and gRPC
-    /// paths so the committee's signed BCS bytes match the on-chain committee
-    /// exactly, without reconstructing the config from extracted fields.
-    pub fn with_mpc_config(members: Vec<CommitteeMember>, epoch: u64, mpc: Config) -> Self {
+    /// Build a committee carrying `config` verbatim. Used by the scrape and
+    /// gRPC paths so the committee's signed BCS bytes match the on-chain
+    /// committee exactly, without reconstructing the config from extracted
+    /// fields.
+    pub fn with_config(members: Vec<CommitteeMember>, epoch: u64, config: Config) -> Self {
         let total_weight = members.iter().map(|member| member.weight).sum();
         let address_to_index = members
             .iter()
@@ -199,7 +200,7 @@ impl Committee {
             members,
             address_to_index,
             total_weight,
-            mpc,
+            config,
         }
     }
 
@@ -218,24 +219,24 @@ impl Committee {
 
     /// The pinned config (MPC parameters), in its verbatim on-chain
     /// representation.
-    pub fn mpc_config(&self) -> &Config {
-        &self.mpc
+    pub fn config(&self) -> &Config {
+        &self.config
     }
 
     pub fn mpc_threshold_in_basis_points(&self) -> u16 {
-        self.mpc.mpc_threshold_in_basis_points()
+        self.config.mpc_threshold_in_basis_points()
     }
 
     pub fn mpc_weight_reduction_allowed_delta(&self) -> u16 {
-        self.mpc.mpc_weight_reduction_allowed_delta()
+        self.config.mpc_weight_reduction_allowed_delta()
     }
 
     pub fn mpc_max_faulty_in_basis_points(&self) -> u16 {
-        self.mpc.mpc_max_faulty_in_basis_points()
+        self.config.mpc_max_faulty_in_basis_points()
     }
 
     pub fn mpc_nonce_generation_protocol(&self) -> u16 {
-        self.mpc.mpc_nonce_generation_protocol()
+        self.config.mpc_nonce_generation_protocol()
     }
 
     fn member(&self, address: &Address) -> Result<&CommitteeMember, SignatureError> {

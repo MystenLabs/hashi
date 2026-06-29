@@ -171,7 +171,7 @@ pub struct Committee {
     /// Move `Committee.mpc: Config`. Carried verbatim end to end so the
     /// committee's signed BCS bytes match the on-chain committee exactly; never
     /// reconstructed from extracted fields.
-    pub mpc: Config,
+    pub config: Config,
 }
 
 /// Rust version of the Move hashi::committee_set::CommitteeHandoffKey type.
@@ -1521,9 +1521,9 @@ impl From<&crate::committee::Committee> for Committee {
             epoch: c.epoch(),
             members: c.members().iter().map(Into::into).collect(),
             total_weight: c.total_weight(),
-            // Carry the pinned MPC config verbatim — no reconstruction, so the
+            // Carry the pinned config verbatim — no reconstruction, so the
             // serialized bytes match the on-chain committee exactly.
-            mpc: c.mpc_config().clone(),
+            config: c.config().clone(),
         }
     }
 }
@@ -1537,8 +1537,8 @@ impl TryFrom<Committee> for crate::committee::Committee {
             .into_iter()
             .map(crate::committee::CommitteeMember::try_from)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(crate::committee::Committee::with_mpc_config(
-            members, c.epoch, c.mpc,
+        Ok(crate::committee::Committee::with_config(
+            members, c.epoch, c.config,
         ))
     }
 }
@@ -1556,14 +1556,14 @@ mod tests {
         // survives byte-for-byte.
         let bytes = bcs::to_bytes(&move_committee).expect("serialize");
         let decoded: Committee = bcs::from_bytes(&bytes).expect("deserialize");
-        assert_eq!(decoded.mpc, move_committee.mpc);
-        assert_eq!(decoded.mpc.mpc_threshold_in_basis_points(), 3334);
-        assert_eq!(decoded.mpc.mpc_weight_reduction_allowed_delta(), 800);
-        assert_eq!(decoded.mpc.mpc_max_faulty_in_basis_points(), 3333);
-        assert_eq!(decoded.mpc.mpc_nonce_generation_protocol(), 1);
+        assert_eq!(decoded.config, move_committee.config);
+        assert_eq!(decoded.config.mpc_threshold_in_basis_points(), 3334);
+        assert_eq!(decoded.config.mpc_weight_reduction_allowed_delta(), 800);
+        assert_eq!(decoded.config.mpc_max_faulty_in_basis_points(), 3333);
+        assert_eq!(decoded.config.mpc_nonce_generation_protocol(), 1);
 
         let back = crate::committee::Committee::try_from(decoded).expect("convert back");
-        assert_eq!(back.mpc_config(), &move_committee.mpc);
+        assert_eq!(back.config(), &move_committee.config);
     }
 
     /// Pins the exact BCS bytes of a committee's pinned config so a change to the

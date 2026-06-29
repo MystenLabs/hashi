@@ -3625,7 +3625,7 @@ pub struct Committee {
     /// this hop without reconstruction. Replaces the former flat mpc\_\* fields
     /// (which dropped the nonce protocol and any future keys).
     #[prost(bytes = "bytes", optional, tag = "7")]
-    pub mpc_config: ::core::option::Option<::prost::bytes::Bytes>,
+    pub config: ::core::option::Option<::prost::bytes::Bytes>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CommitteeMember {
