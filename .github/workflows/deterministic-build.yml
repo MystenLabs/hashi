@@ -2,15 +2,6 @@ name: Deterministic Docker Builds
 
 on:
   pull_request:
-    paths:
-      # for now don't run on every change
-      # - 'crates/**'
-      - 'docker/hashi/**'
-      - 'docker/hashi-screener/**'
-      - 'docker/hashi-guardian-k8s/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/**'
   workflow_dispatch:
   schedule: [cron: "20 3 * * *"]
 
