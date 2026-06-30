@@ -4,11 +4,15 @@
 //! Core types for the DKG protocol
 
 use fastcrypto::error::FastCryptoError;
+use fastcrypto::error::FastCryptoResult;
+use fastcrypto::hash::Blake2b256;
+use fastcrypto::hash::HashFunction;
 use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::nodes::Nodes;
 use fastcrypto_tbls::nodes::PartyId;
 use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::random_oracle::RandomOracle;
+use fastcrypto_tbls::threshold_schnorr::Certificate;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::S;
 use fastcrypto_tbls::threshold_schnorr::avss;
@@ -24,7 +28,9 @@ use hashi_types::move_types::DealerSubmissionV1;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::sync::Arc;
 use sui_sdk_types::Address;
 use sui_sdk_types::Digest;
 
@@ -37,7 +43,7 @@ pub struct NonceMessage {
     pub message: batch_avss::Message,
 }
 
-pub type AvidConfirmCertificate = SignedMessage<batch_avss_avid::AvssVote>;
+pub type AvidConfirmCertificate = SignedMessage<DealerMessagesHash>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AvidNonceMessage {
@@ -462,6 +468,98 @@ impl CertificateV1 {
     }
 }
 
+fn hash_avid_vote(vote: &batch_avss_avid::AvidVote) -> MessageHash {
+    let bytes = bcs::to_bytes(vote).expect("AvidVote is serializable");
+    MessageHash::from(Blake2b256::digest(&bytes).digest)
+}
+
+#[derive(Clone)]
+pub struct AvidCertificate<P> {
+    dealer_cert: DealerCertificate,
+    payload: P,
+    committee: Arc<Committee>,
+    signers: BTreeSet<PartyId>,
+}
+
+impl<P: Clone> Certificate for AvidCertificate<P> {
+    type Payload = P;
+
+    fn signers(&self) -> &BTreeSet<PartyId> {
+        &self.signers
+    }
+
+    fn payload(&self) -> &P {
+        &self.payload
+    }
+
+    fn verify(&self) -> FastCryptoResult<()> {
+        // Constructors pin `payload` to `dealer_cert`, so the committee signature over the
+        // dealer cert authenticates `payload` too.
+        self.committee
+            .verify_signature(&self.dealer_cert)
+            .map_err(|e| FastCryptoError::GeneralError(e.to_string()))
+    }
+}
+
+impl AvidCertificate<batch_avss_avid::AvssVote> {
+    pub fn confirm(dealer_cert: DealerCertificate, committee: Arc<Committee>) -> MpcResult<Self> {
+        let payload = batch_avss_avid::AvssVote {
+            common_message_hash: to_fastcrypto_digest(&dealer_cert.message().messages_hash),
+        };
+        let signers = resolve_signers(&dealer_cert, &committee)?;
+        Ok(Self {
+            dealer_cert,
+            payload,
+            committee,
+            signers,
+        })
+    }
+}
+
+impl AvidCertificate<batch_avss_avid::AvidVote> {
+    pub fn vote(
+        dealer_cert: DealerCertificate,
+        vote: batch_avss_avid::AvidVote,
+        committee: Arc<Committee>,
+    ) -> MpcResult<Self> {
+        if hash_avid_vote(&vote) != dealer_cert.message().messages_hash {
+            return Err(MpcError::InvalidCertificate(
+                "AvidVote does not match the certified messages_hash".into(),
+            ));
+        }
+        let signers = resolve_signers(&dealer_cert, &committee)?;
+        Ok(Self {
+            dealer_cert,
+            payload: vote,
+            committee,
+            signers,
+        })
+    }
+}
+
+fn to_fastcrypto_digest(h: &MessageHash) -> fastcrypto::hash::Digest<32> {
+    fastcrypto::hash::Digest::new(*<MessageHash as AsRef<[u8; 32]>>::as_ref(h))
+}
+
+fn resolve_signers(
+    dealer_cert: &DealerCertificate,
+    committee: &Committee,
+) -> MpcResult<BTreeSet<PartyId>> {
+    dealer_cert
+        .signers(committee)
+        .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?
+        .iter()
+        .map(|addr| {
+            committee
+                .index_of(addr)
+                .map(|i| i as PartyId)
+                .ok_or_else(|| {
+                    MpcError::InvalidCertificate(format!("signer {addr} not in committee"))
+                })
+        })
+        .collect()
+}
+
 pub type MpcResult<T> = Result<T, MpcError>;
 
 #[derive(Clone, Debug, thiserror::Error)]
@@ -633,6 +731,224 @@ mod tests {
     use hashi_types::move_types::CommitteeSignature as MoveCommitteeSignature;
     use hashi_types::move_types::DealerMessagesHashV1;
     use std::num::NonZeroU16;
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    struct StubAvssCert {
+        voters: BTreeSet<PartyId>,
+        vote: batch_avss_avid::AvssVote,
+    }
+    impl Certificate for StubAvssCert {
+        type Payload = batch_avss_avid::AvssVote;
+        fn signers(&self) -> &BTreeSet<PartyId> {
+            &self.voters
+        }
+        fn payload(&self) -> &batch_avss_avid::AvssVote {
+            &self.vote
+        }
+        fn verify(&self) -> FastCryptoResult<()> {
+            Ok(())
+        }
+    }
+
+    fn test_committee(n: usize, epoch: u64) -> (Committee, Vec<Bls12381PrivateKey>) {
+        let mut rng = rand::thread_rng();
+        let signing_keys: Vec<_> = (0..n)
+            .map(|_| Bls12381PrivateKey::generate(&mut rng))
+            .collect();
+        let members: Vec<_> = (0..n)
+            .map(|i| {
+                let enc = EncryptionPrivateKey::new(&mut rng);
+                CommitteeMember::new(
+                    Address::new([i as u8; 32]),
+                    signing_keys[i].public_key(),
+                    EncryptionPublicKey::from_private_key(&enc),
+                    1,
+                )
+            })
+            .collect();
+        let committee = Committee::new(members, epoch, 3334u16, 0u16, 3333u16, 0);
+        (committee, signing_keys)
+    }
+
+    fn dealer_cert(
+        committee: &Committee,
+        keys: &[Bls12381PrivateKey],
+        signer_indices: &[usize],
+        epoch: u64,
+        messages_hash: MessageHash,
+    ) -> DealerCertificate {
+        let message = DealerMessagesHash {
+            dealer_address: Address::new([0u8; 32]),
+            messages_hash,
+        };
+        let mut aggregator = BlsSignatureAggregator::new(committee, message.clone());
+        for &i in signer_indices {
+            let sig = keys[i].sign(epoch, Address::new([i as u8; 32]), &message);
+            aggregator.add_signature(sig).unwrap();
+        }
+        aggregator.finish().unwrap()
+    }
+
+    fn mint_avid_vote(voters: &[u16]) -> batch_avss_avid::AvidVote {
+        use fastcrypto_tbls::ecies_v1;
+        use fastcrypto_tbls::threshold_schnorr::Parameters;
+        let (t, f, n, batch) = (3u16, 3u16, 10u16, 3u16);
+        let mut rng = rand::thread_rng();
+        let sks: Vec<_> = (0..n)
+            .map(|_| ecies_v1::PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .collect();
+        let nodes = Nodes::new(
+            sks.iter()
+                .enumerate()
+                .map(|(id, sk)| Node {
+                    id: id as u16,
+                    pk: ecies_v1::PublicKey::from_private_key(sk),
+                    weight: 1,
+                })
+                .collect(),
+        )
+        .unwrap();
+        let sid = b"avid cert test".to_vec();
+        let params = Parameters { t, f };
+        let dealer =
+            batch_avss_avid::Dealer::new(nodes.clone(), 0, params, sid.clone(), batch).unwrap();
+        let (state, _) = dealer.create_avss_messages(&mut rng).unwrap();
+        let cert = StubAvssCert {
+            voters: voters.iter().copied().collect(),
+            vote: batch_avss_avid::AvssVote {
+                common_message_hash: state.common.hash(),
+            },
+        };
+        let messages = dealer.create_avid_messages(&state, cert).unwrap();
+        let avid_message = messages.message_for(0).unwrap();
+        let receiver =
+            batch_avss_avid::Receiver::new(nodes, 0, 0, params, sid, sks[0].clone(), batch)
+                .unwrap();
+        let verified_common = receiver
+            .verify_common_message(state.common.clone())
+            .unwrap();
+        let (_, avid_vote) = receiver
+            .process_avid_message(Some(&verified_common), avid_message)
+            .unwrap()
+            .unwrap();
+        avid_vote
+    }
+
+    #[test]
+    fn avid_confirm_certificate_reconstructs_payload_and_verifies() {
+        let epoch = 5;
+        let (committee, keys) = test_committee(3, epoch);
+        let h_v: [u8; 32] = [42u8; 32];
+        let signed = dealer_cert(&committee, &keys, &[0, 1, 2], epoch, h_v.into());
+        let committee = Arc::new(committee);
+
+        let cert = AvidCertificate::confirm(signed.clone(), committee).unwrap();
+
+        assert_eq!(cert.signers(), &BTreeSet::from([0u16, 1, 2]));
+        assert_eq!(cert.payload().common_message_hash.digest, h_v);
+        assert!(cert.verify().is_ok());
+        assert!(cert.into_verified().is_ok());
+
+        let (other, _) = test_committee(3, epoch);
+        let bad = AvidCertificate::confirm(signed, Arc::new(other)).unwrap();
+        assert!(bad.verify().is_err());
+    }
+
+    #[test]
+    fn avid_vote_certificate_hash_pins_the_payload() {
+        let epoch = 7;
+        let avid_vote = mint_avid_vote(&[0, 1, 2, 3, 4, 5, 6, 7]);
+        let (committee, keys) = test_committee(3, epoch);
+        let good = dealer_cert(
+            &committee,
+            &keys,
+            &[0, 1, 2],
+            epoch,
+            hash_avid_vote(&avid_vote),
+        );
+        let wrong = dealer_cert(&committee, &keys, &[0, 1, 2], epoch, [0u8; 32].into());
+        let committee = Arc::new(committee);
+
+        let cert = AvidCertificate::vote(good, avid_vote.clone(), committee.clone()).unwrap();
+        assert!(cert.verify().is_ok());
+        assert!(cert.into_verified().is_ok());
+        assert_eq!(
+            bcs::to_bytes(cert.payload()).unwrap(),
+            bcs::to_bytes(&avid_vote).unwrap(),
+        );
+
+        assert!(AvidCertificate::vote(wrong, avid_vote, committee).is_err());
+    }
+
+    #[test]
+    fn process_avid_message_accepts_a_real_confirm_cert() {
+        use fastcrypto_tbls::ecies_v1;
+        use fastcrypto_tbls::threshold_schnorr::Parameters;
+        let (t, f, n, batch, epoch) = (3u16, 3u16, 10u16, 3u16, 9u64);
+        let mut rng = rand::thread_rng();
+
+        let sks: Vec<_> = (0..n)
+            .map(|_| PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .collect();
+        let nodes = Nodes::new(
+            sks.iter()
+                .enumerate()
+                .map(|(id, sk)| Node {
+                    id: id as u16,
+                    pk: ecies_v1::PublicKey::from_private_key(sk),
+                    weight: 1,
+                })
+                .collect(),
+        )
+        .unwrap();
+        let (committee, keys) = test_committee(n as usize, epoch);
+
+        let sid = b"avid confirm integration".to_vec();
+        let params = Parameters { t, f };
+        let dealer =
+            batch_avss_avid::Dealer::new(nodes.clone(), 0, params, sid.clone(), batch).unwrap();
+        let (state, _) = dealer.create_avss_messages(&mut rng).unwrap();
+
+        // A real Confirm cert
+        let h_v = MessageHash::from(state.common.hash().digest);
+        let confirmers: Vec<usize> = (0..=7).collect();
+        let signed = dealer_cert(&committee, &keys, &confirmers, epoch, h_v);
+        let confirm_cert = AvidCertificate::confirm(signed, Arc::new(committee)).unwrap();
+        assert!(confirm_cert.verify().is_ok());
+
+        // Disperse with the real cert
+        let messages = dealer.create_avid_messages(&state, confirm_cert).unwrap();
+        let receiver =
+            batch_avss_avid::Receiver::new(nodes, 0, 0, params, sid, sks[0].clone(), batch)
+                .unwrap();
+        let verified_common = receiver
+            .verify_common_message(state.common.clone())
+            .unwrap();
+        let processed = receiver
+            .process_avid_message(Some(&verified_common), messages.message_for(0).unwrap())
+            .unwrap();
+        assert!(processed.is_some());
+    }
+
+    #[test]
+    fn vote_certificate_binds_the_pending_set() {
+        let epoch = 11;
+        // Two valid dispersals with different recipient sets
+        let vote_89 = mint_avid_vote(&[0, 1, 2, 3, 4, 5, 6, 7]); // recipients {8, 9}
+        let vote_79 = mint_avid_vote(&[0, 1, 2, 3, 4, 5, 6, 8]); // recipients {7, 9}
+
+        assert_ne!(hash_avid_vote(&vote_89), hash_avid_vote(&vote_79));
+
+        let (committee, keys) = test_committee(3, epoch);
+        let signed = dealer_cert(
+            &committee,
+            &keys,
+            &[0, 1, 2],
+            epoch,
+            hash_avid_vote(&vote_89),
+        );
+        assert!(AvidCertificate::vote(signed, vote_79, Arc::new(committee)).is_err());
+    }
 
     fn create_test_validator(
         party_id: u16,
