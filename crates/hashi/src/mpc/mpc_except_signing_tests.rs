@@ -4601,7 +4601,7 @@ fn create_complaint_for_dealer(
     // Get the DKG message
     let dealer_message = match dealer_messages {
         Messages::Dkg(msg) => msg,
-        Messages::Rotation(_) | Messages::NonceGeneration(_) => {
+        Messages::Rotation(_) | Messages::NonceGeneration(_) | Messages::NonceGenerationAvid(_) => {
             panic!("Expected DKG message in create_valid_complaint")
         }
     };
@@ -5807,7 +5807,7 @@ fn test_try_sign_rotation_messages_all_or_nothing() {
     // Get the rotation messages map from the enum
     let rotation_map = match &rotation_messages {
         Messages::Rotation(map) => map,
-        Messages::Dkg(_) | Messages::NonceGeneration(_) => {
+        Messages::Dkg(_) | Messages::NonceGeneration(_) | Messages::NonceGenerationAvid(_) => {
             panic!("Expected rotation messages")
         }
     };
@@ -5932,7 +5932,7 @@ fn test_try_sign_rotation_messages_rejects_wrong_dealer_share_index() {
     // Tamper with bundle: add a message with a share_index that belongs to party 2 (index 6)
     let rotation_map = match &rotation_messages {
         Messages::Rotation(map) => map.clone(),
-        Messages::Dkg(_) | Messages::NonceGeneration(_) => {
+        Messages::Dkg(_) | Messages::NonceGeneration(_) | Messages::NonceGenerationAvid(_) => {
             panic!("Expected rotation messages")
         }
     };
@@ -7056,7 +7056,7 @@ fn test_process_certified_rotation_message_skips_processed_shares() {
     // Verify we have enough rotation messages for this test
     let rotation_map = match &rotation_messages {
         Messages::Rotation(map) => map,
-        Messages::Dkg(_) | Messages::NonceGeneration(_) => {
+        Messages::Dkg(_) | Messages::NonceGeneration(_) | Messages::NonceGenerationAvid(_) => {
             panic!("Expected rotation messages")
         }
     };
@@ -7225,7 +7225,7 @@ async fn test_recover_rotation_shares_via_complaint_success() {
     // Get the rotation messages map
     let valid_rotation_map = match &valid_rotation_messages {
         Messages::Rotation(map) => map.clone(),
-        Messages::Dkg(_) | Messages::NonceGeneration(_) => {
+        Messages::Dkg(_) | Messages::NonceGeneration(_) | Messages::NonceGenerationAvid(_) => {
             panic!("Expected rotation messages")
         }
     };
@@ -7409,7 +7409,7 @@ fn test_handle_complain_request_success() {
     // Get the rotation messages map
     let valid_rotation_map = match &valid_rotation_messages {
         Messages::Rotation(map) => map.clone(),
-        Messages::Dkg(_) | Messages::NonceGeneration(_) => {
+        Messages::Dkg(_) | Messages::NonceGeneration(_) | Messages::NonceGenerationAvid(_) => {
             panic!("Expected rotation messages")
         }
     };
@@ -9483,6 +9483,10 @@ fn retrieve_and_verify_hash(
         Messages::NonceGeneration(nonce) => (
             ProtocolTypeIndicator::NonceGeneration,
             Some(nonce.batch_index),
+        ),
+        Messages::NonceGenerationAvid(avid) => (
+            ProtocolTypeIndicator::NonceGeneration,
+            Some(avid.batch_index),
         ),
     };
     let request = RetrieveMessagesRequest {

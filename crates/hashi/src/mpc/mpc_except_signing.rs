@@ -306,9 +306,14 @@ impl MpcManager {
                 batch_index: nonce.batch_index,
                 sender,
             },
+            Messages::NonceGenerationAvid(avid) => MessageResponsesKey::NonceGeneration {
+                batch_index: avid.batch_index,
+                sender,
+            },
         };
         let batch_index = match &request.messages {
             Messages::NonceGeneration(nonce) => Some(nonce.batch_index),
+            Messages::NonceGenerationAvid(avid) => Some(avid.batch_index),
             _ => None,
         };
         let existing =
@@ -347,6 +352,9 @@ impl MpcManager {
                 self.cache_and_persist_nonce_message(self.mpc_config.epoch, sender, nonce)?;
                 self.try_sign_nonce_message(sender, &request.messages)
             }
+            Messages::NonceGenerationAvid(_) => Err(MpcError::ProtocolFailed(
+                "AVID nonce generation dealer handling is not yet implemented".into(),
+            )),
         }
         .map(|signature| SendMessagesResponse { signature });
         self.message_responses.insert(cache_key, result.clone());
@@ -585,6 +593,11 @@ impl MpcManager {
                 let complaint_response =
                     receiver.handle_complaint(&message, complaint, &nonce_output)?;
                 ComplaintResponse::NonceGeneration(complaint_response)
+            }
+            Messages::NonceGenerationAvid(_) => {
+                return Err(MpcError::ProtocolFailed(
+                    "AVID nonce generation complaint handling is not yet implemented".into(),
+                ));
             }
         };
         if cache_is_current {
@@ -1818,7 +1831,9 @@ impl MpcManager {
     ) -> MpcResult<BLS12381Signature> {
         let message = match messages {
             Messages::Dkg(msg) => msg,
-            Messages::Rotation(_) | Messages::NonceGeneration(_) => {
+            Messages::Rotation(_)
+            | Messages::NonceGeneration(_)
+            | Messages::NonceGenerationAvid(_) => {
                 panic!("try_sign_dkg_message called with non-DKG messages")
             }
         };
@@ -1921,7 +1936,7 @@ impl MpcManager {
     ) -> MpcResult<BLS12381Signature> {
         let (batch_index, message) = match messages {
             Messages::NonceGeneration(nonce) => (nonce.batch_index, &nonce.message),
-            Messages::Dkg(_) | Messages::Rotation(_) => {
+            Messages::Dkg(_) | Messages::Rotation(_) | Messages::NonceGenerationAvid(_) => {
                 panic!("try_sign_nonce_message called with non-nonce messages")
             }
         };
@@ -2872,7 +2887,7 @@ impl MpcManager {
     ) -> MpcResult<BLS12381Signature> {
         let rotation_messages = match messages {
             Messages::Rotation(msgs) => msgs,
-            Messages::Dkg(_) | Messages::NonceGeneration(_) => {
+            Messages::Dkg(_) | Messages::NonceGeneration(_) | Messages::NonceGenerationAvid(_) => {
                 panic!("try_sign_rotation_messages called with non-rotation messages")
             }
         };
@@ -3969,7 +3984,7 @@ impl MpcManager {
                     msgs,
                 )?;
             }
-            Messages::NonceGeneration(_) => unreachable!(
+            Messages::NonceGeneration(_) | Messages::NonceGenerationAvid(_) => unreachable!(
                 "Hash matched previous-epoch certificate but got {:?}",
                 std::mem::discriminant(&messages)
             ),

@@ -36,34 +36,36 @@ message NonceMessage {
   optional sui.rpc.v2.Bcs message = 2;
 }
 
-message AvidNonceOptimisticMessage {
+message AvidNonceMessage {
   // Which nonce generation round within the epoch.
   optional uint32 batch_index = 1;
 
-  // The shared commitment and this recipient's ciphertext.
-  optional sui.rpc.v2.Bcs message = 2;
+  oneof kind {
+    AvidNonceOptimistic optimistic = 2;
+    AvidNonceDispersal dispersal = 3;
+    AvidNonceEcho echo = 4;
+  }
 }
 
-message AvidNonceDispersalMessage {
-  // Which nonce generation round within the epoch.
-  optional uint32 batch_index = 1;
+message AvidNonceOptimistic {
+  // The shared commitment and this recipient's ciphertext.
+  optional sui.rpc.v2.Bcs message = 1;
+}
 
+message AvidNonceDispersal {
   // The per-recipient authenticated shards.
-  optional sui.rpc.v2.Bcs dispersal = 2;
+  optional sui.rpc.v2.Bcs dispersal = 1;
 
   // The confirm certificate bound to this dispersal.
-  optional sui.rpc.v2.Bcs confirm_cert = 3;
+  optional sui.rpc.v2.Bcs confirm_cert = 2;
 }
 
-message AvidNonceEchoMessage {
-  // Which nonce generation round within the epoch.
-  optional uint32 batch_index = 1;
-
+message AvidNonceEcho {
   // Hex-encoded Sui address of the dealer whose dispersal this echoes.
-  optional string dealer = 2;
+  optional string dealer = 1;
 
-  // The disperser's echo for the recipient.
-  optional sui.rpc.v2.Bcs echo = 3;
+  // The voter's echo for the recipient.
+  optional sui.rpc.v2.Bcs echo = 2;
 }
 
 message SendMessagesRequest {
@@ -80,14 +82,8 @@ message SendMessagesRequest {
     // For nonce generation: batch AVSS message with batch index.
     NonceMessage nonce_message = 4;
 
-    // For AVID nonce generation, optimistic phase.
-    AvidNonceOptimisticMessage avid_nonce_optimistic_message = 5;
-
-    // For AVID nonce generation, pessimistic phase.
-    AvidNonceDispersalMessage avid_nonce_dispersal_message = 6;
-
-    // For AVID nonce generation: a pushed echo.
-    AvidNonceEchoMessage avid_nonce_echo_message = 7;
+    // For AVID nonce generation.
+    AvidNonceMessage avid_nonce_message = 5;
   }
 }
 
@@ -116,9 +112,6 @@ message RetrieveMessagesRequest {
 
   // For nonce generation: the batch index.
   optional uint32 batch_index = 4;
-
-  // For AVID nonce generation: hex-encoded Sui address of the requesting recipient.
-  optional string recipient = 5;
 }
 
 message AvidNonceRetrievalMessage {
