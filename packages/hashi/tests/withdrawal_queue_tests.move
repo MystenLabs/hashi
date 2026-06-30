@@ -601,14 +601,21 @@ fun test_miner_fee_batched_with_remainder() {
     let mut config = config::create();
     hashi::btc_config::init_defaults(&mut config);
 
-    // 3 requests, miner_fee=1001 -> per_user=333, remainder=2 goes to miner
     let btc_amount = 40_000u64;
+    let request_count = 3u64;
     let miner_fee = 1_001u64;
-    let per_user = miner_fee / 3; // 333
+    let mut per_user = miner_fee / request_count;
+    if (miner_fee % request_count > 0) {
+        per_user = per_user + 1;
+    };
     let user_output = btc_amount - per_user;
-    let total_user_outputs = user_output * 3;
+    let total_user_outputs = user_output * request_count;
     let input_amount = total_user_outputs + miner_fee + 10_000; // 10k change
     let change = input_amount - total_user_outputs - miner_fee;
+
+    assert!(per_user == 334);
+    assert!(user_output == 39_666);
+    assert!(change == 10_000);
 
     let id1 = setup_request(&mut queue, &clock, btc_amount, ctx);
     let id2 = setup_request(&mut queue, &clock, btc_amount, ctx);

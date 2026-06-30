@@ -325,9 +325,12 @@ public(package) fun new_withdrawal_txn(
     let output_count = outputs.length();
     assert!(output_count >= request_count, EOutputCountMismatch);
 
-    // Miner fee is split evenly across all withdrawal requests. Any remainder
-    // (at most request_count - 1 sats) is a rounding bonus to the miner.
-    let per_user_miner_fee = miner_fee / request_count;
+    // Miner fee is split evenly across all withdrawal requests, rounded up so
+    // the bridge does not subsidize any division remainder.
+    let mut per_user_miner_fee = miner_fee / request_count;
+    if (miner_fee % request_count > 0) {
+        per_user_miner_fee = per_user_miner_fee + 1;
+    };
     assert!(per_user_miner_fee <= max_network_fee, EMinerFeeExceedsMax);
 
     // Each withdrawal output must match the expected amount after deducting
