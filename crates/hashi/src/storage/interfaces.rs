@@ -6,6 +6,7 @@ use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use sui_sdk_types::Address;
 
+pub use crate::mpc::types::AvidRoundState;
 pub use crate::mpc::types::Messages;
 pub use crate::mpc::types::RotationMessages;
 
@@ -68,4 +69,26 @@ pub trait PublicMessagesStore: Send + Sync {
 
     /// List all nonce messages for the current epoch and given batch.
     fn list_nonce_messages(&self, batch_index: u32) -> Result<Vec<(Address, batch_avss::Message)>>;
+
+    /// Store a dealer's AVID round state at the given epoch and batch.
+    /// If state already exists for this dealer and batch, it will be overwritten.
+    fn store_avid_round_state(
+        &mut self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+        state: &AvidRoundState,
+    ) -> Result<()>;
+
+    /// Retrieve a dealer's AVID round state for the given epoch and batch.
+    /// Returns None if no state exists for this dealer.
+    fn get_avid_round_state(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> Result<Option<AvidRoundState>>;
+
+    /// List all AVID round states for the current epoch and given batch.
+    fn list_avid_round_states(&self, batch_index: u32) -> Result<Vec<(Address, AvidRoundState)>>;
 }

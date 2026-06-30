@@ -8,6 +8,7 @@ use crate::metrics::Metrics;
 fn test_metrics() -> Metrics {
     Metrics::new(&prometheus::Registry::new())
 }
+use crate::mpc::types::AvidRoundState;
 use crate::mpc::types::GetPartialSignaturesRequest;
 use crate::mpc::types::GetPartialSignaturesResponse;
 use crate::mpc::types::ProtocolType;
@@ -1218,6 +1219,7 @@ struct InMemoryPublicMessagesStore {
     stored: HashMap<Address, avss::Message>,
     rotation_stored: HashMap<Address, RotationMessages>,
     nonce_stored: HashMap<(u32, Address), batch_avss::Message>,
+    avid_round_stored: HashMap<(u32, Address), AvidRoundState>,
 }
 
 impl InMemoryPublicMessagesStore {
@@ -1226,6 +1228,7 @@ impl InMemoryPublicMessagesStore {
             stored: HashMap::new(),
             rotation_stored: HashMap::new(),
             nonce_stored: HashMap::new(),
+            avid_round_stored: HashMap::new(),
         }
     }
 }
@@ -1315,6 +1318,39 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
             .map(|((_, addr), msg)| (*addr, msg.clone()))
             .collect())
     }
+
+    fn store_avid_round_state(
+        &mut self,
+        _epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+        state: &AvidRoundState,
+    ) -> anyhow::Result<()> {
+        self.avid_round_stored
+            .insert((batch_index, *dealer), state.clone());
+        Ok(())
+    }
+
+    fn get_avid_round_state(
+        &self,
+        _epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> anyhow::Result<Option<AvidRoundState>> {
+        Ok(self.avid_round_stored.get(&(batch_index, *dealer)).cloned())
+    }
+
+    fn list_avid_round_states(
+        &self,
+        batch_index: u32,
+    ) -> anyhow::Result<Vec<(Address, AvidRoundState)>> {
+        Ok(self
+            .avid_round_stored
+            .iter()
+            .filter(|((bi, _), _)| *bi == batch_index)
+            .map(|((_, addr), state)| (*addr, state.clone()))
+            .collect())
+    }
 }
 
 struct FailingPublicMessagesStore;
@@ -1385,6 +1421,32 @@ impl PublicMessagesStore for FailingPublicMessagesStore {
         &self,
         _batch_index: u32,
     ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
+        Ok(vec![])
+    }
+
+    fn store_avid_round_state(
+        &mut self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+        _state: &AvidRoundState,
+    ) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!("Storage failure"))
+    }
+
+    fn get_avid_round_state(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<AvidRoundState>> {
+        Ok(None)
+    }
+
+    fn list_avid_round_states(
+        &self,
+        _batch_index: u32,
+    ) -> anyhow::Result<Vec<(Address, AvidRoundState)>> {
         Ok(vec![])
     }
 }
@@ -5262,6 +5324,32 @@ impl PublicMessagesStore for TrackingPublicMessagesStore {
     ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
         Ok(vec![])
     }
+
+    fn store_avid_round_state(
+        &mut self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+        _state: &AvidRoundState,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn get_avid_round_state(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<AvidRoundState>> {
+        Ok(None)
+    }
+
+    fn list_avid_round_states(
+        &self,
+        _batch_index: u32,
+    ) -> anyhow::Result<Vec<(Address, AvidRoundState)>> {
+        Ok(vec![])
+    }
 }
 
 /// A P2P channel that tracks retrieve_message calls.
@@ -7640,6 +7728,41 @@ impl PublicMessagesStore for SharedMemoryStore {
         batch_index: u32,
     ) -> anyhow::Result<Vec<(Address, batch_avss::Message)>> {
         self.inner.lock().unwrap().list_nonce_messages(batch_index)
+    }
+
+    fn store_avid_round_state(
+        &mut self,
+        _epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+        state: &AvidRoundState,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .store_avid_round_state(0, batch_index, dealer, state)
+    }
+
+    fn get_avid_round_state(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> anyhow::Result<Option<AvidRoundState>> {
+        self.inner
+            .lock()
+            .unwrap()
+            .get_avid_round_state(epoch, batch_index, dealer)
+    }
+
+    fn list_avid_round_states(
+        &self,
+        batch_index: u32,
+    ) -> anyhow::Result<Vec<(Address, AvidRoundState)>> {
+        self.inner
+            .lock()
+            .unwrap()
+            .list_avid_round_states(batch_index)
     }
 }
 
@@ -10577,6 +10700,40 @@ async fn test_run_nonce_generation_preserves_other_batch_state() {
             .contains_key(&(fake_batch, fake_dealer)),
         "batch {fake_batch} state must survive run_nonce_generation({batch_index}) — \
          clear block must not return"
+    );
+}
+
+#[test]
+fn test_prune_nonce_state_drops_old_avid_round_state() {
+    let setup = TestSetup::new(5);
+    let manager = setup.create_manager(0);
+    let fake_dealer = setup.address(2);
+    let state = crate::db::tests::create_test_avid_round_state();
+
+    let manager = Arc::new(RwLock::new(manager));
+    {
+        let mut mgr = manager.write().unwrap();
+        for b in [0u32, 1, 2] {
+            mgr.current_avid_round_state
+                .insert((b, fake_dealer), state.clone());
+        }
+    }
+
+    // cutoff = 3 - (PRUNE_KEEP_RECENT_BATCHES - 1) = 2, so batches < 2 are dropped.
+    MpcManager::prune_nonce_state(&manager, 3);
+
+    let mgr = manager.read().unwrap();
+    assert!(
+        !mgr.current_avid_round_state.contains_key(&(0, fake_dealer)),
+        "batch 0 avid round state should be pruned"
+    );
+    assert!(
+        !mgr.current_avid_round_state.contains_key(&(1, fake_dealer)),
+        "batch 1 avid round state should be pruned"
+    );
+    assert!(
+        mgr.current_avid_round_state.contains_key(&(2, fake_dealer)),
+        "batch 2 avid round state should be retained (most recent before cutoff)"
     );
 }
 
