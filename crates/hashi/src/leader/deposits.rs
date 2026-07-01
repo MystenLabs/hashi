@@ -26,14 +26,30 @@ use tracing::info;
 use tracing::trace;
 use tracing::warn;
 
+#[derive(Clone, Copy, Debug)]
+enum UnapprovedDepositReloadMode {
+    All,
+    StaleEpochApprovalOnly,
+}
+
 impl LeaderService {
-    pub(super) fn process_deposits_on_bitcoin_block(&mut self, block_height: u32) {
-        debug!("New Bitcoin block {block_height}: processing deposit requests");
-        self.reload_pending_unapproved_deposit_requests();
+    pub(super) fn process_deposits_on_bitcoin_block(&mut self) {
+        self.reload_pending_unapproved_deposit_requests(UnapprovedDepositReloadMode::All);
         self.process_unapproved_deposit_requests();
     }
 
-    fn reload_pending_unapproved_deposit_requests(&mut self) {
+    pub(super) fn process_stale_unapproved_deposits_if_new_epoch(&mut self) {
+        let current_epoch = self.inner.onchain_state().epoch();
+        if !self.is_reconfiguring() && self.last_unapproved_deposit_epoch != Some(current_epoch) {
+            self.reload_pending_unapproved_deposit_requests(
+                UnapprovedDepositReloadMode::StaleEpochApprovalOnly,
+            );
+            self.process_unapproved_deposit_requests();
+            self.last_unapproved_deposit_epoch = Some(current_epoch);
+        }
+    }
+
+    fn reload_pending_unapproved_deposit_requests(&mut self, mode: UnapprovedDepositReloadMode) {
         let mut deposit_requests = self.inner.onchain_state().deposit_requests();
         deposit_requests.sort_by_key(|r| r.timestamp_ms);
         let deposit_ids: HashSet<Address> =
@@ -51,14 +67,19 @@ impl LeaderService {
         self.pending_unapproved_deposit_requests = deposit_requests
             .into_iter()
             .filter(|request| !self.never_retry_deposit_ids.contains(&request.id))
-            .filter(|request| {
-                request
+            .filter(|request| match mode {
+                UnapprovedDepositReloadMode::All => request
                     .approval_cert
                     .as_ref()
-                    .is_none_or(|cert| cert.epoch != current_epoch)
+                    .is_none_or(|cert| cert.epoch != current_epoch),
+                UnapprovedDepositReloadMode::StaleEpochApprovalOnly => request
+                    .approval_cert
+                    .as_ref()
+                    .is_some_and(|cert| cert.epoch != current_epoch),
             })
             .collect();
         debug!(
+            reload_mode = ?mode,
             pending_unapproved_deposits = self.pending_unapproved_deposit_requests.len(),
             never_retry_deposits = self.never_retry_deposit_ids.len(),
             "Reloaded pending unapproved deposit worklist"
