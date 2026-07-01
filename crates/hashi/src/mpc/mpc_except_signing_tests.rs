@@ -10703,6 +10703,123 @@ async fn test_run_nonce_generation_preserves_other_batch_state() {
     );
 }
 
+fn extract_optimistic(messages: &Messages) -> &batch_avss_avid::AvssMessage {
+    match messages {
+        Messages::NonceGenerationAvid(AvidNonceMessage {
+            kind: AvidNonceMessageKind::Optimistic(msg),
+            ..
+        }) => msg,
+        _ => panic!("expected an optimistic AVID nonce message"),
+    }
+}
+
+#[test]
+fn test_create_avid_nonce_dealer_messages_yields_one_per_member() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let dealer = setup.create_manager(0);
+    let batch_index = 4u32;
+
+    let (_builder, messages) = dealer
+        .create_avid_nonce_dealer_messages(batch_index, &mut rng)
+        .unwrap();
+
+    assert_eq!(messages.len(), setup.num_validators());
+    for (j, (addr, msg)) in messages.iter().enumerate() {
+        assert_eq!(*addr, setup.address(j));
+        match msg {
+            Messages::NonceGenerationAvid(AvidNonceMessage {
+                batch_index: b,
+                kind: AvidNonceMessageKind::Optimistic(_),
+            }) => assert_eq!(*b, batch_index),
+            _ => panic!("expected an optimistic AVID nonce message"),
+        }
+    }
+}
+
+#[test]
+fn test_try_sign_avid_nonce_optimistic_confirms_and_persists() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let dealer = setup.create_manager(0);
+    let dealer_addr = setup.address(0);
+    let batch_index = 0u32;
+
+    let (_builder, messages) = dealer
+        .create_avid_nonce_dealer_messages(batch_index, &mut rng)
+        .unwrap();
+
+    let receiver_idx = 1;
+    let mut receiver = setup.create_manager(receiver_idx);
+    let avss_msg = extract_optimistic(&messages[receiver_idx].1).clone();
+    let sig = receiver
+        .try_sign_avid_nonce_optimistic(dealer_addr, batch_index, &avss_msg)
+        .unwrap();
+
+    let confirm_target = DealerMessagesHash {
+        dealer_address: dealer_addr,
+        messages_hash: MessageHash::from(avss_msg.common.hash().digest),
+    };
+    let member_sig = MemberSignature::new(receiver.mpc_config.epoch, receiver.address, sig);
+    let mut aggregator = BlsSignatureAggregator::new(setup.committee(), confirm_target);
+    aggregator
+        .add_signature(member_sig)
+        .expect("Confirm signature must verify over DealerMessagesHash{dealer, H(v)}");
+
+    assert!(
+        receiver
+            .dealer_avid_nonce_outputs
+            .contains_key(&(batch_index, dealer_addr))
+    );
+    let state = receiver
+        .current_avid_round_state
+        .get(&(batch_index, dealer_addr))
+        .expect("round state persisted at confirm time")
+        .clone();
+    assert!(state.echoes.is_empty());
+
+    let r = receiver
+        .create_avid_nonce_receiver(dealer_addr, batch_index)
+        .unwrap();
+    assert!(r.verify_common_message(state.common).is_ok());
+}
+
+#[test]
+fn test_try_sign_avid_nonce_optimistic_rejects_wrong_recipient() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(5);
+    let dealer = setup.create_manager(0);
+    let dealer_addr = setup.address(0);
+    let batch_index = 0u32;
+
+    let (_builder, messages) = dealer
+        .create_avid_nonce_dealer_messages(batch_index, &mut rng)
+        .unwrap();
+
+    // Party 1's receiver is handed party 2's message — its ciphertext won't match
+    // `ciphertext_hashes[1]`, so processing must fail before any signing/persist.
+    let mut receiver = setup.create_manager(1);
+    let wrong_msg = extract_optimistic(&messages[2].1).clone();
+    let result = receiver.try_sign_avid_nonce_optimistic(dealer_addr, batch_index, &wrong_msg);
+
+    assert!(
+        result.is_err(),
+        "processing another recipient's message must error"
+    );
+    assert!(
+        !receiver
+            .dealer_avid_nonce_outputs
+            .contains_key(&(batch_index, dealer_addr)),
+        "no output stored on failure"
+    );
+    assert!(
+        !receiver
+            .current_avid_round_state
+            .contains_key(&(batch_index, dealer_addr)),
+        "no round state persisted on failure (§6.2 verify-gated)"
+    );
+}
+
 #[test]
 fn test_prune_nonce_state_drops_old_avid_round_state() {
     let setup = TestSetup::new(5);
