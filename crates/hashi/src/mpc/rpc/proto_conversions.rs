@@ -690,11 +690,13 @@ mod avid_conversion_tests {
     }
 
     fn confirm_cert() -> types::AvidConfirmCertificate {
-        let vote = batch_avss_avid::AvssVote {
-            common_message_hash: Blake2b256::digest(b"confirm cert"),
+        // Cert contents are arbitrary here — the round-trip test only checks BCS serialization.
+        let message = types::DealerMessagesHash {
+            dealer_address: Address::new([0u8; 32]),
+            messages_hash: Blake2b256::digest(b"confirm cert").digest.into(),
         };
         let signature = BLS12381AggregateSignature::default();
-        SignedMessage::new(7, vote, signature.as_bytes(), &[1u8]).unwrap()
+        SignedMessage::new(7, message, signature.as_bytes(), &[1u8]).unwrap()
     }
 
     fn assert_round_trips(messages: types::Messages) {
