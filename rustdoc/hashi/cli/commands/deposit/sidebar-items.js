@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["cli_derive_deposit_address","run"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CeremonyLogMessage","CommitteeUpdateLogMessage","InitLogMessage","LogMessage","WithdrawalLogMessage"],"struct":["SharesLogMessage"]};
