@@ -832,32 +832,32 @@ pub(crate) mod tests {
         let params = Parameters { t, f };
         let dealer =
             batch_avss_avid::Dealer::new(nodes.clone(), 0, params, sid.clone(), batch).unwrap();
-        let (state, optimistic) = dealer.create_avss_messages(&mut rng).unwrap();
+        let builder = dealer.create_avss_messages(&mut rng).unwrap();
+        let own_message = builder.message_for(0).unwrap();
         let cert = StubAvssCert {
             voters: (0u16..=7).collect(),
             vote: batch_avss_avid::AvssVote {
-                common_message_hash: state.common.hash(),
+                common_message_hash: own_message.common.hash(),
             },
         };
-        let messages = dealer.create_avid_messages(&state, cert).unwrap();
+        let messages = dealer.create_avid_messages(&builder, cert).unwrap();
         let avid_message = messages.message_for(0).unwrap();
         let receiver =
             batch_avss_avid::Receiver::new(nodes, 0, 0, params, sid, sks[0].clone(), batch)
                 .unwrap();
         let verified_common = receiver
-            .verify_common_message(state.common.clone())
+            .verify_common_message(own_message.common.clone())
             .unwrap();
         let (echo_builder, _) = receiver
-            .process_avid_message(Some(&verified_common), avid_message)
-            .unwrap()
+            .process_avid_message(&verified_common, avid_message)
             .unwrap();
         let echoes = [8u16, 9u16]
             .into_iter()
             .map(|pending| (pending, echo_builder.create_echo(pending).unwrap()))
             .collect();
         let round_state = AvidRoundState {
-            common: state.common,
-            own_ciphertext: optimistic.get(&0).unwrap().ciphertext.clone(),
+            common: own_message.common,
+            own_ciphertext: own_message.ciphertext,
             echoes,
         };
         (round_state, receiver)

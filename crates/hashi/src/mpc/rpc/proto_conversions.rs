@@ -662,14 +662,15 @@ mod avid_conversion_tests {
         let params = Parameters { t, f };
         let dealer =
             batch_avss_avid::Dealer::new(nodes.clone(), 0, params, sid.clone(), batch).unwrap();
-        let (state, optimistic) = dealer.create_avss_messages(&mut rng).unwrap();
+        let builder = dealer.create_avss_messages(&mut rng).unwrap();
+        let own_message = builder.message_for(0).unwrap();
         let cert = StubAvssCert {
             voters: (0u16..=7).collect(),
             vote: batch_avss_avid::AvssVote {
-                common_message_hash: state.common.hash(),
+                common_message_hash: own_message.common.hash(),
             },
         };
-        let messages = dealer.create_avid_messages(&state, cert).unwrap();
+        let messages = dealer.create_avid_messages(&builder, cert).unwrap();
         // Receiver 0 processes the message addressed to it (its shards verify against its
         // own Merkle leaf), then echoes for a pending recipient.
         let pending: PartyId = 8;
@@ -679,14 +680,13 @@ mod avid_conversion_tests {
             batch_avss_avid::Receiver::new(nodes, 0, 0, params, sid, sks[0].clone(), batch)
                 .unwrap();
         let verified_common = receiver
-            .verify_common_message(state.common.clone())
+            .verify_common_message(own_message.common.clone())
             .unwrap();
         let (echo_builder, _) = receiver
-            .process_avid_message(Some(&verified_common), avid_message)
-            .unwrap()
+            .process_avid_message(&verified_common, avid_message)
             .unwrap();
         let echo = echo_builder.create_echo(pending).unwrap();
-        (optimistic.get(&0).unwrap().clone(), dispersal, echo)
+        (own_message, dispersal, echo)
     }
 
     fn confirm_cert() -> types::AvidConfirmCertificate {

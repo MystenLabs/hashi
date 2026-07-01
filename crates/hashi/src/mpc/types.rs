@@ -820,24 +820,22 @@ mod tests {
         let params = Parameters { t, f };
         let dealer =
             batch_avss_avid::Dealer::new(nodes.clone(), 0, params, sid.clone(), batch).unwrap();
-        let (state, _) = dealer.create_avss_messages(&mut rng).unwrap();
+        let builder = dealer.create_avss_messages(&mut rng).unwrap();
+        let common = builder.message_for(0).unwrap().common;
         let cert = StubAvssCert {
             voters: voters.iter().copied().collect(),
             vote: batch_avss_avid::AvssVote {
-                common_message_hash: state.common.hash(),
+                common_message_hash: common.hash(),
             },
         };
-        let messages = dealer.create_avid_messages(&state, cert).unwrap();
+        let messages = dealer.create_avid_messages(&builder, cert).unwrap();
         let avid_message = messages.message_for(0).unwrap();
         let receiver =
             batch_avss_avid::Receiver::new(nodes, 0, 0, params, sid, sks[0].clone(), batch)
                 .unwrap();
-        let verified_common = receiver
-            .verify_common_message(state.common.clone())
-            .unwrap();
+        let verified_common = receiver.verify_common_message(common).unwrap();
         let (_, avid_vote) = receiver
-            .process_avid_message(Some(&verified_common), avid_message)
-            .unwrap()
+            .process_avid_message(&verified_common, avid_message)
             .unwrap();
         avid_vote
     }
@@ -915,27 +913,25 @@ mod tests {
         let params = Parameters { t, f };
         let dealer =
             batch_avss_avid::Dealer::new(nodes.clone(), 0, params, sid.clone(), batch).unwrap();
-        let (state, _) = dealer.create_avss_messages(&mut rng).unwrap();
+        let builder = dealer.create_avss_messages(&mut rng).unwrap();
+        let common = builder.message_for(0).unwrap().common;
 
         // A real Confirm cert
-        let h_v = MessageHash::from(state.common.hash().digest);
+        let h_v = MessageHash::from(common.hash().digest);
         let confirmers: Vec<usize> = (0..=7).collect();
         let signed = dealer_cert(&committee, &keys, &confirmers, epoch, h_v);
         let confirm_cert = AvidCertificate::confirm(signed, Arc::new(committee)).unwrap();
         assert!(confirm_cert.verify().is_ok());
 
         // Disperse with the real cert
-        let messages = dealer.create_avid_messages(&state, confirm_cert).unwrap();
+        let messages = dealer.create_avid_messages(&builder, confirm_cert).unwrap();
         let receiver =
             batch_avss_avid::Receiver::new(nodes, 0, 0, params, sid, sks[0].clone(), batch)
                 .unwrap();
-        let verified_common = receiver
-            .verify_common_message(state.common.clone())
-            .unwrap();
-        let processed = receiver
-            .process_avid_message(Some(&verified_common), messages.message_for(0).unwrap())
-            .unwrap();
-        assert!(processed.is_some());
+        let verified_common = receiver.verify_common_message(common).unwrap();
+        let processed =
+            receiver.process_avid_message(&verified_common, messages.message_for(0).unwrap());
+        assert!(processed.is_ok());
     }
 
     #[test]
