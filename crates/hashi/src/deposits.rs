@@ -469,7 +469,11 @@ impl ApprovedDepositError {
 // entering retry tracking.
 impl RetryPolicy for ApprovedDepositErrorKind {
     fn retry_base_delay_ms(self) -> u64 {
-        5 * 60 * 1000
+        // All approved-deposit failures are transient in practice (epoch
+        // mismatch, transient RPC errors, slow network). A short base delay
+        // with exponential backoff handles the common case while throttling
+        // genuinely broken deposits.
+        3_000
     }
 
     fn max_delay_ms(self) -> u64 {

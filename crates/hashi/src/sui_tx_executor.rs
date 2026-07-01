@@ -560,7 +560,10 @@ impl SuiTxExecutor {
 
         let response = self.execute(builder).await?;
         if !response.transaction().effects().status().success() {
-            anyhow::bail!("Transaction failed to confirm deposit for request {request_id:?}");
+            anyhow::bail!(
+                "Transaction failed to confirm deposit for request {request_id:?}: {:?}",
+                response.transaction().effects().status()
+            );
         }
         Ok(())
     }
