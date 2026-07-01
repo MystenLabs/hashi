@@ -20,6 +20,7 @@ use hashi_types::committee::EncryptionPublicKey;
 
 use serde::de::DeserializeOwned;
 
+use crate::mpc::types::AvidRoundState;
 use crate::mpc::types::RotationMessages;
 
 pub struct Database {
@@ -67,6 +68,12 @@ pub struct Database {
     // key: (big endian u64 epoch) + (big endian u32 batch_index) + (32-byte validator address)
     // value: BCS-serialized batch_avss::Message
     nonce_messages: Keyspace,
+
+    // Column Family used to store per-round AVID receiver state for restart/resume.
+    //
+    // key: (big endian u64 epoch) + (big endian u32 batch_index) + (32-byte validator address)
+    // value: BCS-serialized AvidRoundState
+    avid_round_states: Keyspace,
 }
 
 const ENCRYPTION_KEYS_CF_NAME: &str = "encryption_keys";
@@ -74,6 +81,7 @@ const SIGNING_KEYS_CF_NAME: &str = "signing_keys";
 const DEALER_MESSAGES_CF_NAME: &str = "dealer_messages";
 const ROTATION_MESSAGES_CF_NAME: &str = "rotation_messages";
 const NONCE_MESSAGES_CF_NAME: &str = "nonce_messages";
+const AVID_ROUND_STATES_CF_NAME: &str = "avid_round_states";
 const ENCRYPTION_EPOCH_INDEX_CF_NAME: &str = "encryption_epoch_index";
 const SIGNING_EPOCH_INDEX_CF_NAME: &str = "signing_epoch_index";
 
@@ -140,6 +148,8 @@ impl Database {
         let rotation_messages =
             db.keyspace(ROTATION_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)?;
         let nonce_messages = db.keyspace(NONCE_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)?;
+        let avid_round_states =
+            db.keyspace(AVID_ROUND_STATES_CF_NAME, KeyspaceCreateOptions::default)?;
         let encryption_epoch_index = db.keyspace(
             ENCRYPTION_EPOCH_INDEX_CF_NAME,
             KeyspaceCreateOptions::default,
@@ -157,6 +167,7 @@ impl Database {
             dealer_messages,
             rotation_messages,
             nonce_messages,
+            avid_round_states,
         })
     }
 
@@ -416,6 +427,62 @@ impl Database {
         self.nonce_messages.remove(key)
     }
 
+    pub fn store_avid_round_state(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+        state: &AvidRoundState,
+    ) -> Result<()> {
+        let key = [
+            epoch.to_be_bytes().as_slice(),
+            batch_index.to_be_bytes().as_slice(),
+            dealer.as_bytes(),
+        ]
+        .concat();
+        let value = bcs::to_bytes(state).unwrap();
+        self.avid_round_states.insert(key, value)
+    }
+
+    pub fn get_avid_round_state(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> Result<Option<AvidRoundState>> {
+        let key = [
+            epoch.to_be_bytes().as_slice(),
+            batch_index.to_be_bytes().as_slice(),
+            dealer.as_bytes(),
+        ]
+        .concat();
+        let bytes = match self.avid_round_states.get(key) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let state = bcs::from_bytes(&bytes).map_err(|_| {
+            fjall::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid avid round state",
+            ))
+        })?;
+        Ok(Some(state))
+    }
+
+    pub fn list_avid_round_states(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+    ) -> Result<Vec<(Address, AvidRoundState)>> {
+        let prefix = [
+            epoch.to_be_bytes().as_slice(),
+            batch_index.to_be_bytes().as_slice(),
+        ]
+        .concat();
+        list_messages_by_prefix(&self.avid_round_states, &prefix)
+    }
+
     /// Prune all MPC keyspaces.
     pub(crate) fn prune_messages_below(
         &self,
@@ -449,6 +516,7 @@ impl Database {
             is_referenced_epoch,
         )?;
         prune_keyspace(&self.nonce_messages, cutoff_epoch)?;
+        prune_keyspace(&self.avid_round_states, cutoff_epoch)?;
         Ok(())
     }
 }
@@ -662,15 +730,22 @@ fn prune_pubkey_keyspace(
 #[cfg(test)]
 pub(crate) mod tests {
     use crate::mpc::EncryptionGroupElement;
+    use fastcrypto_tbls::ecies_v1;
     use fastcrypto_tbls::nodes::Node;
     use fastcrypto_tbls::nodes::Nodes;
+    use fastcrypto_tbls::nodes::PartyId;
+    use fastcrypto_tbls::threshold_schnorr::Certificate;
+    use fastcrypto_tbls::threshold_schnorr::Parameters;
     use fastcrypto_tbls::threshold_schnorr::avss;
     use fastcrypto_tbls::threshold_schnorr::batch_avss;
+    use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
     use hashi_types::committee::Bls12381PrivateKey;
     use hashi_types::committee::EncryptionPrivateKey;
     use hashi_types::committee::EncryptionPublicKey;
+    use std::collections::BTreeSet;
     use sui_sdk_types::Address;
 
+    use super::AvidRoundState;
     use super::Database;
     use super::PruningReferences;
     use super::RETENTION_EXTRA_EPOCHS;
@@ -715,6 +790,81 @@ pub(crate) mod tests {
         )
         .unwrap();
         dealer.create_message(&mut rand::thread_rng()).unwrap()
+    }
+
+    #[derive(Clone, Debug)]
+    struct StubAvssCert {
+        voters: BTreeSet<PartyId>,
+        vote: batch_avss_avid::AvssVote,
+    }
+
+    impl Certificate for StubAvssCert {
+        type Payload = batch_avss_avid::AvssVote;
+        fn signers(&self) -> &BTreeSet<PartyId> {
+            &self.voters
+        }
+        fn payload(&self) -> &batch_avss_avid::AvssVote {
+            &self.vote
+        }
+        fn verify(&self) -> fastcrypto::error::FastCryptoResult<()> {
+            Ok(())
+        }
+    }
+
+    fn avid_round_fixture() -> (AvidRoundState, batch_avss_avid::Receiver) {
+        let (t, f, n, batch) = (3u16, 3u16, 10u16, 3u16);
+        let mut rng = rand::thread_rng();
+        let sks: Vec<_> = (0..n)
+            .map(|_| ecies_v1::PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .collect();
+        let nodes = Nodes::new(
+            sks.iter()
+                .enumerate()
+                .map(|(id, sk)| Node {
+                    id: id as u16,
+                    pk: ecies_v1::PublicKey::from_private_key(sk),
+                    weight: 1,
+                })
+                .collect(),
+        )
+        .unwrap();
+        let sid = b"avid round state test".to_vec();
+        let params = Parameters { t, f };
+        let dealer =
+            batch_avss_avid::Dealer::new(nodes.clone(), 0, params, sid.clone(), batch).unwrap();
+        let (state, optimistic) = dealer.create_avss_messages(&mut rng).unwrap();
+        let cert = StubAvssCert {
+            voters: (0u16..=7).collect(),
+            vote: batch_avss_avid::AvssVote {
+                common_message_hash: state.common.hash(),
+            },
+        };
+        let messages = dealer.create_avid_messages(&state, cert).unwrap();
+        let avid_message = messages.message_for(0).unwrap();
+        let receiver =
+            batch_avss_avid::Receiver::new(nodes, 0, 0, params, sid, sks[0].clone(), batch)
+                .unwrap();
+        let verified_common = receiver
+            .verify_common_message(state.common.clone())
+            .unwrap();
+        let (echo_builder, _) = receiver
+            .process_avid_message(Some(&verified_common), avid_message)
+            .unwrap()
+            .unwrap();
+        let echoes = [8u16, 9u16]
+            .into_iter()
+            .map(|pending| (pending, echo_builder.create_echo(pending).unwrap()))
+            .collect();
+        let round_state = AvidRoundState {
+            common: state.common,
+            own_ciphertext: optimistic.get(&0).unwrap().ciphertext.clone(),
+            echoes,
+        };
+        (round_state, receiver)
+    }
+
+    pub(crate) fn create_test_avid_round_state() -> AvidRoundState {
+        avid_round_fixture().0
     }
 
     #[test]
@@ -1137,6 +1287,68 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_avid_round_states() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let dealer1 = Address::new([1u8; 32]);
+        let dealer2 = Address::new([2u8; 32]);
+        let state1 = create_test_avid_round_state();
+        let state2 = create_test_avid_round_state();
+        // Multi-echo accrual: receiver 0 echoed for both pending recipients.
+        assert_eq!(state1.echoes.len(), 2);
+
+        // Initially empty
+        assert!(db.list_avid_round_states(1, 0).unwrap().is_empty());
+        assert!(db.get_avid_round_state(1, 0, &dealer1).unwrap().is_none());
+
+        // Store and round-trip byte-for-byte
+        db.store_avid_round_state(1, 0, &dealer1, &state1).unwrap();
+        let got = db.get_avid_round_state(1, 0, &dealer1).unwrap().unwrap();
+        assert_eq!(
+            bcs::to_bytes(&got).unwrap(),
+            bcs::to_bytes(&state1).unwrap()
+        );
+        let result = db.list_avid_round_states(1, 0).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, dealer1);
+        assert_eq!(
+            bcs::to_bytes(&result[0].1).unwrap(),
+            bcs::to_bytes(&state1).unwrap()
+        );
+
+        // Same epoch+batch, different dealer
+        db.store_avid_round_state(1, 0, &dealer2, &state2).unwrap();
+        assert_eq!(db.list_avid_round_states(1, 0).unwrap().len(), 2);
+
+        // Different batch / epoch are isolated
+        assert!(db.list_avid_round_states(1, 1).unwrap().is_empty());
+        assert!(db.list_avid_round_states(2, 0).unwrap().is_empty());
+        assert!(db.get_avid_round_state(1, 1, &dealer1).unwrap().is_none());
+        assert!(db.get_avid_round_state(2, 0, &dealer1).unwrap().is_none());
+
+        // Persist across reopen
+        drop(db);
+        let db = Database::open(tmpdir.path()).unwrap();
+        assert_eq!(db.list_avid_round_states(1, 0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_avid_round_state_common_reverifies_after_reload() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let (state, receiver) = avid_round_fixture();
+        let dealer = Address::new([1u8; 32]);
+        db.store_avid_round_state(1, 0, &dealer, &state).unwrap();
+
+        drop(db);
+        let db = Database::open(tmpdir.path()).unwrap();
+        let loaded = db.get_avid_round_state(1, 0, &dealer).unwrap().unwrap();
+        assert!(receiver.verify_common_message(loaded.common).is_ok());
+    }
+
+    #[test]
     fn test_nonce_messages_different_batches() {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let db = Database::open(tmpdir.path()).unwrap();
@@ -1324,6 +1536,7 @@ pub(crate) mod tests {
         let mut rotation_msgs: BTreeMap<NonZeroU16, avss::Message> = BTreeMap::new();
         rotation_msgs.insert(NonZeroU16::new(1).unwrap(), create_test_message());
         let nonce_msg = create_test_nonce_message();
+        let avid_state = create_test_avid_round_state();
         // Cutoff far enough above the retention window that key keyspaces
         // also see prunes (i.e., `cutoff - RETENTION_EXTRA_EPOCHS > 1`).
         let cutoff = RETENTION_EXTRA_EPOCHS + 8;
@@ -1336,6 +1549,8 @@ pub(crate) mod tests {
             db.store_rotation_messages(epoch, &dealer, &rotation_msgs)
                 .unwrap();
             db.store_nonce_message(epoch, 0, &dealer, &nonce_msg)
+                .unwrap();
+            db.store_avid_round_state(epoch, 0, &dealer, &avid_state)
                 .unwrap();
             db.store_encryption_key(epoch, &EncryptionPrivateKey::new(&mut rand::thread_rng()))
                 .unwrap();
@@ -1376,6 +1591,12 @@ pub(crate) mod tests {
                 db.get_nonce_message(epoch, 0, &dealer).unwrap().is_none(),
                 "nonce message at epoch {epoch} should be pruned (flat cutoff)"
             );
+            assert!(
+                db.get_avid_round_state(epoch, 0, &dealer)
+                    .unwrap()
+                    .is_none(),
+                "avid round state at epoch {epoch} should be pruned (flat cutoff)"
+            );
         }
         for epoch in 1..key_retain_floor {
             assert!(
@@ -1409,6 +1630,12 @@ pub(crate) mod tests {
             assert!(
                 db.get_nonce_message(epoch, 0, &dealer).unwrap().is_some(),
                 "nonce message at epoch {epoch} should be kept"
+            );
+            assert!(
+                db.get_avid_round_state(epoch, 0, &dealer)
+                    .unwrap()
+                    .is_some(),
+                "avid round state at epoch {epoch} should be kept"
             );
             assert!(
                 db.get_encryption_key(epoch).unwrap().is_some(),

@@ -8,6 +8,7 @@ use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use sui_sdk_types::Address;
 
 use crate::db::Database;
+use crate::mpc::types::AvidRoundState;
 use crate::mpc::types::Messages;
 use crate::mpc::types::RotationMessages;
 use crate::storage::PublicMessagesStore;
@@ -118,5 +119,37 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
         self.db
             .list_nonce_messages(self.epoch, batch_index)
             .map_err(|e| anyhow::anyhow!("failed to list nonce messages: {e}"))
+    }
+
+    fn store_avid_round_state(
+        &mut self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+        state: &AvidRoundState,
+    ) -> anyhow::Result<()> {
+        self.db
+            .store_avid_round_state(epoch, batch_index, dealer, state)
+            .map_err(|e| anyhow::anyhow!("failed to store avid round state: {e}"))
+    }
+
+    fn get_avid_round_state(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> anyhow::Result<Option<AvidRoundState>> {
+        self.db
+            .get_avid_round_state(epoch, batch_index, dealer)
+            .map_err(|e| anyhow::anyhow!("failed to get avid round state: {e}"))
+    }
+
+    fn list_avid_round_states(
+        &self,
+        batch_index: u32,
+    ) -> anyhow::Result<Vec<(Address, AvidRoundState)>> {
+        self.db
+            .list_avid_round_states(self.epoch, batch_index)
+            .map_err(|e| anyhow::anyhow!("failed to list avid round states: {e}"))
     }
 }

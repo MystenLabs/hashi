@@ -7,6 +7,7 @@ use fastcrypto::error::FastCryptoError;
 use fastcrypto::error::FastCryptoResult;
 use fastcrypto::hash::Blake2b256;
 use fastcrypto::hash::HashFunction;
+use fastcrypto_tbls::ecies_v1::Ciphertext;
 use fastcrypto_tbls::ecies_v1::PrivateKey;
 use fastcrypto_tbls::nodes::Nodes;
 use fastcrypto_tbls::nodes::PartyId;
@@ -63,6 +64,13 @@ pub enum AvidNonceMessageKind {
         dealer: Address,
         echo: batch_avss_avid::Echo,
     },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AvidRoundState {
+    pub common: batch_avss_avid::AvssCommonMessage,
+    pub own_ciphertext: Ciphertext,
+    pub echoes: BTreeMap<PartyId, batch_avss_avid::Echo>,
 }
 
 // Domain separation constants for RandomOracle

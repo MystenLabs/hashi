@@ -11,6 +11,7 @@ use crate::metrics::MPC_LABEL_DKG;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
 use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::metrics::Metrics;
+use crate::mpc::types::AvidRoundState;
 use crate::mpc::types::CertificateV1;
 pub use crate::mpc::types::ComplainRequest;
 pub use crate::mpc::types::ComplaintResponse;
@@ -121,6 +122,7 @@ pub struct MpcManager {
     pub current_dkg_messages: HashMap<Address, avss::Message>,
     pub current_rotation_messages: HashMap<Address, RotationMessages>,
     pub current_nonce_messages: HashMap<(u32, Address), NonceMessage>,
+    pub current_avid_round_state: HashMap<(u32, Address), AvidRoundState>,
     pub message_responses: HashMap<MessageResponsesKey, MpcResult<SendMessagesResponse>>,
     pub complaints_to_process: HashMap<ComplaintsToProcessKey, ProtocolComplaint>,
     pub complaint_responses: HashMap<ComplaintResponsesKey, ComplaintResponse>,
@@ -273,6 +275,7 @@ impl MpcManager {
             current_dkg_messages: HashMap::new(),
             current_rotation_messages: HashMap::new(),
             current_nonce_messages: HashMap::new(),
+            current_avid_round_state: HashMap::new(),
             message_responses: HashMap::new(),
             complaints_to_process: HashMap::new(),
             complaint_responses: HashMap::new(),
@@ -1790,6 +1793,24 @@ impl MpcManager {
         Ok(())
     }
 
+    #[allow(dead_code)]
+    fn cache_and_persist_avid_round_state(
+        &mut self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: Address,
+        state: &AvidRoundState,
+    ) -> MpcResult<()> {
+        if epoch == self.mpc_config.epoch {
+            self.current_avid_round_state
+                .insert((batch_index, dealer), state.clone());
+        }
+        self.public_messages_store
+            .store_avid_round_state(epoch, batch_index, &dealer, state)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?;
+        Ok(())
+    }
+
     fn needs_nonce_retrieval(
         &mut self,
         dealer: Address,
@@ -1969,6 +1990,8 @@ impl MpcManager {
         }
         let mut mgr = mpc_manager.write().unwrap();
         mgr.current_nonce_messages.retain(|(b, _), _| *b >= cutoff);
+        mgr.current_avid_round_state
+            .retain(|(b, _), _| *b >= cutoff);
         mgr.dealer_nonce_outputs.retain(|(b, _), _| *b >= cutoff);
         mgr.complaints_to_process.retain(|k, _| match k {
             ComplaintsToProcessKey::NonceGeneration { batch_index: b, .. } => *b >= cutoff,

@@ -615,7 +615,7 @@ mod avid_conversion_tests {
     use std::collections::BTreeSet;
 
     /// Minimal test [`Certificate`] over an `AvssVote`, mirroring fastcrypto's test cert.
-    #[derive(Clone, Debug, Serialize, Deserialize)]
+    #[derive(Clone, Debug)]
     struct StubAvssCert {
         voters: BTreeSet<PartyId>,
         vote: batch_avss_avid::AvssVote,
