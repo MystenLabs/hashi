@@ -1509,8 +1509,7 @@ pub struct SetupNewKeyResponseData {
     pub encrypted_shares: ::prost::alloc::vec::Vec<KpEncryptedShare>,
     #[prost(message, optional, tag = "2")]
     pub secret_sharing_instance: ::core::option::Option<SecretSharingInstance>,
-    /// x-only BTC master pubkey produced by the ceremony (32 bytes). Lets the
-    /// operator publish `guardian_btc_public_key` on-chain before provisioning.
+    /// x-only BTC master pubkey (32 bytes); lets the operator publish it on-chain pre-provision.
     #[prost(bytes = "bytes", tag = "3")]
     pub btc_master_pubkey: ::prost::bytes::Bytes,
 }

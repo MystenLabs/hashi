@@ -179,8 +179,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     );
 
     // 7. Verify the response signature under the pinned session's signing key,
-    //    and sanity-check the response shape. Capture the ceremony's BTC master
-    //    pubkey (verified as part of the signed response) for the summary below.
+    //    and sanity-check the shape; keep the now-verified BTC master pubkey.
     let sharing_seq = 0u64;
     let response = signed_resp
         .verify(&signing_pub_key)
@@ -256,11 +255,8 @@ pub async fn run(cfg: Config) -> Result<()> {
         );
     }
 
-    // Emit the BTC master pubkey on stdout for the deploy workflow to capture and
-    // record on-chain via `hashi publish --guardian-btc-public-key`. Printed only
-    // after every ceremony check above has passed, so the workflow never publishes
-    // a key from an unverified ceremony. x-only (32 bytes), matching the format
-    // `tools fetch-info --field enclave-btc-pubkey` prints post-provision.
+    // Emit the verified pubkey on stdout for the deploy workflow to capture and
+    // publish on-chain — printed only after every ceremony check above has passed.
     let btc_master_pubkey_hex = hex::encode(btc_master_pubkey.serialize());
     info!(
         phase = "summary",

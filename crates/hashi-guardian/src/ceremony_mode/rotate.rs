@@ -68,8 +68,7 @@ async fn finalize_rotation(
     let k256_sk =
         combine_shares(old_shares, old_instance.threshold()).expect("threshold shares reach");
 
-    // The reconstructed key is unchanged by rotation; record its x-only pubkey so
-    // the new ceremony log asserts key invariance across the rotation.
+    // Rotation re-shares the same key, so its x-only pubkey is unchanged; record it.
     let btc_master_pubkey = k256_sk_to_btc_xonly_pubkey(&k256_sk);
 
     let (new_certs, new_params) = state.into_parts();

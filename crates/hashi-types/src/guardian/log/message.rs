@@ -74,9 +74,8 @@ pub enum CeremonyLogMessage {
         /// roster against the agreed set from the immutable log, not just the
         /// operator-served shares.
         roster: Vec<KPFingerprint>,
-        /// The x-only BTC master pubkey this ceremony produced. Recorded so KPs
-        /// and monitors can cross-check it against the on-chain
-        /// `guardian_btc_public_key` directly from the immutable log.
+        /// The x-only BTC master pubkey this ceremony produced; lets KPs and
+        /// monitors cross-check it against the on-chain `guardian_btc_public_key`.
         btc_master_pubkey: BitcoinPubkey,
     },
     /// Key rotation (`rotate_kps`) from `old_instance` to `new_instance`.
@@ -85,9 +84,7 @@ pub enum CeremonyLogMessage {
         new_instance: SecretSharingInstance,
         /// Recipient fingerprints for `new_instance`; see [`Self::NewKey`].
         roster: Vec<KPFingerprint>,
-        /// The x-only BTC master pubkey. A rotation re-shares the *same* key, so
-        /// this is invariant across rotations; recording it lets verifiers assert
-        /// key invariance from the log alone.
+        /// See [`Self::NewKey`]; invariant across rotations (the same key is re-shared).
         btc_master_pubkey: BitcoinPubkey,
     },
 }

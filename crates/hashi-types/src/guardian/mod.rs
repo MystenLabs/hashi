@@ -240,11 +240,8 @@ pub struct SetupNewKeyRequest {
 pub struct SetupNewKeyResponse {
     pub encrypted_shares: KPEncryptedShares,
     pub secret_sharing_instance: SecretSharingInstance,
-    /// The x-only BTC master pubkey this ceremony produced. Surfaced here (and in
-    /// the `ceremony/` audit log) so the operator can publish
-    /// `guardian_btc_public_key` on-chain before the guardian is provisioned —
-    /// the key is otherwise only revealed by `GetGuardianInfo` after
-    /// `provisioner_init`, which itself requires an on-chain committee.
+    /// x-only BTC master pubkey, surfaced so the operator can publish it on-chain
+    /// as `guardian_btc_public_key` before the guardian is provisioned.
     pub btc_master_pubkey: BitcoinPubkey,
 }
 
