@@ -11,6 +11,8 @@ use crate::metrics::MPC_LABEL_DKG;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
 use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::metrics::Metrics;
+use crate::mpc::types::AvidNonceMessage;
+use crate::mpc::types::AvidNonceMessageKind;
 use crate::mpc::types::AvidRoundState;
 use crate::mpc::types::CertificateV1;
 pub use crate::mpc::types::ComplainRequest;
@@ -66,6 +68,7 @@ use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::Parameters;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss;
+use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
 use fastcrypto_tbls::types::IndexedValue;
 use fastcrypto_tbls::types::ShareIndex;
 use futures::stream::FuturesUnordered;
@@ -130,6 +133,7 @@ pub struct MpcManager {
     /// Must be `BTreeMap` so that all nodes iterate outputs in
     /// the same deterministic order when constructing `Presignatures`.
     pub dealer_nonce_outputs: BTreeMap<(u32, Address), batch_avss::ReceiverOutput>,
+    pub dealer_avid_nonce_outputs: BTreeMap<(u32, Address), batch_avss_avid::ReceiverOutput>,
     /// Test-only: corrupt shares for this target address during dealing.
     test_corrupt_shares_for: Option<Address>,
 }
@@ -286,6 +290,7 @@ impl MpcManager {
             current_output: None,
             batch_size_per_weight,
             dealer_nonce_outputs: BTreeMap::new(),
+            dealer_avid_nonce_outputs: BTreeMap::new(),
             test_corrupt_shares_for,
         };
         manager.load_stored_messages()?;
@@ -1983,6 +1988,125 @@ impl MpcManager {
         }
     }
 
+    #[allow(dead_code)]
+    fn create_avid_nonce_receiver(
+        &self,
+        dealer: Address,
+        batch_index: u32,
+    ) -> MpcResult<batch_avss_avid::Receiver> {
+        let dealer_party_id =
+            self.committee
+                .index_of(&dealer)
+                .ok_or_else(|| MpcError::InvalidMessage {
+                    sender: dealer,
+                    reason: "Dealer not in committee".into(),
+                })? as u16;
+        let dealer_session_id = SessionId::nonce_dealer_session_id(
+            &self.chain_id,
+            self.mpc_config.epoch,
+            batch_index,
+            &dealer,
+        );
+        batch_avss_avid::Receiver::new(
+            self.mpc_config.nodes.clone(),
+            self.party_id,
+            dealer_party_id,
+            Parameters {
+                t: self.mpc_config.threshold,
+                f: self.mpc_config.max_faulty,
+            },
+            dealer_session_id.to_vec(),
+            self.encryption_key.clone(),
+            self.batch_size_per_weight,
+        )
+        .map_err(|e| MpcError::CryptoError(e.to_string()))
+    }
+
+    #[allow(dead_code)]
+    fn create_avid_nonce_dealer_messages(
+        &self,
+        batch_index: u32,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> MpcResult<(
+        batch_avss_avid::AvssMessageBuilder,
+        Vec<(Address, Messages)>,
+    )> {
+        let dealer_sid = SessionId::nonce_dealer_session_id(
+            &self.chain_id,
+            self.mpc_config.epoch,
+            batch_index,
+            &self.address,
+        );
+        let nodes = self.maybe_corrupt_nodes_for_testing(&self.mpc_config.nodes);
+        let dealer = batch_avss_avid::Dealer::new(
+            nodes,
+            self.party_id,
+            Parameters {
+                t: self.mpc_config.threshold,
+                f: self.mpc_config.max_faulty,
+            },
+            dealer_sid.to_vec(),
+            self.batch_size_per_weight,
+        )
+        .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+        let builder = dealer
+            .create_avss_messages(rng)
+            .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+        let messages = self
+            .committee
+            .members()
+            .iter()
+            .enumerate()
+            .map(|(j, member)| {
+                let message = builder.message_for(j as u16).ok_or_else(|| {
+                    MpcError::CryptoError(format!("no optimistic message for recipient {j}"))
+                })?;
+                Ok((
+                    member.validator_address(),
+                    Messages::NonceGenerationAvid(AvidNonceMessage {
+                        batch_index,
+                        kind: AvidNonceMessageKind::Optimistic(message),
+                    }),
+                ))
+            })
+            .collect::<MpcResult<Vec<_>>>()?;
+        Ok((builder, messages))
+    }
+
+    #[allow(dead_code)]
+    fn try_sign_avid_nonce_optimistic(
+        &mut self,
+        dealer: Address,
+        batch_index: u32,
+        message: &batch_avss_avid::AvssMessage,
+    ) -> MpcResult<BLS12381Signature> {
+        let receiver = self.create_avid_nonce_receiver(dealer, batch_index)?;
+        let (output, avss_vote, _verified_common) = receiver
+            .process_avss_message(message, None)
+            .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+        self.dealer_avid_nonce_outputs
+            .insert((batch_index, dealer), output);
+        let state = AvidRoundState {
+            common: message.common.clone(),
+            own_ciphertext: message.ciphertext.clone(),
+            echoes: BTreeMap::new(),
+        };
+        self.cache_and_persist_avid_round_state(
+            self.mpc_config.epoch,
+            batch_index,
+            dealer,
+            &state,
+        )?;
+        let confirm = DealerMessagesHash {
+            dealer_address: dealer,
+            messages_hash: MessageHash::from(avss_vote.common_message_hash.digest),
+        };
+        let signature = self
+            .signing_key
+            .sign(self.mpc_config.epoch, self.address, &confirm);
+        Ok(signature.signature().clone())
+    }
+
     fn prune_nonce_state(mpc_manager: &Arc<RwLock<Self>>, batch_index: u32) {
         let cutoff = batch_index.saturating_sub(PRUNE_KEEP_RECENT_BATCHES - 1);
         if cutoff == 0 {
@@ -1993,6 +2117,8 @@ impl MpcManager {
         mgr.current_avid_round_state
             .retain(|(b, _), _| *b >= cutoff);
         mgr.dealer_nonce_outputs.retain(|(b, _), _| *b >= cutoff);
+        mgr.dealer_avid_nonce_outputs
+            .retain(|(b, _), _| *b >= cutoff);
         mgr.complaints_to_process.retain(|k, _| match k {
             ComplaintsToProcessKey::NonceGeneration { batch_index: b, .. } => *b >= cutoff,
             _ => true,
