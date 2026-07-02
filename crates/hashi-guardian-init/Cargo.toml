@@ -7,7 +7,6 @@ edition = "2024"
 anyhow.workspace = true
 aws-config.workspace = true
 aws-credential-types.workspace = true
-bcs.workspace = true
 bitcoin.workspace = true
 clap.workspace = true
 hashi = { path = "../hashi" }
@@ -20,7 +19,6 @@ rand.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true
-toml.workspace = true
 tonic.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
