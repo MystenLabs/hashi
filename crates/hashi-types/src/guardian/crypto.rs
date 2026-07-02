@@ -475,6 +475,14 @@ pub fn k256_sk_to_btc_keypair(sk: &k256::SecretKey) -> bitcoin::secp256k1::Keypa
     bitcoin::secp256k1::Keypair::from_secret_key(&BTC_LIB, &btc_sk)
 }
 
+/// The x-only BTC public key for a `k256::SecretKey` — i.e. the guardian's BTC
+/// master pubkey. The ceremony surfaces this (before any share is submitted) so
+/// the operator can publish `guardian_btc_public_key` on-chain, which is
+/// otherwise only revealed by `GetGuardianInfo` after `provisioner_init`.
+pub fn k256_sk_to_btc_xonly_pubkey(sk: &k256::SecretKey) -> crate::bitcoin::BitcoinPubkey {
+    k256_sk_to_btc_keypair(sk).x_only_public_key().0
+}
+
 /// Create a commitment (hash) for a share
 pub fn commit_share(share: &Share) -> ShareCommitment {
     let commitment = ProjectivePoint::GENERATOR * share.value;

@@ -341,11 +341,16 @@ fn ceremony_instance_and_roster(
     key: &str,
 ) -> anyhow::Result<(SecretSharingInstance, Vec<KPFingerprint>)> {
     Ok(match msg {
-        CeremonyLogMessage::NewKey { instance, roster } => (instance, roster),
+        CeremonyLogMessage::NewKey {
+            instance,
+            roster,
+            btc_master_pubkey: _,
+        } => (instance, roster),
         CeremonyLogMessage::Rotate {
             old_instance,
             new_instance,
             roster,
+            btc_master_pubkey: _,
         } => {
             let expected = old_instance
                 .sharing_seq()
