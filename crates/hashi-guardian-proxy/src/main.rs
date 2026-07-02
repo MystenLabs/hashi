@@ -29,9 +29,8 @@ async fn main() -> Result<()> {
         "Starting hashi-guardian-proxy (wid-keyed cache + node forwarder + provisioning relay)."
     );
 
-    // Lazy channel to the enclave guardian, shared by the forwarder and the
-    // relay. Mirrors the node-side client (crates/hashi/src/grpc/guardian_client.rs):
-    // connect lazily with the same connect timeout + HTTP/2 keepalive.
+    // Lazy channel to the enclave guardian, shared by forwarder and relay. Mirrors
+    // the node-side client (crates/hashi/src/grpc/guardian_client.rs): same timeout + keepalive.
     let channel = Endpoint::from_shared(config.backend_url.clone())?
         .connect_timeout(config.connect_timeout)
         .http2_keep_alive_interval(config.keepalive_interval)

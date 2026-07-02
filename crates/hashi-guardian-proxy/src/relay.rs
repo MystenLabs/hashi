@@ -3,18 +3,14 @@
 
 //! The provisioning relay: the out-of-enclave half of `single_provisioner_init`.
 //!
-//! A key provisioner verifies the guardian's attestation directly, builds its
-//! HPKE-encrypted share, and submits it here one share at a time. The relay
+//! Key provisioners submit HPKE-encrypted shares one at a time; the relay
 //! accumulates distinct shares for the guardian's current session and, once it
-//! holds a threshold-many, submits them in a single batch `ProvisionerInit` to
-//! the enclave. It never sees share plaintext (shares are encrypted to the
-//! enclave session key), so it is liveness-only: it can stall provisioning but
-//! cannot read a share or forge a key.
+//! holds a threshold-many, submits them in one batch `ProvisionerInit`. Shares
+//! are encrypted to the enclave session key, so the relay is liveness-only: it
+//! can stall provisioning but cannot read a share or forge a key.
 //!
-//! The accumulation logic lives in `Accumulator` (pure, unit-tested); the gRPC
-//! method is thin glue that reads the backend's live session/threshold and
-//! drives the accumulator under a `tokio` mutex (which also serializes the batch
-//! submission so at most one `ProvisionerInit` is in flight).
+//! `Accumulator` holds the (pure, unit-tested) accumulation logic; a `tokio`
+//! mutex serializes it and keeps at most one `ProvisionerInit` in flight.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -42,8 +38,7 @@ struct Accumulator {
 }
 
 impl Accumulator {
-    /// Adopt `live` as the current session, clearing any buffer left from a
-    /// previous session.
+    /// Adopt `live` as the current session, clearing any stale buffer.
     fn sync_session(&mut self, live: &str) {
         if self.session_id.as_deref() != Some(live) {
             self.session_id = Some(live.to_string());
@@ -92,9 +87,8 @@ impl Relay {
         }
     }
 
-    /// Read the backend guardian's live session, provisioning threshold, and
-    /// whether it is already provisioned. Verifies the signed info's signature
-    /// (self-consistency) but not the Nitro attestation — the KP already
+    /// Backend's live session, provisioning threshold, and provisioned flag.
+    /// Verifies the signed info's signature but not the Nitro attestation — the KP
     /// anchored attestation before submitting, and the relay is liveness-only.
     async fn backend_status(&self) -> Result<BackendStatus, Status> {
         let pb = self
@@ -155,8 +149,7 @@ impl GuardianRelayService for Relay {
 
         let status = self.backend_status().await?;
 
-        // Already provisioned (by this relay, a prior relay, or an out-of-band
-        // operator): idempotent success, nothing to accumulate.
+        // Already provisioned (by us, a prior relay, or out-of-band): idempotent success.
         if status.provisioned {
             return Ok(done());
         }
@@ -213,19 +206,17 @@ impl GuardianRelayService for Relay {
                 Ok(done())
             }
             Err(e) => {
-                // A racing batch (or an out-of-band ProvisionerInit) may have
-                // provisioned the guardian between our status read and here;
-                // re-check before surfacing an error.
+                // A racing batch or out-of-band ProvisionerInit may have provisioned
+                // the guardian since our status read; re-check before erroring.
                 match self.backend_status().await {
                     Ok(s) if s.provisioned => {
                         acc.completed = true;
                         Ok(done())
                     }
                     _ => {
-                        // A genuine failure — e.g. one share won't decrypt (a KP
-                        // bound the wrong state_hash). The batch is all-or-nothing
-                        // and the relay can't tell which share is bad, so drop the
-                        // whole buffer and let the KPs resubmit a clean set.
+                        // Genuine failure (e.g. a share won't decrypt). The batch is
+                        // all-or-nothing and we can't tell which share is bad, so drop
+                        // the whole buffer and let the KPs resubmit a clean set.
                         warn!(
                             error = %e,
                             "batch ProvisionerInit failed; clearing the share buffer for resubmission",

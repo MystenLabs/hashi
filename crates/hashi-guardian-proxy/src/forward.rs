@@ -1,20 +1,11 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Adapts a tonic *client* to the enclave guardian into the gRPC *server*
-//! trait. Wrapped by [`crate::cache::CachingGuardianGrpc`] so `StandardWithdrawal`
-//! responses are cached out-of-enclave.
-//!
-//! # Restricted surface
-//!
-//! The proxy is internet-facing, so it forwards only the four RPCs a hashi node
-//! calls at runtime (`GetGuardianInfo`, `StandardWithdrawal`, `UpdateCommittee`,
-//! `UpdateCommitteeChain`) and **rejects** the operator/ceremony RPCs and the raw
-//! batch `ProvisionerInit` with `PERMISSION_DENIED`. `OperatorInit` especially is
-//! one-shot and unauthenticated, so exposing it would let anyone wedge the
-//! guardian on every provisioning window. Operators reach the guardian directly;
-//! KPs submit shares through [`crate::relay`], which does the batch
-//! `ProvisionerInit` itself.
+//! Forwards the four node-facing `GuardianService` RPCs to the enclave guardian
+//! and rejects the operator/ceremony surface with `PERMISSION_DENIED`: the proxy
+//! is internet-facing and `OperatorInit` is one-shot and unauthenticated, so
+//! exposing it would let anyone wedge the guardian. Wrapped by
+//! [`crate::cache::CachingGuardianGrpc`] to cache `StandardWithdrawal`.
 
 use hashi_types::proto;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
@@ -24,12 +15,8 @@ use tonic::Request;
 use tonic::Response;
 use tonic::Status;
 
-/// Forwards the node-facing `GuardianService` RPCs to a remote enclave guardian
-/// and rejects the operator/ceremony RPCs.
-///
-/// Holds a plain [`Channel`] (cheap to clone, `Send + Sync + 'static`) rather
-/// than the node's boxed transport — the generated server trait requires
-/// `Send + Sync + 'static`, and `BoxCloneService` is not `Sync`.
+/// Holds a plain [`Channel`] rather than the node's boxed transport: the generated
+/// server trait requires `Send + Sync + 'static`, and `BoxCloneService` is not `Sync`.
 #[derive(Clone)]
 pub struct Forwarding {
     client: GuardianServiceClient<Channel>,
@@ -43,8 +30,6 @@ impl Forwarding {
     }
 }
 
-/// The proxy never exposes operator/ceremony RPCs; those callers reach the
-/// guardian directly, and KP shares go through the relay service.
 fn denied(rpc: &str) -> Status {
     Status::permission_denied(format!(
         "{rpc} is not served by the guardian proxy; operator/ceremony calls reach the \
@@ -52,10 +37,8 @@ fn denied(rpc: &str) -> Status {
     ))
 }
 
-// The forwarded methods clone the channel-backed client (the generated client
-// takes `&mut self`; cloning a `Channel` is a cheap handle copy) and forward the
-// whole `Request<T>`, so client deadlines/metadata propagate. Transport errors
-// surface as `Status` and pass straight through.
+// Each method clones the cheap channel-backed client and forwards the whole
+// `Request<T>` so client deadlines/metadata propagate.
 #[tonic::async_trait]
 impl GuardianService for Forwarding {
     async fn get_guardian_info(
@@ -86,7 +69,7 @@ impl GuardianService for Forwarding {
         self.client.clone().update_committee_chain(request).await
     }
 
-    // --- Rejected: operator/ceremony surface (never exposed through the proxy) ---
+    // --- Rejected: operator/ceremony surface ---
 
     async fn operator_init(
         &self,
@@ -232,9 +215,6 @@ mod tests {
         (stub, CachingGuardianGrpc::new(Forwarding::new(channel)))
     }
 
-    /// End-to-end over a real gRPC hop: `Forwarding` reaches the stub guardian,
-    /// and the `CachingGuardianGrpc` wrapper makes a same-wid retry idempotent
-    /// while passing other node RPCs straight through.
     #[tokio::test]
     async fn forwards_and_caches_over_real_grpc() {
         let (stub, proxy) = spawn_stub_proxy().await;
@@ -262,9 +242,8 @@ mod tests {
         assert_eq!(stub.get_guardian_info_calls.load(Ordering::SeqCst), 1);
     }
 
-    /// The operator/ceremony RPCs are rejected at the proxy without ever
-    /// reaching the guardian (the stub `unimplemented!()`s them, so a forwarded
-    /// call would panic the server rather than return `PERMISSION_DENIED`).
+    // The stub `unimplemented!()`s the rejected RPCs, so a forwarded call would panic
+    // the server rather than return `PERMISSION_DENIED` — proof the proxy short-circuits.
     #[tokio::test]
     async fn rejects_operator_and_ceremony_rpcs() {
         let (_stub, proxy) = spawn_stub_proxy().await;
