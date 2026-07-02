@@ -130,12 +130,16 @@ impl TryFrom<pb::SignedSetupNewKeyResponse> for GuardianSigned<SetupNewKeyRespon
                 .ok_or_else(|| missing("secret_sharing_instance"))?,
         )?;
 
+        let btc_master_pubkey = BitcoinPubkey::from_slice(data.btc_master_pubkey.as_ref())
+            .map_err(|e| InvalidInputs(format!("invalid btc_master_pubkey: {e}")))?;
+
         let timestamp_ms = resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?;
 
         Ok(GuardianSigned {
             data: SetupNewKeyResponse {
                 encrypted_shares,
                 secret_sharing_instance,
+                btc_master_pubkey,
             },
             timestamp_ms,
             signature,
@@ -832,6 +836,7 @@ pub fn setup_new_key_response_to_pb(r: SetupNewKeyResponse) -> pb::SetupNewKeyRe
             .map(kp_encrypted_share_to_pb)
             .collect(),
         secret_sharing_instance: Some(secret_sharing_instance_to_pb(&r.secret_sharing_instance)),
+        btc_master_pubkey: r.btc_master_pubkey.serialize().to_vec().into(),
     }
 }
 

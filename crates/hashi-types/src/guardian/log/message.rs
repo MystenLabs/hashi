@@ -11,6 +11,7 @@ use super::S3_DIR_HEARTBEAT;
 use super::S3_DIR_INIT;
 use super::S3_DIR_SHARES;
 use super::S3_DIR_WITHDRAW;
+use crate::bitcoin::BitcoinPubkey;
 use crate::committee::CommitteeSignature;
 use crate::guardian::GuardianError;
 use crate::guardian::GuardianInfo;
@@ -73,6 +74,10 @@ pub enum CeremonyLogMessage {
         /// roster against the agreed set from the immutable log, not just the
         /// operator-served shares.
         roster: Vec<KPFingerprint>,
+        /// The x-only BTC master pubkey this ceremony produced. Recorded so KPs
+        /// and monitors can cross-check it against the on-chain
+        /// `guardian_btc_public_key` directly from the immutable log.
+        btc_master_pubkey: BitcoinPubkey,
     },
     /// Key rotation (`rotate_kps`) from `old_instance` to `new_instance`.
     Rotate {
@@ -80,6 +85,10 @@ pub enum CeremonyLogMessage {
         new_instance: SecretSharingInstance,
         /// Recipient fingerprints for `new_instance`; see [`Self::NewKey`].
         roster: Vec<KPFingerprint>,
+        /// The x-only BTC master pubkey. A rotation re-shares the *same* key, so
+        /// this is invariant across rotations; recording it lets verifiers assert
+        /// key invariance from the log alone.
+        btc_master_pubkey: BitcoinPubkey,
     },
 }
 

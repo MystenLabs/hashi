@@ -359,6 +359,12 @@ mod tests {
         ShareCommitments::new(vec).unwrap()
     }
 
+    fn dummy_btc_pubkey() -> hashi_types::bitcoin::BitcoinPubkey {
+        hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey(
+            &k256::SecretKey::from_slice(&[9u8; 32]).unwrap(),
+        )
+    }
+
     fn response(shares: &[u16], commitment_ids: &[u16]) -> SetupNewKeyResponse {
         response_with_instance(
             shares,
@@ -375,6 +381,7 @@ mod tests {
             encrypted_shares: KPEncryptedShares::new(shares.iter().map(|&i| share(i)).collect())
                 .unwrap(),
             secret_sharing_instance,
+            btc_master_pubkey: dummy_btc_pubkey(),
         }
     }
 
@@ -409,6 +416,7 @@ mod tests {
                 0,
             )
             .unwrap(),
+            btc_master_pubkey: dummy_btc_pubkey(),
         }
     }
 
