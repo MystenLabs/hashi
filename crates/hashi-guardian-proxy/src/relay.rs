@@ -11,7 +11,7 @@
 //! enclave session key), so it is liveness-only: it can stall provisioning but
 //! cannot read a share or forge a key.
 //!
-//! The accumulation logic lives in [`Accumulator`] (pure, unit-tested); the gRPC
+//! The accumulation logic lives in `Accumulator` (pure, unit-tested); the gRPC
 //! method is thin glue that reads the backend's live session/threshold and
 //! drives the accumulator under a `tokio` mutex (which also serializes the batch
 //! submission so at most one `ProvisionerInit` is in flight).

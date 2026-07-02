@@ -1,28 +1,21 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Wid-keyed response cache for the guardian's `StandardWithdrawal` RPC,
-//! running in the out-of-enclave `hashi-guardian-proxy`. Pulling this layer out
-//! of the enclave lets it be hardened or replaced independently of the signing
-//! oracle (the enclave now serves the bare `GuardianService`).
+//! Wid-keyed response cache for the guardian's `StandardWithdrawal` RPC. Lives in
+//! the out-of-enclave proxy so it can be hardened or swapped independently of the
+//! signing oracle (the enclave now serves the bare `GuardianService`).
 //!
-//! The guardian debits the bucket and advances `next_seq` when it processes a
-//! `StandardWithdrawal`, before hashi has durably signed the withdrawal on-chain.
-//! If hashi retries the same withdrawal at a *different* seq — e.g. its local
-//! limiter mirror reconciled forward to the guardian's advanced `next_seq` while
-//! the signed event was still pending — re-consuming would drain the bucket and
-//! burn a seq for a withdrawal that was already signed.
+//! Keyed by `wid`, not `(wid, seq)`: the guardian debits the limiter and advances
+//! `next_seq` when it signs, before hashi has the signed event on-chain. If hashi
+//! retries the same wid at a bumped seq (its limiter mirror reconciled forward
+//! while the event was still pending), re-consuming would drain the bucket for a
+//! withdrawal that was already signed. Replaying by `wid` avoids that — safe
+//! because a committed wid's inputs/outputs are immutable (only signatures
+//! change), so the response is stable and carries no seq.
 //!
-//! So the cache is keyed by `wid`, not `(wid, seq)`: a withdrawal consumes the
-//! limiter once, and any retry (at any seq) replays the stored response without
-//! re-consuming. Safe because a `wid`'s `WithdrawalTransaction` has immutable
-//! inputs/outputs once committed (only signatures change), so its enclave
-//! signatures are stable, and the response carries no seq.
-//!
-//! The cache is in-memory; on proxy restart an in-flight wid retried at a bumped
-//! seq re-consumes the enclave limiter (identical to the pre-extraction
-//! in-enclave behaviour, so no regression). A durable backend (e.g. DynamoDB) is
-//! a future hardening that externalizing this layer now makes possible.
+//! In-memory: after a proxy restart, a wid retried at a bumped seq re-consumes the
+//! enclave limiter — same as the old in-enclave behaviour, so no regression. A
+//! durable backend (e.g. DynamoDB) is a future option this extraction enables.
 
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::proto;

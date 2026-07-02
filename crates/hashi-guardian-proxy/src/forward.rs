@@ -7,17 +7,14 @@
 //!
 //! # Restricted surface
 //!
-//! The proxy is internet-facing (an ALB terminates TLS in front of it), so it
-//! forwards only the four RPCs a hashi node calls at runtime:
-//! `GetGuardianInfo`, `StandardWithdrawal`, `UpdateCommittee`,
-//! `UpdateCommitteeChain`. The operator/ceremony RPCs (`OperatorInit`,
-//! `SetupNewKey`, `RotateKps`) and the raw batch `ProvisionerInit` are
-//! **rejected** with `PERMISSION_DENIED`: `OperatorInit` in particular is
-//! one-shot and unauthenticated, so forwarding it would let anyone on the
-//! internet wedge the guardian on every provisioning window. Operators reach
-//! the guardian directly (SSM / port-forward, bypassing the proxy), and KPs
-//! submit shares through the separate [`crate::relay`] service, which does the
-//! backend `ProvisionerInit` itself once it has a threshold batch.
+//! The proxy is internet-facing, so it forwards only the four RPCs a hashi node
+//! calls at runtime (`GetGuardianInfo`, `StandardWithdrawal`, `UpdateCommittee`,
+//! `UpdateCommitteeChain`) and **rejects** the operator/ceremony RPCs and the raw
+//! batch `ProvisionerInit` with `PERMISSION_DENIED`. `OperatorInit` especially is
+//! one-shot and unauthenticated, so exposing it would let anyone wedge the
+//! guardian on every provisioning window. Operators reach the guardian directly;
+//! KPs submit shares through [`crate::relay`], which does the batch
+//! `ProvisionerInit` itself.
 
 use hashi_types::proto;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;

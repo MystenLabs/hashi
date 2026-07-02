@@ -14,8 +14,7 @@ import "sui/hashi/v1alpha/guardian_service.proto";
 // session key, so a malicious or buggy relay can stall provisioning but cannot
 // read shares or forge a key.
 service GuardianRelayService {
-  rpc SingleProvisionerInit(SingleProvisionerInitRequest)
-      returns (SingleProvisionerInitResponse);
+  rpc SingleProvisionerInit(SingleProvisionerInitRequest) returns (SingleProvisionerInitResponse);
 }
 
 message SingleProvisionerInitRequest {
