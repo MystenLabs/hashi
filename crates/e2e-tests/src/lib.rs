@@ -110,6 +110,19 @@ impl TestNetworks {
     }
 }
 
+/// An externally-run guardian (e.g. the dockerized Nitro replica) to publish and
+/// point the nodes at, instead of the in-process test [`guardian_harness::GuardianHarness`].
+/// Its BTC key comes from a completed `operator ceremony`; provisioner-init runs
+/// out-of-band (`operator provision` + `key-provisioner provision`) once the
+/// committee forms, so the harness does NOT finalize it.
+#[derive(Clone)]
+pub struct ExternalGuardian {
+    /// Endpoint the hashi nodes reach the guardian at (typically its proxy).
+    pub url: String,
+    /// The guardian's x-only BTC master pubkey, printed by `operator ceremony`.
+    pub btc_pubkey: hashi_types::bitcoin::BitcoinPubkey,
+}
+
 pub struct TestNetworksBuilder {
     sui_builder: SuiNetworkBuilder,
     hashi_builder: HashiNetworkBuilder,
@@ -117,6 +130,11 @@ pub struct TestNetworksBuilder {
     /// On-chain config overrides applied after DKG completes, before `build()`
     /// returns. Each entry is run through the full propose/vote/execute flow.
     onchain_config_overrides: Vec<(String, hashi_types::move_types::ConfigValue)>,
+    /// When set, publish + point the nodes at this externally-run guardian and
+    /// skip the in-process harness (and its finalize). Used by the local
+    /// dockerized-guardian replica to run the real ceremony/provision flow
+    /// against this localnet.
+    external_guardian: Option<ExternalGuardian>,
 }
 
 impl TestNetworksBuilder {
@@ -134,7 +152,16 @@ impl TestNetworksBuilder {
             hashi_builder: HashiNetworkBuilder::new(),
             bitcoin_builder: BitcoinNodeBuilder::new(),
             onchain_config_overrides,
+            external_guardian: None,
         }
+    }
+
+    /// Publish + point the nodes at an externally-run guardian (the dockerized
+    /// replica) instead of the in-process test harness. The external guardian is
+    /// provisioned out-of-band via the CLI once the committee forms.
+    pub fn with_external_guardian(mut self, guardian: ExternalGuardian) -> Self {
+        self.external_guardian = Some(guardian);
+        self
     }
 
     pub fn with_nodes(mut self, num_nodes: usize) -> Self {
@@ -244,25 +271,41 @@ impl TestNetworksBuilder {
             .await?;
         Self::cp_packages(dir.as_ref())?;
 
-        // Guardian must be reachable + have its BTC key generated BEFORE
-        // publish, so the on-chain config can pin the right BTC pubkey.
-        // Provisioner-init (which needs the hashi DKG output) runs later
-        // via `finalize_guardian_harness`.
-        let guardian_harness =
-            guardian_harness::GuardianHarness::start(bitcoin::Network::Regtest).await?;
-        let guardian_btc_pubkey = guardian_harness.ensure_btc_pubkey()?;
-        let guardian_config = hashi::publish::GuardianConfig {
-            url: guardian_harness.endpoint().to_string(),
-            btc_public_key: guardian_btc_pubkey.serialize().to_vec(),
+        // Guardian must be reachable + have its BTC key generated BEFORE publish,
+        // so the on-chain config pins the right BTC pubkey. With an external
+        // guardian (the dockerized replica) we take its ceremony pubkey + URL and
+        // leave provisioner-init to the out-of-band CLI flow; otherwise we start
+        // the in-process harness and finalize it below once DKG output exists.
+        let (guardian_config, guardian_harness) = match &self.external_guardian {
+            Some(external) => {
+                let guardian_config = hashi::publish::GuardianConfig {
+                    url: external.url.clone(),
+                    btc_public_key: external.btc_pubkey.serialize().to_vec(),
+                };
+                tracing::info!(
+                    endpoint = %external.url,
+                    "using external guardian (dockerized replica); provisioner-init runs out-of-band"
+                );
+                (guardian_config, None)
+            }
+            None => {
+                let harness =
+                    guardian_harness::GuardianHarness::start(bitcoin::Network::Regtest).await?;
+                let guardian_btc_pubkey = harness.ensure_btc_pubkey()?;
+                let guardian_config = hashi::publish::GuardianConfig {
+                    url: harness.endpoint().to_string(),
+                    btc_public_key: guardian_btc_pubkey.serialize().to_vec(),
+                };
+                tracing::info!(
+                    endpoint = %harness.endpoint(),
+                    "guardian harness started (serving; BTC key set, init deferred to finalize)"
+                );
+                (guardian_config, Some(harness))
+            }
         };
-        tracing::info!(
-            endpoint = %guardian_harness.endpoint(),
-            "guardian harness started (serving; BTC key set, init deferred to finalize)"
-        );
 
         let mut hashi_builder = self.hashi_builder;
-        hashi_builder =
-            hashi_builder.with_guardian_endpoint(guardian_harness.endpoint().to_string());
+        hashi_builder = hashi_builder.with_guardian_endpoint(guardian_config.url.clone());
 
         // The post-build steps below (on-chain config overrides, guardian
         // provisioner-init) drive transactions through the running committee, so
@@ -281,8 +324,6 @@ impl TestNetworksBuilder {
             &guardian_config,
         )
         .await?;
-
-        let guardian_harness = Some(guardian_harness);
 
         let hashi_network = hashi_builder
             .build(

@@ -1,0 +1,184 @@
+# Copyright (c), Mysten Labs, Inc.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Mac-local replica of the guardian's AWS Nitro topology, wired to a LOCAL sui
+# node. Each vsock hop is replaced by a TCP hop between containers:
+#
+#   client -> proxy:3000 -> host:3000 -> enclave:3000 (withdraw guardian)
+#   guardian -> 127.0.0.6x:443 -> host:810x -> minio:9000   (S3 audit log)
+#
+# The full ceremony -> provision flow runs against a native `hashi-localnet`
+# (local sui + bitcoin + hashi committee) reached at host.docker.internal. See
+# README.md — the guardian containers here + the native localnet together give a
+# real end-to-end local rig (real ceremony, real provision, real relay), no
+# devnet needed.
+
+name: hashi-guardian-local
+
+x-build: &build
+  build:
+    context: ../..
+    dockerfile: docker/hashi-guardian-local/Dockerfile
+
+x-s3-env: &s3-env
+  AWS_REGION: us-east-1
+  AWS_S3_BUCKET: hashi-guardian-dev
+  # Flips the S3 client to path-style + plaintext so MinIO's http:9000 works
+  # while the enclave->host->minio forwarder chain is preserved.
+  AWS_ENDPOINT_URL_S3: http://s3.us-east-1.amazonaws.com:443
+  RUST_LOG: ${RUST_LOG:-info}
+
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    # Host-published on 19000/19001 to avoid colliding with the native
+    # hashi-localnet sui fullnode (default :9000). Containers still reach MinIO at
+    # minio:9000 internally.
+    ports:
+      - "19000:9000"
+      - "19001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  bucket-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mc alias set local http://minio:9000 minioadmin minioadmin
+        if ! mc ls local/hashi-guardian-dev >/dev/null 2>&1; then
+          mc mb --with-lock local/hashi-guardian-dev
+          echo "Created hashi-guardian-dev with Object Lock enabled"
+        fi
+
+  # The EC2 parent host: bridges inbound (proxy -> withdraw enclave) and outbound
+  # (both guardians -> S3), standing in for expose_enclave.sh + the nitro
+  # vsock-proxy daemons (scripts/user-data.sh).
+  host:
+    <<: *build
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        socat TCP4-LISTEN:3000,reuseaddr,fork TCP:enclave:3000 &
+        socat TCP4-LISTEN:8101,reuseaddr,fork TCP:minio:9000 &
+        socat TCP4-LISTEN:8102,reuseaddr,fork TCP:minio:9000 &
+        socat TCP4-LISTEN:8103,reuseaddr,fork TCP:minio:9000 &
+        wait
+    depends_on:
+      bucket-init:
+        condition: service_completed_successfully
+
+  # The Nitro enclave stand-in: the WITHDRAW-mode guardian.
+  enclave:
+    <<: *build
+    entrypoint: ["/bin/sh", "/run.local.sh"]
+    volumes:
+      - ./run.local.sh:/run.local.sh:ro
+    environment:
+      <<: *s3-env
+    depends_on:
+      host:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "socat -T2 OPEN:/dev/null TCP4:127.0.0.1:3000"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+
+  # The one-time CEREMONY-mode guardian. Profiled, so `make up` skips it; brought
+  # up only for `make ceremony`. Reached directly (not via the proxy). Uses the
+  # same `host` S3 bridge to write ceremony/ + shares/ to MinIO.
+  ceremony:
+    <<: *build
+    entrypoint: ["/bin/sh", "/run.local.sh"]
+    profiles: ["ceremony"]
+    volumes:
+      - ./run.local.sh:/run.local.sh:ro
+    environment:
+      <<: *s3-env
+      CEREMONY_MODE: "true"
+    depends_on:
+      host:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "socat -T2 OPEN:/dev/null TCP4:127.0.0.1:3000"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+
+  # The out-of-enclave proxy: the only port published to the host. Holds the wid
+  # cache + serves the SingleProvisionerInit relay. Forwards to the withdraw
+  # guardian via the host bridge.
+  proxy:
+    <<: *build
+    command: ["/usr/bin/hashi-guardian-proxy"]
+    ports:
+      - "3000:3000"
+    environment:
+      GUARDIAN_BACKEND_URL: http://host:3000
+      PROXY_LISTEN_ADDR: 0.0.0.0:3000
+      RUST_LOG: ${RUST_LOG:-info}
+    depends_on:
+      enclave:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "socat -T2 OPEN:/dev/null TCP4:127.0.0.1:3000"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+
+  # One-shot init runner (gnupg + hashi-guardian-init). Runs the ceremony /
+  # provision scripts. Profiled; invoked via `compose run --rm init <script>`.
+  # Reaches the NATIVE hashi-localnet sui at host.docker.internal.
+  init:
+    <<: *build
+    profiles: ["init"]
+    entrypoint: ["/bin/bash"]
+    working_dir: /work
+    volumes:
+      - ./scripts:/scripts:ro
+      - work:/work
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      <<: *s3-env
+      # The init container reaches MinIO directly (it is outside the guardian's
+      # vsock/socat S3 forwarder chain + /etc/hosts redirect), so point its S3
+      # client straight at MinIO rather than the forwarder-chain hostname.
+      AWS_ENDPOINT_URL_S3: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      NUM_SHARES: ${NUM_SHARES:-3}
+      THRESHOLD: ${THRESHOLD:-2}
+      RELAY_ENDPOINT: http://proxy:3000
+      CEREMONY_GUARDIAN_ENDPOINT: http://ceremony:3000
+      WITHDRAW_GUARDIAN_ENDPOINT: http://host:3000
+      GUARDIAN_GIT_REVISION: ${GUARDIAN_GIT_REVISION:-local}
+      # Filled from the native hashi-localnet state.json by the Makefile.
+      SUI_RPC: ${SUI_RPC:-}
+      PACKAGE_ID: ${PACKAGE_ID:-}
+      HASHI_OBJECT_ID: ${HASHI_OBJECT_ID:-}
+
+volumes:
+  minio-data:
+  work:
