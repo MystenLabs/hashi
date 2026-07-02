@@ -16,16 +16,17 @@ cargo run -p hashi-guardian-init -- operator provision --config guardian-init.sa
 cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-init.sample.yaml
 ```
 
-This will replace the `tools dev-bootstrap` shortcut used in dev. Each KP
-generates a PGP key on a yubikey and exports the public cert to the operator;
-the key ceremony and provisioning flow is then driven through these commands.
-All production commands read the same unified config file; see
+Each KP generates a PGP key on a yubikey and exports the public cert to the
+operator; the key ceremony and provisioning flow is then driven through these
+commands. All production commands read the same unified config file; see
 [`guardian-init.sample.yaml`](guardian-init.sample.yaml).
 
-The guardian init production config may omit `guardian_s3.access_key` and
-`guardian_s3.secret_key`; when both are omitted, the production commands use the
-AWS SDK default credential chain. The `tools dev-bootstrap` shortcut is
-unchanged and still reads AWS credentials from its required env vars.
+For a fully-local end-to-end run of this flow (local sui node + a dockerized
+guardian, no devnet), see [`docker/hashi-guardian-local`](../../docker/hashi-guardian-local).
+
+The guardian init config may omit `guardian_s3.access_key` and
+`guardian_s3.secret_key`; when both are omitted, the commands use the AWS SDK
+default credential chain.
 
 ## operator ceremony
 
@@ -82,9 +83,8 @@ command uses `kp_pgp_cert_path`, `hashi`, and `kp_roster`.
 
 ## operator provision
 
-Initializes a fresh **withdraw-mode** guardian with operator-supplied state.
-This is the missing production replacement for the withdraw-mode `OperatorInit`
-part currently covered by `tools dev-bootstrap`.
+Initializes a fresh **withdraw-mode** guardian with operator-supplied state — the
+production `OperatorInit` half of provisioning.
 
 It:
 
@@ -163,13 +163,10 @@ config. This command uses `kp_pgp_cert_path`, `relay_endpoint`, `hashi`,
 Guardian helper tooling lives under `tools`:
 
 ```bash
-cargo run -p hashi-guardian-init -- tools dev-bootstrap --config <node-config.toml> ...
 cargo run -p hashi-guardian-init -- tools fetch-info --endpoint <guardian-endpoint>
-cargo run -p hashi-guardian-init -- tools generate-master-key
 ```
 
-`dev-bootstrap` is a centralized dev shortcut for driving a guardian through
-bootstrap. `fetch-info` prints deployed guardian public keys for the legacy
-bootstrap path; it verifies the GuardianInfo signature but does not verify Nitro
-attestation or PCRs. `generate-master-key` creates the BTC master keypair used
-by the dev bootstrap flow.
+`fetch-info` prints a deployed guardian's public keys (signing key, or the
+enclave BTC pubkey after provisioning), used by deploy to record them on-chain.
+It verifies the GuardianInfo signature but does not verify Nitro attestation or
+PCRs.
