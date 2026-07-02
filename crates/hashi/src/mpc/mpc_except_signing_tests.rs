@@ -75,6 +75,7 @@ fn receive_dealer_messages(
         sig,
     ))
 }
+
 struct TestSetup {
     pub committee_set: CommitteeSet,
     pub encryption_keys: Vec<PrivateKey<EncryptionGroupElement>>,
@@ -10817,6 +10818,354 @@ fn test_try_sign_avid_nonce_optimistic_rejects_wrong_recipient() {
             .current_avid_round_state
             .contains_key(&(batch_index, dealer_addr)),
         "no round state persisted on failure (§6.2 verify-gated)"
+    );
+}
+
+struct AvidPessimisticFixture {
+    dealer: MpcManager,
+    dealer_addr: Address,
+    builder: batch_avss_avid::AvssMessageBuilder,
+    confirm_cert: DealerCertificate,
+    common: batch_avss_avid::AvssCommonMessage,
+    confirmers: Vec<MpcManager>,
+    optimistic: Vec<(Address, Messages)>,
+}
+
+fn avid_pessimistic_fixture(
+    setup: &TestSetup,
+    dealer_idx: usize,
+    batch_index: u32,
+    confirmer_idxs: &[usize],
+) -> AvidPessimisticFixture {
+    let mut rng = rand::thread_rng();
+    let dealer = setup.create_manager(dealer_idx);
+    let dealer_addr = setup.address(dealer_idx);
+    let (builder, optimistic) = dealer
+        .create_avid_nonce_dealer_messages(batch_index, &mut rng)
+        .unwrap();
+    let mut common = None;
+    let mut sigs = Vec::new();
+    let mut confirmers = Vec::new();
+    for &c in confirmer_idxs {
+        let mut mgr = setup.create_manager(c);
+        let avss = extract_optimistic(&optimistic[c].1).clone();
+        common = Some(avss.common.clone());
+        let sig = mgr
+            .try_sign_avid_nonce_optimistic(dealer_addr, batch_index, &avss)
+            .unwrap();
+        sigs.push(MemberSignature::new(mgr.mpc_config.epoch, mgr.address, sig));
+        confirmers.push(mgr);
+    }
+    let common = common.expect("at least one confirmer");
+    let confirm_target = DealerMessagesHash {
+        dealer_address: dealer_addr,
+        messages_hash: MessageHash::from(common.hash().digest),
+    };
+    let mut agg = BlsSignatureAggregator::new(setup.committee(), confirm_target);
+    for s in sigs {
+        agg.add_signature(s).unwrap();
+    }
+    let confirm_cert = agg.finish().unwrap();
+    AvidPessimisticFixture {
+        dealer,
+        dealer_addr,
+        builder,
+        confirm_cert,
+        common,
+        confirmers,
+        optimistic,
+    }
+}
+
+fn extract_dispersal(msg: &Messages) -> (batch_avss_avid::Dispersal, DealerCertificate) {
+    match msg {
+        Messages::NonceGenerationAvid(AvidNonceMessage {
+            kind:
+                AvidNonceMessageKind::Dispersal {
+                    dispersal,
+                    confirm_cert,
+                },
+            ..
+        }) => (dispersal.clone(), confirm_cert.clone()),
+        _ => panic!("expected an AVID dispersal message"),
+    }
+}
+
+fn extract_echo_for(echoes: &[(Address, Messages)], recipient: Address) -> batch_avss_avid::Echo {
+    echoes
+        .iter()
+        .find_map(|(addr, msg)| {
+            (*addr == recipient).then(|| match msg {
+                Messages::NonceGenerationAvid(AvidNonceMessage {
+                    kind: AvidNonceMessageKind::Echo { echo, .. },
+                    ..
+                }) => echo.clone(),
+                _ => panic!("expected an AVID echo message"),
+            })
+        })
+        .expect("echo addressed to recipient")
+}
+
+#[test]
+fn test_create_avid_nonce_dispersal_messages_yields_one_per_member() {
+    // W=6 -> t=2, f=2; dispersal needs pending weight < f, so exactly one node is pending (node 5).
+    let setup = TestSetup::new(6);
+    let batch_index = 3u32;
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+
+    let messages = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert, batch_index)
+        .unwrap();
+
+    assert_eq!(messages.len(), setup.num_validators());
+    for (j, (addr, msg)) in messages.iter().enumerate() {
+        assert_eq!(*addr, setup.address(j));
+        match msg {
+            Messages::NonceGenerationAvid(AvidNonceMessage {
+                batch_index: b,
+                kind: AvidNonceMessageKind::Dispersal { .. },
+            }) => assert_eq!(*b, batch_index),
+            _ => panic!("expected an AVID dispersal message"),
+        }
+    }
+}
+
+#[test]
+fn test_avid_nonce_echo_and_vote_produces_verifiable_vote_and_echoes() {
+    let setup = TestSetup::new(6);
+    let batch_index = 1u32;
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+
+    // A confirmer (holds its output) processes its dispersal.
+    let voter = &fx.confirmers[1];
+    let (dispersal, confirm_cert) = extract_dispersal(&dispersals[1].1);
+    let (vote, avid_vote, echoes) = voter
+        .avid_nonce_echo_and_vote(
+            fx.dealer_addr,
+            batch_index,
+            fx.common.clone(),
+            dispersal,
+            confirm_cert,
+        )
+        .unwrap();
+
+    // The Vote signs `DealerMessagesHash{dealer, H(AvidVote)}`.
+    let vote_target = DealerMessagesHash {
+        dealer_address: fx.dealer_addr,
+        messages_hash: hash_avid_vote(&avid_vote),
+    };
+    let member_sig = MemberSignature::new(
+        voter.mpc_config.epoch,
+        voter.address,
+        vote.expect("confirmer votes"),
+    );
+    let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target);
+    agg.add_signature(member_sig)
+        .expect("Vote verifies over DealerMessagesHash{dealer, H(AvidVote)}");
+
+    // Echoes go to the pending recipient (node 5).
+    assert!(!echoes.is_empty());
+    for (addr, msg) in &echoes {
+        assert_eq!(*addr, setup.address(5));
+        assert!(matches!(
+            msg,
+            Messages::NonceGenerationAvid(AvidNonceMessage {
+                kind: AvidNonceMessageKind::Echo { .. },
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn test_avid_nonce_echo_and_vote_gates_confirmer_without_output() {
+    let setup = TestSetup::new(6);
+    let batch_index = 2u32;
+    let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+
+    let (dispersal, confirm_cert) = extract_dispersal(&dispersals[1].1);
+    fx.confirmers[1]
+        .dealer_avid_nonce_outputs
+        .remove(&(batch_index, fx.dealer_addr));
+    let (vote, _av, echoes) = fx.confirmers[1]
+        .avid_nonce_echo_and_vote(
+            fx.dealer_addr,
+            batch_index,
+            fx.common.clone(),
+            dispersal,
+            confirm_cert,
+        )
+        .unwrap();
+    assert!(vote.is_none(), "confirmer without its output must not vote");
+    assert!(!echoes.is_empty());
+
+    let mut late = setup.create_manager(5);
+    let avss5 = extract_optimistic(&fx.optimistic[5].1).clone();
+    late.try_sign_avid_nonce_optimistic(fx.dealer_addr, batch_index, &avss5)
+        .unwrap();
+    let (dispersal5, confirm_cert5) = extract_dispersal(&dispersals[5].1);
+    let (vote5, ..) = late
+        .avid_nonce_echo_and_vote(
+            fx.dealer_addr,
+            batch_index,
+            fx.common.clone(),
+            dispersal5,
+            confirm_cert5,
+        )
+        .unwrap();
+    assert!(
+        vote5.is_some(),
+        "a late confirmer verified its round and votes"
+    );
+}
+
+#[test]
+fn test_avid_nonce_echo_and_vote_requires_verified_round() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    // Pending = {5} only: this branch predates the fastcrypto #986 bound fix, so the dispersal
+    // requires pending weight < f.
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+
+    let never_verified = setup.create_manager(5);
+    let (dispersal5, confirm_cert5) = extract_dispersal(&dispersals[5].1);
+    let result = never_verified.avid_nonce_echo_and_vote(
+        fx.dealer_addr,
+        batch_index,
+        fx.common.clone(),
+        dispersal5,
+        confirm_cert5,
+    );
+    assert!(
+        matches!(result, Err(MpcError::NotReady(_))),
+        "an unverified party must not vote: {result:?}"
+    );
+
+    let (_builder2, optimistic2) = fx
+        .dealer
+        .create_avid_nonce_dealer_messages(batch_index, &mut rng)
+        .unwrap();
+    let foreign_common = extract_optimistic(&optimistic2[1].1).common.clone();
+    let (dispersal, confirm_cert) = extract_dispersal(&dispersals[1].1);
+    let result = fx.confirmers[1].avid_nonce_echo_and_vote(
+        fx.dealer_addr,
+        batch_index,
+        foreign_common,
+        dispersal,
+        confirm_cert,
+    );
+    assert!(
+        matches!(result, Err(MpcError::InvalidMessage { .. })),
+        "a foreign v must be rejected: {result:?}"
+    );
+}
+
+#[test]
+fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    // Confirmers {0..4}, decoder = node 5. Decode needs W−2f=2 echoes; the Vote cert needs W−f=4.
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+    let decoder_addr = setup.address(5);
+
+    // Four voters process their dispersal -> Vote sigs (for the W−f cert) and echoes for the decoder.
+    let mut vote_sigs = Vec::new();
+    let mut avid_vote = None;
+    let mut echoes = Vec::new();
+    for j in [1usize, 2, 3, 4] {
+        let voter = &fx.confirmers[j];
+        let (dispersal, confirm_cert) = extract_dispersal(&dispersals[j].1);
+        let (vote, av, es) = voter
+            .avid_nonce_echo_and_vote(
+                fx.dealer_addr,
+                batch_index,
+                fx.common.clone(),
+                dispersal,
+                confirm_cert,
+            )
+            .unwrap();
+        vote_sigs.push(MemberSignature::new(
+            voter.mpc_config.epoch,
+            voter.address,
+            vote.unwrap(),
+        ));
+        avid_vote = Some(av);
+        echoes.push((j as PartyId, extract_echo_for(&es, decoder_addr)));
+    }
+    let avid_vote = avid_vote.unwrap();
+
+    // Form and verify the W−f Vote cert over H(AvidVote).
+    let vote_target = DealerMessagesHash {
+        dealer_address: fx.dealer_addr,
+        messages_hash: hash_avid_vote(&avid_vote),
+    };
+    let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target);
+    for s in vote_sigs {
+        agg.add_signature(s).unwrap();
+    }
+    let vote_cert = AvidCertificate::vote(
+        agg.finish().unwrap(),
+        avid_vote,
+        Arc::new(setup.committee().clone()),
+    )
+    .unwrap();
+    let verified_vote_cert = vote_cert.into_verified().unwrap();
+
+    // The laggard (node 5) verifies each echo, then decodes its share.
+    let mut decoder = setup.create_manager(5);
+    let verified: Vec<_> = echoes
+        .into_iter()
+        .map(|(sender, echo)| {
+            decoder
+                .verify_avid_nonce_echo(
+                    fx.dealer_addr,
+                    batch_index,
+                    sender,
+                    echo,
+                    &verified_vote_cert,
+                )
+                .unwrap()
+        })
+        .collect();
+    let outcome = decoder
+        .decode_avid_nonce_share(
+            fx.dealer_addr,
+            batch_index,
+            fx.common.clone(),
+            &verified,
+            &verified_vote_cert,
+            &mut rng,
+        )
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        batch_avss_avid::DecodeAndDecryptOutcome::Valid(..)
+    ));
+    assert!(
+        decoder
+            .dealer_avid_nonce_outputs
+            .contains_key(&(batch_index, fx.dealer_addr)),
+        "decoded output stored — the laggard can now consume like a confirmer"
     );
 }
 

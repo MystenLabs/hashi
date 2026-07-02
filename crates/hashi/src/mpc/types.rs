@@ -16,6 +16,7 @@ use fastcrypto_tbls::random_oracle::RandomOracle;
 use fastcrypto_tbls::threshold_schnorr::Certificate;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::S;
+use fastcrypto_tbls::threshold_schnorr::VerifiedCertificate;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
@@ -476,7 +477,7 @@ impl CertificateV1 {
     }
 }
 
-fn hash_avid_vote(vote: &batch_avss_avid::AvidVote) -> MessageHash {
+pub(crate) fn hash_avid_vote(vote: &batch_avss_avid::AvidVote) -> MessageHash {
     let bytes = bcs::to_bytes(vote).expect("AvidVote is serializable");
     MessageHash::from(Blake2b256::digest(&bytes).digest)
 }
@@ -488,6 +489,9 @@ pub struct AvidCertificate<P> {
     committee: Arc<Committee>,
     signers: BTreeSet<PartyId>,
 }
+
+pub(crate) type VerifiedAvidVoteCert =
+    VerifiedCertificate<AvidCertificate<batch_avss_avid::AvidVote>>;
 
 impl<P: Clone> Certificate for AvidCertificate<P> {
     type Payload = P;
