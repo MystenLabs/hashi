@@ -1,11 +1,9 @@
 # syntax=docker/dockerfile:1
 
-# Plain (non-enclave) build of hashi-guardian-proxy: the out-of-enclave gRPC
-# front that forwards to the guardian enclave and holds the wid-keyed
-# StandardWithdrawal cache. Mirrors docker/hashi-guardian-k8s/Containerfile.
-# Unlike docker/hashi-guardian/Containerfile (the Nitro enclave build, which
-# emits an EIF), this is a normal runnable OCI image, pushed to ECR for the
-# Fargate proxy stack.
+# Plain (non-enclave) build of hashi-guardian-proxy. Mirrors
+# docker/hashi-guardian-k8s/Containerfile. The sibling
+# docker/hashi-guardian/Containerfile is the Nitro enclave build and produces
+# an EIF, not a runnable OCI image — do not conflate the two.
 
 FROM stagex/pallet-rust@sha256:84621c4c29330c8a969489671d46227a0a43f52cdae243f5b91e95781dbfe5ed AS pallet-rust
 FROM stagex/busybox@sha256:3d128909dbc8e7b6c4b8c3c31f4583f01a307907ea179934bb42c4ef056c7efd AS busybox
