@@ -85,6 +85,19 @@ enum Commands {
         #[clap(long)]
         manual: bool,
 
+        /// Point the localnet at an externally-run guardian (e.g. the dockerized
+        /// replica in docker/hashi-guardian-local) instead of the in-process test
+        /// guardian: publish this URL + `--guardian-btc-pubkey` on-chain and skip
+        /// the in-process guardian. Provision the external guardian out-of-band
+        /// (operator provision + key-provisioner provision) once DKG completes.
+        #[clap(long, requires = "guardian_btc_pubkey")]
+        guardian_url: Option<String>,
+
+        /// The external guardian's x-only BTC master pubkey (hex), as printed by
+        /// `hashi-guardian-init operator ceremony`. Required with --guardian-url.
+        #[clap(long, requires = "guardian_url")]
+        guardian_btc_pubkey: Option<String>,
+
         #[command(flatten)]
         opts: LocalnetOpts,
     },
@@ -240,13 +253,26 @@ async fn main() -> Result<()> {
             sui_rpc_port,
             btc_rpc_port,
             manual,
+            guardian_url,
+            guardian_btc_pubkey,
             opts,
         } => {
+            let external_guardian = match (guardian_url, guardian_btc_pubkey) {
+                (Some(url), Some(pubkey_hex)) => {
+                    let btc_pubkey = pubkey_hex
+                        .trim()
+                        .parse::<hashi_types::bitcoin::BitcoinPubkey>()
+                        .context("--guardian-btc-pubkey must be a 32-byte x-only pubkey (hex)")?;
+                    Some(e2e_tests::ExternalGuardian { url, btc_pubkey })
+                }
+                _ => None,
+            };
             cmd_start(
                 num_validators,
                 sui_rpc_port,
                 btc_rpc_port,
                 manual,
+                external_guardian,
                 &opts.data_dir,
             )
             .await
@@ -279,6 +305,7 @@ async fn cmd_start(
     sui_rpc_port: u16,
     btc_rpc_port: u16,
     manual: bool,
+    external_guardian: Option<e2e_tests::ExternalGuardian>,
     data_dir: &Path,
 ) -> Result<()> {
     // Check for existing running instance
@@ -304,6 +331,12 @@ async fn cmd_start(
         .with_nodes(num_validators)
         .with_sui_rpc_port(sui_rpc_port)
         .with_btc_rpc_port(btc_rpc_port);
+    let external_guardian_url = external_guardian.as_ref().map(|g| g.url.clone());
+    if let Some(guardian) = external_guardian {
+        // Publish this guardian's ceremony pubkey + URL and skip the in-process
+        // guardian; it is provisioned out-of-band once the committee forms.
+        builder = builder.with_external_guardian(guardian);
+    }
     if manual {
         // Bring up infra + node handles but launch no validators and skip the
         // committee-formation wait. The operator registers validators via the
@@ -394,6 +427,18 @@ async fn cmd_start(
     );
     println!();
     print_connection_details(&state);
+
+    if let Some(url) = &external_guardian_url {
+        println!();
+        print_info(&format!(
+            "External guardian {url}: BTC pubkey + URL are published on-chain and the \
+             committee will form via DKG. Provision it out-of-band once DKG completes:"
+        ));
+        println!("      hashi-guardian-init operator provision --config <guardian-init.yaml>");
+        println!(
+            "      hashi-guardian-init key-provisioner provision --config <guardian-init.yaml>  # x threshold"
+        );
+    }
 
     if manual {
         print_manual_bootstrap_guide(data_dir, num_validators);

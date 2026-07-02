@@ -1,0 +1,51 @@
+# Template for the hashi-guardian-init unified config, rendered by
+# scripts/lib.sh (envsubst) into guardian-init.local.yaml. Used by all four
+# ceremony/provision commands. `${...}` are filled from the running localnet +
+# the generated KP roster.
+
+# Ceremony commands hit the ceremony-mode guardian directly; provision commands
+# hit the withdraw-mode guardian directly (operator provision) or the proxy
+# relay (key-provisioner provision, via relay_endpoint). Overridden per-command
+# by the scripts, so this default is the direct-to-guardian endpoint.
+guardian_endpoint: "${GUARDIAN_ENDPOINT}"
+
+# The proxy, which serves the SingleProvisionerInit relay RPC.
+relay_endpoint: "${RELAY_ENDPOINT}"
+
+# The localnet's Bitcoin network.
+bitcoin_network: "regtest"
+
+# This KP's cert — set per key-provisioner invocation; harmless for operator cmds.
+kp_pgp_cert_path: "${KP_PGP_CERT_PATH}"
+
+# MinIO stands in for the S3 audit bucket (object-lock enabled). The path-style
+# + plaintext flip is driven by AWS_ENDPOINT_URL_S3 on the guardian container.
+guardian_s3:
+  bucket: "${AWS_S3_BUCKET}"
+  region: "${AWS_REGION}"
+  access_key: "${AWS_ACCESS_KEY_ID}"
+  secret_key: "${AWS_SECRET_ACCESS_KEY}"
+
+hashi:
+  # The local `hashi-localnet` sui RPC + the ids it published (from state.json).
+  sui_rpc: "${SUI_RPC}"
+  package_id: "${PACKAGE_ID}"
+  hashi_object_id: "${HASHI_OBJECT_ID}"
+
+kp_roster:
+  num_shares: ${NUM_SHARES}
+  threshold: ${THRESHOLD}
+  kp_pgp_cert_paths:
+${KP_CERT_PATHS_YAML}
+  # Dev fidelity: the guardian runs `--features non-enclave-dev` (mock
+  # attestation), so PCR0 is not verified — a dummy build entry satisfies the
+  # config shape. The git_revision check still runs, so it must match the
+  # guardian's built-in revision (GIT_REVISION build arg / `option_env!`).
+  current_build:
+    git_revision: "${GUARDIAN_GIT_REVISION}"
+    pcr0: "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+  prev_builds: []
+
+limiter_config:
+  refill_rate: 1000
+  max_bucket_capacity: 100000000
