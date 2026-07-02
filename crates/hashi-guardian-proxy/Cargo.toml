@@ -1,0 +1,17 @@
+[package]
+name = "hashi-guardian-proxy"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tonic.workspace = true
+tonic-health.workspace = true
+lru.workspace = true
+hashi-types = { path = "../hashi-types" }
+
+[dev-dependencies]
+tokio-stream.workspace = true
