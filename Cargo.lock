@@ -3019,6 +3019,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashi-guardian-proxy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hashi-types",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-health",
+ "tracing",
+]
+
+[[package]]
 name = "hashi-monitor"
 version = "0.1.0"
 dependencies = [
