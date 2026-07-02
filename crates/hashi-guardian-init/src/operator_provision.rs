@@ -115,7 +115,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         phase = "ceremony instance",
         "scraping authoritative ceremony/ log for the secret-sharing instance",
     );
-    let (ceremony_session, scraped_instance, roster) = reader
+    let (ceremony_session, scraped_instance, roster, btc_master_pubkey) = reader
         .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;
@@ -128,6 +128,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         scraped_instance.clone(),
         encrypted_shares,
         &roster,
+        btc_master_pubkey,
         cfg.kp_roster.num_shares,
         cfg.kp_roster.threshold,
     )?;

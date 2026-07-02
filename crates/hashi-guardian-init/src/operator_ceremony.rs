@@ -184,7 +184,6 @@ pub async fn run(cfg: Config) -> Result<()> {
     let response = signed_resp
         .verify(&signing_pub_key)
         .map_err(|e| anyhow!("verify SetupNewKeyResponse signature: {e:?}"))?;
-    let btc_master_pubkey = response.btc_master_pubkey;
     let live = VerifiedCeremonyState::from_response(
         response,
         session_id.clone(),
@@ -257,7 +256,7 @@ pub async fn run(cfg: Config) -> Result<()> {
 
     // Emit the verified pubkey on stdout for the deploy workflow to capture and
     // publish on-chain — printed only after every ceremony check above has passed.
-    let btc_master_pubkey_hex = hex::encode(btc_master_pubkey.serialize());
+    let btc_master_pubkey_hex = hex::encode(live.btc_master_pubkey.serialize());
     info!(
         phase = "summary",
         btc_master_pubkey = %btc_master_pubkey_hex,
