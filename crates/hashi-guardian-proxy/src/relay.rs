@@ -67,8 +67,9 @@ impl Accumulator {
 /// Live backend state the relay needs, read from `GetGuardianInfo`.
 struct BackendStatus {
     session_id: String,
-    /// `None` until the operator has run `operator provision` (no
-    /// `secret_sharing_instance` ⇒ the provisioning threshold is unknown).
+    /// `num_shares`/`threshold` are `Some` together, and only once `operator
+    /// provision` has created the `secret_sharing_instance`.
+    num_shares: Option<usize>,
     threshold: Option<usize>,
     provisioned: bool,
 }
@@ -102,14 +103,15 @@ impl Relay {
         let verified = resp
             .verify_signed_info_without_attestation()
             .map_err(|e| Status::internal(format!("verify backend GuardianInfo: {e:?}")))?;
+        let sharing = verified.info.secret_sharing_instance.as_ref();
+        let num_shares = sharing.map(|i| i.num_shares());
+        let threshold = sharing.map(|i| i.threshold());
+        let provisioned = verified.info.enclave_btc_pubkey.is_some();
         Ok(BackendStatus {
             session_id: verified.session_id,
-            threshold: verified
-                .info
-                .secret_sharing_instance
-                .as_ref()
-                .map(|i| i.threshold()),
-            provisioned: verified.info.enclave_btc_pubkey.is_some(),
+            num_shares,
+            threshold,
+            provisioned,
         })
     }
 }
@@ -134,6 +136,17 @@ fn share_id(share: &proto::GuardianEncryptedShare) -> Option<u32> {
     share.id.as_ref().and_then(|id| id.id)
 }
 
+// Cheap input hygiene — the guardian re-verifies each share. A real KP's id is
+// 1-indexed, so anything outside [1, num_shares] is malformed.
+fn check_share_id(id: u32, num_shares: usize) -> Result<(), Status> {
+    if id == 0 || id as usize > num_shares {
+        return Err(Status::invalid_argument(format!(
+            "share id {id} out of range [1, {num_shares}]"
+        )));
+    }
+    Ok(())
+}
+
 #[tonic::async_trait]
 impl GuardianRelayService for Relay {
     async fn single_provisioner_init(
@@ -146,6 +159,10 @@ impl GuardianRelayService for Relay {
             .ok_or_else(|| Status::invalid_argument("missing encrypted_share"))?;
         let id = share_id(&share)
             .ok_or_else(|| Status::invalid_argument("encrypted_share is missing its share id"))?;
+
+        // Hold the accumulator across the status read + batch submit so a racing
+        // session change can't wipe a half-filled buffer, and only one runs at a time.
+        let mut acc = self.accumulator.lock().await;
 
         let status = self.backend_status().await?;
 
@@ -162,15 +179,14 @@ impl GuardianRelayService for Relay {
                 req.expected_session_id, status.session_id
             )));
         }
-        let threshold = status.threshold.ok_or_else(|| {
-            Status::failed_precondition(
-                "guardian has no secret_sharing_instance yet; run `operator provision` first",
-            )
-        })?;
-
-        // Hold the accumulator across the possible batch submission so at most
-        // one ProvisionerInit is ever in flight.
-        let mut acc = self.accumulator.lock().await;
+        let (num_shares, threshold) =
+            match (status.num_shares, status.threshold) {
+                (Some(n), Some(t)) => (n, t),
+                _ => return Err(Status::failed_precondition(
+                    "guardian has no secret_sharing_instance yet; run `operator provision` first",
+                )),
+            };
+        check_share_id(id, num_shares)?;
         acc.sync_session(&status.session_id);
         if acc.completed {
             return Ok(done());
@@ -285,5 +301,13 @@ mod tests {
         acc.clear_shares();
         assert_eq!(acc.have(), 0);
         assert_eq!(acc.session_id.as_deref(), Some("sess-a"));
+    }
+
+    #[test]
+    fn share_id_bounds() {
+        assert!(check_share_id(1, 3).is_ok());
+        assert!(check_share_id(3, 3).is_ok());
+        assert!(check_share_id(0, 3).is_err());
+        assert!(check_share_id(4, 3).is_err());
     }
 }

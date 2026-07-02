@@ -13,19 +13,25 @@
 //! because a committed wid's inputs/outputs are immutable (only signatures
 //! change), so the response is stable and carries no seq.
 //!
-//! In-memory: after a proxy restart, a wid retried at a bumped seq re-consumes the
-//! enclave limiter — same as the old in-enclave behaviour, so no regression. A
-//! durable backend (e.g. DynamoDB) is a future option this extraction enables.
+//! In-memory and bounded (LRU, `CACHE_CAPACITY` entries): a wid lost to eviction
+//! or a proxy restart re-consumes the enclave limiter on its next retry — same as
+//! the old in-enclave behaviour, so no regression. A durable backend (e.g.
+//! DynamoDB) is a future option this extraction enables.
 
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::proto;
 use hashi_types::proto::guardian_service_server::GuardianService;
-use std::collections::HashMap;
+use lru::LruCache;
+use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use tonic::Request;
 use tonic::Response;
 use tonic::Status;
 use tracing::info;
+
+// One entry per withdrawal would leak forever; 10k far exceeds the rate-limited
+// in-flight working set, so a hot wid always outlives its retry window.
+const CACHE_CAPACITY: usize = 10_000;
 
 struct CacheEntry {
     /// The seq the guardian consumed this wid at. Kept for observability only —
@@ -36,14 +42,21 @@ struct CacheEntry {
 
 pub struct CachingGuardianGrpc<S> {
     inner: S,
-    cache: Mutex<HashMap<WithdrawalID, CacheEntry>>,
+    cache: Mutex<LruCache<WithdrawalID, CacheEntry>>,
 }
 
 impl<S> CachingGuardianGrpc<S> {
     pub fn new(inner: S) -> Self {
+        Self::with_capacity(
+            inner,
+            NonZeroUsize::new(CACHE_CAPACITY).expect("CACHE_CAPACITY > 0"),
+        )
+    }
+
+    fn with_capacity(inner: S, capacity: NonZeroUsize) -> Self {
         Self {
             inner,
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(LruCache::new(capacity)),
         }
     }
 
@@ -54,9 +67,8 @@ impl<S> CachingGuardianGrpc<S> {
         &self,
         wid: &WithdrawalID,
     ) -> Option<(u64, proto::SignedStandardWithdrawalResponse)> {
-        self.cache
-            .lock()
-            .expect("cache mutex poisoned")
+        let mut cache = self.cache.lock().expect("cache mutex poisoned");
+        cache
             .get(wid)
             .map(|entry| (entry.consumed_seq, entry.response.clone()))
     }
@@ -67,7 +79,7 @@ impl<S> CachingGuardianGrpc<S> {
         consumed_seq: u64,
         response: proto::SignedStandardWithdrawalResponse,
     ) {
-        self.cache.lock().expect("cache mutex poisoned").insert(
+        self.cache.lock().expect("cache mutex poisoned").put(
             wid,
             CacheEntry {
                 consumed_seq,
@@ -393,5 +405,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count.load(Ordering::SeqCst), 2, "both retries should hit");
+    }
+
+    #[tokio::test]
+    async fn evicts_lru_entry_when_over_capacity() {
+        let (stub, count) = StubGuardian::ok();
+        let cache = CachingGuardianGrpc::with_capacity(stub, NonZeroUsize::new(2).unwrap());
+
+        // Three distinct wids into a capacity-2 cache evicts the first (LRU).
+        for wid in [[0xa1; 32], [0xb2; 32], [0xc3; 32]] {
+            cache
+                .standard_withdrawal(mock_request(wid, 0))
+                .await
+                .unwrap();
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+
+        // The evicted wid misses and re-forwards; a still-cached wid keeps hitting.
+        cache
+            .standard_withdrawal(mock_request([0xa1; 32], 0))
+            .await
+            .unwrap();
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            4,
+            "evicted wid must re-forward"
+        );
+        cache
+            .standard_withdrawal(mock_request([0xc3; 32], 0))
+            .await
+            .unwrap();
+        assert_eq!(count.load(Ordering::SeqCst), 4, "cached wid must still hit");
     }
 }
