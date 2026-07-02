@@ -25,6 +25,12 @@ tonic.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
 
+[features]
+# Verify against a non-enclave-dev guardian (mock NSM attestation) — used by the
+# local replica + dev deploys. Propagates the feature to hashi-types (where the
+# attestation verify is a no-op under it) and hashi-guardian (its S3 reader).
+non-enclave-dev = ["hashi-types/non-enclave-dev", "hashi-guardian/non-enclave-dev"]
+
 [dev-dependencies]
 fastcrypto.workspace = true
 hashi-guardian = { path = "../hashi-guardian", features = ["test-utils"] }

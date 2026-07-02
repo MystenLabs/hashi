@@ -6,3 +6,8 @@ packages
 out
 **/out
 **/node_modules
+# The image bakes only the built binaries + proto; the replica's compose/scripts/
+# Makefile are mounted or used by `docker compose`, not baked. Excluding them keeps
+# replica-file edits from busting the (expensive) Rust build-context cache.
+docker
+.claude

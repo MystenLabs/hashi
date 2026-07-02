@@ -32,9 +32,12 @@ services:
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
+    # Host-published on 19000/19001 to avoid colliding with the native
+    # hashi-localnet sui fullnode (default :9000). Containers still reach MinIO at
+    # minio:9000 internally.
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "19000:9000"
+      - "19001:9001"
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
@@ -159,6 +162,10 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       <<: *s3-env
+      # The init container reaches MinIO directly (it is outside the guardian's
+      # vsock/socat S3 forwarder chain + /etc/hosts redirect), so point its S3
+      # client straight at MinIO rather than the forwarder-chain hostname.
+      AWS_ENDPOINT_URL_S3: http://minio:9000
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       NUM_SHARES: ${NUM_SHARES:-3}

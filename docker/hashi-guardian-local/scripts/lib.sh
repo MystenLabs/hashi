@@ -31,6 +31,7 @@ gen_kp_keys() {
   rm -rf "${GNUPGHOME}" "${CERTS_DIR}"
   mkdir -p "${GNUPGHOME}" "${CERTS_DIR}"
   chmod 700 "${GNUPGHOME}"
+  local i fpr
   for i in $(seq 1 "${NUM_SHARES}"); do
     gpg --batch --pinentry-mode loopback --passphrase '' --quick-generate-key \
       "hashi-local-kp${i} <kp${i}@localhost>" default default never >/dev/null 2>&1
@@ -53,7 +54,9 @@ render_config() {
   : "${HASHI_OBJECT_ID:?HASHI_OBJECT_ID must be set (from hashi-localnet state.json)}"
 
   # Build the YAML list of cert paths (2-space indent under kp_pgp_cert_paths).
-  local kp_cert_paths_yaml=""
+  # `i` must be local — callers (e.g. provision.sh's KP loop) use `i` too, and
+  # bash's dynamic scoping would otherwise let this loop clobber theirs.
+  local kp_cert_paths_yaml="" i
   for i in $(seq 1 "${NUM_SHARES}"); do
     kp_cert_paths_yaml="${kp_cert_paths_yaml}    - ${CERTS_DIR}/kp${i}.asc"$'\n'
   done
