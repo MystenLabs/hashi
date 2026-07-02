@@ -110,11 +110,10 @@ impl TestNetworks {
     }
 }
 
-/// An externally-run guardian (e.g. the dockerized Nitro replica) to publish and
-/// point the nodes at, instead of the in-process test [`guardian_harness::GuardianHarness`].
-/// Its BTC key comes from a completed `operator ceremony`; provisioner-init runs
-/// out-of-band (`operator provision` + `key-provisioner provision`) once the
-/// committee forms, so the harness does NOT finalize it.
+/// An externally-run guardian (the dockerized Nitro replica) to publish + point
+/// the nodes at, instead of the in-process [`guardian_harness::GuardianHarness`].
+/// Provisioned out-of-band (`operator`/`key-provisioner provision`) once the
+/// committee forms, so `build()` does not finalize it.
 #[derive(Clone)]
 pub struct ExternalGuardian {
     /// Endpoint the hashi nodes reach the guardian at (typically its proxy).
@@ -130,10 +129,8 @@ pub struct TestNetworksBuilder {
     /// On-chain config overrides applied after DKG completes, before `build()`
     /// returns. Each entry is run through the full propose/vote/execute flow.
     onchain_config_overrides: Vec<(String, hashi_types::move_types::ConfigValue)>,
-    /// When set, publish + point the nodes at this externally-run guardian and
-    /// skip the in-process harness (and its finalize). Used by the local
-    /// dockerized-guardian replica to run the real ceremony/provision flow
-    /// against this localnet.
+    /// When set, publish + point nodes at this external guardian instead of the
+    /// in-process harness (and skip its finalize). See [`ExternalGuardian`].
     external_guardian: Option<ExternalGuardian>,
 }
 
@@ -271,11 +268,10 @@ impl TestNetworksBuilder {
             .await?;
         Self::cp_packages(dir.as_ref())?;
 
-        // Guardian must be reachable + have its BTC key generated BEFORE publish,
-        // so the on-chain config pins the right BTC pubkey. With an external
-        // guardian (the dockerized replica) we take its ceremony pubkey + URL and
-        // leave provisioner-init to the out-of-band CLI flow; otherwise we start
-        // the in-process harness and finalize it below once DKG output exists.
+        // The guardian's BTC key must exist BEFORE publish so the on-chain config
+        // pins the right pubkey. External guardian: take its ceremony pubkey + URL
+        // (provisioned out-of-band). Otherwise: start the in-process harness and
+        // finalize it below once DKG output exists.
         let (guardian_config, guardian_harness) = match &self.external_guardian {
             Some(external) => {
                 let guardian_config = hashi::publish::GuardianConfig {

@@ -85,11 +85,9 @@ enum Commands {
         #[clap(long)]
         manual: bool,
 
-        /// Point the localnet at an externally-run guardian (e.g. the dockerized
-        /// replica in docker/hashi-guardian-local) instead of the in-process test
-        /// guardian: publish this URL + `--guardian-btc-pubkey` on-chain and skip
-        /// the in-process guardian. Provision the external guardian out-of-band
-        /// (operator provision + key-provisioner provision) once DKG completes.
+        /// Point the localnet at an externally-run guardian (the dockerized replica)
+        /// instead of the in-process one: publishes this URL + `--guardian-btc-pubkey`
+        /// on-chain. Provision it out-of-band once DKG completes.
         #[clap(long, requires = "guardian_btc_pubkey")]
         guardian_url: Option<String>,
 

@@ -7,14 +7,29 @@ replaced by a TCP hop between containers; the on-chain substrate comes from the
 native `hashi-localnet` harness (local `sui` + `bitcoind` regtest + a real hashi
 committee).
 
-```
-  node ──► proxy:3000 ──► host:3000 ──► enclave:3000 (withdraw guardian)
-                                            │
-   guardian ──► 127.0.0.6x:443 ──► host:810x ──► minio:9000   (S3 audit log)
+```mermaid
+flowchart LR
+    node[hashi node]
+    cli["operator / KP CLI"]
 
-   provision/ceremony CLI ──► ceremony:3000 (ceremony guardian, direct)
-                          ──► proxy:3000 (SingleProvisionerInit relay)
-                          ──► host.docker.internal:9000 (native hashi-localnet sui)
+    subgraph docker["Docker: the Nitro replica"]
+        proxy["proxy :3000 (cache + relay)"]
+        host[host bridge]
+        enclave[withdraw guardian]
+        ceremony[ceremony guardian]
+        minio[("MinIO :9000<br/>S3 audit log")]
+        proxy --> host --> enclave
+        enclave -.->|"S3 :443/:810x"| host
+        ceremony -.->|S3| host
+        host --> minio
+    end
+
+    localnet["hashi-localnet, native<br/>sui + bitcoind + committee"]
+
+    node -->|withdrawal| proxy
+    cli -->|share via relay| proxy
+    cli -->|ceremony, direct| ceremony
+    cli -->|on-chain state| localnet
 ```
 
 The pieces map 1:1 to production:
