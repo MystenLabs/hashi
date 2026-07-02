@@ -434,6 +434,25 @@ mod tests {
     }
 
     #[test]
+    fn verified_ceremony_state_equality_covers_btc_pubkey() {
+        // operator_ceremony gates publishing on `logged == live` (S3 log vs
+        // response), so the pubkey is only guarded if it's part of the equality.
+        let other_pubkey = hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey(
+            &k256::SecretKey::from_slice(&[7u8; 32]).unwrap(),
+        );
+        assert_ne!(dummy_btc_pubkey(), other_pubkey);
+
+        let state = |pubkey| {
+            let mut resp = response(&[1, 2, 3], &[1, 2, 3]);
+            resp.btc_master_pubkey = pubkey;
+            VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2).unwrap()
+        };
+
+        assert_eq!(state(dummy_btc_pubkey()), state(dummy_btc_pubkey()));
+        assert_ne!(state(dummy_btc_pubkey()), state(other_pubkey));
+    }
+
+    #[test]
     fn verified_ceremony_state_rejects_wrong_share_count() {
         let resp = response(&[1, 2], &[1, 2, 3]);
         let err =
