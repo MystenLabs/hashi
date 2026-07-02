@@ -27,9 +27,10 @@
 //! 8. The decrypted share is HPKE-encrypted to the new guardian's
 //!    `encryption_pubkey` (from its `GuardianInfo`), with `state_hash` as AAD,
 //!    producing a `GuardianEncryptedShare` ready for `provisioner_init`.
-//! 9. The share is submitted to the configured relay endpoint, which runs the
-//!    same pre-checks before forwarding it. Submission itself awaits the
-//!    relay's `single_provisioner_init` RPC (TODO).
+//! 9. The share is submitted to the configured relay endpoint via
+//!    `SingleProvisionerInit`, after the relay-side pre-checks pass. The relay
+//!    accumulates T-of-N shares and calls the guardian's batch
+//!    `provisioner_init` once it has enough.
 
 use anyhow::Context;
 use hashi_guardian::s3_reader::BuildPolicy;
@@ -42,6 +43,7 @@ use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::WithdrawModeState;
+use hashi_types::guardian::proto_conversions::guardian_encrypted_share_to_pb;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::load_certs;
 use hashi_types::proto as pb;
@@ -486,12 +488,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
 /// Submit this KP's share to the relay endpoint. The relay fronts the
 /// guardian's `GetGuardianInfo`, so we verify the relay's reported session +
-/// `GuardianInfo` against the values we already pinned from S3 before any
-/// further step.
-///
-/// TODO: once the relay exposes `single_provisioner_init`, send `encrypted_share`
-/// to it here. The relay collects T-of-N shares before calling the guardian's
-/// batch `provisioner_init`.
+/// `GuardianInfo` against the values we already pinned from S3 before submitting
+/// the share via `SingleProvisionerInit`. The relay collects T-of-N shares and
+/// calls the guardian's batch `provisioner_init` once it has enough.
 async fn submit_provisioner_init_to_relay(
     endpoint: &str,
     expected_session_id: &str,
@@ -524,13 +523,43 @@ async fn submit_provisioner_init_to_relay(
     )
     .await
     .with_context(|| "relay endpoint pre-check failed")?;
+    let share_id = encrypted_share.id.get();
     info!(
         phase = "relay submit",
         endpoint = %endpoint,
-        share_id = encrypted_share.id.get(),
-        "relay prechecks passed; share submission awaits single_provisioner_init",
+        share_id,
+        "relay prechecks passed; submitting share via SingleProvisionerInit",
     );
-    todo!("submit encrypted_share via single_provisioner_init once the relay exposes it");
+
+    let mut relay_client = pb::guardian_relay_service_client::GuardianRelayServiceClient::connect(
+        endpoint.to_string(),
+    )
+    .await
+    .with_context(|| format!("failed to connect to relay endpoint {endpoint}"))?;
+    let resp = relay_client
+        .single_provisioner_init(pb::SingleProvisionerInitRequest {
+            encrypted_share: Some(guardian_encrypted_share_to_pb(encrypted_share)),
+            expected_session_id: expected_session_id.to_string(),
+        })
+        .await
+        .with_context(|| "SingleProvisionerInit RPC failed")?
+        .into_inner();
+
+    if resp.completed {
+        info!(
+            phase = "relay submit",
+            share_id, "share accepted; the relay has provisioned the guardian (threshold reached)",
+        );
+    } else {
+        info!(
+            phase = "relay submit",
+            share_id,
+            have = resp.have,
+            need = resp.need,
+            "share accepted; the relay is still collecting shares before it provisions the guardian",
+        );
+    }
+    Ok(())
 }
 
 async fn prechecks(
