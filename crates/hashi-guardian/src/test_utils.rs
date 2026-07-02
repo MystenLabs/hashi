@@ -188,10 +188,11 @@ impl OperatorInitTestArgs {
     /// Rebuild `config` with a different secret-sharing instance.
     pub fn with_commitments(mut self, commitments: ShareCommitments) -> Self {
         let instance = SecretSharingInstance::new(commitments, TEST_N, TEST_T, 0).unwrap();
-        let (state, _, network) = self.config.into_parts();
+        let (state, _, network, fingerprints) = self.config.into_parts();
         let (committee, lc, ls, master) = state.into_parts();
         self.config =
-            WithdrawModeConfig::new(committee, lc, ls, master, instance, network).unwrap();
+            WithdrawModeConfig::new(committee, lc, ls, master, instance, network, fingerprints)
+                .unwrap();
         self
     }
 

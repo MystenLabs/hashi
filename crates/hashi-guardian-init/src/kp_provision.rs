@@ -44,8 +44,10 @@ use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::WithdrawModeState;
 use hashi_types::guardian::proto_conversions::guardian_encrypted_share_to_pb;
+use hashi_types::guardian::relay_submission_signed_bytes;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::load_certs;
+use hashi_types::pgp::sign_detached_via_gpg;
 use hashi_types::proto as pb;
 use hpke::Deserializable;
 use rand::thread_rng;
@@ -481,6 +483,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         &session_id,
         guardian_info,
         encrypted_share,
+        kp_cert.armored(),
+        &want_fp,
         allowlist.current_build(),
     )
     .await?;
@@ -492,11 +496,14 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 /// `GuardianInfo` against the values we already pinned from S3 before submitting
 /// the share via `SingleProvisionerInit`. The relay collects T-of-N shares and
 /// calls the guardian's batch `provisioner_init` once it has enough.
+#[allow(clippy::too_many_arguments)]
 async fn submit_provisioner_init_to_relay(
     endpoint: &str,
     expected_session_id: &str,
     expected_guardian_info: GuardianInfo,
     encrypted_share: GuardianEncryptedShare,
+    signer_cert_armored: &str,
+    signer_fingerprint: &str,
     current_build: &BuildPcrs,
 ) -> anyhow::Result<()> {
     info!(
@@ -537,10 +544,21 @@ async fn submit_provisioner_init_to_relay(
     )
     .await
     .with_context(|| format!("failed to connect to relay endpoint {endpoint}"))?;
+
+    // Authenticate this submission with a detached signature over the exact
+    // (session, share) bytes, produced by this KP's offline key (yubikey). The
+    // relay checks it against the guardian-attested roster before buffering the
+    // share, so a non-KP can't enqueue one and fail the batch.
+    let signed_bytes = relay_submission_signed_bytes(expected_session_id, &encrypted_share);
+    let kp_signature = sign_detached_via_gpg(&signed_bytes, signer_fingerprint, None)
+        .context("sign the relay submission with the KP key")?;
+
     let resp = relay_client
         .single_provisioner_init(pb::SingleProvisionerInitRequest {
             encrypted_share: Some(guardian_encrypted_share_to_pb(encrypted_share)),
             expected_session_id: expected_session_id.to_string(),
+            signer_cert: signer_cert_armored.to_string(),
+            kp_signature,
         })
         .await
         .with_context(|| "SingleProvisionerInit RPC failed")?

@@ -26,13 +26,15 @@ pub(crate) struct WithdrawInstall {
     hashi_btc_master_pubkey: HashiMasterG,
     committee: HashiCommittee,
     rate_limiter: RateLimiter,
+    authorized_kp_fingerprints: Vec<KPFingerprint>,
 }
 
 impl WithdrawInstall {
     /// Decompose a `WithdrawModeConfig` into the install bundle, constructing the
     /// rate limiter (the only fallible step). Shared by `operator_init` and tests.
     pub(crate) fn from_config(config: WithdrawModeConfig) -> GuardianResult<Self> {
-        let (withdraw_state, secret_sharing_instance, network) = config.into_parts();
+        let (withdraw_state, secret_sharing_instance, network, authorized_kp_fingerprints) =
+            config.into_parts();
         let state_hash = withdraw_state.digest();
         let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) =
             withdraw_state.into_parts();
@@ -44,6 +46,7 @@ impl WithdrawInstall {
             hashi_btc_master_pubkey,
             committee,
             rate_limiter,
+            authorized_kp_fingerprints,
         })
     }
 
@@ -70,6 +73,14 @@ impl WithdrawInstall {
         enclave
             .set_state_hash(self.state_hash)
             .expect("Unable to set state hash");
+
+        info!(
+            "Storing {} authorized KP fingerprint(s).",
+            self.authorized_kp_fingerprints.len()
+        );
+        enclave
+            .set_authorized_kp_fingerprints(self.authorized_kp_fingerprints)
+            .expect("Unable to set authorized KP fingerprints");
 
         info!("Setting hashi BTC master pubkey.");
         enclave

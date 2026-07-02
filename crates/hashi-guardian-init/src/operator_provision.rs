@@ -210,6 +210,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     };
     let committee_epoch = committee.epoch();
 
+    // The ceremony roster (fingerprints, share-id ordered) is the set of KPs the
+    // enclave publishes as authorized to submit provisioning shares to the relay.
     let withdraw_config = WithdrawModeConfig::new(
         committee,
         cfg.limiter_config,
@@ -217,6 +219,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         master_g,
         scraped_instance.clone(),
         cfg.bitcoin_network,
+        roster.clone(),
     )?;
     let expected_state = withdraw_config.state().clone();
     let state_hash = expected_state.digest();

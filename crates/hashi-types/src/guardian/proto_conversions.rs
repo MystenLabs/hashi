@@ -80,7 +80,7 @@ fn pb_to_kp_encrypted_share(pb: pb::KpEncryptedShare) -> GuardianResult<KPEncryp
     })
 }
 
-fn pb_to_guardian_encrypted_share(
+pub fn pb_to_guardian_encrypted_share(
     pb: pb::GuardianEncryptedShare,
 ) -> GuardianResult<GuardianEncryptedShare> {
     Ok(GuardianEncryptedShare {
@@ -305,6 +305,7 @@ impl TryFrom<pb::WithdrawModeConfig> for WithdrawModeConfig {
             hashi_btc_master_pubkey,
             secret_sharing_instance,
             network,
+            state_pb.authorized_kp_fingerprints,
         )
     }
 }
@@ -476,7 +477,7 @@ pub fn provisioner_init_request_to_pb(
 
 // Throws an error if network is invalid.
 pub fn withdraw_mode_config_to_pb(s: WithdrawModeConfig) -> GuardianResult<pb::WithdrawModeConfig> {
-    let (state, instance, network) = s.into_parts();
+    let (state, instance, network, authorized_kp_fingerprints) = s.into_parts();
     let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) = state.into_parts();
 
     Ok(pb::WithdrawModeConfig {
@@ -486,6 +487,7 @@ pub fn withdraw_mode_config_to_pb(s: WithdrawModeConfig) -> GuardianResult<pb::W
         limiter_state: Some(limiter_state_to_pb(limiter_state)),
         secret_sharing_instance: Some(secret_sharing_instance_to_pb(&instance)),
         network: Some(network_to_pb(network)?),
+        authorized_kp_fingerprints,
     })
 }
 
@@ -662,6 +664,7 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
         limiter_config,
         current_committee_epoch: data.current_committee_epoch,
         mpc_master_g,
+        authorized_kp_fingerprints: data.authorized_kp_fingerprints,
     })
 }
 
@@ -684,6 +687,7 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
         mpc_master_g: info
             .mpc_master_g
             .map(|g| bcs::to_bytes(&g).expect("serialize MPC master G").into()),
+        authorized_kp_fingerprints: info.authorized_kp_fingerprints,
     }
 }
 
@@ -1192,11 +1196,13 @@ mod tests {
             limiter_config: None,
             current_committee_epoch: None,
             mpc_master_g: None,
+            authorized_kp_fingerprints: vec!["FP-A".to_string(), "FP-B".to_string()],
         };
         let pb = guardian_info_data_to_pb(info.clone());
         let back = pb_to_guardian_info_data(pb).unwrap();
         assert_eq!(info, back);
         assert_eq!(back.enclave_btc_pubkey, Some(pk));
+        assert_eq!(back.authorized_kp_fingerprints, vec!["FP-A", "FP-B"]);
     }
 
     #[test]

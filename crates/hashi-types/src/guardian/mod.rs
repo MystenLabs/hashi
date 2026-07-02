@@ -144,6 +144,10 @@ pub struct GuardianInfo {
     /// MPC committee verifying key `G` (the derivation master, NOT the guardian's
     /// own BTC key). Set after operator_init; lets KPs verify it directly.
     pub mpc_master_g: Option<HashiMasterG>,
+    /// Fingerprints of the KPs authorized to submit shares to the relay. Empty
+    /// before operator_init. Read directly (not via `into_parts`) by the
+    /// out-of-enclave relay to reject submissions from non-KPs.
+    pub authorized_kp_fingerprints: Vec<KPFingerprint>,
     // TODO: report the full committee too, so its membership is directly
     // verifiable (today only the `state_hash` digest covers it); it's large, though.
 }
@@ -163,6 +167,9 @@ pub struct WithdrawModeConfig {
     secret_sharing_instance: SecretSharingInstance,
     /// BTC network.
     network: Network,
+    /// Fingerprints of the KPs authorized to provision this key. Surfaced via
+    /// GuardianInfo for the relay's submitter check; not part of the digest.
+    authorized_kp_fingerprints: Vec<KPFingerprint>,
 }
 
 /// The withdraw-mode state KPs attest to. Its `digest()` is the `state_hash`:
@@ -456,6 +463,7 @@ impl WithdrawModeState {
 }
 
 impl WithdrawModeConfig {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         committee: HashiCommittee,
         limiter_config: LimiterConfig,
@@ -463,6 +471,7 @@ impl WithdrawModeConfig {
         hashi_btc_master_pubkey: HashiMasterG,
         secret_sharing_instance: SecretSharingInstance,
         network: Network,
+        authorized_kp_fingerprints: Vec<KPFingerprint>,
     ) -> GuardianResult<Self> {
         let state = WithdrawModeState::new(
             committee,
@@ -474,11 +483,24 @@ impl WithdrawModeConfig {
             state,
             secret_sharing_instance,
             network,
+            authorized_kp_fingerprints,
         })
     }
 
-    pub fn into_parts(self) -> (WithdrawModeState, SecretSharingInstance, Network) {
-        (self.state, self.secret_sharing_instance, self.network)
+    pub fn into_parts(
+        self,
+    ) -> (
+        WithdrawModeState,
+        SecretSharingInstance,
+        Network,
+        Vec<KPFingerprint>,
+    ) {
+        (
+            self.state,
+            self.secret_sharing_instance,
+            self.network,
+            self.authorized_kp_fingerprints,
+        )
     }
 
     pub fn state(&self) -> &WithdrawModeState {
@@ -492,6 +514,34 @@ impl WithdrawModeConfig {
     pub fn network(&self) -> Network {
         self.network
     }
+
+    pub fn authorized_kp_fingerprints(&self) -> &[KPFingerprint] {
+        &self.authorized_kp_fingerprints
+    }
+}
+
+/// Domain tag mixed into the bytes a KP signs to authenticate a relay
+/// submission. Bump the version if the signed layout ever changes.
+const RELAY_SUBMISSION_DOMAIN: &str = "hashi-kp-relay-submission-v1";
+
+#[derive(Serialize)]
+struct RelaySubmissionAuthPayload<'a> {
+    domain: &'static str,
+    session_id: &'a str,
+    share: &'a GuardianEncryptedShare,
+}
+
+/// The exact bytes a key provisioner detached-signs (and the relay verifies) to
+/// prove a relay submission came from a rostered KP. Binds the guardian session
+/// and the encrypted share, so a captured signature can't be replayed against a
+/// different share or session.
+pub fn relay_submission_signed_bytes(session_id: &str, share: &GuardianEncryptedShare) -> Vec<u8> {
+    bcs::to_bytes(&RelaySubmissionAuthPayload {
+        domain: RELAY_SUBMISSION_DOMAIN,
+        session_id,
+        share,
+    })
+    .expect("BCS serialization of a relay submission payload is infallible")
 }
 
 impl ProvisionerInitRequest {

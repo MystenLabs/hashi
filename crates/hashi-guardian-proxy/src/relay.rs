@@ -15,7 +15,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use hashi_types::guardian::proto_conversions::pb_to_guardian_encrypted_share;
+use hashi_types::guardian::relay_submission_signed_bytes;
 use hashi_types::guardian::GetGuardianInfoResponse;
+use hashi_types::pgp::verify_detached_signature;
+use hashi_types::pgp::PgpPublicCert;
 use hashi_types::proto;
 use hashi_types::proto::guardian_relay_service_server::GuardianRelayService;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
@@ -72,6 +76,9 @@ struct BackendStatus {
     num_shares: Option<usize>,
     threshold: Option<usize>,
     provisioned: bool,
+    /// Fingerprints of the KPs the enclave authorized to submit shares. The relay
+    /// only accepts a submission signed by a cert in this roster.
+    authorized_kp_fingerprints: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -112,8 +119,43 @@ impl Relay {
             num_shares,
             threshold,
             provisioned,
+            authorized_kp_fingerprints: verified.info.authorized_kp_fingerprints,
         })
     }
+}
+
+/// Authenticate a relay submission: the signer must present a cert whose
+/// fingerprint is in the guardian-attested roster and a detached signature over
+/// the exact (session, share) bytes. This is a DoS guard — only a rostered KP
+/// can enqueue a share, so a stranger can't poison the batch; the enclave still
+/// verifies every share against the commitments regardless. Ordered cheap-first:
+/// a signature (expensive) is only checked once the fingerprint is in the roster.
+fn verify_kp_submission(
+    expected_session_id: &str,
+    signer_cert: &str,
+    kp_signature: &str,
+    share: &proto::GuardianEncryptedShare,
+    authorized_kp_fingerprints: &[String],
+) -> Result<(), Status> {
+    if signer_cert.is_empty() || kp_signature.is_empty() {
+        return Err(Status::unauthenticated(
+            "submission is missing signer_cert or kp_signature",
+        ));
+    }
+    let cert = PgpPublicCert::new(signer_cert.to_string())
+        .map_err(|e| Status::unauthenticated(format!("invalid signer_cert: {e}")))?;
+    let fingerprint = cert.fingerprint();
+    if !authorized_kp_fingerprints.iter().any(|f| f == &fingerprint) {
+        return Err(Status::permission_denied(format!(
+            "signer {fingerprint} is not in the guardian's authorized KP roster"
+        )));
+    }
+    let domain_share = pb_to_guardian_encrypted_share(share.clone())
+        .map_err(|e| Status::invalid_argument(format!("malformed encrypted_share: {e:?}")))?;
+    let signed_bytes = relay_submission_signed_bytes(expected_session_id, &domain_share);
+    verify_detached_signature(&signed_bytes, kp_signature, &cert)
+        .map_err(|e| Status::unauthenticated(format!("KP signature verification failed: {e}")))?;
+    Ok(())
 }
 
 fn done() -> Response<proto::SingleProvisionerInitResponse> {
@@ -187,6 +229,18 @@ impl GuardianRelayService for Relay {
                 )),
             };
         check_share_id(id, num_shares)?;
+
+        // Authenticate the submitter before buffering anything: only a rostered
+        // KP (proven by a signature over this exact session + share) may enqueue
+        // a share, so a stranger can't slip in a bad one and fail the batch.
+        verify_kp_submission(
+            &req.expected_session_id,
+            &req.signer_cert,
+            &req.kp_signature,
+            &share,
+            &status.authorized_kp_fingerprints,
+        )?;
+
         acc.sync_session(&status.session_id);
         if acc.completed {
             return Ok(done());
@@ -251,12 +305,66 @@ impl GuardianRelayService for Relay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hashi_types::guardian::proto_conversions::guardian_encrypted_share_to_pb;
+    use hashi_types::guardian::Ciphertext;
+    use hashi_types::guardian::GuardianEncryptedShare;
+    use hashi_types::guardian::ShareID;
+    use hashi_types::pgp::test_utils::mock_pgp_keypair;
+    use hashi_types::pgp::test_utils::sign_detached_in_process;
 
     fn share(id: u32) -> proto::GuardianEncryptedShare {
         proto::GuardianEncryptedShare {
             id: Some(proto::GuardianShareId { id: Some(id) }),
             ciphertext: None,
         }
+    }
+
+    /// A domain share with a dummy ciphertext, and its proto form.
+    fn signed_share(id: u16) -> (GuardianEncryptedShare, proto::GuardianEncryptedShare) {
+        let domain = GuardianEncryptedShare {
+            id: ShareID::new(id).unwrap(),
+            ciphertext: Ciphertext {
+                encapsulated_key: vec![1, 2, 3],
+                aes_ciphertext: vec![4, 5, 6],
+            },
+        };
+        let pb = guardian_encrypted_share_to_pb(domain.clone());
+        (domain, pb)
+    }
+
+    #[test]
+    fn verify_kp_submission_gates_on_roster_and_signature() {
+        let (cert_armored, secret_armored) = mock_pgp_keypair();
+        let cert = PgpPublicCert::new(cert_armored.clone()).unwrap();
+        let roster = vec![cert.fingerprint()];
+        let session = "sess-a";
+
+        let (domain_share, pb_share) = signed_share(1);
+        let signed_bytes = relay_submission_signed_bytes(session, &domain_share);
+        let good_sig = sign_detached_in_process(&secret_armored, &signed_bytes);
+
+        // A rostered signer with a valid signature over the exact submission passes.
+        verify_kp_submission(session, &cert_armored, &good_sig, &pb_share, &roster).unwrap();
+
+        // A signer not in the roster is rejected before any signature work.
+        assert!(
+            verify_kp_submission(session, &cert_armored, &good_sig, &pb_share, &[]).is_err(),
+            "non-rostered signer must be rejected"
+        );
+
+        // Missing signature is rejected.
+        assert!(
+            verify_kp_submission(session, &cert_armored, "", &pb_share, &roster).is_err(),
+            "missing signature must be rejected"
+        );
+
+        // A signature made for a different session doesn't verify against this one.
+        let other_bytes = relay_submission_signed_bytes("other-session", &domain_share);
+        let stale_sig = sign_detached_in_process(&secret_armored, &other_bytes);
+        assert!(
+            verify_kp_submission(session, &cert_armored, &stale_sig, &pb_share, &roster).is_err(),
+            "signature bound to another session must be rejected"
+        );
     }
 
     #[test]
