@@ -25,14 +25,14 @@ up: ## Build + start MinIO, host, withdraw enclave, proxy (no chain needed)
 
 ceremony: ## Generate KP keys + run the genesis ceremony (captures the BTC pubkey)
 	$(COMPOSE) --profile ceremony up -d --build ceremony
-	$(COMPOSE) --profile init run --rm init /scripts/ceremony.sh
+	$(COMPOSE) --profile init run --rm --build init /scripts/ceremony.sh
 	$(COMPOSE) --profile ceremony stop ceremony
 
 pubkey: ## Print the ceremony BTC master pubkey (hex)
-	@$(COMPOSE) --profile init run --rm -T init cat /work/guardian-btc-pubkey.hex; echo
+	@$(COMPOSE) --profile init run --rm -T --entrypoint cat init /work/guardian-btc-pubkey.hex; echo
 
 localnet-cmd: ## Print the `hashi-localnet start` command wired to this guardian
-	@pubkey=$$($(COMPOSE) --profile init run --rm -T init cat /work/guardian-btc-pubkey.hex 2>/dev/null); \
+	@pubkey=$$($(COMPOSE) --profile init run --rm -T --entrypoint cat init /work/guardian-btc-pubkey.hex 2>/dev/null); \
 	if [ -z "$$pubkey" ]; then echo "Run 'make ceremony' first."; exit 1; fi; \
 	echo "Run this NATIVELY (needs 'sui' + 'bitcoind' on PATH; publishes the guardian's"; \
 	echo "ceremony pubkey + forms the committee; stays running):"; \
@@ -47,7 +47,7 @@ provision: ## operator provision + KP provision (needs the native localnet runni
 	pkg=$$(jq -r .package_id "$(STATE)"); obj=$$(jq -r .hashi_object_id "$(STATE)"); \
 	echo "Provisioning against localnet: $$sui_rpc (pkg $$pkg)"; \
 	SUI_RPC="$$sui_rpc" PACKAGE_ID="$$pkg" HASHI_OBJECT_ID="$$obj" \
-	  $(COMPOSE) --profile init run --rm \
+	  $(COMPOSE) --profile init run --rm --build \
 	    -e SUI_RPC -e PACKAGE_ID -e HASHI_OBJECT_ID \
 	    init /scripts/provision.sh
 

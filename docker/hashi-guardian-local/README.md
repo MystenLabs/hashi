@@ -81,6 +81,42 @@ containerized guardian — the whole trust model exercised locally.
 
 `make down` stops everything and drops the volumes.
 
+## Verifying success
+
+Once provisioned, the withdraw guardian's `enclaveBtcPubkey` is **set and equals
+the ceremony pubkey** — the end-to-end proof that the key minted at the ceremony
+was split into shares and reconstructed inside the withdraw enclave via the
+relay's `ProvisionerInit`:
+
+```sh
+make pubkey   # the ceremony BTC master pubkey (hex), e.g. 87c12dde…
+make smoke    # GuardianInfo — `enclaveBtcPubkey` is the SAME key, now held by
+              # the withdraw enclave (base64; decode to compare, or use fetch-info):
+docker compose --profile init run --rm -T init -c \
+  'hashi-guardian-init tools fetch-info --endpoint http://host:3000 --field enclave-btc-pubkey'
+```
+
+## Expected noise (not errors)
+
+- **`make provision` pauses ~60s at the first KP** logging "guardian not
+  heartbeating yet". The withdraw guardian only heartbeats *after* `operator
+  provision`, and the KP audit needs one heartbeat (`HEARTBEAT_INTERVAL` = 1 min);
+  the script waits it out, then the remaining KPs are instant.
+- **Before provisioning, the localnet nodes log FATAL "refusing to seed local
+  limiter"** — expected: the guardian isn't provisioned yet, so nodes back off and
+  retry. It clears once `make provision` completes.
+- **MinIO is published on `19000/19001`** (console http://localhost:19001,
+  `minioadmin`/`minioadmin`) — off the default `9000` so it never collides with
+  the native localnet's sui fullnode.
+
+## Re-running
+
+`make down` drops all state (the MinIO bucket + the KP roster), so the next run is
+a clean `make up → ceremony → localnet → provision` with a *fresh* pubkey (restart
+the native localnet to publish it). To re-provision a guardian that merely
+restarted **without** wiping S3, wait out the other-session quiet period (~10 min)
+so `operator provision`'s single-live-session check passes.
+
 ## Fidelity limits (read this first)
 
 A Mac cannot run real Nitro — no `/dev/nitro_enclaves`, no `nitro-cli`, no
