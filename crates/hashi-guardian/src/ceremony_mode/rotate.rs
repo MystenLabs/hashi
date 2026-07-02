@@ -4,6 +4,7 @@
 use crate::Enclave;
 use hashi_types::guardian::crypto::combine_shares;
 use hashi_types::guardian::crypto::decrypt_verify_shares;
+use hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey;
 use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::GuardianError::InvalidInputs;
@@ -67,6 +68,9 @@ async fn finalize_rotation(
     let k256_sk =
         combine_shares(old_shares, old_instance.threshold()).expect("threshold shares reach");
 
+    // Rotation re-shares the same key, so its x-only pubkey is unchanged; record it.
+    let btc_master_pubkey = k256_sk_to_btc_xonly_pubkey(&k256_sk);
+
     let (new_certs, new_params) = state.into_parts();
     let n = new_params.num_shares();
     let t = new_params.threshold();
@@ -91,6 +95,7 @@ async fn finalize_rotation(
             old_instance: old_instance.clone(),
             new_instance,
             roster: encrypted_shares.recipient_roster(),
+            btc_master_pubkey,
         })
         .await?;
 
@@ -218,6 +223,7 @@ mod tests {
             old_instance,
             new_instance,
             roster,
+            btc_master_pubkey: _,
         } = *ceremony
         else {
             panic!("expected Rotate variant");

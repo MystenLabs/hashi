@@ -139,6 +139,9 @@ impl GuardianSigned<SetupNewKeyResponse> {
         let resp = SetupNewKeyResponse {
             encrypted_shares: dummy_encrypted_shares(),
             secret_sharing_instance: dummy_secret_sharing_instance(),
+            btc_master_pubkey: crate::guardian::crypto::k256_sk_to_btc_xonly_pubkey(
+                &k256::SecretKey::from_slice(&[7u8; 32]).expect("valid k256 sk"),
+            ),
         };
 
         let signing_kp = SigningKey::from([1u8; 32]);

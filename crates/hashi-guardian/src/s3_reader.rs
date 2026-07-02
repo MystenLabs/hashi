@@ -13,6 +13,7 @@
 
 use crate::s3_client::GuardianS3Client;
 use anyhow::Context;
+use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use hashi_types::guardian::BuildPcrs;
@@ -170,16 +171,24 @@ impl GuardianReader {
         Ok(self
             .read_latest_ceremony(build_policy)
             .await?
-            .map(|(_, instance, _)| instance))
+            .map(|(_, instance, _, _)| instance))
     }
 
     /// Like [`Self::read_latest_ceremony_instance`], but also returns the writing
-    /// session id and recipient roster. The session id locates the matching
-    /// `shares/` object; the roster is checked against the agreed KP set.
+    /// session id, recipient roster, and BTC master pubkey. The session id
+    /// locates the matching `shares/` object; the roster is checked against the
+    /// agreed KP set.
     pub async fn read_latest_ceremony(
         &mut self,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<Option<(SessionID, SecretSharingInstance, Vec<KPFingerprint>)>> {
+    ) -> anyhow::Result<
+        Option<(
+            SessionID,
+            SecretSharingInstance,
+            Vec<KPFingerprint>,
+            BitcoinPubkey,
+        )>,
+    > {
         let keys = self
             .s3
             .list_all_keys_in_dir(&format!("{}/", S3_DIR_CEREMONY))
@@ -191,12 +200,17 @@ impl GuardianReader {
     }
 
     /// Read + verify the `ceremony/` record at `key`, returning its writing
-    /// session, resulting instance, and roster.
+    /// session, resulting instance, roster, and BTC master pubkey.
     async fn read_ceremony_record(
         &mut self,
         key: &str,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<(SessionID, SecretSharingInstance, Vec<KPFingerprint>)> {
+    ) -> anyhow::Result<(
+        SessionID,
+        SecretSharingInstance,
+        Vec<KPFingerprint>,
+        BitcoinPubkey,
+    )> {
         let record = self.s3.get_log_record(key).await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
         let session_id = record.session_id.clone();
@@ -205,8 +219,8 @@ impl GuardianReader {
         let LogMessage::Ceremony(msg) = record.message else {
             anyhow::bail!("expected a ceremony log at {key}");
         };
-        let (instance, roster) = ceremony_instance_and_roster(*msg, key)?;
-        Ok((session_id, instance, roster))
+        let (instance, roster, btc_master_pubkey) = ceremony_instance_and_roster(*msg, key)?;
+        Ok((session_id, instance, roster, btc_master_pubkey))
     }
 
     /// Read + verify the encrypted shares at `shares/{seq}-{session}.json`. Point
@@ -339,13 +353,18 @@ impl GuardianSessionCache {
 fn ceremony_instance_and_roster(
     msg: CeremonyLogMessage,
     key: &str,
-) -> anyhow::Result<(SecretSharingInstance, Vec<KPFingerprint>)> {
+) -> anyhow::Result<(SecretSharingInstance, Vec<KPFingerprint>, BitcoinPubkey)> {
     Ok(match msg {
-        CeremonyLogMessage::NewKey { instance, roster } => (instance, roster),
+        CeremonyLogMessage::NewKey {
+            instance,
+            roster,
+            btc_master_pubkey,
+        } => (instance, roster, btc_master_pubkey),
         CeremonyLogMessage::Rotate {
             old_instance,
             new_instance,
             roster,
+            btc_master_pubkey,
         } => {
             let expected = old_instance
                 .sharing_seq()
@@ -357,7 +376,7 @@ fn ceremony_instance_and_roster(
                 old_instance.sharing_seq(),
                 new_instance.sharing_seq()
             );
-            (new_instance, roster)
+            (new_instance, roster, btc_master_pubkey)
         }
     })
 }

@@ -23,6 +23,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
+use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::guardian::KPEncryptedShare;
 use hashi_types::guardian::KPEncryptedShares;
 use hashi_types::guardian::KPFingerprint;
@@ -90,6 +91,7 @@ pub struct VerifiedCeremonyState {
     pub session_id: String,
     pub encrypted_shares: KPEncryptedShares,
     pub secret_sharing_instance: SecretSharingInstance,
+    pub btc_master_pubkey: BitcoinPubkey,
 }
 
 impl VerifiedCeremonyState {
@@ -104,6 +106,7 @@ impl VerifiedCeremonyState {
             session_id,
             encrypted_shares: response.encrypted_shares,
             secret_sharing_instance: response.secret_sharing_instance,
+            btc_master_pubkey: response.btc_master_pubkey,
         };
         anyhow::ensure!(
             state.secret_sharing_instance.sharing_seq() == expected_sharing_seq,
@@ -123,7 +126,7 @@ impl VerifiedCeremonyState {
         // historical ceremony with `BuildPolicy::AnyAllowlisted` to learn N.
         // Keep this helper current-build-only for target verification, and add
         // a separate discovery path there.
-        let (session_id, instance, roster) = reader
+        let (session_id, instance, roster, btc_master_pubkey) = reader
             .read_latest_ceremony(BuildPolicy::Current)
             .await?
             .ok_or_else(|| anyhow!("no ceremony logs found in guardian S3 bucket"))?;
@@ -135,6 +138,7 @@ impl VerifiedCeremonyState {
             instance,
             encrypted_shares,
             &roster,
+            btc_master_pubkey,
             expected_n,
             expected_t,
         )
@@ -148,6 +152,7 @@ impl VerifiedCeremonyState {
         secret_sharing_instance: SecretSharingInstance,
         encrypted_shares: KPEncryptedShares,
         roster: &[KPFingerprint],
+        btc_master_pubkey: BitcoinPubkey,
         expected_n: usize,
         expected_t: usize,
     ) -> Result<Self> {
@@ -155,6 +160,7 @@ impl VerifiedCeremonyState {
             session_id,
             encrypted_shares,
             secret_sharing_instance,
+            btc_master_pubkey,
         };
         state.validate_shape(expected_n, expected_t)?;
         state.ensure_roster_matches(roster)?;
@@ -359,6 +365,12 @@ mod tests {
         ShareCommitments::new(vec).unwrap()
     }
 
+    fn dummy_btc_pubkey() -> hashi_types::bitcoin::BitcoinPubkey {
+        hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey(
+            &k256::SecretKey::from_slice(&[9u8; 32]).unwrap(),
+        )
+    }
+
     fn response(shares: &[u16], commitment_ids: &[u16]) -> SetupNewKeyResponse {
         response_with_instance(
             shares,
@@ -375,6 +387,7 @@ mod tests {
             encrypted_shares: KPEncryptedShares::new(shares.iter().map(|&i| share(i)).collect())
                 .unwrap(),
             secret_sharing_instance,
+            btc_master_pubkey: dummy_btc_pubkey(),
         }
     }
 
@@ -409,6 +422,7 @@ mod tests {
                 0,
             )
             .unwrap(),
+            btc_master_pubkey: dummy_btc_pubkey(),
         }
     }
 
@@ -417,6 +431,25 @@ mod tests {
         let resp = response(&[1, 2, 3], &[1, 2, 3]);
         VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2)
             .expect("well-formed response should pass");
+    }
+
+    #[test]
+    fn verified_ceremony_state_equality_covers_btc_pubkey() {
+        // operator_ceremony gates publishing on `logged == live` (S3 log vs
+        // response), so the pubkey is only guarded if it's part of the equality.
+        let other_pubkey = hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey(
+            &k256::SecretKey::from_slice(&[7u8; 32]).unwrap(),
+        );
+        assert_ne!(dummy_btc_pubkey(), other_pubkey);
+
+        let state = |pubkey| {
+            let mut resp = response(&[1, 2, 3], &[1, 2, 3]);
+            resp.btc_master_pubkey = pubkey;
+            VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2).unwrap()
+        };
+
+        assert_eq!(state(dummy_btc_pubkey()), state(dummy_btc_pubkey()));
+        assert_ne!(state(dummy_btc_pubkey()), state(other_pubkey));
     }
 
     #[test]

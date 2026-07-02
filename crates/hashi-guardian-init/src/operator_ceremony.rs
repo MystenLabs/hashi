@@ -179,20 +179,18 @@ pub async fn run(cfg: Config) -> Result<()> {
     );
 
     // 7. Verify the response signature under the pinned session's signing key,
-    //    and sanity-check the response shape.
+    //    and sanity-check the shape; keep the now-verified BTC master pubkey.
     let sharing_seq = 0u64;
-    let live = signed_resp
+    let response = signed_resp
         .verify(&signing_pub_key)
-        .map_err(|e| anyhow!("verify SetupNewKeyResponse signature: {e:?}"))
-        .and_then(|response| {
-            VerifiedCeremonyState::from_response(
-                response,
-                session_id.clone(),
-                sharing_seq,
-                cfg.kp_roster.num_shares,
-                cfg.kp_roster.threshold,
-            )
-        })?;
+        .map_err(|e| anyhow!("verify SetupNewKeyResponse signature: {e:?}"))?;
+    let live = VerifiedCeremonyState::from_response(
+        response,
+        session_id.clone(),
+        sharing_seq,
+        cfg.kp_roster.num_shares,
+        cfg.kp_roster.threshold,
+    )?;
     info!(
         phase = "setup_new_key",
         session_id = %live.session_id,
@@ -255,6 +253,16 @@ pub async fn run(cfg: Config) -> Result<()> {
             "share commitment",
         );
     }
+
+    // Emit the verified pubkey on stdout for the deploy workflow to capture and
+    // publish on-chain — printed only after every ceremony check above has passed.
+    let btc_master_pubkey_hex = hex::encode(live.btc_master_pubkey.serialize());
+    info!(
+        phase = "summary",
+        btc_master_pubkey = %btc_master_pubkey_hex,
+        "ceremony BTC master pubkey (publish this on-chain as guardian_btc_public_key)",
+    );
+    println!("GUARDIAN_BTC_PUBKEY={btc_master_pubkey_hex}");
 
     Ok(())
 }

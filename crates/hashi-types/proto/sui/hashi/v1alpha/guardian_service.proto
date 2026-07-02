@@ -166,6 +166,8 @@ message GuardianShareCommitment {
 message SetupNewKeyResponseData {
   repeated KPEncryptedShare encrypted_shares = 1;
   SecretSharingInstance secret_sharing_instance = 2;
+  // x-only BTC master pubkey (32 bytes); lets the operator publish it on-chain pre-provision.
+  bytes btc_master_pubkey = 3;
 }
 
 // Application-layer signed response.

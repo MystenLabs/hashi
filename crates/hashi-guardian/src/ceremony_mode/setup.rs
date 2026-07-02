@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::Enclave;
+use hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey;
 use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::*;
@@ -40,14 +41,15 @@ pub async fn setup_new_key(
     info!("Generating new Bitcoin private key.");
     // Confine the !Send `ThreadRng` to a sync scope so the surrounding async
     // future stays Send.
-    let (encrypted_shares, share_commitments, fingerprint_hex) = {
+    let (encrypted_shares, share_commitments, fingerprint_hex, btc_master_pubkey) = {
         let mut rng = rand::thread_rng();
         let sk = SecretKey::random(&mut rng);
         let fp = format!("{:x}", fingerprint(&sk));
+        let btc_master_pubkey = k256_sk_to_btc_xonly_pubkey(&sk);
         info!("Splitting secret into {n} shares (threshold: {t}).");
         let (encrypted, commitments) =
             split_and_encrypt_for_kps(&sk, key_provisioner_certs, params, &mut rng);
-        (encrypted, commitments, fp)
+        (encrypted, commitments, fp, btc_master_pubkey)
     };
     info!(
         "Bitcoin key generated with fingerprint {}; all {} shares encrypted.",
@@ -64,6 +66,7 @@ pub async fn setup_new_key(
         .log_ceremony(CeremonyLogMessage::NewKey {
             instance: ss_instance.clone(),
             roster: encrypted_shares.recipient_roster(),
+            btc_master_pubkey,
         })
         .await?;
 
@@ -74,6 +77,7 @@ pub async fn setup_new_key(
     let response = enclave.sign(SetupNewKeyResponse {
         encrypted_shares,
         secret_sharing_instance: ss_instance,
+        btc_master_pubkey,
     });
 
     *ceremony_complete = true;
@@ -143,7 +147,12 @@ mod tests {
         let LogMessage::Ceremony(ceremony) = record.message else {
             panic!("expected Ceremony variant");
         };
-        let CeremonyLogMessage::NewKey { instance, roster } = *ceremony else {
+        let CeremonyLogMessage::NewKey {
+            instance,
+            roster,
+            btc_master_pubkey,
+        } = *ceremony
+        else {
             panic!("expected NewKey variant");
         };
         assert_eq!(instance.sharing_seq(), 0);
@@ -151,6 +160,8 @@ mod tests {
         assert_eq!(instance.threshold(), TEST_T);
         // The roster commits one recipient fingerprint per share.
         assert_eq!(roster.len(), TEST_N);
+        // The ceremony log records the same BTC master pubkey as the response.
+        assert_eq!(btc_master_pubkey, validated_resp.btc_master_pubkey);
 
         // The encrypted shares are persisted to shares/ keyed by sharing_seq,
         // and carry the ciphertexts the ceremony log omits.

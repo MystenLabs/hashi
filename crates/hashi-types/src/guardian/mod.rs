@@ -240,6 +240,9 @@ pub struct SetupNewKeyRequest {
 pub struct SetupNewKeyResponse {
     pub encrypted_shares: KPEncryptedShares,
     pub secret_sharing_instance: SecretSharingInstance,
+    /// x-only BTC master pubkey, surfaced so the operator can publish it on-chain
+    /// as `guardian_btc_public_key` before the guardian is provisioned.
+    pub btc_master_pubkey: BitcoinPubkey,
 }
 
 /// Ceremony-mode rotation request, assembled by the operator from the current KPs'
