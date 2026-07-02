@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package sui.hashi.v1alpha;
+
+import "sui/hashi/v1alpha/guardian_service.proto";
+
+// The provisioning relay. Served by the out-of-enclave guardian proxy, never by
+// the enclave itself. A key provisioner submits its single HPKE-encrypted share
+// here (after verifying the guardian's attestation directly); the relay
+// accumulates distinct shares and, once it holds a threshold-many, submits them
+// to the guardian's batch `ProvisionerInit` in one call.
+//
+// The relay is liveness-only: shares are end-to-end encrypted to the enclave
+// session key, so a malicious or buggy relay can stall provisioning but cannot
+// read shares or forge a key.
+service GuardianRelayService {
+  rpc SingleProvisionerInit(SingleProvisionerInitRequest)
+      returns (SingleProvisionerInitResponse);
+}
+
+message SingleProvisionerInitRequest {
+  // This KP's share, HPKE-encrypted to the enclave with the state_hash bound as
+  // AAD (built exactly as for the guardian's batch ProvisionerInit).
+  GuardianEncryptedShare encrypted_share = 1;
+
+  // The guardian session id the KP pinned (from the attestation it verified)
+  // before building the share. The relay rejects the submission if its live
+  // backend session differs — the share would be encrypted to a dead session.
+  string expected_session_id = 2;
+}
+
+message SingleProvisionerInitResponse {
+  // Distinct shares the relay now holds for the current session.
+  uint32 have = 1;
+  // Threshold the relay must reach before it submits the batch.
+  uint32 need = 2;
+  // True once the guardian is fully provisioned — set when this call's batch
+  // completed it, when a prior batch did, or when the guardian was already
+  // provisioned (idempotent).
+  bool completed = 3;
+}
