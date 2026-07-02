@@ -40,6 +40,9 @@ impl LeaderService {
 
     pub(super) fn process_stale_unapproved_deposits_if_new_epoch(&mut self) {
         let current_epoch = self.inner.onchain_state().epoch();
+        // This is a local-view optimization, not a correctness check: a stale
+        // view can miss an in-flight reconfig, but Move rejects approval during
+        // reconfig. Avoid doing obviously doomed work when we already know.
         if !self.is_reconfiguring() && self.last_unapproved_deposit_epoch != Some(current_epoch) {
             self.reload_pending_unapproved_deposit_requests(
                 UnapprovedDepositReloadMode::StaleEpochApprovalOnly,
