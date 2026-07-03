@@ -11,14 +11,18 @@ guardian is one party and the Hashi MPC committee is the other.
 
 ## Components
 
-The guardian integration has three distinct flows:
+The guardian integration has four distinct flows:
 
 - **Ceremony mode** is the key-generation control-plane flow. The operator
   initializes a ceremony guardian, supplies the KP roster, and receives the
   guardian BTC public key plus encrypted KP shares.
-- **Withdraw-mode provisioning** initializes the live withdrawal guardian. The
-  operator installs the verified state, and KPs submit threshold encrypted
-  shares through the public relay.
+- **Withdraw-mode provisioning** arms a standby withdrawal guardian while the
+  current active guardian is still alive. The operator installs a stable
+  `InitConfig`; KPs compare `config_hash` against their local pin and submit
+  threshold encrypted shares through the public relay.
+- **Activation** is the operator-triggered takeover step. The standby enclave
+  confirms a quiet window, derives live state from S3, checks the operator's
+  expected state hash, records activation, and only then serves withdrawals.
 - **Normal operation** is a data-plane flow. MPC nodes call the public guardian
   proxy for guardian info, withdrawal signatures, and committee handoff updates.
 
@@ -29,15 +33,18 @@ The main components are:
   Bitcoin signature.
 - **Guardian proxy**: the public gRPC endpoint. It forwards node-facing
   guardian RPCs and relays key-provisioner shares.
-- **Guardian enclave**: the private signer and policy engine. It verifies
-  committee certificates, enforces the limiter, signs Bitcoin inputs, and
-  records signed logs.
+- **Guardian enclave**: the private signer and policy engine. A standby
+  guardian stores static config and the reconstructed BTC key; an active
+  guardian additionally verifies committee certificates, enforces the limiter,
+  signs Bitcoin inputs, and records signed logs.
 - **Key provisioners (KPs)**: independent holders of encrypted guardian key
   shares.
 - **Operator**: the off-enclave actor that drives guardian ceremony and
-  withdraw-mode provisioning.
+  withdraw-mode provisioning and activation.
 - **S3**: immutable log storage for attestation,
-  ceremony, share recovery, heartbeat, withdrawal, and committee-update logs.
+  ceremony, share recovery, heartbeat, genesis, withdrawal, and committee-update
+  logs. Activation records are session lifecycle records in the activating
+  session's init log.
 - **Onchain Hashi state**: the source of committee, config, withdrawal, and MPC
   key state used by nodes and initialization tooling.
 
@@ -70,21 +77,30 @@ sequenceDiagram
     autonumber
 
     participant Operator
-    participant Onchain as Onchain Hashi state
     participant S3
-    participant Proxy as Guardian proxy
     participant Guardian as Guardian enclave
+    participant Proxy as Guardian proxy
     participant KPs as Key provisioners
 
     Note over Operator,Guardian: Operator initialization
-    Operator->>Onchain: Read committee and MPC master G
-    Operator->>S3: Read latest ceremony, limiter, and committee-update logs
-    Operator->>Guardian: OperatorInit(committee, limiter, MPC master G, sharing instance)
-    Guardian->>S3: log(init GuardianInfo(state_hash, limiter, committee))
+    Operator->>Operator: Gather genesis committee and master G from onchain state
+    Operator->>Operator: Gather bucket, limiter config, PCR allowlist, and network
+    Operator->>Operator: Build InitConfig
+    Operator->>Guardian: OperatorInit(S3 config, InitConfig)
+    Guardian->>S3: Read latest ceremony log
+    Guardian->>Guardian: Snapshot sharing instance for this arming
+    Guardian->>S3: Read latest committee-update or genesis record
+    alt no committee-update exists
+        Guardian->>S3: Write or verify write-once genesis record
+    end
+    Guardian->>S3: log(init GuardianInfo(config_hash, sharing instance))
+    Guardian->>S3: start heartbeat stream from OI onward
 
     Note over KPs,Guardian: Threshold share provisioning
-    KPs->>Onchain: Cross-check committee and MPC master G
-    KPs->>S3: Verify live session, state_hash, and encrypted share
+    KPs->>Guardian: GetGuardianInfo via proxy
+    Guardian-->>KPs: config_hash, session_id, n, t, attestation
+    KPs->>KPs: Verify PCRs and compare config_hash to local pin
+    KPs->>KPs: HPKE-encrypt local share with config_hash as AAD
     KPs->>Proxy: SingleProvisionerInit(encrypted share, expected_session_id)
     Proxy->>Guardian: Fetch live session and provisioning status
     Guardian-->>Proxy: session_id, threshold, provisioned flag
@@ -92,10 +108,36 @@ sequenceDiagram
         Proxy-->>KPs: share accepted, waiting for threshold
     else threshold reached
         Proxy->>Guardian: ProvisionerInit(T encrypted shares)
-        Guardian->>Guardian: Reconstruct BTC key and mark initialized
+        Guardian->>Guardian: Decrypt with config_hash AAD and verify commitments
+        Guardian->>Guardian: Reconstruct BTC key and mark armed standby
         Guardian->>S3: log(init fully-initialized)
-        Proxy-->>KPs: guardian provisioned
+        Proxy-->>KPs: standby armed
     end
+```
+
+## Standby Activation Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+
+    participant Operator
+    participant S3
+    participant Guardian as Standby guardian enclave
+
+    Operator->>S3: Download ceremony, committee/genesis, and withdrawal logs
+    Operator->>Operator: Compute expected_state_hash
+    Operator->>Guardian: OperatorActivate(expected_state_hash)
+
+    Guardian->>S3: Confirm all other sessions heartbeat-quiet for QUIET_PERIOD
+    Guardian->>S3: Read latest ceremony log
+    Guardian->>Guardian: Refuse if latest sharing_seq differs from arming snapshot
+    Guardian->>S3: Read latest committee-update or genesis record
+    Guardian->>S3: Read max-seq successful withdrawal log
+    Guardian->>Guardian: Derive ActivationState and state_hash
+    Guardian->>Guardian: Refuse if derived hash differs from operator pin
+    Guardian->>S3: log(init operator-activation record)
+    Guardian->>Guardian: Install derived state and mark active
 ```
 
 ## Normal Operation Flow
@@ -112,20 +154,17 @@ sequenceDiagram
     participant Bitcoin
 
     Note over MPC,Guardian: Guardian info
-    MPC->>Proxy: GetGuardianInfo
-    Proxy->>Guardian: GetGuardianInfo
-    Guardian-->>Proxy: SignedGuardianInfo + attestation
-    Proxy-->>MPC: GuardianInfo
+    MPC->>Guardian: GetGuardianInfo via proxy
+    Guardian-->>MPC: GuardianInfo
 
     Note over Onchain,Guardian: Withdrawal signing
     MPC->>Onchain: Read pending withdrawal transaction
     MPC->>MPC: Collect committee cert for withdrawal
-    MPC->>Proxy: StandardWithdrawal(cert, wid, utxos, seq, timestamp)
-    Proxy->>Guardian: StandardWithdrawal
+    MPC->>Guardian: StandardWithdrawal(cert, wid, utxos, seq, timestamp) via proxy
+    Guardian->>Guardian: Require active session
     Guardian->>Guardian: Verify cert, consume limiter tokens, sign BTC inputs
     Guardian->>S3: log(withdraw success or failure)
-    Guardian-->>Proxy: SignedStandardWithdrawalResponse(enclave signatures)
-    Proxy-->>MPC: Guardian BTC signatures
+    Guardian-->>MPC: Guardian BTC signatures
     MPC->>MPC: Produce MPC signatures and combine witnesses
     MPC->>Onchain: sign_withdrawal(guardian signatures + MPC signatures)
     MPC->>Bitcoin: Broadcast fully signed transaction
@@ -133,9 +172,7 @@ sequenceDiagram
     Note over Onchain,Guardian: Committee handoff catch-up
     MPC->>Onchain: Read stored committee handoffs
     MPC->>MPC: Collect outgoing-committee handoff certs
-    MPC->>Proxy: UpdateCommitteeChain(signed handoffs)
-    Proxy->>Guardian: UpdateCommitteeChain
+    MPC->>Guardian: UpdateCommitteeChain(signed handoffs) via proxy
     Guardian->>S3: log(committee-update)
-    Guardian-->>Proxy: UpdateCommitteeResponse(current_committee_epoch)
-    Proxy-->>MPC: current_committee_epoch
+    Guardian-->>MPC: current_committee_epoch
 ```
