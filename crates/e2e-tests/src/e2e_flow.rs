@@ -33,6 +33,7 @@ mod tests {
     use crate::test_helpers::init_test_logging;
     use crate::test_helpers::lookup_vout;
     use crate::test_helpers::txid_to_address;
+    use crate::test_helpers::wait_for_deposit_confirmation;
 
     const MAX_TX_SIZE_BYTES: usize = 131_072;
     const MAX_SERIALIZED_TX_EFFECTS_SIZE_BYTES: usize = 524_288;
@@ -145,6 +146,48 @@ mod tests {
         info!("MPC key ready");
 
         Ok(networks)
+    }
+
+    async fn wait_for_deposit_approval(
+        networks: &TestNetworks,
+        request_id: Address,
+        timeout: Duration,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some(onchain_state) = networks.hashi_network.nodes()[0]
+                .hashi()
+                .onchain_state_opt()
+                && onchain_state
+                    .deposit_requests()
+                    .iter()
+                    .any(|request| request.id == request_id && request.approval_cert.is_some())
+            {
+                info!(deposit_id = %request_id, "Deposit approved");
+                return Ok(());
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "Timeout waiting for deposit approval after {timeout:?}"
+                ));
+            }
+
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    fn assert_deposit_request_unapproved(networks: &TestNetworks, request_id: Address) {
+        let onchain_state = networks.hashi_network.nodes()[0].hashi().onchain_state();
+        let deposit_request = onchain_state
+            .deposit_requests()
+            .into_iter()
+            .find(|request| request.id == request_id)
+            .unwrap_or_else(|| panic!("deposit request {request_id} not found"));
+        assert!(
+            deposit_request.approval_cert.is_none(),
+            "brand-new deposit should not be approved by epoch-change stale-cert processing"
+        );
     }
 
     async fn wait_for_withdrawal_confirmation(
@@ -347,6 +390,111 @@ mod tests {
         assert_eq!(hbtc_balance, amount_sats, "Expected deposited hBTC amount");
 
         info!("=== Bitcoin Deposit E2E Test Passed ===");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_stale_cert_deposit_reprocessed_after_epoch_change_without_btc_block() -> Result<()>
+    {
+        init_test_logging();
+        info!("=== Starting Stale-Cert Deposit Epoch-Change Test ===");
+
+        let mut networks = setup_test_networks(
+            TestNetworksBuilder::new()
+                .with_nodes(4)
+                .with_onchain_config(
+                    "bitcoin_deposit_time_delay_ms",
+                    hashi_types::move_types::ConfigValue::U64(60_000),
+                ),
+        )
+        .await?;
+
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+        let hbtc_recipient = user_key.public_key().derive_address();
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let deposit_address = hashi.get_deposit_address(Some(&hbtc_recipient))?;
+        let amount_sats = 42_000u64;
+        let unapproved_amount_sats = 43_000u64;
+
+        info!("Sending Bitcoin to deposit address...");
+        let txid = networks
+            .bitcoin_node
+            .send_to_address(&deposit_address, Amount::from_sat(amount_sats))?;
+        let unapproved_txid = networks
+            .bitcoin_node
+            .send_to_address(&deposit_address, Amount::from_sat(unapproved_amount_sats))?;
+        networks.bitcoin_node.generate_blocks(10)?;
+
+        info!("Creating deposit request on Sui...");
+        let vout = lookup_vout(&networks, txid, deposit_address.clone(), amount_sats)?;
+        let unapproved_vout = lookup_vout(
+            &networks,
+            unapproved_txid,
+            deposit_address,
+            unapproved_amount_sats,
+        )?;
+        let mut executor =
+            SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?.with_signer(user_key);
+        let request_id = executor
+            .execute_create_deposit_request(
+                txid_to_address(&txid),
+                vout as u32,
+                amount_sats,
+                Some(hbtc_recipient),
+            )
+            .await?;
+
+        // One BTC block lets the current epoch approve the request. The
+        // non-zero deposit delay prevents confirmation before rotation.
+        networks.bitcoin_node.generate_blocks(1)?;
+        wait_for_deposit_approval(&networks, request_id, Duration::from_secs(60)).await?;
+
+        let unapproved_request_id = executor
+            .execute_create_deposit_request(
+                txid_to_address(&unapproved_txid),
+                unapproved_vout as u32,
+                unapproved_amount_sats,
+                Some(hbtc_recipient),
+            )
+            .await?;
+        assert_deposit_request_unapproved(&networks, unapproved_request_id);
+
+        let initial_epoch = networks.hashi_network.nodes()[0]
+            .current_epoch()
+            .ok_or_else(|| anyhow!("no current Hashi epoch"))?;
+        let target_epoch = initial_epoch + 1;
+        networks.sui_network.force_close_epoch().await?;
+        let futs: Vec<_> = networks
+            .hashi_network()
+            .nodes()
+            .iter()
+            .map(|node| node.wait_for_epoch(target_epoch, Duration::from_secs(180)))
+            .collect();
+        for (i, result) in futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .enumerate()
+        {
+            result.unwrap_or_else(|e| panic!("Node {i} failed to reach epoch {target_epoch}: {e}"));
+        }
+
+        wait_for_deposit_confirmation(
+            &mut networks.sui_network.client,
+            request_id,
+            Duration::from_secs(180),
+        )
+        .await?;
+        assert_deposit_request_unapproved(&networks, unapproved_request_id);
+
+        let hbtc_balance = get_hbtc_balance(
+            &mut networks.sui_network.client,
+            networks.hashi_network.ids().package_id,
+            hbtc_recipient,
+        )
+        .await?;
+        assert_eq!(hbtc_balance, amount_sats, "Expected deposited hBTC amount");
+
+        info!("=== Stale-Cert Deposit Epoch-Change Test Passed ===");
         Ok(())
     }
 

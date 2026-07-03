@@ -57,6 +57,8 @@ pub(crate) struct LeaderService {
     approved_deposit_tasks: JoinSet<(Address, Result<(), ApprovedDepositError>)>,
     // Deposit requests loaded from Bitcoin/on-chain state and waiting for approval processing.
     pending_unapproved_deposit_requests: Vec<DepositRequest>,
+    // Last hashi epoch processed by the checkpoint-triggered deposit path.
+    last_unapproved_deposit_epoch: Option<u64>,
     // Deposit IDs that should not be retried by this leader process.
     never_retry_deposit_ids: HashSet<Address>,
     // Deposit IDs currently running in either deposit task pool.
@@ -127,6 +129,7 @@ impl LeaderService {
             unapproved_deposit_tasks: JoinSet::new(),
             approved_deposit_tasks: JoinSet::new(),
             pending_unapproved_deposit_requests: Vec::new(),
+            last_unapproved_deposit_epoch: None,
             never_retry_deposit_ids: HashSet::new(),
             inflight_deposits: HashSet::new(),
             withdrawal_approval_task: None,
@@ -241,6 +244,7 @@ impl LeaderService {
                     self.check_delete_expired_deposit_requests(checkpoint_timestamp_ms);
                     self.check_delete_proposals(checkpoint_timestamp_ms);
                     self.check_cleanup_spent_utxos();
+                    self.process_stale_unapproved_deposits_if_new_epoch();
                     self.process_approved_deposit_requests();
                 }
                 wait_result = btc_block_rx.changed() => {
@@ -255,7 +259,8 @@ impl LeaderService {
                     self.schedule_withdrawal_checks_for_btc_block();
 
                     if self.is_current_leader(checkpoint_height) {
-                        self.process_deposits_on_bitcoin_block(block_height);
+                        debug!("New Bitcoin block {block_height}: processing deposit requests");
+                        self.process_deposits_on_bitcoin_block();
                     }
                 }
                 Some(result) = self.unapproved_deposit_tasks.join_next() => {
