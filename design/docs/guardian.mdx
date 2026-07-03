@@ -9,4 +9,133 @@ Hashi uses a withdrawal guardian: a second signatory on the managed Bitcoin
 deposits. All deposits are spendable only with a 2-of-2 multisig where the
 guardian is one party and the Hashi MPC committee is the other.
 
-Additional details about the guardian integration are added before Testnet.
+## Components
+
+The guardian integration has three distinct flows:
+
+- **Ceremony mode** is the key-generation control-plane flow. The operator
+  initializes a ceremony guardian, supplies the KP roster, and receives the
+  guardian BTC public key plus encrypted KP shares.
+- **Withdraw-mode provisioning** initializes the live withdrawal guardian. The
+  operator installs the verified state, and KPs submit threshold encrypted
+  shares through the public relay.
+- **Normal operation** is a data-plane flow. MPC nodes call the public guardian
+  proxy for guardian info, withdrawal signatures, and committee handoff updates.
+
+The main components are:
+
+- **MPC nodes**: the Hashi validator committee. Nodes collect committee
+  certificates, run the MPC signer, and call the guardian for the second
+  Bitcoin signature.
+- **Guardian proxy**: the public gRPC endpoint. It forwards node-facing
+  guardian RPCs and relays key-provisioner shares.
+- **Guardian enclave**: the private signer and policy engine. It verifies
+  committee certificates, enforces the limiter, signs Bitcoin inputs, and
+  records signed logs.
+- **Key provisioners (KPs)**: independent holders of encrypted guardian key
+  shares.
+- **Operator**: the off-enclave actor that drives guardian ceremony and
+  withdraw-mode provisioning.
+- **S3**: immutable log storage for attestation,
+  ceremony, share recovery, heartbeat, withdrawal, and committee-update logs.
+- **Onchain Hashi state**: the source of committee, config, withdrawal, and MPC
+  key state used by nodes and initialization tooling.
+
+## Ceremony Mode Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+
+    participant Operator
+    participant S3
+    participant Guardian as Guardian enclave
+    participant KPs as Key provisioners
+
+    Operator->>Guardian: OperatorInit(S3 config)
+    Guardian->>S3: log(init attestation + GuardianInfo)
+    Operator->>Guardian: SetupNewKey(KP PGP certs, n, t)
+    Guardian->>S3: log(ceremony/NewKey + shares)
+    Guardian-->>Operator: encrypted KP shares + guardian BTC pubkey
+
+    KPs->>S3: Read init, ceremony, and shares logs
+    S3-->>KPs: encrypted share addressed to this KP
+    KPs->>KPs: Decrypt share and verify attestation, recipients, commitment
+```
+
+## Withdraw-Mode Provisioning Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+
+    participant Operator
+    participant Onchain as Onchain Hashi state
+    participant S3
+    participant Proxy as Guardian proxy
+    participant Guardian as Guardian enclave
+    participant KPs as Key provisioners
+
+    Note over Operator,Guardian: Operator initialization
+    Operator->>Onchain: Read committee and MPC master G
+    Operator->>S3: Read latest ceremony, limiter, and committee-update logs
+    Operator->>Guardian: OperatorInit(committee, limiter, MPC master G, sharing instance)
+    Guardian->>S3: log(init GuardianInfo(state_hash, limiter, committee))
+
+    Note over KPs,Guardian: Threshold share provisioning
+    KPs->>Onchain: Cross-check committee and MPC master G
+    KPs->>S3: Verify live session, state_hash, and encrypted share
+    KPs->>Proxy: SingleProvisionerInit(encrypted share, expected_session_id)
+    Proxy->>Guardian: Fetch live session and provisioning status
+    Guardian-->>Proxy: session_id, threshold, provisioned flag
+    alt fewer than threshold shares collected
+        Proxy-->>KPs: share accepted, waiting for threshold
+    else threshold reached
+        Proxy->>Guardian: ProvisionerInit(T encrypted shares)
+        Guardian->>Guardian: Reconstruct BTC key and mark initialized
+        Guardian->>S3: log(init fully-initialized)
+        Proxy-->>KPs: guardian provisioned
+    end
+```
+
+## Normal Operation Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+
+    participant Onchain as Onchain Hashi state
+    participant MPC as MPC nodes
+    participant Proxy as Guardian proxy
+    participant Guardian as Guardian enclave
+    participant S3
+    participant Bitcoin
+
+    Note over MPC,Guardian: Guardian info
+    MPC->>Proxy: GetGuardianInfo
+    Proxy->>Guardian: GetGuardianInfo
+    Guardian-->>Proxy: SignedGuardianInfo + attestation
+    Proxy-->>MPC: GuardianInfo
+
+    Note over Onchain,Guardian: Withdrawal signing
+    MPC->>Onchain: Read pending withdrawal transaction
+    MPC->>MPC: Collect committee cert for withdrawal
+    MPC->>Proxy: StandardWithdrawal(cert, wid, utxos, seq, timestamp)
+    Proxy->>Guardian: StandardWithdrawal
+    Guardian->>Guardian: Verify cert, consume limiter tokens, sign BTC inputs
+    Guardian->>S3: log(withdraw success or failure)
+    Guardian-->>Proxy: SignedStandardWithdrawalResponse(enclave signatures)
+    Proxy-->>MPC: Guardian BTC signatures
+    MPC->>MPC: Produce MPC signatures and combine witnesses
+    MPC->>Onchain: sign_withdrawal(guardian signatures + MPC signatures)
+    MPC->>Bitcoin: Broadcast fully signed transaction
+
+    Note over Onchain,Guardian: Committee handoff catch-up
+    MPC->>Onchain: Read stored committee handoffs
+    MPC->>MPC: Collect outgoing-committee handoff certs
+    MPC->>Proxy: UpdateCommitteeChain(signed handoffs)
+    Proxy->>Guardian: UpdateCommitteeChain
+    Guardian->>S3: log(committee-update)
+    Guardian-->>Proxy: UpdateCommitteeResponse(current_committee_epoch)
+    Proxy-->>MPC: current_committee_epoch
+```
