@@ -78,27 +78,23 @@ sequenceDiagram
 
     participant Operator
     participant S3
-    participant Guardian as Guardian enclave
+    participant Guardian as Standby guardian enclave
     participant Proxy as Guardian proxy
     participant KPs as Key provisioners
 
     Note over Operator,Guardian: Operator initialization
-    Operator->>Operator: Gather genesis committee and master G from onchain state
-    Operator->>Operator: Gather bucket, limiter config, PCR allowlist, and network
+    Operator->>Operator: Gather master G from onchain state
+    Operator->>Operator: Gather bucket plus limiter config plus PCR allowlist plus network
     Operator->>Operator: Build InitConfig
     Operator->>Guardian: OperatorInit(S3 config, InitConfig)
     Guardian->>S3: Read latest ceremony log
     Guardian->>Guardian: Snapshot sharing instance for this arming
-    Guardian->>S3: Read latest committee-update or genesis record
-    alt no committee-update exists
-        Guardian->>S3: Write or verify write-once genesis record
-    end
     Guardian->>S3: log(init GuardianInfo(config_hash, sharing instance))
     Guardian->>S3: start heartbeat stream from OI onward
 
     Note over KPs,Guardian: Threshold share provisioning
     KPs->>Guardian: GetGuardianInfo via proxy
-    Guardian-->>KPs: config_hash, session_id, n, t, attestation
+    Guardian-->>KPs: config_hash plus session_id plus n/t plus attestation
     KPs->>KPs: Verify PCRs and compare config_hash to local pin
     KPs->>KPs: HPKE-encrypt local share with config_hash as AAD
     KPs->>Proxy: SingleProvisionerInit(encrypted share, expected_session_id)
@@ -115,6 +111,11 @@ sequenceDiagram
     end
 ```
 
+First deploy also has a genesis bootstrap path not shown above: if the operator
+finds no `committee-update/` or `genesis/` record in S3, it reads the current
+committee from onchain state and calls `write_genesis_untrusted` after
+`OperatorInit` to seed `genesis/`. Later deploys skip this step.
+
 ## Standby Activation Flow
 
 ```mermaid
@@ -123,17 +124,17 @@ sequenceDiagram
 
     participant Operator
     participant S3
-    participant Guardian as Standby guardian enclave
+    participant Guardian as Guardian enclave
 
-    Operator->>S3: Download ceremony, committee/genesis, and withdrawal logs
+    Operator->>S3: Download ceremony instance plus committee/genesis plus limiter post-state
     Operator->>Operator: Compute expected_state_hash
     Operator->>Guardian: OperatorActivate(expected_state_hash)
 
     Guardian->>S3: Confirm all other sessions heartbeat-quiet for QUIET_PERIOD
     Guardian->>S3: Read latest ceremony log
-    Guardian->>Guardian: Refuse if latest sharing_seq differs from arming snapshot
+    Guardian->>Guardian: Refuse if latest ceremony instance differs from arming snapshot
     Guardian->>S3: Read latest committee-update or genesis record
-    Guardian->>S3: Read max-seq successful withdrawal log
+    Guardian->>S3: Recover limiter state from max-seq success or genesis
     Guardian->>Guardian: Derive ActivationState and state_hash
     Guardian->>Guardian: Refuse if derived hash differs from operator pin
     Guardian->>S3: log(init operator-activation record)
@@ -149,7 +150,7 @@ sequenceDiagram
     participant Onchain as Onchain Hashi state
     participant MPC as MPC nodes
     participant Proxy as Guardian proxy
-    participant Guardian as Guardian enclave
+    participant Guardian as Active guardian enclave
     participant S3
     participant Bitcoin
 
@@ -161,8 +162,7 @@ sequenceDiagram
     MPC->>Onchain: Read pending withdrawal transaction
     MPC->>MPC: Collect committee cert for withdrawal
     MPC->>Guardian: StandardWithdrawal(cert, wid, utxos, seq, timestamp) via proxy
-    Guardian->>Guardian: Require active session
-    Guardian->>Guardian: Verify cert, consume limiter tokens, sign BTC inputs
+    Guardian->>Guardian: Require active session then verify cert then consume limiter tokens then sign BTC inputs
     Guardian->>S3: log(withdraw success or failure)
     Guardian-->>MPC: Guardian BTC signatures
     MPC->>MPC: Produce MPC signatures and combine witnesses
