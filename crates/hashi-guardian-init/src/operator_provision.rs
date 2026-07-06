@@ -184,10 +184,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         phase = "committee",
         "sourcing committee from latest committee-update/genesis log or on-chain Hashi state",
     );
-    let (committee, genesis_bootstrap_committee) = match reader
+    let latest_committee = reader
         .read_latest_committee(BuildPolicy::AnyAllowlisted)
-        .await?
-    {
+        .await?;
+    let no_prior_committee_exists = latest_committee.is_none();
+    let committee = match latest_committee {
         Some(scraped) => {
             let committee = scraped.try_into()?;
             info!(
@@ -196,7 +197,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 source = "S3 committee log",
                 "scraped latest committee from S3",
             );
-            (committee, None)
+            committee
         }
         None => {
             let committee = onchain_state
@@ -208,14 +209,13 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 source = "on-chain Hashi state",
                 "no committee-update or genesis log; using on-chain current committee",
             );
-            let genesis_bootstrap_committee = Some(committee.clone());
-            (committee, genesis_bootstrap_committee)
+            committee
         }
     };
     let committee_epoch = committee.epoch();
 
     let withdraw_config = WithdrawModeConfig::new(
-        committee,
+        committee.clone(),
         cfg.limiter_config,
         limiter_state,
         master_g,
@@ -250,7 +250,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         "operator_init complete; guardian state installed"
     );
 
-    if let Some(committee) = genesis_bootstrap_committee {
+    if no_prior_committee_exists {
         info!(
             phase = "write_genesis_untrusted",
             epoch = committee.epoch(),
