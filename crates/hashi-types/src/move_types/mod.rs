@@ -953,7 +953,7 @@ impl ProposalCreatedEvent {
 }
 
 impl MoveType for ProposalCreatedEvent {
-    const MODULE: &'static str = "proposal_events";
+    const MODULE: &'static str = "proposal";
     const NAME: &'static str = "ProposalCreatedEvent";
 }
 
@@ -983,7 +983,7 @@ impl VoteCastEvent {
 }
 
 impl MoveType for VoteCastEvent {
-    const MODULE: &'static str = "proposal_events";
+    const MODULE: &'static str = "proposal";
     const NAME: &'static str = "VoteCastEvent";
 }
 
@@ -1013,7 +1013,7 @@ impl VoteRemovedEvent {
 }
 
 impl MoveType for VoteRemovedEvent {
-    const MODULE: &'static str = "proposal_events";
+    const MODULE: &'static str = "proposal";
     const NAME: &'static str = "VoteRemovedEvent";
 }
 
@@ -1041,7 +1041,7 @@ impl ProposalDeletedEvent {
 }
 
 impl MoveType for ProposalDeletedEvent {
-    const MODULE: &'static str = "proposal_events";
+    const MODULE: &'static str = "proposal";
     const NAME: &'static str = "ProposalDeletedEvent";
 }
 
@@ -1083,7 +1083,7 @@ impl ProposalExecutedEvent {
 }
 
 impl MoveType for ProposalExecutedEvent {
-    const MODULE: &'static str = "proposal_events";
+    const MODULE: &'static str = "proposal";
     const NAME: &'static str = "ProposalExecutedEvent";
 }
 
@@ -1111,7 +1111,7 @@ impl QuorumReachedEvent {
 }
 
 impl MoveType for QuorumReachedEvent {
-    const MODULE: &'static str = "proposal_events";
+    const MODULE: &'static str = "proposal";
     const NAME: &'static str = "QuorumReachedEvent";
 }
 
@@ -1128,7 +1128,7 @@ pub struct PackageUpgradedEvent {
 }
 
 impl MoveType for PackageUpgradedEvent {
-    const MODULE: &'static str = "proposal_events";
+    const MODULE: &'static str = "upgrade";
     const NAME: &'static str = "PackageUpgradedEvent";
 }
 
