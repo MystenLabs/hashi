@@ -4,6 +4,7 @@
 use anyhow::Result;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss;
+use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
 use sui_sdk_types::Address;
 
 pub use crate::mpc::types::AvidRoundState;
@@ -91,4 +92,20 @@ pub trait PublicMessagesStore: Send + Sync {
 
     /// List all AVID round states for the current epoch and given batch.
     fn list_avid_round_states(&self, batch_index: u32) -> Result<Vec<(Address, AvidRoundState)>>;
+
+    /// Store this node's own AVID dealer builder for the given epoch and batch, overwriting any
+    /// existing one.
+    fn store_avid_dealer_builder(
+        &mut self,
+        epoch: u64,
+        batch_index: u32,
+        builder: &batch_avss_avid::AvssMessageBuilder,
+    ) -> Result<()>;
+
+    /// Retrieve this node's own AVID dealer builder for the given epoch and batch.
+    fn get_avid_dealer_builder(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+    ) -> Result<Option<batch_avss_avid::AvssMessageBuilder>>;
 }

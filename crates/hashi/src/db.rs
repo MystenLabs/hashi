@@ -8,6 +8,7 @@ use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss;
+use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
 use fjall::Keyspace;
 use fjall::KeyspaceCreateOptions;
 use fjall::Result;
@@ -74,6 +75,13 @@ pub struct Database {
     // key: (big endian u64 epoch) + (big endian u32 batch_index) + (32-byte validator address)
     // value: BCS-serialized AvidRoundState
     avid_round_states: Keyspace,
+
+    // Column Family used to store this node's own AVID dealer builder per batch, so a restarted
+    // dealer re-serves the identical round (receivers reject a re-deal with a different `v`).
+    //
+    // key: (big endian u64 epoch) + (big endian u32 batch_index)
+    // value: BCS-serialized AvssMessageBuilder
+    avid_dealer_builders: Keyspace,
 }
 
 const ENCRYPTION_KEYS_CF_NAME: &str = "encryption_keys";
@@ -82,6 +90,7 @@ const DEALER_MESSAGES_CF_NAME: &str = "dealer_messages";
 const ROTATION_MESSAGES_CF_NAME: &str = "rotation_messages";
 const NONCE_MESSAGES_CF_NAME: &str = "nonce_messages";
 const AVID_ROUND_STATES_CF_NAME: &str = "avid_round_states";
+const AVID_DEALER_BUILDERS_CF_NAME: &str = "avid_dealer_builders";
 const ENCRYPTION_EPOCH_INDEX_CF_NAME: &str = "encryption_epoch_index";
 const SIGNING_EPOCH_INDEX_CF_NAME: &str = "signing_epoch_index";
 
@@ -150,6 +159,8 @@ impl Database {
         let nonce_messages = db.keyspace(NONCE_MESSAGES_CF_NAME, KeyspaceCreateOptions::default)?;
         let avid_round_states =
             db.keyspace(AVID_ROUND_STATES_CF_NAME, KeyspaceCreateOptions::default)?;
+        let avid_dealer_builders =
+            db.keyspace(AVID_DEALER_BUILDERS_CF_NAME, KeyspaceCreateOptions::default)?;
         let encryption_epoch_index = db.keyspace(
             ENCRYPTION_EPOCH_INDEX_CF_NAME,
             KeyspaceCreateOptions::default,
@@ -168,6 +179,7 @@ impl Database {
             rotation_messages,
             nonce_messages,
             avid_round_states,
+            avid_dealer_builders,
         })
     }
 
@@ -483,6 +495,45 @@ impl Database {
         list_messages_by_prefix(&self.avid_round_states, &prefix)
     }
 
+    pub fn store_avid_dealer_builder(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+        builder: &batch_avss_avid::AvssMessageBuilder,
+    ) -> Result<()> {
+        let key = [
+            epoch.to_be_bytes().as_slice(),
+            batch_index.to_be_bytes().as_slice(),
+        ]
+        .concat();
+        let value = bcs::to_bytes(builder).unwrap();
+        self.avid_dealer_builders.insert(key, value)
+    }
+
+    pub fn get_avid_dealer_builder(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+    ) -> Result<Option<batch_avss_avid::AvssMessageBuilder>> {
+        let key = [
+            epoch.to_be_bytes().as_slice(),
+            batch_index.to_be_bytes().as_slice(),
+        ]
+        .concat();
+        let bytes = match self.avid_dealer_builders.get(key) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let builder = bcs::from_bytes(&bytes).map_err(|_| {
+            fjall::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid avid dealer builder",
+            ))
+        })?;
+        Ok(Some(builder))
+    }
+
     /// Prune all MPC keyspaces.
     pub(crate) fn prune_messages_below(
         &self,
@@ -517,6 +568,7 @@ impl Database {
         )?;
         prune_keyspace(&self.nonce_messages, cutoff_epoch)?;
         prune_keyspace(&self.avid_round_states, cutoff_epoch)?;
+        prune_keyspace(&self.avid_dealer_builders, cutoff_epoch)?;
         Ok(())
     }
 }
@@ -1331,6 +1383,64 @@ pub(crate) mod tests {
         drop(db);
         let db = Database::open(tmpdir.path()).unwrap();
         assert_eq!(db.list_avid_round_states(1, 0).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_avid_dealer_builders() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+
+        let (t, f, n, batch) = (3u16, 3u16, 10u16, 3u16);
+        let mut rng = rand::thread_rng();
+        let sks: Vec<_> = (0..n)
+            .map(|_| ecies_v1::PrivateKey::<EncryptionGroupElement>::new(&mut rng))
+            .collect();
+        let nodes = Nodes::new(
+            sks.iter()
+                .enumerate()
+                .map(|(id, sk)| Node {
+                    id: id as u16,
+                    pk: ecies_v1::PublicKey::from_private_key(sk),
+                    weight: 1,
+                })
+                .collect(),
+        )
+        .unwrap();
+        let dealer = batch_avss_avid::Dealer::new(
+            nodes,
+            0,
+            Parameters { t, f },
+            b"avid dealer builder test".to_vec(),
+            batch,
+        )
+        .unwrap();
+        let builder = dealer.create_avss_messages(&mut rng).unwrap();
+
+        assert!(db.get_avid_dealer_builder(1, 0).unwrap().is_none());
+        db.store_avid_dealer_builder(1, 0, &builder).unwrap();
+        let got = db.get_avid_dealer_builder(1, 0).unwrap().unwrap();
+        assert_eq!(
+            bcs::to_bytes(&got).unwrap(),
+            bcs::to_bytes(&builder).unwrap()
+        );
+
+        // Different batch / epoch are isolated
+        assert!(db.get_avid_dealer_builder(1, 1).unwrap().is_none());
+        assert!(db.get_avid_dealer_builder(2, 0).unwrap().is_none());
+
+        // Persist across reopen
+        drop(db);
+        let db = Database::open(tmpdir.path()).unwrap();
+        let got = db.get_avid_dealer_builder(1, 0).unwrap().unwrap();
+        assert_eq!(
+            bcs::to_bytes(&got).unwrap(),
+            bcs::to_bytes(&builder).unwrap()
+        );
+
+        // Pruned by the epoch cutoff
+        db.prune_messages_below(2, &PruningReferences::default())
+            .unwrap();
+        assert!(db.get_avid_dealer_builder(1, 0).unwrap().is_none());
     }
 
     #[test]

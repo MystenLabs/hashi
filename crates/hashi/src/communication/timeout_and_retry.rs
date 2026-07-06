@@ -62,3 +62,24 @@ where
     }))
     .await
 }
+
+pub async fn send_each<I, Req, Resp, F, Fut>(
+    requests: I,
+    send: F,
+) -> Vec<(Address, ChannelResult<Resp>)>
+where
+    I: IntoIterator<Item = (Address, Req)>,
+    Req: Clone + Send + Sync,
+    Resp: Send,
+    F: Fn(Address, Req) -> Fut + Clone + Send + Sync,
+    Fut: Future<Output = ChannelResult<Resp>> + Send,
+{
+    join_all(requests.into_iter().map(|(addr, req)| {
+        let send = send.clone();
+        async move {
+            let result = with_timeout_and_retry(|| send(addr, req.clone())).await;
+            (addr, result)
+        }
+    }))
+    .await
+}
