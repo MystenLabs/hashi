@@ -455,7 +455,7 @@ impl Hashi {
         self.sign_message_proto(approval)
     }
 
-    pub fn sign_withdrawal_confirmation(
+    pub async fn sign_withdrawal_confirmation(
         &self,
         withdrawal_txn_id: &Address,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
@@ -465,6 +465,37 @@ impl Hashi {
             .ok_or_else(|| {
                 anyhow!("WithdrawalTransaction {withdrawal_txn_id} not found on-chain")
             })?;
+
+        // Confirmation is the terminal transition: it marks the withdrawal's
+        // inputs spent and finalizes requests whose BTC was already burned at
+        // commit. A malicious leader can aggregate confirmation signatures
+        // directly, so each validator must independently refuse to sign unless
+        // the withdrawal is genuinely finalizable — the leader's own checks are
+        // no defense here.
+
+        // (1) The on-chain transaction must be fully signed (every input has an
+        // MPC signature and the guardian signatures are attached), i.e. a
+        // broadcastable Bitcoin transaction actually exists.
+        anyhow::ensure!(
+            txn.is_fully_signed(),
+            "Refusing to sign confirmation for withdrawal {withdrawal_txn_id}: \
+             on-chain transaction is not fully signed"
+        );
+
+        // (2) That Bitcoin transaction must itself be confirmed to the
+        // configured threshold. This observational check is what a malicious
+        // leader cannot forge.
+        let confirmation_threshold = self.onchain_state().bitcoin_confirmation_threshold();
+        let txid: bitcoin::Txid = txn.txid.into();
+        match self.btc_monitor().get_transaction_status(txid).await? {
+            TxStatus::Confirmed { confirmations } if confirmations >= confirmation_threshold => {}
+            status => anyhow::bail!(
+                "Refusing to sign confirmation for withdrawal {withdrawal_txn_id}: \
+                 Bitcoin transaction {txid} not confirmed to threshold \
+                 {confirmation_threshold} (status: {status:?})"
+            ),
+        }
+
         let confirmation = WithdrawalConfirmation {
             withdrawal_id: txn.id,
         };
