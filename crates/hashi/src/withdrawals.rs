@@ -578,7 +578,7 @@ impl Hashi {
                         self.bound_leader_timestamp(ts)?;
                         ts
                     }
-                    None => txn.timestamp_ms / 1000,
+                    None => txn.created_timestamp_ms / 1000,
                 };
                 let result = limiter.validate_consume(expected_seq, timestamp_secs, amount_sats);
                 self.metrics.record_limiter_validate(
@@ -1138,7 +1138,7 @@ impl Hashi {
                 id: r.id,
                 recipient: r.bitcoin_address.clone(),
                 amount: r.btc_amount,
-                timestamp_ms: r.timestamp_ms,
+                timestamp_ms: r.created_timestamp_ms,
             })
             .collect();
 
@@ -1686,7 +1686,7 @@ mod tests {
             inputs: inputs.into_iter().map(input).collect(),
             withdrawal_outputs: withdrawal_outputs.into_iter().map(output).collect(),
             change_outputs: change.into_iter().map(output).collect(),
-            timestamp_ms: 0,
+            created_timestamp_ms: 0,
             randomness: vec![],
             signing: hashi_types::move_types::SigningBatch {
                 signatures: (0..num_inputs)

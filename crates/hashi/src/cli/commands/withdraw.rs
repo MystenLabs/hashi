@@ -259,7 +259,7 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
         println!(
             "  {} {}",
             "Requested:".bold(),
-            display::format_timestamp(wr.timestamp_ms)
+            display::format_timestamp(wr.created_timestamp_ms)
         );
         println!();
 
@@ -383,7 +383,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                         "amount_sats": wr.btc_amount,
                         "status": if wr.status.is_approved() { "approved" } else { "requested" },
                         "caller": wr.sender.to_string(),
-                        "requested_ms": wr.timestamp_ms,
+                        "requested_ms": wr.created_timestamp_ms,
                     })
                 })
                 .collect();
@@ -441,7 +441,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                             wr.btc_amount,
                             status,
                             display::format_address_full(&wr.sender),
-                            display::format_timestamp(wr.timestamp_ms)
+                            display::format_timestamp(wr.created_timestamp_ms)
                         );
                     }
                 }

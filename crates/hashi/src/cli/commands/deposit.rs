@@ -403,7 +403,7 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
     println!(
         "  {} {}",
         "Requested:".bold(),
-        display::format_timestamp(dep.creation_timestamp_ms)
+        display::format_timestamp(dep.created_timestamp_ms)
     );
     println!("  {} {}", "Status:".bold(), "Pending".yellow());
 
@@ -448,7 +448,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                         },
                         "status": "pending",
                         "caller": dep.sender.to_string(),
-                        "requested_ms": dep.creation_timestamp_ms,
+                        "requested_ms": dep.created_timestamp_ms,
                     })
                 })
                 .collect();
@@ -486,7 +486,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                         dep.utxo.id.vout,
                         "Pending".yellow(),
                         display::format_address_full(&dep.sender),
-                        display::format_timestamp(dep.creation_timestamp_ms)
+                        display::format_timestamp(dep.created_timestamp_ms)
                     );
                 }
                 println!("\n  {} deposit(s)", deposits.len());

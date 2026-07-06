@@ -360,7 +360,7 @@ fn parse_deposit_request(
     Ok(DepositRequest {
         id,
         sender: requester_address,
-        creation_timestamp_ms: request.timestamp_ms,
+        created_timestamp_ms: request.timestamp_ms,
         sui_tx_digest,
         utxo: Utxo {
             id: UtxoId {

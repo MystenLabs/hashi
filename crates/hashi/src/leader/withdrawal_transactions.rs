@@ -199,7 +199,7 @@ impl LeaderService {
 
         let mut withdrawal_txns = self.inner.onchain_state().withdrawal_txns();
         withdrawal_txns.retain(|p| !p.is_fully_signed());
-        withdrawal_txns.sort_by_key(|p| p.timestamp_ms);
+        withdrawal_txns.sort_by_key(|p| p.created_timestamp_ms);
 
         let pending_ids: Vec<Address> = withdrawal_txns.iter().map(|p| p.id).collect();
         self.inflight_withdrawal_signings
@@ -889,7 +889,7 @@ impl LeaderService {
         debug!("Entering process_signed_withdrawal_txns");
         let mut withdrawal_txns = self.inner.onchain_state().withdrawal_txns();
         withdrawal_txns.retain(|p| p.is_fully_signed());
-        withdrawal_txns.sort_by_key(|p| p.timestamp_ms);
+        withdrawal_txns.sort_by_key(|p| p.created_timestamp_ms);
 
         let pending_ids: Vec<Address> = withdrawal_txns.iter().map(|p| p.id).collect();
         self.inflight_withdrawal_broadcasts
@@ -957,7 +957,7 @@ impl LeaderService {
     fn process_pending_btc_block_withdrawal_checks(&mut self) {
         let mut withdrawal_txns = self.inner.onchain_state().withdrawal_txns();
         withdrawal_txns.retain(|p| p.is_fully_signed());
-        withdrawal_txns.sort_by_key(|p| p.timestamp_ms);
+        withdrawal_txns.sort_by_key(|p| p.created_timestamp_ms);
 
         let pending_ids: Vec<Address> = withdrawal_txns.iter().map(|p| p.id).collect();
         self.inflight_withdrawal_btc_block_checks
