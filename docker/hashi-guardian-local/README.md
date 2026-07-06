@@ -4,7 +4,7 @@ A Mac-local replica of the guardian's AWS Nitro topology (each `vsock` hop becom
 a TCP hop between containers), wired to a native `hashi-localnet` for the on-chain
 side, so the full ceremony → provision → withdrawal flow runs locally — no devnet.
 The guardian runs `--features non-enclave-dev` (mock attestation), so this
-exercises the real ceremony/relay/provision path, not PCR attestation.
+exercises the real ceremony/relay/provision/activation path, not PCR attestation.
 
 ```mermaid
 flowchart LR
@@ -49,18 +49,19 @@ Needs Docker, plus `sui` and `bitcoind` on `PATH`.
 make up            # MinIO + withdraw guardian + proxy
 make ceremony      # KP roster + genesis ceremony: mints the BTC key, prints its pubkey
 make localnet-cmd  # prints the `hashi-localnet start …` to run NATIVELY (separate terminal)
-make provision     # operator provision, then key-provisioner provision × threshold via the relay
-make smoke         # confirm the guardian is fully initialized
+make provision     # operator provision, KP provision × threshold, then operator activate
+make smoke         # confirm the guardian is activated
 make down          # tear everything down
 ```
 
-Once provisioned, the deposit/withdraw CLI flows work against the local network,
+Once activated, the deposit/withdraw CLI flows work against the local network,
 co-signed by the containerized guardian.
 
 ## Verify
 
-The provisioned guardian's `enclaveBtcPubkey` should equal the ceremony pubkey — the
-key was split into shares and reconstructed inside the enclave via the relay:
+The activated guardian's `enclaveBtcPubkey` should equal the ceremony pubkey — the
+key was split into shares, reconstructed inside the enclave via the relay, and
+then activated by the operator:
 
 ```sh
 make pubkey   # the ceremony BTC master pubkey

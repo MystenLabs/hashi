@@ -14,6 +14,7 @@ cargo run -p hashi-guardian-init -- operator ceremony --config guardian-init.sam
 cargo run -p hashi-guardian-init -- key-provisioner ceremony --config guardian-init.sample.yaml
 cargo run -p hashi-guardian-init -- operator provision --config guardian-init.sample.yaml
 cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-init.sample.yaml
+cargo run -p hashi-guardian-init -- operator activate --config guardian-init.sample.yaml
 ```
 
 This will replace the `tools dev-bootstrap` shortcut used in dev. Each KP
@@ -161,13 +162,36 @@ config. This command uses `kp_pgp_cert_path`, `relay_endpoint`, `hashi`,
 standby session identity. The MPC committee verifying key `G` is fetched from
 on-chain Hashi state.
 
-After enough KPs have submitted shares and `ProvisionerInit` completes, the
-operator activates the standby with the guardian `OperatorActivate` RPC. That
-activation derives live state from S3: it checks other sessions are quiet,
-requires the latest ceremony instance to match the armed instance, reads the
-latest committee from `committee-update/` or `genesis/`, recovers limiter state
-from withdrawal logs, and verifies the operator-supplied `ActivationState`
-digest before the guardian starts serving withdrawals.
+## operator activate
+
+Activates a provisioner-initialized standby guardian. This command talks
+directly to the withdraw-mode guardian endpoint, not the public proxy.
+
+It:
+
+1. Fetches and verifies the standby guardian's live `GuardianInfo` against the
+   configured current build, and confirms `ProvisionerInit` has completed but
+   `OperatorActivate` has not.
+2. Verifies the same session's S3 `init/` log matches the live `GuardianInfo`.
+3. Confirms all other guardian sessions are heartbeat-quiet.
+4. Recomputes the stable `config_hash` from S3 bucket, limiter config, master G,
+   PCR allowlist, and network, then confirms it matches the enclave.
+5. Reads the latest ceremony instance from S3 and requires it to match the armed
+   standby instance.
+6. Reads the latest committee from `committee-update/` or `genesis/`, recovers
+   limiter state from withdrawal logs, builds `ActivationState`, and computes
+   `state_hash`.
+7. Calls `OperatorActivate(expected_state_hash)`, then verifies post-activation
+   `GuardianInfo` exposes the expected `state_hash`, committee epoch, and limiter
+   state.
+
+```bash
+cargo run -p hashi-guardian-init -- operator activate --config guardian-init.sample.yaml
+```
+
+Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
+command uses `guardian_endpoint`, `guardian_s3`, `bitcoin_network`, `hashi`,
+`kp_roster`, and `limiter_config`.
 
 ## tools
 
