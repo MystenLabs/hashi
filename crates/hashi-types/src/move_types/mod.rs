@@ -140,6 +140,9 @@ pub struct MemberInfo {
     /// This public key can be rotated but will only take effect at the
     /// beginning of the next epoch.
     pub next_epoch_encryption_public_key: Vec<u8>,
+
+    /// Open-ended per-member extension slot. Empty today.
+    pub extra_fields: Config,
 }
 
 impl MoveType for MemberInfo {

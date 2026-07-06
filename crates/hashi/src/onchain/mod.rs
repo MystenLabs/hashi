@@ -989,6 +989,7 @@ async fn scrape_all_member_info(
                  endpoint_url,
                  tls_public_key,
                  next_epoch_encryption_public_key,
+                 extra_fields: _,
              }| {
                 let info = types::MemberInfo {
                     validator_address,
@@ -1046,6 +1047,7 @@ pub(crate) async fn scrape_member_info(
         endpoint_url,
         tls_public_key,
         next_epoch_encryption_public_key,
+        extra_fields: _,
     } = field.value;
 
     let info = types::MemberInfo {
