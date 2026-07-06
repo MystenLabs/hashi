@@ -307,6 +307,7 @@ entry fun finalize_withdrawal(
     request_ids: vector<address>,
     guardian_signatures: vector<vector<u8>>,
     cert: CommitteeSignature,
+    clock: &Clock,
 ) {
     hashi.versioning().assert_version_enabled();
     hashi.assert_unpaused();
@@ -329,11 +330,16 @@ entry fun finalize_withdrawal(
     let WithdrawalSignedMessage { request_ids, guardian_signatures, .. } = approval;
 
     let queue = hashi.bitcoin_mut().withdrawal_queue_mut();
-    queue.finalize_withdrawal_txn(withdrawal_id, guardian_signatures);
+    queue.finalize_withdrawal_txn(withdrawal_id, guardian_signatures, clock);
     queue.update_requests_signed(&request_ids);
 }
 
-entry fun confirm_withdrawal(hashi: &mut Hashi, withdrawal_id: address, cert: CommitteeSignature) {
+entry fun confirm_withdrawal(
+    hashi: &mut Hashi,
+    withdrawal_id: address,
+    cert: CommitteeSignature,
+    clock: &Clock,
+) {
     hashi.versioning().assert_version_enabled();
     hashi.assert_unpaused();
     hashi.verify(WithdrawalConfirmationMessage { withdrawal_id }, cert);
@@ -341,7 +347,8 @@ entry fun confirm_withdrawal(hashi: &mut Hashi, withdrawal_id: address, cert: Co
     // Remove the in-flight withdrawal txn from the hot bag so we can do
     // all the bookkeeping with a direct handle, then re-insert it into the
     // confirmed bag at the end.
-    let txn = hashi.bitcoin_mut().withdrawal_queue_mut().remove_withdrawal_txn(withdrawal_id);
+    let mut txn = hashi.bitcoin_mut().withdrawal_queue_mut().remove_withdrawal_txn(withdrawal_id);
+    txn.mark_confirmed(clock);
     txn.emit_withdrawal_confirmed();
 
     // Update request statuses to Confirmed.

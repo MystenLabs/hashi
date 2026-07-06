@@ -243,7 +243,7 @@ fun test_sign_withdrawal_txn() {
     // one-shot guardian signature.
     queue.record_input_signatures(pending_id, vector[0], vector[x"DEADBEEF"]);
     assert!(!queue.withdrawal_txn_is_fully_signed(pending_id));
-    queue.finalize_withdrawal_txn(pending_id, vector[x"AAAAAAAA"]);
+    queue.finalize_withdrawal_txn(pending_id, vector[x"AAAAAAAA"], &clock);
     assert!(queue.withdrawal_txn_is_fully_signed(pending_id));
 
     // Remove and destroy
@@ -288,7 +288,7 @@ fun test_full_withdrawal_queue_lifecycle() {
 
     // Step 4: Sign — record the input's MPC signature, then finalize.
     queue.record_input_signatures(pending_id, vector[0], vector[x"AA"]);
-    queue.finalize_withdrawal_txn(pending_id, vector[x"CC"]);
+    queue.finalize_withdrawal_txn(pending_id, vector[x"CC"], &clock);
 
     // Step 5: Confirm — remove and destroy
     let pending = queue.remove_withdrawal_txn(pending_id);
