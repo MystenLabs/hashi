@@ -1687,6 +1687,8 @@ mod tests {
             withdrawal_outputs: withdrawal_outputs.into_iter().map(output).collect(),
             change_outputs: change.into_iter().map(output).collect(),
             created_timestamp_ms: 0,
+            signed_timestamp_ms: None,
+            confirmed_timestamp_ms: None,
             randomness: vec![],
             signing: hashi_types::move_types::SigningBatch {
                 signatures: (0..num_inputs)

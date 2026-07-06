@@ -102,6 +102,12 @@ public struct WithdrawalTransaction has key, store {
     /// change.
     change_outputs: vector<OutputUtxo>,
     created_timestamp_ms: u64,
+    /// Clock timestamp at which the transaction became fully signed
+    /// (guardian signatures attached). `None` until `finalize_withdrawal`.
+    signed_timestamp_ms: Option<u64>,
+    /// Clock timestamp at which the Bitcoin transaction was confirmed.
+    /// `None` until `confirm_withdrawal`.
+    confirmed_timestamp_ms: Option<u64>,
     randomness: vector<u8>,
     /// Per-input MPC committee signatures, accumulated incrementally and
     /// out-of-order across checkpoints/leaders/epochs. Owns the presignature
@@ -365,6 +371,8 @@ public(package) fun new_withdrawal_txn(
         withdrawal_outputs: outputs,
         change_outputs,
         created_timestamp_ms: clock.timestamp_ms(),
+        signed_timestamp_ms: option::none(),
+        confirmed_timestamp_ms: option::none(),
         randomness,
         signing,
         guardian_signatures: option::none(),
@@ -425,12 +433,20 @@ public(package) fun finalize_withdrawal_txn(
     self: &mut WithdrawalRequestQueue,
     withdrawal_id: address,
     guardian_signatures: vector<vector<u8>>,
+    clock: &Clock,
 ) {
     let txn: &mut WithdrawalTransaction = self.withdrawal_txns.borrow_mut(withdrawal_id);
     assert!(!txn.txn_fully_signed(), EWithdrawalAlreadyFinalized);
     assert!(txn.signing.is_complete(), EWithdrawalNotFullySigned);
     txn.guardian_signatures = option::some(guardian_signatures);
+    txn.signed_timestamp_ms = option::some(clock.timestamp_ms());
     emit_withdrawal_signed(txn);
+}
+
+/// Record the confirmation time on a withdrawal transaction. Called by
+/// `confirm_withdrawal` before the txn moves to the confirmed bag.
+public(package) fun mark_confirmed(self: &mut WithdrawalTransaction, clock: &Clock) {
+    self.confirmed_timestamp_ms = option::some(clock.timestamp_ms());
 }
 
 /// Reassign fresh presig indices to the still-pending inputs of a stale-epoch
@@ -733,6 +749,8 @@ public(package) fun new_withdrawal_txn_for_testing(
         withdrawal_outputs,
         change_outputs,
         created_timestamp_ms: clock.timestamp_ms(),
+        signed_timestamp_ms: option::none(),
+        confirmed_timestamp_ms: option::none(),
         randomness: vector[0, 0, 0, 0],
         signing: mpc_signing::new(num_inputs, 0, 0),
         guardian_signatures: option::none(),

@@ -1486,6 +1486,11 @@ impl SuiTxExecutor {
         let guardian_signatures_arg =
             build_chunked_vec_vec_u8_arg(&mut builder, guardian_signatures);
         let cert_arg = build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, cert);
+        let clock_arg = builder.object(
+            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
 
         builder.move_call(
             Function::new(
@@ -1499,6 +1504,7 @@ impl SuiTxExecutor {
                 request_ids_arg,
                 guardian_signatures_arg,
                 cert_arg,
+                clock_arg,
             ],
         );
 
@@ -1565,6 +1571,11 @@ impl SuiTxExecutor {
         );
         let withdrawal_id_arg = builder.pure(withdrawal_id);
         let cert_arg = build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, cert);
+        let clock_arg = builder.object(
+            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
 
         builder.move_call(
             Function::new(
@@ -1572,7 +1583,7 @@ impl SuiTxExecutor {
                 Identifier::from_static("withdraw"),
                 Identifier::from_static("confirm_withdrawal"),
             ),
-            vec![hashi_arg, withdrawal_id_arg, cert_arg],
+            vec![hashi_arg, withdrawal_id_arg, cert_arg, clock_arg],
         );
 
         let response = self.execute(builder).await?;
