@@ -106,7 +106,7 @@ public(package) fun execute<T: copy + drop + store>(
     data
 }
 
-public fun vote<T: store>(
+entry fun vote<T: store>(
     hashi: &mut Hashi,
     validator_address: address,
     proposal_id: ID,
@@ -129,7 +129,7 @@ public fun vote<T: store>(
     }
 }
 
-public fun remove_vote<T: store>(
+entry fun remove_vote<T: store>(
     hashi: &mut Hashi,
     validator_address: address,
     proposal_id: ID,
@@ -151,7 +151,7 @@ public fun remove_vote<T: store>(
     });
 }
 
-public fun quorum_reached<T>(proposal: &Proposal<T>, hashi: &Hashi): bool {
+public(package) fun quorum_reached<T>(proposal: &Proposal<T>, hashi: &Hashi): bool {
     let valid_voting_power = proposal.votes.fold!(0, |acc, voter| {
         acc + hashi.current_committee().get_member_weight(&voter)
     });
@@ -162,7 +162,7 @@ public fun quorum_reached<T>(proposal: &Proposal<T>, hashi: &Hashi): bool {
     valid_voting_power >= required
 }
 
-public fun is_expired<T>(proposal: &Proposal<T>, clock: &Clock): bool {
+public(package) fun is_expired<T>(proposal: &Proposal<T>, clock: &Clock): bool {
     clock.timestamp_ms() > proposal.created_timestamp_ms + MAX_PROPOSAL_DURATION_MS
 }
 
@@ -194,7 +194,7 @@ public(package) fun delete<T>(proposal: Proposal<T>): T {
 
 // ~~~~~~~ Getters ~~~~~~~
 
-public fun votes<T>(proposal: &Proposal<T>): &vector<address> {
+public(package) fun votes<T>(proposal: &Proposal<T>): &vector<address> {
     &proposal.votes
 }
 

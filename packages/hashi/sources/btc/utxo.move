@@ -27,15 +27,15 @@ public fun utxo(utxo_id: UtxoId, amount: u64, derivation_path: Option<address>):
     Utxo { id: utxo_id, amount, derivation_path }
 }
 
-public fun id(self: &Utxo): UtxoId {
+public(package) fun id(self: &Utxo): UtxoId {
     self.id
 }
 
-public fun amount(self: &Utxo): u64 {
+public(package) fun amount(self: &Utxo): u64 {
     self.amount
 }
 
-public fun derivation_path(self: &Utxo): Option<address> {
+public(package) fun derivation_path(self: &Utxo): Option<address> {
     self.derivation_path
 }
 

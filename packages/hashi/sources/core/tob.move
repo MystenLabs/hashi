@@ -17,15 +17,15 @@ public enum ProtocolType has copy, drop, store {
     NonceGeneration,
 }
 
-public fun protocol_type_dkg(): ProtocolType {
+public(package) fun protocol_type_dkg(): ProtocolType {
     ProtocolType::Dkg
 }
 
-public fun protocol_type_key_rotation(): ProtocolType {
+public(package) fun protocol_type_key_rotation(): ProtocolType {
     ProtocolType::KeyRotation
 }
 
-public fun protocol_type_nonce_generation(): ProtocolType {
+public(package) fun protocol_type_nonce_generation(): ProtocolType {
     ProtocolType::NonceGeneration
 }
 
@@ -34,11 +34,11 @@ public struct TobKey has copy, drop, store {
     batch_index: Option<u32>,
 }
 
-public fun tob_key(epoch: u64, batch_index: Option<u32>): TobKey {
+public(package) fun tob_key(epoch: u64, batch_index: Option<u32>): TobKey {
     TobKey { epoch, batch_index }
 }
 
-public fun epoch(self: &TobKey): u64 {
+public(package) fun epoch(self: &TobKey): u64 {
     self.epoch
 }
 
