@@ -109,6 +109,8 @@ type AvidEchoAndVote = (
     Vec<(Address, Messages)>,
 );
 
+type HeldAvidEchoes = (MessageHash, Vec<(Address, Messages)>);
+
 pub struct MpcManager {
     // Immutable during the epoch
     pub party_id: PartyId,
@@ -136,6 +138,7 @@ pub struct MpcManager {
     pub current_rotation_messages: HashMap<Address, RotationMessages>,
     pub current_nonce_messages: HashMap<(u32, Address), NonceMessage>,
     pub current_avid_round_state: HashMap<(u32, Address), AvidRoundState>,
+    pub avid_held_echoes: HashMap<(u32, Address), HeldAvidEchoes>,
     pub message_responses: HashMap<MessageResponsesKey, MpcResult<SendMessagesResponse>>,
     pub complaints_to_process: HashMap<ComplaintsToProcessKey, ProtocolComplaint>,
     pub complaint_responses: HashMap<ComplaintResponsesKey, ComplaintResponse>,
@@ -290,6 +293,7 @@ impl MpcManager {
             current_rotation_messages: HashMap::new(),
             current_nonce_messages: HashMap::new(),
             current_avid_round_state: HashMap::new(),
+            avid_held_echoes: HashMap::new(),
             message_responses: HashMap::new(),
             complaints_to_process: HashMap::new(),
             complaint_responses: HashMap::new(),
@@ -370,9 +374,7 @@ impl MpcManager {
                 self.cache_and_persist_nonce_message(self.mpc_config.epoch, sender, nonce)?;
                 self.try_sign_nonce_message(sender, &request.messages)
             }
-            Messages::NonceGenerationAvid(_) => Err(MpcError::ProtocolFailed(
-                "AVID nonce generation dealer handling is not yet implemented".into(),
-            )),
+            Messages::NonceGenerationAvid(avid) => self.handle_avid_nonce_message(sender, avid),
         }
         .map(|signature| SendMessagesResponse { signature });
         self.message_responses.insert(cache_key, result.clone());
@@ -1998,7 +2000,6 @@ impl MpcManager {
         }
     }
 
-    #[allow(dead_code)]
     fn create_avid_nonce_receiver(
         &self,
         dealer: Address,
@@ -2080,7 +2081,6 @@ impl MpcManager {
         Ok((builder, messages))
     }
 
-    #[allow(dead_code)]
     fn try_sign_avid_nonce_optimistic(
         &mut self,
         dealer: Address,
@@ -2166,7 +2166,6 @@ impl MpcManager {
             .collect()
     }
 
-    #[allow(dead_code)]
     fn avid_nonce_echo_and_vote(
         &self,
         dealer: Address,
@@ -2262,6 +2261,61 @@ impl MpcManager {
             })
     }
 
+    fn handle_avid_nonce_message(
+        &mut self,
+        sender: Address,
+        message: &AvidNonceMessage,
+    ) -> MpcResult<BLS12381Signature> {
+        let batch_index = message.batch_index;
+        match &message.kind {
+            AvidNonceMessageKind::Optimistic(msg) => {
+                if let Some(common) = self.get_avid_round_common(batch_index, &sender)
+                    && common.hash() != msg.common.hash()
+                {
+                    return Err(MpcError::InvalidMessage {
+                        sender,
+                        reason: "Dealer sent different messages".to_string(),
+                    });
+                }
+                self.try_sign_avid_nonce_optimistic(sender, batch_index, msg)
+            }
+            AvidNonceMessageKind::Dispersal {
+                dispersal,
+                confirm_cert,
+            } => {
+                let common = self
+                    .get_avid_round_common(batch_index, &sender)
+                    .ok_or_else(|| {
+                        MpcError::NotReady("no verified common message for this AVID round".into())
+                    })?;
+                let (vote, avid_vote, echoes) = self.avid_nonce_echo_and_vote(
+                    sender,
+                    batch_index,
+                    common,
+                    dispersal.clone(),
+                    confirm_cert.clone(),
+                )?;
+                let vote_hash = hash_avid_vote(&avid_vote);
+                if let Some((held_hash, _)) = self.avid_held_echoes.get(&(batch_index, sender))
+                    && *held_hash != vote_hash
+                {
+                    return Err(MpcError::InvalidMessage {
+                        sender,
+                        reason: "Dealer sent a different dispersal".to_string(),
+                    });
+                }
+                self.avid_held_echoes
+                    .insert((batch_index, sender), (vote_hash, echoes));
+                vote.ok_or_else(|| {
+                    MpcError::NotReady("vote withheld: listed confirmer holds no output".into())
+                })
+            }
+            AvidNonceMessageKind::Echo { .. } => Err(MpcError::ProtocolFailed(
+                "AVID echoes are pull-served, not pushed".into(),
+            )),
+        }
+    }
+
     #[allow(dead_code)]
     fn verify_avid_nonce_echo(
         &self,
@@ -2313,6 +2367,7 @@ impl MpcManager {
         mgr.dealer_nonce_outputs.retain(|(b, _), _| *b >= cutoff);
         mgr.dealer_avid_nonce_outputs
             .retain(|(b, _), _| *b >= cutoff);
+        mgr.avid_held_echoes.retain(|(b, _), _| *b >= cutoff);
         mgr.complaints_to_process.retain(|k, _| match k {
             ComplaintsToProcessKey::NonceGeneration { batch_index: b, .. } => *b >= cutoff,
             _ => true,
