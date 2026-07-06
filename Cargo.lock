@@ -2999,7 +2999,6 @@ dependencies = [
  "aws-credential-types",
  "bitcoin",
  "clap",
- "fastcrypto",
  "hashi",
  "hashi-guardian",
  "hashi-types",

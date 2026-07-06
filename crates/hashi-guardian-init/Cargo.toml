@@ -30,5 +30,4 @@ zeroize.workspace = true
 non-enclave-dev = ["hashi-types/non-enclave-dev", "hashi-guardian/non-enclave-dev"]
 
 [dev-dependencies]
-fastcrypto.workspace = true
 hashi-guardian = { path = "../hashi-guardian", features = ["test-utils"] }
