@@ -117,6 +117,7 @@ pub struct State {
 struct TobKey {
     epoch: u64,
     batch_index: Option<u32>,
+    protocol_type: move_types::ProtocolType,
 }
 
 impl OnchainState {
@@ -597,9 +598,14 @@ impl OnchainState {
         &self,
         epoch: u64,
         batch_index: Option<u32>,
+        protocol_type: move_types::ProtocolType,
     ) -> Result<Option<move_types::EpochCertsV1>> {
         let tob_id = self.tob_id();
-        let key = TobKey { epoch, batch_index };
+        let key = TobKey {
+            epoch,
+            batch_index,
+            protocol_type,
+        };
         let key_bcs = bcs::to_bytes(&key)?;
         let mut stream = self
             .0
@@ -624,24 +630,23 @@ impl OnchainState {
         Ok(None)
     }
 
-    /// Fetches all certificates for the given key from on-chain.
-    /// Returns the protocol type and raw move types; caller is responsible for conversion.
+    /// Fetches all raw certificates for the given `(epoch, batch_index, protocol_type)`
+    /// bucket from on-chain; caller is responsible for conversion.
     pub async fn fetch_certs(
         &self,
         epoch: u64,
         batch_index: Option<u32>,
-    ) -> Result<
-        Option<(
-            move_types::ProtocolType,
-            Vec<(Address, move_types::DealerSubmissionV1)>,
-        )>,
-    > {
-        let epoch_certs = match self.fetch_epoch_certs(epoch, batch_index).await? {
+        protocol_type: move_types::ProtocolType,
+    ) -> Result<Option<Vec<(Address, move_types::DealerSubmissionV1)>>> {
+        let epoch_certs = match self
+            .fetch_epoch_certs(epoch, batch_index, protocol_type)
+            .await?
+        {
             Some(certs) => certs,
             None => return Ok(None),
         };
         let Some(head) = epoch_certs.certs.head else {
-            return Ok(Some((epoch_certs.protocol_type, vec![])));
+            return Ok(Some(vec![]));
         };
         let mut nodes: std::collections::HashMap<
             Address,
@@ -676,7 +681,7 @@ impl OnchainState {
             certificates.push((dealer, node.value));
             current = node.next;
         }
-        Ok(Some((epoch_certs.protocol_type, certificates)))
+        Ok(Some(certificates))
     }
 }
 

@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use hashi_types::move_types::ProtocolType;
 use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_sdk_types::Address;
 use thiserror::Error;
@@ -50,6 +51,7 @@ pub struct SuiTobChannel {
     onchain_state: OnchainState,
     epoch: u64,
     batch_index: Option<u32>,
+    protocol_type: ProtocolType,
     signer: Ed25519PrivateKey,
     /// Dealers we've already returned certificates for
     seen_dealers: HashSet<Address>,
@@ -63,6 +65,7 @@ impl SuiTobChannel {
         onchain_state: OnchainState,
         epoch: u64,
         batch_index: Option<u32>,
+        protocol_type: ProtocolType,
         signer: Ed25519PrivateKey,
     ) -> Self {
         Self {
@@ -70,6 +73,7 @@ impl SuiTobChannel {
             onchain_state,
             epoch,
             batch_index,
+            protocol_type,
             signer,
             seen_dealers: HashSet::new(),
             pending_certs: VecDeque::new(),
@@ -90,9 +94,10 @@ pub async fn fetch_certificates(
     onchain_state: &OnchainState,
     epoch: u64,
     batch_index: Option<u32>,
+    protocol_type: ProtocolType,
 ) -> Result<Vec<(Address, CertificateV1)>, TobError> {
-    let Some((protocol_type, raw_certs)) = onchain_state
-        .fetch_certs(epoch, batch_index)
+    let Some(raw_certs) = onchain_state
+        .fetch_certs(epoch, batch_index, protocol_type)
         .await
         .map_err(|e| TobError::RpcError(e.to_string()))?
     else {
@@ -108,13 +113,30 @@ pub async fn fetch_certificates(
     Ok(certificates)
 }
 
+pub async fn fetch_key_generation_certificates(
+    onchain_state: &OnchainState,
+    epoch: u64,
+) -> Result<Vec<(Address, CertificateV1)>, TobError> {
+    let rotation =
+        fetch_certificates(onchain_state, epoch, None, ProtocolType::KeyRotation).await?;
+    if !rotation.is_empty() {
+        return Ok(rotation);
+    }
+    fetch_certificates(onchain_state, epoch, None, ProtocolType::Dkg).await
+}
+
 #[async_trait]
 impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     async fn publish(&self, cert: CertificateV1) -> ChannelResult<()> {
         let dealer = cert.dealer_address();
-        let existing = fetch_certificates(&self.onchain_state, self.epoch, self.batch_index)
-            .await
-            .map_err(ChannelError::from)?;
+        let existing = fetch_certificates(
+            &self.onchain_state,
+            self.epoch,
+            self.batch_index,
+            self.protocol_type,
+        )
+        .await
+        .map_err(ChannelError::from)?;
         if existing.iter().any(|(d, _)| *d == dealer) {
             return Ok(());
         }
@@ -132,9 +154,14 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                 return Ok(cert);
             }
             // TODO: Optimize by checking table size first to avoid redundant fetches.
-            let all_certs = fetch_certificates(&self.onchain_state, self.epoch, self.batch_index)
-                .await
-                .map_err(ChannelError::from)?;
+            let all_certs = fetch_certificates(
+                &self.onchain_state,
+                self.epoch,
+                self.batch_index,
+                self.protocol_type,
+            )
+            .await
+            .map_err(ChannelError::from)?;
             for (dealer, cert) in all_certs {
                 if !self.seen_dealers.contains(&dealer) {
                     self.seen_dealers.insert(dealer);
@@ -148,8 +175,13 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     }
 
     async fn certified_dealers(&mut self) -> Vec<Address> {
-        if let Ok(all_certs) =
-            fetch_certificates(&self.onchain_state, self.epoch, self.batch_index).await
+        if let Ok(all_certs) = fetch_certificates(
+            &self.onchain_state,
+            self.epoch,
+            self.batch_index,
+            self.protocol_type,
+        )
+        .await
         {
             for (dealer, cert) in all_certs {
                 if !self.seen_dealers.contains(&dealer) {
