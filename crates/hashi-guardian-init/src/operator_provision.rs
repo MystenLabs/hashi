@@ -30,12 +30,6 @@ use crate::heartbeat_checks;
 use crate::kp_roster::VerifiedCeremonyState;
 use crate::limiter_recovery;
 
-enum CommitteeSource {
-    CommitteeUpdateLog,
-    GenesisLog,
-    OnchainBootstrap,
-}
-
 /// Initialize a fresh withdraw-mode guardian with operator-supplied state.
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
@@ -190,18 +184,19 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         phase = "committee",
         "sourcing committee from latest committee-update/genesis log or on-chain Hashi state",
     );
-    let (committee, committee_source) = match reader
+    let (committee, genesis_bootstrap_committee) = match reader
         .read_latest_committee_update(BuildPolicy::AnyAllowlisted)
         .await?
     {
         Some(scraped) => {
+            let committee = scraped.try_into()?;
             info!(
                 phase = "committee",
-                epoch = scraped.epoch,
+                epoch = committee.epoch(),
                 source = "committee-update log",
                 "scraped latest committee-update log",
             );
-            (scraped.try_into()?, CommitteeSource::CommitteeUpdateLog)
+            (committee, None)
         }
         None => match reader.read_genesis(BuildPolicy::AnyAllowlisted).await? {
             Some(genesis) => {
@@ -212,7 +207,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                     source = "genesis log",
                     "no committee-update log; using genesis bootstrap committee",
                 );
-                (committee, CommitteeSource::GenesisLog)
+                (committee, None)
             }
             None => {
                 let committee = onchain_state
@@ -224,13 +219,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                     source = "on-chain Hashi state",
                     "no committee-update or genesis log; using on-chain current committee",
                 );
-                (committee, CommitteeSource::OnchainBootstrap)
+                let genesis_bootstrap_committee = Some(committee.clone());
+                (committee, genesis_bootstrap_committee)
             }
         },
-    };
-    let genesis_bootstrap_committee = match committee_source {
-        CommitteeSource::OnchainBootstrap => Some(committee.clone()),
-        CommitteeSource::CommitteeUpdateLog | CommitteeSource::GenesisLog => None,
     };
     let committee_epoch = committee.epoch();
 
