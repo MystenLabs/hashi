@@ -153,13 +153,18 @@ public fun request_withdrawal(
     hashi.bitcoin_mut().index_user_request(ctx.sender(), request_id, ctx);
 }
 
-entry fun approve_request(hashi: &mut Hashi, request_id: address, cert: CommitteeSignature) {
+entry fun approve_request(
+    hashi: &mut Hashi,
+    request_id: address,
+    cert: CommitteeSignature,
+    clock: &Clock,
+) {
     hashi.versioning().assert_version_enabled();
     hashi.assert_unpaused();
     hashi.assert_not_reconfiguring();
     hashi.verify(RequestApprovalMessage { request_id }, cert);
 
-    hashi.bitcoin_mut().withdrawal_queue_mut().approve_withdrawal(request_id);
+    hashi.bitcoin_mut().withdrawal_queue_mut().approve_withdrawal(request_id, cert, clock);
     hashi::withdrawal_queue::emit_withdrawal_approved(request_id);
 }
 

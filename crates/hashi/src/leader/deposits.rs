@@ -167,7 +167,7 @@ impl LeaderService {
                 continue;
             }
 
-            let Some(approved_ms) = deposit_request.approval_timestamp_ms else {
+            let Some(approved_ms) = deposit_request.approved_timestamp_ms else {
                 warn!(
                     deposit_id = %deposit_id,
                     "Skipping deposit confirmation: approval timestamp is missing",

@@ -373,7 +373,7 @@ fn parse_deposit_request(
         // Approval state isn't carried by the proto. Validators look up
         // the on-chain version separately when verifying.
         approval_cert: None,
-        approval_timestamp_ms: None,
+        approved_timestamp_ms: None,
         confirmed_timestamp_ms: None,
     })
 }

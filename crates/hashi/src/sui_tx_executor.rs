@@ -1254,6 +1254,11 @@ impl SuiTxExecutor {
                 .as_shared()
                 .with_mutable(true),
         );
+        let clock_arg = builder.object(
+            ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+                .as_shared()
+                .with_mutable(false),
+        );
 
         for (request_id, cert) in approvals {
             let request_id_arg = builder.pure(request_id);
@@ -1266,7 +1271,7 @@ impl SuiTxExecutor {
                     Identifier::from_static("withdraw"),
                     Identifier::from_static("approve_request"),
                 ),
-                vec![hashi_arg, request_id_arg, cert_arg],
+                vec![hashi_arg, request_id_arg, cert_arg, clock_arg],
             );
         }
 

@@ -88,7 +88,7 @@ fun approve_and_commit(
     ctx: &mut TxContext,
 ): (address, withdrawal_queue::CommittedRequestInfo) {
     let id = setup_request(queue, clock, btc_amount, ctx);
-    queue.approve_withdrawal(id);
+    queue.approve_withdrawal(id, dummy_cert(), clock);
     let infos = queue.extract_request_infos(&vector[id]);
     let txid = @0xBEEF;
     let test_utxo = utxo::utxo(utxo::utxo_id(txid, 0), btc_amount * 2, option::none());
@@ -118,7 +118,7 @@ fun setup_withdrawal_txn(
     ctx: &mut TxContext,
 ): address {
     let id = setup_request(queue, clock, btc_amount, ctx);
-    queue.approve_withdrawal(id);
+    queue.approve_withdrawal(id, dummy_cert(), clock);
     let test_utxo = utxo::utxo(utxo::utxo_id(txid, 0), btc_amount * 2, option::none());
     let txn = withdrawal_queue::new_withdrawal_txn_for_testing(
         vector[id],
@@ -136,6 +136,10 @@ fun setup_withdrawal_txn(
     txn_id
 }
 
+fun dummy_cert(): hashi::committee::CommitteeSignature {
+    hashi::committee::new_committee_signature(0, vector[], vector[])
+}
+
 // ======== approve_withdrawal tests ========
 
 #[test]
@@ -147,7 +151,7 @@ fun test_approve_request() {
     let request_id = setup_request(&mut queue, &clock, 10_000, ctx);
 
     // Approve the request
-    queue.approve_withdrawal(request_id);
+    queue.approve_withdrawal(request_id, dummy_cert(), &clock);
 
     // Verify by committing — should not abort (only approved requests can be committed)
     let txn = make_test_txn(vector[request_id], @0xBEEF, &clock, ctx);
@@ -172,9 +176,9 @@ fun test_approve_multiple_requests() {
     let id3 = setup_request(&mut queue, &clock, 25_000, ctx);
 
     // Approve all three
-    queue.approve_withdrawal(id1);
-    queue.approve_withdrawal(id2);
-    queue.approve_withdrawal(id3);
+    queue.approve_withdrawal(id1, dummy_cert(), &clock);
+    queue.approve_withdrawal(id2, dummy_cert(), &clock);
+    queue.approve_withdrawal(id3, dummy_cert(), &clock);
 
     // Commit all as approved
     let txn = make_test_txn(vector[id1, id2, id3], @0xBEEF, &clock, ctx);
@@ -266,7 +270,7 @@ fun test_full_withdrawal_queue_lifecycle() {
     let request_id = setup_request(&mut queue, &clock, 30_000, ctx);
 
     // Step 2: Approve
-    queue.approve_withdrawal(request_id);
+    queue.approve_withdrawal(request_id, dummy_cert(), &clock);
 
     // Step 3: Commit — drain BTC and move to processed
     let test_utxo = utxo::utxo(utxo::utxo_id(@0xAAAA, 1), 50_000, option::none());
@@ -454,7 +458,7 @@ fun test_cancel_approved_request() {
     let request_id = setup_request(&mut queue, &clock, 20_000, ctx);
 
     // Approve first, then cancel via cancel_withdrawal
-    queue.approve_withdrawal(request_id);
+    queue.approve_withdrawal(request_id, dummy_cert(), &clock);
     let btc = queue.cancel_withdrawal(request_id);
     assert!(btc.value() == 20_000);
 
@@ -481,7 +485,7 @@ fun test_miner_fee_single_request() {
     let change = input_amount - user_output - miner_fee;
 
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
-    queue.approve_withdrawal(id);
+    queue.approve_withdrawal(id, dummy_cert(), &clock);
     let infos = queue.extract_request_infos(&vector[id]);
 
     let pending = withdrawal_queue::new_withdrawal_txn(
@@ -521,7 +525,7 @@ fun test_miner_fee_single_request_large_fee() {
     let change = input_amount - user_output - miner_fee;
 
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
-    queue.approve_withdrawal(id);
+    queue.approve_withdrawal(id, dummy_cert(), &clock);
     let infos = queue.extract_request_infos(&vector[id]);
 
     let pending = withdrawal_queue::new_withdrawal_txn(
@@ -563,8 +567,8 @@ fun test_miner_fee_batched_even_split() {
 
     let id1 = setup_request(&mut queue, &clock, btc_amount, ctx);
     let id2 = setup_request(&mut queue, &clock, btc_amount, ctx);
-    queue.approve_withdrawal(id1);
-    queue.approve_withdrawal(id2);
+    queue.approve_withdrawal(id1, dummy_cert(), &clock);
+    queue.approve_withdrawal(id2, dummy_cert(), &clock);
     let infos = queue.extract_request_infos(&vector[id1, id2]);
 
     let pending = withdrawal_queue::new_withdrawal_txn(
@@ -613,9 +617,9 @@ fun test_miner_fee_batched_with_remainder() {
     let id1 = setup_request(&mut queue, &clock, btc_amount, ctx);
     let id2 = setup_request(&mut queue, &clock, btc_amount, ctx);
     let id3 = setup_request(&mut queue, &clock, btc_amount, ctx);
-    queue.approve_withdrawal(id1);
-    queue.approve_withdrawal(id2);
-    queue.approve_withdrawal(id3);
+    queue.approve_withdrawal(id1, dummy_cert(), &clock);
+    queue.approve_withdrawal(id2, dummy_cert(), &clock);
+    queue.approve_withdrawal(id3, dummy_cert(), &clock);
     let infos = queue.extract_request_infos(&vector[id1, id2, id3]);
 
     let pending = withdrawal_queue::new_withdrawal_txn(
@@ -664,8 +668,8 @@ fun test_miner_fee_batched_unequal_amounts() {
 
     let id1 = setup_request(&mut queue, &clock, btc_amount_1, ctx);
     let id2 = setup_request(&mut queue, &clock, btc_amount_2, ctx);
-    queue.approve_withdrawal(id1);
-    queue.approve_withdrawal(id2);
+    queue.approve_withdrawal(id1, dummy_cert(), &clock);
+    queue.approve_withdrawal(id2, dummy_cert(), &clock);
     let infos = queue.extract_request_infos(&vector[id1, id2]);
 
     let pending = withdrawal_queue::new_withdrawal_txn(
@@ -708,7 +712,7 @@ fun test_miner_fee_zero() {
     let change = 5_000u64;
 
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
-    queue.approve_withdrawal(id);
+    queue.approve_withdrawal(id, dummy_cert(), &clock);
     let infos = queue.extract_request_infos(&vector[id]);
 
     let pending = withdrawal_queue::new_withdrawal_txn(
@@ -749,7 +753,7 @@ fun test_miner_fee_output_at_dust_floor() {
     let change = 1_000u64;
 
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
-    queue.approve_withdrawal(id);
+    queue.approve_withdrawal(id, dummy_cert(), &clock);
     let infos = queue.extract_request_infos(&vector[id]);
 
     let pending = withdrawal_queue::new_withdrawal_txn(
@@ -791,7 +795,7 @@ fun test_miner_fee_output_below_dust_aborts() {
     let change = 1_000u64;
 
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
-    queue.approve_withdrawal(id);
+    queue.approve_withdrawal(id, dummy_cert(), &clock);
     let infos = queue.extract_request_infos(&vector[id]);
 
     let pending = withdrawal_queue::new_withdrawal_txn(
@@ -833,7 +837,7 @@ fun test_miner_fee_wrong_output_amount_aborts() {
     // wrong_output = 30000 - 500 = 29500, which != 29000
 
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
-    queue.approve_withdrawal(id);
+    queue.approve_withdrawal(id, dummy_cert(), &clock);
     let infos = queue.extract_request_infos(&vector[id]);
 
     let pending = withdrawal_queue::new_withdrawal_txn(
@@ -872,7 +876,7 @@ fun test_miner_fee_wrong_address_aborts() {
     let change = 5_000u64;
 
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
-    queue.approve_withdrawal(id);
+    queue.approve_withdrawal(id, dummy_cert(), &clock);
     let infos = queue.extract_request_infos(&vector[id]);
 
     // Output uses a different address than the request (which uses all-zeros)
@@ -916,7 +920,7 @@ fun test_miner_fee_exceeds_max_aborts() {
     let change = 5_000u64;
 
     let id = setup_request(&mut queue, &clock, btc_amount, ctx);
-    queue.approve_withdrawal(id);
+    queue.approve_withdrawal(id, dummy_cert(), &clock);
     let infos = queue.extract_request_infos(&vector[id]);
 
     let pending = withdrawal_queue::new_withdrawal_txn(

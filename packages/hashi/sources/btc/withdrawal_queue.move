@@ -6,6 +6,7 @@ module hashi::withdrawal_queue;
 use hashi::{
     btc::BTC,
     btc_config,
+    committee::CommitteeSignature,
     config::Config,
     mpc_signing::{Self, SigningBatch},
     utxo::{Utxo, UtxoId}
@@ -63,6 +64,12 @@ public struct WithdrawalRequest has key, store {
     bitcoin_address: vector<u8>,
     created_timestamp_ms: u64,
     status: WithdrawalStatus,
+    /// Committee certificate recorded at approval time. `None` until
+    /// `approve_request` has been called.
+    approval_cert: Option<CommitteeSignature>,
+    /// Clock timestamp at the moment of approval. `None` until
+    /// `approve_request` has been called.
+    approved_timestamp_ms: Option<u64>,
     withdrawal_txn_id: Option<address>,
     sui_tx_digest: vector<u8>,
     btc: Balance<BTC>,
@@ -158,6 +165,8 @@ public(package) fun create_withdrawal(
         bitcoin_address,
         created_timestamp_ms: clock.timestamp_ms(),
         status: WithdrawalStatus::Requested,
+        approval_cert: option::none(),
+        approved_timestamp_ms: option::none(),
         withdrawal_txn_id: option::none(),
         sui_tx_digest: *ctx.digest(),
         btc,
@@ -176,9 +185,28 @@ public(package) fun insert_withdrawal(
 }
 
 /// Approve a withdrawal request. Updates status in the requests bag.
-public(package) fun approve_withdrawal(self: &mut WithdrawalRequestQueue, request_id: address) {
+public(package) fun approve_withdrawal(
+    self: &mut WithdrawalRequestQueue,
+    request_id: address,
+    cert: CommitteeSignature,
+    clock: &Clock,
+) {
     let request: &mut WithdrawalRequest = self.requests.borrow_mut(request_id);
     request.status = WithdrawalStatus::Approved;
+    request.approval_cert = option::some(cert);
+    request.approved_timestamp_ms = option::some(clock.timestamp_ms());
+}
+
+/// The committee certificate recorded at approval time, if any. Returns
+/// `None` for requests that have not yet been through `approve_request`.
+public(package) fun request_approval_cert(self: &WithdrawalRequest): Option<CommitteeSignature> {
+    self.approval_cert
+}
+
+/// The clock timestamp at which the request was approved, if any. Returns
+/// `None` for requests that have not yet been through `approve_request`.
+public(package) fun request_approved_timestamp_ms(self: &WithdrawalRequest): Option<u64> {
+    self.approved_timestamp_ms
 }
 
 /// Read-only extraction of request data for fee validation.
@@ -261,6 +289,8 @@ public(package) fun cancel_withdrawal(
         bitcoin_address: _,
         created_timestamp_ms: _,
         status: _,
+        approval_cert: _,
+        approved_timestamp_ms: _,
         withdrawal_txn_id: _,
         sui_tx_digest: _,
         btc,
