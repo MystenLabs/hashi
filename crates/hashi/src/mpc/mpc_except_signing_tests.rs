@@ -11170,6 +11170,339 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
 }
 
 #[test]
+fn test_handle_avid_optimistic_returns_confirm_sig_and_persists() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let mut receiver = setup.create_manager(1);
+
+    let request = SendMessagesRequest {
+        messages: fx.optimistic[1].1.clone(),
+    };
+    let response = receiver
+        .handle_send_messages_request(fx.dealer_addr, &request)
+        .unwrap();
+
+    let confirm_target = DealerMessagesHash {
+        dealer_address: fx.dealer_addr,
+        messages_hash: MessageHash::from(fx.common.hash().digest),
+    };
+    let member_sig = MemberSignature::new(
+        receiver.mpc_config.epoch,
+        receiver.address,
+        response.signature.clone(),
+    );
+    let mut agg = BlsSignatureAggregator::new(setup.committee(), confirm_target);
+    agg.add_signature(member_sig)
+        .expect("Confirm sig verifies over DealerMessagesHash{dealer, H(v)}");
+    assert!(
+        receiver
+            .dealer_avid_nonce_outputs
+            .contains_key(&(batch_index, fx.dealer_addr))
+    );
+    assert!(
+        receiver
+            .current_avid_round_state
+            .contains_key(&(batch_index, fx.dealer_addr))
+    );
+
+    let again = receiver
+        .handle_send_messages_request(fx.dealer_addr, &request)
+        .unwrap();
+    assert_eq!(
+        again.signature, response.signature,
+        "identical re-send re-derives the identical Confirm sig"
+    );
+}
+
+#[test]
+fn test_handle_avid_optimistic_rejects_dealer_equivocation() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let mut receiver = setup.create_manager(1);
+    receiver
+        .handle_send_messages_request(
+            fx.dealer_addr,
+            &SendMessagesRequest {
+                messages: fx.optimistic[1].1.clone(),
+            },
+        )
+        .unwrap();
+
+    // The dealer re-deals the same batch: fresh randomness gives a different `v`.
+    let mut rng = rand::thread_rng();
+    let (_builder2, optimistic2) = fx
+        .dealer
+        .create_avid_nonce_dealer_messages(batch_index, &mut rng)
+        .unwrap();
+    let result = receiver.handle_send_messages_request(
+        fx.dealer_addr,
+        &SendMessagesRequest {
+            messages: optimistic2[1].1.clone(),
+        },
+    );
+    assert!(
+        matches!(result, Err(MpcError::InvalidMessage { .. })),
+        "equivocating dealer must be rejected: {result:?}"
+    );
+    let state = receiver
+        .current_avid_round_state
+        .get(&(batch_index, fx.dealer_addr))
+        .unwrap();
+    assert_eq!(
+        state.common.hash(),
+        fx.common.hash(),
+        "the first round stays authoritative"
+    );
+}
+
+#[test]
+fn test_handle_avid_dispersal_returns_vote_and_holds_echoes() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+    let mut receiver = setup.create_manager(1);
+    receiver
+        .handle_send_messages_request(
+            fx.dealer_addr,
+            &SendMessagesRequest {
+                messages: fx.optimistic[1].1.clone(),
+            },
+        )
+        .unwrap();
+
+    let request = SendMessagesRequest {
+        messages: dispersals[1].1.clone(),
+    };
+    let response = receiver
+        .handle_send_messages_request(fx.dealer_addr, &request)
+        .unwrap();
+
+    let (vote_hash, echoes) = receiver
+        .avid_held_echoes
+        .get(&(batch_index, fx.dealer_addr))
+        .expect("echoes held for the round")
+        .clone();
+    let vote_target = DealerMessagesHash {
+        dealer_address: fx.dealer_addr,
+        messages_hash: vote_hash,
+    };
+    let member_sig = MemberSignature::new(
+        receiver.mpc_config.epoch,
+        receiver.address,
+        response.signature.clone(),
+    );
+    let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target);
+    agg.add_signature(member_sig)
+        .expect("Vote verifies over DealerMessagesHash{dealer, H(AvidVote)}");
+    assert!(!echoes.is_empty());
+    for (addr, _) in &echoes {
+        assert!(
+            *addr == setup.address(4) || *addr == setup.address(5),
+            "echoes address only the pending recipients"
+        );
+    }
+
+    let again = receiver
+        .handle_send_messages_request(fx.dealer_addr, &request)
+        .unwrap();
+    assert_eq!(
+        again.signature, response.signature,
+        "identical re-send re-derives the identical Vote sig"
+    );
+}
+
+#[test]
+fn test_handle_avid_dispersal_without_round_state_is_not_ready() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+
+    let mut laggard = setup.create_manager(5);
+    let result = laggard.handle_send_messages_request(
+        fx.dealer_addr,
+        &SendMessagesRequest {
+            messages: dispersals[5].1.clone(),
+        },
+    );
+    assert!(
+        matches!(result, Err(MpcError::NotReady(_))),
+        "laggard dispersal must be NotReady: {result:?}"
+    );
+    assert!(laggard.avid_held_echoes.is_empty());
+}
+
+#[test]
+fn test_handle_avid_dispersal_gated_vote_withheld_but_echoes_held() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+    let mut receiver = setup.create_manager(1);
+    receiver
+        .handle_send_messages_request(
+            fx.dealer_addr,
+            &SendMessagesRequest {
+                messages: fx.optimistic[1].1.clone(),
+            },
+        )
+        .unwrap();
+    receiver
+        .dealer_avid_nonce_outputs
+        .remove(&(batch_index, fx.dealer_addr));
+
+    let result = receiver.handle_send_messages_request(
+        fx.dealer_addr,
+        &SendMessagesRequest {
+            messages: dispersals[1].1.clone(),
+        },
+    );
+    assert!(
+        matches!(result, Err(MpcError::NotReady(_))),
+        "gated vote must be NotReady: {result:?}"
+    );
+    assert!(
+        receiver
+            .avid_held_echoes
+            .contains_key(&(batch_index, fx.dealer_addr)),
+        "echoes held even though the vote is withheld (§6.2)"
+    );
+}
+
+#[test]
+fn test_handle_avid_dispersal_rejects_second_different_dispersal() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let dispersals_a = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+
+    // A second valid Confirm cert with signers {0, 1, 2, 4} (weight 4 = t+f) yields pending
+    // {3, 5} — a structurally valid but different dispersal, hence a different AvidVote.
+    let mut sigs = Vec::new();
+    for i in [0usize, 1, 2] {
+        let avss = extract_optimistic(&fx.optimistic[i].1).clone();
+        let mgr = &mut fx.confirmers[i];
+        let sig = mgr
+            .try_sign_avid_nonce_optimistic(fx.dealer_addr, batch_index, &avss)
+            .unwrap();
+        sigs.push(MemberSignature::new(mgr.mpc_config.epoch, mgr.address, sig));
+    }
+    let mut mgr4 = setup.create_manager(4);
+    let avss4 = extract_optimistic(&fx.optimistic[4].1).clone();
+    let sig4 = mgr4
+        .try_sign_avid_nonce_optimistic(fx.dealer_addr, batch_index, &avss4)
+        .unwrap();
+    sigs.push(MemberSignature::new(
+        mgr4.mpc_config.epoch,
+        mgr4.address,
+        sig4,
+    ));
+    let confirm_target = DealerMessagesHash {
+        dealer_address: fx.dealer_addr,
+        messages_hash: MessageHash::from(fx.common.hash().digest),
+    };
+    let mut agg = BlsSignatureAggregator::new(setup.committee(), confirm_target);
+    for s in sigs {
+        agg.add_signature(s).unwrap();
+    }
+    let cert_b = agg.finish().unwrap();
+    let dispersals_b = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, cert_b, batch_index)
+        .unwrap();
+
+    let mut receiver = setup.create_manager(1);
+    receiver
+        .handle_send_messages_request(
+            fx.dealer_addr,
+            &SendMessagesRequest {
+                messages: fx.optimistic[1].1.clone(),
+            },
+        )
+        .unwrap();
+    receiver
+        .handle_send_messages_request(
+            fx.dealer_addr,
+            &SendMessagesRequest {
+                messages: dispersals_a[1].1.clone(),
+            },
+        )
+        .unwrap();
+    let (held_hash, _) = receiver
+        .avid_held_echoes
+        .get(&(batch_index, fx.dealer_addr))
+        .unwrap()
+        .clone();
+
+    let second = receiver.handle_send_messages_request(
+        fx.dealer_addr,
+        &SendMessagesRequest {
+            messages: dispersals_b[1].1.clone(),
+        },
+    );
+    assert!(
+        matches!(second, Err(MpcError::InvalidMessage { .. })),
+        "a different dispersal for the same round must be rejected: {second:?}"
+    );
+    let (held_after, _) = receiver
+        .avid_held_echoes
+        .get(&(batch_index, fx.dealer_addr))
+        .unwrap()
+        .clone();
+    assert_eq!(
+        held_after, held_hash,
+        "first-held echoes stay authoritative"
+    );
+}
+
+#[test]
+fn test_handle_avid_echo_push_is_rejected() {
+    let setup = TestSetup::new(6);
+    let batch_index = 0u32;
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+    let (dispersal, confirm_cert) = extract_dispersal(&dispersals[1].1);
+    let (_vote, _avid_vote, echoes) = fx.confirmers[1]
+        .avid_nonce_echo_and_vote(
+            fx.dealer_addr,
+            batch_index,
+            fx.common.clone(),
+            dispersal,
+            confirm_cert,
+        )
+        .unwrap();
+    let (_recipient, echo_msg) = echoes.into_iter().next().unwrap();
+
+    let mut receiver = setup.create_manager(4);
+    let result = receiver.handle_send_messages_request(
+        setup.address(1),
+        &SendMessagesRequest { messages: echo_msg },
+    );
+    assert!(
+        matches!(result, Err(MpcError::ProtocolFailed(_))),
+        "pushed echo must be rejected: {result:?}"
+    );
+}
+
+#[test]
 fn test_prune_nonce_state_drops_old_avid_round_state() {
     let setup = TestSetup::new(5);
     let manager = setup.create_manager(0);
