@@ -78,6 +78,13 @@ impl GuardianService for Forwarding {
         Err(denied("OperatorInit"))
     }
 
+    async fn operator_write_genesis(
+        &self,
+        _request: Request<proto::OperatorWriteGenesisRequest>,
+    ) -> Result<Response<proto::OperatorWriteGenesisResponse>, Status> {
+        Err(denied("OperatorWriteGenesis"))
+    }
+
     async fn setup_new_key(
         &self,
         _request: Request<proto::SetupNewKeyRequest>,
@@ -161,6 +168,12 @@ mod tests {
             &self,
             _: Request<proto::OperatorInitRequest>,
         ) -> Result<Response<proto::OperatorInitResponse>, Status> {
+            unimplemented!("a real guardian would serve this; the proxy must never reach it")
+        }
+        async fn operator_write_genesis(
+            &self,
+            _: Request<proto::OperatorWriteGenesisRequest>,
+        ) -> Result<Response<proto::OperatorWriteGenesisResponse>, Status> {
             unimplemented!("a real guardian would serve this; the proxy must never reach it")
         }
         async fn provisioner_init(
@@ -271,6 +284,12 @@ mod tests {
             .operator_activate(Request::new(proto::OperatorActivateRequest::default()))
             .await
             .expect_err("operator_activate must be denied");
+        assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+
+        let denied = proxy
+            .operator_write_genesis(Request::new(proto::OperatorWriteGenesisRequest::default()))
+            .await
+            .expect_err("operator_write_genesis must be denied");
         assert_eq!(denied.code(), tonic::Code::PermissionDenied);
 
         let denied = proxy

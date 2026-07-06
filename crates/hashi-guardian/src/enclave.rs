@@ -539,6 +539,10 @@ impl Enclave {
             .await
     }
 
+    pub async fn log_genesis(&self, msg: GenesisLogMessage) -> GuardianResult<()> {
+        self.write_log(LogMessage::Genesis(Box::new(msg))).await
+    }
+
     pub async fn log_heartbeat(&self, seq: u64) -> GuardianResult<()> {
         self.write_log(LogMessage::Heartbeat { seq }).await
     }

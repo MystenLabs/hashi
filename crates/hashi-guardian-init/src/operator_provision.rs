@@ -9,9 +9,11 @@ use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::OperatorInitRequest;
+use hashi_types::guardian::OperatorWriteGenesisRequest;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
+use hashi_types::guardian::proto_conversions::operator_write_genesis_request_to_pb;
 use hashi_types::pgp::load_certs;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use tracing::info;
@@ -65,6 +67,35 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     let master_g = onchain_state.onchain_verifying_key_g()?;
     info!(phase = "setup", master_g = ?master_g, "fetched on-chain MPC master G");
+
+    info!(
+        phase = "committee",
+        "checking latest committee-update/genesis record before operator_init",
+    );
+    let genesis_bootstrap_committee = match reader
+        .read_latest_committee(BuildPolicy::AnyAllowlisted)
+        .await?
+    {
+        Some(committee) => {
+            info!(
+                phase = "committee",
+                epoch = committee.epoch,
+                "serving committee already exists in S3; genesis bootstrap not needed",
+            );
+            None
+        }
+        None => {
+            let committee = onchain_state
+                .current_committee()
+                .context("no current committee on chain (DKG not yet complete?)")?;
+            info!(
+                phase = "committee",
+                epoch = committee.epoch(),
+                "no committee-update/genesis record; will write on-chain committee to genesis after operator_init",
+            );
+            Some(committee)
+        }
+    };
 
     info!(
         phase = "guardian connect",
@@ -166,6 +197,24 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         phase = "operator_init",
         "operator_init complete; standby config installed"
     );
+
+    if let Some(committee) = genesis_bootstrap_committee {
+        info!(
+            phase = "operator_write_genesis",
+            epoch = committee.epoch(),
+            "writing operator-trusted genesis bootstrap committee"
+        );
+        let genesis_req =
+            operator_write_genesis_request_to_pb(OperatorWriteGenesisRequest::new(committee));
+        client
+            .operator_write_genesis(genesis_req)
+            .await
+            .context("OperatorWriteGenesis RPC failed")?;
+        info!(
+            phase = "operator_write_genesis",
+            "genesis bootstrap committee written"
+        );
+    }
 
     info!(
         phase = "guardian postcheck",

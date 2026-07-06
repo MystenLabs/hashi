@@ -6,6 +6,7 @@
 //! the committee-certificate check shared by `standard` and `committee_update`.
 
 pub mod committee_update;
+pub mod genesis;
 pub mod heartbeat;
 pub mod provisioner_init;
 pub mod standard;

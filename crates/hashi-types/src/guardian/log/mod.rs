@@ -29,6 +29,7 @@ pub const S3_OBJECT_LOCK_DURATION_WITHDRAW: Duration = ONE_WEEK;
 pub const S3_OBJECT_LOCK_DURATION_HEARTBEAT: Duration = ONE_WEEK;
 pub const S3_OBJECT_LOCK_DURATION_CEREMONY: Duration = ONE_WEEK;
 pub const S3_OBJECT_LOCK_DURATION_COMMITTEE_UPDATE: Duration = ONE_WEEK;
+pub const S3_OBJECT_LOCK_DURATION_GENESIS: Duration = ONE_WEEK;
 /// Shares carry their own enclave signature, so the lock isn't for integrity —
 /// it only guarantees a window in which the operator can't purge them before KPs
 /// fetch. Short on purpose; they stay readable after expiry until deleted.
@@ -42,6 +43,7 @@ pub const S3_DIR_HEARTBEAT: &str = "heartbeat";
 pub const S3_DIR_CEREMONY: &str = "ceremony";
 pub const S3_DIR_SHARES: &str = "shares";
 pub const S3_DIR_COMMITTEE_UPDATE: &str = "committee-update";
+pub const S3_DIR_GENESIS: &str = "genesis";
 
 /// Single definition of the flat, sequence-scoped key layout
 /// (`{dir}/{sharing_seq:020}-{session_id}.json`) behind the

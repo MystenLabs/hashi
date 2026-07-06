@@ -93,14 +93,17 @@ It:
    operator-initialized.
 2. Reads the latest attested ceremony from S3 and verifies its encrypted-share
    recipients against the expected KP roster.
-3. Fetches on-chain MPC master `G`.
+3. Fetches on-chain MPC master `G`, and reads the latest `committee-update/` or
+   `genesis/` record if one already exists.
 4. Builds the withdraw-mode `InitConfig` from limiter config, on-chain MPC
    master `G`, the KP PCR allowlist, and configured Bitcoin network.
 5. Calls withdraw-mode `OperatorInit` with guardian S3 config and `InitConfig`;
    the enclave reads the latest ceremony instance from S3 before installing.
-6. Verifies the live and S3-logged `GuardianInfo` match the installed ceremony
+6. On first deploy only, writes the on-chain committee to `genesis/record.json`
+   through `OperatorWriteGenesis`.
+7. Verifies the live and S3-logged `GuardianInfo` match the installed ceremony
    instance and stable config.
-7. Prints the `config_hash` that key provisioners must verify before submitting
+8. Prints the `config_hash` that key provisioners must verify before submitting
    shares.
 
 ```bash

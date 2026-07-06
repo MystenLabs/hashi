@@ -93,6 +93,13 @@ pub struct OperatorInitRequest {
     init_config: Option<InitConfig>,
 }
 
+/// Operator-trusted one-time bootstrap request for `genesis/record.json`.
+/// The operator must source the committee from on-chain state during first deploy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OperatorWriteGenesisRequest {
+    committee: crate::move_types::Committee,
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct GetGuardianInfoResponse {
     /// AWS Nitro attestation
@@ -416,6 +423,26 @@ impl OperatorInitRequest {
 
     pub fn into_parts(self) -> (S3Config, Option<InitConfig>) {
         (self.s3_config, self.init_config)
+    }
+}
+
+impl OperatorWriteGenesisRequest {
+    pub fn new(committee: HashiCommittee) -> Self {
+        Self {
+            committee: (&committee).into(),
+        }
+    }
+
+    pub fn from_move_committee(committee: crate::move_types::Committee) -> Self {
+        Self { committee }
+    }
+
+    pub fn committee(&self) -> &crate::move_types::Committee {
+        &self.committee
+    }
+
+    pub fn into_committee(self) -> crate::move_types::Committee {
+        self.committee
     }
 }
 
