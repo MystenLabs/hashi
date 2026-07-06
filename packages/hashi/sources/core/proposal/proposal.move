@@ -3,7 +3,7 @@
 
 module hashi::proposal;
 
-use hashi::{hashi::Hashi, proposal_events, threshold};
+use hashi::{hashi::Hashi, threshold};
 use std::string::String;
 use sui::{clock::Clock, vec_map::VecMap};
 
@@ -16,7 +16,9 @@ public struct Proposal<T> has key, store {
     creator: address,
     votes: vector<address>,
     quorum_threshold_bps: u64,
-    timestamp_ms: u64,
+    created_timestamp_ms: u64,
+    /// Clock timestamp at execution. `None` until the proposal executes.
+    executed_timestamp_ms: Option<u64>,
     metadata: VecMap<String, String>,
     data: T,
 }
@@ -54,21 +56,22 @@ public(package) fun create<T: store>(
     assert!(hashi.committee_set().member_authorized(validator_address, ctx), EUnauthorizedCaller);
 
     let votes = vector[validator_address];
-    let timestamp_ms = clock.timestamp_ms();
+    let created_timestamp_ms = clock.timestamp_ms();
 
     let proposal = Proposal {
         id: object::new(ctx),
         creator: validator_address,
         votes,
         quorum_threshold_bps,
-        timestamp_ms,
+        created_timestamp_ms,
+        executed_timestamp_ms: option::none(),
         metadata,
         data,
     };
 
     let proposal_id = object::id(&proposal);
     hashi.proposals_mut().active_mut().add(proposal_id, proposal);
-    proposal_events::emit_proposal_created_event<T>(proposal_id, timestamp_ms);
+    sui::event::emit(ProposalCreatedEvent<T> { proposal_id, timestamp_ms: created_timestamp_ms });
     proposal_id
 }
 
@@ -87,17 +90,19 @@ public(package) fun execute<T: copy + drop + store>(
         !hashi.proposals().executed().contains(proposal_id.to_address()),
         EProposalAlreadyExecuted,
     );
-    let proposal: Proposal<T> = hashi.proposals_mut().active_mut().remove(proposal_id);
+    let mut proposal: Proposal<T> = hashi.proposals_mut().active_mut().remove(proposal_id);
 
     assert!(!proposal.is_expired(clock), EProposalExpired);
     assert!(proposal.quorum_reached(hashi), EQuorumNotReached);
+
+    proposal.executed_timestamp_ms = option::some(clock.timestamp_ms());
 
     let data = proposal.data;
     let id = proposal.id.to_inner();
 
     hashi.proposals_mut().executed_mut().add(id.to_address(), proposal);
 
-    proposal_events::emit_proposal_executed_event<T>(id, data);
+    sui::event::emit(ProposalExecutedEvent<T> { proposal_id: id, data });
     data
 }
 
@@ -118,9 +123,9 @@ public fun vote<T: store>(
 
     proposal.votes.push_back(validator_address);
 
-    proposal_events::emit_vote_cast_event<T>(proposal_id, validator_address);
+    sui::event::emit(VoteCastEvent<T> { proposal_id, voter: validator_address });
     if (proposal.quorum_reached(hashi)) {
-        proposal_events::emit_quorum_reached_event<T>(proposal_id);
+        sui::event::emit(QuorumReachedEvent<T> { proposal_id });
     }
 }
 
@@ -140,10 +145,10 @@ public fun remove_vote<T: store>(
         .destroy_or!(abort ENoVoteFound);
 
     proposal.votes.remove(index);
-    proposal_events::emit_vote_removed_event<T>(
-        proposal.id.to_inner(),
-        validator_address,
-    );
+    sui::event::emit(VoteRemovedEvent<T> {
+        proposal_id: proposal.id.to_inner(),
+        voter: validator_address,
+    });
 }
 
 public fun quorum_reached<T>(proposal: &Proposal<T>, hashi: &Hashi): bool {
@@ -158,7 +163,7 @@ public fun quorum_reached<T>(proposal: &Proposal<T>, hashi: &Hashi): bool {
 }
 
 public fun is_expired<T>(proposal: &Proposal<T>, clock: &Clock): bool {
-    clock.timestamp_ms() > proposal.timestamp_ms + MAX_PROPOSAL_DURATION_MS
+    clock.timestamp_ms() > proposal.created_timestamp_ms + MAX_PROPOSAL_DURATION_MS
 }
 
 public fun delete_expired<T: store>(hashi: &mut Hashi, proposal_id: ID, clock: &Clock): T {
@@ -196,4 +201,34 @@ public fun votes<T>(proposal: &Proposal<T>): &vector<address> {
 #[test_only]
 public fun data<T>(proposal: &Proposal<T>): &T {
     &proposal.data
+}
+
+// ~~~~~~~ Events ~~~~~~~
+
+public struct ProposalCreatedEvent<phantom T> has copy, drop {
+    proposal_id: ID,
+    timestamp_ms: u64,
+}
+
+public struct VoteCastEvent<phantom T> has copy, drop {
+    proposal_id: ID,
+    voter: address,
+}
+
+public struct VoteRemovedEvent<phantom T> has copy, drop {
+    proposal_id: ID,
+    voter: address,
+}
+
+public struct ProposalDeletedEvent<phantom T> has copy, drop {
+    proposal_id: ID,
+}
+
+public struct ProposalExecutedEvent<T> has copy, drop {
+    proposal_id: ID,
+    data: T,
+}
+
+public struct QuorumReachedEvent<phantom T> has copy, drop {
+    proposal_id: ID,
 }

@@ -688,7 +688,9 @@ pub struct Proposal<T> {
     pub creator: Address,
     pub votes: Vec<Address>,
     pub quorum_threshold_bps: u64,
-    pub timestamp_ms: u64,
+    pub created_timestamp_ms: u64,
+    /// Clock timestamp at execution. `None` until the proposal executes.
+    pub executed_timestamp_ms: Option<u64>,
     pub metadata: VecMap<String, String>,
     pub data: T,
 }
@@ -968,7 +970,7 @@ impl ProposalCreatedEvent {
 }
 
 impl MoveType for ProposalCreatedEvent {
-    const MODULE: &'static str = "proposal_events";
+    const MODULE: &'static str = "proposal";
     const NAME: &'static str = "ProposalCreatedEvent";
 }
 
@@ -998,7 +1000,7 @@ impl VoteCastEvent {
 }
 
 impl MoveType for VoteCastEvent {
-    const MODULE: &'static str = "proposal_events";
+    const MODULE: &'static str = "proposal";
     const NAME: &'static str = "VoteCastEvent";
 }
 
@@ -1028,7 +1030,7 @@ impl VoteRemovedEvent {
 }
 
 impl MoveType for VoteRemovedEvent {
-    const MODULE: &'static str = "proposal_events";
+    const MODULE: &'static str = "proposal";
     const NAME: &'static str = "VoteRemovedEvent";
 }
 
@@ -1056,7 +1058,7 @@ impl ProposalDeletedEvent {
 }
 
 impl MoveType for ProposalDeletedEvent {
-    const MODULE: &'static str = "proposal_events";
+    const MODULE: &'static str = "proposal";
     const NAME: &'static str = "ProposalDeletedEvent";
 }
 
@@ -1098,7 +1100,7 @@ impl ProposalExecutedEvent {
 }
 
 impl MoveType for ProposalExecutedEvent {
-    const MODULE: &'static str = "proposal_events";
+    const MODULE: &'static str = "proposal";
     const NAME: &'static str = "ProposalExecutedEvent";
 }
 
@@ -1126,7 +1128,7 @@ impl QuorumReachedEvent {
 }
 
 impl MoveType for QuorumReachedEvent {
-    const MODULE: &'static str = "proposal_events";
+    const MODULE: &'static str = "proposal";
     const NAME: &'static str = "QuorumReachedEvent";
 }
 
@@ -1143,7 +1145,7 @@ pub struct PackageUpgradedEvent {
 }
 
 impl MoveType for PackageUpgradedEvent {
-    const MODULE: &'static str = "proposal_events";
+    const MODULE: &'static str = "upgrade";
     const NAME: &'static str = "PackageUpgradedEvent";
 }
 
