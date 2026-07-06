@@ -19,10 +19,12 @@ ARG GIT_REVISION=local
 ENV GIT_REVISION=${GIT_REVISION}
 # The guardian AND the init tooling need `non-enclave-dev`: the guardian stubs
 # the Nitro NSM attestation, and the init tooling must skip attestation
-# verification to talk to that mock-attestation guardian. The proxy is
-# attestation-agnostic, so it builds without the feature.
-RUN cargo build --release --features non-enclave-dev -p hashi-guardian -p hashi-guardian-init
-RUN cargo build --release -p hashi-guardian-proxy
+# verification to talk to that mock-attestation guardian. The proxy doesn't
+# verify attestation (liveness-only), so it needs no feature — one invocation
+# builds all three and shares the dependency compile.
+RUN cargo build --release \
+      -p hashi-guardian -p hashi-guardian-init -p hashi-guardian-proxy \
+      --features hashi-guardian/non-enclave-dev,hashi-guardian-init/non-enclave-dev
 
 FROM debian:bookworm-slim
 # socat: the vsock->TCP shims. gnupg: the test KP keys (`operator ceremony`
@@ -31,7 +33,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends socat gnupg jq gettext-base ca-certificates curl \
  && arch="$(dpkg --print-architecture)"; case "$arch" in amd64) ga=x86_64;; arm64) ga=arm64;; *) ga="$arch";; esac; \
     curl -fsSL "https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_${ga}.tar.gz" \
-      | tar -xz -C /usr/local/bin grpcurl \
+      | tar --no-same-owner -xz -C /usr/local/bin grpcurl \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /src/target/release/hashi-guardian       /usr/bin/hashi-guardian
 COPY --from=builder /src/target/release/hashi-guardian-proxy /usr/bin/hashi-guardian-proxy

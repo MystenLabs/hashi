@@ -38,6 +38,7 @@ localnet-cmd: ## Print the `hashi-localnet start` command wired to this guardian
 	echo "ceremony pubkey + forms the committee; stays running):"; \
 	echo ""; \
 	echo "  cargo run -p e2e-tests --bin hashi-localnet -- start \\"; \
+	echo "    --data-dir $(LOCALNET_DIR) \\"; \
 	echo "    --guardian-url http://localhost:3000 \\"; \
 	echo "    --guardian-btc-pubkey $$pubkey"
 

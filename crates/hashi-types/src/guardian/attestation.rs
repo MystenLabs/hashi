@@ -43,6 +43,18 @@ impl NitroAttestation {
         #[cfg(any(test, feature = "non-enclave-dev"))]
         {
             let _ = (signing_pubkey, build_pcrs);
+            // Real attestation is stubbed here — announce it loudly (once) so a
+            // `non-enclave-dev` binary can't be mistaken for a real enclave.
+            // Gated off `test` so unit tests stay quiet.
+            #[cfg(all(feature = "non-enclave-dev", not(test)))]
+            {
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    tracing::warn!(
+                        "Nitro attestation verification DISABLED (non-enclave-dev build)"
+                    );
+                });
+            }
             Ok(())
         }
         #[cfg(not(any(test, feature = "non-enclave-dev")))]
