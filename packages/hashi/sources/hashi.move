@@ -217,12 +217,11 @@ public(package) fun tob_mut(self: &mut Hashi): &mut Bag {
 public(package) fun epoch_certs(
     self: &mut Hashi,
     key: hashi::tob::TobKey,
-    protocol_type: hashi::tob::ProtocolType,
     ctx: &mut TxContext,
 ): &mut hashi::tob::EpochCertsV1 {
     let epoch = key.epoch();
     if (!self.tob.contains(key)) {
-        self.tob.add(key, hashi::tob::create(epoch, protocol_type, ctx));
+        self.tob.add(key, hashi::tob::create(epoch, key.protocol_type(), ctx));
     };
     self.tob.borrow_mut(key)
 }
@@ -242,6 +241,19 @@ public(package) fun reset_num_consumed_presigs(self: &mut Hashi) {
 }
 
 // ======== Test-only Functions ========
+
+#[test_only]
+public(package) fun tob_contains(self: &Hashi, key: hashi::tob::TobKey): bool {
+    self.tob.contains(key)
+}
+
+#[test_only]
+public(package) fun epoch_certs_ref(
+    self: &Hashi,
+    key: hashi::tob::TobKey,
+): &hashi::tob::EpochCertsV1 {
+    self.tob.borrow(key)
+}
 
 #[test_only]
 /// Creates a Hashi instance for testing with all components provided

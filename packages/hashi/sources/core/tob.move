@@ -32,14 +32,23 @@ public(package) fun protocol_type_nonce_generation(): ProtocolType {
 public struct TobKey has copy, drop, store {
     epoch: u64,
     batch_index: Option<u32>,
+    protocol_type: ProtocolType,
 }
 
-public(package) fun tob_key(epoch: u64, batch_index: Option<u32>): TobKey {
-    TobKey { epoch, batch_index }
+public(package) fun tob_key(
+    epoch: u64,
+    batch_index: Option<u32>,
+    protocol_type: ProtocolType,
+): TobKey {
+    TobKey { epoch, batch_index, protocol_type }
 }
 
 public(package) fun epoch(self: &TobKey): u64 {
     self.epoch
+}
+
+public(package) fun protocol_type(self: &TobKey): ProtocolType {
+    self.protocol_type
 }
 
 /// Certificates for a single epoch.
@@ -116,4 +125,9 @@ public(package) fun submit_cert_with_signature(
     let message = DealerMessagesHashV1 { dealer_address: dealer, messages_hash };
     let submission = DealerSubmissionV1 { message, signature: *sig };
     epoch_certs.certs.push_back(dealer, submission);
+}
+
+#[test_only]
+public fun num_certs(self: &EpochCertsV1): u64 {
+    self.certs.length()
 }

@@ -14,7 +14,7 @@ use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto_tbls::polynomial::Eval;
 use fastcrypto_tbls::threshold_schnorr::G;
 use fastcrypto_tbls::threshold_schnorr::S;
-use hashi::communication::fetch_certificates;
+use hashi::communication::fetch_key_generation_certificates;
 use hashi::db::Database;
 use hashi::mpc::MpcManager;
 use hashi::mpc::types::CertificateV1;
@@ -131,7 +131,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
         previous_committee.members().len()
     );
 
-    let raw_certs = fetch_certificates(onchain_state, previous_epoch, None)
+    let raw_certs = fetch_key_generation_certificates(onchain_state, previous_epoch)
         .await
         .map_err(|e| anyhow!("failed to fetch certificates: {e}"))?;
     let certificates: Vec<CertificateV1> = raw_certs.into_iter().map(|(_, cert)| cert).collect();

@@ -21,6 +21,7 @@ use tracing::warn;
 use crate::Hashi;
 use crate::communication::SuiTobChannel;
 use crate::communication::fetch_certificates;
+use crate::communication::fetch_key_generation_certificates;
 use crate::constants::PRESIG_REFILL_DIVISOR;
 use crate::metrics::MPC_LABEL_DKG;
 use crate::metrics::MPC_LABEL_KEY_ROTATION;
@@ -40,6 +41,7 @@ use hashi_types::committee::BLS12381Signature;
 use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::Committee;
 use hashi_types::committee::certificate_threshold;
+use hashi_types::move_types;
 use hashi_types::move_types::ReconfigCompletionMessage;
 
 const RETRY_INTERVAL: Duration = Duration::from_secs(10);
@@ -271,21 +273,22 @@ impl MpcService {
     async fn recover_mpc_state(&self) -> anyhow::Result<MpcOutput> {
         let onchain_state = self.inner.onchain_state().clone();
         let epoch = onchain_state.epoch();
-        let protocol_type = onchain_state
-            .fetch_certs(epoch, None)
-            .await?
-            .map(|(pt, _)| pt);
+        let certs = fetch_key_generation_certificates(&onchain_state, epoch)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("failed to fetch reconfig certs for epoch {epoch}: {e}")
+            })?;
+        let is_key_rotation = matches!(certs.first(), Some((_, CertificateV1::Rotation(_))));
         let onchain_mpc_key = onchain_state.mpc_public_key();
         info!(
-            "recover_mpc_state: epoch={epoch}, protocol_type={protocol_type:?}, \
+            "recover_mpc_state: epoch={epoch}, is_key_rotation={is_key_rotation}, \
              onchain_mpc_key_len={}",
             onchain_mpc_key.len(),
         );
-        let output = match protocol_type {
-            Some(hashi_types::move_types::ProtocolType::KeyRotation) => {
-                self.recover_current_rotation(epoch, &onchain_mpc_key).await
-            }
-            _ => self.recover_current_dkg(epoch, &onchain_mpc_key).await,
+        let output = if is_key_rotation {
+            self.recover_current_rotation(epoch, &onchain_mpc_key).await
+        } else {
+            self.recover_current_dkg(epoch, &onchain_mpc_key).await
         }?;
         info!(
             "recover_mpc_state: recovered vk={}",
@@ -301,12 +304,13 @@ impl MpcService {
     ) -> anyhow::Result<MpcOutput> {
         self.setup_initial_dkg(epoch)?;
         let onchain_state = self.inner.onchain_state().clone();
-        let certs: Vec<CertificateV1> = fetch_certificates(&onchain_state, epoch, None)
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to fetch DKG certs for epoch {epoch}: {e}"))?
-            .into_iter()
-            .map(|(_, cert)| cert)
-            .collect();
+        let certs: Vec<CertificateV1> =
+            fetch_certificates(&onchain_state, epoch, None, move_types::ProtocolType::Dkg)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to fetch DKG certs for epoch {epoch}: {e}"))?
+                .into_iter()
+                .map(|(_, cert)| cert)
+                .collect();
         let mpc_manager = self
             .inner
             .mpc_manager()
@@ -345,14 +349,19 @@ impl MpcService {
             .mpc_manager()
             .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized for rotation recovery"))?;
         let previous_epoch = mpc_manager.read().unwrap().previous_epoch;
-        let current_certs: Vec<CertificateV1> = fetch_certificates(&onchain_state, epoch, None)
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to fetch rotation certs for epoch {epoch}: {e}"))?
-            .into_iter()
-            .map(|(_, cert)| cert)
-            .collect();
+        let current_certs: Vec<CertificateV1> = fetch_certificates(
+            &onchain_state,
+            epoch,
+            None,
+            move_types::ProtocolType::KeyRotation,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to fetch rotation certs for epoch {epoch}: {e}"))?
+        .into_iter()
+        .map(|(_, cert)| cert)
+        .collect();
         let previous_certs: Vec<CertificateV1> =
-            fetch_certificates(&onchain_state, previous_epoch, None)
+            fetch_key_generation_certificates(&onchain_state, previous_epoch)
                 .await
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -404,6 +413,7 @@ impl MpcService {
             onchain_state,
             target_epoch,
             None,
+            move_types::ProtocolType::Dkg,
             signer,
         );
         let output = MpcManager::run_dkg(
@@ -443,6 +453,7 @@ impl MpcService {
             onchain_state,
             epoch,
             Some(batch_index),
+            move_types::ProtocolType::NonceGeneration,
             signer,
         );
         let metrics = &self.inner.metrics;
@@ -638,8 +649,12 @@ impl MpcService {
         params: Parameters,
     ) -> anyhow::Result<Presignatures> {
         let onchain_state = self.inner.onchain_state().clone();
-        let (_, certs) = onchain_state
-            .fetch_certs(epoch, Some(batch_index))
+        let certs = onchain_state
+            .fetch_certs(
+                epoch,
+                Some(batch_index),
+                move_types::ProtocolType::NonceGeneration,
+            )
             .await?
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -930,7 +945,7 @@ impl MpcService {
             "run_key_rotation: target_epoch={target_epoch}, previous_epoch={previous_epoch}, \
              onchain_epoch={onchain_epoch}, onchain_mpc_key={onchain_mpc_key}",
         );
-        let previous_certs = fetch_certificates(&onchain_state, previous_epoch, None)
+        let previous_certs = fetch_key_generation_certificates(&onchain_state, previous_epoch)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to fetch previous certificates: {e}"))?;
         let previous_certs: Vec<CertificateV1> =
@@ -947,6 +962,7 @@ impl MpcService {
             onchain_state,
             target_epoch,
             None,
+            move_types::ProtocolType::KeyRotation,
             signer,
         );
         let output = MpcManager::run_key_rotation(
