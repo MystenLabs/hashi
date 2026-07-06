@@ -108,6 +108,7 @@ public fun vote<T: store>(
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
+    hashi.versioning().assert_version_enabled();
     assert!(hashi.committee_set().member_authorized(validator_address, ctx), EUnauthorizedCaller);
 
     let proposal: &mut Proposal<T> = hashi.proposals_mut().active_mut().borrow_mut(proposal_id);
@@ -129,6 +130,7 @@ public fun remove_vote<T: store>(
     proposal_id: ID,
     ctx: &mut TxContext,
 ) {
+    hashi.versioning().assert_version_enabled();
     assert!(hashi.committee_set().member_authorized(validator_address, ctx), EUnauthorizedCaller);
 
     let proposal: &mut Proposal<T> = hashi.proposals_mut().active_mut().borrow_mut(proposal_id);
@@ -160,6 +162,7 @@ public fun is_expired<T>(proposal: &Proposal<T>, clock: &Clock): bool {
 }
 
 public fun delete_expired<T: store>(hashi: &mut Hashi, proposal_id: ID, clock: &Clock): T {
+    hashi.versioning().assert_version_enabled();
     // Executed proposals are archived in the executed bag and must
     // never be deletable, even after they expire. Refuse explicitly so
     // the caller gets `EProposalAlreadyExecuted` instead of the bag's
