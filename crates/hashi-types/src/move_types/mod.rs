@@ -59,6 +59,7 @@ pub struct BitcoinStateKey {
 /// Rust version of the Move hashi::bitcoin_state::BitcoinState type.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct BitcoinState {
+    pub id: Address,
     pub deposit_queue: DepositRequestQueue,
     pub withdrawal_queue: WithdrawalRequestQueue,
     pub utxo_pool: UtxoPool,
