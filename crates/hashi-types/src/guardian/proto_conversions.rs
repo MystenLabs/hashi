@@ -40,6 +40,7 @@ use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalRequestWire;
 use super::StandardWithdrawalResponse;
 use super::WithdrawModeConfig;
+use super::WriteGenesisUntrustedRequest;
 use crate::bitcoin::BitcoinAddress;
 use crate::bitcoin::BitcoinPubkey;
 use crate::bitcoin::BitcoinSignature;
@@ -157,6 +158,17 @@ impl TryFrom<pb::OperatorInitRequest> for OperatorInitRequest {
             Some(state) => Ok(OperatorInitRequest::new_withdraw_mode(s3_config, state)),
             None => Ok(OperatorInitRequest::new_ceremony_mode(s3_config)),
         }
+    }
+}
+
+impl TryFrom<pb::WriteGenesisUntrustedRequest> for WriteGenesisUntrustedRequest {
+    type Error = GuardianError;
+
+    fn try_from(req: pb::WriteGenesisUntrustedRequest) -> Result<Self, Self::Error> {
+        let committee_pb = req.committee.ok_or_else(|| missing("committee"))?;
+        Ok(WriteGenesisUntrustedRequest::from_move_committee(
+            pb_to_move_committee(committee_pb)?,
+        ))
     }
 }
 
@@ -460,6 +472,14 @@ pub fn operator_init_request_to_pb(
         s3_config: Some(s3_config_to_pb(s3_config)),
         state: state.map(withdraw_mode_config_to_pb).transpose()?,
     })
+}
+
+pub fn write_genesis_untrusted_request_to_pb(
+    r: WriteGenesisUntrustedRequest,
+) -> pb::WriteGenesisUntrustedRequest {
+    pb::WriteGenesisUntrustedRequest {
+        committee: Some(move_committee_to_pb(&r.into_committee())),
+    }
 }
 
 pub fn provisioner_init_request_to_pb(

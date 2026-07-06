@@ -19,6 +19,7 @@ use hashi_types::guardian::time_utils::UnixSeconds;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
+use hashi_types::guardian::GenesisLogMessage;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::KPEncryptedShares;
@@ -261,12 +262,26 @@ impl GuardianReader {
         Ok(msg.encrypted_shares)
     }
 
+    /// Latest serving committee, preferring `committee-update/` and falling back
+    /// to the operator-trusted `genesis/record.json` bootstrap record. `None`
+    /// means neither source has been written yet.
+    pub async fn read_latest_committee(
+        &mut self,
+        build_policy: BuildPolicy,
+    ) -> anyhow::Result<Option<Committee>> {
+        if let Some(committee) = self.read_latest_committee_update(build_policy).await? {
+            return Ok(Some(committee));
+        }
+        Ok(self
+            .read_genesis(build_policy)
+            .await?
+            .map(|genesis| genesis.committee))
+    }
+
     /// The latest applied committee from `committee-update/` — the lex-last
     /// non-`failure-` (i.e. highest-epoch Success) entry, attestation- and
-    /// signature-verified. `None` if no committee update has been logged (e.g. a
-    /// fresh deployment whose committee still only exists in the operator's boot
-    /// config).
-    pub async fn read_latest_committee(
+    /// signature-verified. `None` if no committee update has been logged.
+    pub async fn read_latest_committee_update(
         &mut self,
         build_policy: BuildPolicy,
     ) -> anyhow::Result<Option<Committee>> {
@@ -289,6 +304,29 @@ impl GuardianReader {
                 anyhow::bail!("lex-last non-failure key resolved to a Failure log at {key}")
             }
         }
+    }
+
+    /// Fixed genesis record from `genesis/record.json`. `None` means the
+    /// operator-trusted bootstrap record has not been written yet.
+    pub async fn read_genesis(
+        &mut self,
+        build_policy: BuildPolicy,
+    ) -> anyhow::Result<Option<GenesisLogMessage>> {
+        let key = GenesisLogMessage::object_key();
+        let keys = self.s3.list_all_keys_in_dir(&key).await?;
+        if keys.is_empty() {
+            return Ok(None);
+        }
+        if keys != [key.clone()] {
+            anyhow::bail!("expected exactly one genesis record at {key}, found {keys:?}");
+        }
+        let record = self.s3.get_log_record(&key).await?;
+        let record = self.cache.verify_record(&self.s3, record).await?;
+        self.enforce_build_policy("genesis log", build_policy, &record.build_pcrs)?;
+        let LogMessage::Genesis(msg) = record.message else {
+            anyhow::bail!("expected a genesis log at {key}");
+        };
+        Ok(Some(*msg))
     }
 }
 

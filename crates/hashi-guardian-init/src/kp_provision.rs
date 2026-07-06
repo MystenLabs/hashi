@@ -299,8 +299,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     // 5. Check D — recompute the init state the operator booted the enclave
     //    with; its digest is the `state_hash` we bind as the share's AAD. The
-    //    committee comes from the latest signed `committee-update/` log or,
-    //    before any update exists, from authoritative on-chain Hashi state.
+    //    committee comes from the latest signed `committee-update/` log, the
+    //    operator-trusted genesis bootstrap record, or authoritative on-chain
+    //    Hashi state before either log exists.
     info!(
         phase = "state hash",
         "recomputing state_hash from committee + limiter + master_g",
@@ -313,8 +314,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             info!(
                 phase = "state hash",
                 epoch = scraped.epoch,
-                source = "committee-update log",
-                "scraped latest committee-update log",
+                source = "S3 committee log",
+                "scraped latest committee from S3",
             );
             scraped.try_into()?
         }

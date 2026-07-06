@@ -22,6 +22,9 @@ service GuardianService {
   // Operator initialization: provide config and commitments before provisioning.
   rpc OperatorInit(OperatorInitRequest) returns (OperatorInitResponse);
 
+  // Bootstrap genesis committee: operator-trusted, idempotent, first deploy only.
+  rpc WriteGenesisUntrusted(WriteGenesisUntrustedRequest) returns (WriteGenesisUntrustedResponse);
+
   // Provisioner initialization: submit encrypted share and readiness info.
   rpc ProvisionerInit(ProvisionerInitRequest) returns (ProvisionerInitResponse);
 
@@ -195,6 +198,12 @@ message OperatorInitRequest {
 }
 
 message OperatorInitResponse {}
+
+message WriteGenesisUntrustedRequest {
+  Committee committee = 1;
+}
+
+message WriteGenesisUntrustedResponse {}
 
 message S3Config {
   optional string access_key = 1;

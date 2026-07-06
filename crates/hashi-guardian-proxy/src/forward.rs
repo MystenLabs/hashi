@@ -78,6 +78,13 @@ impl GuardianService for Forwarding {
         Err(denied("OperatorInit"))
     }
 
+    async fn write_genesis_untrusted(
+        &self,
+        _request: Request<proto::WriteGenesisUntrustedRequest>,
+    ) -> Result<Response<proto::WriteGenesisUntrustedResponse>, Status> {
+        Err(denied("WriteGenesisUntrusted"))
+    }
+
     async fn setup_new_key(
         &self,
         _request: Request<proto::SetupNewKeyRequest>,
@@ -154,6 +161,12 @@ mod tests {
             &self,
             _: Request<proto::OperatorInitRequest>,
         ) -> Result<Response<proto::OperatorInitResponse>, Status> {
+            unimplemented!("a real guardian would serve this; the proxy must never reach it")
+        }
+        async fn write_genesis_untrusted(
+            &self,
+            _: Request<proto::WriteGenesisUntrustedRequest>,
+        ) -> Result<Response<proto::WriteGenesisUntrustedResponse>, Status> {
             unimplemented!("a real guardian would serve this; the proxy must never reach it")
         }
         async fn provisioner_init(

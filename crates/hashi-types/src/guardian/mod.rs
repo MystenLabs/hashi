@@ -94,6 +94,13 @@ pub struct OperatorInitRequest {
     state: Option<WithdrawModeConfig>,
 }
 
+/// Operator-trusted one-time bootstrap request for `genesis/record.json`.
+/// The operator must source the committee from onchain state during first deploy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WriteGenesisUntrustedRequest {
+    committee: crate::move_types::Committee,
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct GetGuardianInfoResponse {
     /// AWS Nitro attestation
@@ -404,6 +411,26 @@ impl OperatorInitRequest {
 
     pub fn into_parts(self) -> (S3Config, Option<WithdrawModeConfig>) {
         (self.s3_config, self.state)
+    }
+}
+
+impl WriteGenesisUntrustedRequest {
+    pub fn new(committee: HashiCommittee) -> Self {
+        Self {
+            committee: (&committee).into(),
+        }
+    }
+
+    pub fn from_move_committee(committee: crate::move_types::Committee) -> Self {
+        Self { committee }
+    }
+
+    pub fn committee(&self) -> &crate::move_types::Committee {
+        &self.committee
+    }
+
+    pub fn into_committee(self) -> crate::move_types::Committee {
+        self.committee
     }
 }
 

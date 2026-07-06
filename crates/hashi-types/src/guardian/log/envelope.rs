@@ -7,6 +7,7 @@
 
 use super::S3_OBJECT_LOCK_DURATION_CEREMONY;
 use super::S3_OBJECT_LOCK_DURATION_COMMITTEE_UPDATE;
+use super::S3_OBJECT_LOCK_DURATION_GENESIS;
 use super::S3_OBJECT_LOCK_DURATION_HEARTBEAT;
 use super::S3_OBJECT_LOCK_DURATION_INIT;
 use super::S3_OBJECT_LOCK_DURATION_SHARES;
@@ -92,6 +93,7 @@ impl LogRecord {
             LogMessage::Ceremony(..) => S3_OBJECT_LOCK_DURATION_CEREMONY,
             LogMessage::Shares(..) => S3_OBJECT_LOCK_DURATION_SHARES,
             LogMessage::CommitteeUpdate(..) => S3_OBJECT_LOCK_DURATION_COMMITTEE_UPDATE,
+            LogMessage::Genesis(..) => S3_OBJECT_LOCK_DURATION_GENESIS,
         }
     }
 
@@ -161,6 +163,7 @@ impl LogRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::guardian::GenesisLogMessage;
     use crate::guardian::InitLogMessage;
     use crate::guardian::KPEncryptedShares;
     use crate::guardian::LimiterState;
@@ -239,6 +242,28 @@ mod tests {
             "shares/00000000000000000007-session-d.json"
         );
         assert_eq!(log.object_lock_duration(), S3_OBJECT_LOCK_DURATION_SHARES);
+    }
+
+    #[test]
+    fn object_key_for_genesis_is_fixed() {
+        let session_id = "session-g".to_string();
+        let signing_key = GuardianSignKeyPair::from([12u8; 32]);
+        let log = LogRecord::new(
+            session_id,
+            LogMessage::Genesis(Box::new(GenesisLogMessage {
+                committee: crate::move_types::Committee {
+                    epoch: 0,
+                    members: vec![],
+                    total_weight: 0,
+                    config: crate::move_types::Config::default(),
+                },
+            })),
+            &signing_key,
+        );
+
+        assert_eq!(log.object_key(), GenesisLogMessage::object_key());
+        assert_eq!(log.object_key(), "genesis/record.json");
+        assert_eq!(log.object_lock_duration(), S3_OBJECT_LOCK_DURATION_GENESIS);
     }
 
     #[test]

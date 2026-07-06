@@ -16,7 +16,9 @@ use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::VerifiedGuardianInfo;
 use hashi_types::guardian::WithdrawModeConfig;
 use hashi_types::guardian::WithdrawModeState;
+use hashi_types::guardian::WriteGenesisUntrustedRequest;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
+use hashi_types::guardian::proto_conversions::write_genesis_untrusted_request_to_pb;
 use hashi_types::pgp::load_certs;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
@@ -27,6 +29,12 @@ use crate::config::Config;
 use crate::heartbeat_checks;
 use crate::kp_roster::VerifiedCeremonyState;
 use crate::limiter_recovery;
+
+enum CommitteeSource {
+    CommitteeUpdateLog,
+    GenesisLog,
+    OnchainBootstrap,
+}
 
 /// Initialize a fresh withdraw-mode guardian with operator-supplied state.
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
@@ -180,10 +188,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     info!(
         phase = "committee",
-        "sourcing committee from latest committee-update log or on-chain Hashi state",
+        "sourcing committee from latest committee-update/genesis log or on-chain Hashi state",
     );
-    let committee = match reader
-        .read_latest_committee(BuildPolicy::AnyAllowlisted)
+    let (committee, committee_source) = match reader
+        .read_latest_committee_update(BuildPolicy::AnyAllowlisted)
         .await?
     {
         Some(scraped) => {
@@ -193,20 +201,36 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 source = "committee-update log",
                 "scraped latest committee-update log",
             );
-            scraped.try_into()?
+            (scraped.try_into()?, CommitteeSource::CommitteeUpdateLog)
         }
-        None => {
-            let committee = onchain_state
-                .current_committee()
-                .context("no current committee on chain (DKG not yet complete?)")?;
-            info!(
-                phase = "committee",
-                epoch = committee.epoch(),
-                source = "on-chain Hashi state",
-                "no committee-update log; falling back to on-chain current committee",
-            );
-            committee
-        }
+        None => match reader.read_genesis(BuildPolicy::AnyAllowlisted).await? {
+            Some(genesis) => {
+                let committee = genesis.committee.try_into()?;
+                info!(
+                    phase = "committee",
+                    epoch = committee.epoch(),
+                    source = "genesis log",
+                    "no committee-update log; using genesis bootstrap committee",
+                );
+                (committee, CommitteeSource::GenesisLog)
+            }
+            None => {
+                let committee = onchain_state
+                    .current_committee()
+                    .context("no current committee on chain (DKG not yet complete?)")?;
+                info!(
+                    phase = "committee",
+                    epoch = committee.epoch(),
+                    source = "on-chain Hashi state",
+                    "no committee-update or genesis log; using on-chain current committee",
+                );
+                (committee, CommitteeSource::OnchainBootstrap)
+            }
+        },
+    };
+    let genesis_bootstrap_committee = match committee_source {
+        CommitteeSource::OnchainBootstrap => Some(committee.clone()),
+        CommitteeSource::CommitteeUpdateLog | CommitteeSource::GenesisLog => None,
     };
     let committee_epoch = committee.epoch();
 
@@ -245,6 +269,24 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         phase = "operator_init",
         "operator_init complete; guardian state installed"
     );
+
+    if let Some(committee) = genesis_bootstrap_committee {
+        info!(
+            phase = "write_genesis_untrusted",
+            epoch = committee.epoch(),
+            "writing operator-trusted genesis bootstrap committee"
+        );
+        let genesis_req =
+            write_genesis_untrusted_request_to_pb(WriteGenesisUntrustedRequest::new(committee));
+        client
+            .write_genesis_untrusted(genesis_req)
+            .await
+            .context("WriteGenesisUntrusted RPC failed")?;
+        info!(
+            phase = "write_genesis_untrusted",
+            "genesis bootstrap committee written"
+        );
+    }
 
     info!(
         phase = "guardian postcheck",

@@ -6,6 +6,7 @@ use crate::ceremony_mode::setup;
 use crate::info;
 use crate::operator_init;
 use crate::withdraw_mode::committee_update;
+use crate::withdraw_mode::genesis;
 use crate::withdraw_mode::provisioner_init;
 use crate::withdraw_mode::standard;
 use crate::Enclave;
@@ -21,6 +22,7 @@ use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::RotateKpsRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
 use hashi_types::guardian::StandardWithdrawalRequest;
+use hashi_types::guardian::WriteGenesisUntrustedRequest;
 use hashi_types::proto;
 use std::sync::Arc;
 use tonic::Request;
@@ -123,6 +125,22 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
             .map_err(to_status)?;
 
         Ok(Response::new(proto::OperatorInitResponse {}))
+    }
+
+    async fn write_genesis_untrusted(
+        &self,
+        request: Request<proto::WriteGenesisUntrustedRequest>,
+    ) -> Result<Response<proto::WriteGenesisUntrustedResponse>, Status> {
+        self.require_normal_mode("write_genesis_untrusted")?;
+
+        let domain_req: WriteGenesisUntrustedRequest =
+            request.into_inner().try_into().map_err(to_status)?;
+
+        genesis::write_genesis_untrusted(self.enclave.clone(), domain_req)
+            .await
+            .map_err(to_status)?;
+
+        Ok(Response::new(proto::WriteGenesisUntrustedResponse {}))
     }
 
     async fn provisioner_init(

@@ -125,6 +125,13 @@ where
         self.inner.operator_init(request).await
     }
 
+    async fn write_genesis_untrusted(
+        &self,
+        request: Request<proto::WriteGenesisUntrustedRequest>,
+    ) -> Result<Response<proto::WriteGenesisUntrustedResponse>, Status> {
+        self.inner.write_genesis_untrusted(request).await
+    }
+
     async fn provisioner_init(
         &self,
         request: Request<proto::ProvisionerInitRequest>,
@@ -239,6 +246,12 @@ mod tests {
             &self,
             _: Request<proto::OperatorInitRequest>,
         ) -> Result<Response<proto::OperatorInitResponse>, Status> {
+            unimplemented!("not exercised by tests")
+        }
+        async fn write_genesis_untrusted(
+            &self,
+            _: Request<proto::WriteGenesisUntrustedRequest>,
+        ) -> Result<Response<proto::WriteGenesisUntrustedResponse>, Status> {
             unimplemented!("not exercised by tests")
         }
         async fn provisioner_init(
