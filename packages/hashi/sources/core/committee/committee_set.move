@@ -4,7 +4,7 @@
 #[allow(unused_function, unused_field)]
 module hashi::committee_set;
 
-use hashi::{committee::{Self, Committee}, config::Config};
+use hashi::{committee::{Self, Committee}, config::{Self, Config}};
 use std::string::String;
 use sui::{
     bag::Bag,
@@ -173,6 +173,10 @@ public struct MemberInfo has store {
     /// This public key can be rotated but will only take effect at the
     /// beginning of the next epoch.
     next_epoch_encryption_public_key: vector<u8>,
+    /// Open-ended per-member extension slot. Empty today; lets future
+    /// upgrades attach new member data (e.g. per-protocol keys) without a
+    /// MemberInfoV2 migration.
+    extra_fields: Config,
 }
 
 /// Register as a member of Hashi.
@@ -196,6 +200,7 @@ public(package) fun new_member(
         endpoint_url: std::vector::empty().to_string(),
         tls_public_key: std::vector::empty(),
         next_epoch_encryption_public_key: std::vector::empty(),
+        extra_fields: config::empty(),
     };
 
     committee_set.insert_member(member);
@@ -604,5 +609,6 @@ fun create_member_info_for_testing(
         endpoint_url: std::vector::empty().to_string(),
         tls_public_key: std::vector::empty(),
         next_epoch_encryption_public_key: encryption_key,
+        extra_fields: config::empty(),
     }
 }
