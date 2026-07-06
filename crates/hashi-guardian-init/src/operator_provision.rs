@@ -185,7 +185,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         "sourcing committee from latest committee-update/genesis log or on-chain Hashi state",
     );
     let (committee, genesis_bootstrap_committee) = match reader
-        .read_latest_committee_update(BuildPolicy::AnyAllowlisted)
+        .read_latest_committee(BuildPolicy::AnyAllowlisted)
         .await?
     {
         Some(scraped) => {
@@ -193,36 +193,24 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             info!(
                 phase = "committee",
                 epoch = committee.epoch(),
-                source = "committee-update log",
-                "scraped latest committee-update log",
+                source = "S3 committee log",
+                "scraped latest committee from S3",
             );
             (committee, None)
         }
-        None => match reader.read_genesis(BuildPolicy::AnyAllowlisted).await? {
-            Some(genesis) => {
-                let committee = genesis.committee.try_into()?;
-                info!(
-                    phase = "committee",
-                    epoch = committee.epoch(),
-                    source = "genesis log",
-                    "no committee-update log; using genesis bootstrap committee",
-                );
-                (committee, None)
-            }
-            None => {
-                let committee = onchain_state
-                    .current_committee()
-                    .context("no current committee on chain (DKG not yet complete?)")?;
-                info!(
-                    phase = "committee",
-                    epoch = committee.epoch(),
-                    source = "on-chain Hashi state",
-                    "no committee-update or genesis log; using on-chain current committee",
-                );
-                let genesis_bootstrap_committee = Some(committee.clone());
-                (committee, genesis_bootstrap_committee)
-            }
-        },
+        None => {
+            let committee = onchain_state
+                .current_committee()
+                .context("no current committee on chain (DKG not yet complete?)")?;
+            info!(
+                phase = "committee",
+                epoch = committee.epoch(),
+                source = "on-chain Hashi state",
+                "no committee-update or genesis log; using on-chain current committee",
+            );
+            let genesis_bootstrap_committee = Some(committee.clone());
+            (committee, genesis_bootstrap_committee)
+        }
     };
     let committee_epoch = committee.epoch();
 

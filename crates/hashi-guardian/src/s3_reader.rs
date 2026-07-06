@@ -281,7 +281,7 @@ impl GuardianReader {
     /// The latest applied committee from `committee-update/` — the lex-last
     /// non-`failure-` (i.e. highest-epoch Success) entry, attestation- and
     /// signature-verified. `None` if no committee update has been logged.
-    pub async fn read_latest_committee_update(
+    async fn read_latest_committee_update(
         &mut self,
         build_policy: BuildPolicy,
     ) -> anyhow::Result<Option<Committee>> {
