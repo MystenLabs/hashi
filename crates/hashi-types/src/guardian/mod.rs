@@ -212,7 +212,7 @@ pub struct StandardWithdrawalRequest {
 }
 
 impl crate::intent::IntentMessage for StandardWithdrawalRequest {
-    const INTENT: u8 = crate::intent::GUARDIAN_WITHDRAWAL_REQUEST;
+    const INTENT: crate::intent::Intent = crate::intent::Intent::GuardianWithdrawalRequest;
 }
 
 /// `EnclaveSigned<T>`
@@ -230,7 +230,7 @@ pub struct CommitteeTransitionRequest {
 }
 
 impl crate::intent::IntentMessage for CommitteeTransitionRequest {
-    const INTENT: u8 = crate::intent::COMMITTEE_TRANSITION;
+    const INTENT: crate::intent::Intent = crate::intent::Intent::CommitteeTransition;
 }
 
 // ---------------------------------------

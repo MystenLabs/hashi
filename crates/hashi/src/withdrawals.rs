@@ -137,7 +137,8 @@ pub struct WithdrawalRequestApproval {
 }
 
 impl hashi_types::intent::IntentMessage for WithdrawalRequestApproval {
-    const INTENT: u8 = hashi_types::intent::WITHDRAWAL_REQUEST_APPROVAL;
+    const INTENT: hashi_types::intent::Intent =
+        hashi_types::intent::Intent::WithdrawalRequestApproval;
 }
 
 /// The data that validators BLS-sign over to commit to a withdrawal transaction.
@@ -151,7 +152,7 @@ pub struct WithdrawalTxCommitment {
 }
 
 impl hashi_types::intent::IntentMessage for WithdrawalTxCommitment {
-    const INTENT: u8 = hashi_types::intent::WITHDRAWAL_COMMITMENT;
+    const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::WithdrawalCommitment;
 }
 
 /// The data that validators BLS-sign over to store witness signatures on-chain.
@@ -167,7 +168,7 @@ pub struct WithdrawalTxSigning {
 }
 
 impl hashi_types::intent::IntentMessage for WithdrawalTxSigning {
-    const INTENT: u8 = hashi_types::intent::WITHDRAWAL_SIGNED;
+    const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::WithdrawalSigned;
 }
 
 /// The data validators BLS-sign over for one incremental chunk of per-input MPC
@@ -182,7 +183,7 @@ pub struct MpcInputSignaturesMessage {
 }
 
 impl hashi_types::intent::IntentMessage for MpcInputSignaturesMessage {
-    const INTENT: u8 = hashi_types::intent::MPC_INPUT_SIGNATURES;
+    const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::MpcInputSignatures;
 }
 
 #[derive(Clone, Debug, serde_derive::Serialize)]
@@ -191,7 +192,7 @@ pub struct WithdrawalConfirmation {
 }
 
 impl hashi_types::intent::IntentMessage for WithdrawalConfirmation {
-    const INTENT: u8 = hashi_types::intent::WITHDRAWAL_CONFIRMATION;
+    const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::WithdrawalConfirmation;
 }
 
 impl Hashi {

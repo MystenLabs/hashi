@@ -137,11 +137,11 @@ fun pending_committee_for_testing(epoch: u64): hashi::committee::Committee {
 }
 
 #[test_only]
-fun cert_message<T: copy + drop + store>(epoch: u64, intent: u8, message: &T): vector<u8> {
+fun cert_message<T: copy + drop + store>(epoch: u64, intent: u16, message: &T): vector<u8> {
     use sui::bcs;
 
-    let mut bytes = bcs::to_bytes(&epoch);
-    bytes.push_back(intent);
+    let mut bytes = bcs::to_bytes(&intent);
+    bytes.append(bcs::to_bytes(&epoch));
     bytes.append(bcs::to_bytes(message));
     bytes
 }

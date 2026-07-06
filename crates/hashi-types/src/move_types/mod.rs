@@ -682,7 +682,7 @@ pub struct ReconfigCompletionMessage {
 }
 
 impl crate::intent::IntentMessage for ReconfigCompletionMessage {
-    const INTENT: u8 = crate::intent::RECONFIG_COMPLETION;
+    const INTENT: crate::intent::Intent = crate::intent::Intent::ReconfigCompletion;
 }
 
 /// Rust version of the Move hashi::proposal::Proposal type.

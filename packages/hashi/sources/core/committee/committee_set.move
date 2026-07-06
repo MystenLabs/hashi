@@ -361,8 +361,8 @@ fun verify_proof_of_possession(
     proof_of_possession_signature: &vector<u8>,
 ): bool {
     let mut message = vector[];
+    message.append(bcs::to_bytes(&hashi::intent::proof_of_possession()));
     message.append(bcs::to_bytes(&epoch));
-    message.push_back(hashi::intent::proof_of_possession());
     message.append(bcs::to_bytes(validator_address));
     bls_public_key.do_ref!(|key_byte| message.append(bcs::to_bytes(key_byte)));
 

@@ -707,7 +707,7 @@ pub struct DepositConfirmationMessage {
 }
 
 impl hashi_types::intent::IntentMessage for DepositConfirmationMessage {
-    const INTENT: u8 = hashi_types::intent::DEPOSIT_CONFIRMATION;
+    const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::DepositConfirmation;
 }
 
 #[derive(Debug)]

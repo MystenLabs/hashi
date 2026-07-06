@@ -338,7 +338,7 @@ pub struct DealerMessagesHash {
 }
 
 impl hashi_types::intent::IntentMessage for DealerMessagesHash {
-    const INTENT: u8 = hashi_types::intent::DEALER_MESSAGES_HASH;
+    const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::DealerMessagesHash;
 }
 
 impl DealerMessagesHash {

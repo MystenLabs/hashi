@@ -107,9 +107,9 @@ fun test_cancel_withdrawal_cooldown_not_elapsed() {
 
 /// Helper: build the signing message bytes for a certificate.
 /// Format: BCS(epoch) || BCS(message)
-fun build_cert_message<T: copy + drop + store>(epoch: u64, intent: u8, message: &T): vector<u8> {
-    let mut bytes = bcs::to_bytes(&epoch);
-    bytes.push_back(intent);
+fun build_cert_message<T: copy + drop + store>(epoch: u64, intent: u16, message: &T): vector<u8> {
+    let mut bytes = bcs::to_bytes(&intent);
+    bytes.append(bcs::to_bytes(&epoch));
     bytes.append(bcs::to_bytes(message));
     bytes
 }

@@ -72,7 +72,7 @@ public(package) fun assert_unpaused(self: &Hashi) {
 /// Returns the certified message (message + signature + stake support).
 public(package) fun verify<T>(
     self: &Hashi,
-    intent: u8,
+    intent: u16,
     message: T,
     sig: CommitteeSignature,
 ): CertifiedMessage<T> {
@@ -86,7 +86,7 @@ public(package) fun verify<T>(
 public(package) fun verify_with_committee<T>(
     _self: &Hashi,
     committee: &Committee,
-    intent: u8,
+    intent: u16,
     message: T,
     sig: CommitteeSignature,
 ): CertifiedMessage<T> {

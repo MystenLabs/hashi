@@ -19,6 +19,7 @@ use fastcrypto::traits::VerifyingKey;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::intent::Intent;
 use crate::intent::IntentMessage;
 use sui_crypto::SignatureError;
 use sui_sdk_types::Address;
@@ -743,11 +744,13 @@ pub struct ProofOfPossessionMessage {
 }
 
 impl IntentMessage for ProofOfPossessionMessage {
-    const INTENT: u8 = crate::intent::PROOF_OF_POSSESSION;
+    const INTENT: Intent = Intent::ProofOfPossession;
 }
 
 fn signing_message<T: IntentMessage>(epoch: u64, message: &T) -> Vec<u8> {
-    bcs::to_bytes(&(epoch, T::INTENT, message)).unwrap()
+    // Preimage: intent (u16 LE) || bcs(epoch) || bcs(message). Intent leads so
+    // the signed bytes are domain-tagged before anything else.
+    bcs::to_bytes(&(T::INTENT.as_u16(), epoch, message)).unwrap()
 }
 
 #[cfg(test)]
@@ -757,7 +760,22 @@ mod test {
 
     /// Test-only signature domain for raw byte messages.
     impl IntentMessage for Vec<u8> {
-        const INTENT: u8 = 255;
+        const INTENT: Intent = Intent::Test;
+    }
+
+    /// Locks the signing preimage layout: intent (u16 LE) first, then the
+    /// bcs(epoch), then bcs(message). Mirrors the Move `verify_certificate`.
+    #[test]
+    fn preimage_is_intent_then_epoch_then_message() {
+        let epoch = 7u64;
+        let msg: Vec<u8> = vec![1, 2, 3];
+        let bytes = signing_message(epoch, &msg);
+        let mut expected = bcs::to_bytes(&(Intent::Test as u16)).unwrap();
+        expected.extend(bcs::to_bytes(&epoch).unwrap());
+        expected.extend(bcs::to_bytes(&msg).unwrap());
+        assert_eq!(bytes, expected);
+        // Intent leads and is two little-endian bytes.
+        assert_eq!(&bytes[..2], &[0xFF, 0xFF]);
     }
     use fastcrypto::groups::bls12381::Scalar;
     use fastcrypto::serde_helpers::ToFromByteArray;
