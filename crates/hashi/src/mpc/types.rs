@@ -337,6 +337,10 @@ pub struct DealerMessagesHash {
     pub messages_hash: MessageHash,
 }
 
+impl hashi_types::intent::IntentMessage for DealerMessagesHash {
+    const INTENT: u8 = hashi_types::intent::DEALER_MESSAGES_HASH;
+}
+
 impl DealerMessagesHash {
     pub fn from_onchain_cert(
         cert: &DealerSubmissionV1,

@@ -54,7 +54,12 @@ entry fun end_reconfig(
     let next_epoch = self.committee_set().pending_epoch_change().destroy_some();
     let next_committee = self.committee_set().get_committee(next_epoch);
     let message = ReconfigCompletionMessage { epoch: next_epoch, mpc_public_key };
-    self.verify_with_committee(next_committee, message, mpc_cert);
+    self.verify_with_committee(
+        next_committee,
+        hashi::intent::reconfig_completion(),
+        message,
+        mpc_cert,
+    );
     let is_initial_reconfig = self.committee_set().mpc_public_key().is_empty();
 
     self.reset_num_consumed_presigs();
@@ -87,7 +92,12 @@ entry fun submit_committee_handoff(
     let next_committee = self.committee_set().get_committee(next_epoch);
     let new_committee = *next_committee;
     let message = CommitteeTransitionRequest { new_committee };
-    self.verify_with_committee(self.current_committee(), message, committee_handoff_cert);
+    self.verify_with_committee(
+        self.current_committee(),
+        hashi::intent::committee_transition(),
+        message,
+        committee_handoff_cert,
+    );
     self.committee_set_mut().set_pending_committee_handoff_cert(committee_handoff_cert);
 }
 
@@ -127,10 +137,11 @@ fun pending_committee_for_testing(epoch: u64): hashi::committee::Committee {
 }
 
 #[test_only]
-fun cert_message<T: copy + drop + store>(epoch: u64, message: &T): vector<u8> {
+fun cert_message<T: copy + drop + store>(epoch: u64, intent: u8, message: &T): vector<u8> {
     use sui::bcs;
 
     let mut bytes = bcs::to_bytes(&epoch);
+    bytes.push_back(intent);
     bytes.append(bcs::to_bytes(message));
     bytes
 }
@@ -151,12 +162,16 @@ fun test_end_reconfig_stores_committee_handoff() {
     let mpc_message = ReconfigCompletionMessage { epoch: next_epoch, mpc_public_key };
     let mpc_cert = test_utils::sign_certificate(
         next_epoch,
-        &cert_message(next_epoch, &mpc_message),
+        &cert_message(next_epoch, hashi::intent::reconfig_completion(), &mpc_message),
         3,
     );
     let committee_handoff_cert = test_utils::sign_certificate(
         0,
-        &cert_message(0, &CommitteeTransitionRequest { new_committee: next_committee }),
+        &cert_message(
+            0,
+            hashi::intent::committee_transition(),
+            &CommitteeTransitionRequest { new_committee: next_committee },
+        ),
         3,
     );
 
@@ -185,7 +200,7 @@ fun test_end_reconfig_requires_committee_handoff_after_initial_reconfig() {
     let mpc_message = ReconfigCompletionMessage { epoch: next_epoch, mpc_public_key };
     let mpc_cert = test_utils::sign_certificate(
         next_epoch,
-        &cert_message(next_epoch, &mpc_message),
+        &cert_message(next_epoch, hashi::intent::reconfig_completion(), &mpc_message),
         3,
     );
 
@@ -207,7 +222,11 @@ fun test_submit_committee_handoff_rejects_initial_reconfig() {
 
     let committee_handoff_cert = test_utils::sign_certificate(
         0,
-        &cert_message(0, &CommitteeTransitionRequest { new_committee: next_committee }),
+        &cert_message(
+            0,
+            hashi::intent::committee_transition(),
+            &CommitteeTransitionRequest { new_committee: next_committee },
+        ),
         3,
     );
 
@@ -232,12 +251,16 @@ fun test_submit_committee_handoff_rejects_handoff_signed_by_wrong_committee() {
     let mpc_message = ReconfigCompletionMessage { epoch: next_epoch, mpc_public_key };
     let mpc_cert = test_utils::sign_certificate(
         next_epoch,
-        &cert_message(next_epoch, &mpc_message),
+        &cert_message(next_epoch, hashi::intent::reconfig_completion(), &mpc_message),
         3,
     );
     let committee_handoff_cert = test_utils::sign_certificate(
         next_epoch,
-        &cert_message(next_epoch, &CommitteeTransitionRequest { new_committee: next_committee }),
+        &cert_message(
+            next_epoch,
+            hashi::intent::committee_transition(),
+            &CommitteeTransitionRequest { new_committee: next_committee },
+        ),
         3,
     );
 

@@ -116,7 +116,11 @@ entry fun approve_deposit(
     );
 
     // Verify the committee certificate over the request ID + UTXO.
-    hashi.verify(DepositConfirmationMessage { request_id, utxo }, cert);
+    hashi.verify(
+        hashi::intent::deposit_confirmation(),
+        DepositConfirmationMessage { request_id, utxo },
+        cert,
+    );
 
     // Record the cert and the approval timestamp for the time-delay check
     // in `confirm_deposit`.
@@ -164,7 +168,11 @@ entry fun confirm_deposit(
     // Verify the certificate over the request ID + UTXO against the current committee.
     // If a deposit is approved by an older committee, it will need to be
     // re-approved by the current committee.
-    hashi.verify(DepositConfirmationMessage { request_id, utxo }, cert);
+    hashi.verify(
+        hashi::intent::deposit_confirmation(),
+        DepositConfirmationMessage { request_id, utxo },
+        cert,
+    );
 
     // Check that the deposit was approved long enough ago.
     assert!(

@@ -18,6 +18,8 @@ use fastcrypto::traits::ToFromBytes;
 use fastcrypto::traits::VerifyingKey;
 use serde::Deserialize;
 use serde::Serialize;
+
+use crate::intent::IntentMessage;
 use sui_crypto::SignatureError;
 use sui_sdk_types::Address;
 
@@ -73,7 +75,12 @@ impl Bls12381PrivateKey {
         Self(min_pk::BLS12381KeyPair::generate(rng).private())
     }
 
-    pub fn sign<T: Serialize>(&self, epoch: u64, address: Address, message: &T) -> MemberSignature {
+    pub fn sign<T: IntentMessage>(
+        &self,
+        epoch: u64,
+        address: Address,
+        message: &T,
+    ) -> MemberSignature {
         let signing_message = signing_message(epoch, message);
         MemberSignature {
             epoch,
@@ -84,7 +91,14 @@ impl Bls12381PrivateKey {
 
     pub fn proof_of_possession(&self, epoch: u64, address: Address) -> MemberSignature {
         let public_key = self.public_key();
-        self.sign(epoch, address, &(address, public_key))
+        self.sign(
+            epoch,
+            address,
+            &ProofOfPossessionMessage {
+                address,
+                public_key,
+            },
+        )
     }
 }
 
@@ -257,7 +271,7 @@ impl Committee {
     }
 
     /// Verify a single signature provided by a [CommitteeMember].
-    fn verify<T: Serialize>(
+    fn verify<T: IntentMessage>(
         &self,
         message: &T,
         signature: &MemberSignature,
@@ -278,7 +292,7 @@ impl Committee {
     /// Verify an [CommitteeSignature]. If you also need to verify the weight, you can either
     /// get the weight of the signature with [CommitteeSignature::weight] or use the [Self::verify_signature_and_weight]
     /// function.
-    pub fn verify_signature<T: Serialize>(
+    pub fn verify_signature<T: IntentMessage>(
         &self,
         signed_message: &SignedMessage<T>,
     ) -> Result<(), SignatureError> {
@@ -303,7 +317,7 @@ impl Committee {
     }
 
     /// Verify a signature and check that the weight of the signature is at least `required_weight`.
-    pub fn verify_signature_and_weight<T: Serialize>(
+    pub fn verify_signature_and_weight<T: IntentMessage>(
         &self,
         signed_message: &SignedMessage<T>,
         required_weight: u64,
@@ -476,7 +490,7 @@ impl<T> SignedMessage<T> {
     }
 }
 
-impl<T: Serialize> SignedMessage<T> {
+impl<T: IntentMessage> SignedMessage<T> {
     pub fn new(
         epoch: u64,
         message: T,
@@ -533,7 +547,7 @@ pub struct BlsSignatureAggregator<'a, T> {
     signed_reduced_weight: u16,
 }
 
-impl<'a, T: Serialize + Clone> BlsSignatureAggregator<'a, T> {
+impl<'a, T: IntentMessage + Clone> BlsSignatureAggregator<'a, T> {
     pub fn new(committee: &'a Committee, message: T) -> Self {
         Self {
             bitmap: BitMap::new(),
@@ -720,14 +734,31 @@ impl BitMap {
     }
 }
 
-fn signing_message<T: Serialize>(epoch: u64, message: &T) -> Vec<u8> {
-    bcs::to_bytes(&(epoch, message)).unwrap()
+/// Proof-of-possession message: BCS-identical to the former
+/// `(address, public_key)` tuple, now with its own signature domain.
+#[derive(Serialize)]
+pub struct ProofOfPossessionMessage {
+    pub address: Address,
+    pub public_key: BLS12381PublicKey,
+}
+
+impl IntentMessage for ProofOfPossessionMessage {
+    const INTENT: u8 = crate::intent::PROOF_OF_POSSESSION;
+}
+
+fn signing_message<T: IntentMessage>(epoch: u64, message: &T) -> Vec<u8> {
+    bcs::to_bytes(&(epoch, T::INTENT, message)).unwrap()
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
     use fastcrypto::groups::FiatShamirChallenge;
+
+    /// Test-only signature domain for raw byte messages.
+    impl IntentMessage for Vec<u8> {
+        const INTENT: u8 = 255;
+    }
     use fastcrypto::groups::bls12381::Scalar;
     use fastcrypto::serde_helpers::ToFromByteArray;
 

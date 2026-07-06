@@ -72,12 +72,13 @@ public(package) fun assert_unpaused(self: &Hashi) {
 /// Returns the certified message (message + signature + stake support).
 public(package) fun verify<T>(
     self: &Hashi,
+    intent: u8,
     message: T,
     sig: CommitteeSignature,
 ): CertifiedMessage<T> {
     let threshold =
         threshold::certificate_threshold(self.current_committee().total_weight() as u16) as u64;
-    self.current_committee().verify_certificate(message, sig, threshold)
+    self.current_committee().verify_certificate(intent, message, sig, threshold)
 }
 
 /// Verify a committee signature against a specific committee (not necessarily current).
@@ -85,11 +86,12 @@ public(package) fun verify<T>(
 public(package) fun verify_with_committee<T>(
     _self: &Hashi,
     committee: &Committee,
+    intent: u8,
     message: T,
     sig: CommitteeSignature,
 ): CertifiedMessage<T> {
     let threshold = threshold::certificate_threshold(committee.total_weight() as u16) as u64;
-    committee.verify_certificate(message, sig, threshold)
+    committee.verify_certificate(intent, message, sig, threshold)
 }
 
 public(package) fun assert_not_reconfiguring(self: &Hashi) {
