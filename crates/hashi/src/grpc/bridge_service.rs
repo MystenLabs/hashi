@@ -322,6 +322,7 @@ impl BridgeService for HttpService {
         let member_signature = self
             .inner
             .sign_withdrawal_confirmation(&withdrawal_txn_id)
+            .await
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
         tracing::info!("Signed withdrawal confirmation");
         Ok(Response::new(SignWithdrawalConfirmationResponse {

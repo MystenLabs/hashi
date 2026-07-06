@@ -31,6 +31,9 @@ const ECooldownNotElapsed: vector<u8> = b"Cancellation cooldown has not elapsed"
 #[error]
 const ECannotCancelProcessingWithdrawal: vector<u8> =
     b"Cannot cancel a withdrawal that is already being processed";
+#[error]
+const EWithdrawalNotFullySigned: vector<u8> =
+    b"Cannot confirm a withdrawal that is not fully signed";
 
 // MESSAGE STEP 1
 public struct RequestApprovalMessage has copy, drop, store {
@@ -348,6 +351,18 @@ entry fun confirm_withdrawal(
     hashi.versioning().assert_version_enabled();
     hashi.assert_unpaused();
     hashi.verify(WithdrawalConfirmationMessage { withdrawal_id }, cert);
+
+    // Refuse to confirm a withdrawal that is not fully signed (every input has
+    // an MPC signature and the guardian signatures are attached). The
+    // confirmation cert only binds `withdrawal_id`, so without this gate a
+    // committee confirmation could finalize a committed-but-unsigned withdrawal
+    // — marking its inputs spent and burning user BTC with no broadcastable
+    // Bitcoin transaction. Off-chain signers additionally verify Bitcoin
+    // confirmation before contributing to this cert.
+    assert!(
+        hashi.bitcoin().withdrawal_queue().withdrawal_txn_is_fully_signed(withdrawal_id),
+        EWithdrawalNotFullySigned,
+    );
 
     // Remove the in-flight withdrawal txn from the hot bag so we can do
     // all the bookkeeping with a direct handle, then re-insert it into the
