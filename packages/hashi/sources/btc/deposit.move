@@ -64,7 +64,7 @@ public fun deposit(
         utxo_id: utxo_ref.id(),
         amount: utxo_ref.amount(),
         derivation_path: utxo_ref.derivation_path(),
-        timestamp_ms: request.request_creation_timestamp_ms(),
+        timestamp_ms: request.request_created_timestamp_ms(),
         requester_address: request.request_sender(),
         sui_tx_digest: request.request_sui_tx_digest(),
     });

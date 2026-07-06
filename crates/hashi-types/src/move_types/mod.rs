@@ -439,7 +439,7 @@ pub struct WithdrawalRequest {
     pub sender: Address,
     pub btc_amount: u64,
     pub bitcoin_address: Vec<u8>,
-    pub timestamp_ms: u64,
+    pub created_timestamp_ms: u64,
     pub status: WithdrawalStatus,
     pub withdrawal_txn_id: Option<Address>,
     pub sui_tx_digest: Digest,
@@ -544,7 +544,7 @@ pub struct WithdrawalTransaction {
     /// the trailing outputs: change output `j` sits at vout
     /// `withdrawal_outputs.len() + j`. Empty when there is no change.
     pub change_outputs: Vec<OutputUtxo>,
-    pub timestamp_ms: u64,
+    pub created_timestamp_ms: u64,
     pub randomness: Vec<u8>,
     /// Per-input MPC signatures, accumulated incrementally and out-of-order.
     pub signing: SigningBatch,
@@ -598,7 +598,7 @@ pub struct OutputUtxo {
 pub struct DepositRequest {
     pub id: Address,
     pub sender: Address,
-    pub creation_timestamp_ms: u64,
+    pub created_timestamp_ms: u64,
     pub sui_tx_digest: Digest,
     pub utxo: Utxo,
     pub approval_cert: Option<CommitteeSignature>,

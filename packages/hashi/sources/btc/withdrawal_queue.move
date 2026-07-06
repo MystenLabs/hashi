@@ -61,7 +61,7 @@ public struct WithdrawalRequest has key, store {
     sender: address,
     btc_amount: u64,
     bitcoin_address: vector<u8>,
-    timestamp_ms: u64,
+    created_timestamp_ms: u64,
     status: WithdrawalStatus,
     withdrawal_txn_id: Option<address>,
     sui_tx_digest: vector<u8>,
@@ -101,7 +101,7 @@ public struct WithdrawalTransaction has key, store {
     /// `withdrawal_outputs.length() + j`. Empty when the transaction has no
     /// change.
     change_outputs: vector<OutputUtxo>,
-    timestamp_ms: u64,
+    created_timestamp_ms: u64,
     randomness: vector<u8>,
     /// Per-input MPC committee signatures, accumulated incrementally and
     /// out-of-order across checkpoints/leaders/epochs. Owns the presignature
@@ -150,7 +150,7 @@ public(package) fun create_withdrawal(
         sender: ctx.sender(),
         btc_amount,
         bitcoin_address,
-        timestamp_ms: clock.timestamp_ms(),
+        created_timestamp_ms: clock.timestamp_ms(),
         status: WithdrawalStatus::Requested,
         withdrawal_txn_id: option::none(),
         sui_tx_digest: *ctx.digest(),
@@ -253,7 +253,7 @@ public(package) fun cancel_withdrawal(
         sender: _,
         btc_amount: _,
         bitcoin_address: _,
-        timestamp_ms: _,
+        created_timestamp_ms: _,
         status: _,
         withdrawal_txn_id: _,
         sui_tx_digest: _,
@@ -364,7 +364,7 @@ public(package) fun new_withdrawal_txn(
         inputs,
         withdrawal_outputs: outputs,
         change_outputs,
-        timestamp_ms: clock.timestamp_ms(),
+        created_timestamp_ms: clock.timestamp_ms(),
         randomness,
         signing,
         guardian_signatures: option::none(),
@@ -563,8 +563,8 @@ public(package) fun request_sender(self: &WithdrawalRequest): address {
     self.sender
 }
 
-public(package) fun request_timestamp_ms(self: &WithdrawalRequest): u64 {
-    self.timestamp_ms
+public(package) fun request_created_timestamp_ms(self: &WithdrawalRequest): u64 {
+    self.created_timestamp_ms
 }
 
 public(package) fun request_btc_amount(self: &WithdrawalRequest): u64 {
@@ -593,7 +593,7 @@ public(package) fun emit_withdrawal_requested(request: &WithdrawalRequest) {
         request_id: request.id.to_address(),
         btc_amount: request.btc_amount,
         bitcoin_address: request.bitcoin_address,
-        timestamp_ms: request.timestamp_ms,
+        timestamp_ms: request.created_timestamp_ms,
         requester_address: request.sender,
         sui_tx_digest: request.sui_tx_digest,
     });
@@ -611,7 +611,7 @@ public(package) fun emit_withdrawal_picked_for_processing(self: &WithdrawalTrans
         inputs: self.inputs,
         withdrawal_outputs: self.withdrawal_outputs,
         change_outputs: self.change_outputs,
-        timestamp_ms: self.timestamp_ms,
+        timestamp_ms: self.created_timestamp_ms,
         randomness: self.randomness,
     });
 }
@@ -732,7 +732,7 @@ public(package) fun new_withdrawal_txn_for_testing(
         inputs,
         withdrawal_outputs,
         change_outputs,
-        timestamp_ms: clock.timestamp_ms(),
+        created_timestamp_ms: clock.timestamp_ms(),
         randomness: vector[0, 0, 0, 0],
         signing: mpc_signing::new(num_inputs, 0, 0),
         guardian_signatures: option::none(),

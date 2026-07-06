@@ -317,7 +317,7 @@ async fn handle_events(
                 let deposit_request = DepositRequest {
                     id: deposit_requested_event.request_id,
                     sender: deposit_requested_event.requester_address,
-                    creation_timestamp_ms: deposit_requested_event.timestamp_ms,
+                    created_timestamp_ms: deposit_requested_event.timestamp_ms,
                     sui_tx_digest: deposit_requested_event.sui_tx_digest,
                     utxo: super::types::Utxo {
                         id: deposit_requested_event.utxo_id,
@@ -392,7 +392,7 @@ async fn handle_events(
                     sender: withdrawal_requested_event.requester_address,
                     btc_amount: withdrawal_requested_event.btc_amount,
                     bitcoin_address: withdrawal_requested_event.bitcoin_address.clone(),
-                    timestamp_ms: withdrawal_requested_event.timestamp_ms,
+                    created_timestamp_ms: withdrawal_requested_event.timestamp_ms,
                     status: super::types::WithdrawalStatus::Requested,
                     withdrawal_txn_id: None,
                     sui_tx_digest: withdrawal_requested_event.sui_tx_digest,
@@ -485,7 +485,7 @@ async fn handle_events(
                 // Watcher is the sole mutator of the local limiter
                 // post-bootstrap; advance it inline with the mirror update.
                 // Advance uses the event's checkpoint timestamp (~sign-time)
-                // rather than `txn.timestamp_ms` (creation time) to stay in
+                // rather than `txn.created_timestamp_ms` (creation time) to stay in
                 // lockstep with the guardian's `last_updated_at`.
                 // Gate on `signatures.is_none()` for idempotency across checkpoint redelivery and bootstrap replay.
                 let (limiter_inputs, pick_to_sign_ms) = {
@@ -513,7 +513,7 @@ async fn handle_events(
                             let amount_sats = withdrawal_limiter_consumption_amount(txn);
                             let timestamp_secs = checkpoint_timestamp_ms / 1000;
                             let pick_to_sign =
-                                checkpoint_timestamp_ms.saturating_sub(txn.timestamp_ms);
+                                checkpoint_timestamp_ms.saturating_sub(txn.created_timestamp_ms);
                             (Some((amount_sats, timestamp_secs)), Some(pick_to_sign))
                         }
                         _ => (None, None),
@@ -658,7 +658,7 @@ async fn handle_events(
                         .withdrawal_queue
                         .withdrawal_txns
                         .remove(&event.withdrawal_txn_id)
-                        .map(|txn| txn.timestamp_ms);
+                        .map(|txn| txn.created_timestamp_ms);
                     (
                         signed_at.map(|s| checkpoint_timestamp_ms.saturating_sub(s)),
                         pick_at.map(|p| checkpoint_timestamp_ms.saturating_sub(p)),

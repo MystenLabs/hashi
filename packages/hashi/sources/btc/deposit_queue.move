@@ -25,7 +25,7 @@ const EDepositAlreadyProcessed: vector<u8> = b"Deposit request has already been 
 public struct DepositRequest has key, store {
     id: UID,
     sender: address,
-    creation_timestamp_ms: u64,
+    created_timestamp_ms: u64,
     sui_tx_digest: vector<u8>,
     utxo: Utxo,
     /// Committee certificate recorded at approval time. `None` until
@@ -61,7 +61,7 @@ public(package) fun create_deposit(utxo: Utxo, clock: &Clock, ctx: &mut TxContex
     DepositRequest {
         id: object::new(ctx),
         sender: ctx.sender(),
-        creation_timestamp_ms: clock.timestamp_ms(),
+        created_timestamp_ms: clock.timestamp_ms(),
         sui_tx_digest: *ctx.digest(),
         utxo,
         approval_cert: option::none(),
@@ -157,7 +157,7 @@ public(package) fun delete_expired(
     let DepositRequest {
         id,
         sender: _,
-        creation_timestamp_ms: _,
+        created_timestamp_ms: _,
         sui_tx_digest: _,
         utxo,
         approval_cert: _,
@@ -186,8 +186,8 @@ public(package) fun request_sender(self: &DepositRequest): address {
     self.sender
 }
 
-public(package) fun request_creation_timestamp_ms(self: &DepositRequest): u64 {
-    self.creation_timestamp_ms
+public(package) fun request_created_timestamp_ms(self: &DepositRequest): u64 {
+    self.created_timestamp_ms
 }
 
 public(package) fun request_sui_tx_digest(self: &DepositRequest): vector<u8> {
@@ -201,5 +201,5 @@ public(package) fun request_utxo(self: &DepositRequest): &Utxo {
 // ======== Internal ========
 
 fun is_expired(request: &DepositRequest, clock: &Clock): bool {
-    clock.timestamp_ms() > request.creation_timestamp_ms + MAX_DEPOSIT_REQUEST_AGE_MS
+    clock.timestamp_ms() > request.created_timestamp_ms + MAX_DEPOSIT_REQUEST_AGE_MS
 }

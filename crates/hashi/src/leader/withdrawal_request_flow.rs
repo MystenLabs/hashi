@@ -57,7 +57,7 @@ impl LeaderService {
             .into_iter()
             .filter(|r| r.status.is_requested())
             .collect();
-        unapproved.sort_by_key(|r| r.timestamp_ms);
+        unapproved.sort_by_key(|r| r.created_timestamp_ms);
 
         let unapproved_ids: Vec<Address> = unapproved.iter().map(|r| r.id).collect();
         self.withdrawal_approval_retry_tracker
@@ -449,7 +449,7 @@ impl LeaderService {
             .into_iter()
             .filter(|r| r.status.is_approved())
             .collect();
-        approved.sort_by_key(|r| r.timestamp_ms);
+        approved.sort_by_key(|r| r.created_timestamp_ms);
 
         // Prune stuck-warn entries so a re-stuck request warns again.
         let pending_ids: HashSet<Address> = approved.iter().map(|r| r.id).collect();
@@ -549,14 +549,14 @@ impl LeaderService {
         let batch_is_full = batch.len() >= max_batch;
         let oldest_has_waited = batch
             .first()
-            .is_some_and(|r| checkpoint_timestamp_ms >= r.timestamp_ms + delay_ms);
+            .is_some_and(|r| checkpoint_timestamp_ms >= r.created_timestamp_ms + delay_ms);
 
         if !batch_is_full && !oldest_has_waited && !at_capacity {
             debug!(
                 "Holding {} approved request(s): oldest is {}ms old, \
                  waiting for {}ms delay or {} requests",
                 batch.len(),
-                checkpoint_timestamp_ms.saturating_sub(batch[0].timestamp_ms),
+                checkpoint_timestamp_ms.saturating_sub(batch[0].created_timestamp_ms),
                 delay_ms,
                 max_batch,
             );
