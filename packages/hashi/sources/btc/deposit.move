@@ -64,7 +64,7 @@ public fun deposit(
         utxo_id: utxo_ref.id(),
         amount: utxo_ref.amount(),
         derivation_path: utxo_ref.derivation_path(),
-        timestamp_ms: request.request_timestamp_ms(),
+        timestamp_ms: request.request_creation_timestamp_ms(),
         requester_address: request.request_sender(),
         sui_tx_digest: request.request_sui_tx_digest(),
     });
@@ -156,7 +156,7 @@ entry fun confirm_deposit(
 
     // Remove from active requests and copy the UTXO. Aborts if the request
     // was never approved (no stored cert or timestamp).
-    let request = hashi.bitcoin_mut().deposit_queue_mut().remove_request(request_id);
+    let mut request = hashi.bitcoin_mut().deposit_queue_mut().remove_request(request_id);
     let utxo = request.utxo();
     let cert = request.approval_cert().destroy_some();
     let approval_timestamp_ms = request.approval_timestamp_ms().destroy_some();
@@ -171,6 +171,8 @@ entry fun confirm_deposit(
         approval_timestamp_ms + hashi.config().deposit_time_delay_ms() <= clock.timestamp_ms(),
         EDepositTimeDelayNotPassed,
     );
+
+    request.confirm(clock);
 
     sui::event::emit(DepositConfirmedEvent {
         request_id,

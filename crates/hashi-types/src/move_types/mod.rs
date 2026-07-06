@@ -597,11 +597,12 @@ pub struct OutputUtxo {
 pub struct DepositRequest {
     pub id: Address,
     pub sender: Address,
-    pub timestamp_ms: u64,
+    pub creation_timestamp_ms: u64,
     pub sui_tx_digest: Digest,
     pub utxo: Utxo,
     pub approval_cert: Option<CommitteeSignature>,
     pub approval_timestamp_ms: Option<u64>,
+    pub confirmed_timestamp_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
