@@ -101,7 +101,8 @@ impl Hashi {
                 // compare the immutable core fields only.
                 let core_matches = onchain_request.id == deposit_request.id
                     && onchain_request.sender == deposit_request.sender
-                    && onchain_request.timestamp_ms == deposit_request.timestamp_ms
+                    && onchain_request.creation_timestamp_ms
+                        == deposit_request.creation_timestamp_ms
                     && onchain_request.sui_tx_digest == deposit_request.sui_tx_digest
                     && onchain_request.utxo == deposit_request.utxo;
                 if !core_matches {

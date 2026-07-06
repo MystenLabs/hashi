@@ -45,14 +45,14 @@ impl LeaderService {
         }
 
         let mut deposit_requests = self.inner.onchain_state().deposit_requests();
-        deposit_requests.sort_by_key(|r| r.timestamp_ms);
+        deposit_requests.sort_by_key(|r| r.creation_timestamp_ms);
 
         let Some(oldest_request) = deposit_requests.first() else {
             return;
         };
 
         if checkpoint_timestamp_ms
-            < oldest_request.timestamp_ms
+            < oldest_request.creation_timestamp_ms
                 + MAX_DEPOSIT_REQUEST_AGE_MS
                 + DEPOSIT_REQUEST_DELETE_DELAY_MS
         {
@@ -61,7 +61,9 @@ impl LeaderService {
 
         let expired_requests: Vec<_> = deposit_requests
             .iter()
-            .filter(|r| checkpoint_timestamp_ms > r.timestamp_ms + MAX_DEPOSIT_REQUEST_AGE_MS)
+            .filter(|r| {
+                checkpoint_timestamp_ms > r.creation_timestamp_ms + MAX_DEPOSIT_REQUEST_AGE_MS
+            })
             .take(MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC)
             .cloned()
             .collect();

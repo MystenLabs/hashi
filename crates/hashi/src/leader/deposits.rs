@@ -54,7 +54,7 @@ impl LeaderService {
 
     fn reload_pending_unapproved_deposit_requests(&mut self, mode: UnapprovedDepositReloadMode) {
         let mut deposit_requests = self.inner.onchain_state().deposit_requests();
-        deposit_requests.sort_by_key(|r| r.timestamp_ms);
+        deposit_requests.sort_by_key(|r| r.creation_timestamp_ms);
         let deposit_ids: HashSet<Address> =
             deposit_requests.iter().map(|request| request.id).collect();
         self.inflight_deposits
@@ -131,7 +131,7 @@ impl LeaderService {
         let current_epoch = self.inner.onchain_state().epoch();
 
         let mut deposit_requests = self.inner.onchain_state().deposit_requests();
-        deposit_requests.sort_by_key(|r| r.timestamp_ms);
+        deposit_requests.sort_by_key(|r| r.creation_timestamp_ms);
         let approved_deposit_requests: Vec<_> = deposit_requests
             .into_iter()
             .filter(|request| !self.never_retry_deposit_ids.contains(&request.id))
@@ -487,7 +487,7 @@ fn deposit_request_to_proto(req: &DepositRequest) -> SignDepositConfirmationRequ
             .utxo
             .derivation_path
             .map(|p| p.as_bytes().to_vec().into()),
-        timestamp_ms: req.timestamp_ms,
+        timestamp_ms: req.creation_timestamp_ms,
         requester_address: req.sender.as_bytes().to_vec().into(),
         sui_tx_digest: req.sui_tx_digest.as_bytes().to_vec().into(),
     }

@@ -317,7 +317,7 @@ async fn handle_events(
                 let deposit_request = DepositRequest {
                     id: deposit_requested_event.request_id,
                     sender: deposit_requested_event.requester_address,
-                    timestamp_ms: deposit_requested_event.timestamp_ms,
+                    creation_timestamp_ms: deposit_requested_event.timestamp_ms,
                     sui_tx_digest: deposit_requested_event.sui_tx_digest,
                     utxo: super::types::Utxo {
                         id: deposit_requested_event.utxo_id,
@@ -326,6 +326,7 @@ async fn handle_events(
                     },
                     approval_cert: None,
                     approval_timestamp_ms: None,
+                    confirmed_timestamp_ms: None,
                 };
                 state
                     .state_mut()

@@ -360,7 +360,7 @@ fn parse_deposit_request(
     Ok(DepositRequest {
         id,
         sender: requester_address,
-        timestamp_ms: request.timestamp_ms,
+        creation_timestamp_ms: request.timestamp_ms,
         sui_tx_digest,
         utxo: Utxo {
             id: UtxoId {
@@ -374,6 +374,7 @@ fn parse_deposit_request(
         // the on-chain version separately when verifying.
         approval_cert: None,
         approval_timestamp_ms: None,
+        confirmed_timestamp_ms: None,
     })
 }
 
