@@ -8,13 +8,9 @@ use std::path::PathBuf;
 mod config;
 mod fetch_info;
 mod guardian_info;
-#[allow(dead_code)]
-mod heartbeat_checks;
 mod kp_ceremony;
 mod kp_provision;
 mod kp_roster;
-#[allow(dead_code)]
-mod limiter_recovery;
 mod operator_ceremony;
 mod operator_provision;
 
