@@ -43,6 +43,35 @@ fun test_delete_deposit_request() {
 }
 
 #[test]
+#[expected_failure(abort_code = deposit_queue::ECannotDeleteApprovedDeposit)]
+fun test_delete_approved_deposit_request_fails() {
+    let ctx = &mut test_utils::new_tx_context(NON_VOTER, 0);
+    let voters = vector[VOTER1, VOTER2, VOTER3];
+    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
+    let mut clock = clock::create_for_testing(ctx);
+
+    // Create a deposit request and approve it with a (dummy) committee cert.
+    let utxo_id = hashi::utxo::utxo_id(@0xCAFE, 0);
+    let utxo = hashi::utxo::utxo(utxo_id, 1000, option::none());
+    let mut request = deposit_queue::create_deposit(utxo, &clock, ctx);
+    let cert = hashi::committee::new_committee_signature(0, vector[], vector[]);
+    request.approve(cert, &clock);
+    let request_id = request.request_id().to_address();
+    hashi.bitcoin_mut().deposit_queue_mut().insert_deposit(request);
+
+    // Advance well past the expiration window; an approved request must still
+    // not be deletable.
+    let three_days_ms = 1000 * 60 * 60 * 24 * 3;
+    clock.set_for_testing(three_days_ms + 1);
+
+    hashi.bitcoin_mut().deposit_queue_mut().delete_expired(request_id, &clock);
+
+    // Unreachable — expected to abort above.
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
 #[expected_failure(abort_code = deposit_queue::EDepositRequestNotExpired)]
 fun test_delete_unexpired_deposit_request() {
     let ctx = &mut test_utils::new_tx_context(NON_VOTER, 0);

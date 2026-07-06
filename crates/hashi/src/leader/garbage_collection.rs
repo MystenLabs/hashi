@@ -45,6 +45,10 @@ impl LeaderService {
         }
 
         let mut deposit_requests = self.inner.onchain_state().deposit_requests();
+        // Approved requests carry a committee certificate and are awaiting
+        // confirmation; the on-chain delete path rejects them, so exclude them
+        // from GC entirely rather than proposing deletions that would abort.
+        deposit_requests.retain(|r| r.approval_cert.is_none());
         deposit_requests.sort_by_key(|r| r.created_timestamp_ms);
 
         let Some(oldest_request) = deposit_requests.first() else {

@@ -13,6 +13,9 @@ const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24; // 1 days
 const EDepositRequestNotExpired: vector<u8> = b"Deposit request not expired";
 #[error]
 const EDepositAlreadyProcessed: vector<u8> = b"Deposit request has already been processed";
+#[error]
+const ECannotDeleteApprovedDeposit: vector<u8> =
+    b"Cannot delete a deposit request that has been approved by the committee";
 
 // ======== Core Structs ========
 
@@ -152,6 +155,11 @@ public(package) fun delete_expired(
 ) {
     assert!(!self.processed.contains(request_id), EDepositAlreadyProcessed);
     let request: DepositRequest = self.requests.remove(request_id);
+    // An approved request carries a committee certificate and is awaiting
+    // confirmation (possibly blocked by pause/reconfiguration). Deleting it
+    // would destroy a valid, mint-pending approval, so approved requests are
+    // never expirable — only never-approved (genuinely abandoned) requests are.
+    assert!(request.approval_cert.is_none(), ECannotDeleteApprovedDeposit);
     assert!(is_expired(&request, clock), EDepositRequestNotExpired);
 
     let DepositRequest {
