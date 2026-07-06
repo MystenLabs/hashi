@@ -10,13 +10,14 @@ use anyhow::Result;
 use bitcoin::Network;
 use hashi_guardian::Enclave;
 use hashi_guardian::OperatorInitTestArgs;
+use hashi_guardian::activate_enclave_for_testing;
 use hashi_guardian::rpc::GuardianGrpc;
 use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::committee::Committee as HashiCommittee;
+use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
-use hashi_types::guardian::WithdrawModeConfig;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -82,10 +83,10 @@ impl GuardianHarness {
         limiter_config: LimiterConfig,
         limiter_state: LimiterState,
     ) -> Result<()> {
-        let config = WithdrawModeConfig::from_parts_for_testing(
+        let config = InitConfig::from_parts_for_testing(
             limiter_config,
             limiter_state,
-            committee,
+            committee.clone(),
             master_pubkey,
             self.network,
         );
@@ -93,6 +94,8 @@ impl GuardianHarness {
             .install_operator_init_for_testing(OperatorInitTestArgs::default().with_config(config));
         hashi_guardian::test_utils::finalize_enclave(&self.enclave)
             .map_err(|e| anyhow::anyhow!("finalize guardian enclave: {e:?}"))?;
+        activate_enclave_for_testing(&self.enclave, committee, limiter_config, limiter_state)
+            .map_err(|e| anyhow::anyhow!("activate guardian enclave: {e:?}"))?;
 
         anyhow::ensure!(
             self.enclave.is_fully_initialized(),

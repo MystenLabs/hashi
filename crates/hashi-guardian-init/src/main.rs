@@ -12,11 +12,9 @@ mod config;
 mod dev_bootstrap;
 mod fetch_info;
 mod generate_master_key;
-mod heartbeat_checks;
 mod kp_ceremony;
 mod kp_provision;
 mod kp_roster;
-mod limiter_recovery;
 mod operator_ceremony;
 mod operator_provision;
 

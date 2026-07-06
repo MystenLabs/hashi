@@ -12,6 +12,7 @@ pub mod attestation;
 pub mod ceremony_mode;
 pub mod enclave;
 pub mod info;
+pub mod operator_activate;
 pub mod operator_init;
 pub mod rpc;
 pub mod s3_client; // used by the monitor
@@ -24,6 +25,8 @@ pub mod test_utils;
 pub use enclave::Enclave;
 pub use s3_client::GuardianS3Client;
 
+#[cfg(any(test, feature = "test-utils"))]
+pub use test_utils::activate_enclave_for_testing;
 #[cfg(any(test, feature = "test-utils"))]
 pub use test_utils::create_fully_initialized_enclave;
 #[cfg(any(test, feature = "test-utils"))]

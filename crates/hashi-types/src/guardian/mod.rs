@@ -85,13 +85,12 @@ pub enum EnclaveMode {
 // ---------------------------------
 
 /// Operator-supplied bootstrap. A ceremony-mode enclave (setup/rotate) needs only
-/// `s3_config`; a withdraw-mode enclave additionally carries the `WithdrawModeConfig`
-/// (committee, limiter, BTC master pubkey, secret-sharing instance, network) whose
-/// digest is the share-decryption AAD.
+/// `s3_config`; a withdraw-mode enclave additionally carries the stable
+/// `InitConfig` whose digest is the share-decryption AAD.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OperatorInitRequest {
     s3_config: S3Config,
-    state: Option<WithdrawModeConfig>,
+    init_config: Option<InitConfig>,
 }
 
 /// Operator-trusted one-time bootstrap request for `genesis/record.json`.
@@ -133,8 +132,11 @@ pub struct GuardianInfo {
     pub bucket_info: Option<S3BucketInfo>,
     /// Encryption key. Used by KPs to encrypt their shares.
     pub encryption_pubkey: EncPubKeyBytes,
-    /// Digest of the operator-supplied `WithdrawModeState` (set after operator_init).
+    /// Digest of the operator-supplied `InitConfig` (set after operator_init).
     /// KPs recompute it from their verified sources and match to confirm config.
+    pub config_hash: Option<[u8; 32]>,
+    /// Digest of the live `ActivationState` (set after operator_activate).
+    /// Operators compute it from S3/on-chain state and pin activation to it.
     pub state_hash: Option<[u8; 32]>,
     /// Git revision of the guardian build. Untrusted (enclave-self-reported);
     /// verified out-of-band by reproducibly building at this revision and matching
@@ -159,46 +161,53 @@ pub struct GuardianInfo {
 //    Withdraw mode requests and responses
 // ---------------------------------------
 
-/// Full operator-supplied withdraw-mode config: the attested `WithdrawModeState`
-/// plus delivery-only fields that are enforced elsewhere and so are excluded from
-/// the digest (the instance via direct share verification; network is share-irrelevant).
-/// Supplied to `operator_init`.
+/// Stable operator-supplied config for arming a withdraw-mode standby. Its
+/// `digest()` is the `config_hash` bound as PI share AAD and exposed via
+/// `GuardianInfo`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct WithdrawModeConfig {
-    state: WithdrawModeState,
-    /// Secret-sharing scheme for the current BTC key (commitments + N + T).
-    secret_sharing_instance: SecretSharingInstance,
+pub struct InitConfig {
+    /// S3 bucket + region, excluding credentials.
+    bucket_info: S3BucketInfo,
+    /// Limiter config.
+    limiter_config: LimiterConfig,
+    /// Raw MPC verifying key (curve point with y-parity preserved).
+    hashi_btc_master_pubkey: HashiMasterG,
+    /// Guardian build PCR pins that operators/KPs use to verify attestation.
+    pcr_allowlist: PcrAllowlist,
     /// BTC network.
     network: Network,
 }
 
-/// The withdraw-mode state KPs attest to. Its `digest()` is the `state_hash`:
-/// bound as HPKE AAD on each KP's share and exposed (as a hash) via `GuardianInfo`.
-/// These are exactly the fields whose agreement is enforced *only* via the digest.
+/// Live serving state derived during operator activation. Its `digest()` is the
+/// `state_hash` checked against the operator's activation pin.
 #[derive(Debug, Clone, PartialEq)]
-pub struct WithdrawModeState {
+pub struct ActivationState {
+    /// Binds the live activation state to the stable arming config.
+    config_hash: [u8; 32],
+    /// Secret-sharing instance armed during OI/PI. Activation rejects if the
+    /// latest ceremony instance no longer matches it.
+    secret_sharing_instance: SecretSharingInstance,
     /// Current Hashi committee
     committee: HashiCommittee,
-    /// Limiter config
-    limiter_config: LimiterConfig,
     /// Limiter state (tokens available, timestamp, seq)
     limiter_state: LimiterState,
-    /// Raw MPC verifying key (curve point with y-parity preserved). The
-    /// guardian uses this directly for `derive_verifying_key` so the
-    /// 2-of-2 child key in the leaf script matches the MPC signature.
-    hashi_btc_master_pubkey: HashiMasterG,
 }
 
 /// The current KPs' encrypted key shares, assembled into one submission (in the
 /// relay model, by the relay once it has collected enough). Each share's HPKE AAD
-/// binds the enclave's `state_hash` (the `WithdrawModeState` digest), so a share
-/// only decrypts if the KP agreed on the operator-supplied state.
+/// binds the enclave's `config_hash`, so a share only decrypts if the KP agreed
+/// on the stable operator-supplied config.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProvisionerInitRequest {
     // TODO: Wrap submitted guardian shares in a domain type that rejects
     // duplicate share ids. Unlike KP output shares, submitted shares are a
     // threshold batch and need not be contiguous 1..=n.
     encrypted_shares: Vec<GuardianEncryptedShare>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OperatorActivateRequest {
+    expected_state_hash: [u8; 32],
 }
 
 /// A withdrawal request. `HashiSigned<T>.`
@@ -376,15 +385,15 @@ impl OperatorInitRequest {
     pub fn new_ceremony_mode(s3_config: S3Config) -> Self {
         Self {
             s3_config,
-            state: None,
+            init_config: None,
         }
     }
 
-    /// Build a withdraw-mode request carrying the full operator config.
-    pub fn new_withdraw_mode(s3_config: S3Config, state: WithdrawModeConfig) -> Self {
+    /// Build a withdraw-mode request carrying the stable operator config.
+    pub fn new_withdraw_mode(s3_config: S3Config, init_config: InitConfig) -> Self {
         Self {
             s3_config,
-            state: Some(state),
+            init_config: Some(init_config),
         }
     }
 
@@ -392,15 +401,15 @@ impl OperatorInitRequest {
         &self.s3_config
     }
 
-    pub fn state(&self) -> Option<&WithdrawModeConfig> {
-        self.state.as_ref()
+    pub fn init_config(&self) -> Option<&InitConfig> {
+        self.init_config.as_ref()
     }
 
-    /// `state` must be present iff the enclave runs in withdraw mode.
+    /// `init_config` must be present iff the enclave runs in withdraw mode.
     pub fn validate(&self, mode: EnclaveMode) -> GuardianResult<()> {
-        match (mode, self.state.is_some()) {
+        match (mode, self.init_config.is_some()) {
             (EnclaveMode::Withdraw, false) => Err(InvalidInputs(
-                "withdraw-mode operator_init requires a WithdrawModeConfig".into(),
+                "withdraw-mode operator_init requires an InitConfig".into(),
             )),
             (EnclaveMode::Ceremony, true) => Err(InvalidInputs(
                 "ceremony-mode operator_init must carry only S3 config".into(),
@@ -409,8 +418,8 @@ impl OperatorInitRequest {
         }
     }
 
-    pub fn into_parts(self) -> (S3Config, Option<WithdrawModeConfig>) {
-        (self.s3_config, self.state)
+    pub fn into_parts(self) -> (S3Config, Option<InitConfig>) {
+        (self.s3_config, self.init_config)
     }
 }
 
@@ -434,34 +443,106 @@ impl WriteGenesisUntrustedRequest {
     }
 }
 
-impl WithdrawModeState {
-    pub fn new(
-        committee: HashiCommittee,
-        limiter_config: LimiterConfig,
-        limiter_state: LimiterState,
-        hashi_btc_master_pubkey: HashiMasterG,
-    ) -> GuardianResult<Self> {
-        // Validate that limiter state is consistent with config.
-        if limiter_state.num_tokens_available > limiter_config.max_bucket_capacity {
-            return Err(InvalidInputs(
-                "limiter num_tokens_available exceeds max_bucket_capacity".into(),
-            ));
+impl OperatorActivateRequest {
+    pub fn new(expected_state_hash: [u8; 32]) -> Self {
+        Self {
+            expected_state_hash,
         }
+    }
+
+    pub fn expected_state_hash(&self) -> &[u8; 32] {
+        &self.expected_state_hash
+    }
+
+    pub fn into_parts(self) -> [u8; 32] {
+        self.expected_state_hash
+    }
+}
+
+impl ActivationState {
+    pub fn new(
+        config_hash: [u8; 32],
+        secret_sharing_instance: SecretSharingInstance,
+        committee: HashiCommittee,
+        limiter_state: LimiterState,
+    ) -> GuardianResult<Self> {
         Ok(Self {
+            config_hash,
+            secret_sharing_instance,
             committee,
-            limiter_config,
             limiter_state,
-            hashi_btc_master_pubkey,
         })
     }
 
-    pub fn into_parts(self) -> (HashiCommittee, LimiterConfig, LimiterState, HashiMasterG) {
+    pub fn into_parts(
+        self,
+    ) -> (
+        [u8; 32],
+        SecretSharingInstance,
+        HashiCommittee,
+        LimiterState,
+    ) {
         (
+            self.config_hash,
+            self.secret_sharing_instance,
             self.committee,
-            self.limiter_config,
             self.limiter_state,
-            self.hashi_btc_master_pubkey,
         )
+    }
+
+    pub fn committee(&self) -> &HashiCommittee {
+        &self.committee
+    }
+
+    pub fn limiter_state(&self) -> &LimiterState {
+        &self.limiter_state
+    }
+
+    /// The `state_hash`: the digest the operator pins at activation.
+    pub fn digest(&self) -> [u8; 32] {
+        let bytes =
+            bcs::to_bytes(&ActivationStateRepr::from(self)).expect("serialization should work");
+        Blake2b::<U32>::digest(bytes).into()
+    }
+}
+
+impl InitConfig {
+    pub fn new(
+        bucket_info: S3BucketInfo,
+        limiter_config: LimiterConfig,
+        hashi_btc_master_pubkey: HashiMasterG,
+        pcr_allowlist: PcrAllowlist,
+        network: Network,
+    ) -> GuardianResult<Self> {
+        Ok(Self {
+            bucket_info,
+            limiter_config,
+            hashi_btc_master_pubkey,
+            pcr_allowlist,
+            network,
+        })
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        S3BucketInfo,
+        LimiterConfig,
+        HashiMasterG,
+        PcrAllowlist,
+        Network,
+    ) {
+        (
+            self.bucket_info,
+            self.limiter_config,
+            self.hashi_btc_master_pubkey,
+            self.pcr_allowlist,
+            self.network,
+        )
+    }
+
+    pub fn bucket_info(&self) -> &S3BucketInfo {
+        &self.bucket_info
     }
 
     pub fn limiter_config(&self) -> &LimiterConfig {
@@ -472,52 +553,18 @@ impl WithdrawModeState {
         self.hashi_btc_master_pubkey
     }
 
-    /// The `state_hash`: the digest KPs bind as their share-encryption AAD.
-    /// Excludes `secret_sharing_instance` (enforced via verify_share) and
-    /// `network` (share-irrelevant), which is why those live outside this struct.
-    pub fn digest(&self) -> [u8; 32] {
-        let bytes =
-            bcs::to_bytes(&WithdrawModeStateRepr::from(self)).expect("serialization should work");
-        Blake2b::<U32>::digest(bytes).into()
-    }
-}
-
-impl WithdrawModeConfig {
-    pub fn new(
-        committee: HashiCommittee,
-        limiter_config: LimiterConfig,
-        limiter_state: LimiterState,
-        hashi_btc_master_pubkey: HashiMasterG,
-        secret_sharing_instance: SecretSharingInstance,
-        network: Network,
-    ) -> GuardianResult<Self> {
-        let state = WithdrawModeState::new(
-            committee,
-            limiter_config,
-            limiter_state,
-            hashi_btc_master_pubkey,
-        )?;
-        Ok(Self {
-            state,
-            secret_sharing_instance,
-            network,
-        })
-    }
-
-    pub fn into_parts(self) -> (WithdrawModeState, SecretSharingInstance, Network) {
-        (self.state, self.secret_sharing_instance, self.network)
-    }
-
-    pub fn state(&self) -> &WithdrawModeState {
-        &self.state
-    }
-
-    pub fn secret_sharing_instance(&self) -> &SecretSharingInstance {
-        &self.secret_sharing_instance
+    pub fn pcr_allowlist(&self) -> &PcrAllowlist {
+        &self.pcr_allowlist
     }
 
     pub fn network(&self) -> Network {
         self.network
+    }
+
+    /// The `config_hash`: the digest KPs bind as their share-encryption AAD.
+    pub fn digest(&self) -> [u8; 32] {
+        let bytes = bcs::to_bytes(&InitConfigRepr::from(self)).expect("serialization should work");
+        Blake2b::<U32>::digest(bytes).into()
     }
 }
 
@@ -526,17 +573,17 @@ impl ProvisionerInitRequest {
         Self { encrypted_shares }
     }
 
-    /// Encrypt one KP's `share` to the enclave's public key, binding `state_hash`
-    /// (the enclave's `WithdrawModeConfig` digest) as HPKE AAD — so the enclave
-    /// only decrypts shares from KPs that agreed on that state. Each KP produces
-    /// one of these; they are bundled into a `ProvisionerInitRequest`.
+    /// Encrypt one KP's `share` to the enclave's public key, binding `config_hash`
+    /// as HPKE AAD — so the enclave only decrypts shares from KPs that agreed on
+    /// the stable config. Each KP produces one of these; they are bundled into a
+    /// `ProvisionerInitRequest`.
     pub fn build_from_share<R: CryptoRng + RngCore>(
         share: &Share,
         enclave_pub_key: &EncPubKey,
-        state_hash: [u8; 32],
+        config_hash: [u8; 32],
         rng: &mut R,
     ) -> GuardianEncryptedShare {
-        encrypt_share(share, enclave_pub_key, Some(&state_hash), rng)
+        encrypt_share(share, enclave_pub_key, Some(&config_hash), rng)
     }
 
     pub fn encrypted_shares(&self) -> &[GuardianEncryptedShare] {
@@ -789,13 +836,23 @@ pub struct SignedStandardWithdrawalRequestWire {
     pub signature: crate::move_types::CommitteeSignature,
 }
 
-/// Serializable representation of WithdrawModeState. Used for computing its digest.
+/// Serializable representation of InitConfig. Used for computing its digest.
 #[derive(Serialize)]
-struct WithdrawModeStateRepr {
-    pub committee: crate::move_types::Committee,
+struct InitConfigRepr {
+    pub bucket_info: S3BucketInfo,
     pub limiter_config: LimiterConfig,
-    pub limiter_state: LimiterState,
     pub hashi_btc_master_pubkey: HashiMasterG,
+    pub pcr_allowlist: PcrAllowlist,
+    pub network: String,
+}
+
+/// Serializable representation of ActivationState. Used for computing its digest.
+#[derive(Serialize)]
+struct ActivationStateRepr {
+    pub config_hash: [u8; 32],
+    pub secret_sharing_instance: SecretSharingInstance,
+    pub committee: crate::move_types::Committee,
+    pub limiter_state: LimiterState,
 }
 
 /// Converter from T -> Self that internally validates addresses
@@ -846,14 +903,29 @@ impl From<StandardWithdrawalRequest> for StandardWithdrawalRequestWire {
     }
 }
 
-impl From<&WithdrawModeState> for WithdrawModeStateRepr {
-    fn from(state: &WithdrawModeState) -> Self {
-        let (committee, config, limiter_state, pubkey) = state.clone().into_parts();
+impl From<&InitConfig> for InitConfigRepr {
+    fn from(config: &InitConfig) -> Self {
+        let (bucket_info, limiter_config, hashi_btc_master_pubkey, pcr_allowlist, network) =
+            config.clone().into_parts();
         Self {
+            bucket_info,
+            limiter_config,
+            hashi_btc_master_pubkey,
+            pcr_allowlist,
+            network: network.to_string(),
+        }
+    }
+}
+
+impl From<&ActivationState> for ActivationStateRepr {
+    fn from(state: &ActivationState) -> Self {
+        let (config_hash, secret_sharing_instance, committee, limiter_state) =
+            state.clone().into_parts();
+        Self {
+            config_hash,
+            secret_sharing_instance,
             committee: (&committee).into(),
-            limiter_config: config,
             limiter_state,
-            hashi_btc_master_pubkey: pubkey,
         }
     }
 }

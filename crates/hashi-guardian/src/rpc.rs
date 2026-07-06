@@ -4,6 +4,7 @@
 use crate::ceremony_mode::rotate;
 use crate::ceremony_mode::setup;
 use crate::info;
+use crate::operator_activate;
 use crate::operator_init;
 use crate::withdraw_mode::committee_update;
 use crate::withdraw_mode::genesis;
@@ -18,6 +19,7 @@ use hashi_types::guardian::EnclaveMode;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::*;
 use hashi_types::guardian::HashiSigned;
+use hashi_types::guardian::OperatorActivateRequest;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::RotateKpsRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
@@ -156,6 +158,22 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
             .map_err(to_status)?;
 
         Ok(Response::new(proto::ProvisionerInitResponse {}))
+    }
+
+    async fn operator_activate(
+        &self,
+        request: Request<proto::OperatorActivateRequest>,
+    ) -> Result<Response<proto::OperatorActivateResponse>, Status> {
+        self.require_normal_mode("operator_activate")?;
+
+        let domain_req: OperatorActivateRequest =
+            request.into_inner().try_into().map_err(to_status)?;
+
+        operator_activate::operator_activate(self.enclave.clone(), domain_req)
+            .await
+            .map_err(to_status)?;
+
+        Ok(Response::new(proto::OperatorActivateResponse {}))
     }
 
     async fn standard_withdrawal(

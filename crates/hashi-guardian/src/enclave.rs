@@ -62,7 +62,7 @@ pub struct EnclaveConfig {
 }
 
 /// Mutable state that changes during operation.
-/// Note: committee + rate limiter are installed during operator_init.
+/// Committee + rate limiter are installed during operator_activate.
 pub struct EnclaveState {
     /// Current Hashi committee.
     committee: RwLock<Option<Arc<HashiCommittee>>>,
@@ -75,10 +75,14 @@ pub struct EnclaveState {
 /// state for the life of the enclave.
 #[derive(Default)]
 pub struct Scratchpad {
+    /// Stable withdraw-mode config set by operator_init.
+    pub init_config: OnceLock<InitConfig>,
     /// Secret-sharing instance (commitments + N + T) set by operator_init.
     pub secret_sharing_instance: OnceLock<SecretSharingInstance>,
-    /// Digest of the operator-supplied WithdrawModeState (set in operator_init);
+    /// Digest of the operator-supplied InitConfig (set in operator_init);
     /// the AAD KPs bind on their share submissions.
+    pub config_hash: OnceLock<[u8; 32]>,
+    /// Digest of the live ActivationState (set in operator_activate).
     pub state_hash: OnceLock<[u8; 32]>,
     /// Set once operator_init has successfully written all logs to S3.
     /// This prevents heartbeats from being emitted before operator_init logs.
@@ -86,6 +90,8 @@ pub struct Scratchpad {
     /// Set once the provisioner init flow has successfully logged EnclaveFullyInitialized.
     /// This prevents withdrawals from starting before provisioner_init logs.
     pub provisioner_init_logging_complete: OnceLock<()>,
+    /// Set once operator_activate has installed live serving state and logged it.
+    pub operator_activate_logging_complete: OnceLock<()>,
     /// Guards the single ceremony per enclave: `setup_new_key` (genesis) or
     /// `rotate_kps` (rotation), never both. Each holds this guard across its
     /// flow so the two can't interleave; the `bool` flips true once a ceremony
@@ -197,7 +203,7 @@ impl EnclaveConfig {
 }
 
 impl EnclaveState {
-    /// Install the operator-supplied committee + rate limiter. Called from operator_init.
+    /// Install the activation-derived committee + rate limiter. Called from operator_activate.
     pub fn init(&self, committee: HashiCommittee, rate_limiter: RateLimiter) -> GuardianResult<()> {
         self.set_committee(committee)?;
         self.set_rate_limiter(rate_limiter)?;
@@ -382,12 +388,17 @@ impl Enclave {
     /// Provisioner_init is complete: the reconstructed BTC keypair is set and
     /// its installation has been logged.
     pub fn is_provisioner_init_complete(&self) -> bool {
-        self.config.is_enclave_btc_keypair_set()
-            && self
-                .scratchpad
-                .provisioner_init_logging_complete
-                .get()
-                .is_some()
+        let logged = self
+            .scratchpad
+            .provisioner_init_logging_complete
+            .get()
+            .is_some();
+        assert!(
+            !logged
+                || (self.config.is_enclave_btc_keypair_set() && self.is_operator_init_complete()),
+            "provisioner_init_logging_complete set but provisioner_init state is incomplete"
+        );
+        logged
     }
 
     pub fn is_operator_init_complete(&self) -> bool {
@@ -419,20 +430,36 @@ impl Enclave {
         }
         match self.config.mode {
             EnclaveMode::Ceremony => true,
-            // Withdraw enclaves additionally install the WithdrawModeConfig.
+            // Withdraw enclaves additionally install the stable InitConfig.
             EnclaveMode::Withdraw => {
                 self.config.btc_network.get().is_some()
+                    && self.scratchpad.init_config.get().is_some()
                     && self.scratchpad.secret_sharing_instance.get().is_some()
-                    && self.scratchpad.state_hash.get().is_some()
+                    && self.scratchpad.config_hash.get().is_some()
                     && self.config.hashi_btc_master_pubkey.get().is_some()
-                    && self.state.has_committee()
-                    && self.state.rate_limiter.get().is_some()
             }
         }
     }
 
     pub fn is_fully_initialized(&self) -> bool {
-        self.is_provisioner_init_complete() && self.is_operator_init_complete()
+        self.is_active()
+    }
+
+    pub fn is_active(&self) -> bool {
+        let logged = self
+            .scratchpad
+            .operator_activate_logging_complete
+            .get()
+            .is_some();
+        assert!(
+            !logged
+                || (self.is_provisioner_init_complete()
+                    && self.scratchpad.state_hash.get().is_some()
+                    && self.state.has_committee()
+                    && self.state.rate_limiter.get().is_some()),
+            "operator_activate_logging_complete set but activation state is incomplete"
+        );
+        logged
     }
 
     // ========================================================================
@@ -473,12 +500,16 @@ impl Enclave {
                 .ok()
                 .map(|l| l.bucket_info().clone()),
             encryption_pubkey: self.encryption_public_key().to_bytes().to_vec(),
+            config_hash: self.config_hash().copied(),
             state_hash: self.state_hash().copied(),
             // Injected at build time (docker/CI); defaults outside a real build.
             untrusted_git_revision: option_env!("GIT_REVISION").unwrap_or("unknown").to_string(),
             enclave_btc_pubkey: self.config.enclave_btc_pubkey().ok(),
             limiter_state: self.state.limiter_state().await,
-            limiter_config: self.state.limiter_config().await,
+            limiter_config: match self.state.limiter_config().await {
+                Some(config) => Some(config),
+                None => self.init_config().map(|config| *config.limiter_config()),
+            },
             current_committee_epoch: self.state.get_committee().ok().map(|c| c.epoch()),
             mpc_master_g: self.config.hashi_btc_master_pubkey.get().cloned(),
         }
@@ -579,6 +610,28 @@ impl Enclave {
             .get()
             .cloned()
             .unwrap_or_else(|| KPEncryptedShares::new(vec![]).expect("empty share list is valid"))
+    }
+
+    pub fn init_config(&self) -> Option<&InitConfig> {
+        self.scratchpad.init_config.get()
+    }
+
+    pub fn set_init_config(&self, config: InitConfig) -> GuardianResult<()> {
+        self.scratchpad
+            .init_config
+            .set(config)
+            .map_err(|_| InvalidInputs("Init config already set".into()))
+    }
+
+    pub fn config_hash(&self) -> Option<&[u8; 32]> {
+        self.scratchpad.config_hash.get()
+    }
+
+    pub fn set_config_hash(&self, hash: [u8; 32]) -> GuardianResult<()> {
+        self.scratchpad
+            .config_hash
+            .set(hash)
+            .map_err(|_| InvalidInputs("Config hash already set".into()))
     }
 
     pub fn state_hash(&self) -> Option<&[u8; 32]> {

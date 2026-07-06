@@ -97,13 +97,9 @@ mod tests {
     use crate::test_utils::OperatorInitTestArgs;
     use hashi_types::guardian::GuardianError;
     use hashi_types::guardian::HashiCommittee;
-    use hashi_types::guardian::WithdrawModeConfig;
 
     fn mock_committee() -> HashiCommittee {
-        let config = WithdrawModeConfig::mock_for_testing(None);
-        let (state, _, _) = config.into_parts();
-        let (committee, _, _, _) = state.into_parts();
-        committee
+        HashiCommittee::new(vec![], 0, 3334, 800, 3333, 1)
     }
 
     #[tokio::test]

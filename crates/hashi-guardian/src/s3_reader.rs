@@ -15,6 +15,8 @@ use crate::s3_client::GuardianS3Client;
 use anyhow::Context;
 use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
+use hashi_types::guardian::time_utils::now_timestamp_secs;
+use hashi_types::guardian::time_utils::unix_millis_to_seconds;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::CeremonyLogMessage;
@@ -22,8 +24,11 @@ use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GenesisLogMessage;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianResult;
+use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::KPEncryptedShares;
 use hashi_types::guardian::KPFingerprint;
+use hashi_types::guardian::LimiterConfig;
+use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::PcrAllowlist;
@@ -33,12 +38,17 @@ use hashi_types::guardian::SessionID;
 use hashi_types::guardian::SharesLogMessage;
 use hashi_types::guardian::VerifiedLogRecord;
 use hashi_types::guardian::VerifiedSessionInfo;
+use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::guardian::S3_DIR_CEREMONY;
 use hashi_types::guardian::S3_DIR_COMMITTEE_UPDATE;
 use hashi_types::guardian::S3_DIR_HEARTBEAT;
 use hashi_types::guardian::S3_DIR_WITHDRAW;
 use hashi_types::move_types::Committee;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::time::Duration;
+
+const OTHER_SESSION_QUIET_PERIOD: Duration = Duration::from_mins(10);
 
 /// Open an hour-scoped cursor at `start` over the `withdraw/` stream. Advance/
 /// retreat with [`S3HourScopedDirectory::next_dir`]/`prev_dir`, gate on
@@ -268,14 +278,19 @@ impl GuardianReader {
     pub async fn read_latest_committee(
         &mut self,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<Option<Committee>> {
-        if let Some(committee) = self.read_latest_committee_update(build_policy).await? {
-            return Ok(Some(committee));
-        }
-        Ok(self
-            .read_genesis(build_policy)
-            .await?
-            .map(|genesis| genesis.committee))
+    ) -> anyhow::Result<Option<HashiCommittee>> {
+        let committee =
+            if let Some(committee) = self.read_latest_committee_update(build_policy).await? {
+                Some(committee)
+            } else {
+                self.read_genesis(build_policy)
+                    .await?
+                    .map(|genesis| genesis.committee)
+            };
+        committee
+            .map(TryInto::try_into)
+            .transpose()
+            .context("invalid serving committee")
     }
 
     /// The latest applied committee from `committee-update/` — the lex-last
@@ -328,6 +343,164 @@ impl GuardianReader {
         };
         Ok(Some(*msg))
     }
+
+    /// Enforces that every guardian session except `ignored_session` has been
+    /// quiet long enough to no longer be considered active. Activation uses
+    /// this to ignore the activating standby's own heartbeat.
+    pub async fn ensure_all_sessions_quiet_except(
+        &mut self,
+        ignored_session: &str,
+    ) -> anyhow::Result<()> {
+        let recent_heartbeats = self.read_recent_heartbeats().await?;
+        let summary = summarize_heartbeats_by_session(recent_heartbeats)?;
+        let now = now_timestamp_secs();
+
+        let active_sessions = summary
+            .iter()
+            .filter(|s| s.session_id != ignored_session)
+            .filter_map(|s| {
+                let age_secs = now.saturating_sub(s.last_heartbeat);
+                (age_secs < OTHER_SESSION_QUIET_PERIOD.as_secs())
+                    .then(|| format!("{} ({}s ago)", s.session_id, age_secs))
+            })
+            .collect::<Vec<_>>();
+        if !active_sessions.is_empty() {
+            anyhow::bail!(
+                "sessions are still active within {}s: {}",
+                OTHER_SESSION_QUIET_PERIOD.as_secs(),
+                active_sessions.join(", ")
+            );
+        }
+        Ok(())
+    }
+
+    async fn read_recent_heartbeats(&mut self) -> anyhow::Result<Vec<VerifiedLogRecord>> {
+        let one_hour_ago = now_timestamp_secs().saturating_sub(60 * 60);
+        let mut cursor = heartbeat_cursor(one_hour_ago);
+        let mut logs = Vec::new();
+        logs.extend(self.read_dir(&cursor).await?);
+        cursor = cursor.next_dir();
+        logs.extend(self.read_dir(&cursor).await?);
+        Ok(logs)
+    }
+
+    /// Derive the activation limiter state from withdrawal logs. Uses the
+    /// global max-seq Success post-state when present, otherwise genesis, and
+    /// caps tokens to the supplied config in case capacity was lowered.
+    pub async fn recover_limiter_state(
+        &mut self,
+        limiter_config: &LimiterConfig,
+    ) -> anyhow::Result<LimiterState> {
+        let Some(mut cursor) = find_latest_success_bucket(self.s3()).await? else {
+            return Ok(LimiterState::genesis(limiter_config));
+        };
+
+        let hit = bucket_max_post_state(self.read_dir(&cursor).await?);
+        cursor = cursor.prev_dir();
+        let peek = bucket_max_post_state(self.read_dir(&cursor).await?);
+        let mut state = [hit, peek]
+            .into_iter()
+            .flatten()
+            .max_by_key(|s| s.next_seq)
+            .unwrap_or_else(|| LimiterState::genesis(limiter_config));
+        state.num_tokens_available = state
+            .num_tokens_available
+            .min(limiter_config.max_bucket_capacity);
+        Ok(state)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct GuardianSessionInfo {
+    session_id: SessionID,
+    last_heartbeat: u64,
+}
+
+fn summarize_heartbeats_by_session(
+    logs: Vec<VerifiedLogRecord>,
+) -> anyhow::Result<Vec<GuardianSessionInfo>> {
+    let mut map: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+
+    for log in logs {
+        if !matches!(log.message, LogMessage::Heartbeat { .. }) {
+            anyhow::bail!("non-heartbeat logs found");
+        }
+
+        let ts = unix_millis_to_seconds(log.timestamp_ms);
+        map.entry(log.session_id)
+            .and_modify(|(first, last)| {
+                *first = (*first).min(ts);
+                *last = (*last).max(ts);
+            })
+            .or_insert((ts, ts));
+    }
+
+    Ok(map
+        .into_iter()
+        .map(|(session_id, (_, last_heartbeat))| GuardianSessionInfo {
+            session_id,
+            last_heartbeat,
+        })
+        .collect())
+}
+
+async fn find_latest_success_bucket(
+    s3_client: &GuardianS3Client,
+) -> anyhow::Result<Option<S3HourScopedDirectory>> {
+    let root = format!("{}/", S3_DIR_WITHDRAW);
+    let years = list_subdirs_desc(s3_client, &root).await?;
+    for year in years {
+        let months = list_subdirs_desc(s3_client, &year).await?;
+        for month in months {
+            let days = list_subdirs_desc(s3_client, &month).await?;
+            for day in days {
+                let hours = list_subdirs_desc(s3_client, &day).await?;
+                for hour in hours {
+                    if hour_bucket_has_success(s3_client, &hour).await? {
+                        return Ok(Some(S3HourScopedDirectory::from_path(&hour)?));
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
+async fn list_subdirs_desc(
+    s3_client: &GuardianS3Client,
+    prefix: &str,
+) -> anyhow::Result<Vec<String>> {
+    let mut subs = s3_client
+        .list_common_prefixes(prefix)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    subs.sort_by(|a, b| b.cmp(a));
+    Ok(subs)
+}
+
+async fn hour_bucket_has_success(
+    s3_client: &GuardianS3Client,
+    bucket: &str,
+) -> anyhow::Result<bool> {
+    let keys = s3_client
+        .list_all_keys_in_dir(&format!("{bucket}success-"))
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+    Ok(!keys.is_empty())
+}
+
+fn bucket_max_post_state(logs: Vec<VerifiedLogRecord>) -> Option<LimiterState> {
+    logs.into_iter()
+        .filter_map(|log| {
+            let LogMessage::Withdrawal(boxed) = log.message else {
+                return None;
+            };
+            match *boxed {
+                WithdrawalLogMessage::Success { post_state, .. } => Some(post_state),
+                WithdrawalLogMessage::Failure { .. } => None,
+            }
+        })
+        .max_by_key(|s| s.next_seq)
 }
 
 /// Per-session [`VerifiedSessionInfo`] cache, internal to [`GuardianReader`]. The first

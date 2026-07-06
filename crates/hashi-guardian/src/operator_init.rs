@@ -1,12 +1,14 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! `operator_init`: receives S3 config and (in withdraw mode) the
-//! `WithdrawModeConfig`, installs them, and writes the init logs. Enabled in
+//! `operator_init`: receives S3 config and (in withdraw mode) the stable
+//! `InitConfig`, installs arming state, and writes the init logs. Enabled in
 //! both modes. The companion `provisioner_init` (withdraw-only) lives in
 //! `withdraw::provisioner_init`.
 
 use crate::attestation::get_attestation;
+use crate::s3_reader::BuildPolicy;
+use crate::s3_reader::GuardianReader;
 use crate::Enclave;
 use crate::GuardianS3Client;
 use hashi_types::bitcoin::HashiMasterG;
@@ -17,39 +19,53 @@ use std::sync::Arc;
 use tracing::info;
 use GuardianError::*;
 
-/// The withdraw-mode state to install, built from `WithdrawModeConfig` (incl. the
-/// computed `state_hash` and the constructed rate limiter).
-pub(crate) struct WithdrawInstall {
-    state_hash: [u8; 32],
+/// The withdraw-mode arming state to install, built from `InitConfig`.
+pub(crate) struct InitInstall {
+    init_config: InitConfig,
+    config_hash: [u8; 32],
     network: bitcoin::Network,
     secret_sharing_instance: SecretSharingInstance,
     hashi_btc_master_pubkey: HashiMasterG,
-    committee: HashiCommittee,
-    rate_limiter: RateLimiter,
 }
 
-impl WithdrawInstall {
-    /// Decompose a `WithdrawModeConfig` into the install bundle, constructing the
-    /// rate limiter (the only fallible step). Shared by `operator_init` and tests.
-    pub(crate) fn from_config(config: WithdrawModeConfig) -> GuardianResult<Self> {
-        let (withdraw_state, secret_sharing_instance, network) = config.into_parts();
-        let state_hash = withdraw_state.digest();
-        let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) =
-            withdraw_state.into_parts();
-        let rate_limiter = RateLimiter::new(limiter_config, limiter_state)?;
+impl InitInstall {
+    /// Build the arming bundle from the stable config and S3-derived ceremony
+    /// state. Shared by `operator_init` and tests.
+    pub(crate) async fn from_config(
+        s3_config: &S3Config,
+        logger: &GuardianS3Client,
+        config: InitConfig,
+    ) -> GuardianResult<Self> {
+        if s3_config.bucket_info != *config.bucket_info() {
+            return Err(InvalidInputs(
+                "InitConfig bucket_info must match OperatorInit S3 config".into(),
+            ));
+        }
+
+        let mut reader =
+            GuardianReader::from_s3_client(logger.clone(), config.pcr_allowlist().clone());
+        let (_, secret_sharing_instance, _, _) = reader
+            .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
+            .await
+            .map_err(|e| InvalidInputs(format!("read latest ceremony: {e}")))?
+            .ok_or_else(|| InvalidInputs("no ceremony log found for withdraw init".into()))?;
+
+        let config_hash = config.digest();
+        let network = config.network();
+        let hashi_btc_master_pubkey = config.hashi_btc_master_pubkey();
+
         Ok(Self {
-            state_hash,
+            init_config: config,
+            config_hash,
             network,
             secret_sharing_instance,
             hashi_btc_master_pubkey,
-            committee,
-            rate_limiter,
         })
     }
 
     /// Install the bundle onto a fresh enclave. Infallible by design (see the
     /// `operator_init` invariant): every set runs once on a fresh enclave.
-    pub(crate) fn install_into(self, enclave: &Enclave) {
+    fn install_into(self, enclave: &Enclave) {
         info!("Setting bitcoin network to {:?}.", self.network);
         enclave
             .config
@@ -66,33 +82,31 @@ impl WithdrawInstall {
             .set_secret_sharing_instance(self.secret_sharing_instance)
             .expect("Unable to set secret-sharing instance");
 
-        info!("Setting state hash.");
+        info!("Setting init config.");
         enclave
-            .set_state_hash(self.state_hash)
-            .expect("Unable to set state hash");
+            .set_init_config(self.init_config)
+            .expect("Unable to set init config");
+
+        info!("Setting config hash.");
+        enclave
+            .set_config_hash(self.config_hash)
+            .expect("Unable to set config hash");
 
         info!("Setting hashi BTC master pubkey.");
         enclave
             .config
             .set_hashi_btc_pk(self.hashi_btc_master_pubkey)
             .expect("Unable to set hashi BTC master pubkey");
-
-        info!("Installing committee and rate limiter.");
-        enclave
-            .state
-            .init(self.committee, self.rate_limiter)
-            .expect("Unable to init enclave state");
     }
 }
 
-/// Receives S3 API keys and — for a withdraw-mode enclave — the `WithdrawModeConfig`
-/// (committee, limiter, BTC master pubkey, secret-sharing instance, network);
-/// installs them and fixes the `state_hash`. A ceremony enclave carries only S3.
+/// Receives S3 API keys and — for a withdraw-mode enclave — the stable `InitConfig`;
+/// installs arming state and fixes the `config_hash`. A ceremony enclave carries only S3.
 ///
 /// Invariant: operator_init never returns an `Err` from a partially-initialized
-/// enclave. Every fallible step (request validation, S3 connectivity, rate-limiter
-/// construction) runs before any state is mutated, so an early `Err` leaves the
-/// enclave untouched and retryable. The mutation then happens entirely in
+/// enclave. Every fallible step (request validation, S3 connectivity, S3 reads)
+/// runs before any state is mutated, so an early `Err` leaves the enclave
+/// untouched and retryable. The mutation then happens entirely in
 /// `commit_operator_init`, which returns `()` — it cannot report an error, so a
 /// half-mutated enclave is never observed via an `Err`.
 pub async fn operator_init(
@@ -114,14 +128,13 @@ pub async fn operator_init(
     // A withdraw-mode enclave must carry the config and a ceremony enclave must not.
     request.validate(enclave.mode())?;
 
-    let (s3_config, state) = request.into_parts();
+    let (s3_config, init_config) = request.into_parts();
     let logger = GuardianS3Client::new_checked(&s3_config).await?;
     info!("S3 connectivity check complete.");
 
-    // Build the withdraw-mode install bundle (incl. the rate limiter, the last
-    // fallible step) up front; `None` for a ceremony enclave.
-    let withdraw = match state {
-        Some(config) => Some(WithdrawInstall::from_config(config)?),
+    // Build the withdraw-mode install bundle up front; `None` for a ceremony enclave.
+    let withdraw = match init_config {
+        Some(config) => Some(InitInstall::from_config(&s3_config, &logger, config).await?),
         None => None,
     };
 
@@ -137,7 +150,7 @@ pub async fn operator_init(
 async fn commit_operator_init(
     enclave: &Enclave,
     logger: GuardianS3Client,
-    withdraw: Option<WithdrawInstall>,
+    withdraw: Option<InitInstall>,
 ) {
     info!("Storing S3 configuration.");
     enclave
@@ -145,8 +158,8 @@ async fn commit_operator_init(
         .set_s3_logger(logger)
         .expect("Unable to set logger");
 
-    // Withdraw-mode state (committee, limiter, BTC master pubkey, instance, network,
-    // state_hash); a ceremony enclave installs none of it.
+    // Withdraw-mode arming state (InitConfig, BTC master pubkey, instance,
+    // network, config_hash); a ceremony enclave installs none of it.
     if let Some(install) = withdraw {
         install.install_into(enclave);
     }
@@ -182,7 +195,7 @@ mod tests {
     use super::*;
 
     /// Run commit_operator_init on a fresh enclave for the given mode (withdraw =>
-    /// carries the WithdrawModeConfig install bundle; ceremony => none).
+    /// carries the InitConfig install bundle; ceremony => none).
     async fn commit_for_mode(mode: EnclaveMode) -> Arc<Enclave> {
         let enclave = Arc::new(Enclave::new(
             GuardianSignKeyPair::new(rand::thread_rng()),
@@ -191,9 +204,18 @@ mod tests {
         ));
 
         let withdraw = match mode {
-            EnclaveMode::Withdraw => Some(
-                WithdrawInstall::from_config(WithdrawModeConfig::mock_for_testing(None)).unwrap(),
-            ),
+            EnclaveMode::Withdraw => {
+                let config = InitConfig::mock_for_testing(None);
+                let config_hash = config.digest();
+                Some(InitInstall {
+                    network: config.network(),
+                    secret_sharing_instance: crate::test_utils::OperatorInitTestArgs::default()
+                        .secret_sharing_instance,
+                    hashi_btc_master_pubkey: config.hashi_btc_master_pubkey(),
+                    init_config: config,
+                    config_hash,
+                })
+            }
             EnclaveMode::Ceremony => None,
         };
 
