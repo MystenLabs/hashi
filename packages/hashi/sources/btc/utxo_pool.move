@@ -20,16 +20,17 @@ const EUtxoAlreadyUsed: vector<u8> = b"UTXO is already active or spent";
 ///
 /// `produced_by`: None = confirmed deposit or promoted change output;
 ///                Some(id) = unconfirmed change output of that withdrawal.
-/// `locked_by`:   None = available for coin selection;
-///                Some(id) = currently locked in that pending withdrawal.
+/// `spent_by`:    None = available for coin selection;
+///                Some(id) = reserved (locked) by that pending withdrawal to
+///                be spent; there is no unlock, so this withdrawal will spend it.
 ///
-/// A UTXO is selectable when `locked_by` is None, regardless of
+/// A UTXO is selectable when `spent_by` is None, regardless of
 /// `produced_by`. This allows chaining withdrawals through mempool change
 /// outputs before the parent transaction confirms.
 public struct UtxoRecord has store {
     utxo: Utxo,
     produced_by: Option<address>,
-    locked_by: Option<address>,
+    spent_by: Option<address>,
     spent_epoch: Option<u64>,
 }
 
@@ -65,7 +66,7 @@ public(package) fun insert_active(self: &mut UtxoPool, utxo: Utxo) {
             UtxoRecord {
                 utxo,
                 produced_by: option::none(),
-                locked_by: option::none(),
+                spent_by: option::none(),
                 spent_epoch: option::none(),
             },
         )
@@ -73,7 +74,7 @@ public(package) fun insert_active(self: &mut UtxoPool, utxo: Utxo) {
 
 /// Insert an unconfirmed change UTXO produced by a pending withdrawal.
 ///
-/// The UTXO is immediately selectable (`locked_by = None`) but flagged as
+/// The UTXO is immediately selectable (`spent_by = None`) but flagged as
 /// unconfirmed until `confirm_pending()` is called after the producing
 /// transaction confirms on Bitcoin.
 public(package) fun insert_pending(self: &mut UtxoPool, utxo: Utxo, withdrawal_id: address) {
@@ -85,7 +86,7 @@ public(package) fun insert_pending(self: &mut UtxoPool, utxo: Utxo, withdrawal_i
             UtxoRecord {
                 utxo,
                 produced_by: option::some(withdrawal_id),
-                locked_by: option::none(),
+                spent_by: option::none(),
                 spent_epoch: option::none(),
             },
         )
@@ -94,8 +95,8 @@ public(package) fun insert_pending(self: &mut UtxoPool, utxo: Utxo, withdrawal_i
 /// Lock a UTXO for use in a pending withdrawal. Aborts if already locked.
 public(package) fun lock(self: &mut UtxoPool, utxo_id: UtxoId, withdrawal_id: address) {
     let record: &mut UtxoRecord = self.utxo_records.borrow_mut(utxo_id);
-    assert!(record.locked_by.is_none(), EUtxoAlreadyLocked);
-    record.locked_by = option::some(withdrawal_id);
+    assert!(record.spent_by.is_none(), EUtxoAlreadyLocked);
+    record.spent_by = option::some(withdrawal_id);
 }
 
 /// Return a copy of a UTXO from the pool.
@@ -115,7 +116,7 @@ public(package) fun mark_spent(self: &mut UtxoPool, utxo_id: UtxoId, epoch: u64)
 /// No-ops if the record has already been cleaned up.
 public(package) fun cleanup_spent(self: &mut UtxoPool, utxo_id: UtxoId) {
     if (self.utxo_records.contains(utxo_id)) {
-        let UtxoRecord { utxo, produced_by: _, locked_by: _, spent_epoch } = self
+        let UtxoRecord { utxo, produced_by: _, spent_by: _, spent_epoch } = self
             .utxo_records
             .remove(utxo_id);
         let epoch = spent_epoch.destroy_some();
@@ -126,7 +127,7 @@ public(package) fun cleanup_spent(self: &mut UtxoPool, utxo_id: UtxoId) {
 
 /// Promote a pending change UTXO to confirmed once its producing withdrawal
 /// confirms on Bitcoin. If the UTXO was already locked by a subsequent
-/// withdrawal, only `produced_by` is cleared; `locked_by` is left intact.
+/// withdrawal, only `produced_by` is cleared; `spent_by` is left intact.
 /// No-ops if the UTXO is no longer present (it was already spent).
 public(package) fun confirm_pending(self: &mut UtxoPool, utxo_id: UtxoId) {
     if (self.utxo_records.contains(utxo_id)) {

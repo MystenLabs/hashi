@@ -277,9 +277,9 @@ impl Hashi {
                     .get(id)
                     .ok_or_else(|| anyhow!("UTXO {id:?} not found in the pool"))?;
                 anyhow::ensure!(
-                    record.locked_by.is_none(),
+                    record.spent_by.is_none(),
                     "UTXO {id:?} is locked by pending withdrawal {:?}",
-                    record.locked_by.unwrap()
+                    record.spent_by.unwrap()
                 );
                 Ok(record)
             })
@@ -1117,7 +1117,7 @@ impl Hashi {
         // Map available (unlocked) UTXOs to UtxoCandidates.
         let candidates: Vec<UtxoCandidate> = utxo_records
             .values()
-            .filter(|r| r.locked_by.is_none())
+            .filter(|r| r.spent_by.is_none())
             .map(|r| {
                 let status =
                     build_utxo_status(self, r, &withdrawal_txns, &tx_confirmations, &utxo_records);

@@ -371,7 +371,7 @@ async fn handle_events(
                     super::types::UtxoRecord {
                         utxo,
                         produced_by: None,
-                        locked_by: None,
+                        spent_by: None,
                         spent_epoch: None,
                     },
                 );
@@ -454,7 +454,7 @@ async fn handle_events(
                     for input in &event.inputs {
                         if let Some(record) = state.hashi.utxo_pool.utxo_records.get_mut(&input.id)
                         {
-                            record.locked_by = Some(event.withdrawal_txn_id);
+                            record.spent_by = Some(event.withdrawal_txn_id);
                         }
                     }
                     // Change outputs are the trailing outputs: change output `j`
@@ -475,7 +475,7 @@ async fn handle_events(
                             super::types::UtxoRecord {
                                 utxo: change_utxo,
                                 produced_by: Some(event.withdrawal_txn_id),
-                                locked_by: None,
+                                spent_by: None,
                                 spent_epoch: None,
                             },
                         );

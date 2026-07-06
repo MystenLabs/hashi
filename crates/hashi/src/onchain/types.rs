@@ -728,7 +728,7 @@ impl UtxoPool {
     pub fn active_utxos(&self) -> impl Iterator<Item = (&UtxoId, &Utxo)> {
         self.utxo_records
             .iter()
-            .filter(|(_, r)| r.locked_by.is_none())
+            .filter(|(_, r)| r.spent_by.is_none())
             .map(|(id, r)| (id, &r.utxo))
     }
 
