@@ -121,3 +121,65 @@ entry fun destroy_all_certs(hashi: &mut Hashi, epoch: u64, batch_index: Option<u
     let epoch_certs: hashi::tob::EpochCertsV1 = hashi.tob_mut().remove(key);
     hashi::tob::destroy_all(epoch_certs, current_epoch);
 }
+
+// ======== Tests ========
+
+#[test_only]
+const TEST_V1: address = @0x1;
+#[test_only]
+const TEST_V2: address = @0x2;
+#[test_only]
+const TEST_V3: address = @0x3;
+
+#[test_only]
+fun dummy_cert(): CommitteeSignature {
+    // Cert verification is deferred (see `tob::submit_cert_with_signature`), so
+    // an empty cert suffices to reach and exercise the ceremony-state guards.
+    hashi::committee::new_committee_signature(0, vector[], vector[])
+}
+
+// DKG is valid while no MPC key exists (genesis reconfig).
+#[test]
+fun test_submit_dkg_cert_accepted_before_genesis() {
+    use hashi::test_utils;
+    let ctx = &mut test_utils::new_tx_context(TEST_V1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[TEST_V1, TEST_V2, TEST_V3], ctx);
+    submit_dkg_cert(&mut hashi, 0, TEST_V1, vector[], dummy_cert(), ctx);
+    std::unit_test::destroy(hashi);
+}
+
+// A rotation cert before genesis must be rejected so it cannot poison the
+// shared genesis-DKG bucket.
+#[test]
+#[expected_failure(abort_code = ERotationRequiresExistingKey)]
+fun test_submit_rotation_cert_rejected_before_genesis() {
+    use hashi::test_utils;
+    let ctx = &mut test_utils::new_tx_context(TEST_V1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[TEST_V1, TEST_V2, TEST_V3], ctx);
+    submit_rotation_cert(&mut hashi, 0, TEST_V1, vector[], dummy_cert(), ctx);
+    std::unit_test::destroy(hashi);
+}
+
+// Rotation is valid once a genesis MPC key exists.
+#[test]
+fun test_submit_rotation_cert_accepted_after_genesis() {
+    use hashi::test_utils;
+    let ctx = &mut test_utils::new_tx_context(TEST_V1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[TEST_V1, TEST_V2, TEST_V3], ctx);
+    hashi.committee_set_mut().set_mpc_public_key_for_testing(vector[1, 2, 3]);
+    submit_rotation_cert(&mut hashi, 0, TEST_V1, vector[], dummy_cert(), ctx);
+    std::unit_test::destroy(hashi);
+}
+
+// A stray DKG cert after genesis must be rejected so it cannot poison the
+// shared rotation bucket.
+#[test]
+#[expected_failure(abort_code = EDkgOnlyDuringInitialReconfig)]
+fun test_submit_dkg_cert_rejected_after_genesis() {
+    use hashi::test_utils;
+    let ctx = &mut test_utils::new_tx_context(TEST_V1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[TEST_V1, TEST_V2, TEST_V3], ctx);
+    hashi.committee_set_mut().set_mpc_public_key_for_testing(vector[1, 2, 3]);
+    submit_dkg_cert(&mut hashi, 0, TEST_V1, vector[], dummy_cert(), ctx);
+    std::unit_test::destroy(hashi);
+}
