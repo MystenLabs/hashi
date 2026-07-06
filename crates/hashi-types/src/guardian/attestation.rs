@@ -107,7 +107,7 @@ pub struct VerifiedSessionInfo {
 /// We record only PCR0: in a StageX (reproducible, single-binary) build it is
 /// the only measurement that carries signal - the others (kernel, bootloader, IAM
 /// role) are constant or irrelevant for our pinning.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BuildPcrs {
     git_revision: GitRevision,
     pcr0: Vec<u8>,
@@ -138,7 +138,7 @@ impl BuildPcrs {
 /// Verification matches the signature-verified `untrusted_git_revision` to one
 /// entry, then checks PCR0 against that entry. Callers use the resolved
 /// `BuildPcrs` to enforce the policy for their context.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PcrAllowlist {
     current_build: BuildPcrs,
     prev_builds: Vec<BuildPcrs>,

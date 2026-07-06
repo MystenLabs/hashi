@@ -120,7 +120,7 @@ impl CeremonyLogMessage {
 /// OI: operator_init
 /// PI: provisioner_init
 /// Init messages are expected to be logged in the following order:
-/// OIAttestationUnsigned -> OIGuardianInfo -> PIEnclaveFullyInitialized.
+/// OIAttestationUnsigned -> OIGuardianInfo -> PIEnclaveFullyInitialized -> OAActivated.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum InitLogMessage {
     /// Attestation and signing public key posted in /operator_init
@@ -135,6 +135,8 @@ pub enum InitLogMessage {
     /// Threshold reached — enclave fully initialized (happens once). Records the
     /// ids of the shares that were combined.
     PIEnclaveFullyInitialized { share_ids: Vec<ShareID> },
+    /// Operator activation succeeded and installed live serving state.
+    OAActivated { state_hash: [u8; 32] },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -181,6 +183,7 @@ impl InitLogMessage {
     pub const OI_ATTEST_UNSIGNED: &'static str = "oi-attestation-unsigned";
     pub const OI_GUARDIAN_INFO: &'static str = "oi-guardian-info";
     pub const PI_FULLY_INITIALIZED: &'static str = "pi-enclave-fully-initialized";
+    pub const OA_ACTIVATED: &'static str = "oa-activated";
 
     pub fn log_name(&self, prefix: &str) -> String {
         let suffix = match self {
@@ -189,6 +192,7 @@ impl InitLogMessage {
             InitLogMessage::PIEnclaveFullyInitialized { .. } => {
                 Self::PI_FULLY_INITIALIZED.to_string()
             }
+            InitLogMessage::OAActivated { .. } => Self::OA_ACTIVATED.to_string(),
         };
 
         format!("{}-{}.json", prefix, suffix)

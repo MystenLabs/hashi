@@ -91,7 +91,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         .with_context(|| format!("connect to guardian at {}", cfg.guardian_endpoint))?;
     info!(phase = "connect", endpoint = %cfg.guardian_endpoint, "connected to guardian");
 
-    // 4. operator_init (ceremony mode: S3 config only, no WithdrawModeConfig).
+    // 4. operator_init (ceremony mode: S3 config only, no InitConfig).
     info!(
         phase = "operator_init",
         bucket = guardian_s3.bucket_name(),

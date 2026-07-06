@@ -168,15 +168,16 @@ async fn log_withdrawal_failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activate_enclave_for_testing;
     use crate::OperatorInitTestArgs;
     use bitcoin::Network;
     use hashi_types::bitcoin::create_btc_keypair_for_test;
     use hashi_types::bitcoin::hashi_master_g_from_btc_xonly_for_test;
     use hashi_types::guardian::HashiCommittee;
+    use hashi_types::guardian::InitConfig;
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::StandardWithdrawalRequest;
-    use hashi_types::guardian::WithdrawModeConfig;
 
     /// Sets up an enclave with a single committee and token bucket limiter.
     async fn setup_fully_initialized_enclave(
@@ -194,10 +195,10 @@ mod tests {
             max_bucket_capacity: max_bucket_capacity_sats,
         };
         let limiter_state = LimiterState::genesis(&limiter_config);
-        let config = WithdrawModeConfig::from_parts_for_testing(
+        let config = InitConfig::from_parts_for_testing(
             limiter_config,
             limiter_state,
-            committee,
+            committee.clone(),
             hashi_btc_master_pubkey,
             network,
         );
@@ -219,6 +220,8 @@ mod tests {
             .provisioner_init_logging_complete
             .set(())
             .expect("provisioner_init_logging_complete should only be set once");
+        activate_enclave_for_testing(&enclave, committee, limiter_config, limiter_state)
+            .expect("activate_enclave_for_testing should succeed on a fresh enclave");
 
         assert!(enclave.is_fully_initialized());
         enclave

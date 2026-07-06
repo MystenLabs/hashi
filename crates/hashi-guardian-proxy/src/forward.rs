@@ -99,6 +99,13 @@ impl GuardianService for Forwarding {
         Err(denied("ProvisionerInit (use SingleProvisionerInit)"))
     }
 
+    async fn operator_activate(
+        &self,
+        _request: Request<proto::OperatorActivateRequest>,
+    ) -> Result<Response<proto::OperatorActivateResponse>, Status> {
+        Err(denied("OperatorActivate"))
+    }
+
     async fn rotate_kps(
         &self,
         _request: Request<proto::RotateKpsRequest>,
@@ -173,6 +180,12 @@ mod tests {
             &self,
             _: Request<proto::ProvisionerInitRequest>,
         ) -> Result<Response<proto::ProvisionerInitResponse>, Status> {
+            unimplemented!("a real guardian would serve this; the proxy must never reach it")
+        }
+        async fn operator_activate(
+            &self,
+            _: Request<proto::OperatorActivateRequest>,
+        ) -> Result<Response<proto::OperatorActivateResponse>, Status> {
             unimplemented!("a real guardian would serve this; the proxy must never reach it")
         }
         async fn update_committee(

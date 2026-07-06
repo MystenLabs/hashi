@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::BuildPcrs;
 use super::Ciphertext;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
@@ -9,12 +10,14 @@ use super::GuardianSigned;
 use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
+use super::InitConfig;
 use super::KPEncryptedShare;
 use super::KPEncryptedShares;
 use super::LimiterConfig;
 use super::LimiterState;
 use super::NitroAttestation;
 use super::OperatorInitRequest;
+use super::PcrAllowlist;
 use super::ProvisionerInitRequest;
 use super::RotateKpsResponse;
 use super::S3BucketInfo;
@@ -26,7 +29,6 @@ use super::ShareCommitment;
 use super::ShareCommitments;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
-use super::WithdrawModeConfig;
 use super::WithdrawalID;
 pub use crate::pgp::test_utils::mock_pgp_certs;
 pub use crate::pgp::test_utils::mock_pgp_certs_armored;
@@ -86,6 +88,7 @@ impl GetGuardianInfoResponse {
                 region: "us-east-1".to_string(),
             }),
             encryption_pubkey: vec![0u8; 32],
+            config_hash: None,
             state_hash: None,
             untrusted_git_revision: "unknown".to_string(),
             enclave_btc_pubkey: None,
@@ -169,10 +172,7 @@ impl OperatorInitRequest {
                 region: "us-east-1".into(),
             },
         };
-        OperatorInitRequest::new_withdraw_mode(
-            s3_config,
-            WithdrawModeConfig::mock_for_testing(None),
-        )
+        OperatorInitRequest::new_withdraw_mode(s3_config, InitConfig::mock_for_testing(None))
     }
 }
 
@@ -216,23 +216,22 @@ fn mock_committee_with_one_member(epoch: u64) -> HashiCommittee {
     )
 }
 
-impl WithdrawModeConfig {
+impl InitConfig {
     pub fn from_parts_for_testing(
         limiter_config: LimiterConfig,
-        limiter_state: LimiterState,
-        committee: HashiCommittee,
+        _limiter_state: LimiterState,
+        _committee: HashiCommittee,
         hashi_btc_master_pubkey: HashiMasterG,
         network: super::Network,
     ) -> Self {
-        WithdrawModeConfig::new(
-            committee,
+        InitConfig::new(
+            mock_s3_bucket_info(),
             limiter_config,
-            limiter_state,
             hashi_btc_master_pubkey,
-            dummy_secret_sharing_instance(),
+            mock_pcr_allowlist(),
             network,
         )
-        .expect("valid WithdrawModeConfig")
+        .expect("valid InitConfig")
     }
 
     pub fn mock_for_testing(kp: Option<BitcoinKeypair>) -> Self {
@@ -246,27 +245,32 @@ impl WithdrawModeConfig {
         let hashi_btc_master_pubkey =
             hashi_master_g_from_btc_xonly_for_test(&kp.x_only_public_key().0);
 
-        WithdrawModeConfig::new(
-            mock_committee_with_one_member(0),
+        InitConfig::new(
+            mock_s3_bucket_info(),
             LimiterConfig {
                 refill_rate: 10,
                 max_bucket_capacity: max_capacity,
             },
-            LimiterState {
-                num_tokens_available: max_capacity,
-                last_updated_at: 0,
-                next_seq: 0,
-            },
             hashi_btc_master_pubkey,
-            dummy_secret_sharing_instance(),
+            mock_pcr_allowlist(),
             super::Network::Regtest,
         )
-        .expect("valid WithdrawModeConfig")
+        .expect("valid InitConfig")
     }
 }
 
-/// A throwaway secret-sharing instance for tests that don't exercise share
-/// verification (it's carried in `WithdrawModeConfig` but not in the digest).
+fn mock_s3_bucket_info() -> S3BucketInfo {
+    S3BucketInfo {
+        bucket: "bucket".into(),
+        region: "us-east-1".into(),
+    }
+}
+
+fn mock_pcr_allowlist() -> PcrAllowlist {
+    PcrAllowlist::new(BuildPcrs::new("unknown", vec![0]), []).expect("valid PCR allowlist")
+}
+
+/// A throwaway secret-sharing instance for tests that don't exercise share verification.
 fn dummy_secret_sharing_instance() -> SecretSharingInstance {
     SecretSharingInstance::new(dummy_commitments(), TEST_N, TEST_T, 0).unwrap()
 }

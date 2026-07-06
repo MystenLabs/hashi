@@ -19,21 +19,24 @@ use clap::Parser;
 use hashi::onchain::OnchainState;
 use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::bitcoin::HashiMasterG;
+use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GetGuardianInfoResponse;
+use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::LimiterConfig;
-use hashi_types::guardian::LimiterState;
+use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::ProvisionerInitRequest;
-use hashi_types::guardian::SecretSharingInstance;
+use hashi_types::guardian::S3BucketInfo;
 use hashi_types::guardian::SecretSharingParams;
 use hashi_types::guardian::Share;
 use hashi_types::guardian::ShareCommitment;
 use hashi_types::guardian::ShareCommitments;
-use hashi_types::guardian::WithdrawModeConfig;
+use hashi_types::guardian::WriteGenesisUntrustedRequest;
 use hashi_types::guardian::crypto::commit_share;
 use hashi_types::guardian::crypto::split_secret;
+use hashi_types::guardian::proto_conversions::init_config_to_pb;
 use hashi_types::guardian::proto_conversions::provisioner_init_request_to_pb;
-use hashi_types::guardian::proto_conversions::withdraw_mode_config_to_pb;
+use hashi_types::guardian::proto_conversions::write_genesis_untrusted_request_to_pb;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use hpke::Deserializable;
@@ -129,28 +132,32 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .await
         .with_context(|| format!("connect to guardian at {}", args.guardian_endpoint))?;
 
-    // The operator now supplies the full init state at OperatorInit; its digest
-    // is the state_hash KPs bind as their share-encryption AAD.
+    // The operator now supplies stable init config at OperatorInit; its digest
+    // is the config_hash KPs bind as their share-encryption AAD.
     let limiter_config = LimiterConfig {
         refill_rate: args.refill_rate_sats_per_sec,
         max_bucket_capacity: args.max_bucket_capacity_sats,
     };
-    let limiter_state = LimiterState::genesis(&limiter_config);
     // `hashi_btc_master_pubkey` is the MPC committee `G` the 2-of-2 scripts derive
     // from — use the on-chain MPC `G` (as hashi does), not the guardian's own key.
     let master_g = decode_mpc_master_g(&onchain_state.mpc_public_key())?;
-    let secret_sharing_instance = SecretSharingInstance::new(material.commitments.clone(), n, t, 0)
-        .map_err(|e| anyhow!("build SecretSharingInstance: {e:?}"))?;
-    let config = WithdrawModeConfig::new(
-        committee,
+    let pcr_allowlist = PcrAllowlist::new(
+        BuildPcrs::new("dev-bootstrap", vec![0]),
+        Vec::<BuildPcrs>::new(),
+    )
+    .map_err(|e| anyhow!("build PCR allowlist: {e:?}"))?;
+    let init_config = InitConfig::new(
+        S3BucketInfo {
+            bucket: bucket.clone(),
+            region: region.clone(),
+        },
         limiter_config,
-        limiter_state,
         master_g,
-        secret_sharing_instance,
+        pcr_allowlist,
         network,
     )
-    .map_err(|e| anyhow!("build WithdrawModeConfig: {e:?}"))?;
-    let state_hash = config.state().digest();
+    .map_err(|e| anyhow!("build InitConfig: {e:?}"))?;
+    let config_hash = init_config.digest();
 
     let operator_init_req = pb::OperatorInitRequest {
         s3_config: Some(pb::S3Config {
@@ -159,9 +166,8 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
             bucket_name: Some(bucket.clone()),
             region: Some(region.clone()),
         }),
-        state: Some(
-            withdraw_mode_config_to_pb(config)
-                .map_err(|e| anyhow!("encode WithdrawModeConfig: {e:?}"))?,
+        init_config: Some(
+            init_config_to_pb(init_config).map_err(|e| anyhow!("encode InitConfig: {e:?}"))?,
         ),
     };
     tracing::info!("calling OperatorInit");
@@ -169,6 +175,14 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .operator_init(operator_init_req)
         .await
         .context("OperatorInit RPC failed")?;
+
+    tracing::info!("calling WriteGenesisUntrusted");
+    client
+        .write_genesis_untrusted(write_genesis_untrusted_request_to_pb(
+            WriteGenesisUntrustedRequest::new(committee),
+        ))
+        .await
+        .context("WriteGenesisUntrusted RPC failed")?;
 
     let info_pb = client
         .get_guardian_info(pb::GetGuardianInfoRequest {})
@@ -215,12 +229,12 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
             && returned_instance.sharing_seq() == 0,
         "secret-sharing instance mismatch: guardian echoed different scheme than was submitted"
     );
-    let returned_state_hash = info
-        .state_hash
-        .ok_or_else(|| anyhow!("guardian info missing state_hash"))?;
+    let returned_config_hash = info
+        .config_hash
+        .ok_or_else(|| anyhow!("guardian info missing config_hash"))?;
     anyhow::ensure!(
-        returned_state_hash == state_hash,
-        "state_hash mismatch: guardian echoed a different init state than was submitted"
+        returned_config_hash == config_hash,
+        "config_hash mismatch: guardian echoed a different init config than was submitted"
     );
 
     let enc_pubkey = EncPubKey::from_bytes(&info.encryption_pubkey)
@@ -233,7 +247,7 @@ pub async fn run(args: Args, onchain_state: &OnchainState) -> Result<()> {
         .iter()
         .take(t)
         .map(|share| {
-            ProvisionerInitRequest::build_from_share(share, &enc_pubkey, state_hash, &mut rng)
+            ProvisionerInitRequest::build_from_share(share, &enc_pubkey, config_hash, &mut rng)
         })
         .collect();
     let pb_req = provisioner_init_request_to_pb(ProvisionerInitRequest::new(encrypted_shares))
