@@ -10908,10 +10908,10 @@ fn extract_echo_for(echoes: &[(Address, Messages)], recipient: Address) -> batch
 
 #[test]
 fn test_create_avid_nonce_dispersal_messages_yields_one_per_member() {
-    // W=6 -> t=2, f=2; dispersal needs pending weight < f, so exactly one node is pending (node 5).
+    // W=6 -> t=2, f=2; pending = {4, 5} sits exactly on the dispersal bound (pending weight = f).
     let setup = TestSetup::new(6);
     let batch_index = 3u32;
-    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
 
     let messages = fx
         .dealer
