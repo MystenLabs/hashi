@@ -5,13 +5,6 @@ module hashi::cert_submission;
 
 use hashi::{committee::CommitteeSignature, hashi::Hashi, tob::ProtocolType};
 
-#[error]
-const EDkgOnlyDuringInitialReconfig: vector<u8> =
-    b"DKG certificates may only be submitted during the initial reconfig (before any MPC key exists)";
-#[error]
-const ERotationRequiresExistingKey: vector<u8> =
-    b"Key-rotation certificates require an existing MPC key (not valid during the initial reconfig)";
-
 entry fun submit_dkg_cert(
     hashi: &mut Hashi,
     epoch: u64,
@@ -20,14 +13,6 @@ entry fun submit_dkg_cert(
     cert: CommitteeSignature,
     ctx: &mut TxContext,
 ) {
-    // DKG and key-rotation certificates share the same `(epoch, None)` TOB
-    // bucket, whose stored `ProtocolType` is fixed by whichever submission
-    // creates it. Gate each ceremony on committee state so the wrong type can
-    // never create or join the bucket: an MPC key exists iff genesis DKG has
-    // completed, so DKG is valid only while the key is still empty. Without
-    // this, a malicious member could submit the wrong-type cert first and
-    // poison the bucket, stalling reconfiguration.
-    assert!(hashi.committee_set().mpc_public_key().is_empty(), EDkgOnlyDuringInitialReconfig);
     let key = hashi::tob::tob_key(epoch, option::none());
     submit_cert_internal(
         hashi,
@@ -49,9 +34,6 @@ entry fun submit_rotation_cert(
     cert: CommitteeSignature,
     ctx: &mut TxContext,
 ) {
-    // Symmetric to `submit_dkg_cert`: rotation is valid only once a genesis MPC
-    // key exists, so a rotation cert cannot poison the initial-DKG bucket.
-    assert!(!hashi.committee_set().mpc_public_key().is_empty(), ERotationRequiresExistingKey);
     let key = hashi::tob::tob_key(epoch, option::none());
     submit_cert_internal(
         hashi,
