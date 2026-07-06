@@ -1032,13 +1032,13 @@ impl Metrics {
                     .sum::<u64>() as i64,
             );
         // Track three views of utxo_records:
-        // - available:         all selectable UTXOs (locked_by = None), whether
+        // - available:         all selectable UTXOs (spent_by = None), whether
         //                      confirmed or not; this is the coin-selection pool
         // - unconfirmed_change: subset of available whose producing withdrawal
         //                      has not yet confirmed on Bitcoin (produced_by =
         //                      Some); useful for gauging mempool chain depth
         // - locked:            committed to a pending withdrawal, awaiting
-        //                      Bitcoin confirmation (locked_by = Some)
+        //                      Bitcoin confirmation (spent_by = Some)
         let mut available_count = 0i64;
         let mut unconfirmed_change_count = 0i64;
         let mut locked_count = 0i64;
@@ -1046,7 +1046,7 @@ impl Metrics {
         let mut unconfirmed_change_value = 0u64;
         let mut locked_value = 0u64;
         for record in hashi.utxo_pool.utxo_records().values() {
-            if record.locked_by.is_some() {
+            if record.spent_by.is_some() {
                 locked_count += 1;
                 locked_value += record.utxo.amount;
             } else {

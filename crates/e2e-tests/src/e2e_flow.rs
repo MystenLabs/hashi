@@ -954,7 +954,7 @@ mod tests {
 
         // Wait for the committee to commit withdrawal 1. At this point the
         // deposit UTXO is locked and the change UTXO is inserted as pending
-        // (produced_by = Some, locked_by = None). No Bitcoin blocks have been
+        // (produced_by = Some, spent_by = None). No Bitcoin blocks have been
         // mined, so neither the deposit spend nor the change output is
         // confirmed on-chain.
         let picked1 =

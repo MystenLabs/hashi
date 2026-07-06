@@ -634,7 +634,7 @@ pub struct Utxo {
 pub struct UtxoRecord {
     pub utxo: Utxo,
     pub produced_by: Option<Address>,
-    pub locked_by: Option<Address>,
+    pub spent_by: Option<Address>,
     pub spent_epoch: Option<u64>,
 }
 

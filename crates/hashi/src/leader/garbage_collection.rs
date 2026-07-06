@@ -359,7 +359,7 @@ mod tests {
                 derivation_path: None,
             },
             produced_by: None,
-            locked_by: None,
+            spent_by: None,
             spent_epoch,
         }
     }
