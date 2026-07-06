@@ -1529,37 +1529,37 @@ async fn scrape_proposal_bag(
             types::ProposalType::UpdateConfig => {
                 bcs::from_bytes::<move_types::Proposal<move_types::UpdateConfig>>(contents)
                     .ok()
-                    .map(|p| (p.id, p.timestamp_ms))
+                    .map(|p| (p.id, p.created_timestamp_ms))
             }
             types::ProposalType::EnableVersion => {
                 bcs::from_bytes::<move_types::Proposal<move_types::EnableVersion>>(contents)
                     .ok()
-                    .map(|p| (p.id, p.timestamp_ms))
+                    .map(|p| (p.id, p.created_timestamp_ms))
             }
             types::ProposalType::DisableVersion => {
                 bcs::from_bytes::<move_types::Proposal<move_types::DisableVersion>>(contents)
                     .ok()
-                    .map(|p| (p.id, p.timestamp_ms))
+                    .map(|p| (p.id, p.created_timestamp_ms))
             }
             types::ProposalType::Upgrade => {
                 bcs::from_bytes::<move_types::Proposal<move_types::Upgrade>>(contents)
                     .ok()
-                    .map(|p| (p.id, p.timestamp_ms))
+                    .map(|p| (p.id, p.created_timestamp_ms))
             }
             types::ProposalType::EmergencyPause => {
                 bcs::from_bytes::<move_types::Proposal<move_types::EmergencyPause>>(contents)
                     .ok()
-                    .map(|p| (p.id, p.timestamp_ms))
+                    .map(|p| (p.id, p.created_timestamp_ms))
             }
             types::ProposalType::AbortReconfig => {
                 bcs::from_bytes::<move_types::Proposal<move_types::AbortReconfig>>(contents)
                     .ok()
-                    .map(|p| (p.id, p.timestamp_ms))
+                    .map(|p| (p.id, p.created_timestamp_ms))
             }
             types::ProposalType::UpdateGuardian => {
                 bcs::from_bytes::<move_types::Proposal<move_types::UpdateGuardian>>(contents)
                     .ok()
-                    .map(|p| (p.id, p.timestamp_ms))
+                    .map(|p| (p.id, p.created_timestamp_ms))
             }
             types::ProposalType::Unknown(_) => None,
         };

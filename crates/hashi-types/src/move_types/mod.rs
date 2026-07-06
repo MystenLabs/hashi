@@ -671,7 +671,9 @@ pub struct Proposal<T> {
     pub creator: Address,
     pub votes: Vec<Address>,
     pub quorum_threshold_bps: u64,
-    pub timestamp_ms: u64,
+    pub created_timestamp_ms: u64,
+    /// Clock timestamp at execution. `None` until the proposal executes.
+    pub executed_timestamp_ms: Option<u64>,
     pub metadata: VecMap<String, String>,
     pub data: T,
 }
