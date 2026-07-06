@@ -13,6 +13,9 @@ use sui::{bag::Bag, table::Table};
 public struct BitcoinStateKey has copy, drop, store {}
 
 public struct BitcoinState has store {
+    /// Extension point: dynamic fields can be attached here so new BTC-side
+    /// state can be added after the struct layout freezes at mainnet.
+    id: UID,
     deposit_queue: DepositRequestQueue,
     withdrawal_queue: WithdrawalRequestQueue,
     utxo_pool: UtxoPool,
@@ -25,11 +28,20 @@ public(package) fun key(): BitcoinStateKey { BitcoinStateKey {} }
 
 public(package) fun new(ctx: &mut TxContext): BitcoinState {
     BitcoinState {
+        id: object::new(ctx),
         deposit_queue: hashi::deposit_queue::create(ctx),
         withdrawal_queue: hashi::withdrawal_queue::create(ctx),
         utxo_pool: hashi::utxo_pool::create(ctx),
         user_requests: sui::table::new(ctx),
     }
+}
+
+public(package) fun id(self: &BitcoinState): &UID {
+    &self.id
+}
+
+public(package) fun id_mut(self: &mut BitcoinState): &mut UID {
+    &mut self.id
 }
 
 public(package) fun deposit_queue(self: &BitcoinState): &DepositRequestQueue {
