@@ -9,6 +9,7 @@ use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;
+use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::S3Config;
@@ -190,7 +191,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let no_prior_committee_exists = latest_committee.is_none();
     let committee = match latest_committee {
         Some(scraped) => {
-            let committee = scraped.try_into()?;
+            let committee: HashiCommittee = scraped.try_into()?;
             info!(
                 phase = "committee",
                 epoch = committee.epoch(),
