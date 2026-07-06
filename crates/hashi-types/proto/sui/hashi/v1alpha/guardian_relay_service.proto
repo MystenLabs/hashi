@@ -28,8 +28,8 @@ message SingleProvisionerInitRequest {
   string expected_session_id = 2;
 
   // Armored OpenPGP certificate of the submitting key provisioner. The relay
-  // checks its fingerprint against the guardian-attested roster (from
-  // GuardianInfo) before doing any other work.
+  // checks its fingerprint against its operator-configured KP roster before
+  // doing any other work.
   string signer_cert = 3;
 
   // Detached armored OpenPGP signature, produced by the KP's offline key

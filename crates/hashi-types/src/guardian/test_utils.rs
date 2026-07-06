@@ -93,7 +93,6 @@ impl GetGuardianInfoResponse {
             limiter_config: None,
             current_committee_epoch: None,
             mpc_master_g: None,
-            authorized_kp_fingerprints: vec![],
         };
 
         GetGuardianInfoResponse::new(
@@ -232,7 +231,6 @@ impl WithdrawModeConfig {
             hashi_btc_master_pubkey,
             dummy_secret_sharing_instance(),
             network,
-            vec![],
         )
         .expect("valid WithdrawModeConfig")
     }
@@ -262,7 +260,6 @@ impl WithdrawModeConfig {
             hashi_btc_master_pubkey,
             dummy_secret_sharing_instance(),
             super::Network::Regtest,
-            vec![],
         )
         .expect("valid WithdrawModeConfig")
     }

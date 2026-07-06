@@ -144,10 +144,6 @@ pub struct GuardianInfo {
     /// MPC committee verifying key `G` (the derivation master, NOT the guardian's
     /// own BTC key). Set after operator_init; lets KPs verify it directly.
     pub mpc_master_g: Option<HashiMasterG>,
-    /// Fingerprints of the KPs authorized to submit shares to the relay. Empty
-    /// before operator_init. Read directly (not via `into_parts`) by the
-    /// out-of-enclave relay to reject submissions from non-KPs.
-    pub authorized_kp_fingerprints: Vec<KPFingerprint>,
     // TODO: report the full committee too, so its membership is directly
     // verifiable (today only the `state_hash` digest covers it); it's large, though.
 }
@@ -167,9 +163,6 @@ pub struct WithdrawModeConfig {
     secret_sharing_instance: SecretSharingInstance,
     /// BTC network.
     network: Network,
-    /// Fingerprints of the KPs authorized to provision this key. Surfaced via
-    /// GuardianInfo for the relay's submitter check; not part of the digest.
-    authorized_kp_fingerprints: Vec<KPFingerprint>,
 }
 
 /// The withdraw-mode state KPs attest to. Its `digest()` is the `state_hash`:
@@ -463,7 +456,6 @@ impl WithdrawModeState {
 }
 
 impl WithdrawModeConfig {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         committee: HashiCommittee,
         limiter_config: LimiterConfig,
@@ -471,7 +463,6 @@ impl WithdrawModeConfig {
         hashi_btc_master_pubkey: HashiMasterG,
         secret_sharing_instance: SecretSharingInstance,
         network: Network,
-        authorized_kp_fingerprints: Vec<KPFingerprint>,
     ) -> GuardianResult<Self> {
         let state = WithdrawModeState::new(
             committee,
@@ -483,24 +474,11 @@ impl WithdrawModeConfig {
             state,
             secret_sharing_instance,
             network,
-            authorized_kp_fingerprints,
         })
     }
 
-    pub fn into_parts(
-        self,
-    ) -> (
-        WithdrawModeState,
-        SecretSharingInstance,
-        Network,
-        Vec<KPFingerprint>,
-    ) {
-        (
-            self.state,
-            self.secret_sharing_instance,
-            self.network,
-            self.authorized_kp_fingerprints,
-        )
+    pub fn into_parts(self) -> (WithdrawModeState, SecretSharingInstance, Network) {
+        (self.state, self.secret_sharing_instance, self.network)
     }
 
     pub fn state(&self) -> &WithdrawModeState {
@@ -513,10 +491,6 @@ impl WithdrawModeConfig {
 
     pub fn network(&self) -> Network {
         self.network
-    }
-
-    pub fn authorized_kp_fingerprints(&self) -> &[KPFingerprint] {
-        &self.authorized_kp_fingerprints
     }
 }
 

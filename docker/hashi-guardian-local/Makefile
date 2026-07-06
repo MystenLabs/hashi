@@ -27,6 +27,10 @@ ceremony: ## Generate KP keys + run the genesis ceremony (captures the BTC pubke
 	$(COMPOSE) --profile ceremony up -d --build ceremony
 	$(COMPOSE) --profile init run --rm --build init /scripts/ceremony.sh
 	$(COMPOSE) --profile ceremony stop ceremony
+	@fps=$$($(COMPOSE) --profile init run --rm -T --entrypoint cat init /work/kp-fingerprints.csv); \
+	echo "AUTHORIZED_KP_FINGERPRINTS=$$fps" > kp-roster.env; \
+	echo "Handing the KP roster to the proxy relay: $$fps"; \
+	$(COMPOSE) up -d proxy
 
 pubkey: ## Print the ceremony BTC master pubkey (hex)
 	@$(COMPOSE) --profile init run --rm -T --entrypoint cat init /work/guardian-btc-pubkey.hex; echo
@@ -62,3 +66,4 @@ logs: ## Tail logs
 
 down: ## Stop everything and drop volumes
 	$(COMPOSE) --profile ceremony --profile init down -v
+	rm -f kp-roster.env

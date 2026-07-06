@@ -97,11 +97,6 @@ message GuardianInfoData {
   // MPC committee verifying key `G` as `bcs(G)` (the derivation master, NOT the
   // guardian's own BTC key). Set after operator_init.
   optional bytes mpc_master_g = 10;
-
-  // Fingerprints of the key provisioners authorized to submit shares to the
-  // relay. Published so the out-of-enclave relay can reject submissions from
-  // non-KPs; the enclave still verifies every share against the commitments.
-  repeated string authorized_kp_fingerprints = 11;
 }
 
 // Public description of the current BTC key's secret-sharing scheme.
@@ -246,11 +241,6 @@ message WithdrawModeConfig {
 
   // BTC network. Carried for delivery; not part of the state_hash digest.
   optional Network network = 8;
-
-  // Fingerprints of the KPs authorized to provision this key. Carried for
-  // delivery; surfaced via GuardianInfo for the relay's submitter check. Not
-  // part of the state_hash digest.
-  repeated string authorized_kp_fingerprints = 9;
 }
 
 message LimiterState {

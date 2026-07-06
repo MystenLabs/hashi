@@ -80,9 +80,6 @@ pub struct Scratchpad {
     /// Digest of the operator-supplied WithdrawModeState (set in operator_init);
     /// the AAD KPs bind on their share submissions.
     pub state_hash: OnceLock<[u8; 32]>,
-    /// Fingerprints of the KPs authorized to provision this key (set in
-    /// operator_init). Published via GuardianInfo for the relay's submitter check.
-    pub authorized_kp_fingerprints: OnceLock<Vec<KPFingerprint>>,
     /// Set once operator_init has successfully written all logs to S3.
     /// This prevents heartbeats from being emitted before operator_init logs.
     pub operator_init_logging_complete: OnceLock<()>,
@@ -484,12 +481,6 @@ impl Enclave {
             limiter_config: self.state.limiter_config().await,
             current_committee_epoch: self.state.get_committee().ok().map(|c| c.epoch()),
             mpc_master_g: self.config.hashi_btc_master_pubkey.get().cloned(),
-            authorized_kp_fingerprints: self
-                .scratchpad
-                .authorized_kp_fingerprints
-                .get()
-                .cloned()
-                .unwrap_or_default(),
         }
     }
 
@@ -595,15 +586,5 @@ impl Enclave {
             .state_hash
             .set(hash)
             .map_err(|_| InvalidInputs("State hash already set".into()))
-    }
-
-    pub fn set_authorized_kp_fingerprints(
-        &self,
-        fingerprints: Vec<KPFingerprint>,
-    ) -> GuardianResult<()> {
-        self.scratchpad
-            .authorized_kp_fingerprints
-            .set(fingerprints)
-            .map_err(|_| InvalidInputs("Authorized KP fingerprints already set".into()))
     }
 }

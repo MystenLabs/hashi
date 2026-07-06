@@ -1369,8 +1369,8 @@ pub struct SingleProvisionerInitRequest {
     #[prost(string, tag = "2")]
     pub expected_session_id: ::prost::alloc::string::String,
     /// Armored OpenPGP certificate of the submitting key provisioner. The relay
-    /// checks its fingerprint against the guardian-attested roster (from
-    /// GuardianInfo) before doing any other work.
+    /// checks its fingerprint against its operator-configured KP roster before
+    /// doing any other work.
     #[prost(string, tag = "3")]
     pub signer_cert: ::prost::alloc::string::String,
     /// Detached armored OpenPGP signature, produced by the KP's offline key
@@ -1787,13 +1787,6 @@ pub struct GuardianInfoData {
     /// guardian's own BTC key). Set after operator_init.
     #[prost(bytes = "bytes", optional, tag = "10")]
     pub mpc_master_g: ::core::option::Option<::prost::bytes::Bytes>,
-    /// Fingerprints of the key provisioners authorized to submit shares to the
-    /// relay. Published so the out-of-enclave relay can reject submissions from
-    /// non-KPs; the enclave still verifies every share against the commitments.
-    #[prost(string, repeated, tag = "11")]
-    pub authorized_kp_fingerprints: ::prost::alloc::vec::Vec<
-        ::prost::alloc::string::String,
-    >,
 }
 /// Public description of the current BTC key's secret-sharing scheme.
 /// `commitments.len() == num_shares` and `2 <= threshold <= num_shares`.
@@ -1949,13 +1942,6 @@ pub struct WithdrawModeConfig {
     /// BTC network. Carried for delivery; not part of the state_hash digest.
     #[prost(enumeration = "Network", optional, tag = "8")]
     pub network: ::core::option::Option<i32>,
-    /// Fingerprints of the KPs authorized to provision this key. Carried for
-    /// delivery; surfaced via GuardianInfo for the relay's submitter check. Not
-    /// part of the state_hash digest.
-    #[prost(string, repeated, tag = "9")]
-    pub authorized_kp_fingerprints: ::prost::alloc::vec::Vec<
-        ::prost::alloc::string::String,
-    >,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LimiterState {

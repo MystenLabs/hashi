@@ -18,7 +18,9 @@ use std::sync::Arc;
 use hashi_types::guardian::proto_conversions::pb_to_guardian_encrypted_share;
 use hashi_types::guardian::relay_submission_signed_bytes;
 use hashi_types::guardian::GetGuardianInfoResponse;
+use hashi_types::pgp::normalize_fingerprint;
 use hashi_types::pgp::verify_detached_signature;
+use hashi_types::pgp::Fingerprint;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::proto;
 use hashi_types::proto::guardian_relay_service_server::GuardianRelayService;
@@ -76,22 +78,24 @@ struct BackendStatus {
     num_shares: Option<usize>,
     threshold: Option<usize>,
     provisioned: bool,
-    /// Fingerprints of the KPs the enclave authorized to submit shares. The relay
-    /// only accepts a submission signed by a cert in this roster.
-    authorized_kp_fingerprints: Vec<String>,
 }
 
 #[derive(Clone)]
 pub struct Relay {
     client: GuardianServiceClient<Channel>,
     accumulator: Arc<Mutex<Accumulator>>,
+    /// Operator-configured fingerprints of the KPs allowed to submit shares
+    /// (the ceremony roster, via deploy config). The relay only accepts a
+    /// submission signed by a cert in this roster; empty rejects everything.
+    authorized_kp_fingerprints: Vec<Fingerprint>,
 }
 
 impl Relay {
-    pub fn new(channel: Channel) -> Self {
+    pub fn new(channel: Channel, authorized_kp_fingerprints: Vec<Fingerprint>) -> Self {
         Self {
             client: GuardianServiceClient::new(channel),
             accumulator: Arc::new(Mutex::new(Accumulator::default())),
+            authorized_kp_fingerprints,
         }
     }
 
@@ -119,23 +123,23 @@ impl Relay {
             num_shares,
             threshold,
             provisioned,
-            authorized_kp_fingerprints: verified.info.authorized_kp_fingerprints,
         })
     }
 }
 
 /// Authenticate a relay submission: the signer must present a cert whose
-/// fingerprint is in the guardian-attested roster and a detached signature over
-/// the exact (session, share) bytes. This is a DoS guard — only a rostered KP
-/// can enqueue a share, so a stranger can't poison the batch; the enclave still
-/// verifies every share against the commitments regardless. Ordered cheap-first:
-/// a signature (expensive) is only checked once the fingerprint is in the roster.
+/// fingerprint is in the relay's configured KP roster and a detached signature
+/// over the exact (session, share) bytes. This is a DoS guard — only a rostered
+/// KP can enqueue a share, so a stranger can't poison the batch; the enclave
+/// still verifies every share against the commitments regardless. Ordered
+/// cheap-first: a signature (expensive) is only checked once the fingerprint is
+/// in the roster. Fingerprints compare normalized (spacing/case-insensitive).
 fn verify_kp_submission(
     expected_session_id: &str,
     signer_cert: &str,
     kp_signature: &str,
     share: &proto::GuardianEncryptedShare,
-    authorized_kp_fingerprints: &[String],
+    authorized_kp_fingerprints: &[Fingerprint],
 ) -> Result<(), Status> {
     if signer_cert.is_empty() || kp_signature.is_empty() {
         return Err(Status::unauthenticated(
@@ -144,10 +148,13 @@ fn verify_kp_submission(
     }
     let cert = PgpPublicCert::new(signer_cert.to_string())
         .map_err(|e| Status::unauthenticated(format!("invalid signer_cert: {e}")))?;
-    let fingerprint = cert.fingerprint();
-    if !authorized_kp_fingerprints.iter().any(|f| f == &fingerprint) {
+    let fingerprint = normalize_fingerprint(&cert.fingerprint());
+    if !authorized_kp_fingerprints
+        .iter()
+        .any(|f| normalize_fingerprint(f) == fingerprint)
+    {
         return Err(Status::permission_denied(format!(
-            "signer {fingerprint} is not in the guardian's authorized KP roster"
+            "signer {fingerprint} is not in the relay's authorized KP roster"
         )));
     }
     let domain_share = pb_to_guardian_encrypted_share(share.clone())
@@ -195,6 +202,15 @@ impl GuardianRelayService for Relay {
         &self,
         request: Request<proto::SingleProvisionerInitRequest>,
     ) -> Result<Response<proto::SingleProvisionerInitResponse>, Status> {
+        // Fail closed with a clear signal when no roster is configured (e.g. the
+        // proxy was deployed before the ceremony published the KP set).
+        if self.authorized_kp_fingerprints.is_empty() {
+            return Err(Status::failed_precondition(
+                "relay has no authorized KP roster configured; \
+                 set AUTHORIZED_KP_FINGERPRINTS on the proxy",
+            ));
+        }
+
         let req = request.into_inner();
         let share = req
             .encrypted_share
@@ -238,7 +254,7 @@ impl GuardianRelayService for Relay {
             &req.signer_cert,
             &req.kp_signature,
             &share,
-            &status.authorized_kp_fingerprints,
+            &self.authorized_kp_fingerprints,
         )?;
 
         acc.sync_session(&status.session_id);
@@ -345,6 +361,14 @@ mod tests {
 
         // A rostered signer with a valid signature over the exact submission passes.
         verify_kp_submission(session, &cert_armored, &good_sig, &pb_share, &roster).unwrap();
+
+        // Roster entries compare normalized: the bare lowercase hex form of the
+        // same fingerprint (as deploy config might carry it) also matches.
+        let bare = roster[0]
+            .split_whitespace()
+            .collect::<String>()
+            .to_lowercase();
+        verify_kp_submission(session, &cert_armored, &good_sig, &pb_share, &[bare]).unwrap();
 
         // A signer not in the roster is rejected before any signature work.
         assert!(

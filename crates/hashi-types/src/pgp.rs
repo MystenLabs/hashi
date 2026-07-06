@@ -49,6 +49,16 @@ pub struct PgpPublicCert {
 /// identity; in the guardian/roster context it's aliased as `KPFingerprint`.
 pub type Fingerprint = String;
 
+/// Normalize a fingerprint for comparison: strip whitespace and uppercase.
+/// Accepts the spaced form `gpg --fingerprint` prints (and [`PgpPublicCert::
+/// fingerprint`] returns) as well as bare hex from config.
+pub fn normalize_fingerprint(s: &str) -> Fingerprint {
+    s.chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_uppercase()
+}
+
 impl PgpPublicCert {
     pub fn new(armored: String) -> Result<Self> {
         let cert =
@@ -724,6 +734,17 @@ mod tests {
         let homedir = tempfile::Builder::new().tempdir().unwrap();
         test_utils::prepare_gnupg_home(homedir.path());
         homedir
+    }
+
+    #[test]
+    fn normalize_fingerprint_strips_spacing_and_case() {
+        let spaced = "AAAA BBBB CCCC DDDD EEEE  1111 2222 3333 4444 5555";
+        let bare = "aaaabbbbccccddddeeee11112222333344445555";
+        assert_eq!(normalize_fingerprint(spaced), normalize_fingerprint(bare));
+        assert_eq!(
+            normalize_fingerprint(spaced),
+            "AAAABBBBCCCCDDDDEEEE11112222333344445555"
+        );
     }
 
     #[test]

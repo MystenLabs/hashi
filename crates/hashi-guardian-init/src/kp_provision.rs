@@ -547,7 +547,7 @@ async fn submit_provisioner_init_to_relay(
 
     // Authenticate this submission with a detached signature over the exact
     // (session, share) bytes, produced by this KP's offline key (yubikey). The
-    // relay checks it against the guardian-attested roster before buffering the
+    // relay checks it against its configured KP roster before buffering the
     // share, so a non-KP can't enqueue one and fail the batch.
     let signed_bytes = relay_submission_signed_bytes(expected_session_id, &encrypted_share);
     let kp_signature = sign_detached_via_gpg(&signed_bytes, signer_fingerprint, None)
