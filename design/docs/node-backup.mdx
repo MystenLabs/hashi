@@ -38,9 +38,10 @@ on any machine, including a cloud server without a USB port.
 
 2. Install tools on the USB-capable machine:
    - [oct](https://codeberg.org/openpgp-card/openpgp-card-tools), OpenPGP card tools.
+   - [gpg](https://gnupg.org/), for testing decryption.
 
-3. Insert a YubiKey and confirm it is visible. Make sure no other YubiKeys or
-   smartcards are plugged into the machine.
+3. Insert a YubiKey and confirm it is visible. **Make sure no other YubiKeys or
+   smartcards are plugged into the machine.**
 
 ```sh
 $ oct list
@@ -53,11 +54,13 @@ Available OpenPGP cards:
 0006:26883270
 ```
 
-4. Save the card id:
+4. Save the card id and a filename for the public key:
 
 ```sh
 CARD=$(oct list --idents-only | head -n1)
+CARD_FILE="yubikey-public-$(echo "$CARD" | tr ':' '-').asc"
 echo "$CARD"
+echo "$CARD_FILE"
 ```
 
 5. Change default PINs
@@ -84,19 +87,71 @@ oct pin --card "$CARD" set-user
 oct pin --card "$CARD" set-admin
 ```
 
-6. Generate the PGP key on the YubiKey. You will be prompted to enter both the
-   new user and new admin PINs. The public key will be saved to the output file.
+6. Confirm the YubiKey does not already contain keys:
+
+```sh
+oct status --card "$CARD"
+```
+
+Confirm the Signature, Decryption, and Authentication key slots do not show
+fingerprints. **If the card already has keys, stop here!**
+
+7. Generate the PGP key on the YubiKey.
+
+**This overwrites any existing keys on the YubiKey. Existing keys cannot be
+recovered after they are overwritten. Any files encrypted to the old public
+key will become permanently undecryptable!**
+
+You will be prompted to enter both the new user and new admin PINs. Be sure to
+update the name and email to real values. The public key will be saved to the
+output file.
 
 ```sh
 oct admin --card "$CARD" generate \
   --userid "Your Name <you@example.com>" \
-  --output "yubikey-public-$CARD.pgp" \
+  --output "$CARD_FILE" \
   curve25519
 ```
 
-7. Repeat the above steps for any additional YubiKeys.
+8. Repeat the above steps for any additional YubiKeys.
 
-8. Store the YubiKeys in a secure location, such as a company safe. Also save
+9. Test encrypting a file to each YubiKey's public key. Import the public key,
+   then encrypt a test file:
+
+```sh
+gpg --import "$CARD_FILE"
+```
+
+```sh
+echo "test message" > test.txt
+gpg --encrypt --armor \
+  --trust-model always \
+  --recipient "you@example.com" \
+  --output test.txt.asc \
+  test.txt
+```
+
+10. Test decrypting the file with the YubiKey. With the YubiKey plugged in,
+   link the card to gpg, then decrypt. You will be prompted for the User PIN,
+   and to tap the YubiKey.
+
+```sh
+gpg --card-status
+```
+
+```sh
+gpg --decrypt test.txt.asc
+```
+
+You may see a warning like `cipher algorithm AES not found in recipient
+preferences`. You can ignore this. It happens because the public key exported by
+`oct` does not include the cipher preferences that `gpg` expects, so `gpg` warns
+even though encryption and decryption still work.
+
+Confirm the output matches the original file contents, then delete the test
+files.
+
+11. Store the YubiKeys in a secure location, such as a company safe. Also save
    the public key files in a secure location.
 
 ### Option 2: Create a local private key file
@@ -109,13 +164,14 @@ Store the file carefully.
 1. Install tools:
    - [sequoia-sq](https://gitlab.com/sequoia-pgp/sequoia-sq), Sequoia PGP.
 
-2. Generate a new key pair:
+2. Generate a new key pair. Be sure to update the name and email to real
+values.
 
 ```sh
 sq key generate \
   --own-key \
   --name "Your Name" \
-  --email you@example.com \
+  --email "you@example.com" \
   --expiration never \
   --without-password \
   --output private-key.asc \
@@ -131,7 +187,27 @@ sq key delete \
   --output public-key.asc
 ```
 
-4. Save the revocation, public key, and private key files in a secure location.
+4. Test encrypting a file to the public key:
+
+```sh
+echo "test message" > test.txt
+sq encrypt \
+  --for-file public-key.asc \
+  --without-signature \
+  --output test.txt.asc \
+  test.txt
+```
+
+5. Test decrypting the file with the private key:
+
+```sh
+sq decrypt --recipient-file private-key.asc test.txt.asc
+```
+
+Confirm the output matches the original file contents, then delete the test
+files.
+
+6. Save the revocation, public key, and private key files in a secure location.
 
 ## Configuring hashi
 
