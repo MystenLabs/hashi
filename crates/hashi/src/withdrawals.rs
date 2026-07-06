@@ -136,6 +136,11 @@ pub struct WithdrawalRequestApproval {
     pub request_id: Address,
 }
 
+impl hashi_types::intent::IntentMessage for WithdrawalRequestApproval {
+    const INTENT: hashi_types::intent::Intent =
+        hashi_types::intent::Intent::WithdrawalRequestApproval;
+}
+
 /// The data that validators BLS-sign over to commit to a withdrawal transaction.
 /// This is the step 2 certificate with UTXO selection and tx construction.
 #[derive(Clone, Debug, serde_derive::Serialize)]
@@ -144,6 +149,10 @@ pub struct WithdrawalTxCommitment {
     pub selected_utxos: Vec<UtxoId>,
     pub outputs: Vec<OutputUtxo>,
     pub txid: BitcoinTxid,
+}
+
+impl hashi_types::intent::IntentMessage for WithdrawalTxCommitment {
+    const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::WithdrawalCommitment;
 }
 
 /// The data that validators BLS-sign over to store witness signatures on-chain.
@@ -158,6 +167,10 @@ pub struct WithdrawalTxSigning {
     pub guardian_signatures: Vec<Vec<u8>>,
 }
 
+impl hashi_types::intent::IntentMessage for WithdrawalTxSigning {
+    const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::WithdrawalSigned;
+}
+
 /// The data validators BLS-sign over for one incremental chunk of per-input MPC
 /// signatures (the step-3 chunk certificate). BCS must match Move
 /// `hashi::withdraw::MpcInputSignaturesMessage` exactly: `(withdrawal_id,
@@ -169,9 +182,17 @@ pub struct MpcInputSignaturesMessage {
     pub signatures: Vec<Vec<u8>>,
 }
 
+impl hashi_types::intent::IntentMessage for MpcInputSignaturesMessage {
+    const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::MpcInputSignatures;
+}
+
 #[derive(Clone, Debug, serde_derive::Serialize)]
 pub struct WithdrawalConfirmation {
     pub withdrawal_id: Address,
+}
+
+impl hashi_types::intent::IntentMessage for WithdrawalConfirmation {
+    const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::WithdrawalConfirmation;
 }
 
 impl Hashi {
@@ -756,7 +777,7 @@ impl Hashi {
     // --- Generic BLS signing helper ---
 
     /// Proto-format BLS signing helper. Signs at the current on-chain epoch.
-    fn sign_message_proto<T: serde::Serialize>(
+    fn sign_message_proto<T: hashi_types::intent::IntentMessage>(
         &self,
         message: &T,
     ) -> anyhow::Result<hashi_types::proto::MemberSignature> {
@@ -764,7 +785,7 @@ impl Hashi {
     }
 
     /// Sign at a specific historical `epoch` using that epoch's DB key.
-    pub(crate) fn sign_message_proto_at_epoch<T: serde::Serialize>(
+    pub(crate) fn sign_message_proto_at_epoch<T: hashi_types::intent::IntentMessage>(
         &self,
         message: &T,
         epoch: u64,

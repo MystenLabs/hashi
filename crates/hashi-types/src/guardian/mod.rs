@@ -211,6 +211,10 @@ pub struct StandardWithdrawalRequest {
     seq: u64,
 }
 
+impl crate::intent::IntentMessage for StandardWithdrawalRequest {
+    const INTENT: crate::intent::Intent = crate::intent::Intent::GuardianWithdrawalRequest;
+}
+
 /// `EnclaveSigned<T>`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StandardWithdrawalResponse {
@@ -223,6 +227,10 @@ pub struct StandardWithdrawalResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CommitteeTransitionRequest {
     pub new_committee: crate::move_types::Committee,
+}
+
+impl crate::intent::IntentMessage for CommitteeTransitionRequest {
+    const INTENT: crate::intent::Intent = crate::intent::Intent::CommitteeTransition;
 }
 
 // ---------------------------------------

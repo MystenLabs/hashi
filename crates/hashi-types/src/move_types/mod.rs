@@ -681,6 +681,10 @@ pub struct ReconfigCompletionMessage {
     pub mpc_public_key: Vec<u8>,
 }
 
+impl crate::intent::IntentMessage for ReconfigCompletionMessage {
+    const INTENT: crate::intent::Intent = crate::intent::Intent::ReconfigCompletion;
+}
+
 /// Rust version of the Move hashi::proposal::Proposal type.
 #[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct Proposal<T> {

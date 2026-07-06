@@ -337,6 +337,10 @@ pub struct DealerMessagesHash {
     pub messages_hash: MessageHash,
 }
 
+impl hashi_types::intent::IntentMessage for DealerMessagesHash {
+    const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::DealerMessagesHash;
+}
+
 impl DealerMessagesHash {
     pub fn from_onchain_cert(
         cert: &DealerSubmissionV1,

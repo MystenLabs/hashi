@@ -706,6 +706,10 @@ pub struct DepositConfirmationMessage {
     pub utxo: Utxo,
 }
 
+impl hashi_types::intent::IntentMessage for DepositConfirmationMessage {
+    const INTENT: hashi_types::intent::Intent = hashi_types::intent::Intent::DepositConfirmation;
+}
+
 #[derive(Debug)]
 pub struct UtxoPool {
     pub(super) utxo_records_id: Address,

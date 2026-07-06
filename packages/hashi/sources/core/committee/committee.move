@@ -160,6 +160,7 @@ public(package) fun verify_proposal(
 /// If there is a certificate, the function returns the total stake. Otherwise, it aborts.
 public(package) fun verify_certificate<T>(
     self: &Committee,
+    intent: u16,
     message: T,
     signature: CommitteeSignature,
     threshold: u64, //XXX threshold could be lookedup by type in the config
@@ -212,8 +213,11 @@ public(package) fun verify_certificate<T>(
     // Verify the signature
     let pub_key_bytes = group_ops::bytes(&aggregate_key);
 
-    // Signing message is always prefixed with the epoch
-    let mut message_bytes = bcs::to_bytes(&signature.epoch);
+    // Signing preimage: intent (u16 LE) || bcs(epoch) || bcs(message). The
+    // intent leads so the signed bytes are domain-tagged before anything else,
+    // separating message types signed under the same keys (see hashi::intent).
+    let mut message_bytes = bcs::to_bytes(&intent);
+    message_bytes.append(bcs::to_bytes(&signature.epoch));
     message_bytes.append(bcs::to_bytes(&message));
 
     assert!(

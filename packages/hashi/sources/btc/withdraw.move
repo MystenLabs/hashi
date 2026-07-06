@@ -165,7 +165,11 @@ entry fun approve_request(
     hashi.versioning().assert_version_enabled();
     hashi.assert_unpaused();
     hashi.assert_not_reconfiguring();
-    hashi.verify(RequestApprovalMessage { request_id }, cert);
+    hashi.verify(
+        hashi::intent::withdrawal_request_approval(),
+        RequestApprovalMessage { request_id },
+        cert,
+    );
 
     hashi.bitcoin_mut().withdrawal_queue_mut().approve_withdrawal(request_id, cert, clock);
     hashi::withdrawal_queue::emit_withdrawal_approved(request_id);
@@ -199,7 +203,7 @@ entry fun commit_withdrawal_tx(
         txid,
     };
 
-    hashi.verify(approval, cert);
+    hashi.verify(hashi::intent::withdrawal_commitment(), approval, cert);
 
     let WithdrawalCommitmentMessage { outputs, txid, .. } = approval;
 
@@ -296,7 +300,7 @@ entry fun commit_input_signatures(
     hashi.assert_not_reconfiguring();
 
     let approval = MpcInputSignaturesMessage { withdrawal_id, indices, signatures };
-    hashi.verify(approval, cert);
+    hashi.verify(hashi::intent::mpc_input_signatures(), approval, cert);
     let MpcInputSignaturesMessage { indices, signatures, .. } = approval;
 
     hashi
@@ -334,7 +338,7 @@ entry fun finalize_withdrawal(
         signatures,
         guardian_signatures,
     };
-    hashi.verify(approval, cert);
+    hashi.verify(hashi::intent::withdrawal_signed(), approval, cert);
     let WithdrawalSignedMessage { request_ids, guardian_signatures, .. } = approval;
 
     let queue = hashi.bitcoin_mut().withdrawal_queue_mut();
@@ -350,7 +354,11 @@ entry fun confirm_withdrawal(
 ) {
     hashi.versioning().assert_version_enabled();
     hashi.assert_unpaused();
-    hashi.verify(WithdrawalConfirmationMessage { withdrawal_id }, cert);
+    hashi.verify(
+        hashi::intent::withdrawal_confirmation(),
+        WithdrawalConfirmationMessage { withdrawal_id },
+        cert,
+    );
 
     // Refuse to confirm a withdrawal that is not fully signed (every input has
     // an MPC signature and the guardian signatures are attached). The

@@ -14,11 +14,10 @@ use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::HashiSigned;
-use serde::Serialize;
 use std::sync::Arc;
 
 /// Verify the committee certificate on `signed_request` meets `threshold`.
-pub fn verify_hashi_cert<T: Serialize>(
+pub fn verify_hashi_cert<T: hashi_types::intent::IntentMessage>(
     committee: Arc<HashiCommittee>,
     threshold: u64,
     signed_request: &HashiSigned<T>,
