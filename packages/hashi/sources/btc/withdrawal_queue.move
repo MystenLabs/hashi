@@ -625,7 +625,7 @@ public(package) fun request_bitcoin_address(self: &WithdrawalRequest): &vector<u
     &self.bitcoin_address
 }
 
-public fun is_approved(self: &WithdrawalStatus): bool {
+public(package) fun is_approved(self: &WithdrawalStatus): bool {
     match (self) {
         WithdrawalStatus::Approved => true,
         _ => false,

@@ -38,7 +38,7 @@ public fun new_deposit_confirmation_message(
     DepositConfirmationMessage { request_id, utxo }
 }
 
-public fun deposit(
+entry fun deposit(
     hashi: &mut Hashi,
     utxo: hashi::utxo::Utxo,
     clock: &sui::clock::Clock,
@@ -202,7 +202,7 @@ entry fun confirm_deposit(
     };
 }
 
-public fun delete_expired_deposit(
+entry fun delete_expired_deposit(
     hashi: &mut Hashi,
     request_id: address,
     clock: &sui::clock::Clock,

@@ -8,7 +8,7 @@ use hashi::hashi::Hashi;
 use std::string::String;
 use sui::event;
 
-public fun register(
+entry fun register(
     self: &mut Hashi,
     sui_system: &sui_system::sui_system::SuiSystemState,
     ctx: &mut TxContext,
@@ -21,7 +21,7 @@ public fun register(
     });
 }
 
-public fun update_next_epoch_public_key(
+entry fun update_next_epoch_public_key(
     self: &mut Hashi,
     validator: address,
     next_epoch_public_key: vector<u8>,
@@ -41,7 +41,7 @@ public fun update_next_epoch_public_key(
     event::emit(ValidatorUpdated { validator });
 }
 
-public fun update_operator_address(
+entry fun update_operator_address(
     self: &mut Hashi,
     validator: address,
     operator: address,
@@ -53,7 +53,7 @@ public fun update_operator_address(
     event::emit(ValidatorUpdated { validator });
 }
 
-public fun update_endpoint_url(
+entry fun update_endpoint_url(
     self: &mut Hashi,
     validator: address,
     endpoint_url: String,
@@ -65,7 +65,7 @@ public fun update_endpoint_url(
     event::emit(ValidatorUpdated { validator });
 }
 
-public fun update_tls_public_key(
+entry fun update_tls_public_key(
     self: &mut Hashi,
     validator: address,
     tls_public_key: vector<u8>,
@@ -77,7 +77,7 @@ public fun update_tls_public_key(
     event::emit(ValidatorUpdated { validator });
 }
 
-public fun update_next_epoch_encryption_public_key(
+entry fun update_next_epoch_encryption_public_key(
     self: &mut Hashi,
     validator: address,
     next_epoch_encryption_public_key: vector<u8>,
