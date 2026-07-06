@@ -325,7 +325,7 @@ async fn handle_events(
                         derivation_path: deposit_requested_event.derivation_path,
                     },
                     approval_cert: None,
-                    approval_timestamp_ms: None,
+                    approved_timestamp_ms: None,
                     confirmed_timestamp_ms: None,
                 };
                 state
@@ -351,8 +351,8 @@ async fn handle_events(
                     .get_mut(&deposit_approved_event.request_id)
                 {
                     request.approval_cert = Some(deposit_approved_event.cert.clone());
-                    request.approval_timestamp_ms =
-                        Some(deposit_approved_event.approval_timestamp_ms);
+                    request.approved_timestamp_ms =
+                        Some(deposit_approved_event.approved_timestamp_ms);
                 }
             }
             HashiEvent::DepositConfirmedEvent(deposit_confirmed_event) => {
@@ -394,6 +394,8 @@ async fn handle_events(
                     bitcoin_address: withdrawal_requested_event.bitcoin_address.clone(),
                     created_timestamp_ms: withdrawal_requested_event.timestamp_ms,
                     status: super::types::WithdrawalStatus::Requested,
+                    approval_cert: None,
+                    approved_timestamp_ms: None,
                     withdrawal_txn_id: None,
                     sui_tx_digest: withdrawal_requested_event.sui_tx_digest,
                     btc: withdrawal_requested_event.btc_amount,

@@ -444,6 +444,12 @@ pub struct WithdrawalRequest {
     pub bitcoin_address: Vec<u8>,
     pub created_timestamp_ms: u64,
     pub status: WithdrawalStatus,
+    /// Committee certificate recorded at approval time. `None` until
+    /// `approve_request` has been called.
+    pub approval_cert: Option<CommitteeSignature>,
+    /// Clock timestamp at the moment of approval. `None` until
+    /// `approve_request` has been called.
+    pub approved_timestamp_ms: Option<u64>,
     pub withdrawal_txn_id: Option<Address>,
     pub sui_tx_digest: Digest,
     /// BTC balance in satoshis.
@@ -600,7 +606,7 @@ pub struct OutputUtxo {
 
 /// Rust version of the Move hashi::deposit_queue::DepositRequest type.
 ///
-/// `approval_cert` and `approval_timestamp_ms` are populated when the
+/// `approval_cert` and `approved_timestamp_ms` are populated when the
 /// committee approves the deposit via `approve_deposit`. They remain
 /// `None` until then. `confirm_deposit` requires both to be set.
 #[derive(Clone, Debug, PartialEq, serde_derive::Deserialize)]
@@ -611,7 +617,7 @@ pub struct DepositRequest {
     pub sui_tx_digest: Digest,
     pub utxo: Utxo,
     pub approval_cert: Option<CommitteeSignature>,
-    pub approval_timestamp_ms: Option<u64>,
+    pub approved_timestamp_ms: Option<u64>,
     pub confirmed_timestamp_ms: Option<u64>,
 }
 
@@ -1226,14 +1232,14 @@ impl From<DepositRequestedEvent> for HashiEvent {
 /// Emitted by `approve_deposit` when the committee certifies a pending
 /// deposit. The corresponding `hBTC` is not yet minted — the deposit
 /// must still wait through the time-delay window and then be confirmed.
-/// `approval_timestamp_ms` is the on-chain clock timestamp recorded on
+/// `approved_timestamp_ms` is the on-chain clock timestamp recorded on
 /// the request, against which `confirm_deposit` enforces the delay.
 #[derive(Debug, serde_derive::Deserialize)]
 pub struct DepositApprovedEvent {
     pub request_id: Address,
     pub utxo: Utxo,
     pub cert: CommitteeSignature,
-    pub approval_timestamp_ms: u64,
+    pub approved_timestamp_ms: u64,
 }
 
 impl MoveType for DepositApprovedEvent {

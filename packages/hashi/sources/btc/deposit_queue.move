@@ -18,7 +18,7 @@ const EDepositAlreadyProcessed: vector<u8> = b"Deposit request has already been 
 
 /// Deposit request object stored in the `requests` bag until confirmed or expired.
 ///
-/// `approval_cert` and `approval_timestamp_ms` are populated by
+/// `approval_cert` and `approved_timestamp_ms` are populated by
 /// `approve_deposit` (the first phase of deposit confirmation) and read
 /// by `confirm_deposit` (the second phase) to re-verify against the
 /// current committee and to enforce the time-delay window.
@@ -33,7 +33,7 @@ public struct DepositRequest has key, store {
     approval_cert: Option<CommitteeSignature>,
     /// Clock timestamp at the moment of approval. `None` until
     /// `approve_deposit` has been called.
-    approval_timestamp_ms: Option<u64>,
+    approved_timestamp_ms: Option<u64>,
     /// Clock timestamp at the moment of confirmation. `None` until
     /// `confirm_deposit` has been called.
     confirmed_timestamp_ms: Option<u64>,
@@ -65,7 +65,7 @@ public(package) fun create_deposit(utxo: Utxo, clock: &Clock, ctx: &mut TxContex
         sui_tx_digest: *ctx.digest(),
         utxo,
         approval_cert: option::none(),
-        approval_timestamp_ms: option::none(),
+        approved_timestamp_ms: option::none(),
         confirmed_timestamp_ms: option::none(),
     }
 }
@@ -105,8 +105,8 @@ public(package) fun approval_cert(request: &DepositRequest): Option<CommitteeSig
 /// The clock timestamp at which the request was approved, if any.
 /// Returns `None` for requests that have not yet been through
 /// `approve_deposit`.
-public(package) fun approval_timestamp_ms(request: &DepositRequest): Option<u64> {
-    request.approval_timestamp_ms
+public(package) fun approved_timestamp_ms(request: &DepositRequest): Option<u64> {
+    request.approved_timestamp_ms
 }
 
 /// Record `cert` and the current clock timestamp on `request` to mark it
@@ -114,7 +114,7 @@ public(package) fun approval_timestamp_ms(request: &DepositRequest): Option<u64>
 /// current committee before calling this.
 public(package) fun approve(request: &mut DepositRequest, cert: CommitteeSignature, clock: &Clock) {
     request.approval_cert = option::some(cert);
-    request.approval_timestamp_ms = option::some(clock.timestamp_ms());
+    request.approved_timestamp_ms = option::some(clock.timestamp_ms());
 }
 
 /// Record the current clock timestamp on `request` to mark it as
@@ -161,7 +161,7 @@ public(package) fun delete_expired(
         sui_tx_digest: _,
         utxo,
         approval_cert: _,
-        approval_timestamp_ms: _,
+        approved_timestamp_ms: _,
         confirmed_timestamp_ms: _,
     } = request;
     id.delete();

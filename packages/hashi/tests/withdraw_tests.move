@@ -129,12 +129,12 @@ fun test_approve_request_with_certificate() {
     let approval1 = hashi::withdraw::new_request_approval_message(id1);
     let message_bytes1 = build_cert_message(epoch, &approval1);
     let cert1 = test_utils::sign_certificate(epoch, &message_bytes1, 3);
-    hashi::withdraw::approve_request(&mut hashi, id1, cert1);
+    hashi::withdraw::approve_request(&mut hashi, id1, cert1, &clock);
 
     let approval2 = hashi::withdraw::new_request_approval_message(id2);
     let message_bytes2 = build_cert_message(epoch, &approval2);
     let cert2 = test_utils::sign_certificate(epoch, &message_bytes2, 3);
-    hashi::withdraw::approve_request(&mut hashi, id2, cert2);
+    hashi::withdraw::approve_request(&mut hashi, id2, cert2, &clock);
 
     // Verify both requests are now approved by committing them
     let test_utxo = utxo::utxo(utxo::utxo_id(@0xBEEF, 0), 1_000_000, option::none());
@@ -173,7 +173,7 @@ fun test_approve_request_bad_signature() {
     let bad_cert = test_utils::sign_certificate(epoch, &wrong_bytes, 3);
 
     // Should fail signature verification
-    hashi::withdraw::approve_request(&mut hashi, id1, bad_cert);
+    hashi::withdraw::approve_request(&mut hashi, id1, bad_cert, &clock);
 
     clock.destroy_for_testing();
     std::unit_test::destroy(hashi);
@@ -195,7 +195,7 @@ fun test_approve_then_cancel() {
     let approval = hashi::withdraw::new_request_approval_message(id1);
     let message_bytes = build_cert_message(epoch, &approval);
     let cert = test_utils::sign_certificate(epoch, &message_bytes, 3);
-    hashi::withdraw::approve_request(&mut hashi, id1, cert);
+    hashi::withdraw::approve_request(&mut hashi, id1, cert, &clock);
 
     // Cancelling an approved request should succeed — BTC hasn't been burned yet
     let one_hour_ms = 1000 * 60 * 60;
@@ -225,7 +225,7 @@ fun test_cancel_processing_request() {
     let approval = hashi::withdraw::new_request_approval_message(id1);
     let message_bytes = build_cert_message(epoch, &approval);
     let cert = test_utils::sign_certificate(epoch, &message_bytes, 3);
-    hashi::withdraw::approve_request(&mut hashi, id1, cert);
+    hashi::withdraw::approve_request(&mut hashi, id1, cert, &clock);
 
     // Commit the request into a WithdrawalTransaction — this moves it to Processing.
     let test_utxo = utxo::utxo(utxo::utxo_id(@0xBEEF, 0), 1_000_000, option::none());

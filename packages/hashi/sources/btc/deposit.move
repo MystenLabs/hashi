@@ -159,7 +159,7 @@ entry fun confirm_deposit(
     let mut request = hashi.bitcoin_mut().deposit_queue_mut().remove_request(request_id);
     let utxo = request.utxo();
     let cert = request.approval_cert().destroy_some();
-    let approval_timestamp_ms = request.approval_timestamp_ms().destroy_some();
+    let approved_timestamp_ms = request.approved_timestamp_ms().destroy_some();
 
     // Verify the certificate over the request ID + UTXO against the current committee.
     // If a deposit is approved by an older committee, it will need to be
@@ -168,7 +168,7 @@ entry fun confirm_deposit(
 
     // Check that the deposit was approved long enough ago.
     assert!(
-        approval_timestamp_ms + hashi.config().deposit_time_delay_ms() <= clock.timestamp_ms(),
+        approved_timestamp_ms + hashi.config().deposit_time_delay_ms() <= clock.timestamp_ms(),
         EDepositTimeDelayNotPassed,
     );
 
