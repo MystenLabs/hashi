@@ -132,6 +132,13 @@ where
         self.inner.provisioner_init(request).await
     }
 
+    async fn operator_activate(
+        &self,
+        request: Request<proto::OperatorActivateRequest>,
+    ) -> Result<Response<proto::OperatorActivateResponse>, Status> {
+        self.inner.operator_activate(request).await
+    }
+
     async fn standard_withdrawal(
         &self,
         request: Request<proto::SignedStandardWithdrawalRequest>,
@@ -245,6 +252,12 @@ mod tests {
             &self,
             _: Request<proto::ProvisionerInitRequest>,
         ) -> Result<Response<proto::ProvisionerInitResponse>, Status> {
+            unimplemented!("not exercised by tests")
+        }
+        async fn operator_activate(
+            &self,
+            _: Request<proto::OperatorActivateRequest>,
+        ) -> Result<Response<proto::OperatorActivateResponse>, Status> {
             unimplemented!("not exercised by tests")
         }
         async fn standard_withdrawal(

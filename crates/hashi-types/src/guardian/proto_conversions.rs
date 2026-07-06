@@ -5,6 +5,7 @@
 //    Protobuf RPC conversions
 // ---------------------------------
 
+use super::BuildPcrs;
 use super::Ciphertext;
 use super::CommitteeTransitionRequest;
 use super::GetGuardianInfoResponse;
@@ -19,12 +20,15 @@ use super::GuardianSigned;
 use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
+use super::InitConfig;
 use super::KPEncryptedShare;
 use super::KPEncryptedShares;
 use super::LimiterConfig;
 use super::LimiterState;
 use super::NitroAttestation;
+use super::OperatorActivateRequest;
 use super::OperatorInitRequest;
+use super::PcrAllowlist;
 use super::ProvisionerInitRequest;
 use super::RotateKpsRequest;
 use super::RotateKpsResponse;
@@ -39,7 +43,6 @@ use super::SignedStandardWithdrawalRequestWire;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalRequestWire;
 use super::StandardWithdrawalResponse;
-use super::WithdrawModeConfig;
 use crate::bitcoin::BitcoinAddress;
 use crate::bitcoin::BitcoinPubkey;
 use crate::bitcoin::BitcoinSignature;
@@ -152,11 +155,27 @@ impl TryFrom<pb::OperatorInitRequest> for OperatorInitRequest {
 
     fn try_from(req: pb::OperatorInitRequest) -> Result<Self, Self::Error> {
         let s3_config = pb_to_s3_config(req.s3_config.ok_or_else(|| missing("s3_config"))?)?;
-        // `state` present ⇔ withdraw mode; absent ⇔ ceremony (S3 only).
-        match req.state.map(WithdrawModeConfig::try_from).transpose()? {
-            Some(state) => Ok(OperatorInitRequest::new_withdraw_mode(s3_config, state)),
+        // `init_config` present ⇔ withdraw mode; absent ⇔ ceremony (S3 only).
+        match req.init_config.map(InitConfig::try_from).transpose()? {
+            Some(init_config) => Ok(OperatorInitRequest::new_withdraw_mode(
+                s3_config,
+                init_config,
+            )),
             None => Ok(OperatorInitRequest::new_ceremony_mode(s3_config)),
         }
+    }
+}
+
+impl TryFrom<pb::OperatorActivateRequest> for OperatorActivateRequest {
+    type Error = GuardianError;
+
+    fn try_from(req: pb::OperatorActivateRequest) -> Result<Self, Self::Error> {
+        let expected_state_hash = req
+            .expected_state_hash
+            .ok_or_else(|| missing("expected_state_hash"))?;
+        let expected_state_hash = <[u8; 32]>::try_from(expected_state_hash.as_ref())
+            .map_err(|_| InvalidInputs("expected_state_hash must be 32 bytes".into()))?;
+        Ok(OperatorActivateRequest::new(expected_state_hash))
     }
 }
 
@@ -259,25 +278,46 @@ impl TryFrom<pb::SignedRotateKpsResponse> for GuardianSigned<RotateKpsResponse> 
     }
 }
 
-impl TryFrom<pb::WithdrawModeConfig> for WithdrawModeConfig {
+impl TryFrom<pb::BuildPcrs> for BuildPcrs {
     type Error = GuardianError;
 
-    fn try_from(state_pb: pb::WithdrawModeConfig) -> Result<Self, Self::Error> {
-        let committee_pb = state_pb.committee.ok_or_else(|| missing("committee"))?;
-        let committee = pb_to_hashi_committee(committee_pb)?;
+    fn try_from(build_pb: pb::BuildPcrs) -> Result<Self, Self::Error> {
+        let git_revision = build_pb
+            .git_revision
+            .ok_or_else(|| missing("git_revision"))?;
+        let pcr0 = build_pb.pcr0.ok_or_else(|| missing("pcr0"))?.to_vec();
+        Ok(BuildPcrs::new(&git_revision, pcr0))
+    }
+}
 
-        let limiter_config_pb = state_pb
+impl TryFrom<pb::PcrAllowlist> for PcrAllowlist {
+    type Error = GuardianError;
+
+    fn try_from(allowlist_pb: pb::PcrAllowlist) -> Result<Self, Self::Error> {
+        let current_build = BuildPcrs::try_from(
+            allowlist_pb
+                .current_build
+                .ok_or_else(|| missing("current_build"))?,
+        )?;
+        let prev_builds = allowlist_pb
+            .prev_builds
+            .into_iter()
+            .map(BuildPcrs::try_from)
+            .collect::<GuardianResult<Vec<_>>>()?;
+        PcrAllowlist::new(current_build, prev_builds)
+    }
+}
+
+impl TryFrom<pb::InitConfig> for InitConfig {
+    type Error = GuardianError;
+
+    fn try_from(config_pb: pb::InitConfig) -> Result<Self, Self::Error> {
+        let limiter_config_pb = config_pb
             .limiter_config
             .ok_or_else(|| missing("limiter_config"))?;
         let limiter_config = pb_to_limiter_config(limiter_config_pb)?;
 
-        let limiter_state = pb_to_limiter_state(
-            state_pb
-                .limiter_state
-                .ok_or_else(|| missing("limiter_state"))?,
-        )?;
-
-        let master_pk_bytes = state_pb
+        let master_pk_bytes = config_pb
             .hashi_btc_master_pubkey
             .ok_or_else(|| missing("hashi_btc_master_pubkey"))?;
 
@@ -290,20 +330,18 @@ impl TryFrom<pb::WithdrawModeConfig> for WithdrawModeConfig {
         let hashi_btc_master_pubkey = HashiMasterG::from_byte_array(&master_pk_bytes_arr)
             .map_err(|e| InvalidInputs(format!("invalid hashi_btc_master_pubkey: {e:?}")))?;
 
-        let secret_sharing_instance = pb_to_secret_sharing_instance(
-            state_pb
-                .secret_sharing_instance
-                .ok_or_else(|| missing("secret_sharing_instance"))?,
+        let pcr_allowlist = PcrAllowlist::try_from(
+            config_pb
+                .pcr_allowlist
+                .ok_or_else(|| missing("pcr_allowlist"))?,
         )?;
 
-        let network = pb_to_network(state_pb.network.ok_or_else(|| missing("network"))?)?;
+        let network = pb_to_network(config_pb.network.ok_or_else(|| missing("network"))?)?;
 
-        WithdrawModeConfig::new(
-            committee,
+        InitConfig::new(
             limiter_config,
-            limiter_state,
             hashi_btc_master_pubkey,
-            secret_sharing_instance,
+            pcr_allowlist,
             network,
         )
     }
@@ -455,11 +493,17 @@ pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequ
 pub fn operator_init_request_to_pb(
     r: OperatorInitRequest,
 ) -> GuardianResult<pb::OperatorInitRequest> {
-    let (s3_config, state) = r.into_parts();
+    let (s3_config, init_config) = r.into_parts();
     Ok(pb::OperatorInitRequest {
         s3_config: Some(s3_config_to_pb(s3_config)),
-        state: state.map(withdraw_mode_config_to_pb).transpose()?,
+        init_config: init_config.map(init_config_to_pb).transpose()?,
     })
+}
+
+pub fn operator_activate_request_to_pb(r: OperatorActivateRequest) -> pb::OperatorActivateRequest {
+    pb::OperatorActivateRequest {
+        expected_state_hash: Some(r.expected_state_hash().to_vec().into()),
+    }
 }
 
 pub fn provisioner_init_request_to_pb(
@@ -475,18 +519,31 @@ pub fn provisioner_init_request_to_pb(
 }
 
 // Throws an error if network is invalid.
-pub fn withdraw_mode_config_to_pb(s: WithdrawModeConfig) -> GuardianResult<pb::WithdrawModeConfig> {
-    let (state, instance, network) = s.into_parts();
-    let (committee, limiter_config, limiter_state, hashi_btc_master_pubkey) = state.into_parts();
+pub fn init_config_to_pb(s: InitConfig) -> GuardianResult<pb::InitConfig> {
+    let (limiter_config, hashi_btc_master_pubkey, pcr_allowlist, network) = s.into_parts();
 
-    Ok(pb::WithdrawModeConfig {
-        committee: Some(hashi_committee_to_pb(committee)),
+    Ok(pb::InitConfig {
         limiter_config: Some(limiter_config_to_pb(limiter_config)),
         hashi_btc_master_pubkey: Some(hashi_btc_master_pubkey.to_byte_array().to_vec().into()),
-        limiter_state: Some(limiter_state_to_pb(limiter_state)),
-        secret_sharing_instance: Some(secret_sharing_instance_to_pb(&instance)),
+        pcr_allowlist: Some(pcr_allowlist_to_pb(pcr_allowlist)),
         network: Some(network_to_pb(network)?),
     })
+}
+
+fn build_pcrs_to_pb(build: BuildPcrs) -> pb::BuildPcrs {
+    pb::BuildPcrs {
+        git_revision: Some(build.git_revision().to_string()),
+        pcr0: Some(build.pcr0().to_vec().into()),
+    }
+}
+
+fn pcr_allowlist_to_pb(allowlist: PcrAllowlist) -> pb::PcrAllowlist {
+    let current_build = allowlist.current_build().clone();
+    let prev_builds = allowlist.prev_builds().to_vec();
+    pb::PcrAllowlist {
+        current_build: Some(build_pcrs_to_pb(current_build)),
+        prev_builds: prev_builds.into_iter().map(build_pcrs_to_pb).collect(),
+    }
 }
 
 pub fn rotate_kps_request_to_pb(r: RotateKpsRequest) -> pb::RotateKpsRequest {
@@ -624,11 +681,11 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
         .untrusted_git_revision
         .ok_or_else(|| missing("untrusted_git_revision"))?;
 
-    let state_hash = data
-        .state_hash
+    let config_hash = data
+        .config_hash
         .map(|b| {
             <[u8; 32]>::try_from(b.as_ref())
-                .map_err(|_| InvalidInputs("state_hash must be 32 bytes".into()))
+                .map_err(|_| InvalidInputs("config_hash must be 32 bytes".into()))
         })
         .transpose()?;
 
@@ -655,7 +712,7 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
         secret_sharing_instance,
         bucket_info,
         encryption_pubkey,
-        state_hash,
+        config_hash,
         untrusted_git_revision,
         enclave_btc_pubkey,
         limiter_state,
@@ -673,7 +730,7 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
             .map(secret_sharing_instance_to_pb),
         bucket_info: info.bucket_info.map(s3_bucket_info_to_pb),
         encryption_pubkey: Some(info.encryption_pubkey.into()),
-        state_hash: info.state_hash.map(|h| h.to_vec().into()),
+        config_hash: info.config_hash.map(|h| h.to_vec().into()),
         untrusted_git_revision: Some(info.untrusted_git_revision),
         enclave_btc_pubkey: info
             .enclave_btc_pubkey
@@ -913,19 +970,6 @@ fn pb_to_hashi_committee(c: pb::Committee) -> GuardianResult<HashiCommittee> {
     Ok(committee)
 }
 
-fn hashi_committee_to_pb(c: HashiCommittee) -> pb::Committee {
-    pb::Committee {
-        epoch: Some(c.epoch()),
-        members: c
-            .members()
-            .iter()
-            .map(|m| hashi_committee_member_to_pb(m.clone()))
-            .collect(),
-        total_weight: Some(c.total_weight()),
-        config: Some(bcs::to_bytes(c.config()).expect("Config serializes").into()),
-    }
-}
-
 fn pb_to_hashi_committee_member(m: pb::CommitteeMember) -> GuardianResult<HashiCommitteeMember> {
     let address = m.address.ok_or_else(|| missing("address"))?;
     let validator_address = sui_sdk_types::Address::from_str(&address)
@@ -947,16 +991,6 @@ fn pb_to_hashi_committee_member(m: pb::CommitteeMember) -> GuardianResult<HashiC
 
     HashiCommitteeMember::try_from(x)
         .map_err(|e| InvalidInputs(format!("invalid committee member: {e}")))
-}
-
-fn hashi_committee_member_to_pb(m: HashiCommitteeMember) -> pb::CommitteeMember {
-    let x = crate::move_types::CommitteeMember::from(&m);
-    pb::CommitteeMember {
-        address: Some(x.validator_address.to_string()),
-        public_key: Some(x.public_key.into()),
-        encryption_public_key: Some(x.encryption_public_key.into()),
-        weight: Some(x.weight),
-    }
 }
 
 // -----------------------------------------
@@ -1185,7 +1219,7 @@ mod tests {
             secret_sharing_instance: None,
             bucket_info: None,
             encryption_pubkey: vec![0u8; 32],
-            state_hash: None,
+            config_hash: None,
             untrusted_git_revision: "unknown".to_string(),
             enclave_btc_pubkey: Some(pk),
             limiter_state: None,

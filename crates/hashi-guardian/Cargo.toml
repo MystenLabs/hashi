@@ -13,6 +13,7 @@ tracing.workspace = true
 tonic.workspace = true
 tonic-health.workspace = true
 hashi-types = { path = "../hashi-types" }
+hex.workspace = true
 
 # Crypto dependencies
 rand.workspace = true

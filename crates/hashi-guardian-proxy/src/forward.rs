@@ -92,6 +92,13 @@ impl GuardianService for Forwarding {
         Err(denied("ProvisionerInit (use SingleProvisionerInit)"))
     }
 
+    async fn operator_activate(
+        &self,
+        _request: Request<proto::OperatorActivateRequest>,
+    ) -> Result<Response<proto::OperatorActivateResponse>, Status> {
+        Err(denied("OperatorActivate"))
+    }
+
     async fn rotate_kps(
         &self,
         _request: Request<proto::RotateKpsRequest>,
@@ -160,6 +167,12 @@ mod tests {
             &self,
             _: Request<proto::ProvisionerInitRequest>,
         ) -> Result<Response<proto::ProvisionerInitResponse>, Status> {
+            unimplemented!("a real guardian would serve this; the proxy must never reach it")
+        }
+        async fn operator_activate(
+            &self,
+            _: Request<proto::OperatorActivateRequest>,
+        ) -> Result<Response<proto::OperatorActivateResponse>, Status> {
             unimplemented!("a real guardian would serve this; the proxy must never reach it")
         }
         async fn update_committee(
@@ -252,6 +265,12 @@ mod tests {
             .operator_init(Request::new(proto::OperatorInitRequest::default()))
             .await
             .expect_err("operator_init must be denied");
+        assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+
+        let denied = proxy
+            .operator_activate(Request::new(proto::OperatorActivateRequest::default()))
+            .await
+            .expect_err("operator_activate must be denied");
         assert_eq!(denied.code(), tonic::Code::PermissionDenied);
 
         let denied = proxy

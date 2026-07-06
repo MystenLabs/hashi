@@ -19,11 +19,14 @@ service GuardianService {
   // returns the new encrypted shares.
   rpc RotateKps(RotateKpsRequest) returns (SignedRotateKpsResponse);
 
-  // Operator initialization: provide config and commitments before provisioning.
+  // Operator initialization: provide stable config before provisioning.
   rpc OperatorInit(OperatorInitRequest) returns (OperatorInitResponse);
 
   // Provisioner initialization: submit encrypted share and readiness info.
   rpc ProvisionerInit(ProvisionerInitRequest) returns (ProvisionerInitResponse);
+
+  // Operator activation: derive live serving state and make an armed standby active.
+  rpc OperatorActivate(OperatorActivateRequest) returns (OperatorActivateResponse);
 
   // Standard withdrawal: request withdrawal signature.
   rpc StandardWithdrawal(SignedStandardWithdrawalRequest) returns (SignedStandardWithdrawalResponse);
@@ -82,8 +85,8 @@ message GuardianInfoData {
   // Absent before `provisioner_init` has set the keypair.
   optional bytes enclave_btc_pubkey = 5;
 
-  // Digest of the operator-supplied WithdrawModeState (32 bytes, if set).
-  optional bytes state_hash = 6;
+  // Digest of the operator-supplied InitConfig (32 bytes, if set).
+  optional bytes config_hash = 6;
 
   // Current rate limiter state (if initialized).
   LimiterState limiter_state = 7;
@@ -189,9 +192,9 @@ message OperatorInitRequest {
   // S3 access keys
   S3Config s3_config = 1;
 
-  // Withdraw-mode config (absent for a ceremony enclave); the enclave binds the
-  // inner state's digest as the share-decryption AAD and exposes it via GuardianInfo.
-  WithdrawModeConfig state = 4;
+  // Withdraw-mode stable init config (absent for a ceremony enclave). The enclave
+  // binds this digest as the share-decryption AAD and exposes it via GuardianInfo.
+  InitConfig init_config = 4;
 }
 
 message OperatorInitResponse {}
@@ -216,31 +219,41 @@ enum Network {
 
 // Assembled from the current KPs' encrypted shares (in the relay model, by the
 // relay once it has collected enough). Each share's HPKE AAD binds the enclave's
-// state_hash (the WithdrawModeState digest), so a share only decrypts if the KP
-// agreed on the operator-supplied state.
+// config_hash, so a share only decrypts if the KP agreed on the operator-supplied
+// stable config.
 message ProvisionerInitRequest {
   repeated GuardianEncryptedShare encrypted_shares = 1;
 }
 
-message WithdrawModeConfig {
-  // Current Hashi committee.
-  Committee committee = 1;
+message OperatorActivateRequest {
+  // Digest of the ActivationState the operator expects the enclave to derive.
+  optional bytes expected_state_hash = 1;
+}
 
+message OperatorActivateResponse {}
+
+message BuildPcrs {
+  optional string git_revision = 1;
+  optional bytes pcr0 = 2;
+}
+
+message PcrAllowlist {
+  BuildPcrs current_build = 1;
+  repeated BuildPcrs prev_builds = 2;
+}
+
+message InitConfig {
   // Limiter configuration.
-  LimiterConfig limiter_config = 2;
+  LimiterConfig limiter_config = 1;
 
   // Compressed public key bytes (33 bytes).
-  optional bytes hashi_btc_master_pubkey = 4;
+  optional bytes hashi_btc_master_pubkey = 2;
 
-  // Rate limiter state.
-  LimiterState limiter_state = 6;
+  // Guardian build PCR pins used by operators/KPs for attestation checks.
+  PcrAllowlist pcr_allowlist = 3;
 
-  // Secret-sharing scheme for the current BTC key. Carried for delivery; not
-  // part of the state_hash digest.
-  SecretSharingInstance secret_sharing_instance = 7;
-
-  // BTC network. Carried for delivery; not part of the state_hash digest.
-  optional Network network = 8;
+  // BTC network.
+  optional Network network = 4;
 }
 
 message LimiterState {
