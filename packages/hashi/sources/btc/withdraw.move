@@ -450,3 +450,64 @@ public fun cancel_withdrawal(
 
     btc
 }
+
+// ======== Tests ========
+
+#[test_only]
+const T_VOTER1: address = @0x1;
+#[test_only]
+const T_VOTER2: address = @0x2;
+#[test_only]
+const T_VOTER3: address = @0x3;
+
+#[test_only]
+fun cert_message<T: copy + drop + store>(epoch: u64, message: &T): vector<u8> {
+    let mut bytes = sui::bcs::to_bytes(&epoch);
+    bytes.append(sui::bcs::to_bytes(message));
+    bytes
+}
+
+// A committed-but-unsigned withdrawal cannot be confirmed, even with a valid
+// committee confirmation certificate over its id.
+#[test]
+#[expected_failure(abort_code = EWithdrawalNotFullySigned)]
+fun test_confirm_withdrawal_rejects_unsigned() {
+    use hashi::{test_utils, withdrawal_queue};
+
+    let ctx = &mut test_utils::new_tx_context(T_VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(
+        vector[T_VOTER1, T_VOTER2, T_VOTER3],
+        ctx,
+    );
+    let clock = sui::clock::create_for_testing(ctx);
+
+    // An unsigned withdrawal transaction with one input: its single MPC
+    // signature is never recorded and no guardian signatures are attached, so
+    // it is not fully signed.
+    let input = hashi::utxo::utxo(hashi::utxo::utxo_id(@0xCAFE, 0), 1000, option::none());
+    let txn = withdrawal_queue::new_withdrawal_txn_for_testing(
+        vector[],
+        vector[input],
+        vector[],
+        vector[],
+        @0xBEEF,
+        &clock,
+        ctx,
+    );
+    let withdrawal_id = txn.withdrawal_txn_id();
+    hashi.bitcoin_mut().withdrawal_queue_mut().insert_withdrawal_txn(txn);
+
+    // A genuinely valid committee certificate over the confirmation message —
+    // the gate must reject on signing state, not on the cert.
+    let cert = test_utils::sign_certificate(
+        0,
+        &cert_message(0, &WithdrawalConfirmationMessage { withdrawal_id }),
+        3,
+    );
+
+    confirm_withdrawal(&mut hashi, withdrawal_id, cert, &clock);
+
+    // Unreachable — expected to abort above.
+    clock.destroy_for_testing();
+    std::unit_test::destroy(hashi);
+}
