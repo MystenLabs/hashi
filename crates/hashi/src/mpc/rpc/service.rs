@@ -36,9 +36,9 @@ impl MpcService for HttpService {
         let label = match &internal_request.messages {
             types::Messages::Dkg(_) => crate::metrics::MPC_LABEL_DKG,
             types::Messages::Rotation(_) => crate::metrics::MPC_LABEL_KEY_ROTATION,
-            types::Messages::NonceGeneration(_) | types::Messages::NonceGenerationAvid(_) => {
-                crate::metrics::MPC_LABEL_NONCE_GENERATION
-            }
+            types::Messages::NonceGeneration(_)
+            | types::Messages::NonceGenerationAvid(_)
+            | types::Messages::AvidNonceRetrieval(_) => crate::metrics::MPC_LABEL_NONCE_GENERATION,
         };
         let mpc_manager = self.mpc_manager()?;
         let _timer = self
@@ -69,7 +69,7 @@ impl MpcService for HttpService {
         &self,
         request: tonic::Request<RetrieveMessagesRequest>,
     ) -> Result<tonic::Response<RetrieveMessagesResponse>, Status> {
-        authenticate_caller(&request)?;
+        let requester = authenticate_caller(&request)?;
         let external_request = request.into_inner();
         let internal_request = types::RetrieveMessagesRequest::try_from(&external_request)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -81,7 +81,7 @@ impl MpcService for HttpService {
                 mgr.previous_epoch,
                 internal_request.epoch,
             )?;
-            mgr.handle_retrieve_messages_request(&internal_request)
+            mgr.handle_retrieve_messages_request(requester, &internal_request)
                 .map_err(|e| {
                     match &e {
                         MpcError::NotFound(_) => {

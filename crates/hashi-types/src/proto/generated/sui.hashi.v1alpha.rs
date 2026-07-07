@@ -3308,6 +3308,9 @@ pub struct AvidNonceRetrievalMessage {
     /// The voter's echo for the requester.
     #[prost(message, optional, tag = "2")]
     pub echo: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
+    /// The vote over the dispersal, pinned by the certified digest.
+    #[prost(message, optional, tag = "3")]
+    pub avid_vote: ::core::option::Option<::sui_rpc::proto::sui::rpc::v2::Bcs>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RetrieveMessagesResponse {

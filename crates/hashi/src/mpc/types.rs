@@ -68,6 +68,13 @@ pub enum AvidNonceMessageKind {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AvidNonceRetrievalMessage {
+    pub common: Option<batch_avss_avid::AvssCommonMessage>,
+    pub echo: Option<batch_avss_avid::Echo>,
+    pub avid_vote: Option<batch_avss_avid::AvidVote>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AvidRoundState {
     pub common: batch_avss_avid::AvssCommonMessage,
     pub own_ciphertext: Ciphertext,
@@ -214,6 +221,7 @@ pub enum Messages {
     Rotation(RotationMessages),
     NonceGeneration(NonceMessage),
     NonceGenerationAvid(AvidNonceMessage),
+    AvidNonceRetrieval(AvidNonceRetrievalMessage),
 }
 
 impl Messages {
@@ -223,6 +231,7 @@ impl Messages {
             Messages::Rotation(_) => ProtocolTypeIndicator::KeyRotation,
             Messages::NonceGeneration(_) => ProtocolTypeIndicator::NonceGeneration,
             Messages::NonceGenerationAvid(_) => ProtocolTypeIndicator::NonceGeneration,
+            Messages::AvidNonceRetrieval(_) => ProtocolTypeIndicator::NonceGeneration,
         }
     }
 }

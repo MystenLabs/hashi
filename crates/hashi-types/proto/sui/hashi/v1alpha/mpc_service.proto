@@ -120,6 +120,9 @@ message AvidNonceRetrievalMessage {
 
   // The voter's echo for the requester.
   optional sui.rpc.v2.Bcs echo = 2;
+
+  // The vote over the dispersal, pinned by the certified digest.
+  optional sui.rpc.v2.Bcs avid_vote = 3;
 }
 
 message RetrieveMessagesResponse {

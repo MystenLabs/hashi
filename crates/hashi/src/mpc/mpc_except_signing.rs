@@ -16,6 +16,7 @@ use crate::mpc::types::AvidCertificate;
 use crate::mpc::types::AvidDealerFlowData;
 use crate::mpc::types::AvidNonceMessage;
 use crate::mpc::types::AvidNonceMessageKind;
+use crate::mpc::types::AvidNonceRetrievalMessage;
 use crate::mpc::types::AvidRoundState;
 use crate::mpc::types::CertificateV1;
 pub use crate::mpc::types::ComplainRequest;
@@ -111,7 +112,13 @@ type AvidEchoAndVote = (
     Vec<(Address, Messages)>,
 );
 
-type HeldAvidEchoes = (MessageHash, Vec<(Address, Messages)>);
+type HeldAvidEchoes = (batch_avss_avid::AvidVote, Vec<(Address, Messages)>);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CertKind {
+    AvssVote,
+    AvidVote,
+}
 
 pub struct MpcManager {
     // Immutable during the epoch
@@ -323,6 +330,12 @@ impl MpcManager {
         sender: Address,
         request: &SendMessagesRequest,
     ) -> MpcResult<SendMessagesResponse> {
+        if matches!(request.messages, Messages::AvidNonceRetrieval(_)) {
+            return Err(MpcError::InvalidMessage {
+                sender,
+                reason: "retrieval messages are response-only".into(),
+            });
+        }
         let cache_key = match &request.messages {
             Messages::Dkg(_) => MessageResponsesKey::Dkg { sender },
             Messages::Rotation(_) => MessageResponsesKey::Rotation { sender },
@@ -334,6 +347,7 @@ impl MpcManager {
                 batch_index: avid.batch_index,
                 sender,
             },
+            Messages::AvidNonceRetrieval(_) => unreachable!("rejected above"),
         };
         let batch_index = match &request.messages {
             Messages::NonceGeneration(nonce) => Some(nonce.batch_index),
@@ -373,10 +387,28 @@ impl MpcManager {
                 self.try_sign_rotation_messages(&previous, sender, &request.messages)
             }
             Messages::NonceGeneration(nonce) => {
+                if self.mpc_config.nonce_generation_protocol != NonceGenerationProtocol::Vanilla {
+                    return Err(MpcError::InvalidMessage {
+                        sender,
+                        reason: "vanilla nonce generation messages are rejected in an AVID epoch"
+                            .into(),
+                    });
+                }
                 self.cache_and_persist_nonce_message(self.mpc_config.epoch, sender, nonce)?;
                 self.try_sign_nonce_message(sender, &request.messages)
             }
-            Messages::NonceGenerationAvid(avid) => self.handle_avid_nonce_message(sender, avid),
+            Messages::NonceGenerationAvid(avid) => {
+                if self.mpc_config.nonce_generation_protocol != NonceGenerationProtocol::Avid {
+                    return Err(MpcError::InvalidMessage {
+                        sender,
+                        reason: "AVID nonce messages are rejected in a vanilla nonce generation \
+                                 epoch"
+                            .into(),
+                    });
+                }
+                self.handle_avid_nonce_message(sender, avid)
+            }
+            Messages::AvidNonceRetrieval(_) => unreachable!("rejected above"),
         }
         .map(|signature| SendMessagesResponse { signature });
         self.message_responses.insert(cache_key, result.clone());
@@ -385,6 +417,7 @@ impl MpcManager {
 
     pub fn handle_retrieve_messages_request(
         &self,
+        requester: Address,
         request: &RetrieveMessagesRequest,
     ) -> MpcResult<RetrieveMessagesResponse> {
         if request.epoch == self.mpc_config.epoch
@@ -411,6 +444,9 @@ impl MpcManager {
                 let batch_index = request.batch_index.ok_or_else(|| {
                     MpcError::NotFound("batch_index required for nonce gen retrieval".into())
                 })?;
+                if self.mpc_config.nonce_generation_protocol == NonceGenerationProtocol::Avid {
+                    return self.serve_avid_nonce_retrieval(requester, batch_index, request);
+                }
                 self.public_messages_store
                     .get_nonce_message(request.epoch, batch_index, &request.dealer)
                     .map_err(|e| MpcError::StorageError(e.to_string()))?
@@ -425,6 +461,48 @@ impl MpcManager {
         messages
             .map(|m| RetrieveMessagesResponse { messages: m })
             .ok_or_else(|| MpcError::NotFound(format!("Messages for dealer {:?}", request.dealer)))
+    }
+
+    fn serve_avid_nonce_retrieval(
+        &self,
+        requester: Address,
+        batch_index: u32,
+        request: &RetrieveMessagesRequest,
+    ) -> MpcResult<RetrieveMessagesResponse> {
+        if request.epoch != self.mpc_config.epoch {
+            return Err(MpcError::NotFound(
+                "AVID retrieval serves the current epoch only".into(),
+            ));
+        }
+        let common = self.get_avid_round_common(batch_index, &request.dealer);
+        let (avid_vote, echo) = match self.avid_held_echoes.get(&(batch_index, request.dealer)) {
+            Some((vote, echoes)) => {
+                let echo = echoes.iter().find_map(|(addr, msg)| {
+                    (*addr == requester).then(|| match msg {
+                        Messages::NonceGenerationAvid(AvidNonceMessage {
+                            kind: AvidNonceMessageKind::Echo { echo, .. },
+                            ..
+                        }) => echo.clone(),
+                        _ => unreachable!("held echoes are echo messages"),
+                    })
+                });
+                (Some(vote.clone()), echo)
+            }
+            None => (None, None),
+        };
+        if common.is_none() && avid_vote.is_none() && echo.is_none() {
+            return Err(MpcError::NotFound(format!(
+                "no AVID round state for dealer {:?}",
+                request.dealer
+            )));
+        }
+        Ok(RetrieveMessagesResponse {
+            messages: Messages::AvidNonceRetrieval(AvidNonceRetrievalMessage {
+                common,
+                echo,
+                avid_vote,
+            }),
+        })
     }
 
     pub fn handle_complain_request(
@@ -616,7 +694,7 @@ impl MpcManager {
                     receiver.handle_complaint(&message, complaint, &nonce_output)?;
                 ComplaintResponse::NonceGeneration(complaint_response)
             }
-            Messages::NonceGenerationAvid(_) => {
+            Messages::NonceGenerationAvid(_) | Messages::AvidNonceRetrieval(_) => {
                 return Err(MpcError::ProtocolFailed(
                     "AVID nonce generation complaint handling is not yet implemented".into(),
                 ));
@@ -821,47 +899,87 @@ impl MpcManager {
                 .sum();
             (weight, mgr.required_nonce_weight())
         };
-        if certified_reduced_weight < required_reduced_weight
-            && let Err(e) = Self::run_as_nonce_dealer(
-                mpc_manager,
-                batch_index,
-                p2p_channel,
-                tob_channel,
-                metrics,
-            )
-            .await
-        {
-            tracing::error!(
-                "Nonce dealer phase failed: {}. Continuing as party only.",
-                e
-            );
+        let protocol = {
+            let mgr = mpc_manager.read().unwrap();
+            mgr.mpc_config.nonce_generation_protocol
+        };
+        if certified_reduced_weight < required_reduced_weight {
+            let dealer_result = match protocol {
+                NonceGenerationProtocol::Vanilla => {
+                    Self::run_as_nonce_dealer(
+                        mpc_manager,
+                        batch_index,
+                        p2p_channel,
+                        tob_channel,
+                        metrics,
+                    )
+                    .await
+                }
+                NonceGenerationProtocol::Avid => {
+                    Self::run_as_avid_nonce_dealer(
+                        mpc_manager,
+                        batch_index,
+                        p2p_channel,
+                        tob_channel,
+                        metrics,
+                    )
+                    .await
+                }
+            };
+            if let Err(e) = dealer_result {
+                tracing::error!(
+                    "Nonce dealer phase failed: {}. Continuing as party only.",
+                    e
+                );
+            }
         }
-        let certified =
-            Self::run_as_nonce_party(mpc_manager, batch_index, p2p_channel, tob_channel, metrics)
-                .await?;
+        let certified = match protocol {
+            NonceGenerationProtocol::Vanilla => {
+                Self::run_as_nonce_party(
+                    mpc_manager,
+                    batch_index,
+                    p2p_channel,
+                    tob_channel,
+                    metrics,
+                )
+                .await?
+            }
+            NonceGenerationProtocol::Avid => {
+                Self::run_as_avid_nonce_party(
+                    mpc_manager,
+                    batch_index,
+                    p2p_channel,
+                    tob_channel,
+                    metrics,
+                )
+                .await?
+            }
+        };
         let mut mgr = mpc_manager.write().unwrap();
-        // Keep only the outputs selected by the party phase. The RPC handler's
-        // `try_sign_nonce_message` may have inserted additional outputs
-        // concurrently — discard them so all nodes use the same deterministic set.
-        let pre_filter = mgr
-            .dealer_nonce_outputs
-            .keys()
-            .filter(|(b, _)| *b == batch_index)
-            .count();
-        let mut dealers = Vec::new();
-        let mut outputs = Vec::new();
-        mgr.dealer_nonce_outputs.retain(|(b, addr), output| {
-            if *b != batch_index {
-                return true;
+        // Keep only the outputs selected by the party phase. The RPC handler may have inserted
+        // additional outputs concurrently — discard them so all nodes use the same deterministic
+        // set.
+        let (pre_filter, dealers, outputs) = match protocol {
+            NonceGenerationProtocol::Vanilla => consume_certified_nonce_outputs(
+                &mut mgr.dealer_nonce_outputs,
+                batch_index,
+                &certified,
+                |output| output.clone(),
+            ),
+            NonceGenerationProtocol::Avid => {
+                let indices = mgr
+                    .mpc_config
+                    .nodes
+                    .share_ids_of(mgr.party_id)
+                    .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+                consume_certified_nonce_outputs(
+                    &mut mgr.dealer_avid_nonce_outputs,
+                    batch_index,
+                    &certified,
+                    |output| output.clone().into_legacy(&indices),
+                )
             }
-            if certified.contains(addr) {
-                dealers.push(*addr);
-                outputs.push(output.clone());
-                true
-            } else {
-                false
-            }
-        });
+        };
         tracing::info!(
             "run_nonce_generation: epoch={}, batch_index={batch_index}, \
              {pre_filter} outputs before filter, {} after. dealers={dealers:?}",
@@ -1861,7 +1979,8 @@ impl MpcManager {
             Messages::Dkg(msg) => msg,
             Messages::Rotation(_)
             | Messages::NonceGeneration(_)
-            | Messages::NonceGenerationAvid(_) => {
+            | Messages::NonceGenerationAvid(_)
+            | Messages::AvidNonceRetrieval(_) => {
                 panic!("try_sign_dkg_message called with non-DKG messages")
             }
         };
@@ -1964,7 +2083,10 @@ impl MpcManager {
     ) -> MpcResult<BLS12381Signature> {
         let (batch_index, message) = match messages {
             Messages::NonceGeneration(nonce) => (nonce.batch_index, &nonce.message),
-            Messages::Dkg(_) | Messages::Rotation(_) | Messages::NonceGenerationAvid(_) => {
+            Messages::Dkg(_)
+            | Messages::Rotation(_)
+            | Messages::NonceGenerationAvid(_)
+            | Messages::AvidNonceRetrieval(_) => {
                 panic!("try_sign_nonce_message called with non-nonce messages")
             }
         };
@@ -2286,8 +2408,8 @@ impl MpcManager {
                     confirm_cert.clone(),
                 )?;
                 let vote_hash = hash_avid_vote(&avid_vote);
-                if let Some((held_hash, _)) = self.avid_held_echoes.get(&(batch_index, sender))
-                    && *held_hash != vote_hash
+                if let Some((held_vote, _)) = self.avid_held_echoes.get(&(batch_index, sender))
+                    && hash_avid_vote(held_vote) != vote_hash
                 {
                     return Err(MpcError::InvalidMessage {
                         sender,
@@ -2295,14 +2417,15 @@ impl MpcManager {
                     });
                 }
                 self.avid_held_echoes
-                    .insert((batch_index, sender), (vote_hash, echoes));
+                    .insert((batch_index, sender), (avid_vote.clone(), echoes));
                 vote.ok_or_else(|| {
                     MpcError::NotReady("vote withheld: listed confirmer holds no output".into())
                 })
             }
-            AvidNonceMessageKind::Echo { .. } => Err(MpcError::ProtocolFailed(
-                "AVID echoes are pull-served, not pushed".into(),
-            )),
+            AvidNonceMessageKind::Echo { .. } => Err(MpcError::InvalidMessage {
+                sender,
+                reason: "AVID echoes are pull-served, not pushed".into(),
+            }),
         }
     }
 
@@ -2370,7 +2493,6 @@ impl MpcManager {
         })
     }
 
-    #[allow(dead_code)]
     async fn run_as_avid_nonce_dealer(
         mpc_manager: &Arc<RwLock<Self>>,
         batch_index: u32,
@@ -2472,11 +2594,12 @@ impl MpcManager {
                 };
                 let own_address = mgr.address;
                 let signature = mgr.handle_avid_nonce_message(own_address, own_avid)?;
-                let vote_hash = mgr
-                    .avid_held_echoes
-                    .get(&(batch_index, mgr.address))
-                    .expect("own dispersal was just processed")
-                    .0;
+                let vote_hash = hash_avid_vote(
+                    &mgr.avid_held_echoes
+                        .get(&(batch_index, mgr.address))
+                        .expect("own dispersal was just processed")
+                        .0,
+                );
                 let vote_target = DealerMessagesHash {
                     dealer_address: mgr.address,
                     messages_hash: vote_hash,
@@ -2533,6 +2656,302 @@ impl MpcManager {
         Ok(())
     }
 
+    fn reduced_weight_of_cert(&self, cert: &DealerCertificate) -> MpcResult<u32> {
+        let signers = cert
+            .signers(&self.committee)
+            .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
+        Ok(signers
+            .iter()
+            .filter_map(|addr| {
+                let party_id = self.committee.index_of(addr)? as u16;
+                self.mpc_config
+                    .nodes
+                    .weight_of(party_id)
+                    .ok()
+                    .map(|w| w as u32)
+            })
+            .sum())
+    }
+
+    fn resolve_avid_cert_kind_locally(
+        &self,
+        batch_index: u32,
+        dealer: &Address,
+        digest: &MessageHash,
+    ) -> Option<CertKind> {
+        if let Some(common) = self.get_avid_round_common(batch_index, dealer)
+            && MessageHash::from(common.hash().digest) == *digest
+        {
+            return Some(CertKind::AvssVote);
+        }
+        if let Some((vote, _)) = self.avid_held_echoes.get(&(batch_index, *dealer))
+            && hash_avid_vote(vote) == *digest
+        {
+            return Some(CertKind::AvidVote);
+        }
+        None
+    }
+
+    async fn pull_and_resolve_avid_cert(
+        mpc_manager: &Arc<RwLock<Self>>,
+        dealer: Address,
+        batch_index: u32,
+        nonce_cert: &DealerCertificate,
+        p2p_channel: &impl P2PChannel,
+    ) -> MpcResult<CertKind> {
+        let (request, signers) = {
+            let mgr = mpc_manager.read().unwrap();
+            let request = RetrieveMessagesRequest {
+                dealer,
+                protocol_type: ProtocolTypeIndicator::NonceGeneration,
+                epoch: mgr.mpc_config.epoch,
+                batch_index: Some(batch_index),
+            };
+            let signers: Vec<Address> = nonce_cert
+                .signers(&mgr.committee)
+                .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?
+                .into_iter()
+                .filter(|addr| *addr != mgr.address)
+                .collect();
+            (request, signers)
+        };
+        let results = send_to_many(signers, request, |addr, req| async move {
+            p2p_channel.retrieve_messages(&addr, &req).await
+        })
+        .await;
+        let bundles: Vec<(Address, AvidNonceRetrievalMessage)> = results
+            .into_iter()
+            .filter_map(|(addr, result)| match result {
+                Ok(RetrieveMessagesResponse {
+                    messages: Messages::AvidNonceRetrieval(bundle),
+                }) => Some((addr, bundle)),
+                Ok(_) => {
+                    tracing::info!("Unexpected retrieval response from {:?}", addr);
+                    None
+                }
+                Err(e) => {
+                    tracing::info!("AVID retrieval from {:?} failed: {}", addr, e);
+                    None
+                }
+            })
+            .collect();
+        let mgr = Arc::clone(mpc_manager);
+        let nonce_cert = nonce_cert.clone();
+        spawn_blocking(move || {
+            let mut mgr = mgr.write().unwrap();
+            let digest = nonce_cert.message().messages_hash;
+            let avid_vote = bundles.iter().find_map(|(_, b)| {
+                b.avid_vote
+                    .as_ref()
+                    .filter(|v| hash_avid_vote(v) == digest)
+                    .cloned()
+            });
+            let Some(avid_vote) = avid_vote else {
+                let common_pins = bundles.iter().any(|(_, b)| {
+                    b.common
+                        .as_ref()
+                        .is_some_and(|c| MessageHash::from(c.hash().digest) == digest)
+                });
+                return if common_pins {
+                    Ok(CertKind::AvssVote)
+                } else {
+                    Err(MpcError::NotFound(
+                        "no pulled artifact pins to the certified digest".into(),
+                    ))
+                };
+            };
+            let expected_common_hash = avid_vote.common_message_hash;
+            let common = bundles
+                .iter()
+                .find_map(|(_, b)| {
+                    b.common
+                        .as_ref()
+                        .filter(|c| c.hash() == expected_common_hash)
+                        .cloned()
+                })
+                .ok_or_else(|| {
+                    MpcError::NotFound("no common message pins to the certified vote".into())
+                })?;
+            let vote_cert =
+                AvidCertificate::vote(nonce_cert, avid_vote, Arc::new(mgr.committee.clone()))?
+                    .into_verified()
+                    .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+            let mut verified_echoes = Vec::new();
+            for (addr, bundle) in &bundles {
+                let Some(echo) = bundle.echo.clone() else {
+                    continue;
+                };
+                let Some(sender) = mgr.committee.index_of(addr).map(|i| i as PartyId) else {
+                    continue;
+                };
+                match mgr.verify_avid_nonce_echo(dealer, batch_index, sender, echo, &vote_cert) {
+                    Ok(verified) => verified_echoes.push(verified),
+                    Err(e) => tracing::info!("Echo from {:?} failed to verify: {}", addr, e),
+                }
+            }
+            let mut rng = rand::thread_rng();
+            match mgr.decode_avid_nonce_share(
+                dealer,
+                batch_index,
+                common,
+                &verified_echoes,
+                &vote_cert,
+                &mut rng,
+            ) {
+                Ok(batch_avss_avid::DecodeAndDecryptOutcome::Valid(..)) => {}
+                Ok(outcome) => {
+                    tracing::warn!(
+                        "AVID decode for dealer {:?} produced a complaint: {:?}",
+                        dealer,
+                        std::mem::discriminant(&outcome)
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("AVID decode for dealer {:?} failed: {}", dealer, e);
+                }
+            }
+            Ok(CertKind::AvidVote)
+        })
+        .await
+    }
+
+    async fn run_as_avid_nonce_party(
+        mpc_manager: &Arc<RwLock<Self>>,
+        batch_index: u32,
+        p2p_channel: &impl P2PChannel,
+        tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
+        metrics: &Metrics,
+    ) -> MpcResult<HashSet<Address>> {
+        let (required_weight, total_reduced_weight, vote_quorum_weight) = {
+            let mgr = mpc_manager.read().unwrap();
+            let total = mgr.mpc_config.nodes.total_weight() as u32;
+            (
+                mgr.required_nonce_weight(),
+                total,
+                total - mgr.mpc_config.max_faulty as u32,
+            )
+        };
+        let mut certified_dealers = HashSet::new();
+        let mut dealer_weight_sum = 0u32;
+        loop {
+            if dealer_weight_sum >= required_weight {
+                break;
+            }
+            let _timer = metrics
+                .mpc_tob_poll_duration_seconds
+                .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
+                .start_timer();
+            let cert = tob_channel
+                .receive()
+                .await
+                .map_err(|e| MpcError::BroadcastError(e.to_string()))?;
+            drop(_timer);
+            let CertificateV1::NonceGeneration {
+                cert: nonce_cert, ..
+            } = cert
+            else {
+                continue;
+            };
+            let dealer = nonce_cert.message().dealer_address;
+            if certified_dealers.contains(&dealer) {
+                continue;
+            }
+            let signer_weight = {
+                let _timer = metrics
+                    .mpc_cert_verify_duration_seconds
+                    .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
+                    .start_timer();
+                let mgr = Arc::clone(mpc_manager);
+                let cert = nonce_cert.clone();
+                let result = spawn_blocking(move || {
+                    let mgr = mgr.read().unwrap();
+                    mgr.committee
+                        .verify_signature(&cert)
+                        .map_err(|e| MpcError::InvalidCertificate(e.to_string()))?;
+                    mgr.reduced_weight_of_cert(&cert)
+                })
+                .await;
+                drop(_timer);
+                match result {
+                    Ok(weight) => weight,
+                    Err(e) => {
+                        tracing::info!("Invalid nonce certificate from {:?}: {}", dealer, e);
+                        continue;
+                    }
+                }
+            };
+            let digest = nonce_cert.message().messages_hash;
+            let kind = {
+                let mgr = mpc_manager.read().unwrap();
+                mgr.resolve_avid_cert_kind_locally(batch_index, &dealer, &digest)
+            };
+            let kind = match kind {
+                Some(kind) => kind,
+                None => {
+                    let _timer = metrics
+                        .mpc_message_retrieval_duration_seconds
+                        .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
+                        .start_timer();
+                    let result = Self::pull_and_resolve_avid_cert(
+                        mpc_manager,
+                        dealer,
+                        batch_index,
+                        &nonce_cert,
+                        p2p_channel,
+                    )
+                    .await;
+                    drop(_timer);
+                    match result {
+                        Ok(kind) => kind,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Could not resolve AVID cert kind for dealer {:?}: {}",
+                                dealer,
+                                e
+                            );
+                            continue;
+                        }
+                    }
+                }
+            };
+            let required_cert_weight = match kind {
+                CertKind::AvssVote => total_reduced_weight,
+                CertKind::AvidVote => vote_quorum_weight,
+            };
+            if signer_weight < required_cert_weight {
+                tracing::warn!(
+                    "AVID nonce cert for dealer {:?} below quorum: {} < {} ({:?})",
+                    dealer,
+                    signer_weight,
+                    required_cert_weight,
+                    kind
+                );
+                continue;
+            }
+            let dealer_weight = {
+                let mgr = mpc_manager.read().unwrap();
+                if !mgr
+                    .dealer_avid_nonce_outputs
+                    .contains_key(&(batch_index, dealer))
+                {
+                    tracing::warn!("No AVID nonce output for {:?} after processing", dealer);
+                    continue;
+                }
+                let party_id = mgr
+                    .committee
+                    .index_of(&dealer)
+                    .expect("dealer must be in committee") as u16;
+                mgr.mpc_config
+                    .nodes
+                    .weight_of(party_id)
+                    .map_err(|_| MpcError::ProtocolFailed("Missing dealer weight".to_string()))?
+            };
+            dealer_weight_sum += dealer_weight as u32;
+            certified_dealers.insert(dealer);
+        }
+        Ok(certified_dealers)
+    }
+
     async fn publish_nonce_generation_cert(
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
         batch_index: u32,
@@ -2549,7 +2968,6 @@ impl MpcManager {
             .map_err(|e| MpcError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e)))
     }
 
-    #[allow(dead_code)]
     fn verify_avid_nonce_echo(
         &self,
         dealer: Address,
@@ -2564,7 +2982,6 @@ impl MpcManager {
             .map_err(|e| MpcError::CryptoError(e.to_string()))
     }
 
-    #[allow(dead_code)]
     fn decode_avid_nonce_share(
         &mut self,
         dealer: Address,
@@ -3518,7 +3935,10 @@ impl MpcManager {
     ) -> MpcResult<BLS12381Signature> {
         let rotation_messages = match messages {
             Messages::Rotation(msgs) => msgs,
-            Messages::Dkg(_) | Messages::NonceGeneration(_) | Messages::NonceGenerationAvid(_) => {
+            Messages::Dkg(_)
+            | Messages::NonceGeneration(_)
+            | Messages::NonceGenerationAvid(_)
+            | Messages::AvidNonceRetrieval(_) => {
                 panic!("try_sign_rotation_messages called with non-rotation messages")
             }
         };
@@ -4615,7 +5035,9 @@ impl MpcManager {
                     msgs,
                 )?;
             }
-            Messages::NonceGeneration(_) | Messages::NonceGenerationAvid(_) => unreachable!(
+            Messages::NonceGeneration(_)
+            | Messages::NonceGenerationAvid(_)
+            | Messages::AvidNonceRetrieval(_) => unreachable!(
                 "Hash matched previous-epoch certificate but got {:?}",
                 std::mem::discriminant(&messages)
             ),
@@ -5020,6 +5442,33 @@ fn build_reduced_nodes(
 fn hash_public_mpc_output(output: &PublicMpcOutput) -> [u8; 32] {
     let bytes = bcs::to_bytes(output).expect(EXPECT_SERIALIZATION_SUCCESS);
     Blake2b256::digest(&bytes).digest
+}
+
+fn consume_certified_nonce_outputs<T>(
+    outputs_map: &mut BTreeMap<(u32, Address), T>,
+    batch_index: u32,
+    certified: &HashSet<Address>,
+    mut convert: impl FnMut(&T) -> batch_avss::ReceiverOutput,
+) -> (usize, Vec<Address>, Vec<batch_avss::ReceiverOutput>) {
+    let pre_filter = outputs_map
+        .keys()
+        .filter(|(b, _)| *b == batch_index)
+        .count();
+    let mut dealers = Vec::new();
+    let mut outputs = Vec::new();
+    outputs_map.retain(|(b, addr), output| {
+        if *b != batch_index {
+            return true;
+        }
+        if certified.contains(addr) {
+            dealers.push(*addr);
+            outputs.push(convert(output));
+            true
+        } else {
+            false
+        }
+    });
+    (pre_filter, dealers, outputs)
 }
 
 pub(crate) async fn spawn_blocking<F, T>(f: F) -> T
