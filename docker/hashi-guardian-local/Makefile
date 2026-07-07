@@ -28,6 +28,7 @@ ceremony: ## Generate KP keys + run the genesis ceremony (captures the BTC pubke
 	$(COMPOSE) --profile init run --rm --build init /scripts/ceremony.sh
 	$(COMPOSE) --profile ceremony stop ceremony
 	@fps=$$($(COMPOSE) --profile init run --rm -T --entrypoint cat init /work/kp-fingerprints.csv); \
+	if [ -z "$$fps" ]; then echo "Ceremony left no KP roster at /work/kp-fingerprints.csv; not updating the proxy."; exit 1; fi; \
 	echo "AUTHORIZED_KP_FINGERPRINTS=$$fps" > kp-roster.env; \
 	echo "Handing the KP roster to the proxy relay: $$fps"; \
 	$(COMPOSE) up -d proxy
