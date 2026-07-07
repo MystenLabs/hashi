@@ -45,6 +45,7 @@ use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::WithdrawModeState;
 use hashi_types::guardian::proto_conversions::guardian_encrypted_share_to_pb;
 use hashi_types::guardian::relay_submission_signed_bytes;
+use hashi_types::pgp::Fingerprint;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::load_certs;
 use hashi_types::pgp::sign_detached_via_gpg;
@@ -388,10 +389,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     // Find this KP's share by exact fingerprint match. Given the roster checks
     // above, this should always succeed; keep the error for defensive clarity.
+    let want_fp_hex = want_fp.to_hex();
     let kp_encrypted_share = state
         .encrypted_shares
         .iter()
-        .find(|s| s.recipient_fingerprint == want_fp)
+        .find(|s| s.recipient_fingerprint == want_fp_hex)
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "no share in the shares/ log is labeled for this KP's fingerprint \
@@ -502,7 +504,7 @@ async fn submit_provisioner_init_to_relay(
     expected_guardian_info: GuardianInfo,
     encrypted_share: GuardianEncryptedShare,
     signer_cert_armored: &str,
-    signer_fingerprint: &str,
+    signer_fingerprint: &Fingerprint,
     current_build: &BuildPcrs,
 ) -> anyhow::Result<()> {
     info!(

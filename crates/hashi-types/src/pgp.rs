@@ -45,18 +45,11 @@ pub struct PgpPublicCert {
     cert: openpgp::Cert,
 }
 
-/// A PGP certificate's primary fingerprint (uppercase hex). A cert's stable
-/// identity; in the guardian/roster context it's aliased as `KPFingerprint`.
-pub type Fingerprint = String;
-
-/// Normalize a fingerprint for comparison (strip whitespace, uppercase), so
-/// the spaced `gpg --fingerprint` form and bare config hex compare equal.
-pub fn normalize_fingerprint(s: &str) -> Fingerprint {
-    s.chars()
-        .filter(|c| !c.is_whitespace())
-        .collect::<String>()
-        .to_uppercase()
-}
+/// A PGP certificate's primary fingerprint — sequoia's canonical type, so any
+/// textual form (`FromStr` takes the spaced `gpg --fingerprint` output or bare
+/// hex, case-insensitively) compares as bytes. `to_hex()` is the bare
+/// uppercase form persisted in ceremony artifacts as `KPFingerprint`.
+pub use sequoia_openpgp::Fingerprint;
 
 impl PgpPublicCert {
     pub fn new(armored: String) -> Result<Self> {
@@ -70,10 +63,9 @@ impl PgpPublicCert {
         &self.armored
     }
 
-    /// The cert's primary fingerprint, as uppercase hex with spaces (the same
-    /// form `gpg --fingerprint` prints and `Cert::fingerprint`'s Display).
+    /// The cert's primary fingerprint — its stable identity.
     pub fn fingerprint(&self) -> Fingerprint {
-        self.cert.fingerprint().to_string()
+        self.cert.fingerprint()
     }
 }
 
@@ -355,15 +347,13 @@ pub fn decrypt_armored_via_gpg(armored: &str, homedir: Option<&Path>) -> Result<
 /// production the KP's offline key (e.g. a yubikey).
 pub fn sign_detached_via_gpg(
     payload: &[u8],
-    signer_fingerprint: &str,
+    signer_fingerprint: &Fingerprint,
     homedir: Option<&Path>,
 ) -> Result<String> {
-    // Strip spaces so the grouped `Cert::fingerprint()` form works as --local-user.
-    let key_id: String = signer_fingerprint.split_whitespace().collect();
     let mut command = Command::new("gpg");
     command
         .arg("--local-user")
-        .arg(&key_id)
+        .arg(signer_fingerprint.to_hex())
         .arg("--armor")
         .arg("--detach-sign");
     if let Some(homedir) = homedir {
@@ -728,17 +718,6 @@ mod tests {
         let homedir = tempfile::Builder::new().tempdir().unwrap();
         test_utils::prepare_gnupg_home(homedir.path());
         homedir
-    }
-
-    #[test]
-    fn normalize_fingerprint_strips_spacing_and_case() {
-        let spaced = "AAAA BBBB CCCC DDDD EEEE  1111 2222 3333 4444 5555";
-        let bare = "aaaabbbbccccddddeeee11112222333344445555";
-        assert_eq!(normalize_fingerprint(spaced), normalize_fingerprint(bare));
-        assert_eq!(
-            normalize_fingerprint(spaced),
-            "AAAABBBBCCCCDDDDEEEE11112222333344445555"
-        );
     }
 
     #[test]

@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
-use hashi_types::pgp::normalize_fingerprint;
 use hashi_types::pgp::Fingerprint;
 
 pub struct Config {
@@ -55,22 +54,26 @@ impl Config {
     }
 }
 
-/// Parse the comma-separated KP roster: normalize each entry and require
-/// fingerprint-shaped hex, so a config typo fails at startup.
+/// Parse the comma-separated KP roster into canonical fingerprints (spacing
+/// and case insensitive), so a config typo fails at startup.
 fn parse_kp_roster(raw: &str) -> Result<Vec<Fingerprint>> {
     let mut roster = Vec::new();
     for entry in raw.split(',') {
-        let fp = normalize_fingerprint(entry);
-        if fp.is_empty() {
+        if entry.trim().is_empty() {
             continue;
         }
-        // 40 hex chars for a v4 PGP fingerprint, 64 for v6.
-        if !(fp.len() == 40 || fp.len() == 64) || !fp.chars().all(|c| c.is_ascii_hexdigit()) {
-            anyhow::bail!(
-                "AUTHORIZED_KP_FINGERPRINTS entry {entry:?} is not a PGP fingerprint \
-                 (expected 40 or 64 hex chars; spacing and case are ignored)"
-            );
-        }
+        let fp = entry
+            .parse::<Fingerprint>()
+            .ok()
+            // Sequoia parses odd-sized hex into `Fingerprint::Unknown` rather
+            // than failing; only real v4/v6 shapes can name a KP cert.
+            .filter(|fp| matches!(fp, Fingerprint::V4(_) | Fingerprint::V6(_)))
+            .with_context(|| {
+                format!(
+                    "AUTHORIZED_KP_FINGERPRINTS entry {entry:?} is not a PGP fingerprint \
+                     (expected 40 or 64 hex chars; spacing and case are ignored)"
+                )
+            })?;
         roster.push(fp);
     }
     Ok(roster)
@@ -90,18 +93,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_kp_roster_normalizes_entries() {
+    fn parse_kp_roster_accepts_spaced_and_bare_hex() {
         // Spaced gpg form + bare lowercase hex, with a trailing comma.
         let raw = "AAAA BBBB CCCC DDDD EEEE 1111 2222 3333 4444 5555,\
                    aaaabbbbccccddddeeee1111222233334444ffff,";
         let roster = parse_kp_roster(raw).unwrap();
-        assert_eq!(
-            roster,
-            vec![
-                "AAAABBBBCCCCDDDDEEEE11112222333344445555".to_string(),
-                "AAAABBBBCCCCDDDDEEEE1111222233334444FFFF".to_string(),
-            ]
-        );
+        let expected: Vec<Fingerprint> = vec![
+            "AAAABBBBCCCCDDDDEEEE11112222333344445555".parse().unwrap(),
+            "AAAABBBBCCCCDDDDEEEE1111222233334444FFFF".parse().unwrap(),
+        ];
+        assert_eq!(roster, expected);
     }
 
     #[test]

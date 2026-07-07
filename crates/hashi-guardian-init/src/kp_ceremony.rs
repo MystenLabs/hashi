@@ -118,13 +118,13 @@ pub async fn run(cfg: Config) -> Result<()> {
     );
 
     // 3. Find this KP's share by exact fingerprint match (both sides derive
-    //    from PgpPublicCert::fingerprint over the same key, so they're
-    //    canonical and identical: no normalization needed). The matched share
-    //    carries its own crypto `id`.
+    //    from `Fingerprint::to_hex` over the same key, so they're canonical
+    //    and identical). The matched share carries its own crypto `id`.
+    let want_fp_hex = want_fp.to_hex();
     let share = state
         .encrypted_shares
         .iter()
-        .find(|s| s.recipient_fingerprint == want_fp)
+        .find(|s| s.recipient_fingerprint == want_fp_hex)
         .ok_or_else(|| {
             anyhow!(
                 "no share in the shares/ log is labeled for this KP's fingerprint \

@@ -97,10 +97,10 @@ pub struct GuardianEncryptedShare {
     pub ciphertext: Ciphertext,
 }
 
-/// A key-provisioner's PGP fingerprint ([`crate::pgp::Fingerprint`] in the
-/// guardian/roster context). Labels an encrypted share and is the per-share
-/// identity in a ceremony roster.
-pub type KPFingerprint = crate::pgp::Fingerprint;
+/// A key-provisioner's PGP fingerprint as bare uppercase hex — the string
+/// form persisted in ceremony artifacts (share labels, log rosters). For
+/// comparing fingerprints, prefer the canonical [`crate::pgp::Fingerprint`].
+pub type KPFingerprint = String;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct KPEncryptedShare {
@@ -542,7 +542,7 @@ pub fn split_and_encrypt_for_kps<R: CryptoRng + RngCore>(
 pub fn encrypt_share_for_provisioner(share: &Share, cert: &PgpPublicCert) -> KPEncryptedShare {
     KPEncryptedShare {
         id: share.id,
-        recipient_fingerprint: cert.fingerprint(),
+        recipient_fingerprint: cert.fingerprint().to_hex(),
         armored_ciphertext: encrypt_armored(&share.value.to_bytes(), cert)
             .expect("PgpPublicCert validation ensures OpenPGP encryption works"),
     }

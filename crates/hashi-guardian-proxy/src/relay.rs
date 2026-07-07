@@ -18,7 +18,6 @@ use std::sync::Arc;
 use hashi_types::guardian::proto_conversions::pb_to_guardian_encrypted_share;
 use hashi_types::guardian::relay_submission_signed_bytes;
 use hashi_types::guardian::GetGuardianInfoResponse;
-use hashi_types::pgp::normalize_fingerprint;
 use hashi_types::pgp::verify_detached_signature;
 use hashi_types::pgp::Fingerprint;
 use hashi_types::pgp::PgpPublicCert;
@@ -129,7 +128,7 @@ impl Relay {
 /// Authenticate a submission: the signer's cert must be in the KP roster and
 /// its detached signature must cover these exact (session, share) bytes. A DoS
 /// guard only — the enclave still verifies every share against the commitments.
-/// Cheap checks run first; fingerprints compare normalized.
+/// Cheap checks run first.
 fn verify_kp_submission(
     expected_session_id: &str,
     signer_cert: &str,
@@ -144,11 +143,8 @@ fn verify_kp_submission(
     }
     let cert = PgpPublicCert::new(signer_cert.to_string())
         .map_err(|e| Status::unauthenticated(format!("invalid signer_cert: {e}")))?;
-    let fingerprint = normalize_fingerprint(&cert.fingerprint());
-    if !authorized_kp_fingerprints
-        .iter()
-        .any(|f| normalize_fingerprint(f) == fingerprint)
-    {
+    let fingerprint = cert.fingerprint();
+    if !authorized_kp_fingerprints.contains(&fingerprint) {
         return Err(Status::permission_denied(format!(
             "signer {fingerprint} is not in the relay's authorized KP roster"
         )));
@@ -356,12 +352,10 @@ mod tests {
         // A rostered signer with a valid signature over the exact submission passes.
         verify_kp_submission(session, &cert_armored, &good_sig, &pb_share, &roster).unwrap();
 
-        // Roster entries compare normalized: bare lowercase hex matches too.
-        let bare = roster[0]
-            .split_whitespace()
-            .collect::<String>()
-            .to_lowercase();
-        verify_kp_submission(session, &cert_armored, &good_sig, &pb_share, &[bare]).unwrap();
+        // A roster entry parsed from config text (bare lowercase hex) names
+        // the same key as the cert-derived fingerprint.
+        let from_config: Fingerprint = cert.fingerprint().to_hex().to_lowercase().parse().unwrap();
+        verify_kp_submission(session, &cert_armored, &good_sig, &pb_share, &[from_config]).unwrap();
 
         // A signature over one share doesn't authenticate a different share.
         let (_, other_share) = signed_share(2);
