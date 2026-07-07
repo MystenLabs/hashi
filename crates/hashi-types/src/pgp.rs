@@ -45,10 +45,8 @@ pub struct PgpPublicCert {
     cert: openpgp::Cert,
 }
 
-/// A PGP certificate's primary fingerprint — sequoia's canonical type, so any
-/// textual form (`FromStr` takes the spaced `gpg --fingerprint` output or bare
-/// hex, case-insensitively) compares as bytes. `to_hex()` is the bare
-/// uppercase form persisted in ceremony artifacts as `KPFingerprint`.
+/// A PGP certificate's primary fingerprint — sequoia's canonical type;
+/// `to_hex()` is the bare uppercase form persisted as `KPFingerprint`.
 pub use sequoia_openpgp::Fingerprint;
 
 impl PgpPublicCert {
@@ -63,7 +61,6 @@ impl PgpPublicCert {
         &self.armored
     }
 
-    /// The cert's primary fingerprint — its stable identity.
     pub fn fingerprint(&self) -> Fingerprint {
         self.cert.fingerprint()
     }
@@ -370,9 +367,8 @@ pub fn sign_detached_via_gpg(
         Some(mut stdin) => stdin.write_all(payload),
         None => Err(io::Error::other("failed to open gpg stdin")),
     };
-    // Reap gpg even if the write failed (EPIPE means gpg died early), so the
-    // child can't linger as a zombie; the exit status is the better diagnostic,
-    // so check it before surfacing the write error.
+    // Reap gpg even if the write failed (EPIPE = gpg died early); its exit
+    // status is the more useful error, so check it first.
     let output = child
         .wait_with_output()
         .context("wait for `gpg --detach-sign`")?;
@@ -667,9 +663,7 @@ pub mod test_utils {
         (0..n).map(|_| mock_pgp_cert()).collect()
     }
 
-    /// Test-only: an armored detached signature over `payload` from the secret
-    /// half of a `mock_pgp_keypair()`. Pure sequoia (no gpg), so it mirrors what
-    /// `sign_detached_via_gpg` produces without needing a keyring.
+    /// What `sign_detached_via_gpg` produces, minus the gpg keyring.
     pub fn sign_detached_in_process(secret_armored: &str, payload: &[u8]) -> String {
         use openpgp::parse::Parse;
         use openpgp::policy::StandardPolicy;
@@ -876,11 +870,8 @@ mod tests {
         let payload = b"relay submission bytes";
         let sig = test_utils::sign_detached_in_process(&secret, payload);
 
-        // Good signature over the exact bytes verifies.
         verify_detached_signature(payload, &sig, &cert).unwrap();
-        // A different payload is rejected (the signature is bound to the bytes).
         assert!(verify_detached_signature(b"other bytes", &sig, &cert).is_err());
-        // A different cert is rejected (the roster must name the right signer).
         let other = test_utils::mock_pgp_cert();
         assert!(verify_detached_signature(payload, &sig, &other).is_err());
     }

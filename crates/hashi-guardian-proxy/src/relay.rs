@@ -128,7 +128,6 @@ impl Relay {
 /// Authenticate a submission: the signer's cert must be in the KP roster and
 /// its detached signature must cover these exact (session, share) bytes. A DoS
 /// guard only — the enclave still verifies every share against the commitments.
-/// Cheap checks run first.
 fn verify_kp_submission(
     expected_session_id: &str,
     signer_cert: &str,
@@ -209,9 +208,8 @@ impl GuardianRelayService for Relay {
         let id = share_id(&share)
             .ok_or_else(|| Status::invalid_argument("encrypted_share is missing its share id"))?;
 
-        // Authenticate before the lock or any backend read: a stranger can't
-        // slip a bad share into the batch, serialize real KPs behind the
-        // accumulator mutex, or turn junk requests into enclave round-trips.
+        // Authenticate before the lock or any backend read: junk submissions
+        // can't poison the batch, hold the mutex, or cost enclave round-trips.
         verify_kp_submission(
             &req.expected_session_id,
             &req.signer_cert,
@@ -353,31 +351,26 @@ mod tests {
         // A rostered signer with a valid signature over the exact submission passes.
         verify_kp_submission(session, &cert_armored, &good_sig, &pb_share, &roster).unwrap();
 
-        // A roster entry parsed from config text (bare lowercase hex) names
-        // the same key as the cert-derived fingerprint.
+        // A roster entry parsed from config text (lowercase bare hex) matches too.
         let from_config: Fingerprint = cert.fingerprint().to_hex().to_lowercase().parse().unwrap();
         verify_kp_submission(session, &cert_armored, &good_sig, &pb_share, &[from_config]).unwrap();
 
-        // A signature over one share doesn't authenticate a different share.
         let (_, other_share) = signed_share(2);
         assert!(
             verify_kp_submission(session, &cert_armored, &good_sig, &other_share, &roster).is_err(),
             "signature bound to another share must be rejected"
         );
 
-        // A signer not in the roster is rejected before any signature work.
         assert!(
             verify_kp_submission(session, &cert_armored, &good_sig, &pb_share, &[]).is_err(),
             "non-rostered signer must be rejected"
         );
 
-        // Missing signature is rejected.
         assert!(
             verify_kp_submission(session, &cert_armored, "", &pb_share, &roster).is_err(),
             "missing signature must be rejected"
         );
 
-        // A signature made for a different session doesn't verify against this one.
         let other_bytes = relay_submission_signed_bytes("other-session", &domain_share);
         let stale_sig = sign_detached_in_process(&secret_armored, &other_bytes);
         assert!(
