@@ -177,6 +177,9 @@ impl types::SendMessagesRequest {
             types::Messages::NonceGenerationAvid(avid) => {
                 Messages::AvidNonceMessage(avid_nonce_message_to_proto(avid))
             }
+            types::Messages::AvidNonceRetrieval(_) => {
+                unreachable!("retrieval messages are response-only")
+            }
         };
         proto::SendMessagesRequest {
             epoch: Some(epoch),
@@ -322,6 +325,13 @@ impl From<&types::RetrieveMessagesResponse> for proto::RetrieveMessagesResponse 
             types::Messages::NonceGenerationAvid(_) => {
                 unreachable!("AVID nonce generation send message in a RetrieveMessagesResponse")
             }
+            types::Messages::AvidNonceRetrieval(retrieval) => {
+                Messages::AvidNonceRetrievalMessage(proto::AvidNonceRetrievalMessage {
+                    common: retrieval.common.as_ref().map(serialize_bcs),
+                    echo: retrieval.echo.as_ref().map(serialize_bcs),
+                    avid_vote: retrieval.avid_vote.as_ref().map(serialize_bcs),
+                })
+            }
         };
         Self {
             messages: Some(messages),
@@ -353,11 +363,24 @@ impl TryFrom<&proto::RetrieveMessagesResponse> for types::RetrieveMessagesRespon
                     message,
                 })
             }
-            Some(Messages::AvidNonceRetrievalMessage(_)) => {
-                return Err(TryFromProtoError::invalid(
-                    "messages",
-                    "AVID nonce-generation retrieval is not yet supported",
-                ));
+            Some(Messages::AvidNonceRetrievalMessage(retrieval)) => {
+                types::Messages::AvidNonceRetrieval(types::AvidNonceRetrievalMessage {
+                    common: retrieval
+                        .common
+                        .as_ref()
+                        .map(|b| deserialize_bcs(b, "avid_nonce_retrieval_message.common"))
+                        .transpose()?,
+                    echo: retrieval
+                        .echo
+                        .as_ref()
+                        .map(|b| deserialize_bcs(b, "avid_nonce_retrieval_message.echo"))
+                        .transpose()?,
+                    avid_vote: retrieval
+                        .avid_vote
+                        .as_ref()
+                        .map(|b| deserialize_bcs(b, "avid_nonce_retrieval_message.avid_vote"))
+                        .transpose()?,
+                })
             }
             None => {
                 return Err(TryFromProtoError::missing("messages"));
