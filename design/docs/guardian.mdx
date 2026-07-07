@@ -18,8 +18,10 @@ The guardian integration has four distinct flows:
   guardian BTC public key plus encrypted KP shares.
 - **Withdraw-mode provisioning** arms a standby withdrawal guardian while the
   current active guardian is still alive. The operator installs a stable
-  `InitConfig`; KPs compare `config_hash` against their local pin and submit
-  threshold encrypted shares through the public relay.
+  `InitConfig`; each KP independently recomputes `config_hash` from its locally
+  configured limiter config, PCR allowlist, and network plus the onchain master
+  key, requires it to match the enclave's, and submits threshold encrypted shares
+  through the public relay.
 - **Activation** is the operator-triggered takeover step. The standby enclave
   confirms a quiet window, derives live state from S3, checks the operator's
   expected state hash, records activation, and only then serves withdrawals.
@@ -48,7 +50,7 @@ The main components are:
 - **Onchain Hashi state**: the source of committee, config, withdrawal, and MPC
   key state used by nodes and initialization tooling.
 
-## Ceremony Mode Flow
+## Ceremony mode flow
 
 ```mermaid
 sequenceDiagram
@@ -70,7 +72,7 @@ sequenceDiagram
     KPs->>KPs: Decrypt share and verify attestation, recipients, commitment
 ```
 
-## Withdraw-Mode Provisioning Flow
+## Withdraw-mode provisioning flow
 
 ```mermaid
 sequenceDiagram
@@ -113,10 +115,12 @@ sequenceDiagram
 
 First deploy also has a genesis bootstrap path not shown above: if the operator
 finds no `committee-update/` or `genesis/` record in S3, it reads the current
-committee from onchain state and calls `write_genesis_untrusted` after
-`OperatorInit` to seed `genesis/`. Later deploys skip this step.
+committee from onchain state and calls the guardian's `OperatorWriteGenesis` RPC
+after `OperatorInit`. The enclave logs the operator-supplied committee to
+`genesis/` as-is; it is operator-trusted and used on first deploy only. Later
+deploys skip this step.
 
-## Standby Activation Flow
+## Standby activation flow
 
 ```mermaid
 sequenceDiagram
@@ -141,7 +145,7 @@ sequenceDiagram
     Guardian->>Guardian: Install derived state and mark active
 ```
 
-## Normal Operation Flow
+## Normal operation flow
 
 ```mermaid
 sequenceDiagram
