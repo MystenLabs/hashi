@@ -130,6 +130,11 @@ services:
       GUARDIAN_BACKEND_URL: http://host:3000
       PROXY_LISTEN_ADDR: 0.0.0.0:3000
       RUST_LOG: ${RUST_LOG:-info}
+    # AUTHORIZED_KP_FINGERPRINTS, written by `make ceremony` once the KP keys
+    # exist. Absent before that: the relay fail-closes until the roster lands.
+    env_file:
+      - path: kp-roster.env
+        required: false
     depends_on:
       enclave:
         condition: service_healthy

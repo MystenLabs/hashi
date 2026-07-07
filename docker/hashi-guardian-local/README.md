@@ -54,6 +54,11 @@ make smoke         # confirm the guardian is fully initialized
 make down          # tear everything down
 ```
 
+`make ceremony` also writes the KP fingerprints to `kp-roster.env` and restarts
+the proxy with them (`AUTHORIZED_KP_FINGERPRINTS`) — the relay rejects share
+submissions from unrostered signers, mirroring the deploy, where the ceremony
+roster reaches the proxy as deploy-time config.
+
 Once provisioned, the deposit/withdraw CLI flows work against the local network,
 co-signed by the containerized guardian.
 

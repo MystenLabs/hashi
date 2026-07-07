@@ -502,6 +502,29 @@ impl WithdrawModeConfig {
     }
 }
 
+/// Domain tag mixed into the bytes a KP signs to authenticate a relay
+/// submission. Bump the version if the signed layout ever changes.
+const RELAY_SUBMISSION_DOMAIN: &str = "hashi-kp-relay-submission-v1";
+
+#[derive(Serialize)]
+struct RelaySubmissionAuthPayload<'a> {
+    domain: &'static str,
+    session_id: &'a str,
+    share: &'a GuardianEncryptedShare,
+}
+
+/// The exact bytes a key provisioner detached-signs (and the relay verifies).
+/// Binds the guardian session and the encrypted share, so a captured signature
+/// can't be replayed against a different share or session.
+pub fn relay_submission_signed_bytes(session_id: &str, share: &GuardianEncryptedShare) -> Vec<u8> {
+    bcs::to_bytes(&RelaySubmissionAuthPayload {
+        domain: RELAY_SUBMISSION_DOMAIN,
+        session_id,
+        share,
+    })
+    .expect("BCS serialization of a relay submission payload is infallible")
+}
+
 impl ProvisionerInitRequest {
     pub fn new(encrypted_shares: Vec<GuardianEncryptedShare>) -> Self {
         Self { encrypted_shares }

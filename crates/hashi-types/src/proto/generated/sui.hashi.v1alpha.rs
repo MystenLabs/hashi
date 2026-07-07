@@ -1368,6 +1368,16 @@ pub struct SingleProvisionerInitRequest {
     /// backend session differs — the share would be encrypted to a dead session.
     #[prost(string, tag = "2")]
     pub expected_session_id: ::prost::alloc::string::String,
+    /// Armored OpenPGP certificate of the submitting key provisioner. The relay
+    /// checks its fingerprint against its operator-configured KP roster before
+    /// doing any other work.
+    #[prost(string, tag = "3")]
+    pub signer_cert: ::prost::alloc::string::String,
+    /// Detached armored OpenPGP signature by the KP's offline key (e.g. a
+    /// yubikey) over the domain-tagged (session id + encrypted share) bytes —
+    /// proves a rostered KP made this exact submission.
+    #[prost(string, tag = "4")]
+    pub kp_signature: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SingleProvisionerInitResponse {

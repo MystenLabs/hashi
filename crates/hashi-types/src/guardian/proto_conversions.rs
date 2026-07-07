@@ -80,7 +80,7 @@ fn pb_to_kp_encrypted_share(pb: pb::KpEncryptedShare) -> GuardianResult<KPEncryp
     })
 }
 
-fn pb_to_guardian_encrypted_share(
+pub fn pb_to_guardian_encrypted_share(
     pb: pb::GuardianEncryptedShare,
 ) -> GuardianResult<GuardianEncryptedShare> {
     Ok(GuardianEncryptedShare {

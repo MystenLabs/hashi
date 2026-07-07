@@ -26,6 +26,16 @@ message SingleProvisionerInitRequest {
   // before building the share. The relay rejects the submission if its live
   // backend session differs — the share would be encrypted to a dead session.
   string expected_session_id = 2;
+
+  // Armored OpenPGP certificate of the submitting key provisioner. The relay
+  // checks its fingerprint against its operator-configured KP roster before
+  // doing any other work.
+  string signer_cert = 3;
+
+  // Detached armored OpenPGP signature by the KP's offline key (e.g. a
+  // yubikey) over the domain-tagged (session id + encrypted share) bytes —
+  // proves a rostered KP made this exact submission.
+  string kp_signature = 4;
 }
 
 message SingleProvisionerInitResponse {

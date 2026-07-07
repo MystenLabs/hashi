@@ -8,6 +8,8 @@ use sequoia_openpgp::crypto::SessionKey;
 use sequoia_openpgp::parse::Parse;
 use sequoia_openpgp::parse::stream::DecryptionHelper;
 use sequoia_openpgp::parse::stream::DecryptorBuilder;
+use sequoia_openpgp::parse::stream::DetachedVerifierBuilder;
+use sequoia_openpgp::parse::stream::MessageLayer;
 use sequoia_openpgp::parse::stream::MessageStructure;
 use sequoia_openpgp::parse::stream::VerificationHelper;
 use sequoia_openpgp::policy::StandardPolicy;
@@ -43,9 +45,9 @@ pub struct PgpPublicCert {
     cert: openpgp::Cert,
 }
 
-/// A PGP certificate's primary fingerprint (uppercase hex). A cert's stable
-/// identity; in the guardian/roster context it's aliased as `KPFingerprint`.
-pub type Fingerprint = String;
+/// A PGP certificate's primary fingerprint — sequoia's canonical type;
+/// `to_hex()` is the bare uppercase form persisted as `KPFingerprint`.
+pub use sequoia_openpgp::Fingerprint;
 
 impl PgpPublicCert {
     pub fn new(armored: String) -> Result<Self> {
@@ -59,10 +61,8 @@ impl PgpPublicCert {
         &self.armored
     }
 
-    /// The cert's primary fingerprint, as uppercase hex with spaces (the same
-    /// form `gpg --fingerprint` prints and `Cert::fingerprint`'s Display).
     pub fn fingerprint(&self) -> Fingerprint {
-        self.cert.fingerprint().to_string()
+        self.cert.fingerprint()
     }
 }
 
@@ -339,6 +339,86 @@ pub fn decrypt_armored_via_gpg(armored: &str, homedir: Option<&Path>) -> Result<
     Ok(plaintext)
 }
 
+/// Produce an armored detached OpenPGP signature over `payload` with the local
+/// gpg key selected by `signer_fingerprint` (`gpg --local-user`) — in
+/// production the KP's offline key (e.g. a yubikey).
+pub fn sign_detached_via_gpg(
+    payload: &[u8],
+    signer_fingerprint: &Fingerprint,
+    homedir: Option<&Path>,
+) -> Result<String> {
+    let mut command = Command::new("gpg");
+    command
+        .arg("--local-user")
+        .arg(signer_fingerprint.to_hex())
+        .arg("--armor")
+        .arg("--detach-sign");
+    if let Some(homedir) = homedir {
+        command.env("GNUPGHOME", homedir);
+    }
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::inherit());
+    let mut child = command
+        .spawn()
+        .context("Failed to run `gpg --detach-sign`; is gpg installed and on PATH?")?;
+    // Dropping the `ChildStdin` below signals EOF, making gpg emit the signature.
+    let write_result = match child.stdin.take() {
+        Some(mut stdin) => stdin.write_all(payload),
+        None => Err(io::Error::other("failed to open gpg stdin")),
+    };
+    // Reap gpg even if the write failed (EPIPE = gpg died early); its exit
+    // status is the more useful error, so check it first.
+    let output = child
+        .wait_with_output()
+        .context("wait for `gpg --detach-sign`")?;
+    if !output.status.success() {
+        anyhow::bail!("`gpg --detach-sign` exited with status {}", output.status);
+    }
+    write_result.context("write payload to gpg stdin")?;
+    String::from_utf8(output.stdout).context("gpg produced a non-UTF8 armored signature")
+}
+
+/// A `VerificationHelper` that accepts exactly one signer cert.
+struct DetachedSigVerifier<'a> {
+    cert: &'a openpgp::Cert,
+}
+
+impl VerificationHelper for DetachedSigVerifier<'_> {
+    fn get_certs(&mut self, _ids: &[openpgp::KeyHandle]) -> openpgp::Result<Vec<openpgp::Cert>> {
+        Ok(vec![self.cert.clone()])
+    }
+
+    fn check(&mut self, structure: MessageStructure) -> openpgp::Result<()> {
+        for layer in structure.into_iter() {
+            if let MessageLayer::SignatureGroup { results } = layer
+                && results.iter().any(|r| r.is_ok())
+            {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("no valid signature from the expected signer cert")
+    }
+}
+
+/// Verify an armored detached OpenPGP `signature` over `payload` was produced
+/// by `cert`. Pure Rust (no gpg subprocess), so it runs inside the distroless
+/// proxy image.
+pub fn verify_detached_signature(
+    payload: &[u8],
+    signature: &str,
+    cert: &PgpPublicCert,
+) -> Result<()> {
+    let helper = DetachedSigVerifier { cert: &cert.cert };
+    let mut verifier = DetachedVerifierBuilder::from_bytes(signature.as_bytes())
+        .context("parse detached signature")?
+        .with_policy(&*POLICY, None, helper)
+        .context("initialize detached verifier")?;
+    verifier
+        .verify_bytes(payload)
+        .context("detached signature verification failed")
+}
+
 struct GpgDecryptReader {
     child: Child,
     stdout: ChildStdout,
@@ -582,6 +662,45 @@ pub mod test_utils {
     pub fn mock_pgp_certs(n: usize) -> Vec<PgpPublicCert> {
         (0..n).map(|_| mock_pgp_cert()).collect()
     }
+
+    /// What `sign_detached_via_gpg` produces, minus the gpg keyring.
+    pub fn sign_detached_in_process(secret_armored: &str, payload: &[u8]) -> String {
+        use openpgp::parse::Parse;
+        use openpgp::policy::StandardPolicy;
+        use openpgp::serialize::stream::Armorer;
+        use openpgp::serialize::stream::Message;
+        use openpgp::serialize::stream::Signer;
+        use std::io::Write;
+
+        let policy = StandardPolicy::new();
+        let cert = openpgp::Cert::from_bytes(secret_armored.as_bytes()).unwrap();
+        let keypair = cert
+            .keys()
+            .secret()
+            .with_policy(&policy, None)
+            .for_signing()
+            .next()
+            .unwrap()
+            .key()
+            .clone()
+            .into_keypair()
+            .unwrap();
+
+        let mut sig = Vec::new();
+        let message = Message::new(&mut sig);
+        let message = Armorer::new(message)
+            .kind(openpgp::armor::Kind::Signature)
+            .build()
+            .unwrap();
+        let mut signer = Signer::new(message, keypair)
+            .unwrap()
+            .detached()
+            .build()
+            .unwrap();
+        signer.write_all(payload).unwrap();
+        signer.finalize().unwrap();
+        String::from_utf8(sig).unwrap()
+    }
 }
 
 #[cfg(test)]
@@ -742,5 +861,35 @@ mod tests {
 
         let decrypted = decrypt_armored_via_gpg(&ciphertext, Some(homedir.path())).unwrap();
         assert_eq!(plaintext, decrypted.as_slice());
+    }
+
+    #[test]
+    fn verify_detached_signature_accepts_good_rejects_tampered_and_wrong_cert() {
+        let (public, secret) = test_utils::mock_pgp_keypair();
+        let cert = PgpPublicCert::new(public).unwrap();
+        let payload = b"relay submission bytes";
+        let sig = test_utils::sign_detached_in_process(&secret, payload);
+
+        verify_detached_signature(payload, &sig, &cert).unwrap();
+        assert!(verify_detached_signature(b"other bytes", &sig, &cert).is_err());
+        let other = test_utils::mock_pgp_cert();
+        assert!(verify_detached_signature(payload, &sig, &other).is_err());
+    }
+
+    #[test]
+    fn sign_detached_via_gpg_round_trips_through_verify() {
+        let homedir = temp_gnupg_home();
+        let (public, secret) = test_utils::mock_pgp_keypair();
+        let cert = PgpPublicCert::new(public).unwrap();
+        let secret_key_path = homedir.path().join("secret-key.asc");
+        fs::write(&secret_key_path, secret).unwrap();
+        test_utils::gpg_import_key(homedir.path(), &secret_key_path);
+
+        let payload = b"relay submission bytes";
+        let sig =
+            sign_detached_via_gpg(payload, &cert.fingerprint(), Some(homedir.path())).unwrap();
+
+        verify_detached_signature(payload, &sig, &cert).unwrap();
+        assert!(verify_detached_signature(b"tampered", &sig, &cert).is_err());
     }
 }

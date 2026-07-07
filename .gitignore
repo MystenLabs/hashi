@@ -1,3 +1,4 @@
 /target
 /out
 .hashi/
+/docker/hashi-guardian-local/kp-roster.env

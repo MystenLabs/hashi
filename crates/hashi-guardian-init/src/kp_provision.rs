@@ -44,8 +44,11 @@ use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::WithdrawModeState;
 use hashi_types::guardian::proto_conversions::guardian_encrypted_share_to_pb;
+use hashi_types::guardian::relay_submission_signed_bytes;
+use hashi_types::pgp::Fingerprint;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::load_certs;
+use hashi_types::pgp::sign_detached_via_gpg;
 use hashi_types::proto as pb;
 use hpke::Deserializable;
 use rand::thread_rng;
@@ -386,10 +389,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     // Find this KP's share by exact fingerprint match. Given the roster checks
     // above, this should always succeed; keep the error for defensive clarity.
+    let want_fp_hex = want_fp.to_hex();
     let kp_encrypted_share = state
         .encrypted_shares
         .iter()
-        .find(|s| s.recipient_fingerprint == want_fp)
+        .find(|s| s.recipient_fingerprint == want_fp_hex)
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "no share in the shares/ log is labeled for this KP's fingerprint \
@@ -481,6 +485,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         &session_id,
         guardian_info,
         encrypted_share,
+        kp_cert.armored(),
+        &want_fp,
         allowlist.current_build(),
     )
     .await?;
@@ -497,6 +503,8 @@ async fn submit_provisioner_init_to_relay(
     expected_session_id: &str,
     expected_guardian_info: GuardianInfo,
     encrypted_share: GuardianEncryptedShare,
+    signer_cert_armored: &str,
+    signer_fingerprint: &Fingerprint,
     current_build: &BuildPcrs,
 ) -> anyhow::Result<()> {
     info!(
@@ -537,10 +545,19 @@ async fn submit_provisioner_init_to_relay(
     )
     .await
     .with_context(|| format!("failed to connect to relay endpoint {endpoint}"))?;
+
+    // Detached-sign the exact (session, share) bytes with this KP's offline
+    // key; the relay only buffers submissions signed by a rostered cert.
+    let signed_bytes = relay_submission_signed_bytes(expected_session_id, &encrypted_share);
+    let kp_signature = sign_detached_via_gpg(&signed_bytes, signer_fingerprint, None)
+        .context("sign the relay submission with the KP key")?;
+
     let resp = relay_client
         .single_provisioner_init(pb::SingleProvisionerInitRequest {
             encrypted_share: Some(guardian_encrypted_share_to_pb(encrypted_share)),
             expected_session_id: expected_session_id.to_string(),
+            signer_cert: signer_cert_armored.to_string(),
+            kp_signature,
         })
         .await
         .with_context(|| "SingleProvisionerInit RPC failed")?

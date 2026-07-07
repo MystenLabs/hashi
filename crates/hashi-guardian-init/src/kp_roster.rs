@@ -209,8 +209,10 @@ impl VerifiedCeremonyState {
     /// Identity is by fingerprint, not positional index — a share is matched to
     /// its cert by `recipient_fingerprint`, independent of ordering.
     pub fn verify_encrypted_share_recipients(&self, certs: &[PgpPublicCert]) -> Result<()> {
-        let by_fingerprint: std::collections::HashMap<KPFingerprint, &PgpPublicCert> =
-            certs.iter().map(|c| (c.fingerprint(), c)).collect();
+        let by_fingerprint: std::collections::HashMap<KPFingerprint, &PgpPublicCert> = certs
+            .iter()
+            .map(|c| (c.fingerprint().to_hex(), c))
+            .collect();
         anyhow::ensure!(
             by_fingerprint.len() == certs.len(),
             "duplicate fingerprints among the supplied KP certs"
@@ -399,7 +401,7 @@ mod tests {
     fn encrypted_share(id: u16, cert: &PgpPublicCert) -> KPEncryptedShare {
         KPEncryptedShare {
             id: NonZeroU16::new(id).unwrap(),
-            recipient_fingerprint: cert.fingerprint(),
+            recipient_fingerprint: cert.fingerprint().to_hex(),
             armored_ciphertext: encrypt_armored(&[id as u8; 32], cert).unwrap(),
         }
     }
