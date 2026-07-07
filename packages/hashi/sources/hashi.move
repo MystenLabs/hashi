@@ -109,10 +109,14 @@ public(package) fun assert_not_reconfiguring(self: &Hashi) {
 // and every withdrawal signature, so a deploy without them would produce
 // a non-functional bridge.
 //
-// The package's `UpgradeCap` stays with the publisher; handing it in later
-// via `register_upgrade_cap` is the launch switch that unlocks genesis.
+// The `UpgradeCap` is taken by reference purely as proof of publisher
+// authority: the Hashi object is shared, so without it anyone could call
+// this first and set the write-once guardian key / URL / chain id. Custody
+// stays with the publisher; handing the cap in later via
+// `register_upgrade_cap` is the launch switch that unlocks genesis.
 entry fun finish_publish(
     self: &mut Hashi,
+    upgrade_cap: &sui::package::UpgradeCap,
     bitcoin_chain_id: address,
     guardian_url: String,
     guardian_btc_public_key: vector<u8>,
@@ -122,6 +126,10 @@ entry fun finish_publish(
     ctx: &mut TxContext,
 ) {
     self.versioning.assert_version_enabled();
+
+    let this_package_id = std::type_name::original_id<Hashi>().to_id();
+    // Ensure that the provided cap is for this package
+    assert!(upgrade_cap.package() == this_package_id, EWrongUpgradeCap);
 
     hashi::btc_config::set_bitcoin_chain_id(self.config_mut(), bitcoin_chain_id);
 

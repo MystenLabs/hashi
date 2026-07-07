@@ -231,6 +231,9 @@ pub async fn publish_and_init(
             .as_shared()
             .with_mutable(true),
     );
+    // Passed by reference on the Move side: proof of publisher authority,
+    // custody stays with the sender.
+    let upgrade_cap_arg = builder.object(ObjectInput::new(upgrade_cap_id).as_owned());
     let bitcoin_chain_id_arg = builder.pure(&bitcoin_chain_id_addr);
     let guardian_url_arg = builder.pure(&guardian.url.as_str());
     let guardian_btc_public_key_arg = builder.pure(&guardian.btc_public_key.as_slice());
@@ -250,6 +253,7 @@ pub async fn publish_and_init(
         ),
         vec![
             hashi_arg,
+            upgrade_cap_arg,
             bitcoin_chain_id_arg,
             guardian_url_arg,
             guardian_btc_public_key_arg,
