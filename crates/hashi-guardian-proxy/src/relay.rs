@@ -209,6 +209,17 @@ impl GuardianRelayService for Relay {
         let id = share_id(&share)
             .ok_or_else(|| Status::invalid_argument("encrypted_share is missing its share id"))?;
 
+        // Authenticate before the lock or any backend read: a stranger can't
+        // slip a bad share into the batch, serialize real KPs behind the
+        // accumulator mutex, or turn junk requests into enclave round-trips.
+        verify_kp_submission(
+            &req.expected_session_id,
+            &req.signer_cert,
+            &req.kp_signature,
+            &share,
+            &self.authorized_kp_fingerprints,
+        )?;
+
         // Hold the accumulator across the status read + batch submit so a racing
         // session change can't wipe a half-filled buffer, and only one runs at a time.
         let mut acc = self.accumulator.lock().await;
@@ -236,16 +247,6 @@ impl GuardianRelayService for Relay {
                 )),
             };
         check_share_id(id, num_shares)?;
-
-        // Authenticate before buffering: only a rostered KP may enqueue a
-        // share, so a stranger can't slip in a bad one and fail the batch.
-        verify_kp_submission(
-            &req.expected_session_id,
-            &req.signer_cert,
-            &req.kp_signature,
-            &share,
-            &self.authorized_kp_fingerprints,
-        )?;
 
         acc.sync_session(&status.session_id);
         if acc.completed {
