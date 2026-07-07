@@ -32,10 +32,9 @@ message SingleProvisionerInitRequest {
   // doing any other work.
   string signer_cert = 3;
 
-  // Detached armored OpenPGP signature, produced by the KP's offline key
-  // (e.g. a yubikey), over the domain-tagged submission bytes
-  // (session id + encrypted share). Authenticates the submitter to the relay
-  // so a non-KP can't enqueue a share and poison the batch.
+  // Detached armored OpenPGP signature by the KP's offline key (e.g. a
+  // yubikey) over the domain-tagged (session id + encrypted share) bytes —
+  // proves a rostered KP made this exact submission.
   string kp_signature = 4;
 }
 

@@ -496,7 +496,6 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 /// `GuardianInfo` against the values we already pinned from S3 before submitting
 /// the share via `SingleProvisionerInit`. The relay collects T-of-N shares and
 /// calls the guardian's batch `provisioner_init` once it has enough.
-#[allow(clippy::too_many_arguments)]
 async fn submit_provisioner_init_to_relay(
     endpoint: &str,
     expected_session_id: &str,
@@ -545,10 +544,8 @@ async fn submit_provisioner_init_to_relay(
     .await
     .with_context(|| format!("failed to connect to relay endpoint {endpoint}"))?;
 
-    // Authenticate this submission with a detached signature over the exact
-    // (session, share) bytes, produced by this KP's offline key (yubikey). The
-    // relay checks it against its configured KP roster before buffering the
-    // share, so a non-KP can't enqueue one and fail the batch.
+    // Detached-sign the exact (session, share) bytes with this KP's offline
+    // key; the relay only buffers submissions signed by a rostered cert.
     let signed_bytes = relay_submission_signed_bytes(expected_session_id, &encrypted_share);
     let kp_signature = sign_detached_via_gpg(&signed_bytes, signer_fingerprint, None)
         .context("sign the relay submission with the KP key")?;

@@ -84,9 +84,8 @@ struct BackendStatus {
 pub struct Relay {
     client: GuardianServiceClient<Channel>,
     accumulator: Arc<Mutex<Accumulator>>,
-    /// Operator-configured fingerprints of the KPs allowed to submit shares
-    /// (the ceremony roster, via deploy config). The relay only accepts a
-    /// submission signed by a cert in this roster; empty rejects everything.
+    /// Fingerprints of the KPs allowed to submit shares (the ceremony roster,
+    /// via deploy config). Empty rejects every submission — fail closed.
     authorized_kp_fingerprints: Vec<Fingerprint>,
 }
 
@@ -127,13 +126,10 @@ impl Relay {
     }
 }
 
-/// Authenticate a relay submission: the signer must present a cert whose
-/// fingerprint is in the relay's configured KP roster and a detached signature
-/// over the exact (session, share) bytes. This is a DoS guard — only a rostered
-/// KP can enqueue a share, so a stranger can't poison the batch; the enclave
-/// still verifies every share against the commitments regardless. Ordered
-/// cheap-first: a signature (expensive) is only checked once the fingerprint is
-/// in the roster. Fingerprints compare normalized (spacing/case-insensitive).
+/// Authenticate a submission: the signer's cert must be in the KP roster and
+/// its detached signature must cover these exact (session, share) bytes. A DoS
+/// guard only — the enclave still verifies every share against the commitments.
+/// Cheap checks run first; fingerprints compare normalized.
 fn verify_kp_submission(
     expected_session_id: &str,
     signer_cert: &str,
@@ -202,8 +198,7 @@ impl GuardianRelayService for Relay {
         &self,
         request: Request<proto::SingleProvisionerInitRequest>,
     ) -> Result<Response<proto::SingleProvisionerInitResponse>, Status> {
-        // Fail closed with a clear signal when no roster is configured (e.g. the
-        // proxy was deployed before the ceremony published the KP set).
+        // No roster configured (proxy deployed before its ceremony): fail closed.
         if self.authorized_kp_fingerprints.is_empty() {
             return Err(Status::failed_precondition(
                 "relay has no authorized KP roster configured; \
@@ -246,9 +241,8 @@ impl GuardianRelayService for Relay {
             };
         check_share_id(id, num_shares)?;
 
-        // Authenticate the submitter before buffering anything: only a rostered
-        // KP (proven by a signature over this exact session + share) may enqueue
-        // a share, so a stranger can't slip in a bad one and fail the batch.
+        // Authenticate before buffering: only a rostered KP may enqueue a
+        // share, so a stranger can't slip in a bad one and fail the batch.
         verify_kp_submission(
             &req.expected_session_id,
             &req.signer_cert,
@@ -362,13 +356,19 @@ mod tests {
         // A rostered signer with a valid signature over the exact submission passes.
         verify_kp_submission(session, &cert_armored, &good_sig, &pb_share, &roster).unwrap();
 
-        // Roster entries compare normalized: the bare lowercase hex form of the
-        // same fingerprint (as deploy config might carry it) also matches.
+        // Roster entries compare normalized: bare lowercase hex matches too.
         let bare = roster[0]
             .split_whitespace()
             .collect::<String>()
             .to_lowercase();
         verify_kp_submission(session, &cert_armored, &good_sig, &pb_share, &[bare]).unwrap();
+
+        // A signature over one share doesn't authenticate a different share.
+        let (_, other_share) = signed_share(2);
+        assert!(
+            verify_kp_submission(session, &cert_armored, &good_sig, &other_share, &roster).is_err(),
+            "signature bound to another share must be rejected"
+        );
 
         // A signer not in the roster is rejected before any signature work.
         assert!(

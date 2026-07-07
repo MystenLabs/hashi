@@ -505,10 +505,9 @@ struct RelaySubmissionAuthPayload<'a> {
     share: &'a GuardianEncryptedShare,
 }
 
-/// The exact bytes a key provisioner detached-signs (and the relay verifies) to
-/// prove a relay submission came from a rostered KP. Binds the guardian session
-/// and the encrypted share, so a captured signature can't be replayed against a
-/// different share or session.
+/// The exact bytes a key provisioner detached-signs (and the relay verifies).
+/// Binds the guardian session and the encrypted share, so a captured signature
+/// can't be replayed against a different share or session.
 pub fn relay_submission_signed_bytes(session_id: &str, share: &GuardianEncryptedShare) -> Vec<u8> {
     bcs::to_bytes(&RelaySubmissionAuthPayload {
         domain: RELAY_SUBMISSION_DOMAIN,

@@ -1373,10 +1373,9 @@ pub struct SingleProvisionerInitRequest {
     /// doing any other work.
     #[prost(string, tag = "3")]
     pub signer_cert: ::prost::alloc::string::String,
-    /// Detached armored OpenPGP signature, produced by the KP's offline key
-    /// (e.g. a yubikey), over the domain-tagged submission bytes
-    /// (session id + encrypted share). Authenticates the submitter to the relay
-    /// so a non-KP can't enqueue a share and poison the batch.
+    /// Detached armored OpenPGP signature by the KP's offline key (e.g. a
+    /// yubikey) over the domain-tagged (session id + encrypted share) bytes —
+    /// proves a rostered KP made this exact submission.
     #[prost(string, tag = "4")]
     pub kp_signature: ::prost::alloc::string::String,
 }

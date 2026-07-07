@@ -26,11 +26,9 @@ pub struct Config {
     /// HTTP/2 keepalive ping interval to the backend
     /// (`GUARDIAN_KEEPALIVE_SECS`, default 5).
     pub keepalive_interval: Duration,
-    /// PGP fingerprints of the KPs authorized to submit provisioning shares
-    /// through the relay (`AUTHORIZED_KP_FINGERPRINTS`, comma-separated,
-    /// spacing/case-insensitive). Sourced from the ceremony roster at deploy
-    /// time. Empty (the default) fail-closes the relay — submissions are
-    /// rejected; the cache/forwarding paths are unaffected.
+    /// PGP fingerprints of the KPs allowed to submit shares through the relay
+    /// (`AUTHORIZED_KP_FINGERPRINTS`, comma-separated, default empty). Empty
+    /// fail-closes the relay; the cache/forwarding paths are unaffected.
     pub authorized_kp_fingerprints: Vec<Fingerprint>,
 }
 
@@ -57,9 +55,8 @@ impl Config {
     }
 }
 
-/// Parse the comma-separated KP fingerprint roster: normalize each entry
-/// (whitespace/case) and require plausible fingerprint hex, so a config typo
-/// fails at startup instead of as per-submission permission errors.
+/// Parse the comma-separated KP roster: normalize each entry and require
+/// fingerprint-shaped hex, so a config typo fails at startup.
 fn parse_kp_roster(raw: &str) -> Result<Vec<Fingerprint>> {
     let mut roster = Vec::new();
     for entry in raw.split(',') {
@@ -94,8 +91,7 @@ mod tests {
 
     #[test]
     fn parse_kp_roster_normalizes_entries() {
-        // The spaced `gpg --fingerprint` form and bare lowercase hex both
-        // normalize; a trailing comma is tolerated.
+        // Spaced gpg form + bare lowercase hex, with a trailing comma.
         let raw = "AAAA BBBB CCCC DDDD EEEE 1111 2222 3333 4444 5555,\
                    aaaabbbbccccddddeeee1111222233334444ffff,";
         let roster = parse_kp_roster(raw).unwrap();

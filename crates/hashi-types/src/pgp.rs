@@ -49,9 +49,8 @@ pub struct PgpPublicCert {
 /// identity; in the guardian/roster context it's aliased as `KPFingerprint`.
 pub type Fingerprint = String;
 
-/// Normalize a fingerprint for comparison: strip whitespace and uppercase.
-/// Accepts the spaced form `gpg --fingerprint` prints (and [`PgpPublicCert::
-/// fingerprint`] returns) as well as bare hex from config.
+/// Normalize a fingerprint for comparison (strip whitespace, uppercase), so
+/// the spaced `gpg --fingerprint` form and bare config hex compare equal.
 pub fn normalize_fingerprint(s: &str) -> Fingerprint {
     s.chars()
         .filter(|c| !c.is_whitespace())
@@ -352,17 +351,14 @@ pub fn decrypt_armored_via_gpg(armored: &str, homedir: Option<&Path>) -> Result<
 }
 
 /// Produce an armored detached OpenPGP signature over `payload` with the local
-/// gpg key selected by `signer_fingerprint` (`gpg --local-user`). In production
-/// this drives the KP's offline key (e.g. a yubikey); locally it picks the right
-/// key out of a shared keyring. `payload` is small and bounded, so it is written
-/// to gpg's stdin in one shot before the signature is read back.
+/// gpg key selected by `signer_fingerprint` (`gpg --local-user`) — in
+/// production the KP's offline key (e.g. a yubikey).
 pub fn sign_detached_via_gpg(
     payload: &[u8],
     signer_fingerprint: &str,
     homedir: Option<&Path>,
 ) -> Result<String> {
-    // gpg takes a fingerprint with or without spaces; strip them so the grouped
-    // `Cert::fingerprint()` form is always accepted by `--local-user`.
+    // Strip spaces so the grouped `Cert::fingerprint()` form works as --local-user.
     let key_id: String = signer_fingerprint.split_whitespace().collect();
     let mut command = Command::new("gpg");
     command
@@ -385,8 +381,7 @@ pub fn sign_detached_via_gpg(
         .ok_or_else(|| anyhow::anyhow!("Failed to open gpg stdin"))?
         .write_all(payload)
         .context("write payload to gpg stdin")?;
-    // The `ChildStdin` above is dropped at the end of that statement, signalling
-    // EOF so gpg emits the signature; read it off stdout.
+    // Dropping the `ChildStdin` above signals EOF, making gpg emit the signature.
     let output = child
         .wait_with_output()
         .context("wait for `gpg --detach-sign`")?;
@@ -418,10 +413,9 @@ impl VerificationHelper for DetachedSigVerifier<'_> {
     }
 }
 
-/// Verify an armored detached OpenPGP `signature` over `payload` was produced by
-/// `cert`. Pure Rust (no gpg subprocess), so it runs inside the distroless proxy
-/// image. Returns `Ok(())` iff the cert made a good signature over exactly these
-/// bytes.
+/// Verify an armored detached OpenPGP `signature` over `payload` was produced
+/// by `cert`. Pure Rust (no gpg subprocess), so it runs inside the distroless
+/// proxy image.
 pub fn verify_detached_signature(
     payload: &[u8],
     signature: &str,
