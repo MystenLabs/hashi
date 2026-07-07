@@ -365,19 +365,21 @@ pub fn sign_detached_via_gpg(
     let mut child = command
         .spawn()
         .context("Failed to run `gpg --detach-sign`; is gpg installed and on PATH?")?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("Failed to open gpg stdin"))?
-        .write_all(payload)
-        .context("write payload to gpg stdin")?;
-    // Dropping the `ChildStdin` above signals EOF, making gpg emit the signature.
+    // Dropping the `ChildStdin` below signals EOF, making gpg emit the signature.
+    let write_result = match child.stdin.take() {
+        Some(mut stdin) => stdin.write_all(payload),
+        None => Err(io::Error::other("failed to open gpg stdin")),
+    };
+    // Reap gpg even if the write failed (EPIPE means gpg died early), so the
+    // child can't linger as a zombie; the exit status is the better diagnostic,
+    // so check it before surfacing the write error.
     let output = child
         .wait_with_output()
         .context("wait for `gpg --detach-sign`")?;
     if !output.status.success() {
         anyhow::bail!("`gpg --detach-sign` exited with status {}", output.status);
     }
+    write_result.context("write payload to gpg stdin")?;
     String::from_utf8(output.stdout).context("gpg produced a non-UTF8 armored signature")
 }
 
