@@ -14,6 +14,7 @@ cargo run -p hashi-guardian-init -- operator ceremony --config guardian-init.sam
 cargo run -p hashi-guardian-init -- key-provisioner ceremony --config guardian-init.sample.yaml
 cargo run -p hashi-guardian-init -- operator provision --config guardian-init.sample.yaml
 cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-init.sample.yaml
+cargo run -p hashi-guardian-init -- operator activate --config guardian-init.sample.yaml
 ```
 
 Each KP generates a PGP key on a yubikey and exports the public cert to the
@@ -154,6 +155,35 @@ See [`guardian-init.sample.yaml`](guardian-init.sample.yaml) for the unified
 config. This command uses `kp_pgp_cert_path`, `relay_endpoint`, `hashi`,
 `kp_roster`, and `limiter_config`. The MPC committee verifying key `G` is fetched
 from on-chain Hashi state.
+
+## operator activate
+
+Activates a provisioner-initialized **withdraw-mode** standby guardian.
+
+It:
+
+1. Fetches and verifies the live standby `GuardianInfo` against the configured
+   current build, and confirms `provisioner_init` has completed but activation
+   has not.
+2. Verifies the standby's S3 `init/` identity/config still matches the live
+   guardian.
+3. Checks that all other guardian sessions in the configured S3 bucket have
+   been quiet long enough.
+4. Reads the latest `ceremony/` instance and requires it to match the armed
+   standby instance.
+5. Reads the latest `committee-update/` or `genesis/` record, recovers the
+   limiter state from successful withdrawal logs, computes the expected
+   `ActivationState` hash, and calls `OperatorActivate`.
+6. Verifies the guardian reports the expected active committee epoch and limiter
+   state.
+
+```bash
+cargo run -p hashi-guardian-init -- operator activate --config guardian-init.sample.yaml
+```
+
+Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
+command uses `guardian_endpoint`, `guardian_s3`, `bitcoin_network`, `hashi`,
+`kp_roster`, and `limiter_config`.
 
 ## tools
 

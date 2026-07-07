@@ -17,8 +17,8 @@ help: ## Show this help
 	@echo "  1. make up          # MinIO + withdraw guardian + proxy"
 	@echo "  2. make ceremony    # generate KP keys + run the ceremony -> BTC pubkey"
 	@echo "  3. make localnet-cmd  # prints the 'hashi-localnet start ...' to run natively"
-	@echo "  4. make provision   # operator provision + KP provision via the relay"
-	@echo "  5. make smoke       # GetGuardianInfo through the proxy"
+	@echo "  4. make provision   # operator provision + KP provision + activation"
+	@echo "  5. make smoke       # GetGuardianInfo for the activated guardian"
 
 up: ## Build + start MinIO, host, withdraw enclave, proxy (no chain needed)
 	$(COMPOSE) up -d --build minio bucket-init host enclave proxy
@@ -47,7 +47,7 @@ localnet-cmd: ## Print the `hashi-localnet start` command wired to this guardian
 	echo "    --guardian-url http://localhost:3000 \\"; \
 	echo "    --guardian-btc-pubkey $$pubkey"
 
-provision: ## operator provision + KP provision (needs the native localnet running)
+provision: ## operator provision + KP provision + activation (needs the native localnet running)
 	@test -f "$(STATE)" || { echo "No localnet state at $(STATE). Run 'make localnet-cmd' and start it first."; exit 1; }
 	@sui_rpc=$$(jq -r .sui_rpc_url "$(STATE)" | sed 's#127.0.0.1#host.docker.internal#; s#localhost#host.docker.internal#'); \
 	pkg=$$(jq -r .package_id "$(STATE)"); obj=$$(jq -r .hashi_object_id "$(STATE)"); \
@@ -57,7 +57,7 @@ provision: ## operator provision + KP provision (needs the native localnet runni
 	    -e SUI_RPC -e PACKAGE_ID -e HASHI_OBJECT_ID \
 	    init /scripts/provision.sh
 
-smoke: ## GetGuardianInfo through the proxy -> host -> enclave -> guardian
+smoke: ## GetGuardianInfo for the activated guardian through the proxy
 	$(COMPOSE) exec -T proxy grpcurl -plaintext -import-path /proto \
 		-proto sui/hashi/v1alpha/guardian_service.proto \
 		localhost:3000 sui.hashi.v1alpha.GuardianService/GetGuardianInfo

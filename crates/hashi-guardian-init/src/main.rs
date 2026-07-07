@@ -11,6 +11,7 @@ mod guardian_info;
 mod kp_ceremony;
 mod kp_provision;
 mod kp_roster;
+mod operator_activate;
 mod operator_ceremony;
 mod operator_provision;
 
@@ -52,6 +53,12 @@ enum OperatorCommand {
     /// Initialize a withdraw-mode guardian with operator-supplied stable config.
     Provision {
         /// Path to operator provision YAML config file.
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Activate a provisioner-initialized withdraw-mode guardian.
+    Activate {
+        /// Path to operator activate YAML config file.
         #[arg(long)]
         config: PathBuf,
     },
@@ -99,6 +106,10 @@ async fn main() -> anyhow::Result<()> {
             OperatorCommand::Provision { config } => {
                 let cfg = config::Config::load_yaml(&config)?;
                 operator_provision::run(cfg).await?;
+            }
+            OperatorCommand::Activate { config } => {
+                let cfg = config::Config::load_yaml(&config)?;
+                operator_activate::run(cfg).await?;
             }
         },
         Command::KeyProvisioner { command } => match command {
