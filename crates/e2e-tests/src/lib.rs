@@ -313,7 +313,7 @@ impl TestNetworksBuilder {
             .unwrap_or(hashi_builder.num_nodes)
             > 0;
 
-        let hashi_ids = publish(
+        let publish_output = publish(
             dir.as_ref(),
             &mut sui_network.client,
             sui_network.user_keys.first().unwrap(),
@@ -326,7 +326,8 @@ impl TestNetworksBuilder {
                 &dir.path().join("hashi"),
                 &sui_network,
                 &bitcoin_node,
-                hashi_ids,
+                publish_output.ids,
+                publish_output.upgrade_cap_id,
             )
             .await?;
 

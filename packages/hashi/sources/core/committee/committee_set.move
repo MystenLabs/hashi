@@ -471,26 +471,6 @@ public(package) fun start_reconfig(
         ctx,
     );
 
-    // At genesis bootstrap the forming committee must represent >=95% of total
-    // Sui stake, so the bridge only launches once a supermajority of validators
-    // has registered. After bootstrap, Hashi follows Sui's validator set
-    // unconditionally -- enforcing a floor on a normal reconfig would let
-    // validators brick reconfiguration (and with it all deposits/withdrawals)
-    // by withholding registration.
-    if (self.mpc_public_key.is_empty()) {
-        let mut sui_system_weight = 0;
-        let (_, weights) = sui_system.active_validator_voting_powers().into_keys_values();
-        weights.do!(|weight| {
-            sui_system_weight = sui_system_weight + weight;
-        });
-        assert!(
-            hashi::threshold::genesis_stake_satisfied(
-                committee.total_weight(),
-                sui_system_weight,
-            ),
-        );
-    };
-
     let epoch = committee.epoch();
     self.pending_epoch_change =
         option::some(PendingEpochChange {

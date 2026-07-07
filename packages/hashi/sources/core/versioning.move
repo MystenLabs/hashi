@@ -74,6 +74,10 @@ public(package) fun set_upgrade_cap(self: &mut Versioning, upgrade_cap: UpgradeC
     self.upgrade_cap.fill(upgrade_cap);
 }
 
+public(package) fun has_upgrade_cap(self: &Versioning): bool {
+    self.upgrade_cap.is_some()
+}
+
 public(package) fun upgrade_cap(self: &Versioning): &UpgradeCap {
     self.upgrade_cap.borrow()
 }

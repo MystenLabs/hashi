@@ -8,6 +8,7 @@ use hashi::{committee::CommitteeSignature, hashi::Hashi};
 
 const ENotReconfiguring: u64 = 0;
 const EInitialReconfig: u64 = 1;
+const EGenesisNotAuthorized: u64 = 2;
 
 /// Message that committee members sign to confirm successful key rotation.
 public struct ReconfigCompletionMessage has copy, drop, store {
@@ -29,6 +30,7 @@ entry fun start_reconfig(
     self.versioning().assert_version_enabled();
     // Assert that we are not already reconfiguring
     assert!(!self.committee_set().is_reconfiguring());
+    assert_genesis_launch_authorized(self);
     // Pin the current MPC parameters so they stay fixed for the new epoch even
     // if governance changes them mid-epoch.
     let config = hashi::mpc_config::pin(self.config());
@@ -99,6 +101,19 @@ entry fun submit_committee_handoff(
         committee_handoff_cert,
     );
     self.committee_set_mut().set_pending_committee_handoff_cert(committee_handoff_cert);
+}
+
+/// At genesis bootstrap (no MPC key yet) the initial committee may only form
+/// after the publisher registers the package `UpgradeCap`
+/// (`hashi::register_upgrade_cap`) -- the launch switch. After bootstrap this
+/// is never consulted; Hashi follows Sui's validator set unconditionally --
+/// enforcing a floor on a normal reconfig would let validators brick
+/// reconfiguration (and with it all deposits/withdrawals) by withholding
+/// registration.
+fun assert_genesis_launch_authorized(self: &Hashi) {
+    if (self.committee_set().mpc_public_key().is_empty()) {
+        assert!(self.versioning().has_upgrade_cap(), EGenesisNotAuthorized);
+    }
 }
 
 public struct StartReconfigEvent has copy, drop {
@@ -266,5 +281,41 @@ fun test_submit_committee_handoff_rejects_handoff_signed_by_wrong_committee() {
 
     submit_committee_handoff(&mut hashi, committee_handoff_cert, ctx);
     end_reconfig(&mut hashi, mpc_public_key, mpc_cert, ctx);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+#[expected_failure(abort_code = EGenesisNotAuthorized)]
+fun test_genesis_gate_requires_upgrade_cap() {
+    use hashi::test_utils;
+
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
+
+    assert_genesis_launch_authorized(&hashi);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+fun test_genesis_gate_passes_with_cap() {
+    use hashi::test_utils;
+
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
+    hashi.versioning_mut().set_upgrade_cap(sui::package::test_publish(@0x42.to_id(), ctx));
+
+    assert_genesis_launch_authorized(&hashi);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
+fun test_genesis_gate_skipped_after_bootstrap() {
+    use hashi::test_utils;
+
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[VOTER1], ctx);
+    hashi.committee_set_mut().set_mpc_public_key_for_testing(vector[1]);
+
+    assert_genesis_launch_authorized(&hashi);
     std::unit_test::destroy(hashi);
 }

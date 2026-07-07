@@ -1215,7 +1215,10 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
 
     // Publish + init
     print_info("Publishing and initializing ...");
-    let ids = crate::publish::publish_and_init(
+    let crate::publish::PublishOutput {
+        ids,
+        upgrade_cap_id,
+    } = crate::publish::publish_and_init(
         &mut client,
         &signer,
         compiled,
@@ -1226,6 +1229,11 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
     .await?;
     print_success(&format!("package_id:      {}", ids.package_id));
     print_success(&format!("hashi_object_id: {}", ids.hashi_object_id));
+    print_success(&format!("upgrade_cap_id:  {upgrade_cap_id}"));
+    print_info(
+        "The UpgradeCap stays in the publisher's wallet. Once all expected validators \
+         have registered, send `hashi::register_upgrade_cap` to unlock genesis.",
+    );
 
     // Write ids to hashi_ids.json
     let json = serde_json::to_string_pretty(&ids)?;

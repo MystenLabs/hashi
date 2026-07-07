@@ -118,16 +118,25 @@ pub struct BitcoinConfigOverrides {
     pub deposit_time_delay_ms: Option<u64>,
 }
 
+/// Result of [`publish_and_init`].
+pub struct PublishOutput {
+    pub ids: HashiIds,
+    /// `UpgradeCap` object id, left in the publisher's wallet until
+    /// [`register_upgrade_cap`] (the launch switch) is sent.
+    pub upgrade_cap_id: Address,
+}
+
 /// Publish the compiled package and run post-publish initialization.
 ///
 /// Executes two transactions:
 ///
 /// 1. **Publish** – publishes the modules, transfers the `UpgradeCap` to the sender.
-/// 2. **Init** – calls `hashi::finish_publish` to register BTC, the upgrade cap,
-///    set the bitcoin chain ID, and optionally configure the guardian and
-///    bitcoin config overrides.
+/// 2. **Init** – calls `hashi::finish_publish` to register BTC, set the
+///    bitcoin chain ID, and optionally configure the guardian and bitcoin
+///    config overrides.
 ///
-/// Returns the [`HashiIds`] (package ID + Hashi shared-object ID) on success.
+/// The `UpgradeCap` stays in the publisher's wallet; genesis is unlocked
+/// later by handing it in via [`register_upgrade_cap`].
 pub async fn publish_and_init(
     client: &mut Client,
     signer: &Ed25519PrivateKey,
@@ -135,7 +144,7 @@ pub async fn publish_and_init(
     bitcoin_chain_id: &str,
     guardian: &GuardianConfig,
     bitcoin_overrides: &BitcoinConfigOverrides,
-) -> Result<HashiIds> {
+) -> Result<PublishOutput> {
     let sender = signer.public_key().derive_address();
 
     // Validate and convert bitcoin_chain_id to a Move-compatible address.
@@ -222,7 +231,6 @@ pub async fn publish_and_init(
             .as_shared()
             .with_mutable(true),
     );
-    let upgrade_cap_arg = builder.object(ObjectInput::new(upgrade_cap_id).as_owned());
     let bitcoin_chain_id_arg = builder.pure(&bitcoin_chain_id_addr);
     let guardian_url_arg = builder.pure(&guardian.url.as_str());
     let guardian_btc_public_key_arg = builder.pure(&guardian.btc_public_key.as_slice());
@@ -242,7 +250,6 @@ pub async fn publish_and_init(
         ),
         vec![
             hashi_arg,
-            upgrade_cap_arg,
             bitcoin_chain_id_arg,
             guardian_url_arg,
             guardian_btc_public_key_arg,
@@ -270,8 +277,64 @@ pub async fn publish_and_init(
         "init transaction failed (finish_publish)"
     );
 
-    Ok(HashiIds {
-        package_id,
-        hashi_object_id,
+    Ok(PublishOutput {
+        ids: HashiIds {
+            package_id,
+            hashi_object_id,
+        },
+        upgrade_cap_id,
     })
+}
+
+/// Send `hashi::register_upgrade_cap` — the launch switch. Hands the
+/// `UpgradeCap` into on-chain custody, which unlocks the genesis
+/// `start_reconfig`; validator nodes then form the initial committee from
+/// whoever is registered, so only call this once all expected validators
+/// have fully registered.
+pub async fn register_upgrade_cap(
+    client: &mut Client,
+    signer: &Ed25519PrivateKey,
+    ids: &HashiIds,
+    upgrade_cap_id: Address,
+) -> Result<()> {
+    let sender = signer.public_key().derive_address();
+
+    let mut builder = TransactionBuilder::new();
+    builder.set_sender(sender);
+
+    let hashi_arg = builder.object(
+        ObjectInput::new(ids.hashi_object_id)
+            .as_shared()
+            .with_mutable(true),
+    );
+    let upgrade_cap_arg = builder.object(ObjectInput::new(upgrade_cap_id).as_owned());
+
+    builder.move_call(
+        Function::new(
+            ids.package_id,
+            Identifier::from_static("hashi"),
+            Identifier::from_static("register_upgrade_cap"),
+        ),
+        vec![hashi_arg, upgrade_cap_arg],
+    );
+
+    let transaction = builder.build(client).await?;
+    let signature = signer.sign_transaction(&transaction)?;
+
+    let response = client
+        .execute_transaction_and_wait_for_checkpoint(
+            ExecuteTransactionRequest::new(transaction.into())
+                .with_signatures(vec![signature.into()])
+                .with_read_mask(FieldMask::from_str("*")),
+            std::time::Duration::from_secs(30),
+        )
+        .await?
+        .into_inner();
+
+    anyhow::ensure!(
+        response.transaction().effects().status().success(),
+        "launch transaction failed (register_upgrade_cap)"
+    );
+
+    Ok(())
 }

@@ -11,6 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 use sui_futures::service::Service;
 use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
+use sui_sdk_types::Address;
 use sui_sdk_types::Identifier;
 use sui_transaction_builder::Function;
 use sui_transaction_builder::ObjectInput;
@@ -213,6 +214,9 @@ impl HashiNodeHandle {
 
 pub struct HashiNetwork {
     ids: HashiIds,
+    /// `UpgradeCap` object id, held by the publisher until the launch tx
+    /// (`hashi::register_upgrade_cap`) hands it into on-chain custody.
+    upgrade_cap_id: Address,
     nodes: Vec<HashiNodeHandle>,
     /// Keeps the mock screener gRPC server alive for the lifetime of the test network.
     _screener_service: Service,
@@ -221,6 +225,10 @@ pub struct HashiNetwork {
 impl HashiNetwork {
     pub fn nodes(&self) -> &[HashiNodeHandle] {
         &self.nodes
+    }
+
+    pub fn upgrade_cap_id(&self) -> Address {
+        self.upgrade_cap_id
     }
 
     pub fn nodes_mut(&mut self) -> &mut [HashiNodeHandle] {
@@ -353,6 +361,7 @@ impl HashiNetworkBuilder {
         sui: &SuiNetworkHandle,
         bitcoin: &BitcoinNodeHandle,
         hashi_ids: HashiIds,
+        upgrade_cap_id: Address,
     ) -> Result<HashiNetwork> {
         // Start a mock screener server for integration tests
         let (screener_addr, screener_service) =
@@ -420,8 +429,9 @@ impl HashiNetworkBuilder {
             configs.len()
         );
         // Nodes register themselves on startup, and will trigger
-        // start_reconfig + DKG + end_reconfig automatically once enough
-        // validators have registered.
+        // start_reconfig + DKG + end_reconfig automatically once the
+        // publisher registers the UpgradeCap (the launch switch), which the
+        // harness sends after all initially-active validators are registered.
         let mut nodes = Vec::with_capacity(configs.len());
         for config in configs {
             let node_handle = HashiNodeHandle::new(config)?;
@@ -447,12 +457,58 @@ impl HashiNetworkBuilder {
             );
         }
 
-        // Wait for the initial committee to appear on-chain, which indicates
-        // that the genesis bootstrap (start_reconfig → DKG → end_reconfig)
-        // has completed. Skipped when no nodes are started up front (e.g.
-        // localnet `--manual` mode, where registration is driven externally
-        // before the validators are launched).
+        // Unlock genesis, then wait for the initial committee to appear
+        // on-chain, which indicates that the genesis bootstrap
+        // (start_reconfig → DKG → end_reconfig) has completed. Skipped when
+        // no nodes are started up front (e.g. localnet `--manual` mode,
+        // where registration and launch are driven externally after the
+        // validators are launched).
         if initially_active > 0 {
+            // The genesis committee is formed from whoever is fully
+            // registered when start_reconfig lands, so every
+            // initially-active validator must be registered (with its
+            // next-epoch keys) before the launch tx unlocks it.
+            let expected = nodes[..initially_active]
+                .iter()
+                .map(|node| node.config.validator_address())
+                .collect::<Result<Vec<_>>>()?;
+            wait_for_registered_validators(
+                &nodes[0],
+                &expected,
+                std::time::Duration::from_secs(120),
+            )
+            .await?;
+
+            // The gate must have held while validators registered: even
+            // though every node has been retrying start_reconfig, genesis
+            // cannot begin before the launch tx below.
+            if let Some(onchain) = nodes[0].hashi().onchain_state_opt() {
+                anyhow::ensure!(
+                    onchain.current_committee().is_none()
+                        && onchain
+                            .state()
+                            .hashi()
+                            .committees
+                            .pending_epoch_change()
+                            .is_none(),
+                    "genesis started before the launch tx (upgrade cap registration)"
+                );
+            }
+
+            let publisher = sui
+                .user_keys
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("no publisher key in Sui network handle"))?;
+            let mut client = sui.client.clone();
+            hashi::publish::register_upgrade_cap(
+                &mut client,
+                publisher,
+                &hashi_ids,
+                upgrade_cap_id,
+            )
+            .await?;
+            debug!("Upgrade cap registered — genesis unlocked");
+
             let genesis_timeout = std::time::Duration::from_secs(120);
             tokio::time::timeout(genesis_timeout, async {
                 loop {
@@ -477,10 +533,42 @@ impl HashiNetworkBuilder {
 
         Ok(HashiNetwork {
             ids: hashi_ids,
+            upgrade_cap_id,
             nodes,
             _screener_service: screener_service,
         })
     }
+}
+
+/// Wait until every `expected` validator is fully registered on-chain:
+/// present in the members bag with its next-epoch encryption key set (the
+/// last piece a node registers before it is eligible for the genesis
+/// committee).
+pub async fn wait_for_registered_validators(
+    node: &HashiNodeHandle,
+    expected: &[Address],
+    timeout: std::time::Duration,
+) -> Result<()> {
+    tokio::time::timeout(timeout, async {
+        loop {
+            if let Some(onchain) = node.hashi().onchain_state_opt()
+                && expected.iter().all(|address| {
+                    onchain
+                        .state()
+                        .hashi()
+                        .committees
+                        .members()
+                        .get(address)
+                        .is_some_and(|m| m.next_epoch_encryption_public_key().is_some())
+                })
+            {
+                return;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("Timed out waiting for validators to register on-chain"))
 }
 
 impl Default for HashiNetworkBuilder {

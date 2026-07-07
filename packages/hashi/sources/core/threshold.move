@@ -8,10 +8,6 @@ const MAX_BPS: u64 = 10000;
 /// Quorum threshold (2f + 1 out of 3f) in basis points.
 const CERTIFICATE_THRESHOLD_BPS: u64 = 6667;
 
-/// Minimum fraction of total Sui stake (in basis points) that the forming
-/// Hashi committee must represent at genesis bootstrap.
-const GENESIS_STAKE_THRESHOLD_BPS: u64 = 9500;
-
 #[error]
 const EThresholdBpsTooHigh: vector<u8> = b"Threshold basis points must be at most 10000";
 
@@ -28,15 +24,6 @@ public(package) fun certificate_threshold(total_weight: u16): u16 {
 public(package) fun weight_threshold(total_weight: u64, threshold_bps: u64): u64 {
     assert!(threshold_bps <= MAX_BPS, EThresholdBpsTooHigh);
     (total_weight * threshold_bps).divide_and_round_up(MAX_BPS)
-}
-
-/// Whether a forming committee meets the genesis stake floor: it must represent
-/// at least 95% of total Sui stake. The caller only checks this at genesis
-/// bootstrap, so the bridge launches only once a supermajority of validators
-/// has registered; after bootstrap Hashi follows Sui's validator set
-/// unconditionally and this is not consulted.
-public(package) fun genesis_stake_satisfied(committee_weight: u64, total_sui_weight: u64): bool {
-    committee_weight >= weight_threshold(total_sui_weight, GENESIS_STAKE_THRESHOLD_BPS)
 }
 
 // ======== Tests ========

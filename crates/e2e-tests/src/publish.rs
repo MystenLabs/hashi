@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use hashi::config::HashiIds;
+use hashi::publish::PublishOutput;
 use std::path::Path;
 use sui_crypto::ed25519::Ed25519PrivateKey;
 use sui_rpc::Client;
@@ -14,7 +14,7 @@ pub async fn publish(
     client: &mut Client,
     private_key: &Ed25519PrivateKey,
     guardian: &hashi::publish::GuardianConfig,
-) -> Result<HashiIds> {
+) -> Result<PublishOutput> {
     let params = hashi::publish::BuildParams {
         sui_binary: sui_binary(),
         package_path: &dir.join("packages/hashi"),
