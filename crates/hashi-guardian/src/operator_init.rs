@@ -43,7 +43,7 @@ impl InitInstall {
     ) -> GuardianResult<Self> {
         let mut reader =
             GuardianReader::from_s3_client(logger.clone(), config.pcr_allowlist().clone());
-        let (_, secret_sharing_instance, _, _) = reader
+        let (_, secret_sharing_instance, _) = reader
             .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
             .await
             .map_err(|e| InvalidInputs(format!("read latest ceremony: {e}")))?

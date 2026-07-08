@@ -5,7 +5,7 @@
 # Genesis ceremony against the ceremony-mode guardian (chain-free):
 #   1. generate the test KP roster,
 #   2. `operator ceremony` -> the guardian generates the BTC key in-enclave,
-#      splits it, encrypts shares to the KP certs, writes ceremony/ + shares/
+#      splits it, encrypts shares to the KP certs, writes ceremony/ + kp-shares/
 #      to MinIO, and returns the x-only BTC master pubkey,
 #   3. capture that pubkey for `hashi-localnet start --guardian-btc-pubkey`.
 #

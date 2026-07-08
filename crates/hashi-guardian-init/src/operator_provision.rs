@@ -138,19 +138,20 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         phase = "ceremony instance",
         "scraping authoritative ceremony/ log for the secret-sharing instance",
     );
-    let (ceremony_session, scraped_instance, roster, btc_master_pubkey) = reader
+    let (ceremony_session, scraped_instance, btc_master_pubkey) = reader
         .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;
     let sharing_seq = scraped_instance.sharing_seq();
-    let encrypted_shares = reader
-        .read_shares(&ceremony_session, sharing_seq, BuildPolicy::AnyAllowlisted)
-        .await?;
+    let (kp_share_session, kp_share_state) = reader
+        .read_latest_kp_share_state(sharing_seq, BuildPolicy::AnyAllowlisted)
+        .await?
+        .context("no kp-shares log found in S3; key setup has not run")?;
     let ceremony_state = VerifiedCeremonyState::from_scraped(
         ceremony_session.clone(),
+        kp_share_session.clone(),
         scraped_instance.clone(),
-        encrypted_shares,
-        &roster,
+        kp_share_state,
         btc_master_pubkey,
         cfg.kp_roster.num_shares,
         cfg.kp_roster.threshold,
@@ -159,11 +160,13 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     info!(
         phase = "ceremony instance",
         ceremony_session = %ceremony_session,
+        kp_share_session = %kp_share_session,
         sharing_seq,
+        cert_seq = ceremony_state.kp_share_cert_seq,
         n = scraped_instance.num_shares(),
         t = scraped_instance.threshold(),
         share_count = ceremony_state.encrypted_shares.len(),
-        "ceremony instance and encrypted shares verified against expected roster",
+        "ceremony instance and KP share state verified against expected roster",
     );
 
     let init_config = InitConfig::new(

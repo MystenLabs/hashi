@@ -10,7 +10,7 @@ use super::S3_DIR_COMMITTEE_UPDATE;
 use super::S3_DIR_GENESIS;
 use super::S3_DIR_HEARTBEAT;
 use super::S3_DIR_INIT;
-use super::S3_DIR_SHARES;
+use super::S3_DIR_KP_SHARES;
 use super::S3_DIR_WITHDRAW;
 use crate::bitcoin::BitcoinPubkey;
 use crate::committee::CommitteeSignature;
@@ -18,7 +18,6 @@ use crate::guardian::GuardianError;
 use crate::guardian::GuardianInfo;
 use crate::guardian::GuardianPubKey;
 use crate::guardian::KPEncryptedShares;
-use crate::guardian::KPFingerprint;
 use crate::guardian::LimiterState;
 use crate::guardian::NitroAttestation;
 use crate::guardian::SecretSharingInstance;
@@ -41,7 +40,7 @@ pub enum LogMessage {
     Init(Box<InitLogMessage>),
     Withdrawal(Box<WithdrawalLogMessage>),
     Ceremony(Box<CeremonyLogMessage>),
-    Shares(Box<SharesLogMessage>),
+    KpShareState(Box<KpShareState>),
     CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
     Genesis(Box<GenesisLogMessage>),
 }
@@ -62,36 +61,60 @@ impl GenesisLogMessage {
     }
 }
 
-/// Encrypted KP shares persisted for recovery, written to `shares/` after each
-/// ceremony. Keyed by `sharing_seq` so it pairs with the matching `ceremony/`
-/// instance; carries the ciphertexts the `ceremony/` log deliberately omits.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SharesLogMessage {
+/// Current encrypted KP share state for a secret-sharing instance. The initial
+/// ceremony writes `cert_seq = 0`; later individual KP cert rotations can write
+/// higher `cert_seq` entries for the same `sharing_seq` without changing the
+/// `ceremony/` instance.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct KpShareState {
     pub sharing_seq: u64,
+    pub cert_seq: u64,
     pub encrypted_shares: KPEncryptedShares,
 }
 
-impl SharesLogMessage {
-    /// `shares/{sharing_seq:020}-{session_id}.json` — the object key a reader
-    /// fetches for `(session_id, sharing_seq)`.
-    pub fn object_key(session_id: &str, sharing_seq: u64) -> String {
-        super::seq_scoped_object_key(S3_DIR_SHARES, sharing_seq, session_id)
+impl KpShareState {
+    pub fn new(sharing_seq: u64, cert_seq: u64, encrypted_shares: KPEncryptedShares) -> Self {
+        Self {
+            sharing_seq,
+            cert_seq,
+            encrypted_shares,
+        }
+    }
+
+    /// `kp-shares/{sharing_seq:020}/` — the prefix containing every cert-state
+    /// version for one `SecretSharingInstance`.
+    pub fn object_prefix(sharing_seq: u64) -> String {
+        format!("{S3_DIR_KP_SHARES}/{sharing_seq:020}/")
+    }
+
+    /// `kp-shares/{sharing_seq:020}/{cert_seq:020}-{session_id}.json` — the
+    /// object key for one written KP share state.
+    pub fn object_key(session_id: &str, sharing_seq: u64, cert_seq: u64) -> String {
+        format!(
+            "{}{:020}-{session_id}.json",
+            Self::object_prefix(sharing_seq),
+            cert_seq
+        )
+    }
+
+    pub fn log_dir(&self) -> String {
+        Self::object_prefix(self.sharing_seq)
+    }
+
+    pub fn log_name(&self, session_id: &str) -> String {
+        format!("{:020}-{session_id}.json", self.cert_seq)
     }
 }
 
-/// The authoritative share state, written to `ceremony/` after each ceremony.
-/// Carries the instance (commitments + n/t/seq) plus the recipient roster; the
-/// ciphertexts live in `shares/`. A rotation records the `old_instance` it
-/// consumed so the chain is auditable from the log alone.
+/// The authoritative secret-sharing instance, written to `ceremony/` after each
+/// ceremony. Carries the commitments + n/t/seq; encrypted KP shares live in
+/// `kp-shares/`. A rotation records the `old_instance` it consumed so the chain
+/// is auditable from the log alone.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum CeremonyLogMessage {
     /// Initial key setup (`setup_new_key`); `instance` has `sharing_seq` 0.
     NewKey {
         instance: SecretSharingInstance,
-        /// Recipient fingerprints ordered by share id; lets a KP check the full
-        /// roster against the agreed set from the immutable log, not just the
-        /// operator-served shares.
-        roster: Vec<KPFingerprint>,
         /// The x-only BTC master pubkey this ceremony produced; lets KPs and
         /// monitors cross-check it against the on-chain `guardian_btc_public_key`.
         btc_master_pubkey: BitcoinPubkey,
@@ -100,8 +123,6 @@ pub enum CeremonyLogMessage {
     Rotate {
         old_instance: SecretSharingInstance,
         new_instance: SecretSharingInstance,
-        /// Recipient fingerprints for `new_instance`; see [`Self::NewKey`].
-        roster: Vec<KPFingerprint>,
         /// See [`Self::NewKey`]; invariant across rotations (the same key is re-shared).
         btc_master_pubkey: BitcoinPubkey,
     },
@@ -298,7 +319,7 @@ impl LogMessage {
                     .to_string()
             }
             LogMessage::Ceremony(..) => format!("{}/", S3_DIR_CEREMONY),
-            LogMessage::Shares(..) => format!("{}/", S3_DIR_SHARES),
+            LogMessage::KpShareState(state) => state.log_dir(),
             LogMessage::CommitteeUpdate(..) => format!("{}/", S3_DIR_COMMITTEE_UPDATE),
             LogMessage::Genesis(..) => format!("{}/", S3_DIR_GENESIS),
         }
@@ -311,7 +332,7 @@ impl LogMessage {
             LogMessage::Heartbeat { seq } => format!("{}-{:020}.json", prefix, seq),
             LogMessage::Withdrawal(withdrawal_message) => withdrawal_message.log_name(prefix),
             LogMessage::Ceremony(ss) => format!("{:020}-{}.json", ss.sharing_seq(), prefix),
-            LogMessage::Shares(s) => format!("{:020}-{}.json", s.sharing_seq, prefix),
+            LogMessage::KpShareState(state) => state.log_name(prefix),
             LogMessage::CommitteeUpdate(committee_message) => committee_message.log_name(prefix),
             LogMessage::Genesis(_) => GenesisLogMessage::LOG_NAME.to_string(),
         }

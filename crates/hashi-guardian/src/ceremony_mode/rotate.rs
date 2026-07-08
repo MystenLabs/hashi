@@ -85,16 +85,17 @@ async fn finalize_rotation(
 
     let new_sharing_seq = old_instance.sharing_seq() + 1;
     let new_instance = SecretSharingInstance::new(share_commitments, n, t, new_sharing_seq)?;
-    info!("Persisting rotation sharing_seq={new_sharing_seq} to shares/ + ceremony/.");
+    info!(
+        "Persisting rotation sharing_seq={new_sharing_seq} cert_seq=0 to kp-shares/ + ceremony/."
+    );
     enclave
-        .log_shares(new_sharing_seq, encrypted_shares.clone())
+        .log_kp_share_state(new_sharing_seq, 0, encrypted_shares.clone())
         .await?;
 
     enclave
         .log_ceremony(CeremonyLogMessage::Rotate {
             old_instance: old_instance.clone(),
             new_instance,
-            roster: encrypted_shares.recipient_roster(),
             btc_master_pubkey,
         })
         .await?;
@@ -222,7 +223,6 @@ mod tests {
         let CeremonyLogMessage::Rotate {
             old_instance,
             new_instance,
-            roster,
             btc_master_pubkey: _,
         } = *ceremony
         else {
@@ -235,25 +235,25 @@ mod tests {
         assert_eq!(new_instance.sharing_seq(), 1);
         assert_eq!(new_instance.num_shares(), new_n);
         assert_eq!(new_instance.threshold(), new_t);
-        // Roster commits one recipient fingerprint per new share.
-        assert_eq!(roster.len(), new_n);
 
-        // The new shares are persisted to shares/ keyed by the new sharing_seq.
+        // The new shares are persisted to kp-shares/ keyed by the new sharing_seq
+        // and initial cert_seq=0.
         let shares_logs: Vec<_> = captured
             .iter()
-            .filter(|(k, _)| k.starts_with("shares/"))
+            .filter(|(k, _)| k.starts_with("kp-shares/"))
             .collect();
-        assert_eq!(shares_logs.len(), 1, "expected one shares/ log");
+        assert_eq!(shares_logs.len(), 1, "expected one kp-shares/ log");
         let (shares_key, shares_body) = shares_logs[0];
         assert!(
-            shares_key.starts_with("shares/00000000000000000001-"),
-            "expected sharing_seq=1, got key {shares_key}"
+            shares_key.starts_with("kp-shares/00000000000000000001/00000000000000000000-"),
+            "expected sharing_seq=1 cert_seq=0, got key {shares_key}"
         );
         let shares_record: LogRecord = serde_json::from_slice(shares_body).unwrap();
-        let LogMessage::Shares(shares) = shares_record.message else {
-            panic!("expected Shares variant");
+        let LogMessage::KpShareState(shares) = shares_record.message else {
+            panic!("expected KpShareState variant");
         };
         assert_eq!(shares.sharing_seq, 1);
+        assert_eq!(shares.cert_seq, 0);
         assert_eq!(shares.encrypted_shares.len(), new_n);
     }
 

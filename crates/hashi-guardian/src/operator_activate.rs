@@ -61,7 +61,7 @@ pub async fn operator_activate(
         .await
         .map_err(|e| InvalidInputs(format!("heartbeat activation check failed: {e}")))?;
 
-    let (_, latest_instance, _, _) = reader
+    let (_, latest_instance, _) = reader
         .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
         .await
         .map_err(|e| InternalError(format!("read latest ceremony: {e}")))?

@@ -33,7 +33,7 @@ pub const S3_OBJECT_LOCK_DURATION_GENESIS: Duration = ONE_WEEK;
 /// Shares carry their own enclave signature, so the lock isn't for integrity —
 /// it only guarantees a window in which the operator can't purge them before KPs
 /// fetch. Short on purpose; they stay readable after expiry until deleted.
-pub const S3_OBJECT_LOCK_DURATION_SHARES: Duration = ONE_DAY;
+pub const S3_OBJECT_LOCK_DURATION_KP_SHARES: Duration = ONE_DAY;
 
 /// S3 sub-prefixes used for guardian log streams.
 /// See `crates/hashi-guardian/README.md` for canonical key layout.
@@ -41,13 +41,6 @@ pub const S3_DIR_INIT: &str = "init";
 pub const S3_DIR_WITHDRAW: &str = "withdraw";
 pub const S3_DIR_HEARTBEAT: &str = "heartbeat";
 pub const S3_DIR_CEREMONY: &str = "ceremony";
-pub const S3_DIR_SHARES: &str = "shares";
+pub const S3_DIR_KP_SHARES: &str = "kp-shares";
 pub const S3_DIR_COMMITTEE_UPDATE: &str = "committee-update";
 pub const S3_DIR_GENESIS: &str = "genesis";
-
-/// Single definition of the flat, sequence-scoped key layout
-/// (`{dir}/{sharing_seq:020}-{session_id}.json`) behind the
-/// [`SharesLogMessage::object_key`] helper.
-pub(crate) fn seq_scoped_object_key(dir: &str, sharing_seq: u64, session_id: &str) -> String {
-    format!("{dir}/{sharing_seq:020}-{session_id}.json")
-}

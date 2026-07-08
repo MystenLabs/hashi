@@ -8,7 +8,7 @@
 //! - load a roster of KP OpenPGP certs
 //! - discover the latest attested ceremony from S3
 //! - validate the ceremony's `secret_sharing_instance` against expected params
-//! - confirm every encrypted share in `shares/` is addressed only to its
+//! - confirm every encrypted share in `kp-shares/` is addressed only to its
 //!   labeled cert (without decrypting)
 //!
 //! `provision` additionally decrypts one share via the yubikey and re-encrypts
@@ -27,6 +27,7 @@ use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::guardian::KPEncryptedShare;
 use hashi_types::guardian::KPEncryptedShares;
 use hashi_types::guardian::KPFingerprint;
+use hashi_types::guardian::KpShareState;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::SecretSharingParams;
@@ -85,10 +86,12 @@ impl KpRosterConfig {
 
 /// Validated ceremony state. May come from the live `SetupNewKeyResponse`
 /// (`operator ceremony`) or be reconstructed from the guardian's `ceremony/` +
-/// `shares/` logs (`key-provisioner ceremony`, `key-provisioner provision`).
+/// `kp-shares/` logs (`key-provisioner ceremony`, `key-provisioner provision`).
 #[derive(Debug, PartialEq)]
 pub struct VerifiedCeremonyState {
-    pub session_id: String,
+    pub ceremony_session_id: String,
+    pub kp_share_session_id: String,
+    pub kp_share_cert_seq: u64,
     pub encrypted_shares: KPEncryptedShares,
     pub secret_sharing_instance: SecretSharingInstance,
     pub btc_master_pubkey: BitcoinPubkey,
@@ -103,7 +106,9 @@ impl VerifiedCeremonyState {
         expected_t: usize,
     ) -> Result<Self> {
         let state = Self {
-            session_id,
+            ceremony_session_id: session_id.clone(),
+            kp_share_session_id: session_id,
+            kp_share_cert_seq: 0,
             encrypted_shares: response.encrypted_shares,
             secret_sharing_instance: response.secret_sharing_instance,
             btc_master_pubkey: response.btc_master_pubkey,
@@ -126,18 +131,24 @@ impl VerifiedCeremonyState {
         // historical ceremony with `BuildPolicy::AnyAllowlisted` to learn N.
         // Keep this helper current-build-only for target verification, and add
         // a separate discovery path there.
-        let (session_id, instance, roster, btc_master_pubkey) = reader
+        let (ceremony_session_id, instance, btc_master_pubkey) = reader
             .read_latest_ceremony(BuildPolicy::Current)
             .await?
             .ok_or_else(|| anyhow!("no ceremony logs found in guardian S3 bucket"))?;
-        let encrypted_shares = reader
-            .read_shares(&session_id, instance.sharing_seq(), BuildPolicy::Current)
-            .await?;
+        let (kp_share_session_id, kp_share_state) = reader
+            .read_latest_kp_share_state(instance.sharing_seq(), BuildPolicy::Current)
+            .await?
+            .ok_or_else(|| {
+                anyhow!(
+                    "no kp-shares log found for sharing_seq {}",
+                    instance.sharing_seq()
+                )
+            })?;
         Self::from_scraped(
-            session_id,
+            ceremony_session_id,
+            kp_share_session_id,
             instance,
-            encrypted_shares,
-            &roster,
+            kp_share_state,
             btc_master_pubkey,
             expected_n,
             expected_t,
@@ -145,25 +156,32 @@ impl VerifiedCeremonyState {
     }
 
     /// Assemble + validate from parts already scraped from S3 (the ceremony
-    /// log and the shares log). Use instead of [`Self::latest_from_s3`] when the
+    /// log and the kp-shares log). Use instead of [`Self::latest_from_s3`] when the
     /// caller has already read those objects and wants to avoid a second walk.
     pub fn from_scraped(
-        session_id: String,
+        ceremony_session_id: String,
+        kp_share_session_id: String,
         secret_sharing_instance: SecretSharingInstance,
-        encrypted_shares: KPEncryptedShares,
-        roster: &[KPFingerprint],
+        kp_share_state: KpShareState,
         btc_master_pubkey: BitcoinPubkey,
         expected_n: usize,
         expected_t: usize,
     ) -> Result<Self> {
+        anyhow::ensure!(
+            kp_share_state.sharing_seq == secret_sharing_instance.sharing_seq(),
+            "kp-shares sharing_seq ({}) differs from ceremony sharing_seq ({})",
+            kp_share_state.sharing_seq,
+            secret_sharing_instance.sharing_seq()
+        );
         let state = Self {
-            session_id,
-            encrypted_shares,
+            ceremony_session_id,
+            kp_share_session_id,
+            kp_share_cert_seq: kp_share_state.cert_seq,
+            encrypted_shares: kp_share_state.encrypted_shares,
             secret_sharing_instance,
             btc_master_pubkey,
         };
         state.validate_shape(expected_n, expected_t)?;
-        state.ensure_roster_matches(roster)?;
         Ok(state)
     }
 
@@ -184,19 +202,6 @@ impl VerifiedCeremonyState {
             self.encrypted_shares.len() == expected_n,
             "expected {expected_n} encrypted shares, got {}",
             self.encrypted_shares.len()
-        );
-        Ok(())
-    }
-
-    /// Confirm the agreed `ceremony/` roster matches the recipient fingerprints
-    /// on the `shares/` ciphertexts. The roster is ordered by share id, so this
-    /// check preserves the ceremony log's share-id-to-KP binding.
-    pub fn ensure_roster_matches(&self, roster: &[KPFingerprint]) -> Result<()> {
-        let got = self.encrypted_shares.recipient_roster();
-        anyhow::ensure!(
-            roster == got.as_slice(),
-            "ceremony/ roster differs from shares/ recipient fingerprints: expected \
-             {roster:?}, got {got:?}"
         );
         Ok(())
     }
@@ -268,7 +273,7 @@ impl VerifiedCeremonyState {
             );
         }
         info!(
-            "all {} shares encrypted to their labeled certs",
+            "all {} KP share-state entries encrypted to their labeled certs",
             self.encrypted_shares.len()
         );
         Ok(())
@@ -489,38 +494,19 @@ mod tests {
     }
 
     #[test]
-    fn verified_ceremony_state_matches_roster() {
-        // Shares arrive in arbitrary id order (`[3, 1, 2]`), but
-        // KPEncryptedShares normalizes them by share id. The ceremony roster is
-        // ordered by share id too, so a permutation must fail.
+    fn verified_ceremony_state_rejects_mismatched_kp_share_state_seq() {
         let resp = response(&[3, 1, 2], &[1, 2, 3]);
-        let state = VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2)
-            .expect("valid state");
-        let canonical = vec![
-            "DUMMY FINGERPRINT 1".to_string(),
-            "DUMMY FINGERPRINT 2".to_string(),
-            "DUMMY FINGERPRINT 3".to_string(),
-        ];
-        let reordered = vec![
-            "DUMMY FINGERPRINT 3".to_string(),
-            "DUMMY FINGERPRINT 1".to_string(),
-            "DUMMY FINGERPRINT 2".to_string(),
-        ];
-
-        state
-            .ensure_roster_matches(&canonical)
-            .expect("canonical roster matches");
-        let err = state.ensure_roster_matches(&reordered).unwrap_err();
-        assert!(format!("{err}").contains("roster differs"), "{err}");
-
-        // A genuinely different fingerprint set must still fail.
-        let different = vec![
-            "DUMMY FINGERPRINT 1".to_string(),
-            "DUMMY FINGERPRINT 2".to_string(),
-            "DUMMY FINGERPRINT 9".to_string(),
-        ];
-        let err = state.ensure_roster_matches(&different).unwrap_err();
-        assert!(format!("{err}").contains("roster differs"), "{err}");
+        let err = VerifiedCeremonyState::from_scraped(
+            "ceremony-session".into(),
+            "kp-share-session".into(),
+            resp.secret_sharing_instance,
+            KpShareState::new(1, 0, resp.encrypted_shares),
+            resp.btc_master_pubkey,
+            3,
+            2,
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("kp-shares sharing_seq"), "{err}");
     }
 
     #[test]

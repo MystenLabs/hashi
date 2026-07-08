@@ -551,17 +551,20 @@ impl Enclave {
         self.write_log(LogMessage::Ceremony(Box::new(state))).await
     }
 
-    /// Persist the ceremony's encrypted shares to `shares/` for recovery. Keyed
-    /// by `sharing_seq` so it pairs with the matching `ceremony/` instance.
-    pub async fn log_shares(
+    /// Persist the current encrypted KP share state to `kp-shares/` for recovery.
+    /// `sharing_seq` pairs it with the matching `ceremony/` instance, while
+    /// `cert_seq` versions recipient-cert rotations within that instance.
+    pub async fn log_kp_share_state(
         &self,
         sharing_seq: u64,
+        cert_seq: u64,
         encrypted_shares: KPEncryptedShares,
     ) -> GuardianResult<()> {
-        self.write_log(LogMessage::Shares(Box::new(SharesLogMessage {
+        self.write_log(LogMessage::KpShareState(Box::new(KpShareState::new(
             sharing_seq,
+            cert_seq,
             encrypted_shares,
-        })))
+        ))))
         .await
     }
 

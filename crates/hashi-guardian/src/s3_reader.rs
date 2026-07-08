@@ -22,15 +22,13 @@ use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GenesisLogMessage;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianResult;
-use hashi_types::guardian::KPEncryptedShares;
-use hashi_types::guardian::KPFingerprint;
+use hashi_types::guardian::KpShareState;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::SessionID;
-use hashi_types::guardian::SharesLogMessage;
 use hashi_types::guardian::VerifiedLogRecord;
 use hashi_types::guardian::VerifiedSessionInfo;
 use hashi_types::guardian::S3_DIR_CEREMONY;
@@ -176,24 +174,17 @@ impl GuardianReader {
         Ok(self
             .read_latest_ceremony(build_policy)
             .await?
-            .map(|(_, instance, _, _)| instance))
+            .map(|(_, instance, _)| instance))
     }
 
     /// Like [`Self::read_latest_ceremony_instance`], but also returns the writing
-    /// session id, recipient roster, and BTC master pubkey. The session id
-    /// locates the matching `shares/` object; the roster is checked against the
-    /// agreed KP set.
+    /// session id and BTC master pubkey. `kp-shares/` is read independently so
+    /// later KP cert rotations can advance `cert_seq` without rewriting the
+    /// `ceremony/` instance.
     pub async fn read_latest_ceremony(
         &mut self,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<
-        Option<(
-            SessionID,
-            SecretSharingInstance,
-            Vec<KPFingerprint>,
-            BitcoinPubkey,
-        )>,
-    > {
+    ) -> anyhow::Result<Option<(SessionID, SecretSharingInstance, BitcoinPubkey)>> {
         let keys = self
             .s3
             .list_all_keys_in_dir(&format!("{}/", S3_DIR_CEREMONY))
@@ -205,17 +196,12 @@ impl GuardianReader {
     }
 
     /// Read + verify the `ceremony/` record at `key`, returning its writing
-    /// session, resulting instance, roster, and BTC master pubkey.
+    /// session, resulting instance, and BTC master pubkey.
     async fn read_ceremony_record(
         &mut self,
         key: &str,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<(
-        SessionID,
-        SecretSharingInstance,
-        Vec<KPFingerprint>,
-        BitcoinPubkey,
-    )> {
+    ) -> anyhow::Result<(SessionID, SecretSharingInstance, BitcoinPubkey)> {
         let record = self.s3.get_log_record(key).await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
         let session_id = record.session_id.clone();
@@ -224,38 +210,41 @@ impl GuardianReader {
         let LogMessage::Ceremony(msg) = record.message else {
             anyhow::bail!("expected a ceremony log at {key}");
         };
-        let (instance, roster, btc_master_pubkey) = ceremony_instance_and_roster(*msg, key)?;
-        Ok((session_id, instance, roster, btc_master_pubkey))
+        let (instance, btc_master_pubkey) = ceremony_instance_and_pubkey(*msg, key)?;
+        Ok((session_id, instance, btc_master_pubkey))
     }
 
-    /// Read + verify the encrypted shares at `shares/{seq}-{session}.json`. Point
-    /// read by exact key (recovery anchors on the ceremony instance's seq), so a
-    /// purged older `shares/` object never blocks reading the current one.
+    /// Read + verify the latest encrypted KP share state for `sharing_seq`.
+    /// The lex-greatest object under `kp-shares/{sharing_seq:020}/` has the
+    /// latest `cert_seq`, so future per-KP cert rotation can advance the share
+    /// recipient state without changing the `ceremony/` instance.
     ///
     /// Uses the lock-agnostic read: shares carry only a short lock that is
     /// expected to expire, and their integrity is the enclave signature checked
     /// below — not S3 immutability — so the immutable-log lock assertion in
     /// `get_log_record` doesn't apply.
-    pub async fn read_shares(
+    pub async fn read_latest_kp_share_state(
         &mut self,
-        session_id: &str,
         sharing_seq: u64,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<KPEncryptedShares> {
-        let key = SharesLogMessage::object_key(session_id, sharing_seq);
-        let record: LogRecord = self.s3.get_object_no_lock(&key).await?;
-        if record.session_id != session_id {
-            anyhow::bail!(
-                "session id mismatch at {key}: expected {session_id}, got {}",
-                record.session_id
-            );
-        }
-        let record = self.cache.verify_record(&self.s3, record).await?;
-        let build_pcrs = record.build_pcrs.clone();
-        self.enforce_build_policy("shares log", build_policy, &build_pcrs)?;
-        let LogMessage::Shares(msg) = record.message else {
-            anyhow::bail!("expected a shares log at {key}");
+    ) -> anyhow::Result<Option<(SessionID, KpShareState)>> {
+        let prefix = KpShareState::object_prefix(sharing_seq);
+        let keys = self.s3.list_all_keys_in_dir(&prefix).await?;
+        let Some(key) = keys.into_iter().max() else {
+            return Ok(None);
         };
+        let record: LogRecord = self.s3.get_object_no_lock(&key).await?;
+        let record = self.cache.verify_record(&self.s3, record).await?;
+        let session_id = record.session_id.clone();
+        let build_pcrs = record.build_pcrs.clone();
+        self.enforce_build_policy("kp-shares log", build_policy, &build_pcrs)?;
+        let LogMessage::KpShareState(msg) = record.message else {
+            anyhow::bail!("expected a kp-shares log at {key}");
+        };
+        let expected_key = KpShareState::object_key(&session_id, msg.sharing_seq, msg.cert_seq);
+        if key != expected_key {
+            anyhow::bail!("kp-shares key mismatch: expected {expected_key}, got {key}");
+        }
         if msg.sharing_seq != sharing_seq {
             anyhow::bail!(
                 "sharing_seq mismatch: {} != {}",
@@ -263,7 +252,7 @@ impl GuardianReader {
                 sharing_seq
             );
         }
-        Ok(msg.encrypted_shares)
+        Ok(Some((session_id, *msg)))
     }
 
     /// Latest serving committee, preferring `committee-update/` and falling back
@@ -392,23 +381,21 @@ impl GuardianSessionCache {
     }
 }
 
-/// The resulting instance + recipient roster from a ceremony message: `NewKey`
-/// yields its instance; `Rotate` yields `new_instance`, asserting the rotation
-/// bumps `sharing_seq` by exactly one over the consumed `old_instance`.
-fn ceremony_instance_and_roster(
+/// The resulting instance from a ceremony message: `NewKey` yields its instance;
+/// `Rotate` yields `new_instance`, asserting the rotation bumps `sharing_seq` by
+/// exactly one over the consumed `old_instance`.
+fn ceremony_instance_and_pubkey(
     msg: CeremonyLogMessage,
     key: &str,
-) -> anyhow::Result<(SecretSharingInstance, Vec<KPFingerprint>, BitcoinPubkey)> {
+) -> anyhow::Result<(SecretSharingInstance, BitcoinPubkey)> {
     Ok(match msg {
         CeremonyLogMessage::NewKey {
             instance,
-            roster,
             btc_master_pubkey,
-        } => (instance, roster, btc_master_pubkey),
+        } => (instance, btc_master_pubkey),
         CeremonyLogMessage::Rotate {
             old_instance,
             new_instance,
-            roster,
             btc_master_pubkey,
         } => {
             let expected = old_instance
@@ -421,7 +408,7 @@ fn ceremony_instance_and_roster(
                 old_instance.sharing_seq(),
                 new_instance.sharing_seq()
             );
-            (new_instance, roster, btc_master_pubkey)
+            (new_instance, btc_master_pubkey)
         }
     })
 }
