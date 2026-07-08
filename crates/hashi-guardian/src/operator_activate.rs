@@ -13,7 +13,6 @@ use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::InitLogMessage;
-use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::OperatorActivateRequest;
 use hashi_types::guardian::RateLimiter;
 use std::sync::Arc;
@@ -57,9 +56,10 @@ pub async fn operator_activate(
         .clone();
     let mut reader = GuardianReader::from_s3_client(s3, init_config.pcr_allowlist().clone());
 
-    // TODO(PR 2): enforce that all other guardian sessions have been quiet long
-    // enough before activating this standby. The reader-backed implementation
-    // moves in the next PR so this core lifecycle PR stays focused.
+    reader
+        .ensure_session_live_and_others_quiet(&enclave.s3_session_id())
+        .await
+        .map_err(|e| InvalidInputs(format!("heartbeat activation check failed: {e}")))?;
 
     let (_, latest_instance, _, _) = reader
         .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
@@ -80,9 +80,10 @@ pub async fn operator_activate(
         .try_into()
         .map_err(|e| InvalidInputs(format!("invalid serving committee: {e}")))?;
 
-    // TODO(PR 2): recover limiter state from the prior enclave's withdrawal logs.
-    // Until that lands, activation starts from a full genesis bucket.
-    let limiter_state = LimiterState::genesis(init_config.limiter_config());
+    let limiter_state = reader
+        .recover_limiter_state(init_config.limiter_config())
+        .await
+        .map_err(|e| InvalidInputs(format!("recover limiter state: {e}")))?;
     let rate_limiter = RateLimiter::new(*init_config.limiter_config(), limiter_state)?;
 
     let activation_state = ActivationState::new(

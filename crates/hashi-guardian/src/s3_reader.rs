@@ -41,6 +41,9 @@ use hashi_types::guardian::S3_DIR_WITHDRAW;
 use hashi_types::move_types::Committee;
 use std::collections::HashMap;
 
+mod heartbeat_checks;
+mod limiter_recovery;
+
 /// Open an hour-scoped cursor at `start` over the `withdraw/` stream. Advance/
 /// retreat with [`S3HourScopedDirectory::next_dir`]/`prev_dir`, gate on
 /// `write_completion_time`, and read via [`GuardianReader::read_dir`].
