@@ -285,3 +285,29 @@ public fun create_for_testing(
     df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
     hashi
 }
+
+#[test_only]
+/// Forwards to `finish_publish` so its guards can be exercised from
+/// `hashi::finish_publish_tests` (non-public entry functions are not
+/// callable from other modules).
+public fun finish_publish_for_testing(
+    self: &mut Hashi,
+    upgrade_cap: sui::package::UpgradeCap,
+    bitcoin_chain_id: address,
+    guardian_url: String,
+    guardian_btc_public_key: vector<u8>,
+    coin_registry: &mut sui::coin_registry::CoinRegistry,
+    ctx: &mut TxContext,
+) {
+    finish_publish(
+        self,
+        upgrade_cap,
+        bitcoin_chain_id,
+        guardian_url,
+        guardian_btc_public_key,
+        option::none(),
+        option::none(),
+        coin_registry,
+        ctx,
+    )
+}
