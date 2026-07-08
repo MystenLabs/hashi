@@ -1,14 +1,17 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::Context;
 use anyhow::Result;
 use hashi_guardian_proxy::cache::CachingGuardianGrpc;
 use hashi_guardian_proxy::config::Config;
 use hashi_guardian_proxy::forward::Forwarding;
+use hashi_guardian_proxy::info;
 use hashi_guardian_proxy::metrics::ProxyMetrics;
 use hashi_guardian_proxy::relay::Relay;
 use hashi_guardian_proxy::widlog::S3LogStore;
 use hashi_types::proto::guardian_relay_service_server::GuardianRelayServiceServer;
+use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
 use std::sync::Arc;
 use std::time::Duration;
@@ -60,8 +63,9 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Lazy channel to the enclave guardian, shared by forwarder and relay. Mirrors
-    // the node-side client (crates/hashi/src/grpc/guardian_client.rs): same timeout + keepalive.
+    // Lazy channel to the enclave guardian, shared by forwarder, relay, and the
+    // /info reader. Mirrors the node-side client
+    // (crates/hashi/src/grpc/guardian_client.rs): same timeout + keepalive.
     let channel = Endpoint::from_shared(config.backend_url.clone())?
         .connect_timeout(config.connect_timeout)
         .http2_keep_alive_interval(config.keepalive_interval)
@@ -72,6 +76,10 @@ async fn main() -> Result<()> {
         log_store,
         config.btc_network,
         metrics.clone(),
+    );
+    let info_state = info::InfoState::new(
+        GuardianServiceClient::new(channel.clone()),
+        config.info_cache_ttl,
     );
     let relay_svc = Relay::new(channel, config.authorized_kp_fingerprints);
 
@@ -91,13 +99,25 @@ async fn main() -> Result<()> {
         .await;
 
     info!("gRPC proxy listening on {}.", config.listen_addr);
-    Server::builder()
+    let grpc_server = Server::builder()
         .add_service(health_service)
         .add_service(GuardianServiceServer::new(guardian_svc))
         .add_service(GuardianRelayServiceServer::new(relay_svc))
-        .serve(config.listen_addr)
+        .serve(config.listen_addr);
+
+    let http_listener = tokio::net::TcpListener::bind(config.http_listen_addr)
         .await
-        .map_err(|e| anyhow::anyhow!("Server error: {}", e))
+        .with_context(|| format!("bind HTTP info server to {}", config.http_listen_addr))?;
+    info!("HTTP info server listening on {}.", config.http_listen_addr);
+    let http_server = axum::serve(http_listener, info::router(info_state));
+
+    // If either server's accept loop dies, return so the supervisor restarts a
+    // clean task rather than leaving one surface silently dead.
+    tokio::select! {
+        r = grpc_server => r.map_err(|e| anyhow::anyhow!("gRPC server error: {e}"))?,
+        r = http_server => r.map_err(|e| anyhow::anyhow!("HTTP info server error: {e}"))?,
+    }
+    Ok(())
 }
 
 /// Retry transient S3 blips at boot (no target-group crash-loop), but fail

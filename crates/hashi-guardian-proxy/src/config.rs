@@ -23,6 +23,12 @@ pub struct Config {
     /// Address the prometheus `/metrics` endpoint listens on
     /// (`METRICS_LISTEN_ADDR`, default `0.0.0.0:9184`).
     pub metrics_listen_addr: SocketAddr,
+    /// Address the read-only HTTP `/info` + `/health` server listens on
+    /// (`HTTP_LISTEN_ADDR`, default `0.0.0.0:3001`).
+    pub http_listen_addr: SocketAddr,
+    /// TTL for the single-slot `/info` response cache
+    /// (`INFO_CACHE_TTL_MS`, default 1000).
+    pub info_cache_ttl: Duration,
     /// TCP connect timeout to the backend
     /// (`GUARDIAN_CONNECT_TIMEOUT_SECS`, default 5).
     pub connect_timeout: Duration,
@@ -56,6 +62,11 @@ impl Config {
             .unwrap_or_else(|_| "0.0.0.0:9184".to_string())
             .parse()
             .context("METRICS_LISTEN_ADDR must be a valid socket address")?;
+        let http_listen_addr = std::env::var("HTTP_LISTEN_ADDR")
+            .unwrap_or_else(|_| "0.0.0.0:3001".to_string())
+            .parse()
+            .context("HTTP_LISTEN_ADDR must be a valid socket address")?;
+        let info_cache_ttl = Duration::from_millis(parse_env_u64("INFO_CACHE_TTL_MS", 1000)?);
         let connect_timeout =
             Duration::from_secs(parse_env_u64("GUARDIAN_CONNECT_TIMEOUT_SECS", 5)?);
         let keepalive_interval = Duration::from_secs(parse_env_u64("GUARDIAN_KEEPALIVE_SECS", 5)?);
@@ -73,6 +84,8 @@ impl Config {
             backend_url,
             listen_addr,
             metrics_listen_addr,
+            http_listen_addr,
+            info_cache_ttl,
             connect_timeout,
             keepalive_interval,
             log_bucket,

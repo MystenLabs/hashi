@@ -12,6 +12,9 @@
 //! - [`relay`] serves `GuardianRelayService`: key provisioners submit one share
 //!   each and the relay batches a threshold-many into the guardian's
 //!   `ProvisionerInit`.
+//! - [`info`] serves a read-only HTTP `/info` + `/health` JSON surface (a
+//!   curated limiter/identity view, with CORS) so browser / `fetch` clients can
+//!   read limiter status that the gRPC surface only exposes to nodes.
 //!
 //! The proxy is liveness-only in the trust model: it can stall but never forge a
 //! withdrawal or read a KP share (shares are end-to-end encrypted to the enclave).
@@ -19,6 +22,7 @@
 pub mod cache;
 pub mod config;
 pub mod forward;
+pub mod info;
 pub mod metrics;
 pub mod relay;
 pub mod widlog;
