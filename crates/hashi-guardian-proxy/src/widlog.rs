@@ -40,7 +40,7 @@ const SUCCESS_KEY_PREFIX: &str = "success-";
 pub enum WidLogError {
     /// A LIST or GET failed; the lookup is indeterminate.
     Store(anyhow::Error),
-    /// The scan exceeded [`SCAN_LIST_CAP`] without terminating.
+    /// The scan exceeded `SCAN_LIST_CAP` without terminating.
     CapExceeded,
 }
 
