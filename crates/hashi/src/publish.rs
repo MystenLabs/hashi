@@ -1,10 +1,12 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Build and publish the Hashi Move package.
+//! Build, publish, and launch the Hashi Move package.
 //!
-//! Provides a reusable [`build_package`] + [`publish_and_init`] workflow that can be called
-//! from both the CLI and integration tests.
+//! Provides a reusable [`build_package`] + [`publish_package`] +
+//! [`finish_publish`] workflow that can be called from both the CLI and
+//! integration tests. [`finish_publish`] is deferred to launch time: it is
+//! the switch that unlocks genesis.
 
 use std::path::Path;
 use std::process::Command;
@@ -118,35 +120,25 @@ pub struct BitcoinConfigOverrides {
     pub deposit_time_delay_ms: Option<u64>,
 }
 
-/// Publish the compiled package and run post-publish initialization.
-///
-/// Executes two transactions:
-///
-/// 1. **Publish** – publishes the modules, transfers the `UpgradeCap` to the sender.
-/// 2. **Init** – calls `hashi::finish_publish` to register BTC, the upgrade cap,
-///    set the bitcoin chain ID, and optionally configure the guardian and
-///    bitcoin config overrides.
-///
-/// Returns the [`HashiIds`] (package ID + Hashi shared-object ID) on success.
-pub async fn publish_and_init(
+/// Result of [`publish_package`].
+pub struct PublishOutput {
+    pub ids: HashiIds,
+    /// `UpgradeCap` object id, left in the publisher's wallet until
+    /// [`finish_publish`] (the launch switch) is sent.
+    pub upgrade_cap_id: Address,
+}
+
+/// Publish the compiled package. The `UpgradeCap` is transferred to the
+/// sender, where it stays through the validator-registration window;
+/// genesis is unlocked later by handing it in via [`finish_publish`].
+pub async fn publish_package(
     client: &mut Client,
     signer: &Ed25519PrivateKey,
     publish: sui_sdk_types::Publish,
-    bitcoin_chain_id: &str,
-    guardian: &GuardianConfig,
-    bitcoin_overrides: &BitcoinConfigOverrides,
-) -> Result<HashiIds> {
+) -> Result<PublishOutput> {
     let sender = signer.public_key().derive_address();
 
-    // Validate and convert bitcoin_chain_id to a Move-compatible address.
-    anyhow::ensure!(
-        network_from_chain_id(bitcoin_chain_id).is_some(),
-        "unrecognized bitcoin chain id: {bitcoin_chain_id}"
-    );
-    let block_hash = BlockHash::from_str(bitcoin_chain_id)?;
-    let bitcoin_chain_id_addr = Address::new(*block_hash.as_byte_array());
-
-    // ── Transaction 1: Publish ──────────────────────────────────────────
+    // ── Transaction: Publish ────────────────────────────────────────────
     let mut builder = TransactionBuilder::new();
     builder.set_sender(sender);
 
@@ -213,12 +205,40 @@ pub async fn publish_and_init(
         .object_id()
         .parse::<Address>()?;
 
-    // ── Transaction 2: Init (finish_publish) ─────────────────────────────
+    Ok(PublishOutput {
+        ids: HashiIds {
+            package_id,
+            hashi_object_id,
+        },
+        upgrade_cap_id,
+    })
+}
+
+/// Build the unsigned `hashi::finish_publish` transaction (the launch
+/// switch). Exposed separately from [`finish_publish`] for offline /
+/// multisig signing.
+pub async fn build_finish_publish_tx(
+    client: &mut Client,
+    sender: Address,
+    ids: &HashiIds,
+    upgrade_cap_id: Address,
+    bitcoin_chain_id: &str,
+    guardian: &GuardianConfig,
+    bitcoin_overrides: &BitcoinConfigOverrides,
+) -> Result<sui_sdk_types::Transaction> {
+    // Validate and convert bitcoin_chain_id to a Move-compatible address.
+    anyhow::ensure!(
+        network_from_chain_id(bitcoin_chain_id).is_some(),
+        "unrecognized bitcoin chain id: {bitcoin_chain_id}"
+    );
+    let block_hash = BlockHash::from_str(bitcoin_chain_id)?;
+    let bitcoin_chain_id_addr = Address::new(*block_hash.as_byte_array());
+
     let mut builder = TransactionBuilder::new();
     builder.set_sender(sender);
 
     let hashi_arg = builder.object(
-        ObjectInput::new(hashi_object_id)
+        ObjectInput::new(ids.hashi_object_id)
             .as_shared()
             .with_mutable(true),
     );
@@ -236,7 +256,7 @@ pub async fn publish_and_init(
 
     builder.move_call(
         Function::new(
-            package_id,
+            ids.package_id,
             Identifier::from_static("hashi"),
             Identifier::from_static("finish_publish"),
         ),
@@ -252,7 +272,35 @@ pub async fn publish_and_init(
         ],
     );
 
-    let transaction = builder.build(client).await?;
+    Ok(builder.build(client).await?)
+}
+
+/// Send `hashi::finish_publish` — the launch switch. Finalizes the deploy
+/// parameters (chain id, guardian, overrides) and hands the `UpgradeCap`
+/// into on-chain custody, which unlocks the genesis `start_reconfig`;
+/// validator nodes then form the initial committee from whoever is
+/// registered, so only call this once all expected validators have fully
+/// registered.
+pub async fn finish_publish(
+    client: &mut Client,
+    signer: &Ed25519PrivateKey,
+    ids: &HashiIds,
+    upgrade_cap_id: Address,
+    bitcoin_chain_id: &str,
+    guardian: &GuardianConfig,
+    bitcoin_overrides: &BitcoinConfigOverrides,
+) -> Result<()> {
+    let sender = signer.public_key().derive_address();
+    let transaction = build_finish_publish_tx(
+        client,
+        sender,
+        ids,
+        upgrade_cap_id,
+        bitcoin_chain_id,
+        guardian,
+        bitcoin_overrides,
+    )
+    .await?;
     let signature = signer.sign_transaction(&transaction)?;
 
     let response = client
@@ -267,11 +315,8 @@ pub async fn publish_and_init(
 
     anyhow::ensure!(
         response.transaction().effects().status().success(),
-        "init transaction failed (finish_publish)"
+        "launch transaction failed (finish_publish)"
     );
 
-    Ok(HashiIds {
-        package_id,
-        hashi_object_id,
-    })
+    Ok(())
 }

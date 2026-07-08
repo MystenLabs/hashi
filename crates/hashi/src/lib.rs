@@ -262,6 +262,31 @@ impl Hashi {
     }
 
     pub fn guardian_client(&self) -> Option<&grpc::guardian_client::GuardianClient> {
+        if self.guardian_client.get().is_none() {
+            // Pre-launch boot: no guardian endpoint existed at startup.
+            // `guardian_url` lands on-chain with the launch tx
+            // (finish_publish); resolve the client on first use afterwards.
+            let endpoint = self.onchain_state_opt().and_then(|onchain| {
+                let state = onchain.state();
+                state.hashi().config.guardian_url().map(|s| s.to_string())
+            });
+            if let Some(endpoint) = endpoint {
+                match grpc::guardian_client::GuardianClient::new(&endpoint) {
+                    Ok(guardian) => {
+                        let guardian = guardian.with_metrics(self.metrics.clone());
+                        tracing::info!(
+                            "Guardian client configured from on-chain config for {}",
+                            guardian.endpoint()
+                        );
+                        self.metrics.guardian_enabled.set(1);
+                        let _ = self.guardian_client.set(Some(guardian));
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to configure guardian client for {endpoint}: {e}")
+                    }
+                }
+            }
+        }
         self.guardian_client.get().and_then(|opt| opt.as_ref())
     }
 
@@ -566,17 +591,31 @@ impl Hashi {
     }
 
     /// Verify the local config's `bitcoin_chain_id` matches the value stored on-chain.
-    fn verify_bitcoin_chain_id(&self) -> anyhow::Result<()> {
+    ///
+    /// Before the launch tx (`finish_publish`) the value does not exist
+    /// on-chain yet — nodes boot in that window to register their keys — so
+    /// absence skips the check rather than failing; any restart after launch
+    /// re-verifies. Reconfig participation re-runs the check
+    /// (`MpcService::handle_reconfig`), which covers nodes that booted
+    /// pre-launch and never restarted: a pending epoch change implies the
+    /// launch happened, so the value is present by then.
+    pub(crate) fn verify_bitcoin_chain_id(&self) -> anyhow::Result<()> {
         use bitcoin::hashes::Hash as _;
         use std::str::FromStr;
 
-        let onchain_chain_id = self
+        let Some(onchain_chain_id) = self
             .onchain_state()
             .state()
             .hashi()
             .config
             .bitcoin_chain_id()
-            .ok_or_else(|| anyhow!("bitcoin_chain_id not found in on-chain config"))?;
+        else {
+            tracing::warn!(
+                "bitcoin_chain_id not on-chain yet (pre-launch, before finish_publish); \
+                 skipping verification"
+            );
+            return Ok(());
+        };
 
         let local_chain_id = self.config.bitcoin_chain_id();
         let block_hash = btc_monitor::config::BlockHash::from_str(local_chain_id)?;
@@ -675,29 +714,38 @@ impl Hashi {
         // Initialize on-chain state first so we can read guardian config from it.
         let onchain_service = self.initialize_onchain_state().await?;
 
+        // Guardian endpoint: prefer the on-chain value (published by the
+        // launch tx, `finish_publish`), falling back to local config. On a
+        // pre-launch boot neither may exist yet — nodes still need to start
+        // to register their keys — so leave the client unresolved;
+        // `guardian_client()` resolves it lazily from on-chain config once
+        // the launch lands.
         let guardian_endpoint = {
             let state = self.onchain_state().state();
             state.hashi().config.guardian_url().map(|s| s.to_string())
         }
-        .or_else(|| self.config.guardian_endpoint().map(|s| s.to_string()))
-        .ok_or_else(|| {
-            anyhow!(
-                "Guardian is required: set `guardian_url` on-chain or \
-                 `guardian_endpoint` in local config / env override"
-            )
-        })?;
+        .or_else(|| self.config.guardian_endpoint().map(|s| s.to_string()));
 
-        let guardian = grpc::guardian_client::GuardianClient::new(&guardian_endpoint)
-            .map_err(|e| {
-                anyhow!("Failed to configure guardian client for {guardian_endpoint}: {e}")
-            })?
-            .with_metrics(self.metrics.clone());
-        tracing::info!("Guardian client configured for {}", guardian.endpoint());
+        match guardian_endpoint {
+            Some(guardian_endpoint) => {
+                let guardian = grpc::guardian_client::GuardianClient::new(&guardian_endpoint)
+                    .map_err(|e| {
+                        anyhow!("Failed to configure guardian client for {guardian_endpoint}: {e}")
+                    })?
+                    .with_metrics(self.metrics.clone());
+                tracing::info!("Guardian client configured for {}", guardian.endpoint());
 
-        self.metrics.guardian_enabled.set(1);
-        self.guardian_client
-            .set(Some(guardian))
-            .map_err(|_| anyhow!("Guardian client already initialized"))?;
+                self.metrics.guardian_enabled.set(1);
+                self.guardian_client
+                    .set(Some(guardian))
+                    .map_err(|_| anyhow!("Guardian client already initialized"))?;
+            }
+            None => tracing::warn!(
+                "Guardian endpoint not available yet (pre-launch: `guardian_url` lands \
+                 on-chain with finish_publish and no local `guardian_endpoint` is set); \
+                 will configure the guardian client once it appears on-chain"
+            ),
+        }
 
         // Verify the local bitcoin_chain_id matches the on-chain value.
         self.verify_bitcoin_chain_id()?;
@@ -970,8 +1018,15 @@ impl Hashi {
         // Cadence for the limiter reconciliation safety net below.
         const RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
         Service::new().spawn_aborting(async move {
-            if self.guardian_client().is_none() {
-                return Ok(());
+            // The guardian may be set up after this node boots: on a
+            // pre-launch boot the on-chain guardian_url only lands with
+            // finish_publish, and an external guardian can be provisioned
+            // later still. `guardian_client()` re-resolves from on-chain
+            // config on every call, so wait for it rather than giving up —
+            // returning here would permanently skip limiter seeding and the
+            // reconcile loop for this process lifetime.
+            while self.guardian_client().is_none() {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             }
             let policy = backon::ExponentialBuilder::default()
                 .with_min_delay(std::time::Duration::from_secs(1))

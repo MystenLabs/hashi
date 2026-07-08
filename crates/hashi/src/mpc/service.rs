@@ -240,8 +240,8 @@ impl MpcService {
                 }
                 Err(e) => debug!("Failed to compute next_reconfig_epoch: {e}"),
             }
-            // Attempt to submit start_reconfig. This will fail on-chain if
-            // not enough validators have registered (95% stake threshold).
+            // Attempt to submit start_reconfig. This will fail on-chain until
+            // the publisher sends finish_publish (the launch switch).
             let result = async {
                 let mut executor =
                     crate::sui_tx_executor::SuiTxExecutor::from_hashi(self.inner.clone())?;
@@ -752,6 +752,18 @@ impl MpcService {
             info!(
                 "handle_reconfig: epoch {target_epoch} no longer pending at entry, aborting before start",
             );
+            return;
+        }
+        // A pending epoch change implies the launch (finish_publish) has
+        // happened, so the on-chain bitcoin_chain_id exists now even if this
+        // node booted pre-launch and the startup check was skipped. Refuse
+        // to participate on mismatch — signing for the wrong Bitcoin network
+        // must not happen; the caller re-enters while the epoch change is
+        // pending, surfacing the error every RETRY_INTERVAL until an
+        // operator fixes the config.
+        if let Err(e) = self.inner.verify_bitcoin_chain_id() {
+            error!("refusing to participate in reconfig for epoch {target_epoch}: {e}");
+            self.sleep_if_still_pending(target_epoch).await;
             return;
         }
         let metrics = &self.inner.metrics;

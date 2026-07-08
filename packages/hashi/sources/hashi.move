@@ -101,8 +101,14 @@ public(package) fun assert_not_reconfiguring(self: &Hashi) {
     assert!(self.committee_set().has_committee(self.committee_set().epoch()), ENoCommittee);
 }
 
-// Function that needs to be called immediately after publishing to finalize
-// some input parameters, register BTC and the package's UpgradeCap.
+// The launch switch. Finalizes input parameters, registers BTC, and hands
+// the package's `UpgradeCap` into on-chain custody (`Versioning`) — which is
+// what unlocks genesis: validators can register beforehand, but
+// `reconfig::start_reconfig` refuses to form the initial committee until the
+// cap is registered here. The publisher holds the cap through the
+// validator-registration window and calls this once the expected committee
+// has registered. `Option::fill` inside `set_upgrade_cap` (and the write-once
+// BTC currency/treasury registration) make this call-once.
 //
 // The guardian URL and BTC key are both required: the guardian is a
 // load-bearing component of every deposit address (2-of-2 taproot leaf)
@@ -278,4 +284,30 @@ public fun create_for_testing(
     };
     df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
     hashi
+}
+
+#[test_only]
+/// Forwards to `finish_publish` so its guards can be exercised from
+/// `hashi::finish_publish_tests` (non-public entry functions are not
+/// callable from other modules).
+public fun finish_publish_for_testing(
+    self: &mut Hashi,
+    upgrade_cap: sui::package::UpgradeCap,
+    bitcoin_chain_id: address,
+    guardian_url: String,
+    guardian_btc_public_key: vector<u8>,
+    coin_registry: &mut sui::coin_registry::CoinRegistry,
+    ctx: &mut TxContext,
+) {
+    finish_publish(
+        self,
+        upgrade_cap,
+        bitcoin_chain_id,
+        guardian_url,
+        guardian_btc_public_key,
+        option::none(),
+        option::none(),
+        coin_registry,
+        ctx,
+    )
 }

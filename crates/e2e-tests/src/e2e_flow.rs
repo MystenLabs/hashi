@@ -507,7 +507,10 @@ mod tests {
         let mut networks = setup_test_networks(builder).await?;
 
         for node in networks.hashi_network.nodes() {
-            assert!(node.hashi().config.guardian_endpoint().is_some());
+            // The harness injects no local guardian_endpoint, so a resolved
+            // client proves the lazy on-chain path (guardian_url set by the
+            // launch tx after these nodes booted) — guardian set up last.
+            assert!(node.hashi().config.guardian_endpoint().is_none());
             assert!(node.hashi().guardian_client().is_some());
             // Harness waits for limiter bootstrap before returning.
             assert!(node.hashi().local_limiter().is_some());

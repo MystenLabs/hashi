@@ -8,6 +8,7 @@ use hashi::{committee::CommitteeSignature, hashi::Hashi};
 
 const ENotReconfiguring: u64 = 0;
 const EInitialReconfig: u64 = 1;
+const EGenesisNotAuthorized: u64 = 2;
 
 /// Message that committee members sign to confirm successful key rotation.
 public struct ReconfigCompletionMessage has copy, drop, store {
@@ -29,6 +30,7 @@ entry fun start_reconfig(
     self.versioning().assert_version_enabled();
     // Assert that we are not already reconfiguring
     assert!(!self.committee_set().is_reconfiguring());
+    assert_genesis_launch_authorized(self);
     // Pin the current MPC parameters so they stay fixed for the new epoch even
     // if governance changes them mid-epoch.
     let config = hashi::mpc_config::pin(self.config());
@@ -99,6 +101,19 @@ entry fun submit_committee_handoff(
         committee_handoff_cert,
     );
     self.committee_set_mut().set_pending_committee_handoff_cert(committee_handoff_cert);
+}
+
+/// At genesis bootstrap (no MPC key yet) the initial committee may only form
+/// after the publisher hands the package `UpgradeCap` into on-chain custody
+/// via `hashi::finish_publish` -- the launch switch. After bootstrap this is
+/// never consulted; Hashi follows Sui's validator set unconditionally --
+/// enforcing a floor on a normal reconfig would let validators brick
+/// reconfiguration (and with it all deposits/withdrawals) by withholding
+/// registration.
+public(package) fun assert_genesis_launch_authorized(self: &Hashi) {
+    if (self.committee_set().mpc_public_key().is_empty()) {
+        assert!(self.versioning().has_upgrade_cap(), EGenesisNotAuthorized);
+    }
 }
 
 public struct StartReconfigEvent has copy, drop {
