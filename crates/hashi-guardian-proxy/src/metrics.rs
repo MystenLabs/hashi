@@ -2,10 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Prometheus metrics for the proxy, served on `METRICS_LISTEN_ADDR`. The
-//! request counter's `outcome` label is the wid cache's decision surface —
-//! `unavailable_*` outcomes are the fail-closed paths and worth alerting on
-//! (`unavailable_verify_failed` in particular: a log record whose signatures
-//! don't verify is either bucket tampering or version skew).
+//! `unavailable_*` outcomes are the fail-closed paths and worth alerting on,
+//! `unavailable_verify_failed` especially (bucket tampering or version skew).
 
 use prometheus::Encoder;
 use prometheus::Histogram;
@@ -22,10 +20,6 @@ use tracing::info;
 pub const OUTCOME_L1_HIT: &str = "l1_hit";
 pub const OUTCOME_S3_HIT: &str = "s3_hit";
 pub const OUTCOME_FORWARDED: &str = "forwarded";
-/// A log record existed but the enclave never committed its seq (S3 ack lost
-/// before the limiter commit); forwarded so the enclave signs and debits it
-/// properly instead of replaying an un-debited record.
-pub const OUTCOME_FORWARDED_UNCOMMITTED: &str = "forwarded_uncommitted";
 pub const OUTCOME_UNAVAILABLE_LOG_STORE: &str = "unavailable_log_store";
 pub const OUTCOME_UNAVAILABLE_SCAN_CAP: &str = "unavailable_scan_cap";
 pub const OUTCOME_UNAVAILABLE_VERIFY_FAILED: &str = "unavailable_verify_failed";
@@ -39,6 +33,9 @@ pub struct ProxyMetrics {
     pub scan_lists: Histogram,
     /// Wid-matching log records that failed to parse (schema skew or garbage).
     pub record_parse_failures: IntCounter,
+    /// Log records the enclave never committed (S3 ack lost, limiter reverted);
+    /// these forward for a fresh sign instead of replaying.
+    pub uncommitted_records: IntCounter,
 }
 
 impl ProxyMetrics {
@@ -66,6 +63,11 @@ impl ProxyMetrics {
             "Wid-matching log records that failed to parse",
         )
         .expect("valid metric");
+        let uncommitted_records = IntCounter::new(
+            "guardian_proxy_widlog_uncommitted_records_total",
+            "Log records found but never committed by the enclave",
+        )
+        .expect("valid metric");
 
         registry
             .register(Box::new(requests.clone()))
@@ -76,12 +78,16 @@ impl ProxyMetrics {
         registry
             .register(Box::new(record_parse_failures.clone()))
             .expect("register");
+        registry
+            .register(Box::new(uncommitted_records.clone()))
+            .expect("register");
 
         Self {
             registry,
             requests,
             scan_lists,
             record_parse_failures,
+            uncommitted_records,
         }
     }
 

@@ -1,25 +1,24 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Read-only access to the guardian's S3 withdrawal log, used as the durable
-//! tier of the wid cache. The enclave writes one `Success` record per signed
-//! withdrawal *before* it releases the signatures (fail-closed, see
-//! `hashi-guardian/src/withdraw_mode/standard.rs`), so any signature a node has
-//! ever seen has a durable record here — the proxy never writes.
+//! Read-only access to the guardian's S3 withdrawal log — the wid cache's
+//! durable tier. The enclave writes one `Success` record per signed withdrawal
+//! *before* releasing the signatures and fails closed if the write fails
+//! (`withdraw_mode/standard.rs`), so every signature a node has seen has a
+//! record here; the proxy never writes.
 //!
-//! Success keys are `withdraw/YYYY/MM/DD/HH/success-{seq:020}-{session}-wid{wid}.json`
-//! (hour buckets; lexicographic order within a bucket is seq order; the wid only
-//! appears as a suffix, so lookups scan buckets newest-first). The scan is
-//! bounded by the request's `seq`: the node only retries a wid the guardian
-//! signed at seq `S` while its own mirror reads `S` or `S+1`, so once two
-//! consecutive success-bearing buckets top out below `seq - 1` the record cannot
-//! be further back. Two buckets (not one) so a forward clock step in the enclave
-//! can't hide the record behind a single future-labelled bucket; failure-only
-//! buckets are skipped by listing the `success-` prefix and never terminate the
-//! scan. An exhausted prefix tree is a definitive miss; hitting the LIST cap is
-//! NOT — the caller must fail closed on it, never forward.
+//! Keys are `withdraw/YYYY/MM/DD/HH/success-{seq:020}-{session}-wid{wid}.json`,
+//! with the wid only a suffix — so a lookup walks hour buckets newest-first.
+//! The request's `seq` bounds the walk: a retried wid was signed at `seq` or
+//! `seq - 1` (the node's mirror trails the guardian by at most the reconcile
+//! snap), so once two consecutive success-bearing buckets top out below
+//! `seq - 1` the record can't be further back (two, not one, so a forward
+//! clock step can't hide it behind a single future-labelled bucket). Exhausted
+//! prefixes are a definitive miss; hitting the LIST cap is NOT — the caller
+//! must fail closed on it, never forward.
 
 use crate::metrics::ProxyMetrics;
+use aws_sdk_s3::error::DisplayErrorContext;
 use hashi_types::guardian::log::S3_DIR_WITHDRAW;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::LogRecord;
@@ -28,10 +27,8 @@ use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::WithdrawalLogMessage;
 use tracing::warn;
 
-/// Total LIST calls a single lookup may issue. A terminating scan needs ~4 tree
-/// walks + 2-3 bucket lists; the cap only trips when the requested seq is far
-/// below everything in the bucket (e.g. a rogue client), and it must surface as
-/// "cache unavailable", not "not found".
+// A terminating scan needs ~4 tree walks + 2-3 bucket lists; the cap only
+// trips on a seq far below everything in the log (e.g. a rogue client).
 const SCAN_LIST_CAP: usize = 100;
 
 const SUCCESS_KEY_PREFIX: &str = "success-";
@@ -89,8 +86,7 @@ pub async fn find_success_record<L: LogStore>(
                         )
                         .await?;
                         if keys.is_empty() {
-                            // Failure-only (or empty) bucket: indeterminate for
-                            // the seq bound, keep walking.
+                            // Failure-only bucket: says nothing about the seq bound.
                             continue;
                         }
 
@@ -100,9 +96,7 @@ pub async fn find_success_record<L: LogStore>(
                             match parse_success(&bytes, wid) {
                                 Ok(found) => return Ok(Some(found)),
                                 Err(e) => {
-                                    // Version-skewed or malformed record: skip it.
-                                    // Ending as a miss degrades to a re-sign (one
-                                    // limiter double-debit) and self-heals, where
+                                    // Skip (schema skew): a miss re-signs and heals;
                                     // failing closed would wedge until a proxy fix.
                                     metrics.record_parse_failures.inc();
                                     warn!(key, error = %e, "unreadable success record for wid; skipping");
@@ -197,10 +191,8 @@ fn parse_success(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<FoundSucces
     })
 }
 
-/// The guardian's log bucket over the AWS SDK, read-only. Credentials come from
-/// the default provider chain (task role on Fargate, static env vars against
-/// MinIO); an `AWS_ENDPOINT_URL_S3` override implies an S3-compatible service
-/// that needs path-style addressing, mirroring the enclave's client.
+/// The guardian's log bucket over the AWS SDK, read-only. Credentials come
+/// from the default provider chain (task role on Fargate, env vars for MinIO).
 pub struct S3LogStore {
     client: aws_sdk_s3::Client,
     bucket: String,
@@ -232,7 +224,7 @@ impl S3LogStore {
             .max_keys(1)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("list {}: {}", self.bucket, e.into_service_error()))?;
+            .map_err(|e| anyhow::anyhow!("list {}: {}", self.bucket, DisplayErrorContext(e)))?;
         Ok(())
     }
 }
@@ -250,7 +242,8 @@ impl LogStore for S3LogStore {
             .into_paginator()
             .send();
         while let Some(page) = pages.next().await {
-            let page = page.map_err(|e| anyhow::anyhow!("list dirs {prefix}: {e}"))?;
+            let page = page
+                .map_err(|e| anyhow::anyhow!("list dirs {prefix}: {}", DisplayErrorContext(e)))?;
             dirs.extend(
                 page.common_prefixes()
                     .iter()
@@ -270,7 +263,8 @@ impl LogStore for S3LogStore {
             .into_paginator()
             .send();
         while let Some(page) = pages.next().await {
-            let page = page.map_err(|e| anyhow::anyhow!("list keys {prefix}: {e}"))?;
+            let page = page
+                .map_err(|e| anyhow::anyhow!("list keys {prefix}: {}", DisplayErrorContext(e)))?;
             keys.extend(
                 page.contents()
                     .iter()
@@ -288,7 +282,7 @@ impl LogStore for S3LogStore {
             .key(key)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("get {key}: {}", e.into_service_error()))?;
+            .map_err(|e| anyhow::anyhow!("get {key}: {}", DisplayErrorContext(e)))?;
         let bytes = object
             .body
             .collect()

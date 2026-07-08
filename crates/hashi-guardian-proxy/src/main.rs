@@ -44,9 +44,8 @@ async fn main() -> Result<()> {
         );
     }
 
-    // The guardian's S3 withdrawal log — the wid cache's durable tier. Prove
-    // bucket access before serving: a proxy that can't read the log would fail
-    // every retry closed, and a supervisor restart converges once access works.
+    // The wid cache's durable tier. Prove bucket access before serving: a
+    // proxy that can't read the log fails every retry closed.
     let log_store = S3LogStore::connect(config.log_bucket.clone(), config.log_region.clone()).await;
     probe_with_retries(&log_store).await?;
 
@@ -101,9 +100,8 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Server error: {}", e))
 }
 
-/// Bounded boot probe: retry transient S3 blips so a task start doesn't
-/// crash-loop through the target group, but still fail fast on a real
-/// misconfiguration (bad bucket, missing role).
+/// Retry transient S3 blips at boot (no target-group crash-loop), but fail
+/// fast on real misconfiguration (bad bucket, missing role).
 async fn probe_with_retries(log_store: &S3LogStore) -> Result<()> {
     const ATTEMPTS: u32 = 5;
     for attempt in 1..=ATTEMPTS {

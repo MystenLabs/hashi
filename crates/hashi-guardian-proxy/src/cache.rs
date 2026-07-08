@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Wid-keyed response cache for the guardian's `StandardWithdrawal` RPC: an
-//! in-process LRU in front of the guardian's own S3 withdrawal log as the
-//! durable tier. Lives in the out-of-enclave proxy so it can be hardened or
-//! swapped independently of the signing oracle.
+//! in-process LRU in front of the guardian's own S3 withdrawal log
+//! ([`crate::widlog`]) as the durable, read-only tier.
 //!
 //! Keyed by `wid`, not `(wid, seq)`: the guardian debits the limiter and
 //! advances `next_seq` when it signs, before hashi has the signed event
@@ -14,22 +13,12 @@
 //! `wid` avoids that — safe because a committed wid's inputs/outputs are
 //! immutable (only signatures change), so the response is stable.
 //!
-//! The durable tier is read-only: the enclave writes its `Success` record
-//! *before* releasing signatures and fails closed if the write fails, so any
-//! signature a node has ever seen has a record — the proxy has nothing durable
-//! of its own to lose, across restarts or otherwise. A replay from the log
-//! passes two gates first: the record's seq must be committed (below the
-//! enclave's `next_seq`; an S3 put whose ack was lost leaves a record the
-//! enclave reverted, which must re-sign, not replay), and the recorded
-//! signatures must verify against the guardian BTC key over sighashes
-//! recomputed from the incoming request (a bucket writer must not be able to
-//! wedge withdrawals with a poisoned record).
-//!
-//! When the log can't answer — LIST/GET failure, scan cap, guardian info
-//! unavailable, verification failure — the proxy fails closed with
-//! `UNAVAILABLE` rather than forwarding blind: it cannot distinguish "never
-//! signed" from "signed but unreadable", and forwarding the latter re-signs
-//! and double-debits the limiter. Errors from the enclave are never cached.
+//! The enclave persists every signed withdrawal before releasing it, so the
+//! proxy has nothing durable of its own to lose. A log replay passes two gates
+//! (see `replay_from_log`); when the log can't answer, the proxy fails closed
+//! with `UNAVAILABLE` rather than forwarding blind — it cannot distinguish
+//! "never signed" from "signed but unreadable", and forwarding the latter
+//! re-signs and double-debits the limiter.
 
 use crate::metrics;
 use crate::metrics::ProxyMetrics;
@@ -178,10 +167,8 @@ where
             }
         };
 
-        // Gate 1 (committed): the enclave holds the limiter across its S3 write
-        // and reverts if the write's ack never arrived — such an orphan record
-        // has `seq >= next_seq` and its withdrawal was never debited, so it must
-        // re-sign, not replay.
+        // Gate 1 (committed): a record whose S3 ack never reached the enclave
+        // was reverted, not debited — `seq >= next_seq` — and must re-sign.
         let info = match self.guardian_info().await {
             Ok(info) => info,
             Err(e) => {
@@ -202,7 +189,7 @@ where
             return Err(unavailable());
         };
         if found.consumed_seq >= limiter_state.next_seq {
-            self.metrics.outcome(metrics::OUTCOME_FORWARDED_UNCOMMITTED);
+            self.metrics.uncommitted_records.inc();
             warn!(
                 %wid,
                 record_seq = found.consumed_seq,
@@ -212,9 +199,8 @@ where
             return Ok(None);
         }
 
-        // Gate 2 (integrity): recompute this request's sighashes and verify the
-        // recorded signatures against the guardian BTC key, so the replay path
-        // can never hand the node signatures that don't spend its transaction.
+        // Gate 2 (integrity): the replay path must never hand the node
+        // signatures that don't spend its transaction.
         if let Err(e) = verify_recorded_signatures(
             request,
             &found.response.enclave_signatures,
@@ -301,11 +287,9 @@ fn synthesize_response(found: &FoundSuccess) -> proto::SignedStandardWithdrawalR
                 .collect(),
         }),
         timestamp_ms: Some(found.timestamp_ms),
-        // The log record predates the response envelope (the enclave signs the
-        // envelope only after the S3 write), so a replay cannot carry the
-        // original. The node's wire parse requires a 64-byte value but never
-        // verifies it (`into_data_unchecked`; see leader/guardian.rs), so zeros
-        // are honest: they can't be mistaken for a real signature.
+        // The record predates the response envelope (the enclave signs it after
+        // the S3 write). Nodes require a 64-byte value but never verify it
+        // (`into_data_unchecked`), so zeros can't pass for a real signature.
         signature: Some(vec![0u8; 64].into()),
     }
 }
@@ -939,10 +923,8 @@ mod tests {
         assert_eq!(count.load(Ordering::SeqCst), 0);
     }
 
-    /// The deploy-survival property against a real object store: a fresh proxy
-    /// instance (empty L1) serves a wid whose Success record was written before
-    /// it existed, without touching the enclave. Run against the local replica's
-    /// MinIO (`docker/hashi-guardian-local`, `make up`):
+    /// A fresh proxy instance (empty L1) serves a wid whose record predates it,
+    /// without touching the enclave. Against the local replica's MinIO:
     ///
     /// ```text
     /// GUARDIAN_LOG_BUCKET=hashi-guardian-dev GUARDIAN_LOG_REGION=us-east-1 \

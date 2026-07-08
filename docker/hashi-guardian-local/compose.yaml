@@ -120,9 +120,8 @@ services:
 
   # The out-of-enclave proxy: the only port published to the host. Holds the wid
   # cache + serves the SingleProvisionerInit relay. Forwards to the withdraw
-  # guardian via the host bridge. Reads the guardian's withdrawal log (MinIO
-  # directly — the proxy sits outside the enclave's S3 forwarder chain) as the
-  # cache's durable tier.
+  # guardian via the host bridge; reads the wid log straight from MinIO (it sits
+  # outside the enclave's S3 forwarder chain).
   proxy:
     <<: *build
     command: ["/usr/bin/hashi-guardian-proxy"]
