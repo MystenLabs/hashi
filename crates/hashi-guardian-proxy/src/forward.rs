@@ -220,7 +220,10 @@ mod tests {
         })
     }
 
-    async fn spawn_stub_proxy() -> (StubGuardian, CachingGuardianGrpc<Forwarding>) {
+    async fn spawn_stub_proxy() -> (
+        StubGuardian,
+        CachingGuardianGrpc<Forwarding, crate::widlog::test_store::MemStore>,
+    ) {
         let stub = StubGuardian::default();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -238,7 +241,13 @@ mod tests {
         let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
             .unwrap()
             .connect_lazy();
-        (stub, CachingGuardianGrpc::new(Forwarding::new(channel)))
+        let cache = CachingGuardianGrpc::new(
+            Forwarding::new(channel),
+            crate::widlog::test_store::MemStore::default(),
+            bitcoin::Network::Regtest,
+            std::sync::Arc::new(crate::metrics::ProxyMetrics::new()),
+        );
+        (stub, cache)
     }
 
     #[tokio::test]
