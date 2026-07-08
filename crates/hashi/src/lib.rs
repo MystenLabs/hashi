@@ -1018,8 +1018,15 @@ impl Hashi {
         // Cadence for the limiter reconciliation safety net below.
         const RECONCILE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
         Service::new().spawn_aborting(async move {
-            if self.guardian_client().is_none() {
-                return Ok(());
+            // The guardian may be set up after this node boots: on a
+            // pre-launch boot the on-chain guardian_url only lands with
+            // finish_publish, and an external guardian can be provisioned
+            // later still. `guardian_client()` re-resolves from on-chain
+            // config on every call, so wait for it rather than giving up —
+            // returning here would permanently skip limiter seeding and the
+            // reconcile loop for this process lifetime.
+            while self.guardian_client().is_none() {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             }
             let policy = backon::ExponentialBuilder::default()
                 .with_min_delay(std::time::Duration::from_secs(1))

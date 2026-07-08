@@ -301,8 +301,7 @@ impl TestNetworksBuilder {
             }
         };
 
-        let mut hashi_builder = self.hashi_builder;
-        hashi_builder = hashi_builder.with_guardian_endpoint(guardian_config.url.clone());
+        let hashi_builder = self.hashi_builder;
 
         // The post-build steps below (on-chain config overrides, guardian
         // provisioner-init) drive transactions through the running committee, so
