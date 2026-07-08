@@ -545,6 +545,30 @@ impl MpcManager {
         {
             return Ok(cached_response.clone());
         }
+        if matches!(
+            request.complaint,
+            ProtocolComplaint::AvidReveal(_) | ProtocolComplaint::AvidBlame { .. }
+        ) {
+            if request.protocol_type != ProtocolTypeIndicator::NonceGeneration {
+                return Err(MpcError::InvalidMessage {
+                    sender: caller,
+                    reason: "AVID complaints require the nonce-generation protocol type".into(),
+                });
+            }
+            let response = self.handle_avid_nonce_complaint_request(caller, request)?;
+            if cache_is_current {
+                self.complaint_responses.insert(cache_key, response.clone());
+            }
+            return Ok(response);
+        }
+        if request.protocol_type == ProtocolTypeIndicator::NonceGeneration
+            && self.mpc_config.nonce_generation_protocol != NonceGenerationProtocol::Vanilla
+        {
+            return Err(MpcError::InvalidMessage {
+                sender: caller,
+                reason: "vanilla nonce complaints are rejected in an AVID epoch".into(),
+            });
+        }
         let cached_messages = cache_is_current
             .then(|| {
                 self.get_dealer_messages(
@@ -2356,6 +2380,99 @@ impl MpcManager {
         Ok((vote, avid_vote, echoes))
     }
 
+    fn handle_avid_nonce_complaint_request(
+        &self,
+        caller: Address,
+        request: &ComplainRequest,
+    ) -> MpcResult<ComplaintResponse> {
+        if self.mpc_config.nonce_generation_protocol != NonceGenerationProtocol::Avid {
+            return Err(MpcError::InvalidMessage {
+                sender: caller,
+                reason: "AVID nonce complaints are rejected in a vanilla nonce generation epoch"
+                    .into(),
+            });
+        }
+        if request.epoch != self.mpc_config.epoch {
+            return Err(MpcError::NotFound(
+                "AVID complaints serve the current epoch only".into(),
+            ));
+        }
+        let batch_index = request
+            .batch_index
+            .ok_or_else(|| MpcError::InvalidMessage {
+                sender: caller,
+                reason: "batch_index required for nonce complaint".into(),
+            })?;
+        let accuser_id =
+            self.committee
+                .index_of(&caller)
+                .ok_or_else(|| MpcError::InvalidMessage {
+                    sender: caller,
+                    reason: "complainer not in committee".into(),
+                })? as PartyId;
+        let state = self
+            .current_avid_round_state
+            .get(&(batch_index, request.dealer))
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| {
+                self.public_messages_store
+                    .get_avid_round_state(self.mpc_config.epoch, batch_index, &request.dealer)
+                    .map_err(|e| MpcError::StorageError(e.to_string()))?
+                    .ok_or_else(|| {
+                        MpcError::NotFound("no AVID round state for the complained round".into())
+                    })
+            })?;
+        let receiver = self.create_avid_nonce_receiver(request.dealer, batch_index)?;
+        let verified_common = receiver
+            .verify_common_message(state.common)
+            .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+        let mut rng = rand::thread_rng();
+        let response = match &request.complaint {
+            ProtocolComplaint::AvidReveal(complaint) => receiver
+                .handle_avss_complaint(
+                    complaint,
+                    accuser_id,
+                    &verified_common,
+                    state.own_ciphertext,
+                    &mut rng,
+                )
+                .map_err(|e| MpcError::CryptoError(e.to_string()))?,
+            ProtocolComplaint::AvidBlame {
+                complaint,
+                vote_cert,
+            } => {
+                let (held_vote, _) = self
+                    .avid_held_echoes
+                    .get(&(batch_index, request.dealer))
+                    .ok_or_else(|| {
+                        MpcError::NotFound("no held vote for the complained round".into())
+                    })?;
+                let cert = AvidCertificate::vote(
+                    vote_cert.clone(),
+                    held_vote.clone(),
+                    Arc::new(self.committee.clone()),
+                )?
+                .into_verified()
+                .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+                receiver
+                    .handle_avid_complaint(
+                        complaint,
+                        accuser_id,
+                        &verified_common,
+                        &cert,
+                        state.own_ciphertext,
+                        &mut rng,
+                    )
+                    .map_err(|e| MpcError::CryptoError(e.to_string()))?
+            }
+            ProtocolComplaint::Avss(_) | ProtocolComplaint::BatchedAvss(_) => {
+                unreachable!("routed by the AVID complaint check")
+            }
+        };
+        Ok(ComplaintResponse::NonceGenerationAvid(response))
+    }
+
     fn get_avid_round_common(
         &self,
         batch_index: u32,
@@ -2715,6 +2832,7 @@ impl MpcManager {
                 .collect();
             (request, signers)
         };
+        let complaint_signers = signers.clone();
         let results = send_to_many(signers, request, |addr, req| async move {
             p2p_channel.retrieve_messages(&addr, &req).await
         })
@@ -2737,7 +2855,7 @@ impl MpcManager {
             .collect();
         let mgr = Arc::clone(mpc_manager);
         let nonce_cert = nonce_cert.clone();
-        spawn_blocking(move || {
+        let outcome = spawn_blocking(move || {
             let mut mgr = mgr.write().unwrap();
             let digest = nonce_cert.message().messages_hash;
             let avid_vote = bundles.iter().find_map(|(_, b)| {
@@ -2753,7 +2871,7 @@ impl MpcManager {
                         .is_some_and(|c| MessageHash::from(c.hash().digest) == digest)
                 });
                 return if common_pins {
-                    Ok(CertKind::AvssVote)
+                    Ok((CertKind::AvssVote, None))
                 } else {
                     Err(MpcError::NotFound(
                         "no pulled artifact pins to the certified digest".into(),
@@ -2772,10 +2890,13 @@ impl MpcManager {
                 .ok_or_else(|| {
                     MpcError::NotFound("no common message pins to the certified vote".into())
                 })?;
-            let vote_cert =
-                AvidCertificate::vote(nonce_cert, avid_vote, Arc::new(mgr.committee.clone()))?
-                    .into_verified()
-                    .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+            let vote_cert = AvidCertificate::vote(
+                nonce_cert.clone(),
+                avid_vote,
+                Arc::new(mgr.committee.clone()),
+            )?
+            .into_verified()
+            .map_err(|e| MpcError::CryptoError(e.to_string()))?;
             let mut verified_echoes = Vec::new();
             for (addr, bundle) in &bundles {
                 let Some(echo) = bundle.echo.clone() else {
@@ -2793,26 +2914,153 @@ impl MpcManager {
             match mgr.decode_avid_nonce_share(
                 dealer,
                 batch_index,
-                common,
+                common.clone(),
                 &verified_echoes,
                 &vote_cert,
                 &mut rng,
             ) {
                 Ok(batch_avss_avid::DecodeAndDecryptOutcome::Valid(..)) => {}
-                Ok(outcome) => {
-                    tracing::warn!(
-                        "AVID decode for dealer {:?} produced a complaint: {:?}",
-                        dealer,
-                        std::mem::discriminant(&outcome)
-                    );
+                Ok(batch_avss_avid::DecodeAndDecryptOutcome::InvalidDecryption(complaint)) => {
+                    return Ok((
+                        CertKind::AvidVote,
+                        Some((ProtocolComplaint::AvidReveal(complaint), common)),
+                    ));
+                }
+                Ok(batch_avss_avid::DecodeAndDecryptOutcome::InvalidDispersal(complaint)) => {
+                    return Ok((
+                        CertKind::AvidVote,
+                        Some((
+                            ProtocolComplaint::AvidBlame {
+                                complaint,
+                                vote_cert: nonce_cert,
+                            },
+                            common,
+                        )),
+                    ));
                 }
                 Err(e) => {
                     tracing::warn!("AVID decode for dealer {:?} failed: {}", dealer, e);
                 }
             }
-            Ok(CertKind::AvidVote)
+            Ok((CertKind::AvidVote, None))
         })
-        .await
+        .await?;
+        let (kind, complaint) = outcome;
+        if let Some((complaint, common)) = complaint
+            && let Err(e) = Self::recover_avid_nonce_shares_via_complaint(
+                mpc_manager,
+                dealer,
+                batch_index,
+                common,
+                complaint,
+                complaint_signers,
+                p2p_channel,
+            )
+            .await
+        {
+            tracing::warn!(
+                "AVID complaint recovery for dealer {:?} failed: {}",
+                dealer,
+                e
+            );
+        }
+        Ok(kind)
+    }
+
+    async fn recover_avid_nonce_shares_via_complaint(
+        mpc_manager: &Arc<RwLock<Self>>,
+        dealer: Address,
+        batch_index: u32,
+        common: batch_avss_avid::AvssCommonMessage,
+        complaint: ProtocolComplaint,
+        signers: Vec<Address>,
+        p2p_channel: &impl P2PChannel,
+    ) -> MpcResult<()> {
+        let epoch = {
+            let mgr = mpc_manager.read().unwrap();
+            mgr.mpc_config.epoch
+        };
+        let request = ComplainRequest {
+            dealer,
+            share_index: None,
+            batch_index: Some(batch_index),
+            complaint,
+            protocol_type: ProtocolTypeIndicator::NonceGeneration,
+            epoch,
+        };
+        let (receiver, verified_common) = {
+            let mgr = Arc::clone(mpc_manager);
+            spawn_blocking(move || -> MpcResult<_> {
+                let mgr = mgr.read().unwrap();
+                let receiver = mgr.create_avid_nonce_receiver(dealer, batch_index)?;
+                let verified_common = receiver
+                    .verify_common_message(common)
+                    .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+                Ok((receiver, verified_common))
+            })
+            .await?
+        };
+        let receiver = Arc::new(receiver);
+        let verified_common = Arc::new(verified_common);
+        let mut verified: Vec<batch_avss_avid::VerifiedComplaintResponse> = Vec::new();
+        let mut futures = fan_out_complaints(signers, p2p_channel, &request);
+        while let Some((signer, result)) = futures.next().await {
+            let response = match result {
+                Ok(ComplaintResponse::NonceGenerationAvid(response)) => response,
+                Ok(_) => {
+                    tracing::info!(
+                        "Unexpected response kind in AVID complaint recovery from {:?}",
+                        signer
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    tracing::info!("AVID complaint to {:?} failed: {}", signer, e);
+                    continue;
+                }
+            };
+            let responder_id = {
+                let mgr = mpc_manager.read().unwrap();
+                match mgr.committee.index_of(&signer) {
+                    Some(index) => index as PartyId,
+                    None => continue,
+                }
+            };
+            let result = {
+                let receiver = Arc::clone(&receiver);
+                let verified_common = Arc::clone(&verified_common);
+                let verified_so_far = verified.clone();
+                spawn_blocking(move || {
+                    let response = receiver
+                        .verify_complaint_response(responder_id, response, &verified_common)
+                        .map_err(|e| {
+                            tracing::info!(
+                                "Complaint response from {:?} failed to verify: {}",
+                                signer,
+                                e
+                            );
+                        })
+                        .ok()?;
+                    let mut attempt = verified_so_far;
+                    attempt.push(response.clone());
+                    Some((response, receiver.recover(&verified_common, attempt).ok()))
+                })
+                .await
+            };
+            let Some((response, output)) = result else {
+                continue;
+            };
+            verified.push(response);
+            if let Some(output) = output {
+                let mut mgr = mpc_manager.write().unwrap();
+                mgr.dealer_avid_nonce_outputs
+                    .insert((batch_index, dealer), output);
+                return Ok(());
+            }
+        }
+        Err(MpcError::ProtocolFailed(
+            "AVID complaint recovery did not reach the response quorum".into(),
+        ))
     }
 
     async fn run_as_avid_nonce_party(
@@ -3579,7 +3827,9 @@ impl MpcManager {
             };
             let complaint_response = match response {
                 ComplaintResponse::Dkg(resp) => resp,
-                ComplaintResponse::Rotation(_) | ComplaintResponse::NonceGeneration(_) => {
+                ComplaintResponse::Rotation(_)
+                | ComplaintResponse::NonceGeneration(_)
+                | ComplaintResponse::NonceGenerationAvid(_) => {
                     tracing::info!("Unexpected non-DKG response in DKG complaint recovery");
                     continue;
                 }
@@ -3685,7 +3935,9 @@ impl MpcManager {
             };
             let complaint_response = match response {
                 ComplaintResponse::NonceGeneration(resp) => resp,
-                ComplaintResponse::Dkg(_) | ComplaintResponse::Rotation(_) => {
+                ComplaintResponse::Dkg(_)
+                | ComplaintResponse::Rotation(_)
+                | ComplaintResponse::NonceGenerationAvid(_) => {
                     tracing::info!("Unexpected non-nonce response in nonce complaint recovery");
                     continue;
                 }

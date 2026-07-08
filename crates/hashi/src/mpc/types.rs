@@ -319,9 +319,15 @@ pub enum NonceReconstructionOutcome {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum ProtocolComplaint {
     Avss(avss::Complaint),
     BatchedAvss(complaint::Complaint),
+    AvidReveal(batch_avss_avid::AvssComplaint),
+    AvidBlame {
+        complaint: batch_avss_avid::AvidComplaint,
+        vote_cert: DealerCertificate,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -335,10 +341,12 @@ pub struct ComplainRequest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)]
 pub enum ComplaintResponse {
     Dkg(avss::ComplaintResponse),
     Rotation(avss::ComplaintResponse),
     NonceGeneration(complaint::ComplaintResponse<batch_avss::SharesForNode>),
+    NonceGenerationAvid(batch_avss_avid::ComplaintResponse),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
