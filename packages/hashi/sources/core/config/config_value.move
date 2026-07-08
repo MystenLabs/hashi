@@ -7,17 +7,18 @@ use std::string::String;
 
 const EInvalidConfigValue: u64 = 0;
 
+// Variant order is BCS-load-bearing: the Rust mirror (hashi-types) decodes
+// by variant index, and once published to a persistent network the order is
+// frozen — package upgrades reject enums whose existing variants change, so
+// new variants may then only be appended at the end.
 public enum Value has copy, drop, store {
     U64(u64),
+    U128(u128),
+    U256(u256),
     Address(address),
     String(String),
     Bool(bool),
     Bytes(vector<u8>),
-    // New variants must be appended (never inserted or reordered): package
-    // upgrades reject enums whose existing variant order changes, and the
-    // Rust mirror (hashi-types) decodes by BCS variant index.
-    U128(u128),
-    U256(u256),
 }
 
 public fun new_u64(value: u64): Value {

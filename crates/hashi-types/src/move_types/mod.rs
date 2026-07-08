@@ -212,14 +212,14 @@ pub struct UpgradeCap {
 #[derive(Debug, Clone, PartialEq, serde_derive::Deserialize, serde_derive::Serialize)]
 pub enum ConfigValue {
     U64(u64),
-    Address(Address),
-    String(String),
-    Bool(bool),
-    Bytes(Vec<u8>),
     U128(u128),
     /// Move `u256`, as its 32 little-endian BCS bytes (no Rust u256 primitive;
     /// a fixed-size array BCS-encodes to exactly the same 32 bytes).
     U256([u8; 32]),
+    Address(Address),
+    String(String),
+    Bool(bool),
+    Bytes(Vec<u8>),
 }
 
 /// MPC parameter keys, in the canonical order Move's `mpc_config::pin` writes
@@ -1628,13 +1628,13 @@ mod tests {
     }
 
     /// Pins the BCS encoding of the wide-integer `ConfigValue` variants against
-    /// what Move produces: 1-byte variant tag (U128 = 5, U256 = 6) followed by
+    /// what Move produces: 1-byte variant tag (U128 = 1, U256 = 2) followed by
     /// the little-endian integer bytes (16 for u128, 32 for u256).
     #[test]
     fn config_value_wide_integer_bcs_round_trip() {
         let u128_value = ConfigValue::U128(1u128 << 100);
         let bytes = bcs::to_bytes(&u128_value).expect("serialize");
-        let mut expected = vec![5u8];
+        let mut expected = vec![1u8];
         expected.extend_from_slice(&(1u128 << 100).to_le_bytes());
         assert_eq!(bytes, expected);
         assert_eq!(
@@ -1646,7 +1646,7 @@ mod tests {
         le[16] = 1; // 2^128, unrepresentable in u128
         let u256_value = ConfigValue::U256(le);
         let bytes = bcs::to_bytes(&u256_value).expect("serialize");
-        let mut expected = vec![6u8];
+        let mut expected = vec![2u8];
         expected.extend_from_slice(&le);
         assert_eq!(bytes, expected);
         assert_eq!(
