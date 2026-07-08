@@ -450,7 +450,7 @@ Genesis forms the initial Hashi committee and generates the shared Bitcoin maste
 ### 5.1 Timeline
 
 ```
-Package Published → Validators Register → 95% Stake Threshold → DKG (Automatic) → End Reconfig → Presignatures → Operational
+Package Published → Validators Register → Launch (Admin) → DKG (Automatic) → End Reconfig → Presignatures → Operational
 ```
 
 From DKG trigger to operational typically takes 30 to 120 seconds, assuming validators are online and reachable.
@@ -458,6 +458,8 @@ From DKG trigger to operational typically takes 30 to 120 seconds, assuming vali
 ### 5.2 Step 1: package publication (admin)
 
 The admin publishes the Hashi Move package. This produces the `package-id` and `hashi-object-id` you need in both configs. The admin communicates these values to you.
+
+At this point the deploy is **not yet configured**: the package `UpgradeCap` stays in the publisher's wallet, and the chain id and guardian parameters are not onchain yet. They land later with the launch step (`hashi::finish_publish`), the **launch switch** that unlocks genesis.
 
 ### 5.3 Step 2: register your validator
 
@@ -478,17 +480,35 @@ The registration transaction writes your BLS12-381 public key, Ed25519 TLS publi
 hashi server --config /path/to/validator.toml
 ```
 
-The node starts the gRPC+TLS server, connects to Sui (gRPC) and Bitcoin (RPC + P2P), and begins monitoring for the genesis trigger.
+The node starts the gRPC+TLS server, connects to Sui (gRPC) and Bitcoin (RPC + P2P), registers its next-epoch keys onchain, and begins monitoring for the genesis trigger.
 
-### 5.5 Step 4: DKG (automatic)
+Booting **before the launch step is expected and required** because the launch only happens once every validator has finished key registration, which nodes do on startup. In this pre-launch window the onchain config is not finalized yet, so the node logs two benign warnings: the `bitcoin_chain_id` cross-check is skipped (it re-verifies on any restart after launch), and the guardian client is deferred (it resolves automatically from onchain config once the launch lands).
 
-Once **95% of total Sui validator stake** has registered with Hashi, the first node to detect this submits `start_reconfig`. All registered validators then run DKG concurrently. **No operator action needed**; monitor logs for `start_reconfig`, `DKG started`, `DKG completed`. DKG times out after 600 s per attempt and retries until it succeeds or a newer epoch supersedes it.
+### 5.5 Step 4: launch (admin)
 
-### 5.6 Step 5: end reconfig (automatic)
+Genesis is gated on an explicit launch step. Once every expected validator has registered and started its node, the publisher runs:
+
+```bash
+hashi launch \
+  --bitcoin-chain-id <genesis block hash> \
+  --guardian-url <guardian gRPC URL> \
+  --guardian-btc-public-key <x-only hex> \
+  --keypair /path/to/publisher.pem   # reads ./hashi_ids.json from publish
+```
+
+This sends `hashi::finish_publish`: it finalizes the deploy configuration (chain id, guardian) and hands the package `UpgradeCap` into onchain custody, the launch switch that `start_reconfig` requires before it forms the initial committee. Before sending, the command lists the registered validators and flags any that have not finished key registration (they would be excluded from the genesis committee). The **initial committee is exactly the set of fully-registered validators at this moment**, so the admin should confirm the roster before launching. Multisig publishers can use `--serialize-unsigned-transaction` (with `--sender`) to produce the transaction for offline signing.
+
+**No operator action needed**, but your validator must be registered and running before the admin launches; otherwise it is excluded from the genesis committee.
+
+### 5.6 Step 5: DKG (automatic)
+
+Once the launch transaction lands, the first node to detect it submits `start_reconfig`. All registered validators then run DKG concurrently. **No operator action needed**; monitor logs for `start_reconfig`, `DKG started`, `DKG completed`. DKG times out after 600 s per attempt and retries until it succeeds or a newer epoch supersedes it.
+
+### 5.7 Step 6: end reconfig (automatic)
 
 After DKG, validators exchange BLS signatures over the result. Once 2/3 of committee weight has signed, `end_reconfig` is submitted onchain and the committee generates presignatures. **No operator action needed**; monitor logs for `end_reconfig submitted` and presignature generation.
 
-### 5.7 Post-genesis verification
+### 5.8 Post-genesis verification
 
 ```bash
 hashi committee list

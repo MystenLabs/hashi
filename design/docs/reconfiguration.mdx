@@ -46,6 +46,16 @@ The new committee membership is determined by the set of validators that
 registered with Hashi for the new epoch. Stake weights come from the Sui
 validator set.
 
+At genesis (when no MPC public key exists yet), the **launch switch**
+additionally gates `start_reconfig`: it aborts until the publisher
+has sent `hashi::finish_publish` (the `hashi launch` CLI command), which
+finalizes the deploy configuration and hands the package `UpgradeCap` into
+onchain custody. This gives the publisher explicit control over when (and
+with which registered validators) the initial committee forms. After genesis
+Hashi never consults the gate; it follows Sui's validator set
+unconditionally, because a floor on a normal reconfig would let validators
+brick reconfiguration by withholding registration.
+
 
 ### DKG or Key Rotation
 
