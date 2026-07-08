@@ -7,8 +7,14 @@ use std::string::String;
 
 const EInvalidConfigValue: u64 = 0;
 
+// Variant order is BCS-load-bearing: the Rust mirror (hashi-types) decodes
+// by variant index, and once published to a persistent network the order is
+// frozen — package upgrades reject enums whose existing variants change, so
+// new variants may then only be appended at the end.
 public enum Value has copy, drop, store {
     U64(u64),
+    U128(u128),
+    U256(u256),
     Address(address),
     String(String),
     Bool(bool),
@@ -35,6 +41,14 @@ public fun new_bytes(value: vector<u8>): Value {
     Value::Bytes(value)
 }
 
+public fun new_u128(value: u128): Value {
+    Value::U128(value)
+}
+
+public fun new_u256(value: u256): Value {
+    Value::U256(value)
+}
+
 public(package) fun same_variant(self: &Value, other: &Value): bool {
     match (self) {
         Value::U64(_) => other.is_u64(),
@@ -42,6 +56,8 @@ public(package) fun same_variant(self: &Value, other: &Value): bool {
         Value::String(_) => other.is_string(),
         Value::Bool(_) => other.is_bool(),
         Value::Bytes(_) => other.is_bytes(),
+        Value::U128(_) => other.is_u128(),
+        Value::U256(_) => other.is_u256(),
     }
 }
 
@@ -111,6 +127,34 @@ public(package) fun as_bool(value: Value): bool {
 public(package) fun as_bytes(value: Value): vector<u8> {
     match (value) {
         Value::Bytes(bytes) => bytes,
+        _ => abort EInvalidConfigValue,
+    }
+}
+
+public(package) fun is_u128(value: &Value): bool {
+    match (value) {
+        Value::U128(_) => true,
+        _ => false,
+    }
+}
+
+public(package) fun is_u256(value: &Value): bool {
+    match (value) {
+        Value::U256(_) => true,
+        _ => false,
+    }
+}
+
+public(package) fun as_u128(value: Value): u128 {
+    match (value) {
+        Value::U128(num) => num,
+        _ => abort EInvalidConfigValue,
+    }
+}
+
+public(package) fun as_u256(value: Value): u256 {
+    match (value) {
+        Value::U256(num) => num,
         _ => abort EInvalidConfigValue,
     }
 }
