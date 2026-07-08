@@ -7,6 +7,7 @@
 
 use super::S3_DIR_CEREMONY;
 use super::S3_DIR_COMMITTEE_UPDATE;
+use super::S3_DIR_GENESIS;
 use super::S3_DIR_HEARTBEAT;
 use super::S3_DIR_INIT;
 use super::S3_DIR_SHARES;
@@ -42,6 +43,23 @@ pub enum LogMessage {
     Ceremony(Box<CeremonyLogMessage>),
     Shares(Box<SharesLogMessage>),
     CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
+    Genesis(Box<GenesisLogMessage>),
+}
+
+/// Operator-trusted bootstrap committee used before any `committee-update/`
+/// history exists. Written at `genesis/record.json`; callers must source it from
+/// on-chain state during first deploy.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct GenesisLogMessage {
+    pub committee: crate::move_types::Committee,
+}
+
+impl GenesisLogMessage {
+    pub const LOG_NAME: &'static str = "record.json";
+
+    pub fn object_key() -> String {
+        format!("{}/{}", S3_DIR_GENESIS, Self::LOG_NAME)
+    }
 }
 
 /// Encrypted KP shares persisted for recovery, written to `shares/` after each
@@ -282,6 +300,7 @@ impl LogMessage {
             LogMessage::Ceremony(..) => format!("{}/", S3_DIR_CEREMONY),
             LogMessage::Shares(..) => format!("{}/", S3_DIR_SHARES),
             LogMessage::CommitteeUpdate(..) => format!("{}/", S3_DIR_COMMITTEE_UPDATE),
+            LogMessage::Genesis(..) => format!("{}/", S3_DIR_GENESIS),
         }
     }
 
@@ -294,6 +313,7 @@ impl LogMessage {
             LogMessage::Ceremony(ss) => format!("{:020}-{}.json", ss.sharing_seq(), prefix),
             LogMessage::Shares(s) => format!("{:020}-{}.json", s.sharing_seq, prefix),
             LogMessage::CommitteeUpdate(committee_message) => committee_message.log_name(prefix),
+            LogMessage::Genesis(_) => GenesisLogMessage::LOG_NAME.to_string(),
         }
     }
 

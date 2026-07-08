@@ -28,6 +28,7 @@ use super::LimiterState;
 use super::NitroAttestation;
 use super::OperatorActivateRequest;
 use super::OperatorInitRequest;
+use super::OperatorWriteGenesisRequest;
 use super::PcrAllowlist;
 use super::ProvisionerInitRequest;
 use super::RotateKpsRequest;
@@ -176,6 +177,17 @@ impl TryFrom<pb::OperatorActivateRequest> for OperatorActivateRequest {
         let expected_state_hash = <[u8; 32]>::try_from(expected_state_hash.as_ref())
             .map_err(|_| InvalidInputs("expected_state_hash must be 32 bytes".into()))?;
         Ok(OperatorActivateRequest::new(expected_state_hash))
+    }
+}
+
+impl TryFrom<pb::OperatorWriteGenesisRequest> for OperatorWriteGenesisRequest {
+    type Error = GuardianError;
+
+    fn try_from(req: pb::OperatorWriteGenesisRequest) -> Result<Self, Self::Error> {
+        let committee_pb = req.committee.ok_or_else(|| missing("committee"))?;
+        Ok(OperatorWriteGenesisRequest::from_move_committee(
+            pb_to_move_committee(committee_pb)?,
+        ))
     }
 }
 
@@ -503,6 +515,14 @@ pub fn operator_init_request_to_pb(
 pub fn operator_activate_request_to_pb(r: OperatorActivateRequest) -> pb::OperatorActivateRequest {
     pb::OperatorActivateRequest {
         expected_state_hash: Some(r.expected_state_hash().to_vec().into()),
+    }
+}
+
+pub fn operator_write_genesis_request_to_pb(
+    r: OperatorWriteGenesisRequest,
+) -> pb::OperatorWriteGenesisRequest {
+    pb::OperatorWriteGenesisRequest {
+        committee: Some(move_committee_to_pb(&r.into_committee())),
     }
 }
 

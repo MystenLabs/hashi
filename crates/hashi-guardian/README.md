@@ -12,6 +12,7 @@ Canonical key layout:
 - `withdraw/{yyyy}/{mm}/{dd}/{hh}/failure-{session_id}-wid{wid}-{rand8}.json`
 - `ceremony/{sharing_seq:020}-{session_id}.json`
 - `shares/{sharing_seq:020}-{session_id}.json`
+- `genesis/record.json`
 - `committee-update/{new_epoch:020}-{session_id}.json`
 - `committee-update/failure-{proposed_epoch:020}-{session_id}-{rand8}.json`
 
@@ -32,12 +33,13 @@ Where:
 - `withdraw` logs are hour-partitioned. Successes are seq-sorted within a bucket so the KP rotating in the next enclave can recover limiter state by reading the lexicographically last success key.
 - `ceremony` logs are flat (not date-partitioned). Each entry is a `CeremonyLogMessage` — `NewKey { instance }` written by `setup_new_key` (genesis, `sharing_seq=0`) or `Rotate { old_instance, new_instance }` written by `rotate_kps` (each rotation, `sharing_seq=prev+1`). A rotation records the `old_instance` it consumed so the chain is auditable from the log alone (each entry's `old_instance` should match the prior entry's instance). KPs read the lexicographically last entry to learn the current authoritative instance (commitments + N + T). The log does not carry the encrypted shares (those live in `shares/`); it does commit the recipient roster (per-share fingerprints) so a KP can check the full recipient set against the immutable record.
 - `shares` logs are flat and carry the ceremony's encrypted shares (the ciphertexts `ceremony/` omits), keyed by the same `sharing_seq` so each pairs with its `ceremony/` instance. Written by `setup_new_key` (`sharing_seq=0`) and each `rotate_kps`. Persisted purely for recovery liveness — a KP who lost their share point-reads `shares/{sharing_seq:020}-{session_id}.json`, verifies its enclave signature, and checks the decrypted share against the instance's commitments. Integrity is the signature, not S3 immutability, so these get only a short object lock (a fetch-window guarantee) and stay readable until purged.
+- `genesis` is a fixed singleton record carrying the operator-trusted bootstrap committee before any `committee-update/` success exists.
 - `committee-update` logs are flat (not date-partitioned). Successes are epoch-sorted; failures lead with `failure-` so all successes sort first — the lex-last non-`failure-` key is the latest successfully-applied epoch.
 
 ## Why this layout
 
 - `init/{session_id}-...` keeps init logs session-addressable.
 - `heartbeat/...` and `withdraw/...` date partitions support efficient hour-based polling.
-- `ceremony/` and `committee-update/` are flat because the consumer always wants "latest"; a lex sort over the whole prefix is cheap and gives that directly.
+- `ceremony/` and `committee-update/` are flat because the consumer always wants "latest"; a lex sort over the whole prefix is cheap and gives that directly. `genesis/record.json` is fixed because there is at most one bootstrap committee.
 - Zero-padding (`{seq:020}` in `withdraw/`, `{sharing_seq:020}` in `ceremony/`, `{new_epoch:020}` in `committee-update/`) makes lexicographic order over the keys equal seq/epoch order. The signed log payload embeds the same value, so a fetched object's filename and content can be cross-checked.
-- Prefixes (`init`, `heartbeat`, `withdraw`, `ceremony`, `committee-update`) allow independent S3 deletion policies.
+- Prefixes (`init`, `heartbeat`, `withdraw`, `ceremony`, `genesis`, `committee-update`) allow independent S3 deletion policies.

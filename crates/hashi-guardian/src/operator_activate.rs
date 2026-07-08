@@ -76,11 +76,7 @@ pub async fn operator_activate(
         .read_latest_committee(BuildPolicy::AnyAllowlisted)
         .await
         .map_err(|e| InternalError(format!("read latest serving committee: {e}")))?
-        .ok_or_else(|| {
-            InvalidInputs(
-                "no committee-update record found; genesis fallback lands in the genesis PR".into(),
-            )
-        })?
+        .ok_or_else(|| InvalidInputs("no committee-update or genesis record found".into()))?
         .try_into()
         .map_err(|e| InvalidInputs(format!("invalid serving committee: {e}")))?;
 
