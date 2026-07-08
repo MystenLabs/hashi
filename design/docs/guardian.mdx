@@ -9,4 +9,174 @@ Hashi uses a withdrawal guardian: a second signatory on the managed Bitcoin
 deposits. All deposits are spendable only with a 2-of-2 multisig where the
 guardian is one party and the Hashi MPC committee is the other.
 
-Additional details about the guardian integration are added before Testnet.
+## Components
+
+The guardian integration has four distinct flows:
+
+- **Ceremony mode** is the key-generation control-plane flow. The operator
+  initializes a ceremony guardian, supplies the KP roster, and receives the
+  guardian BTC public key plus encrypted KP shares.
+- **Withdraw-mode provisioning** arms a standby withdrawal guardian while the
+  current active guardian is still alive. The operator installs a stable
+  `InitConfig`; each KP independently recomputes `config_hash` from its locally
+  configured limiter config, PCR allowlist, and network plus the onchain master
+  key, requires it to match the enclave's, and submits threshold encrypted shares
+  through the public relay.
+- **Activation** is the operator-triggered takeover step. The standby enclave
+  confirms a quiet window, derives live state from S3, checks the operator's
+  expected state hash, records activation, and only then serves withdrawals.
+- **Normal operation** is a data-plane flow. MPC nodes call the public guardian
+  proxy for guardian info, withdrawal signatures, and committee handoff updates.
+
+The main components are:
+
+- **MPC nodes**: the Hashi validator committee. Nodes collect committee
+  certificates, run the MPC signer, and call the guardian for the second
+  Bitcoin signature.
+- **Guardian proxy**: the public gRPC endpoint. It forwards node-facing
+  guardian RPCs and relays key-provisioner shares.
+- **Guardian enclave**: the private signer and policy engine. A standby
+  guardian stores static config and the reconstructed BTC key; an active
+  guardian additionally verifies committee certificates, enforces the limiter,
+  signs Bitcoin inputs, and records signed logs.
+- **Key provisioners (KPs)**: independent holders of encrypted guardian key
+  shares.
+- **Operator**: the off-enclave actor that drives guardian ceremony and
+  withdraw-mode provisioning and activation.
+- **S3**: immutable log storage for attestation,
+  ceremony, share recovery, heartbeat, genesis, withdrawal, and committee-update
+  logs. Activation records are session lifecycle records in the activating
+  session's init log.
+- **Onchain Hashi state**: the source of committee, config, withdrawal, and MPC
+  key state used by nodes and initialization tooling.
+
+## Ceremony mode flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+
+    participant Operator
+    participant S3
+    participant Guardian as Guardian enclave
+    participant KPs as Key provisioners
+
+    Operator->>Guardian: OperatorInit(S3 config)
+    Guardian->>S3: log(init attestation + GuardianInfo)
+    Operator->>Guardian: SetupNewKey(KP PGP certs, n, t)
+    Guardian->>S3: log(ceremony/NewKey + shares)
+    Guardian-->>Operator: encrypted KP shares + guardian BTC pubkey
+
+    KPs->>S3: Read init, ceremony, and shares logs
+    S3-->>KPs: encrypted share addressed to this KP
+    KPs->>KPs: Decrypt share and verify attestation, recipients, commitment
+```
+
+## Withdraw-mode provisioning flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+
+    participant Operator
+    participant S3
+    participant Guardian as Standby guardian enclave
+    participant Proxy as Guardian proxy
+    participant KPs as Key provisioners
+
+    Note over Operator,Guardian: Operator initialization
+    Operator->>Operator: Gather master G from onchain state
+    Operator->>Operator: Gather bucket plus limiter config plus PCR allowlist plus network
+    Operator->>Operator: Build InitConfig
+    Operator->>Guardian: OperatorInit(S3 config, InitConfig)
+    Guardian->>S3: Read latest ceremony log
+    Guardian->>Guardian: Snapshot sharing instance for this arming
+    Guardian->>S3: log(init GuardianInfo(config_hash, sharing instance))
+    Guardian->>S3: start heartbeat stream from OI onward
+
+    Note over KPs,Guardian: Threshold share provisioning
+    KPs->>Guardian: GetGuardianInfo via proxy
+    Guardian-->>KPs: config_hash plus session_id plus n/t plus attestation
+    KPs->>KPs: Verify PCRs and compare config_hash to local pin
+    KPs->>KPs: HPKE-encrypt local share with config_hash as AAD
+    KPs->>Proxy: SingleProvisionerInit(encrypted share, expected_session_id)
+    Proxy->>Guardian: Fetch live session and provisioning status
+    Guardian-->>Proxy: session_id, threshold, provisioned flag
+    alt fewer than threshold shares collected
+        Proxy-->>KPs: share accepted, waiting for threshold
+    else threshold reached
+        Proxy->>Guardian: ProvisionerInit(T encrypted shares)
+        Guardian->>Guardian: Decrypt with config_hash AAD and verify commitments
+        Guardian->>Guardian: Reconstruct BTC key and mark armed standby
+        Guardian->>S3: log(init fully-initialized)
+        Proxy-->>KPs: standby armed
+    end
+```
+
+First deploy also has a genesis bootstrap path not shown above: if the operator
+finds no `committee-update/` or `genesis/` record in S3, it reads the current
+committee from onchain state and calls the guardian's `OperatorWriteGenesis` RPC
+after `OperatorInit`. The enclave logs the operator-supplied committee to
+`genesis/` as-is; it is operator-trusted and used on first deploy only. Later
+deploys skip this step.
+
+## Standby activation flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+
+    participant Operator
+    participant S3
+    participant Guardian as Guardian enclave
+
+    Operator->>S3: Download ceremony instance plus committee/genesis plus limiter post-state
+    Operator->>Operator: Compute expected_state_hash
+    Operator->>Guardian: OperatorActivate(expected_state_hash)
+
+    Guardian->>S3: Confirm all other sessions heartbeat-quiet for QUIET_PERIOD
+    Guardian->>S3: Read latest ceremony log
+    Guardian->>Guardian: Refuse if latest ceremony instance differs from arming snapshot
+    Guardian->>S3: Read latest committee-update or genesis record
+    Guardian->>S3: Recover limiter state from max-seq success or genesis
+    Guardian->>Guardian: Derive ActivationState and state_hash
+    Guardian->>Guardian: Refuse if derived hash differs from operator pin
+    Guardian->>S3: log(init operator-activation record)
+    Guardian->>Guardian: Install derived state and mark active
+```
+
+## Normal operation flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+
+    participant Onchain as Onchain Hashi state
+    participant MPC as MPC nodes
+    participant Proxy as Guardian proxy
+    participant Guardian as Active guardian enclave
+    participant S3
+    participant Bitcoin
+
+    Note over MPC,Guardian: Guardian info
+    MPC->>Guardian: GetGuardianInfo via proxy
+    Guardian-->>MPC: GuardianInfo
+
+    Note over Onchain,Guardian: Withdrawal signing
+    MPC->>Onchain: Read pending withdrawal transaction
+    MPC->>MPC: Collect committee cert for withdrawal
+    MPC->>Guardian: StandardWithdrawal(cert, wid, utxos, seq, timestamp) via proxy
+    Guardian->>Guardian: Require active session then verify cert then consume limiter tokens then sign BTC inputs
+    Guardian->>S3: log(withdraw success or failure)
+    Guardian-->>MPC: Guardian BTC signatures
+    MPC->>MPC: Produce MPC signatures and combine witnesses
+    MPC->>Onchain: sign_withdrawal(guardian signatures + MPC signatures)
+    MPC->>Bitcoin: Broadcast fully signed transaction
+
+    Note over Onchain,Guardian: Committee handoff catch-up
+    MPC->>Onchain: Read stored committee handoffs
+    MPC->>MPC: Collect outgoing-committee handoff certs
+    MPC->>Guardian: UpdateCommitteeChain(signed handoffs) via proxy
+    Guardian->>S3: log(committee-update)
+    Guardian-->>MPC: current_committee_epoch
+```
