@@ -645,6 +645,19 @@ pub struct DealerFlowData {
     pub reduced_weights: HashMap<Address, u16>,
 }
 
+pub(crate) struct AvidDealerFlowData {
+    pub(crate) builder: batch_avss_avid::AvssMessageBuilder,
+    pub(crate) confirm_target: DealerMessagesHash,
+    pub(crate) my_signature: MemberSignature,
+    /// Per-recipient optimistic messages, excluding the dealer's own.
+    pub(crate) recipient_messages: Vec<(Address, Messages)>,
+    pub(crate) committee: Committee,
+    pub(crate) reduced_weights: HashMap<Address, u16>,
+    pub(crate) total_reduced_weight: u32,
+    /// `W − f` in reduced weight.
+    pub(crate) vote_quorum_weight: u32,
+}
+
 pub(crate) struct RotationComplainContext {
     pub(crate) request: ComplainRequest,
     pub(crate) receiver: avss::Receiver,

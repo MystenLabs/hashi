@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use fastcrypto_tbls::threshold_schnorr::avss;
 use fastcrypto_tbls::threshold_schnorr::batch_avss;
+use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
 use sui_sdk_types::Address;
 
 use crate::db::Database;
@@ -151,5 +152,26 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
         self.db
             .list_avid_round_states(self.epoch, batch_index)
             .map_err(|e| anyhow::anyhow!("failed to list avid round states: {e}"))
+    }
+
+    fn store_avid_dealer_builder(
+        &mut self,
+        epoch: u64,
+        batch_index: u32,
+        builder: &batch_avss_avid::AvssMessageBuilder,
+    ) -> anyhow::Result<()> {
+        self.db
+            .store_avid_dealer_builder(epoch, batch_index, builder)
+            .map_err(|e| anyhow::anyhow!("failed to store avid dealer builder: {e}"))
+    }
+
+    fn get_avid_dealer_builder(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+    ) -> anyhow::Result<Option<batch_avss_avid::AvssMessageBuilder>> {
+        self.db
+            .get_avid_dealer_builder(epoch, batch_index)
+            .map_err(|e| anyhow::anyhow!("failed to get avid dealer builder: {e}"))
     }
 }

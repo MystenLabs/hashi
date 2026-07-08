@@ -4,6 +4,7 @@
 use crate::communication::ChannelResult;
 use crate::communication::OrderedBroadcastChannel;
 use crate::communication::P2PChannel;
+use crate::communication::send_each;
 use crate::communication::send_to_many;
 use crate::communication::with_timeout_and_retry;
 use crate::constants::is_production_sui_chain;
@@ -12,6 +13,7 @@ use crate::metrics::MPC_LABEL_KEY_ROTATION;
 use crate::metrics::MPC_LABEL_NONCE_GENERATION;
 use crate::metrics::Metrics;
 use crate::mpc::types::AvidCertificate;
+use crate::mpc::types::AvidDealerFlowData;
 use crate::mpc::types::AvidNonceMessage;
 use crate::mpc::types::AvidNonceMessageKind;
 use crate::mpc::types::AvidRoundState;
@@ -1547,20 +1549,8 @@ impl MpcManager {
             let nonce_cert = aggregator
                 .finish()
                 .expect("signatures should always be valid");
-            let cert = CertificateV1::NonceGeneration {
-                batch_index,
-                cert: nonce_cert,
-            };
-            let _timer = metrics
-                .mpc_cert_publish_duration_seconds
-                .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
-                .start_timer();
-            with_timeout_and_retry(|| tob_channel.publish(cert.clone()))
-                .await
-                .map_err(|e| {
-                    MpcError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e))
-                })?;
-            drop(_timer);
+            Self::publish_nonce_generation_cert(tob_channel, batch_index, nonce_cert, metrics)
+                .await?;
         }
         Ok(())
     }
@@ -2033,15 +2023,11 @@ impl MpcManager {
         .map_err(|e| MpcError::CryptoError(e.to_string()))
     }
 
-    #[allow(dead_code)]
-    fn create_avid_nonce_dealer_messages(
+    fn create_avid_nonce_dealer_builder(
         &self,
         batch_index: u32,
         rng: &mut impl fastcrypto::traits::AllowedRng,
-    ) -> MpcResult<(
-        batch_avss_avid::AvssMessageBuilder,
-        Vec<(Address, Messages)>,
-    )> {
+    ) -> MpcResult<batch_avss_avid::AvssMessageBuilder> {
         let dealer_sid = SessionId::nonce_dealer_session_id(
             &self.chain_id,
             self.mpc_config.epoch,
@@ -2060,11 +2046,17 @@ impl MpcManager {
             self.batch_size_per_weight,
         )
         .map_err(|e| MpcError::CryptoError(e.to_string()))?;
-        let builder = dealer
+        dealer
             .create_avss_messages(rng)
-            .map_err(|e| MpcError::CryptoError(e.to_string()))?;
-        let messages = self
-            .committee
+            .map_err(|e| MpcError::CryptoError(e.to_string()))
+    }
+
+    fn avid_nonce_optimistic_messages(
+        &self,
+        builder: &batch_avss_avid::AvssMessageBuilder,
+        batch_index: u32,
+    ) -> Vec<(Address, Messages)> {
+        self.committee
             .members()
             .iter()
             .zip(builder.messages())
@@ -2077,8 +2069,7 @@ impl MpcManager {
                     }),
                 )
             })
-            .collect();
-        Ok((builder, messages))
+            .collect()
     }
 
     fn try_sign_avid_nonce_optimistic(
@@ -2114,7 +2105,6 @@ impl MpcManager {
         Ok(signature.signature().clone())
     }
 
-    #[allow(dead_code)]
     fn create_avid_nonce_dispersal_messages(
         &self,
         builder: &batch_avss_avid::AvssMessageBuilder,
@@ -2314,6 +2304,249 @@ impl MpcManager {
                 "AVID echoes are pull-served, not pushed".into(),
             )),
         }
+    }
+
+    fn prepare_avid_nonce_dealer_flow(
+        &mut self,
+        batch_index: u32,
+        rng: &mut impl fastcrypto::traits::AllowedRng,
+    ) -> MpcResult<AvidDealerFlowData> {
+        let epoch = self.mpc_config.epoch;
+        let builder = match self
+            .public_messages_store
+            .get_avid_dealer_builder(epoch, batch_index)
+            .map_err(|e| MpcError::StorageError(e.to_string()))?
+        {
+            Some(builder) => builder,
+            None => {
+                let builder = self.create_avid_nonce_dealer_builder(batch_index, rng)?;
+                self.public_messages_store
+                    .store_avid_dealer_builder(epoch, batch_index, &builder)
+                    .map_err(|e| MpcError::StorageError(e.to_string()))?;
+                builder
+            }
+        };
+        let mut messages = self.avid_nonce_optimistic_messages(&builder, batch_index);
+        let own_index = messages
+            .iter()
+            .position(|(addr, _)| *addr == self.address)
+            .ok_or_else(|| MpcError::ProtocolFailed("dealer not in committee".into()))?;
+        let (_, own_message) = messages.remove(own_index);
+        let Messages::NonceGenerationAvid(AvidNonceMessage {
+            kind: AvidNonceMessageKind::Optimistic(own_avss),
+            ..
+        }) = own_message
+        else {
+            unreachable!("avid_nonce_optimistic_messages yields optimistic messages");
+        };
+        let signature =
+            self.try_sign_avid_nonce_optimistic(self.address, batch_index, &own_avss)?;
+        let my_signature = MemberSignature::new(epoch, self.address, signature);
+        let confirm_target = DealerMessagesHash {
+            dealer_address: self.address,
+            messages_hash: MessageHash::from(own_avss.common.hash().digest),
+        };
+        let reduced_weights: HashMap<Address, u16> = self
+            .committee
+            .members()
+            .iter()
+            .filter_map(|m| {
+                let party_id = self.committee.index_of(&m.validator_address())? as u16;
+                let weight = self.mpc_config.nodes.weight_of(party_id).ok()?;
+                Some((m.validator_address(), weight))
+            })
+            .collect();
+        let total_reduced_weight = self.mpc_config.nodes.total_weight() as u32;
+        let vote_quorum_weight = total_reduced_weight - self.mpc_config.max_faulty as u32;
+        Ok(AvidDealerFlowData {
+            builder,
+            confirm_target,
+            my_signature,
+            recipient_messages: messages,
+            committee: self.committee.clone(),
+            reduced_weights,
+            total_reduced_weight,
+            vote_quorum_weight,
+        })
+    }
+
+    #[allow(dead_code)]
+    async fn run_as_avid_nonce_dealer(
+        mpc_manager: &Arc<RwLock<Self>>,
+        batch_index: u32,
+        p2p_channel: &impl P2PChannel,
+        tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
+        metrics: &Metrics,
+    ) -> MpcResult<()> {
+        let _timer = metrics
+            .mpc_dealer_crypto_duration_seconds
+            .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
+            .start_timer();
+        let mut dealer_data = {
+            let mgr = Arc::clone(mpc_manager);
+            spawn_blocking(move || {
+                let mut rng = rand::thread_rng();
+                let mut mgr = mgr.write().unwrap();
+                mgr.prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
+            })
+            .await?
+        };
+        drop(_timer);
+        let mut aggregator = BlsSignatureAggregator::new_with_reduced_weights(
+            &dealer_data.committee,
+            dealer_data.confirm_target.clone(),
+            dealer_data.reduced_weights.clone(),
+        );
+        aggregator
+            .add_signature(dealer_data.my_signature.clone())
+            .expect("first signature should always be valid");
+        let _timer = metrics
+            .mpc_p2p_broadcast_duration_seconds
+            .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
+            .start_timer();
+        let requests: Vec<_> = std::mem::take(&mut dealer_data.recipient_messages)
+            .into_iter()
+            .map(|(addr, messages)| (addr, SendMessagesRequest { messages }))
+            .collect();
+        let results = send_each(requests, |addr, req| async move {
+            p2p_channel.send_messages(&addr, &req).await
+        })
+        .await;
+        drop(_timer);
+        for (addr, result) in results {
+            match result {
+                Ok(response) => {
+                    if let Err(e) = aggregator.add_signature_from(addr, response.signature) {
+                        tracing::info!("Invalid Confirm signature from {:?}: {}", addr, e);
+                    }
+                }
+                Err(e) => {
+                    tracing::info!("Failed to send optimistic message to {:?}: {}", addr, e)
+                }
+            }
+        }
+        let confirmed = aggregator.reduced_weight() as u32;
+        if confirmed >= dealer_data.total_reduced_weight {
+            let cert = aggregator
+                .finish()
+                .expect("signatures should always be valid");
+            return Self::publish_nonce_generation_cert(tob_channel, batch_index, cert, metrics)
+                .await;
+        }
+        let pending = dealer_data.total_reduced_weight - confirmed;
+        let (max_faulty, min_confirm_weight) = {
+            let mgr = mpc_manager.read().unwrap();
+            (
+                mgr.mpc_config.max_faulty as u32,
+                (mgr.mpc_config.threshold + mgr.mpc_config.max_faulty) as u32,
+            )
+        };
+        if pending > max_faulty || confirmed < min_confirm_weight {
+            tracing::warn!(
+                "AVID nonce round abandoned: pending weight {pending} > f={max_faulty} or \
+                 confirmed weight {confirmed} < t+f={min_confirm_weight} (batch_index={batch_index})"
+            );
+            return Ok(());
+        }
+        let confirm_cert = aggregator
+            .finish()
+            .expect("signatures should always be valid");
+        let _timer = metrics
+            .mpc_dealer_crypto_duration_seconds
+            .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
+            .start_timer();
+        let builder = dealer_data.builder;
+        let (vote_target, my_vote, recipient_dispersals) = {
+            let mgr = Arc::clone(mpc_manager);
+            spawn_blocking(move || -> MpcResult<_> {
+                let mut mgr = mgr.write().unwrap();
+                let mut dispersals =
+                    mgr.create_avid_nonce_dispersal_messages(&builder, confirm_cert, batch_index)?;
+                let own_index = dispersals
+                    .iter()
+                    .position(|(addr, _)| *addr == mgr.address)
+                    .ok_or_else(|| MpcError::ProtocolFailed("dealer not in committee".into()))?;
+                let (_, own_dispersal) = dispersals.remove(own_index);
+                let Messages::NonceGenerationAvid(own_avid) = &own_dispersal else {
+                    unreachable!("create_avid_nonce_dispersal_messages yields AVID messages");
+                };
+                let own_address = mgr.address;
+                let signature = mgr.handle_avid_nonce_message(own_address, own_avid)?;
+                let vote_hash = mgr
+                    .avid_held_echoes
+                    .get(&(batch_index, mgr.address))
+                    .expect("own dispersal was just processed")
+                    .0;
+                let vote_target = DealerMessagesHash {
+                    dealer_address: mgr.address,
+                    messages_hash: vote_hash,
+                };
+                let my_vote = MemberSignature::new(mgr.mpc_config.epoch, mgr.address, signature);
+                Ok((vote_target, my_vote, dispersals))
+            })
+            .await?
+        };
+        drop(_timer);
+        let mut vote_aggregator = BlsSignatureAggregator::new_with_reduced_weights(
+            &dealer_data.committee,
+            vote_target,
+            dealer_data.reduced_weights.clone(),
+        );
+        vote_aggregator
+            .add_signature(my_vote)
+            .expect("first signature should always be valid");
+        let _timer = metrics
+            .mpc_p2p_broadcast_duration_seconds
+            .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
+            .start_timer();
+        let requests: Vec<_> = recipient_dispersals
+            .into_iter()
+            .map(|(addr, messages)| (addr, SendMessagesRequest { messages }))
+            .collect();
+        let results = send_each(requests, |addr, req| async move {
+            p2p_channel.send_messages(&addr, &req).await
+        })
+        .await;
+        drop(_timer);
+        for (addr, result) in results {
+            match result {
+                Ok(response) => {
+                    if let Err(e) = vote_aggregator.add_signature_from(addr, response.signature) {
+                        tracing::info!("Invalid Vote signature from {:?}: {}", addr, e);
+                    }
+                }
+                Err(e) => tracing::info!("No Vote from {:?}: {}", addr, e),
+            }
+        }
+        if (vote_aggregator.reduced_weight() as u32) >= dealer_data.vote_quorum_weight {
+            let cert = vote_aggregator
+                .finish()
+                .expect("signatures should always be valid");
+            return Self::publish_nonce_generation_cert(tob_channel, batch_index, cert, metrics)
+                .await;
+        }
+        tracing::warn!(
+            "AVID Vote quorum not reached: {} < {} (batch_index={batch_index})",
+            vote_aggregator.reduced_weight(),
+            dealer_data.vote_quorum_weight
+        );
+        Ok(())
+    }
+
+    async fn publish_nonce_generation_cert(
+        tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
+        batch_index: u32,
+        cert: DealerCertificate,
+        metrics: &Metrics,
+    ) -> MpcResult<()> {
+        let cert = CertificateV1::NonceGeneration { batch_index, cert };
+        let _timer = metrics
+            .mpc_cert_publish_duration_seconds
+            .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
+            .start_timer();
+        with_timeout_and_retry(|| tob_channel.publish(cert.clone()))
+            .await
+            .map_err(|e| MpcError::BroadcastError(format!("{}: {}", ERR_PUBLISH_CERT_FAILED, e)))
     }
 
     #[allow(dead_code)]
