@@ -320,3 +320,48 @@ pub async fn finish_publish(
 
     Ok(())
 }
+
+/// Find the `UpgradeCap` for `package_id` among the objects owned by
+/// `owner` (the publisher holds it between publish and launch).
+pub async fn find_upgrade_cap(
+    client: &mut Client,
+    owner: Address,
+    package_id: Address,
+) -> Result<Address> {
+    use futures::TryStreamExt as _;
+    use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
+    use sui_rpc::proto::sui::rpc::v2::ListOwnedObjectsRequest;
+
+    let cap_type = StructTag::from_str("0x2::package::UpgradeCap")?;
+    let list_request = ListOwnedObjectsRequest::default()
+        .with_owner(owner)
+        .with_object_type(&cap_type)
+        .with_page_size(100u32)
+        .with_read_mask(FieldMask::from_paths(["object_id"]));
+
+    let candidate_ids: Vec<Address> = client
+        .list_owned_objects(list_request)
+        .try_filter_map(|o| async move { Ok(o.object_id().parse::<Address>().ok()) })
+        .try_collect()
+        .await?;
+
+    for object_id in candidate_ids {
+        let object = client
+            .ledger_client()
+            .get_object(
+                GetObjectRequest::new(&object_id)
+                    .with_read_mask(FieldMask::from_paths(["object_id", "contents"])),
+            )
+            .await?
+            .into_inner();
+        let cap: hashi_types::move_types::UpgradeCap = object.object().contents().deserialize()?;
+        if cap.package == package_id {
+            return Ok(object_id);
+        }
+    }
+
+    anyhow::bail!(
+        "no UpgradeCap for package {package_id} owned by {owner}; it may already be \
+         registered on-chain (launch already done) or held by a different address"
+    )
+}

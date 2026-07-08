@@ -70,6 +70,14 @@ enum Commands {
         publish_opts: hashi::cli::PublishOpts,
     },
 
+    /// Send the launch switch (hashi::finish_publish): configure the deploy
+    /// and hand the UpgradeCap into on-chain custody, unlocking genesis. Run
+    /// this after all expected validators have registered.
+    Launch {
+        #[clap(flatten)]
+        launch_opts: hashi::cli::LaunchOpts,
+    },
+
     /// Register a validator on-chain
     Register {
         #[clap(flatten)]
@@ -131,6 +139,7 @@ async fn main() -> anyhow::Result<()> {
             hashi::cli::run(cli_opts, hashi::cli::CliCommand::Backup { action }).await
         }
         Commands::Publish { publish_opts } => hashi::cli::run_publish(publish_opts).await,
+        Commands::Launch { launch_opts } => hashi::cli::run_launch(launch_opts).await,
         Commands::Register { register_opts } => hashi::cli::run_register(register_opts).await,
         Commands::Deposit { cli_opts, action } => {
             hashi::cli::run(cli_opts, hashi::cli::CliCommand::Deposit { action }).await

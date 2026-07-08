@@ -659,6 +659,87 @@ pub struct PublishOpts {
     pub yes: bool,
 }
 
+/// Options for the `launch` subcommand.
+///
+/// Like [`PublishOpts`] this does *not* use [`CliGlobalOpts`]: launch is a
+/// one-time publisher action driven off the `hashi publish` output rather
+/// than an operator CLI config.
+#[derive(Args)]
+pub struct LaunchOpts {
+    /// Sui RPC endpoint URL
+    #[clap(
+        long,
+        env = "SUI_RPC_URL",
+        default_value = "https://fullnode.mainnet.sui.io:443"
+    )]
+    pub sui_rpc_url: String,
+
+    /// Path to the `hashi_ids.json` written by `hashi publish`
+    /// (alternative: pass --package-id and --hashi-object-id)
+    #[clap(long, default_value = "hashi_ids.json")]
+    pub hashi_ids: std::path::PathBuf,
+
+    /// Package ID (overrides --hashi-ids; requires --hashi-object-id)
+    #[clap(long)]
+    pub package_id: Option<String>,
+
+    /// Hashi shared-object ID (overrides --hashi-ids; requires --package-id)
+    #[clap(long)]
+    pub hashi_object_id: Option<String>,
+
+    /// Bitcoin chain ID (genesis block hash) to store on-chain
+    #[clap(long)]
+    pub bitcoin_chain_id: String,
+
+    /// Guardian gRPC endpoint URL. Required — every deposit address is a
+    /// 2-of-2 (mpc, guardian) taproot leaf.
+    #[clap(long)]
+    pub guardian_url: String,
+
+    /// Guardian BTC pubkey, x-only hex-encoded (32 bytes). Published
+    /// on-chain for 2-of-2 deposit address derivation.
+    #[clap(long)]
+    pub guardian_btc_public_key: String,
+
+    /// Override `bitcoin_confirmation_threshold` on-chain at launch time.
+    /// Falls back to the Move package's `init_defaults` (currently 6) when omitted.
+    #[clap(long)]
+    pub bitcoin_confirmation_threshold: Option<u64>,
+
+    /// Override `bitcoin_deposit_time_delay_ms` on-chain at launch time.
+    /// Falls back to the Move package's `init_defaults` (currently 600_000) when omitted.
+    #[clap(long)]
+    pub bitcoin_deposit_time_delay_ms: Option<u64>,
+
+    /// Path to the publisher keypair (the `UpgradeCap` owner)
+    #[clap(long, short = 'k', env = "HASHI_KEYPAIR")]
+    pub keypair: Option<std::path::PathBuf>,
+
+    /// `UpgradeCap` object ID. Auto-discovered from the sender's owned
+    /// objects when omitted.
+    #[clap(long)]
+    pub upgrade_cap: Option<String>,
+
+    /// Sender address for --serialize-unsigned-transaction when no local
+    /// keypair exists (e.g. a multisig publisher)
+    #[clap(long)]
+    pub sender: Option<String>,
+
+    /// Build the transaction and print it as base64 (BCS `TransactionData`)
+    /// instead of executing it — for offline / multisig signing via
+    /// `sui keytool sign`. No private key required.
+    #[clap(long = "serialize-unsigned-transaction")]
+    pub serialize_unsigned: bool,
+
+    /// Enable verbose output
+    #[clap(long, short)]
+    pub verbose: bool,
+
+    /// Skip confirmation prompts
+    #[clap(long, short = 'y')]
+    pub yes: bool,
+}
+
 /// Options for the `register` subcommand.
 ///
 /// Unlike other CLI commands this uses a validator config file (the same one
@@ -1178,9 +1259,9 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
     print_success(&format!("upgrade_cap_id:  {upgrade_cap_id}"));
     print_info(
         "The UpgradeCap stays in the publisher's wallet and the deploy is not yet \
-         configured. Once all expected validators have registered, send \
-         `hashi::finish_publish` (the launch switch) with the UpgradeCap, chain id, \
-         and guardian parameters to configure the deploy and unlock genesis.",
+         configured. Once all expected validators have registered, run `hashi launch` \
+         with the chain id and guardian parameters to configure the deploy and unlock \
+         genesis.",
     );
 
     // Write ids to hashi_ids.json
@@ -1189,6 +1270,185 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
     std::fs::write(out_path, &json)?;
     print_success(&format!("Wrote {out_path}"));
 
+    Ok(())
+}
+
+/// Run the `launch` command – send `hashi::finish_publish` (the launch
+/// switch): configure the deploy (chain id, guardian, overrides) and hand
+/// the package `UpgradeCap` into on-chain custody, which unlocks genesis.
+/// The initial committee forms from the validators fully registered at that
+/// moment.
+pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
+    use sui_sdk_types::bcs::ToBcs;
+
+    crate::init_crypto_provider();
+    init_tracing(opts.verbose);
+
+    // In serialize mode keep stdout clean (base64 only); notes go to stderr.
+    set_notes_to_stderr(opts.serialize_unsigned);
+
+    // Resolve ids: explicit flags win, else the hashi_ids.json from publish.
+    let ids: crate::config::HashiIds = match (&opts.package_id, &opts.hashi_object_id) {
+        (Some(package_id), Some(hashi_object_id)) => crate::config::HashiIds {
+            package_id: package_id.parse()?,
+            hashi_object_id: hashi_object_id.parse()?,
+        },
+        (None, None) => {
+            let raw = std::fs::read_to_string(&opts.hashi_ids).with_context(|| {
+                format!(
+                    "failed to read {} (or pass --package-id and --hashi-object-id)",
+                    opts.hashi_ids.display()
+                )
+            })?;
+            serde_json::from_str(&raw)?
+        }
+        _ => anyhow::bail!("--package-id and --hashi-object-id must be provided together"),
+    };
+
+    // Guardian parameters are published on-chain by the launch tx.
+    let btc_public_key = hex::decode(
+        opts.guardian_btc_public_key
+            .strip_prefix("0x")
+            .unwrap_or(&opts.guardian_btc_public_key),
+    )
+    .context("Invalid hex for --guardian-btc-public-key")?;
+    anyhow::ensure!(
+        btc_public_key.len() == 32,
+        "--guardian-btc-public-key must be 32 bytes (x-only), got {} bytes",
+        btc_public_key.len(),
+    );
+    let guardian = crate::publish::GuardianConfig {
+        url: opts.guardian_url.clone(),
+        btc_public_key,
+    };
+    let bitcoin_overrides = crate::publish::BitcoinConfigOverrides {
+        confirmation_threshold: opts.bitcoin_confirmation_threshold,
+        deposit_time_delay_ms: opts.bitcoin_deposit_time_delay_ms,
+    };
+
+    // Resolve the sender (the UpgradeCap owner): a local keypair, or an
+    // explicit --sender for the serialize-unsigned (multisig) path.
+    let signer = opts
+        .keypair
+        .as_deref()
+        .map(crate::config::load_ed25519_private_key_from_path)
+        .transpose()?;
+    let sender: sui_sdk_types::Address = match (&signer, &opts.sender) {
+        (Some(signer), None) => signer.public_key().derive_address(),
+        (None, Some(sender)) => sender.parse()?,
+        (Some(_), Some(_)) => anyhow::bail!("pass either --keypair or --sender, not both"),
+        (None, None) => anyhow::bail!(
+            "pass --keypair, or --sender together with --serialize-unsigned-transaction"
+        ),
+    };
+    if signer.is_none() && !opts.serialize_unsigned {
+        anyhow::bail!("--sender requires --serialize-unsigned-transaction (no key to sign with)");
+    }
+
+    print_info(&format!("Sender (UpgradeCap owner): {sender}"));
+    print_info(&format!("Sui RPC: {}", opts.sui_rpc_url));
+
+    let mut client = sui_rpc::Client::new(&opts.sui_rpc_url)?;
+
+    // Pre-flight: the launch must not have happened yet, and show who would
+    // form the initial committee.
+    let (onchain, _watcher) =
+        crate::onchain::OnchainState::new(&opts.sui_rpc_url, ids, None, None, None).await?;
+    let (num_members, num_ready) = {
+        let state = onchain.state();
+        anyhow::ensure!(
+            state.hashi().config.upgrade_cap.is_none(),
+            "the UpgradeCap is already in on-chain custody — the launch (finish_publish) \
+             has already happened"
+        );
+        let members = state.hashi().committees.members();
+        anyhow::ensure!(
+            !members.is_empty(),
+            "no validators are registered yet; the genesis committee would be empty"
+        );
+        print_info(&format!("Registered validators ({}):", members.len()));
+        let mut num_ready = 0usize;
+        for (address, member) in members {
+            let ready = member.next_epoch_encryption_public_key().is_some();
+            num_ready += usize::from(ready);
+            print_info(&format!(
+                "  {address}  {}",
+                if ready {
+                    "ready"
+                } else {
+                    "MISSING NEXT-EPOCH KEYS (will be excluded from the committee)"
+                }
+            ));
+        }
+        (members.len(), num_ready)
+    };
+    anyhow::ensure!(
+        num_ready > 0,
+        "no validator has finished key registration; genesis would stall"
+    );
+    if num_ready < num_members {
+        print_warning(&format!(
+            "{} of {num_members} registered validators have not finished key registration \
+             and would be excluded from the genesis committee",
+            num_members - num_ready,
+        ));
+    }
+
+    // Locate the cap.
+    let upgrade_cap_id: sui_sdk_types::Address = match &opts.upgrade_cap {
+        Some(id) => id.parse()?,
+        None => {
+            print_info("Locating UpgradeCap among the sender's owned objects ...");
+            crate::publish::find_upgrade_cap(&mut client, sender, ids.package_id).await?
+        }
+    };
+    print_info(&format!("UpgradeCap: {upgrade_cap_id}"));
+
+    if opts.serialize_unsigned {
+        let tx = crate::publish::build_finish_publish_tx(
+            &mut client,
+            sender,
+            &ids,
+            upgrade_cap_id,
+            &opts.bitcoin_chain_id,
+            &guardian,
+            &bitcoin_overrides,
+        )
+        .await?;
+        println!("{}", tx.to_bcs_base64()?);
+        return Ok(());
+    }
+
+    if !opts.yes {
+        print_info(
+            "This sends hashi::finish_publish: it configures the deploy (chain id, \
+             guardian) and hands the UpgradeCap into on-chain custody, UNLOCKING \
+             GENESIS — the initial committee forms from the validators that are fully \
+             registered right now (1 transaction).",
+        );
+        print_info("Use --yes / -y to skip this prompt.");
+        eprint!("Continue? [y/N] ");
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            print_warning("Aborted.");
+            return Ok(());
+        }
+    }
+
+    let signer = signer.expect("presence checked during sender resolution");
+    print_info("Sending launch transaction (hashi::finish_publish) ...");
+    crate::publish::finish_publish(
+        &mut client,
+        &signer,
+        &ids,
+        upgrade_cap_id,
+        &opts.bitcoin_chain_id,
+        &guardian,
+        &bitcoin_overrides,
+    )
+    .await?;
+    print_success("finish_publish executed — genesis unlocked. Validators will now run DKG.");
     Ok(())
 }
 

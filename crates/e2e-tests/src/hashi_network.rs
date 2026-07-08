@@ -233,6 +233,10 @@ impl HashiNetwork {
         self.upgrade_cap_id
     }
 
+    pub fn guardian(&self) -> &hashi::publish::GuardianConfig {
+        &self.guardian
+    }
+
     pub fn nodes_mut(&mut self) -> &mut [HashiNodeHandle] {
         &mut self.nodes
     }

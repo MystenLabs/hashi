@@ -452,35 +452,34 @@ async fn cmd_start(
             .hashi_network_mut()
             .start_pending_validators()
             .await?;
+        print_success("Validators launched; they now register their next-epoch keys on-chain.");
 
-        // Genesis is gated on the launch switch: wait until every validator
-        // has finished registering its next-epoch keys (nodes do this on
-        // startup), then send finish_publish from the publisher key to
-        // configure the deploy and unlock DKG.
-        print_info("Waiting for all validators to finish on-chain key registration...");
-        let expected = test_networks
-            .hashi_network()
-            .nodes()
+        // Genesis is gated on the launch switch (finish_publish): rehearse
+        // the real rollout by having the operator send it via the CLI, which
+        // shows which validators are fully registered before unlocking.
+        let guardian = test_networks.hashi_network().guardian();
+        let guardian_btc_public_key: String = guardian
+            .btc_public_key
             .iter()
-            .map(|node| node.config().validator_address())
-            .collect::<anyhow::Result<Vec<_>>>()?;
-
-        let mut client = test_networks.sui_network().client.clone();
-        let publisher = test_networks
-            .sui_network()
-            .user_keys
-            .first()
-            .context("No funded user keys in localnet genesis")?;
-        test_networks
-            .hashi_network()
-            .launch_genesis(
-                &mut client,
-                publisher,
-                &expected,
-                std::time::Duration::from_secs(180),
-            )
-            .await?;
-        print_success("finish_publish sent — genesis unlocked; DKG proceeds automatically.");
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        println!();
+        print_info("Unlock genesis with the launch switch once every validator is ready:");
+        println!(
+            "      hashi launch --sui-rpc-url {} \\\n          --package-id {} --hashi-object-id {} \\\n          --bitcoin-chain-id {} \\\n          --guardian-url {} \\\n          --guardian-btc-public-key {} \\\n          --keypair {} -y",
+            state.sui_rpc_url,
+            state.package_id,
+            state.hashi_object_id,
+            hashi::constants::BITCOIN_REGTEST_CHAIN_ID,
+            guardian.url,
+            guardian_btc_public_key,
+            funded_key_path.display(),
+        );
+        print_info(
+            "The command lists registered validators, warns about any still missing keys \
+             (re-run once they are ready), and then sends hashi::finish_publish. \
+             DKG starts automatically afterwards.",
+        );
     }
 
     print_info("Press Ctrl+C to stop the localnet.");
@@ -1030,9 +1029,9 @@ fn print_manual_bootstrap_guide(data_dir: &Path, num_validators: usize) {
         println!("       hashi register --config {d}/validators/validator_{i}.toml -y");
     }
     println!(
-        "  2. Press Enter here to launch the validators. Once they finish registering \
-         their keys, the harness sends the launch tx (hashi::finish_publish) \
-         from the publisher key, unlocking DKG/genesis."
+        "  2. Press Enter here to launch the validators (they register their next-epoch \
+         keys on startup), then run the printed `hashi launch` command to unlock \
+         DKG/genesis."
     );
     println!("  3. Govern as a committee member (HASHI_CLI_CONFIG selects the identity):");
     println!("       HASHI_CLI_CONFIG={d}/cli-validator-0.toml hashi committee epoch");
