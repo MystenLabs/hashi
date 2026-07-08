@@ -50,10 +50,10 @@ At genesis (when no MPC public key exists yet), `start_reconfig` is
 additionally gated on the **launch switch**: it aborts until the publisher
 has sent `hashi::finish_publish` (the `hashi launch` CLI command), which
 finalizes the deploy configuration and hands the package `UpgradeCap` into
-on-chain custody. This gives the publisher explicit control over when — and
-with which registered validators — the initial committee forms. After genesis
+onchain custody. This gives the publisher explicit control over when (and
+with which registered validators) the initial committee forms. After genesis
 the gate is never consulted; Hashi follows Sui's validator set
-unconditionally, since a floor on a normal reconfig would let validators
+unconditionally, because a floor on a normal reconfig would let validators
 brick reconfiguration by withholding registration.
 
 
