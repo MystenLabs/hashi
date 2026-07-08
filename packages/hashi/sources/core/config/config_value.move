@@ -13,6 +13,11 @@ public enum Value has copy, drop, store {
     String(String),
     Bool(bool),
     Bytes(vector<u8>),
+    // New variants must be appended (never inserted or reordered): package
+    // upgrades reject enums whose existing variant order changes, and the
+    // Rust mirror (hashi-types) decodes by BCS variant index.
+    U128(u128),
+    U256(u256),
 }
 
 public fun new_u64(value: u64): Value {
@@ -35,6 +40,14 @@ public fun new_bytes(value: vector<u8>): Value {
     Value::Bytes(value)
 }
 
+public fun new_u128(value: u128): Value {
+    Value::U128(value)
+}
+
+public fun new_u256(value: u256): Value {
+    Value::U256(value)
+}
+
 public(package) fun same_variant(self: &Value, other: &Value): bool {
     match (self) {
         Value::U64(_) => other.is_u64(),
@@ -42,6 +55,8 @@ public(package) fun same_variant(self: &Value, other: &Value): bool {
         Value::String(_) => other.is_string(),
         Value::Bool(_) => other.is_bool(),
         Value::Bytes(_) => other.is_bytes(),
+        Value::U128(_) => other.is_u128(),
+        Value::U256(_) => other.is_u256(),
     }
 }
 
@@ -111,6 +126,34 @@ public(package) fun as_bool(value: Value): bool {
 public(package) fun as_bytes(value: Value): vector<u8> {
     match (value) {
         Value::Bytes(bytes) => bytes,
+        _ => abort EInvalidConfigValue,
+    }
+}
+
+public(package) fun is_u128(value: &Value): bool {
+    match (value) {
+        Value::U128(_) => true,
+        _ => false,
+    }
+}
+
+public(package) fun is_u256(value: &Value): bool {
+    match (value) {
+        Value::U256(_) => true,
+        _ => false,
+    }
+}
+
+public(package) fun as_u128(value: Value): u128 {
+    match (value) {
+        Value::U128(num) => num,
+        _ => abort EInvalidConfigValue,
+    }
+}
+
+public(package) fun as_u256(value: Value): u256 {
+    match (value) {
+        Value::U256(num) => num,
         _ => abort EInvalidConfigValue,
     }
 }

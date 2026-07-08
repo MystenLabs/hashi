@@ -723,6 +723,9 @@ fn build_config_value(
         ConfigValue::String(v) => ("new_string", builder.pure(v)),
         ConfigValue::Bool(v) => ("new_bool", builder.pure(v)),
         ConfigValue::Bytes(v) => ("new_bytes", builder.pure(v)),
+        ConfigValue::U128(v) => ("new_u128", builder.pure(v)),
+        // The 32 LE bytes BCS-encode identically to a Move `u256` pure arg.
+        ConfigValue::U256(v) => ("new_u256", builder.pure(v)),
     };
 
     builder.move_call(

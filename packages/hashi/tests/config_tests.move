@@ -4,7 +4,7 @@
 #[test_only]
 module hashi::config_tests;
 
-use hashi::{btc_config, config, test_utils};
+use hashi::{btc_config, config, config_value, test_utils};
 use std::string;
 
 const VOTER1: address = @0x1;
@@ -148,4 +148,31 @@ fun test_bitcoin_withdrawal_minimum_updates() {
     assert!(btc_config::bitcoin_withdrawal_minimum(hashi.config()) < baseline);
 
     std::unit_test::destroy(hashi);
+}
+
+#[test]
+fun test_config_value_wide_integers_round_trip() {
+    let mut config = config::empty();
+
+    // Values that cannot fit the next-smaller integer width.
+    let big_u128 = 1u128 << 100;
+    config.upsert(b"test_u128", config_value::new_u128(big_u128));
+    assert!(config.get(b"test_u128").as_u128() == big_u128);
+
+    let big_u256 = 1u256 << 200;
+    config.upsert(b"test_u256", config_value::new_u256(big_u256));
+    assert!(config.get(b"test_u256").as_u256() == big_u256);
+}
+
+#[test]
+fun test_config_value_same_variant_distinguishes_integer_widths() {
+    let u64_value = config_value::new_u64(1);
+    let u128_value = config_value::new_u128(1);
+    let u256_value = config_value::new_u256(1);
+
+    assert!(u128_value.same_variant(&config_value::new_u128(2)));
+    assert!(u256_value.same_variant(&config_value::new_u256(2)));
+    assert!(!u64_value.same_variant(&u128_value));
+    assert!(!u128_value.same_variant(&u256_value));
+    assert!(!u256_value.same_variant(&u64_value));
 }
