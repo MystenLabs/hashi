@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `provisioner_init` (withdraw mode): collects the current KPs' encrypted
-//! shares, decrypts/verifies them under the enclave's `state_hash`, and
+//! shares, decrypts/verifies them under the enclave's `config_hash`, and
 //! reconstructs the BTC key once threshold shares are present. Runs after the
 //! shared `crate::operator_init`.
 
@@ -18,10 +18,10 @@ use tracing::info;
 use GuardianError::*;
 
 /// Receives the current KPs' encrypted shares in one submission. Decrypts each
-/// under the enclave's state_hash (set at operator_init) as AAD — so only shares
-/// from KPs that agreed on the operator-supplied state decrypt — verifies them
-/// against the commitments, and reconstructs the BTC key once threshold shares
-/// are present.
+/// under the enclave's config_hash (set at operator_init) as AAD — so only shares
+/// from KPs that agreed on the operator-supplied stable config decrypt — verifies
+/// them against the commitments, and reconstructs the BTC key once threshold
+/// shares are present.
 pub async fn provisioner_init(
     enclave: Arc<Enclave>,
     request: ProvisionerInitRequest,
@@ -46,17 +46,17 @@ pub async fn provisioner_init(
     let threshold = instance.threshold();
     // Always set here: provisioner_init is withdraw-mode only, and the
     // operator_init check above guarantees a withdraw-mode enclave installed it.
-    let state_hash = *enclave
-        .state_hash()
-        .expect("withdraw-mode operator_init installs the state_hash");
+    let config_hash = enclave
+        .config_hash()
+        .expect("withdraw-mode operator_init installs the config_hash");
 
     // Decrypt and verify every submission. A share only decrypts if its KP bound
-    // the enclave's state_hash as AAD, so the decrypted shares all agree on the
-    // operator-supplied state.
+    // the enclave's config_hash as AAD, so the decrypted shares all agree on the
+    // operator-supplied stable config.
     let shares = decrypt_verify_shares(
         request.encrypted_shares(),
         sk,
-        &state_hash,
+        &config_hash,
         instance.commitments(),
         threshold,
     )?;
@@ -64,8 +64,8 @@ pub async fn provisioner_init(
 
     let share_ids = shares.iter().map(|s| s.id).collect();
     finalize_init(&shares, threshold, &enclave).await;
-    // Log to S3 indicating that withdrawals can be expected henceforth. This log
-    // does not serve any security purpose.
+    // Log to S3 indicating that the BTC key has been reconstructed. OA waits for
+    // this durable marker before activating the enclave for withdrawals.
     enclave
         .log_init(PIEnclaveFullyInitialized { share_ids })
         .await
@@ -80,8 +80,8 @@ pub async fn provisioner_init(
     Ok(())
 }
 
-/// Reconstruct the BTC key from the threshold shares and install it. The rest of
-/// the enclave state was set at operator_init.
+/// Reconstruct the BTC key from the threshold shares and install it. Live
+/// serving state is installed later by operator_activate.
 /// Panics upon an error as the enclaves state is irrecoverable at this point.
 async fn finalize_init(shares: &[Share], threshold: usize, enclave: &Arc<Enclave>) {
     info!("Threshold reached, combining shares.");
@@ -120,17 +120,17 @@ mod tests {
         (shares, enclave)
     }
 
-    /// Bundle one submission per share, all bound to the enclave's state_hash as
+    /// Bundle one submission per share, all bound to the enclave's config_hash as
     /// AAD — i.e. what the relay assembles from the current KPs.
     fn build_request(shares: &[Share], enclave: &Enclave) -> ProvisionerInitRequest {
-        let state_hash = *enclave.state_hash().unwrap();
+        let config_hash = enclave.config_hash().unwrap();
         let submissions = shares
             .iter()
             .map(|s| {
                 ProvisionerInitRequest::build_from_share(
                     s,
                     enclave.encryption_public_key(),
-                    state_hash,
+                    config_hash,
                     &mut rand::thread_rng(),
                 )
             })
@@ -148,7 +148,11 @@ mod tests {
             enclave.config.is_enclave_btc_keypair_set(),
             "Bitcoin key should be set after threshold"
         );
-        assert!(enclave.is_fully_initialized(), "fully initialized");
+        assert!(
+            enclave.is_provisioner_init_complete(),
+            "provisioner init complete"
+        );
+        assert!(!enclave.is_fully_initialized(), "not active before OA");
     }
 
     #[tokio::test]
@@ -203,18 +207,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_share_with_mismatched_state_hash() {
+    async fn rejects_share_with_mismatched_config_hash() {
         let (shares, enclave) = setup_test_shares_and_enclave().await;
 
-        // A KP that binds a state_hash differing from the enclave's (i.e. it
-        // disagreed on the operator-supplied state) produces a share that fails
-        // to decrypt — rejected gracefully, not via a panic.
-        let wrong_state_hash = [0xABu8; 32];
-        assert_ne!(&wrong_state_hash, enclave.state_hash().unwrap());
+        // A KP that binds a config_hash differing from the enclave's (i.e. it
+        // disagreed on the operator-supplied stable config) produces a share
+        // that fails to decrypt — rejected gracefully, not via a panic.
+        let wrong_config_hash = [0xABu8; 32];
+        assert_ne!(wrong_config_hash, enclave.config_hash().unwrap());
         let enc = ProvisionerInitRequest::build_from_share(
             &shares[0],
             enclave.encryption_public_key(),
-            wrong_state_hash,
+            wrong_config_hash,
             &mut rand::thread_rng(),
         );
         let req = ProvisionerInitRequest::new(vec![enc]);

@@ -1359,7 +1359,7 @@ pub mod bridge_service_server {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SingleProvisionerInitRequest {
-    /// This KP's share, HPKE-encrypted to the enclave with the state_hash bound as
+    /// This KP's share, HPKE-encrypted to the enclave with the config_hash bound as
     /// AAD (built exactly as for the guardian's batch ProvisionerInit).
     #[prost(message, optional, tag = "1")]
     pub encrypted_share: ::core::option::Option<GuardianEncryptedShare>,
@@ -1770,9 +1770,9 @@ pub struct GuardianInfoData {
     /// Absent before `provisioner_init` has set the keypair.
     #[prost(bytes = "bytes", optional, tag = "5")]
     pub enclave_btc_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
-    /// Digest of the operator-supplied WithdrawModeState (32 bytes, if set).
+    /// Digest of the operator-supplied InitConfig (32 bytes, if set).
     #[prost(bytes = "bytes", optional, tag = "6")]
-    pub state_hash: ::core::option::Option<::prost::bytes::Bytes>,
+    pub config_hash: ::core::option::Option<::prost::bytes::Bytes>,
     /// Current rate limiter state (if initialized).
     #[prost(message, optional, tag = "7")]
     pub limiter_state: ::core::option::Option<LimiterState>,
@@ -1893,10 +1893,10 @@ pub struct OperatorInitRequest {
     /// S3 access keys
     #[prost(message, optional, tag = "1")]
     pub s3_config: ::core::option::Option<S3Config>,
-    /// Withdraw-mode config (absent for a ceremony enclave); the enclave binds the
-    /// inner state's digest as the share-decryption AAD and exposes it via GuardianInfo.
+    /// Withdraw-mode stable init config (absent for a ceremony enclave). The enclave
+    /// binds this digest as the share-decryption AAD and exposes it via GuardianInfo.
     #[prost(message, optional, tag = "4")]
-    pub state: ::core::option::Option<WithdrawModeConfig>,
+    pub init_config: ::core::option::Option<InitConfig>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct OperatorInitResponse {}
@@ -1913,33 +1913,48 @@ pub struct S3Config {
 }
 /// Assembled from the current KPs' encrypted shares (in the relay model, by the
 /// relay once it has collected enough). Each share's HPKE AAD binds the enclave's
-/// state_hash (the WithdrawModeState digest), so a share only decrypts if the KP
-/// agreed on the operator-supplied state.
+/// config_hash, so a share only decrypts if the KP agreed on the operator-supplied
+/// stable config.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ProvisionerInitRequest {
     #[prost(message, repeated, tag = "1")]
     pub encrypted_shares: ::prost::alloc::vec::Vec<GuardianEncryptedShare>,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OperatorActivateRequest {
+    /// Digest of the ActivationState the operator expects the enclave to derive.
+    #[prost(bytes = "bytes", optional, tag = "1")]
+    pub expected_state_hash: ::core::option::Option<::prost::bytes::Bytes>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct OperatorActivateResponse {}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BuildPcrs {
+    #[prost(string, optional, tag = "1")]
+    pub git_revision: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(bytes = "bytes", optional, tag = "2")]
+    pub pcr0: ::core::option::Option<::prost::bytes::Bytes>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct WithdrawModeConfig {
-    /// Current Hashi committee.
+pub struct PcrAllowlist {
     #[prost(message, optional, tag = "1")]
-    pub committee: ::core::option::Option<Committee>,
+    pub current_build: ::core::option::Option<BuildPcrs>,
+    #[prost(message, repeated, tag = "2")]
+    pub prev_builds: ::prost::alloc::vec::Vec<BuildPcrs>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct InitConfig {
     /// Limiter configuration.
-    #[prost(message, optional, tag = "2")]
+    #[prost(message, optional, tag = "1")]
     pub limiter_config: ::core::option::Option<LimiterConfig>,
     /// Compressed public key bytes (33 bytes).
-    #[prost(bytes = "bytes", optional, tag = "4")]
+    #[prost(bytes = "bytes", optional, tag = "2")]
     pub hashi_btc_master_pubkey: ::core::option::Option<::prost::bytes::Bytes>,
-    /// Rate limiter state.
-    #[prost(message, optional, tag = "6")]
-    pub limiter_state: ::core::option::Option<LimiterState>,
-    /// Secret-sharing scheme for the current BTC key. Carried for delivery; not
-    /// part of the state_hash digest.
-    #[prost(message, optional, tag = "7")]
-    pub secret_sharing_instance: ::core::option::Option<SecretSharingInstance>,
-    /// BTC network. Carried for delivery; not part of the state_hash digest.
-    #[prost(enumeration = "Network", optional, tag = "8")]
+    /// Guardian build PCR pins used by operators/KPs for attestation checks.
+    #[prost(message, optional, tag = "3")]
+    pub pcr_allowlist: ::core::option::Option<PcrAllowlist>,
+    /// BTC network.
+    #[prost(enumeration = "Network", optional, tag = "4")]
     pub network: ::core::option::Option<i32>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -2285,7 +2300,7 @@ pub mod guardian_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Operator initialization: provide config and commitments before provisioning.
+        /// Operator initialization: provide stable config before provisioning.
         pub async fn operator_init(
             &mut self,
             request: impl tonic::IntoRequest<super::OperatorInitRequest>,
@@ -2338,6 +2353,36 @@ pub mod guardian_service_client {
                     GrpcMethod::new(
                         "sui.hashi.v1alpha.GuardianService",
                         "ProvisionerInit",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// Operator activation: derive live serving state and make an armed standby active.
+        pub async fn operator_activate(
+            &mut self,
+            request: impl tonic::IntoRequest<super::OperatorActivateRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::OperatorActivateResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.GuardianService/OperatorActivate",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.GuardianService",
+                        "OperatorActivate",
                     ),
                 );
             self.inner.unary(req, path, codec).await
@@ -2475,7 +2520,7 @@ pub mod guardian_service_server {
             tonic::Response<super::SignedRotateKpsResponse>,
             tonic::Status,
         >;
-        /// Operator initialization: provide config and commitments before provisioning.
+        /// Operator initialization: provide stable config before provisioning.
         async fn operator_init(
             &self,
             request: tonic::Request<super::OperatorInitRequest>,
@@ -2489,6 +2534,14 @@ pub mod guardian_service_server {
             request: tonic::Request<super::ProvisionerInitRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ProvisionerInitResponse>,
+            tonic::Status,
+        >;
+        /// Operator activation: derive live serving state and make an armed standby active.
+        async fn operator_activate(
+            &self,
+            request: tonic::Request<super::OperatorActivateRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::OperatorActivateResponse>,
             tonic::Status,
         >;
         /// Standard withdrawal: request withdrawal signature.
@@ -2804,6 +2857,52 @@ pub mod guardian_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = ProvisionerInitSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.GuardianService/OperatorActivate" => {
+                    #[allow(non_camel_case_types)]
+                    struct OperatorActivateSvc<T: GuardianService>(pub Arc<T>);
+                    impl<
+                        T: GuardianService,
+                    > tonic::server::UnaryService<super::OperatorActivateRequest>
+                    for OperatorActivateSvc<T> {
+                        type Response = super::OperatorActivateResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::OperatorActivateRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as GuardianService>::operator_activate(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = OperatorActivateSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

@@ -18,7 +18,7 @@ service GuardianRelayService {
 }
 
 message SingleProvisionerInitRequest {
-  // This KP's share, HPKE-encrypted to the enclave with the state_hash bound as
+  // This KP's share, HPKE-encrypted to the enclave with the config_hash bound as
   // AAD (built exactly as for the guardian's batch ProvisionerInit).
   GuardianEncryptedShare encrypted_share = 1;
 

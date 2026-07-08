@@ -7,10 +7,13 @@ use std::path::PathBuf;
 
 mod config;
 mod fetch_info;
+mod guardian_info;
+#[allow(dead_code)]
 mod heartbeat_checks;
 mod kp_ceremony;
 mod kp_provision;
 mod kp_roster;
+#[allow(dead_code)]
 mod limiter_recovery;
 mod operator_ceremony;
 mod operator_provision;
@@ -50,7 +53,7 @@ enum OperatorCommand {
         #[arg(long)]
         config: PathBuf,
     },
-    /// Initialize a withdraw-mode guardian with operator-supplied state.
+    /// Initialize a withdraw-mode guardian with operator-supplied stable config.
     Provision {
         /// Path to operator provision YAML config file.
         #[arg(long)]

@@ -19,7 +19,6 @@ use anyhow::anyhow;
 use anyhow::ensure;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
-use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianSigned;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
@@ -28,11 +27,11 @@ use hashi_types::guardian::SharesLogMessage;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
 use hashi_types::guardian::proto_conversions::setup_new_key_request_to_pb;
 use hashi_types::pgp::load_certs;
-use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use tracing::info;
 
 use crate::config::Config;
+use crate::guardian_info::verified_live_guardian_info;
 use crate::kp_roster::VerifiedCeremonyState;
 
 /// Run the one-time production guardian key ceremony.
@@ -91,7 +90,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         .with_context(|| format!("connect to guardian at {}", cfg.guardian_endpoint))?;
     info!(phase = "connect", endpoint = %cfg.guardian_endpoint, "connected to guardian");
 
-    // 4. operator_init (ceremony mode: S3 config only, no WithdrawModeConfig).
+    // 4. operator_init (ceremony mode: S3 config only, no InitConfig).
     info!(
         phase = "operator_init",
         bucket = guardian_s3.bucket_name(),
@@ -114,17 +113,8 @@ pub async fn run(cfg: Config) -> Result<()> {
     //    session id. This binds `signing_pub_key` (and thus the session) before
     //    we trust the SetupNewKey response we'll verify against it below.
     info!(phase = "guardian info", "calling GetGuardianInfo");
-    let info_pb = client
-        .get_guardian_info(pb::GetGuardianInfoRequest {})
-        .await
-        .context("GetGuardianInfo RPC failed")?
-        .into_inner();
-    let info_resp = GetGuardianInfoResponse::try_from(info_pb)
-        .map_err(|e| anyhow!("decode GetGuardianInfoResponse: {e:?}"))?;
     let allowlist = cfg.kp_roster.pcr_allowlist();
-    let verified = info_resp
-        .verify(allowlist.current_build())
-        .map_err(|e| anyhow!("verify GuardianInfo attestation/signature: {e:?}"))?;
+    let verified = verified_live_guardian_info(&mut client, allowlist.current_build()).await?;
     let signing_pub_key = verified.signing_pub_key;
     let session_id = verified.session_id;
     info!(

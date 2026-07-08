@@ -10,7 +10,8 @@
 # future `operator provision` will expect withdraw mode.
 guardian_endpoint: "http://localhost:3000"
 
-# Relay endpoint the KP's share is submitted to. Used by `key-provisioner provision`.
+# Relay endpoint the KP's share is submitted to. `key-provisioner provision`
+# also uses this endpoint's GuardianInfo to pin the standby session.
 relay_endpoint: "http://localhost:50051"
 
 # Bitcoin network the withdraw-mode guardian validates withdrawal addresses for.

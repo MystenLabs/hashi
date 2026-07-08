@@ -6,6 +6,9 @@ use super::GuardianResult;
 use crate::bitcoin::BTC_LIB;
 use crate::pgp::PgpPublicCert;
 use crate::pgp::encrypt_armored;
+use blake2::Blake2b;
+use blake2::Digest;
+use blake2::digest::consts::U32;
 use hpke::Deserializable;
 use hpke::Kem;
 use hpke::Serializable;
@@ -24,6 +27,7 @@ use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::num::NonZeroU16;
 use tracing::info;
 // ---------------------------------
@@ -240,6 +244,22 @@ impl SecretSharingInstance {
 
     pub fn sharing_seq(&self) -> u64 {
         self.sharing_seq
+    }
+}
+
+impl fmt::Display for SecretSharingInstance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let bytes = bcs::to_bytes(&self.commitments).expect("serialization should work");
+        let commitments_hash = Blake2b::<U32>::digest(bytes);
+        let commitments_hash_hex = hex::encode(commitments_hash);
+        write!(
+            f,
+            "SecretSharingInstance(seq={},n={},t={},commitments_hash={})",
+            self.sharing_seq,
+            self.num_shares(),
+            self.threshold(),
+            commitments_hash_hex
+        )
     }
 }
 
@@ -801,6 +821,18 @@ mod tests {
         let err = SecretSharingInstance::new(test_commitments(&[1, 2, 4]), 3, 2, 0)
             .expect_err("commitment ids must be exactly 1..=n");
         assert!(format!("{err}").contains("commitment ids"), "{err}");
+    }
+
+    #[test]
+    fn secret_sharing_instance_display_is_concise() {
+        let instance = SecretSharingInstance::new(test_commitments(&[1, 2, 3]), 3, 2, 7)
+            .expect("valid instance");
+        let display = instance.to_string();
+
+        assert!(display.contains("seq=7"), "{display}");
+        assert!(display.contains("n=3"), "{display}");
+        assert!(display.contains("t=2"), "{display}");
+        assert!(display.contains("commitments_hash="), "{display}");
     }
 
     #[test]

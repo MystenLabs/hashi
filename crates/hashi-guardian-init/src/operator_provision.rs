@@ -6,29 +6,21 @@ use anyhow::anyhow;
 use anyhow::ensure;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
-use hashi_types::guardian::BuildPcrs;
-use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;
-use hashi_types::guardian::LimiterState;
+use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::SecretSharingInstance;
-use hashi_types::guardian::VerifiedGuardianInfo;
-use hashi_types::guardian::WithdrawModeConfig;
-use hashi_types::guardian::WithdrawModeState;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
 use hashi_types::pgp::load_certs;
-use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
-use tonic::transport::Channel;
 use tracing::info;
 
 use crate::config::Config;
-use crate::heartbeat_checks;
+use crate::guardian_info::verified_live_guardian_info;
 use crate::kp_roster::VerifiedCeremonyState;
-use crate::limiter_recovery;
 
-/// Initialize a fresh withdraw-mode guardian with operator-supplied state.
+/// Initialize a fresh withdraw-mode guardian with operator-supplied stable config.
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
     let guardian_s3 = cfg.guardian_s3.resolve().await?;
@@ -143,89 +135,18 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         "ceremony instance and encrypted shares verified against expected roster",
     );
 
-    info!(
-        phase = "heartbeat quiet",
-        "checking all prior guardian sessions are quiet before limiter recovery",
-    );
-    heartbeat_checks::ensure_all_sessions_quiet(&mut reader).await?;
-
-    info!(
-        phase = "limiter recovery",
-        "recovering initial limiter state from prior enclave's withdraw logs",
-    );
-    let limiter_state = match limiter_recovery::recover_limiter_state(&mut reader).await? {
-        Some(mut recovered) => {
-            recovered.num_tokens_available = recovered
-                .num_tokens_available
-                .min(cfg.limiter_config.max_bucket_capacity);
-            info!(
-                phase = "limiter recovery",
-                source = "recovered",
-                next_seq = recovered.next_seq,
-                num_tokens_available = recovered.num_tokens_available,
-                last_updated_at = recovered.last_updated_at,
-                "recovered limiter state from prior enclave's max-seq Success log",
-            );
-            recovered
-        }
-        None => {
-            info!(
-                phase = "limiter recovery",
-                source = "genesis",
-                "no prior Success withdrawal logs found; initializing limiter from genesis",
-            );
-            LimiterState::genesis(&cfg.limiter_config)
-        }
-    };
-
-    info!(
-        phase = "committee",
-        "sourcing committee from latest committee-update log or on-chain Hashi state",
-    );
-    let committee = match reader
-        .read_latest_committee(BuildPolicy::AnyAllowlisted)
-        .await?
-    {
-        Some(scraped) => {
-            info!(
-                phase = "committee",
-                epoch = scraped.epoch,
-                source = "committee-update log",
-                "scraped latest committee-update log",
-            );
-            scraped.try_into()?
-        }
-        None => {
-            let committee = onchain_state
-                .current_committee()
-                .context("no current committee on chain (DKG not yet complete?)")?;
-            info!(
-                phase = "committee",
-                epoch = committee.epoch(),
-                source = "on-chain Hashi state",
-                "no committee-update log; falling back to on-chain current committee",
-            );
-            committee
-        }
-    };
-    let committee_epoch = committee.epoch();
-
-    let withdraw_config = WithdrawModeConfig::new(
-        committee,
+    let init_config = InitConfig::new(
         cfg.limiter_config,
-        limiter_state,
         master_g,
-        scraped_instance.clone(),
+        allowlist.clone(),
         cfg.bitcoin_network,
     )?;
-    let expected_state = withdraw_config.state().clone();
-    let state_hash = expected_state.digest();
+    let config_hash = init_config.digest();
     info!(
-        phase = "state build",
-        committee_epoch,
-        state_hash = hex::encode(state_hash),
+        phase = "config build",
+        config_hash = hex::encode(config_hash),
         bitcoin_network = ?cfg.bitcoin_network,
-        "built withdraw-mode config",
+        "built InitConfig",
     );
 
     info!(
@@ -234,7 +155,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     );
     let oi_req = operator_init_request_to_pb(OperatorInitRequest::new_withdraw_mode(
         guardian_s3.clone(),
-        withdraw_config,
+        init_config.clone(),
     ))
     .map_err(|e| anyhow!("encode OperatorInitRequest: {e:?}"))?;
     client
@@ -243,7 +164,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         .context("OperatorInit RPC failed")?;
     info!(
         phase = "operator_init",
-        "operator_init complete; guardian state installed"
+        "operator_init complete; standby config installed"
     );
 
     info!(
@@ -265,15 +186,14 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         post.info.clone(),
         &guardian_s3,
         &scraped_instance,
-        &expected_state,
-        state_hash,
-        committee_epoch,
+        &init_config,
+        config_hash,
     )?;
     info!(
         phase = "guardian postcheck",
         session_id = %session_id,
-        state_hash = hex::encode(state_hash),
-        "live GuardianInfo matches operator-supplied state",
+        config_hash = hex::encode(config_hash),
+        "live GuardianInfo matches operator-supplied config",
     );
 
     info!(
@@ -303,15 +223,13 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         session_id = %session_id,
         ceremony_session = %ceremony_session,
         sharing_seq,
-        committee_epoch,
-        state_hash = hex::encode(state_hash),
+        config_hash = hex::encode(config_hash),
         bitcoin_network = ?cfg.bitcoin_network,
         "operator provision complete",
     );
     println!("Guardian operator provision complete.");
     println!("  session_id:      {session_id}");
-    println!("  state_hash:      {}", hex::encode(state_hash));
-    println!("  committee_epoch: {committee_epoch}");
+    println!("  config_hash:     {}", hex::encode(config_hash));
     println!("  sharing_seq:     {sharing_seq}");
     println!("  num_shares:      {}", scraped_instance.num_shares());
     println!("  threshold:       {}", scraped_instance.threshold());
@@ -320,22 +238,6 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     println!("  region:          {}", guardian_s3.region());
 
     Ok(())
-}
-
-async fn verified_live_guardian_info(
-    client: &mut GuardianServiceClient<Channel>,
-    current_build: &BuildPcrs,
-) -> anyhow::Result<VerifiedGuardianInfo> {
-    let info_pb = client
-        .get_guardian_info(pb::GetGuardianInfoRequest {})
-        .await
-        .context("GetGuardianInfo RPC failed")?
-        .into_inner();
-    let info_resp = GetGuardianInfoResponse::try_from(info_pb)
-        .map_err(|e| anyhow!("decode GetGuardianInfoResponse: {e:?}"))?;
-    info_resp
-        .verify(current_build)
-        .map_err(|e| anyhow!("verify GuardianInfo attestation/signature: {e:?}"))
 }
 
 fn ensure_uninitialized(info: &GuardianInfo) -> anyhow::Result<()> {
@@ -347,7 +249,10 @@ fn ensure_uninitialized(info: &GuardianInfo) -> anyhow::Result<()> {
         info.bucket_info.is_none(),
         "guardian already has bucket info"
     );
-    ensure!(info.state_hash.is_none(), "guardian already has state_hash");
+    ensure!(
+        info.config_hash.is_none(),
+        "guardian already has config_hash"
+    );
     ensure!(
         info.enclave_btc_pubkey.is_none(),
         "guardian already has a BTC pubkey"
@@ -375,26 +280,24 @@ fn verify_initialized_info(
     info: GuardianInfo,
     guardian_s3: &S3Config,
     expected_instance: &SecretSharingInstance,
-    expected_state: &WithdrawModeState,
-    expected_state_hash: [u8; 32],
-    expected_committee_epoch: u64,
+    expected_config: &InitConfig,
+    expected_config_hash: [u8; 32],
 ) -> anyhow::Result<()> {
-    let (
-        instance,
-        bucket_info,
-        _enc_pubkey,
-        state_hash,
-        _git_revision,
-        enclave_btc_pubkey,
-        limiter_state,
-        limiter_config,
-        current_committee_epoch,
-        mpc_master_g,
-    ) = info
-        .into_parts()
-        .context("Guardian info has missing operator-initialized fields")?;
-    let (_, expected_limiter_config, expected_limiter_state, expected_master_g) =
-        expected_state.clone().into_parts();
+    let instance = info
+        .secret_sharing_instance
+        .context("Guardian info missing secret-sharing instance")?;
+    let bucket_info = info
+        .bucket_info
+        .context("Guardian info missing bucket info")?;
+    let config_hash = info
+        .config_hash
+        .context("Guardian info missing config_hash")?;
+    let limiter_config = info
+        .limiter_config
+        .context("Guardian info missing limiter config")?;
+    let mpc_master_g = info
+        .mpc_master_g
+        .context("Guardian info missing MPC master G")?;
 
     ensure!(
         instance == *expected_instance,
@@ -409,37 +312,33 @@ fn verify_initialized_info(
         bucket_info
     );
     ensure!(
-        state_hash == expected_state_hash,
-        "Guardian state_hash mismatch: expected {}, got {}",
-        hex::encode(expected_state_hash),
-        hex::encode(state_hash)
+        config_hash == expected_config_hash,
+        "Guardian config_hash mismatch: expected {}, got {}",
+        hex::encode(expected_config_hash),
+        hex::encode(config_hash)
     );
     ensure!(
-        enclave_btc_pubkey.is_none(),
+        info.enclave_btc_pubkey.is_none(),
         "Guardian has a BTC pubkey before provisioner init"
     );
     ensure!(
-        limiter_state == expected_limiter_state,
-        "Guardian limiter state mismatch: expected {:?}, got {:?}",
-        expected_limiter_state,
-        limiter_state
+        info.limiter_state.is_none(),
+        "Guardian has limiter state before operator activation"
     );
     ensure!(
-        limiter_config == expected_limiter_config,
+        limiter_config == *expected_config.limiter_config(),
         "Guardian limiter config mismatch: expected {:?}, got {:?}",
-        expected_limiter_config,
+        expected_config.limiter_config(),
         limiter_config
     );
     ensure!(
-        current_committee_epoch == expected_committee_epoch,
-        "Guardian committee epoch mismatch: expected {}, got {}",
-        expected_committee_epoch,
-        current_committee_epoch
+        info.current_committee_epoch.is_none(),
+        "Guardian has committee epoch before operator activation"
     );
     ensure!(
-        mpc_master_g == expected_master_g,
+        mpc_master_g == expected_config.hashi_btc_master_pubkey(),
         "Guardian MPC master G mismatch: expected {:?}, got {:?}",
-        expected_master_g,
+        expected_config.hashi_btc_master_pubkey(),
         mpc_master_g
     );
     Ok(())

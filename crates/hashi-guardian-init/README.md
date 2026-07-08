@@ -83,8 +83,8 @@ command uses `kp_pgp_cert_path`, `hashi`, and `kp_roster`.
 
 ## operator provision
 
-Initializes a fresh **withdraw-mode** guardian with operator-supplied state — the
-production `OperatorInit` half of provisioning.
+Initializes a fresh **withdraw-mode** guardian with operator-supplied stable
+config — the production `OperatorInit` half of provisioning.
 
 It:
 
@@ -93,16 +93,14 @@ It:
    operator-initialized.
 2. Reads the latest attested ceremony from S3 and verifies its encrypted-share
    recipients against the expected KP roster.
-3. Confirms all prior guardian sessions are quiet, then recovers limiter state
-   from prior withdrawal logs or uses genesis state for first deployment.
-4. Sources the committee from the latest signed `committee-update/` log, or from
-   on-chain Hashi state before any update exists.
-5. Builds the withdraw-mode `OperatorInit` state from guardian S3 config,
-   limiter config/state, committee, on-chain MPC master `G`, ceremony
-   secret-sharing instance, and configured Bitcoin network.
-6. Calls withdraw-mode `OperatorInit`, then verifies the live and S3-logged
-   `GuardianInfo` match the operator-supplied state.
-7. Prints the state hash that key provisioners must verify before submitting
+3. Fetches on-chain MPC master `G`.
+4. Builds the withdraw-mode `InitConfig` from limiter config, on-chain MPC
+   master `G`, the KP PCR allowlist, and configured Bitcoin network.
+5. Calls withdraw-mode `OperatorInit` with guardian S3 config and `InitConfig`;
+   the enclave reads the latest ceremony instance from S3 before installing.
+6. Verifies the live and S3-logged `GuardianInfo` match the installed ceremony
+   instance and stable config.
+7. Prints the `config_hash` that key provisioners must verify before submitting
    shares.
 
 ```bash
@@ -120,34 +118,30 @@ brought up to replace one that went down. Each KP decrypts through their
 yubikey-backed gpg setup; plaintext never touches disk, but the raw share scalar
 is held in this process' memory long enough to verify and re-encrypt it. It:
 
-1. Audits `heartbeat/` logs to select the single live enclave session (check A).
-2. Fetches and verifies that session's signed `GuardianInfo` (attestation-
-   anchored) and checks the enclave's config against expected values — S3 bucket,
-   limiter config, `mpc_master_g`, and that `enclave_btc_pubkey` is unset (the
-   guardian is not already provisioner-initialized) (check B).
+1. Fetches and verifies the relay/standby endpoint's signed `GuardianInfo`
+   (attestation-anchored), pinning the standby session.
+2. Fetches the same session's signed `GuardianInfo` from S3 and requires it to
+   match the endpoint response, then checks the enclave's config against expected
+   values — S3 bucket, limiter config, `mpc_master_g`, and that the guardian is
+   not already provisioner-initialized or activated.
 3. Scrapes the authoritative `ceremony/` log for the secret-sharing instance
    (commitments + N + T + sharing_seq) the new guardian was booted with, and
    confirms it matches.
-4. Sources the initial `LimiterState` — recovered from the prior enclave's
-   max-seq `Success` withdrawal log on rotation, or genesis on first deployment —
-   and confirms it matches the enclave's (check C).
-5. Sources the committee (latest signed `committee-update/` log, or on-chain
-   Hashi state before any update exists), recomputes the `state_hash` the operator
-   booted the enclave with, and fails fast on mismatch (check D).
-6. Reads this KP's encrypted share from `shares/{seq}-{session}.json` (the
+4. Recomputes the stable `InitConfig` from limiter config, on-chain MPC master
+   `G`, PCR allowlist, and network, then confirms its `config_hash` matches the
+   enclave.
+5. Reads this KP's encrypted share from `shares/{seq}-{session}.json` (the
    ceremony's recovery log), verifies every share's recipients against the
    roster, finds the one labeled for this KP's cert fingerprint, decrypts it via
    the yubikey (`gpg --decrypt` over a pipe; the plaintext stays in memory and
-   never touches disk), and verifies the decrypted share against its commitment
-   (check E).
-7. HPKE-encrypts the decrypted share to the new guardian's `encryption_pubkey`
-   (from its `GuardianInfo`), binding the verified `state_hash` as AAD — so the
-   share only decrypts on a guardian the KP agreed on the operator-supplied
-   state with.
-8. Submits the share to the configured relay endpoint, which runs the same
-   pre-checks before forwarding it. The relay collects T-of-N shares before
-   forwarding them to the guardian in one `ProvisionerInit` call; submission
-   itself awaits the relay's `single_provisioner_init` RPC.
+   never touches disk), and verifies the decrypted share against its commitment.
+6. HPKE-encrypts the decrypted share to the new guardian's `encryption_pubkey`
+   (from its `GuardianInfo`), binding the verified `config_hash` as AAD — so the
+   share only decrypts on a guardian the KP agreed on the stable config with.
+7. Submits the share to the configured relay endpoint. The relay rejects if the
+   backend session no longer matches the pinned session, otherwise it collects
+   T-of-N shares before forwarding them to the guardian in one `ProvisionerInit`
+   call.
 
 ```bash
 cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-init.sample.yaml
@@ -155,8 +149,8 @@ cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-
 
 See [`guardian-init.sample.yaml`](guardian-init.sample.yaml) for the unified
 config. This command uses `kp_pgp_cert_path`, `relay_endpoint`, `hashi`,
-`kp_roster`, and `limiter_config`. The committee and MPC committee verifying key
-`G` are fetched from on-chain Hashi state.
+`kp_roster`, and `limiter_config`. The MPC committee verifying key `G` is fetched
+from on-chain Hashi state.
 
 ## tools
 
