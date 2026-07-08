@@ -595,8 +595,11 @@ impl Hashi {
     /// Before the launch tx (`finish_publish`) the value does not exist
     /// on-chain yet — nodes boot in that window to register their keys — so
     /// absence skips the check rather than failing; any restart after launch
-    /// re-verifies.
-    fn verify_bitcoin_chain_id(&self) -> anyhow::Result<()> {
+    /// re-verifies. Reconfig participation re-runs the check
+    /// (`MpcService::handle_reconfig`), which covers nodes that booted
+    /// pre-launch and never restarted: a pending epoch change implies the
+    /// launch happened, so the value is present by then.
+    pub(crate) fn verify_bitcoin_chain_id(&self) -> anyhow::Result<()> {
         use bitcoin::hashes::Hash as _;
         use std::str::FromStr;
 

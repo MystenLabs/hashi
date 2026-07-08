@@ -754,6 +754,18 @@ impl MpcService {
             );
             return;
         }
+        // A pending epoch change implies the launch (finish_publish) has
+        // happened, so the on-chain bitcoin_chain_id exists now even if this
+        // node booted pre-launch and the startup check was skipped. Refuse
+        // to participate on mismatch — signing for the wrong Bitcoin network
+        // must not happen; the caller re-enters while the epoch change is
+        // pending, surfacing the error every RETRY_INTERVAL until an
+        // operator fixes the config.
+        if let Err(e) = self.inner.verify_bitcoin_chain_id() {
+            error!("refusing to participate in reconfig for epoch {target_epoch}: {e}");
+            self.sleep_if_still_pending(target_epoch).await;
+            return;
+        }
         let metrics = &self.inner.metrics;
         let _reconfig_timer = metrics
             .mpc_reconfig_total_duration_seconds
