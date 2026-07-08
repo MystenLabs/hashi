@@ -650,30 +650,6 @@ pub struct PublishOpts {
     #[clap(long)]
     pub sui_client_config: Option<std::path::PathBuf>,
 
-    /// Bitcoin chain ID (genesis block hash) to store on-chain
-    #[clap(long)]
-    pub bitcoin_chain_id: String,
-
-    /// Guardian gRPC endpoint URL. Required — every deposit address is a
-    /// 2-of-2 (mpc, guardian) taproot leaf.
-    #[clap(long)]
-    pub guardian_url: String,
-
-    /// Guardian BTC pubkey, x-only hex-encoded (32 bytes). Published
-    /// on-chain for 2-of-2 deposit address derivation.
-    #[clap(long)]
-    pub guardian_btc_public_key: String,
-
-    /// Override `bitcoin_confirmation_threshold` on-chain at publish time.
-    /// Falls back to the Move package's `init_defaults` (currently 6) when omitted.
-    #[clap(long)]
-    pub bitcoin_confirmation_threshold: Option<u64>,
-
-    /// Override `bitcoin_deposit_time_delay_ms` on-chain at publish time.
-    /// Falls back to the Move package's `init_defaults` (currently 600_000) when omitted.
-    #[clap(long)]
-    pub bitcoin_deposit_time_delay_ms: Option<u64>,
-
     /// Enable verbose output
     #[clap(long, short)]
     pub verbose: bool,
@@ -1177,7 +1153,7 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
     ));
 
     if !opts.yes {
-        print_info("This will publish the package and run initialization (2 transactions).");
+        print_info("This will publish the package (1 transaction).");
         print_info("Use --yes / -y to skip this prompt.");
         eprint!("Continue? [y/N] ");
         let mut answer = String::new();
@@ -1191,48 +1167,20 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
     // Connect to RPC
     let mut client = sui_rpc::Client::new(&opts.sui_rpc_url)?;
 
-    // Guardian is required — both flags must be present.
-    let btc_public_key = hex::decode(
-        opts.guardian_btc_public_key
-            .strip_prefix("0x")
-            .unwrap_or(&opts.guardian_btc_public_key),
-    )
-    .context("Invalid hex for --guardian-btc-public-key")?;
-    anyhow::ensure!(
-        btc_public_key.len() == 32,
-        "--guardian-btc-public-key must be 32 bytes (x-only), got {} bytes",
-        btc_public_key.len(),
-    );
-    let guardian = crate::publish::GuardianConfig {
-        url: opts.guardian_url,
-        btc_public_key,
-    };
-
-    let bitcoin_overrides = crate::publish::BitcoinConfigOverrides {
-        confirmation_threshold: opts.bitcoin_confirmation_threshold,
-        deposit_time_delay_ms: opts.bitcoin_deposit_time_delay_ms,
-    };
-
-    // Publish + init
-    print_info("Publishing and initializing ...");
+    // Publish
+    print_info("Publishing ...");
     let crate::publish::PublishOutput {
         ids,
         upgrade_cap_id,
-    } = crate::publish::publish_and_init(
-        &mut client,
-        &signer,
-        compiled,
-        &opts.bitcoin_chain_id,
-        &guardian,
-        &bitcoin_overrides,
-    )
-    .await?;
+    } = crate::publish::publish_package(&mut client, &signer, compiled).await?;
     print_success(&format!("package_id:      {}", ids.package_id));
     print_success(&format!("hashi_object_id: {}", ids.hashi_object_id));
     print_success(&format!("upgrade_cap_id:  {upgrade_cap_id}"));
     print_info(
-        "The UpgradeCap stays in the publisher's wallet. Once all expected validators \
-         have registered, send `hashi::register_upgrade_cap` to unlock genesis.",
+        "The UpgradeCap stays in the publisher's wallet and the deploy is not yet \
+         configured. Once all expected validators have registered, send \
+         `hashi::finish_publish` (the launch switch) with the UpgradeCap, chain id, \
+         and guardian parameters to configure the deploy and unlock genesis.",
     );
 
     // Write ids to hashi_ids.json

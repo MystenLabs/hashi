@@ -455,8 +455,8 @@ async fn cmd_start(
 
         // Genesis is gated on the launch switch: wait until every validator
         // has finished registering its next-epoch keys (nodes do this on
-        // startup), then hand the UpgradeCap in from the publisher key to
-        // unlock DKG.
+        // startup), then send finish_publish from the publisher key to
+        // configure the deploy and unlock DKG.
         print_info("Waiting for all validators to finish on-chain key registration...");
         let expected = test_networks
             .hashi_network()
@@ -464,12 +464,6 @@ async fn cmd_start(
             .iter()
             .map(|node| node.config().validator_address())
             .collect::<anyhow::Result<Vec<_>>>()?;
-        e2e_tests::hashi_network::wait_for_registered_validators(
-            &test_networks.hashi_network().nodes()[0],
-            &expected,
-            std::time::Duration::from_secs(180),
-        )
-        .await?;
 
         let mut client = test_networks.sui_network().client.clone();
         let publisher = test_networks
@@ -477,14 +471,16 @@ async fn cmd_start(
             .user_keys
             .first()
             .context("No funded user keys in localnet genesis")?;
-        hashi::publish::register_upgrade_cap(
-            &mut client,
-            publisher,
-            &ids,
-            test_networks.hashi_network().upgrade_cap_id(),
-        )
-        .await?;
-        print_success("Upgrade cap registered — genesis unlocked; DKG proceeds automatically.");
+        test_networks
+            .hashi_network()
+            .launch_genesis(
+                &mut client,
+                publisher,
+                &expected,
+                std::time::Duration::from_secs(180),
+            )
+            .await?;
+        print_success("finish_publish sent — genesis unlocked; DKG proceeds automatically.");
     }
 
     print_info("Press Ctrl+C to stop the localnet.");
@@ -1035,7 +1031,7 @@ fn print_manual_bootstrap_guide(data_dir: &Path, num_validators: usize) {
     }
     println!(
         "  2. Press Enter here to launch the validators. Once they finish registering \
-         their keys, the harness sends the launch tx (hashi::register_upgrade_cap) \
+         their keys, the harness sends the launch tx (hashi::finish_publish) \
          from the publisher key, unlocking DKG/genesis."
     );
     println!("  3. Govern as a committee member (HASHI_CLI_CONFIG selects the identity):");

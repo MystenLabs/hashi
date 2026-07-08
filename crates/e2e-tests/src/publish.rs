@@ -9,11 +9,13 @@ use sui_rpc::Client;
 
 use crate::sui_network::sui_binary;
 
+/// Build and publish the Hashi package. Configuration and the launch switch
+/// (`hashi::finish_publish`) are deferred until the expected validators have
+/// registered — see `HashiNetwork::launch_genesis`.
 pub async fn publish(
     dir: &Path,
     client: &mut Client,
     private_key: &Ed25519PrivateKey,
-    guardian: &hashi::publish::GuardianConfig,
 ) -> Result<PublishOutput> {
     let params = hashi::publish::BuildParams {
         sui_binary: sui_binary(),
@@ -22,14 +24,5 @@ pub async fn publish(
         environment: Some("testnet"),
     };
     let compiled = hashi::publish::build_package(&params)?;
-    let bitcoin_chain_id = hashi::constants::BITCOIN_REGTEST_CHAIN_ID;
-    hashi::publish::publish_and_init(
-        client,
-        private_key,
-        compiled,
-        bitcoin_chain_id,
-        guardian,
-        &hashi::publish::BitcoinConfigOverrides::default(),
-    )
-    .await
+    hashi::publish::publish_package(client, private_key, compiled).await
 }

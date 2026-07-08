@@ -215,8 +215,10 @@ impl HashiNodeHandle {
 pub struct HashiNetwork {
     ids: HashiIds,
     /// `UpgradeCap` object id, held by the publisher until the launch tx
-    /// (`hashi::register_upgrade_cap`) hands it into on-chain custody.
+    /// (`hashi::finish_publish`) hands it into on-chain custody.
     upgrade_cap_id: Address,
+    /// Guardian parameters, published on-chain by the launch tx.
+    guardian: hashi::publish::GuardianConfig,
     nodes: Vec<HashiNodeHandle>,
     /// Keeps the mock screener gRPC server alive for the lifetime of the test network.
     _screener_service: Service,
@@ -233,6 +235,51 @@ impl HashiNetwork {
 
     pub fn nodes_mut(&mut self) -> &mut [HashiNodeHandle] {
         &mut self.nodes
+    }
+
+    /// Send the launch switch (`hashi::finish_publish`): wait until every
+    /// `expected` validator is fully registered, assert genesis has not
+    /// started, then configure the deploy and hand the `UpgradeCap` into
+    /// on-chain custody — unlocking the genesis `start_reconfig`. The
+    /// initial committee is exactly the set of fully-registered validators
+    /// at this moment.
+    pub async fn launch_genesis(
+        &self,
+        client: &mut sui_rpc::Client,
+        publisher: &sui_crypto::ed25519::Ed25519PrivateKey,
+        expected: &[Address],
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        wait_for_registered_validators(&self.nodes[0], expected, timeout).await?;
+
+        // The gate must have held while validators registered: even though
+        // every node has been retrying start_reconfig, genesis cannot begin
+        // before the launch tx below.
+        if let Some(onchain) = self.nodes[0].hashi().onchain_state_opt() {
+            anyhow::ensure!(
+                onchain.current_committee().is_none()
+                    && onchain
+                        .state()
+                        .hashi()
+                        .committees
+                        .pending_epoch_change()
+                        .is_none(),
+                "genesis started before the launch tx (finish_publish)"
+            );
+        }
+
+        hashi::publish::finish_publish(
+            client,
+            publisher,
+            &self.ids,
+            self.upgrade_cap_id,
+            hashi::constants::BITCOIN_REGTEST_CHAIN_ID,
+            &self.guardian,
+            &hashi::publish::BitcoinConfigOverrides::default(),
+        )
+        .await?;
+        debug!("finish_publish sent — genesis unlocked");
+        Ok(())
     }
 
     pub async fn restart(&mut self) -> Result<()> {
@@ -362,6 +409,7 @@ impl HashiNetworkBuilder {
         bitcoin: &BitcoinNodeHandle,
         hashi_ids: HashiIds,
         upgrade_cap_id: Address,
+        guardian: hashi::publish::GuardianConfig,
     ) -> Result<HashiNetwork> {
         // Start a mock screener server for integration tests
         let (screener_addr, screener_service) =
@@ -430,8 +478,8 @@ impl HashiNetworkBuilder {
         );
         // Nodes register themselves on startup, and will trigger
         // start_reconfig + DKG + end_reconfig automatically once the
-        // publisher registers the UpgradeCap (the launch switch), which the
-        // harness sends after all initially-active validators are registered.
+        // publisher sends finish_publish (the launch switch), which the
+        // harness does after all initially-active validators are registered.
         let mut nodes = Vec::with_capacity(configs.len());
         for config in configs {
             let node_handle = HashiNodeHandle::new(config)?;
@@ -457,6 +505,14 @@ impl HashiNetworkBuilder {
             );
         }
 
+        let network = HashiNetwork {
+            ids: hashi_ids,
+            upgrade_cap_id,
+            guardian,
+            nodes,
+            _screener_service: screener_service,
+        };
+
         // Unlock genesis, then wait for the initial committee to appear
         // on-chain, which indicates that the genesis bootstrap
         // (start_reconfig → DKG → end_reconfig) has completed. Skipped when
@@ -468,51 +524,28 @@ impl HashiNetworkBuilder {
             // registered when start_reconfig lands, so every
             // initially-active validator must be registered (with its
             // next-epoch keys) before the launch tx unlocks it.
-            let expected = nodes[..initially_active]
+            let expected = network.nodes[..initially_active]
                 .iter()
                 .map(|node| node.config.validator_address())
                 .collect::<Result<Vec<_>>>()?;
-            wait_for_registered_validators(
-                &nodes[0],
-                &expected,
-                std::time::Duration::from_secs(120),
-            )
-            .await?;
-
-            // The gate must have held while validators registered: even
-            // though every node has been retrying start_reconfig, genesis
-            // cannot begin before the launch tx below.
-            if let Some(onchain) = nodes[0].hashi().onchain_state_opt() {
-                anyhow::ensure!(
-                    onchain.current_committee().is_none()
-                        && onchain
-                            .state()
-                            .hashi()
-                            .committees
-                            .pending_epoch_change()
-                            .is_none(),
-                    "genesis started before the launch tx (upgrade cap registration)"
-                );
-            }
-
             let publisher = sui
                 .user_keys
                 .first()
                 .ok_or_else(|| anyhow::anyhow!("no publisher key in Sui network handle"))?;
             let mut client = sui.client.clone();
-            hashi::publish::register_upgrade_cap(
-                &mut client,
-                publisher,
-                &hashi_ids,
-                upgrade_cap_id,
-            )
-            .await?;
-            debug!("Upgrade cap registered — genesis unlocked");
+            network
+                .launch_genesis(
+                    &mut client,
+                    publisher,
+                    &expected,
+                    std::time::Duration::from_secs(120),
+                )
+                .await?;
 
             let genesis_timeout = std::time::Duration::from_secs(120);
             tokio::time::timeout(genesis_timeout, async {
                 loop {
-                    if let Some(onchain) = nodes[0].hashi().onchain_state_opt()
+                    if let Some(onchain) = network.nodes[0].hashi().onchain_state_opt()
                         && onchain.current_committee().is_some()
                         && onchain
                             .state()
@@ -531,12 +564,7 @@ impl HashiNetworkBuilder {
             debug!("Initial committee formed on-chain");
         }
 
-        Ok(HashiNetwork {
-            ids: hashi_ids,
-            upgrade_cap_id,
-            nodes,
-            _screener_service: screener_service,
-        })
+        Ok(network)
     }
 }
 

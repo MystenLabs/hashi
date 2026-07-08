@@ -241,7 +241,7 @@ impl MpcService {
                 Err(e) => debug!("Failed to compute next_reconfig_epoch: {e}"),
             }
             // Attempt to submit start_reconfig. This will fail on-chain until
-            // the publisher registers the UpgradeCap (the launch switch).
+            // the publisher sends finish_publish (the launch switch).
             let result = async {
                 let mut executor =
                     crate::sui_tx_executor::SuiTxExecutor::from_hashi(self.inner.clone())?;

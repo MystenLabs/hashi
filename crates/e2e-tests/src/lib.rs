@@ -268,10 +268,11 @@ impl TestNetworksBuilder {
             .await?;
         Self::cp_packages(dir.as_ref())?;
 
-        // The guardian's BTC key must exist BEFORE publish so the on-chain config
-        // pins the right pubkey. External guardian: take its ceremony pubkey + URL
-        // (provisioned out-of-band). Otherwise: start the in-process harness and
-        // finalize it below once DKG output exists.
+        // The guardian's BTC key must exist BEFORE the launch tx
+        // (finish_publish) so the on-chain config pins the right pubkey.
+        // External guardian: take its ceremony pubkey + URL (provisioned
+        // out-of-band). Otherwise: start the in-process harness and finalize
+        // it below once DKG output exists.
         let (guardian_config, guardian_harness) = match &self.external_guardian {
             Some(external) => {
                 let guardian_config = hashi::publish::GuardianConfig {
@@ -317,7 +318,6 @@ impl TestNetworksBuilder {
             dir.as_ref(),
             &mut sui_network.client,
             sui_network.user_keys.first().unwrap(),
-            &guardian_config,
         )
         .await?;
 
@@ -328,6 +328,7 @@ impl TestNetworksBuilder {
                 &bitcoin_node,
                 publish_output.ids,
                 publish_output.upgrade_cap_id,
+                guardian_config,
             )
             .await?;
 

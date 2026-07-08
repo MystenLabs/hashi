@@ -101,22 +101,22 @@ public(package) fun assert_not_reconfiguring(self: &Hashi) {
     assert!(self.committee_set().has_committee(self.committee_set().epoch()), ENoCommittee);
 }
 
-// Function that needs to be called immediately after publishing to finalize
-// some input parameters and register BTC.
+// The launch switch. Finalizes input parameters, registers BTC, and hands
+// the package's `UpgradeCap` into on-chain custody (`Versioning`) — which is
+// what unlocks genesis: validators can register beforehand, but
+// `reconfig::start_reconfig` refuses to form the initial committee until the
+// cap is registered here. The publisher holds the cap through the
+// validator-registration window and calls this once the expected committee
+// has registered. `Option::fill` inside `set_upgrade_cap` (and the write-once
+// BTC currency/treasury registration) make this call-once.
 //
 // The guardian URL and BTC key are both required: the guardian is a
 // load-bearing component of every deposit address (2-of-2 taproot leaf)
 // and every withdrawal signature, so a deploy without them would produce
 // a non-functional bridge.
-//
-// The `UpgradeCap` is taken by reference purely as proof of publisher
-// authority: the Hashi object is shared, so without it anyone could call
-// this first and set the write-once guardian key / URL / chain id. Custody
-// stays with the publisher; handing the cap in later via
-// `register_upgrade_cap` is the launch switch that unlocks genesis.
 entry fun finish_publish(
     self: &mut Hashi,
-    upgrade_cap: &sui::package::UpgradeCap,
+    upgrade_cap: sui::package::UpgradeCap,
     bitcoin_chain_id: address,
     guardian_url: String,
     guardian_btc_public_key: vector<u8>,
@@ -131,6 +131,7 @@ entry fun finish_publish(
     // Ensure that the provided cap is for this package
     assert!(upgrade_cap.package() == this_package_id, EWrongUpgradeCap);
 
+    self.versioning_mut().set_upgrade_cap(upgrade_cap);
     hashi::btc_config::set_bitcoin_chain_id(self.config_mut(), bitcoin_chain_id);
 
     self.config_mut().set_guardian_url(guardian_url);
@@ -157,24 +158,6 @@ entry fun finish_publish(
     let (treasury_cap, metadata_cap) = hashi::btc::create(coin_registry, ctx);
     self.treasury.register_treasury_cap(treasury_cap);
     self.treasury.register_metadata_cap(metadata_cap);
-}
-
-/// The launch switch. Hands the package's `UpgradeCap` into on-chain custody
-/// (`Versioning`). Validators can register beforehand, but
-/// `reconfig::start_reconfig` refuses to form the initial committee until the
-/// cap is registered. `Option::fill` inside `set_upgrade_cap` makes this
-/// call-once.
-entry fun register_upgrade_cap(self: &mut Hashi, upgrade_cap: sui::package::UpgradeCap) {
-    self.versioning.assert_version_enabled();
-    let this_package_id = std::type_name::original_id<Hashi>().to_id();
-    // Ensure that the provided cap is for this package
-    assert!(upgrade_cap.package() == this_package_id, EWrongUpgradeCap);
-    self.versioning_mut().set_upgrade_cap(upgrade_cap);
-    sui::event::emit(UpgradeCapRegisteredEvent { package: this_package_id });
-}
-
-public struct UpgradeCapRegisteredEvent has copy, drop {
-    package: ID,
 }
 
 public(package) fun id(self: &Hashi): &UID {
@@ -301,59 +284,4 @@ public fun create_for_testing(
     };
     df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
     hashi
-}
-
-// `hashi::test_utils` depends on this module, so these tests construct a
-// Hashi directly (same constructors as `init`) to avoid a dependency cycle.
-#[test_only]
-fun hashi_for_testing(ctx: &mut TxContext): Hashi {
-    Hashi {
-        id: object::new(ctx),
-        committee_set: hashi::committee_set::create(ctx),
-        config: hashi::config::create(),
-        versioning: versioning::create(),
-        treasury: hashi::treasury::create(ctx),
-        proposals: proposals::create(ctx),
-        tob: bag::new(ctx),
-        num_consumed_presigs: 0,
-    }
-}
-
-#[test]
-fun test_register_upgrade_cap_stores_cap() {
-    let ctx = &mut sui::tx_context::dummy();
-    let mut hashi = hashi_for_testing(ctx);
-    let this_package_id = std::type_name::original_id<Hashi>().to_id();
-    let cap = sui::package::test_publish(this_package_id, ctx);
-
-    register_upgrade_cap(&mut hashi, cap);
-
-    assert!(hashi.versioning().has_upgrade_cap());
-    std::unit_test::destroy(hashi);
-}
-
-#[test]
-#[expected_failure(abort_code = EWrongUpgradeCap)]
-fun test_register_upgrade_cap_rejects_wrong_cap() {
-    let ctx = &mut sui::tx_context::dummy();
-    let mut hashi = hashi_for_testing(ctx);
-    let cap = sui::package::test_publish(@0xdead.to_id(), ctx);
-
-    register_upgrade_cap(&mut hashi, cap);
-
-    std::unit_test::destroy(hashi);
-}
-
-#[test]
-// option::fill aborts on the second registration
-#[expected_failure]
-fun test_register_upgrade_cap_twice_aborts() {
-    let ctx = &mut sui::tx_context::dummy();
-    let mut hashi = hashi_for_testing(ctx);
-    let this_package_id = std::type_name::original_id<Hashi>().to_id();
-
-    register_upgrade_cap(&mut hashi, sui::package::test_publish(this_package_id, ctx));
-    register_upgrade_cap(&mut hashi, sui::package::test_publish(this_package_id, ctx));
-
-    std::unit_test::destroy(hashi);
 }

@@ -104,9 +104,9 @@ entry fun submit_committee_handoff(
 }
 
 /// At genesis bootstrap (no MPC key yet) the initial committee may only form
-/// after the publisher registers the package `UpgradeCap`
-/// (`hashi::register_upgrade_cap`) -- the launch switch. After bootstrap this
-/// is never consulted; Hashi follows Sui's validator set unconditionally --
+/// after the publisher hands the package `UpgradeCap` into on-chain custody
+/// via `hashi::finish_publish` -- the launch switch. After bootstrap this is
+/// never consulted; Hashi follows Sui's validator set unconditionally --
 /// enforcing a floor on a normal reconfig would let validators brick
 /// reconfiguration (and with it all deposits/withdrawals) by withholding
 /// registration.
