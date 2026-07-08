@@ -3,11 +3,12 @@
 # Reuse this same file for:
 #   cargo run -p hashi-guardian-init -- operator ceremony --config guardian-init.sample.yaml
 #   cargo run -p hashi-guardian-init -- operator provision --config guardian-init.sample.yaml
+#   cargo run -p hashi-guardian-init -- operator activate --config guardian-init.sample.yaml
 #   cargo run -p hashi-guardian-init -- key-provisioner ceremony --config guardian-init.sample.yaml
 #   cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-init.sample.yaml
 
 # gRPC endpoint of the guardian. `operator ceremony` expects ceremony mode;
-# future `operator provision` will expect withdraw mode.
+# `operator provision` and `operator activate` expect withdraw mode.
 guardian_endpoint: "http://localhost:3000"
 
 # Relay endpoint the KP's share is submitted to. `key-provisioner provision`
