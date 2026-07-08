@@ -1354,7 +1354,7 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
     // form the initial committee.
     let (onchain, _watcher) =
         crate::onchain::OnchainState::new(&opts.sui_rpc_url, ids, None, None, None).await?;
-    let (num_members, num_ready) = {
+    let roster: Vec<(sui_sdk_types::Address, bool)> = {
         let state = onchain.state();
         anyhow::ensure!(
             state.hashi().config.upgrade_cap.is_none(),
@@ -1366,31 +1366,73 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
             !members.is_empty(),
             "no validators are registered yet; the genesis committee would be empty"
         );
-        print_info(&format!("Registered validators ({}):", members.len()));
-        let mut num_ready = 0usize;
-        for (address, member) in members {
-            let ready = member.next_epoch_encryption_public_key().is_some();
-            num_ready += usize::from(ready);
-            print_info(&format!(
-                "  {address}  {}",
-                if ready {
-                    "ready"
-                } else {
-                    "MISSING NEXT-EPOCH KEYS (will be excluded from the committee)"
-                }
-            ));
-        }
-        (members.len(), num_ready)
+        members
+            .iter()
+            .map(|(address, member)| {
+                (
+                    *address,
+                    member.next_epoch_encryption_public_key().is_some(),
+                )
+            })
+            .collect()
     };
+
+    // Stake-weight the roster: the genesis committee's security is the Sui
+    // voting power it carries, not its head-count. Sui voting power sums to
+    // 10_000 basis points across the active validator set.
+    let voting_powers = fetch_voting_powers(&mut client).await?;
+    let total_power: u64 = voting_powers.values().sum();
+    let power_of = |address: &sui_sdk_types::Address| -> u64 {
+        voting_powers.get(address).copied().unwrap_or(0)
+    };
+    let percent = |power: u64| -> f64 {
+        if total_power == 0 {
+            0.0
+        } else {
+            100.0 * power as f64 / total_power as f64
+        }
+    };
+
+    print_info(&format!("Registered validators ({}):", roster.len()));
+    for (address, ready) in &roster {
+        let status = if !voting_powers.contains_key(address) {
+            "NOT AN ACTIVE SUI VALIDATOR"
+        } else if *ready {
+            "ready"
+        } else {
+            "MISSING NEXT-EPOCH KEYS (will be excluded from the committee)"
+        };
+        print_info(&format!(
+            "  {address}  {:6.2}% stake  {status}",
+            percent(power_of(address)),
+        ));
+    }
+    let num_ready = roster.iter().filter(|(_, ready)| *ready).count();
+    let ready_power: u64 = roster
+        .iter()
+        .filter(|(_, ready)| *ready)
+        .map(|(address, _)| power_of(address))
+        .sum();
+    let registered_power: u64 = roster.iter().map(|(address, _)| power_of(address)).sum();
+    print_info(&format!(
+        "Ready to launch: {num_ready}/{} validators, {:.2}% of total Sui voting power \
+         (registered: {:.2}%)",
+        roster.len(),
+        percent(ready_power),
+        percent(registered_power),
+    ));
+
     anyhow::ensure!(
         num_ready > 0,
         "no validator has finished key registration; genesis would stall"
     );
-    if num_ready < num_members {
+    if num_ready < roster.len() {
         print_warning(&format!(
-            "{} of {num_members} registered validators have not finished key registration \
-             and would be excluded from the genesis committee",
-            num_members - num_ready,
+            "{} of {} registered validators ({:.2}% of total Sui voting power) have not \
+             finished key registration and would be excluded from the genesis committee",
+            roster.len() - num_ready,
+            roster.len(),
+            percent(registered_power - ready_power),
         ));
     }
 
@@ -1450,6 +1492,39 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
     .await?;
     print_success("finish_publish executed — genesis unlocked. Validators will now run DKG.");
     Ok(())
+}
+
+/// Active Sui validators' voting power (basis points of the 10_000 total),
+/// keyed by validator address.
+async fn fetch_voting_powers(
+    client: &mut sui_rpc::Client,
+) -> anyhow::Result<std::collections::HashMap<sui_sdk_types::Address, u64>> {
+    use sui_rpc::field::FieldMaskUtil;
+
+    let mut request = sui_rpc::proto::sui::rpc::v2::GetEpochRequest::default();
+    request.read_mask = Some(sui_rpc::field::FieldMask::from_paths([
+        "system_state.validators.active_validators",
+    ]));
+    let response = client
+        .ledger_client()
+        .get_epoch(request)
+        .await?
+        .into_inner();
+
+    let validators = response
+        .epoch
+        .and_then(|epoch| epoch.system_state)
+        .and_then(|system_state| system_state.validators)
+        .map(|validator_set| validator_set.active_validators)
+        .unwrap_or_default();
+
+    let mut powers = std::collections::HashMap::new();
+    for validator in validators {
+        if let (Some(address), Some(power)) = (validator.address, validator.voting_power) {
+            powers.insert(address.parse::<sui_sdk_types::Address>()?, power);
+        }
+    }
+    Ok(powers)
 }
 
 /// Run the `register` command – register a validator on-chain.
