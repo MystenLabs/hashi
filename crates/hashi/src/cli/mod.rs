@@ -688,18 +688,18 @@ pub struct LaunchOpts {
     pub hashi_object_id: Option<String>,
 
     /// Bitcoin chain ID (genesis block hash) to store on-chain
-    #[clap(long)]
-    pub bitcoin_chain_id: String,
+    #[clap(long, required_unless_present = "status")]
+    pub bitcoin_chain_id: Option<String>,
 
     /// Guardian gRPC endpoint URL. Required — every deposit address is a
     /// 2-of-2 (mpc, guardian) taproot leaf.
-    #[clap(long)]
-    pub guardian_url: String,
+    #[clap(long, required_unless_present = "status")]
+    pub guardian_url: Option<String>,
 
     /// Guardian BTC pubkey, x-only hex-encoded (32 bytes). Published
     /// on-chain for 2-of-2 deposit address derivation.
-    #[clap(long)]
-    pub guardian_btc_public_key: String,
+    #[clap(long, required_unless_present = "status")]
+    pub guardian_btc_public_key: Option<String>,
 
     /// Override `bitcoin_confirmation_threshold` on-chain at launch time.
     /// Falls back to the Move package's `init_defaults` (currently 6) when omitted.
@@ -730,6 +730,19 @@ pub struct LaunchOpts {
     /// `sui keytool sign`. No private key required.
     #[clap(long = "serialize-unsigned-transaction")]
     pub serialize_unsigned: bool,
+
+    /// Report launch readiness and exit — no transaction is built and no
+    /// keypair or guardian parameters are needed. Prints exactly one
+    /// machine-readable line to stdout (the human roster goes to stderr):
+    ///
+    ///   LAUNCH_STATUS launched=<bool> registered=<n> ready=<n>
+    ///     ready_stake_bps=<n> registered_stake_bps=<n>
+    ///
+    /// Stake is in basis points of total Sui voting power (10000 = all).
+    /// This line is a STABLE CONTRACT parsed by deployment automation
+    /// (sui-operations deploy-hashi.yaml) — change it only in lockstep.
+    #[clap(long, conflicts_with = "serialize_unsigned")]
+    pub status: bool,
 
     /// Enable verbose output
     #[clap(long, short)]
@@ -1284,8 +1297,9 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
     crate::init_crypto_provider();
     init_tracing(opts.verbose);
 
-    // In serialize mode keep stdout clean (base64 only); notes go to stderr.
-    set_notes_to_stderr(opts.serialize_unsigned);
+    // In serialize/status mode keep stdout clean (base64 / the LAUNCH_STATUS
+    // line only); notes go to stderr.
+    set_notes_to_stderr(opts.serialize_unsigned || opts.status);
 
     // Resolve ids: explicit flags win, else the hashi_ids.json from publish.
     let ids: crate::config::HashiIds = match (&opts.package_id, &opts.hashi_object_id) {
@@ -1305,76 +1319,31 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
         _ => anyhow::bail!("--package-id and --hashi-object-id must be provided together"),
     };
 
-    // Guardian parameters are published on-chain by the launch tx.
-    let btc_public_key = hex::decode(
-        opts.guardian_btc_public_key
-            .strip_prefix("0x")
-            .unwrap_or(&opts.guardian_btc_public_key),
-    )
-    .context("Invalid hex for --guardian-btc-public-key")?;
-    anyhow::ensure!(
-        btc_public_key.len() == 32,
-        "--guardian-btc-public-key must be 32 bytes (x-only), got {} bytes",
-        btc_public_key.len(),
-    );
-    let guardian = crate::publish::GuardianConfig {
-        url: opts.guardian_url.clone(),
-        btc_public_key,
-    };
-    let bitcoin_overrides = crate::publish::BitcoinConfigOverrides {
-        confirmation_threshold: opts.bitcoin_confirmation_threshold,
-        deposit_time_delay_ms: opts.bitcoin_deposit_time_delay_ms,
-    };
-
-    // Resolve the sender (the UpgradeCap owner): a local keypair, or an
-    // explicit --sender for the serialize-unsigned (multisig) path.
-    let signer = opts
-        .keypair
-        .as_deref()
-        .map(crate::config::load_ed25519_private_key_from_path)
-        .transpose()?;
-    let sender: sui_sdk_types::Address = match (&signer, &opts.sender) {
-        (Some(signer), None) => signer.public_key().derive_address(),
-        (None, Some(sender)) => sender.parse()?,
-        (Some(_), Some(_)) => anyhow::bail!("pass either --keypair or --sender, not both"),
-        (None, None) => anyhow::bail!(
-            "pass --keypair, or --sender together with --serialize-unsigned-transaction"
-        ),
-    };
-    if signer.is_none() && !opts.serialize_unsigned {
-        anyhow::bail!("--sender requires --serialize-unsigned-transaction (no key to sign with)");
-    }
-
-    print_info(&format!("Sender (UpgradeCap owner): {sender}"));
     print_info(&format!("Sui RPC: {}", opts.sui_rpc_url));
 
     let mut client = sui_rpc::Client::new(&opts.sui_rpc_url)?;
 
-    // Pre-flight: the launch must not have happened yet, and show who would
-    // form the initial committee.
+    // Pre-flight: read the launch state and who would form the initial
+    // committee. No hard failures yet — status mode reports every state.
     let (onchain, _watcher) =
         crate::onchain::OnchainState::new(&opts.sui_rpc_url, ids, None, None, None).await?;
-    let roster: Vec<(sui_sdk_types::Address, bool)> = {
+    let (launched, roster): (bool, Vec<(sui_sdk_types::Address, bool)>) = {
         let state = onchain.state();
-        anyhow::ensure!(
-            state.hashi().config.upgrade_cap.is_none(),
-            "the UpgradeCap is already in on-chain custody — the launch (finish_publish) \
-             has already happened"
-        );
-        let members = state.hashi().committees.members();
-        anyhow::ensure!(
-            !members.is_empty(),
-            "no validators are registered yet; the genesis committee would be empty"
-        );
-        members
-            .iter()
-            .map(|(address, member)| {
-                (
-                    *address,
-                    member.next_epoch_encryption_public_key().is_some(),
-                )
-            })
-            .collect()
+        (
+            state.hashi().config.upgrade_cap.is_some(),
+            state
+                .hashi()
+                .committees
+                .members()
+                .iter()
+                .map(|(address, member)| {
+                    (
+                        *address,
+                        member.next_epoch_encryption_public_key().is_some(),
+                    )
+                })
+                .collect(),
+        )
     };
 
     // Stake-weight the roster: the genesis committee's security is the Sui
@@ -1422,6 +1391,30 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
         percent(registered_power),
     ));
 
+    if opts.status {
+        // STABLE CONTRACT: the only stdout line in --status mode, parsed by
+        // deployment automation (sui-operations deploy-hashi.yaml). Change
+        // only in lockstep with its consumers.
+        let bps = |power: u64| -> u64 { (power * 10_000).checked_div(total_power).unwrap_or(0) };
+        println!(
+            "LAUNCH_STATUS launched={launched} registered={} ready={num_ready} \
+             ready_stake_bps={} registered_stake_bps={}",
+            roster.len(),
+            bps(ready_power),
+            bps(registered_power),
+        );
+        return Ok(());
+    }
+
+    anyhow::ensure!(
+        !launched,
+        "the UpgradeCap is already in on-chain custody — the launch (finish_publish) \
+         has already happened"
+    );
+    anyhow::ensure!(
+        !roster.is_empty(),
+        "no validators are registered yet; the genesis committee would be empty"
+    );
     anyhow::ensure!(
         num_ready > 0,
         "no validator has finished key registration; genesis would stall"
@@ -1435,6 +1428,57 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
             percent(registered_power - ready_power),
         ));
     }
+
+    // Guardian parameters are published on-chain by the launch tx (clap
+    // requires them in every mode except --status).
+    let bitcoin_chain_id = opts
+        .bitcoin_chain_id
+        .expect("required unless --status (enforced by clap)");
+    let guardian_btc_public_key = opts
+        .guardian_btc_public_key
+        .expect("required unless --status (enforced by clap)");
+    let guardian_url = opts
+        .guardian_url
+        .expect("required unless --status (enforced by clap)");
+    let btc_public_key = hex::decode(
+        guardian_btc_public_key
+            .strip_prefix("0x")
+            .unwrap_or(&guardian_btc_public_key),
+    )
+    .context("Invalid hex for --guardian-btc-public-key")?;
+    anyhow::ensure!(
+        btc_public_key.len() == 32,
+        "--guardian-btc-public-key must be 32 bytes (x-only), got {} bytes",
+        btc_public_key.len(),
+    );
+    let guardian = crate::publish::GuardianConfig {
+        url: guardian_url,
+        btc_public_key,
+    };
+    let bitcoin_overrides = crate::publish::BitcoinConfigOverrides {
+        confirmation_threshold: opts.bitcoin_confirmation_threshold,
+        deposit_time_delay_ms: opts.bitcoin_deposit_time_delay_ms,
+    };
+
+    // Resolve the sender (the UpgradeCap owner): a local keypair, or an
+    // explicit --sender for the serialize-unsigned (multisig) path.
+    let signer = opts
+        .keypair
+        .as_deref()
+        .map(crate::config::load_ed25519_private_key_from_path)
+        .transpose()?;
+    let sender: sui_sdk_types::Address = match (&signer, &opts.sender) {
+        (Some(signer), None) => signer.public_key().derive_address(),
+        (None, Some(sender)) => sender.parse()?,
+        (Some(_), Some(_)) => anyhow::bail!("pass either --keypair or --sender, not both"),
+        (None, None) => anyhow::bail!(
+            "pass --keypair, or --sender together with --serialize-unsigned-transaction"
+        ),
+    };
+    if signer.is_none() && !opts.serialize_unsigned {
+        anyhow::bail!("--sender requires --serialize-unsigned-transaction (no key to sign with)");
+    }
+    print_info(&format!("Sender (UpgradeCap owner): {sender}"));
 
     // Locate the cap.
     let upgrade_cap_id: sui_sdk_types::Address = match &opts.upgrade_cap {
@@ -1452,7 +1496,7 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
             sender,
             &ids,
             upgrade_cap_id,
-            &opts.bitcoin_chain_id,
+            &bitcoin_chain_id,
             &guardian,
             &bitcoin_overrides,
         )
@@ -1485,7 +1529,7 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
         &signer,
         &ids,
         upgrade_cap_id,
-        &opts.bitcoin_chain_id,
+        &bitcoin_chain_id,
         &guardian,
         &bitcoin_overrides,
     )
