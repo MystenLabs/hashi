@@ -51,6 +51,10 @@ FROM base AS build
 ARG BUCKET_NAME
 ARG AWS_REGION=us-east-1
 ARG GIT_REVISION
+# Extra cargo features for the guardian build. Empty (the default) is the real
+# enclave build — leave it empty for anything whose PCR0 must match provenance.
+# Dev deploys pass `non-enclave-dev` so a runner-local mock ceremony verifies.
+ARG FEATURES=""
 RUN [ -n "$GIT_REVISION" ] || { echo "GIT_REVISION build-arg must be set"; exit 1; }
 ENV GIT_REVISION=${GIT_REVISION}
 COPY crates /crates
@@ -61,7 +65,7 @@ WORKDIR /
 ENV OPENSSL_STATIC=true
 ENV TARGET=x86_64-unknown-linux-musl
 ENV RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static -C target-cpu=x86-64"
-RUN cargo build --locked --no-default-features --release --target "$TARGET" -p hashi-guardian
+RUN cargo build --locked --no-default-features --release --target "$TARGET" -p hashi-guardian ${FEATURES:+--features "$FEATURES"}
 
 WORKDIR /build_cpio
 ENV KBUILD_BUILD_TIMESTAMP=1
