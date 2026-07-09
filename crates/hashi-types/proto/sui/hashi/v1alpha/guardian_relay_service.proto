@@ -14,10 +14,10 @@ import "sui/hashi/v1alpha/guardian_service.proto";
 // session key, so a malicious or buggy relay can stall provisioning but cannot
 // read shares or forge a key.
 service GuardianRelayService {
-  rpc SingleProvisionerInit(SingleProvisionerInitRequest) returns (SingleProvisionerInitResponse);
+  rpc SingleProvisionerInit(SignedSingleProvisionerInitRequest) returns (SingleProvisionerInitResponse);
 }
 
-message SingleProvisionerInitRequest {
+message SignedSingleProvisionerInitRequest {
   // This KP's share, HPKE-encrypted to the enclave with the config_hash bound as
   // AAD (built exactly as for the guardian's batch ProvisionerInit).
   GuardianEncryptedShare encrypted_share = 1;
@@ -33,7 +33,7 @@ message SingleProvisionerInitRequest {
   string signer_cert = 3;
 
   // Detached armored OpenPGP signature by the KP's offline key (e.g. a
-  // yubikey) over the domain-tagged (session id + encrypted share) bytes —
+  // yubikey) over the intent-tagged SingleProvisionerInitRequest payload —
   // proves a rostered KP made this exact submission.
   string kp_signature = 4;
 }

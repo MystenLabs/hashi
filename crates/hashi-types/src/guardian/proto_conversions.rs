@@ -23,6 +23,7 @@ use super::HashiSigned;
 use super::InitConfig;
 use super::KPEncryptedShare;
 use super::KPEncryptedShares;
+use super::KpSigned;
 use super::LimiterConfig;
 use super::LimiterState;
 use super::NitroAttestation;
@@ -41,6 +42,7 @@ use super::ShareCommitment;
 use super::ShareCommitments;
 use super::ShareID;
 use super::SignedStandardWithdrawalRequestWire;
+use super::SingleProvisionerInitRequest;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalRequestWire;
 use super::StandardWithdrawalResponse;
@@ -227,6 +229,34 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
             .collect::<GuardianResult<Vec<_>>>()?;
 
         Ok(ProvisionerInitRequest::new(encrypted_shares))
+    }
+}
+
+impl TryFrom<pb::SignedSingleProvisionerInitRequest> for KpSigned<SingleProvisionerInitRequest> {
+    type Error = GuardianError;
+
+    fn try_from(req: pb::SignedSingleProvisionerInitRequest) -> Result<Self, Self::Error> {
+        if req.expected_session_id.is_empty() {
+            return Err(missing("expected_session_id"));
+        }
+        if req.signer_cert.is_empty() {
+            return Err(missing("signer_cert"));
+        }
+        if req.kp_signature.is_empty() {
+            return Err(missing("kp_signature"));
+        }
+        let encrypted_share = pb_to_guardian_encrypted_share(
+            req.encrypted_share
+                .ok_or_else(|| missing("encrypted_share"))?,
+        )?;
+        let signer_cert =
+            PgpPublicCert::new(req.signer_cert).map_err(|e| InvalidInputs(e.to_string()))?;
+        let request = SingleProvisionerInitRequest::new(req.expected_session_id, encrypted_share);
+        Ok(KpSigned {
+            data: request,
+            signer_cert,
+            signature: req.kp_signature,
+        })
     }
 }
 
@@ -536,6 +566,23 @@ pub fn provisioner_init_request_to_pb(
             .map(guardian_encrypted_share_to_pb)
             .collect(),
     })
+}
+
+impl From<KpSigned<SingleProvisionerInitRequest>> for pb::SignedSingleProvisionerInitRequest {
+    fn from(r: KpSigned<SingleProvisionerInitRequest>) -> Self {
+        let KpSigned {
+            data: request,
+            signer_cert,
+            signature,
+        } = r;
+        let (expected_session_id, encrypted_share) = request.into_parts();
+        Self {
+            encrypted_share: Some(guardian_encrypted_share_to_pb(encrypted_share)),
+            expected_session_id,
+            signer_cert: signer_cert.armored().to_string(),
+            kp_signature: signature,
+        }
+    }
 }
 
 // Throws an error if network is invalid.
@@ -1291,6 +1338,43 @@ mod tests {
         let pb = provisioner_init_request_to_pb(req.clone()).unwrap();
         let back = ProvisionerInitRequest::try_from(pb).unwrap();
         assert_eq!(req, back);
+    }
+
+    #[test]
+    fn signed_single_provisioner_init_request_round_trip_and_verifies() {
+        use crate::pgp::test_utils::mock_pgp_keypair;
+        use crate::pgp::test_utils::sign_detached_in_process;
+
+        let (cert_armored, secret_armored) = mock_pgp_keypair();
+        let cert = PgpPublicCert::new(cert_armored).unwrap();
+        let encrypted_share = ProvisionerInitRequest::mock_for_testing()
+            .into_parts()
+            .pop()
+            .unwrap();
+        let request =
+            SingleProvisionerInitRequest::new("session-a".to_string(), encrypted_share.clone());
+        let signature =
+            sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&request));
+        let signed = KpSigned {
+            data: request,
+            signer_cert: cert.clone(),
+            signature,
+        };
+
+        let pb = pb::SignedSingleProvisionerInitRequest::from(signed);
+        let back = KpSigned::<SingleProvisionerInitRequest>::try_from(pb.clone()).unwrap();
+        assert_eq!(back.data.expected_session_id(), "session-a");
+        assert_eq!(back.data.encrypted_share(), &encrypted_share);
+        assert_eq!(back.signer_cert.fingerprint(), cert.fingerprint());
+        back.verify().unwrap();
+
+        let mut tampered = pb;
+        tampered.expected_session_id = "other-session".to_string();
+        let tampered = KpSigned::<SingleProvisionerInitRequest>::try_from(tampered).unwrap();
+        assert!(
+            tampered.verify().is_err(),
+            "signature must bind the expected guardian session"
+        );
     }
 
     #[test]

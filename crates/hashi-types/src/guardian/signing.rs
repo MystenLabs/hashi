@@ -7,19 +7,26 @@
 //! value, and `GuardianSigned::{new,verify}` mix that value into the signed
 //! bytes so a signature over one type can never be replayed as another.
 
+use super::GuardianError::InternalError;
 use super::GuardianError::InvalidInputs;
 use super::GuardianInfo;
 use super::GuardianResult;
 use super::LogMessage;
 use super::RotateKpsResponse;
 use super::SetupNewKeyResponse;
+use super::SingleProvisionerInitRequest;
 use super::StandardWithdrawalResponse;
 use super::UnixMillis;
+use crate::pgp::Fingerprint;
+use crate::pgp::PgpPublicCert;
+use crate::pgp::sign_detached_via_gpg;
+use crate::pgp::verify_detached_signature;
 use ed25519_consensus::Signature as GuardianSignature;
 use ed25519_consensus::SigningKey;
 use ed25519_consensus::VerificationKey;
 use serde::Deserialize;
 use serde::Serialize;
+use std::path::Path;
 
 /// All possible signing intent types.
 /// Using an enum ensures no two types can accidentally share the same intent value.
@@ -43,6 +50,24 @@ pub trait SigningIntent {
     const INTENT: IntentType;
 }
 
+/// All possible KP signing intent types.
+///
+/// These signatures are detached OpenPGP signatures produced by KPs, not
+/// enclave ed25519 signatures. Each KP-submitted request type gets a stable
+/// intent so a signature for one request cannot be replayed as another request
+/// with the same BCS shape.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KpSigningIntentType {
+    /// One KP's share submission to the provisioning relay.
+    ProvisionerInitRelaySubmission = 0,
+}
+
+/// Trait for KP-submitted request payloads that need detached signatures.
+pub trait KpSigningIntent {
+    const INTENT: KpSigningIntentType;
+}
+
 impl SigningIntent for LogMessage {
     const INTENT: IntentType = IntentType::LogMessage;
 }
@@ -61,6 +86,19 @@ impl SigningIntent for GuardianInfo {
 
 impl SigningIntent for RotateKpsResponse {
     const INTENT: IntentType = IntentType::RotateKpsResponse;
+}
+
+impl KpSigningIntent for SingleProvisionerInitRequest {
+    const INTENT: KpSigningIntentType = KpSigningIntentType::ProvisionerInitRelaySubmission;
+}
+
+/// KP-signed wrapper - adds signer cert and detached OpenPGP signature to any
+/// KP-submitted request payload.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct KpSigned<T> {
+    pub data: T,
+    pub signer_cert: PgpPublicCert,
+    pub signature: String,
 }
 
 /// Guardian-signed wrapper - adds timestamp and signature to any data
@@ -96,6 +134,47 @@ impl<T: Serialize + SigningIntent> GuardianSigned<T> {
             .verify(&self.signature, &msg_bytes)
             .map_err(|_| InvalidInputs("signature invalid".into()))?;
         Ok(self.data)
+    }
+}
+
+impl<T: Serialize + KpSigningIntent> KpSigned<T> {
+    /// Create a new signed KP payload by invoking `gpg --detach-sign` for the
+    /// signer certificate's fingerprint. Includes the KP intent in the signed
+    /// bytes; payload types carry any request-specific replay-binding fields.
+    pub fn new(
+        data: T,
+        signer_cert: PgpPublicCert,
+        gpg_home: Option<&Path>,
+    ) -> GuardianResult<Self> {
+        let signing_payload = Self::signed_bytes(&data);
+        let signature =
+            sign_detached_via_gpg(&signing_payload, &signer_cert.fingerprint(), gpg_home)
+                .map_err(|e| InternalError(format!("KP signing failed: {e}")))?;
+        Ok(Self {
+            data,
+            signer_cert,
+            signature,
+        })
+    }
+
+    /// The exact bytes a key provisioner detached-signs for a typed guardian
+    /// request. Binds the request intent and request payload.
+    pub fn signed_bytes(data: &T) -> Vec<u8> {
+        let tuple = (T::INTENT, data);
+        bcs::to_bytes(&tuple).expect("serialization should not fail")
+    }
+
+    /// Verify signature and extract the payload.
+    /// Checks intent byte to ensure signature is for the correct request type.
+    pub fn verify(self) -> GuardianResult<T> {
+        let msg_bytes = Self::signed_bytes(&self.data);
+        verify_detached_signature(&msg_bytes, &self.signature, &self.signer_cert)
+            .map_err(|e| InvalidInputs(format!("KP signature verification failed: {e}")))?;
+        Ok(self.data)
+    }
+
+    pub fn signer_fingerprint(&self) -> Fingerprint {
+        self.signer_cert.fingerprint()
     }
 }
 

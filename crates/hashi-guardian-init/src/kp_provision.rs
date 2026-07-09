@@ -39,14 +39,12 @@ use hashi_types::guardian::EncPubKey;
 use hashi_types::guardian::GuardianEncryptedShare;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::InitConfig;
+use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::ProvisionerInitRequest;
+use hashi_types::guardian::SingleProvisionerInitRequest;
 use hashi_types::guardian::VerifiedGuardianInfo;
-use hashi_types::guardian::proto_conversions::guardian_encrypted_share_to_pb;
-use hashi_types::guardian::relay_submission_signed_bytes;
-use hashi_types::pgp::Fingerprint;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::load_certs;
-use hashi_types::pgp::sign_detached_via_gpg;
 use hashi_types::proto as pb;
 use hpke::Deserializable;
 use rand::thread_rng;
@@ -434,8 +432,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         &session_id,
         guardian_info,
         encrypted_share,
-        kp_cert.armored(),
-        &want_fp,
+        &kp_cert,
         allowlist.current_build(),
     )
     .await?;
@@ -465,8 +462,7 @@ async fn submit_provisioner_init_to_relay(
     expected_session_id: &str,
     expected_guardian_info: GuardianInfo,
     encrypted_share: GuardianEncryptedShare,
-    signer_cert_armored: &str,
-    signer_fingerprint: &Fingerprint,
+    signer_cert: &PgpPublicCert,
     current_build: &BuildPcrs,
 ) -> anyhow::Result<()> {
     info!(
@@ -510,16 +506,13 @@ async fn submit_provisioner_init_to_relay(
 
     // Detached-sign the exact (session, share) bytes with this KP's offline
     // key; the relay only buffers submissions signed by a rostered cert.
-    let signed_bytes = relay_submission_signed_bytes(expected_session_id, &encrypted_share);
-    let kp_signature = sign_detached_via_gpg(&signed_bytes, signer_fingerprint, None)
+    let request =
+        SingleProvisionerInitRequest::new(expected_session_id.to_string(), encrypted_share);
+    let signed_request = KpSigned::new(request, signer_cert.clone(), None)
+        .map_err(anyhow::Error::msg)
         .context("sign the relay submission with the KP key")?;
     let resp = relay_client
-        .single_provisioner_init(pb::SingleProvisionerInitRequest {
-            encrypted_share: Some(guardian_encrypted_share_to_pb(encrypted_share)),
-            expected_session_id: expected_session_id.to_string(),
-            signer_cert: signer_cert_armored.to_string(),
-            kp_signature,
-        })
+        .single_provisioner_init(pb::SignedSingleProvisionerInitRequest::from(signed_request))
         .await
         .with_context(|| "SingleProvisionerInit RPC failed")?
         .into_inner();
