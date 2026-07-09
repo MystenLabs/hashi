@@ -31,6 +31,7 @@ async fn main() -> Result<()> {
     let config = Config::from_env()?;
     info!(
         backend = %config.backend_url,
+        standby = config.standby_backend_url.as_deref().unwrap_or("<none>"),
         listen = %config.listen_addr,
         log_bucket = %config.log_bucket,
         network = %config.btc_network,
@@ -54,14 +55,17 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Lazy channel to the enclave guardian, shared by forwarder and relay. Mirrors
-    // the node-side client (crates/hashi/src/grpc/guardian_client.rs): same timeout + keepalive.
-    let channel = Endpoint::from_shared(config.backend_url.clone())?
-        .connect_timeout(config.connect_timeout)
-        .http2_keep_alive_interval(config.keepalive_interval)
-        .connect_lazy();
+    // Lazy channel to the active enclave guardian. Mirrors the node-side client
+    // (crates/hashi/src/grpc/guardian_client.rs): same timeout + keepalive.
+    let channel = lazy_channel(&config.backend_url, &config)?;
+    // The relay provisions the standby when one is configured; the node-facing
+    // forwarder and wid cache always front the active guardian.
+    let relay_channel = match &config.standby_backend_url {
+        Some(url) => lazy_channel(url, &config)?,
+        None => channel.clone(),
+    };
 
-    let relay_svc = Relay::new(channel.clone(), log_store.clone());
+    let relay_svc = Relay::new(relay_channel, log_store.clone());
     let guardian_svc = CachingGuardianGrpc::new(
         Forwarding::new(channel),
         log_store,
@@ -92,6 +96,13 @@ async fn main() -> Result<()> {
         .serve(config.listen_addr)
         .await
         .map_err(|e| anyhow::anyhow!("Server error: {}", e))
+}
+
+fn lazy_channel(url: &str, config: &Config) -> Result<tonic::transport::Channel> {
+    Ok(Endpoint::from_shared(url.to_string())?
+        .connect_timeout(config.connect_timeout)
+        .http2_keep_alive_interval(config.keepalive_interval)
+        .connect_lazy())
 }
 
 /// Retry transient S3 blips at boot (no target-group crash-loop), but fail

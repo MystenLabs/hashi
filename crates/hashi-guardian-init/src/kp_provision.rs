@@ -8,8 +8,10 @@
 //! setup; plaintext never touches disk, but the raw share scalar is held in this
 //! process' memory long enough to verify and re-encrypt it. The flow:
 //!
-//! 1. The relay/standby endpoint's signed `GuardianInfo` is fetched and
-//!    verified against the enclave attestation, pinning the standby session.
+//! 1. The relay's `GetStandbyInfo` — signed `GuardianInfo` of the guardian KPs
+//!    are provisioning (the proxy's standby backend when one is configured) —
+//!    is fetched and verified against the enclave attestation, pinning the
+//!    standby session.
 //! 2. The same session's S3 `init/` log is fetched and required to match the
 //!    endpoint `GuardianInfo`. Bucket, limiter config, `mpc_master_g`, and
 //!    `enclave_btc_pubkey == None` are all confirmed.
@@ -26,10 +28,10 @@
 //!    `encryption_pubkey` (from its `GuardianInfo`), with `config_hash` as AAD,
 //!    producing a `GuardianEncryptedShare` ready for `provisioner_init`.
 //! 8. The share is submitted to the configured relay endpoint via
-//!    `SingleProvisionerInit`. The relay rejects if the backend session no
-//!    longer matches the session pinned above, otherwise it accumulates T-of-N
-//!    shares and calls the guardian's batch `provisioner_init` once it has
-//!    enough.
+//!    `SingleProvisionerInit` (after re-checking `GetStandbyInfo` against the
+//!    pinned session). The relay rejects if its backend session no longer
+//!    matches, otherwise it accumulates T-of-N shares and calls the guardian's
+//!    batch `provisioner_init` once it has enough.
 
 use anyhow::Context;
 use hashi_guardian::s3_reader::BuildPolicy;
@@ -53,7 +55,7 @@ use rand::thread_rng;
 use tracing::info;
 
 use crate::config::Config;
-use crate::guardian_info::verified_live_guardian_info;
+use crate::guardian_info::verified_standby_guardian_info;
 use crate::kp_roster::VerifiedCeremonyState;
 use crate::kp_roster::decrypt_share;
 use crate::kp_roster::ensure_cert_in_roster;
@@ -130,13 +132,15 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     );
     ensure_cert_in_roster(&kp_cert, &certs)?;
 
-    // 1. Ask the relay/standby endpoint which session KPs are provisioning.
-    // Active guardian heartbeats may still exist, so identity comes from the
-    // endpoint KPs will submit to rather than from S3 heartbeat discovery.
+    // 1. Ask the relay which session KPs are provisioning (`GetStandbyInfo` —
+    // the proxy's standby backend, not the active guardian its node-facing
+    // GetGuardianInfo fronts). Active guardian heartbeats may still exist, so
+    // identity comes from the endpoint KPs will submit to rather than from S3
+    // heartbeat discovery.
     info!(
         phase = "guardian endpoint",
         endpoint = %cfg.relay_endpoint,
-        "fetching + verifying relay endpoint GuardianInfo",
+        "fetching + verifying the relay's standby GuardianInfo",
     );
     let endpoint_verified =
         verified_endpoint_guardian_info(&cfg.relay_endpoint, allowlist.current_build()).await?;
@@ -446,19 +450,20 @@ async fn verified_endpoint_guardian_info(
     endpoint: &str,
     current_build: &BuildPcrs,
 ) -> anyhow::Result<VerifiedGuardianInfo> {
-    let mut client =
-        pb::guardian_service_client::GuardianServiceClient::connect(endpoint.to_string())
-            .await
-            .with_context(|| format!("failed to connect to relay endpoint {endpoint}"))?;
-    verified_live_guardian_info(&mut client, current_build)
+    let mut client = pb::guardian_relay_service_client::GuardianRelayServiceClient::connect(
+        endpoint.to_string(),
+    )
+    .await
+    .with_context(|| format!("failed to connect to relay endpoint {endpoint}"))?;
+    verified_standby_guardian_info(&mut client, current_build)
         .await
-        .with_context(|| format!("verify relay endpoint GuardianInfo at {endpoint}"))
+        .with_context(|| format!("verify relay standby GuardianInfo at {endpoint}"))
 }
 
-/// Submit this KP's share to the relay endpoint. The relay fronts the
-/// guardian's current session and rejects `SingleProvisionerInit` if it no
-/// longer matches the session this KP pinned before encrypting the share. The
-/// relay collects T-of-N shares and calls the guardian's batch `provisioner_init`
+/// Submit this KP's share to the relay endpoint. The relay fronts the session
+/// KPs are provisioning and rejects `SingleProvisionerInit` if it no longer
+/// matches the session this KP pinned before encrypting the share. The relay
+/// collects T-of-N shares and calls the guardian's batch `provisioner_init`
 /// once it has enough.
 async fn submit_provisioner_init_to_relay(
     endpoint: &str,
@@ -474,20 +479,21 @@ async fn submit_provisioner_init_to_relay(
         endpoint = %endpoint,
         "connecting to relay endpoint",
     );
-    let mut client =
-        pb::guardian_service_client::GuardianServiceClient::connect(endpoint.to_string())
-            .await
-            .with_context(|| format!("failed to connect to relay endpoint {endpoint}"))?;
+    let mut relay_client = pb::guardian_relay_service_client::GuardianRelayServiceClient::connect(
+        endpoint.to_string(),
+    )
+    .await
+    .with_context(|| format!("failed to connect to relay endpoint {endpoint}"))?;
     info!(phase = "relay submit", endpoint = %endpoint, "connected to relay");
 
     info!(
         phase = "relay submit",
         endpoint = %endpoint,
         expected_session_id = %expected_session_id,
-        "running relay-side prechecks (GetGuardianInfo + session pin + GuardianInfo match)",
+        "running relay-side prechecks (GetStandbyInfo + session pin + GuardianInfo match)",
     );
     prechecks(
-        &mut client,
+        &mut relay_client,
         expected_session_id,
         expected_guardian_info,
         current_build,
@@ -501,12 +507,6 @@ async fn submit_provisioner_init_to_relay(
         share_id,
         "relay prechecks passed; submitting share via SingleProvisionerInit",
     );
-
-    let mut relay_client = pb::guardian_relay_service_client::GuardianRelayServiceClient::connect(
-        endpoint.to_string(),
-    )
-    .await
-    .with_context(|| format!("failed to connect to relay endpoint {endpoint}"))?;
 
     // Detached-sign the exact (session, share) bytes with this KP's offline
     // key; the relay only buffers submissions signed by a rostered cert.
@@ -542,12 +542,14 @@ async fn submit_provisioner_init_to_relay(
 }
 
 async fn prechecks(
-    client: &mut pb::guardian_service_client::GuardianServiceClient<tonic::transport::Channel>,
+    client: &mut pb::guardian_relay_service_client::GuardianRelayServiceClient<
+        tonic::transport::Channel,
+    >,
     expected_session_id: &str,
     expected_guardian_info: GuardianInfo,
     current_build: &BuildPcrs,
 ) -> anyhow::Result<()> {
-    let verified = verified_live_guardian_info(client, current_build).await?;
+    let verified = verified_standby_guardian_info(client, current_build).await?;
     let actual_session_id = verified.session_id;
     info!(
         phase = "relay submit",
