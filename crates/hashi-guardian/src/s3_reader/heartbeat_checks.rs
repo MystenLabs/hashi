@@ -22,6 +22,28 @@ use hashi_types::guardian::VersionedLogMessage::V2;
 use std::collections::BTreeMap;
 use tracing::info;
 
+/// The quiet-period fence, env-overridable (`GUARDIAN_OTHER_SESSION_QUIET_SECS`)
+/// ONLY in `non-enclave-dev` builds so the local replica can rehearse a
+/// switchover without the real ten-minute wait. A real-attestation build
+/// compiles the constant in.
+fn other_session_quiet_secs() -> u64 {
+    #[cfg(feature = "non-enclave-dev")]
+    if let Some(secs) = env_override_secs("GUARDIAN_OTHER_SESSION_QUIET_SECS") {
+        return secs;
+    }
+    OTHER_SESSION_QUIET_PERIOD.as_secs()
+}
+
+#[cfg(feature = "non-enclave-dev")]
+fn env_override_secs(key: &str) -> Option<u64> {
+    let raw = std::env::var(key).ok()?;
+    // A dev override that fails to parse should be loud, not silently ignored.
+    Some(
+        raw.parse()
+            .unwrap_or_else(|_| panic!("{key} must be integer seconds, got {raw:?}")),
+    )
+}
+
 impl GuardianReader {
     /// Enforces that `live_session` has heartbeated recently, while every other
     /// guardian session has been quiet long enough to no longer be considered
@@ -38,7 +60,7 @@ impl GuardianReader {
             &summary,
             now,
             live_session,
-            OTHER_SESSION_QUIET_PERIOD.as_secs(),
+            other_session_quiet_secs(),
         )?;
 
         let live_session_info = summary
