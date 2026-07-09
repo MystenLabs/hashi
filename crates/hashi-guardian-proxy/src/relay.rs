@@ -15,7 +15,11 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
+use crate::roster::latest_kp_roster;
+use crate::widlog::LogStore;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::SessionID;
@@ -82,21 +86,64 @@ struct BackendStatus {
     provisioned: bool,
 }
 
-#[derive(Clone)]
-pub struct Relay {
-    client: GuardianServiceClient<Channel>,
-    accumulator: Arc<Mutex<Accumulator>>,
-    /// Fingerprints of the KPs allowed to submit shares (the ceremony roster,
-    /// via deploy config). Empty rejects every submission — fail closed.
-    authorized_kp_fingerprints: Vec<Fingerprint>,
+/// The committed roster changes only at ceremonies/rotations; a short TTL
+/// bounds S3 reads under submission spam without staleness that matters.
+const ROSTER_TTL: Duration = Duration::from_secs(60);
+
+/// TTL-cached view of the S3-committed KP roster. The mutex is held across the
+/// fetch, so concurrent misses collapse into one S3 read.
+struct RosterCache<L> {
+    store: L,
+    cached: Mutex<Option<(Instant, Arc<Vec<Fingerprint>>)>>,
 }
 
-impl Relay {
-    pub fn new(channel: Channel, authorized_kp_fingerprints: Vec<Fingerprint>) -> Self {
+impl<L: LogStore> RosterCache<L> {
+    fn new(store: L) -> Self {
+        Self {
+            store,
+            cached: Mutex::new(None),
+        }
+    }
+
+    async fn get(&self) -> Result<Arc<Vec<Fingerprint>>, Status> {
+        let mut cached = self.cached.lock().await;
+        if let Some((at, roster)) = cached.as_ref() {
+            if at.elapsed() < ROSTER_TTL {
+                return Ok(roster.clone());
+            }
+        }
+        match latest_kp_roster(&self.store).await {
+            Ok(Some(roster)) => {
+                let roster = Arc::new(roster);
+                *cached = Some((Instant::now(), roster.clone()));
+                Ok(roster)
+            }
+            // No ceremony has committed a share set yet: fail closed, uncached
+            // (so the first ceremony is authorized the moment its log lands).
+            Ok(None) => Err(Status::failed_precondition(
+                "no KP share log in the guardian bucket; run the key ceremony first",
+            )),
+            Err(e) => {
+                warn!(error = %format!("{e:#}"), "KP roster read failed");
+                Err(Status::unavailable("KP roster unavailable; retry"))
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct Relay<L> {
+    client: GuardianServiceClient<Channel>,
+    accumulator: Arc<Mutex<Accumulator>>,
+    roster: Arc<RosterCache<L>>,
+}
+
+impl<L: LogStore> Relay<L> {
+    pub fn new(channel: Channel, roster_store: L) -> Self {
         Self {
             client: GuardianServiceClient::new(channel),
             accumulator: Arc::new(Mutex::new(Accumulator::default())),
-            authorized_kp_fingerprints,
+            roster: Arc::new(RosterCache::new(roster_store)),
         }
     }
 
@@ -130,8 +177,8 @@ impl Relay {
     }
 }
 
-/// Pre-authenticate a submission: the signer's cert must be in the configured
-/// relay roster and its detached signature must cover these exact
+/// Pre-authenticate a submission: the signer's cert must be in the ceremony's
+/// committed roster and its detached signature must cover these exact
 /// (session, config, share) bytes. This is only a DoS guard; the enclave repeats
 /// signature verification authoritatively.
 fn verify_kp_submission<'a>(
@@ -177,18 +224,15 @@ fn check_share_id(id: u32, num_shares: usize) -> Result<(), Status> {
 }
 
 #[tonic::async_trait]
-impl GuardianRelayService for Relay {
+impl<L: LogStore> GuardianRelayService for Relay<L> {
     async fn single_provisioner_init(
         &self,
         request: Request<proto::SignedSingleProvisionerInitRequest>,
     ) -> Result<Response<proto::SingleProvisionerInitResponse>, Status> {
-        // No roster configured (proxy deployed before its ceremony): fail closed.
-        if self.authorized_kp_fingerprints.is_empty() {
-            return Err(Status::failed_precondition(
-                "relay has no authorized KP roster configured; \
-                 set AUTHORIZED_KP_FINGERPRINTS on the proxy",
-            ));
-        }
+        // The ceremony's committed roster, not deploy config: a rotation
+        // re-deals shares without a proxy redeploy. Fails closed when no share
+        // log exists yet.
+        let roster = self.roster.get().await?;
 
         let submission = request.into_inner();
         let signed_request = KpSigned::<SingleProvisionerInitRequest>::try_from(submission.clone())
@@ -196,8 +240,7 @@ impl GuardianRelayService for Relay {
 
         // Authenticate before the lock or any backend read: junk submissions
         // can't poison the batch, hold the mutex, or cost enclave round-trips.
-        let verified_request =
-            verify_kp_submission(&signed_request, &self.authorized_kp_fingerprints)?;
+        let verified_request = verify_kp_submission(&signed_request, &roster)?;
         let expected_session_id = verified_request.expected_session_id().to_string();
         let expected_config_hash = *verified_request.expected_config_hash();
         let expected_genesis_state_hash = verified_request.expected_genesis_state_hash();
