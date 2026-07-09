@@ -24,6 +24,9 @@ pub use limiter::RateLimiter;
 pub use log::*;
 pub use signing::GuardianSigned;
 pub use signing::IntentType;
+pub use signing::KpSigned;
+pub use signing::KpSigningIntent;
+pub use signing::KpSigningIntentType;
 pub use signing::SigningIntent;
 pub use time_utils::UnixMillis;
 pub use time_utils::now_timestamp_ms;
@@ -198,6 +201,14 @@ pub struct ProvisionerInitRequest {
     // duplicate share ids. Unlike KP output shares, submitted shares are a
     // threshold batch and need not be contiguous 1..=n.
     encrypted_shares: Vec<GuardianEncryptedShare>,
+}
+
+/// Relay-facing request carrying one KP's signed contribution toward
+/// `ProvisionerInit` for a specific guardian session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SingleProvisionerInitRequest {
+    expected_session_id: SessionID,
+    encrypted_share: GuardianEncryptedShare,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -552,29 +563,6 @@ impl InitConfig {
     }
 }
 
-/// Domain tag mixed into the bytes a KP signs to authenticate a relay
-/// submission. Bump the version if the signed layout ever changes.
-const RELAY_SUBMISSION_DOMAIN: &str = "hashi-kp-relay-submission-v1";
-
-#[derive(Serialize)]
-struct RelaySubmissionAuthPayload<'a> {
-    domain: &'static str,
-    session_id: &'a str,
-    share: &'a GuardianEncryptedShare,
-}
-
-/// The exact bytes a key provisioner detached-signs (and the relay verifies).
-/// Binds the guardian session and the encrypted share, so a captured signature
-/// can't be replayed against a different share or session.
-pub fn relay_submission_signed_bytes(session_id: &str, share: &GuardianEncryptedShare) -> Vec<u8> {
-    bcs::to_bytes(&RelaySubmissionAuthPayload {
-        domain: RELAY_SUBMISSION_DOMAIN,
-        session_id,
-        share,
-    })
-    .expect("BCS serialization of a relay submission payload is infallible")
-}
-
 impl ProvisionerInitRequest {
     pub fn new(encrypted_shares: Vec<GuardianEncryptedShare>) -> Self {
         Self { encrypted_shares }
@@ -599,6 +587,27 @@ impl ProvisionerInitRequest {
 
     pub fn into_parts(self) -> Vec<GuardianEncryptedShare> {
         self.encrypted_shares
+    }
+}
+
+impl SingleProvisionerInitRequest {
+    pub fn new(expected_session_id: SessionID, encrypted_share: GuardianEncryptedShare) -> Self {
+        Self {
+            expected_session_id,
+            encrypted_share,
+        }
+    }
+
+    pub fn expected_session_id(&self) -> &str {
+        &self.expected_session_id
+    }
+
+    pub fn encrypted_share(&self) -> &GuardianEncryptedShare {
+        &self.encrypted_share
+    }
+
+    pub fn into_parts(self) -> (SessionID, GuardianEncryptedShare) {
+        (self.expected_session_id, self.encrypted_share)
     }
 }
 

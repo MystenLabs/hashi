@@ -1358,7 +1358,7 @@ pub mod bridge_service_server {
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SingleProvisionerInitRequest {
+pub struct SignedSingleProvisionerInitRequest {
     /// This KP's share, HPKE-encrypted to the enclave with the config_hash bound as
     /// AAD (built exactly as for the guardian's batch ProvisionerInit).
     #[prost(message, optional, tag = "1")]
@@ -1374,7 +1374,7 @@ pub struct SingleProvisionerInitRequest {
     #[prost(string, tag = "3")]
     pub signer_cert: ::prost::alloc::string::String,
     /// Detached armored OpenPGP signature by the KP's offline key (e.g. a
-    /// yubikey) over the domain-tagged (session id + encrypted share) bytes —
+    /// yubikey) over the intent-tagged SingleProvisionerInitRequest payload —
     /// proves a rostered KP made this exact submission.
     #[prost(string, tag = "4")]
     pub kp_signature: ::prost::alloc::string::String,
@@ -1495,7 +1495,7 @@ pub mod guardian_relay_service_client {
         }
         pub async fn single_provisioner_init(
             &mut self,
-            request: impl tonic::IntoRequest<super::SingleProvisionerInitRequest>,
+            request: impl tonic::IntoRequest<super::SignedSingleProvisionerInitRequest>,
         ) -> std::result::Result<
             tonic::Response<super::SingleProvisionerInitResponse>,
             tonic::Status,
@@ -1539,7 +1539,7 @@ pub mod guardian_relay_service_server {
     pub trait GuardianRelayService: std::marker::Send + std::marker::Sync + 'static {
         async fn single_provisioner_init(
             &self,
-            request: tonic::Request<super::SingleProvisionerInitRequest>,
+            request: tonic::Request<super::SignedSingleProvisionerInitRequest>,
         ) -> std::result::Result<
             tonic::Response<super::SingleProvisionerInitResponse>,
             tonic::Status,
@@ -1636,8 +1636,9 @@ pub mod guardian_relay_service_server {
                     struct SingleProvisionerInitSvc<T: GuardianRelayService>(pub Arc<T>);
                     impl<
                         T: GuardianRelayService,
-                    > tonic::server::UnaryService<super::SingleProvisionerInitRequest>
-                    for SingleProvisionerInitSvc<T> {
+                    > tonic::server::UnaryService<
+                        super::SignedSingleProvisionerInitRequest,
+                    > for SingleProvisionerInitSvc<T> {
                         type Response = super::SingleProvisionerInitResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
@@ -1645,7 +1646,9 @@ pub mod guardian_relay_service_server {
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::SingleProvisionerInitRequest>,
+                            request: tonic::Request<
+                                super::SignedSingleProvisionerInitRequest,
+                            >,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
