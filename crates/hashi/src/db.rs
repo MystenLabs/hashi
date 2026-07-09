@@ -22,6 +22,7 @@ use hashi_types::committee::EncryptionPublicKey;
 use serde::de::DeserializeOwned;
 
 use crate::mpc::types::AvidRoundState;
+use crate::mpc::types::HeldAvidEchoes;
 use crate::mpc::types::RotationMessages;
 
 pub struct Database {
@@ -76,12 +77,17 @@ pub struct Database {
     // value: BCS-serialized AvidRoundState
     avid_round_states: Keyspace,
 
-    // Column Family used to store this node's own AVID dealer builder per batch, so a restarted
-    // dealer re-serves the identical round (receivers reject a re-deal with a different `v`).
+    // Column Family used to store this node's own AVID dealer builder per batch.
     //
     // key: (big endian u64 epoch) + (big endian u32 batch_index)
     // value: BCS-serialized AvssMessageBuilder
     avid_dealer_builders: Keyspace,
+
+    // Column Family used to store this node's held AVID vote and outbound echoes per round.
+    //
+    // key: (big endian u64 epoch) + (big endian u32 batch_index) + (32-byte dealer address)
+    // value: BCS-serialized HeldAvidEchoes
+    avid_held_echoes: Keyspace,
 }
 
 const ENCRYPTION_KEYS_CF_NAME: &str = "encryption_keys";
@@ -91,6 +97,7 @@ const ROTATION_MESSAGES_CF_NAME: &str = "rotation_messages";
 const NONCE_MESSAGES_CF_NAME: &str = "nonce_messages";
 const AVID_ROUND_STATES_CF_NAME: &str = "avid_round_states";
 const AVID_DEALER_BUILDERS_CF_NAME: &str = "avid_dealer_builders";
+const AVID_HELD_ECHOES_CF_NAME: &str = "avid_held_echoes";
 const ENCRYPTION_EPOCH_INDEX_CF_NAME: &str = "encryption_epoch_index";
 const SIGNING_EPOCH_INDEX_CF_NAME: &str = "signing_epoch_index";
 
@@ -161,6 +168,8 @@ impl Database {
             db.keyspace(AVID_ROUND_STATES_CF_NAME, KeyspaceCreateOptions::default)?;
         let avid_dealer_builders =
             db.keyspace(AVID_DEALER_BUILDERS_CF_NAME, KeyspaceCreateOptions::default)?;
+        let avid_held_echoes =
+            db.keyspace(AVID_HELD_ECHOES_CF_NAME, KeyspaceCreateOptions::default)?;
         let encryption_epoch_index = db.keyspace(
             ENCRYPTION_EPOCH_INDEX_CF_NAME,
             KeyspaceCreateOptions::default,
@@ -180,6 +189,7 @@ impl Database {
             nonce_messages,
             avid_round_states,
             avid_dealer_builders,
+            avid_held_echoes,
         })
     }
 
@@ -495,6 +505,49 @@ impl Database {
         list_messages_by_prefix(&self.avid_round_states, &prefix)
     }
 
+    pub fn store_avid_held_echoes(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+        held: &HeldAvidEchoes,
+    ) -> Result<()> {
+        let key = [
+            epoch.to_be_bytes().as_slice(),
+            batch_index.to_be_bytes().as_slice(),
+            dealer.as_bytes(),
+        ]
+        .concat();
+        let value = bcs::to_bytes(held).unwrap();
+        self.avid_held_echoes.insert(key, value)
+    }
+
+    pub fn get_avid_held_echoes(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> Result<Option<HeldAvidEchoes>> {
+        let key = [
+            epoch.to_be_bytes().as_slice(),
+            batch_index.to_be_bytes().as_slice(),
+            dealer.as_bytes(),
+        ]
+        .concat();
+        let bytes = match self.avid_held_echoes.get(key) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let held = bcs::from_bytes(&bytes).map_err(|_| {
+            fjall::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid avid held echoes",
+            ))
+        })?;
+        Ok(Some(held))
+    }
+
     pub fn store_avid_dealer_builder(
         &self,
         epoch: u64,
@@ -569,6 +622,7 @@ impl Database {
         prune_keyspace(&self.nonce_messages, cutoff_epoch)?;
         prune_keyspace(&self.avid_round_states, cutoff_epoch)?;
         prune_keyspace(&self.avid_dealer_builders, cutoff_epoch)?;
+        prune_keyspace(&self.avid_held_echoes, cutoff_epoch)?;
         Ok(())
     }
 }
@@ -863,7 +917,11 @@ pub(crate) mod tests {
         }
     }
 
-    fn avid_round_fixture() -> (AvidRoundState, batch_avss_avid::Receiver) {
+    fn avid_round_fixture() -> (
+        AvidRoundState,
+        batch_avss_avid::Receiver,
+        batch_avss_avid::AvidVote,
+    ) {
         let (t, f, n, batch) = (3u16, 3u16, 10u16, 3u16);
         let mut rng = rand::thread_rng();
         let sks: Vec<_> = (0..n)
@@ -900,23 +958,35 @@ pub(crate) mod tests {
         let verified_common = receiver
             .verify_common_message(own_message.common.clone())
             .unwrap();
-        let (echo_builder, _) = receiver
+        let (_echo_builder, avid_vote) = receiver
             .process_avid_message(&verified_common, avid_message)
             .unwrap();
-        let echoes = [8u16, 9u16]
-            .into_iter()
-            .map(|pending| (pending, echo_builder.create_echo(pending).unwrap()))
-            .collect();
         let round_state = AvidRoundState {
             common: own_message.common,
             own_ciphertext: own_message.ciphertext,
-            echoes,
         };
-        (round_state, receiver)
+        (round_state, receiver, avid_vote)
     }
 
     pub(crate) fn create_test_avid_round_state() -> AvidRoundState {
         avid_round_fixture().0
+    }
+
+    #[test]
+    fn test_avid_held_echoes_store_round_trips() {
+        let tmpdir = tempfile::Builder::new().tempdir().unwrap();
+        let db = Database::open(tmpdir.path()).unwrap();
+        let dealer = Address::new([3u8; 32]);
+        let held: crate::mpc::types::HeldAvidEchoes = (avid_round_fixture().2, Vec::new());
+
+        assert!(db.get_avid_held_echoes(1, 0, &dealer).unwrap().is_none());
+        db.store_avid_held_echoes(1, 0, &dealer, &held).unwrap();
+        let loaded = db.get_avid_held_echoes(1, 0, &dealer).unwrap().unwrap();
+        assert_eq!(
+            bcs::to_bytes(&loaded).unwrap(),
+            bcs::to_bytes(&held).unwrap()
+        );
+        assert!(db.get_avid_held_echoes(2, 0, &dealer).unwrap().is_none());
     }
 
     #[test]
@@ -1347,8 +1417,6 @@ pub(crate) mod tests {
         let dealer2 = Address::new([2u8; 32]);
         let state1 = create_test_avid_round_state();
         let state2 = create_test_avid_round_state();
-        // Multi-echo accrual: receiver 0 echoed for both pending recipients.
-        assert_eq!(state1.echoes.len(), 2);
 
         // Initially empty
         assert!(db.list_avid_round_states(1, 0).unwrap().is_empty());
@@ -1448,7 +1516,7 @@ pub(crate) mod tests {
         let tmpdir = tempfile::Builder::new().tempdir().unwrap();
         let db = Database::open(tmpdir.path()).unwrap();
 
-        let (state, receiver) = avid_round_fixture();
+        let (state, receiver, _) = avid_round_fixture();
         let dealer = Address::new([1u8; 32]);
         db.store_avid_round_state(1, 0, &dealer, &state).unwrap();
 
