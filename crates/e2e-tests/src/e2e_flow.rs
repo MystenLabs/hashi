@@ -829,8 +829,7 @@ mod tests {
                         .name()
                         .contains("WithdrawalPickedForProcessing")
                     {
-                        match WithdrawalPickedForProcessing::from_bcs(event.contents().value())
-                        {
+                        match WithdrawalPickedForProcessing::from_bcs(event.contents().value()) {
                             Ok(data) => {
                                 info!(
                                     withdrawal_txn_id = %data.withdrawal_txn_id,
@@ -1145,8 +1144,7 @@ mod tests {
                         .name()
                         .contains("WithdrawalPickedForProcessing")
                     {
-                        match WithdrawalPickedForProcessing::from_bcs(event.contents().value())
-                        {
+                        match WithdrawalPickedForProcessing::from_bcs(event.contents().value()) {
                             Ok(data) if data.request_ids.len() >= min_requests => {
                                 info!(
                                     withdrawal_txn_id = %data.withdrawal_txn_id,

@@ -210,6 +210,9 @@ entry fun confirm_deposit(
     };
 }
 
+/// Garbage collection: deliberately NOT gated on pause/reconfig — expiry
+/// refunds nothing (deposits mint on confirmation) and GC must stay
+/// callable during an emergency pause.
 entry fun delete_expired_deposit(
     hashi: &mut Hashi,
     request_id: address,

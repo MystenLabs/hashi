@@ -861,62 +861,38 @@ impl HashiEvent {
             ValidatorRegistered::MODULE_NAME => ValidatorRegistered::from_bcs(bcs.value())?.into(),
             ValidatorUpdated::MODULE_NAME => ValidatorUpdated::from_bcs(bcs.value())?.into(),
             VoteCast::MODULE_NAME => VoteCast::new(&event_type, bcs.value())?.into(),
-            VoteRemoved::MODULE_NAME => {
-                VoteRemoved::new(&event_type, bcs.value())?.into()
-            }
-            ProposalCreated::MODULE_NAME => {
-                ProposalCreated::new(&event_type, bcs.value())?.into()
-            }
-            ProposalDeleted::MODULE_NAME => {
-                ProposalDeleted::new(&event_type, bcs.value())?.into()
-            }
+            VoteRemoved::MODULE_NAME => VoteRemoved::new(&event_type, bcs.value())?.into(),
+            ProposalCreated::MODULE_NAME => ProposalCreated::new(&event_type, bcs.value())?.into(),
+            ProposalDeleted::MODULE_NAME => ProposalDeleted::new(&event_type, bcs.value())?.into(),
             ProposalExecuted::MODULE_NAME => {
                 ProposalExecuted::new(&event_type, bcs.value())?.into()
             }
-            QuorumReached::MODULE_NAME => {
-                QuorumReached::new(&event_type, bcs.value())?.into()
-            }
+            QuorumReached::MODULE_NAME => QuorumReached::new(&event_type, bcs.value())?.into(),
             Minted::MODULE_NAME => Minted::new(&event_type, bcs.value())?.into(),
             Burned::MODULE_NAME => Burned::new(&event_type, bcs.value())?.into(),
-            DepositRequested::MODULE_NAME => {
-                DepositRequested::from_bcs(bcs.value())?.into()
-            }
-            DepositApproved::MODULE_NAME => {
-                DepositApproved::from_bcs(bcs.value())?.into()
-            }
-            DepositConfirmed::MODULE_NAME => {
-                DepositConfirmed::from_bcs(bcs.value())?.into()
-            }
+            DepositRequested::MODULE_NAME => DepositRequested::from_bcs(bcs.value())?.into(),
+            DepositApproved::MODULE_NAME => DepositApproved::from_bcs(bcs.value())?.into(),
+            DepositConfirmed::MODULE_NAME => DepositConfirmed::from_bcs(bcs.value())?.into(),
             ExpiredDepositDeleted::MODULE_NAME => {
                 ExpiredDepositDeleted::from_bcs(bcs.value())?.into()
             }
-            WithdrawalRequested::MODULE_NAME => {
-                WithdrawalRequested::from_bcs(bcs.value())?.into()
-            }
-            WithdrawalApproved::MODULE_NAME => {
-                WithdrawalApproved::from_bcs(bcs.value())?.into()
-            }
+            WithdrawalRequested::MODULE_NAME => WithdrawalRequested::from_bcs(bcs.value())?.into(),
+            WithdrawalApproved::MODULE_NAME => WithdrawalApproved::from_bcs(bcs.value())?.into(),
             WithdrawalPickedForProcessing::MODULE_NAME => {
                 WithdrawalPickedForProcessing::from_bcs(bcs.value())?.into()
             }
-            WithdrawalSigned::MODULE_NAME => {
-                WithdrawalSigned::from_bcs(bcs.value())?.into()
-            }
+            WithdrawalSigned::MODULE_NAME => WithdrawalSigned::from_bcs(bcs.value())?.into(),
             WithdrawalInputsSigned::MODULE_NAME => {
                 WithdrawalInputsSigned::from_bcs(bcs.value())?.into()
             }
             WithdrawalPresigsReassigned::MODULE_NAME => {
                 WithdrawalPresigsReassigned::from_bcs(bcs.value())?.into()
             }
-            WithdrawalConfirmed::MODULE_NAME => {
-                WithdrawalConfirmed::from_bcs(bcs.value())?.into()
-            }
+            WithdrawalConfirmed::MODULE_NAME => WithdrawalConfirmed::from_bcs(bcs.value())?.into(),
             UtxoSpent::MODULE_NAME => UtxoSpent::from_bcs(bcs.value())?.into(),
             ReconfigStarted::MODULE_NAME => ReconfigStarted::from_bcs(bcs.value())?.into(),
             ReconfigEnded::MODULE_NAME => ReconfigEnded::from_bcs(bcs.value())?.into(),
-            PackageUpgraded::MODULE_NAME => {
-                PackageUpgraded::from_bcs(bcs.value())?.into()
-            }
+            PackageUpgraded::MODULE_NAME => PackageUpgraded::from_bcs(bcs.value())?.into(),
             _ => {
                 return Ok(None);
             }
@@ -1092,10 +1068,7 @@ impl ProposalExecuted {
         // Layout is `(proposal_id: Address, data: T)`; Address is a fixed
         // 32-byte BCS encoding with no length prefix, so split there.
         if bcs.len() < 32 {
-            anyhow::bail!(
-                "ProposalExecuted payload too short: {} bytes",
-                bcs.len()
-            );
+            anyhow::bail!("ProposalExecuted payload too short: {} bytes", bcs.len());
         }
         let proposal_id: Address = bcs::from_bytes(&bcs[..32])?;
         let data_bcs = bcs[32..].to_vec();

@@ -72,6 +72,9 @@ fun submit_cert_internal(
     );
 }
 
+/// Garbage collection: deliberately NOT gated on pause/reconfig — cert
+/// buckets old enough to destroy (see `tob::destroy_all`) carry no live
+/// state, and GC must stay callable during an emergency pause.
 entry fun destroy_all_certs(
     hashi: &mut Hashi,
     epoch: u64,

@@ -360,6 +360,9 @@ public(package) fun new_withdrawal_txn(
     let request_count = request_ids.length();
     let output_count = outputs.length();
     assert!(output_count >= request_count, EOutputCountMismatch);
+    // Vouts are u32 (change-output UTXO ids are derived from output indices);
+    // unreachable for real Bitcoin transactions, but make the cast explicit.
+    assert!(output_count <= (std::u32::max_value!() as u64), EOutputCountMismatch);
 
     // Miner fee is split evenly across all withdrawal requests. Any remainder
     // (at most request_count - 1 sats) is a rounding bonus to the miner.

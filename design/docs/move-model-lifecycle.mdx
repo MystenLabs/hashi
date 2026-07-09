@@ -8,6 +8,21 @@ This document illustrates the lifecycle of key Move models in the deposit and
 withdrawal flows, showing how data structures transform between onchain (Sui)
 and offchain (Bitcoin) states.
 
+## Entry-function gating principle
+
+Every entry function asserts the package version is enabled. Beyond that,
+gating follows one rule: **operations that move funds or advance a state
+machine also gate on pause and (where ordering matters) on reconfiguration;
+garbage collection and operator registration deliberately do not.** Deposits,
+withdrawal approvals, signing, and confirmation all stop when governance
+pauses the system or while a committee handoff is pending. Cleanup entries
+(`cleanup_spent_utxos`, `destroy_all_certs`, `delete_expired_deposit`) and
+validator registration or key rotation stay callable, because an emergency
+pause must not block operators from maintaining nodes or the chain from
+shedding dead state. One asymmetry is intentional: users can *request*
+withdrawals during reconfiguration (the request only escrows their hBTC);
+only committee-driven approval and processing wait for the new committee.
+
 ## Deposit flow
 
 ```mermaid
