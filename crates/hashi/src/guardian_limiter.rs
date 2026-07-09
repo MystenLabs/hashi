@@ -3,7 +3,7 @@
 
 //! Local emulator of the guardian's token-bucket limiter. Bootstrapped
 //! from the guardian at startup and advanced by the watcher on every
-//! `WithdrawalSignedEvent`. MPC signing only `validate_consume`s.
+//! `WithdrawalSigned`. MPC signing only `validate_consume`s.
 
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
@@ -175,7 +175,7 @@ pub(crate) const STALL_RECONCILE_TICKS: usize = 20;
 /// Flags a local mirror that has fallen out of lockstep with the guardian.
 ///
 /// The guardian bumps `next_seq` at finalize-request time but a node only
-/// advances on the matching on-chain `WithdrawalSignedEvent`, so `local <
+/// advances on the matching on-chain `WithdrawalSigned`, so `local <
 /// guardian` is ordinary in-flight lag and must not, on its own, trip a
 /// reconcile (forward-snapping a healthy mirror would double-count the event
 /// still in flight). We fire only when the mirror has failed to reach the

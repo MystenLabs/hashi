@@ -108,7 +108,7 @@ public(package) fun get_utxo(self: &UtxoPool, utxo_id: UtxoId): hashi::utxo::Utx
 public(package) fun mark_spent(self: &mut UtxoPool, utxo_id: UtxoId, epoch: u64) {
     let record: &mut UtxoRecord = self.utxo_records.borrow_mut(utxo_id);
     record.spent_epoch = option::some(epoch);
-    sui::event::emit(UtxoSpentEvent { utxo_id, spent_epoch: epoch });
+    sui::event::emit(UtxoSpent { utxo_id, spent_epoch: epoch });
 }
 
 /// Deferred bookkeeping for a spent UTXO: remove from `utxo_records` and
@@ -136,7 +136,7 @@ public(package) fun confirm_pending(self: &mut UtxoPool, utxo_id: UtxoId) {
     }
 }
 
-public struct UtxoSpentEvent has copy, drop {
+public struct UtxoSpent has copy, drop {
     utxo_id: UtxoId,
     spent_epoch: u64,
 }

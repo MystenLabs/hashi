@@ -852,7 +852,7 @@ impl Hashi {
             self.metrics.record_limiter_state(&state, &config);
             self.metrics.guardian_limiter_initialized.set(1);
             // Hand the same Arc to OnchainState so the watcher can advance
-            // it inline when WithdrawalSignedEvent fires.
+            // it inline when WithdrawalSigned fires.
             self.onchain_state().set_local_limiter(limiter);
         }
         self.metrics
@@ -998,7 +998,7 @@ impl Hashi {
     /// Reconcile on a watcher rescrape. A rescrape can't tell a dropped signed event
     /// (real drift) from an in-flight withdrawal (consumed by the guardian, event
     /// pending), so forward-snapping `next_seq` would double-count the in-flight ones
-    /// (the snap counts them, then their `WithdrawalSignedEvent` counts them again).
+    /// (the snap counts them, then their `WithdrawalSigned` counts them again).
     /// So only re-align the bucket at a matching seq; seq drift is left to the stall tick.
     async fn reconcile_guardian_limiter_on_rescrape(&self) {
         let Some((limiter, state)) = self.guardian_limiter_and_state().await else {

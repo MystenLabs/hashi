@@ -353,13 +353,13 @@ impl Metrics {
             .unwrap(),
             guardian_limiter_anchor_events_total: register_int_counter_with_registry!(
                 "hashi_guardian_limiter_anchor_events_total",
-                "Total on-chain WithdrawalSignedEvent observations applied to the local guardian-limiter",
+                "Total on-chain WithdrawalSigned observations applied to the local guardian-limiter",
                 registry,
             )
             .unwrap(),
             guardian_limiter_anchor_events_skipped_total: register_int_counter_with_registry!(
                 "hashi_guardian_limiter_anchor_events_skipped_total",
-                "WithdrawalSignedEvent observations skipped as duplicates (checkpoint redelivery or bootstrap replay)",
+                "WithdrawalSigned observations skipped as duplicates (checkpoint redelivery or bootstrap replay)",
                 registry,
             )
             .unwrap(),
@@ -1119,7 +1119,7 @@ pub const GUARDIAN_LIMITER_OUTCOME_SEQ_MISMATCH: &str = "seq_mismatch";
 pub const GUARDIAN_LIMITER_OUTCOME_STALE_TIMESTAMP: &str = "stale_timestamp";
 pub const GUARDIAN_LIMITER_OUTCOME_INSUFFICIENT_CAPACITY: &str = "insufficient_capacity";
 // Apply-only label (no analogue on validate): watcher saw a
-// WithdrawalSignedEvent before the local limiter was bootstrapped.
+// WithdrawalSigned before the local limiter was bootstrapped.
 pub const GUARDIAN_LIMITER_OUTCOME_NO_LIMITER: &str = "no_limiter";
 
 pub const GUARDIAN_LIMITER_CALLSITE_LEADER_PRE_MPC: &str = "leader_pre_mpc";

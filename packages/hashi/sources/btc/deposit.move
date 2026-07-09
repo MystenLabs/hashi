@@ -59,7 +59,7 @@ entry fun deposit(
     let request_id = request.request_id().to_address();
 
     let utxo_ref = request.request_utxo();
-    sui::event::emit(DepositRequestedEvent {
+    sui::event::emit(DepositRequested {
         request_id,
         utxo_id: utxo_ref.id(),
         amount: utxo_ref.amount(),
@@ -128,7 +128,7 @@ entry fun approve_deposit(
 
     hashi.bitcoin_mut().deposit_queue_mut().insert_deposit(request);
 
-    sui::event::emit(DepositApprovedEvent {
+    sui::event::emit(DepositApproved {
         request_id,
         utxo,
         cert,
@@ -182,7 +182,7 @@ entry fun confirm_deposit(
 
     request.confirm(clock);
 
-    sui::event::emit(DepositConfirmedEvent {
+    sui::event::emit(DepositConfirmed {
         request_id,
         utxo,
     });
@@ -218,10 +218,10 @@ entry fun delete_expired_deposit(
     hashi.versioning().assert_version_enabled();
     hashi.bitcoin_mut().deposit_queue_mut().delete_expired(request_id, clock);
 
-    sui::event::emit(ExpiredDepositDeletedEvent { request_id });
+    sui::event::emit(ExpiredDepositDeleted { request_id });
 }
 
-public struct DepositRequestedEvent has copy, drop {
+public struct DepositRequested has copy, drop {
     request_id: address,
     utxo_id: UtxoId,
     amount: u64,
@@ -236,7 +236,7 @@ public struct DepositRequestedEvent has copy, drop {
 /// `approval_timestamp_ms` is the clock timestamp recorded on the
 /// request, against which `confirm_deposit` enforces the time-delay
 /// window.
-public struct DepositApprovedEvent has copy, drop {
+public struct DepositApproved has copy, drop {
     request_id: address,
     utxo: Utxo,
     cert: CommitteeSignature,
@@ -246,11 +246,11 @@ public struct DepositApprovedEvent has copy, drop {
 /// Emitted when an approved deposit has cleared the time-delay window
 /// and the corresponding BTC has been minted (when applicable) and the
 /// UTXO moved into the active pool.
-public struct DepositConfirmedEvent has copy, drop {
+public struct DepositConfirmed has copy, drop {
     request_id: address,
     utxo: Utxo,
 }
 
-public struct ExpiredDepositDeletedEvent has copy, drop {
+public struct ExpiredDepositDeleted has copy, drop {
     request_id: address,
 }

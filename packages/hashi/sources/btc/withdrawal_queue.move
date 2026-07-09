@@ -449,7 +449,7 @@ public(package) fun record_input_signatures(
     let txn: &mut WithdrawalTransaction = self.withdrawal_txns.borrow_mut(withdrawal_id);
     assert!(!txn.txn_fully_signed(), EWithdrawalAlreadyFinalized);
     txn.signing.record(indices, signatures);
-    sui::event::emit(WithdrawalInputsSignedEvent {
+    sui::event::emit(WithdrawalInputsSigned {
         withdrawal_txn_id: withdrawal_id,
         signed_count: txn.signing.signed_count(),
         num_inputs: txn.signing.num_inputs(),
@@ -491,7 +491,7 @@ public(package) fun reallocate_presigs_for_withdrawal_txn(
 ) {
     let txn: &mut WithdrawalTransaction = self.withdrawal_txns.borrow_mut(withdrawal_id);
     txn.signing.reallocate(new_base, current_epoch, allocated_count);
-    sui::event::emit(WithdrawalPresigsReassignedEvent {
+    sui::event::emit(WithdrawalPresigsReassigned {
         withdrawal_txn_id: withdrawal_id,
         epoch: current_epoch,
         presig_start_index: new_base,
@@ -635,7 +635,7 @@ public(package) fun is_approved(self: &WithdrawalStatus): bool {
 // ======== Events ========
 
 public(package) fun emit_withdrawal_requested(request: &WithdrawalRequest) {
-    sui::event::emit(WithdrawalRequestedEvent {
+    sui::event::emit(WithdrawalRequested {
         request_id: request.id.to_address(),
         btc_amount: request.btc_amount,
         bitcoin_address: request.bitcoin_address,
@@ -646,11 +646,11 @@ public(package) fun emit_withdrawal_requested(request: &WithdrawalRequest) {
 }
 
 public(package) fun emit_withdrawal_approved(request_id: address) {
-    sui::event::emit(WithdrawalApprovedEvent { request_id });
+    sui::event::emit(WithdrawalApproved { request_id });
 }
 
 public(package) fun emit_withdrawal_picked_for_processing(self: &WithdrawalTransaction) {
-    sui::event::emit(WithdrawalPickedForProcessingEvent {
+    sui::event::emit(WithdrawalPickedForProcessing {
         withdrawal_txn_id: self.id.to_address(),
         txid: self.txid,
         request_ids: self.request_ids,
@@ -663,7 +663,7 @@ public(package) fun emit_withdrawal_picked_for_processing(self: &WithdrawalTrans
 }
 
 public(package) fun emit_withdrawal_signed(self: &WithdrawalTransaction) {
-    sui::event::emit(WithdrawalSignedEvent {
+    sui::event::emit(WithdrawalSigned {
         withdrawal_txn_id: self.id.to_address(),
         request_ids: self.request_ids,
         signatures: self.signing.to_signatures(),
@@ -675,7 +675,7 @@ public(package) fun emit_withdrawal_confirmed(self: &WithdrawalTransaction) {
     let change_utxo_ids = self.change_utxo_ids();
     let change_utxo_amounts = self.change_outputs.map_ref!(|change| change.amount);
 
-    sui::event::emit(WithdrawalConfirmedEvent {
+    sui::event::emit(WithdrawalConfirmed {
         withdrawal_txn_id: self.id.to_address(),
         txid: self.txid,
         change_utxo_ids,
@@ -685,7 +685,7 @@ public(package) fun emit_withdrawal_confirmed(self: &WithdrawalTransaction) {
 }
 
 public(package) fun emit_withdrawal_cancelled(request: &WithdrawalRequest) {
-    sui::event::emit(WithdrawalCancelledEvent {
+    sui::event::emit(WithdrawalCancelled {
         request_id: request.id.to_address(),
         requester_address: request.sender,
         btc_amount: request.btc_amount,
@@ -694,7 +694,7 @@ public(package) fun emit_withdrawal_cancelled(request: &WithdrawalRequest) {
 
 // ======== Event Structs ========
 
-public struct WithdrawalRequestedEvent has copy, drop {
+public struct WithdrawalRequested has copy, drop {
     request_id: address,
     btc_amount: u64,
     bitcoin_address: vector<u8>,
@@ -703,11 +703,11 @@ public struct WithdrawalRequestedEvent has copy, drop {
     sui_tx_digest: vector<u8>,
 }
 
-public struct WithdrawalApprovedEvent has copy, drop {
+public struct WithdrawalApproved has copy, drop {
     request_id: address,
 }
 
-public struct WithdrawalPickedForProcessingEvent has copy, drop {
+public struct WithdrawalPickedForProcessing has copy, drop {
     withdrawal_txn_id: address,
     txid: address,
     request_ids: vector<address>,
@@ -721,13 +721,13 @@ public struct WithdrawalPickedForProcessingEvent has copy, drop {
 /// Emitted on each incremental chunk write so the watcher can track signing
 /// progress (X / N) and the next leader can resume; the per-input state itself
 /// lives on the object.
-public struct WithdrawalInputsSignedEvent has copy, drop {
+public struct WithdrawalInputsSigned has copy, drop {
     withdrawal_txn_id: address,
     signed_count: u64,
     num_inputs: u64,
 }
 
-public struct WithdrawalSignedEvent has copy, drop {
+public struct WithdrawalSigned has copy, drop {
     withdrawal_txn_id: address,
     request_ids: vector<address>,
     /// Per-input Schnorr signatures from the MPC committee.
@@ -738,13 +738,13 @@ public struct WithdrawalSignedEvent has copy, drop {
     guardian_signatures: vector<vector<u8>>,
 }
 
-public struct WithdrawalPresigsReassignedEvent has copy, drop {
+public struct WithdrawalPresigsReassigned has copy, drop {
     withdrawal_txn_id: address,
     epoch: u64,
     presig_start_index: u64,
 }
 
-public struct WithdrawalConfirmedEvent has copy, drop {
+public struct WithdrawalConfirmed has copy, drop {
     withdrawal_txn_id: address,
     txid: address,
     change_utxo_ids: vector<UtxoId>,
@@ -752,7 +752,7 @@ public struct WithdrawalConfirmedEvent has copy, drop {
     change_utxo_amounts: vector<u64>,
 }
 
-public struct WithdrawalCancelledEvent has copy, drop {
+public struct WithdrawalCancelled has copy, drop {
     request_id: address,
     requester_address: address,
     btc_amount: u64,

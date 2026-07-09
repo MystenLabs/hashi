@@ -155,7 +155,7 @@ flowchart TD
     GRL -.->|"GetGuardianInfo<br/>(bootstrap only)"| LL
     BLS_GW -->|"witness signatures + cert"| SUBMIT_SIGS
     SUBMIT_SIGS -->|"signatures<br/>stored on-chain"| PW_SIGNED
-    PW_SIGNED -.->|"WithdrawalSignedEvent<br/>each node's observer:<br/>apply_consume(next_seq, ts, amt)"| LL
+    PW_SIGNED -.->|"WithdrawalSigned<br/>each node's observer:<br/>apply_consume(next_seq, ts, amt)"| LL
     PW_SIGNED -->|"Reconstruct & broadcast<br/>signed BTC tx"| BTC_TX
     BTC_TX --> BTC_UTXO
     BTC_UTXO -.->|"Observe confirmation<br/>(N confirmations)"| SIGN2
@@ -188,7 +188,7 @@ rotation or mempool eviction).
 
 **Limiter coordination.** The `LocalLimiter` on each committee node is a
 deterministic projection of the onchain stream. Its `next_seq` advances
-**only** when the node's watcher observes `WithdrawalSignedEvent` for a
+**only** when the node's watcher observes `WithdrawalSigned` for a
 withdrawal. The MPC signing path uses `validate_consume` (read-only) to
 gate participation, never to mutate state. The leader's flow only reaches
 `sign_withdrawal()` after `finalize_withdrawal_through_guardian` returns
@@ -212,7 +212,7 @@ failures. On startup, each node bootstraps its `LocalLimiter` once through
 | 6    | Leader BLS-certs `StandardWithdrawalRequest` | Aggregated cert over `(wid, seq, ts, utxos)` — input to the guardian RPC    |
 | 7    | Guardian rate-limit check + enclave sig      | `StandardWithdrawal` RPC: verify cert → `consume(wid, seq)` → `EnclaveSig`  |
 | 8    | Leader stores witness signatures onchain     | `sign_withdrawal()` → `WithdrawalTransaction` updated with signatures       |
-| 9    | Each node advances its `LocalLimiter`        | Watcher observes `WithdrawalSignedEvent` → `apply_consume(seq, ts, amt)`    |
+| 9    | Each node advances its `LocalLimiter`        | Watcher observes `WithdrawalSigned` → `apply_consume(seq, ts, amt)`    |
 | 10   | BTC transaction broadcast (and re-broadcast) | Signed tx reconstructed from onchain data, broadcast to Bitcoin             |
 | 11   | Committee signs confirmation certificate     | `CommitteeSignature` created after BTC tx confirmed                         |
 | 12   | Leader confirms withdrawal                   | `WithdrawalTransaction` moved to `.confirmed_txns`, UTXOs marked spent      |

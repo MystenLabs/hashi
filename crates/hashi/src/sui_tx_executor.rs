@@ -38,8 +38,8 @@ use hashi_types::committee::Bls12381PrivateKey;
 use hashi_types::committee::CommitteeSignature;
 use hashi_types::committee::EncryptionPublicKey;
 use hashi_types::committee::SignedMessage;
-use hashi_types::move_types::DepositRequestedEvent;
-use hashi_types::move_types::WithdrawalRequestedEvent;
+use hashi_types::move_types::DepositRequested;
+use hashi_types::move_types::WithdrawalRequested;
 
 /// Construct a `CommitteeSignature` via a Move call in the PTB.
 ///
@@ -739,15 +739,15 @@ impl SuiTxExecutor {
         let mut request_ids = Vec::new();
         for event in events.events() {
             let event_type = event.contents().name();
-            if event_type.contains("DepositRequestedEvent") {
-                let event_data = DepositRequestedEvent::from_bcs(event.contents().value())?;
+            if event_type.contains("DepositRequested") {
+                let event_data = DepositRequested::from_bcs(event.contents().value())?;
                 request_ids.push(event_data.request_id);
             }
         }
 
         anyhow::ensure!(
             request_ids.len() == utxos.len(),
-            "Expected {} DepositRequestedEvents but found {}",
+            "Expected {} DepositRequesteds but found {}",
             utxos.len(),
             request_ids.len(),
         );
@@ -834,15 +834,15 @@ impl SuiTxExecutor {
         let events = response.transaction().events();
         let mut request_ids = Vec::new();
         for event in events.events() {
-            if event.contents().name().contains("DepositRequestedEvent") {
-                let event_data = DepositRequestedEvent::from_bcs(event.contents().value())?;
+            if event.contents().name().contains("DepositRequested") {
+                let event_data = DepositRequested::from_bcs(event.contents().value())?;
                 request_ids.push(event_data.request_id);
             }
         }
 
         anyhow::ensure!(
             request_ids.len() == deposits.len(),
-            "Expected {} DepositRequestedEvents but found {}",
+            "Expected {} DepositRequesteds but found {}",
             deposits.len(),
             request_ids.len(),
         );
@@ -967,15 +967,15 @@ impl SuiTxExecutor {
 
         let mut request_ids = Vec::with_capacity(count);
         for event in response.transaction().events().events() {
-            if event.contents().name().contains("WithdrawalRequestedEvent") {
-                let event_data = WithdrawalRequestedEvent::from_bcs(event.contents().value())?;
+            if event.contents().name().contains("WithdrawalRequested") {
+                let event_data = WithdrawalRequested::from_bcs(event.contents().value())?;
                 request_ids.push(event_data.request_id);
             }
         }
 
         anyhow::ensure!(
             request_ids.len() == count,
-            "Expected {} WithdrawalRequestedEvents but found {}",
+            "Expected {} WithdrawalRequesteds but found {}",
             count,
             request_ids.len(),
         );
@@ -1734,12 +1734,12 @@ pub fn deposit_request_id_from_response(
     response: &ExecuteTransactionResponse,
 ) -> anyhow::Result<Address> {
     for event in response.transaction().events().events() {
-        if event.contents().name().contains("DepositRequestedEvent") {
-            let event_data = DepositRequestedEvent::from_bcs(event.contents().value())?;
+        if event.contents().name().contains("DepositRequested") {
+            let event_data = DepositRequested::from_bcs(event.contents().value())?;
             return Ok(event_data.request_id);
         }
     }
-    anyhow::bail!("DepositRequestedEvent not found in transaction events")
+    anyhow::bail!("DepositRequested not found in transaction events")
 }
 
 /// Build the PTB for a withdrawal request. The `Balance<BTC>` is drawn from the
@@ -1790,12 +1790,12 @@ pub fn withdrawal_request_id_from_response(
     response: &ExecuteTransactionResponse,
 ) -> anyhow::Result<Address> {
     for event in response.transaction().events().events() {
-        if event.contents().name().contains("WithdrawalRequestedEvent") {
-            let event_data = WithdrawalRequestedEvent::from_bcs(event.contents().value())?;
+        if event.contents().name().contains("WithdrawalRequested") {
+            let event_data = WithdrawalRequested::from_bcs(event.contents().value())?;
             return Ok(event_data.request_id);
         }
     }
-    anyhow::bail!("WithdrawalRequestedEvent not found in transaction events")
+    anyhow::bail!("WithdrawalRequested not found in transaction events")
 }
 
 /// Build the PTB for cancelling a withdrawal. The refunded `Balance<BTC>` is

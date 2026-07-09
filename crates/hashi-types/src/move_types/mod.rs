@@ -820,29 +820,29 @@ pub struct DealerSubmissionV1 {
 pub enum HashiEvent {
     ValidatorRegistered(ValidatorRegistered),
     ValidatorUpdated(ValidatorUpdated),
-    VoteCastEvent(VoteCastEvent),
-    VoteRemovedEvent(VoteRemovedEvent),
-    ProposalCreatedEvent(ProposalCreatedEvent),
-    ProposalDeletedEvent(ProposalDeletedEvent),
-    ProposalExecutedEvent(ProposalExecutedEvent),
-    QuorumReachedEvent(QuorumReachedEvent),
-    PackageUpgradedEvent(PackageUpgradedEvent),
-    MintEvent(MintEvent),
-    BurnEvent(BurnEvent),
-    DepositRequestedEvent(DepositRequestedEvent),
-    DepositApprovedEvent(DepositApprovedEvent),
-    DepositConfirmedEvent(DepositConfirmedEvent),
-    ExpiredDepositDeletedEvent(ExpiredDepositDeletedEvent),
-    WithdrawalRequestedEvent(WithdrawalRequestedEvent),
-    WithdrawalApprovedEvent(WithdrawalApprovedEvent),
-    WithdrawalPickedForProcessingEvent(WithdrawalPickedForProcessingEvent),
-    WithdrawalSignedEvent(WithdrawalSignedEvent),
-    WithdrawalInputsSignedEvent(WithdrawalInputsSignedEvent),
-    WithdrawalPresigsReassignedEvent(WithdrawalPresigsReassignedEvent),
-    WithdrawalConfirmedEvent(WithdrawalConfirmedEvent),
-    UtxoSpentEvent(UtxoSpentEvent),
-    StartReconfigEvent(StartReconfigEvent),
-    EndReconfigEvent(EndReconfigEvent),
+    VoteCast(VoteCast),
+    VoteRemoved(VoteRemoved),
+    ProposalCreated(ProposalCreated),
+    ProposalDeleted(ProposalDeleted),
+    ProposalExecuted(ProposalExecuted),
+    QuorumReached(QuorumReached),
+    PackageUpgraded(PackageUpgraded),
+    Minted(Minted),
+    Burned(Burned),
+    DepositRequested(DepositRequested),
+    DepositApproved(DepositApproved),
+    DepositConfirmed(DepositConfirmed),
+    ExpiredDepositDeleted(ExpiredDepositDeleted),
+    WithdrawalRequested(WithdrawalRequested),
+    WithdrawalApproved(WithdrawalApproved),
+    WithdrawalPickedForProcessing(WithdrawalPickedForProcessing),
+    WithdrawalSigned(WithdrawalSigned),
+    WithdrawalInputsSigned(WithdrawalInputsSigned),
+    WithdrawalPresigsReassigned(WithdrawalPresigsReassigned),
+    WithdrawalConfirmed(WithdrawalConfirmed),
+    UtxoSpent(UtxoSpent),
+    ReconfigStarted(ReconfigStarted),
+    ReconfigEnded(ReconfigEnded),
 }
 
 impl HashiEvent {
@@ -860,62 +860,62 @@ impl HashiEvent {
         let event = match (event_type.module().as_str(), event_type.name().as_str()) {
             ValidatorRegistered::MODULE_NAME => ValidatorRegistered::from_bcs(bcs.value())?.into(),
             ValidatorUpdated::MODULE_NAME => ValidatorUpdated::from_bcs(bcs.value())?.into(),
-            VoteCastEvent::MODULE_NAME => VoteCastEvent::new(&event_type, bcs.value())?.into(),
-            VoteRemovedEvent::MODULE_NAME => {
-                VoteRemovedEvent::new(&event_type, bcs.value())?.into()
+            VoteCast::MODULE_NAME => VoteCast::new(&event_type, bcs.value())?.into(),
+            VoteRemoved::MODULE_NAME => {
+                VoteRemoved::new(&event_type, bcs.value())?.into()
             }
-            ProposalCreatedEvent::MODULE_NAME => {
-                ProposalCreatedEvent::new(&event_type, bcs.value())?.into()
+            ProposalCreated::MODULE_NAME => {
+                ProposalCreated::new(&event_type, bcs.value())?.into()
             }
-            ProposalDeletedEvent::MODULE_NAME => {
-                ProposalDeletedEvent::new(&event_type, bcs.value())?.into()
+            ProposalDeleted::MODULE_NAME => {
+                ProposalDeleted::new(&event_type, bcs.value())?.into()
             }
-            ProposalExecutedEvent::MODULE_NAME => {
-                ProposalExecutedEvent::new(&event_type, bcs.value())?.into()
+            ProposalExecuted::MODULE_NAME => {
+                ProposalExecuted::new(&event_type, bcs.value())?.into()
             }
-            QuorumReachedEvent::MODULE_NAME => {
-                QuorumReachedEvent::new(&event_type, bcs.value())?.into()
+            QuorumReached::MODULE_NAME => {
+                QuorumReached::new(&event_type, bcs.value())?.into()
             }
-            MintEvent::MODULE_NAME => MintEvent::new(&event_type, bcs.value())?.into(),
-            BurnEvent::MODULE_NAME => BurnEvent::new(&event_type, bcs.value())?.into(),
-            DepositRequestedEvent::MODULE_NAME => {
-                DepositRequestedEvent::from_bcs(bcs.value())?.into()
+            Minted::MODULE_NAME => Minted::new(&event_type, bcs.value())?.into(),
+            Burned::MODULE_NAME => Burned::new(&event_type, bcs.value())?.into(),
+            DepositRequested::MODULE_NAME => {
+                DepositRequested::from_bcs(bcs.value())?.into()
             }
-            DepositApprovedEvent::MODULE_NAME => {
-                DepositApprovedEvent::from_bcs(bcs.value())?.into()
+            DepositApproved::MODULE_NAME => {
+                DepositApproved::from_bcs(bcs.value())?.into()
             }
-            DepositConfirmedEvent::MODULE_NAME => {
-                DepositConfirmedEvent::from_bcs(bcs.value())?.into()
+            DepositConfirmed::MODULE_NAME => {
+                DepositConfirmed::from_bcs(bcs.value())?.into()
             }
-            ExpiredDepositDeletedEvent::MODULE_NAME => {
-                ExpiredDepositDeletedEvent::from_bcs(bcs.value())?.into()
+            ExpiredDepositDeleted::MODULE_NAME => {
+                ExpiredDepositDeleted::from_bcs(bcs.value())?.into()
             }
-            WithdrawalRequestedEvent::MODULE_NAME => {
-                WithdrawalRequestedEvent::from_bcs(bcs.value())?.into()
+            WithdrawalRequested::MODULE_NAME => {
+                WithdrawalRequested::from_bcs(bcs.value())?.into()
             }
-            WithdrawalApprovedEvent::MODULE_NAME => {
-                WithdrawalApprovedEvent::from_bcs(bcs.value())?.into()
+            WithdrawalApproved::MODULE_NAME => {
+                WithdrawalApproved::from_bcs(bcs.value())?.into()
             }
-            WithdrawalPickedForProcessingEvent::MODULE_NAME => {
-                WithdrawalPickedForProcessingEvent::from_bcs(bcs.value())?.into()
+            WithdrawalPickedForProcessing::MODULE_NAME => {
+                WithdrawalPickedForProcessing::from_bcs(bcs.value())?.into()
             }
-            WithdrawalSignedEvent::MODULE_NAME => {
-                WithdrawalSignedEvent::from_bcs(bcs.value())?.into()
+            WithdrawalSigned::MODULE_NAME => {
+                WithdrawalSigned::from_bcs(bcs.value())?.into()
             }
-            WithdrawalInputsSignedEvent::MODULE_NAME => {
-                WithdrawalInputsSignedEvent::from_bcs(bcs.value())?.into()
+            WithdrawalInputsSigned::MODULE_NAME => {
+                WithdrawalInputsSigned::from_bcs(bcs.value())?.into()
             }
-            WithdrawalPresigsReassignedEvent::MODULE_NAME => {
-                WithdrawalPresigsReassignedEvent::from_bcs(bcs.value())?.into()
+            WithdrawalPresigsReassigned::MODULE_NAME => {
+                WithdrawalPresigsReassigned::from_bcs(bcs.value())?.into()
             }
-            WithdrawalConfirmedEvent::MODULE_NAME => {
-                WithdrawalConfirmedEvent::from_bcs(bcs.value())?.into()
+            WithdrawalConfirmed::MODULE_NAME => {
+                WithdrawalConfirmed::from_bcs(bcs.value())?.into()
             }
-            UtxoSpentEvent::MODULE_NAME => UtxoSpentEvent::from_bcs(bcs.value())?.into(),
-            StartReconfigEvent::MODULE_NAME => StartReconfigEvent::from_bcs(bcs.value())?.into(),
-            EndReconfigEvent::MODULE_NAME => EndReconfigEvent::from_bcs(bcs.value())?.into(),
-            PackageUpgradedEvent::MODULE_NAME => {
-                PackageUpgradedEvent::from_bcs(bcs.value())?.into()
+            UtxoSpent::MODULE_NAME => UtxoSpent::from_bcs(bcs.value())?.into(),
+            ReconfigStarted::MODULE_NAME => ReconfigStarted::from_bcs(bcs.value())?.into(),
+            ReconfigEnded::MODULE_NAME => ReconfigEnded::from_bcs(bcs.value())?.into(),
+            PackageUpgraded::MODULE_NAME => {
+                PackageUpgraded::from_bcs(bcs.value())?.into()
             }
             _ => {
                 return Ok(None);
@@ -959,13 +959,13 @@ impl From<ValidatorUpdated> for HashiEvent {
 }
 
 #[derive(Debug)]
-pub struct ProposalCreatedEvent {
+pub struct ProposalCreated {
     pub proposal_id: Address,
     pub timestamp_ms: u64,
     pub proposal_type: TypeTag,
 }
 
-impl ProposalCreatedEvent {
+impl ProposalCreated {
     fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
         let proposal_type = extract_type_param::<Self>(event_type)?;
         let (proposal_id, timestamp_ms): (Address, u64) = bcs::from_bytes(bcs)?;
@@ -977,25 +977,25 @@ impl ProposalCreatedEvent {
     }
 }
 
-impl MoveType for ProposalCreatedEvent {
+impl MoveType for ProposalCreated {
     const MODULE: &'static str = "proposal";
-    const NAME: &'static str = "ProposalCreatedEvent";
+    const NAME: &'static str = "ProposalCreated";
 }
 
-impl From<ProposalCreatedEvent> for HashiEvent {
-    fn from(value: ProposalCreatedEvent) -> Self {
-        Self::ProposalCreatedEvent(value)
+impl From<ProposalCreated> for HashiEvent {
+    fn from(value: ProposalCreated) -> Self {
+        Self::ProposalCreated(value)
     }
 }
 
 #[derive(Debug)]
-pub struct VoteCastEvent {
+pub struct VoteCast {
     pub proposal_id: Address,
     pub voter: Address,
     pub proposal_type: TypeTag,
 }
 
-impl VoteCastEvent {
+impl VoteCast {
     fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
         let proposal_type = extract_type_param::<Self>(event_type)?;
         let (proposal_id, voter): (Address, Address) = bcs::from_bytes(bcs)?;
@@ -1007,25 +1007,25 @@ impl VoteCastEvent {
     }
 }
 
-impl MoveType for VoteCastEvent {
+impl MoveType for VoteCast {
     const MODULE: &'static str = "proposal";
-    const NAME: &'static str = "VoteCastEvent";
+    const NAME: &'static str = "VoteCast";
 }
 
-impl From<VoteCastEvent> for HashiEvent {
-    fn from(value: VoteCastEvent) -> Self {
-        Self::VoteCastEvent(value)
+impl From<VoteCast> for HashiEvent {
+    fn from(value: VoteCast) -> Self {
+        Self::VoteCast(value)
     }
 }
 
 #[derive(Debug)]
-pub struct VoteRemovedEvent {
+pub struct VoteRemoved {
     pub proposal_id: Address,
     pub voter: Address,
     pub proposal_type: TypeTag,
 }
 
-impl VoteRemovedEvent {
+impl VoteRemoved {
     fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
         let proposal_type = extract_type_param::<Self>(event_type)?;
         let (proposal_id, voter): (Address, Address) = bcs::from_bytes(bcs)?;
@@ -1037,24 +1037,24 @@ impl VoteRemovedEvent {
     }
 }
 
-impl MoveType for VoteRemovedEvent {
+impl MoveType for VoteRemoved {
     const MODULE: &'static str = "proposal";
-    const NAME: &'static str = "VoteRemovedEvent";
+    const NAME: &'static str = "VoteRemoved";
 }
 
-impl From<VoteRemovedEvent> for HashiEvent {
-    fn from(value: VoteRemovedEvent) -> Self {
-        Self::VoteRemovedEvent(value)
+impl From<VoteRemoved> for HashiEvent {
+    fn from(value: VoteRemoved) -> Self {
+        Self::VoteRemoved(value)
     }
 }
 
 #[derive(Debug)]
-pub struct ProposalDeletedEvent {
+pub struct ProposalDeleted {
     pub proposal_id: Address,
     pub proposal_type: TypeTag,
 }
 
-impl ProposalDeletedEvent {
+impl ProposalDeleted {
     fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
         let proposal_type = extract_type_param::<Self>(event_type)?;
         let proposal_id: Address = bcs::from_bytes(bcs)?;
@@ -1065,35 +1065,35 @@ impl ProposalDeletedEvent {
     }
 }
 
-impl MoveType for ProposalDeletedEvent {
+impl MoveType for ProposalDeleted {
     const MODULE: &'static str = "proposal";
-    const NAME: &'static str = "ProposalDeletedEvent";
+    const NAME: &'static str = "ProposalDeleted";
 }
 
-impl From<ProposalDeletedEvent> for HashiEvent {
-    fn from(value: ProposalDeletedEvent) -> Self {
-        Self::ProposalDeletedEvent(value)
+impl From<ProposalDeleted> for HashiEvent {
+    fn from(value: ProposalDeleted) -> Self {
+        Self::ProposalDeleted(value)
     }
 }
 
 #[derive(Debug)]
-pub struct ProposalExecutedEvent {
+pub struct ProposalExecuted {
     pub proposal_id: Address,
     pub proposal_type: TypeTag,
     /// BCS-encoded bytes of the proposal `data` payload (`T` in the Move
-    /// `ProposalExecutedEvent<T>`). Decode using `proposal_type` to get the
+    /// `ProposalExecuted<T>`). Decode using `proposal_type` to get the
     /// typed value.
     pub data_bcs: Vec<u8>,
 }
 
-impl ProposalExecutedEvent {
+impl ProposalExecuted {
     fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
         let proposal_type = extract_type_param::<Self>(event_type)?;
         // Layout is `(proposal_id: Address, data: T)`; Address is a fixed
         // 32-byte BCS encoding with no length prefix, so split there.
         if bcs.len() < 32 {
             anyhow::bail!(
-                "ProposalExecutedEvent payload too short: {} bytes",
+                "ProposalExecuted payload too short: {} bytes",
                 bcs.len()
             );
         }
@@ -1107,24 +1107,24 @@ impl ProposalExecutedEvent {
     }
 }
 
-impl MoveType for ProposalExecutedEvent {
+impl MoveType for ProposalExecuted {
     const MODULE: &'static str = "proposal";
-    const NAME: &'static str = "ProposalExecutedEvent";
+    const NAME: &'static str = "ProposalExecuted";
 }
 
-impl From<ProposalExecutedEvent> for HashiEvent {
-    fn from(value: ProposalExecutedEvent) -> Self {
-        Self::ProposalExecutedEvent(value)
+impl From<ProposalExecuted> for HashiEvent {
+    fn from(value: ProposalExecuted) -> Self {
+        Self::ProposalExecuted(value)
     }
 }
 
 #[derive(Debug)]
-pub struct QuorumReachedEvent {
+pub struct QuorumReached {
     pub proposal_id: Address,
     pub proposal_type: TypeTag,
 }
 
-impl QuorumReachedEvent {
+impl QuorumReached {
     fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
         let proposal_type = extract_type_param::<Self>(event_type)?;
         let proposal_id: Address = bcs::from_bytes(bcs)?;
@@ -1135,46 +1135,46 @@ impl QuorumReachedEvent {
     }
 }
 
-impl MoveType for QuorumReachedEvent {
+impl MoveType for QuorumReached {
     const MODULE: &'static str = "proposal";
-    const NAME: &'static str = "QuorumReachedEvent";
+    const NAME: &'static str = "QuorumReached";
 }
 
-impl From<QuorumReachedEvent> for HashiEvent {
-    fn from(value: QuorumReachedEvent) -> Self {
-        Self::QuorumReachedEvent(value)
+impl From<QuorumReached> for HashiEvent {
+    fn from(value: QuorumReached) -> Self {
+        Self::QuorumReached(value)
     }
 }
 
 #[derive(Debug, serde_derive::Deserialize)]
-pub struct PackageUpgradedEvent {
+pub struct PackageUpgraded {
     pub package: Address,
     pub version: u64,
 }
 
-impl MoveType for PackageUpgradedEvent {
+impl MoveType for PackageUpgraded {
     const MODULE: &'static str = "upgrade";
-    const NAME: &'static str = "PackageUpgradedEvent";
+    const NAME: &'static str = "PackageUpgraded";
 }
 
-impl From<PackageUpgradedEvent> for HashiEvent {
-    fn from(value: PackageUpgradedEvent) -> Self {
-        Self::PackageUpgradedEvent(value)
+impl From<PackageUpgraded> for HashiEvent {
+    fn from(value: PackageUpgraded) -> Self {
+        Self::PackageUpgraded(value)
     }
 }
 
 #[derive(Debug)]
-pub struct MintEvent {
+pub struct Minted {
     pub coin_type: TypeTag,
     pub amount: u64,
 }
 
-impl MoveType for MintEvent {
+impl MoveType for Minted {
     const MODULE: &'static str = "treasury";
-    const NAME: &'static str = "MintEvent";
+    const NAME: &'static str = "Minted";
 }
 
-impl MintEvent {
+impl Minted {
     fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
         let coin_type = extract_type_param::<Self>(event_type)?;
         Ok(Self {
@@ -1184,24 +1184,24 @@ impl MintEvent {
     }
 }
 
-impl From<MintEvent> for HashiEvent {
-    fn from(value: MintEvent) -> Self {
-        Self::MintEvent(value)
+impl From<Minted> for HashiEvent {
+    fn from(value: Minted) -> Self {
+        Self::Minted(value)
     }
 }
 
 #[derive(Debug)]
-pub struct BurnEvent {
+pub struct Burned {
     pub coin_type: TypeTag,
     pub amount: u64,
 }
 
-impl MoveType for BurnEvent {
+impl MoveType for Burned {
     const MODULE: &'static str = "treasury";
-    const NAME: &'static str = "BurnEvent";
+    const NAME: &'static str = "Burned";
 }
 
-impl BurnEvent {
+impl Burned {
     fn new(event_type: &StructTag, bcs: &[u8]) -> Result<Self, anyhow::Error> {
         let coin_type = extract_type_param::<Self>(event_type)?;
         Ok(Self {
@@ -1211,14 +1211,14 @@ impl BurnEvent {
     }
 }
 
-impl From<BurnEvent> for HashiEvent {
-    fn from(value: BurnEvent) -> Self {
-        Self::BurnEvent(value)
+impl From<Burned> for HashiEvent {
+    fn from(value: Burned) -> Self {
+        Self::Burned(value)
     }
 }
 
 #[derive(Debug, serde_derive::Deserialize)]
-pub struct DepositRequestedEvent {
+pub struct DepositRequested {
     pub request_id: Address,
     pub utxo_id: UtxoId,
     pub amount: u64,
@@ -1228,14 +1228,14 @@ pub struct DepositRequestedEvent {
     pub sui_tx_digest: Digest,
 }
 
-impl MoveType for DepositRequestedEvent {
+impl MoveType for DepositRequested {
     const MODULE: &'static str = "deposit";
-    const NAME: &'static str = "DepositRequestedEvent";
+    const NAME: &'static str = "DepositRequested";
 }
 
-impl From<DepositRequestedEvent> for HashiEvent {
-    fn from(value: DepositRequestedEvent) -> Self {
-        Self::DepositRequestedEvent(value)
+impl From<DepositRequested> for HashiEvent {
+    fn from(value: DepositRequested) -> Self {
+        Self::DepositRequested(value)
     }
 }
 
@@ -1245,61 +1245,61 @@ impl From<DepositRequestedEvent> for HashiEvent {
 /// `approved_timestamp_ms` is the on-chain clock timestamp recorded on
 /// the request, against which `confirm_deposit` enforces the delay.
 #[derive(Debug, serde_derive::Deserialize)]
-pub struct DepositApprovedEvent {
+pub struct DepositApproved {
     pub request_id: Address,
     pub utxo: Utxo,
     pub cert: CommitteeSignature,
     pub approved_timestamp_ms: u64,
 }
 
-impl MoveType for DepositApprovedEvent {
+impl MoveType for DepositApproved {
     const MODULE: &'static str = "deposit";
-    const NAME: &'static str = "DepositApprovedEvent";
+    const NAME: &'static str = "DepositApproved";
 }
 
-impl From<DepositApprovedEvent> for HashiEvent {
-    fn from(value: DepositApprovedEvent) -> Self {
-        Self::DepositApprovedEvent(value)
+impl From<DepositApproved> for HashiEvent {
+    fn from(value: DepositApproved) -> Self {
+        Self::DepositApproved(value)
     }
 }
 
 /// Emitted by `confirm_deposit` once an approved deposit clears the
 /// time-delay window and the corresponding `hBTC` is minted.
 #[derive(Debug, serde_derive::Deserialize)]
-pub struct DepositConfirmedEvent {
+pub struct DepositConfirmed {
     pub request_id: Address,
     pub utxo: Utxo,
 }
 
-impl MoveType for DepositConfirmedEvent {
+impl MoveType for DepositConfirmed {
     const MODULE: &'static str = "deposit";
-    const NAME: &'static str = "DepositConfirmedEvent";
+    const NAME: &'static str = "DepositConfirmed";
 }
 
-impl From<DepositConfirmedEvent> for HashiEvent {
-    fn from(value: DepositConfirmedEvent) -> Self {
-        Self::DepositConfirmedEvent(value)
+impl From<DepositConfirmed> for HashiEvent {
+    fn from(value: DepositConfirmed) -> Self {
+        Self::DepositConfirmed(value)
     }
 }
 
 #[derive(Debug, serde_derive::Deserialize)]
-pub struct ExpiredDepositDeletedEvent {
+pub struct ExpiredDepositDeleted {
     pub request_id: Address,
 }
 
-impl MoveType for ExpiredDepositDeletedEvent {
+impl MoveType for ExpiredDepositDeleted {
     const MODULE: &'static str = "deposit";
-    const NAME: &'static str = "ExpiredDepositDeletedEvent";
+    const NAME: &'static str = "ExpiredDepositDeleted";
 }
 
-impl From<ExpiredDepositDeletedEvent> for HashiEvent {
-    fn from(value: ExpiredDepositDeletedEvent) -> Self {
-        Self::ExpiredDepositDeletedEvent(value)
+impl From<ExpiredDepositDeleted> for HashiEvent {
+    fn from(value: ExpiredDepositDeleted) -> Self {
+        Self::ExpiredDepositDeleted(value)
     }
 }
 
 #[derive(Debug, serde_derive::Deserialize)]
-pub struct WithdrawalRequestedEvent {
+pub struct WithdrawalRequested {
     pub request_id: Address,
     pub btc_amount: u64,
     pub bitcoin_address: Vec<u8>,
@@ -1308,35 +1308,35 @@ pub struct WithdrawalRequestedEvent {
     pub sui_tx_digest: Digest,
 }
 
-impl MoveType for WithdrawalRequestedEvent {
+impl MoveType for WithdrawalRequested {
     const MODULE: &'static str = "withdrawal_queue";
-    const NAME: &'static str = "WithdrawalRequestedEvent";
+    const NAME: &'static str = "WithdrawalRequested";
 }
 
-impl From<WithdrawalRequestedEvent> for HashiEvent {
-    fn from(value: WithdrawalRequestedEvent) -> Self {
-        Self::WithdrawalRequestedEvent(value)
+impl From<WithdrawalRequested> for HashiEvent {
+    fn from(value: WithdrawalRequested) -> Self {
+        Self::WithdrawalRequested(value)
     }
 }
 
 #[derive(Debug, serde_derive::Deserialize)]
-pub struct WithdrawalApprovedEvent {
+pub struct WithdrawalApproved {
     pub request_id: Address,
 }
 
-impl MoveType for WithdrawalApprovedEvent {
+impl MoveType for WithdrawalApproved {
     const MODULE: &'static str = "withdrawal_queue";
-    const NAME: &'static str = "WithdrawalApprovedEvent";
+    const NAME: &'static str = "WithdrawalApproved";
 }
 
-impl From<WithdrawalApprovedEvent> for HashiEvent {
-    fn from(value: WithdrawalApprovedEvent) -> Self {
-        Self::WithdrawalApprovedEvent(value)
+impl From<WithdrawalApproved> for HashiEvent {
+    fn from(value: WithdrawalApproved) -> Self {
+        Self::WithdrawalApproved(value)
     }
 }
 
 #[derive(Debug, serde_derive::Deserialize)]
-pub struct WithdrawalPickedForProcessingEvent {
+pub struct WithdrawalPickedForProcessing {
     pub withdrawal_txn_id: Address,
     pub txid: BitcoinTxid,
     pub request_ids: Vec<Address>,
@@ -1349,19 +1349,19 @@ pub struct WithdrawalPickedForProcessingEvent {
     pub randomness: Vec<u8>,
 }
 
-impl MoveType for WithdrawalPickedForProcessingEvent {
+impl MoveType for WithdrawalPickedForProcessing {
     const MODULE: &'static str = "withdrawal_queue";
-    const NAME: &'static str = "WithdrawalPickedForProcessingEvent";
+    const NAME: &'static str = "WithdrawalPickedForProcessing";
 }
 
-impl From<WithdrawalPickedForProcessingEvent> for HashiEvent {
-    fn from(value: WithdrawalPickedForProcessingEvent) -> Self {
-        Self::WithdrawalPickedForProcessingEvent(value)
+impl From<WithdrawalPickedForProcessing> for HashiEvent {
+    fn from(value: WithdrawalPickedForProcessing) -> Self {
+        Self::WithdrawalPickedForProcessing(value)
     }
 }
 
 #[derive(Debug, serde_derive::Deserialize)]
-pub struct WithdrawalSignedEvent {
+pub struct WithdrawalSigned {
     pub withdrawal_txn_id: Address,
     pub request_ids: Vec<Address>,
     /// Per-input MPC committee Schnorr signatures.
@@ -1371,57 +1371,57 @@ pub struct WithdrawalSignedEvent {
     pub guardian_signatures: Vec<Vec<u8>>,
 }
 
-impl MoveType for WithdrawalSignedEvent {
+impl MoveType for WithdrawalSigned {
     const MODULE: &'static str = "withdrawal_queue";
-    const NAME: &'static str = "WithdrawalSignedEvent";
+    const NAME: &'static str = "WithdrawalSigned";
 }
 
-impl From<WithdrawalSignedEvent> for HashiEvent {
-    fn from(value: WithdrawalSignedEvent) -> Self {
-        Self::WithdrawalSignedEvent(value)
+impl From<WithdrawalSigned> for HashiEvent {
+    fn from(value: WithdrawalSigned) -> Self {
+        Self::WithdrawalSigned(value)
     }
 }
 
 /// Emitted on each incremental chunk write so the watcher can track signing
 /// progress (signed_count / num_inputs); the per-input state lives on the object.
 #[derive(Debug, serde_derive::Deserialize)]
-pub struct WithdrawalInputsSignedEvent {
+pub struct WithdrawalInputsSigned {
     pub withdrawal_txn_id: Address,
     pub signed_count: u64,
     pub num_inputs: u64,
 }
 
-impl MoveType for WithdrawalInputsSignedEvent {
+impl MoveType for WithdrawalInputsSigned {
     const MODULE: &'static str = "withdrawal_queue";
-    const NAME: &'static str = "WithdrawalInputsSignedEvent";
+    const NAME: &'static str = "WithdrawalInputsSigned";
 }
 
-impl From<WithdrawalInputsSignedEvent> for HashiEvent {
-    fn from(value: WithdrawalInputsSignedEvent) -> Self {
-        Self::WithdrawalInputsSignedEvent(value)
+impl From<WithdrawalInputsSigned> for HashiEvent {
+    fn from(value: WithdrawalInputsSigned) -> Self {
+        Self::WithdrawalInputsSigned(value)
     }
 }
 
 #[derive(Debug, serde_derive::Deserialize)]
-pub struct WithdrawalPresigsReassignedEvent {
+pub struct WithdrawalPresigsReassigned {
     pub withdrawal_txn_id: Address,
     pub epoch: u64,
     pub presig_start_index: u64,
 }
 
-impl MoveType for WithdrawalPresigsReassignedEvent {
+impl MoveType for WithdrawalPresigsReassigned {
     const MODULE: &'static str = "withdrawal_queue";
-    const NAME: &'static str = "WithdrawalPresigsReassignedEvent";
+    const NAME: &'static str = "WithdrawalPresigsReassigned";
 }
 
-impl From<WithdrawalPresigsReassignedEvent> for HashiEvent {
-    fn from(value: WithdrawalPresigsReassignedEvent) -> Self {
-        Self::WithdrawalPresigsReassignedEvent(value)
+impl From<WithdrawalPresigsReassigned> for HashiEvent {
+    fn from(value: WithdrawalPresigsReassigned) -> Self {
+        Self::WithdrawalPresigsReassigned(value)
     }
 }
 
 #[derive(Debug, serde_derive::Deserialize)]
-pub struct WithdrawalConfirmedEvent {
+pub struct WithdrawalConfirmed {
     pub withdrawal_txn_id: Address,
     pub txid: BitcoinTxid,
     /// Change UTXO IDs promoted to confirmed, in vout order. Empty when there
@@ -1432,65 +1432,65 @@ pub struct WithdrawalConfirmedEvent {
     pub change_utxo_amounts: Vec<u64>,
 }
 
-impl MoveType for WithdrawalConfirmedEvent {
+impl MoveType for WithdrawalConfirmed {
     const MODULE: &'static str = "withdrawal_queue";
-    const NAME: &'static str = "WithdrawalConfirmedEvent";
+    const NAME: &'static str = "WithdrawalConfirmed";
 }
 
-impl From<WithdrawalConfirmedEvent> for HashiEvent {
-    fn from(value: WithdrawalConfirmedEvent) -> Self {
-        Self::WithdrawalConfirmedEvent(value)
+impl From<WithdrawalConfirmed> for HashiEvent {
+    fn from(value: WithdrawalConfirmed) -> Self {
+        Self::WithdrawalConfirmed(value)
     }
 }
 
 #[derive(Debug, serde_derive::Deserialize)]
-pub struct UtxoSpentEvent {
+pub struct UtxoSpent {
     pub utxo_id: UtxoId,
     pub spent_epoch: u64,
 }
 
-impl MoveType for UtxoSpentEvent {
+impl MoveType for UtxoSpent {
     const MODULE: &'static str = "utxo_pool";
-    const NAME: &'static str = "UtxoSpentEvent";
+    const NAME: &'static str = "UtxoSpent";
 }
 
-impl From<UtxoSpentEvent> for HashiEvent {
-    fn from(value: UtxoSpentEvent) -> Self {
-        Self::UtxoSpentEvent(value)
+impl From<UtxoSpent> for HashiEvent {
+    fn from(value: UtxoSpent) -> Self {
+        Self::UtxoSpent(value)
     }
 }
 
 #[derive(Debug, serde_derive::Deserialize)]
-pub struct StartReconfigEvent {
+pub struct ReconfigStarted {
     pub epoch: u64,
 }
 
-impl MoveType for StartReconfigEvent {
+impl MoveType for ReconfigStarted {
     const MODULE: &'static str = "reconfig";
-    const NAME: &'static str = "StartReconfigEvent";
+    const NAME: &'static str = "ReconfigStarted";
 }
 
-impl From<StartReconfigEvent> for HashiEvent {
-    fn from(value: StartReconfigEvent) -> Self {
-        Self::StartReconfigEvent(value)
+impl From<ReconfigStarted> for HashiEvent {
+    fn from(value: ReconfigStarted) -> Self {
+        Self::ReconfigStarted(value)
     }
 }
 
 #[derive(Debug, serde_derive::Deserialize)]
-pub struct EndReconfigEvent {
+pub struct ReconfigEnded {
     pub from_epoch: u64,
     pub epoch: u64,
     pub mpc_public_key: Vec<u8>,
 }
 
-impl MoveType for EndReconfigEvent {
+impl MoveType for ReconfigEnded {
     const MODULE: &'static str = "reconfig";
-    const NAME: &'static str = "EndReconfigEvent";
+    const NAME: &'static str = "ReconfigEnded";
 }
 
-impl From<EndReconfigEvent> for HashiEvent {
-    fn from(value: EndReconfigEvent) -> Self {
-        Self::EndReconfigEvent(value)
+impl From<ReconfigEnded> for HashiEvent {
+    fn from(value: ReconfigEnded) -> Self {
+        Self::ReconfigEnded(value)
     }
 }
 

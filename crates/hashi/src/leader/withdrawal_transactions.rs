@@ -322,7 +322,7 @@ impl LeaderService {
             }
             // TODO(guardian-seq-durability): the guardian advances next_seq at
             // finalize-request, but the mirror only advances on the on-chain
-            // WithdrawalSignedEvent, so over the multi-checkpoint signing window the
+            // WithdrawalSigned, so over the multi-checkpoint signing window the
             // mirror can lag by several seqs. A leader with a stale/empty
             // `guardian_last_finalized` (e.g. just rotated in) can slip past the
             // should_defer check below and present a stale seq -> guardian rejects ->

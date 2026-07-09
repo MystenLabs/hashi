@@ -34,17 +34,17 @@ fun metadata_cap<T>(self: &mut Treasury): &mut MetadataCap<T> {
 }
 
 public(package) fun burn<T>(self: &mut Treasury, balance: Balance<T>) {
-    sui::event::emit(BurnEvent<T> { amount: balance.value() });
+    sui::event::emit(Burned<T> { amount: balance.value() });
     self.treasury_cap<T>().supply_mut().decrease_supply(balance);
 }
 
 public(package) fun mint<T>(self: &mut Treasury, amount: u64, ctx: &mut TxContext): Coin<T> {
-    sui::event::emit(MintEvent<T> { amount });
+    sui::event::emit(Minted<T> { amount });
     self.treasury_cap<T>().mint(amount, ctx)
 }
 
 public(package) fun mint_balance<T>(self: &mut Treasury, amount: u64): Balance<T> {
-    sui::event::emit(MintEvent<T> { amount });
+    sui::event::emit(Minted<T> { amount });
     self.treasury_cap<T>().mint_balance(amount)
 }
 
@@ -70,10 +70,10 @@ public(package) fun create(ctx: &mut TxContext): Treasury {
 // Events
 //
 
-public struct MintEvent<phantom T> has copy, drop {
+public struct Minted<phantom T> has copy, drop {
     amount: u64,
 }
 
-public struct BurnEvent<phantom T> has copy, drop {
+public struct Burned<phantom T> has copy, drop {
     amount: u64,
 }

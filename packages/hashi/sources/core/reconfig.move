@@ -49,7 +49,7 @@ entry fun start_reconfig(
             config,
             ctx,
         );
-    sui::event::emit(StartReconfigEvent { epoch });
+    sui::event::emit(ReconfigStarted { epoch });
 }
 
 entry fun end_reconfig(
@@ -87,7 +87,7 @@ entry fun end_reconfig(
                 committee_handoff_cert.destroy_some(),
             );
     };
-    sui::event::emit(EndReconfigEvent { from_epoch, epoch, mpc_public_key });
+    sui::event::emit(ReconfigEnded { from_epoch, epoch, mpc_public_key });
 }
 
 entry fun submit_committee_handoff(
@@ -124,11 +124,11 @@ public(package) fun assert_genesis_launch_authorized(self: &Hashi) {
     }
 }
 
-public struct StartReconfigEvent has copy, drop {
+public struct ReconfigStarted has copy, drop {
     epoch: u64,
 }
 
-public struct EndReconfigEvent has copy, drop {
+public struct ReconfigEnded has copy, drop {
     from_epoch: u64,
     epoch: u64,
     /// The MPC committee's threshold public key.

@@ -5,7 +5,7 @@
 //!
 //! Test modules across this crate (`e2e_flow`, `upgrade_tests`, ...) all need
 //! the same boilerplate to drive a localnet: init tracing, look up an hBTC
-//! balance, wait for a `DepositConfirmedEvent`, deposit-and-wait, etc. Define
+//! balance, wait for a `DepositConfirmed`, deposit-and-wait, etc. Define
 //! them here once and import from each test module.
 
 use anyhow::Result;
@@ -15,7 +15,7 @@ use bitcoin::Txid;
 use futures::StreamExt;
 use hashi::sui_tx_executor::SuiTxExecutor;
 use hashi_types::bitcoin::BitcoinAddress;
-use hashi_types::move_types::DepositConfirmedEvent;
+use hashi_types::move_types::DepositConfirmed;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -108,8 +108,8 @@ pub async fn wait_for_deposit_confirmation(
 
         for txn in checkpoint.checkpoint().transactions() {
             for event in txn.events().events() {
-                if event.contents().name().contains("DepositConfirmedEvent")
-                    && let Ok(evt) = DepositConfirmedEvent::from_bcs(event.contents().value())
+                if event.contents().name().contains("DepositConfirmed")
+                    && let Ok(evt) = DepositConfirmed::from_bcs(event.contents().value())
                     && evt.request_id == request_id
                 {
                     info!("Deposit confirmed for request_id: {request_id}");
