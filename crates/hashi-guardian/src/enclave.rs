@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::time::Duration;
+use tokio::sync::OwnedMutexGuard;
 use tracing::info;
 
 use crate::s3_client::GuardianS3Client;
@@ -283,19 +284,19 @@ impl EnclaveState {
             .map_err(|_| InvalidInputs("rate_limiter already initialized".into()))
     }
 
-    /// Acquire exclusive access to the limiter, consume tokens, and return a guard.
-    /// The guard holds the mutex lock — no other withdrawal can start until it is
-    /// committed or dropped (which reverts).
     /// Timeout for acquiring the limiter lock. If a withdrawal is in progress and
     /// takes longer than this, we bail rather than queue up requests indefinitely.
     const LIMITER_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
+    /// Acquire exclusive access to the limiter, consume tokens, and return a guard.
+    /// The guard is held through signing and durable logging so no other withdrawal
+    /// can start until this one is durably logged or the enclave aborts.
     pub async fn consume_from_limiter(
         &self,
         seq: u64,
         timestamp: u64,
         amount_sats: u64,
-    ) -> GuardianResult<LimiterGuard> {
+    ) -> GuardianResult<OwnedMutexGuard<RateLimiter>> {
         let rate_limiter = self
             .rate_limiter
             .get()
@@ -307,7 +308,7 @@ impl EnclaveState {
         .await
         .map_err(|_| InvalidInputs("timed out waiting for rate limiter lock".into()))?;
         guard.consume(seq, timestamp, amount_sats)?;
-        Ok(LimiterGuard::new(guard))
+        Ok(guard)
     }
 
     pub async fn limiter_state(&self) -> Option<LimiterState> {
@@ -318,39 +319,6 @@ impl EnclaveState {
     pub async fn limiter_config(&self) -> Option<LimiterConfig> {
         let limiter = self.rate_limiter.get()?;
         Some(*limiter.lock().await.config())
-    }
-}
-
-/// RAII guard that holds the limiter mutex via an owned guard, returned by
-/// [`EnclaveState::consume_from_limiter`]. Reverts on drop unless committed.
-pub struct LimiterGuard {
-    guard: tokio::sync::OwnedMutexGuard<RateLimiter>,
-    committed: bool,
-}
-
-impl LimiterGuard {
-    pub(crate) fn new(guard: tokio::sync::OwnedMutexGuard<RateLimiter>) -> Self {
-        Self {
-            guard,
-            committed: false,
-        }
-    }
-
-    /// Mark this withdrawal as successful. Prevents revert on drop.
-    pub fn commit(mut self) {
-        self.committed = true;
-    }
-
-    pub fn state(&self) -> &LimiterState {
-        self.guard.state()
-    }
-}
-
-impl Drop for LimiterGuard {
-    fn drop(&mut self) {
-        if !self.committed {
-            self.guard.revert();
-        }
     }
 }
 
@@ -526,29 +494,48 @@ impl Enclave {
         self.config.s3_logger()?.write_log_record(log).await
     }
 
+    async fn write_log_or_abort(&self, message: LogMessage) -> GuardianResult<()> {
+        let log = LogRecord::new(
+            self.s3_session_id(),
+            message,
+            &self.config.eph_keys.signing_keys,
+        );
+
+        self.config
+            .s3_logger()?
+            .write_log_record_or_abort(log)
+            .await
+    }
+
+    /// Only init skips grace-period retries, providing quick fail-stop for basic
+    /// S3 write/access issues. The incomplete enclave cannot serve and will restart,
+    /// so S3 being ahead after a lost acknowledgement is acceptable.
     pub async fn log_init(&self, msg: InitLogMessage) -> GuardianResult<()> {
         self.write_log(LogMessage::Init(Box::new(msg))).await
     }
 
     pub async fn log_withdraw(&self, msg: WithdrawalLogMessage) -> GuardianResult<()> {
-        self.write_log(LogMessage::Withdrawal(Box::new(msg))).await
+        self.write_log_or_abort(LogMessage::Withdrawal(Box::new(msg)))
+            .await
     }
 
     pub async fn log_committee_update(&self, msg: CommitteeUpdateLogMessage) -> GuardianResult<()> {
-        self.write_log(LogMessage::CommitteeUpdate(Box::new(msg)))
+        self.write_log_or_abort(LogMessage::CommitteeUpdate(Box::new(msg)))
             .await
     }
 
     pub async fn log_genesis(&self, msg: GenesisLogMessage) -> GuardianResult<()> {
-        self.write_log(LogMessage::Genesis(Box::new(msg))).await
+        self.write_log_or_abort(LogMessage::Genesis(Box::new(msg)))
+            .await
     }
 
     pub async fn log_heartbeat(&self, seq: u64) -> GuardianResult<()> {
-        self.write_log(LogMessage::Heartbeat { seq }).await
+        self.write_log_or_abort(LogMessage::Heartbeat { seq }).await
     }
 
     pub async fn log_ceremony(&self, state: CeremonyLogMessage) -> GuardianResult<()> {
-        self.write_log(LogMessage::Ceremony(Box::new(state))).await
+        self.write_log_or_abort(LogMessage::Ceremony(Box::new(state)))
+            .await
     }
 
     /// Persist the current encrypted KP share state to `kp-shares/` for recovery.
@@ -560,7 +547,7 @@ impl Enclave {
         cert_seq: u64,
         encrypted_shares: KPEncryptedShares,
     ) -> GuardianResult<()> {
-        self.write_log(LogMessage::KpShareState(Box::new(KpShareState::new(
+        self.write_log_or_abort(LogMessage::KpShareState(Box::new(KpShareState::new(
             sharing_seq,
             cert_seq,
             encrypted_shares,

@@ -52,8 +52,6 @@ impl LimiterState {
 pub struct RateLimiter {
     config: LimiterConfig,
     state: LimiterState,
-    /// Snapshot of state before the most recent `consume`, used for revert.
-    prev_state: LimiterState,
 }
 
 impl RateLimiter {
@@ -63,12 +61,7 @@ impl RateLimiter {
                 "num_tokens_available exceeds max_bucket_capacity".into(),
             ));
         }
-        let prev_state = state;
-        Ok(Self {
-            config,
-            state,
-            prev_state,
-        })
+        Ok(Self { config, state })
     }
 
     pub fn config(&self) -> &LimiterConfig {
@@ -114,16 +107,10 @@ impl RateLimiter {
             return Err(RateLimitExceeded);
         }
 
-        self.prev_state = self.state;
         self.state.last_updated_at = timestamp;
         self.state.num_tokens_available = capacity - amount_sats;
         self.state.next_seq += 1;
         Ok(())
-    }
-
-    /// Revert a previous `consume`. Restores state to pre-consume snapshot.
-    pub fn revert(&mut self) {
-        self.state = self.prev_state;
     }
 }
 
@@ -179,19 +166,6 @@ mod test {
                 .consume(0, u64::MAX, config.max_bucket_capacity)
                 .is_ok()
         );
-    }
-
-    #[test]
-    fn test_revert_restores_pre_refill_state() {
-        let (config, state) = make_limiter();
-        let mut limiter = RateLimiter::new(config, state).unwrap();
-        // Consume after refill, then revert — should restore original state.
-        limiter.consume(0, 100, 50_000).unwrap();
-        assert_eq!(limiter.state().num_tokens_available, 50_000); // 100*1000 - 50_000
-        limiter.revert();
-        assert_eq!(limiter.state().num_tokens_available, 0);
-        assert_eq!(limiter.state().last_updated_at, 0);
-        assert_eq!(limiter.state().next_seq, 0);
     }
 
     #[test]

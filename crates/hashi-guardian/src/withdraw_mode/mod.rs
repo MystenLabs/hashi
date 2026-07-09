@@ -3,13 +3,14 @@
 
 //! Withdraw-mode flows (enabled when CEREMONY_MODE=false): standard withdrawal,
 //! committee updates, provisioner init, and heartbeats. `verify_hashi_cert` is
-//! the committee-certificate check shared by `standard` and `committee_update`.
+//! the committee-certificate check shared by `standard_withdrawal` and
+//! `committee_update`.
 
 pub mod committee_update;
 pub mod genesis;
 pub mod heartbeat;
 pub mod provisioner_init;
-pub mod standard;
+pub mod standard_withdrawal;
 
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
