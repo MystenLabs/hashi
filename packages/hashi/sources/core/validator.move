@@ -1,12 +1,27 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-/// Module: validator
+/// Validator registration and metadata maintenance. Entry points let a Sui
+/// validator register as a Hashi committee member and update its next-epoch
+/// BLS key, operator address, endpoint URL, TLS key, and next-epoch
+/// encryption key. Every mutation emits an event for off-chain watchers.
 module hashi::validator;
 
 use hashi::hashi::Hashi;
 use std::string::String;
 use sui::event;
+
+// ~~~~~~~ Events ~~~~~~~
+
+public struct ValidatorRegistered has copy, drop {
+    validator: address,
+}
+
+public struct ValidatorUpdated has copy, drop {
+    validator: address,
+}
+
+// ~~~~~~~ Entry Functions ~~~~~~~
 
 /// Registration and key/metadata updates (below) are deliberately NOT gated
 /// on pause/reconfig: operators must be able to rotate keys and prepare
@@ -93,12 +108,4 @@ entry fun update_next_epoch_encryption_public_key(
         .set_next_epoch_encryption_public_key(validator, next_epoch_encryption_public_key, ctx);
 
     event::emit(ValidatorUpdated { validator });
-}
-
-public struct ValidatorRegistered has copy, drop {
-    validator: address,
-}
-
-public struct ValidatorUpdated has copy, drop {
-    validator: address,
 }

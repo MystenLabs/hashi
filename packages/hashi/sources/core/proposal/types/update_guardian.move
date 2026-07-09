@@ -1,17 +1,28 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+/// Governance proposal for updating the guardian's URL in the global config.
+/// Only the URL is governable: the guardian's BTC public key is immutable once
+/// set (rotating it would invalidate derived deposit addresses), and the
+/// ephemeral signing key is intentionally not pinned on-chain — nodes
+/// authenticate the guardian over TLS plus the immutable BTC key.
 module hashi::update_guardian;
 
 use hashi::{hashi::Hashi, proposal};
 use std::string::String;
 use sui::{clock::Clock, vec_map::VecMap};
 
+// ~~~~~~~ Constants ~~~~~~~
+
 const THRESHOLD_BPS: u64 = 6667;
+
+// ~~~~~~~ Structs ~~~~~~~
 
 public struct UpdateGuardian has copy, drop, store {
     url: String,
 }
+
+// ~~~~~~~ Public Functions ~~~~~~~
 
 public fun propose(
     hashi: &mut Hashi,

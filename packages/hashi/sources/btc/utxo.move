@@ -1,15 +1,15 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+/// Bitcoin UTXO value types shared by the deposit and withdrawal flows. A
+/// `UtxoId` identifies an outpoint (txid:vout) and a `Utxo` pairs it with
+/// its satoshi amount and an optional derivation path (the Sui address a
+/// deposit mints to). The constructors are `public` so PTBs can assemble
+/// UTXOs when calling into the bridge; everything else is package-only.
 #[allow(unused_function, unused_field, unused_use)]
 module hashi::utxo;
 
-public struct Utxo has copy, drop, store {
-    id: UtxoId,
-    // In satoshis
-    amount: u64,
-    derivation_path: Option<address>,
-}
+// ~~~~~~~ Structs ~~~~~~~
 
 /// txid:vout
 public struct UtxoId has copy, drop, store {
@@ -19,6 +19,15 @@ public struct UtxoId has copy, drop, store {
     vout: u32,
 }
 
+public struct Utxo has copy, drop, store {
+    id: UtxoId,
+    // In satoshis
+    amount: u64,
+    derivation_path: Option<address>,
+}
+
+// ~~~~~~~ Public Functions ~~~~~~~
+
 public fun utxo_id(txid: address, vout: u32): UtxoId {
     UtxoId { txid, vout }
 }
@@ -26,6 +35,8 @@ public fun utxo_id(txid: address, vout: u32): UtxoId {
 public fun utxo(utxo_id: UtxoId, amount: u64, derivation_path: Option<address>): Utxo {
     Utxo { id: utxo_id, amount, derivation_path }
 }
+
+// ~~~~~~~ Package Functions ~~~~~~~
 
 public(package) fun id(self: &Utxo): UtxoId {
     self.id

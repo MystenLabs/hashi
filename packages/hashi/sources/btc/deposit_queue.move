@@ -1,20 +1,30 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+/// Storage and bookkeeping for Bitcoin deposit requests. Active requests
+/// sit in an ObjectBag awaiting committee approval and confirmation;
+/// confirmed requests move to a processed bag, and requests that were never
+/// confirmed can be deleted once they pass the maximum age. The state
+/// transitions themselves (certificate verification, minting, time-delay
+/// enforcement) are driven by `hashi::deposit`.
 module hashi::deposit_queue;
 
 use hashi::{committee::CommitteeSignature, utxo::Utxo};
 use sui::{clock::Clock, object_bag::ObjectBag};
 
+// ~~~~~~~ Constants ~~~~~~~
+
 // const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24 * 3; // 3 days
 const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24; // 1 days
+
+// ~~~~~~~ Errors ~~~~~~~
 
 #[error(code = 0)]
 const EDepositRequestNotExpired: vector<u8> = b"Deposit request not expired";
 #[error]
 const EDepositAlreadyProcessed: vector<u8> = b"Deposit request has already been processed";
 
-// ======== Core Structs ========
+// ~~~~~~~ Structs ~~~~~~~
 
 /// Deposit request object stored in the `requests` bag until confirmed or expired.
 ///
@@ -47,7 +57,9 @@ public struct DepositRequestQueue has store {
     processed: ObjectBag,
 }
 
-// ======== Constructors ========
+// ~~~~~~~ Package Functions ~~~~~~~
+
+// === Constructors ===
 
 public(package) fun create(ctx: &mut TxContext): DepositRequestQueue {
     DepositRequestQueue {
@@ -70,17 +82,12 @@ public(package) fun create_deposit(utxo: Utxo, clock: &Clock, ctx: &mut TxContex
     }
 }
 
-// ======== Lifecycle Functions ========
+// === Lifecycle ===
 
 /// Insert a new deposit request into the active requests bag.
 public(package) fun insert_deposit(self: &mut DepositRequestQueue, request: DepositRequest) {
     let request_id = request.id.to_address();
     self.requests.add(request_id, request);
-}
-
-/// Check if an active deposit request exists.
-public(package) fun contains(self: &DepositRequestQueue, id: address): bool {
-    self.requests.contains(id)
 }
 
 /// Remove an active deposit request.
@@ -89,24 +96,6 @@ public(package) fun remove_request(
     request_id: address,
 ): DepositRequest {
     self.requests.remove(request_id)
-}
-
-/// Copy the UTXO out of a deposit request (Utxo has copy).
-public(package) fun utxo(request: &DepositRequest): Utxo {
-    request.utxo
-}
-
-/// The committee certificate recorded at approval time, if any. Returns
-/// `None` for requests that have not yet been through `approve_deposit`.
-public(package) fun approval_cert(request: &DepositRequest): Option<CommitteeSignature> {
-    request.approval_cert
-}
-
-/// The clock timestamp at which the request was approved, if any.
-/// Returns `None` for requests that have not yet been through
-/// `approve_deposit`.
-public(package) fun approved_timestamp_ms(request: &DepositRequest): Option<u64> {
-    request.approved_timestamp_ms
 }
 
 /// Record `cert` and the current clock timestamp on `request` to mark it
@@ -122,13 +111,6 @@ public(package) fun approve(request: &mut DepositRequest, cert: CommitteeSignatu
 /// before calling this.
 public(package) fun confirm(request: &mut DepositRequest, clock: &Clock) {
     request.confirmed_timestamp_ms = option::some(clock.timestamp_ms());
-}
-
-/// The clock timestamp at which the request was confirmed, if any.
-/// Returns `None` for requests that have not yet been through
-/// `confirm_deposit`.
-public(package) fun confirmed_timestamp_ms(request: &DepositRequest): Option<u64> {
-    request.confirmed_timestamp_ms
 }
 
 /// Insert a completed deposit into the processed bag.
@@ -168,6 +150,13 @@ public(package) fun delete_expired(
     utxo.delete();
 }
 
+// === Accessors ===
+
+/// Check if an active deposit request exists.
+public(package) fun contains(self: &DepositRequestQueue, id: address): bool {
+    self.requests.contains(id)
+}
+
 /// Borrow an active deposit request.
 public(package) fun borrow_request(
     self: &DepositRequestQueue,
@@ -176,7 +165,30 @@ public(package) fun borrow_request(
     self.requests.borrow(request_id)
 }
 
-// ======== Accessors ========
+/// Copy the UTXO out of a deposit request (Utxo has copy).
+public(package) fun utxo(request: &DepositRequest): Utxo {
+    request.utxo
+}
+
+/// The committee certificate recorded at approval time, if any. Returns
+/// `None` for requests that have not yet been through `approve_deposit`.
+public(package) fun approval_cert(request: &DepositRequest): Option<CommitteeSignature> {
+    request.approval_cert
+}
+
+/// The clock timestamp at which the request was approved, if any.
+/// Returns `None` for requests that have not yet been through
+/// `approve_deposit`.
+public(package) fun approved_timestamp_ms(request: &DepositRequest): Option<u64> {
+    request.approved_timestamp_ms
+}
+
+/// The clock timestamp at which the request was confirmed, if any.
+/// Returns `None` for requests that have not yet been through
+/// `confirm_deposit`.
+public(package) fun confirmed_timestamp_ms(request: &DepositRequest): Option<u64> {
+    request.confirmed_timestamp_ms
+}
 
 public(package) fun request_id(self: &DepositRequest): ID {
     self.id.to_inner()
@@ -198,7 +210,7 @@ public(package) fun request_utxo(self: &DepositRequest): &Utxo {
     &self.utxo
 }
 
-// ======== Internal ========
+// ~~~~~~~ Private Functions ~~~~~~~
 
 fun is_expired(request: &DepositRequest, clock: &Clock): bool {
     clock.timestamp_ms() > request.created_timestamp_ms + MAX_DEPOSIT_REQUEST_AGE_MS

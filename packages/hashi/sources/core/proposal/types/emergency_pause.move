@@ -11,9 +11,13 @@ use hashi::{hashi::Hashi, proposal};
 use std::string::String;
 use sui::{clock::Clock, vec_map::VecMap};
 
+// ~~~~~~~ Structs ~~~~~~~
+
 public struct EmergencyPause has copy, drop, store {
     pause: bool,
 }
+
+// ~~~~~~~ Public Functions ~~~~~~~
 
 public fun propose(
     hashi: &mut Hashi,

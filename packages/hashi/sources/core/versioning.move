@@ -12,12 +12,18 @@ module hashi::versioning;
 
 use sui::{package::{Self, UpgradeCap, UpgradeTicket, UpgradeReceipt}, vec_set::{Self, VecSet}};
 
+// ~~~~~~~ Constants ~~~~~~~
+
 const PACKAGE_VERSION: u64 = 1;
+
+// ~~~~~~~ Errors ~~~~~~~
 
 #[error(code = 0)]
 const EVersionDisabled: vector<u8> = b"Version disabled";
 #[error(code = 1)]
 const EDisableCurrentVersion: vector<u8> = b"Cannot disable current version";
+
+// ~~~~~~~ Structs ~~~~~~~
 
 public struct Versioning has store {
     /// Package versions allowed to run; gated on every entry.
@@ -27,7 +33,9 @@ public struct Versioning has store {
     upgrade_cap: Option<UpgradeCap>,
 }
 
-// ======== Constructor ========
+// ~~~~~~~ Package Functions ~~~~~~~
+
+// Constructor
 
 public(package) fun create(): Versioning {
     Versioning {
@@ -36,7 +44,7 @@ public(package) fun create(): Versioning {
     }
 }
 
-// ======== Version Management ========
+// Version management
 
 /// Assert that the package version is currently enabled.
 #[allow(implicit_const_copy)]
@@ -53,7 +61,7 @@ public(package) fun enable_version(self: &mut Versioning, version: u64) {
     self.enabled_versions.insert(version);
 }
 
-// ======== Upgrade Management ========
+// Upgrade management
 
 public(package) fun authorize_upgrade(self: &mut Versioning, digest: vector<u8>): UpgradeTicket {
     let policy = sui::package::upgrade_policy(self.upgrade_cap.borrow());
