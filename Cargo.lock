@@ -3034,6 +3034,7 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-health",
+ "tower",
  "tower-http",
  "tracing",
 ]

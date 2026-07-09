@@ -14,7 +14,8 @@
 //!   `ProvisionerInit`.
 //! - [`info`] serves a read-only HTTP `/info` + `/health` JSON surface (a
 //!   curated limiter/identity view, with CORS) so browser / `fetch` clients can
-//!   read limiter status that the gRPC surface only exposes to nodes.
+//!   read limiter status the gRPC surface only exposes to nodes — on the same
+//!   port as gRPC, so the guardian exposes one interface.
 //!
 //! The proxy is liveness-only in the trust model: it can stall but never forge a
 //! withdrawal or read a KP share (shares are end-to-end encrypted to the enclave).

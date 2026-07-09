@@ -17,15 +17,12 @@ pub struct Config {
     /// gRPC endpoint of the enclave guardian to forward to, e.g.
     /// `http://10.0.1.20:3000` (`GUARDIAN_BACKEND_URL`, required).
     pub backend_url: String,
-    /// Address the proxy listens on for node traffic
-    /// (`PROXY_LISTEN_ADDR`, default `0.0.0.0:3000`).
+    /// Address the proxy serves everything on — gRPC (forwarder + relay + health)
+    /// and the HTTP `/info` + `/health` (`PROXY_LISTEN_ADDR`, default `0.0.0.0:3000`).
     pub listen_addr: SocketAddr,
     /// Address the prometheus `/metrics` endpoint listens on
     /// (`METRICS_LISTEN_ADDR`, default `0.0.0.0:9184`).
     pub metrics_listen_addr: SocketAddr,
-    /// Address the read-only HTTP `/info` + `/health` server listens on
-    /// (`HTTP_LISTEN_ADDR`, default `0.0.0.0:3001`).
-    pub http_listen_addr: SocketAddr,
     /// TTL for the single-slot `/info` response cache
     /// (`INFO_CACHE_TTL_MS`, default 1000).
     pub info_cache_ttl: Duration,
@@ -62,10 +59,6 @@ impl Config {
             .unwrap_or_else(|_| "0.0.0.0:9184".to_string())
             .parse()
             .context("METRICS_LISTEN_ADDR must be a valid socket address")?;
-        let http_listen_addr = std::env::var("HTTP_LISTEN_ADDR")
-            .unwrap_or_else(|_| "0.0.0.0:3001".to_string())
-            .parse()
-            .context("HTTP_LISTEN_ADDR must be a valid socket address")?;
         let info_cache_ttl = Duration::from_millis(parse_env_u64("INFO_CACHE_TTL_MS", 1000)?);
         let connect_timeout =
             Duration::from_secs(parse_env_u64("GUARDIAN_CONNECT_TIMEOUT_SECS", 5)?);
@@ -84,7 +77,6 @@ impl Config {
             backend_url,
             listen_addr,
             metrics_listen_addr,
-            http_listen_addr,
             info_cache_ttl,
             connect_timeout,
             keepalive_interval,
