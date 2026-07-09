@@ -137,11 +137,6 @@ services:
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       RUST_LOG: ${RUST_LOG:-info}
-    # AUTHORIZED_KP_FINGERPRINTS, written by `make ceremony` once the KP keys
-    # exist. Absent before that: the relay fail-closes until the roster lands.
-    env_file:
-      - path: kp-roster.env
-        required: false
     depends_on:
       enclave:
         condition: service_healthy

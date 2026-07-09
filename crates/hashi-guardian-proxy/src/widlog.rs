@@ -193,6 +193,8 @@ fn parse_success(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<FoundSucces
 
 /// The guardian's log bucket over the AWS SDK, read-only. Credentials come
 /// from the default provider chain (task role on Fargate, env vars for MinIO).
+/// Cloning shares the underlying SDK client (the cache and relay each hold one).
+#[derive(Clone)]
 pub struct S3LogStore {
     client: aws_sdk_s3::Client,
     bucket: String,

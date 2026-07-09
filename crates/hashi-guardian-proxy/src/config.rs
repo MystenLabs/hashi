@@ -11,7 +11,6 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use bitcoin::Network;
-use hashi_types::pgp::Fingerprint;
 
 pub struct Config {
     /// gRPC endpoint of the enclave guardian to forward to, e.g.
@@ -38,10 +37,6 @@ pub struct Config {
     /// bitcoin|testnet|signet|regtest). Must match the guardian's config; used
     /// to recompute sighashes when verifying a log replay.
     pub btc_network: Network,
-    /// PGP fingerprints of the KPs allowed to submit shares through the relay
-    /// (`AUTHORIZED_KP_FINGERPRINTS`, comma-separated, default empty). Empty
-    /// fail-closes the relay; the cache/forwarding paths are unaffected.
-    pub authorized_kp_fingerprints: Vec<Fingerprint>,
 }
 
 impl Config {
@@ -67,8 +62,6 @@ impl Config {
             .context("BTC_NETWORK must be set (bitcoin|testnet|signet|regtest)")?
             .parse()
             .context("BTC_NETWORK must be one of bitcoin|testnet|signet|regtest")?;
-        let authorized_kp_fingerprints =
-            parse_kp_roster(&std::env::var("AUTHORIZED_KP_FINGERPRINTS").unwrap_or_default())?;
         Ok(Self {
             backend_url,
             listen_addr,
@@ -78,34 +71,8 @@ impl Config {
             log_bucket,
             log_region,
             btc_network,
-            authorized_kp_fingerprints,
         })
     }
-}
-
-/// Parse the comma-separated KP roster into canonical fingerprints (spacing
-/// and case insensitive), so a config typo fails at startup.
-fn parse_kp_roster(raw: &str) -> Result<Vec<Fingerprint>> {
-    let mut roster = Vec::new();
-    for entry in raw.split(',') {
-        if entry.trim().is_empty() {
-            continue;
-        }
-        let fp = entry
-            .parse::<Fingerprint>()
-            .ok()
-            // Sequoia parses odd-sized hex into `Fingerprint::Unknown` rather
-            // than failing; only real v4/v6 shapes can name a KP cert.
-            .filter(|fp| matches!(fp, Fingerprint::V4(_) | Fingerprint::V6(_)))
-            .with_context(|| {
-                format!(
-                    "AUTHORIZED_KP_FINGERPRINTS entry {entry:?} is not a PGP fingerprint \
-                     (expected 40 or 64 hex chars; spacing and case are ignored)"
-                )
-            })?;
-        roster.push(fp);
-    }
-    Ok(roster)
 }
 
 fn parse_env_u64(key: &str, default: u64) -> Result<u64> {
@@ -114,31 +81,5 @@ fn parse_env_u64(key: &str, default: u64) -> Result<u64> {
             .parse()
             .with_context(|| format!("{key} must be a non-negative integer")),
         Err(_) => Ok(default),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_kp_roster_accepts_spaced_and_bare_hex() {
-        // Spaced gpg form + bare lowercase hex, with a trailing comma.
-        let raw = "AAAA BBBB CCCC DDDD EEEE 1111 2222 3333 4444 5555,\
-                   aaaabbbbccccddddeeee1111222233334444ffff,";
-        let roster = parse_kp_roster(raw).unwrap();
-        let expected: Vec<Fingerprint> = vec![
-            "AAAABBBBCCCCDDDDEEEE11112222333344445555".parse().unwrap(),
-            "AAAABBBBCCCCDDDDEEEE1111222233334444FFFF".parse().unwrap(),
-        ];
-        assert_eq!(roster, expected);
-    }
-
-    #[test]
-    fn parse_kp_roster_empty_and_invalid() {
-        assert!(parse_kp_roster("").unwrap().is_empty());
-        assert!(parse_kp_roster("not-a-fingerprint").is_err());
-        // Hex but not a fingerprint length.
-        assert!(parse_kp_roster("ABCD").is_err());
     }
 }

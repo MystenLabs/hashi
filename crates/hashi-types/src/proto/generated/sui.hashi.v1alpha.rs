@@ -1369,8 +1369,9 @@ pub struct SingleProvisionerInitRequest {
     #[prost(string, tag = "2")]
     pub expected_session_id: ::prost::alloc::string::String,
     /// Armored OpenPGP certificate of the submitting key provisioner. The relay
-    /// checks its fingerprint against its operator-configured KP roster before
-    /// doing any other work.
+    /// verifies the signature below, then checks this cert's fingerprint against
+    /// the ceremony's committed roster (the recipient set of the latest S3 share
+    /// log).
     #[prost(string, tag = "3")]
     pub signer_cert: ::prost::alloc::string::String,
     /// Detached armored OpenPGP signature by the KP's offline key (e.g. a

@@ -14,7 +14,6 @@ export GNUPGHOME="${WORK}/gnupg"
 CERTS_DIR="${WORK}/kp-certs"
 CONFIG="${WORK}/guardian-init.local.yaml"
 PUBKEY_FILE="${WORK}/guardian-btc-pubkey.hex"
-ROSTER_FILE="${WORK}/kp-fingerprints.csv"
 
 NUM_SHARES="${NUM_SHARES:-3}"
 THRESHOLD="${THRESHOLD:-2}"
@@ -41,18 +40,6 @@ gen_kp_keys() {
     gpg --armor --export "${fpr}" > "${CERTS_DIR}/kp${i}.asc"
   done
   echo "Wrote ${NUM_SHARES} KP certs to ${CERTS_DIR}."
-}
-
-# Write the KP cert fingerprints (comma-separated) — the relay roster the
-# Makefile hands to the proxy's AUTHORIZED_KP_FINGERPRINTS after the ceremony.
-write_kp_roster() {
-  local i fpr fprs=""
-  for i in $(seq 1 "${NUM_SHARES}"); do
-    fpr="$(gpg --show-keys --with-colons "${CERTS_DIR}/kp${i}.asc" | awk -F: '/^fpr:/{print $10; exit}')"
-    fprs="${fprs:+${fprs},}${fpr}"
-  done
-  printf '%s' "${fprs}" > "${ROSTER_FILE}"
-  echo "Wrote the KP roster (${NUM_SHARES} fingerprints) to ${ROSTER_FILE}."
 }
 
 # Render guardian-init.local.yaml from the template + the running localnet.
