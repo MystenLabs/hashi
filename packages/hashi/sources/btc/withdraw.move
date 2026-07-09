@@ -1,7 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-/// Module: withdraw
+/// User-facing Bitcoin withdrawal flow. A user escrows hBTC against a target
+/// Bitcoin address; the committee approves the request, batches one or more
+/// requests into a withdrawal transaction (burning the hBTC and locking the
+/// input UTXOs), accumulates per-input MPC signatures incrementally,
+/// finalizes with the one-shot guardian signatures, and confirms once the
+/// transaction lands on Bitcoin. A not-yet-committed request can be
+/// cancelled by its requester after a cooldown, refunding the hBTC.
 module hashi::withdraw;
 
 use hashi::{
@@ -19,6 +25,8 @@ use fun btc_config::bitcoin_withdrawal_minimum as Config.bitcoin_withdrawal_mini
 use fun btc_config::withdrawal_cancellation_cooldown_ms as
     Config.withdrawal_cancellation_cooldown_ms;
 
+// ~~~~~~~ Errors ~~~~~~~
+
 #[error]
 const EBelowMinimumWithdrawal: vector<u8> = b"Withdrawal amount is below the minimum";
 #[error]
@@ -34,6 +42,11 @@ const ECannotCancelProcessingWithdrawal: vector<u8> =
 #[error]
 const EWithdrawalNotFullySigned: vector<u8> =
     b"Cannot confirm a withdrawal that is not fully signed";
+
+// ~~~~~~~ Structs ~~~~~~~
+
+// The message structs below are committee-signed and their BCS encodings are
+// frozen: never add, remove, or reorder fields.
 
 // MESSAGE STEP 1
 public struct RequestApprovalMessage has copy, drop, store {
@@ -73,88 +86,7 @@ public struct WithdrawalConfirmationMessage has copy, drop, store {
     withdrawal_id: address,
 }
 
-// ======== Message Constructors ========
-
-public(package) fun new_request_approval_message(request_id: address): RequestApprovalMessage {
-    RequestApprovalMessage { request_id }
-}
-
-public(package) fun new_withdrawal_commitment_message(
-    request_ids: vector<address>,
-    selected_utxos: vector<UtxoId>,
-    outputs: vector<OutputUtxo>,
-    txid: address,
-): WithdrawalCommitmentMessage {
-    WithdrawalCommitmentMessage { request_ids, selected_utxos, outputs, txid }
-}
-
-public(package) fun new_withdrawal_signed_message(
-    withdrawal_id: address,
-    request_ids: vector<address>,
-    signatures: vector<vector<u8>>,
-    guardian_signatures: vector<vector<u8>>,
-): WithdrawalSignedMessage {
-    WithdrawalSignedMessage {
-        withdrawal_id,
-        request_ids,
-        signatures,
-        guardian_signatures,
-    }
-}
-
-public(package) fun new_mpc_input_signatures_message(
-    withdrawal_id: address,
-    indices: vector<u64>,
-    signatures: vector<vector<u8>>,
-): MpcInputSignaturesMessage {
-    MpcInputSignaturesMessage { withdrawal_id, indices, signatures }
-}
-
-public(package) fun new_withdrawal_confirmation_message(
-    withdrawal_id: address,
-): WithdrawalConfirmationMessage {
-    WithdrawalConfirmationMessage { withdrawal_id }
-}
-
-/// Request a withdrawal of BTC from the bridge.
-///
-/// The full BTC amount is stored in the withdrawal request. The miner
-/// fee is deducted later at commitment time.
-///
-/// The user must provide at least `bitcoin_withdrawal_minimum()` sats,
-/// which guarantees the amount covers worst-case miner fees plus dust.
-public fun request_withdrawal(
-    hashi: &mut Hashi,
-    clock: &Clock,
-    btc: Balance<BTC>,
-    bitcoin_address: vector<u8>,
-    ctx: &mut TxContext,
-) {
-    hashi.versioning().assert_version_enabled();
-    hashi.assert_unpaused();
-
-    assert!(btc.value() >= hashi.config().bitcoin_withdrawal_minimum(), EBelowMinimumWithdrawal);
-
-    // Only P2WPKH (20 bytes) and P2TR (32 bytes) witness programs are supported.
-    let addr_len = bitcoin_address.length();
-    assert!(addr_len == 20 || addr_len == 32, EInvalidBitcoinAddress);
-
-    // Create the withdrawal request.
-    let request = hashi::withdrawal_queue::create_withdrawal(
-        btc,
-        bitcoin_address,
-        clock,
-        ctx,
-    );
-    let request_id = request.request_id().to_address();
-    hashi::withdrawal_queue::emit_withdrawal_requested(&request);
-
-    // Insert into the active requests bag.
-    hashi.bitcoin_mut().withdrawal_queue_mut().insert_withdrawal(request);
-
-    // Index by sender for client discovery.
-    hashi.bitcoin_mut().index_user_request(ctx.sender(), request_id, ctx);
-}
+// ~~~~~~~ Entry Functions ~~~~~~~
 
 entry fun approve_request(
     hashi: &mut Hashi,
@@ -259,28 +191,6 @@ entry fun commit_withdrawal_tx(
     withdrawal_txn.emit_withdrawal_picked_for_processing();
 
     hashi.bitcoin_mut().withdrawal_queue_mut().insert_withdrawal_txn(withdrawal_txn);
-}
-
-/// Reassign fresh presignatures to the still-unsigned inputs of a withdrawal
-/// whose signing batch is from a previous epoch. Only the pending tail is
-/// re-presigned; already-collected signatures are final and epoch-independent.
-///
-/// Gated like commit/finalize (version-enabled, unpaused, not-reconfiguring): an
-/// in-progress reconfiguration settles first, then this runs afterward to recover
-/// the now-stale batch. Carries no committee cert: it authorizes no signatures,
-/// only re-points pending presig indices, bounded to once-per-withdrawal-per-epoch
-/// by the `mpc_signing` stale-epoch guard.
-entry fun reallocate_presigs(hashi: &mut Hashi, withdrawal_id: address) {
-    hashi.versioning().assert_version_enabled();
-    hashi.assert_unpaused();
-    hashi.assert_not_reconfiguring();
-    let current_epoch = hashi.committee_set().epoch();
-    let pending = hashi.bitcoin().withdrawal_queue().withdrawal_txn_pending_count(withdrawal_id);
-    let new_base = hashi.allocate_presigs(pending);
-    hashi
-        .bitcoin_mut()
-        .withdrawal_queue_mut()
-        .reallocate_presigs_for_withdrawal_txn(withdrawal_id, new_base, current_epoch, pending);
 }
 
 /// Record a chunk of completed per-input MPC signatures into the withdrawal's
@@ -406,6 +316,28 @@ entry fun confirm_withdrawal(
     hashi.bitcoin_mut().withdrawal_queue_mut().insert_confirmed_txn(txn);
 }
 
+/// Reassign fresh presignatures to the still-unsigned inputs of a withdrawal
+/// whose signing batch is from a previous epoch. Only the pending tail is
+/// re-presigned; already-collected signatures are final and epoch-independent.
+///
+/// Gated like commit/finalize (version-enabled, unpaused, not-reconfiguring): an
+/// in-progress reconfiguration settles first, then this runs afterward to recover
+/// the now-stale batch. Carries no committee cert: it authorizes no signatures,
+/// only re-points pending presig indices, bounded to once-per-withdrawal-per-epoch
+/// by the `mpc_signing` stale-epoch guard.
+entry fun reallocate_presigs(hashi: &mut Hashi, withdrawal_id: address) {
+    hashi.versioning().assert_version_enabled();
+    hashi.assert_unpaused();
+    hashi.assert_not_reconfiguring();
+    let current_epoch = hashi.committee_set().epoch();
+    let pending = hashi.bitcoin().withdrawal_queue().withdrawal_txn_pending_count(withdrawal_id);
+    let new_base = hashi.allocate_presigs(pending);
+    hashi
+        .bitcoin_mut()
+        .withdrawal_queue_mut()
+        .reallocate_presigs_for_withdrawal_txn(withdrawal_id, new_base, current_epoch, pending);
+}
+
 /// Finalize the on-chain bookkeeping for spent UTXOs. Moves each UTXO's
 /// record from `utxo_records` to `spent_utxos`, reading the spent epoch
 /// from the record's `spent_epoch` field (set by `mark_spent` during
@@ -418,6 +350,48 @@ entry fun cleanup_spent_utxos(hashi: &mut Hashi, utxo_ids: vector<UtxoId>) {
     utxo_ids.do!(|utxo_id| {
         hashi.bitcoin_mut().utxo_pool_mut().cleanup_spent(utxo_id);
     });
+}
+
+// ~~~~~~~ Public Functions ~~~~~~~
+
+/// Request a withdrawal of BTC from the bridge.
+///
+/// The full BTC amount is stored in the withdrawal request. The miner
+/// fee is deducted later at commitment time.
+///
+/// The user must provide at least `bitcoin_withdrawal_minimum()` sats,
+/// which guarantees the amount covers worst-case miner fees plus dust.
+public fun request_withdrawal(
+    hashi: &mut Hashi,
+    clock: &Clock,
+    btc: Balance<BTC>,
+    bitcoin_address: vector<u8>,
+    ctx: &mut TxContext,
+) {
+    hashi.versioning().assert_version_enabled();
+    hashi.assert_unpaused();
+
+    assert!(btc.value() >= hashi.config().bitcoin_withdrawal_minimum(), EBelowMinimumWithdrawal);
+
+    // Only P2WPKH (20 bytes) and P2TR (32 bytes) witness programs are supported.
+    let addr_len = bitcoin_address.length();
+    assert!(addr_len == 20 || addr_len == 32, EInvalidBitcoinAddress);
+
+    // Create the withdrawal request.
+    let request = hashi::withdrawal_queue::create_withdrawal(
+        btc,
+        bitcoin_address,
+        clock,
+        ctx,
+    );
+    let request_id = request.request_id().to_address();
+    hashi::withdrawal_queue::emit_withdrawal_requested(&request);
+
+    // Insert into the active requests bag.
+    hashi.bitcoin_mut().withdrawal_queue_mut().insert_withdrawal(request);
+
+    // Index by sender for client discovery.
+    hashi.bitcoin_mut().index_user_request(ctx.sender(), request_id, ctx);
 }
 
 /// Cancel a pending withdrawal request and return the stored BTC to the requester.
@@ -460,4 +434,49 @@ public fun cancel_withdrawal(
     hashi.bitcoin_mut().unindex_user_request(ctx.sender(), request_id);
 
     btc
+}
+
+// ~~~~~~~ Package Functions ~~~~~~~
+
+// === Message Constructors ===
+
+public(package) fun new_request_approval_message(request_id: address): RequestApprovalMessage {
+    RequestApprovalMessage { request_id }
+}
+
+public(package) fun new_withdrawal_commitment_message(
+    request_ids: vector<address>,
+    selected_utxos: vector<UtxoId>,
+    outputs: vector<OutputUtxo>,
+    txid: address,
+): WithdrawalCommitmentMessage {
+    WithdrawalCommitmentMessage { request_ids, selected_utxos, outputs, txid }
+}
+
+public(package) fun new_withdrawal_signed_message(
+    withdrawal_id: address,
+    request_ids: vector<address>,
+    signatures: vector<vector<u8>>,
+    guardian_signatures: vector<vector<u8>>,
+): WithdrawalSignedMessage {
+    WithdrawalSignedMessage {
+        withdrawal_id,
+        request_ids,
+        signatures,
+        guardian_signatures,
+    }
+}
+
+public(package) fun new_mpc_input_signatures_message(
+    withdrawal_id: address,
+    indices: vector<u64>,
+    signatures: vector<vector<u8>>,
+): MpcInputSignaturesMessage {
+    MpcInputSignaturesMessage { withdrawal_id, indices, signatures }
+}
+
+public(package) fun new_withdrawal_confirmation_message(
+    withdrawal_id: address,
+): WithdrawalConfirmationMessage {
+    WithdrawalConfirmationMessage { withdrawal_id }
 }

@@ -7,11 +7,26 @@ module hashi::btc_config;
 
 use hashi::{config::Config, config_value};
 
+// ~~~~~~~ Constants ~~~~~~~
+
 /// Minimum value (satoshis) for a Bitcoin output to be relayed (dust threshold).
 /// Uses the highest threshold (P2PKH 546 sats) as a conservative floor.
 const DUST_RELAY_MIN_VALUE: u64 = 546;
 
-// ======== Accessors ========
+// ~~~~~~~ Package Functions ~~~~~~~
+
+// === Initialization ===
+
+/// Initialize BTC-specific config defaults. Called after config::create().
+public(package) fun init_defaults(config: &mut Config) {
+    config.upsert(b"bitcoin_deposit_time_delay_ms", config_value::new_u64(10 * 60 * 1_000)); // 15 minutes
+    config.upsert(b"bitcoin_deposit_minimum", config_value::new_u64(30_000));
+    config.upsert(b"bitcoin_withdrawal_minimum", config_value::new_u64(30_000));
+    config.upsert(b"bitcoin_confirmation_threshold", config_value::new_u64(6));
+    config.upsert(b"withdrawal_cancellation_cooldown_ms", config_value::new_u64(1000 * 60 * 60)); // 1 hour
+}
+
+// === Accessors ===
 
 public(package) fun bitcoin_chain_id(self: &Config): address {
     self.get(b"bitcoin_chain_id").as_address()
@@ -80,15 +95,4 @@ public(package) fun withdrawal_cancellation_cooldown_ms(self: &Config): u64 {
 
 public(package) fun set_withdrawal_cancellation_cooldown_ms(self: &mut Config, cooldown_ms: u64) {
     self.upsert(b"withdrawal_cancellation_cooldown_ms", config_value::new_u64(cooldown_ms))
-}
-
-// ======== Initialization ========
-
-/// Initialize BTC-specific config defaults. Called after config::create().
-public(package) fun init_defaults(config: &mut Config) {
-    config.upsert(b"bitcoin_deposit_time_delay_ms", config_value::new_u64(10 * 60 * 1_000)); // 15 minutes
-    config.upsert(b"bitcoin_deposit_minimum", config_value::new_u64(30_000));
-    config.upsert(b"bitcoin_withdrawal_minimum", config_value::new_u64(30_000));
-    config.upsert(b"bitcoin_confirmation_threshold", config_value::new_u64(6));
-    config.upsert(b"withdrawal_cancellation_cooldown_ms", config_value::new_u64(1000 * 60 * 60)); // 1 hour
 }
