@@ -541,7 +541,7 @@ pub(crate) async fn apply_onchain_config_overrides(
 
     // Wait for all nodes' watchers to process the checkpoint that contains the
     // last execute transaction. The watcher re-fetches config on each
-    // ProposalExecutedEvent<UpdateConfig>, so once a node reaches this
+    // ProposalExecuted<UpdateConfig>, so once a node reaches this
     // checkpoint its in-memory config will reflect the override.
     let futs = networks
         .hashi_network()

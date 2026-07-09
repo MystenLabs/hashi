@@ -410,6 +410,9 @@ entry fun confirm_withdrawal(
 /// record from `utxo_records` to `spent_utxos`, reading the spent epoch
 /// from the record's `spent_epoch` field (set by `mark_spent` during
 /// `confirm_withdrawal`). Callers pass the individual UTXO IDs to clean up.
+///
+/// Garbage collection: deliberately NOT gated on pause/reconfig — it moves
+/// no funds and must stay callable during an emergency pause.
 entry fun cleanup_spent_utxos(hashi: &mut Hashi, utxo_ids: vector<UtxoId>) {
     hashi.versioning().assert_version_enabled();
     utxo_ids.do!(|utxo_id| {

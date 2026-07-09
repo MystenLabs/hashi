@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use hashi_types::move_types::AbortReconfig;
-use hashi_types::move_types::BurnEvent;
+use hashi_types::move_types::Burned;
 use hashi_types::move_types::HashiEvent;
-use hashi_types::move_types::MintEvent;
+use hashi_types::move_types::Minted;
 use hashi_types::move_types::MpcSig;
 use sui_rpc::Client;
 use sui_rpc::field::FieldMask;
@@ -213,9 +213,9 @@ async fn handle_events(
             HashiEvent::ValidatorUpdated(validator_updated) => {
                 validator_updates.insert(validator_updated.validator);
             }
-            HashiEvent::VoteCastEvent(_) => {}
-            HashiEvent::VoteRemovedEvent(_) => {}
-            HashiEvent::ProposalCreatedEvent(proposal_created_event) => {
+            HashiEvent::VoteCast(_) => {}
+            HashiEvent::VoteRemoved(_) => {}
+            HashiEvent::ProposalCreated(proposal_created_event) => {
                 let proposal = Proposal {
                     id: proposal_created_event.proposal_id,
                     timestamp_ms: proposal_created_event.timestamp_ms,
@@ -230,7 +230,7 @@ async fn handle_events(
                     .active
                     .insert(proposal.id, proposal);
             }
-            HashiEvent::ProposalDeletedEvent(proposal_deleted_event) => {
+            HashiEvent::ProposalDeleted(proposal_deleted_event) => {
                 state
                     .state_mut()
                     .hashi
@@ -238,7 +238,7 @@ async fn handle_events(
                     .active
                     .remove(&proposal_deleted_event.proposal_id);
             }
-            HashiEvent::ProposalExecutedEvent(proposal_executed_event) => {
+            HashiEvent::ProposalExecuted(proposal_executed_event) => {
                 // Move the entry from `active` to `executed` to mirror
                 // the on-chain dual-bag layout. Scope the write lock so
                 // it's released before the async config refetch below.
@@ -301,18 +301,18 @@ async fn handle_events(
                     }
                 }
             }
-            HashiEvent::QuorumReachedEvent(_) => {}
-            HashiEvent::PackageUpgradedEvent(package_upgraded_event) => {
+            HashiEvent::QuorumReached(_) => {}
+            HashiEvent::PackageUpgraded(package_upgraded_event) => {
                 state.add_package_version(
                     package_upgraded_event.version,
                     package_upgraded_event.package,
                 );
             }
-            HashiEvent::MintEvent(MintEvent { coin_type, .. })
-            | HashiEvent::BurnEvent(BurnEvent { coin_type, .. }) => {
+            HashiEvent::Minted(Minted { coin_type, .. })
+            | HashiEvent::Burned(Burned { coin_type, .. }) => {
                 refresh_treasury_cap_supply(client, state, coin_type).await;
             }
-            HashiEvent::DepositRequestedEvent(deposit_requested_event) => {
+            HashiEvent::DepositRequested(deposit_requested_event) => {
                 tracing::info!(deposit_request_id = %deposit_requested_event.request_id, "Deposit request detected");
                 let deposit_request = DepositRequest {
                     id: deposit_requested_event.request_id,
@@ -335,7 +335,7 @@ async fn handle_events(
                     .requests
                     .insert(deposit_request.id, deposit_request);
             }
-            HashiEvent::DepositApprovedEvent(deposit_approved_event) => {
+            HashiEvent::DepositApproved(deposit_approved_event) => {
                 tracing::info!(deposit_request_id = %deposit_approved_event.request_id, "Deposit approved");
                 let mut state = state.state_mut();
                 // Stamp the in-memory request so the leader's next pass
@@ -355,7 +355,7 @@ async fn handle_events(
                         Some(deposit_approved_event.approved_timestamp_ms);
                 }
             }
-            HashiEvent::DepositConfirmedEvent(deposit_confirmed_event) => {
+            HashiEvent::DepositConfirmed(deposit_confirmed_event) => {
                 tracing::info!(deposit_request_id = %deposit_confirmed_event.request_id, "Deposit confirmed");
                 let mut state = state.state_mut();
 
@@ -376,7 +376,7 @@ async fn handle_events(
                     },
                 );
             }
-            HashiEvent::ExpiredDepositDeletedEvent(expired_deposit_deleted_event) => {
+            HashiEvent::ExpiredDepositDeleted(expired_deposit_deleted_event) => {
                 tracing::info!(deposit_request_id = %expired_deposit_deleted_event.request_id, "Expired deposit deleted");
                 state
                     .state_mut()
@@ -385,7 +385,7 @@ async fn handle_events(
                     .requests
                     .remove(&expired_deposit_deleted_event.request_id);
             }
-            HashiEvent::WithdrawalRequestedEvent(withdrawal_requested_event) => {
+            HashiEvent::WithdrawalRequested(withdrawal_requested_event) => {
                 tracing::info!(withdrawal_request_id = %withdrawal_requested_event.request_id, "Withdrawal request detected");
                 let withdrawal_request = WithdrawalRequest {
                     id: withdrawal_requested_event.request_id,
@@ -407,7 +407,7 @@ async fn handle_events(
                     .requests
                     .insert(withdrawal_request.id, withdrawal_request);
             }
-            HashiEvent::WithdrawalApprovedEvent(event) => {
+            HashiEvent::WithdrawalApproved(event) => {
                 tracing::info!(withdrawal_request_id = %event.request_id, "Withdrawal approved");
                 if let Some(request) = state
                     .state_mut()
@@ -419,7 +419,7 @@ async fn handle_events(
                     request.status = super::types::WithdrawalStatus::Approved;
                 }
             }
-            HashiEvent::WithdrawalPickedForProcessingEvent(event) => {
+            HashiEvent::WithdrawalPickedForProcessing(event) => {
                 tracing::info!(withdrawal_txn_id = %event.withdrawal_txn_id, "Withdrawal picked for processing");
                 // Remove requests from the queue
                 {
@@ -482,7 +482,7 @@ async fn handle_events(
                     }
                 }
             }
-            HashiEvent::WithdrawalSignedEvent(event) => {
+            HashiEvent::WithdrawalSigned(event) => {
                 tracing::info!(withdrawal_txn_id = %event.withdrawal_txn_id, "Withdrawal signatures stored on-chain");
                 // Watcher is the sole mutator of the local limiter
                 // post-bootstrap; advance it inline with the mirror update.
@@ -524,7 +524,7 @@ async fn handle_events(
                 if limiter_inputs.is_none() {
                     tracing::debug!(
                         withdrawal_txn_id = %event.withdrawal_txn_id,
-                        "Skipping limiter apply: WithdrawalSignedEvent for already-signed txn"
+                        "Skipping limiter apply: WithdrawalSigned for already-signed txn"
                     );
                     if let Some(metrics) = state.metrics() {
                         metrics.guardian_limiter_anchor_events_skipped_total.inc();
@@ -559,7 +559,7 @@ async fn handle_events(
                                     amount_sats,
                                     timestamp_secs,
                                     withdrawal_txn_id = %event.withdrawal_txn_id,
-                                    "Local limiter advanced from on-chain WithdrawalSignedEvent",
+                                    "Local limiter advanced from on-chain WithdrawalSigned",
                                 );
                             }
                             Err(e) => {
@@ -584,7 +584,7 @@ async fn handle_events(
                     }
                 }
             }
-            HashiEvent::WithdrawalInputsSignedEvent(event) => {
+            HashiEvent::WithdrawalInputsSigned(event) => {
                 tracing::info!(
                     withdrawal_txn_id = %event.withdrawal_txn_id,
                     signed_count = event.signed_count,
@@ -611,7 +611,7 @@ async fn handle_events(
                     }
                 }
             }
-            HashiEvent::WithdrawalPresigsReassignedEvent(event) => {
+            HashiEvent::WithdrawalPresigsReassigned(event) => {
                 tracing::info!(
                     withdrawal_txn_id = %event.withdrawal_txn_id,
                     epoch = event.epoch,
@@ -636,14 +636,14 @@ async fn handle_events(
                     }
                 }
             }
-            HashiEvent::WithdrawalConfirmedEvent(event) => {
+            HashiEvent::WithdrawalConfirmed(event) => {
                 tracing::info!(withdrawal_txn_id = %event.withdrawal_txn_id, "Withdrawal confirmed on-chain");
                 let (sign_to_confirm_ms, total_ms) = {
                     let mut state = state.state_mut();
 
                     // Promote the change UTXOs from pending to confirmed by
                     // clearing `produced_by`. The UTXOs were already inserted at
-                    // commit time; input UTXOs are removed via UtxoSpentEvent.
+                    // commit time; input UTXOs are removed via UtxoSpent.
                     for change_utxo_id in &event.change_utxo_ids {
                         if let Some(record) =
                             state.hashi.utxo_pool.utxo_records.get_mut(change_utxo_id)
@@ -681,7 +681,7 @@ async fn handle_events(
                     }
                 }
             }
-            HashiEvent::UtxoSpentEvent(utxo_spent_event) => {
+            HashiEvent::UtxoSpent(utxo_spent_event) => {
                 let mut state = state.state_mut();
                 // Mark the local record as spent so the orphan scanner can discover it.
                 if let Some(record) = state
@@ -698,7 +698,7 @@ async fn handle_events(
                     .spent_utxos
                     .insert(utxo_spent_event.utxo_id, utxo_spent_event.spent_epoch);
             }
-            HashiEvent::StartReconfigEvent(start_reconfig_event) => {
+            HashiEvent::ReconfigStarted(start_reconfig_event) => {
                 let epoch = start_reconfig_event.epoch;
                 // Fetch new committee
                 let committees_id = state.state().hashi().committees.committees_id();
@@ -717,7 +717,7 @@ async fn handle_events(
                 }
                 state.notify(Notification::StartReconfig(epoch));
             }
-            HashiEvent::EndReconfigEvent(end_reconfig_event) => {
+            HashiEvent::ReconfigEnded(end_reconfig_event) => {
                 let committees_id = state.state().hashi().committees.committees_id();
                 let scraped_committees =
                     super::scrape_committees(client.clone(), committees_id).await;
@@ -732,7 +732,7 @@ async fn handle_events(
                     }
                     Err(e) => tracing::error!(
                         from_epoch = end_reconfig_event.from_epoch,
-                        "failed to scrape committee handoffs after EndReconfigEvent: {e}"
+                        "failed to scrape committee handoffs after ReconfigEnded: {e}"
                     ),
                 }
                 state

@@ -99,10 +99,10 @@ if (result.$kind !== "Transaction") {
   throw new Error(`request failed: ${JSON.stringify(result.FailedTransaction)}`);
 }
 
-// Pull the request id out of the WithdrawalRequestedEvent — needed if
+// Pull the request id out of the WithdrawalRequested — needed if
 // you later want to cancel.
 const evt = result.Transaction.events?.find((e) =>
-  e.eventType.endsWith("::withdrawal_queue::WithdrawalRequestedEvent"),
+  e.eventType.endsWith("::withdrawal_queue::WithdrawalRequested"),
 );
 const requestId = (evt as { json?: { request_id?: string } } | undefined)?.json?.request_id;
 ```

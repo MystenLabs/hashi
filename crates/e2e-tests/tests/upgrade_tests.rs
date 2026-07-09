@@ -4,7 +4,7 @@
 //! End-to-end test for the package upgrade lifecycle.
 //!
 //! Exercises real cascading effects of upgrading the hashi package:
-//! - Rust watcher picks up the new package version via PackageUpgradedEvent
+//! - Rust watcher picks up the new package version via PackageUpgraded
 //! - Validators auto-confirm deposits against the upgraded package
 //! - Package ID routing updates correctly in OnchainState
 
@@ -25,7 +25,7 @@ use tracing::info;
 
 /// Test the full upgrade lifecycle, exercising real cascading effects.
 ///
-/// 1. Watcher picks up new package — PackageUpgradedEvent updates OnchainState
+/// 1. Watcher picks up new package — PackageUpgraded updates OnchainState
 /// 2. Validators confirm deposits post-upgrade — leader routes calls correctly
 /// 3. Package ID routing — OnchainState.package_id() returns the new package
 #[tokio::test]
@@ -59,7 +59,7 @@ async fn test_upgrade_v1_to_v2() -> Result<()> {
 
     // ── Cascading effect 1: Watcher picks up new package ────────────────
     //
-    // The PackageUpgradedEvent handler in watcher.rs should update
+    // The PackageUpgraded handler in watcher.rs should update
     // OnchainState's package_versions map. Poll until all nodes see the
     // new package — this proves the watcher correctly processes the event.
     info!("waiting for all nodes to detect the new package version...");
@@ -114,7 +114,7 @@ async fn test_upgrade_v1_to_v2() -> Result<()> {
     //
     // This is the real test: deposit BTC, submit a deposit request, and
     // wait for the validators to auto-confirm it. The leader must:
-    // - Observe the DepositRequestedEvent
+    // - Observe the DepositRequested
     // - Build a BLS certificate
     // - Call approve_deposit on the correct (upgraded) package
     // - After the time-delay window, call confirm_deposit

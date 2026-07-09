@@ -8,6 +8,10 @@ use hashi::hashi::Hashi;
 use std::string::String;
 use sui::event;
 
+/// Registration and key/metadata updates (below) are deliberately NOT gated
+/// on pause/reconfig: operators must be able to rotate keys and prepare
+/// nodes while the system is paused, and blocking updates during reconfig
+/// would let a stalled reconfig freeze operator maintenance.
 entry fun register(
     self: &mut Hashi,
     sui_system: &sui_system::sui_system::SuiSystemState,

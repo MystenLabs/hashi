@@ -9,7 +9,7 @@
 //! - Building an upgrade package via `sui move build`
 //! - Constructing the `execute + publish + finalize` PTB
 //! - Constructing the generic `execute` PTB for non-upgrade proposals
-//! - Parsing the proposal ID out of a `ProposalCreatedEvent` in tx effects
+//! - Parsing the proposal ID out of a `ProposalCreated` in tx effects
 //! - Finding the new package ID in the effects of an upgrade transaction
 //!
 //! Orchestration (collecting votes from committee members, driving the full
@@ -253,7 +253,7 @@ pub fn build_execute_proposal_transaction(
 }
 
 /// Extract the newly-created proposal's object ID from a transaction that
-/// called `<module>::propose(...)`. Looks for a single `ProposalCreatedEvent`
+/// called `<module>::propose(...)`. Looks for a single `ProposalCreated`
 /// in the transaction's emitted events.
 ///
 /// The BCS payload of the event is `(proposal_id, timestamp_ms)`; we only
@@ -264,11 +264,11 @@ pub fn extract_proposal_id_from_response(response: &ExecuteTransactionResponse) 
         .events()
         .events()
         .iter()
-        .find(|e| e.contents().name().contains("ProposalCreatedEvent"))
-        .ok_or_else(|| anyhow!("ProposalCreatedEvent not found in transaction effects"))?;
+        .find(|e| e.contents().name().contains("ProposalCreated"))
+        .ok_or_else(|| anyhow!("ProposalCreated not found in transaction effects"))?;
 
     let (id, _ts): (Address, u64) = bcs::from_bytes(event.contents().value())
-        .map_err(|e| anyhow!("failed to deserialize ProposalCreatedEvent payload: {e}"))?;
+        .map_err(|e| anyhow!("failed to deserialize ProposalCreated payload: {e}"))?;
     Ok(id)
 }
 

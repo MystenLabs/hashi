@@ -50,7 +50,10 @@ const MAX_PROTOCOL_ATTEMPTS: u32 = 3;
 const START_RECONFIG_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const MPC_RECONFIG_TIMEOUT: Duration = Duration::from_secs(600);
 const RECONCILE_TICK: Duration = Duration::from_secs(15);
-const RECONFIG_E_NOT_RECONFIGURING: u64 = 0;
+/// Move `hashi::reconfig::ENotReconfiguring`, matched by its clever-error
+/// constant name (the `#[error]` abort code encodes a source line, so the
+/// numeric code is not stable).
+const RECONFIG_E_NOT_RECONFIGURING: &str = "ENotReconfiguring";
 
 #[derive(Clone)]
 pub struct MpcHandle {
@@ -1268,10 +1271,14 @@ fn classify_reconfig_submission_error(err: &anyhow::Error) -> ReconfigSubmission
     };
     let location = abort.location();
 
+    let abort_constant_name = abort
+        .clever_error
+        .as_ref()
+        .and_then(|clever| clever.constant_name.as_deref());
     match (
         location.module_opt(),
         location.function_name_opt(),
-        abort.abort_code_opt(),
+        abort_constant_name,
     ) {
         (Some("committee_set"), Some("set_pending_committee_handoff_cert"), _) => {
             ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted

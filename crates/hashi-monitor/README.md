@@ -5,13 +5,13 @@ Hashi monitoring library and CLI tool.
 Audits the cross-system bridge flow on two parallel tracks.
 
 ### Withdrawals (Sui → BTC)
-- **E1**: Hashi approval event on Sui (`WithdrawalPickedForProcessingEvent`).
+- **E1**: Hashi approval event on Sui (`WithdrawalPickedForProcessing`).
 - **E2**: Guardian approval event (success record logged to S3).
 - **E3**: BTC transaction confirmed on Bitcoin.
 
 ### Deposits (BTC → Sui)
 - **E1**: Deposit confirmed on Bitcoin.
-- **E2**: `DepositConfirmedEvent` on Sui.
+- **E2**: `DepositConfirmed` on Sui.
 
 ### Checks
 - **Predecessor existence**: every successor event has a matching predecessor with consistent txid / wid.

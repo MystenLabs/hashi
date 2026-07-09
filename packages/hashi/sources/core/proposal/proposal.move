@@ -71,7 +71,7 @@ public(package) fun create<T: store>(
 
     let proposal_id = object::id(&proposal);
     hashi.proposals_mut().active_mut().add(proposal_id, proposal);
-    sui::event::emit(ProposalCreatedEvent<T> { proposal_id, timestamp_ms: created_timestamp_ms });
+    sui::event::emit(ProposalCreated<T> { proposal_id, timestamp_ms: created_timestamp_ms });
     proposal_id
 }
 
@@ -102,7 +102,7 @@ public(package) fun execute<T: copy + drop + store>(
 
     hashi.proposals_mut().executed_mut().add(id.to_address(), proposal);
 
-    sui::event::emit(ProposalExecutedEvent<T> { proposal_id: id, data });
+    sui::event::emit(ProposalExecuted<T> { proposal_id: id, data });
     data
 }
 
@@ -123,9 +123,9 @@ entry fun vote<T: store>(
 
     proposal.votes.push_back(validator_address);
 
-    sui::event::emit(VoteCastEvent<T> { proposal_id, voter: validator_address });
+    sui::event::emit(VoteCast<T> { proposal_id, voter: validator_address });
     if (proposal.quorum_reached(hashi)) {
-        sui::event::emit(QuorumReachedEvent<T> { proposal_id });
+        sui::event::emit(QuorumReached<T> { proposal_id });
     }
 }
 
@@ -145,7 +145,7 @@ entry fun remove_vote<T: store>(
         .destroy_or!(abort ENoVoteFound);
 
     proposal.votes.remove(index);
-    sui::event::emit(VoteRemovedEvent<T> {
+    sui::event::emit(VoteRemoved<T> {
         proposal_id: proposal.id.to_inner(),
         voter: validator_address,
     });
@@ -205,30 +205,30 @@ public fun data<T>(proposal: &Proposal<T>): &T {
 
 // ~~~~~~~ Events ~~~~~~~
 
-public struct ProposalCreatedEvent<phantom T> has copy, drop {
+public struct ProposalCreated<phantom T> has copy, drop {
     proposal_id: ID,
     timestamp_ms: u64,
 }
 
-public struct VoteCastEvent<phantom T> has copy, drop {
+public struct VoteCast<phantom T> has copy, drop {
     proposal_id: ID,
     voter: address,
 }
 
-public struct VoteRemovedEvent<phantom T> has copy, drop {
+public struct VoteRemoved<phantom T> has copy, drop {
     proposal_id: ID,
     voter: address,
 }
 
-public struct ProposalDeletedEvent<phantom T> has copy, drop {
+public struct ProposalDeleted<phantom T> has copy, drop {
     proposal_id: ID,
 }
 
-public struct ProposalExecutedEvent<T> has copy, drop {
+public struct ProposalExecuted<T> has copy, drop {
     proposal_id: ID,
     data: T,
 }
 
-public struct QuorumReachedEvent<phantom T> has copy, drop {
+public struct QuorumReached<phantom T> has copy, drop {
     proposal_id: ID,
 }

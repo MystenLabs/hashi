@@ -13,14 +13,14 @@ use sui::{
 };
 
 // Error codes
-/// The signers bitmap is invalid.
-const EInvalidBitmap: u64 = 0;
-/// The signature is invalid.
-const ESigVerification: u64 = 1;
-/// The certificate does not have enough stake support.
-const ENotEnoughStake: u64 = 2;
-/// The committee has members with a zero weight.
-const EIncorrectCommittee: u64 = 3;
+#[error]
+const EInvalidBitmap: vector<u8> = b"The signers bitmap is invalid";
+#[error]
+const ESigVerification: vector<u8> = b"The signature is invalid";
+#[error]
+const ENotEnoughStake: vector<u8> = b"The certificate does not have enough stake support";
+#[error]
+const EIncorrectCommittee: vector<u8> = b"The committee has members with a zero weight";
 
 public struct CommitteeMember has copy, drop, store {
     validator_address: address,

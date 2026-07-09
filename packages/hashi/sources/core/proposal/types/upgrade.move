@@ -60,10 +60,10 @@ public fun finalize_upgrade(hashi: &mut Hashi, receipt: UpgradeReceipt) {
     let upgrade_package = receipt.package();
     hashi.versioning_mut().commit_upgrade(receipt);
     let version = hashi.versioning().upgrade_cap().version();
-    sui::event::emit(PackageUpgradedEvent { package: upgrade_package, version });
+    sui::event::emit(PackageUpgraded { package: upgrade_package, version });
 }
 
-public struct PackageUpgradedEvent has copy, drop {
+public struct PackageUpgraded has copy, drop {
     package: ID,
     version: u64,
 }

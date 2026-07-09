@@ -4,7 +4,7 @@
 //! Domain model for the monitor.
 //!
 //! We model the cross-system withdrawal flow as a sequence of events:
-//! - E1 or E_hashi: Hashi approval event on sui (corresponds to WithdrawalPickedForProcessingEvent)
+//! - E1 or E_hashi: Hashi approval event on sui (corresponds to WithdrawalPickedForProcessing)
 //! - E2 or E_guardian: Guardian approval event on S3 (corresponds to NormalWithdrawalSuccess)
 //! - E3 or E_btc: BTC tx broadcast
 //!
@@ -62,7 +62,7 @@ pub struct MonitorWithdrawalEvent {
 /// Note: Make sure WithdrawalEventType::NON_TERMINAL_EVENTS and TERMINAL_EVENT are up-to-date.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize)]
 pub enum WithdrawalEventType {
-    /// E_hashi (WithdrawalPickedForProcessingEvent on sui)
+    /// E_hashi (WithdrawalPickedForProcessing on sui)
     E1HashiApproved,
     /// E_guardian (NormalWithdrawalSuccess on s3)
     E2GuardianApproved,
@@ -81,7 +81,7 @@ pub struct MonitorDepositEvent {
 pub enum DepositEventType {
     /// deposit confirmed event on btc
     E1BtcConfirmed,
-    /// DepositConfirmedEvent on Sui
+    /// DepositConfirmed on Sui
     E2HashiDeposited,
 }
 

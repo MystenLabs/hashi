@@ -610,7 +610,7 @@ impl Hashi {
         // so the committee independently re-validates the limit once here, before
         // certifying the finalize — refusing to sign blocks an over-limit broadcast
         // even if the guardian co-signed. Validate-only: the watcher advances the
-        // limiter on `WithdrawalSignedEvent`, never from this path.
+        // limiter on `WithdrawalSigned`, never from this path.
         //
         // TODO(guardian-seq-durability): this gate is necessarily *after* the
         // guardian co-signed (the cert binds the guardian sigs), so a rejection
@@ -1151,7 +1151,7 @@ impl Hashi {
         let configured_max_requests = self.config.withdrawal_max_batch_size().min(requests.len());
 
         // Snapshot both maps under a single read-lock so they are always
-        // mutually consistent (e.g., a WithdrawalConfirmedEvent cannot update
+        // mutually consistent (e.g., a WithdrawalConfirmed cannot update
         // one map but not the other between the two reads).
         let (withdrawal_txns, utxo_records) = {
             let state = self.onchain_state().state();

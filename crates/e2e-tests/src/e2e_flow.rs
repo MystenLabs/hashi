@@ -11,9 +11,9 @@ mod tests {
     use futures::StreamExt;
     use hashi::sui_tx_executor::SuiTxExecutor;
     use hashi_types::bitcoin::BitcoinAddress;
-    use hashi_types::move_types::WithdrawalConfirmedEvent;
-    use hashi_types::move_types::WithdrawalPickedForProcessingEvent;
-    use hashi_types::move_types::WithdrawalSignedEvent;
+    use hashi_types::move_types::WithdrawalConfirmed;
+    use hashi_types::move_types::WithdrawalPickedForProcessing;
+    use hashi_types::move_types::WithdrawalSigned;
     use std::time::Duration;
     use sui_rpc::field::FieldMask;
     use sui_rpc::field::FieldMaskUtil;
@@ -193,7 +193,7 @@ mod tests {
     async fn wait_for_withdrawal_confirmation(
         sui_client: &mut sui_rpc::Client,
         timeout: Duration,
-    ) -> Result<WithdrawalConfirmedEvent> {
+    ) -> Result<WithdrawalConfirmed> {
         info!("Waiting for withdrawal confirmation...");
 
         let start = std::time::Instant::now();
@@ -228,7 +228,7 @@ mod tests {
             };
 
             debug!(
-                "Received checkpoint {}, checking for WithdrawalConfirmedEvent...",
+                "Received checkpoint {}, checking for WithdrawalConfirmed...",
                 checkpoint.cursor()
             );
 
@@ -236,8 +236,8 @@ mod tests {
                 for event in txn.events().events() {
                     let event_type = event.contents().name();
 
-                    if event_type.contains("WithdrawalConfirmedEvent") {
-                        match WithdrawalConfirmedEvent::from_bcs(event.contents().value()) {
+                    if event_type.contains("WithdrawalConfirmed") {
+                        match WithdrawalConfirmed::from_bcs(event.contents().value()) {
                             Ok(event_data) => {
                                 info!(
                                     withdrawal_txn_id = %event_data.withdrawal_txn_id,
@@ -247,7 +247,7 @@ mod tests {
                                 return Ok(event_data);
                             }
                             Err(e) => {
-                                debug!("Failed to parse WithdrawalConfirmedEvent: {}", e);
+                                debug!("Failed to parse WithdrawalConfirmed: {}", e);
                             }
                         }
                     }
@@ -792,7 +792,7 @@ mod tests {
     async fn wait_for_withdrawal_picked(
         sui_client: &mut sui_rpc::Client,
         timeout: Duration,
-    ) -> Result<WithdrawalPickedForProcessingEvent> {
+    ) -> Result<WithdrawalPickedForProcessing> {
         let start = std::time::Instant::now();
         let subscription_read_mask = FieldMask::from_paths([Checkpoint::path_builder()
             .transactions()
@@ -811,7 +811,7 @@ mod tests {
         while let Some(item) = subscription.next().await {
             if start.elapsed() > timeout {
                 return Err(anyhow!(
-                    "Timeout waiting for WithdrawalPickedForProcessingEvent after {:?}",
+                    "Timeout waiting for WithdrawalPickedForProcessing after {:?}",
                     timeout
                 ));
             }
@@ -827,10 +827,9 @@ mod tests {
                     if event
                         .contents()
                         .name()
-                        .contains("WithdrawalPickedForProcessingEvent")
+                        .contains("WithdrawalPickedForProcessing")
                     {
-                        match WithdrawalPickedForProcessingEvent::from_bcs(event.contents().value())
-                        {
+                        match WithdrawalPickedForProcessing::from_bcs(event.contents().value()) {
                             Ok(data) => {
                                 info!(
                                     withdrawal_txn_id = %data.withdrawal_txn_id,
@@ -839,7 +838,7 @@ mod tests {
                                 return Ok(data);
                             }
                             Err(e) => {
-                                debug!("Failed to parse WithdrawalPickedForProcessingEvent: {}", e);
+                                debug!("Failed to parse WithdrawalPickedForProcessing: {}", e);
                             }
                         }
                     }
@@ -857,7 +856,7 @@ mod tests {
         sui_client: &mut sui_rpc::Client,
         n: usize,
         timeout: Duration,
-    ) -> Result<Vec<WithdrawalConfirmedEvent>> {
+    ) -> Result<Vec<WithdrawalConfirmed>> {
         let start = std::time::Instant::now();
         let subscription_read_mask = FieldMask::from_paths([Checkpoint::path_builder()
             .transactions()
@@ -895,8 +894,8 @@ mod tests {
             };
             for txn in checkpoint.checkpoint().transactions() {
                 for event in txn.events().events() {
-                    if event.contents().name().contains("WithdrawalConfirmedEvent") {
-                        match WithdrawalConfirmedEvent::from_bcs(event.contents().value()) {
+                    if event.contents().name().contains("WithdrawalConfirmed") {
+                        match WithdrawalConfirmed::from_bcs(event.contents().value()) {
                             Ok(data) => {
                                 info!(
                                     withdrawal_txn_id = %data.withdrawal_txn_id,
@@ -906,7 +905,7 @@ mod tests {
                                 events.push(data);
                             }
                             Err(e) => {
-                                debug!("Failed to parse WithdrawalConfirmedEvent: {}", e);
+                                debug!("Failed to parse WithdrawalConfirmed: {}", e);
                             }
                         }
                     }
@@ -924,12 +923,12 @@ mod tests {
     /// Test outline:
     /// 1. Deposit 200 000 sats → one confirmed UTXO in the pool.
     /// 2. Submit withdrawal 1 (30 000 sats). Wait for the committee to commit
-    ///    it (`WithdrawalPickedForProcessingEvent`). No Bitcoin blocks mined
+    ///    it (`WithdrawalPickedForProcessing`). No Bitcoin blocks mined
     ///    yet, so the change UTXO is pending/unconfirmed.
     /// 3. Submit withdrawal 2 (30 000 sats) immediately. Wait for the
     ///    committee to commit it. Assert that it spent the pending change UTXO
     ///    from withdrawal 1.
-    /// 4. Mine blocks and wait for both `WithdrawalConfirmedEvent`s.
+    /// 4. Mine blocks and wait for both `WithdrawalConfirmed`s.
     #[tokio::test]
     async fn test_withdrawal_chains_through_unconfirmed_change_utxo() -> Result<()> {
         init_test_logging();
@@ -1100,14 +1099,14 @@ mod tests {
         Ok(())
     }
 
-    /// Waits for a `WithdrawalPickedForProcessingEvent` that contains at least
+    /// Waits for a `WithdrawalPickedForProcessing` that contains at least
     /// `min_requests` request IDs in a single batch, indicating that the new
     /// multi-request coin selection algorithm batched them together.
     async fn wait_for_batched_withdrawal_picked(
         sui_client: &mut sui_rpc::Client,
         min_requests: usize,
         timeout: Duration,
-    ) -> Result<WithdrawalPickedForProcessingEvent> {
+    ) -> Result<WithdrawalPickedForProcessing> {
         let start = std::time::Instant::now();
         let subscription_read_mask = FieldMask::from_paths([Checkpoint::path_builder()
             .transactions()
@@ -1126,7 +1125,7 @@ mod tests {
         while let Some(item) = subscription.next().await {
             if start.elapsed() > timeout {
                 return Err(anyhow!(
-                    "Timeout waiting for batched WithdrawalPickedForProcessingEvent \
+                    "Timeout waiting for batched WithdrawalPickedForProcessing \
                      (min_requests={min_requests}) after {:?}",
                     timeout
                 ));
@@ -1143,10 +1142,9 @@ mod tests {
                     if event
                         .contents()
                         .name()
-                        .contains("WithdrawalPickedForProcessingEvent")
+                        .contains("WithdrawalPickedForProcessing")
                     {
-                        match WithdrawalPickedForProcessingEvent::from_bcs(event.contents().value())
-                        {
+                        match WithdrawalPickedForProcessing::from_bcs(event.contents().value()) {
                             Ok(data) if data.request_ids.len() >= min_requests => {
                                 info!(
                                     withdrawal_txn_id = %data.withdrawal_txn_id,
@@ -1157,14 +1155,14 @@ mod tests {
                             }
                             Ok(data) => {
                                 info!(
-                                    "WithdrawalPickedForProcessingEvent with {} request(s) \
+                                    "WithdrawalPickedForProcessing with {} request(s) \
                                      (waiting for batch of ≥{})",
                                     data.request_ids.len(),
                                     min_requests,
                                 );
                             }
                             Err(e) => {
-                                debug!("Failed to parse WithdrawalPickedForProcessingEvent: {}", e);
+                                debug!("Failed to parse WithdrawalPickedForProcessing: {}", e);
                             }
                         }
                     }
@@ -1263,18 +1261,18 @@ mod tests {
         sui_client: &mut sui_rpc::Client,
         min_requests: usize,
         timeout: Duration,
-    ) -> Result<EventWithEffects<WithdrawalPickedForProcessingEvent>> {
+    ) -> Result<EventWithEffects<WithdrawalPickedForProcessing>> {
         wait_for_event_with_effects(
             sui_client,
-            "WithdrawalPickedForProcessingEvent",
+            "WithdrawalPickedForProcessing",
             timeout,
             |bytes| {
-                let data = WithdrawalPickedForProcessingEvent::from_bcs(bytes)?;
+                let data = WithdrawalPickedForProcessing::from_bcs(bytes)?;
                 if data.request_ids.len() >= min_requests {
                     Ok(Some(data))
                 } else {
                     info!(
-                        "WithdrawalPickedForProcessingEvent with {} request(s) \
+                        "WithdrawalPickedForProcessing with {} request(s) \
                          (waiting for batch of ≥{})",
                         data.request_ids.len(),
                         min_requests,
@@ -1290,9 +1288,9 @@ mod tests {
         sui_client: &mut sui_rpc::Client,
         withdrawal_id: Address,
         timeout: Duration,
-    ) -> Result<EventWithEffects<WithdrawalSignedEvent>> {
-        wait_for_event_with_effects(sui_client, "WithdrawalSignedEvent", timeout, |bytes| {
-            let data = WithdrawalSignedEvent::from_bcs(bytes)?;
+    ) -> Result<EventWithEffects<WithdrawalSigned>> {
+        wait_for_event_with_effects(sui_client, "WithdrawalSigned", timeout, |bytes| {
+            let data = WithdrawalSigned::from_bcs(bytes)?;
             Ok((data.withdrawal_txn_id == withdrawal_id).then_some(data))
         })
         .await
@@ -1302,9 +1300,9 @@ mod tests {
         sui_client: &mut sui_rpc::Client,
         withdrawal_id: Address,
         timeout: Duration,
-    ) -> Result<EventWithEffects<WithdrawalConfirmedEvent>> {
-        wait_for_event_with_effects(sui_client, "WithdrawalConfirmedEvent", timeout, |bytes| {
-            let data = WithdrawalConfirmedEvent::from_bcs(bytes)?;
+    ) -> Result<EventWithEffects<WithdrawalConfirmed>> {
+        wait_for_event_with_effects(sui_client, "WithdrawalConfirmed", timeout, |bytes| {
+            let data = WithdrawalConfirmed::from_bcs(bytes)?;
             Ok((data.withdrawal_txn_id == withdrawal_id).then_some(data))
         })
         .await
@@ -1318,10 +1316,10 @@ mod tests {
     ///    Sui, before either is committed. Both requests will be approved
     ///    independently by the committee, then the leader picks up both
     ///    approved requests and batches them into one Bitcoin tx.
-    /// 3. Wait for a `WithdrawalPickedForProcessingEvent` whose `request_ids`
+    /// 3. Wait for a `WithdrawalPickedForProcessing` whose `request_ids`
     ///    has length ≥ 2, confirming the batch.
     /// 4. Assert the Bitcoin tx has two withdrawal outputs (one per request).
-    /// 5. Mine blocks and wait for the single `WithdrawalConfirmedEvent`.
+    /// 5. Mine blocks and wait for the single `WithdrawalConfirmed`.
     #[tokio::test]
     async fn test_batch_withdrawal() -> Result<()> {
         init_test_logging();
@@ -1365,7 +1363,7 @@ mod tests {
             .await?;
         info!("Withdrawal request 2 submitted");
 
-        // Wait for a single WithdrawalPickedForProcessingEvent that batches both
+        // Wait for a single WithdrawalPickedForProcessing that batches both
         // requests into one Bitcoin transaction.
         let picked = wait_for_batched_withdrawal_picked(
             &mut networks.sui_network.client,
@@ -1422,7 +1420,7 @@ mod tests {
     ///    and a max batch size of 2.
     /// 2. Deposit and submit 2 withdrawal requests.
     /// 3. The batch should fire at capacity (2 requests) well before the delay
-    ///    expires, producing a single `WithdrawalPickedForProcessingEvent` with
+    ///    expires, producing a single `WithdrawalPickedForProcessing` with
     ///    exactly 2 request IDs.
     #[tokio::test]
     async fn test_batch_withdrawal_fires_at_capacity() -> Result<()> {
