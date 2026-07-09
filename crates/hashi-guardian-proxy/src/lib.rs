@@ -10,8 +10,9 @@
 //!   in front of the guardian's own S3 withdrawal log ([`widlog`]) as the
 //!   durable, read-only tier.
 //! - [`relay`] serves `GuardianRelayService`: key provisioners submit one share
-//!   each and the relay batches a threshold-many into the guardian's
-//!   `ProvisionerInit`.
+//!   each — authenticated against the ceremony's committed roster read from the
+//!   S3 share log ([`roster`]) — and the relay batches a threshold-many into
+//!   the guardian's `ProvisionerInit`.
 //!
 //! The proxy is liveness-only in the trust model: it can stall but never forge a
 //! withdrawal or read a KP share (shares are end-to-end encrypted to the enclave).
@@ -21,6 +22,7 @@ pub mod config;
 pub mod forward;
 pub mod metrics;
 pub mod relay;
+pub mod roster;
 pub mod widlog;
 
 pub use cache::CachingGuardianGrpc;

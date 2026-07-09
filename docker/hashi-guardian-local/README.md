@@ -54,10 +54,9 @@ make smoke         # confirm the guardian is activated
 make down          # tear everything down
 ```
 
-`make ceremony` also writes the KP fingerprints to `kp-roster.env` and restarts
-the proxy with them (`AUTHORIZED_KP_FINGERPRINTS`) — the relay rejects share
-submissions from unrostered signers, mirroring the deploy, where the ceremony
-roster reaches the proxy as deploy-time config.
+The relay rejects share submissions from unrostered signers; its roster is the
+recipient set of the ceremony's share log, read straight from MinIO — no config
+handoff, exactly as the deploy's proxy reads it from S3.
 
 Once activated, the deposit/withdraw CLI flows work against the local network,
 co-signed by the containerized guardian.

@@ -22,7 +22,6 @@ HASHI_OBJECT_ID="${HASHI_OBJECT_ID:-0x000000000000000000000000000000000000000000
 export SUI_RPC PACKAGE_ID HASHI_OBJECT_ID
 
 gen_kp_keys
-write_kp_roster
 # `operator ceremony` connects to the ceremony-mode guardian directly.
 render_config "${CEREMONY_GUARDIAN_ENDPOINT:-http://ceremony:3000}" ""
 

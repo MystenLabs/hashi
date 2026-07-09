@@ -34,18 +34,12 @@ async fn main() -> Result<()> {
         listen = %config.listen_addr,
         log_bucket = %config.log_bucket,
         network = %config.btc_network,
-        kp_roster = config.authorized_kp_fingerprints.len(),
         "Starting hashi-guardian-proxy (wid-keyed cache + node forwarder + provisioning relay)."
     );
-    if config.authorized_kp_fingerprints.is_empty() {
-        warn!(
-            "AUTHORIZED_KP_FINGERPRINTS is empty: the provisioning relay will reject \
-             all share submissions until a KP roster is configured."
-        );
-    }
 
-    // The wid cache's durable tier. Prove bucket access before serving: a
-    // proxy that can't read the log fails every retry closed.
+    // The wid cache's durable tier and the relay's roster source. Prove bucket
+    // access before serving: a proxy that can't read the log fails every retry
+    // closed.
     let log_store = S3LogStore::connect(config.log_bucket.clone(), config.log_region.clone()).await;
     probe_with_retries(&log_store).await?;
 
@@ -67,13 +61,13 @@ async fn main() -> Result<()> {
         .http2_keep_alive_interval(config.keepalive_interval)
         .connect_lazy();
 
+    let relay_svc = Relay::new(channel.clone(), log_store.clone());
     let guardian_svc = CachingGuardianGrpc::new(
-        Forwarding::new(channel.clone()),
+        Forwarding::new(channel),
         log_store,
         config.btc_network,
         metrics.clone(),
     );
-    let relay_svc = Relay::new(channel, config.authorized_kp_fingerprints);
 
     // gRPC health service, mirroring the guardian — the ALB target group
     // health-checks `grpc.health.v1.Health/Check`.
@@ -82,7 +76,7 @@ async fn main() -> Result<()> {
         .set_serving::<GuardianServiceServer<CachingGuardianGrpc<Forwarding, S3LogStore>>>()
         .await;
     health_reporter
-        .set_serving::<GuardianRelayServiceServer<Relay>>()
+        .set_serving::<GuardianRelayServiceServer<Relay<S3LogStore>>>()
         .await;
     // An ALB gRPC health check queries the empty ("") service, so mark it
     // serving too — otherwise the target group flaps the proxy as unhealthy.

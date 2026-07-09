@@ -3027,6 +3027,7 @@ dependencies = [
  "hashi-types",
  "lru 0.16.3",
  "prometheus",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-stream",
