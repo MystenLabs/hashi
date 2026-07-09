@@ -10,6 +10,12 @@
 //! is liveness-only: it can stall provisioning but cannot read a share or forge
 //! a key.
 //!
+//! The relay's backend is the guardian KPs are provisioning: the proxy's
+//! standby when one is configured, else the active guardian. `GetStandbyInfo`
+//! exposes that backend's `GetGuardianInfo` so KP tooling pins the session it
+//! is actually submitting to (the node-facing `GetGuardianInfo` always answers
+//! for the ACTIVE guardian).
+//!
 //! `Accumulator` holds the (pure, unit-tested) accumulation logic; a `tokio`
 //! mutex serializes it and keeps at most one `ProvisionerInit` in flight.
 
@@ -204,6 +210,16 @@ fn check_share_id(id: u32, num_shares: usize) -> Result<(), Status> {
 
 #[tonic::async_trait]
 impl<L: LogStore> GuardianRelayService for Relay<L> {
+    async fn get_standby_info(
+        &self,
+        _request: Request<proto::GetStandbyInfoRequest>,
+    ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+        self.client
+            .clone()
+            .get_guardian_info(proto::GetGuardianInfoRequest {})
+            .await
+    }
+
     async fn single_provisioner_init(
         &self,
         request: Request<proto::SignedSingleProvisionerInitRequest>,
@@ -342,6 +358,7 @@ mod tests {
 
     use crate::widlog::test_store::MemStore;
     use std::sync::atomic::Ordering;
+    use std::time::Duration;
 
     /// A relay whose backend is never dialled — enough to exercise the roster
     /// mapping, which happens before any backend call.
@@ -449,6 +466,111 @@ mod tests {
         // its retriable bucket.
         assert!(!err.message().contains("seq mismatch"));
         assert!(!err.message().contains("Rate limit exceeded"));
+    }
+
+    /// A stub guardian whose `GetGuardianInfo` carries a tag, so a test can
+    /// tell which backend answered.
+    #[derive(Clone)]
+    struct TaggedGuardian(u8);
+
+    #[tonic::async_trait]
+    impl hashi_types::proto::guardian_service_server::GuardianService for TaggedGuardian {
+        async fn get_guardian_info(
+            &self,
+            _: Request<proto::GetGuardianInfoRequest>,
+        ) -> Result<Response<proto::GetGuardianInfoResponse>, Status> {
+            Ok(Response::new(proto::GetGuardianInfoResponse {
+                signing_pub_key: Some(vec![self.0; 32].into()),
+                ..Default::default()
+            }))
+        }
+
+        async fn standard_withdrawal(
+            &self,
+            _: Request<proto::SignedStandardWithdrawalRequest>,
+        ) -> Result<Response<proto::SignedStandardWithdrawalResponse>, Status> {
+            unimplemented!("not exercised by tests")
+        }
+        async fn setup_new_key(
+            &self,
+            _: Request<proto::SetupNewKeyRequest>,
+        ) -> Result<Response<proto::SignedSetupNewKeyResponse>, Status> {
+            unimplemented!("not exercised by tests")
+        }
+        async fn operator_init(
+            &self,
+            _: Request<proto::OperatorInitRequest>,
+        ) -> Result<Response<proto::OperatorInitResponse>, Status> {
+            unimplemented!("not exercised by tests")
+        }
+        async fn provisioner_init(
+            &self,
+            _: Request<proto::ProvisionerInitRequest>,
+        ) -> Result<Response<proto::ProvisionerInitResponse>, Status> {
+            unimplemented!("not exercised by tests")
+        }
+        async fn provisioner_rotate_cert(
+            &self,
+            _: Request<proto::SignedProvisionerRotateCertRequest>,
+        ) -> Result<Response<proto::SignedProvisionerRotateCertResponse>, Status> {
+            unimplemented!("not exercised by tests")
+        }
+        async fn operator_activate(
+            &self,
+            _: Request<proto::OperatorActivateRequest>,
+        ) -> Result<Response<proto::OperatorActivateResponse>, Status> {
+            unimplemented!("not exercised by tests")
+        }
+        async fn update_committee(
+            &self,
+            _: Request<proto::SignedCommitteeTransition>,
+        ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
+            unimplemented!("not exercised by tests")
+        }
+        async fn update_committee_chain(
+            &self,
+            _: Request<proto::UpdateCommitteeChainRequest>,
+        ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
+            unimplemented!("not exercised by tests")
+        }
+        async fn rotate_kps(
+            &self,
+            _: Request<proto::RotateKpsRequest>,
+        ) -> Result<Response<proto::SignedRotateKpsResponse>, Status> {
+            unimplemented!("not exercised by tests")
+        }
+    }
+
+    #[tokio::test]
+    async fn get_standby_info_answers_from_the_relay_backend() {
+        use hashi_types::proto::guardian_service_server::GuardianServiceServer;
+        use tokio_stream::wrappers::TcpListenerStream;
+
+        // The relay fronts its own (standby) backend; GetStandbyInfo must
+        // answer with that backend's info, untouched — main.rs gives the
+        // node-facing forwarder a separate channel to the active guardian.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(GuardianServiceServer::new(TaggedGuardian(0xB)))
+                .serve_with_incoming(TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .unwrap()
+            .connect_lazy();
+        let relay = Relay::new(channel, Arc::new(RosterCache::new(MemStore::default())));
+
+        let info = relay
+            .get_standby_info(Request::new(proto::GetStandbyInfoRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(info.signing_pub_key.unwrap().as_ref(), &[0xB; 32]);
     }
 
     #[test]

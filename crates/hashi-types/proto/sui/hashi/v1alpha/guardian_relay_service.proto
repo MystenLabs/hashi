@@ -16,7 +16,15 @@ import "sui/hashi/v1alpha/guardian_service.proto";
 // read shares or forge a key.
 service GuardianRelayService {
   rpc SingleProvisionerInit(SignedSingleProvisionerInitRequest) returns (SingleProvisionerInitResponse);
+
+  // GuardianInfo of the guardian KPs are provisioning: the proxy's standby
+  // backend when one is configured, else the active guardian (first deploy).
+  // KP tooling pins its session from this instead of the node-facing
+  // GetGuardianInfo, which always answers for the ACTIVE guardian.
+  rpc GetStandbyInfo(GetStandbyInfoRequest) returns (GetGuardianInfoResponse);
 }
+
+message GetStandbyInfoRequest {}
 
 message SingleProvisionerInitResponse {
   // Distinct shares the relay now holds for the current session.
