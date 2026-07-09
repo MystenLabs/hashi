@@ -14,8 +14,12 @@ use std::string::String;
 use sui::{clock::Clock, vec_map::VecMap};
 
 const THRESHOLD_BPS: u64 = 6667;
-const ENotReconfiguring: u64 = 0;
-const EWrongReconfigEpoch: u64 = 1;
+
+#[error]
+const ENotReconfiguring: vector<u8> = b"No reconfiguration is in progress";
+#[error]
+const EWrongReconfigEpoch: vector<u8> =
+    b"Proposal's epoch does not match the pending reconfiguration epoch";
 
 public struct AbortReconfig has copy, drop, store {
     epoch: u64,

@@ -8,8 +8,11 @@ module hashi::tob;
 use hashi::committee::CommitteeSignature;
 use sui::linked_table::{Self, LinkedTable};
 
-const EWrongEpoch: u64 = 0;
-const ETooEarlyToDestroy: u64 = 1;
+#[error]
+const EWrongEpoch: vector<u8> = b"Certificate epoch does not match the bucket's epoch";
+#[error]
+const ETooEarlyToDestroy: vector<u8> =
+    b"TOB certificates may only be destroyed two epochs after their epoch";
 
 public enum ProtocolType has copy, drop, store {
     Dkg,

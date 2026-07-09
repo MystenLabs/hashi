@@ -5,7 +5,8 @@ module hashi::config_value;
 
 use std::string::String;
 
-const EInvalidConfigValue: u64 = 0;
+#[error]
+const EInvalidConfigValue: vector<u8> = b"Config value has a different type than expected";
 
 // Variant order is BCS-load-bearing: the Rust mirror (hashi-types) decodes
 // by variant index, and once published to a persistent network the order is

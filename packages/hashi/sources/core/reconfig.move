@@ -6,9 +6,17 @@ module hashi::reconfig;
 
 use hashi::{committee::CommitteeSignature, hashi::Hashi};
 
-const ENotReconfiguring: u64 = 0;
-const EInitialReconfig: u64 = 1;
-const EGenesisNotAuthorized: u64 = 2;
+// NOTE: `ENotReconfiguring` is matched BY NAME in the node's reconfig-abort
+// classifier (crates/hashi/src/mpc/service.rs) to detect the benign
+// "end_reconfig already completed by another node" race — keep the name.
+#[error]
+const ENotReconfiguring: vector<u8> = b"No reconfiguration is in progress";
+#[error]
+const EInitialReconfig: vector<u8> =
+    b"Not allowed during the initial reconfig (no committee handoff exists yet)";
+#[error]
+const EGenesisNotAuthorized: vector<u8> =
+    b"Genesis is locked until the publisher sends finish_publish (the launch switch)";
 
 /// Message that committee members sign to confirm successful key rotation.
 public struct ReconfigCompletionMessage has copy, drop, store {
