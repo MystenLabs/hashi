@@ -400,10 +400,7 @@ impl types::ComplainRequest {
             epoch: Some(self.epoch),
             dealer: Some(self.dealer.to_string()),
             share_index: self.share_index.map(|idx| idx.get() as u32),
-            complaint: Some(match &self.complaint {
-                types::ProtocolComplaint::Avss(c) => serialize_bcs(c),
-                types::ProtocolComplaint::BatchedAvss(c) => serialize_bcs(c),
-            }),
+            complaint: Some(serialize_bcs(&self.complaint)),
             protocol_type: Some(mpc_protocol_type_to_proto(self.protocol_type) as i32),
             batch_index: self.batch_index,
         }
@@ -427,14 +424,7 @@ impl TryFrom<&proto::ComplainRequest> for types::ComplainRequest {
         let protocol_type =
             mpc_protocol_type_from_proto(required(value.protocol_type, "protocol_type")?)?;
         let complaint_bytes = required(value.complaint.as_ref(), "complaint")?;
-        let complaint = match protocol_type {
-            types::ProtocolTypeIndicator::Dkg | types::ProtocolTypeIndicator::KeyRotation => {
-                types::ProtocolComplaint::Avss(deserialize_bcs(complaint_bytes, "complaint")?)
-            }
-            types::ProtocolTypeIndicator::NonceGeneration => types::ProtocolComplaint::BatchedAvss(
-                deserialize_bcs(complaint_bytes, "complaint")?,
-            ),
-        };
+        let complaint = deserialize_bcs(complaint_bytes, "complaint")?;
         Ok(Self {
             dealer,
             share_index,
@@ -463,6 +453,9 @@ impl From<&types::ComplaintResponse> for proto::ComplainResponse {
             types::ComplaintResponse::NonceGeneration(response) => {
                 Responses::NonceResponse(serialize_bcs(response))
             }
+            types::ComplaintResponse::NonceGenerationAvid(response) => {
+                Responses::AvidNonceResponse(serialize_bcs(response))
+            }
         };
         Self {
             responses: Some(responses),
@@ -485,6 +478,11 @@ impl TryFrom<&proto::ComplainResponse> for types::ComplaintResponse {
                 let response: avss::ComplaintResponse =
                     deserialize_bcs(rotation_response, "rotation_response")?;
                 Ok(types::ComplaintResponse::Rotation(response))
+            }
+            Some(Responses::AvidNonceResponse(avid_response)) => {
+                let response: batch_avss_avid::ComplaintResponse =
+                    deserialize_bcs(avid_response, "avid_nonce_response")?;
+                Ok(types::ComplaintResponse::NonceGenerationAvid(response))
             }
             Some(Responses::NonceResponse(nonce_response)) => {
                 let response: complaint::ComplaintResponse<batch_avss::SharesForNode> =

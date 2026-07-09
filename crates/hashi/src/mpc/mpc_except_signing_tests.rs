@@ -7697,7 +7697,9 @@ fn test_handle_complain_request_success() {
     // Response carries only the responder's shares for the complained share index.
     match &response {
         ComplaintResponse::Rotation(_) => {}
-        ComplaintResponse::Dkg(_) | ComplaintResponse::NonceGeneration(_) => {
+        ComplaintResponse::Dkg(_)
+        | ComplaintResponse::NonceGeneration(_)
+        | ComplaintResponse::NonceGenerationAvid(_) => {
             panic!("Expected rotation complaint response")
         }
     };
@@ -12205,6 +12207,219 @@ async fn test_run_nonce_generation_avid_consumes_and_converts() {
     assert!(
         mgr.dealer_avid_nonce_outputs
             .contains_key(&(batch_index, dealer_addr))
+    );
+}
+
+#[tokio::test]
+async fn test_run_as_avid_nonce_party_recovers_via_complaint() {
+    let setup = TestSetup::new_avid(6);
+    let batch_index = 0u32;
+    let dealer_addr = setup.address(0);
+    let victim = setup.address(5);
+    // The dealer encrypts node 5's shares to a garbage key: node 5 cannot confirm, the round
+    // goes pessimistic, and node 5's later decode reconstructs the (faithfully dispersed)
+    // ciphertext but fails decryption — the reveal-complaint path.
+    let mut dealer_mgr = setup.create_manager(0);
+    dealer_mgr.test_corrupt_shares_for = Some(victim);
+    let others: HashMap<_, _> = (1..6)
+        .map(|i| (setup.address(i), setup.create_manager(i)))
+        .collect();
+    let dealer_p2p = MockP2PChannel::new(others, dealer_addr);
+    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![]);
+    let dealer = Arc::new(RwLock::new(dealer_mgr));
+    MpcManager::run_as_avid_nonce_dealer(
+        &dealer,
+        batch_index,
+        &dealer_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        mock_tob.pending_messages(),
+        Some(1),
+        "Vote cert published — the victim could not confirm"
+    );
+
+    let mut nodes = std::mem::take(&mut *dealer_p2p.managers.lock().unwrap());
+    let Ok(dealer) = Arc::try_unwrap(dealer) else {
+        panic!("dealer Arc still shared");
+    };
+    nodes.insert(dealer_addr, dealer.into_inner().unwrap());
+    let victim_mgr = nodes.remove(&victim).unwrap();
+    assert!(
+        victim_mgr.current_avid_round_state.is_empty(),
+        "the victim never verified its optimistic message"
+    );
+    let party = Arc::new(RwLock::new(victim_mgr));
+    let party_p2p = MockP2PChannel::new(nodes, victim);
+    let result = MpcManager::run_as_avid_nonce_party(
+        &party,
+        batch_index,
+        &party_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await;
+    assert!(result.is_err(), "mock TOB runs dry: {result:?}");
+    let mgr = party.read().unwrap();
+    assert!(
+        mgr.dealer_avid_nonce_outputs
+            .contains_key(&(batch_index, dealer_addr)),
+        "the victim recovered its share via the complaint path"
+    );
+}
+
+#[test]
+fn test_handle_avid_nonce_complaint_responds_and_gates() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new_avid(6);
+    let batch_index = 0u32;
+    let victim = setup.address(5);
+    // Corrupt round harvested at the unit level: confirmers 0..4 verify fine, the victim's
+    // decode fails decryption, yielding a real AvssComplaint.
+    let mut dealer_mgr = setup.create_manager(0);
+    dealer_mgr.test_corrupt_shares_for = Some(victim);
+    let flow = dealer_mgr
+        .prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
+        .unwrap();
+    let dealer_addr = setup.address(0);
+    let mut confirmers: Vec<MpcManager> = Vec::new();
+    let mut sigs = vec![flow.my_signature.clone()];
+    for i in 1..5 {
+        let addr = setup.address(i);
+        let mut mgr = setup.create_manager(i);
+        let (_, msg) = flow
+            .recipient_messages
+            .iter()
+            .find(|(a, _)| *a == addr)
+            .unwrap()
+            .clone();
+        let response = mgr
+            .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg })
+            .unwrap();
+        sigs.push(MemberSignature::new(
+            mgr.mpc_config.epoch,
+            addr,
+            response.signature,
+        ));
+        confirmers.push(mgr);
+    }
+    let mut agg = BlsSignatureAggregator::new(setup.committee(), flow.confirm_target.clone());
+    for sig in &sigs {
+        agg.add_signature(sig.clone()).unwrap();
+    }
+    let confirm_cert = agg.finish().unwrap();
+    let dispersals = dealer_mgr
+        .create_avid_nonce_dispersal_messages(&flow.builder, confirm_cert, batch_index)
+        .unwrap();
+
+    let mut vote_sigs = Vec::new();
+    let mut echoes_for_victim = Vec::new();
+    for (i, mgr) in confirmers.iter_mut().enumerate() {
+        let addr = setup.address(i + 1);
+        let (_, msg) = dispersals.iter().find(|(a, _)| *a == addr).unwrap().clone();
+        let response = mgr
+            .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg })
+            .unwrap();
+        vote_sigs.push(MemberSignature::new(
+            mgr.mpc_config.epoch,
+            addr,
+            response.signature,
+        ));
+        let (_, held) = mgr
+            .avid_held_echoes
+            .get(&(batch_index, dealer_addr))
+            .unwrap()
+            .clone();
+        echoes_for_victim.push((
+            setup.committee().index_of(&addr).unwrap() as PartyId,
+            extract_echo_for(&held, victim),
+        ));
+    }
+    let (held_vote, _) = confirmers[0]
+        .avid_held_echoes
+        .get(&(batch_index, dealer_addr))
+        .unwrap()
+        .clone();
+    let vote_target = DealerMessagesHash {
+        dealer_address: dealer_addr,
+        messages_hash: hash_avid_vote(&held_vote),
+    };
+    let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target);
+    for sig in vote_sigs {
+        agg.add_signature(sig).unwrap();
+    }
+    let vote_cert = AvidCertificate::vote(
+        agg.finish().unwrap(),
+        held_vote,
+        Arc::new(setup.committee().clone()),
+    )
+    .unwrap()
+    .into_verified()
+    .unwrap();
+
+    let common = confirmers[0]
+        .current_avid_round_state
+        .get(&(batch_index, dealer_addr))
+        .unwrap()
+        .common
+        .clone();
+    let mut victim_mgr = setup.create_manager(5);
+    let verified: Vec<_> = echoes_for_victim
+        .into_iter()
+        .map(|(sender, echo)| {
+            victim_mgr
+                .verify_avid_nonce_echo(dealer_addr, batch_index, sender, echo, &vote_cert)
+                .unwrap()
+        })
+        .collect();
+    let outcome = victim_mgr
+        .decode_avid_nonce_share(
+            dealer_addr,
+            batch_index,
+            common,
+            &verified,
+            &vote_cert,
+            &mut rng,
+        )
+        .unwrap();
+    let batch_avss_avid::DecodeAndDecryptOutcome::InvalidDecryption(complaint) = outcome else {
+        panic!("expected an InvalidDecryption complaint");
+    };
+
+    let request = ComplainRequest {
+        dealer: dealer_addr,
+        share_index: None,
+        batch_index: Some(batch_index),
+        complaint: ProtocolComplaint::AvidReveal(complaint.clone()),
+        protocol_type: ProtocolTypeIndicator::NonceGeneration,
+        epoch: setup.epoch(),
+    };
+    let responder = &mut confirmers[0];
+    responder.current_avid_round_state.clear();
+    let response = responder
+        .handle_complain_request(victim, &request)
+        .expect("responder answers from the store");
+    assert!(matches!(
+        response,
+        ComplaintResponse::NonceGenerationAvid(_)
+    ));
+
+    let wrong_accuser = setup.address(2);
+    let result = confirmers[1].handle_complain_request(wrong_accuser, &request);
+    assert!(
+        result.is_err(),
+        "a complaint from the wrong accuser must not be answered: {result:?}"
+    );
+
+    let vanilla_setup = TestSetup::new(6);
+    let mut vanilla_mgr = vanilla_setup.create_manager(1);
+    let result = vanilla_mgr.handle_complain_request(vanilla_setup.address(5), &request);
+    assert!(
+        matches!(result, Err(MpcError::InvalidMessage { .. })),
+        "AVID complaint must be rejected in a vanilla epoch: {result:?}"
     );
 }
 

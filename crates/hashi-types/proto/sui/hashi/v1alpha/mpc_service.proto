@@ -170,8 +170,11 @@ message ComplainResponse {
     // For key rotation
     sui.rpc.v2.Bcs rotation_response = 2;
 
-    // For nonce generation
+    // For vanilla nonce generation
     sui.rpc.v2.Bcs nonce_response = 3;
+
+    // For AVID nonce generation
+    sui.rpc.v2.Bcs avid_nonce_response = 4;
   }
 }
 
