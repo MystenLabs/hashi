@@ -8,6 +8,12 @@
 //! only exposes to nodes. `u64`s serialize as strings (JSON/JS `2^53`), and
 //! `limiter`/`btcPubkey`/`committeeEpoch` are `null` until the guardian is
 //! provisioned. The S3 bucket and KP shares are deliberately not exposed.
+//!
+//! `/info` is public and polled by every SDK client, so it fronts the enclave
+//! with a single-slot TTL cache and single-flight refresh: a burst of hits
+//! collapses to at most one `GetGuardianInfo` per TTL, and while the enclave is
+//! briefly unreachable the last good view is served (its age is visible via
+//! `signedAtMs`) rather than erroring.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -70,34 +76,157 @@ struct LimiterConfigView {
     max_bucket_capacity_sats: String,
 }
 
-/// gRPC client to the enclave plus a single-slot TTL cache, so a burst of public
-/// `/info` hits collapses to at most one (uncached) `GetGuardianInfo` per `ttl`.
+/// Why an `/info` refresh could not produce a fresh view. Kept transport-shaped
+/// so the source stays decoupled from the HTTP response contract.
+enum InfoError {
+    /// The enclave gRPC call failed (unreachable / deadline / transport).
+    Unreachable(String),
+    /// The response decoded but failed signature verification.
+    Invalid(String),
+}
+
+impl InfoError {
+    fn into_response(self) -> Response {
+        match self {
+            InfoError::Unreachable(detail) => unavailable("guardian_unreachable", &detail),
+            InfoError::Invalid(detail) => unavailable("guardian_info_invalid", &detail),
+        }
+    }
+}
+
+/// Source of a fresh [`GuardianInfoView`]. A trait so the cache can be tested
+/// without a live enclave or a signed response to verify against.
+#[tonic::async_trait]
+trait InfoSource: Send + Sync + 'static {
+    async fn fetch(&self) -> Result<GuardianInfoView, InfoError>;
+}
+
+/// [`InfoSource`] backed by the enclave's gRPC `GetGuardianInfo`, verifying and
+/// projecting the signed response.
+struct GrpcInfoSource {
+    client: GuardianServiceClient<Channel>,
+}
+
+#[tonic::async_trait]
+impl InfoSource for GrpcInfoSource {
+    async fn fetch(&self) -> Result<GuardianInfoView, InfoError> {
+        let raw = self
+            .client
+            .clone()
+            .get_guardian_info(proto::GetGuardianInfoRequest {})
+            .await
+            .map_err(|status| InfoError::Unreachable(status.to_string()))?
+            .into_inner();
+
+        // Read the signing timestamp off the raw proto; the domain conversion drops it.
+        let signed_at_ms = raw.signed_info.as_ref().and_then(|s| s.timestamp_ms);
+        let verified = GetGuardianInfoResponse::try_from(raw)
+            .and_then(|resp| resp.verify_signed_info_without_attestation())
+            .map_err(|e| {
+                error!(error = ?e, "GetGuardianInfo could not be decoded/verified for /info");
+                InfoError::Invalid(format!("{e:?}"))
+            })?;
+        Ok(project(&verified, signed_at_ms))
+    }
+}
+
+/// The `/info` cache: the last projected view plus a refresh lock. Reads take
+/// the fast path off `slot`; a miss elects one refresher via `refresh` so a
+/// burst of public hits collapses to a single backend call.
+struct InfoCache {
+    slot: Mutex<Option<(Instant, GuardianInfoView)>>,
+    refresh: tokio::sync::Mutex<()>,
+}
+
+/// Backend source plus its single-slot TTL cache, so a burst of public `/info`
+/// hits collapses to at most one `GetGuardianInfo` per `ttl`.
 #[derive(Clone)]
 pub struct InfoState {
-    client: GuardianServiceClient<Channel>,
-    cache: Arc<Mutex<Option<(Instant, GuardianInfoView)>>>,
+    source: Arc<dyn InfoSource>,
+    cache: Arc<InfoCache>,
     ttl: Duration,
 }
 
 impl InfoState {
     pub fn new(client: GuardianServiceClient<Channel>, ttl: Duration) -> Self {
+        Self::with_source(Arc::new(GrpcInfoSource { client }), ttl)
+    }
+
+    fn with_source(source: Arc<dyn InfoSource>, ttl: Duration) -> Self {
         Self {
-            client,
-            cache: Arc::new(Mutex::new(None)),
+            source,
+            cache: Arc::new(InfoCache {
+                slot: Mutex::new(None),
+                refresh: tokio::sync::Mutex::new(()),
+            }),
             ttl,
         }
     }
 
-    fn cached(&self) -> Option<GuardianInfoView> {
-        let guard = self.cache.lock().expect("info cache mutex poisoned");
-        guard
-            .as_ref()
+    /// Serve `/info`: a fresh cached view, otherwise one single-flighted
+    /// refresh whose result (or, if the enclave is down, the last good view) is
+    /// shared with every concurrent caller.
+    async fn serve(&self) -> Response {
+        if let Some(view) = self.fresh() {
+            return Json(view).into_response();
+        }
+
+        // Elect a single refresher. Concurrent callers serve the last good view
+        // rather than pile onto the enclave; on a cold cache (nothing to serve)
+        // they instead wait for that one refresh.
+        let refreshed = match self.cache.refresh.try_lock() {
+            Ok(_leader) => self.refresh_locked().await,
+            Err(_) => match self.last_good() {
+                Some(view) => return Json(view).into_response(),
+                None => {
+                    let _leader = self.cache.refresh.lock().await;
+                    self.refresh_locked().await
+                }
+            },
+        };
+
+        match refreshed {
+            Ok(view) => Json(view).into_response(),
+            // Enclave unreachable: the last good view (its age is visible via
+            // `signedAtMs`) beats a hard error for an advisory route.
+            Err(err) => self
+                .last_good()
+                .map(|view| Json(view).into_response())
+                .unwrap_or_else(|| err.into_response()),
+        }
+    }
+
+    /// Refresh from the backend. Call with `refresh` held; re-checks the cache
+    /// first so callers that queued behind the leader reuse its fetch.
+    async fn refresh_locked(&self) -> Result<GuardianInfoView, InfoError> {
+        if let Some(view) = self.fresh() {
+            return Ok(view);
+        }
+        let view = self.source.fetch().await?;
+        self.store(view.clone());
+        Ok(view)
+    }
+
+    /// The cached view if it is still within its TTL.
+    fn fresh(&self) -> Option<GuardianInfoView> {
+        let slot = self.cache.slot.lock().expect("info cache mutex poisoned");
+        slot.as_ref()
             .filter(|(at, _)| at.elapsed() < self.ttl)
             .map(|(_, view)| view.clone())
     }
 
+    /// The last successfully fetched view regardless of age.
+    fn last_good(&self) -> Option<GuardianInfoView> {
+        self.cache
+            .slot
+            .lock()
+            .expect("info cache mutex poisoned")
+            .as_ref()
+            .map(|(_, view)| view.clone())
+    }
+
     fn store(&self, view: GuardianInfoView) {
-        *self.cache.lock().expect("info cache mutex poisoned") = Some((Instant::now(), view));
+        *self.cache.slot.lock().expect("info cache mutex poisoned") = Some((Instant::now(), view));
     }
 }
 
@@ -122,37 +251,7 @@ async fn health() -> StatusCode {
 }
 
 async fn get_info(State(state): State<InfoState>) -> Response {
-    if let Some(view) = state.cached() {
-        return Json(view).into_response();
-    }
-
-    // Fetch outside the lock so the handler stays `Send`; a few racing misses
-    // each hitting the enclave on a cold cache is harmless.
-    let raw = match state
-        .client
-        .clone()
-        .get_guardian_info(proto::GetGuardianInfoRequest {})
-        .await
-    {
-        Ok(resp) => resp.into_inner(),
-        Err(status) => return unavailable("guardian_unreachable", &status.to_string()),
-    };
-
-    // Read the signing timestamp off the raw proto; the domain conversion drops it.
-    let signed_at_ms = raw.signed_info.as_ref().and_then(|s| s.timestamp_ms);
-    let verified = match GetGuardianInfoResponse::try_from(raw)
-        .and_then(|resp| resp.verify_signed_info_without_attestation())
-    {
-        Ok(verified) => verified,
-        Err(e) => {
-            error!(error = ?e, "GetGuardianInfo could not be decoded/verified for /info");
-            return unavailable("guardian_info_invalid", &format!("{e:?}"));
-        }
-    };
-
-    let view = project(&verified, signed_at_ms);
-    state.store(view.clone());
-    Json(view).into_response()
+    state.serve().await
 }
 
 fn unavailable(error: &str, detail: &str) -> Response {
@@ -198,6 +297,9 @@ fn limiter_view(state: Option<LimiterState>, config: Option<LimiterConfig>) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
 
     fn limiter_state() -> LimiterState {
         LimiterState {
@@ -279,5 +381,153 @@ mod tests {
                 "signedAtMs": null,
             })
         );
+    }
+
+    fn sample_view() -> GuardianInfoView {
+        GuardianInfoView {
+            limiter: limiter_view(Some(limiter_state()), Some(limiter_config())),
+            git_revision: "abc123".to_string(),
+            committee_epoch: Some("7".to_string()),
+            btc_pubkey: Some("deadbeef".to_string()),
+            signing_pub_key: "feedface".to_string(),
+            signed_at_ms: Some("1720000000123".to_string()),
+        }
+    }
+
+    /// Test source: counts calls, can be flipped `down`, and can delay each
+    /// fetch to widen the window a concurrent burst races in.
+    #[derive(Clone)]
+    struct FakeSource {
+        view: GuardianInfoView,
+        calls: Arc<AtomicUsize>,
+        down: Arc<AtomicBool>,
+        delay: Duration,
+    }
+
+    impl FakeSource {
+        fn new(delay: Duration) -> Self {
+            Self {
+                view: sample_view(),
+                calls: Arc::new(AtomicUsize::new(0)),
+                down: Arc::new(AtomicBool::new(false)),
+                delay,
+            }
+        }
+    }
+
+    #[tonic::async_trait]
+    impl InfoSource for FakeSource {
+        async fn fetch(&self) -> Result<GuardianInfoView, InfoError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
+            if self.down.load(Ordering::SeqCst) {
+                Err(InfoError::Unreachable("fake guardian down".to_string()))
+            } else {
+                Ok(self.view.clone())
+            }
+        }
+    }
+
+    fn state_with(fake: &FakeSource, ttl: Duration) -> InfoState {
+        InfoState::with_source(Arc::new(fake.clone()), ttl)
+    }
+
+    async fn body_json(resp: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn concurrent_misses_collapse_to_a_single_fetch() {
+        // Six cold-cache hits arrive while the one leader is still fetching; the
+        // rest must reuse its result, not each call the enclave.
+        let fake = FakeSource::new(Duration::from_millis(200));
+        let state = state_with(&fake, Duration::from_secs(10));
+
+        let responses = tokio::join!(
+            state.serve(),
+            state.serve(),
+            state.serve(),
+            state.serve(),
+            state.serve(),
+            state.serve(),
+        );
+        for resp in [
+            responses.0,
+            responses.1,
+            responses.2,
+            responses.3,
+            responses.4,
+            responses.5,
+        ] {
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        assert_eq!(
+            fake.calls.load(Ordering::SeqCst),
+            1,
+            "a burst must collapse to one GetGuardianInfo"
+        );
+    }
+
+    #[tokio::test]
+    async fn caches_within_ttl_then_refetches_after_expiry() {
+        let fake = FakeSource::new(Duration::ZERO);
+        let state = state_with(&fake, Duration::from_millis(60));
+
+        state.serve().await;
+        state.serve().await;
+        assert_eq!(
+            fake.calls.load(Ordering::SeqCst),
+            1,
+            "a second hit within the TTL serves from cache"
+        );
+
+        tokio::time::sleep(Duration::from_millis(90)).await;
+        state.serve().await;
+        assert_eq!(
+            fake.calls.load(Ordering::SeqCst),
+            2,
+            "a hit past the TTL refetches"
+        );
+    }
+
+    #[tokio::test]
+    async fn serves_stale_view_when_the_enclave_is_briefly_unreachable() {
+        let fake = FakeSource::new(Duration::ZERO);
+        let state = state_with(&fake, Duration::from_millis(60));
+
+        state.serve().await; // prime the cache while the backend is up
+        fake.down.store(true, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(90)).await; // let it go stale
+
+        let resp = state.serve().await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a stale-but-good view beats a hard error"
+        );
+        assert_eq!(
+            body_json(resp).await,
+            serde_json::to_value(sample_view()).unwrap()
+        );
+        assert_eq!(
+            fake.calls.load(Ordering::SeqCst),
+            2,
+            "it still attempted a refresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn returns_503_when_unreachable_and_the_cache_is_cold() {
+        let fake = FakeSource::new(Duration::ZERO);
+        fake.down.store(true, Ordering::SeqCst);
+        let state = state_with(&fake, Duration::from_secs(1));
+
+        let resp = state.serve().await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }
