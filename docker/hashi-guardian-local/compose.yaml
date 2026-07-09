@@ -19,6 +19,11 @@ x-s3-env: &s3-env
   # Flips the S3 client to path-style + plaintext so MinIO's http:9000 works
   # while the enclave->host->minio forwarder chain is preserved.
   AWS_ENDPOINT_URL_S3: http://s3.us-east-1.amazonaws.com:443
+  # Shrinks the activation fence (every other session heartbeat-quiet >= this)
+  # so a local switchover waits ~90s instead of 10 minutes. Kept above the 60s
+  # heartbeat interval so a live-but-between-beats session still counts as
+  # active. Honored by non-enclave-dev builds only.
+  GUARDIAN_OTHER_SESSION_QUIET_SECS: ${GUARDIAN_QUIET_SECS:-90}
   RUST_LOG: ${RUST_LOG:-info}
 
 services:
@@ -96,6 +101,46 @@ services:
       retries: 20
       start_period: 3s
 
+  # The standby pair for rotation rehearsals (profile `standby`): a second
+  # parent host + withdraw enclave sharing the SAME MinIO bucket, like a second
+  # EC2/Nitro pair in the deploy. Armed via the relay, activated by `make
+  # switchover` (see "Rotating the guardian" in the README).
+  host-b:
+    <<: *build
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        socat TCP4-LISTEN:3000,reuseaddr,fork TCP:enclave-b:3000 &
+        socat TCP4-LISTEN:8101,reuseaddr,fork TCP:minio:9000 &
+        socat TCP4-LISTEN:8102,reuseaddr,fork TCP:minio:9000 &
+        socat TCP4-LISTEN:8103,reuseaddr,fork TCP:minio:9000 &
+        wait
+    profiles: ["standby"]
+    depends_on:
+      bucket-init:
+        condition: service_completed_successfully
+
+  enclave-b:
+    <<: *build
+    entrypoint: ["/bin/sh", "/run.local.sh"]
+    profiles: ["standby"]
+    volumes:
+      - ./run.local.sh:/run.local.sh:ro
+    environment:
+      <<: *s3-env
+      HOST_BRIDGE: host-b
+    depends_on:
+      host-b:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "socat -T2 OPEN:/dev/null TCP4:127.0.0.1:3000"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+
   # The one-time CEREMONY-mode guardian. Profiled, so `make up` skips it; brought
   # up only for `make ceremony`. Reached directly (not via the proxy). Uses the
   # same `host` S3 bridge to write ceremony/ + shares/ to MinIO.
@@ -127,8 +172,15 @@ services:
     command: ["/usr/bin/hashi-guardian-proxy"]
     ports:
       - "3000:3000"
+      # Prometheus /metrics, host-published for rotation verification (wid
+      # cache s3_hit/forwarded counters).
+      - "19184:9184"
     environment:
-      GUARDIAN_BACKEND_URL: http://host:3000
+      # Rotation state lives in this dir's `.env` (written by the standby /
+      # switchover make targets): the active backend flips at switchover, and
+      # a standby URL exists only while one is being armed.
+      GUARDIAN_BACKEND_URL: ${ACTIVE_GUARDIAN_URL:-http://host:3000}
+      STANDBY_GUARDIAN_URL: ${STANDBY_GUARDIAN_URL:-}
       PROXY_LISTEN_ADDR: 0.0.0.0:3000
       GUARDIAN_LOG_BUCKET: hashi-guardian-dev
       GUARDIAN_LOG_REGION: us-east-1
@@ -175,6 +227,7 @@ services:
       RELAY_ENDPOINT: http://proxy:3000
       CEREMONY_GUARDIAN_ENDPOINT: http://ceremony:3000
       WITHDRAW_GUARDIAN_ENDPOINT: http://host:3000
+      WITHDRAW_GUARDIAN_B_ENDPOINT: http://host-b:3000
       GUARDIAN_GIT_REVISION: ${GUARDIAN_GIT_REVISION:-local}
       # Filled from the native hashi-localnet state.json by the Makefile.
       SUI_RPC: ${SUI_RPC:-}

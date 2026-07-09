@@ -20,13 +20,16 @@ echo "127.0.0.64   s3.${AWS_REGION}.amazonaws.com" >> /etc/hosts
 echo "127.0.0.65   ${AWS_S3_BUCKET}.s3.${AWS_REGION}.amazonaws.com" >> /etc/hosts
 echo "127.0.0.66   s3.amazonaws.com" >> /etc/hosts
 
-# Outbound S3 forwarders: 127.0.0.6x:443 -> host:810x. On real Nitro these
-# VSOCK-CONNECT the host's nitro vsock-proxy daemons; here they TCP-connect the
-# `host` container, which forwards 810x -> MinIO. (Path-style addressing only
-# uses the .64/8101 region endpoint; .65/.66 are kept for topology fidelity.)
-socat TCP4-LISTEN:443,bind=127.0.0.64,reuseaddr,fork TCP:host:8101 &
-socat TCP4-LISTEN:443,bind=127.0.0.65,reuseaddr,fork TCP:host:8102 &
-socat TCP4-LISTEN:443,bind=127.0.0.66,reuseaddr,fork TCP:host:8103 &
+# Outbound S3 forwarders: 127.0.0.6x:443 -> parent host 810x. On real Nitro
+# these VSOCK-CONNECT the host's nitro vsock-proxy daemons; here they
+# TCP-connect this enclave's parent-host container (HOST_BRIDGE — `host` for
+# the primary enclave, `host-b` for the standby), which forwards 810x -> MinIO.
+# (Path-style addressing only uses the .64/8101 region endpoint; .65/.66 are
+# kept for topology fidelity.)
+HOST_BRIDGE="${HOST_BRIDGE:-host}"
+socat TCP4-LISTEN:443,bind=127.0.0.64,reuseaddr,fork "TCP:${HOST_BRIDGE}:8101" &
+socat TCP4-LISTEN:443,bind=127.0.0.65,reuseaddr,fork "TCP:${HOST_BRIDGE}:8102" &
+socat TCP4-LISTEN:443,bind=127.0.0.66,reuseaddr,fork "TCP:${HOST_BRIDGE}:8103" &
 
 # The guardian binds 0.0.0.0:3000 directly, so (unlike real Nitro) there is no
 # in-enclave vsock->TCP inbound bridge — the `host`/`proxy` containers connect
