@@ -469,7 +469,7 @@ impl GuardianS3Client {
 
     /// Plain point read + deserialize, with no object-lock assertion and no
     /// version/deletion check. For objects whose integrity comes from their own
-    /// signature rather than S3 immutability (e.g. `shares/`, which carry only a
+    /// signature rather than S3 immutability (e.g. `kp-shares/`, which carry only a
     /// short lock that is expected to expire). A tampered object fails the
     /// caller's signature check; a purged one surfaces as a get error.
     pub async fn get_object_no_lock<T: DeserializeOwned>(&self, key: &str) -> GuardianResult<T> {

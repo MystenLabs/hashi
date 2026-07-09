@@ -161,8 +161,7 @@ impl KPEncryptedShares {
         self.0
     }
 
-    /// Recipient PGP fingerprints ordered by share id — the roster committed
-    /// into the `ceremony/` log so a KP can check the full recipient set.
+    /// Recipient PGP fingerprints ordered by share id.
     pub fn recipient_roster(&self) -> Vec<KPFingerprint> {
         self.iter()
             .map(|s| s.recipient_fingerprint.clone())

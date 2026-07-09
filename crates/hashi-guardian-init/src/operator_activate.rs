@@ -132,7 +132,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         phase = "ceremony instance",
         "reading latest ceremony log for the activation instance",
     );
-    let (ceremony_session, latest_instance, _, _) = reader
+    let (ceremony_session, latest_instance, _) = reader
         .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;

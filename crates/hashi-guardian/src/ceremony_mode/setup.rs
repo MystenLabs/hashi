@@ -13,7 +13,7 @@ use tracing::info;
 /// Set up a new BTC key. Flow:
 ///     1. KPs send their OpenPGP certificates to the operator
 ///     2. Operator calls setup_new_key
-///     3. KPs fetch commitments/roster from `ceremony/` and ciphertexts from `shares/`
+///     3. KPs fetch commitments from `ceremony/` and ciphertexts from `kp-shares/`
 pub async fn setup_new_key(
     enclave: Arc<Enclave>,
     request: SetupNewKeyRequest,
@@ -59,13 +59,14 @@ pub async fn setup_new_key(
     let ss_instance = SecretSharingInstance::new(share_commitments.clone(), n, t, 0)
         .expect("(n, t) validated by SetupNewKeyRequest; commitments produced with matching count");
 
-    info!("Persisting setup sharing_seq=0 to shares/ + ceremony/.");
-    enclave.log_shares(0, encrypted_shares.clone()).await?;
+    info!("Persisting setup sharing_seq=0 cert_seq=0 to kp-shares/ + ceremony/.");
+    enclave
+        .log_kp_share_state(0, 0, encrypted_shares.clone())
+        .await?;
 
     enclave
         .log_ceremony(CeremonyLogMessage::NewKey {
             instance: ss_instance.clone(),
-            roster: encrypted_shares.recipient_roster(),
             btc_master_pubkey,
         })
         .await?;
@@ -149,7 +150,6 @@ mod tests {
         };
         let CeremonyLogMessage::NewKey {
             instance,
-            roster,
             btc_master_pubkey,
         } = *ceremony
         else {
@@ -158,28 +158,32 @@ mod tests {
         assert_eq!(instance.sharing_seq(), 0);
         assert_eq!(instance.num_shares(), TEST_N);
         assert_eq!(instance.threshold(), TEST_T);
-        // The roster commits one recipient fingerprint per share.
-        assert_eq!(roster.len(), TEST_N);
         // The ceremony log records the same BTC master pubkey as the response.
         assert_eq!(btc_master_pubkey, validated_resp.btc_master_pubkey);
 
-        // The encrypted shares are persisted to shares/ keyed by sharing_seq,
-        // and carry the ciphertexts the ceremony log omits.
+        // The encrypted shares are persisted to kp-shares/ keyed by sharing_seq
+        // and cert_seq, and carry the ciphertexts the ceremony log omits.
         let shares_logs: Vec<_> = captured
             .iter()
-            .filter(|(k, _)| k.starts_with("shares/"))
+            .filter(|(k, _)| k.starts_with("kp-shares/"))
             .collect();
-        assert_eq!(shares_logs.len(), 1, "expected one shares/ log");
+        assert_eq!(shares_logs.len(), 1, "expected one kp-shares/ log");
         let (shares_key, shares_body) = shares_logs[0];
         assert_eq!(
             *shares_key,
-            format!("shares/{:020}-{}.json", 0, enclave.s3_session_id())
+            format!(
+                "kp-shares/{:020}/{:020}-{}.json",
+                0,
+                0,
+                enclave.s3_session_id()
+            )
         );
         let shares_record: LogRecord = serde_json::from_slice(shares_body).unwrap();
-        let LogMessage::Shares(shares) = shares_record.message else {
-            panic!("expected Shares variant");
+        let LogMessage::KpShareState(shares) = shares_record.message else {
+            panic!("expected KpShareState variant");
         };
         assert_eq!(shares.sharing_seq, 0);
+        assert_eq!(shares.cert_seq, 0);
         assert_eq!(shares.encrypted_shares.len(), TEST_N);
         assert!(std::str::from_utf8(shares_body)
             .unwrap()

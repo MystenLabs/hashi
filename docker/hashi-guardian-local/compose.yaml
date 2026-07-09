@@ -98,7 +98,7 @@ services:
 
   # The one-time CEREMONY-mode guardian. Profiled, so `make up` skips it; brought
   # up only for `make ceremony`. Reached directly (not via the proxy). Uses the
-  # same `host` S3 bridge to write ceremony/ + shares/ to MinIO.
+  # same `host` S3 bridge to write ceremony/ + kp-shares/ to MinIO.
   ceremony:
     <<: *build
     entrypoint: ["/bin/sh", "/run.local.sh"]

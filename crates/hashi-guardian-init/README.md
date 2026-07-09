@@ -35,7 +35,7 @@ The production guardian key ceremony — genesis setup, run once by the operator
 
 One S3 bucket is involved: the guardian's **log bucket** (object-lock enabled).
 The guardian writes its `init/` attestation, `ceremony/` audit log, and
-`shares/` encrypted-share recovery log here. The operator and key provisioner
+`kp-shares/` encrypted-share recovery log here. The operator and key provisioner
 ceremony commands both read it.
 
 Drives a fresh **ceremony-mode** guardian through the one-time genesis BTC key
@@ -43,7 +43,7 @@ setup (`sharing_seq = 0`). It connects over gRPC and: `operator_init` (ceremony 
 `setup_new_key` → verifies the response signature and shape → confirms each
 encrypted share is addressed only to its labeled KP cert (PKESK recipients,
 parsed without decrypting) → cross-checks the guardian's `ceremony/` audit log
-and `shares/` recovery log.
+and `kp-shares/` recovery log.
 
 Each share is labeled with its recipient cert's `recipient_fingerprint`, so a KP
 finds their share by fingerprint (not positional index).
@@ -61,7 +61,7 @@ Confirms a KP can fetch and decrypt their share from the latest setup or
 rotation ceremony. Trust is anchored to the guardian's S3 attestation log (no
 gRPC to the live guardian): it discovers the latest ceremony session from S3,
 loads that session's attested signing pubkey, verifies its `ceremony/` audit log
-and `shares/` recovery log against the expected `n`/`t`, confirms every
+and `kp-shares/` recovery log against the expected `n`/`t`, confirms every
 encrypted share is addressed only to its labeled KP cert, finds the share labeled
 for this KP's cert fingerprint, decrypts via the yubikey (`gpg --decrypt`), and
 verifies the decrypted share against its commitment.
@@ -134,8 +134,8 @@ is held in this process' memory long enough to verify and re-encrypt it. It:
 4. Recomputes the stable `InitConfig` from limiter config, on-chain MPC master
    `G`, PCR allowlist, and network, then confirms its `config_hash` matches the
    enclave.
-5. Reads this KP's encrypted share from `shares/{seq}-{session}.json` (the
-   ceremony's recovery log), verifies every share's recipients against the
+5. Reads this KP's encrypted share from the latest `kp-shares/{seq}/` state,
+   verifies every share's recipients against the
    roster, finds the one labeled for this KP's cert fingerprint, decrypts it via
    the yubikey (`gpg --decrypt` over a pipe; the plaintext stays in memory and
    never touches disk), and verifies the decrypted share against its commitment.

@@ -17,9 +17,9 @@
 //!    instance the new guardian was booted with; it must match.
 //! 4. The stable `InitConfig` is recomputed from limiter config, master G, PCR
 //!    allowlist, and network; its `config_hash` is confirmed.
-//! 5. This KP's encrypted share is read from `shares/{seq}-{session}.json`
-//!    (attestation-anchored), every share's recipients are verified against
-//!    the roster, and this KP's share is located by fingerprint.
+//! 5. This KP's encrypted share is read from the latest `kp-shares/{seq}/`
+//!    state (attestation-anchored), every share's recipients are verified
+//!    against the roster, and this KP's share is located by fingerprint.
 //! 6. The share is decrypted via the yubikey (`gpg --decrypt` over a pipe;
 //!    plaintext stays in memory) and verified against its commitment.
 //! 7. The decrypted share is HPKE-encrypted to the new guardian's
@@ -252,7 +252,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         phase = "ceremony instance",
         "scraping authoritative ceremony/ log for the secret-sharing instance",
     );
-    let (ceremony_session, scraped_instance, roster, btc_master_pubkey) = reader
+    let (ceremony_session, scraped_instance, btc_master_pubkey) = reader
         .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;
@@ -263,7 +263,6 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         sharing_seq,
         n = scraped_instance.num_shares(),
         t = scraped_instance.threshold(),
-        roster_len = roster.len(),
         "scraped latest ceremony entry",
     );
     anyhow::ensure!(
@@ -306,21 +305,22 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     // 5. Read + verify this KP's encrypted share. The ceremony state is
     //    constructed directly from the S3 log reads above so we don't pay for a
-    //    second ceremony/ + shares/ walk.
+    //    second ceremony/ + kp-shares/ walk.
     info!(
         phase = "share read",
         ceremony_session = %ceremony_session,
         sharing_seq,
-        "reading + verifying this KP's encrypted share from shares/",
+        "reading + verifying this KP's encrypted share from kp-shares/",
     );
-    let encrypted_shares = reader
-        .read_shares(&ceremony_session, sharing_seq, BuildPolicy::AnyAllowlisted)
-        .await?;
+    let (kp_share_session, kp_share_state) = reader
+        .read_latest_kp_share_state(sharing_seq, BuildPolicy::AnyAllowlisted)
+        .await?
+        .context("no kp-shares log found in S3; key setup has not run")?;
     let state = VerifiedCeremonyState::from_scraped(
         ceremony_session.clone(),
+        kp_share_session.clone(),
         scraped_instance.clone(),
-        encrypted_shares,
-        &roster,
+        kp_share_state,
         btc_master_pubkey,
         cfg.kp_roster.num_shares,
         cfg.kp_roster.threshold,
@@ -328,10 +328,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     state.verify_encrypted_share_recipients(&certs)?;
     info!(
         phase = "share read",
+        kp_share_session = %kp_share_session,
+        cert_seq = state.kp_share_cert_seq,
         share_count = state.encrypted_shares.len(),
-        roster_matches = true,
         all_recipients_verified = true,
-        "shares/ log verified: every share is addressed only to its labeled KP cert",
+        "kp-shares log verified: every share is addressed only to its labeled KP cert",
     );
 
     // Find this KP's share by exact fingerprint match. Given the roster checks
@@ -343,7 +344,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         .find(|s| s.recipient_fingerprint == want_fp_hex)
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "no share in the shares/ log is labeled for this KP's fingerprint \
+                "no share in the kp-shares log is labeled for this KP's fingerprint \
                  {want_fp} (labeled fingerprints: {:?})",
                 state
                     .encrypted_shares

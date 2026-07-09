@@ -7,7 +7,7 @@
 //! [`OperatorInit`] (ceremony mode, S3-only) -> [`SetupNewKey`] -> inspect each
 //! returned encrypted share to confirm it is addressed to the expected KP cert
 //! (without decrypting) -> cross-check the guardian's `ceremony/` audit log and
-//! `shares/` recovery log.
+//! `kp-shares/` recovery log.
 //!
 //! [`OperatorInit`]: hashi_types::guardian::OperatorInitRequest
 //! [`SetupNewKey`]: hashi_types::guardian::SetupNewKeyRequest
@@ -20,10 +20,10 @@ use anyhow::ensure;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::GuardianSigned;
+use hashi_types::guardian::KpShareState;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
 use hashi_types::guardian::SetupNewKeyResponse;
-use hashi_types::guardian::SharesLogMessage;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
 use hashi_types::guardian::proto_conversions::setup_new_key_request_to_pb;
 use hashi_types::pgp::load_certs;
@@ -183,7 +183,8 @@ pub async fn run(cfg: Config) -> Result<()> {
     )?;
     info!(
         phase = "setup_new_key",
-        session_id = %live.session_id,
+        ceremony_session_id = %live.ceremony_session_id,
+        kp_share_session_id = %live.kp_share_session_id,
         sharing_seq = live.secret_sharing_instance.sharing_seq(),
         "verified SetupNewKeyResponse signature + shape",
     );
@@ -201,11 +202,11 @@ pub async fn run(cfg: Config) -> Result<()> {
         "all returned shares verified against expected KP certs",
     );
 
-    // 9. Cross-check the latest guardian ceremony/ and shares/ logs.
-    //    KPs will fetch the same shares/ object during key-provisioner ceremony.
+    // 9. Cross-check the latest guardian ceremony/ and kp-shares/ logs.
+    //    KPs will fetch the same KP share state during key-provisioner ceremony.
     info!(
         phase = "log cross-check",
-        "cross-checking the latest guardian ceremony/ and shares/ logs",
+        "cross-checking the latest guardian ceremony/ and kp-shares/ logs",
     );
     let logged = VerifiedCeremonyState::latest_from_s3(
         &mut reader,
@@ -215,21 +216,24 @@ pub async fn run(cfg: Config) -> Result<()> {
     .await?;
     anyhow::ensure!(
         logged == live,
-        "ceremony/ and shares/ logs differ from the SetupNewKeyResponse"
+        "ceremony/ and kp-shares/ logs differ from the SetupNewKeyResponse"
     );
     info!(
         phase = "log cross-check",
-        "ceremony/ and shares/ logs match the SetupNewKeyResponse",
+        "ceremony/ and kp-shares/ logs match the SetupNewKeyResponse",
     );
 
     // 10. Summary.
     info!(
         phase = "summary",
-        session_id = %live.session_id,
+        ceremony_session_id = %live.ceremony_session_id,
+        kp_share_session_id = %live.kp_share_session_id,
         sharing_seq = live.secret_sharing_instance.sharing_seq(),
-        shares_key = %SharesLogMessage::object_key(
-            &live.session_id,
-            live.secret_sharing_instance.sharing_seq()
+        cert_seq = live.kp_share_cert_seq,
+        kp_shares_key = %KpShareState::object_key(
+            &live.kp_share_session_id,
+            live.secret_sharing_instance.sharing_seq(),
+            live.kp_share_cert_seq
         ),
         n = live.secret_sharing_instance.num_shares(),
         t = live.secret_sharing_instance.threshold(),

@@ -20,7 +20,7 @@ use crate::kp_roster::ensure_cert_in_roster;
 ///
 /// Trust is anchored entirely to the guardian's S3 attestation log: the
 /// `GuardianReader` resolves the session's attested signing pubkey through the
-/// reader cache, and both the `ceremony/` audit entry and `shares/` recovery
+/// reader cache, and both the `ceremony/` audit entry and `kp-shares/` recovery
 /// entry are verified under it. Each step is logged.
 ///
 /// Security: the ciphertext is piped into `gpg --decrypt` over stdin and the
@@ -54,7 +54,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         "KP cert roster loaded"
     );
 
-    // Load this KP's cert. Its fingerprint finds our share in `shares/`, and
+    // Load this KP's cert. Its fingerprint finds our share in `kp-shares/`, and
     // the cert itself lets us confirm the ciphertext is genuinely encrypted to
     // us before we touch the yubikey.
     let kp_pgp_cert_path = cfg.require_kp_pgp_cert_path("key-provisioner ceremony")?;
@@ -87,7 +87,7 @@ pub async fn run(cfg: Config) -> Result<()> {
 
     info!(
         phase = "ceremony scrape",
-        "scraping latest ceremony/ + shares/ logs (attestation-anchored)",
+        "scraping latest ceremony/ + kp-shares/ logs (attestation-anchored)",
     );
     let state = VerifiedCeremonyState::latest_from_s3(
         &mut reader,
@@ -97,8 +97,10 @@ pub async fn run(cfg: Config) -> Result<()> {
     .await?;
     info!(
         phase = "ceremony scrape",
-        session_id = %state.session_id,
+        ceremony_session_id = %state.ceremony_session_id,
+        kp_share_session_id = %state.kp_share_session_id,
         sharing_seq = state.secret_sharing_instance.sharing_seq(),
+        cert_seq = state.kp_share_cert_seq,
         n = state.secret_sharing_instance.num_shares(),
         t = state.secret_sharing_instance.threshold(),
         share_count = state.encrypted_shares.len(),
@@ -114,7 +116,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     state.verify_encrypted_share_recipients(&certs)?;
     info!(
         phase = "roster verify",
-        "ceremony/ and shares/ logs verified against expected params and KP certs",
+        "ceremony/ and kp-shares/ logs verified against expected params and KP certs",
     );
 
     // 3. Find this KP's share by exact fingerprint match (both sides derive
@@ -127,7 +129,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         .find(|s| s.recipient_fingerprint == want_fp_hex)
         .ok_or_else(|| {
             anyhow!(
-                "no share in the shares/ log is labeled for this KP's fingerprint \
+                "no share in the kp-shares log is labeled for this KP's fingerprint \
                  {want_fp} (labeled fingerprints: {:?})",
                 state
                     .encrypted_shares
@@ -190,9 +192,11 @@ pub async fn run(cfg: Config) -> Result<()> {
 
     info!(
         phase = "summary",
-        session_id = %state.session_id,
+        ceremony_session_id = %state.ceremony_session_id,
+        kp_share_session_id = %state.kp_share_session_id,
         share_id = share_id.get(),
         sharing_seq = state.secret_sharing_instance.sharing_seq(),
+        cert_seq = state.kp_share_cert_seq,
         fingerprint = %want_fp,
         commitment = hex::encode(&expected_commitment.digest),
         "ceremony share verified",
