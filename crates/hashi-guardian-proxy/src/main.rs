@@ -5,12 +5,17 @@ use anyhow::Result;
 use hashi_guardian_proxy::cache::CachingGuardianGrpc;
 use hashi_guardian_proxy::config::Config;
 use hashi_guardian_proxy::forward::Forwarding;
+use hashi_guardian_proxy::metrics::ProxyMetrics;
 use hashi_guardian_proxy::relay::Relay;
+use hashi_guardian_proxy::widlog::S3LogStore;
 use hashi_types::proto::guardian_relay_service_server::GuardianRelayServiceServer;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
+use std::sync::Arc;
+use std::time::Duration;
 use tonic::transport::Endpoint;
 use tonic::transport::Server;
 use tonic_health::server::health_reporter;
+use tracing::error;
 use tracing::info;
 use tracing::warn;
 
@@ -27,6 +32,8 @@ async fn main() -> Result<()> {
     info!(
         backend = %config.backend_url,
         listen = %config.listen_addr,
+        log_bucket = %config.log_bucket,
+        network = %config.btc_network,
         kp_roster = config.authorized_kp_fingerprints.len(),
         "Starting hashi-guardian-proxy (wid-keyed cache + node forwarder + provisioning relay)."
     );
@@ -37,6 +44,22 @@ async fn main() -> Result<()> {
         );
     }
 
+    // The wid cache's durable tier. Prove bucket access before serving: a
+    // proxy that can't read the log fails every retry closed.
+    let log_store = S3LogStore::connect(config.log_bucket.clone(), config.log_region.clone()).await;
+    probe_with_retries(&log_store).await?;
+
+    let metrics = Arc::new(ProxyMetrics::new());
+    tokio::spawn({
+        let metrics = metrics.clone();
+        let addr = config.metrics_listen_addr;
+        async move {
+            if let Err(e) = metrics.serve(addr).await {
+                error!(error = %e, "Metrics server exited.");
+            }
+        }
+    });
+
     // Lazy channel to the enclave guardian, shared by forwarder and relay. Mirrors
     // the node-side client (crates/hashi/src/grpc/guardian_client.rs): same timeout + keepalive.
     let channel = Endpoint::from_shared(config.backend_url.clone())?
@@ -44,14 +67,19 @@ async fn main() -> Result<()> {
         .http2_keep_alive_interval(config.keepalive_interval)
         .connect_lazy();
 
-    let guardian_svc = CachingGuardianGrpc::new(Forwarding::new(channel.clone()));
+    let guardian_svc = CachingGuardianGrpc::new(
+        Forwarding::new(channel.clone()),
+        log_store,
+        config.btc_network,
+        metrics.clone(),
+    );
     let relay_svc = Relay::new(channel, config.authorized_kp_fingerprints);
 
     // gRPC health service, mirroring the guardian — the ALB target group
     // health-checks `grpc.health.v1.Health/Check`.
     let (health_reporter, health_service) = health_reporter();
     health_reporter
-        .set_serving::<GuardianServiceServer<CachingGuardianGrpc<Forwarding>>>()
+        .set_serving::<GuardianServiceServer<CachingGuardianGrpc<Forwarding, S3LogStore>>>()
         .await;
     health_reporter
         .set_serving::<GuardianRelayServiceServer<Relay>>()
@@ -70,6 +98,23 @@ async fn main() -> Result<()> {
         .serve(config.listen_addr)
         .await
         .map_err(|e| anyhow::anyhow!("Server error: {}", e))
+}
+
+/// Retry transient S3 blips at boot (no target-group crash-loop), but fail
+/// fast on real misconfiguration (bad bucket, missing role).
+async fn probe_with_retries(log_store: &S3LogStore) -> Result<()> {
+    const ATTEMPTS: u32 = 5;
+    for attempt in 1..=ATTEMPTS {
+        match log_store.probe().await {
+            Ok(()) => return Ok(()),
+            Err(e) if attempt < ATTEMPTS => {
+                warn!(attempt, error = %e, "Wid log bucket probe failed; retrying.");
+                tokio::time::sleep(Duration::from_secs(2 * u64::from(attempt))).await;
+            }
+            Err(e) => return Err(e.context("wid log bucket is not readable")),
+        }
+    }
+    unreachable!("loop returns on success or final error")
 }
 
 /// Make any panic abort the process instead of unwinding. The wid-keyed cache

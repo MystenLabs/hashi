@@ -3020,8 +3020,14 @@ name = "hashi-guardian-proxy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-config",
+ "aws-sdk-s3",
+ "axum",
+ "bitcoin",
  "hashi-types",
  "lru 0.16.3",
+ "prometheus",
+ "serde_json",
  "tokio",
  "tokio-stream",
  "tonic",
