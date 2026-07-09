@@ -33,9 +33,6 @@ pub struct ProxyMetrics {
     pub scan_lists: Histogram,
     /// Wid-matching log records that failed to parse (schema skew or garbage).
     pub record_parse_failures: IntCounter,
-    /// Log records the enclave never committed (S3 ack lost, limiter reverted);
-    /// these forward for a fresh sign instead of replaying.
-    pub uncommitted_records: IntCounter,
 }
 
 impl ProxyMetrics {
@@ -63,11 +60,6 @@ impl ProxyMetrics {
             "Wid-matching log records that failed to parse",
         )
         .expect("valid metric");
-        let uncommitted_records = IntCounter::new(
-            "guardian_proxy_widlog_uncommitted_records_total",
-            "Log records found but never committed by the enclave",
-        )
-        .expect("valid metric");
 
         registry
             .register(Box::new(requests.clone()))
@@ -78,16 +70,12 @@ impl ProxyMetrics {
         registry
             .register(Box::new(record_parse_failures.clone()))
             .expect("register");
-        registry
-            .register(Box::new(uncommitted_records.clone()))
-            .expect("register");
 
         Self {
             registry,
             requests,
             scan_lists,
             record_parse_failures,
-            uncommitted_records,
         }
     }
 

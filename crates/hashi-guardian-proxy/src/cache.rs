@@ -14,11 +14,15 @@
 //! immutable (only signatures change), so the response is stable.
 //!
 //! The enclave persists every signed withdrawal before releasing it, so the
-//! proxy has nothing durable of its own to lose. A log replay passes two gates
-//! (see `replay_from_log`); when the log can't answer, the proxy fails closed
-//! with `UNAVAILABLE` rather than forwarding blind — it cannot distinguish
-//! "never signed" from "signed but unreadable", and forwarding the latter
-//! re-signs and double-debits the limiter.
+//! proxy has nothing durable of its own to lose. On a log hit it verifies the
+//! record's signatures spend the incoming request, then replays them (see
+//! `replay_from_log`); it does not reason about the limiter `seq`, which is the
+//! guardian's to own — the node's mirror self-heals any divergence
+//! (`hashi/src/guardian_limiter.rs`). When the log can't answer, the proxy
+//! fails closed with `UNAVAILABLE` rather than forwarding blind — it cannot
+//! distinguish "never signed" from "signed but unreadable", and forwarding the
+//! latter re-signs a withdrawal the guardian already durably signed, the
+//! double-debit the cache exists to prevent.
 
 use crate::metrics;
 use crate::metrics::ProxyMetrics;
@@ -49,7 +53,6 @@ use tonic::Response;
 use tonic::Status;
 use tracing::error;
 use tracing::info;
-use tracing::warn;
 
 // One entry per withdrawal would leak forever; 10k far exceeds the rate-limited
 // in-flight working set, so a hot wid always outlives its retry window.
@@ -144,8 +147,7 @@ where
     L: LogStore,
 {
     /// Serve a wid from the guardian's S3 withdrawal log. `Ok(None)` means
-    /// "definitively not in the log (or not committed): forward"; `Err` is the
-    /// fail-closed path.
+    /// "definitively not in the log: forward"; `Err` is the fail-closed path.
     async fn replay_from_log(
         &self,
         wid: &WithdrawalID,
@@ -167,40 +169,35 @@ where
             }
         };
 
-        // Gate 1 (committed): a record whose S3 ack never reached the enclave
-        // was reverted, not debited — `seq >= next_seq` — and must re-sign.
+        // Idempotency is by wid; the proxy does not gate on the limiter `seq`.
+        // A record the enclave signed but never committed (a lost-ack S3 write
+        // it then reverted) still replays here: the node's requested seq stays
+        // pinned to its mirror, and its stall reconcile snaps that mirror back
+        // to the guardian's authoritative seq (`hashi/src/guardian_limiter.rs`),
+        // so a served orphan self-heals — at worst a bounded one-withdrawal
+        // limiter under-count, which is the guardian's to close, not the proxy's.
+        //
+        // Integrity gate: never hand the node signatures that don't spend its
+        // transaction. Needs the guardian's live BTC key + master G (the enclave
+        // key rotates per instance, so it can't be cached across rotations).
         let info = match self.guardian_info().await {
             Ok(info) => info,
             Err(e) => {
                 self.metrics
                     .outcome(metrics::OUTCOME_UNAVAILABLE_GUARDIAN_INFO);
-                error!(%wid, error = %e, "Cannot fetch guardian info to gate a log replay.");
+                error!(%wid, error = %e, "Cannot fetch guardian info to verify a log replay.");
                 return Err(unavailable());
             }
         };
-        let (Some(enclave_btc_pubkey), Some(master_g), Some(limiter_state)) = (
-            info.enclave_btc_pubkey,
-            info.mpc_master_g,
-            info.limiter_state,
-        ) else {
+        let (Some(enclave_btc_pubkey), Some(master_g)) =
+            (info.enclave_btc_pubkey, info.mpc_master_g)
+        else {
             self.metrics
                 .outcome(metrics::OUTCOME_UNAVAILABLE_GUARDIAN_INFO);
-            error!(%wid, "Guardian info lacks BTC pubkey / master G / limiter state; cannot gate a log replay.");
+            error!(%wid, "Guardian info lacks BTC pubkey / master G; cannot verify a log replay.");
             return Err(unavailable());
         };
-        if found.consumed_seq >= limiter_state.next_seq {
-            self.metrics.uncommitted_records.inc();
-            warn!(
-                %wid,
-                record_seq = found.consumed_seq,
-                next_seq = limiter_state.next_seq,
-                "Log record was never committed by the enclave; forwarding for a fresh sign."
-            );
-            return Ok(None);
-        }
 
-        // Gate 2 (integrity): the replay path must never hand the node
-        // signatures that don't spend its transaction.
         if let Err(e) = verify_recorded_signatures(
             request,
             &found.response.enclave_signatures,
@@ -821,7 +818,7 @@ mod tests {
         let stub = stub.with_info(stub_info_pb(
             fixture.enclave_btc_pubkey,
             fixture.master_g,
-            // The record's seq is committed: next_seq is past it.
+            // next_seq is carried in guardian info but no longer gated on.
             fixture.consumed_seq + 1,
         ));
         let store = MemStore::default();
@@ -850,30 +847,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn uncommitted_record_forwards_for_a_fresh_sign() {
-        // An orphan record (S3 put acked but the enclave reverted: its seq is
-        // not below next_seq) was never debited — it must re-sign, not replay.
+    async fn record_at_or_above_next_seq_is_still_served_by_wid() {
+        // A record whose seq is not below the guardian's next_seq (e.g. a
+        // lost-ack S3 write the enclave reverted) still carries signatures the
+        // enclave really produced, so the proxy replays it by wid rather than
+        // forwarding. The proxy owns no seq logic; the node's stall reconcile
+        // self-heals any divergence (hashi/src/guardian_limiter.rs). Contrast
+        // the removed committed-gate, which forwarded here and re-signed.
         let fixture = replay_fixture(7);
         let (stub, count) = StubGuardian::ok();
         let stub = stub.with_info(stub_info_pb(
             fixture.enclave_btc_pubkey,
             fixture.master_g,
-            fixture.consumed_seq,
+            fixture.consumed_seq, // next_seq == the record's seq
         ));
         let store = MemStore::default();
         store.insert(fixture.record_key.clone(), fixture.record_bytes.clone());
         let cache = cache_over(stub, store);
 
-        cache
+        let replayed = cache
             .standard_withdrawal(Request::new(fixture.request.clone()))
             .await
-            .unwrap();
+            .unwrap()
+            .into_inner();
 
         assert_eq!(
             count.load(Ordering::SeqCst),
-            1,
-            "must forward to the enclave"
+            0,
+            "served from the log by wid, not forwarded"
         );
+        assert!(!replayed
+            .data
+            .as_ref()
+            .unwrap()
+            .enclave_signatures
+            .is_empty());
     }
 
     #[tokio::test]
@@ -906,8 +914,8 @@ mod tests {
 
     #[tokio::test]
     async fn guardian_info_failure_fails_closed() {
-        // A record exists but the enclave can't be asked for next_seq: the
-        // committed gate can't run, so the proxy fails closed.
+        // A record exists but the enclave can't be asked for its BTC key: the
+        // integrity gate can't run, so the proxy fails closed.
         let fixture = replay_fixture(7);
         let (stub, count) = StubGuardian::ok(); // no .with_info(..)
         let store = MemStore::default();
