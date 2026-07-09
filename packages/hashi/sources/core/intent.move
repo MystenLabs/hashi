@@ -16,6 +16,8 @@
 /// - `0x0200..`: reserved for future chains, one block each
 module hashi::intent;
 
+// ~~~~~~~ Constants ~~~~~~~
+
 // ==== Core protocol (0x0000..=0x00FF) ====
 
 /// Proof of possession of a member BLS key (epoch, address, public key).
@@ -45,6 +47,8 @@ const WITHDRAWAL_CONFIRMATION: u16 = 0x0105;
 /// Request for the guardian to co-sign a withdrawal. Verified off-chain
 /// only; reserved here so the registry is complete.
 const GUARDIAN_WITHDRAWAL_REQUEST: u16 = 0x0106;
+
+// ~~~~~~~ Package Functions ~~~~~~~
 
 public(package) fun proof_of_possession(): u16 { PROOF_OF_POSSESSION }
 

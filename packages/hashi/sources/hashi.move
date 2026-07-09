@@ -1,7 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-/// Module: hashi
+/// The root shared object of the bridge. `Hashi` aggregates every subsystem —
+/// committee set, config, versioning, treasury, governance proposals, and TOB
+/// certificate storage — and hangs per-chain state (e.g. `BitcoinState`) off
+/// its `UID` as dynamic fields. It also provides the package-wide guards
+/// (pause, reconfig, committee-signature verification) that entry functions
+/// in other modules call through, and the one-time `finish_publish` launch
+/// switch that hands the package `UpgradeCap` into on-chain custody.
 module hashi::hashi;
 
 use hashi::{
@@ -17,6 +23,8 @@ use hashi::{
 use std::string::String;
 use sui::{bag::{Self, Bag}, dynamic_field as df};
 
+// ~~~~~~~ Errors ~~~~~~~
+
 #[error]
 const ESystemPaused: vector<u8> = b"System is currently paused";
 #[error]
@@ -25,6 +33,8 @@ const EReconfiguring: vector<u8> = b"System is currently reconfiguring";
 const ENoCommittee: vector<u8> = b"No committee exists for the current epoch";
 #[error]
 const EWrongUpgradeCap: vector<u8> = b"Upgrade cap does not belong to this package";
+
+// ~~~~~~~ Structs ~~~~~~~
 
 public struct Hashi has key {
     id: UID,
@@ -40,66 +50,7 @@ public struct Hashi has key {
     num_consumed_presigs: u64,
 }
 
-#[allow(unused_function)]
-fun init(ctx: &mut TxContext) {
-    let mut hashi = Hashi {
-        id: object::new(ctx),
-        committee_set: hashi::committee_set::create(ctx),
-        config: {
-            let mut config = hashi::config::create();
-            hashi::btc_config::init_defaults(&mut config);
-            hashi::mpc_config::init_defaults(&mut config);
-            config
-        },
-        versioning: versioning::create(),
-        treasury: hashi::treasury::create(ctx),
-        proposals: proposals::create(ctx),
-        tob: bag::new(ctx),
-        num_consumed_presigs: 0,
-    };
-
-    df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
-
-    sui::transfer::share_object(hashi);
-}
-
-public(package) fun assert_unpaused(self: &Hashi) {
-    // Check if state is PAUSED
-    assert!(!self.config().paused(), ESystemPaused);
-}
-
-/// Verify a committee signature over a message.
-/// Returns the certified message (message + signature + stake support).
-public(package) fun verify<T>(
-    self: &Hashi,
-    intent: u16,
-    message: T,
-    sig: CommitteeSignature,
-): CertifiedMessage<T> {
-    let threshold =
-        threshold::certificate_threshold(self.current_committee().total_weight() as u16) as u64;
-    self.current_committee().verify_certificate(intent, message, sig, threshold)
-}
-
-/// Verify a committee signature against a specific committee (not necessarily current).
-/// Used by reconfig which verifies against the next epoch's committee.
-public(package) fun verify_with_committee<T>(
-    _self: &Hashi,
-    committee: &Committee,
-    intent: u16,
-    message: T,
-    sig: CommitteeSignature,
-): CertifiedMessage<T> {
-    let threshold = threshold::certificate_threshold(committee.total_weight() as u16) as u64;
-    committee.verify_certificate(intent, message, sig, threshold)
-}
-
-public(package) fun assert_not_reconfiguring(self: &Hashi) {
-    // Check that we are not reconfiguring
-    assert!(!self.committee_set().is_reconfiguring(), EReconfiguring);
-    // Check that we still don't need to do genesis
-    assert!(self.committee_set().has_committee(self.committee_set().epoch()), ENoCommittee);
-}
+// ~~~~~~~ Entry Functions ~~~~~~~
 
 // The launch switch. Finalizes input parameters, registers BTC, and hands
 // the package's `UpgradeCap` into on-chain custody (`Versioning`) — which is
@@ -158,6 +109,46 @@ entry fun finish_publish(
     let (treasury_cap, metadata_cap) = hashi::btc::create(coin_registry, ctx);
     self.treasury.register_treasury_cap(treasury_cap);
     self.treasury.register_metadata_cap(metadata_cap);
+}
+
+// ~~~~~~~ Package Functions ~~~~~~~
+
+public(package) fun assert_unpaused(self: &Hashi) {
+    // Check if state is PAUSED
+    assert!(!self.config().paused(), ESystemPaused);
+}
+
+/// Verify a committee signature over a message.
+/// Returns the certified message (message + signature + stake support).
+public(package) fun verify<T>(
+    self: &Hashi,
+    intent: u16,
+    message: T,
+    sig: CommitteeSignature,
+): CertifiedMessage<T> {
+    let threshold =
+        threshold::certificate_threshold(self.current_committee().total_weight() as u16) as u64;
+    self.current_committee().verify_certificate(intent, message, sig, threshold)
+}
+
+/// Verify a committee signature against a specific committee (not necessarily current).
+/// Used by reconfig which verifies against the next epoch's committee.
+public(package) fun verify_with_committee<T>(
+    _self: &Hashi,
+    committee: &Committee,
+    intent: u16,
+    message: T,
+    sig: CommitteeSignature,
+): CertifiedMessage<T> {
+    let threshold = threshold::certificate_threshold(committee.total_weight() as u16) as u64;
+    committee.verify_certificate(intent, message, sig, threshold)
+}
+
+public(package) fun assert_not_reconfiguring(self: &Hashi) {
+    // Check that we are not reconfiguring
+    assert!(!self.committee_set().is_reconfiguring(), EReconfiguring);
+    // Check that we still don't need to do genesis
+    assert!(self.committee_set().has_committee(self.committee_set().epoch()), ENoCommittee);
 }
 
 public(package) fun id(self: &Hashi): &UID {
@@ -246,7 +237,32 @@ public(package) fun reset_num_consumed_presigs(self: &mut Hashi) {
     self.num_consumed_presigs = 0;
 }
 
-// ======== Test-only Functions ========
+// ~~~~~~~ Private Functions ~~~~~~~
+
+#[allow(unused_function)]
+fun init(ctx: &mut TxContext) {
+    let mut hashi = Hashi {
+        id: object::new(ctx),
+        committee_set: hashi::committee_set::create(ctx),
+        config: {
+            let mut config = hashi::config::create();
+            hashi::btc_config::init_defaults(&mut config);
+            hashi::mpc_config::init_defaults(&mut config);
+            config
+        },
+        versioning: versioning::create(),
+        treasury: hashi::treasury::create(ctx),
+        proposals: proposals::create(ctx),
+        tob: bag::new(ctx),
+        num_consumed_presigs: 0,
+    };
+
+    df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
+
+    sui::transfer::share_object(hashi);
+}
+
+// ~~~~~~~ Test Helpers ~~~~~~~
 
 #[test_only]
 public(package) fun tob_contains(self: &Hashi, key: hashi::tob::TobKey): bool {

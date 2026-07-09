@@ -1,6 +1,10 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+/// Custody of the coin capabilities for bridge-issued assets. `Treasury`
+/// holds the `TreasuryCap` and `MetadataCap` of each registered coin type in
+/// an `ObjectBag` keyed by cap type, and exposes package-only mint/burn that
+/// emit `Minted`/`Burned` events for off-chain watchers.
 module hashi::treasury;
 
 use sui::{
@@ -10,9 +14,7 @@ use sui::{
     object_bag::{Self, ObjectBag}
 };
 
-//////////////////////////////////////////////////////
-// Types
-//
+// ~~~~~~~ Structs ~~~~~~~
 
 public struct Key<phantom T> has copy, drop, store {}
 
@@ -20,22 +22,30 @@ public struct Treasury has store {
     objects: ObjectBag,
 }
 
-//////////////////////////////////////////////////////
-// Internal functions
-//
+// ~~~~~~~ Events ~~~~~~~
 
-fun treasury_cap<T>(self: &mut Treasury): &mut TreasuryCap<T> {
-    &mut self.objects[Key<TreasuryCap<T>> {}]
+public struct Minted<phantom T> has copy, drop {
+    amount: u64,
 }
 
-#[allow(unused_function)]
-fun metadata_cap<T>(self: &mut Treasury): &mut MetadataCap<T> {
-    &mut self.objects[Key<MetadataCap<T>> {}]
+public struct Burned<phantom T> has copy, drop {
+    amount: u64,
 }
 
-public(package) fun burn<T>(self: &mut Treasury, balance: Balance<T>) {
-    sui::event::emit(Burned<T> { amount: balance.value() });
-    self.treasury_cap<T>().supply_mut().decrease_supply(balance);
+// ~~~~~~~ Package Functions ~~~~~~~
+
+public(package) fun create(ctx: &mut TxContext): Treasury {
+    Treasury {
+        objects: object_bag::new(ctx),
+    }
+}
+
+public(package) fun register_treasury_cap<T>(self: &mut Treasury, treasury_cap: TreasuryCap<T>) {
+    self.objects.add(Key<TreasuryCap<T>> {}, treasury_cap);
+}
+
+public(package) fun register_metadata_cap<T>(self: &mut Treasury, metadata_cap: MetadataCap<T>) {
+    self.objects.add(Key<MetadataCap<T>> {}, metadata_cap);
 }
 
 public(package) fun mint<T>(self: &mut Treasury, amount: u64, ctx: &mut TxContext): Coin<T> {
@@ -48,32 +58,18 @@ public(package) fun mint_balance<T>(self: &mut Treasury, amount: u64): Balance<T
     self.treasury_cap<T>().mint_balance(amount)
 }
 
-public(package) fun register_treasury_cap<T>(self: &mut Treasury, treasury_cap: TreasuryCap<T>) {
-    self.objects.add(Key<TreasuryCap<T>> {}, treasury_cap);
+public(package) fun burn<T>(self: &mut Treasury, balance: Balance<T>) {
+    sui::event::emit(Burned<T> { amount: balance.value() });
+    self.treasury_cap<T>().supply_mut().decrease_supply(balance);
 }
 
-public(package) fun register_metadata_cap<T>(self: &mut Treasury, metadata_cap: MetadataCap<T>) {
-    self.objects.add(Key<MetadataCap<T>> {}, metadata_cap);
+// ~~~~~~~ Private Functions ~~~~~~~
+
+fun treasury_cap<T>(self: &mut Treasury): &mut TreasuryCap<T> {
+    &mut self.objects[Key<TreasuryCap<T>> {}]
 }
 
-//
-// Constructor
-//
-
-public(package) fun create(ctx: &mut TxContext): Treasury {
-    Treasury {
-        objects: object_bag::new(ctx),
-    }
-}
-
-//
-// Events
-//
-
-public struct Minted<phantom T> has copy, drop {
-    amount: u64,
-}
-
-public struct Burned<phantom T> has copy, drop {
-    amount: u64,
+#[allow(unused_function)]
+fun metadata_cap<T>(self: &mut Treasury): &mut MetadataCap<T> {
+    &mut self.objects[Key<MetadataCap<T>> {}]
 }
