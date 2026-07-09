@@ -2,16 +2,35 @@
 # Copyright (c), Mysten Labs, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-# Setup script for hashi-guardian that acts as an init script (launched by nit)
-# - Sets up library paths
+# Init for the hashi-guardian Nitro enclave; the kernel execs this as PID 1.
+# - Mounts the pseudo-filesystems
+# - Signals the parent that the enclave booted (Nitro vsock heartbeat)
 # - Configures loopback network and /etc/hosts
 # - Starts traffic forwarders for S3 endpoints
 # - Forwards VSOCK port 3000 to localhost:3000 (gRPC)
 # - Launches hashi-guardian
 
 set -e
-echo "run.sh script is running"
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/
 export LD_LIBRARY_PATH=/lib:$LD_LIBRARY_PATH
+echo "run.sh script is running"
+
+# The Nitro loader hands us a bare initramfs root; mount the pseudo-filesystems.
+# Tolerate an already-mounted fs (the kernel auto-mounts devtmpfs).
+busybox mount -t proc proc /proc 2>/dev/null || :
+busybox mount -t sysfs sysfs /sys 2>/dev/null || :
+busybox mount -t devtmpfs devtmpfs /dev 2>/dev/null || :
+busybox mount -t tmpfs tmpfs /tmp 2>/dev/null || :
+
+# Signal the parent that the enclave booted: connect to the parent (vsock CID 3,
+# port 9000) and exchange the 0xB7 heartbeat byte. Without it the parent times
+# out (VsockTimeout) and the enclave never reaches the RUNNING state.
+n=0
+while ! printf '\267' | socat - VSOCK-CONNECT:3:9000; do
+	n=$((n + 1))
+	[ "$n" -ge 10 ] && break
+	sleep 1
+done
 
 # Assign an IP address to local loopback
 busybox ip addr add 127.0.0.1/32 dev lo
@@ -36,4 +55,4 @@ socat TCP4-LISTEN:443,bind=127.0.0.66,reuseaddr,fork VSOCK-CONNECT:3:8103 &
 # Forward VSOCK port 3000 to localhost:3000 (gRPC server)
 socat VSOCK-LISTEN:3000,reuseaddr,fork TCP:localhost:3000 &
 
-/guardian
+exec /guardian
