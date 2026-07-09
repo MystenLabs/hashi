@@ -1,19 +1,21 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::Context;
 use anyhow::Result;
 use hashi_guardian_proxy::cache::CachingGuardianGrpc;
 use hashi_guardian_proxy::config::Config;
 use hashi_guardian_proxy::forward::Forwarding;
+use hashi_guardian_proxy::info;
 use hashi_guardian_proxy::metrics::ProxyMetrics;
 use hashi_guardian_proxy::relay::Relay;
 use hashi_guardian_proxy::widlog::S3LogStore;
 use hashi_types::proto::guardian_relay_service_server::GuardianRelayServiceServer;
+use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use hashi_types::proto::guardian_service_server::GuardianServiceServer;
 use std::sync::Arc;
 use std::time::Duration;
 use tonic::transport::Endpoint;
-use tonic::transport::Server;
 use tonic_health::server::health_reporter;
 use tracing::error;
 use tracing::info;
@@ -60,8 +62,9 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Lazy channel to the enclave guardian, shared by forwarder and relay. Mirrors
-    // the node-side client (crates/hashi/src/grpc/guardian_client.rs): same timeout + keepalive.
+    // Lazy channel to the enclave guardian, shared by forwarder, relay, and the
+    // /info reader. Mirrors the node-side client
+    // (crates/hashi/src/grpc/guardian_client.rs): same timeout + keepalive.
     let channel = Endpoint::from_shared(config.backend_url.clone())?
         .connect_timeout(config.connect_timeout)
         .http2_keep_alive_interval(config.keepalive_interval)
@@ -73,10 +76,14 @@ async fn main() -> Result<()> {
         config.btc_network,
         metrics.clone(),
     );
+    let info_state = info::InfoState::new(
+        GuardianServiceClient::new(channel.clone()),
+        config.info_cache_ttl,
+    );
     let relay_svc = Relay::new(channel, config.authorized_kp_fingerprints);
 
-    // gRPC health service, mirroring the guardian — the ALB target group
-    // health-checks `grpc.health.v1.Health/Check`.
+    // Standard gRPC health service (`grpc.health.v1.Health`) for gRPC
+    // health-checkers; the HTTP `/health` route below covers plain-HTTP liveness.
     let (health_reporter, health_service) = health_reporter();
     health_reporter
         .set_serving::<GuardianServiceServer<CachingGuardianGrpc<Forwarding, S3LogStore>>>()
@@ -84,20 +91,69 @@ async fn main() -> Result<()> {
     health_reporter
         .set_serving::<GuardianRelayServiceServer<Relay>>()
         .await;
-    // An ALB gRPC health check queries the empty ("") service, so mark it
-    // serving too — otherwise the target group flaps the proxy as unhealthy.
+    // A gRPC health check may query the empty ("") service, so mark it serving
+    // too — otherwise such a check flaps the proxy as unhealthy.
     health_reporter
         .set_service_status("", tonic_health::ServingStatus::Serving)
         .await;
 
-    info!("gRPC proxy listening on {}.", config.listen_addr);
-    Server::builder()
-        .add_service(health_service)
-        .add_service(GuardianServiceServer::new(guardian_svc))
-        .add_service(GuardianRelayServiceServer::new(relay_svc))
-        .serve(config.listen_addr)
+    // Serve gRPC (forwarder + relay + health) and the HTTP `/info` + `/health` on
+    // ONE port: each tonic service is mounted as an axum route-service, the plain
+    // routes merged in, one `axum::serve`. Mirrors crates/hashi/src/grpc/mod.rs.
+    let router = axum::Router::new()
+        .add_grpc_service(health_service)
+        .add_grpc_service(GuardianServiceServer::new(guardian_svc))
+        .add_grpc_service(GuardianRelayServiceServer::new(relay_svc))
+        .merge(info::router(info_state));
+
+    let listener = tokio::net::TcpListener::bind(config.listen_addr)
         .await
-        .map_err(|e| anyhow::anyhow!("Server error: {}", e))
+        .with_context(|| format!("bind proxy server to {}", config.listen_addr))?;
+    info!(
+        "Proxy listening on {} (gRPC + HTTP /info + /health).",
+        config.listen_addr
+    );
+    // If the accept loop dies, return so the supervisor restarts a clean task
+    // rather than leaving the surface silently dead.
+    axum::serve(listener, router)
+        .await
+        .map_err(|e| anyhow::anyhow!("proxy server error: {e}"))?;
+    Ok(())
+}
+
+/// Mount a tonic gRPC service as an axum route-service at `/{ServiceName}/*`, so
+/// gRPC and plain-HTTP routes share one router. Mirrors `crates/hashi/src/grpc/mod.rs`.
+trait RouterExt {
+    fn add_grpc_service<S>(self, svc: S) -> Self
+    where
+        S: tower::Service<
+                axum::extract::Request,
+                Response: axum::response::IntoResponse,
+                Error = std::convert::Infallible,
+            > + tonic::server::NamedService
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+        S::Future: Send + 'static;
+}
+
+impl RouterExt for axum::Router {
+    fn add_grpc_service<S>(self, svc: S) -> Self
+    where
+        S: tower::Service<
+                axum::extract::Request,
+                Response: axum::response::IntoResponse,
+                Error = std::convert::Infallible,
+            > + tonic::server::NamedService
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+        S::Future: Send + 'static,
+    {
+        self.route_service(&format!("/{}/{{*rest}}", S::NAME), svc)
+    }
 }
 
 /// Retry transient S3 blips at boot (no target-group crash-loop), but fail

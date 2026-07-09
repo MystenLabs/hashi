@@ -3025,13 +3025,17 @@ dependencies = [
  "axum",
  "bitcoin",
  "hashi-types",
+ "hex",
  "lru 0.16.3",
  "prometheus",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-stream",
  "tonic",
  "tonic-health",
+ "tower",
+ "tower-http",
  "tracing",
 ]
 
