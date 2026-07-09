@@ -21,6 +21,37 @@ const LIVE_SESSION_MAX_AGE: Duration = Duration::from_mins(3);
 /// active, so standby activation must fail.
 const OTHER_SESSION_QUIET_PERIOD: Duration = Duration::from_mins(10);
 
+// The fence windows, env-overridable ONLY in `non-enclave-dev` builds
+// (`GUARDIAN_LIVE_SESSION_MAX_AGE_SECS` / `GUARDIAN_OTHER_SESSION_QUIET_SECS`)
+// so the local replica can rehearse a switchover without the real ten-minute
+// wait. A real-attestation build compiles the constants in.
+
+fn live_session_max_age_secs() -> u64 {
+    #[cfg(feature = "non-enclave-dev")]
+    if let Some(secs) = env_override_secs("GUARDIAN_LIVE_SESSION_MAX_AGE_SECS") {
+        return secs;
+    }
+    LIVE_SESSION_MAX_AGE.as_secs()
+}
+
+fn other_session_quiet_secs() -> u64 {
+    #[cfg(feature = "non-enclave-dev")]
+    if let Some(secs) = env_override_secs("GUARDIAN_OTHER_SESSION_QUIET_SECS") {
+        return secs;
+    }
+    OTHER_SESSION_QUIET_PERIOD.as_secs()
+}
+
+#[cfg(feature = "non-enclave-dev")]
+fn env_override_secs(key: &str) -> Option<u64> {
+    let raw = std::env::var(key).ok()?;
+    // A dev override that fails to parse should be loud, not silently ignored.
+    Some(
+        raw.parse()
+            .unwrap_or_else(|_| panic!("{key} must be integer seconds, got {raw:?}")),
+    )
+}
+
 impl GuardianReader {
     /// Enforces that `live_session` has heartbeated recently, while every other
     /// guardian session has been quiet long enough to no longer be considered
@@ -37,8 +68,8 @@ impl GuardianReader {
             &summary,
             now,
             live_session,
-            LIVE_SESSION_MAX_AGE.as_secs(),
-            OTHER_SESSION_QUIET_PERIOD.as_secs(),
+            live_session_max_age_secs(),
+            other_session_quiet_secs(),
         )?;
 
         let live_session_info = summary
