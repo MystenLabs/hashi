@@ -130,9 +130,9 @@ impl GuardianInitS3Config {
             .as_deref()
             .filter(|value| !value.trim().is_empty());
 
-        let (access_key, secret_key) = match (access_key, secret_key) {
+        let (access_key, secret_key, session_token) = match (access_key, secret_key) {
             (Some(access_key), Some(secret_key)) => {
-                (access_key.to_string(), secret_key.to_string())
+                (access_key.to_string(), secret_key.to_string(), None)
             }
             (None, None) => {
                 let provider =
@@ -146,6 +146,7 @@ impl GuardianInitS3Config {
                 (
                     creds.access_key_id().to_string(),
                     creds.secret_access_key().to_string(),
+                    creds.session_token().map(ToOwned::to_owned),
                 )
             }
             _ => anyhow::bail!(
@@ -156,6 +157,7 @@ impl GuardianInitS3Config {
         Ok(S3Config {
             access_key,
             secret_key,
+            session_token,
             bucket_info: S3BucketInfo {
                 bucket: self.bucket.clone(),
                 region: self.region.clone(),

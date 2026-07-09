@@ -1920,6 +1920,8 @@ pub struct S3Config {
     pub bucket_name: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag = "4")]
     pub region: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "5")]
+    pub session_token: ::core::option::Option<::prost::alloc::string::String>,
 }
 /// Assembled from the current KPs' encrypted shares (in the relay model, by the
 /// relay once it has collected enough). Each share's HPKE AAD binds the enclave's

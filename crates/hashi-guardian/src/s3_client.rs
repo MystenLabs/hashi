@@ -49,11 +49,12 @@ impl GuardianS3Client {
         info!("   Bucket: {}", config.bucket_name());
         info!("   Region: {}", config.region());
 
-        let creds = CredentialsBuilder::default()
+        let mut creds = CredentialsBuilder::default()
             .access_key_id(config.access_key.clone())
             .secret_access_key(config.secret_key.clone())
-            .provider_name("hashi-guardian")
-            .build();
+            .provider_name("hashi-guardian");
+        creds.set_session_token(config.session_token.clone());
+        let creds = creds.build();
 
         let retry_config = RetryConfig::standard().with_max_attempts(MAX_RETRY_ATTEMPTS); // default is 3
 
@@ -602,6 +603,7 @@ mod tests {
         let config = S3Config {
             access_key: "test-access-key".to_string(),
             secret_key: "test-secret-key".to_string(),
+            session_token: None,
             bucket_info: S3BucketInfo {
                 bucket: "bucket".to_string(),
                 region: "us-east-1".to_string(),

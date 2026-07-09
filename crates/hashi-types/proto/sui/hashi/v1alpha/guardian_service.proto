@@ -213,6 +213,7 @@ message S3Config {
   optional string secret_key = 2;
   optional string bucket_name = 3;
   optional string region = 4;
+  optional string session_token = 5;
 }
 
 enum Network {
