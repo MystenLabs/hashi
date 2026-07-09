@@ -1,11 +1,22 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+/// Governance proposal for updating entries in the global config. A proposal
+/// carries a map of key/value entries; on execution every entry must refer to
+/// an existing key with a matching value type (and pass MPC-config range
+/// validation) before being upserted, so governance can tune parameters but
+/// never introduce unknown keys or change an entry's type.
 module hashi::update_config;
 
 use hashi::{config_value::Value, hashi::Hashi, mpc_config, proposal};
 use std::string::String;
 use sui::{clock::Clock, vec_map::VecMap};
+
+// ~~~~~~~ Constants ~~~~~~~
+
+const THRESHOLD_BPS: u64 = 6667;
+
+// ~~~~~~~ Errors ~~~~~~~
 
 #[error]
 const EInvalidConfigEntry: vector<u8> = b"Unknown config key or wrong value type in proposed entry";
@@ -13,11 +24,13 @@ const EInvalidConfigEntry: vector<u8> = b"Unknown config key or wrong value type
 #[error]
 const ENoEntriesProvided: vector<u8> = b"UpdateConfig proposal must contain at least one entry";
 
-const THRESHOLD_BPS: u64 = 6667;
+// ~~~~~~~ Structs ~~~~~~~
 
 public struct UpdateConfig has copy, drop, store {
     entries: VecMap<String, Value>,
 }
+
+// ~~~~~~~ Public Functions ~~~~~~~
 
 public fun propose(
     hashi: &mut Hashi,

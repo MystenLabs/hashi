@@ -13,7 +13,11 @@ use hashi::{hashi::Hashi, proposal};
 use std::string::String;
 use sui::{clock::Clock, vec_map::VecMap};
 
+// ~~~~~~~ Constants ~~~~~~~
+
 const THRESHOLD_BPS: u64 = 6667;
+
+// ~~~~~~~ Errors ~~~~~~~
 
 #[error]
 const ENotReconfiguring: vector<u8> = b"No reconfiguration is in progress";
@@ -21,9 +25,13 @@ const ENotReconfiguring: vector<u8> = b"No reconfiguration is in progress";
 const EWrongReconfigEpoch: vector<u8> =
     b"Proposal's epoch does not match the pending reconfiguration epoch";
 
+// ~~~~~~~ Structs ~~~~~~~
+
 public struct AbortReconfig has copy, drop, store {
     epoch: u64,
 }
+
+// ~~~~~~~ Public Functions ~~~~~~~
 
 public fun propose(
     hashi: &mut Hashi,
