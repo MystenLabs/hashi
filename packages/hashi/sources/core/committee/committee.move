@@ -1,6 +1,12 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+/// BLS signing committees and certificate verification. A `Committee` pins an
+/// epoch's members (validator addresses, BLS public keys, encryption keys,
+/// voting weights) together with the MPC parameters snapshotted at reconfig
+/// time. `verify_certificate` checks an aggregate BLS12-381 min-pk signature
+/// against a signers bitmap, enforces the stake threshold, and wraps the
+/// payload in a `CertifiedMessage` as proof of committee approval.
 #[allow(unused_const)]
 module hashi::committee;
 
@@ -12,7 +18,8 @@ use sui::{
     vec_map::{Self, VecMap}
 };
 
-// Error codes
+// ~~~~~~~ Errors ~~~~~~~
+
 #[error]
 const EInvalidBitmap: vector<u8> = b"The signers bitmap is invalid";
 #[error]
@@ -21,6 +28,8 @@ const ESigVerification: vector<u8> = b"The signature is invalid";
 const ENotEnoughStake: vector<u8> = b"The certificate does not have enough stake support";
 #[error]
 const EIncorrectCommittee: vector<u8> = b"The committee has members with a zero weight";
+
+// ~~~~~~~ Structs ~~~~~~~
 
 public struct CommitteeMember has copy, drop, store {
     validator_address: address,
@@ -42,6 +51,34 @@ public struct Committee has copy, drop, store {
     /// snapshotted from the governed config at reconfig time.
     config: Config,
 }
+
+public struct CommitteeSignature has copy, drop, store {
+    epoch: u64,
+    signature: vector<u8>,
+    signers_bitmap: vector<u8>,
+}
+
+public struct CertifiedMessage<T> has copy, drop, store {
+    message: T,
+    signature: CommitteeSignature,
+    stake_support: u64,
+}
+
+// ~~~~~~~ Public Functions ~~~~~~~
+
+public fun new_committee_signature(
+    epoch: u64,
+    signature: vector<u8>,
+    signers_bitmap: vector<u8>,
+): CommitteeSignature {
+    CommitteeSignature {
+        epoch,
+        signature,
+        signers_bitmap,
+    }
+}
+
+// ~~~~~~~ Package Functions ~~~~~~~
 
 /// Constructor for committee.
 public(package) fun new_committee(
@@ -236,33 +273,11 @@ public(package) fun verify_certificate<T>(
     }
 }
 
-public struct CommitteeSignature has copy, drop, store {
-    epoch: u64,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
-}
-
-public fun new_committee_signature(
-    epoch: u64,
-    signature: vector<u8>,
-    signers_bitmap: vector<u8>,
-): CommitteeSignature {
-    CommitteeSignature {
-        epoch,
-        signature,
-        signers_bitmap,
-    }
-}
+// === Accessors for CommitteeSignature ===
 
 /// The epoch in which the certificate was produced.
 public(package) fun signature_epoch(self: &CommitteeSignature): u64 {
     self.epoch
-}
-
-public struct CertifiedMessage<T> has copy, drop, store {
-    message: T,
-    signature: CommitteeSignature,
-    stake_support: u64,
 }
 
 // === Accessors for CertifiedMessage ===
