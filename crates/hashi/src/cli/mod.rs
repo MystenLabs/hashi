@@ -735,8 +735,10 @@ pub struct LaunchOpts {
     /// keypair or guardian parameters are needed. Prints exactly one
     /// machine-readable line to stdout (the human roster goes to stderr):
     ///
-    ///   LAUNCH_STATUS launched=<bool> registered=<n> ready=<n>
-    ///     ready_stake_bps=<n> registered_stake_bps=<n>
+    /// ```text
+    /// LAUNCH_STATUS launched=<bool> registered=<n> ready=<n>
+    ///   ready_stake_bps=<n> registered_stake_bps=<n>
+    /// ```
     ///
     /// Stake is in basis points of total Sui voting power (10000 = all).
     /// This line is a STABLE CONTRACT parsed by deployment automation
