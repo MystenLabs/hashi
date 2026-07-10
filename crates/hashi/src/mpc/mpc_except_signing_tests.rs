@@ -12344,6 +12344,75 @@ async fn test_run_nonce_generation_avid_consumes_and_converts() {
 }
 
 #[tokio::test]
+async fn test_run_nonce_generation_avid_recovers_from_replayed_certs() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::with_weights_avid(&[5, 1, 1, 1, 1, 1]);
+    let batch_index = 0u32;
+    let dealer_addr = setup.address(0);
+    let mut dealer = setup.create_manager(0);
+    let flow = dealer
+        .prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
+        .unwrap();
+
+    let mut managers: HashMap<Address, MpcManager> = (1..6)
+        .map(|i| (setup.address(i), setup.create_manager(i)))
+        .collect();
+    let mut agg = BlsSignatureAggregator::new(setup.committee(), flow.confirm_target.clone());
+    agg.add_signature(flow.my_signature.clone()).unwrap();
+    for i in 1..6 {
+        let addr = setup.address(i);
+        let (_, msg) = flow
+            .recipient_messages
+            .iter()
+            .find(|(a, _)| *a == addr)
+            .unwrap()
+            .clone();
+        let response = managers
+            .get_mut(&addr)
+            .unwrap()
+            .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg })
+            .unwrap();
+        agg.add_signature(MemberSignature::new(
+            dealer.mpc_config.epoch,
+            addr,
+            response.signature,
+        ))
+        .unwrap();
+    }
+    let cert = CertificateV1::NonceGeneration {
+        batch_index,
+        cert: agg.finish().unwrap(),
+    };
+
+    let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
+    let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
+    let mut prefetched = crate::communication::PrefetchedTobChannel::new(vec![(dealer_addr, cert)]);
+    let outputs = MpcManager::run_nonce_generation(
+        &party,
+        batch_index,
+        &mock_p2p,
+        &mut prefetched,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outputs.len(), 1, "one certified dealer recovered");
+    let mgr = party.read().unwrap();
+    assert!(
+        mgr.dealer_avid_nonce_outputs
+            .contains_key(&(batch_index, dealer_addr))
+    );
+    assert!(
+        mgr.public_messages_store
+            .get_avid_dealer_builder(mgr.mpc_config.epoch, batch_index)
+            .unwrap()
+            .is_none(),
+        "recovery must not deal a round of its own"
+    );
+}
+
+#[tokio::test]
 async fn test_run_as_avid_nonce_party_recovers_via_complaint() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
