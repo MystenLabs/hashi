@@ -275,7 +275,7 @@ impl GuardianS3Client {
     /// tampering / lock-expiry beyond what the immutable-log model allows).
     /// Returned keys are unique and sorted lexicographically.
     ///
-    /// Keys-only counterpart to [`Self::list_all_objects_in_dir`].
+    /// Keys-only counterpart to [`Self::list_all_log_records_in_dir`].
     pub async fn list_all_keys_in_dir(&self, prefix: &str) -> GuardianResult<Vec<String>> {
         self.ensure_no_duplicates_or_deletions(prefix).await
     }
@@ -408,18 +408,18 @@ impl GuardianS3Client {
     /// Batch read. Callers must ensure that all objects with prefix `dir.to_string()` have
     /// unexpired compliance-mode object locks.
     ///
-    /// Returns each object together with its actual S3 key so callers can bind
-    /// verification to the location from which the object was read.
-    pub async fn list_all_objects_in_dir<T: DeserializeOwned>(
+    /// Each returned record carries the actual S3 key from which it was read.
+    pub async fn list_all_log_records_in_dir(
         &self,
         dir: &S3HourScopedDirectory,
-    ) -> GuardianResult<Vec<(String, T)>> {
+    ) -> GuardianResult<Vec<LogRecord>> {
         let prefix = dir.to_string();
         let keys = self.ensure_no_duplicates_or_deletions(&prefix).await?;
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
-            let obj: T = self.get_object_unsafe(&key).await?;
-            out.push((key, obj));
+            let mut record: LogRecord = self.get_object_unsafe(&key).await?;
+            record.object_key = key;
+            out.push(record);
         }
         Ok(out)
     }
@@ -474,7 +474,7 @@ impl GuardianS3Client {
     /// signature rather than S3 immutability (e.g. `kp-shares/`, which carry only a
     /// short lock that is expected to expire). A tampered object fails the
     /// caller's signature check; a purged one surfaces as a get error.
-    pub async fn get_object_no_lock<T: DeserializeOwned>(&self, key: &str) -> GuardianResult<T> {
+    pub async fn get_log_record_no_lock(&self, key: &str) -> GuardianResult<LogRecord> {
         let response = self
             .client
             .get_object()
@@ -498,12 +498,14 @@ impl GuardianS3Client {
             ))
         })?;
 
-        serde_json::from_slice::<T>(&bytes.into_bytes()).map_err(|e| {
+        let mut record = serde_json::from_slice::<LogRecord>(&bytes.into_bytes()).map_err(|e| {
             S3Error(format!(
                 "Failed to deserialize object {} into target type: {}",
                 key, e
             ))
-        })
+        })?;
+        record.object_key = key.to_owned();
+        Ok(record)
     }
 
     /// Reads an immutable-log object, asserting its Compliance lock metadata is
@@ -520,7 +522,9 @@ impl GuardianS3Client {
             )));
         }
 
-        self.get_object_unsafe::<LogRecord>(key).await
+        let mut record = self.get_object_unsafe::<LogRecord>(key).await?;
+        record.object_key = key.to_owned();
+        Ok(record)
     }
 
     /// Note: Callers must set signing_pubkey to None only for unsigned messages.
@@ -535,8 +539,8 @@ impl GuardianS3Client {
             return Err(S3Error(format!("log session_id mismatch for key {}", key)));
         }
         let (_, _, _, message) = match signing_pubkey {
-            Some(pk) => log.verify(key, pk),
-            None => log.verify_unsigned(key),
+            Some(pk) => log.verify(pk),
+            None => log.verify_unsigned(),
         }?;
         Ok(message)
     }

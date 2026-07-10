@@ -126,13 +126,13 @@ impl GuardianReader {
     ) -> anyhow::Result<Vec<VerifiedLogRecord>> {
         let all_logs = self
             .s3
-            .list_all_objects_in_dir::<LogRecord>(dir)
+            .list_all_log_records_in_dir(dir)
             .await
             .with_context(|| format!("failed to list guardian logs in {dir}"))?;
 
         let mut out = Vec::with_capacity(all_logs.len());
-        for (key, log) in all_logs {
-            out.push(self.cache.verify_record(&self.s3, &key, log).await?);
+        for log in all_logs {
+            out.push(self.cache.verify_record(&self.s3, log).await?);
         }
         Ok(out)
     }
@@ -203,7 +203,7 @@ impl GuardianReader {
         build_policy: BuildPolicy,
     ) -> anyhow::Result<(SessionID, SecretSharingInstance, BitcoinPubkey)> {
         let record = self.s3.get_log_record(key).await?;
-        let record = self.cache.verify_record(&self.s3, key, record).await?;
+        let record = self.cache.verify_record(&self.s3, record).await?;
         let session_id = record.session_id.clone();
         let build_pcrs = record.build_pcrs.clone();
         self.enforce_build_policy("ceremony log", build_policy, &build_pcrs)?;
@@ -233,8 +233,8 @@ impl GuardianReader {
         let Some(key) = keys.into_iter().max() else {
             return Ok(None);
         };
-        let record: LogRecord = self.s3.get_object_no_lock(&key).await?;
-        let record = self.cache.verify_record(&self.s3, &key, record).await?;
+        let record = self.s3.get_log_record_no_lock(&key).await?;
+        let record = self.cache.verify_record(&self.s3, record).await?;
         let session_id = record.session_id.clone();
         let build_pcrs = record.build_pcrs.clone();
         self.enforce_build_policy("kp-shares log", build_policy, &build_pcrs)?;
@@ -282,7 +282,7 @@ impl GuardianReader {
             return Ok(None);
         };
         let record = self.s3.get_log_record(&key).await?;
-        let record = self.cache.verify_record(&self.s3, &key, record).await?;
+        let record = self.cache.verify_record(&self.s3, record).await?;
         self.enforce_build_policy("committee-update log", build_policy, &record.build_pcrs)?;
         let LogMessage::CommitteeUpdate(msg) = record.message else {
             anyhow::bail!("expected a committee-update log at {key}");
@@ -313,7 +313,7 @@ impl GuardianReader {
             anyhow::bail!("expected exactly one genesis record at {key}, found {keys:?}");
         }
         let record = self.s3.get_log_record(&key).await?;
-        let record = self.cache.verify_record(&self.s3, &key, record).await?;
+        let record = self.cache.verify_record(&self.s3, record).await?;
         self.enforce_build_policy("genesis log", build_policy, &record.build_pcrs)?;
         let LogMessage::Genesis(msg) = record.message else {
             anyhow::bail!("expected a genesis log at {key}");
@@ -358,18 +358,18 @@ impl GuardianSessionCache {
     async fn verify_record(
         &mut self,
         s3: &GuardianS3Client,
-        object_key: &str,
         record: LogRecord,
     ) -> anyhow::Result<VerifiedLogRecord> {
+        let object_key = record.object_key.clone();
         let session_info = self
             .get_or_load_session_info(s3, &record.session_id)
             .await?;
         record
-            .verify(object_key, &session_info.signing_pubkey)
+            .verify(&session_info.signing_pubkey)
             .map(|(schema_version, session_id, timestamp_ms, message)| {
                 VerifiedLogRecord::new(
                     schema_version,
-                    object_key.to_owned(),
+                    object_key,
                     session_id,
                     timestamp_ms,
                     message,

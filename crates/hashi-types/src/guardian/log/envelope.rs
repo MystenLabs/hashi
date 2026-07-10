@@ -196,12 +196,11 @@ impl LogRecord {
     }
 
     pub fn verify(
-        mut self,
-        object_key: &str,
+        self,
         pub_key: &GuardianPubKey,
     ) -> GuardianResult<(u8, SessionID, UnixMillis, LogMessage)> {
-        self.object_key = object_key.to_owned();
         self.validate_object_key()?;
+        let object_key = self.object_key.clone();
         let schema_version = self.schema_version;
         let session_id = self.session_id;
         let timestamp_ms = self.timestamp_ms;
@@ -217,7 +216,7 @@ impl LogRecord {
                 data: LogSigningPayload {
                     schema_version: self.schema_version,
                     session_id: session_id.clone(),
-                    object_key: object_key.to_owned(),
+                    object_key,
                     message,
                 },
                 timestamp_ms,
@@ -230,16 +229,12 @@ impl LogRecord {
         Ok((schema_version, session_id, timestamp_ms, message))
     }
 
-    pub fn verify_unsigned(
-        mut self,
-        object_key: &str,
-    ) -> GuardianResult<(u8, SessionID, UnixMillis, LogMessage)> {
+    pub fn verify_unsigned(self) -> GuardianResult<(u8, SessionID, UnixMillis, LogMessage)> {
         if !self.message.is_allowed_unsigned() {
             return Err(InvalidInputs(
                 "expected unsigned log record but message requires a signature".into(),
             ));
         }
-        self.object_key = object_key.to_owned();
         self.validate_object_key()?;
         Ok((
             self.schema_version,
@@ -346,16 +341,18 @@ mod tests {
         }
 
         let body = serde_json::to_vec(&log).unwrap();
-        let record_read_from_s3: LogRecord = serde_json::from_slice(&body).unwrap();
+        let mut record_read_from_s3: LogRecord = serde_json::from_slice(&body).unwrap();
+        record_read_from_s3.object_key = writer_key;
         record_read_from_s3
-            .verify(&writer_key, &signing_key.verification_key())
+            .verify(&signing_key.verification_key())
             .expect("the serialized record must verify at the key used by the writer");
     }
 
     fn assert_heartbeat_relocation_rejected(relocated_key: &str) {
-        let (_, log, signing_key) = signed_heartbeat(1_700_000_000_000);
+        let (_, mut log, signing_key) = signed_heartbeat(1_700_000_000_000);
+        log.object_key = relocated_key.to_owned();
         let err = log
-            .verify(relocated_key, &signing_key.verification_key())
+            .verify(&signing_key.verification_key())
             .expect_err("relocated record must be rejected");
         assert!(format!("{err:?}").contains("non-canonical S3 object key"));
     }
@@ -404,10 +401,10 @@ mod tests {
 
     #[test]
     fn signed_log_verifies_at_canonical_object_key() {
-        let (object_key, log, signing_key) = signed_heartbeat(1_700_000_000_000);
+        let (_, log, signing_key) = signed_heartbeat(1_700_000_000_000);
 
         let (schema_version, _, timestamp_ms, message) = log
-            .verify(&object_key, &signing_key.verification_key())
+            .verify(&signing_key.verification_key())
             .expect("record should verify at its intended S3 key");
 
         assert_eq!(schema_version, LOG_SCHEMA_VERSION);
@@ -421,10 +418,11 @@ mod tests {
         let json = serde_json::to_value(&log).unwrap();
         assert!(json.get("object_key").is_none());
 
-        let from_s3: LogRecord = serde_json::from_value(json).unwrap();
+        let mut from_s3: LogRecord = serde_json::from_value(json).unwrap();
         assert!(from_s3.object_key().is_empty());
+        from_s3.object_key = object_key;
         from_s3
-            .verify(&object_key, &signing_key.verification_key())
+            .verify(&signing_key.verification_key())
             .expect("actual S3 key should restore the signed routing context");
     }
 
@@ -463,9 +461,10 @@ mod tests {
             serde_json::from_slice(&serde_json::to_vec(&log).unwrap()).unwrap();
         tampered.message = LogMessage::Heartbeat { seq: 43 };
         let tampered_key = "heartbeat/2023/11/14/22/session-key-binding-00000000000000000043.json";
+        tampered.object_key = tampered_key.to_owned();
 
         let err = tampered
-            .verify(tampered_key, &signing_key.verification_key())
+            .verify(&signing_key.verification_key())
             .expect_err("signature must cover the canonical object key and message");
 
         assert!(format!("{err:?}").contains("signature invalid"));
@@ -491,10 +490,11 @@ mod tests {
         let nonce = u32::from_str_radix(nonce_hex, 16).unwrap();
         let relocated_key = format!("{prefix}-{:08x}.json", nonce ^ 1);
 
-        let record_read_from_s3: LogRecord =
+        let mut record_read_from_s3: LogRecord =
             serde_json::from_slice(&serde_json::to_vec(&log).unwrap()).unwrap();
+        record_read_from_s3.object_key = relocated_key;
         let err = record_read_from_s3
-            .verify(&relocated_key, &signing_key.verification_key())
+            .verify(&signing_key.verification_key())
             .expect_err("changing only the random failure nonce must invalidate placement");
 
         assert!(format!("{err:?}").contains("signature invalid"));
@@ -519,12 +519,10 @@ mod tests {
         let mut aliased: LogRecord =
             serde_json::from_slice(&serde_json::to_vec(&log).unwrap()).unwrap();
         aliased.session_id = "aliased-session".to_string();
+        aliased.object_key = GenesisLogMessage::object_key();
 
         let err = aliased
-            .verify(
-                &GenesisLogMessage::object_key(),
-                &signing_key.verification_key(),
-            )
+            .verify(&signing_key.verification_key())
             .expect_err("session ID must be part of the signed routing context");
 
         assert!(format!("{err:?}").contains("signature invalid"));
@@ -532,11 +530,11 @@ mod tests {
 
     #[test]
     fn log_rejects_unknown_schema_version() {
-        let (object_key, mut log, signing_key) = signed_heartbeat(1_700_000_000_000);
+        let (_, mut log, signing_key) = signed_heartbeat(1_700_000_000_000);
         log.schema_version = LOG_SCHEMA_VERSION + 1;
 
         let err = log
-            .verify(&object_key, &signing_key.verification_key())
+            .verify(&signing_key.verification_key())
             .expect_err("unknown schema versions must be rejected");
 
         assert!(format!("{err:?}").contains("unsupported log schema version"));
@@ -555,7 +553,7 @@ mod tests {
     fn unsigned_log_rejects_replay_at_another_s3_key() {
         let signing_key = GuardianSignKeyPair::from([14u8; 32]);
         let session_id = session_id_from_signing_pubkey(&signing_key.verification_key());
-        let log = LogRecord::new_at_timestamp(
+        let mut log = LogRecord::new_at_timestamp(
             session_id,
             LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
                 attestation: NitroAttestation::new(vec![1, 2, 3]),
@@ -565,8 +563,9 @@ mod tests {
             1_700_000_000_000,
         );
 
+        log.object_key = "init/copied-attestation.json".to_string();
         let err = log
-            .verify_unsigned("init/copied-attestation.json")
+            .verify_unsigned()
             .expect_err("unsigned record copied to another S3 key must be rejected");
 
         assert!(format!("{err:?}").contains("non-canonical S3 object key"));
@@ -584,10 +583,8 @@ mod tests {
             &signing_key,
             1_700_000_000_000,
         );
-        let object_key = log.object_key().to_string();
-
         let err = log
-            .verify_unsigned(&object_key)
+            .verify_unsigned()
             .expect_err("attestation session ID must come from its signing public key");
 
         assert!(format!("{err:?}").contains("attestation session ID mismatch"));
