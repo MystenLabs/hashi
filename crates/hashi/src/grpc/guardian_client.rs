@@ -49,10 +49,7 @@ impl GuardianClient {
             .map_err(tonic::Status::from_error)?
             .connect_timeout(Duration::from_secs(5))
             .http2_keep_alive_interval(Duration::from_secs(5));
-        // A public guardian/proxy endpoint is HTTPS (CA-signed at the ALB). tonic
-        // rejects an https:// URI with no TLS config (HttpsUriWithoutTlsSupport),
-        // which fails limiter bootstrap + committee reconcile. Enable webpki roots
-        // for https; http:// (in-cluster, local, tests) stays plaintext h2c.
+        // tonic rejects an https:// endpoint without a TLS config; http:// stays plaintext.
         if endpoint.starts_with("https://") {
             builder = builder
                 .tls_config(ClientTlsConfig::new().with_webpki_roots())
