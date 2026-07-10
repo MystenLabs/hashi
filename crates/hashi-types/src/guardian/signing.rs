@@ -11,7 +11,7 @@ use super::GuardianError::InternalError;
 use super::GuardianError::InvalidInputs;
 use super::GuardianInfo;
 use super::GuardianResult;
-use super::LogMessage;
+use super::LogSigningPayload;
 use super::RotateKpsResponse;
 use super::SetupNewKeyResponse;
 use super::SingleProvisionerInitRequest;
@@ -33,7 +33,7 @@ use std::path::Path;
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IntentType {
-    /// Intent for all LogMessage's
+    /// Intent for key-bound guardian log records.
     LogMessage = 0,
     /// Intent for SetupNewKeyResponse
     SetupNewKeyResponse = 1,
@@ -68,7 +68,7 @@ pub trait KpSigningIntent {
     const INTENT: KpSigningIntentType;
 }
 
-impl SigningIntent for LogMessage {
+impl SigningIntent for LogSigningPayload {
     const INTENT: IntentType = IntentType::LogMessage;
 }
 

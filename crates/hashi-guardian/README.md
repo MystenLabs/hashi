@@ -2,6 +2,13 @@
 
 Guardian enclave service that emits immutable S3 logs for audit/state-restart workflows.
 
+Signed records bind their canonical S3 object key along with the message and
+timestamp. Readers derive that key from the record contents and compare it with
+the actual key returned by S3 before accepting the signature. The unsigned OI
+attestation receives the same placement check; its key is anchored by the
+Nitro-attested signing public key because both the session ID and canonical object
+key are derived from that public key.
+
 ## S3 log key format
 
 Canonical key layout:

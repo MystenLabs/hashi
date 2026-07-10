@@ -159,6 +159,7 @@ mod tests {
 
     fn heartbeat_log(session_id: &str, timestamp_secs: UnixSeconds) -> VerifiedLogRecord {
         VerifiedLogRecord {
+            object_key: format!("heartbeat/{session_id}.json"),
             session_id: session_id.to_string(),
             timestamp_ms: timestamp_secs * 1_000,
             message: LogMessage::Heartbeat { seq: 0 },
@@ -168,6 +169,7 @@ mod tests {
 
     fn non_heartbeat_log() -> VerifiedLogRecord {
         VerifiedLogRecord {
+            object_key: "init/test-session-pi-enclave-fully-initialized.json".to_string(),
             session_id: "test-session".to_string(),
             timestamp_ms: 0,
             message: LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {

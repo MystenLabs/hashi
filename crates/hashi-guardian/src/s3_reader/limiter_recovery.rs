@@ -186,6 +186,7 @@ mod tests {
             post_state: state_with_seq(next_seq),
         };
         VerifiedLogRecord {
+            object_key: format!("withdraw/success-{next_seq}.json"),
             session_id: "test-session".to_string(),
             timestamp_ms: 0,
             message: LogMessage::Withdrawal(Box::new(msg)),
@@ -202,6 +203,7 @@ mod tests {
             error: GuardianError::RateLimitExceeded,
         };
         VerifiedLogRecord {
+            object_key: "withdraw/failure.json".to_string(),
             session_id: "test-session".to_string(),
             timestamp_ms: 0,
             message: LogMessage::Withdrawal(Box::new(msg)),

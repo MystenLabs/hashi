@@ -408,17 +408,18 @@ impl GuardianS3Client {
     /// Batch read. Callers must ensure that all objects with prefix `dir.to_string()` have
     /// unexpired compliance-mode object locks.
     ///
-    /// Returns: List of objects.
+    /// Returns each object together with its actual S3 key so callers can bind
+    /// verification to the location from which the object was read.
     pub async fn list_all_objects_in_dir<T: DeserializeOwned>(
         &self,
         dir: &S3HourScopedDirectory,
-    ) -> GuardianResult<Vec<T>> {
+    ) -> GuardianResult<Vec<(String, T)>> {
         let prefix = dir.to_string();
         let keys = self.ensure_no_duplicates_or_deletions(&prefix).await?;
         let mut out = Vec::with_capacity(keys.len());
-        for key in &keys {
-            let obj: T = self.get_object_unsafe(key).await?;
-            out.push(obj);
+        for key in keys {
+            let obj: T = self.get_object_unsafe(&key).await?;
+            out.push((key, obj));
         }
         Ok(out)
     }
@@ -534,8 +535,8 @@ impl GuardianS3Client {
             return Err(S3Error(format!("log session_id mismatch for key {}", key)));
         }
         let (_, _, message) = match signing_pubkey {
-            Some(pk) => log.verify(pk),
-            None => log.verify_unsigned(),
+            Some(pk) => log.verify(key, pk),
+            None => log.verify_unsigned(key),
         }?;
         Ok(message)
     }
