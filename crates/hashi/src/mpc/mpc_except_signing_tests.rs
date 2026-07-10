@@ -12087,12 +12087,13 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
     let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![thin_cert, full_cert]);
+    let metrics = test_metrics();
     let certified = MpcManager::run_as_avid_nonce_party(
         &party,
         batch_index,
         &mock_p2p,
         &mut mock_tob,
-        &test_metrics(),
+        &metrics,
     )
     .await
     .unwrap();
@@ -12102,6 +12103,14 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
         mock_tob.pending_messages(),
         Some(0),
         "the thin cert was ignored — the full cert had to be consumed for the quorum"
+    );
+    assert!(
+        metrics
+            .mpc_avid_rounds_total
+            .with_label_values(&["confirm"])
+            .get()
+            >= 1,
+        "a confirm-kind consumption must be counted"
     );
 }
 
@@ -12215,12 +12224,13 @@ async fn test_run_as_avid_nonce_party_laggard_pulls_and_decodes() {
     voters.insert(dealer_addr, dealer.into_inner().unwrap());
     let laggard = Arc::new(RwLock::new(setup.create_manager(5)));
     let laggard_p2p = MockP2PChannel::new(voters, setup.address(5));
+    let metrics = test_metrics();
     let result = MpcManager::run_as_avid_nonce_party(
         &laggard,
         batch_index,
         &laggard_p2p,
         &mut mock_tob,
-        &test_metrics(),
+        &metrics,
     )
     .await;
     assert!(result.is_err(), "mock TOB runs dry: {result:?}");
@@ -12229,6 +12239,14 @@ async fn test_run_as_avid_nonce_party_laggard_pulls_and_decodes() {
         mgr.dealer_avid_nonce_outputs
             .contains_key(&(batch_index, dealer_addr)),
         "the laggard decoded its share from pulled echoes"
+    );
+    assert!(
+        metrics
+            .mpc_avid_rounds_total
+            .with_label_values(&["vote"])
+            .get()
+            >= 1,
+        "a vote-kind consumption must be counted"
     );
 }
 
@@ -12588,12 +12606,13 @@ async fn test_run_as_avid_nonce_party_recovers_via_complaint() {
     );
     let party = Arc::new(RwLock::new(victim_mgr));
     let party_p2p = MockP2PChannel::new(nodes, victim);
+    let metrics = test_metrics();
     let result = MpcManager::run_as_avid_nonce_party(
         &party,
         batch_index,
         &party_p2p,
         &mut mock_tob,
-        &test_metrics(),
+        &metrics,
     )
     .await;
     assert!(result.is_err(), "mock TOB runs dry: {result:?}");
@@ -12602,6 +12621,10 @@ async fn test_run_as_avid_nonce_party_recovers_via_complaint() {
         mgr.dealer_avid_nonce_outputs
             .contains_key(&(batch_index, dealer_addr)),
         "the victim recovered its share via the complaint path"
+    );
+    assert!(
+        metrics.mpc_avid_complaints_recovered_total.get() >= 1,
+        "the complaint recovery must be counted"
     );
 }
 

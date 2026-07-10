@@ -495,6 +495,15 @@ impl MpcManager {
                 request.dealer
             )));
         }
+        tracing::info!(
+            "AVID echo pull served: requester {:?}, dealer {:?}, batch_index={batch_index}, \
+             common={}, vote={}, echo={}",
+            requester,
+            request.dealer,
+            common.is_some(),
+            avid_vote.is_some(),
+            echo.is_some()
+        );
         Ok(RetrieveMessagesResponse {
             messages: Messages::AvidNonceRetrieval(AvidNonceRetrievalMessage {
                 common,
@@ -2485,6 +2494,17 @@ impl MpcManager {
                 unreachable!("routed by the AVID complaint check")
             }
         };
+        tracing::info!(
+            "AVID nonce complaint answered: accuser {:?}, dealer {:?}, batch_index={batch_index}, \
+             kind {}",
+            caller,
+            request.dealer,
+            match &request.complaint {
+                ProtocolComplaint::AvidReveal(_) => "reveal",
+                ProtocolComplaint::AvidBlame { .. } => "blame",
+                _ => unreachable!("routed by the AVID complaint check"),
+            }
+        );
         Ok(ComplaintResponse::NonceGenerationAvid(response))
     }
 
@@ -2513,6 +2533,11 @@ impl MpcManager {
             ciphertext: state.own_ciphertext,
         };
         self.try_sign_avid_nonce_optimistic(dealer, batch_index, &message)?;
+        tracing::info!(
+            "AVID nonce output re-derived from persisted round state: dealer {:?}, \
+             batch_index={batch_index}",
+            dealer
+        );
         Ok(())
     }
 
@@ -2717,11 +2742,12 @@ impl MpcManager {
                 .await;
         }
         let pending = dealer_data.total_reduced_weight - confirmed;
-        let (max_faulty, min_confirm_weight) = {
+        let (max_faulty, min_confirm_weight, address) = {
             let mgr = mpc_manager.read().unwrap();
             (
                 mgr.mpc_config.max_faulty as u32,
                 (mgr.mpc_config.threshold + mgr.mpc_config.max_faulty) as u32,
+                mgr.address,
             )
         };
         if pending > max_faulty || confirmed < min_confirm_weight {
@@ -2731,6 +2757,10 @@ impl MpcManager {
             );
             return Ok(());
         }
+        tracing::info!(
+            "AVID nonce round entered the pessimistic path: dealer {address:?}, \
+             batch_index={batch_index}, confirmed weight {confirmed}, pending weight {pending}"
+        );
         let confirm_cert = aggregator
             .finish()
             .expect("signatures should always be valid");
@@ -2803,6 +2833,12 @@ impl MpcManager {
             }
         }
         if (vote_aggregator.reduced_weight() as u32) >= dealer_data.vote_quorum_weight {
+            tracing::info!(
+                "AVID nonce Vote quorum reached: dealer {address:?}, batch_index={batch_index}, \
+                 weight {} >= {}",
+                vote_aggregator.reduced_weight(),
+                dealer_data.vote_quorum_weight
+            );
             let cert = vote_aggregator
                 .finish()
                 .expect("signatures should always be valid");
@@ -2859,6 +2895,7 @@ impl MpcManager {
         batch_index: u32,
         nonce_cert: &DealerCertificate,
         p2p_channel: &impl P2PChannel,
+        metrics: &Metrics,
     ) -> MpcResult<CertKind> {
         let (request, signers) = {
             let mgr = mpc_manager.read().unwrap();
@@ -2963,7 +3000,12 @@ impl MpcManager {
                 &vote_cert,
                 &mut rng,
             ) {
-                Ok(batch_avss_avid::DecodeAndDecryptOutcome::Valid(..)) => {}
+                Ok(batch_avss_avid::DecodeAndDecryptOutcome::Valid(..)) => {
+                    tracing::info!(
+                        "AVID laggard decode completed: dealer {:?}, batch_index={batch_index}",
+                        dealer
+                    );
+                }
                 Ok(batch_avss_avid::DecodeAndDecryptOutcome::InvalidDecryption(complaint)) => {
                     return Ok((
                         CertKind::AvidVote,
@@ -2999,6 +3041,7 @@ impl MpcManager {
                 complaint,
                 complaint_signers,
                 p2p_channel,
+                metrics,
             )
             .await
         {
@@ -3011,6 +3054,7 @@ impl MpcManager {
         Ok(kind)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn recover_avid_nonce_shares_via_complaint(
         mpc_manager: &Arc<RwLock<Self>>,
         dealer: Address,
@@ -3019,6 +3063,7 @@ impl MpcManager {
         complaint: ProtocolComplaint,
         signers: Vec<Address>,
         p2p_channel: &impl P2PChannel,
+        metrics: &Metrics,
     ) -> MpcResult<()> {
         let epoch = {
             let mgr = mpc_manager.read().unwrap();
@@ -3099,6 +3144,13 @@ impl MpcManager {
                 let mut mgr = mpc_manager.write().unwrap();
                 mgr.dealer_avid_nonce_outputs
                     .insert((batch_index, dealer), output);
+                tracing::info!(
+                    "AVID nonce shares recovered via complaint: dealer {:?}, \
+                     batch_index={batch_index}, responses used {}",
+                    dealer,
+                    verified.len()
+                );
+                metrics.mpc_avid_complaints_recovered_total.inc();
                 return Ok(());
             }
         }
@@ -3190,6 +3242,7 @@ impl MpcManager {
                         batch_index,
                         &nonce_cert,
                         p2p_channel,
+                        metrics,
                     )
                     .await;
                     drop(_timer);
@@ -3239,6 +3292,18 @@ impl MpcManager {
                     .weight_of(party_id)
                     .map_err(|_| MpcError::ProtocolFailed("Missing dealer weight".to_string()))?
             };
+            tracing::info!(
+                "AVID nonce round consumed: dealer {:?}, batch_index={batch_index}, kind {:?}",
+                dealer,
+                kind
+            );
+            metrics
+                .mpc_avid_rounds_total
+                .with_label_values(&[match kind {
+                    CertKind::AvssVote => "confirm",
+                    CertKind::AvidVote => "vote",
+                }])
+                .inc();
             dealer_weight_sum += dealer_weight as u32;
             certified_dealers.insert(dealer);
         }
