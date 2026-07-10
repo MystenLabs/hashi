@@ -1,10 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+// `ctx` params stay `&mut` so future versions can create objects in these
+// entry points without a signature change.
 /// Validator registration and metadata maintenance. Entry points let a Sui
 /// validator register as a Hashi committee member and update its next-epoch
 /// BLS key, operator address, endpoint URL, TLS key, and next-epoch
 /// encryption key. Every mutation emits an event for off-chain watchers.
+#[allow(unused_mut_parameter)]
 module hashi::validator;
 
 use hashi::hashi::Hashi;

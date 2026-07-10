@@ -16,7 +16,7 @@ const DECIMALS: u8 = 8;
 const SYMBOL: vector<u8> = b"hBTC";
 const NAME: vector<u8> = b"BTC";
 const DESCRIPTION: vector<u8> = b"BTC secured by hashi.";
-const ICON_URL: vector<u8> = b"";
+const ICON_URL: vector<u8> = b"https://icons.hashi.sui.io/hbtc";
 
 // ~~~~~~~ Structs ~~~~~~~
 

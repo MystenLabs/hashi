@@ -81,6 +81,9 @@ public struct QuorumReached<phantom T> has copy, drop {
 
 // ~~~~~~~ Entry Functions ~~~~~~~
 
+// `ctx` stays `&mut` (here and in `remove_vote`) so future versions can
+// create objects without a signature change.
+#[allow(unused_mut_parameter)]
 entry fun vote<T: store>(
     hashi: &mut Hashi,
     validator_address: address,
@@ -104,6 +107,7 @@ entry fun vote<T: store>(
     }
 }
 
+#[allow(unused_mut_parameter)]
 entry fun remove_vote<T: store>(
     hashi: &mut Hashi,
     validator_address: address,
