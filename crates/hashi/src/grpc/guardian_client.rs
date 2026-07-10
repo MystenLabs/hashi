@@ -8,6 +8,7 @@ use axum::http;
 use sui_http::middleware::callback::CallbackLayer;
 use tonic::body::Body;
 use tonic::transport::Channel;
+use tonic::transport::ClientTlsConfig;
 use tonic::transport::Endpoint;
 use tower::ServiceBuilder;
 use tower::util::BoxCloneService;
@@ -43,12 +44,19 @@ impl std::fmt::Debug for GuardianClient {
 
 impl GuardianClient {
     pub fn new(endpoint: &str) -> Result<Self, tonic::Status> {
-        let channel = Endpoint::from_shared(endpoint.to_string())
+        let mut builder = Endpoint::from_shared(endpoint.to_string())
             .map_err(Into::<BoxError>::into)
             .map_err(tonic::Status::from_error)?
             .connect_timeout(Duration::from_secs(5))
-            .http2_keep_alive_interval(Duration::from_secs(5))
-            .connect_lazy();
+            .http2_keep_alive_interval(Duration::from_secs(5));
+        // tonic rejects an https:// endpoint without a TLS config; http:// stays plaintext.
+        if endpoint.starts_with("https://") {
+            builder = builder
+                .tls_config(ClientTlsConfig::new().with_webpki_roots())
+                .map_err(Into::<BoxError>::into)
+                .map_err(tonic::Status::from_error)?;
+        }
+        let channel = builder.connect_lazy();
         Ok(Self {
             endpoint: endpoint.to_string(),
             channel,
