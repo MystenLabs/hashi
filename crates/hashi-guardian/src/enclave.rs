@@ -354,6 +354,22 @@ impl Drop for LimiterGuard {
     }
 }
 
+/// Build identity for `GuardianInfo.untrusted_git_revision` / the `PcrAllowlist`
+/// key. A real ceremony enclave is a distinct measured build (its own PCR0) from
+/// the same-commit withdraw enclave, so it reports a distinct identity — the
+/// allowlist forbids two entries per revision, so otherwise the withdraw enclave
+/// and KPs couldn't pin both PCR0s. `test`/`non-enclave-dev` skip attestation and
+/// share one entry, so the suffix is compiled out (existing mock flow unchanged).
+fn reported_git_revision(mode: EnclaveMode) -> String {
+    // Injected at build time (docker/CI); defaults outside a real build.
+    let base = option_env!("GIT_REVISION").unwrap_or("unknown");
+    if cfg!(not(any(test, feature = "non-enclave-dev"))) && mode == EnclaveMode::Ceremony {
+        format!("{base}-ceremony")
+    } else {
+        base.to_string()
+    }
+}
+
 impl Enclave {
     // ========================================================================
     // Construction & Initialization Status
@@ -494,8 +510,7 @@ impl Enclave {
                 .map(|l| l.bucket_info().clone()),
             encryption_pubkey: self.encryption_public_key().to_bytes().to_vec(),
             config_hash: self.config_hash(),
-            // Injected at build time (docker/CI); defaults outside a real build.
-            untrusted_git_revision: option_env!("GIT_REVISION").unwrap_or("unknown").to_string(),
+            untrusted_git_revision: reported_git_revision(self.mode()),
             enclave_btc_pubkey: self.config.enclave_btc_pubkey().ok(),
             limiter_state: self.state.limiter_state().await,
             limiter_config: match self.state.limiter_config().await {
