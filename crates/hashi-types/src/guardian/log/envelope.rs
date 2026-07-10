@@ -227,18 +227,24 @@ impl LogRecord {
                 self.schema_version
             )));
         }
-        let object_key_nonce = self.object_key_nonce(&self.object_key)?;
-        let canonical_key = Self::derive_object_key(
-            &self.session_id,
-            self.timestamp_ms,
-            &self.message,
-            object_key_nonce,
-        )?;
-        if self.object_key != canonical_key {
-            return Err(InvalidInputs(format!(
-                "non-canonical S3 object key: got {}, expected {canonical_key}",
-                self.object_key
-            )));
+        if let Some(name_prefix) = self.message.random_object_key_name_prefix(&self.session_id) {
+            let expected_prefix =
+                format!("{}{name_prefix}", self.message.log_dir(self.timestamp_ms));
+            if !self.object_key.starts_with(&expected_prefix) {
+                return Err(InvalidInputs(format!(
+                    "non-canonical S3 object key: got {}, expected prefix {expected_prefix}",
+                    self.object_key
+                )));
+            }
+        } else {
+            let canonical_key =
+                Self::derive_object_key(&self.session_id, self.timestamp_ms, &self.message, None)?;
+            if self.object_key != canonical_key {
+                return Err(InvalidInputs(format!(
+                    "non-canonical S3 object key: got {}, expected {canonical_key}",
+                    self.object_key
+                )));
+            }
         }
         if let LogMessage::Init(init) = &self.message
             && let super::message::InitLogMessage::OIAttestationUnsigned {
@@ -254,25 +260,6 @@ impl LogRecord {
             }
         }
         Ok(())
-    }
-
-    fn object_key_nonce(&self, actual_key: &str) -> GuardianResult<Option<u32>> {
-        if !self.message.uses_random_object_key_suffix() {
-            return Ok(None);
-        }
-        let nonce_hex = actual_key
-            .strip_suffix(".json")
-            .and_then(|stem| stem.rsplit_once('-').map(|(_, nonce)| nonce))
-            .filter(|nonce| {
-                nonce.len() == 8
-                    && nonce
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            })
-            .ok_or_else(|| InvalidInputs("invalid random failure-log key suffix".into()))?;
-        u32::from_str_radix(nonce_hex, 16)
-            .map(Some)
-            .map_err(|_| InvalidInputs("invalid random failure-log key suffix".into()))
     }
 
     fn derive_object_key(

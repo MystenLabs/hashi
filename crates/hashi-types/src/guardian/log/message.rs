@@ -327,6 +327,25 @@ impl LogMessage {
         )
     }
 
+    /// Deterministic portion of a random-suffix object name, through the final
+    /// `-` before the nonce. The signature authenticates the opaque suffix.
+    pub fn random_object_key_name_prefix(&self, session_id: &str) -> Option<String> {
+        match self {
+            LogMessage::Withdrawal(message)
+                if matches!(message.as_ref(), WithdrawalLogMessage::Failure { .. }) =>
+            {
+                Some(format!("failure-{session_id}-wid{}-", message.wid()))
+            }
+            LogMessage::CommitteeUpdate(message) => match message.as_ref() {
+                CommitteeUpdateLogMessage::Failure { new_committee, .. } => {
+                    Some(format!("failure-{:020}-{session_id}-", new_committee.epoch))
+                }
+                CommitteeUpdateLogMessage::Success { .. } => None,
+            },
+            _ => None,
+        }
+    }
+
     pub fn is_allowed_unsigned(&self) -> bool {
         if let LogMessage::Init(init_message) = self {
             matches!(**init_message, InitLogMessage::OIAttestationUnsigned { .. })
