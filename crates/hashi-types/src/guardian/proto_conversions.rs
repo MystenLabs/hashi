@@ -869,6 +869,7 @@ fn pb_to_s3_config(cfg: pb::S3Config) -> GuardianResult<super::S3Config> {
     Ok(super::S3Config {
         access_key: access_key.to_string(),
         secret_key: secret_key.to_string(),
+        session_token: cfg.session_token.map(|token| token.to_string()),
         bucket_info: super::S3BucketInfo {
             bucket: bucket_name.to_string(),
             region: region.to_string(),
@@ -882,6 +883,7 @@ fn s3_config_to_pb(cfg: super::S3Config) -> pb::S3Config {
         secret_key: Some(cfg.secret_key),
         bucket_name: Some(cfg.bucket_info.bucket),
         region: Some(cfg.bucket_info.region),
+        session_token: cfg.session_token,
     }
 }
 

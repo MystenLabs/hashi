@@ -320,6 +320,7 @@ pub type SessionID = String;
 pub struct S3Config {
     pub access_key: String,
     pub secret_key: String,
+    pub session_token: Option<String>,
     pub bucket_info: S3BucketInfo,
 }
 
