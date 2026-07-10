@@ -19,7 +19,7 @@ use sui::{bag::Bag, table::Table};
 
 public struct BitcoinStateKey has copy, drop, store {}
 
-public struct BitcoinState has store {
+public struct BitcoinState has key, store {
     /// Extension point: dynamic fields can be attached here so new BTC-side
     /// state can be added after the struct layout freezes at mainnet.
     id: UID,
