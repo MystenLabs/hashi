@@ -148,6 +148,55 @@ mod tests {
         Ok(networks)
     }
 
+    async fn rotate_into_avid(networks: &mut TestNetworks) -> Result<()> {
+        let initial_epoch = {
+            let nodes = networks.hashi_network.nodes();
+            let futs: Vec<_> = nodes
+                .iter()
+                .map(|n| n.wait_for_mpc_key(Duration::from_secs(120)))
+                .collect();
+            for (i, r) in futures::future::join_all(futs)
+                .await
+                .into_iter()
+                .enumerate()
+            {
+                r.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+            }
+            assert_eq!(
+                nodes[0]
+                    .hashi()
+                    .onchain_state()
+                    .mpc_nonce_generation_protocol(),
+                1,
+                "the AVID protocol override must have landed"
+            );
+            nodes[0].current_epoch().unwrap()
+        };
+        networks.sui_network.force_close_epoch().await?;
+        let target_epoch = initial_epoch + 1;
+        let futs: Vec<_> = networks
+            .hashi_network
+            .nodes()
+            .iter()
+            .map(|n| n.wait_for_epoch(target_epoch, Duration::from_secs(480)))
+            .collect();
+        for (i, r) in futures::future::join_all(futs)
+            .await
+            .into_iter()
+            .enumerate()
+        {
+            r.unwrap_or_else(|e| panic!("Node {i} failed to reach epoch {target_epoch}: {e}"));
+        }
+        Ok(())
+    }
+
+    fn avid_override(builder: TestNetworksBuilder) -> TestNetworksBuilder {
+        builder.with_onchain_config(
+            "mpc_nonce_generation_protocol",
+            hashi_types::move_types::ConfigValue::U64(1),
+        )
+    }
+
     async fn wait_for_deposit_approval(
         networks: &TestNetworks,
         request_id: Address,
@@ -674,7 +723,20 @@ mod tests {
     #[tokio::test]
     async fn test_presigning_recovery_within_batch() -> Result<()> {
         init_test_logging();
-        let mut networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
+        let networks = setup_test_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
+        presigning_recovery_within_batch_flow(networks).await
+    }
+
+    #[tokio::test]
+    async fn test_avid_presigning_recovery_within_batch() -> Result<()> {
+        init_test_logging();
+        let mut networks =
+            setup_test_networks(avid_override(TestNetworksBuilder::new().with_nodes(4))).await?;
+        rotate_into_avid(&mut networks).await?;
+        presigning_recovery_within_batch_flow(networks).await
+    }
+
+    async fn presigning_recovery_within_batch_flow(mut networks: TestNetworks) -> Result<()> {
         let deposit_amount_sats = 100_000u64;
         let withdrawal_amount_sats = 30_000u64;
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();
@@ -734,10 +796,29 @@ mod tests {
             .with_batch_size_per_weight(1)
             .build()
             .await?;
-        let mut networks = networks;
         networks.hashi_network.nodes()[0]
             .wait_for_mpc_key(Duration::from_secs(60))
             .await?;
+        presigning_recovery_across_batch_boundary_flow(networks).await
+    }
+
+    #[tokio::test]
+    async fn test_avid_presigning_recovery_across_batch_boundary() -> Result<()> {
+        init_test_logging();
+        let mut networks = avid_override(
+            TestNetworksBuilder::new()
+                .with_nodes(4)
+                .with_batch_size_per_weight(1),
+        )
+        .build()
+        .await?;
+        rotate_into_avid(&mut networks).await?;
+        presigning_recovery_across_batch_boundary_flow(networks).await
+    }
+
+    async fn presigning_recovery_across_batch_boundary_flow(
+        mut networks: TestNetworks,
+    ) -> Result<()> {
         let deposit_amount_sats = 100_000u64;
         let withdrawal_amount_sats = 30_000u64;
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();
@@ -1612,9 +1693,20 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_varying_t_and_allowed_delta_across_epochs() -> Result<()> {
         init_test_logging();
+        let networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+        varying_t_and_allowed_delta_flow(networks).await
+    }
 
-        let mut networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+    #[tokio::test]
+    async fn test_avid_varying_t_and_allowed_delta_across_epochs() -> Result<()> {
+        init_test_logging();
+        let networks = avid_override(TestNetworksBuilder::new().with_nodes(4))
+            .build()
+            .await?;
+        varying_t_and_allowed_delta_flow(networks).await
+    }
 
+    async fn varying_t_and_allowed_delta_flow(mut networks: TestNetworks) -> Result<()> {
         use hashi::onchain::types::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
         use hashi::onchain::types::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
         use hashi::onchain::types::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
@@ -2091,13 +2183,16 @@ mod tests {
         // With 4 nodes at weight 25 each (total_weight=100), the presig pool
         // is batch_size_per_weight * total_weight. We need enough
         // presignatures for 500 inputs.
-        let mut networks = TestNetworksBuilder::new()
-            .with_nodes(4)
-            .with_withdrawal_max_batch_size(num_withdrawals)
-            .with_withdrawal_batching_delay_ms(86_400_000)
-            .with_batch_size_per_weight(100)
-            .build()
-            .await?;
+        let mut networks = avid_override(
+            TestNetworksBuilder::new()
+                .with_nodes(4)
+                .with_withdrawal_max_batch_size(num_withdrawals)
+                .with_withdrawal_batching_delay_ms(86_400_000)
+                .with_batch_size_per_weight(100),
+        )
+        .build()
+        .await?;
+        rotate_into_avid(&mut networks).await?;
 
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();

@@ -97,6 +97,15 @@ pub struct SigningManager {
     refill_tx: Arc<watch::Sender<u32>>,
 }
 
+fn presig_pool_fingerprint<'a>(nonces: impl Iterator<Item = &'a G>) -> String {
+    use fastcrypto::hash::HashFunction;
+    let mut hasher = fastcrypto::hash::Blake2b256::default();
+    for nonce in nonces {
+        hasher.update(bcs::to_bytes(nonce).expect("serialization should always succeed"));
+    }
+    hex::encode(&hasher.finalize().digest[..8])
+}
+
 impl SigningManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -112,6 +121,12 @@ impl SigningManager {
         refill_tx: Arc<watch::Sender<u32>>,
     ) -> Self {
         let pool: Vec<Option<(Vec<S>, G)>> = presignatures.map(Some).collect();
+        tracing::info!(
+            "Presig batch installed: address={address}, batch_index={batch_index}, \
+             start_index={batch_start_index}, size={}, fingerprint={}",
+            pool.len(),
+            presig_pool_fingerprint(pool.iter().flatten().map(|(_, nonce)| nonce)),
+        );
         let batch = PresigBatch {
             pool,
             start_index: batch_start_index,
@@ -381,6 +396,15 @@ impl SigningManager {
                         let next_batch_index = latest.batch_index + 1;
                         if let Some(next) = state.next_batch.take() {
                             let pool: Vec<Option<(Vec<S>, G)>> = next.map(Some).collect();
+                            tracing::info!(
+                                "Presig batch installed: address={}, batch_index={next_batch_index}, \
+                                 start_index={next_start}, size={}, fingerprint={}",
+                                config.address,
+                                pool.len(),
+                                presig_pool_fingerprint(
+                                    pool.iter().flatten().map(|(_, nonce)| nonce)
+                                ),
+                            );
                             state.batches.push(PresigBatch {
                                 pool,
                                 start_index: next_start,
@@ -424,9 +448,10 @@ impl SigningManager {
                 let used_batch_index = batch.batch_index;
                 tracing::info!(
                     "Cache miss for {signing_id}, using presig \
-                     (global_presig_index={global_presig_index}, \
+                     (address={}, global_presig_index={global_presig_index}, \
                      batch_index={used_batch_index}, \
                      position={target_position})",
+                    config.address,
                 );
                 // Trigger refill based on the latest batch's consumption.
                 if let Some(latest) = state.batches.last() {
