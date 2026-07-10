@@ -17,6 +17,7 @@ use crate::committee::CommitteeSignature;
 use crate::guardian::GuardianError;
 use crate::guardian::GuardianInfo;
 use crate::guardian::GuardianPubKey;
+use crate::guardian::GuardianResult;
 use crate::guardian::KPEncryptedShares;
 use crate::guardian::LimiterState;
 use crate::guardian::NitroAttestation;
@@ -244,22 +245,33 @@ impl WithdrawalLogMessage {
     /// log, which the KP reads to recover limiter state. Failures don't have a
     /// meaningful seq (the request's seq may be stale), so they use a random
     /// suffix for dedup.
-    pub fn log_name(&self, prefix: &str) -> String {
+    pub fn log_name(&self, prefix: &str, object_key_nonce: Option<u32>) -> GuardianResult<String> {
         match self {
-            WithdrawalLogMessage::Success { request_data, .. } => format!(
-                "success-{:020}-{}-wid{}.json",
-                request_data.seq,
-                prefix,
-                self.wid()
-            ),
+            WithdrawalLogMessage::Success { request_data, .. } => {
+                if object_key_nonce.is_some() {
+                    return Err(GuardianError::InvalidInputs(
+                        "unexpected object key nonce for successful withdrawal log".into(),
+                    ));
+                }
+                Ok(format!(
+                    "success-{:020}-{}-wid{}.json",
+                    request_data.seq,
+                    prefix,
+                    self.wid()
+                ))
+            }
             WithdrawalLogMessage::Failure { .. } => {
-                let random_suffix = rand::random::<u32>();
-                format!(
+                let nonce = object_key_nonce.ok_or_else(|| {
+                    GuardianError::InvalidInputs(
+                        "missing object key nonce for failed withdrawal log".into(),
+                    )
+                })?;
+                Ok(format!(
                     "failure-{}-wid{}-{:08x}.json",
                     prefix,
                     self.wid(),
-                    random_suffix
-                )
+                    nonce
+                ))
             }
         }
     }
@@ -277,23 +289,44 @@ impl CommitteeUpdateLogMessage {
     /// is epoch-sorted; failures lead with `failure-` so they sort after
     /// all successes, leaving the lex-last success key as the latest
     /// successfully-applied epoch.
-    pub fn log_name(&self, prefix: &str) -> String {
+    pub fn log_name(&self, prefix: &str, object_key_nonce: Option<u32>) -> GuardianResult<String> {
         match self {
             CommitteeUpdateLogMessage::Success { new_committee, .. } => {
-                format!("{:020}-{}.json", new_committee.epoch, prefix)
+                if object_key_nonce.is_some() {
+                    return Err(GuardianError::InvalidInputs(
+                        "unexpected object key nonce for successful committee-update log".into(),
+                    ));
+                }
+                Ok(format!("{:020}-{}.json", new_committee.epoch, prefix))
             }
             CommitteeUpdateLogMessage::Failure { new_committee, .. } => {
-                let random_suffix = rand::random::<u32>();
-                format!(
+                let nonce = object_key_nonce.ok_or_else(|| {
+                    GuardianError::InvalidInputs(
+                        "missing object key nonce for failed committee-update log".into(),
+                    )
+                })?;
+                Ok(format!(
                     "failure-{:020}-{}-{:08x}.json",
-                    new_committee.epoch, prefix, random_suffix
-                )
+                    new_committee.epoch, prefix, nonce
+                ))
             }
         }
     }
 }
 
 impl LogMessage {
+    pub fn uses_random_object_key_suffix(&self) -> bool {
+        matches!(
+            self,
+            LogMessage::Withdrawal(message)
+                if matches!(message.as_ref(), WithdrawalLogMessage::Failure { .. })
+        ) || matches!(
+            self,
+            LogMessage::CommitteeUpdate(message)
+                if matches!(message.as_ref(), CommitteeUpdateLogMessage::Failure { .. })
+        )
+    }
+
     pub fn is_allowed_unsigned(&self) -> bool {
         if let LogMessage::Init(init_message) = self {
             matches!(**init_message, InitLogMessage::OIAttestationUnsigned { .. })
@@ -326,16 +359,24 @@ impl LogMessage {
     }
 
     /// The name of the log.
-    pub fn log_name(&self, prefix: &str) -> String {
-        match self {
+    pub fn log_name(&self, prefix: &str, object_key_nonce: Option<u32>) -> GuardianResult<String> {
+        let name = match self {
+            LogMessage::Withdrawal(message) => return message.log_name(prefix, object_key_nonce),
+            LogMessage::CommitteeUpdate(message) => {
+                return message.log_name(prefix, object_key_nonce);
+            }
+            _ if object_key_nonce.is_some() => {
+                return Err(GuardianError::InvalidInputs(
+                    "unexpected object key nonce for deterministic log key".into(),
+                ));
+            }
             LogMessage::Init(init_message) => init_message.log_name(prefix),
             LogMessage::Heartbeat { seq } => format!("{}-{:020}.json", prefix, seq),
-            LogMessage::Withdrawal(withdrawal_message) => withdrawal_message.log_name(prefix),
             LogMessage::Ceremony(ss) => format!("{:020}-{}.json", ss.sharing_seq(), prefix),
             LogMessage::KpShareState(state) => state.log_name(prefix),
-            LogMessage::CommitteeUpdate(committee_message) => committee_message.log_name(prefix),
             LogMessage::Genesis(_) => GenesisLogMessage::LOG_NAME.to_string(),
-        }
+        };
+        Ok(name)
     }
 
     pub fn into_init_log(self) -> Option<InitLogMessage> {

@@ -159,6 +159,7 @@ mod tests {
 
     fn heartbeat_log(session_id: &str, timestamp_secs: UnixSeconds) -> VerifiedLogRecord {
         VerifiedLogRecord {
+            schema_version: hashi_types::guardian::LOG_SCHEMA_VERSION,
             object_key: format!("heartbeat/{session_id}.json"),
             session_id: session_id.to_string(),
             timestamp_ms: timestamp_secs * 1_000,
@@ -169,6 +170,7 @@ mod tests {
 
     fn non_heartbeat_log() -> VerifiedLogRecord {
         VerifiedLogRecord {
+            schema_version: hashi_types::guardian::LOG_SCHEMA_VERSION,
             object_key: "init/test-session-pi-enclave-fully-initialized.json".to_string(),
             session_id: "test-session".to_string(),
             timestamp_ms: 0,

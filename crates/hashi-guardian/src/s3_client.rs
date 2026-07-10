@@ -105,8 +105,8 @@ impl GuardianS3Client {
     // ========================================================================
 
     pub async fn write_log_record(&self, log: LogRecord) -> GuardianResult<()> {
+        let key = log.object_key().to_string();
         let object_lock_duration = log.object_lock_duration();
-        let key = log.object_key();
         self.write_at_key(&key, &log, object_lock_duration).await
     }
 
@@ -534,7 +534,7 @@ impl GuardianS3Client {
         if log.session_id != expected_session_id {
             return Err(S3Error(format!("log session_id mismatch for key {}", key)));
         }
-        let (_, _, message) = match signing_pubkey {
+        let (_, _, _, message) = match signing_pubkey {
             Some(pk) => log.verify(key, pk),
             None => log.verify_unsigned(key),
         }?;

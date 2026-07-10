@@ -11,7 +11,7 @@ use super::GuardianError::InternalError;
 use super::GuardianError::InvalidInputs;
 use super::GuardianInfo;
 use super::GuardianResult;
-use super::LogSigningPayload;
+use super::LogMessage;
 use super::RotateKpsResponse;
 use super::SetupNewKeyResponse;
 use super::SingleProvisionerInitRequest;
@@ -68,7 +68,7 @@ pub trait KpSigningIntent {
     const INTENT: KpSigningIntentType;
 }
 
-impl SigningIntent for LogSigningPayload {
+impl SigningIntent for LogMessage {
     const INTENT: IntentType = IntentType::LogMessage;
 }
 

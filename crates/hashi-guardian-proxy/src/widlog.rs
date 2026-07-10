@@ -338,7 +338,12 @@ pub(crate) mod test_store {
             &signing_key,
         );
         record.timestamp_ms = timestamp_ms;
-        let key = record.object_key();
+        record.object_key = format!(
+            "{}{}",
+            record.message.log_dir(timestamp_ms),
+            record.message.log_name(&record.session_id, None).unwrap()
+        );
+        let key = record.object_key().to_string();
         (key, serde_json::to_vec(&record).unwrap())
     }
 

@@ -241,10 +241,6 @@ impl GuardianReader {
         let LogMessage::KpShareState(msg) = record.message else {
             anyhow::bail!("expected a kp-shares log at {key}");
         };
-        let expected_key = KpShareState::object_key(&session_id, msg.sharing_seq, msg.cert_seq);
-        if key != expected_key {
-            anyhow::bail!("kp-shares key mismatch: expected {expected_key}, got {key}");
-        }
         if msg.sharing_seq != sharing_seq {
             anyhow::bail!(
                 "sharing_seq mismatch: {} != {}",
@@ -370,8 +366,9 @@ impl GuardianSessionCache {
             .await?;
         record
             .verify(object_key, &session_info.signing_pubkey)
-            .map(|(session_id, timestamp_ms, message)| {
+            .map(|(schema_version, session_id, timestamp_ms, message)| {
                 VerifiedLogRecord::new(
+                    schema_version,
                     object_key.to_owned(),
                     session_id,
                     timestamp_ms,

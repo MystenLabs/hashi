@@ -2,12 +2,11 @@
 
 Guardian enclave service that emits immutable S3 logs for audit/state-restart workflows.
 
-Signed records bind their canonical S3 object key along with the message and
-timestamp. Readers derive that key from the record contents and compare it with
-the actual key returned by S3 before accepting the signature. The unsigned OI
-attestation receives the same placement check; its key is anchored by the
-Nitro-attested signing public key because both the session ID and canonical object
-key are derived from that public key.
+The S3 bucket operator is untrusted. Log signatures bind the intent, schema
+version, session ID, timestamp, actual object key, and event; readers reject
+relocated or non-canonical records. The key is S3 metadata, not JSON. Random
+failure suffixes are sampled once before signing. Unsigned OI attestations bind
+placement through their Nitro-authenticated signing key and derived session ID.
 
 ## S3 log key format
 

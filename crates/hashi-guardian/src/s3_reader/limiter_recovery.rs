@@ -186,6 +186,7 @@ mod tests {
             post_state: state_with_seq(next_seq),
         };
         VerifiedLogRecord {
+            schema_version: hashi_types::guardian::LOG_SCHEMA_VERSION,
             object_key: format!("withdraw/success-{next_seq}.json"),
             session_id: "test-session".to_string(),
             timestamp_ms: 0,
@@ -203,6 +204,7 @@ mod tests {
             error: GuardianError::RateLimitExceeded,
         };
         VerifiedLogRecord {
+            schema_version: hashi_types::guardian::LOG_SCHEMA_VERSION,
             object_key: "withdraw/failure.json".to_string(),
             session_id: "test-session".to_string(),
             timestamp_ms: 0,
