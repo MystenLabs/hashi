@@ -13,6 +13,8 @@
 set -e
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/
 export LD_LIBRARY_PATH=/lib:$LD_LIBRARY_PATH
+# The enclave has no system CA store; point TLS clients (S3, Sui) at the bundled certs.
+export SSL_CERT_FILE=/ca-certificates.crt
 echo "run.sh script is running"
 
 # The Nitro loader hands us a bare initramfs root; mount the pseudo-filesystems.
