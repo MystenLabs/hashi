@@ -13,6 +13,10 @@
 set -e
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin:/
 export LD_LIBRARY_PATH=/lib:$LD_LIBRARY_PATH
+# The guardian's TLS clients (S3, Sui RPC) verify against this bundle; the enclave
+# has no system trust store, and a bare init never sources /etc/environment (where
+# the Containerfile also sets it). Without it: "invalid peer certificate: UnknownIssuer".
+export SSL_CERT_FILE=/ca-certificates.crt
 echo "run.sh script is running"
 
 # The Nitro loader hands us a bare initramfs root; mount the pseudo-filesystems.
