@@ -57,4 +57,10 @@ socat TCP4-LISTEN:443,bind=127.0.0.66,reuseaddr,fork VSOCK-CONNECT:3:8103 &
 # Forward VSOCK port 3000 to localhost:3000 (gRPC server)
 socat VSOCK-LISTEN:3000,reuseaddr,fork TCP:localhost:3000 &
 
+# CEREMONY_MODE selects ceremony vs withdraw mode (see guardian main.rs). A real
+# Nitro PID 1 starts with an empty environment, so it is baked here at build time
+# via the Containerfile (like BUCKET_NAME/AWS_REGION); empty => withdraw, "true"
+# => ceremony. A ceremony enclave is therefore a distinct EIF with its own PCR0.
+export CEREMONY_MODE=${CEREMONY_MODE}
+
 exec /guardian
