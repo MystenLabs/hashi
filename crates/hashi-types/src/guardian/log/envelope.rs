@@ -19,8 +19,10 @@ use crate::guardian::GuardianPubKey;
 use crate::guardian::GuardianResult;
 use crate::guardian::GuardianSignKeyPair;
 use crate::guardian::GuardianSignature;
+use crate::guardian::GuardianSigned;
 use crate::guardian::IntentType;
 use crate::guardian::SessionID;
+use crate::guardian::SigningIntent;
 use crate::guardian::UnixMillis;
 use crate::guardian::now_timestamp_ms;
 use crate::guardian::session_id_from_signing_pubkey;
@@ -44,6 +46,30 @@ pub struct LogRecord {
     pub message: LogMessage,
     /// Present for signed logs; omitted for unsigned logs (currently only OIAttestationUnsigned).
     pub signature: Option<GuardianSignature>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct LogSigningPayload {
+    schema_version: u8,
+    session_id: SessionID,
+    object_key: String,
+    message: LogMessage,
+}
+
+impl SigningIntent for LogSigningPayload {
+    const INTENT: IntentType = IntentType::LogMessage;
+
+    fn signing_bytes(&self, timestamp_ms: UnixMillis) -> Vec<u8> {
+        bcs::to_bytes(&(
+            Self::INTENT,
+            self.schema_version,
+            &self.session_id,
+            timestamp_ms,
+            &self.object_key,
+            &self.message,
+        ))
+        .expect("log signing payload serialization should not fail")
+    }
 }
 
 /// A log record whose message signature and writing session's attestation/PCRs
@@ -129,21 +155,23 @@ impl LogRecord {
         timestamp_ms: UnixMillis,
         object_key: String,
     ) -> Self {
-        let signing_bytes = Self::signing_bytes(
-            LOG_SCHEMA_VERSION,
-            &session_id,
+        let signed = GuardianSigned::new(
+            LogSigningPayload {
+                schema_version: LOG_SCHEMA_VERSION,
+                session_id,
+                object_key,
+                message,
+            },
+            signing_key,
             timestamp_ms,
-            &object_key,
-            &message,
         );
-        let signature = signing_key.sign(&signing_bytes);
         Self {
-            schema_version: LOG_SCHEMA_VERSION,
-            object_key,
-            session_id,
-            timestamp_ms,
-            message,
-            signature: Some(signature),
+            schema_version: signed.data.schema_version,
+            object_key: signed.data.object_key,
+            session_id: signed.data.session_id,
+            timestamp_ms: signed.timestamp_ms,
+            message: signed.data.message,
+            signature: Some(signed.signature),
         }
     }
 
@@ -185,17 +213,18 @@ impl LogRecord {
             let signature = self
                 .signature
                 .ok_or_else(|| InvalidInputs("missing log signature".into()))?;
-            let signing_bytes = Self::signing_bytes(
-                self.schema_version,
-                &session_id,
+            GuardianSigned {
+                data: LogSigningPayload {
+                    schema_version: self.schema_version,
+                    session_id: session_id.clone(),
+                    object_key: object_key.to_owned(),
+                    message,
+                },
                 timestamp_ms,
-                object_key,
-                &message,
-            );
-            pub_key
-                .verify(&signature, &signing_bytes)
-                .map_err(|_| InvalidInputs("signature invalid".into()))?;
-            message
+                signature,
+            }
+            .verify(pub_key)?
+            .message
         };
 
         Ok((schema_version, session_id, timestamp_ms, message))
@@ -271,24 +300,6 @@ impl LogRecord {
         let dir = message.log_dir(timestamp_ms);
         let log_name = message.log_name(session_id, object_key_nonce)?;
         Ok(format!("{}{}", dir, log_name))
-    }
-
-    fn signing_bytes(
-        schema_version: u8,
-        session_id: &str,
-        timestamp_ms: UnixMillis,
-        object_key: &str,
-        message: &LogMessage,
-    ) -> Vec<u8> {
-        bcs::to_bytes(&(
-            IntentType::LogMessage,
-            schema_version,
-            session_id,
-            timestamp_ms,
-            object_key,
-            message,
-        ))
-        .expect("log signing payload serialization should not fail")
     }
 }
 
@@ -454,7 +465,7 @@ mod tests {
         let tampered_key = "heartbeat/2023/11/14/22/session-key-binding-00000000000000000043.json";
 
         let err = tampered
-            .verify(&tampered_key, &signing_key.verification_key())
+            .verify(tampered_key, &signing_key.verification_key())
             .expect_err("signature must cover the canonical object key and message");
 
         assert!(format!("{err:?}").contains("signature invalid"));
