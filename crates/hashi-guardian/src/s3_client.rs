@@ -182,7 +182,6 @@ impl GuardianS3Client {
             .expect("Cant overflow");
 
         let body = serde_json::to_vec(value).expect("Cant serialize to JSON");
-        info!("Log message: {}", String::from_utf8_lossy(&body));
 
         // `If-None-Match: *` makes retries safe: a lost-ack write that already
         // landed returns 412 instead of creating another version. A 412 is only

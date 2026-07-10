@@ -24,6 +24,7 @@ impl HeartbeatWriter {
     /// Attempt to send one heartbeat.
     ///
     /// - If operator init is not complete, this is a no-op.
+    ///
     /// The shared S3 writer retries failures and aborts the process if its grace
     /// period expires.
     pub async fn tick(&mut self) -> GuardianResult<()> {

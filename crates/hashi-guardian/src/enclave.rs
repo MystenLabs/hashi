@@ -312,13 +312,25 @@ impl EnclaveState {
     }
 
     pub async fn limiter_state(&self) -> Option<LimiterState> {
-        let limiter = self.rate_limiter.get()?;
-        Some(*limiter.lock().await.state())
+        Some(*self.lock_limiter_for_read().await?.state())
     }
 
     pub async fn limiter_config(&self) -> Option<LimiterConfig> {
-        let limiter = self.rate_limiter.get()?;
-        Some(*limiter.lock().await.config())
+        Some(*self.lock_limiter_for_read().await?.config())
+    }
+
+    /// Lock the limiter for a read-only status query, bounded by
+    /// `LIMITER_LOCK_TIMEOUT` so an in-flight durable write cannot stall `info`
+    /// for minutes. Returns None if uninitialized or the lock is still held at
+    /// the deadline.
+    async fn lock_limiter_for_read(&self) -> Option<OwnedMutexGuard<RateLimiter>> {
+        let rate_limiter = self.rate_limiter.get()?;
+        tokio::time::timeout(
+            Self::LIMITER_LOCK_TIMEOUT,
+            rate_limiter.clone().lock_owned(),
+        )
+        .await
+        .ok()
     }
 }
 
