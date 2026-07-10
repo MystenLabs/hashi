@@ -226,7 +226,9 @@ impl LogRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::guardian::CommitteeUpdateLogMessage;
     use crate::guardian::GenesisLogMessage;
+    use crate::guardian::GuardianError;
     use crate::guardian::InitLogMessage;
     use crate::guardian::KPEncryptedShares;
     use crate::guardian::LimiterState;
@@ -253,6 +255,67 @@ mod tests {
             timestamp_ms,
         );
         (log, signing_key)
+    }
+
+    fn assert_writer_key_is_stable_and_verifies(log: LogRecord, signing_key: &GuardianSignKeyPair) {
+        let writer_key = log.object_key();
+        for _ in 0..4 {
+            assert_eq!(
+                log.object_key(),
+                writer_key,
+                "a record must keep the same object key after construction"
+            );
+        }
+
+        let body = serde_json::to_vec(&log).unwrap();
+        let record_read_from_s3: LogRecord = serde_json::from_slice(&body).unwrap();
+        record_read_from_s3
+            .verify(&writer_key, &signing_key.verification_key())
+            .expect("the serialized record must verify at the key used by the writer");
+    }
+
+    #[test]
+    fn withdrawal_failure_writer_key_is_stable_and_verifies() {
+        let signing_key = GuardianSignKeyPair::from([16u8; 32]);
+        let signed_request = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
+        let (request_sign, request_data) = signed_request.into_parts();
+        let log = LogRecord::signed(
+            "session-withdraw-failure".to_string(),
+            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
+                request_data: request_data.into(),
+                request_sign,
+                error: GuardianError::RateLimitExceeded,
+            })),
+            &signing_key,
+            1_700_000_000_000,
+        );
+
+        assert_writer_key_is_stable_and_verifies(log, &signing_key);
+    }
+
+    #[test]
+    fn committee_update_failure_writer_key_is_stable_and_verifies() {
+        let signing_key = GuardianSignKeyPair::from([17u8; 32]);
+        let signed_request = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
+        let (request_sign, _) = signed_request.into_parts();
+        let log = LogRecord::signed(
+            "session-committee-failure".to_string(),
+            LogMessage::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Failure {
+                from_epoch: 6,
+                new_committee: crate::move_types::Committee {
+                    epoch: 7,
+                    members: vec![],
+                    total_weight: 0,
+                    config: crate::move_types::Config::default(),
+                },
+                request_sign,
+                error: GuardianError::InvalidInputs("test failure".to_string()),
+            })),
+            &signing_key,
+            1_700_000_000_000,
+        );
+
+        assert_writer_key_is_stable_and_verifies(log, &signing_key);
     }
 
     #[test]
