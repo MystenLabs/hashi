@@ -1,17 +1,28 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+/// Governance proposal for disabling a package version. Once quorum is
+/// reached, `execute` marks the proposed version as disabled in `versioning`,
+/// so every entry point guarded by `assert_version_enabled` stops serving
+/// calls made through that version — the recovery lever if an upgraded
+/// package turns out to be broken.
 module hashi::disable_version;
 
 use hashi::{hashi::Hashi, proposal};
 use std::string::String;
 use sui::{clock::Clock, vec_map::VecMap};
 
+// ~~~~~~~ Constants ~~~~~~~
+
 const THRESHOLD_BPS: u64 = 6667;
+
+// ~~~~~~~ Structs ~~~~~~~
 
 public struct DisableVersion has copy, drop, store {
     version: u64,
 }
+
+// ~~~~~~~ Public Functions ~~~~~~~
 
 public fun propose(
     hashi: &mut Hashi,

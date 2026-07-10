@@ -1,6 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+/// User-facing Bitcoin deposit flow. A depositor registers the UTXO they
+/// sent to the bridge's address, the committee approves it with a
+/// certificate over `(request_id, utxo)`, and — after a configurable time
+/// delay in which a faulty approval can be caught and the service paused —
+/// the deposit is confirmed: hBTC is minted to the recipient encoded in the
+/// UTXO's derivation path and the UTXO joins the active pool. Requests that
+/// are never confirmed can be garbage-collected once they expire.
 module hashi::deposit;
 
 use hashi::{
@@ -16,6 +23,8 @@ use hashi::{
 use fun btc_config::bitcoin_deposit_minimum as Config.deposit_minimum;
 use fun btc_config::bitcoin_deposit_time_delay_ms as Config.deposit_time_delay_ms;
 
+// ~~~~~~~ Errors ~~~~~~~
+
 #[error]
 const EBelowMinimumDeposit: vector<u8> = b"Deposit amount is below the minimum";
 #[error]
@@ -24,19 +33,54 @@ const EDepositTimeDelayNotPassed: vector<u8> = b"Deposit time-delay has not pass
 const EAlreadyApprovedThisEpoch: vector<u8> =
     b"Deposit has already been approved by the current committee";
 
+// ~~~~~~~ Structs ~~~~~~~
+
+// This message struct is committee-signed and its BCS encoding is frozen:
+// never add, remove, or reorder fields.
+
 /// Message signed by the committee to confirm a deposit.
 public struct DepositConfirmationMessage has copy, drop, store {
     request_id: address,
     utxo: Utxo,
 }
 
-#[test_only]
-public fun new_deposit_confirmation_message(
+// ~~~~~~~ Events ~~~~~~~
+
+public struct DepositRequested has copy, drop {
+    request_id: address,
+    utxo_id: UtxoId,
+    amount: u64,
+    derivation_path: Option<address>,
+    timestamp_ms: u64,
+    requester_address: address,
+    sui_tx_digest: vector<u8>,
+}
+
+/// Emitted when a committee certificate has been recorded against a
+/// deposit request. The deposit is not yet final — see `confirm_deposit`.
+/// `approval_timestamp_ms` is the clock timestamp recorded on the
+/// request, against which `confirm_deposit` enforces the time-delay
+/// window.
+public struct DepositApproved has copy, drop {
     request_id: address,
     utxo: Utxo,
-): DepositConfirmationMessage {
-    DepositConfirmationMessage { request_id, utxo }
+    cert: CommitteeSignature,
+    approval_timestamp_ms: u64,
 }
+
+/// Emitted when an approved deposit has cleared the time-delay window
+/// and the corresponding BTC has been minted (when applicable) and the
+/// UTXO moved into the active pool.
+public struct DepositConfirmed has copy, drop {
+    request_id: address,
+    utxo: Utxo,
+}
+
+public struct ExpiredDepositDeleted has copy, drop {
+    request_id: address,
+}
+
+// ~~~~~~~ Entry Functions ~~~~~~~
 
 entry fun deposit(
     hashi: &mut Hashi,
@@ -224,36 +268,12 @@ entry fun delete_expired_deposit(
     sui::event::emit(ExpiredDepositDeleted { request_id });
 }
 
-public struct DepositRequested has copy, drop {
-    request_id: address,
-    utxo_id: UtxoId,
-    amount: u64,
-    derivation_path: Option<address>,
-    timestamp_ms: u64,
-    requester_address: address,
-    sui_tx_digest: vector<u8>,
-}
+// ~~~~~~~ Test Helpers ~~~~~~~
 
-/// Emitted when a committee certificate has been recorded against a
-/// deposit request. The deposit is not yet final — see `confirm_deposit`.
-/// `approval_timestamp_ms` is the clock timestamp recorded on the
-/// request, against which `confirm_deposit` enforces the time-delay
-/// window.
-public struct DepositApproved has copy, drop {
+#[test_only]
+public fun new_deposit_confirmation_message(
     request_id: address,
     utxo: Utxo,
-    cert: CommitteeSignature,
-    approval_timestamp_ms: u64,
-}
-
-/// Emitted when an approved deposit has cleared the time-delay window
-/// and the corresponding BTC has been minted (when applicable) and the
-/// UTXO moved into the active pool.
-public struct DepositConfirmed has copy, drop {
-    request_id: address,
-    utxo: Utxo,
-}
-
-public struct ExpiredDepositDeleted has copy, drop {
-    request_id: address,
+): DepositConfirmationMessage {
+    DepositConfirmationMessage { request_id, utxo }
 }

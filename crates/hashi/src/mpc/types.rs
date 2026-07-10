@@ -78,8 +78,9 @@ pub struct AvidNonceRetrievalMessage {
 pub struct AvidRoundState {
     pub common: batch_avss_avid::AvssCommonMessage,
     pub own_ciphertext: Ciphertext,
-    pub echoes: BTreeMap<PartyId, batch_avss_avid::Echo>,
 }
+
+pub(crate) type HeldAvidEchoes = (batch_avss_avid::AvidVote, Vec<(Address, Messages)>);
 
 // Domain separation constants for RandomOracle
 const DOMAIN_HASHI: &str =

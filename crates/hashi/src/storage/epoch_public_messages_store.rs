@@ -10,6 +10,7 @@ use sui_sdk_types::Address;
 
 use crate::db::Database;
 use crate::mpc::types::AvidRoundState;
+use crate::mpc::types::HeldAvidEchoes;
 use crate::mpc::types::Messages;
 use crate::mpc::types::RotationMessages;
 use crate::storage::PublicMessagesStore;
@@ -152,6 +153,29 @@ impl PublicMessagesStore for EpochPublicMessagesStore {
         self.db
             .list_avid_round_states(self.epoch, batch_index)
             .map_err(|e| anyhow::anyhow!("failed to list avid round states: {e}"))
+    }
+
+    fn store_avid_held_echoes(
+        &mut self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+        held: &HeldAvidEchoes,
+    ) -> anyhow::Result<()> {
+        self.db
+            .store_avid_held_echoes(epoch, batch_index, dealer, held)
+            .map_err(|e| anyhow::anyhow!("failed to store avid held echoes: {e}"))
+    }
+
+    fn get_avid_held_echoes(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> anyhow::Result<Option<HeldAvidEchoes>> {
+        self.db
+            .get_avid_held_echoes(epoch, batch_index, dealer)
+            .map_err(|e| anyhow::anyhow!("failed to get avid held echoes: {e}"))
     }
 
     fn store_avid_dealer_builder(

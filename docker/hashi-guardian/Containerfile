@@ -20,11 +20,91 @@ FROM stagex/core-busybox@sha256:e4a30addc8939c8e232472de904d1d9e97fc2e735fca9a97
 FROM stagex/core-libzstd@sha256:bfe96f975a2a2a7a48aeb418b44accc79dd26d601a94d9f02b0562eaa0f89fdd AS core-libzstd
 FROM stagex/user-eif_build@sha256:8bbd8fb500322e719063645460f3942d04ca99048089adea237026443c9517b7 AS user-eif_build
 FROM stagex/user-gen_initramfs@sha256:1c957893705011044a1b11aefbcffd80dc0797f439b997bfbfe87df0a4a3756e AS user-gen_initramfs
-FROM stagex/user-linux-nitro@sha256:edc0a74392d7b3ca904fa0e999307aabbe4a84ad780328439a2def6bdee55189 AS user-linux-nitro
 FROM stagex/user-cpio@sha256:46ca4a247908c502e31a26842925b02cc7133fec619b19e0d5c3833f6d073d8e AS user-cpio
 FROM stagex/user-socat@sha256:70b21dec5de83d366babfa90215ce510118df88b798d4106f429bde3bf55973a AS user-socat
 FROM stagex/user-jq@sha256:1b2dddde7a2a35395430ebd99e07117bbc48fa29a0dba8a6b18d6d74bf762368 AS user-jq
-FROM stagex/user-nit@sha256:6a59292f829293117994c63fae27326e4dd95dea591441bf148571dfec5fa8d3 AS user-nit
+# Kept only for its kernel config; its prebuilt bzImage is clang-linked and does
+# not boot on Nitro, so we build the kernel ourselves (see the kernel stage).
+FROM stagex/user-linux-nitro@sha256:edc0a74392d7b3ca904fa0e999307aabbe4a84ad780328439a2def6bdee55189 AS user-linux-nitro
+
+# Toolchain for building the enclave kernel from source (see the kernel stage).
+FROM stagex/core-gmp@sha256:f90653ed07062074363542a77e26a2d16a142f9be5ebf6900b53f4ab8a82d39d AS core-gmp
+FROM stagex/core-mpfr@sha256:894c11d709646f4589541a6e49181aabaac843bbf429578acf767fabf5a40838 AS core-mpfr
+FROM stagex/core-mpc@sha256:6151912722b77722863de0e2784897f864bce2cc362cc8e4d777872536d060e4 AS core-mpc
+FROM stagex/core-isl@sha256:2f1b39d0339a5c8ba26b6d83d7dd1fa67047c385a521f14b27aee0fe79c994f5 AS core-isl
+FROM stagex/core-make@sha256:739a3d4989618d41885fb837dd04acb9dc4a3dee6a22edea33b2b5ddf33ecf91 AS core-make
+FROM stagex/core-flex@sha256:62722524f7b7d9aee3274ffab8a5886fb0fdc047dd7665e2decde3aae6d2c66b AS core-flex
+FROM stagex/core-bison@sha256:558021a4d87a37e11ae6283c60049596cf5692e6aa05066c68c45ab1c75a1a90 AS core-bison
+FROM stagex/core-m4@sha256:21c1b1d495b7826e22e929f0945ee3027da9357c113c23dde0ad98fc659e12c0 AS core-m4
+FROM stagex/core-bc@sha256:bc781a4e60608bed540dac7afb0745aeb8491402531723cf20637b414f71ee0f AS core-bc
+FROM stagex/core-perl@sha256:8fd254741399dba7904bd2a6b8b028f8f49cbe7e2af2024a538f8f52e8aa2e14 AS core-perl
+FROM stagex/core-gawk@sha256:ed94e9f4cb1efa95f707d65d5c70df6cf4d085cf9dffb27a38713dcec4c4cd7e AS core-gawk
+FROM stagex/core-sed@sha256:d8881e3578a6e0e7d73b41e0a23735adca7c459cf8727ae1ae366c6a92b60741 AS core-sed
+FROM stagex/core-grep@sha256:13e9c0240695c2a183322b453d53ec9f362e477e012b777ec2a6777631840464 AS core-grep
+FROM stagex/core-diffutils@sha256:84db3ff630c4f8ae163abf3af358805357710822daa5734385688f42e986038e AS core-diffutils
+FROM stagex/core-findutils@sha256:be0c14da166f313c890e26d666795b29b2432f8290e0de784544c6d649244e26 AS core-findutils
+FROM stagex/core-gettext@sha256:7900f37849f401a6bcf8a8aeaeee01ea34485c00561c8d2a58087c30892e0a1e AS core-gettext
+FROM stagex/core-xz@sha256:dfb8a0242af8592479c8b95cc308a5c82b3b8d6581e6c2ba7b514ec3efbd49a4 AS core-xz
+FROM stagex/user-elfutils@sha256:4b92a003113aad14c240afdea42cc7f490a30da87d7c4b8d79d47dbb9e72af21 AS user-elfutils
+FROM stagex/core-linux-headers@sha256:889417d635e16a308ce86b13c8073970646ef162bfeb9b7f1bce18d005c2b938 AS core-linux-headers
+FROM stagex/core-python@sha256:c11c35b6d3a2a907d14735c9f515c3644d1a13abe85bdb39c16939354b05d1e9 AS core-python
+
+# Kernel build toolchain root.
+FROM scratch AS kernel-toolchain
+COPY --from=core-busybox . /
+COPY --from=core-musl . /
+COPY --from=core-gcc . /
+COPY --from=core-binutils . /
+COPY --from=core-gmp . /
+COPY --from=core-mpfr . /
+COPY --from=core-mpc . /
+COPY --from=core-isl . /
+COPY --from=core-make . /
+COPY --from=core-flex . /
+COPY --from=core-bison . /
+COPY --from=core-m4 . /
+COPY --from=core-bc . /
+COPY --from=core-perl . /
+COPY --from=core-gawk . /
+COPY --from=core-sed . /
+COPY --from=core-grep . /
+COPY --from=core-diffutils . /
+COPY --from=core-findutils . /
+COPY --from=core-gettext . /
+COPY --from=core-xz . /
+COPY --from=core-openssl . /
+COPY --from=core-zlib . /
+COPY --from=core-libzstd . /
+COPY --from=user-elfutils . /
+COPY --from=core-linux-headers . /
+COPY --from=core-python . /
+
+# Build the Nitro enclave kernel from upstream source with gcc.
+#
+# We build the kernel here rather than using stagex/user-linux-nitro's prebuilt
+# bzImage because that one is clang/LLD-linked and does not execute under the AWS
+# Nitro hypervisor (empty console, VsockTimeout); a gcc build of the same config
+# boots. The config is that image's own kernel config (NSM + vsock + initramfs);
+# its toolchain-identity lines are dropped so olddefconfig re-derives them for
+# gcc. The objtool patch enlarges its SIGSTKSZ alt-stack, which musl sizes below
+# this host's runtime minimum (host tool only; no effect on the kernel image).
+FROM kernel-toolchain AS kernel
+ADD --checksum=sha256:de9999b784d2293f00d39c62d8f92a08ab8a54bc4e80ffd250a0c09cb07a0f98 \
+	https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.0.14.tar.xz /linux.tar.xz
+COPY --from=user-linux-nitro /linux.config /config
+ENV SOURCE_DATE_EPOCH=1 KBUILD_BUILD_TIMESTAMP=1 KBUILD_BUILD_USER=stagex KBUILD_BUILD_HOST=stagex
+RUN <<-EOF
+	set -eux
+	tar -xf /linux.tar.xz
+	cd linux-7.0.14
+	cp /config .config
+	sed -i "/CONFIG_CC_IS_CLANG/d; /CONFIG_LD_IS_LLD/d; /CONFIG_AS_IS_LLVM/d; /CONFIG_CC_VERSION_TEXT/d; /CONFIG_GCC_/d; /CONFIG_CLANG_/d; /CONFIG_LD_VERSION/d; /CONFIG_LLD_VERSION/d" .config
+	sed -i "s/\bSIGSTKSZ\b/65536/g" tools/objtool/signal.c
+	make olddefconfig
+	make bzImage -j"$(nproc)"
+	cp arch/x86/boot/bzImage /bzImage
+	cp .config /kernel.config
+EOF
 
 FROM scratch AS base
 COPY --from=core-busybox . /
@@ -44,8 +124,8 @@ COPY --from=core-llvm . /
 COPY --from=core-libffi . /
 COPY --from=core-gcc . /
 COPY --from=user-cpio . /
-COPY --from=user-linux-nitro /bzImage .
-COPY --from=user-linux-nitro /linux.config .
+COPY --from=kernel /bzImage .
+COPY --from=kernel /kernel.config .
 
 FROM base AS build
 ARG BUCKET_NAME
@@ -55,6 +135,10 @@ ARG GIT_REVISION
 # enclave build — leave it empty for anything whose PCR0 must match provenance.
 # Dev deploys pass `non-enclave-dev` so a runner-local mock ceremony verifies.
 ARG FEATURES=""
+# Enclave boot mode, baked into run.sh below (see guardian main.rs). Empty (the
+# default) => withdraw; "true" => ceremony. A ceremony enclave is intentionally a
+# distinct, separately-attested EIF with its own PCR0.
+ARG CEREMONY_MODE=""
 RUN [ -n "$GIT_REVISION" ] || { echo "GIT_REVISION build-arg must be set"; exit 1; }
 ENV GIT_REVISION=${GIT_REVISION}
 COPY crates /crates
@@ -69,18 +153,18 @@ RUN cargo build --locked --no-default-features --release --target "$TARGET" -p h
 
 WORKDIR /build_cpio
 ENV KBUILD_BUILD_TIMESTAMP=1
-RUN mkdir initramfs/
+RUN mkdir -p initramfs/proc initramfs/sys initramfs/dev initramfs/tmp
 COPY --from=core-busybox . initramfs
 COPY --from=core-musl . initramfs
 COPY --from=core-ca-certificates /etc/ssl/certs initramfs
 COPY --from=core-busybox /bin/sh initramfs/sh
 COPY --from=user-jq /bin/jq initramfs
 COPY --from=user-socat /bin/socat . initramfs
-COPY --from=user-nit /bin/init initramfs
 RUN cp /target/${TARGET}/release/hashi-guardian initramfs/guardian
-COPY docker/hashi-guardian/run.sh initramfs/
-RUN sed -i "s/\${BUCKET_NAME}/${BUCKET_NAME}/g; s/\${AWS_REGION}/${AWS_REGION}/g" initramfs/run.sh
-RUN chmod 755 initramfs/run.sh
+# run.sh is the enclave init: the kernel execs /init as PID 1.
+COPY docker/hashi-guardian/run.sh initramfs/init
+RUN sed -i "s/\${BUCKET_NAME}/${BUCKET_NAME}/g; s/\${AWS_REGION}/${AWS_REGION}/g; s/\${CEREMONY_MODE}/${CEREMONY_MODE}/g" initramfs/init
+RUN chmod 755 initramfs/init
 
 COPY <<-EOF initramfs/etc/environment
 SSL_CERT_FILE=/ca-certificates.crt
@@ -103,14 +187,16 @@ RUN <<-EOF
 EOF
 
 WORKDIR /build_eif
-# initrd size must equal the ramdisk byte count; compute it (was a stale hardcoded value).
-RUN RAMDISK_BYTES=$(stat -c%s /build_cpio/rootfs.cpio) && eif_build \
+# The Nitro loader unpacks the ramdisk as an initramfs and execs /init, so the
+# cmdline carries no initrd=/root= (an old-style ramdisk-root cmdline panics the
+# kernel with "Cannot open root device").
+RUN eif_build \
 	--kernel /bzImage \
-	--kernel_config /linux.config \
+	--kernel_config /kernel.config \
 	--ramdisk /build_cpio/rootfs.cpio \
 	--pcrs_output /nitro.pcrs \
 	--output /nitro.eif \
-	--cmdline "reboot=k initrd=0x2000000,${RAMDISK_BYTES} root=/dev/ram0 panic=1 pci=off nomodules console=ttyS0 i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd nit.target=/run.sh"
+	--cmdline "reboot=k panic=1 pci=off nomodules console=ttyS0 i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd"
 
 FROM base AS install
 WORKDIR /rootfs

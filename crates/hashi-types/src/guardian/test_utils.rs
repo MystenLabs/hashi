@@ -165,6 +165,7 @@ impl OperatorInitRequest {
         let s3_config = super::S3Config {
             access_key: "ak".into(),
             secret_key: "sk".into(),
+            session_token: Some("token".into()),
             bucket_info: super::S3BucketInfo {
                 bucket: "bucket".into(),
                 region: "us-east-1".into(),
@@ -379,6 +380,7 @@ impl S3Config {
         Self {
             access_key: "test-access-key".to_string(),
             secret_key: "test-secret-key".to_string(),
+            session_token: None,
             bucket_info: S3BucketInfo::mock_for_testing(),
         }
     }

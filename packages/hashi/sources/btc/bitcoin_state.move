@@ -1,6 +1,11 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+/// Per-chain Bitcoin state, attached to the `Hashi` shared object as a
+/// dynamic field keyed by `BitcoinStateKey`. Bundles the deposit queue,
+/// withdrawal queue, and UTXO pool behind package-only accessors, and
+/// maintains a per-user index of request IDs so clients can discover all
+/// deposits and withdrawals belonging to an address.
 module hashi::bitcoin_state;
 
 use hashi::{
@@ -10,9 +15,11 @@ use hashi::{
 };
 use sui::{bag::Bag, table::Table};
 
+// ~~~~~~~ Structs ~~~~~~~
+
 public struct BitcoinStateKey has copy, drop, store {}
 
-public struct BitcoinState has store {
+public struct BitcoinState has key, store {
     /// Extension point: dynamic fields can be attached here so new BTC-side
     /// state can be added after the struct layout freezes at mainnet.
     id: UID,
@@ -23,6 +30,8 @@ public struct BitcoinState has store {
     /// Allows clients to discover all requests for a given address.
     user_requests: Table<address, Bag>,
 }
+
+// ~~~~~~~ Package Functions ~~~~~~~
 
 public(package) fun key(): BitcoinStateKey { BitcoinStateKey {} }
 
@@ -68,7 +77,7 @@ public(package) fun utxo_pool_mut(self: &mut BitcoinState): &mut UtxoPool {
     &mut self.utxo_pool
 }
 
-// ======== User Request Index ========
+// === User Request Index ===
 
 /// Index a request ID under a user address.
 public(package) fun index_user_request(

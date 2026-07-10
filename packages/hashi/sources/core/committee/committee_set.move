@@ -1,6 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+/// Registry of Hashi committee state: registered member metadata
+/// (`MemberInfo`), per-epoch `Committee`s, the current epoch, the MPC
+/// threshold public key, and the pending epoch change while a reconfiguration
+/// is in flight. Members register (and rotate keys/metadata) here between
+/// epochs; `start_reconfig` builds the next committee from Sui's active
+/// validator set, and `end_reconfig` activates it — storing the outgoing
+/// committee's handoff certificate for non-initial reconfigs.
 #[allow(unused_function, unused_field)]
 module hashi::committee_set;
 
@@ -13,13 +20,7 @@ use sui::{
     group_ops::Element
 };
 
-//
-// Errors
-//
-
-//
-// CommitteeSet
-//
+// ~~~~~~~ Structs ~~~~~~~
 
 public struct CommitteeSet has store {
     members: Bag,
@@ -29,16 +30,6 @@ public struct CommitteeSet has store {
     pending_epoch_change: Option<PendingEpochChange>,
     /// The MPC committee's threshold public key.
     mpc_public_key: vector<u8>,
-}
-
-public(package) fun create(ctx: &mut TxContext): CommitteeSet {
-    CommitteeSet {
-        members: sui::bag::new(ctx),
-        epoch: 0,
-        committees: sui::bag::new(ctx),
-        pending_epoch_change: option::none(),
-        mpc_public_key: std::vector::empty(),
-    }
 }
 
 /// Reconfiguration state while a new committee is pending activation.
@@ -67,81 +58,6 @@ public struct CommitteeHandoff has store {
     next_epoch: u64,
     cert: committee::CommitteeSignature,
 }
-
-fun member(self: &CommitteeSet, validator_address: address): &MemberInfo {
-    &self.members[validator_address]
-}
-
-public(package) fun has_member(self: &CommitteeSet, validator_address: address): bool {
-    self.members.contains_with_type<_, MemberInfo>(validator_address)
-}
-
-/// Returns true if the transaction sender is authorized to act on behalf of the
-/// member registered under `validator_address` — that is, the sender is either
-/// the validator's own Sui address or the operator address it has delegated to.
-/// Returns false if no such member exists.
-///
-/// The validator's own key always retains authority, so it can serve as a
-/// backup if the operator key is lost.
-public(package) fun member_authorized(
-    self: &CommitteeSet,
-    validator_address: address,
-    ctx: &TxContext,
-): bool {
-    self.has_member(validator_address) && self.member(validator_address).is_authorized(ctx)
-}
-
-fun member_mut(self: &mut CommitteeSet, validator_address: address): &mut MemberInfo {
-    &mut self.members[validator_address]
-}
-
-fun insert_member(self: &mut CommitteeSet, member: MemberInfo) {
-    self.members.add(member.validator_address, member)
-}
-
-fun committee(self: &CommitteeSet, epoch: u64): &Committee {
-    &self.committees[epoch]
-}
-
-public(package) fun has_committee(self: &CommitteeSet, epoch: u64): bool {
-    self.committees.contains_with_type<u64, Committee>(epoch)
-}
-
-fun insert_committee(self: &mut CommitteeSet, committee: Committee) {
-    self.committees.add(committee.epoch(), committee)
-}
-
-public(package) fun insert_committee_handoff(
-    self: &mut CommitteeSet,
-    from_epoch: u64,
-    next_epoch: u64,
-    cert: committee::CommitteeSignature,
-) {
-    let key = CommitteeHandoffKey { epoch: from_epoch };
-    assert!(!self.committees.contains_with_type<CommitteeHandoffKey, CommitteeHandoff>(key));
-    self.committees.add(key, CommitteeHandoff { next_epoch, cert })
-}
-
-#[test_only]
-public fun has_committee_handoff_for_testing(self: &CommitteeSet, from_epoch: u64): bool {
-    self
-        .committees
-        .contains_with_type<CommitteeHandoffKey, CommitteeHandoff>(CommitteeHandoffKey {
-            epoch: from_epoch,
-        })
-}
-
-fun remove_committee(self: &mut CommitteeSet, epoch: u64): Committee {
-    self.committees.remove(epoch)
-}
-
-public(package) fun current_committee(self: &CommitteeSet): &Committee {
-    &self.committees[self.epoch()]
-}
-
-//
-// MemberInfo
-//
 
 public struct MemberInfo has store {
     /// Sui Validator Address of this node
@@ -179,6 +95,18 @@ public struct MemberInfo has store {
     extra_fields: Config,
 }
 
+// ~~~~~~~ Package Functions ~~~~~~~
+
+public(package) fun create(ctx: &mut TxContext): CommitteeSet {
+    CommitteeSet {
+        members: sui::bag::new(ctx),
+        epoch: 0,
+        committees: sui::bag::new(ctx),
+        pending_epoch_change: option::none(),
+        mpc_public_key: std::vector::empty(),
+    }
+}
+
 /// Register as a member of Hashi.
 ///
 /// Only BLS key is required at registration time, other info can be set in
@@ -206,15 +134,23 @@ public(package) fun new_member(
     committee_set.insert_member(member);
 }
 
-/// True if the tx sender is authorized to act for this member — its validator
-/// key or its delegated operator key. The validator key always retains authority.
-fun is_authorized(self: &MemberInfo, ctx: &TxContext): bool {
-    let sender = ctx.sender();
-    sender == self.validator_address || sender == self.operator_address
+/// Returns true if the transaction sender is authorized to act on behalf of the
+/// member registered under `validator_address` — that is, the sender is either
+/// the validator's own Sui address or the operator address it has delegated to.
+/// Returns false if no such member exists.
+///
+/// The validator's own key always retains authority, so it can serve as a
+/// backup if the operator key is lost.
+public(package) fun member_authorized(
+    self: &CommitteeSet,
+    validator_address: address,
+    ctx: &TxContext,
+): bool {
+    self.has_member(validator_address) && self.member(validator_address).is_authorized(ctx)
 }
 
-fun assert_authorized(self: &MemberInfo, ctx: &TxContext) {
-    assert!(self.is_authorized(ctx));
+public(package) fun has_member(self: &CommitteeSet, validator_address: address): bool {
+    self.members.contains_with_type<_, MemberInfo>(validator_address)
 }
 
 /// Set the public key of the member.
@@ -296,31 +232,97 @@ public(package) fun set_operator_address(
     member.operator_address = operator_address;
 }
 
-// === Accessors ===
+public(package) fun start_reconfig(
+    self: &mut CommitteeSet,
+    sui_system: &sui_system::sui_system::SuiSystemState,
+    config: Config,
+    ctx: &TxContext,
+): u64 {
+    // We can't trigger reconfig if we are already reconfiguring
+    assert!(!self.is_reconfiguring());
+    // Don't start a reconfig for an epoch where we already have a committee
+    // determined.
+    assert!(!self.has_committee(ctx.epoch()));
+    // We can only trigger reconfig if the current epoch is 0 (for genesis) or
+    // our current epoch is not the same as Sui's epoch
+    assert!(self.epoch == 0 || self.epoch != ctx.epoch());
 
-/// Return the address of the node.
-fun validator_address(self: &MemberInfo): &address {
-    &self.validator_address
+    let committee = self.new_committee_from_validator_set(
+        sui_system,
+        config,
+        ctx,
+    );
+
+    let epoch = committee.epoch();
+    self.pending_epoch_change =
+        option::some(PendingEpochChange {
+            epoch,
+            committee_handoff_cert: option::none(),
+        });
+    self.insert_committee(committee);
+    epoch
 }
 
-/// Return the next epoch public key of the node.
-fun next_epoch_public_key(self: &MemberInfo): &Element<UncompressedG1> {
-    &self.next_epoch_public_key
+public(package) fun set_pending_committee_handoff_cert(
+    self: &mut CommitteeSet,
+    cert: committee::CommitteeSignature,
+) {
+    let mut pending = self.pending_epoch_change.extract();
+    assert!(pending.committee_handoff_cert.is_none());
+    pending.committee_handoff_cert = option::some(cert);
+    self.pending_epoch_change = option::some(pending);
 }
 
-/// Return the endpoint_url of the node.
-fun endpoint_url(self: &MemberInfo): &String {
-    &self.endpoint_url
+public(package) fun end_reconfig(
+    self: &mut CommitteeSet,
+    mpc_public_key: vector<u8>,
+    _ctx: &TxContext,
+): (u64, Option<committee::CommitteeSignature>) {
+    assert!(self.is_reconfiguring());
+    let PendingEpochChange { epoch: next_epoch, committee_handoff_cert } = self
+        .pending_epoch_change
+        .extract();
+    assert!(self.has_committee(next_epoch));
+
+    // If the mpc_public_key is empty, then this is the initial reconfig where
+    // DKG is run and we need to set the produced pubkey.
+    if (self.mpc_public_key.is_empty()) {
+        self.mpc_public_key = mpc_public_key;
+    } else {
+        assert!(committee_handoff_cert.is_some());
+    };
+
+    // On subsequent reconfigs where key resharing is performing instead of
+    // DKG, we need to ensure that the pubkey remains constant
+    assert!(self.mpc_public_key == mpc_public_key);
+
+    self.epoch = next_epoch;
+    (next_epoch, committee_handoff_cert)
 }
 
-/// Return the tls_public_key of the node.
-fun tls_public_key(self: &MemberInfo): &vector<u8> {
-    &self.tls_public_key
+public(package) fun abort_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u64 {
+    assert!(self.is_reconfiguring());
+    let PendingEpochChange { epoch: next_epoch, committee_handoff_cert } = self
+        .pending_epoch_change
+        .extract();
+    if (committee_handoff_cert.is_some()) {
+        committee_handoff_cert.destroy_some();
+    } else {
+        committee_handoff_cert.destroy_none();
+    };
+    self.remove_committee(next_epoch);
+    next_epoch
 }
 
-/// Return the next epoch encryption public key of the node.
-fun next_epoch_encryption_public_key(self: &MemberInfo): &vector<u8> {
-    &self.next_epoch_encryption_public_key
+public(package) fun insert_committee_handoff(
+    self: &mut CommitteeSet,
+    from_epoch: u64,
+    next_epoch: u64,
+    cert: committee::CommitteeSignature,
+) {
+    let key = CommitteeHandoffKey { epoch: from_epoch };
+    assert!(!self.committees.contains_with_type<CommitteeHandoffKey, CommitteeHandoff>(key));
+    self.committees.add(key, CommitteeHandoff { next_epoch, cert })
 }
 
 /// Return the current epoch.
@@ -328,49 +330,58 @@ public(package) fun epoch(self: &CommitteeSet): u64 {
     self.epoch
 }
 
+public(package) fun current_committee(self: &CommitteeSet): &Committee {
+    &self.committees[self.epoch()]
+}
+
+public(package) fun get_committee(self: &CommitteeSet, epoch: u64): &Committee {
+    &self.committees[epoch]
+}
+
+public(package) fun has_committee(self: &CommitteeSet, epoch: u64): bool {
+    self.committees.contains_with_type<u64, Committee>(epoch)
+}
+
+public(package) fun pending_epoch_change(self: &CommitteeSet): Option<u64> {
+    if (self.pending_epoch_change.is_some()) {
+        option::some(self.pending_epoch_change.borrow().epoch)
+    } else {
+        option::none()
+    }
+}
+
 public(package) fun mpc_public_key(self: &CommitteeSet): &vector<u8> {
     &self.mpc_public_key
 }
 
-// Verifies that the provided bls public key is valid and there is a valid
-// proof of possession.
-fun verify_bls_public_key(
-    epoch: u64,
-    validator_address: address,
-    bls_public_key: vector<u8>,
-    proof_of_possession_signature: vector<u8>,
-): Element<UncompressedG1> {
-    // Verify the proof of possession of the private key
-    assert!(
-        verify_proof_of_possession(
-            epoch,
-            &validator_address,
-            &bls_public_key,
-            &proof_of_possession_signature,
-        ),
-    );
-
-    // Convert the public key to its Uncompressed form
-    g1_to_uncompressed_g1(&g1_from_bytes(&bls_public_key))
+public(package) fun is_reconfiguring(self: &CommitteeSet): bool {
+    self.pending_epoch_change.is_some()
 }
 
-fun verify_proof_of_possession(
-    epoch: u64,
-    validator_address: &address,
-    bls_public_key: &vector<u8>,
-    proof_of_possession_signature: &vector<u8>,
-): bool {
-    let mut message = vector[];
-    message.append(bcs::to_bytes(&hashi::intent::proof_of_possession()));
-    message.append(bcs::to_bytes(&epoch));
-    message.append(bcs::to_bytes(validator_address));
-    bls_public_key.do_ref!(|key_byte| message.append(bcs::to_bytes(key_byte)));
+// ~~~~~~~ Private Functions ~~~~~~~
 
-    bls12381_min_pk_verify(
-        proof_of_possession_signature,
-        bls_public_key,
-        &message,
-    )
+fun member(self: &CommitteeSet, validator_address: address): &MemberInfo {
+    &self.members[validator_address]
+}
+
+fun member_mut(self: &mut CommitteeSet, validator_address: address): &mut MemberInfo {
+    &mut self.members[validator_address]
+}
+
+fun insert_member(self: &mut CommitteeSet, member: MemberInfo) {
+    self.members.add(member.validator_address, member)
+}
+
+fun committee(self: &CommitteeSet, epoch: u64): &Committee {
+    &self.committees[epoch]
+}
+
+fun insert_committee(self: &mut CommitteeSet, committee: Committee) {
+    self.committees.add(committee.epoch(), committee)
+}
+
+fun remove_committee(self: &mut CommitteeSet, epoch: u64): Committee {
+    self.committees.remove(epoch)
 }
 
 fun new_committee_from_validator_set(
@@ -424,102 +435,94 @@ fun new_committee_from_validator_set(
     )
 }
 
-public(package) fun is_reconfiguring(self: &CommitteeSet): bool {
-    self.pending_epoch_change.is_some()
+/// True if the tx sender is authorized to act for this member — its validator
+/// key or its delegated operator key. The validator key always retains authority.
+fun is_authorized(self: &MemberInfo, ctx: &TxContext): bool {
+    let sender = ctx.sender();
+    sender == self.validator_address || sender == self.operator_address
 }
 
-public(package) fun pending_epoch_change(self: &CommitteeSet): Option<u64> {
-    if (self.pending_epoch_change.is_some()) {
-        option::some(self.pending_epoch_change.borrow().epoch)
-    } else {
-        option::none()
-    }
+fun assert_authorized(self: &MemberInfo, ctx: &TxContext) {
+    assert!(self.is_authorized(ctx));
 }
 
-public(package) fun set_pending_committee_handoff_cert(
-    self: &mut CommitteeSet,
-    cert: committee::CommitteeSignature,
-) {
-    let mut pending = self.pending_epoch_change.extract();
-    assert!(pending.committee_handoff_cert.is_none());
-    pending.committee_handoff_cert = option::some(cert);
-    self.pending_epoch_change = option::some(pending);
+// === Accessors ===
+
+/// Return the address of the node.
+fun validator_address(self: &MemberInfo): &address {
+    &self.validator_address
 }
 
-public(package) fun get_committee(self: &CommitteeSet, epoch: u64): &Committee {
-    &self.committees[epoch]
+/// Return the next epoch public key of the node.
+fun next_epoch_public_key(self: &MemberInfo): &Element<UncompressedG1> {
+    &self.next_epoch_public_key
 }
 
-public(package) fun start_reconfig(
-    self: &mut CommitteeSet,
-    sui_system: &sui_system::sui_system::SuiSystemState,
-    config: Config,
-    ctx: &TxContext,
-): u64 {
-    // We can't trigger reconfig if we are already reconfiguring
-    assert!(!self.is_reconfiguring());
-    // Don't start a reconfig for an epoch where we already have a committee
-    // determined.
-    assert!(!self.has_committee(ctx.epoch()));
-    // We can only trigger reconfig if the current epoch is 0 (for genesis) or
-    // our current epoch is not the same as Sui's epoch
-    assert!(self.epoch == 0 || self.epoch != ctx.epoch());
+/// Return the endpoint_url of the node.
+fun endpoint_url(self: &MemberInfo): &String {
+    &self.endpoint_url
+}
 
-    let committee = self.new_committee_from_validator_set(
-        sui_system,
-        config,
-        ctx,
+/// Return the tls_public_key of the node.
+fun tls_public_key(self: &MemberInfo): &vector<u8> {
+    &self.tls_public_key
+}
+
+/// Return the next epoch encryption public key of the node.
+fun next_epoch_encryption_public_key(self: &MemberInfo): &vector<u8> {
+    &self.next_epoch_encryption_public_key
+}
+
+// Verifies that the provided bls public key is valid and there is a valid
+// proof of possession.
+fun verify_bls_public_key(
+    epoch: u64,
+    validator_address: address,
+    bls_public_key: vector<u8>,
+    proof_of_possession_signature: vector<u8>,
+): Element<UncompressedG1> {
+    // Verify the proof of possession of the private key
+    assert!(
+        verify_proof_of_possession(
+            epoch,
+            &validator_address,
+            &bls_public_key,
+            &proof_of_possession_signature,
+        ),
     );
 
-    let epoch = committee.epoch();
-    self.pending_epoch_change =
-        option::some(PendingEpochChange {
-            epoch,
-            committee_handoff_cert: option::none(),
-        });
-    self.insert_committee(committee);
-    epoch
+    // Convert the public key to its Uncompressed form
+    g1_to_uncompressed_g1(&g1_from_bytes(&bls_public_key))
 }
 
-public(package) fun end_reconfig(
-    self: &mut CommitteeSet,
-    mpc_public_key: vector<u8>,
-    _ctx: &TxContext,
-): (u64, Option<committee::CommitteeSignature>) {
-    assert!(self.is_reconfiguring());
-    let PendingEpochChange { epoch: next_epoch, committee_handoff_cert } = self
-        .pending_epoch_change
-        .extract();
-    assert!(self.has_committee(next_epoch));
+fun verify_proof_of_possession(
+    epoch: u64,
+    validator_address: &address,
+    bls_public_key: &vector<u8>,
+    proof_of_possession_signature: &vector<u8>,
+): bool {
+    let mut message = vector[];
+    message.append(bcs::to_bytes(&hashi::intent::proof_of_possession()));
+    message.append(bcs::to_bytes(&epoch));
+    message.append(bcs::to_bytes(validator_address));
+    bls_public_key.do_ref!(|key_byte| message.append(bcs::to_bytes(key_byte)));
 
-    // If the mpc_public_key is empty, then this is the initial reconfig where
-    // DKG is run and we need to set the produced pubkey.
-    if (self.mpc_public_key.is_empty()) {
-        self.mpc_public_key = mpc_public_key;
-    } else {
-        assert!(committee_handoff_cert.is_some());
-    };
-
-    // On subsequent reconfigs where key resharing is performing instead of
-    // DKG, we need to ensure that the pubkey remains constant
-    assert!(self.mpc_public_key == mpc_public_key);
-
-    self.epoch = next_epoch;
-    (next_epoch, committee_handoff_cert)
+    bls12381_min_pk_verify(
+        proof_of_possession_signature,
+        bls_public_key,
+        &message,
+    )
 }
 
-public(package) fun abort_reconfig(self: &mut CommitteeSet, _ctx: &TxContext): u64 {
-    assert!(self.is_reconfiguring());
-    let PendingEpochChange { epoch: next_epoch, committee_handoff_cert } = self
-        .pending_epoch_change
-        .extract();
-    if (committee_handoff_cert.is_some()) {
-        committee_handoff_cert.destroy_some();
-    } else {
-        committee_handoff_cert.destroy_none();
-    };
-    self.remove_committee(next_epoch);
-    next_epoch
+// ~~~~~~~ Test Helpers ~~~~~~~
+
+#[test_only]
+public fun has_committee_handoff_for_testing(self: &CommitteeSet, from_epoch: u64): bool {
+    self
+        .committees
+        .contains_with_type<CommitteeHandoffKey, CommitteeHandoff>(CommitteeHandoffKey {
+            epoch: from_epoch,
+        })
 }
 
 #[test_only]
@@ -539,8 +542,6 @@ public fun set_pending_reconfig_for_testing(self: &mut CommitteeSet, committee: 
 public fun set_mpc_public_key_for_testing(self: &mut CommitteeSet, mpc_public_key: vector<u8>) {
     self.mpc_public_key = mpc_public_key;
 }
-
-// ======== Test-only Functions ========
 
 #[test_only]
 /// Creates a CommitteeSet for testing with a pre-built committee

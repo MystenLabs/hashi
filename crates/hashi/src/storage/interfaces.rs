@@ -8,6 +8,7 @@ use fastcrypto_tbls::threshold_schnorr::batch_avss_avid;
 use sui_sdk_types::Address;
 
 pub use crate::mpc::types::AvidRoundState;
+use crate::mpc::types::HeldAvidEchoes;
 pub use crate::mpc::types::Messages;
 pub use crate::mpc::types::RotationMessages;
 
@@ -92,6 +93,24 @@ pub trait PublicMessagesStore: Send + Sync {
 
     /// List all AVID round states for the current epoch and given batch.
     fn list_avid_round_states(&self, batch_index: u32) -> Result<Vec<(Address, AvidRoundState)>>;
+
+    /// Store this node's held AVID vote and echoes for the given epoch, batch, and dealer,
+    /// overwriting any existing entry.
+    fn store_avid_held_echoes(
+        &mut self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+        held: &HeldAvidEchoes,
+    ) -> Result<()>;
+
+    /// Retrieve this node's held AVID vote and echoes for the given epoch, batch, and dealer.
+    fn get_avid_held_echoes(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> Result<Option<HeldAvidEchoes>>;
 
     /// Store this node's own AVID dealer builder for the given epoch and batch, overwriting any
     /// existing one.

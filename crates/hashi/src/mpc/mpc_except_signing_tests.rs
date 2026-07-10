@@ -11,6 +11,7 @@ fn test_metrics() -> Metrics {
 use crate::mpc::types::AvidRoundState;
 use crate::mpc::types::GetPartialSignaturesRequest;
 use crate::mpc::types::GetPartialSignaturesResponse;
+use crate::mpc::types::HeldAvidEchoes;
 use crate::mpc::types::ProtocolType;
 use crate::mpc::types::RotationMessages;
 use crate::onchain::types::MemberInfo;
@@ -1238,6 +1239,7 @@ struct InMemoryPublicMessagesStore {
     rotation_stored: HashMap<Address, RotationMessages>,
     nonce_stored: HashMap<(u32, Address), batch_avss::Message>,
     avid_round_stored: HashMap<(u32, Address), AvidRoundState>,
+    avid_held_echoes_stored: HashMap<(u32, Address), HeldAvidEchoes>,
     avid_dealer_builder_stored: HashMap<u32, batch_avss_avid::AvssMessageBuilder>,
 }
 
@@ -1248,6 +1250,7 @@ impl InMemoryPublicMessagesStore {
             rotation_stored: HashMap::new(),
             nonce_stored: HashMap::new(),
             avid_round_stored: HashMap::new(),
+            avid_held_echoes_stored: HashMap::new(),
             avid_dealer_builder_stored: HashMap::new(),
         }
     }
@@ -1372,6 +1375,30 @@ impl PublicMessagesStore for InMemoryPublicMessagesStore {
             .collect())
     }
 
+    fn store_avid_held_echoes(
+        &mut self,
+        _epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+        held: &HeldAvidEchoes,
+    ) -> anyhow::Result<()> {
+        self.avid_held_echoes_stored
+            .insert((batch_index, *dealer), held.clone());
+        Ok(())
+    }
+
+    fn get_avid_held_echoes(
+        &self,
+        _epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> anyhow::Result<Option<HeldAvidEchoes>> {
+        Ok(self
+            .avid_held_echoes_stored
+            .get(&(batch_index, *dealer))
+            .cloned())
+    }
+
     fn store_avid_dealer_builder(
         &mut self,
         _epoch: u64,
@@ -1487,6 +1514,25 @@ impl PublicMessagesStore for FailingPublicMessagesStore {
         _batch_index: u32,
     ) -> anyhow::Result<Vec<(Address, AvidRoundState)>> {
         Ok(vec![])
+    }
+
+    fn store_avid_held_echoes(
+        &mut self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+        _held: &HeldAvidEchoes,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("store failure")
+    }
+
+    fn get_avid_held_echoes(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<HeldAvidEchoes>> {
+        anyhow::bail!("store failure")
     }
 
     fn store_avid_dealer_builder(
@@ -5419,6 +5465,25 @@ impl PublicMessagesStore for TrackingPublicMessagesStore {
         Ok(vec![])
     }
 
+    fn store_avid_held_echoes(
+        &mut self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+        _held: &HeldAvidEchoes,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn get_avid_held_echoes(
+        &self,
+        _epoch: u64,
+        _batch_index: u32,
+        _dealer: &Address,
+    ) -> anyhow::Result<Option<HeldAvidEchoes>> {
+        Ok(None)
+    }
+
     fn store_avid_dealer_builder(
         &mut self,
         _epoch: u64,
@@ -7865,6 +7930,31 @@ impl PublicMessagesStore for SharedMemoryStore {
             .lock()
             .unwrap()
             .list_avid_round_states(batch_index)
+    }
+
+    fn store_avid_held_echoes(
+        &mut self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+        held: &HeldAvidEchoes,
+    ) -> anyhow::Result<()> {
+        self.inner
+            .lock()
+            .unwrap()
+            .store_avid_held_echoes(epoch, batch_index, dealer, held)
+    }
+
+    fn get_avid_held_echoes(
+        &self,
+        epoch: u64,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> anyhow::Result<Option<HeldAvidEchoes>> {
+        self.inner
+            .lock()
+            .unwrap()
+            .get_avid_held_echoes(epoch, batch_index, dealer)
     }
 
     fn store_avid_dealer_builder(
@@ -10906,7 +10996,6 @@ fn test_try_sign_avid_nonce_optimistic_confirms_and_persists() {
         .get(&(batch_index, dealer_addr))
         .expect("round state persisted at confirm time")
         .clone();
-    assert!(state.echoes.is_empty());
 
     let r = receiver
         .create_avid_nonce_receiver(dealer_addr, batch_index)
@@ -11066,14 +11155,14 @@ fn test_create_avid_nonce_dispersal_messages_yields_one_per_member() {
 fn test_avid_nonce_echo_and_vote_produces_verifiable_vote_and_echoes() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 1u32;
-    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
         .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
 
     // A confirmer (holds its output) processes its dispersal.
-    let voter = &fx.confirmers[1];
+    let voter = &mut fx.confirmers[1];
     let (dispersal, confirm_cert) = extract_dispersal(&dispersals[1].1);
     let (vote, avid_vote, echoes) = voter
         .avid_nonce_echo_and_vote(
@@ -11090,11 +11179,7 @@ fn test_avid_nonce_echo_and_vote_produces_verifiable_vote_and_echoes() {
         dealer_address: fx.dealer_addr,
         messages_hash: hash_avid_vote(&avid_vote),
     };
-    let member_sig = MemberSignature::new(
-        voter.mpc_config.epoch,
-        voter.address,
-        vote.expect("confirmer votes"),
-    );
+    let member_sig = MemberSignature::new(voter.mpc_config.epoch, voter.address, vote);
     let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target);
     agg.add_signature(member_sig)
         .expect("Vote verifies over DealerMessagesHash{dealer, H(AvidVote)}");
@@ -11114,7 +11199,8 @@ fn test_avid_nonce_echo_and_vote_produces_verifiable_vote_and_echoes() {
 }
 
 #[test]
-fn test_avid_nonce_echo_and_vote_gates_confirmer_without_output() {
+fn test_avid_nonce_echo_and_vote_requires_verified_round() {
+    let mut rng = rand::thread_rng();
     let setup = TestSetup::new_avid(6);
     let batch_index = 2u32;
     let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
@@ -11123,54 +11209,7 @@ fn test_avid_nonce_echo_and_vote_gates_confirmer_without_output() {
         .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
 
-    let (dispersal, confirm_cert) = extract_dispersal(&dispersals[1].1);
-    fx.confirmers[1]
-        .dealer_avid_nonce_outputs
-        .remove(&(batch_index, fx.dealer_addr));
-    let (vote, _av, echoes) = fx.confirmers[1]
-        .avid_nonce_echo_and_vote(
-            fx.dealer_addr,
-            batch_index,
-            fx.common.clone(),
-            dispersal,
-            confirm_cert,
-        )
-        .unwrap();
-    assert!(vote.is_none(), "confirmer without its output must not vote");
-    assert!(!echoes.is_empty());
-
-    let mut late = setup.create_manager(5);
-    let avss5 = extract_optimistic(&fx.optimistic[5].1).clone();
-    late.try_sign_avid_nonce_optimistic(fx.dealer_addr, batch_index, &avss5)
-        .unwrap();
-    let (dispersal5, confirm_cert5) = extract_dispersal(&dispersals[5].1);
-    let (vote5, ..) = late
-        .avid_nonce_echo_and_vote(
-            fx.dealer_addr,
-            batch_index,
-            fx.common.clone(),
-            dispersal5,
-            confirm_cert5,
-        )
-        .unwrap();
-    assert!(
-        vote5.is_some(),
-        "a late confirmer verified its round and votes"
-    );
-}
-
-#[test]
-fn test_avid_nonce_echo_and_vote_requires_verified_round() {
-    let mut rng = rand::thread_rng();
-    let setup = TestSetup::new(6);
-    let batch_index = 0u32;
-    let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
-    let dispersals = fx
-        .dealer
-        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
-        .unwrap();
-
-    let never_verified = setup.create_manager(5);
+    let mut never_verified = setup.create_manager(5);
     let (dispersal5, confirm_cert5) = extract_dispersal(&dispersals[5].1);
     let result = never_verified.avid_nonce_echo_and_vote(
         fx.dealer_addr,
@@ -11183,6 +11222,20 @@ fn test_avid_nonce_echo_and_vote_requires_verified_round() {
         matches!(result, Err(MpcError::NotReady(_))),
         "an unverified party must not vote: {result:?}"
     );
+
+    let mut late = setup.create_manager(5);
+    let avss5 = extract_optimistic(&fx.optimistic[5].1).clone();
+    late.try_sign_avid_nonce_optimistic(fx.dealer_addr, batch_index, &avss5)
+        .unwrap();
+    let (dispersal5, confirm_cert5) = extract_dispersal(&dispersals[5].1);
+    late.avid_nonce_echo_and_vote(
+        fx.dealer_addr,
+        batch_index,
+        fx.common.clone(),
+        dispersal5,
+        confirm_cert5,
+    )
+    .expect("a late confirmer verified its round and votes");
 
     let foreign_flow = fx
         .dealer
@@ -11215,7 +11268,7 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
     // Confirmers {0..4}, decoder = node 5. Decode needs W−2f=2 echoes; the Vote cert needs W−f=4.
-    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
     let dispersals = fx
         .dealer
         .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
@@ -11227,7 +11280,7 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
     let mut avid_vote = None;
     let mut echoes = Vec::new();
     for j in [1usize, 2, 3, 4] {
-        let voter = &fx.confirmers[j];
+        let voter = &mut fx.confirmers[j];
         let (dispersal, confirm_cert) = extract_dispersal(&dispersals[j].1);
         let (vote, av, es) = voter
             .avid_nonce_echo_and_vote(
@@ -11241,7 +11294,7 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
         vote_sigs.push(MemberSignature::new(
             voter.mpc_config.epoch,
             voter.address,
-            vote.unwrap(),
+            vote,
         ));
         avid_vote = Some(av);
         echoes.push((j as PartyId, extract_echo_for(&es, decoder_addr)));
@@ -11480,7 +11533,7 @@ fn test_handle_avid_dispersal_without_round_state_is_not_ready() {
 }
 
 #[test]
-fn test_handle_avid_dispersal_gated_vote_withheld_but_echoes_held() {
+fn test_handle_avid_dispersal_rederives_lost_output_and_votes() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
     let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
@@ -11488,8 +11541,9 @@ fn test_handle_avid_dispersal_gated_vote_withheld_but_echoes_held() {
         .dealer
         .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
         .unwrap();
-    let mut receiver = setup.create_manager(1);
-    receiver
+    let store = SharedMemoryStore::new();
+    let mut confirmer = setup.create_manager_with_store(1, Box::new(store.clone()));
+    confirmer
         .handle_send_messages_request(
             fx.dealer_addr,
             &SendMessagesRequest {
@@ -11497,25 +11551,28 @@ fn test_handle_avid_dispersal_gated_vote_withheld_but_echoes_held() {
             },
         )
         .unwrap();
-    receiver
-        .dealer_avid_nonce_outputs
-        .remove(&(batch_index, fx.dealer_addr));
+    let mut restarted = setup.create_manager_with_store(1, Box::new(store.clone()));
+    assert!(restarted.dealer_avid_nonce_outputs.is_empty());
 
-    let result = receiver.handle_send_messages_request(
-        fx.dealer_addr,
-        &SendMessagesRequest {
-            messages: dispersals[1].1.clone(),
-        },
+    restarted
+        .handle_send_messages_request(
+            fx.dealer_addr,
+            &SendMessagesRequest {
+                messages: dispersals[1].1.clone(),
+            },
+        )
+        .expect("a restarted confirmer re-derives its output and votes");
+    assert!(
+        restarted
+            .dealer_avid_nonce_outputs
+            .contains_key(&(batch_index, fx.dealer_addr)),
+        "the lost output is re-derived from the persisted round state"
     );
     assert!(
-        matches!(result, Err(MpcError::NotReady(_))),
-        "gated vote must be NotReady: {result:?}"
-    );
-    assert!(
-        receiver
+        restarted
             .avid_held_echoes
             .contains_key(&(batch_index, fx.dealer_addr)),
-        "echoes held even though the vote is withheld (§6.2)"
+        "echoes held for serving"
     );
 }
 
@@ -11613,7 +11670,7 @@ fn test_handle_avid_dispersal_rejects_second_different_dispersal() {
 fn test_handle_avid_echo_push_is_rejected() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
-    let fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
+    let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3]);
     let dispersals = fx
         .dealer
         .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
@@ -12049,6 +12106,82 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
 }
 
 #[tokio::test]
+async fn test_run_as_avid_nonce_party_rederives_after_restart() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::with_weights_avid(&[5, 1, 1, 1, 1, 1]);
+    let batch_index = 0u32;
+    let dealer_addr = setup.address(0);
+    let mut dealer = setup.create_manager(0);
+    let flow = dealer
+        .prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
+        .unwrap();
+
+    let store = SharedMemoryStore::new();
+    let mut managers: HashMap<Address, MpcManager> = (2..6)
+        .map(|i| (setup.address(i), setup.create_manager(i)))
+        .collect();
+    managers.insert(
+        setup.address(1),
+        setup.create_manager_with_store(1, Box::new(store.clone())),
+    );
+    let mut sigs = vec![flow.my_signature.clone()];
+    for i in 1..6 {
+        let addr = setup.address(i);
+        let (_, msg) = flow
+            .recipient_messages
+            .iter()
+            .find(|(a, _)| *a == addr)
+            .unwrap()
+            .clone();
+        let response = managers
+            .get_mut(&addr)
+            .unwrap()
+            .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg })
+            .unwrap();
+        sigs.push(MemberSignature::new(
+            dealer.mpc_config.epoch,
+            addr,
+            response.signature,
+        ));
+    }
+    let mut agg = BlsSignatureAggregator::new(setup.committee(), flow.confirm_target.clone());
+    for sig in sigs {
+        agg.add_signature(sig).unwrap();
+    }
+    let full_cert = CertificateV1::NonceGeneration {
+        batch_index,
+        cert: agg.finish().unwrap(),
+    };
+
+    managers.remove(&setup.address(1));
+    let restarted = setup.create_manager_with_store(1, Box::new(store.clone()));
+    assert!(restarted.dealer_avid_nonce_outputs.is_empty());
+
+    let party = Arc::new(RwLock::new(restarted));
+    let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
+    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![full_cert]);
+    let certified = MpcManager::run_as_avid_nonce_party(
+        &party,
+        batch_index,
+        &mock_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(certified, HashSet::from([dealer_addr]));
+    assert!(
+        party
+            .read()
+            .unwrap()
+            .dealer_avid_nonce_outputs
+            .contains_key(&(batch_index, dealer_addr)),
+        "the restarted confirmer re-derived its output at the consume seam"
+    );
+}
+
+#[tokio::test]
 async fn test_run_as_avid_nonce_party_laggard_pulls_and_decodes() {
     let setup = TestSetup::new_avid(6);
     let batch_index = 0u32;
@@ -12268,6 +12401,201 @@ async fn test_run_as_avid_nonce_party_recovers_via_complaint() {
         mgr.dealer_avid_nonce_outputs
             .contains_key(&(batch_index, dealer_addr)),
         "the victim recovered its share via the complaint path"
+    );
+}
+
+#[test]
+fn test_avid_voter_state_survives_restart() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new_avid(6);
+    let batch_index = 0u32;
+    let dealer_addr = setup.address(0);
+    let mut dealer = setup.create_manager(0);
+    let flow = dealer
+        .prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
+        .unwrap();
+
+    let voter_store = SharedMemoryStore::new();
+    let mut voter = setup.create_manager_with_store(1, Box::new(voter_store.clone()));
+    let mut others: HashMap<usize, MpcManager> = [2, 3, 4]
+        .into_iter()
+        .zip([2, 3, 4].map(|i| setup.create_manager(i)))
+        .collect();
+    let mut confirm_sigs = vec![flow.my_signature.clone()];
+    for i in [1usize, 2, 3, 4] {
+        let addr = setup.address(i);
+        let (_, msg) = flow
+            .recipient_messages
+            .iter()
+            .find(|(a, _)| *a == addr)
+            .unwrap()
+            .clone();
+        let mgr = if i == 1 {
+            &mut voter
+        } else {
+            others.get_mut(&i).unwrap()
+        };
+        let response = mgr
+            .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg })
+            .unwrap();
+        confirm_sigs.push(MemberSignature::new(
+            mgr.mpc_config.epoch,
+            addr,
+            response.signature,
+        ));
+    }
+    let cert = |sigs: &[MemberSignature]| {
+        let mut agg = BlsSignatureAggregator::new(setup.committee(), flow.confirm_target.clone());
+        for sig in sigs {
+            agg.add_signature(sig.clone()).unwrap();
+        }
+        agg.finish().unwrap()
+    };
+
+    let cert_a = cert(&confirm_sigs[..4]);
+    let cert_b = cert(&confirm_sigs);
+    let dispersals_a = dealer
+        .create_avid_nonce_dispersal_messages(&flow.builder, cert_a, batch_index)
+        .unwrap();
+    let dispersals_b = dealer
+        .create_avid_nonce_dispersal_messages(&flow.builder, cert_b, batch_index)
+        .unwrap();
+
+    let mut vote_sigs = Vec::new();
+    for i in [1usize, 2, 3, 4] {
+        let addr = setup.address(i);
+        let (_, msg) = dispersals_a
+            .iter()
+            .find(|(a, _)| *a == addr)
+            .unwrap()
+            .clone();
+        let mgr = if i == 1 {
+            &mut voter
+        } else {
+            others.get_mut(&i).unwrap()
+        };
+        let response = mgr
+            .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg })
+            .unwrap();
+        vote_sigs.push(MemberSignature::new(
+            mgr.mpc_config.epoch,
+            addr,
+            response.signature,
+        ));
+    }
+    let (held_vote, held_echoes) = voter
+        .avid_held_echoes
+        .get(&(batch_index, dealer_addr))
+        .unwrap()
+        .clone();
+    let echo_before = extract_echo_for(&held_echoes, setup.address(5));
+    let vote_target = DealerMessagesHash {
+        dealer_address: dealer_addr,
+        messages_hash: hash_avid_vote(&held_vote),
+    };
+    let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target);
+    for sig in vote_sigs {
+        agg.add_signature(sig).unwrap();
+    }
+    let vote_cert = AvidCertificate::vote(
+        agg.finish().unwrap(),
+        held_vote.clone(),
+        Arc::new(setup.committee().clone()),
+    )
+    .unwrap()
+    .into_verified()
+    .unwrap();
+
+    let mut restarted = setup.create_manager_with_store(1, Box::new(voter_store.clone()));
+    assert!(restarted.avid_held_echoes.is_empty());
+
+    assert_eq!(
+        restarted.resolve_avid_cert_kind_locally(
+            batch_index,
+            &dealer_addr,
+            &hash_avid_vote(&held_vote),
+        ),
+        Some(CertKind::AvidVote)
+    );
+
+    let request = RetrieveMessagesRequest {
+        dealer: dealer_addr,
+        protocol_type: ProtocolTypeIndicator::NonceGeneration,
+        epoch: restarted.mpc_config.epoch,
+        batch_index: Some(batch_index),
+    };
+    let response = restarted
+        .handle_retrieve_messages_request(setup.address(5), &request)
+        .unwrap();
+    let Messages::AvidNonceRetrieval(bundle) = response.messages else {
+        panic!("expected an AVID retrieval bundle");
+    };
+    let served_echo = bundle.echo.expect("pending recipient gets its echo");
+    assert_eq!(
+        bcs::to_bytes(&served_echo).unwrap(),
+        bcs::to_bytes(&echo_before).unwrap()
+    );
+    assert_eq!(
+        bcs::to_bytes(&bundle.avid_vote.unwrap()).unwrap(),
+        bcs::to_bytes(&held_vote).unwrap()
+    );
+
+    let mut laggard = setup.create_manager(5);
+    let mut verified = Vec::new();
+    for (i, echo) in [(1usize, served_echo)]
+        .into_iter()
+        .chain([2, 3, 4].map(|i| {
+            let (_, held) = others[&i]
+                .avid_held_echoes
+                .get(&(batch_index, dealer_addr))
+                .unwrap()
+                .clone();
+            (i, extract_echo_for(&held, setup.address(5)))
+        }))
+    {
+        verified.push(
+            laggard
+                .verify_avid_nonce_echo(
+                    dealer_addr,
+                    batch_index,
+                    setup.committee().index_of(&setup.address(i)).unwrap() as PartyId,
+                    echo,
+                    &vote_cert,
+                )
+                .unwrap(),
+        );
+    }
+    let common = restarted
+        .get_avid_round_common(batch_index, &dealer_addr)
+        .unwrap();
+    let outcome = laggard
+        .decode_avid_nonce_share(
+            dealer_addr,
+            batch_index,
+            common,
+            &verified,
+            &vote_cert,
+            &mut rng,
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        batch_avss_avid::DecodeAndDecryptOutcome::Valid(..)
+    ));
+
+    let (_, msg_b) = dispersals_b
+        .iter()
+        .find(|(a, _)| *a == setup.address(1))
+        .unwrap()
+        .clone();
+    let result = restarted
+        .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg_b });
+    assert!(
+        matches!(
+            result,
+            Err(MpcError::InvalidMessage { ref reason, .. }) if reason.contains("different dispersal")
+        ),
+        "double-vote across restart must be rejected: {result:?}"
     );
 }
 

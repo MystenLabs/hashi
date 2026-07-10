@@ -1,6 +1,12 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+/// Storage and state machine for Bitcoin withdrawals. Holds `WithdrawalRequest`
+/// objects as they move from Requested through Approved, Processing, Signed,
+/// and Confirmed, plus the `WithdrawalTransaction` objects that batch them:
+/// each transaction tracks its input UTXOs, withdrawal and change outputs, and
+/// the incrementally collected MPC and guardian signatures. Certificate
+/// verification and funds movement are driven by `hashi::withdraw`.
 module hashi::withdrawal_queue;
 
 use hashi::{
@@ -14,6 +20,8 @@ use hashi::{
 use sui::{balance::Balance, clock::Clock, object_bag::ObjectBag};
 
 use fun btc_config::worst_case_network_fee as Config.worst_case_network_fee;
+
+// ~~~~~~~ Errors ~~~~~~~
 
 #[error]
 const ERequestNotApproved: vector<u8> = b"Withdrawal request has not been approved";
@@ -37,7 +45,7 @@ const EWithdrawalAlreadyFinalized: vector<u8> = b"Withdrawal transaction is alre
 const EWithdrawalNotFullySigned: vector<u8> =
     b"Withdrawal transaction is missing one or more MPC signatures";
 
-// ======== Status Enum ========
+// ~~~~~~~ Structs ~~~~~~~
 
 public enum WithdrawalStatus has copy, drop, store {
     Requested,
@@ -46,8 +54,6 @@ public enum WithdrawalStatus has copy, drop, store {
     Signed,
     Confirmed,
 }
-
-// ======== Core Structs ========
 
 /// Unified withdrawal request object. Tracks the full lifecycle of a withdrawal,
 /// from initial request through to confirmation or cancellation.
@@ -132,11 +138,87 @@ public struct OutputUtxo has copy, drop, store {
     bitcoin_address: vector<u8>,
 }
 
-// ======== Constructors ========
+/// Lightweight info extracted from a request at commit time for validation.
+public struct CommittedRequestInfo has copy, drop, store {
+    btc_amount: u64,
+    bitcoin_address: vector<u8>,
+}
+
+// ~~~~~~~ Events ~~~~~~~
+
+public struct WithdrawalRequested has copy, drop {
+    request_id: address,
+    btc_amount: u64,
+    bitcoin_address: vector<u8>,
+    timestamp_ms: u64,
+    requester_address: address,
+    sui_tx_digest: vector<u8>,
+}
+
+public struct WithdrawalApproved has copy, drop {
+    request_id: address,
+}
+
+public struct WithdrawalPickedForProcessing has copy, drop {
+    withdrawal_txn_id: address,
+    txid: address,
+    request_ids: vector<address>,
+    inputs: vector<Utxo>,
+    withdrawal_outputs: vector<OutputUtxo>,
+    change_outputs: vector<OutputUtxo>,
+    timestamp_ms: u64,
+    randomness: vector<u8>,
+}
+
+/// Emitted on each incremental chunk write so the watcher can track signing
+/// progress (X / N) and the next leader can resume; the per-input state itself
+/// lives on the object.
+public struct WithdrawalInputsSigned has copy, drop {
+    withdrawal_txn_id: address,
+    signed_count: u64,
+    num_inputs: u64,
+}
+
+public struct WithdrawalSigned has copy, drop {
+    withdrawal_txn_id: address,
+    request_ids: vector<address>,
+    /// Per-input Schnorr signatures from the MPC committee.
+    signatures: vector<vector<u8>>,
+    /// Per-input Schnorr signatures from the guardian enclave. Same
+    /// length as `signatures`; the watcher pairs index `i` of both to
+    /// form the witness for input `i` at broadcast time.
+    guardian_signatures: vector<vector<u8>>,
+}
+
+public struct WithdrawalPresigsReassigned has copy, drop {
+    withdrawal_txn_id: address,
+    epoch: u64,
+    presig_start_index: u64,
+}
+
+public struct WithdrawalConfirmed has copy, drop {
+    withdrawal_txn_id: address,
+    txid: address,
+    change_utxo_ids: vector<UtxoId>,
+    request_ids: vector<address>,
+    change_utxo_amounts: vector<u64>,
+}
+
+public struct WithdrawalCancelled has copy, drop {
+    request_id: address,
+    requester_address: address,
+    btc_amount: u64,
+}
+
+// ~~~~~~~ Public Functions ~~~~~~~
 
 public fun output_utxo(amount: u64, bitcoin_address: vector<u8>): OutputUtxo {
     OutputUtxo { amount, bitcoin_address }
 }
+
+// ~~~~~~~ Package Functions ~~~~~~~
+
+// === Constructors ===
 
 public(package) fun create(ctx: &mut TxContext): WithdrawalRequestQueue {
     WithdrawalRequestQueue {
@@ -173,7 +255,7 @@ public(package) fun create_withdrawal(
     }
 }
 
-// ======== Request Lifecycle Functions ========
+// === Request Lifecycle ===
 
 /// Insert a new withdrawal request into the active requests bag and index by sender.
 public(package) fun insert_withdrawal(
@@ -316,15 +398,7 @@ public(package) fun is_request_processing(
     self.processed.contains(request_id)
 }
 
-// ======== Committed Request Info ========
-
-/// Lightweight info extracted from a request at commit time for validation.
-public struct CommittedRequestInfo has copy, drop, store {
-    btc_amount: u64,
-    bitcoin_address: vector<u8>,
-}
-
-// ======== WithdrawalTransaction Functions ========
+// === Transaction Lifecycle ===
 
 public(package) fun new_withdrawal_txn(
     ctx: &mut TxContext,
@@ -501,7 +575,7 @@ public(package) fun reallocate_presigs_for_withdrawal_txn(
     });
 }
 
-// ======== WithdrawalTransaction signing views (drive the leader/watcher) ========
+// === Signing Views (drive the leader/watcher) ===
 
 /// Number of inputs still awaiting an MPC signature (what must be re-presigned
 /// on a stale-epoch reallocation).
@@ -530,13 +604,6 @@ public(package) fun withdrawal_txn_mpc_signatures(
 ): vector<vector<u8>> {
     let txn: &WithdrawalTransaction = self.withdrawal_txns.borrow(withdrawal_id);
     txn.signing.to_signatures()
-}
-
-/// Derived broadcast gate: every input has an MPC signature and the one-shot
-/// guardian signatures are attached. Not stored — computed from `signing` and
-/// `guardian_signatures` so it can't fall out of sync.
-fun txn_fully_signed(txn: &WithdrawalTransaction): bool {
-    txn.signing.is_complete() && txn.guardian_signatures.is_some()
 }
 
 public(package) fun withdrawal_txn_is_fully_signed(
@@ -586,7 +653,7 @@ public(package) fun change_utxo_ids(self: &WithdrawalTransaction): vector<UtxoId
     ids
 }
 
-// ======== Accessors ========
+// === Accessors ===
 
 public(package) fun withdrawal_txn_id(self: &WithdrawalTransaction): address {
     self.id.to_address()
@@ -635,7 +702,7 @@ public(package) fun is_approved(self: &WithdrawalStatus): bool {
     }
 }
 
-// ======== Events ========
+// === Event Emitters ===
 
 public(package) fun emit_withdrawal_requested(request: &WithdrawalRequest) {
     sui::event::emit(WithdrawalRequested {
@@ -695,73 +762,16 @@ public(package) fun emit_withdrawal_cancelled(request: &WithdrawalRequest) {
     });
 }
 
-// ======== Event Structs ========
+// ~~~~~~~ Private Functions ~~~~~~~
 
-public struct WithdrawalRequested has copy, drop {
-    request_id: address,
-    btc_amount: u64,
-    bitcoin_address: vector<u8>,
-    timestamp_ms: u64,
-    requester_address: address,
-    sui_tx_digest: vector<u8>,
+/// Derived broadcast gate: every input has an MPC signature and the one-shot
+/// guardian signatures are attached. Not stored — computed from `signing` and
+/// `guardian_signatures` so it can't fall out of sync.
+fun txn_fully_signed(txn: &WithdrawalTransaction): bool {
+    txn.signing.is_complete() && txn.guardian_signatures.is_some()
 }
 
-public struct WithdrawalApproved has copy, drop {
-    request_id: address,
-}
-
-public struct WithdrawalPickedForProcessing has copy, drop {
-    withdrawal_txn_id: address,
-    txid: address,
-    request_ids: vector<address>,
-    inputs: vector<Utxo>,
-    withdrawal_outputs: vector<OutputUtxo>,
-    change_outputs: vector<OutputUtxo>,
-    timestamp_ms: u64,
-    randomness: vector<u8>,
-}
-
-/// Emitted on each incremental chunk write so the watcher can track signing
-/// progress (X / N) and the next leader can resume; the per-input state itself
-/// lives on the object.
-public struct WithdrawalInputsSigned has copy, drop {
-    withdrawal_txn_id: address,
-    signed_count: u64,
-    num_inputs: u64,
-}
-
-public struct WithdrawalSigned has copy, drop {
-    withdrawal_txn_id: address,
-    request_ids: vector<address>,
-    /// Per-input Schnorr signatures from the MPC committee.
-    signatures: vector<vector<u8>>,
-    /// Per-input Schnorr signatures from the guardian enclave. Same
-    /// length as `signatures`; the watcher pairs index `i` of both to
-    /// form the witness for input `i` at broadcast time.
-    guardian_signatures: vector<vector<u8>>,
-}
-
-public struct WithdrawalPresigsReassigned has copy, drop {
-    withdrawal_txn_id: address,
-    epoch: u64,
-    presig_start_index: u64,
-}
-
-public struct WithdrawalConfirmed has copy, drop {
-    withdrawal_txn_id: address,
-    txid: address,
-    change_utxo_ids: vector<UtxoId>,
-    request_ids: vector<address>,
-    change_utxo_amounts: vector<u64>,
-}
-
-public struct WithdrawalCancelled has copy, drop {
-    request_id: address,
-    requester_address: address,
-    btc_amount: u64,
-}
-
-// ======== Test Helpers ========
+// ~~~~~~~ Test Helpers ~~~~~~~
 
 #[test_only]
 public(package) fun new_withdrawal_txn_for_testing(

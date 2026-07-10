@@ -1,12 +1,22 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+/// Typed value wrapper for config entries: the `Value` enum carries one of the
+/// primitive types a configuration entry can hold, with a public constructor
+/// per variant and package-level helpers for variant checks (`is_*`) and
+/// extraction (`as_*`, aborting on a type mismatch). Storing typed values —
+/// rather than raw bytes — lets `config::is_valid_config_update` reject
+/// governance updates that would change an entry's type.
 module hashi::config_value;
 
 use std::string::String;
 
+// ~~~~~~~ Errors ~~~~~~~
+
 #[error]
 const EInvalidConfigValue: vector<u8> = b"Config value has a different type than expected";
+
+// ~~~~~~~ Structs ~~~~~~~
 
 // Variant order is BCS-load-bearing: the Rust mirror (hashi-types) decodes
 // by variant index, and once published to a persistent network the order is
@@ -21,6 +31,8 @@ public enum Value has copy, drop, store {
     Bool(bool),
     Bytes(vector<u8>),
 }
+
+// ~~~~~~~ Public Functions ~~~~~~~
 
 public fun new_u64(value: u64): Value {
     Value::U64(value)
@@ -50,6 +62,8 @@ public fun new_u256(value: u256): Value {
     Value::U256(value)
 }
 
+// ~~~~~~~ Package Functions ~~~~~~~
+
 public(package) fun same_variant(self: &Value, other: &Value): bool {
     match (self) {
         Value::U64(_) => other.is_u64(),
@@ -65,6 +79,20 @@ public(package) fun same_variant(self: &Value, other: &Value): bool {
 public(package) fun is_u64(value: &Value): bool {
     match (value) {
         Value::U64(_) => true,
+        _ => false,
+    }
+}
+
+public(package) fun is_u128(value: &Value): bool {
+    match (value) {
+        Value::U128(_) => true,
+        _ => false,
+    }
+}
+
+public(package) fun is_u256(value: &Value): bool {
+    match (value) {
+        Value::U256(_) => true,
         _ => false,
     }
 }
@@ -104,6 +132,20 @@ public(package) fun as_u64(value: Value): u64 {
     }
 }
 
+public(package) fun as_u128(value: Value): u128 {
+    match (value) {
+        Value::U128(num) => num,
+        _ => abort EInvalidConfigValue,
+    }
+}
+
+public(package) fun as_u256(value: Value): u256 {
+    match (value) {
+        Value::U256(num) => num,
+        _ => abort EInvalidConfigValue,
+    }
+}
+
 public(package) fun as_address(value: Value): address {
     match (value) {
         Value::Address(addr) => addr,
@@ -128,34 +170,6 @@ public(package) fun as_bool(value: Value): bool {
 public(package) fun as_bytes(value: Value): vector<u8> {
     match (value) {
         Value::Bytes(bytes) => bytes,
-        _ => abort EInvalidConfigValue,
-    }
-}
-
-public(package) fun is_u128(value: &Value): bool {
-    match (value) {
-        Value::U128(_) => true,
-        _ => false,
-    }
-}
-
-public(package) fun is_u256(value: &Value): bool {
-    match (value) {
-        Value::U256(_) => true,
-        _ => false,
-    }
-}
-
-public(package) fun as_u128(value: Value): u128 {
-    match (value) {
-        Value::U128(num) => num,
-        _ => abort EInvalidConfigValue,
-    }
-}
-
-public(package) fun as_u256(value: Value): u256 {
-    match (value) {
-        Value::U256(num) => num,
         _ => abort EInvalidConfigValue,
     }
 }

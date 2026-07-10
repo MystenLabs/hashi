@@ -1,9 +1,17 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+/// Governed MPC protocol parameters — signing threshold, weight-reduction
+/// allowed delta, max-faulty bound, and nonce-generation protocol — each
+/// stored under a permanent config key with a compiled-in default. `pin`
+/// snapshots the full parameter set into a deterministic, canonically-ordered
+/// store that is attached to a `Committee` for its epoch, so mid-epoch
+/// governance changes never affect an active committee.
 module hashi::mpc_config;
 
 use hashi::{config::{Self, Config}, config_value};
+
+// ~~~~~~~ Constants ~~~~~~~
 
 const DEFAULT_THRESHOLD_IN_BASIS_POINTS: u64 = 3334;
 
@@ -19,6 +27,8 @@ const KEY_THRESHOLD_IN_BASIS_POINTS: vector<u8> = b"mpc_threshold_in_basis_point
 const KEY_MAX_FAULTY_IN_BASIS_POINTS: vector<u8> = b"mpc_max_faulty_in_basis_points";
 const KEY_WEIGHT_REDUCTION_ALLOWED_DELTA: vector<u8> = b"mpc_weight_reduction_allowed_delta";
 const KEY_NONCE_GENERATION_PROTOCOL: vector<u8> = b"mpc_nonce_generation_protocol";
+
+// ~~~~~~~ Package Functions ~~~~~~~
 
 #[allow(implicit_const_copy)]
 public(package) fun is_valid_value(key: &std::string::String, value: &config_value::Value): bool {
@@ -109,6 +119,8 @@ public(package) fun pin(config: &Config): Config {
     );
     mpc
 }
+
+// ~~~~~~~ Test Helpers ~~~~~~~
 
 #[test_only]
 /// Build a pinned MPC parameter store directly from explicit values, in the

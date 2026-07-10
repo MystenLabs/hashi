@@ -17,11 +17,7 @@ use hashi::config_value::{Self, Value};
 use std::string::String;
 use sui::vec_map::{Self, VecMap};
 
-#[error(code = 3)]
-const EBadGuardianBtcPublicKeyLength: vector<u8> = b"Guardian BTC public key must be 32 bytes";
-#[error(code = 4)]
-const EGuardianBtcPublicKeyImmutable: vector<u8> =
-    b"Guardian BTC public key cannot be changed once set";
+// ~~~~~~~ Constants ~~~~~~~
 
 const PAUSED_KEY: vector<u8> = b"paused";
 const GUARDIAN_URL_KEY: vector<u8> = b"guardian_url";
@@ -31,8 +27,33 @@ const EMERGENCY_PAUSE_THRESHOLD_BPS_KEY: vector<u8> = b"governance_emergency_pau
 const EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY: vector<u8> =
     b"governance_emergency_unpause_threshold_bps";
 
+// ~~~~~~~ Errors ~~~~~~~
+
+#[error(code = 3)]
+const EBadGuardianBtcPublicKeyLength: vector<u8> = b"Guardian BTC public key must be 32 bytes";
+#[error(code = 4)]
+const EGuardianBtcPublicKeyImmutable: vector<u8> =
+    b"Guardian BTC public key cannot be changed once set";
+
+// ~~~~~~~ Structs ~~~~~~~
+
 public struct Config has copy, drop, store {
     config: VecMap<String, Value>,
+}
+
+// ~~~~~~~ Package Functions ~~~~~~~
+
+/// Create the global config with core defaults only. Chain-specific defaults
+/// (e.g. BTC fees) are initialized separately via btc_config::init_defaults.
+public(package) fun create(): Config {
+    let mut config = empty();
+
+    // Core defaults
+    config.upsert(PAUSED_KEY, config_value::new_bool(false));
+    config.upsert(EMERGENCY_PAUSE_THRESHOLD_BPS_KEY, config_value::new_u64(500));
+    config.upsert(EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY, config_value::new_u64(6667));
+
+    config
 }
 
 /// Create an empty store. Used to build a pinned snapshot (e.g. a `Committee`'s
@@ -80,7 +101,7 @@ public(package) fun is_valid_config_update(self: &Config, key: &String, value: &
     self.config.get(key).same_variant(value)
 }
 
-// ======== Core Accessors ========
+// === Core Accessors ===
 
 public(package) fun paused(self: &Config): bool {
     self.get(PAUSED_KEY).as_bool()
@@ -123,19 +144,4 @@ public(package) fun emergency_pause_threshold_bps(self: &Config): u64 {
 
 public(package) fun emergency_unpause_threshold_bps(self: &Config): u64 {
     self.try_get(EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY).map!(|v| v.as_u64()).destroy_or!(6667)
-}
-
-// ======== Constructor ========
-
-/// Create the global config with core defaults only. Chain-specific defaults
-/// (e.g. BTC fees) are initialized separately via btc_config::init_defaults.
-public(package) fun create(): Config {
-    let mut config = empty();
-
-    // Core defaults
-    config.upsert(PAUSED_KEY, config_value::new_bool(false));
-    config.upsert(EMERGENCY_PAUSE_THRESHOLD_BPS_KEY, config_value::new_u64(500));
-    config.upsert(EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY, config_value::new_u64(6667));
-
-    config
 }

@@ -19,11 +19,24 @@ use hashi::{hashi::Hashi, proposal};
 use std::string::String;
 use sui::{clock::Clock, package::{UpgradeTicket, UpgradeReceipt}, vec_map::VecMap};
 
+// ~~~~~~~ Constants ~~~~~~~
+
 const THRESHOLD_BPS: u64 = 6667;
+
+// ~~~~~~~ Structs ~~~~~~~
 
 public struct Upgrade has copy, drop, store {
     digest: vector<u8>,
 }
+
+// ~~~~~~~ Events ~~~~~~~
+
+public struct PackageUpgraded has copy, drop {
+    package: ID,
+    version: u64,
+}
+
+// ~~~~~~~ Public Functions ~~~~~~~
 
 public fun propose(
     hashi: &mut Hashi,
@@ -61,9 +74,4 @@ public fun finalize_upgrade(hashi: &mut Hashi, receipt: UpgradeReceipt) {
     hashi.versioning_mut().commit_upgrade(receipt);
     let version = hashi.versioning().upgrade_cap().version();
     sui::event::emit(PackageUpgraded { package: upgrade_package, version });
-}
-
-public struct PackageUpgraded has copy, drop {
-    package: ID,
-    version: u64,
 }

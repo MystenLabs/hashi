@@ -1,8 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-/// Module: mpc_signing
-///
 /// Durable, out-of-order accumulator for a withdrawal's per-input threshold
 /// Schnorr signatures. This is the MPC-protocol side of incremental signing:
 /// the dangerous presignature / nonce bookkeeping lives here, behind a
@@ -31,6 +29,8 @@
 ///   - a `Signed` slot holds no index, so there is nothing stale to reuse.
 module hashi::mpc_signing;
 
+// ~~~~~~~ Errors ~~~~~~~
+
 #[error]
 const EZeroInputs: vector<u8> = b"signing batch must have at least one input";
 #[error]
@@ -43,6 +43,8 @@ const ENotStale: vector<u8> = b"signing batch is already on the current epoch";
 const EAllocationMismatch: vector<u8> = b"allocated presig count does not match pending count";
 #[error]
 const ENotComplete: vector<u8> = b"signing batch is not fully signed";
+
+// ~~~~~~~ Structs ~~~~~~~
 
 /// Per-input signing slot.
 public enum MpcSig has drop, store {
@@ -63,7 +65,9 @@ public struct SigningBatch has store {
     epoch: u64,
 }
 
-// ======== Constructors ========
+// ~~~~~~~ Package Functions ~~~~~~~
+
+// === Constructors ===
 
 // TODO(presig-allocation-centralization): `new` and `reallocate` take a
 // pre-allocated `presig_base`/`new_base` from the caller (hashi::allocate_presigs),
@@ -83,7 +87,7 @@ public(package) fun new(num_inputs: u64, presig_base: u64, epoch: u64): SigningB
     SigningBatch { signatures, epoch }
 }
 
-// ======== Mutation ========
+// === Mutation ===
 
 /// Fill the given slots with completed signatures. First-writer-wins applies
 /// both within a call and across calls: a slot that is already `Signed` is left
@@ -146,7 +150,7 @@ public(package) fun reallocate(
     self.epoch = current_epoch;
 }
 
-// ======== Views ========
+// === Views ===
 
 /// Number of still-`Pending` slots (the count that must be re-presigned on a
 /// stale-epoch `reallocate`).
@@ -216,7 +220,7 @@ public(package) fun to_signatures(self: &SigningBatch): vector<vector<u8>> {
     out
 }
 
-// ======== Internal ========
+// ~~~~~~~ Private Functions ~~~~~~~
 
 fun is_pending(self: &MpcSig): bool {
     match (self) {
@@ -225,7 +229,7 @@ fun is_pending(self: &MpcSig): bool {
     }
 }
 
-// ======== Test helpers ========
+// ~~~~~~~ Test Helpers ~~~~~~~
 
 #[test_only]
 public(package) fun destroy_for_testing(self: SigningBatch) {
