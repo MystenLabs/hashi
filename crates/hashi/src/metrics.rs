@@ -113,6 +113,8 @@ pub struct Metrics {
     pub mpc_sign_failures_total: IntCounterVec,
     /// Post-restart key recoveries that found suspicious local state
     pub mpc_recovery_suspicious_total: IntCounter,
+    pub mpc_avid_rounds_total: IntCounterVec,
+    pub mpc_avid_complaints_recovered_total: IntCounter,
 
     // MPC profiling metrics
     pub mpc_reconfig_total_duration_seconds: HistogramVec,
@@ -660,6 +662,19 @@ impl Metrics {
                 "hashi_mpc_sign_failures_total",
                 "Total MPC signing failures by reason",
                 &["reason"],
+                registry,
+            )
+            .unwrap(),
+            mpc_avid_rounds_total: register_int_counter_vec_with_registry!(
+                "hashi_mpc_avid_rounds_total",
+                "AVID nonce rounds consumed, by resolved certificate kind",
+                &["kind"],
+                registry,
+            )
+            .unwrap(),
+            mpc_avid_complaints_recovered_total: register_int_counter_with_registry!(
+                "hashi_mpc_avid_complaints_recovered_total",
+                "AVID nonce shares recovered via the complaint protocol",
                 registry,
             )
             .unwrap(),
