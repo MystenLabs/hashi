@@ -178,11 +178,17 @@ bitcoin-cli -signet getnetworkinfo                        # NODE_COMPACT_FILTERS
 
 ### 2.2 TLS key (dedicated)
 
-Generate a fresh Ed25519 TLS key dedicated to your Hashi node, separate from your Sui validator's TLS key, for clean separation of concerns. This key authenticates your Hashi node to other committee members, and the node registers the corresponding public key onchain during registration. Set `tls-private-key` to a PKCS#8 PEM/DER file path or an inline PEM string.
+Generate a fresh Ed25519 TLS key dedicated to your Hashi node, separate from your Sui validator's TLS key, for clean separation of concerns. This key authenticates your Hashi node to other committee members, and the node registers the corresponding public key onchain during registration. Set `tls-private-key` to a PKCS#8 PEM/DER file path or an inline PEM string:
+
+```bash
+openssl genpkey -algorithm ed25519 -out tls-private-key.pem
+```
 
 ```toml
 tls-private-key = "/path/to/tls-private-key.pem"
 ```
+
+Make sure the file is readable by the user running `hashi` (e.g. `chmod 600` owned by that user) — `hashi register` needs it to include your TLS public key in the registration transaction.
 
 > A planned enhancement is for the node to generate its TLS key on startup, removing this manual step.
 
@@ -195,10 +201,12 @@ Because that key is typically in cold storage or a hardware wallet, use the **of
 ```bash
 # Emit the unsigned registration tx (no private key required)
 hashi register --config /path/to/validator.toml \
-  --operator-address 0x<your-operator-address> \
+  --operator-address 0x<operator-address> \
   --print-only
 # -> sign the printed base64 tx with the validator account key (cold/hardware) and broadcast
 ```
+
+`--operator-address` is the Sui address of the **fresh operator key** you generate in [2.4](#24-operator-key-day-to-day-signing) — it is *not* your validator address. Passing it here delegates day-to-day signing in the same transaction, so the validator account key can go straight back to cold storage.
 
 > Do **not** rely on the plain `hashi register` (execute) path for the first registration unless your configured `operator-private-key` *is* the validator account key. The builder forces the sender to the validator address while the execute path signs with the operator key, producing a signer/sender mismatch.
 
@@ -231,7 +239,7 @@ operator-private-key = "/path/to/hashi-operator-key.pem"
 
 > A raw hex private key (the `hexWithoutFlag` output of `sui keytool convert`) is **not** accepted, because it does not carry the key-scheme flag. Convert it to one of the formats above with `sui keytool convert`.
 
-**Delegating to the operator key.** After registration (signed by the validator account key, see [2.3](#23-registration-must-be-signed-by-the-account-key)), authorize the operator key by setting it as the member's operator address with `--operator-address`:
+**Delegating to the operator key.** Delegation is set with `--operator-address`, normally passed during initial registration as shown in [2.3](#23-registration-must-be-signed-by-the-account-key) — one transaction registers *and* delegates. If you registered without it (or are rotating the operator key), run the same command again; it is idempotent and sends only the missing updates, but the transaction must again be signed by the validator account key:
 
 ```bash
 hashi register --config /path/to/validator.toml \
@@ -253,10 +261,14 @@ Hashi creates encrypted backups of critical state (MPC key shares, DB, config) e
 - **Option 1 (recommended): YubiKey.** Generate the key on the device; the private key never leaves it.
 - **Option 2: local OpenPGP key.** Generate with `sq` or `gpg`.
 
-Set the armored public certificate (inline or a path) in the node config:
+Set the armored public certificate **inline** in the node config, as a TOML multi-line string. The config field does not resolve file paths (a path fails with `invalid OpenPGP certificate`); only the `hashi backup save --backup-pgp-cert` CLI override accepts a path:
 
 ```toml
-backup-pgp-cert = "/path/to/hashi-backup-cert.asc"   # armored OpenPGP public cert, or inline armored text
+backup-pgp-cert = """
+-----BEGIN PGP PUBLIC KEY BLOCK-----
+...
+-----END PGP PUBLIC KEY BLOCK-----
+"""
 backup-dir = "/var/lib/hashi/backups"
 ```
 
@@ -274,6 +286,8 @@ Hashi uses two configuration files:
 ### 3.1 Validator config
 
 All fields use kebab-case. Optional fields show their defaults in comments.
+
+> **Field order matters.** In TOML, every key that appears after a `[section]` header belongs to that section. Keep all top-level keys **above** the `[hashi-ids]` and `[bitcoin-rpc-auth]` sections (as in the template below); a top-level key placed after a section header is rejected at startup with an unknown-field error.
 
 ```toml
 # ── Identity ──────────────────────────────────────────────────────────
@@ -332,8 +346,14 @@ db = "/var/lib/hashi/db"
 
 # ── Backup (OpenPGP / Sequoia) ────────────────────────────────────────
 
-# Armored OpenPGP public certificate (file path or inline) for encrypted backups
-# backup-pgp-cert = "/path/to/hashi-backup-cert.asc"
+# Armored OpenPGP public certificate for encrypted backups. Inline armored
+# text only (use a TOML multi-line string) — file paths are NOT resolved for
+# this field (only the `hashi backup save --backup-pgp-cert` CLI flag takes a path).
+# backup-pgp-cert = """
+# -----BEGIN PGP PUBLIC KEY BLOCK-----
+# ...
+# -----END PGP PUBLIC KEY BLOCK-----
+# """
 
 # Backup output directory (default: /tmp)
 # backup-dir = "/var/lib/hashi/backups"
@@ -373,7 +393,7 @@ db = "/var/lib/hashi/db"
 # TOML table headers apply to every following key until the next table,
 # so keep all root-level settings above this section.
 
-# Hashi package and object IDs (provided after package publication)
+# Hashi package and object IDs. Use your network's values from the Networks table.
 [hashi-ids]
 package-id = "0x<package-id>"
 hashi-object-id = "0x<hashi-object-id>"
