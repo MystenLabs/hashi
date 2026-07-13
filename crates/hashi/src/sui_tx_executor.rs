@@ -315,7 +315,7 @@ pub async fn finalize(
     timeout: Duration,
 ) -> anyhow::Result<TxOutcome> {
     let sender = sender
-        .or_else(|| signer.map(crate::keys::keypair_address))
+        .or_else(|| signer.map(|s| s.verifying_key().derive_address()))
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "no sender available: pass --sender <address> \
@@ -415,7 +415,7 @@ impl SuiTxExecutor {
 
     /// Get the sender address (derived from the signer's public key).
     pub fn sender(&self) -> Address {
-        crate::keys::keypair_address(&self.signer)
+        self.signer.verifying_key().derive_address()
     }
 
     /// Borrow the signer (e.g. so a shared finalizer can sign on this
@@ -1137,7 +1137,7 @@ impl SuiTxExecutor {
         next_epoch_encryption_public_key: Option<&EncryptionPublicKey>,
         next_epoch_signing_key: Option<&Bls12381PrivateKey>,
     ) -> anyhow::Result<bool> {
-        let sender = crate::keys::keypair_address(&self.signer);
+        let sender = self.signer.verifying_key().derive_address();
         let transaction = build_register_or_update_validator_tx(
             &mut self.client,
             &self.hashi_ids,
@@ -2080,7 +2080,7 @@ pub async fn build_register_or_update_validator_tx(
 /// Sweeps SUI coins into the account's Address Balance
 pub async fn sweep_to_address_balance(client: &mut Client, config: &Config) -> anyhow::Result<()> {
     let signer = config.operator_private_key()?;
-    let sender = crate::keys::keypair_address(&signer);
+    let sender = signer.verifying_key().derive_address();
 
     // First we need to sweep any SUI into the account's AB so that subsequent txn can all be done
     // in parallel, using its AB to pay for gas fees.

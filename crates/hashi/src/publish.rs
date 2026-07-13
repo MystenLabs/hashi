@@ -136,7 +136,7 @@ pub async fn publish_package(
     signer: &SimpleKeypair,
     publish: sui_sdk_types::Publish,
 ) -> Result<PublishOutput> {
-    let sender = crate::keys::keypair_address(signer);
+    let sender = signer.verifying_key().derive_address();
 
     // ── Transaction: Publish ────────────────────────────────────────────
     let mut builder = TransactionBuilder::new();
@@ -290,7 +290,7 @@ pub async fn finish_publish(
     guardian: &GuardianConfig,
     bitcoin_overrides: &BitcoinConfigOverrides,
 ) -> Result<()> {
-    let sender = crate::keys::keypair_address(signer);
+    let sender = signer.verifying_key().derive_address();
     let transaction = build_finish_publish_tx(
         client,
         sender,

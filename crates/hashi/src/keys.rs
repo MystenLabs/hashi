@@ -17,9 +17,6 @@ use std::path::Path;
 use anyhow::Context as _;
 use base64ct::Encoding as _;
 use sui_crypto::simple::SimpleKeypair;
-use sui_sdk_types::Address;
-use sui_sdk_types::MultisigMemberPublicKey;
-use sui_sdk_types::SignatureScheme;
 
 /// The formats accepted for a Sui private key, referenced in error messages.
 const SUPPORTED_FORMATS: &str = "PKCS#8 PEM, PKCS#8 DER, Bech32 `suiprivkey...` (sui keytool), \
@@ -59,7 +56,7 @@ pub fn load_keypair(path_or_key: &str) -> anyhow::Result<SimpleKeypair> {
         Err(read_err) => {
             // Not a readable file. The value may still be an inline Base64
             // keystore entry.
-            if let Ok(keypair) = keypair_from_base64(value) {
+            if let Ok(keypair) = SimpleKeypair::from_base64(value) {
                 return Ok(keypair);
             }
             Err(anyhow::anyhow!(
@@ -80,19 +77,6 @@ pub fn load_keypair_from_path(path: &Path) -> anyhow::Result<SimpleKeypair> {
         .with_context(|| format!("unable to load the private key from '{}'", path.display()))
 }
 
-/// Derive the Sui address that corresponds to this keypair.
-// TODO: Replace with `SimpleVerifiyingKey::derive_address` once the
-// sui-crypto addition of it is released.
-pub fn keypair_address(keypair: &SimpleKeypair) -> Address {
-    match keypair.public_key() {
-        MultisigMemberPublicKey::Ed25519(pk) => pk.derive_address(),
-        MultisigMemberPublicKey::Secp256k1(pk) => pk.derive_address(),
-        MultisigMemberPublicKey::Secp256r1(pk) => pk.derive_address(),
-        // `SimpleKeypair` only wraps the three simple schemes.
-        other => unreachable!("SimpleKeypair produced non-simple public key {other:?}"),
-    }
-}
-
 /// Parse a private key from raw file contents in any supported format.
 fn parse_keypair(contents: &[u8]) -> anyhow::Result<SimpleKeypair> {
     if let Ok(keypair) = SimpleKeypair::from_der(contents) {
@@ -107,45 +91,12 @@ fn parse_keypair(contents: &[u8]) -> anyhow::Result<SimpleKeypair> {
         if let Ok(keypair) = SimpleKeypair::from_suiprivkey(text) {
             return Ok(keypair);
         }
-        if let Ok(keypair) = keypair_from_base64(text) {
+        if let Ok(keypair) = SimpleKeypair::from_base64(text) {
             return Ok(keypair);
         }
     }
 
     anyhow::bail!("unrecognized private key format; expected {SUPPORTED_FORMATS}")
-}
-
-/// Decode a Base64 `flag || private_key` string, the legacy keystore format
-/// used for entries of the Sui CLI's `sui.keystore` file.
-// TODO: Replace with `SimpleKeypair::from_base64` once the sui-crypto
-// addition of it is released.
-fn keypair_from_base64(s: &str) -> anyhow::Result<SimpleKeypair> {
-    let bytes = base64ct::Base64::decode_vec(s)
-        .map_err(|e| anyhow::anyhow!("invalid base64 private key string: {e}"))?;
-    let (flag, key) = bytes
-        .split_first()
-        .ok_or_else(|| anyhow::anyhow!("private key payload is empty"))?;
-    let scheme = SignatureScheme::from_byte(*flag)
-        .map_err(|e| anyhow::anyhow!("invalid private key scheme flag: {e}"))?;
-
-    let invalid_length = || anyhow::anyhow!("private key has invalid length for {}", scheme.name());
-    match scheme {
-        SignatureScheme::Ed25519 => {
-            let bytes = key.try_into().map_err(|_| invalid_length())?;
-            Ok(sui_crypto::ed25519::Ed25519PrivateKey::new(bytes).into())
-        }
-        SignatureScheme::Secp256k1 => {
-            let bytes = key.try_into().map_err(|_| invalid_length())?;
-            Ok(sui_crypto::secp256k1::Secp256k1PrivateKey::new(bytes)
-                .map_err(|e| anyhow::anyhow!("invalid secp256k1 private key: {e}"))?
-                .into())
-        }
-        SignatureScheme::Secp256r1 => {
-            let bytes = key.try_into().map_err(|_| invalid_length())?;
-            Ok(sui_crypto::secp256r1::Secp256r1PrivateKey::new(bytes).into())
-        }
-        other => anyhow::bail!("unsupported private key scheme `{}`", other.name()),
-    }
 }
 
 /// Decide whether a failed key value is safe to echo in an error message.
@@ -189,7 +140,10 @@ mod tests {
     fn loads_inline_pem() {
         let (key, pem) = ed25519_pem();
         let loaded = load_keypair(&pem).unwrap();
-        assert_eq!(keypair_address(&loaded), keypair_address(&key));
+        assert_eq!(
+            loaded.verifying_key().derive_address(),
+            key.verifying_key().derive_address()
+        );
     }
 
     #[test]
@@ -197,13 +151,16 @@ mod tests {
         let from_bech32 = load_keypair(VECTOR_SUIPRIVKEY).unwrap();
         let from_base64 = load_keypair(VECTOR_BASE64).unwrap();
         assert_eq!(from_bech32.scheme(), SignatureScheme::Ed25519);
-        assert_eq!(keypair_address(&from_bech32), keypair_address(&from_base64));
+        assert_eq!(
+            from_bech32.verifying_key().derive_address(),
+            from_base64.verifying_key().derive_address()
+        );
     }
 
     #[test]
     fn loads_all_formats_from_files() {
         let (key, pem) = ed25519_pem();
-        let expected = keypair_address(&key);
+        let expected = key.verifying_key().derive_address();
         let der = SimpleKeypair::from_pem(&pem).unwrap().to_der().unwrap();
         let suiprivkey = SimpleKeypair::from_pem(&pem)
             .unwrap()
@@ -222,9 +179,17 @@ mod tests {
             std::fs::write(&path, contents).unwrap();
 
             let via_path_str = load_keypair(path.to_str().unwrap()).unwrap();
-            assert_eq!(keypair_address(&via_path_str), expected, "{name}");
+            assert_eq!(
+                via_path_str.verifying_key().derive_address(),
+                expected,
+                "{name}"
+            );
             let via_path = load_keypair_from_path(&path).unwrap();
-            assert_eq!(keypair_address(&via_path), expected, "{name}");
+            assert_eq!(
+                via_path.verifying_key().derive_address(),
+                expected,
+                "{name}"
+            );
         }
 
         // A base64 keystore entry stored in a file.
