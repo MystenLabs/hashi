@@ -23,6 +23,7 @@ pub mod db;
 pub mod deposits;
 pub mod grpc;
 pub mod guardian_limiter;
+pub mod keys;
 pub mod leader;
 pub mod metrics;
 pub mod metrics_push;

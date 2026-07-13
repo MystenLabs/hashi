@@ -274,7 +274,7 @@ impl HashiNetwork {
 
         hashi::publish::finish_publish(
             client,
-            publisher,
+            &publisher.clone().into(),
             &self.ids,
             self.upgrade_cap_id,
             hashi::constants::BITCOIN_REGTEST_CHAIN_ID,

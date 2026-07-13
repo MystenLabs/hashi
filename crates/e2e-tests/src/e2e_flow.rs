@@ -482,8 +482,8 @@ mod tests {
             deposit_address,
             unapproved_amount_sats,
         )?;
-        let mut executor =
-            SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?.with_signer(user_key);
+        let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+            .with_signer(user_key.clone().into());
         let request_id = executor
             .execute_create_deposit_request(
                 txid_to_address(&txid),
@@ -596,7 +596,7 @@ mod tests {
 
         let mut withdrawal_executor =
             SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
-                .with_signer(user_key.clone());
+                .with_signer(user_key.clone().into());
         let withdrawal_request_id = withdrawal_executor
             .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes)
             .await?;
@@ -688,8 +688,8 @@ mod tests {
     ) -> Result<()> {
         let btc_destination = networks.bitcoin_node.get_new_address()?;
         let destination_bytes = extract_witness_program(&btc_destination)?;
-        let mut executor =
-            SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?.with_signer(signer);
+        let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+            .with_signer(signer.into());
         executor
             .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes)
             .await?;
@@ -1029,7 +1029,7 @@ mod tests {
         let btc_destination1 = networks.bitcoin_node.get_new_address()?;
         let destination_bytes1 = extract_witness_program(&btc_destination1)?;
         let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
-            .with_signer(user_key.clone());
+            .with_signer(user_key.clone().into());
         executor
             .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes1)
             .await?;
@@ -1145,7 +1145,8 @@ mod tests {
             .ok_or_else(|| anyhow!("no current Hashi epoch"))?;
 
         let mut withdrawal_executor =
-            SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?.with_signer(user_key);
+            SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+                .with_signer(user_key.clone().into());
         withdrawal_executor
             .execute_create_withdrawal_request(withdrawal_amount_sats, destination_bytes)
             .await?;
@@ -1425,7 +1426,7 @@ mod tests {
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();
         let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
-            .with_signer(user_key.clone());
+            .with_signer(user_key.clone().into());
 
         // Submit two withdrawal requests back-to-back without waiting for either
         // to be committed. The leader should approve both and then batch them
@@ -1526,7 +1527,7 @@ mod tests {
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();
         let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
-            .with_signer(user_key.clone());
+            .with_signer(user_key.clone().into());
 
         let btc_destination1 = networks.bitcoin_node.get_new_address()?;
         let destination_bytes1 = extract_witness_program(&btc_destination1)?;
@@ -1970,7 +1971,7 @@ mod tests {
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();
         let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
-            .with_signer(user_key.clone());
+            .with_signer(user_key.clone().into());
 
         // --- Withdrawal 1 ---
         let btc_destination1 = networks.bitcoin_node.get_new_address()?;
@@ -2070,7 +2071,7 @@ mod tests {
         let hashi = networks.hashi_network.nodes()[0].hashi().clone();
         let user_key = networks.sui_network.user_keys.first().unwrap().clone();
         let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
-            .with_signer(user_key.clone());
+            .with_signer(user_key.clone().into());
 
         // --- Withdrawal A ---
         let btc_destination_a = networks.bitcoin_node.get_new_address()?;
@@ -2236,7 +2237,7 @@ mod tests {
 
         // Look up vout for each tx and register deposits on Sui in batches.
         let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
-            .with_signer(user_key.clone());
+            .with_signer(user_key.clone().into());
 
         let deposits_data: Vec<(Address, u32, u64)> = btc_txids
             .iter()

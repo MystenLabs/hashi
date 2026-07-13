@@ -1438,7 +1438,7 @@ mod tests {
             &hashi.config,
             hashi.onchain_state(),
         )?
-        .with_signer(user_key.clone());
+        .with_signer(user_key.clone().into());
         let dummy_txid = sui_sdk_types::Address::new([0xCA; 32]);
         let _request_id = executor
             .execute_create_deposit_request(dummy_txid, 0, 50_000, Some(hbtc_recipient))

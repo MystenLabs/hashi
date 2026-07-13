@@ -6,14 +6,13 @@
 //! Configuration can be loaded from a TOML file and/or environment variables.
 //! CLI arguments take precedence over config file values.
 
-use crate::config::load_ed25519_private_key_from_path;
 use anyhow::Context;
 use anyhow::Result;
 use serde::Deserialize;
 use serde::Serialize;
 use std::path::Path;
 use std::path::PathBuf;
-use sui_crypto::ed25519::Ed25519PrivateKey;
+use sui_crypto::simple::SimpleKeypair;
 use sui_sdk_types::Address;
 
 /// Bitcoin RPC and wallet configuration
@@ -247,14 +246,14 @@ sui_rpc_url = "https://fullnode.mainnet.sui.io:443"
     /// Returns `None` if no keypair path is configured.
     /// Returns an error if the path is configured but the keypair cannot be loaded.
     ///
-    /// Uses the shared `load_ed25519_private_key_from_path` from the hashi crate,
-    /// which supports DER and PEM formats.
-    pub fn load_keypair(&self) -> Result<Option<Ed25519PrivateKey>> {
+    /// Uses the shared `crate::keys::load_keypair_from_path`, which accepts
+    /// all key formats produced by `sui keytool` and `openssl genpkey`.
+    pub fn load_keypair(&self) -> Result<Option<SimpleKeypair>> {
         let Some(ref path) = self.keypair_path else {
             return Ok(None);
         };
 
-        let pk = load_ed25519_private_key_from_path(path)
+        let pk = crate::keys::load_keypair_from_path(path)
             .with_context(|| format!("Failed to load keypair from {}", path.display()))?;
 
         Ok(Some(pk))

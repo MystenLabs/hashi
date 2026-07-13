@@ -73,7 +73,7 @@ async fn request(
     // The BTC balance is drawn from this sender during the build.
     let sender = tx_opts
         .sender
-        .or_else(|| signer.as_ref().map(|s| s.public_key().derive_address()));
+        .or_else(|| signer.as_ref().map(crate::keys::keypair_address));
 
     // Parse the BTC destination address and verify it matches the configured network
     let btc_network = crate::btc_monitor::config::parse_btc_network(
@@ -193,7 +193,7 @@ async fn cancel(config: &CliConfig, tx_opts: &TxOptions, request_id: &str) -> Re
     // transaction sender. Required up front so the PTB can address the refund.
     let sender = tx_opts
         .sender
-        .or_else(|| signer.as_ref().map(|s| s.public_key().derive_address()))
+        .or_else(|| signer.as_ref().map(crate::keys::keypair_address))
         .context(
             "No sender available: pass --sender (the refund recipient) or configure a keypair",
         )?;
