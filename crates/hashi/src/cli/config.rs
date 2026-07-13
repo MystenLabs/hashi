@@ -200,7 +200,9 @@ sui_rpc_url = "https://fullnode.mainnet.sui.io:443"
 # This is the main Hashi shared object that holds state
 # hashi_object_id = "0x..."
 
-# Path to your keypair file for signing transactions (PEM or DER format)
+# Path to your keypair file for signing transactions, in any format
+# produced by `sui keytool` or openssl (PKCS#8 PEM/DER, suiprivkey,
+# or Base64 keystore)
 # keypair_path = "/path/to/keypair.pem"
 
 # Optional: Specific gas coin to use for transactions
