@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::Context;
 use clap::Parser;
 use clap::Subcommand;
 use hashi::Hashi;
@@ -176,9 +177,11 @@ async fn run_server(config_path: Option<std::path::PathBuf>) -> anyhow::Result<(
 
     let config = config_path
         .as_deref()
-        .map(Config::load)
-        .transpose()
-        .unwrap()
+        .map(|path| {
+            Config::load(path)
+                .with_context(|| format!("failed to load config from {}", path.display()))
+        })
+        .transpose()?
         .unwrap_or_default();
 
     let hashi_ids = config.hashi_ids();

@@ -26,7 +26,8 @@ Hashi is network-specific: the Sui chain, the Bitcoin chain, and their endpoints
 | `[bitcoin].network` | `signet` | `mainnet` |
 | Bitcoin RPC port (default) | 38332 | 8332 |
 | Bitcoin P2P port (default) | 38333 | 8333 |
-| `package-id` / `hashi-object-id` | _provided at launch_ | _TBD_ |
+| `package-id` | `0xfcea10cadbb553c4874201584abf68771592678952efd957b2e82c010c7f4360` | _TBD_ |
+| `hashi-object-id` | `0x22c0ce66ce09df2dc88a31bd320d4177b766518b9b88010368cfbdcd724528f8` | _TBD_ |
 
 > A self-hosted Sui fullnode is reached at its RPC port (default `http://127.0.0.1:9000`) on any network. Hashi's built-in default for `bitcoin-rpc` is `http://localhost:8332` (the Mainnet port), so on Signet you must set the port explicitly.
 
@@ -60,7 +61,7 @@ A Hashi node depends on two external services that you provide:
   - `txindex=1` (Hashi calls `getrawtransaction` on arbitrary deposit txids)
   - `blockfilterindex=1` + `peerblockfilters=1` (BIP-157/158 compact block filter serving for the embedded light client)
   - `server=1` plus RPC auth
-- **Sui fullnode with gRPC enabled**. As a Sui validator you already operate one; ensure its gRPC v2 API is enabled.
+- **Sui fullnode serving the gRPC v2 API** (`sui.rpc.v2` services, including the `SubscribeCheckpoints` stream). The public fullnode works out of the box, or self-host one if you want isolation; see [1.4](#14-sui-rpc).
 
 > Run both dependencies on separate infrastructure from the Hashi node, not colocated on the same host, so a fault or compromise in one does not cascade to the others.
 
@@ -97,7 +98,7 @@ Hashi connects to Sui over the **gRPC v2 API (gRPC over HTTP/2)**, **not** JSON-
 | Public Sui Foundation fullnode | `https://fullnode.testnet.sui.io:443` | gRPC over TLS (443) |
 | Self-hosted fullnode (separate host) | `http://<fullnode-host>:9000` | plaintext gRPC/h2c (default 9000) |
 
-As a Sui validator you already run a fullnode, so point Hashi at it and confirm gRPC is enabled in the fullnode config. The node verifies the endpoint's reported chain ID matches `sui-chain-id` at startup and refuses to start on mismatch.
+Point `sui-rpc` at any fullnode serving `sui.rpc.v2` plus the `SubscribeCheckpoints` stream. The public fullnode (`https://fullnode.testnet.sui.io:443`) serves everything Hashi requires and works out of the box; self-host a fullnode if you want isolation from shared infrastructure. The node verifies the endpoint's reported chain ID matches `sui-chain-id` at startup and refuses to start on mismatch.
 
 Set `sui-chain-id` and `sui-rpc` to match your target network, as shown in the [Networks](#networks) table.
 
@@ -287,11 +288,6 @@ sui-chain-id = "69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD"
 sui-rpc = "https://fullnode.testnet.sui.io:443"
 # sui-rpc = "http://127.0.0.1:9000"
 
-# Hashi package and object IDs (provided after package publication)
-[hashi-ids]
-package-id = "0x<package-id>"
-hashi-object-id = "0x<hashi-object-id>"
-
 # ── Bitcoin ───────────────────────────────────────────────────────────
 
 # Bitcoin chain ID — genesis block hash. Use your network's value from the
@@ -300,11 +296,6 @@ bitcoin-chain-id = "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee
 
 # Bitcoin Core RPC endpoint (Hashi default is http://localhost:8332 — override for Signet)
 bitcoin-rpc = "http://127.0.0.1:38332"
-
-# RPC authentication: None, UserPass, or CookieFile
-[bitcoin-rpc-auth]
-UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
-# CookieFile = "/home/USER/.bitcoin/signet/.cookie"
 
 # Trusted Bitcoin P2P peers for the embedded BIP-157 light client (host:port; port mandatory)
 bitcoin-trusted-peers = ["127.0.0.1:38333"]
@@ -355,6 +346,20 @@ db = "/var/lib/hashi/db"
 
 # Concurrency for leader job tasks, e.g. deposit processing (default: 32)
 # max-concurrent-leader-job-tasks = 32
+
+# ── Nested tables ─────────────────────────────────────────────────────
+# TOML table headers apply to every following key until the next table,
+# so keep all root-level settings above this section.
+
+# Hashi package and object IDs (provided after package publication)
+[hashi-ids]
+package-id = "0x<package-id>"
+hashi-object-id = "0x<hashi-object-id>"
+
+# Bitcoin RPC authentication: None, UserPass, or CookieFile
+[bitcoin-rpc-auth]
+UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
+# CookieFile = "/home/USER/.bitcoin/signet/.cookie"
 ```
 
 ### 3.2 CLI config
@@ -457,7 +462,7 @@ From DKG trigger to operational typically takes 30 to 120 seconds, assuming vali
 
 ### 5.2 Step 1: package publication (admin)
 
-The admin publishes the Hashi Move package. This produces the `package-id` and `hashi-object-id` you need in both configs. The admin communicates these values to you.
+The admin publishes the Hashi Move package. This produces the `package-id` and `hashi-object-id` you need in both configs; the values for each network are recorded in the [Networks](#networks) table.
 
 At this point the deploy is **not yet configured**: the package `UpgradeCap` stays in the publisher's wallet, and the chain id and guardian parameters are not onchain yet. They land later with the launch step (`hashi::finish_publish`), the **launch switch** that unlocks genesis.
 
