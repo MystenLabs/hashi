@@ -70,6 +70,28 @@ pub fn load_ed25519_private_key_from_path(path: &Path) -> anyhow::Result<Ed25519
     anyhow::bail!("unsupported key format in '{}'", path.display())
 }
 
+fn deserialize_backup_pgp_cert<'de, D>(
+    deserializer: D,
+) -> Result<Option<hashi_types::pgp::PgpPublicCert>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(value) = <Option<String> as serde::Deserialize>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+
+    let path = Path::new(&value);
+    let armored = if path.is_file() {
+        std::fs::read_to_string(path).map_err(serde::de::Error::custom)?
+    } else {
+        value
+    };
+
+    hashi_types::pgp::PgpPublicCert::new(armored)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
@@ -127,8 +149,12 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub db: Option<PathBuf>,
 
-    /// Armored OpenPGP certificate used for node backups.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Armored OpenPGP certificate or certificate file path used for node backups.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_backup_pgp_cert",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub backup_pgp_cert: Option<hashi_types::pgp::PgpPublicCert>,
 
     /// Directory to write automatic encrypted backups into.
@@ -568,6 +594,28 @@ mod tests {
         let tls_key = config.tls_private_key.as_ref().unwrap();
         assert!(tls_key.starts_with("-----BEGIN PRIVATE KEY-----"));
         assert!(tls_key.ends_with("-----END PRIVATE KEY-----\n"));
+    }
+
+    #[test]
+    fn backup_pgp_cert_accepts_file_path() {
+        let dir = tempfile::Builder::new().tempdir().unwrap();
+        let cert_path = dir.path().join("backup-cert.asc");
+        let config_path = dir.path().join("config.toml");
+        let (public_cert, _) = hashi_types::pgp::test_utils::mock_pgp_keypair();
+        std::fs::write(&cert_path, &public_cert).unwrap();
+
+        let mut config = toml::Table::new();
+        config.insert(
+            "backup-pgp-cert".to_string(),
+            toml::Value::String(cert_path.to_string_lossy().into_owned()),
+        );
+        std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+
+        let config = Config::load(&config_path).unwrap();
+        assert_eq!(
+            config.backup_pgp_cert.unwrap().armored(),
+            public_cert.as_str()
+        );
     }
 
     #[test]
