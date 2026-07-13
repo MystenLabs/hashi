@@ -70,7 +70,9 @@ async fn main() -> Result<()> {
     // to allow KPs to detect old sessions that might still be running
     // in order to bypass limiter. Not a concern for ceremony mode.
     if !ceremony_mode {
-        let _ = tokio::spawn(HeartbeatWriter::new(enclave).run(HEARTBEAT_INTERVAL));
+        drop(tokio::spawn(
+            HeartbeatWriter::new(enclave).run(HEARTBEAT_INTERVAL),
+        ));
     }
 
     Server::builder()

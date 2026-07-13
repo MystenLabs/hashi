@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::MAX_S3_WRITE_FAILURE_INTERVAL;
 use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_credential_types::CredentialsBuilder;
 use aws_sdk_s3::error::DisplayErrorContext;
@@ -34,8 +35,6 @@ use tracing::warn;
 const MAX_RETRY_ATTEMPTS: u32 = 5;
 /// Delay between application-level retries of an immutable S3 log write.
 const S3_WRITE_RETRY_INTERVAL: Duration = Duration::from_secs(10);
-/// Maximum write failure interval before the enclave aborts.
-const MAX_S3_WRITE_FAILURE_INTERVAL: Duration = Duration::from_mins(5);
 
 #[derive(Clone)]
 pub struct GuardianS3Client {
@@ -223,6 +222,8 @@ impl GuardianS3Client {
         Ok(())
     }
 
+    /// Similar to `get_object_unsafe`, but compares the raw bytes and treats
+    /// invalid lock metadata as a fatal conflict at this write-once key.
     async fn verify_existing_write(&self, key: &str, expected_body: &[u8]) -> GuardianResult<()> {
         let response = self
             .client
@@ -524,13 +525,12 @@ impl GuardianS3Client {
         Ok(out)
     }
 
-    async fn get_locked_object_bytes(&self, key: &str) -> GuardianResult<Vec<u8>> {
-        let s3_client = &self.client;
-        let s3_config = &self.config;
-
-        let response = s3_client
+    /// Point read. This method is unsafe to use since the bucket operator might've overwritten objects.
+    async fn get_object_unsafe<T: DeserializeOwned>(&self, key: &str) -> GuardianResult<T> {
+        let response = self
+            .client
             .get_object()
-            .bucket(s3_config.bucket_name())
+            .bucket(self.config.bucket_name())
             .key(key)
             .send()
             .await
@@ -560,14 +560,7 @@ impl GuardianS3Client {
             ))
         })?;
 
-        Ok(bytes.into_bytes().to_vec())
-    }
-
-    /// Point read. This method is unsafe to use since the bucket operator might've overwritten objects.
-    async fn get_object_unsafe<T: DeserializeOwned>(&self, key: &str) -> GuardianResult<T> {
-        let bytes = self.get_locked_object_bytes(key).await?;
-
-        serde_json::from_slice::<T>(&bytes).map_err(|e| {
+        serde_json::from_slice::<T>(&bytes.into_bytes()).map_err(|e| {
             S3Error(format!(
                 "Failed to deserialize object {} into target type: {}",
                 key, e

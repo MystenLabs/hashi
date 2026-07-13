@@ -3,8 +3,21 @@
 
 use std::time::Duration;
 
-// TODO: Leave as consts or make them configurable?
+/// Interval between successful heartbeat writes.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_mins(1);
+/// Maximum write failure interval before the enclave aborts.
+pub const MAX_S3_WRITE_FAILURE_INTERVAL: Duration = Duration::from_mins(5);
+/// Maximum acceptable heartbeat age for the activating standby session.
+pub const LIVE_SESSION_MAX_AGE: Duration = Duration::from_mins(3);
+/// Silence required before another session is considered inactive.
+pub const OTHER_SESSION_QUIET_PERIOD: Duration = Duration::from_mins(10);
+
+// An enclave that cannot write its next heartbeat must abort before another
+// session is allowed to treat it as quiet.
+const _: () = assert!(
+    HEARTBEAT_INTERVAL.as_secs() + MAX_S3_WRITE_FAILURE_INTERVAL.as_secs()
+        < OTHER_SESSION_QUIET_PERIOD.as_secs()
+);
 
 pub mod attestation;
 pub mod ceremony_mode;
