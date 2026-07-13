@@ -188,7 +188,7 @@ openssl genpkey -algorithm ed25519 -out tls-private-key.pem
 tls-private-key = "/path/to/tls-private-key.pem"
 ```
 
-Make sure the file is readable by the user running `hashi` (e.g. `chmod 600` owned by that user) — `hashi register` needs it to include your TLS public key in the registration transaction.
+Make sure the file is readable by the user running `hashi` (for example, `chmod 600` owned by that user). `hashi register` needs it to include your TLS public key in the registration transaction.
 
 > A planned enhancement is for the node to generate its TLS key on startup, removing this manual step.
 
@@ -206,7 +206,7 @@ hashi register --config /path/to/validator.toml \
 # -> sign the printed base64 tx with the validator account key (cold/hardware) and broadcast
 ```
 
-`--operator-address` is the Sui address of the **fresh operator key** you generate in [2.4](#24-operator-key-day-to-day-signing) — it is *not* your validator address. Passing it here delegates day-to-day signing in the same transaction, so the validator account key can go straight back to cold storage.
+`--operator-address` is the Sui address of the **fresh operator key** you generate in [2.4](#24-operator-key-day-to-day-signing). It is *not* your validator address. Passing it here delegates day-to-day signing in the same transaction, so the validator account key can go straight back to cold storage.
 
 > Do **not** rely on the plain `hashi register` (execute) path for the first registration unless your configured `operator-private-key` *is* the validator account key. The builder forces the sender to the validator address while the execute path signs with the operator key, producing a signer/sender mismatch.
 
@@ -239,7 +239,7 @@ operator-private-key = "/path/to/hashi-operator-key.pem"
 
 > A raw hex private key (the `hexWithoutFlag` output of `sui keytool convert`) is **not** accepted, because it does not carry the key-scheme flag. Convert it to one of the formats above with `sui keytool convert`.
 
-**Delegating to the operator key.** Delegation is set with `--operator-address`, normally passed during initial registration as shown in [2.3](#23-registration-must-be-signed-by-the-account-key) — one transaction registers *and* delegates. If you registered without it (or are rotating the operator key), run the same command again; it is idempotent and sends only the missing updates, but the transaction must again be signed by the validator account key:
+**Delegating to the operator key.** Delegation is set with `--operator-address`, normally passed during initial registration as shown in [2.3](#23-registration-must-be-signed-by-the-account-key), so one transaction registers *and* delegates. If you registered without it (or are rotating the operator key), run the same command again; it is idempotent and sends only the missing updates, but the transaction must again be signed by the validator account key:
 
 ```bash
 hashi register --config /path/to/validator.toml \
@@ -347,7 +347,7 @@ db = "/var/lib/hashi/db"
 # ── Backup (OpenPGP / Sequoia) ────────────────────────────────────────
 
 # Armored OpenPGP public certificate for encrypted backups. Inline armored
-# text only (use a TOML multi-line string) — file paths are NOT resolved for
+# text only (use a TOML multi-line string); file paths are NOT resolved for
 # this field (only the `hashi backup save --backup-pgp-cert` CLI flag takes a path).
 # backup-pgp-cert = """
 # -----BEGIN PGP PUBLIC KEY BLOCK-----
