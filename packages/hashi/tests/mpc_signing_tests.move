@@ -12,7 +12,7 @@ use hashi::mpc_signing::{
     ELengthMismatch,
     ENotStale,
     EAllocationMismatch,
-    ENotComplete
+    ENotComplete,
 };
 
 fun sig(byte: u8): vector<u8> {
