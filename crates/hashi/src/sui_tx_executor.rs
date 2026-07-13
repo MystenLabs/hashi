@@ -186,7 +186,7 @@ fn uleb128_len(value: usize) -> usize {
 }
 
 use sui_crypto::SuiSigner;
-use sui_crypto::ed25519::Ed25519PrivateKey;
+use sui_crypto::simple::SimpleKeypair;
 use sui_rpc::Client;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
@@ -307,7 +307,7 @@ impl TransactionExecutionError {
 /// transaction for a multisig sender.
 pub async fn finalize(
     client: &mut Client,
-    signer: Option<&Ed25519PrivateKey>,
+    signer: Option<&SimpleKeypair>,
     mut builder: TransactionBuilder,
     sender: Option<Address>,
     gas: &GasOverrides,
@@ -315,7 +315,7 @@ pub async fn finalize(
     timeout: Duration,
 ) -> anyhow::Result<TxOutcome> {
     let sender = sender
-        .or_else(|| signer.map(|s| s.public_key().derive_address()))
+        .or_else(|| signer.map(crate::keys::keypair_address))
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "no sender available: pass --sender <address> \
@@ -365,14 +365,14 @@ pub async fn finalize(
 /// automatically.
 pub struct SuiTxExecutor {
     client: Client,
-    signer: Ed25519PrivateKey,
+    signer: SimpleKeypair,
     hashi_ids: HashiIds,
     timeout: Duration,
 }
 
 impl SuiTxExecutor {
     /// Create a new executor with minimal dependencies.
-    pub fn new(client: Client, signer: Ed25519PrivateKey, hashi_ids: HashiIds) -> Self {
+    pub fn new(client: Client, signer: SimpleKeypair, hashi_ids: HashiIds) -> Self {
         Self {
             client,
             signer,
@@ -402,7 +402,7 @@ impl SuiTxExecutor {
     }
 
     /// Override the signer.
-    pub fn with_signer(mut self, signer: Ed25519PrivateKey) -> Self {
+    pub fn with_signer(mut self, signer: SimpleKeypair) -> Self {
         self.signer = signer;
         self
     }
@@ -415,12 +415,12 @@ impl SuiTxExecutor {
 
     /// Get the sender address (derived from the signer's public key).
     pub fn sender(&self) -> Address {
-        self.signer.public_key().derive_address()
+        crate::keys::keypair_address(&self.signer)
     }
 
     /// Borrow the signer (e.g. so a shared finalizer can sign on this
     /// executor's behalf).
-    pub fn signer(&self) -> &Ed25519PrivateKey {
+    pub fn signer(&self) -> &SimpleKeypair {
         &self.signer
     }
 
@@ -1137,7 +1137,7 @@ impl SuiTxExecutor {
         next_epoch_encryption_public_key: Option<&EncryptionPublicKey>,
         next_epoch_signing_key: Option<&Bls12381PrivateKey>,
     ) -> anyhow::Result<bool> {
-        let sender = self.signer.public_key().derive_address();
+        let sender = crate::keys::keypair_address(&self.signer);
         let transaction = build_register_or_update_validator_tx(
             &mut self.client,
             &self.hashi_ids,
@@ -2080,7 +2080,7 @@ pub async fn build_register_or_update_validator_tx(
 /// Sweeps SUI coins into the account's Address Balance
 pub async fn sweep_to_address_balance(client: &mut Client, config: &Config) -> anyhow::Result<()> {
     let signer = config.operator_private_key()?;
-    let sender = signer.public_key().derive_address();
+    let sender = crate::keys::keypair_address(&signer);
 
     // First we need to sweep any SUI into the account's AB so that subsequent txn can all be done
     // in parallel, using its AB to pay for gas fees.

@@ -14,7 +14,7 @@ use std::str::FromStr;
 
 use anyhow::Result;
 use sui_crypto::SuiSigner;
-use sui_crypto::ed25519::Ed25519PrivateKey;
+use sui_crypto::simple::SimpleKeypair;
 use sui_rpc::Client;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
@@ -133,10 +133,10 @@ pub struct PublishOutput {
 /// genesis is unlocked later by handing it in via [`finish_publish`].
 pub async fn publish_package(
     client: &mut Client,
-    signer: &Ed25519PrivateKey,
+    signer: &SimpleKeypair,
     publish: sui_sdk_types::Publish,
 ) -> Result<PublishOutput> {
-    let sender = signer.public_key().derive_address();
+    let sender = crate::keys::keypair_address(signer);
 
     // ── Transaction: Publish ────────────────────────────────────────────
     let mut builder = TransactionBuilder::new();
@@ -283,14 +283,14 @@ pub async fn build_finish_publish_tx(
 /// registered.
 pub async fn finish_publish(
     client: &mut Client,
-    signer: &Ed25519PrivateKey,
+    signer: &SimpleKeypair,
     ids: &HashiIds,
     upgrade_cap_id: Address,
     bitcoin_chain_id: &str,
     guardian: &GuardianConfig,
     bitcoin_overrides: &BitcoinConfigOverrides,
 ) -> Result<()> {
-    let sender = signer.public_key().derive_address();
+    let sender = crate::keys::keypair_address(signer);
     let transaction = build_finish_publish_tx(
         client,
         sender,

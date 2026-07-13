@@ -1227,8 +1227,8 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
     init_tracing(opts.verbose);
 
     // Load signer
-    let signer = crate::config::load_ed25519_private_key_from_path(&opts.keypair)?;
-    let sender = signer.public_key().derive_address();
+    let signer = crate::keys::load_keypair_from_path(&opts.keypair)?;
+    let sender = crate::keys::keypair_address(&signer);
     print_info(&format!("Sender address: {sender}"));
 
     // Build
@@ -1467,10 +1467,10 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
     let signer = opts
         .keypair
         .as_deref()
-        .map(crate::config::load_ed25519_private_key_from_path)
+        .map(crate::keys::load_keypair_from_path)
         .transpose()?;
     let sender: sui_sdk_types::Address = match (&signer, &opts.sender) {
-        (Some(signer), None) => signer.public_key().derive_address(),
+        (Some(signer), None) => crate::keys::keypair_address(signer),
         (None, Some(sender)) => sender.parse()?,
         (Some(_), Some(_)) => anyhow::bail!("pass either --keypair or --sender, not both"),
         (None, None) => anyhow::bail!(

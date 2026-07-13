@@ -708,10 +708,9 @@ async fn cmd_faucet_sui(address: &str, amount: u64, data_dir: &Path) -> Result<(
         .as_ref()
         .context("No funded keypair path in localnet state. Restart the localnet.")?;
 
-    let funded_key =
-        hashi::config::load_ed25519_private_key_from_path(std::path::Path::new(keypair_path))
-            .context("Failed to load funded keypair")?;
-    let sender = funded_key.public_key().derive_address();
+    let funded_key = hashi::keys::load_keypair_from_path(std::path::Path::new(keypair_path))
+        .context("Failed to load funded keypair")?;
+    let sender = hashi::keys::keypair_address(&funded_key);
 
     let recipient = sui_sdk_types::Address::from_str(address).context("Invalid Sui address")?;
 
@@ -837,9 +836,8 @@ async fn cmd_deposit(amount: u64, recipient: Option<&str>, data_dir: &Path) -> R
         .funded_sui_keypair_path
         .as_ref()
         .context("No funded keypair path in localnet state. Restart the localnet.")?;
-    let signer =
-        hashi::config::load_ed25519_private_key_from_path(std::path::Path::new(keypair_path))
-            .context("Failed to load funded keypair")?;
+    let signer = hashi::keys::load_keypair_from_path(std::path::Path::new(keypair_path))
+        .context("Failed to load funded keypair")?;
 
     // Resolve recipient — default to signer address
     let recipient_addr = match recipient {
@@ -847,7 +845,7 @@ async fn cmd_deposit(amount: u64, recipient: Option<&str>, data_dir: &Path) -> R
             .parse::<sui_sdk_types::Address>()
             .context("Invalid recipient Sui address")?,
         None => {
-            let addr = signer.public_key().derive_address();
+            let addr = hashi::keys::keypair_address(&signer);
             print_info(&format!(
                 "No --recipient specified, defaulting to signer address {}",
                 addr
