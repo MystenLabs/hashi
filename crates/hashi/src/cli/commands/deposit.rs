@@ -202,7 +202,7 @@ async fn request(
         TxMode::Execute => print_info("Submitting deposit request on Sui..."),
     }
 
-    let mut client = sui_rpc::Client::new(&config.sui_rpc_url)?;
+    let mut client = crate::sui_rpc_client::new_sui_rpc_client(&config.sui_rpc_url)?;
     let outcome = crate::sui_tx_executor::finalize(
         &mut client,
         signer.as_ref(),
@@ -339,7 +339,7 @@ async fn request_all(
     // 3 dynamic-field ops per deposit × 1000 object-runtime cap = 333/PTB.
     const CHUNK_SIZE: usize = 333;
 
-    let sui_client = sui_rpc::Client::new(&config.sui_rpc_url)?;
+    let sui_client = crate::sui_rpc_client::new_sui_rpc_client(&config.sui_rpc_url)?;
     let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(sui_client, signer, hashi_ids);
 
     let txid_address =

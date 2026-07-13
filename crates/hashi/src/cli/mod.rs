@@ -1261,7 +1261,7 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
     }
 
     // Connect to RPC
-    let mut client = sui_rpc::Client::new(&opts.sui_rpc_url)?;
+    let mut client = crate::sui_rpc_client::new_sui_rpc_client(&opts.sui_rpc_url)?;
 
     // Publish
     print_info("Publishing ...");
@@ -1323,7 +1323,7 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
 
     print_info(&format!("Sui RPC: {}", opts.sui_rpc_url));
 
-    let mut client = sui_rpc::Client::new(&opts.sui_rpc_url)?;
+    let mut client = crate::sui_rpc_client::new_sui_rpc_client(&opts.sui_rpc_url)?;
 
     // Pre-flight: read the launch state and who would form the initial
     // committee. No hard failures yet — status mode reports every state.
@@ -1606,7 +1606,7 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
     if opts.serialize_unsigned {
         // Build the transaction and print as base64 without executing.
         // No private key is required for this path.
-        let mut client = sui_rpc::Client::new(&sui_rpc_url)?;
+        let mut client = crate::sui_rpc_client::new_sui_rpc_client(&sui_rpc_url)?;
         let hashi_ids = config.hashi_ids();
 
         print_info("Building registration transaction ...");
@@ -1643,7 +1643,7 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
         }
     }
 
-    let client = sui_rpc::Client::new(&sui_rpc_url)?;
+    let client = crate::sui_rpc_client::new_sui_rpc_client(&sui_rpc_url)?;
     let signer = config.operator_private_key()?;
     let hashi_ids = config.hashi_ids();
     let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
