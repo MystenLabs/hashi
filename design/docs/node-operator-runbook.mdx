@@ -261,14 +261,10 @@ Hashi creates encrypted backups of critical state (MPC key shares, DB, config) e
 - **Option 1 (recommended): YubiKey.** Generate the key on the device; the private key never leaves it.
 - **Option 2: local OpenPGP key.** Generate with `sq` or `gpg`.
 
-Set the armored public certificate **inline** in the node config, as a TOML multi-line string. The config field does not resolve file paths (a path fails with `invalid OpenPGP certificate`); only the `hashi backup save --backup-pgp-cert` CLI override accepts a path:
+Set the armored public certificate (a file path or inline armored text) in the node config:
 
 ```toml
-backup-pgp-cert = """
------BEGIN PGP PUBLIC KEY BLOCK-----
-...
------END PGP PUBLIC KEY BLOCK-----
-"""
+backup-pgp-cert = "/path/to/hashi-backup-cert.asc"   # armored OpenPGP public cert, or inline armored text
 backup-dir = "/var/lib/hashi/backups"
 ```
 
@@ -346,14 +342,8 @@ db = "/var/lib/hashi/db"
 
 # ── Backup (OpenPGP / Sequoia) ────────────────────────────────────────
 
-# Armored OpenPGP public certificate for encrypted backups. Inline armored
-# text only (use a TOML multi-line string); file paths are NOT resolved for
-# this field (only the `hashi backup save --backup-pgp-cert` CLI flag takes a path).
-# backup-pgp-cert = """
-# -----BEGIN PGP PUBLIC KEY BLOCK-----
-# ...
-# -----END PGP PUBLIC KEY BLOCK-----
-# """
+# Armored OpenPGP public certificate (file path or inline) for encrypted backups
+# backup-pgp-cert = "/path/to/hashi-backup-cert.asc"
 
 # Backup output directory (default: /tmp)
 # backup-dir = "/var/lib/hashi/backups"
