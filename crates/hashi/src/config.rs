@@ -29,8 +29,24 @@ pub fn load_ed25519_private_key(path_or_pem: &str) -> anyhow::Result<Ed25519Priv
                 .map_err(|e| anyhow::anyhow!("PEM parse error: {}", e))
         })
         .map_err(|_: anyhow::Error| {
-            anyhow::anyhow!("unable to load Ed25519 private key from '{}'", path_or_pem)
+            anyhow::anyhow!(
+                "unable to load Ed25519 private key from '{}' — expected a PKCS#8 PEM/DER \
+                 file path or an inline PEM string (`sui keytool` output is not supported)",
+                redact_key_source(path_or_pem)
+            )
         })
+}
+
+/// The configured value may be inline key material rather than a file path —
+/// never echo anything that could be a secret into errors or logs.
+fn redact_key_source(value: &str) -> &str {
+    let looks_like_path =
+        !value.contains('\n') && value.len() <= 128 && !value.starts_with("suiprivkey");
+    if looks_like_path {
+        value
+    } else {
+        "<inline value (redacted)>"
+    }
 }
 
 /// Load an Ed25519 private key from a file path.
@@ -511,6 +527,23 @@ fn get_ephemeral_port() -> std::io::Result<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_load_error_names_missing_path_but_redacts_key_material() {
+        // A plain (missing) path is useful context and safe to echo.
+        let err = load_ed25519_private_key("/nonexistent/key.pem").unwrap_err();
+        assert!(err.to_string().contains("/nonexistent/key.pem"));
+
+        // Inline PEM, bech32 sui keys, and long blobs must never be echoed.
+        let bad_pem = "-----BEGIN PRIVATE KEY-----\nnot-actually-valid\n-----END PRIVATE KEY-----";
+        let suiprivkey = "suiprivkey1qzabcdefabcdefabcdefabcdefabcdefabcdef";
+        let long_blob = "A".repeat(200);
+        for secret in [bad_pem, suiprivkey, long_blob.as_str()] {
+            let msg = load_ed25519_private_key(secret).unwrap_err().to_string();
+            assert!(!msg.contains(secret), "error echoed key material: {msg}");
+            assert!(msg.contains("redacted"));
+        }
+    }
 
     #[test]
     fn test_new_for_testing() {
