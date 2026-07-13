@@ -224,11 +224,39 @@ impl GuardianS3Client {
     }
 
     async fn verify_existing_write(&self, key: &str, expected_body: &[u8]) -> GuardianResult<()> {
-        let actual_body = self.get_locked_object_bytes(key).await?;
-        if actual_body != expected_body {
+        let response = self
+            .client
+            .get_object()
+            .bucket(self.config.bucket_name())
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| {
+                S3Error(format!(
+                    "Failed to get object {}: {}",
+                    key,
+                    DisplayErrorContext(&e)
+                ))
+            })?;
+        let has_compliance_lock = response.object_lock_mode() == Some(&ObjectLockMode::Compliance)
+            && response.object_lock_retain_until_date().is_some();
+        let actual_body = response.body.collect().await.map_err(|e| {
+            S3Error(format!(
+                "Failed to read object body for key {}: {}",
+                key,
+                DisplayErrorContext(&e)
+            ))
+        })?;
+
+        if actual_body.into_bytes().as_ref() != expected_body {
             // A 412 revealed different content at this write-once key. Retrying
             // cannot replace it, so continuing would violate log durability.
             panic!("existing object {key} differs from the intended record");
+        }
+        if !has_compliance_lock {
+            // The intended record exists but is not immutable. Retrying cannot
+            // replace it, so it cannot satisfy the durable-write requirement.
+            panic!("existing object {key} is missing a valid compliance lock");
         }
 
         Ok(())
@@ -772,11 +800,36 @@ mod tests {
             .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
             .then_output(|| {
                 GetObjectOutput::builder()
-                    .object_lock_mode(ObjectLockMode::Compliance)
-                    .object_lock_retain_until_date(DateTime::from(
-                        SystemTime::now() + Duration::from_mins(5),
-                    ))
                     .body(ByteStream::from_static(br#"{"a":2}"#))
+                    .build()
+            });
+
+        let client = mock_client!(
+            aws_sdk_s3,
+            RuleMode::MatchAny,
+            &[&put_precondition_failed, &get_existing],
+            |builder| builder.retry_config(RetryConfig::standard().with_max_attempts(1))
+        );
+        let logger = mk_logger_with_client(client);
+        logger
+            .write_at_key("key", &TestPayload { a: 1 }, Duration::from_mins(5))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "is missing a valid compliance lock")]
+    async fn test_412_identical_unlocked_object_panics() {
+        let put_precondition_failed = mock!(Client::put_object)
+            .match_requests(|req| req.bucket() == Some("bucket"))
+            .sequence()
+            .http_status(412, None)
+            .build();
+        let get_existing = mock!(Client::get_object)
+            .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
+            .then_output(|| {
+                GetObjectOutput::builder()
+                    .body(ByteStream::from_static(br#"{"a":1}"#))
                     .build()
             });
 
