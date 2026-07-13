@@ -19,6 +19,7 @@ use tracing::info;
 use tracing::warn;
 
 use crate::Hashi;
+use crate::communication::PrefetchedTobChannel;
 use crate::communication::SuiTobChannel;
 use crate::communication::fetch_certificates;
 use crate::communication::fetch_key_generation_certificates;
@@ -32,6 +33,7 @@ use crate::mpc::SigningManager;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::mpc::types::CertificateV1;
 use crate::mpc::types::MpcOutputRecoveryOutcome;
+use crate::mpc::types::NonceGenerationProtocol;
 use crate::mpc::types::ProtocolType;
 use crate::onchain::Notification;
 use fastcrypto_tbls::threshold_schnorr::G;
@@ -652,31 +654,63 @@ impl MpcService {
         params: Parameters,
     ) -> anyhow::Result<Presignatures> {
         let onchain_state = self.inner.onchain_state().clone();
-        let certs = onchain_state
-            .fetch_certs(
-                epoch,
-                Some(batch_index),
-                move_types::ProtocolType::NonceGeneration,
-            )
-            .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No nonce gen certificates on TOB for epoch {epoch} batch {batch_index}"
-                )
-            })?;
         let p2p_channel = RpcP2PChannel::new(
             self.inner.onchain_state().clone(),
             epoch,
             MPC_LABEL_NONCE_GENERATION,
         );
-        let outputs = MpcManager::reconstruct_presignatures_with_complaint_recovery(
-            mpc_manager,
-            epoch,
-            batch_index,
-            &certs,
-            &p2p_channel,
-        )
-        .await?;
+        let protocol = {
+            let mgr = mpc_manager.read().unwrap();
+            mgr.mpc_config.nonce_generation_protocol
+        };
+        let outputs = match protocol {
+            NonceGenerationProtocol::Vanilla => {
+                let certs = onchain_state
+                    .fetch_certs(
+                        epoch,
+                        Some(batch_index),
+                        move_types::ProtocolType::NonceGeneration,
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "No nonce gen certificates on TOB for epoch {epoch} batch {batch_index}"
+                        )
+                    })?;
+                MpcManager::reconstruct_presignatures_with_complaint_recovery(
+                    mpc_manager,
+                    epoch,
+                    batch_index,
+                    &certs,
+                    &p2p_channel,
+                )
+                .await?
+            }
+            NonceGenerationProtocol::Avid => {
+                let certs = fetch_certificates(
+                    &onchain_state,
+                    epoch,
+                    Some(batch_index),
+                    move_types::ProtocolType::NonceGeneration,
+                )
+                .await?;
+                if certs.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "No nonce gen certificates on TOB for epoch {epoch} batch {batch_index}"
+                    ));
+                }
+                let mut prefetched = PrefetchedTobChannel::new(certs);
+                MpcManager::run_nonce_generation(
+                    mpc_manager,
+                    batch_index,
+                    &p2p_channel,
+                    &mut prefetched,
+                    &self.inner.metrics,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("AVID nonce recovery from certs failed: {e}"))?
+            }
+        };
         if outputs.is_empty() {
             return Err(anyhow::anyhow!(
                 "No valid nonce outputs after reconstruction for epoch {epoch} batch {batch_index}"
