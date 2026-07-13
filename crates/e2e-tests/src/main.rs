@@ -710,7 +710,7 @@ async fn cmd_faucet_sui(address: &str, amount: u64, data_dir: &Path) -> Result<(
 
     let funded_key = hashi::keys::load_keypair_from_path(std::path::Path::new(keypair_path))
         .context("Failed to load funded keypair")?;
-    let sender = hashi::keys::keypair_address(&funded_key);
+    let sender = funded_key.verifying_key().derive_address();
 
     let recipient = sui_sdk_types::Address::from_str(address).context("Invalid Sui address")?;
 
@@ -845,7 +845,7 @@ async fn cmd_deposit(amount: u64, recipient: Option<&str>, data_dir: &Path) -> R
             .parse::<sui_sdk_types::Address>()
             .context("Invalid recipient Sui address")?,
         None => {
-            let addr = hashi::keys::keypair_address(&signer);
+            let addr = signer.verifying_key().derive_address();
             print_info(&format!(
                 "No --recipient specified, defaulting to signer address {}",
                 addr

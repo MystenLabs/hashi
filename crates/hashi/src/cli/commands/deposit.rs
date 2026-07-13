@@ -167,7 +167,7 @@ async fn request(
     // Sender: explicit --sender (e.g. a multisig), else the keypair's address.
     let sender = tx_opts
         .sender
-        .or_else(|| signer.as_ref().map(crate::keys::keypair_address));
+        .or_else(|| signer.as_ref().map(|s| s.verifying_key().derive_address()));
 
     // hBTC recipient defaults to the sender when not given explicitly.
     let derivation_path = match recipient {
@@ -257,7 +257,7 @@ async fn request_all(
                 .context("Invalid recipient Sui address")?,
         ),
         None => {
-            let addr = crate::keys::keypair_address(&signer);
+            let addr = signer.verifying_key().derive_address();
             print_info(&format!(
                 "No --recipient specified, defaulting to signer address {}",
                 addr
