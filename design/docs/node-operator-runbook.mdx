@@ -288,11 +288,6 @@ sui-chain-id = "69WiPg3DAQiwdxfncX6wYQ2siKwAe6L9BZthQea3JNMD"
 sui-rpc = "https://fullnode.testnet.sui.io:443"
 # sui-rpc = "http://127.0.0.1:9000"
 
-# Hashi package and object IDs (provided after package publication)
-[hashi-ids]
-package-id = "0x<package-id>"
-hashi-object-id = "0x<hashi-object-id>"
-
 # ── Bitcoin ───────────────────────────────────────────────────────────
 
 # Bitcoin chain ID — genesis block hash. Use your network's value from the
@@ -301,11 +296,6 @@ bitcoin-chain-id = "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee
 
 # Bitcoin Core RPC endpoint (Hashi default is http://localhost:8332 — override for Signet)
 bitcoin-rpc = "http://127.0.0.1:38332"
-
-# RPC authentication: None, UserPass, or CookieFile
-[bitcoin-rpc-auth]
-UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
-# CookieFile = "/home/USER/.bitcoin/signet/.cookie"
 
 # Trusted Bitcoin P2P peers for the embedded BIP-157 light client (host:port; port mandatory)
 bitcoin-trusted-peers = ["127.0.0.1:38333"]
@@ -356,6 +346,20 @@ db = "/var/lib/hashi/db"
 
 # Concurrency for leader job tasks, e.g. deposit processing (default: 32)
 # max-concurrent-leader-job-tasks = 32
+
+# ── Nested tables ─────────────────────────────────────────────────────
+# TOML table headers apply to every following key until the next table,
+# so keep all root-level settings above this section.
+
+# Hashi package and object IDs (provided after package publication)
+[hashi-ids]
+package-id = "0x<package-id>"
+hashi-object-id = "0x<hashi-object-id>"
+
+# Bitcoin RPC authentication: None, UserPass, or CookieFile
+[bitcoin-rpc-auth]
+UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
+# CookieFile = "/home/USER/.bitcoin/signet/.cookie"
 ```
 
 ### 3.2 CLI config

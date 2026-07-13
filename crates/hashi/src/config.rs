@@ -55,7 +55,7 @@ pub fn load_ed25519_private_key_from_path(path: &Path) -> anyhow::Result<Ed25519
 }
 
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_private_key: Option<String>,
@@ -228,7 +228,7 @@ pub struct Config {
 }
 
 #[derive(Clone, Debug, serde_derive::Deserialize, serde_derive::Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct MetricsPushConfig {
     /// sui-proxy `/publish/metrics` URL (e.g. `https://metrics-proxy.testnet.example.com/publish/metrics`).
     pub push_url: String,
@@ -468,7 +468,7 @@ impl Config {
 
 /// Relevant Onchain Ids for the hashi protocol.
 #[derive(Debug, Clone, Copy, serde_derive::Deserialize, serde_derive::Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct HashiIds {
     /// The original package id of the `hashi` package.
     pub package_id: Address,
@@ -544,6 +544,29 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.backup_dir(), Path::new("/var/lib/hashi/backups"));
+    }
+
+    #[test]
+    fn rejects_unknown_root_field() {
+        let error = toml::from_str::<Config>("databse = '/var/lib/hashi/db'")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown field `databse`"), "{error}");
+    }
+
+    #[test]
+    fn rejects_root_field_nested_under_hashi_ids() {
+        let address = Address::ZERO;
+        let config = format!(
+            "[hashi-ids]\npackage-id = '{address}'\nhashi-object-id = '{address}'\ndb = '/var/lib/hashi/db'\n"
+        );
+
+        let error = toml::from_str::<Config>(&config).unwrap_err().to_string();
+        assert!(error.contains("unknown field `db`"), "{error}");
+        assert!(
+            error.contains("expected `package-id` or `hashi-object-id`"),
+            "{error}"
+        );
     }
 
     #[test]
