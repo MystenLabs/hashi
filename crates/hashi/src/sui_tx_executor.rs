@@ -2009,23 +2009,38 @@ pub async fn build_register_or_update_validator_tx(
         has_calls = true;
     }
 
-    // 5. Update TLS key if available and changed.
-    if let Ok(tls_key) = config.tls_public_key()
-        && onchain_member
+    // 5. Update TLS key if configured and changed. A configured-but-unloadable
+    // key is a hard error: silently skipping would produce a registration
+    // without `update_tls_public_key` (bad key-file permissions did exactly
+    // this to an operator, who registered incomplete with no warning).
+    if config.tls_private_key.is_some() {
+        let tls_key = config.tls_public_key().map_err(|e| {
+            e.context(
+                "failed to load tls-private-key from the node config; \
+                 fix the file path, format, or permissions (or remove the field \
+                 to skip setting a TLS public key)",
+            )
+        })?;
+        if onchain_member
             .as_ref()
             .map(|m| m.tls_public_key() != Some(&tls_key))
             .unwrap_or(true)
-    {
-        let tls_key_arg = builder.pure(&tls_key.as_bytes().to_vec());
-        builder.move_call(
-            Function::new(
-                hashi_ids.package_id,
-                Identifier::from_static("validator"),
-                Identifier::from_static("update_tls_public_key"),
-            ),
-            vec![hashi_arg, validator_address_arg, tls_key_arg],
+        {
+            let tls_key_arg = builder.pure(&tls_key.as_bytes().to_vec());
+            builder.move_call(
+                Function::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("validator"),
+                    Identifier::from_static("update_tls_public_key"),
+                ),
+                vec![hashi_arg, validator_address_arg, tls_key_arg],
+            );
+            has_calls = true;
+        }
+    } else {
+        tracing::warn!(
+            "tls-private-key is not configured; registration will not set a TLS public key"
         );
-        has_calls = true;
     }
 
     // 6. Update operator address if provided and changed.
