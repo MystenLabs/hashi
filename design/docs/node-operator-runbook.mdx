@@ -204,11 +204,32 @@ hashi register --config /path/to/validator.toml \
 
 ### 2.4 Operator key (day-to-day signing)
 
-Generate a fresh Ed25519 keypair for the operator and fund its address with SUI for gas. The running node (`hashi server`) signs **all** its day-to-day Sui transactions with this `operator-private-key`: MPC certificate submission, governance, and metadata updates.
+Generate a fresh keypair for the operator and fund its address with SUI for gas. The running node (`hashi server`) signs **all** its day-to-day Sui transactions with this `operator-private-key`: MPC certificate submission, governance, and metadata updates.
+
+All three simple Sui key schemes (Ed25519, secp256k1, and secp256r1) are accepted, in any of the formats standard tooling produces. The value may be a file path or the key itself inline:
+
+| Format | Produced by |
+| --- | --- |
+| Bech32 `suiprivkey...` string | `sui keytool generate` / `export` / `convert` |
+| Base64 keystore entry | `sui.keystore` entries, `sui keytool convert` |
+| PKCS#8 PEM | `openssl genpkey -algorithm ed25519` |
+| PKCS#8 DER (file path only) | `openssl genpkey ... -outform DER` |
+
+```bash
+# Option A: sui keytool (writes <address>.key to the current directory)
+sui keytool generate ed25519
+
+# Option B: openssl
+openssl genpkey -algorithm ed25519 -out hashi-operator-key.pem
+```
 
 ```toml
 operator-private-key = "/path/to/hashi-operator-key.pem"
+# or inline, e.g.:
+# operator-private-key = "suiprivkey1..."
 ```
+
+> A raw hex private key (the `hexWithoutFlag` output of `sui keytool convert`) is **not** accepted, because it does not carry the key-scheme flag. Convert it to one of the formats above with `sui keytool convert`.
 
 **Delegating to the operator key.** After registration (signed by the validator account key, see [2.3](#23-registration-must-be-signed-by-the-account-key)), authorize the operator key by setting it as the member's operator address with `--operator-address`:
 
@@ -260,8 +281,9 @@ All fields use kebab-case. Optional fields show their defaults in comments.
 # Ed25519 TLS private key (PEM file path, DER file path, or inline PEM)
 tls-private-key = "/path/to/tls-private-key.pem"
 
-# Ed25519 operator private key for signing the node's Sui transactions
-# (see the delegation caveat in section 2.4)
+# Operator private key for signing the node's Sui transactions: a file
+# path or an inline key, in any format listed in section 2.4 (PKCS#8
+# PEM/DER, suiprivkey, or Base64 keystore)
 operator-private-key = "/path/to/operator-key.pem"
 
 # Your Sui validator address
@@ -380,7 +402,8 @@ package_id = "0x<package-id>"
 # Hashi shared object ID
 hashi_object_id = "0x<hashi-object-id>"
 
-# Path to Ed25519 keypair for signing CLI transactions
+# Path to the keypair for signing CLI transactions, in any format
+# listed in section 2.4
 keypair_path = "/path/to/operator-key.pem"
 
 [bitcoin]
