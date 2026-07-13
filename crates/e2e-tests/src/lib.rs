@@ -633,6 +633,7 @@ mod tests {
     use bitcoin::Witness;
     use fastcrypto::groups::GroupElement;
     use fastcrypto::groups::Scalar;
+    use fastcrypto::hash::HashFunction;
     use fastcrypto::serde_helpers::ToFromByteArray;
     use fastcrypto_tbls::polynomial::Poly;
     use fastcrypto_tbls::threshold_schnorr::G;
@@ -954,7 +955,13 @@ mod tests {
             >,
         >,
     > {
-        let beacon_value = S::rand(&mut rand::thread_rng());
+        let beacon_value = {
+            let mut hasher = fastcrypto::hash::Blake2b256::default();
+            for (signing_id, _, _, _) in inputs {
+                hasher.update(signing_id.as_bytes());
+            }
+            S::from_bytes_mod_order(&hasher.finalize().digest)
+        };
         let order: Vec<sui_sdk_types::Address> = inputs.iter().map(|(sid, _, _, _)| *sid).collect();
         let sign_futures: Vec<_> = nodes
             .iter()
@@ -2386,6 +2393,310 @@ mod tests {
         let results = sign_on_all_nodes(nodes, b"post-restart", epoch, request_id, 0, None).await;
         assert_all_signatures_match(results);
 
+        Ok(())
+    }
+
+    async fn build_avid_networks(builder: TestNetworksBuilder) -> Result<TestNetworks> {
+        let mut test_networks = builder
+            .with_onchain_config(
+                "mpc_nonce_generation_protocol",
+                hashi_types::move_types::ConfigValue::U64(1),
+            )
+            .build()
+            .await?;
+        let initial_epoch = {
+            let nodes = test_networks.hashi_network().nodes();
+            let mpc_key_futures: Vec<_> = nodes
+                .iter()
+                .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+                .collect();
+            let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+            for (i, result) in results.into_iter().enumerate() {
+                result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+            }
+            assert_eq!(
+                nodes[0]
+                    .hashi()
+                    .onchain_state()
+                    .mpc_nonce_generation_protocol(),
+                1,
+                "the AVID protocol override must have landed"
+            );
+            nodes[0].current_epoch().unwrap()
+        };
+        force_rotate_and_assert_key_agreement(&mut test_networks, initial_epoch + 1).await;
+        Ok(test_networks)
+    }
+
+    fn avid_fault_tolerant_builder() -> TestNetworksBuilder {
+        TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_onchain_config(
+                "mpc_threshold_in_basis_points",
+                hashi_types::move_types::ConfigValue::U64(5000),
+            )
+            .with_onchain_config(
+                "mpc_max_faulty_in_basis_points",
+                hashi_types::move_types::ConfigValue::U64(2500),
+            )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_avid_refill_presignature_pool() -> Result<()> {
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let test_networks = build_avid_networks(TestNetworksBuilder::new().with_nodes(4)).await?;
+        let nodes = test_networks.hashi_network().nodes();
+        let epoch = nodes[0].hashi().onchain_state().epoch();
+
+        wait_for_signing_manager(nodes, epoch, std::time::Duration::from_secs(120)).await?;
+        let signing_manager = nodes[0]
+            .hashi()
+            .signing_manager_for(epoch)
+            .expect("just waited for it");
+        let pool_size = signing_manager.initial_presig_count();
+        let refill_trigger_at = pool_size - pool_size / hashi::constants::PRESIG_REFILL_DIVISOR;
+        let num_signings = pool_size + 1;
+        let wait_at = refill_trigger_at + (pool_size - refill_trigger_at) / 2;
+
+        for i in 0..num_signings {
+            let mut bytes = [0u8; 32];
+            bytes[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            let request_id = sui_sdk_types::Address::new(bytes);
+            let results =
+                sign_on_all_nodes(nodes, b"avid refill", epoch, request_id, i as u64, None).await;
+            assert_all_signatures_match(results);
+
+            if i == wait_at {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+                while !signing_manager.has_next_batch() {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "Timed out waiting for presignature refill"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            }
+        }
+
+        assert_eq!(signing_manager.batch_index(), 1);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_avid_complaint_recovery() -> Result<()> {
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let test_networks =
+            build_avid_networks(avid_fault_tolerant_builder().with_corrupt_shares_target(0))
+                .await?;
+        let nodes = test_networks.hashi_network().nodes();
+        let epoch = nodes[0].hashi().onchain_state().epoch();
+        wait_for_signing_manager(nodes, epoch, std::time::Duration::from_secs(120)).await?;
+        let request_id = sui_sdk_types::Address::ZERO;
+        let results =
+            sign_on_all_nodes(nodes, b"avid complaint test", epoch, request_id, 0, None).await;
+        assert_all_signatures_match(results);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_avid_complaint_recovery_after_restart() -> Result<()> {
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let mut test_networks =
+            build_avid_networks(avid_fault_tolerant_builder().with_corrupt_shares_target(0))
+                .await?;
+        {
+            let nodes = test_networks.hashi_network().nodes();
+            let epoch = nodes[0].hashi().onchain_state().epoch();
+            wait_for_signing_manager(nodes, epoch, std::time::Duration::from_secs(120)).await?;
+            let results = sign_on_all_nodes(
+                nodes,
+                b"avid pre-restart",
+                epoch,
+                sui_sdk_types::Address::ZERO,
+                0,
+                None,
+            )
+            .await;
+            assert_all_signatures_match(results);
+        }
+
+        test_networks.hashi_network_mut().restart().await?;
+        let nodes = test_networks.hashi_network().nodes();
+        let recovery_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(recovery_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} MPC recovery after restart failed: {e}"));
+        }
+        let epoch = nodes[0].hashi().onchain_state().epoch();
+        let mut bytes = [0u8; 32];
+        bytes[0] = 1;
+        let results = sign_on_all_nodes(
+            nodes,
+            b"avid post-restart",
+            epoch,
+            sui_sdk_types::Address::new(bytes),
+            1,
+            None,
+        )
+        .await;
+        assert_all_signatures_match(results);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_avid_straggler_catches_up() -> Result<()> {
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let mut test_networks =
+            build_avid_networks(avid_fault_tolerant_builder().with_batch_size_per_weight(1))
+                .await?;
+        let epoch = test_networks.hashi_network().nodes()[0]
+            .hashi()
+            .onchain_state()
+            .epoch();
+        let (pool_size, refill_trigger_at) = {
+            let nodes = test_networks.hashi_network().nodes();
+            wait_for_signing_manager(nodes, epoch, std::time::Duration::from_secs(120)).await?;
+            let signing_manager = nodes[0]
+                .hashi()
+                .signing_manager_for(epoch)
+                .expect("just waited for it");
+            let pool_size = signing_manager.initial_presig_count();
+            (
+                pool_size,
+                pool_size - pool_size / hashi::constants::PRESIG_REFILL_DIVISOR,
+            )
+        };
+
+        test_networks.hashi_network_mut().nodes_mut()[3]
+            .shutdown()
+            .await;
+        let wait_at = refill_trigger_at + (pool_size - refill_trigger_at) / 2;
+        assert!(
+            wait_at + 1 < pool_size,
+            "batch too small: no batch-0 headroom after the drain (pool={pool_size}, wait_at={wait_at})"
+        );
+
+        {
+            let nodes = &test_networks.hashi_network().nodes()[..3];
+            let signing_manager = nodes[0]
+                .hashi()
+                .signing_manager_for(epoch)
+                .expect("initialized before the straggler went dark");
+            let inputs: Vec<_> = (0..=wait_at)
+                .map(|i| {
+                    let mut bytes = [0u8; 32];
+                    bytes[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                    (
+                        sui_sdk_types::Address::new(bytes),
+                        i as u64,
+                        b"avid straggler".to_vec(),
+                        None,
+                    )
+                })
+                .collect();
+            let results = sign_batch_on_all_nodes(nodes, epoch, &inputs).await;
+            for node_results in &results {
+                for result in node_results {
+                    result.as_ref().expect("drain signing failed");
+                }
+            }
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+            while !signing_manager.has_next_batch() {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "Timed out waiting for the refill batch dealt without the straggler"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+
+        test_networks.hashi_network_mut().nodes_mut()[3]
+            .start()
+            .await?;
+        let nodes = test_networks.hashi_network().nodes();
+        nodes[3].wait_for_mpc_key(DKG_TIMEOUT).await?;
+        wait_for_signing_manager(&nodes[3..], epoch, std::time::Duration::from_secs(120)).await?;
+
+        let inputs: Vec<_> = ((wait_at + 1)..pool_size)
+            .map(|i| {
+                let mut bytes = [0u8; 32];
+                bytes[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                (
+                    sui_sdk_types::Address::new(bytes),
+                    i as u64,
+                    b"avid straggler".to_vec(),
+                    None,
+                )
+            })
+            .collect();
+        let results = sign_batch_on_all_nodes(nodes, epoch, &inputs).await;
+        for node_results in &results {
+            for result in node_results {
+                result
+                    .as_ref()
+                    .expect("post-restart batch-0 signing failed");
+            }
+        }
+
+        for i in pool_size..(pool_size + 2) {
+            let mut bytes = [0u8; 32];
+            bytes[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            let request_id = sui_sdk_types::Address::new(bytes);
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(240);
+            loop {
+                let results =
+                    sign_on_all_nodes(nodes, b"avid straggler", epoch, request_id, i as u64, None)
+                        .await;
+                if results.iter().all(|r| r.is_ok()) {
+                    assert_all_signatures_match(results);
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "Timed out waiting for the straggler to sign refill-batch presigs: {:?}",
+                    results
+                        .iter()
+                        .map(|r| r.as_ref().err().map(|e| e.to_string()))
+                        .collect::<Vec<_>>()
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
         Ok(())
     }
 

@@ -619,6 +619,15 @@ impl Config {
         }
     }
 
+    pub fn mpc_nonce_generation_protocol(&self) -> u16 {
+        match self.config.get("mpc_nonce_generation_protocol") {
+            Some(ConfigValue::U64(v)) => {
+                u16::try_from(*v).expect("mpc_nonce_generation_protocol exceeds u16::MAX")
+            }
+            _ => hashi_types::move_types::VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
+        }
+    }
+
     pub fn guardian_url(&self) -> Option<&str> {
         match self.config.get("guardian_url") {
             Some(ConfigValue::String(v)) => Some(v.as_str()),
