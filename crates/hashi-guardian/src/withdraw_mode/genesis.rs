@@ -79,7 +79,12 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(err, GuardianError::InvalidInputs(msg) if msg.contains("operator_init")));
+        assert!(matches!(
+            err,
+            GuardianError::InvalidInputs(msg)
+                if msg.contains("Withdraw(OperatorInitialized)")
+                    && msg.contains("Withdraw(Uninitialized)")
+        ));
     }
 
     #[tokio::test]
