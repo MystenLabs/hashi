@@ -6,7 +6,6 @@ use super::GuardianReader;
 use hashi_types::guardian::time_utils::now_timestamp_secs;
 use hashi_types::guardian::time_utils::unix_millis_to_seconds;
 use hashi_types::guardian::time_utils::UnixSeconds;
-use hashi_types::guardian::HeartbeatLogMessage;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::VerifiedLogRecord;
@@ -152,6 +151,7 @@ fn validate_session_live_and_others_quiet(
 mod tests {
     use super::*;
     use hashi_types::guardian::BuildPcrs;
+    use hashi_types::guardian::HeartbeatLogMessage;
     use hashi_types::guardian::InitLogMessage;
 
     fn build_pcrs() -> BuildPcrs {

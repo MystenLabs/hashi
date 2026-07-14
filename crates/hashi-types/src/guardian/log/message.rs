@@ -13,8 +13,8 @@
 //! Writers call `LogRecord::new()`, which finalizes the pattern exactly once,
 //! stores the resulting key, and uses it for signing and upload.
 //! Readers either fetch a deterministic record using `object_key()` or list
-//! records in `object_key_dir()`. In both read paths, the actual key
-//! returned by S3 is attached to `LogRecord` and authenticated during verification.
+//! records in `object_key_dir()`. In both read paths, the S3 client rejects a
+//! record unless its signed key matches the actual key returned by S3.
 
 use super::S3_DIR_CEREMONY;
 use super::S3_DIR_COMMITTEE_UPDATE;
