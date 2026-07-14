@@ -13,7 +13,10 @@ signing key and derived session ID.
 
 Canonical key layout:
 
-- `init/{session_id}-{init_suffix}.json`
+- `init/{session_id}/01-oi-attestation-unsigned.json`
+- `init/{session_id}/02-oi-guardian-info.json`
+- `init/{session_id}/03-pi-enclave-fully-initialized.json`
+- `init/{session_id}/04-oa-activated.json`
 - `heartbeat/{yyyy}/{mm}/{dd}/{hh}/{session_id}-{counter:020}.json`
 - `withdraw/{yyyy}/{mm}/{dd}/{hh}/success-{seq:020}-{session_id}-wid{wid}.json`
 - `withdraw/{yyyy}/{mm}/{dd}/{hh}/failure-{session_id}-wid{wid}-{rand8}.json`
@@ -26,7 +29,6 @@ Canonical key layout:
 Where:
 
 - `session_id` is the first 16 hex chars of the enclave ephemeral signing pubkey (lowercase). Acts as a short per-session tag in keys; full pubkey verification still happens via the signed log payload (`SessionID::HEX_LEN` in `hashi-types`).
-- `init_suffix` is a semantic label (`oi-attestation-unsigned`, `oi-guardian-info`, `pi-enclave-fully-initialized`).
 - `counter` is a zero-padded decimal sequence number (used in heartbeats only).
 - `seq` (in `withdraw/`) is the zero-padded limiter sequence number consumed by the withdrawal.
 - `sharing_seq` (in `ceremony/`) is a zero-padded rotation counter — `setup_new_key` writes `0`; each `rotate_kps` appends `prev+1`.
@@ -36,7 +38,7 @@ Where:
 
 ## Stream semantics
 
-- `init` logs are per-session and deterministic by semantic message kind.
+- `init` logs are grouped per session and numerically ordered by lifecycle step.
 - `heartbeat` logs are hour-partitioned and strictly ordered per session.
 - `withdraw` logs are hour-partitioned. Successes are seq-sorted within a bucket so the KP rotating in the next enclave can recover limiter state by reading the lexicographically last success key.
 - `ceremony` logs are flat (not date-partitioned). Each entry is a `CeremonyLogMessage` — `NewKey { instance }` written by `setup_new_key` (genesis, `sharing_seq=0`) or `Rotate { old_instance, new_instance }` written by `rotate_kps` (each rotation, `sharing_seq=prev+1`). A rotation records the `old_instance` it consumed so the chain is auditable from the log alone (each entry's `old_instance` should match the prior entry's instance). KPs read the lexicographically last entry to learn the current authoritative instance (commitments + N + T). The log does not carry encrypted shares or a separate recipient roster.

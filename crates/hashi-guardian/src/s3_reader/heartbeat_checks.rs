@@ -164,7 +164,7 @@ mod tests {
 
     fn non_heartbeat_log() -> VerifiedLogRecord {
         VerifiedLogRecord {
-            object_key: "init/test-session-pi-enclave-fully-initialized.json".to_string(),
+            object_key: "init/test-session/03-pi-enclave-fully-initialized.json".to_string(),
             session_id: "test-session".into(),
             timestamp_ms: 0,
             message: LogMessageV1::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {

@@ -291,10 +291,10 @@ pub enum CommitteeUpdateLogMessage {
 }
 
 impl InitLogMessage {
-    pub const OI_ATTEST_UNSIGNED: &'static str = "oi-attestation-unsigned";
-    pub const OI_GUARDIAN_INFO: &'static str = "oi-guardian-info";
-    pub const PI_FULLY_INITIALIZED: &'static str = "pi-enclave-fully-initialized";
-    pub const OA_ACTIVATED: &'static str = "oa-activated";
+    pub const OI_ATTEST_UNSIGNED: &'static str = "01-oi-attestation-unsigned";
+    pub const OI_GUARDIAN_INFO: &'static str = "02-oi-guardian-info";
+    pub const PI_FULLY_INITIALIZED: &'static str = "03-pi-enclave-fully-initialized";
+    pub const OA_ACTIVATED: &'static str = "04-oa-activated";
 
     pub fn object_key(&self, session_id: &str) -> String {
         let suffix = match self {
@@ -304,7 +304,7 @@ impl InitLogMessage {
             InitLogMessage::OAActivated { .. } => Self::OA_ACTIVATED,
         };
 
-        format!("{S3_DIR_INIT}/{session_id}-{suffix}.json")
+        Self::object_key_for_suffix(session_id, suffix)
     }
 
     fn object_key_pattern(&self, session_id: &str) -> ObjectKeyPattern {
@@ -312,21 +312,15 @@ impl InitLogMessage {
     }
 
     pub fn attestation_object_key(session_id: &str) -> String {
-        format!(
-            "{}/{}-{}.json",
-            S3_DIR_INIT,
-            session_id,
-            Self::OI_ATTEST_UNSIGNED
-        )
+        Self::object_key_for_suffix(session_id, Self::OI_ATTEST_UNSIGNED)
     }
 
     pub fn guardian_info_object_key(session_id: &str) -> String {
-        format!(
-            "{}/{}-{}.json",
-            S3_DIR_INIT,
-            session_id,
-            Self::OI_GUARDIAN_INFO
-        )
+        Self::object_key_for_suffix(session_id, Self::OI_GUARDIAN_INFO)
+    }
+
+    fn object_key_for_suffix(session_id: &str, suffix: &str) -> String {
+        format!("{S3_DIR_INIT}/{session_id}/{suffix}.json")
     }
 }
 

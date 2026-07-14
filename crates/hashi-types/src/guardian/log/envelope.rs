@@ -670,7 +670,7 @@ mod tests {
 
         assert_eq!(
             log.object_key(),
-            "init/session-a-oi-attestation-unsigned.json"
+            "init/session-a/01-oi-attestation-unsigned.json"
         );
     }
 
