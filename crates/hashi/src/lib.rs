@@ -1208,9 +1208,8 @@ mod test {
         assert!(msg.contains("Bitcoin Core v29 or newer"), "{msg}");
 
         // Connectivity problems must not be misattributed to the version.
-        let transport = jsonrpc::Error::Transport(Box::new(std::io::Error::other(
-            "connection refused",
-        )));
+        let transport =
+            jsonrpc::Error::Transport(Box::new(std::io::Error::other("connection refused")));
         let e = corepc_client::client_sync::Error::JsonRpc(transport);
         let msg = bitcoind_rpc_error_with_version_hint(e).to_string();
         assert!(!msg.contains("Bitcoin Core"), "{msg}");
