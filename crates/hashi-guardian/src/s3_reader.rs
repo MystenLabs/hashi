@@ -228,7 +228,7 @@ impl GuardianReader {
         sharing_seq: u64,
         build_policy: BuildPolicy,
     ) -> anyhow::Result<Option<(SessionID, KpShareStateLogMessage)>> {
-        let prefix = KpShareStateLogMessage::object_key_prefix(sharing_seq);
+        let prefix = KpShareStateLogMessage::object_key_dir(sharing_seq);
         let keys = self.s3.list_all_keys_in_dir(&prefix).await?;
         let Some(key) = keys.into_iter().max() else {
             return Ok(None);

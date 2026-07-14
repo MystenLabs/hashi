@@ -462,12 +462,12 @@ mod tests {
     }
 
     #[test]
-    fn signed_log_rejects_changed_failure_nonce_relocation() {
+    fn signed_log_rejects_changed_failure_random_suffix_relocation() {
         let signing_key = GuardianSignKeyPair::from([18u8; 32]);
         let signed_request = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
         let (request_sign, request_data) = signed_request.into_parts();
         let log = LogRecord::new(
-            "session-failure-nonce".to_string(),
+            "session-failure-random-suffix".to_string(),
             LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
                 request_data: request_data.into(),
                 request_sign,
@@ -477,16 +477,16 @@ mod tests {
         );
         let original_key = log.object_key();
         let stem = original_key.strip_suffix(".json").unwrap();
-        let (prefix, nonce_hex) = stem.rsplit_once('-').unwrap();
-        let nonce = u32::from_str_radix(nonce_hex, 16).unwrap();
-        let relocated_key = format!("{prefix}-{:08x}.json", nonce ^ 1);
+        let (prefix, suffix_hex) = stem.rsplit_once('-').unwrap();
+        let suffix = u32::from_str_radix(suffix_hex, 16).unwrap();
+        let relocated_key = format!("{prefix}-{:08x}.json", suffix ^ 1);
 
         let mut record_read_from_s3: LogRecord =
             serde_json::from_slice(&serde_json::to_vec(&log).unwrap()).unwrap();
         record_read_from_s3.object_key = relocated_key;
         let err = record_read_from_s3
             .verify(&signing_key.verification_key())
-            .expect_err("changing only the random failure nonce must invalidate placement");
+            .expect_err("changing only the random failure suffix must invalidate placement");
 
         assert!(format!("{err:?}").contains("signature invalid"));
     }

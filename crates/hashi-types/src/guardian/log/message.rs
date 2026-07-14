@@ -5,14 +5,16 @@
 //! rules. The `LogRecord` wrapper that carries these to S3 lives in
 //! `super::envelope`.
 //!
-//! Every message type exposes `object_key_pattern()`. Types with deterministic
-//! keys also expose `object_key()`, which returns the complete bucket-relative
-//! key. `LogRecord` finalizes a pattern once and stores the resulting key.
+//! Every message type exposes `object_key_pattern()`.
+//! Types with deterministic keys also expose `object_key()`, which returns the
+//! complete bucket-relative key. Types supporting batch reads may additionally
+//! expose `object_key_dir()`, a slash-terminated S3 key prefix.
 //!
-//! Readers can either fetch a deterministic record directly using its message
-//! type's `object_key()`, or batch-read records by listing a prefix obtained from
-//! an `object_key_prefix()` API. In both cases, the actual key returned by S3 is
-//! attached to `LogRecord` and authenticated during verification.
+//! Writers call `LogRecord::new()`, which finalizes the pattern exactly once,
+//! stores the resulting key, and uses it for signing and upload.
+//! Readers either fetch a deterministic record using `object_key()` or list
+//! records in `object_key_dir()`. In both read paths, the actual key
+//! returned by S3 is attached to `LogRecord` and authenticated during verification.
 
 use super::S3_DIR_CEREMONY;
 use super::S3_DIR_COMMITTEE_UPDATE;
@@ -56,7 +58,7 @@ pub enum LogMessage {
 
 pub(super) enum ObjectKeyPattern {
     Fixed(String),
-    /// Complete key prefix through the final `-`; preparation appends the nonce.
+    /// Complete key prefix before the random suffix; finalize() appends the suffix.
     RandomSuffix(String),
 }
 
@@ -133,9 +135,9 @@ impl KpShareStateLogMessage {
         }
     }
 
-    /// `kp-shares/{sharing_seq:020}/` — the prefix containing every cert-state
-    /// version for one `SecretSharingInstance`.
-    pub fn object_key_prefix(sharing_seq: u64) -> String {
+    /// `kp-shares/{sharing_seq:020}/` — the slash-terminated S3 key prefix
+    /// containing every cert-state version for one `SecretSharingInstance`.
+    pub fn object_key_dir(sharing_seq: u64) -> String {
         format!("{S3_DIR_KP_SHARES}/{sharing_seq:020}/")
     }
 
@@ -144,7 +146,7 @@ impl KpShareStateLogMessage {
     pub fn object_key(session_id: &str, sharing_seq: u64, cert_seq: u64) -> String {
         format!(
             "{}{:020}-{session_id}.json",
-            Self::object_key_prefix(sharing_seq),
+            Self::object_key_dir(sharing_seq),
             cert_seq
         )
     }
