@@ -831,7 +831,7 @@ mod tests {
         let logger = mk_logger_with_client(client);
         let signing_key = GuardianSignKeyPair::new(rand::thread_rng());
         let log = LogRecord::new(
-            "session".to_string(),
+            "session".into(),
             LogMessageV1::Heartbeat(HeartbeatLogMessage::new(7)),
             &signing_key,
         );
@@ -860,7 +860,7 @@ mod tests {
         let logger = mk_logger_with_client(client);
         let signing_key = GuardianSignKeyPair::new(rand::thread_rng());
         let log = LogRecord::new(
-            "session".to_string(),
+            "session".into(),
             LogMessageV1::Heartbeat(HeartbeatLogMessage::new(7)),
             &signing_key,
         );
