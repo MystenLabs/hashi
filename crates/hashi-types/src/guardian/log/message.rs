@@ -243,9 +243,12 @@ pub enum InitLogMessage {
     /// config_hash, encryption/BTC pubkeys). Boxed: much larger than the other
     /// variants (`clippy::large_enum_variant`).
     OIGuardianInfo(Box<GuardianInfo>),
-    /// Threshold reached — enclave BTC key reconstructed (happens once). Records
-    /// the ids of the shares that were combined.
-    PIEnclaveFullyInitialized { share_ids: Vec<ShareID> },
+    /// Threshold reached — enclave BTC key reconstructed (happens once).
+    PIEnclaveFullyInitialized {
+        sharing_seq: u64,
+        share_ids: Vec<ShareID>,
+        enclave_btc_pubkey: BitcoinPubkey,
+    },
     /// Operator activation succeeded and installed live serving state.
     OAActivated { state_hash: [u8; 32] },
 }

@@ -7,6 +7,7 @@
 //! shared `crate::operator_init`.
 
 use crate::Enclave;
+use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::guardian::crypto::combine_shares;
 use hashi_types::guardian::crypto::decrypt_verify_shares;
 use hashi_types::guardian::crypto::k256_sk_to_btc_keypair;
@@ -44,6 +45,7 @@ pub async fn provisioner_init(
         .secret_sharing_instance()
         .expect("secret-sharing instance should be set after operator_init");
     let threshold = instance.threshold();
+    let sharing_seq = instance.sharing_seq();
     // Always set here: provisioner_init is withdraw-mode only, and the
     // operator_init check above guarantees a withdraw-mode enclave installed it.
     let config_hash = enclave
@@ -63,11 +65,15 @@ pub async fn provisioner_init(
     info!("Verified {} shares (threshold {threshold}).", shares.len());
 
     let share_ids = shares.iter().map(|s| s.id).collect();
-    finalize_init(&shares, threshold, &enclave).await;
+    let enclave_btc_pubkey = finalize_init(&shares, threshold, &enclave).await;
     // Log to S3 indicating that the BTC key has been reconstructed. OA waits for
     // this durable marker before activating the enclave for withdrawals.
     enclave
-        .log_init(PIEnclaveFullyInitialized { share_ids })
+        .log_init(PIEnclaveFullyInitialized {
+            sharing_seq,
+            share_ids,
+            enclave_btc_pubkey,
+        })
         .await
         .expect("Unable to log EnclaveFullyInitialized");
 
@@ -83,10 +89,15 @@ pub async fn provisioner_init(
 /// Reconstruct the BTC key from the threshold shares and install it. Live
 /// serving state is installed later by operator_activate.
 /// Panics upon an error as the enclaves state is irrecoverable at this point.
-async fn finalize_init(shares: &[Share], threshold: usize, enclave: &Arc<Enclave>) {
+async fn finalize_init(
+    shares: &[Share],
+    threshold: usize,
+    enclave: &Arc<Enclave>,
+) -> BitcoinPubkey {
     info!("Threshold reached, combining shares.");
     let enclave_k256_sk = combine_shares(shares, threshold).expect("Unable to combine shares");
     let enclave_btc_keypair = k256_sk_to_btc_keypair(&enclave_k256_sk);
+    let enclave_btc_pubkey = enclave_btc_keypair.x_only_public_key().0;
 
     info!("Setting enclave keypair.");
     enclave
@@ -95,6 +106,7 @@ async fn finalize_init(shares: &[Share], threshold: usize, enclave: &Arc<Enclave
         .expect("Unable to set enclave keypair");
 
     info!("Enclave initialization complete.");
+    enclave_btc_pubkey
 }
 
 #[cfg(test)]

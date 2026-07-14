@@ -168,7 +168,11 @@ mod tests {
             session_id: "test-session".into(),
             timestamp_ms: 0,
             message: LogMessageV1::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
+                sharing_seq: 0,
                 share_ids: vec![],
+                enclave_btc_pubkey: hashi_types::bitcoin::create_btc_keypair_for_test(&[1; 32])
+                    .x_only_public_key()
+                    .0,
             }))
             .into(),
             build_pcrs: build_pcrs(),
