@@ -511,7 +511,7 @@ impl Enclave {
         session_id_from_signing_pubkey(&self.signing_pubkey())
     }
 
-    async fn write_log(&self, message: LogMessage) -> GuardianResult<()> {
+    async fn write_log(&self, message: LogMessageV1) -> GuardianResult<()> {
         let log = LogRecord::new(
             self.s3_session_id(),
             message,
@@ -521,7 +521,7 @@ impl Enclave {
         self.config.s3_logger()?.write_log_record(log).await
     }
 
-    async fn write_log_or_abort(&self, message: LogMessage) -> GuardianResult<()> {
+    async fn write_log_or_abort(&self, message: LogMessageV1) -> GuardianResult<()> {
         let log = LogRecord::new(
             self.s3_session_id(),
             message,
@@ -538,30 +538,30 @@ impl Enclave {
     /// S3 write/access issues. The incomplete enclave cannot serve and will restart,
     /// so S3 being ahead after a lost acknowledgement is acceptable.
     pub async fn log_init(&self, msg: InitLogMessage) -> GuardianResult<()> {
-        self.write_log(LogMessage::Init(Box::new(msg))).await
+        self.write_log(LogMessageV1::Init(Box::new(msg))).await
     }
 
     pub async fn log_withdraw(&self, msg: WithdrawalLogMessage) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::Withdrawal(Box::new(msg)))
+        self.write_log_or_abort(LogMessageV1::Withdrawal(Box::new(msg)))
             .await
     }
 
     pub async fn log_committee_update(&self, msg: CommitteeUpdateLogMessage) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::CommitteeUpdate(Box::new(msg)))
+        self.write_log_or_abort(LogMessageV1::CommitteeUpdate(Box::new(msg)))
             .await
     }
 
     pub async fn log_genesis(&self, msg: GenesisLogMessage) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::Genesis(Box::new(msg)))
+        self.write_log_or_abort(LogMessageV1::Genesis(Box::new(msg)))
             .await
     }
 
     pub async fn log_heartbeat(&self, msg: HeartbeatLogMessage) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::Heartbeat(msg)).await
+        self.write_log_or_abort(LogMessageV1::Heartbeat(msg)).await
     }
 
     pub async fn log_ceremony(&self, state: CeremonyLogMessage) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::Ceremony(Box::new(state)))
+        self.write_log_or_abort(LogMessageV1::Ceremony(Box::new(state)))
             .await
     }
 
@@ -574,7 +574,7 @@ impl Enclave {
         cert_seq: u64,
         encrypted_shares: KPEncryptedShares,
     ) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::KpShareState(Box::new(
+        self.write_log_or_abort(LogMessageV1::KpShareState(Box::new(
             KpShareStateLogMessage::new(sharing_seq, cert_seq, encrypted_shares),
         )))
         .await

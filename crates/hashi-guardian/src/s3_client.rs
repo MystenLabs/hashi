@@ -22,6 +22,7 @@ use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::InitLogMessage;
+use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::VerifiedSessionInfo;
 use serde::Serialize;
@@ -364,20 +365,30 @@ impl GuardianS3Client {
 
         Ok(())
     }
+}
 
+/// Controls whether an S3 read requires Compliance-mode object-lock metadata.
+pub(crate) enum LockCheck {
+    /// Reject the object unless Compliance lock metadata is present.
+    Required,
+    /// Do not inspect lock metadata. Used for signed records whose short lock
+    /// is expected to expire, such as KP-share state.
+    Skipped,
+}
+
+/// Controls whether an S3 read validates that the key has no overwrite or
+/// deletion history.
+pub(crate) enum HistoryCheck {
+    /// Validate the exact key's history before fetching it.
+    Required,
+    /// The caller already validated the history of the enclosing prefix.
+    AlreadyChecked,
+}
+
+impl GuardianS3Client {
     // ========================================================================
     // S3 Reads
     // ========================================================================
-
-    /// Lists every key under `prefix`, refusing to proceed if the bucket has any
-    /// delete markers or non-latest versions in scope (which would indicate
-    /// tampering / lock-expiry beyond what the immutable-log model allows).
-    /// Returned keys are unique and sorted lexicographically.
-    ///
-    /// Keys-only counterpart to [`Self::list_all_log_records_in_dir`].
-    pub async fn list_all_keys_in_dir(&self, prefix: &str) -> GuardianResult<Vec<String>> {
-        self.ensure_no_duplicates_or_deletions(prefix).await
-    }
 
     /// Lists immediate subdirectories under `prefix` (S3 `CommonPrefixes`,
     /// returned by `list_objects_v2` with `delimiter='/'`). Used to tree-walk
@@ -423,11 +434,13 @@ impl GuardianS3Client {
         Ok(out.into_iter().collect())
     }
 
-    /// Checks that all matching object keys do not have either deletions or overwrites.
-    /// The prefix can either correspond to a directory or a complete object key.
-    ///
-    /// Returns: list of keys.
-    async fn ensure_no_duplicates_or_deletions(&self, prefix: &str) -> GuardianResult<Vec<String>> {
+    /// Lists every key under `prefix`, refusing to proceed if any matching
+    /// object has a delete marker or non-latest version. The prefix may be a
+    /// directory or a complete object key. Returned keys are unique and sorted.
+    pub async fn validate_prefix_history_and_list_keys(
+        &self,
+        prefix: &str,
+    ) -> GuardianResult<Vec<String>> {
         let s3_client = &self.client;
         let s3_config = &self.config;
 
@@ -514,21 +527,39 @@ impl GuardianS3Client {
         dir: &S3HourScopedDirectory,
     ) -> GuardianResult<Vec<LogRecord>> {
         let prefix = dir.to_string();
-        let keys = self.ensure_no_duplicates_or_deletions(&prefix).await?;
+        let keys = self.validate_prefix_history_and_list_keys(&prefix).await?;
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
-            out.push(self.get_log_record_inner(&key, true).await?);
+            // The prefix history was checked above. Immutable batch logs are
+            // also expected to remain under Compliance lock.
+            out.push(
+                self.get_log_record_inner(&key, LockCheck::Required, HistoryCheck::AlreadyChecked)
+                    .await?,
+            );
         }
         Ok(out)
     }
 
-    /// Fetches and deserializes a record, rejecting a mismatch between its
-    /// signed intended key and the actual S3 key.
-    async fn get_log_record_inner(
+    /// Fetches and deserializes a record with explicit S3 integrity checks,
+    /// always rejecting a mismatch between its signed intended key and the
+    /// actual S3 key. `HistoryCheck::AlreadyChecked` requires the caller to have
+    /// validated the key's enclosing prefix.
+    pub(crate) async fn get_log_record_inner(
         &self,
         key: &str,
-        require_object_lock: bool,
+        lock_check: LockCheck,
+        history_check: HistoryCheck,
     ) -> GuardianResult<LogRecord> {
+        if matches!(history_check, HistoryCheck::Required) {
+            let keys = self.validate_prefix_history_and_list_keys(key).await?;
+            if keys.len() != 1 || keys[0] != key {
+                return Err(S3Error(format!(
+                    "expected exactly one object for key {}, found {:?}",
+                    key, keys
+                )));
+            }
+        }
+
         let response = self
             .client
             .get_object()
@@ -545,7 +576,7 @@ impl GuardianS3Client {
             })?;
 
         // NOTE: When required, we are explicitly assuming locks are unexpired.
-        if require_object_lock
+        if matches!(lock_check, LockCheck::Required)
             && (response.object_lock_mode() != Some(&ObjectLockMode::Compliance)
                 || response.object_lock_retain_until_date().is_none())
         {
@@ -573,30 +604,14 @@ impl GuardianS3Client {
         Ok(record)
     }
 
-    /// Plain point read + deserialize, with no object-lock assertion and no
-    /// version/deletion check. For objects whose integrity comes from their own
-    /// signature rather than S3 immutability (e.g. `kp-shares/`, which carry only a
-    /// short lock that is expected to expire). A tampered object fails the
-    /// caller's signature check; a purged one surfaces as a get error.
-    pub async fn get_log_record_no_lock(&self, key: &str) -> GuardianResult<LogRecord> {
-        self.get_log_record_inner(key, false).await
-    }
-
     /// Reads an immutable-log object, asserting its Compliance lock metadata is
     /// present but not that it is unexpired.
     /// TODO: also reject when `retain_until <= now` — once the lock lapses the
     /// version check below no longer detects tampering (see
-    /// `ensure_no_duplicates_or_deletions`).
+    /// `validate_prefix_history_and_list_keys`).
     pub(crate) async fn get_log_record(&self, key: &str) -> GuardianResult<LogRecord> {
-        let keys = self.ensure_no_duplicates_or_deletions(key).await?;
-        if keys.len() != 1 || keys[0] != key {
-            return Err(S3Error(format!(
-                "expected exactly one object for key {}, found {:?}",
-                key, keys
-            )));
-        }
-
-        self.get_log_record_inner(key, true).await
+        self.get_log_record_inner(key, LockCheck::Required, HistoryCheck::Required)
+            .await
     }
 
     /// Resolve a session's [`VerifiedSessionInfo`]: read the AWS-self-signed
@@ -614,7 +629,8 @@ impl GuardianS3Client {
         let attestation_record = self.get_log_record(&att_key).await?;
         let (_, _, attestation_message) = attestation_record.validate_unsigned()?;
         let (attestation, signing_pubkey) = attestation_message
-            .into_init_log()
+            .into_v1()
+            .and_then(LogMessageV1::into_init_log)
             .and_then(|x| match x {
                 InitLogMessage::OIAttestationUnsigned {
                     attestation,
@@ -629,7 +645,8 @@ impl GuardianS3Client {
         let info_record = self.get_log_record(&info_key).await?;
         let (_, _, info_message) = info_record.verify(&signing_pubkey)?;
         let info = info_message
-            .into_init_log()
+            .into_v1()
+            .and_then(LogMessageV1::into_init_log)
             .and_then(|x| match x {
                 InitLogMessage::OIGuardianInfo(info) => Some(*info),
                 _ => None,
@@ -660,7 +677,7 @@ mod tests {
     use aws_smithy_mocks::RuleMode;
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::HeartbeatLogMessage;
-    use hashi_types::guardian::LogMessage;
+    use hashi_types::guardian::LogMessageV1;
 
     fn mk_logger_with_client(client: Client) -> GuardianS3Client {
         let config = S3Config {
@@ -815,7 +832,7 @@ mod tests {
         let signing_key = GuardianSignKeyPair::new(rand::thread_rng());
         let log = LogRecord::new(
             "session".to_string(),
-            LogMessage::Heartbeat(HeartbeatLogMessage::new(7)),
+            LogMessageV1::Heartbeat(HeartbeatLogMessage::new(7)),
             &signing_key,
         );
 
@@ -844,7 +861,7 @@ mod tests {
         let signing_key = GuardianSignKeyPair::new(rand::thread_rng());
         let log = LogRecord::new(
             "session".to_string(),
-            LogMessage::Heartbeat(HeartbeatLogMessage::new(7)),
+            LogMessageV1::Heartbeat(HeartbeatLogMessage::new(7)),
             &signing_key,
         );
 

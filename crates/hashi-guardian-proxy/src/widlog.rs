@@ -21,6 +21,7 @@ use crate::metrics::ProxyMetrics;
 use aws_sdk_s3::error::DisplayErrorContext;
 use hashi_types::guardian::log::S3_DIR_WITHDRAW;
 use hashi_types::guardian::LogMessage;
+use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::StandardWithdrawalResponse;
 use hashi_types::guardian::WithdrawalID;
@@ -167,7 +168,7 @@ fn parse_success_seq(key: &str) -> Option<u64> {
 fn parse_success(bytes: &[u8], wid: &WithdrawalID) -> anyhow::Result<FoundSuccess> {
     let record: LogRecord = serde_json::from_slice(bytes)?;
     let timestamp_ms = record.timestamp_ms;
-    let LogMessage::Withdrawal(message) = record.message else {
+    let LogMessage::V1(LogMessageV1::Withdrawal(message)) = record.message else {
         anyhow::bail!("not a withdrawal record");
     };
     let WithdrawalLogMessage::Success {
@@ -324,7 +325,7 @@ pub(crate) mod test_store {
         let signing_key = GuardianSignKeyPair::from([9u8; 32]);
         let record = LogRecord::new_at_timestamp(
             "test-session".to_string(),
-            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Success {
+            LogMessageV1::Withdrawal(Box::new(WithdrawalLogMessage::Success {
                 txid: bitcoin::Txid::from_slice(&[3u8; 32]).unwrap(),
                 request_data,
                 request_sign,

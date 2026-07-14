@@ -12,6 +12,8 @@
 //! advances/retreats and feeds to [`GuardianReader::read_dir`].
 
 use crate::s3_client::GuardianS3Client;
+use crate::s3_client::HistoryCheck;
+use crate::s3_client::LockCheck;
 use anyhow::Context;
 use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
@@ -24,6 +26,7 @@ use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::LogMessage;
+use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::S3Config;
@@ -187,7 +190,7 @@ impl GuardianReader {
     ) -> anyhow::Result<Option<(SessionID, SecretSharingInstance, BitcoinPubkey)>> {
         let keys = self
             .s3
-            .list_all_keys_in_dir(&format!("{}/", S3_DIR_CEREMONY))
+            .validate_prefix_history_and_list_keys(&format!("{}/", S3_DIR_CEREMONY))
             .await?;
         let Some(key) = pick_latest_key(keys, S3_DIR_CEREMONY) else {
             return Ok(None);
@@ -207,7 +210,7 @@ impl GuardianReader {
         let session_id = record.session_id.clone();
         let build_pcrs = record.build_pcrs.clone();
         self.enforce_build_policy("ceremony log", build_policy, &build_pcrs)?;
-        let LogMessage::Ceremony(msg) = record.message else {
+        let LogMessage::V1(LogMessageV1::Ceremony(msg)) = record.message else {
             anyhow::bail!("expected a ceremony log at {key}");
         };
         let (instance, btc_master_pubkey) = ceremony_instance_and_pubkey(*msg, key)?;
@@ -229,16 +232,24 @@ impl GuardianReader {
         build_policy: BuildPolicy,
     ) -> anyhow::Result<Option<(SessionID, KpShareStateLogMessage)>> {
         let prefix = KpShareStateLogMessage::object_key_dir(sharing_seq);
-        let keys = self.s3.list_all_keys_in_dir(&prefix).await?;
+        let keys = self
+            .s3
+            .validate_prefix_history_and_list_keys(&prefix)
+            .await?;
         let Some(key) = keys.into_iter().max() else {
             return Ok(None);
         };
-        let record = self.s3.get_log_record_no_lock(&key).await?;
+        // The prefix history was checked above. KP-share locks are short-lived
+        // and expected to expire, so integrity comes from the signature below.
+        let record = self
+            .s3
+            .get_log_record_inner(&key, LockCheck::Skipped, HistoryCheck::AlreadyChecked)
+            .await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
         let session_id = record.session_id.clone();
         let build_pcrs = record.build_pcrs.clone();
         self.enforce_build_policy("kp-shares log", build_policy, &build_pcrs)?;
-        let LogMessage::KpShareState(msg) = record.message else {
+        let LogMessage::V1(LogMessageV1::KpShareState(msg)) = record.message else {
             anyhow::bail!("expected a kp-shares log at {key}");
         };
         if msg.sharing_seq != sharing_seq {
@@ -276,7 +287,7 @@ impl GuardianReader {
     ) -> anyhow::Result<Option<Committee>> {
         let keys = self
             .s3
-            .list_all_keys_in_dir(&format!("{}/", S3_DIR_COMMITTEE_UPDATE))
+            .validate_prefix_history_and_list_keys(&format!("{}/", S3_DIR_COMMITTEE_UPDATE))
             .await?;
         let Some(key) = pick_latest_key(keys, S3_DIR_COMMITTEE_UPDATE) else {
             return Ok(None);
@@ -284,7 +295,7 @@ impl GuardianReader {
         let record = self.s3.get_log_record(&key).await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
         self.enforce_build_policy("committee-update log", build_policy, &record.build_pcrs)?;
-        let LogMessage::CommitteeUpdate(msg) = record.message else {
+        let LogMessage::V1(LogMessageV1::CommitteeUpdate(msg)) = record.message else {
             anyhow::bail!("expected a committee-update log at {key}");
         };
         match *msg {
@@ -304,7 +315,7 @@ impl GuardianReader {
         let key = GenesisLogMessage::object_key();
         let keys = self
             .s3
-            .list_all_keys_in_dir(&format!("{}/", S3_DIR_GENESIS))
+            .validate_prefix_history_and_list_keys(&format!("{}/", S3_DIR_GENESIS))
             .await?;
         if keys.is_empty() {
             return Ok(None);
@@ -315,7 +326,7 @@ impl GuardianReader {
         let record = self.s3.get_log_record(&key).await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
         self.enforce_build_policy("genesis log", build_policy, &record.build_pcrs)?;
-        let LogMessage::Genesis(msg) = record.message else {
+        let LogMessage::V1(LogMessageV1::Genesis(msg)) = record.message else {
             anyhow::bail!("expected a genesis log at {key}");
         };
         Ok(Some(*msg))
