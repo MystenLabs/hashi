@@ -658,7 +658,9 @@ mod tests {
     use aws_smithy_mocks::mock;
     use aws_smithy_mocks::mock_client;
     use aws_smithy_mocks::RuleMode;
-    use hashi_types::guardian::{GuardianSignKeyPair, HeartbeatLogMessage, LogMessage};
+    use hashi_types::guardian::GuardianSignKeyPair;
+    use hashi_types::guardian::HeartbeatLogMessage;
+    use hashi_types::guardian::LogMessage;
 
     fn mk_logger_with_client(client: Client) -> GuardianS3Client {
         let config = S3Config {
