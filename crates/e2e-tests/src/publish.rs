@@ -24,5 +24,5 @@ pub async fn publish(
         environment: Some("testnet"),
     };
     let compiled = hashi::publish::build_package(&params)?;
-    hashi::publish::publish_package(client, private_key, compiled).await
+    hashi::publish::publish_package(client, &private_key.clone().into(), compiled).await
 }

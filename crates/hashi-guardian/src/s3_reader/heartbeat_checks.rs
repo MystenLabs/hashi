@@ -3,6 +3,8 @@
 
 use super::heartbeat_cursor;
 use super::GuardianReader;
+use crate::LIVE_SESSION_MAX_AGE;
+use crate::OTHER_SESSION_QUIET_PERIOD;
 use hashi_types::guardian::time_utils::now_timestamp_secs;
 use hashi_types::guardian::time_utils::unix_millis_to_seconds;
 use hashi_types::guardian::time_utils::UnixSeconds;
@@ -10,16 +12,7 @@ use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::VerifiedLogRecord;
 use std::collections::BTreeMap;
-use std::time::Duration;
 use tracing::info;
-
-/// Maximum acceptable heartbeat age for the activating standby session.
-/// Set to HEARTBEAT_INTERVAL + grace period to account for clock skew and retries.
-const LIVE_SESSION_MAX_AGE: Duration = Duration::from_mins(3);
-
-/// A non-ignored session with a heartbeat inside this window is considered
-/// active, so standby activation must fail.
-const OTHER_SESSION_QUIET_PERIOD: Duration = Duration::from_mins(10);
 
 impl GuardianReader {
     /// Enforces that `live_session` has heartbeated recently, while every other

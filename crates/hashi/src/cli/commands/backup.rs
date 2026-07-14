@@ -228,6 +228,7 @@ fn decrypt_with_local_secret_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64ct::Encoding as _;
     use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use std::path::Path;
     use std::path::PathBuf;
@@ -800,8 +801,61 @@ mod tests {
             "expected error to name the offending field, got: {chain}"
         );
         assert!(
-            chain.contains("neither inline PEM nor an existing file"),
+            chain.contains("neither inline key material nor an existing file"),
             "expected missing-key error, got: {chain}"
+        );
+    }
+
+    #[test]
+    fn save_ignores_inline_suiprivkey_and_base64_node_config_key_values() {
+        // The operator key may be configured inline in any format the key
+        // loader accepts; none of them may be mistaken for a file path. The
+        // node config file itself already captures inline values.
+        let inline_values = [
+            // The upstream sui-crypto test vector in both string encodings.
+            "suiprivkey1qzdlfxn2qa2lj5uprl8pyhexs02sg2wrhdy7qaq50cqgnffw4c2477kg9h3",
+            "AJv0mmoHVflTgR/OEl8mg9UEKcO7SeB0FH4AiaUurhVf",
+        ];
+        for inline in inline_values {
+            let fixture = TestFixture::new();
+
+            let mut node_config = crate::config::Config::load(&fixture.node_config_path).unwrap();
+            node_config.operator_private_key = Some(inline.to_string());
+            node_config.save(&fixture.node_config_path).unwrap();
+
+            // Just running save without error is the assertion: if the
+            // inline key were treated as a path, save() would bail on the
+            // missing file.
+            let _ = save_with_fresh_pgp_key(&fixture);
+        }
+    }
+
+    #[test]
+    fn save_error_never_echoes_inline_key_material() {
+        // A malformed inline key must fail the backup without the value
+        // (potentially a private key) ending up in the error chain, which
+        // automatic backups write to the log.
+        let fixture = TestFixture::new();
+
+        // Valid Base64 of secret-sized data, but not a loadable key: too
+        // long for the flagged keystore payload.
+        let secret = base64ct::Base64::encode_string(&[0x42; 48]);
+        let mut node_config = crate::config::Config::load(&fixture.node_config_path).unwrap();
+        node_config.operator_private_key = Some(secret.clone());
+        node_config.save(&fixture.node_config_path).unwrap();
+
+        let out = tempfile::Builder::new().tempdir().unwrap();
+        let (public_cert, _) = mock_pgp_keypair();
+        let err = save(&fixture.node_config_path, Some(public_cert), out.path()).unwrap_err();
+
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("operator_private_key"),
+            "expected error to name the offending field, got: {chain}"
+        );
+        assert!(
+            !chain.contains(&secret),
+            "error echoed key material: {chain}"
         );
     }
 

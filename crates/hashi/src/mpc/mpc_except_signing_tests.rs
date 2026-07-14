@@ -12087,12 +12087,13 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
     let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
     let mut mock_tob = MockOrderedBroadcastChannel::new(vec![thin_cert, full_cert]);
+    let metrics = test_metrics();
     let certified = MpcManager::run_as_avid_nonce_party(
         &party,
         batch_index,
         &mock_p2p,
         &mut mock_tob,
-        &test_metrics(),
+        &metrics,
     )
     .await
     .unwrap();
@@ -12102,6 +12103,14 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
         mock_tob.pending_messages(),
         Some(0),
         "the thin cert was ignored — the full cert had to be consumed for the quorum"
+    );
+    assert!(
+        metrics
+            .mpc_avid_rounds_total
+            .with_label_values(&["confirm"])
+            .get()
+            >= 1,
+        "a confirm-kind consumption must be counted"
     );
 }
 
@@ -12215,12 +12224,13 @@ async fn test_run_as_avid_nonce_party_laggard_pulls_and_decodes() {
     voters.insert(dealer_addr, dealer.into_inner().unwrap());
     let laggard = Arc::new(RwLock::new(setup.create_manager(5)));
     let laggard_p2p = MockP2PChannel::new(voters, setup.address(5));
+    let metrics = test_metrics();
     let result = MpcManager::run_as_avid_nonce_party(
         &laggard,
         batch_index,
         &laggard_p2p,
         &mut mock_tob,
-        &test_metrics(),
+        &metrics,
     )
     .await;
     assert!(result.is_err(), "mock TOB runs dry: {result:?}");
@@ -12229,6 +12239,14 @@ async fn test_run_as_avid_nonce_party_laggard_pulls_and_decodes() {
         mgr.dealer_avid_nonce_outputs
             .contains_key(&(batch_index, dealer_addr)),
         "the laggard decoded its share from pulled echoes"
+    );
+    assert!(
+        metrics
+            .mpc_avid_rounds_total
+            .with_label_values(&["vote"])
+            .get()
+            >= 1,
+        "a vote-kind consumption must be counted"
     );
 }
 
@@ -12343,6 +12361,207 @@ async fn test_run_nonce_generation_avid_consumes_and_converts() {
     );
 }
 
+#[test]
+fn test_decoded_shares_match_optimistic_shares() {
+    let setup = TestSetup::new_avid(6);
+    let batch_index = 0u32;
+    let mut fx = avid_pessimistic_fixture(&setup, 0, batch_index, &[0, 1, 2, 3, 4]);
+    let dispersals = fx
+        .dealer
+        .create_avid_nonce_dispersal_messages(&fx.builder, fx.confirm_cert.clone(), batch_index)
+        .unwrap();
+    let decoder_addr = setup.address(5);
+
+    let mut vote_sigs = Vec::new();
+    let mut avid_vote = None;
+    let mut echoes = Vec::new();
+    for j in [1usize, 2, 3, 4] {
+        let voter = &mut fx.confirmers[j];
+        let (dispersal, confirm_cert) = extract_dispersal(&dispersals[j].1);
+        let (vote, av, es) = voter
+            .avid_nonce_echo_and_vote(
+                fx.dealer_addr,
+                batch_index,
+                fx.common.clone(),
+                dispersal,
+                confirm_cert,
+            )
+            .unwrap();
+        vote_sigs.push(MemberSignature::new(
+            voter.mpc_config.epoch,
+            voter.address,
+            vote,
+        ));
+        avid_vote = Some(av);
+        echoes.push((j as PartyId, extract_echo_for(&es, decoder_addr)));
+    }
+    let avid_vote = avid_vote.unwrap();
+    let vote_target = DealerMessagesHash {
+        dealer_address: fx.dealer_addr,
+        messages_hash: hash_avid_vote(&avid_vote),
+    };
+    let mut agg = BlsSignatureAggregator::new(setup.committee(), vote_target);
+    for s in vote_sigs {
+        agg.add_signature(s).unwrap();
+    }
+    let vote_cert = AvidCertificate::vote(
+        agg.finish().unwrap(),
+        avid_vote,
+        Arc::new(setup.committee().clone()),
+    )
+    .unwrap()
+    .into_verified()
+    .unwrap();
+
+    let mut rng = rand::thread_rng();
+    let mut decoder = setup.create_manager(5);
+    let verified: Vec<_> = echoes
+        .into_iter()
+        .map(|(sender, echo)| {
+            decoder
+                .verify_avid_nonce_echo(fx.dealer_addr, batch_index, sender, echo, &vote_cert)
+                .unwrap()
+        })
+        .collect();
+    let outcome = decoder
+        .decode_avid_nonce_share(
+            fx.dealer_addr,
+            batch_index,
+            fx.common.clone(),
+            &verified,
+            &vote_cert,
+            &mut rng,
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        batch_avss_avid::DecodeAndDecryptOutcome::Valid(..)
+    ));
+    let decoded = decoder
+        .dealer_avid_nonce_outputs
+        .get(&(batch_index, fx.dealer_addr))
+        .unwrap()
+        .clone();
+
+    let mut optimistic = setup.create_manager(5);
+    let avss5 = extract_optimistic(&fx.optimistic[5].1).clone();
+    optimistic
+        .try_sign_avid_nonce_optimistic(fx.dealer_addr, batch_index, &avss5)
+        .unwrap();
+    let direct = optimistic
+        .dealer_avid_nonce_outputs
+        .get(&(batch_index, fx.dealer_addr))
+        .unwrap()
+        .clone();
+
+    let indices = decoder
+        .mpc_config
+        .nodes
+        .share_ids_of(decoder.party_id)
+        .unwrap();
+    let decoded = decoded.into_legacy(&indices);
+    let direct = direct.into_legacy(&indices);
+    assert_eq!(
+        bcs::to_bytes(&decoded.public_keys).unwrap(),
+        bcs::to_bytes(&direct.public_keys).unwrap(),
+        "public keys must match"
+    );
+    assert_eq!(
+        decoded.my_shares.shares.len(),
+        direct.my_shares.shares.len(),
+        "share-batch counts must match"
+    );
+    for (d, o) in decoded
+        .my_shares
+        .shares
+        .iter()
+        .zip(direct.my_shares.shares.iter())
+    {
+        assert_eq!(d.index, o.index, "share indices must match");
+        assert_eq!(
+            bcs::to_bytes(&d.batch).unwrap(),
+            bcs::to_bytes(&o.batch).unwrap(),
+            "share values must match for index {}",
+            d.index
+        );
+        assert_eq!(
+            bcs::to_bytes(&d.blinding_share).unwrap(),
+            bcs::to_bytes(&o.blinding_share).unwrap(),
+            "blinding shares must match for index {}",
+            d.index
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_run_nonce_generation_avid_recovers_from_replayed_certs() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::with_weights_avid(&[5, 1, 1, 1, 1, 1]);
+    let batch_index = 0u32;
+    let dealer_addr = setup.address(0);
+    let mut dealer = setup.create_manager(0);
+    let flow = dealer
+        .prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
+        .unwrap();
+
+    let mut managers: HashMap<Address, MpcManager> = (1..6)
+        .map(|i| (setup.address(i), setup.create_manager(i)))
+        .collect();
+    let mut agg = BlsSignatureAggregator::new(setup.committee(), flow.confirm_target.clone());
+    agg.add_signature(flow.my_signature.clone()).unwrap();
+    for i in 1..6 {
+        let addr = setup.address(i);
+        let (_, msg) = flow
+            .recipient_messages
+            .iter()
+            .find(|(a, _)| *a == addr)
+            .unwrap()
+            .clone();
+        let response = managers
+            .get_mut(&addr)
+            .unwrap()
+            .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg })
+            .unwrap();
+        agg.add_signature(MemberSignature::new(
+            dealer.mpc_config.epoch,
+            addr,
+            response.signature,
+        ))
+        .unwrap();
+    }
+    let cert = CertificateV1::NonceGeneration {
+        batch_index,
+        cert: agg.finish().unwrap(),
+    };
+
+    let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
+    let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
+    let mut prefetched = crate::communication::PrefetchedTobChannel::new(vec![(dealer_addr, cert)]);
+    let outputs = MpcManager::run_nonce_generation(
+        &party,
+        batch_index,
+        &mock_p2p,
+        &mut prefetched,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outputs.len(), 1, "one certified dealer recovered");
+    let mgr = party.read().unwrap();
+    assert!(
+        mgr.dealer_avid_nonce_outputs
+            .contains_key(&(batch_index, dealer_addr))
+    );
+    assert!(
+        mgr.public_messages_store
+            .get_avid_dealer_builder(mgr.mpc_config.epoch, batch_index)
+            .unwrap()
+            .is_none(),
+        "recovery must not deal a round of its own"
+    );
+}
+
 #[tokio::test]
 async fn test_run_as_avid_nonce_party_recovers_via_complaint() {
     let setup = TestSetup::new_avid(6);
@@ -12387,12 +12606,13 @@ async fn test_run_as_avid_nonce_party_recovers_via_complaint() {
     );
     let party = Arc::new(RwLock::new(victim_mgr));
     let party_p2p = MockP2PChannel::new(nodes, victim);
+    let metrics = test_metrics();
     let result = MpcManager::run_as_avid_nonce_party(
         &party,
         batch_index,
         &party_p2p,
         &mut mock_tob,
-        &test_metrics(),
+        &metrics,
     )
     .await;
     assert!(result.is_err(), "mock TOB runs dry: {result:?}");
@@ -12401,6 +12621,10 @@ async fn test_run_as_avid_nonce_party_recovers_via_complaint() {
         mgr.dealer_avid_nonce_outputs
             .contains_key(&(batch_index, dealer_addr)),
         "the victim recovered its share via the complaint path"
+    );
+    assert!(
+        metrics.mpc_avid_complaints_recovered_total.get() >= 1,
+        "the complaint recovery must be counted"
     );
 }
 

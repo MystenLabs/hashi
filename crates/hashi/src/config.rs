@@ -5,7 +5,9 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
 
-use sui_crypto::ed25519::Ed25519PrivateKey;
+use anyhow::Context as _;
+
+use sui_crypto::simple::SimpleKeypair;
 use sui_sdk_types::Address;
 
 use crate::constants::SUI_MAINNET_CHAIN_ID;
@@ -16,46 +18,30 @@ const DEFAULT_MPC_SIGNING_CHUNK_SIZE: usize = 64;
 /// receive large MPC round messages.
 pub(crate) const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 
-/// Load an Ed25519 private key from a file path or inline PEM string.
-///
-/// Supported formats:
-/// - DER-encoded binary file
-/// - PEM-encoded text file
-/// - Inline PEM string (if not a valid file path)
-pub fn load_ed25519_private_key(path_or_pem: &str) -> anyhow::Result<Ed25519PrivateKey> {
-    load_ed25519_private_key_from_path(Path::new(path_or_pem))
-        .or_else(|_| {
-            Ed25519PrivateKey::from_pem(path_or_pem)
-                .map_err(|e| anyhow::anyhow!("PEM parse error: {}", e))
-        })
-        .map_err(|_: anyhow::Error| {
-            anyhow::anyhow!("unable to load Ed25519 private key from '{}'", path_or_pem)
-        })
-}
+fn deserialize_backup_pgp_cert<'de, D>(
+    deserializer: D,
+) -> Result<Option<hashi_types::pgp::PgpPublicCert>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(value) = <Option<String> as serde::Deserialize>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
 
-/// Load an Ed25519 private key from a file path.
-///
-/// Supported formats:
-/// - DER-encoded binary file
-/// - PEM-encoded text file
-pub fn load_ed25519_private_key_from_path(path: &Path) -> anyhow::Result<Ed25519PrivateKey> {
-    let contents = std::fs::read(path)?;
+    let path = Path::new(&value);
+    let armored = if path.is_file() {
+        std::fs::read_to_string(path).map_err(serde::de::Error::custom)?
+    } else {
+        value
+    };
 
-    if let Ok(pk) = Ed25519PrivateKey::from_der(&contents) {
-        return Ok(pk);
-    }
-
-    if let Ok(contents_str) = std::str::from_utf8(&contents)
-        && let Ok(pk) = Ed25519PrivateKey::from_pem(contents_str)
-    {
-        return Ok(pk);
-    }
-
-    anyhow::bail!("unsupported key format in '{}'", path.display())
+    hashi_types::pgp::PgpPublicCert::new(armored)
+        .map(Some)
+        .map_err(serde::de::Error::custom)
 }
 
 #[derive(Clone, Debug, Default, serde_derive::Deserialize, serde_derive::Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls_private_key: Option<String>,
@@ -111,8 +97,12 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub db: Option<PathBuf>,
 
-    /// Armored OpenPGP certificate used for node backups.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Armored OpenPGP certificate or certificate file path used for node backups.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_backup_pgp_cert",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub backup_pgp_cert: Option<hashi_types::pgp::PgpPublicCert>,
 
     /// Directory to write automatic encrypted backups into.
@@ -228,7 +218,7 @@ pub struct Config {
 }
 
 #[derive(Clone, Debug, serde_derive::Deserialize, serde_derive::Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct MetricsPushConfig {
     /// sui-proxy `/publish/metrics` URL (e.g. `https://metrics-proxy.testnet.example.com/publish/metrics`).
     pub push_url: String,
@@ -287,14 +277,17 @@ impl Config {
         Ok(ed25519_dalek::VerifyingKey::from(&tls_private_key))
     }
 
-    //TODO support more than just Ed25519
-    pub fn operator_private_key(&self) -> Result<Ed25519PrivateKey, anyhow::Error> {
+    /// Load the operator signing keypair from `operator-private-key`.
+    ///
+    /// The configured value may be a file path or an inline key; see
+    /// [`crate::keys::load_keypair`] for the accepted formats.
+    pub fn operator_private_key(&self) -> Result<SimpleKeypair, anyhow::Error> {
         let raw = self
             .operator_private_key
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("no operator_private_key configured"))?;
 
-        load_ed25519_private_key(raw)
+        crate::keys::load_keypair(raw).context("unable to load the operator private key")
     }
 
     pub fn validator_address(&self) -> Result<Address, anyhow::Error> {
@@ -468,7 +461,7 @@ impl Config {
 
 /// Relevant Onchain Ids for the hashi protocol.
 #[derive(Debug, Clone, Copy, serde_derive::Deserialize, serde_derive::Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct HashiIds {
     /// The original package id of the `hashi` package.
     pub package_id: Address,
@@ -538,12 +531,57 @@ mod tests {
     }
 
     #[test]
+    fn backup_pgp_cert_accepts_file_path() {
+        let dir = tempfile::Builder::new().tempdir().unwrap();
+        let cert_path = dir.path().join("backup-cert.asc");
+        let config_path = dir.path().join("config.toml");
+        let (public_cert, _) = hashi_types::pgp::test_utils::mock_pgp_keypair();
+        std::fs::write(&cert_path, &public_cert).unwrap();
+
+        let mut config = toml::Table::new();
+        config.insert(
+            "backup-pgp-cert".to_string(),
+            toml::Value::String(cert_path.to_string_lossy().into_owned()),
+        );
+        std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+
+        let config = Config::load(&config_path).unwrap();
+        assert_eq!(
+            config.backup_pgp_cert.unwrap().armored(),
+            public_cert.as_str()
+        );
+    }
+
+    #[test]
     fn backup_dir_uses_configured_path() {
         let config = Config {
             backup_dir: Some(PathBuf::from("/var/lib/hashi/backups")),
             ..Default::default()
         };
         assert_eq!(config.backup_dir(), Path::new("/var/lib/hashi/backups"));
+    }
+
+    #[test]
+    fn rejects_unknown_root_field() {
+        let error = toml::from_str::<Config>("databse = '/var/lib/hashi/db'")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown field `databse`"), "{error}");
+    }
+
+    #[test]
+    fn rejects_root_field_nested_under_hashi_ids() {
+        let address = Address::ZERO;
+        let config = format!(
+            "[hashi-ids]\npackage-id = '{address}'\nhashi-object-id = '{address}'\ndb = '/var/lib/hashi/db'\n"
+        );
+
+        let error = toml::from_str::<Config>(&config).unwrap_err().to_string();
+        assert!(error.contains("unknown field `db`"), "{error}");
+        assert!(
+            error.contains("expected `package-id` or `hashi-object-id`"),
+            "{error}"
+        );
     }
 
     #[test]

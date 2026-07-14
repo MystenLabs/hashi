@@ -24,7 +24,6 @@ use sui_sdk_types::Input;
 use sui_sdk_types::MoveCall;
 use sui_sdk_types::ProgrammableTransaction;
 use sui_sdk_types::SharedInput;
-use sui_sdk_types::SignatureScheme;
 use sui_sdk_types::StructTag;
 use sui_sdk_types::Transaction;
 use sui_sdk_types::TransactionExpiration;
@@ -246,27 +245,6 @@ impl SuiNetworkBuilder {
     }
 }
 
-fn keypair_from_base64(b64: &str) -> Result<Ed25519PrivateKey> {
-    let bytes = <base64ct::Base64 as base64ct::Encoding>::decode_vec(b64)?;
-
-    let keypair =
-        match SignatureScheme::from_byte(*bytes.first().ok_or_else(|| anyhow!("Invalid key"))?)
-            .map_err(|e| anyhow!("{e}"))?
-        {
-            SignatureScheme::Ed25519 => Ed25519PrivateKey::new(
-                bytes
-                    .get(1..)
-                    .ok_or_else(|| anyhow!("Invalid key"))?
-                    .try_into()?,
-            ),
-            SignatureScheme::Secp256k1 => bail!("invalid key"),
-            SignatureScheme::Secp256r1 => bail!("invalid key"),
-            _ => bail!("invalid key"),
-        };
-
-    Ok(keypair)
-}
-
 fn ed25519_private_key_from_base64(b64: &str) -> Result<Ed25519PrivateKey> {
     let bytes = <base64ct::Base64 as base64ct::Encoding>::decode_vec(b64)?;
     Ok(Ed25519PrivateKey::new((&bytes[..]).try_into()?))
@@ -304,7 +282,8 @@ fn load_keys(dir: &Path) -> Result<NetworkKeys> {
     let mut admin_ports = vec![];
 
     for validator in network_config.validator_configs {
-        let keypair = keypair_from_base64(&validator.account_key_pair.value)?;
+        let keypair = Ed25519PrivateKey::from_base64(&validator.account_key_pair.value)
+            .map_err(|e| anyhow!("invalid validator account key: {e}"))?;
         let address = keypair.public_key().derive_address();
         validator_keys.insert(address, keypair);
         admin_ports.push(validator.admin_interface_port);

@@ -186,7 +186,7 @@ fn uleb128_len(value: usize) -> usize {
 }
 
 use sui_crypto::SuiSigner;
-use sui_crypto::ed25519::Ed25519PrivateKey;
+use sui_crypto::simple::SimpleKeypair;
 use sui_rpc::Client;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
@@ -307,7 +307,7 @@ impl TransactionExecutionError {
 /// transaction for a multisig sender.
 pub async fn finalize(
     client: &mut Client,
-    signer: Option<&Ed25519PrivateKey>,
+    signer: Option<&SimpleKeypair>,
     mut builder: TransactionBuilder,
     sender: Option<Address>,
     gas: &GasOverrides,
@@ -315,7 +315,7 @@ pub async fn finalize(
     timeout: Duration,
 ) -> anyhow::Result<TxOutcome> {
     let sender = sender
-        .or_else(|| signer.map(|s| s.public_key().derive_address()))
+        .or_else(|| signer.map(|s| s.verifying_key().derive_address()))
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "no sender available: pass --sender <address> \
@@ -365,14 +365,14 @@ pub async fn finalize(
 /// automatically.
 pub struct SuiTxExecutor {
     client: Client,
-    signer: Ed25519PrivateKey,
+    signer: SimpleKeypair,
     hashi_ids: HashiIds,
     timeout: Duration,
 }
 
 impl SuiTxExecutor {
     /// Create a new executor with minimal dependencies.
-    pub fn new(client: Client, signer: Ed25519PrivateKey, hashi_ids: HashiIds) -> Self {
+    pub fn new(client: Client, signer: SimpleKeypair, hashi_ids: HashiIds) -> Self {
         Self {
             client,
             signer,
@@ -402,7 +402,7 @@ impl SuiTxExecutor {
     }
 
     /// Override the signer.
-    pub fn with_signer(mut self, signer: Ed25519PrivateKey) -> Self {
+    pub fn with_signer(mut self, signer: SimpleKeypair) -> Self {
         self.signer = signer;
         self
     }
@@ -415,12 +415,12 @@ impl SuiTxExecutor {
 
     /// Get the sender address (derived from the signer's public key).
     pub fn sender(&self) -> Address {
-        self.signer.public_key().derive_address()
+        self.signer.verifying_key().derive_address()
     }
 
     /// Borrow the signer (e.g. so a shared finalizer can sign on this
     /// executor's behalf).
-    pub fn signer(&self) -> &Ed25519PrivateKey {
+    pub fn signer(&self) -> &SimpleKeypair {
         &self.signer
     }
 
@@ -1137,7 +1137,7 @@ impl SuiTxExecutor {
         next_epoch_encryption_public_key: Option<&EncryptionPublicKey>,
         next_epoch_signing_key: Option<&Bls12381PrivateKey>,
     ) -> anyhow::Result<bool> {
-        let sender = self.signer.public_key().derive_address();
+        let sender = self.signer.verifying_key().derive_address();
         let transaction = build_register_or_update_validator_tx(
             &mut self.client,
             &self.hashi_ids,
@@ -2009,23 +2009,38 @@ pub async fn build_register_or_update_validator_tx(
         has_calls = true;
     }
 
-    // 5. Update TLS key if available and changed.
-    if let Ok(tls_key) = config.tls_public_key()
-        && onchain_member
+    // 5. Update TLS key if configured and changed. A configured-but-unloadable
+    // key is a hard error: silently skipping would produce a registration
+    // without `update_tls_public_key` (bad key-file permissions did exactly
+    // this to an operator, who registered incomplete with no warning).
+    if config.tls_private_key.is_some() {
+        let tls_key = config.tls_public_key().map_err(|e| {
+            e.context(
+                "failed to load tls-private-key from the node config; \
+                 fix the file path, format, or permissions (or remove the field \
+                 to skip setting a TLS public key)",
+            )
+        })?;
+        if onchain_member
             .as_ref()
             .map(|m| m.tls_public_key() != Some(&tls_key))
             .unwrap_or(true)
-    {
-        let tls_key_arg = builder.pure(&tls_key.as_bytes().to_vec());
-        builder.move_call(
-            Function::new(
-                hashi_ids.package_id,
-                Identifier::from_static("validator"),
-                Identifier::from_static("update_tls_public_key"),
-            ),
-            vec![hashi_arg, validator_address_arg, tls_key_arg],
+        {
+            let tls_key_arg = builder.pure(&tls_key.as_bytes().to_vec());
+            builder.move_call(
+                Function::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("validator"),
+                    Identifier::from_static("update_tls_public_key"),
+                ),
+                vec![hashi_arg, validator_address_arg, tls_key_arg],
+            );
+            has_calls = true;
+        }
+    } else {
+        tracing::warn!(
+            "tls-private-key is not configured; registration will not set a TLS public key"
         );
-        has_calls = true;
     }
 
     // 6. Update operator address if provided and changed.
@@ -2065,7 +2080,7 @@ pub async fn build_register_or_update_validator_tx(
 /// Sweeps SUI coins into the account's Address Balance
 pub async fn sweep_to_address_balance(client: &mut Client, config: &Config) -> anyhow::Result<()> {
     let signer = config.operator_private_key()?;
-    let sender = signer.public_key().derive_address();
+    let sender = signer.verifying_key().derive_address();
 
     // First we need to sweep any SUI into the account's AB so that subsequent txn can all be done
     // in parallel, using its AB to pay for gas fees.

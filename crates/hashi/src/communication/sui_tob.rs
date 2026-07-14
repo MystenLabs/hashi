@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use hashi_types::move_types::ProtocolType;
-use sui_crypto::ed25519::Ed25519PrivateKey;
+use sui_crypto::simple::SimpleKeypair;
 use sui_sdk_types::Address;
 use thiserror::Error;
 
@@ -52,7 +52,7 @@ pub struct SuiTobChannel {
     epoch: u64,
     batch_index: Option<u32>,
     protocol_type: ProtocolType,
-    signer: Ed25519PrivateKey,
+    signer: SimpleKeypair,
     /// Dealers we've already returned certificates for
     seen_dealers: HashSet<Address>,
     /// Cached certificates not yet returned
@@ -66,7 +66,7 @@ impl SuiTobChannel {
         epoch: u64,
         batch_index: Option<u32>,
         protocol_type: ProtocolType,
-        signer: Ed25519PrivateKey,
+        signer: SimpleKeypair,
     ) -> Self {
         Self {
             hashi_ids,
@@ -111,6 +111,40 @@ pub async fn fetch_certificates(
         certificates.push((dealer, cert));
     }
     Ok(certificates)
+}
+
+pub struct PrefetchedTobChannel {
+    certs: VecDeque<CertificateV1>,
+    dealers: Vec<Address>,
+}
+
+impl PrefetchedTobChannel {
+    pub fn new(certs: Vec<(Address, CertificateV1)>) -> Self {
+        let dealers = certs.iter().map(|(dealer, _)| *dealer).collect();
+        Self {
+            certs: certs.into_iter().map(|(_, cert)| cert).collect(),
+            dealers,
+        }
+    }
+}
+
+#[async_trait]
+impl OrderedBroadcastChannel<CertificateV1> for PrefetchedTobChannel {
+    async fn publish(&self, _cert: CertificateV1) -> ChannelResult<()> {
+        Err(ChannelError::Other(
+            "replayed certificate stream is receive-only".into(),
+        ))
+    }
+
+    async fn receive(&mut self) -> ChannelResult<CertificateV1> {
+        self.certs
+            .pop_front()
+            .ok_or_else(|| ChannelError::Other("replayed certificate stream exhausted".into()))
+    }
+
+    async fn certified_dealers(&mut self) -> Vec<Address> {
+        self.dealers.clone()
+    }
 }
 
 pub async fn fetch_key_generation_certificates(

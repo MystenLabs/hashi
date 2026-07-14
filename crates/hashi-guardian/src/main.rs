@@ -6,8 +6,6 @@ use hashi_guardian::rpc::GuardianGrpc;
 use hashi_guardian::withdraw_mode::heartbeat::HeartbeatWriter;
 use hashi_guardian::Enclave;
 use hashi_guardian::HEARTBEAT_INTERVAL;
-use hashi_guardian::HEARTBEAT_RETRY_INTERVAL;
-use hashi_guardian::MAX_HEARTBEAT_FAILURES_INTERVAL;
 use hashi_types::guardian::EnclaveMode;
 use hashi_types::guardian::GuardianEncKeyPair;
 use hashi_types::guardian::GuardianSignKeyPair;
@@ -68,31 +66,21 @@ async fn main() -> Result<()> {
         .set_serving::<GuardianServiceServer<GuardianGrpc>>()
         .await;
 
-    let server_future = Server::builder()
-        .add_service(health_service)
-        .add_service(GuardianServiceServer::new(svc))
-        .serve(addr);
-
     // Don't emit heartbeats in ceremony mode: their primary function is
     // to allow KPs to detect old sessions that might still be running
     // in order to bypass limiter. Not a concern for ceremony mode.
-    if ceremony_mode {
-        return server_future
-            .await
-            .map_err(|e| anyhow::anyhow!("Server error: {}", e));
+    if !ceremony_mode {
+        drop(tokio::spawn(
+            HeartbeatWriter::new(enclave).run(HEARTBEAT_INTERVAL),
+        ));
     }
 
-    let heartbeat_future = HeartbeatWriter::new(enclave, MAX_HEARTBEAT_FAILURES_INTERVAL)
-        .run(HEARTBEAT_INTERVAL, HEARTBEAT_RETRY_INTERVAL);
-
-    tokio::select! {
-        res = server_future => {
-            res.map_err(|e| anyhow::anyhow!("Server error: {}", e))
-        }
-        res = heartbeat_future => {
-            panic!("Heartbeat failed: {:?}", res)
-        }
-    }
+    Server::builder()
+        .add_service(health_service)
+        .add_service(GuardianServiceServer::new(svc))
+        .serve(addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("Server error: {}", e))
 }
 
 /// Make any panic abort the process instead of unwinding to the tokio task

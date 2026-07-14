@@ -23,6 +23,7 @@ pub mod db;
 pub mod deposits;
 pub mod grpc;
 pub mod guardian_limiter;
+pub mod keys;
 pub mod leader;
 pub mod metrics;
 pub mod metrics_push;
@@ -79,7 +80,10 @@ impl Hashi {
         config: config::Config,
     ) -> anyhow::Result<Arc<Self>> {
         init_crypto_provider();
-        let db_path = config.db.as_deref().unwrap();
+        let db_path = config
+            .db
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("missing required `db` in node config"))?;
         let db = db::Database::open(db_path)?;
         let metrics = Arc::new(metrics::Metrics::new_default());
         Ok(Arc::new(Self {
@@ -110,7 +114,10 @@ impl Hashi {
         registry: &prometheus::Registry,
     ) -> anyhow::Result<Arc<Self>> {
         init_crypto_provider();
-        let db_path = config.db.as_deref().unwrap();
+        let db_path = config
+            .db
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("missing required `db` in node config"))?;
         let db = db::Database::open(db_path)?;
         let metrics = Arc::new(metrics::Metrics::new(registry));
         Ok(Arc::new(Self {
@@ -1170,6 +1177,28 @@ mod test {
         let registry = prometheus::Registry::new();
         let hashi = Hashi::new_with_registry(server_version, None, config, &registry).unwrap();
         (hashi, tmpdir)
+    }
+
+    #[test]
+    fn constructors_reject_missing_db() {
+        let error = Hashi::new(
+            ServerVersion::new("unknown", "unknown"),
+            None,
+            Config::default(),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.to_string(), "missing required `db` in node config");
+
+        let error = Hashi::new_with_registry(
+            ServerVersion::new("unknown", "unknown"),
+            None,
+            Config::default(),
+            &prometheus::Registry::new(),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.to_string(), "missing required `db` in node config");
     }
 
     #[test]

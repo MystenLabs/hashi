@@ -139,7 +139,7 @@ async fn test_upgrade_v1_to_v2() -> Result<()> {
     let user_key = networks.sui_network.user_keys.first().unwrap();
     let hashi = networks.hashi_network.nodes()[0].hashi().clone();
     let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
-        .with_signer(user_key.clone());
+        .with_signer(user_key.clone().into());
 
     let mut builder = TransactionBuilder::new();
     builder.move_call(

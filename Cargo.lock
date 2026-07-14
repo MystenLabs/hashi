@@ -5994,8 +5994,10 @@ checksum = "734676eb262c623cec13c3155096e08d1f8f29adce39ba17948b18dad1e54142"
 [[package]]
 name = "sui-crypto"
 version = "0.3.0"
-source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1#210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1"
+source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=680287aa8df3fae4a5a73fd7d04091cf2d3717ff#680287aa8df3fae4a5a73fd7d04091cf2d3717ff"
 dependencies = [
+ "base64ct",
+ "bech32 0.11.1",
  "ed25519-dalek",
  "k256",
  "p256 0.13.2",
@@ -6043,8 +6045,8 @@ dependencies = [
 
 [[package]]
 name = "sui-rpc"
-version = "0.3.0"
-source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1#210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1"
+version = "0.3.1"
+source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=680287aa8df3fae4a5a73fd7d04091cf2d3717ff#680287aa8df3fae4a5a73fd7d04091cf2d3717ff"
 dependencies = [
  "base64 0.22.1",
  "bcs",
@@ -6066,8 +6068,8 @@ dependencies = [
 
 [[package]]
 name = "sui-sdk-types"
-version = "0.3.0"
-source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1#210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1"
+version = "0.3.1"
+source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=680287aa8df3fae4a5a73fd7d04091cf2d3717ff#680287aa8df3fae4a5a73fd7d04091cf2d3717ff"
 dependencies = [
  "base64ct",
  "bcs",
@@ -6087,8 +6089,8 @@ dependencies = [
 
 [[package]]
 name = "sui-transaction-builder"
-version = "0.3.0"
-source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1#210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1"
+version = "0.3.1"
+source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=680287aa8df3fae4a5a73fd7d04091cf2d3717ff#680287aa8df3fae4a5a73fd7d04091cf2d3717ff"
 dependencies = [
  "async-trait",
  "bcs",
