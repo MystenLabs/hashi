@@ -21,13 +21,14 @@ use crate::guardian::GuardianPubKey;
 use crate::guardian::GuardianResult;
 use crate::guardian::GuardianSignKeyPair;
 use crate::guardian::GuardianSignature;
-use crate::guardian::GuardianSigned;
 use crate::guardian::IntentType;
 use crate::guardian::SessionID;
 use crate::guardian::SigningIntent;
 use crate::guardian::UnixMillis;
 use crate::guardian::now_timestamp_ms;
 use crate::guardian::session_id_from_signing_pubkey;
+use crate::guardian::signing::sign_intent;
+use crate::guardian::signing::verify_intent;
 use serde::Deserialize;
 use serde::Serialize;
 use std::time::Duration;
@@ -56,18 +57,18 @@ pub struct LogRecordBody<M> {
 pub type LogRecordV1 = LogRecordBody<LogMessageV1>;
 
 #[derive(Serialize)]
-pub(crate) enum LogSigningPayload {
-    V1(LogSigningPayloadV1),
+enum LogSigningPayload<'a> {
+    V1(LogSigningPayloadV1<'a>),
 }
 
 #[derive(Serialize)]
-pub(crate) struct LogSigningPayloadV1 {
-    session_id: SessionID,
-    object_key: String,
-    message: LogMessageV1,
+struct LogSigningPayloadV1<'a> {
+    session_id: &'a SessionID,
+    object_key: &'a str,
+    message: &'a LogMessageV1,
 }
 
-impl SigningIntent for LogSigningPayload {
+impl SigningIntent for LogSigningPayload<'_> {
     const INTENT: IntentType = IntentType::LogMessage;
 }
 
@@ -164,23 +165,19 @@ impl LogRecord {
         timestamp_ms: UnixMillis,
         object_key: String,
     ) -> Self {
-        let signed = GuardianSigned::new(
-            LogSigningPayload::V1(LogSigningPayloadV1 {
-                session_id,
-                object_key,
-                message,
-            }),
-            signing_key,
+        let mut record = LogRecordBody {
+            object_key,
+            session_id,
             timestamp_ms,
-        );
-        let LogSigningPayload::V1(payload) = signed.data;
-        Self::V1(LogRecordBody {
-            object_key: payload.object_key,
-            session_id: payload.session_id,
-            timestamp_ms: signed.timestamp_ms,
-            message: payload.message,
-            signature: Some(signed.signature),
-        })
+            message,
+            signature: None,
+        };
+        record.signature = Some(sign_intent(
+            &record.signing_payload(),
+            timestamp_ms,
+            signing_key,
+        ));
+        Self::V1(record)
     }
 
     fn unsigned(
@@ -260,20 +257,11 @@ impl LogRecordBody<LogMessageV1> {
         let timestamp_ms = self.timestamp_ms;
         let signature = self
             .signature
+            .as_ref()
             .ok_or_else(|| InvalidInputs("missing log signature".into()))?;
-        let payload = GuardianSigned {
-            data: LogSigningPayload::V1(LogSigningPayloadV1 {
-                session_id: self.session_id,
-                object_key: self.object_key,
-                message: self.message,
-            }),
-            timestamp_ms,
-            signature,
-        }
-        .verify(pub_key)?;
-        let LogSigningPayload::V1(payload) = payload;
+        verify_intent(&self.signing_payload(), timestamp_ms, signature, pub_key)?;
 
-        Ok((payload.session_id, timestamp_ms, payload.message))
+        Ok((self.session_id, timestamp_ms, self.message))
     }
 
     fn validate_unsigned(self) -> GuardianResult<(SessionID, UnixMillis, LogMessageV1)> {
@@ -344,6 +332,14 @@ impl LogRecordBody<LogMessageV1> {
             )));
         }
         Ok(())
+    }
+
+    fn signing_payload(&self) -> LogSigningPayload<'_> {
+        LogSigningPayload::V1(LogSigningPayloadV1 {
+            session_id: &self.session_id,
+            object_key: &self.object_key,
+            message: &self.message,
+        })
     }
 }
 

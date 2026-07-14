@@ -59,6 +59,25 @@ pub trait SigningIntent {
     }
 }
 
+pub(crate) fn sign_intent<T: Serialize + SigningIntent>(
+    data: &T,
+    timestamp_ms: UnixMillis,
+    signing_key: &SigningKey,
+) -> GuardianSignature {
+    signing_key.sign(&data.signing_bytes(timestamp_ms))
+}
+
+pub(crate) fn verify_intent<T: Serialize + SigningIntent>(
+    data: &T,
+    timestamp_ms: UnixMillis,
+    signature: &GuardianSignature,
+    pub_key: &VerificationKey,
+) -> GuardianResult<()> {
+    pub_key
+        .verify(signature, &data.signing_bytes(timestamp_ms))
+        .map_err(|_| InvalidInputs("signature invalid".into()))
+}
+
 /// All possible KP signing intent types.
 ///
 /// These signatures are detached OpenPGP signatures produced by KPs, not
@@ -120,8 +139,7 @@ impl<T: Serialize + SigningIntent> GuardianSigned<T> {
     /// Create a new signed payload (used by enclave)
     /// Includes intent byte for domain separation to prevent cross-type signature attacks
     pub fn new(data: T, signing_key: &SigningKey, timestamp_ms: UnixMillis) -> Self {
-        let signing_payload = data.signing_bytes(timestamp_ms);
-        let signature = signing_key.sign(&signing_payload);
+        let signature = sign_intent(&data, timestamp_ms, signing_key);
         Self {
             data,
             timestamp_ms,
@@ -132,10 +150,7 @@ impl<T: Serialize + SigningIntent> GuardianSigned<T> {
     /// Verify signature and extract payload
     /// Checks intent byte to ensure signature is for the correct type
     pub fn verify(self, pub_key: &VerificationKey) -> GuardianResult<T> {
-        let msg_bytes = self.data.signing_bytes(self.timestamp_ms);
-        pub_key
-            .verify(&self.signature, &msg_bytes)
-            .map_err(|_| InvalidInputs("signature invalid".into()))?;
+        verify_intent(&self.data, self.timestamp_ms, &self.signature, pub_key)?;
         Ok(self.data)
     }
 }
