@@ -99,6 +99,35 @@ fn parse_keypair(contents: &[u8]) -> anyhow::Result<SimpleKeypair> {
     anyhow::bail!("unrecognized private key format; expected {SUPPORTED_FORMATS}")
 }
 
+/// Classify a configured private key value the way [`load_keypair`] does,
+/// returning the file path it references, or `None` when the value is inline
+/// key material (a PEM block, a `suiprivkey...` string, or a Base64 keystore
+/// entry) that is already captured by the config itself.
+///
+/// A value that is neither inline key material nor an existing file is an
+/// error; like all errors in this module, it never echoes a value that could
+/// be a secret.
+pub(crate) fn referenced_key_file(value: &str) -> anyhow::Result<Option<&Path>> {
+    let value = value.trim();
+    if value.starts_with("-----BEGIN") || value.starts_with("suiprivkey") {
+        return Ok(None);
+    }
+
+    let path = Path::new(value);
+    if path.is_file() {
+        return Ok(Some(path));
+    }
+
+    if SimpleKeypair::from_base64(value).is_ok() {
+        return Ok(None);
+    }
+
+    anyhow::bail!(
+        "'{}' is neither inline key material nor an existing file",
+        redact_secret_like(value)
+    )
+}
+
 /// Decide whether a failed key value is safe to echo in an error message.
 ///
 /// Paths are useful context and safe; anything that could plausibly be key
@@ -291,5 +320,34 @@ mod tests {
         // Truncated key bytes.
         let truncated = base64ct::Base64::encode_string(&[0x00, 0x42, 0x42]);
         load_keypair(&truncated).unwrap_err();
+    }
+
+    #[test]
+    fn referenced_key_file_classifies_like_the_loader() {
+        let (_, pem) = ed25519_pem();
+
+        // Inline key material in every accepted format references no file.
+        for inline in [pem.as_str(), VECTOR_SUIPRIVKEY, VECTOR_BASE64] {
+            assert_eq!(referenced_key_file(inline).unwrap(), None);
+        }
+
+        // An existing file is returned as a path.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("operator.pem");
+        std::fs::write(&path, &pem).unwrap();
+        let value = path.to_str().unwrap();
+        assert_eq!(referenced_key_file(value).unwrap(), Some(path.as_path()));
+
+        // A missing path is an error naming the path.
+        let err = referenced_key_file("/nonexistent/operator.pem")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("/nonexistent/operator.pem"), "{err}");
+
+        // A secret-shaped value that is neither loadable nor a file is an
+        // error that never echoes the value.
+        let secret = base64ct::Base64::encode_string(&[0x42; 48]);
+        let err = referenced_key_file(&secret).unwrap_err().to_string();
+        assert!(!err.contains(&secret), "error echoed key material: {err}");
     }
 }

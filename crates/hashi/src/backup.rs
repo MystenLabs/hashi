@@ -327,13 +327,13 @@ fn backup_file_paths(
 /// fields.
 ///
 /// Both `tls_private_key` and `operator_private_key` are `Option<String>`
-/// interpreted as path-first, inline-PEM-fallback by the node. We classify
-/// the value here so the backup either includes the referenced file or, when
-/// the value is inline PEM, relies on the node config file itself to capture
-/// the key material. A path-shaped value that doesn't resolve to a file is
-/// an error: it would mean the node config points at a missing key, and
-/// silently skipping it would produce a backup that can't actually restore
-/// the node.
+/// holding either a file path or inline key material (in any format
+/// `crate::keys` accepts). The backup either includes the referenced file
+/// or, when the value is inline, relies on the node config file itself to
+/// capture the key material. A path-shaped value that doesn't resolve to a
+/// file is an error: it would mean the node config points at a missing key,
+/// and silently skipping it would produce a backup that can't actually
+/// restore the node.
 fn node_config_referenced_files(node_config: &crate::config::Config) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
 
@@ -346,27 +346,18 @@ fn node_config_referenced_files(node_config: &crate::config::Config) -> Result<V
     ] {
         let Some(raw) = raw else { continue };
 
-        if is_inline_pem(raw) {
-            continue;
+        let referenced = crate::keys::referenced_key_file(raw).with_context(|| {
+            format!(
+                "node config field `{field_name}` cannot be backed up; fix the value or remove \
+                 it before running backup"
+            )
+        })?;
+        if let Some(path) = referenced {
+            paths.push(path.to_path_buf());
         }
-
-        let candidate = Path::new(raw);
-        if !candidate.is_file() {
-            anyhow::bail!(
-                "node config field `{field_name}` is set to {raw:?} which is neither inline PEM nor an existing file. \
-                 Fix the value or remove it before running backup."
-            );
-        }
-        paths.push(candidate.to_path_buf());
     }
 
     Ok(paths)
-}
-
-/// Heuristic: PEM blobs start with the armor header `-----BEGIN`, optionally
-/// after some leading whitespace. A real path on any sane filesystem won't.
-fn is_inline_pem(value: &str) -> bool {
-    value.trim_start().starts_with("-----BEGIN")
 }
 
 pub fn encrypted_backup_file_name() -> PathBuf {
