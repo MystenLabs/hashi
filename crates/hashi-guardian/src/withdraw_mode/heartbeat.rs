@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::Enclave;
+use hashi_types::guardian::EnclaveMode;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::HeartbeatLogMessage;
 use hashi_types::guardian::WithdrawStage;
@@ -17,6 +18,11 @@ pub struct HeartbeatWriter {
 
 impl HeartbeatWriter {
     pub fn new(enclave: Arc<Enclave>) -> Self {
+        assert_eq!(
+            enclave.mode(),
+            EnclaveMode::Withdraw,
+            "heartbeats are only supported in withdraw mode"
+        );
         Self {
             enclave,
             next_seq: 0,

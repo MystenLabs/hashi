@@ -209,6 +209,7 @@ impl OperatorInitTestArgs {
 }
 
 impl Enclave {
+    /// Enclave in the requested mode with fresh random keys.
     pub fn create_with_random_keys_for_mode(mode: EnclaveMode) -> Arc<Self> {
         let signing_keys = GuardianSignKeyPair::new(rand::thread_rng());
         let encryption_keys = GuardianEncKeyPair::random(&mut rand::thread_rng());

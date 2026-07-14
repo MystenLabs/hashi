@@ -3,7 +3,6 @@
 
 use super::BuildPcrs;
 use super::Ciphertext;
-use super::EnclaveMode;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianInfo;

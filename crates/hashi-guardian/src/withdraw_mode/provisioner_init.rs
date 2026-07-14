@@ -16,7 +16,6 @@ use hashi_types::guardian::InitLogMessage::PIEnclaveFullyInitialized;
 use hashi_types::guardian::*;
 use std::sync::Arc;
 use tracing::info;
-use GuardianError::*;
 
 /// Receives the current KPs' encrypted shares in one submission. Decrypts each
 /// under the enclave's config_hash (set at operator_init) as AAD — so only shares
@@ -106,6 +105,7 @@ async fn finalize_init(
 mod tests {
     use super::*;
     use crate::OperatorInitTestArgs;
+    use hashi_types::guardian::GuardianError::InvalidInputs;
     use k256::SecretKey;
 
     const TEST_N: usize = 5;

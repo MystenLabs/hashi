@@ -17,7 +17,6 @@ use hashi_types::guardian::RateLimiter;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalResponse;
-use hashi_types::guardian::WithdrawStage;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::WithdrawalLogMessage;
 use std::sync::Arc;
@@ -184,6 +183,7 @@ mod tests {
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::StandardWithdrawalRequest;
+    use hashi_types::guardian::WithdrawStage;
 
     /// Sets up an enclave with a single committee and token bucket limiter.
     async fn setup_fully_initialized_enclave(

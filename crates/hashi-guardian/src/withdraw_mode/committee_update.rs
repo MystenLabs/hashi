@@ -87,16 +87,7 @@ pub async fn update_committee_chain(
     enclave: Arc<Enclave>,
     transitions: Vec<HashiSigned<CommitteeTransitionRequest>>,
 ) -> GuardianResult<u64> {
-    let mut transitions = transitions.into_iter();
-    let Some(first) = transitions.next() else {
-        // An empty chain must not bypass the activation check in `update_committee`.
-        if !enclave.is_fully_initialized() {
-            return Err(EnclaveUninitialized);
-        }
-        return Ok(enclave.state.get_committee()?.epoch());
-    };
-
-    let mut current_epoch = update_committee(enclave.clone(), first).await?;
+    let mut current_epoch = enclave.state.get_committee()?.epoch();
     for signed in transitions {
         current_epoch = update_committee(enclave.clone(), signed).await?;
     }

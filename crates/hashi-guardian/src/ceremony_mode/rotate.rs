@@ -7,7 +7,6 @@ use hashi_types::guardian::crypto::decrypt_verify_shares;
 use hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey;
 use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
 use hashi_types::guardian::CeremonyLogMessage;
-use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::*;
 use std::sync::Arc;
@@ -22,6 +21,8 @@ pub async fn rotate_kps(
 ) -> GuardianResult<GuardianSigned<RotateKpsResponse>> {
     info!("/rotate_kps - Received request.");
 
+    // Serialize the whole ceremony. The exact lifecycle check prevents setup
+    // and rotation from interleaving and rejects another ceremony afterward.
     let _guard = enclave.control_lock.lock().await;
     enclave.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
 
@@ -110,6 +111,7 @@ mod tests {
     use crate::test_utils::CapturedPuts;
     use hashi_types::guardian::crypto::split_secret;
     use hashi_types::guardian::test_utils::mock_pgp_certs;
+    use hashi_types::guardian::GuardianError::InvalidInputs;
     use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::LogMessageV1;
     use hashi_types::guardian::LogRecord;

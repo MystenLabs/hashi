@@ -31,8 +31,6 @@ use hashi_types::committee::Committee as HashiCommittee;
 
 /// Enclave's config & state
 pub struct Enclave {
-    /// Authoritative mode-specific lifecycle, initialized at boot.
-    lifecycle: RwLock<EnclaveLifecycle>,
     /// Immutable config (set once during init)
     pub config: EnclaveConfig,
     /// Mutable state
@@ -63,6 +61,8 @@ pub struct EnclaveConfig {
 /// Mutable state that changes during operation.
 /// Committee + rate limiter are installed during operator_activate.
 pub struct EnclaveState {
+    /// Authoritative mode-specific lifecycle, initialized at boot.
+    lifecycle: RwLock<EnclaveLifecycle>,
     /// Current Hashi committee.
     committee: RwLock<Option<Arc<HashiCommittee>>>,
     /// Rate limiter. Set once during operator_activate.
@@ -200,8 +200,7 @@ impl EnclaveState {
             .ok_or_else(|| InvalidInputs("committee not initialized".into()))
     }
 
-    /// Whether the committee is installed, without cloning the `Arc` — used by the
-    /// operator_init completeness check, which runs on the heartbeat/withdrawal path.
+    /// Whether the committee is installed, without cloning the `Arc`.
     fn has_committee(&self) -> bool {
         self.committee
             .read()
@@ -209,7 +208,7 @@ impl EnclaveState {
             .is_some()
     }
 
-    /// Set committee. Called only from `init` (operator_init).
+    /// Set committee. Called only from `init` during operator activation.
     fn set_committee(&self, committee: HashiCommittee) -> GuardianResult<()> {
         info!("Setting committee for epoch {}.", committee.epoch());
 
@@ -339,12 +338,12 @@ impl Enclave {
         mode: EnclaveMode,
     ) -> Self {
         Enclave {
-            lifecycle: RwLock::new(match mode {
-                EnclaveMode::Ceremony => CeremonyStage::Uninitialized.into(),
-                EnclaveMode::Withdraw => WithdrawStage::Uninitialized.into(),
-            }),
             config: EnclaveConfig::new(signing_keys, encryption_keys),
             state: EnclaveState {
+                lifecycle: RwLock::new(match mode {
+                    EnclaveMode::Ceremony => CeremonyStage::Uninitialized.into(),
+                    EnclaveMode::Withdraw => WithdrawStage::Uninitialized.into(),
+                }),
                 committee: RwLock::new(None),
                 rate_limiter: OnceLock::new(),
             },
@@ -359,7 +358,11 @@ impl Enclave {
     }
 
     pub fn lifecycle(&self) -> EnclaveLifecycle {
-        *self.lifecycle.read().expect("lifecycle lock poisoned")
+        *self
+            .state
+            .lifecycle
+            .read()
+            .expect("lifecycle lock poisoned")
     }
 
     /// Require an exact mode and lifecycle stage.
@@ -379,7 +382,11 @@ impl Enclave {
         let expected = next
             .predecessor()
             .ok_or_else(|| InvalidInputs(format!("cannot advance lifecycle into {next:?}")))?;
-        let mut lifecycle = self.lifecycle.write().expect("lifecycle lock poisoned");
+        let mut lifecycle = self
+            .state
+            .lifecycle
+            .write()
+            .expect("lifecycle lock poisoned");
         if *lifecycle != expected {
             return Err(InvalidInputs(format!(
                 "expected enclave lifecycle {expected:?}, got {:?}",
@@ -410,9 +417,7 @@ impl Enclave {
                 self.config.is_enclave_btc_keypair_set()
             }
             EnclaveLifecycle::Withdraw(WithdrawStage::Activated) => {
-                self.config.is_enclave_btc_keypair_set()
-                    && self.state.has_committee()
-                    && self.state.rate_limiter.get().is_some()
+                self.state.has_committee() && self.state.rate_limiter.get().is_some()
             }
         };
         assert!(
