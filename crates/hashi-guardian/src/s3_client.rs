@@ -22,6 +22,7 @@ use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::InitLogMessage;
+use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::VerifiedSessionInfo;
 use serde::Serialize;
@@ -614,7 +615,8 @@ impl GuardianS3Client {
         let attestation_record = self.get_log_record(&att_key).await?;
         let (_, _, attestation_message) = attestation_record.validate_unsigned()?;
         let (attestation, signing_pubkey) = attestation_message
-            .into_init_log()
+            .into_v1()
+            .and_then(LogMessageV1::into_init_log)
             .and_then(|x| match x {
                 InitLogMessage::OIAttestationUnsigned {
                     attestation,
@@ -629,7 +631,8 @@ impl GuardianS3Client {
         let info_record = self.get_log_record(&info_key).await?;
         let (_, _, info_message) = info_record.verify(&signing_pubkey)?;
         let info = info_message
-            .into_init_log()
+            .into_v1()
+            .and_then(LogMessageV1::into_init_log)
             .and_then(|x| match x {
                 InitLogMessage::OIGuardianInfo(info) => Some(*info),
                 _ => None,
@@ -660,7 +663,7 @@ mod tests {
     use aws_smithy_mocks::RuleMode;
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::HeartbeatLogMessage;
-    use hashi_types::guardian::LogMessage;
+    use hashi_types::guardian::LogMessageV1;
 
     fn mk_logger_with_client(client: Client) -> GuardianS3Client {
         let config = S3Config {
@@ -815,7 +818,7 @@ mod tests {
         let signing_key = GuardianSignKeyPair::new(rand::thread_rng());
         let log = LogRecord::new(
             "session".to_string(),
-            LogMessage::Heartbeat(HeartbeatLogMessage::new(7)),
+            LogMessageV1::Heartbeat(HeartbeatLogMessage::new(7)),
             &signing_key,
         );
 
@@ -844,7 +847,7 @@ mod tests {
         let signing_key = GuardianSignKeyPair::new(rand::thread_rng());
         let log = LogRecord::new(
             "session".to_string(),
-            LogMessage::Heartbeat(HeartbeatLogMessage::new(7)),
+            LogMessageV1::Heartbeat(HeartbeatLogMessage::new(7)),
             &signing_key,
         );
 

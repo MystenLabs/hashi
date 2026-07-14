@@ -1,7 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `LogMessage` family the enclave emits and its per-message S3 object-key
+//! The versioned `LogMessage` family the enclave emits and its per-message S3 object-key
 //! rules. The `LogRecord` wrapper that carries these to S3 lives in
 //! `super::envelope`.
 //!
@@ -43,10 +43,35 @@ use bitcoin::Txid;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// All log messages emitted by the guardian enclave.
-/// Uses enum discriminator for automatic domain separation between variants.
-#[derive(Debug, Serialize, Deserialize)]
+/// The versioned message stored in a [`super::LogRecord`]. Its version is
+/// serialized as the record's sibling `schema_version` field rather than as an
+/// additional JSON enum layer.
+#[derive(Debug)]
 pub enum LogMessage {
+    V1(LogMessageV1),
+}
+
+impl From<LogMessageV1> for LogMessage {
+    fn from(message: LogMessageV1) -> Self {
+        Self::V1(message)
+    }
+}
+
+impl Serialize for LogMessage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::V1(message) => message.serialize(serializer),
+        }
+    }
+}
+
+/// All schema-version-1 log messages emitted by the guardian enclave.
+/// Uses an enum discriminator for automatic domain separation between variants.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum LogMessageV1 {
     Heartbeat(HeartbeatLogMessage),
     Init(Box<InitLogMessage>),
     Withdrawal(Box<WithdrawalLogMessage>),
@@ -353,9 +378,9 @@ impl CommitteeUpdateLogMessage {
     }
 }
 
-impl LogMessage {
+impl LogMessageV1 {
     pub fn is_allowed_unsigned(&self) -> bool {
-        if let LogMessage::Init(init_message) = self {
+        if let LogMessageV1::Init(init_message) = self {
             matches!(**init_message, InitLogMessage::OIAttestationUnsigned { .. })
         } else {
             false
@@ -384,8 +409,44 @@ impl LogMessage {
 
     pub fn into_init_log(self) -> Option<InitLogMessage> {
         match self {
-            LogMessage::Init(init_message) => Some(*init_message),
+            LogMessageV1::Init(init_message) => Some(*init_message),
             _ => None,
+        }
+    }
+}
+
+impl LogMessage {
+    pub const SCHEMA_VERSION_V1: u64 = 1;
+
+    pub fn schema_version(&self) -> u64 {
+        match self {
+            Self::V1(_) => Self::SCHEMA_VERSION_V1,
+        }
+    }
+
+    pub fn is_allowed_unsigned(&self) -> bool {
+        match self {
+            Self::V1(message) => message.is_allowed_unsigned(),
+        }
+    }
+
+    pub fn must_be_signed(&self) -> bool {
+        !self.is_allowed_unsigned()
+    }
+
+    pub(super) fn object_key_pattern(
+        &self,
+        session_id: &str,
+        timestamp_ms: UnixMillis,
+    ) -> ObjectKeyPattern {
+        match self {
+            Self::V1(message) => message.object_key_pattern(session_id, timestamp_ms),
+        }
+    }
+
+    pub fn into_v1(self) -> Option<LogMessageV1> {
+        match self {
+            Self::V1(message) => Some(message),
         }
     }
 }

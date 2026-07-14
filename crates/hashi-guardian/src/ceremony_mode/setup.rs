@@ -92,6 +92,7 @@ mod tests {
     use crate::mock_logger_capturing;
     use crate::OperatorInitTestArgs;
     use hashi_types::guardian::LogMessage;
+    use hashi_types::guardian::LogMessageV1;
     use hashi_types::guardian::LogRecord;
     use hashi_types::pgp::test_utils::mock_pgp_certs;
 
@@ -145,7 +146,7 @@ mod tests {
         );
 
         let record: LogRecord = serde_json::from_slice(body).unwrap();
-        let LogMessage::Ceremony(ceremony) = record.message else {
+        let LogMessage::V1(LogMessageV1::Ceremony(ceremony)) = record.message else {
             panic!("expected Ceremony variant");
         };
         let CeremonyLogMessage::NewKey {
@@ -179,7 +180,7 @@ mod tests {
             )
         );
         let shares_record: LogRecord = serde_json::from_slice(shares_body).unwrap();
-        let LogMessage::KpShareState(shares) = shares_record.message else {
+        let LogMessage::V1(LogMessageV1::KpShareState(shares)) = shares_record.message else {
             panic!("expected KpShareState variant");
         };
         assert_eq!(shares.sharing_seq, 0);

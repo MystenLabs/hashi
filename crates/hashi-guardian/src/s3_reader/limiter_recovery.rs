@@ -30,6 +30,7 @@ use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::LogMessage;
+use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::VerifiedLogRecord;
 use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::guardian::S3_DIR_WITHDRAW;
@@ -129,7 +130,7 @@ async fn hour_bucket_has_success(
 fn bucket_max_post_state(logs: Vec<VerifiedLogRecord>) -> Option<LimiterState> {
     logs.into_iter()
         .filter_map(|log| {
-            let LogMessage::Withdrawal(boxed) = log.message else {
+            let LogMessage::V1(LogMessageV1::Withdrawal(boxed)) = log.message else {
                 return None;
             };
             match *boxed {
@@ -189,7 +190,7 @@ mod tests {
             object_key: format!("withdraw/success-{next_seq}.json"),
             session_id: "test-session".to_string(),
             timestamp_ms: 0,
-            message: LogMessage::Withdrawal(Box::new(msg)),
+            message: LogMessageV1::Withdrawal(Box::new(msg)).into(),
             build_pcrs: build_pcrs(),
         }
     }
@@ -206,7 +207,7 @@ mod tests {
             object_key: "withdraw/failure.json".to_string(),
             session_id: "test-session".to_string(),
             timestamp_ms: 0,
-            message: LogMessage::Withdrawal(Box::new(msg)),
+            message: LogMessageV1::Withdrawal(Box::new(msg)).into(),
             build_pcrs: build_pcrs(),
         }
     }
