@@ -33,7 +33,7 @@ unspendable UTXOs.
 | | |
 |---|---|
 | **Type** | `u64` |
-| **Default** | `1000` |
+| **Default** | `600000` (10 minutes) |
 | **Unit** | milliseconds |
 
 The minimum time that must elapse between a deposit being approved by the
@@ -92,6 +92,89 @@ system is unpaused. Reconfiguration and governance actions are not affected.
 The minimum time a withdrawal request must remain in the queue before the user
 can cancel it. Prevents users from using rapid submit-cancel cycles to
 interfere with processing.
+
+### `governance_emergency_pause_threshold_bps`
+
+| | |
+|---|---|
+| **Type** | `u64` |
+| **Default** | `500` (5%) |
+| **Unit** | basis points of committee voting weight |
+
+The vote threshold for an emergency **pause** proposal. Deliberately low so a
+small fraction of the committee can quickly halt deposit and withdrawal
+processing when something looks wrong.
+
+### `governance_emergency_unpause_threshold_bps`
+
+| | |
+|---|---|
+| **Type** | `u64` |
+| **Default** | `6667` (two thirds) |
+| **Unit** | basis points of committee voting weight |
+
+The vote threshold for the **unpause** variant of the same proposal. Resuming
+operation requires a supermajority.
+
+## MPC parameters
+
+The MPC parameters are snapshotted (pinned) onto each committee at
+reconfiguration. An `UpdateConfig` that changes them mid-epoch never affects
+the active committee; new values take effect when the next committee forms.
+
+### `mpc_threshold_in_basis_points`
+
+| | |
+|---|---|
+| **Type** | `u64` |
+| **Default** | `3334` |
+| **Valid range** | `1` to `10000` |
+| **Unit** | basis points of committee voting weight |
+
+The MPC signing threshold: the minimum fraction of total committee voting
+weight whose shares are required to produce a threshold signature.
+
+### `mpc_max_faulty_in_basis_points`
+
+| | |
+|---|---|
+| **Type** | `u64` |
+| **Default** | `3333` |
+| **Valid range** | `0` to `10000` |
+| **Unit** | basis points of committee voting weight |
+
+The assumed upper bound on faulty (offline or adversarial) committee weight.
+MPC protocol parameters are derived under the assumption that at most this
+fraction of weight misbehaves.
+
+### `mpc_weight_reduction_allowed_delta`
+
+| | |
+|---|---|
+| **Type** | `u64` |
+| **Default** | `800` |
+| **Valid range** | `0` to `10000` |
+| **Unit** | basis points |
+
+Committee voting weights are proportionally reduced (compressed) before the
+MPC protocol runs, because each unit of weight corresponds to a share and
+protocol cost scales with total shares. Reduction necessarily distorts
+relative voting power; this parameter bounds the distortion, allowing the
+effective fault-tolerance assumption to shift by at most this many basis
+points relative to the unreduced committee. `0` disables weight reduction,
+so parties keep their full committee weights.
+
+### `mpc_nonce_generation_protocol`
+
+| | |
+|---|---|
+| **Type** | `u64` |
+| **Default** | `0` |
+| **Valid values** | `0` (vanilla), `1` (AVID) |
+
+Selects the protocol the committee uses to generate signing nonces
+(presignatures): `0` is the original protocol, `1` enables AVID-based nonce
+generation.
 
 ## Read-only or genesis-only parameters
 
