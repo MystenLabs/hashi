@@ -68,6 +68,7 @@ impl Serialize for LogRecord {
             session_id: &'a SessionID,
             timestamp_ms: UnixMillis,
             message: &'a M,
+            #[serde(with = "crate::guardian::serde_utils::option_guardian_signature")]
             signature: &'a Option<GuardianSignature>,
         }
 
@@ -97,6 +98,7 @@ impl<'de> Deserialize<'de> for LogRecord {
             session_id: SessionID,
             timestamp_ms: UnixMillis,
             message: Value,
+            #[serde(with = "crate::guardian::serde_utils::option_guardian_signature")]
             signature: Option<GuardianSignature>,
         }
 
@@ -345,15 +347,22 @@ impl LogRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::guardian::CeremonyLogMessage;
     use crate::guardian::CommitteeUpdateLogMessage;
     use crate::guardian::GenesisLogMessage;
+    use crate::guardian::GetGuardianInfoResponse;
     use crate::guardian::GuardianError;
     use crate::guardian::GuardianSigned;
     use crate::guardian::HeartbeatLogMessage;
     use crate::guardian::InitLogMessage;
     use crate::guardian::KPEncryptedShares;
+    use crate::guardian::KpShareStateLogMessage;
     use crate::guardian::LimiterState;
     use crate::guardian::NitroAttestation;
+    use crate::guardian::RotateKpsResponse;
+    use crate::guardian::SecretSharingInstance;
+    use crate::guardian::ShareCommitment;
+    use crate::guardian::ShareCommitments;
     use crate::guardian::StandardWithdrawalRequest;
     use crate::guardian::StandardWithdrawalRequestWire;
     use crate::guardian::StandardWithdrawalResponse;
@@ -362,6 +371,7 @@ mod tests {
     use bitcoin::Network;
     use bitcoin::Txid;
     use bitcoin::hashes::Hash as _;
+    use std::num::NonZeroU16;
 
     fn heartbeat_session_id() -> SessionID {
         SessionID::from_signing_pubkey(&GuardianSignKeyPair::from([13u8; 32]).verification_key())
@@ -406,6 +416,183 @@ mod tests {
             .validate_actual_object_key(&relocated_key)
             .expect_err("relocated record must be rejected");
         assert!(format!("{err:?}").contains("S3 object key mismatch"));
+    }
+
+    fn test_sharing_instance(sharing_seq: u64) -> SecretSharingInstance {
+        let commitments = ShareCommitments::new(
+            (1..=2)
+                .map(|id| ShareCommitment {
+                    id: NonZeroU16::new(id).unwrap(),
+                    digest: vec![id as u8; 33],
+                })
+                .collect(),
+        )
+        .unwrap();
+        SecretSharingInstance::new(commitments, 2, 2, sharing_seq).unwrap()
+    }
+
+    #[test]
+    fn every_log_message_json_round_trips_and_verifies() {
+        let signing_key = GuardianSignKeyPair::from([21u8; 32]);
+        let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
+        let btc_master_pubkey = crate::bitcoin::create_btc_keypair_for_test(&[3u8; 32])
+            .x_only_public_key()
+            .0;
+        let instance_0 = test_sharing_instance(0);
+        let instance_1 = test_sharing_instance(1);
+        let (signed_request, committee_0) =
+            StandardWithdrawalRequest::mock_signed_and_committee_for_testing(Network::Regtest);
+        let (request_sign, request_data) = signed_request.into_parts();
+        let request_data: StandardWithdrawalRequestWire = request_data.into();
+        let response = GuardianSigned::<StandardWithdrawalResponse>::mock_for_testing().data;
+        let encrypted_shares = GuardianSigned::<RotateKpsResponse>::mock_for_testing()
+            .data
+            .encrypted_shares;
+        let guardian_info = GetGuardianInfoResponse::mock_for_testing().into_info_unchecked();
+        let committee_0: crate::move_types::Committee = (&committee_0).into();
+        let mut committee_1 = committee_0.clone();
+        committee_1.epoch = 1;
+
+        let cases = vec![
+            (
+                "heartbeat",
+                LogMessageV1::Heartbeat(HeartbeatLogMessage::new(1)),
+            ),
+            (
+                "init OI attestation",
+                LogMessageV1::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
+                    attestation: NitroAttestation::new(vec![1, 2, 3]),
+                    signing_public_key: signing_key.verification_key(),
+                })),
+            ),
+            (
+                "init OI guardian info",
+                LogMessageV1::Init(Box::new(InitLogMessage::OIGuardianInfo(Box::new(
+                    guardian_info,
+                )))),
+            ),
+            (
+                "init PI complete",
+                LogMessageV1::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
+                    sharing_seq: 0,
+                    share_ids: vec![NonZeroU16::new(1).unwrap()],
+                    enclave_btc_pubkey: btc_master_pubkey,
+                })),
+            ),
+            (
+                "init OA activated",
+                LogMessageV1::Init(Box::new(InitLogMessage::OAActivated {
+                    state_hash: [1; 32],
+                    config_hash: [2; 32],
+                    sharing_seq: 0,
+                    committee_epoch: 0,
+                    limiter_state: LimiterState {
+                        num_tokens_available: 10,
+                        last_updated_at: 20,
+                        next_seq: 30,
+                    },
+                })),
+            ),
+            (
+                "withdrawal success",
+                LogMessageV1::Withdrawal(Box::new(WithdrawalLogMessage::Success {
+                    txid: Txid::from_slice(&[3; 32]).unwrap(),
+                    request_data: request_data.clone(),
+                    request_sign: request_sign.clone(),
+                    response,
+                    post_state: LimiterState {
+                        num_tokens_available: 10,
+                        last_updated_at: 20,
+                        next_seq: request_data.seq + 1,
+                    },
+                })),
+            ),
+            (
+                "withdrawal failure",
+                LogMessageV1::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
+                    request_data,
+                    request_sign: request_sign.clone(),
+                    error: GuardianError::RateLimitExceeded,
+                })),
+            ),
+            (
+                "ceremony new key",
+                LogMessageV1::Ceremony(Box::new(CeremonyLogMessage::NewKey {
+                    instance: instance_0.clone(),
+                    btc_master_pubkey,
+                })),
+            ),
+            (
+                "ceremony rotate",
+                LogMessageV1::Ceremony(Box::new(CeremonyLogMessage::Rotate {
+                    old_instance: instance_0,
+                    new_instance: instance_1,
+                    btc_master_pubkey,
+                })),
+            ),
+            (
+                "KP share state",
+                LogMessageV1::KpShareState(Box::new(KpShareStateLogMessage::new(
+                    0,
+                    0,
+                    encrypted_shares,
+                ))),
+            ),
+            (
+                "committee update success",
+                LogMessageV1::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Success {
+                    from_epoch: 0,
+                    new_committee: committee_1.clone(),
+                    request_sign: request_sign.clone(),
+                })),
+            ),
+            (
+                "committee update failure",
+                LogMessageV1::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Failure {
+                    from_epoch: 0,
+                    new_committee: committee_1,
+                    request_sign,
+                    error: GuardianError::InvalidInputs("test failure".into()),
+                })),
+            ),
+            (
+                "genesis",
+                LogMessageV1::Genesis(Box::new(GenesisLogMessage {
+                    committee: committee_0,
+                })),
+            ),
+        ];
+
+        for (name, message) in cases {
+            let record = LogRecord::new_at_timestamp(
+                session_id.clone(),
+                message,
+                &signing_key,
+                1_700_000_000_000,
+            );
+            let object_key = record.object_key().to_owned();
+            let json = serde_json::to_vec(&record).unwrap();
+            let decoded: LogRecord = serde_json::from_slice(&json)
+                .unwrap_or_else(|error| panic!("{name} failed to deserialize: {error}"));
+
+            assert_eq!(
+                serde_json::to_vec(&decoded).unwrap(),
+                json,
+                "{name} did not reserialize canonically"
+            );
+            decoded
+                .validate_actual_object_key(&object_key)
+                .unwrap_or_else(|error| panic!("{name} failed key validation: {error}"));
+            if decoded.message.is_allowed_unsigned() {
+                decoded
+                    .validate_unsigned()
+                    .unwrap_or_else(|error| panic!("{name} failed validation: {error}"));
+            } else {
+                decoded
+                    .verify(&signing_key.verification_key())
+                    .unwrap_or_else(|error| panic!("{name} failed verification: {error}"));
+            }
+        }
     }
 
     #[test]
@@ -473,6 +660,16 @@ mod tests {
         let json = serde_json::to_value(&log).unwrap();
         assert_eq!(json.get("schema_version").unwrap(), 1);
         assert_eq!(json.get("object_key").unwrap(), &object_key);
+        let signature = json["signature"].as_str().unwrap();
+        assert_eq!(signature.len(), 128);
+        assert!(
+            signature
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+        let mut malformed = json.clone();
+        malformed["signature"] = "00".into();
+        assert!(serde_json::from_value::<LogRecord>(malformed).is_err());
 
         let from_s3: LogRecord = serde_json::from_value(json).unwrap();
         from_s3
@@ -656,7 +853,7 @@ mod tests {
 
     #[test]
     fn object_key_for_init_attestation_unsigned() {
-        let session_id = "session-a".to_string();
+        let session_id: SessionID = "session-a".into();
         let signing_key = GuardianSignKeyPair::from([7u8; 32]);
         let log = LogRecord::new_at_timestamp(
             session_id.clone(),
@@ -672,11 +869,51 @@ mod tests {
             log.object_key(),
             "init/session-a/01-oi-attestation-unsigned.json"
         );
+
+        let json = serde_json::to_value(&log).unwrap();
+        let message = &json["message"]["Init"]["OIAttestationUnsigned"];
+        assert_eq!(message["attestation"], "AQID");
+        assert_eq!(
+            message["signing_public_key"],
+            hex::encode(signing_key.verification_key().as_bytes())
+        );
+        let from_json: LogRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(from_json.object_key(), log.object_key());
+    }
+
+    #[test]
+    fn operator_activation_json_encodes_hashes_as_hex() {
+        let signing_key = GuardianSignKeyPair::from([20u8; 32]);
+        let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
+        let log = LogRecord::new_at_timestamp(
+            session_id,
+            LogMessageV1::Init(Box::new(InitLogMessage::OAActivated {
+                state_hash: [0xab; 32],
+                config_hash: [0xcd; 32],
+                sharing_seq: 7,
+                committee_epoch: 9,
+                limiter_state: LimiterState {
+                    num_tokens_available: 11,
+                    last_updated_at: 12,
+                    next_seq: 13,
+                },
+            })),
+            &signing_key,
+            1_700_000_000_000,
+        );
+
+        let json = serde_json::to_value(&log).unwrap();
+        let message = &json["message"]["Init"]["OAActivated"];
+        assert_eq!(message["state_hash"], hex::encode([0xab; 32]));
+        assert_eq!(message["config_hash"], hex::encode([0xcd; 32]));
+
+        let from_json: LogRecord = serde_json::from_value(json).unwrap();
+        from_json.verify(&signing_key.verification_key()).unwrap();
     }
 
     #[test]
     fn object_key_for_heartbeat() {
-        let session_id = "session-b".to_string();
+        let session_id: SessionID = "session-b".into();
         let signing_key = GuardianSignKeyPair::from([8u8; 32]);
         let seq = 42_u64;
         let timestamp_ms = 1_700_000_000_000;
@@ -696,9 +933,7 @@ mod tests {
 
     #[test]
     fn object_key_and_lock_for_kp_share_state() {
-        use crate::guardian::KpShareStateLogMessage;
-
-        let session_id = "session-d".to_string();
+        let session_id: SessionID = "session-d".into();
         let signing_key = GuardianSignKeyPair::from([10u8; 32]);
         let log = LogRecord::new_at_timestamp(
             session_id,
@@ -723,7 +958,7 @@ mod tests {
 
     #[test]
     fn object_key_and_lock_for_genesis_is_fixed() {
-        let session_id = "session-g".to_string();
+        let session_id: SessionID = "session-g".into();
         let signing_key = GuardianSignKeyPair::from([12u8; 32]);
         let log = LogRecord::new_at_timestamp(
             session_id,
@@ -746,7 +981,7 @@ mod tests {
 
     #[test]
     fn object_key_for_withdrawal_success() {
-        let session_id = "session-c".to_string();
+        let session_id: SessionID = "session-c".into();
         let signing_key = GuardianSignKeyPair::from([9u8; 32]);
         let timestamp_ms = 1_700_000_000_000;
         let wid = WithdrawalID::new([0xcd; 32]);

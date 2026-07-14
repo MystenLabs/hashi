@@ -6,6 +6,7 @@ pub mod crypto;
 pub mod errors;
 pub mod log;
 pub mod proto_conversions;
+pub(crate) mod serde_utils;
 pub mod signing;
 pub mod test_utils;
 pub mod time_utils;
@@ -119,9 +120,11 @@ pub struct GuardianInfo {
     /// S3 bucket name (if set). Used by KPs to check S3 bucket info.
     pub bucket_info: Option<S3BucketInfo>,
     /// Encryption key. Used by KPs to encrypt their shares.
+    #[serde(with = "hex::serde")]
     pub encryption_pubkey: EncPubKeyBytes,
     /// Digest of the operator-supplied `InitConfig` (set after operator_init).
     /// KPs recompute it from their verified sources and match to confirm config.
+    #[serde(with = "crate::guardian::serde_utils::option_hex_32")]
     pub config_hash: Option<[u8; 32]>,
     /// Git revision of the guardian build. Untrusted (enclave-self-reported);
     /// verified out-of-band by reproducibly building at this revision and matching
@@ -138,6 +141,7 @@ pub struct GuardianInfo {
     pub current_committee_epoch: Option<u64>,
     /// MPC committee verifying key `G` (the derivation master, NOT the guardian's
     /// own BTC key). Set after operator_init; lets KPs verify it directly.
+    #[serde(with = "crate::guardian::serde_utils::option_mpc_master_g")]
     pub mpc_master_g: Option<HashiMasterG>,
     // TODO: report the full committee too, so its membership is directly
     // verifiable from GuardianInfo; it's large, though.
@@ -953,6 +957,32 @@ impl From<&ActivationState> for ActivationStateRepr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guardian_info_json_encodes_binary_fields_as_strings() {
+        let mut info = GetGuardianInfoResponse::mock_for_testing().into_info_unchecked();
+        info.config_hash = Some([0xab; 32]);
+        let btc_pubkey = crate::bitcoin::create_btc_keypair_for_test(&[3u8; 32])
+            .x_only_public_key()
+            .0;
+        info.mpc_master_g = Some(crate::bitcoin::hashi_master_g_from_btc_xonly_for_test(
+            &btc_pubkey,
+        ));
+
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["encryption_pubkey"], hex::encode([0u8; 32]));
+        assert_eq!(json["config_hash"], hex::encode([0xab; 32]));
+        let mpc_master_g = json["mpc_master_g"].as_str().unwrap();
+        assert_eq!(mpc_master_g.len(), 66);
+        assert!(
+            mpc_master_g
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+
+        let from_json: GuardianInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(from_json, info);
+    }
 
     #[test]
     fn get_guardian_info_verify_signed_info_passes_for_valid_signature() {

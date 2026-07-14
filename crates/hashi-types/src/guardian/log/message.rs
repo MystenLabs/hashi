@@ -237,6 +237,7 @@ pub enum InitLogMessage {
     /// Attestation and signing public key posted in /operator_init
     OIAttestationUnsigned {
         attestation: NitroAttestation,
+        #[serde(with = "crate::guardian::serde_utils::guardian_pubkey")]
         signing_public_key: GuardianPubKey,
     },
     /// Signed GuardianInfo logged in /operator_init (secret-sharing instance,
@@ -251,7 +252,9 @@ pub enum InitLogMessage {
     },
     /// Operator activation succeeded and installed live serving state.
     OAActivated {
+        #[serde(with = "hex::serde")]
         state_hash: [u8; 32],
+        #[serde(with = "hex::serde")]
         config_hash: [u8; 32],
         sharing_seq: u64,
         committee_epoch: u64,

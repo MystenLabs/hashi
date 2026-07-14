@@ -17,7 +17,7 @@ pub type GitRevision = String;
 
 /// Raw AWS Nitro attestation document bytes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct NitroAttestation(Vec<u8>);
+pub struct NitroAttestation(#[serde(with = "crate::guardian::serde_utils::base64_bytes")] Vec<u8>);
 
 impl NitroAttestation {
     pub fn new(bytes: Vec<u8>) -> Self {
