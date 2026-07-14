@@ -113,7 +113,7 @@ For the **JSON-RPC** channel you can run your own archival Signet node or use a 
 
 The **P2P / BIP-157** channel (the embedded light client's compact-filter sync) needs a peer that serves filters (`peerblockfilters=1`). Run your own Signet node for this, or use a provider that exposes Signet P2P with compact-filter serving. The simplest setup that satisfies both channels is a single self-hosted archival Signet node.
 
-**RPC methods Hashi calls** (so you can scope RPC permissions): `getrawtransaction` (verbose), `sendrawtransaction`, `estimatesmartfee`, `gettxout`, `getblockchaininfo`, `getblockheader` (verbose). Hashi targets **Bitcoin Core v29**.
+**RPC methods Hashi calls** (so you can scope RPC permissions): `getrawtransaction` (verbose), `sendrawtransaction`, `estimatesmartfee`, `gettxout`, `getblockchaininfo`, `getblockheader` (verbose). Hashi requires **Bitcoin Core v29 or newer**; the latest release works fine.
 
 **`bitcoin.conf`, run as an archival, non-pruned node** (Signet shown; for another network use its ports and network flag from the [Networks](#networks) table):
 
