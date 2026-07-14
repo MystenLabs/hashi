@@ -491,8 +491,13 @@ impl MpcService {
             .mpc_presig_conversion_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
             .start_timer();
-        let presignatures = Presignatures::new(nonce_outputs, batch_size_per_weight, params)
-            .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
+        let presignatures = Presignatures::new(
+            nonce_outputs,
+            batch_size_per_weight,
+            params,
+            crate::constants::PRESIG_USE_LEGACY_EXTRACTION,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
         drop(_timer);
         Ok((committee, presignatures))
     }
@@ -716,8 +721,13 @@ impl MpcService {
                 "No valid nonce outputs after reconstruction for epoch {epoch} batch {batch_index}"
             ));
         }
-        Presignatures::new(outputs, batch_size_per_weight, params)
-            .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))
+        Presignatures::new(
+            outputs,
+            batch_size_per_weight,
+            params,
+            crate::constants::PRESIG_USE_LEGACY_EXTRACTION,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))
     }
 
     async fn try_submit_start_reconfig(&self, sui_epoch: u64) {

@@ -790,7 +790,13 @@ mod tests {
                 }
             })
             .collect();
-        Presignatures::new(receiver_outputs, batch_size_per_weight, params).unwrap()
+        Presignatures::new(
+            receiver_outputs,
+            batch_size_per_weight,
+            params,
+            hashi::constants::PRESIG_USE_LEGACY_EXTRACTION,
+        )
+        .unwrap()
     }
 
     fn mock_shares(
