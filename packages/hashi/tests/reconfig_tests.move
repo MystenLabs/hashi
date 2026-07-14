@@ -53,7 +53,7 @@ fun pending_committee_for_testing(epoch: u64): hashi::committee::Committee {
         committee::new_committee_member(VOTER2, public_key, sk, 1),
         committee::new_committee_member(VOTER3, public_key, sk, 1),
     ];
-    committee::new_committee(epoch, members, mpc_config::new_for_testing(3334, 800, 3333, 0))
+    committee::new_committee(epoch, members, mpc_config::new_for_testing(3334, 800, 3333, 0, 1))
 }
 
 fun cert_message<T: copy + drop + store>(epoch: u64, intent: u16, message: &T): vector<u8> {

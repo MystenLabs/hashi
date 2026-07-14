@@ -143,6 +143,7 @@ impl TestSetup {
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             nonce_generation_protocol,
+            0,
         );
         // Also create a previous committee for key rotation tests
         let previous_committee = Committee::new(
@@ -152,6 +153,7 @@ impl TestSetup {
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             nonce_generation_protocol,
+            0,
         );
 
         let mut committees = BTreeMap::new();
@@ -231,6 +233,7 @@ impl TestSetup {
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             nonce_generation_protocol,
+            0,
         );
         // Also create a previous committee for key rotation tests
         let previous_committee = Committee::new(
@@ -240,6 +243,7 @@ impl TestSetup {
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             nonce_generation_protocol,
+            0,
         );
 
         let mut committees = BTreeMap::new();
@@ -1064,6 +1068,7 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             0,
+            0,
         )
     };
     let mut committees = BTreeMap::new();
@@ -1150,6 +1155,7 @@ fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
             TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
+            0,
             0,
         )
     };
@@ -7023,6 +7029,7 @@ async fn test_prepare_previous_output_for_new_member() {
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
+        0,
     );
     let previous_committee = rotation_setup
         .setup
@@ -8298,6 +8305,7 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
+        0,
     );
     let target_committee = Committee::new(
         target_members,
@@ -8305,6 +8313,7 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
         TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
+        0,
         0,
     );
 
@@ -8492,6 +8501,7 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
+        0,
     );
     let target_committee = Committee::new(
         members,
@@ -8499,6 +8509,7 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
         TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
+        0,
         0,
     );
 
@@ -8624,6 +8635,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
+        0,
     );
     let target_committee = Committee::new(
         members,
@@ -8631,6 +8643,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
+        0,
         0,
     );
     let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
@@ -8769,6 +8782,7 @@ fn test_recover_current_dkg() {
         TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
+        0,
         0,
     );
     let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
@@ -8923,6 +8937,7 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
+        0,
     );
     let mut committee_set = CommitteeSet::new(Address::ZERO, Address::ZERO);
     let mut committees = BTreeMap::new();
@@ -9006,6 +9021,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
+        0,
     );
     let committee_at_101 = Committee::new(
         members.clone(),
@@ -9013,6 +9029,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
         TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
+        0,
         0,
     );
 
@@ -9136,6 +9153,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
+        0,
     );
     let previous_committee = Committee::new(
         members,
@@ -9144,6 +9162,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
         0,
+        0,
     );
     let target_committee = Committee::new(
         target_members,
@@ -9151,6 +9170,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
         TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
+        0,
         0,
     );
 
@@ -9251,6 +9271,7 @@ fn test_recover_current_rotation() {
             TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
+            0,
             0,
         )
     };
@@ -9451,6 +9472,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
             TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
+            0,
             0,
         )
     };
@@ -13604,6 +13626,7 @@ fn make_jumped_committee_set(setup: &mut TestSetup, prev_epoch: u64) {
         TEST_THRESHOLD_IN_BASIS_POINTS,
         TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
         TEST_MAX_FAULTY_IN_BASIS_POINTS,
+        0,
         0,
     );
     let current_committee = setup.committee_set.current_committee().unwrap().clone();

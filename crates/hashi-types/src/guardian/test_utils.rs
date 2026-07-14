@@ -212,6 +212,7 @@ fn mock_committee_with_one_member(epoch: u64) -> HashiCommittee {
         DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
         DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
         VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
+        0,
     )
 }
 

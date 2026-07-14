@@ -105,6 +105,29 @@ impl NonceGenerationProtocol {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PresignatureDerivationVersion {
+    #[default]
+    Legacy,
+    PrivacyThreshold,
+}
+
+impl PresignatureDerivationVersion {
+    pub fn from_onchain(value: u16) -> MpcResult<Self> {
+        match value {
+            0 => Ok(Self::Legacy),
+            1 => Ok(Self::PrivacyThreshold),
+            other => Err(MpcError::InvalidConfig(format!(
+                "unknown mpc_presignature_derivation_version: {other}"
+            ))),
+        }
+    }
+
+    pub fn use_legacy(&self) -> bool {
+        matches!(self, Self::Legacy)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MpcConfig {
     pub epoch: u64,
@@ -114,6 +137,7 @@ pub struct MpcConfig {
     /// Maximum number of faulty validators (f)
     pub max_faulty: u16,
     pub nonce_generation_protocol: NonceGenerationProtocol,
+    pub presignature_derivation_version: PresignatureDerivationVersion,
 }
 
 impl MpcConfig {
@@ -123,6 +147,7 @@ impl MpcConfig {
         threshold: u16,
         max_faulty: u16,
         nonce_generation_protocol: NonceGenerationProtocol,
+        presignature_derivation_version: PresignatureDerivationVersion,
     ) -> Self {
         Self {
             epoch,
@@ -130,6 +155,7 @@ impl MpcConfig {
             threshold,
             max_faulty,
             nonce_generation_protocol,
+            presignature_derivation_version,
         }
     }
 }
@@ -813,7 +839,7 @@ mod tests {
                 )
             })
             .collect();
-        let committee = Committee::new(members, epoch, 3334u16, 0u16, 3333u16, 0);
+        let committee = Committee::new(members, epoch, 3334u16, 0u16, 3333u16, 0, 0);
         (committee, signing_keys)
     }
 
@@ -1116,7 +1142,7 @@ mod tests {
                 )
             })
             .collect();
-        let committee = Committee::new(members, epoch, 3334u16, 0u16, 3333u16, 0);
+        let committee = Committee::new(members, epoch, 3334u16, 0u16, 3333u16, 0, 0);
 
         // Create a DealerMessagesHash
         let dealer_address = Address::new([0u8; 32]);
@@ -1206,6 +1232,26 @@ mod tests {
         assert_eq!(
             NonceGenerationProtocol::default(),
             NonceGenerationProtocol::Vanilla
+        );
+    }
+
+    #[test]
+    fn presignature_derivation_version_from_onchain() {
+        assert_eq!(
+            PresignatureDerivationVersion::from_onchain(0).unwrap(),
+            PresignatureDerivationVersion::Legacy
+        );
+        assert_eq!(
+            PresignatureDerivationVersion::from_onchain(1).unwrap(),
+            PresignatureDerivationVersion::PrivacyThreshold
+        );
+        assert!(PresignatureDerivationVersion::from_onchain(2).is_err());
+        assert!(PresignatureDerivationVersion::from_onchain(u16::MAX).is_err());
+        assert!(PresignatureDerivationVersion::Legacy.use_legacy());
+        assert!(!PresignatureDerivationVersion::PrivacyThreshold.use_legacy());
+        assert_eq!(
+            PresignatureDerivationVersion::default(),
+            PresignatureDerivationVersion::Legacy
         );
     }
 }

@@ -477,7 +477,7 @@ impl MpcService {
         drop(_timer);
         let nonce_outputs =
             nonce_result.map_err(|e| anyhow::anyhow!("Nonce generation failed: {e}"))?;
-        let (batch_size_per_weight, params) = {
+        let (batch_size_per_weight, params, use_legacy) = {
             let mgr = mpc_manager.read().unwrap();
             (
                 mgr.batch_size_per_weight,
@@ -485,19 +485,16 @@ impl MpcService {
                     t: mgr.mpc_config.threshold,
                     f: mgr.mpc_config.max_faulty,
                 },
+                mgr.mpc_config.presignature_derivation_version.use_legacy(),
             )
         };
         let _timer = metrics
             .mpc_presig_conversion_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
             .start_timer();
-        let presignatures = Presignatures::new(
-            nonce_outputs,
-            batch_size_per_weight,
-            params,
-            crate::constants::PRESIG_USE_LEGACY_EXTRACTION,
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
+        let presignatures =
+            Presignatures::new(nonce_outputs, batch_size_per_weight, params, use_legacy)
+                .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
         drop(_timer);
         Ok((committee, presignatures))
     }
@@ -664,9 +661,12 @@ impl MpcService {
             epoch,
             MPC_LABEL_NONCE_GENERATION,
         );
-        let protocol = {
+        let (protocol, use_legacy) = {
             let mgr = mpc_manager.read().unwrap();
-            mgr.mpc_config.nonce_generation_protocol
+            (
+                mgr.mpc_config.nonce_generation_protocol,
+                mgr.mpc_config.presignature_derivation_version.use_legacy(),
+            )
         };
         let outputs = match protocol {
             NonceGenerationProtocol::Vanilla => {
@@ -721,13 +721,8 @@ impl MpcService {
                 "No valid nonce outputs after reconstruction for epoch {epoch} batch {batch_index}"
             ));
         }
-        Presignatures::new(
-            outputs,
-            batch_size_per_weight,
-            params,
-            crate::constants::PRESIG_USE_LEGACY_EXTRACTION,
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))
+        Presignatures::new(outputs, batch_size_per_weight, params, use_legacy)
+            .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))
     }
 
     async fn try_submit_start_reconfig(&self, sui_epoch: u64) {

@@ -218,7 +218,8 @@ pub enum CreateProposalCommands {
     },
 
     /// Propose updating MPC parameters (`t`, `f`, `allowed_delta`,
-    /// `nonce_generation_protocol`) in one transaction.
+    /// `nonce_generation_protocol`, `presignature_derivation_version`) in one
+    /// transaction.
     UpdateMpcConfig {
         #[clap(long)]
         threshold_bps: Option<u64>,
@@ -232,6 +233,11 @@ pub enum CreateProposalCommands {
         /// Nonce-generation protocol: 0 = vanilla broadcast, 1 = AVID.
         #[clap(long)]
         nonce_generation_protocol: Option<u64>,
+
+        /// Presignature-derivation version: 0 = legacy (W - f), 1 = privacy
+        /// threshold (W - (t - 1)).
+        #[clap(long)]
+        presignature_derivation_version: Option<u64>,
 
         #[clap(flatten)]
         metadata: MetadataArgs,
@@ -926,6 +932,7 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                     max_faulty_bps,
                     weight_reduction_allowed_delta,
                     nonce_generation_protocol,
+                    presignature_derivation_version,
                     metadata,
                 } => {
                     commands::proposal::create_update_mpc_config_proposal(
@@ -934,6 +941,7 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                         max_faulty_bps,
                         weight_reduction_allowed_delta,
                         nonce_generation_protocol,
+                        presignature_derivation_version,
                         parse_metadata(metadata.metadata),
                         &tx_opts,
                     )

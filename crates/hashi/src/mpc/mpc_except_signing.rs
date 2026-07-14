@@ -43,6 +43,7 @@ pub use crate::mpc::types::MpcResult;
 use crate::mpc::types::NonceGenerationProtocol;
 pub use crate::mpc::types::NonceMessage;
 pub use crate::mpc::types::NonceReconstructionOutcome;
+use crate::mpc::types::PresignatureDerivationVersion;
 pub use crate::mpc::types::ProtocolComplaint;
 pub use crate::mpc::types::ProtocolType;
 pub use crate::mpc::types::ProtocolTypeIndicator;
@@ -199,12 +200,16 @@ impl MpcManager {
         let total_weight = nodes.total_weight();
         let nonce_generation_protocol =
             NonceGenerationProtocol::from_onchain(committee.mpc_nonce_generation_protocol())?;
+        let presignature_derivation_version = PresignatureDerivationVersion::from_onchain(
+            committee.mpc_presignature_derivation_version(),
+        )?;
         let mpc_config = MpcConfig::new(
             epoch,
             nodes,
             threshold,
             max_faulty,
             nonce_generation_protocol,
+            presignature_derivation_version,
         );
         let party_id = committee
             .index_of(&address)

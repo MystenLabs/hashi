@@ -511,6 +511,7 @@ pub(crate) async fn apply_onchain_config_overrides(
                 max_faulty_bps: mpc_max_faulty_bps,
                 weight_reduction_allowed_delta: mpc_weight_reduction_allowed_delta,
                 nonce_generation_protocol: None,
+                presignature_derivation_version: None,
                 metadata: vec![],
             },
             update_config_type_tag.clone(),
@@ -790,13 +791,7 @@ mod tests {
                 }
             })
             .collect();
-        Presignatures::new(
-            receiver_outputs,
-            batch_size_per_weight,
-            params,
-            hashi::constants::PRESIG_USE_LEGACY_EXTRACTION,
-        )
-        .unwrap()
+        Presignatures::new(receiver_outputs, batch_size_per_weight, params, true).unwrap()
     }
 
     fn mock_shares(
@@ -2295,6 +2290,126 @@ mod tests {
         }
 
         assert_eq!(signing_manager.batch_index(), 1);
+        Ok(())
+    }
+
+    fn assert_pool_derivation(pool_size: usize, node: &HashiNodeHandle, expect_legacy: bool) {
+        let (w_total, w_node, t, f, bspw) = {
+            let mpc_manager = node.hashi().mpc_manager().unwrap();
+            let mgr = mpc_manager.read().unwrap();
+            let num_nodes = mgr.committee.members().len();
+            let w_total = mgr.mpc_config.nodes.total_weight() as usize;
+            assert_eq!(w_total % num_nodes, 0, "uniform node weights expected");
+            (
+                w_total,
+                w_total / num_nodes,
+                mgr.mpc_config.threshold as usize,
+                mgr.mpc_config.max_faulty as usize,
+                mgr.batch_size_per_weight as usize,
+            )
+        };
+        let (c_expected, c_other) = if expect_legacy {
+            (f, t - 1)
+        } else {
+            (t - 1, f)
+        };
+        assert_ne!(
+            c_expected % w_node,
+            c_other % w_node,
+            "params cannot distinguish the two formulas"
+        );
+        assert_eq!(pool_size % bspw, 0, "pool must be whole positions");
+        let height = pool_size / bspw;
+        let w_out = height + c_expected;
+        assert!(
+            w_out.is_multiple_of(w_node) && t <= w_out && w_out <= w_total,
+            "pool of {pool_size} (height {height}) does not match the expected \
+             derivation (c = {c_expected}); it implies output weight {w_out}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_presignature_derivation_version_flips_at_epoch_boundary() -> Result<()> {
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_onchain_config(
+                "mpc_presignature_derivation_version",
+                hashi_types::move_types::ConfigValue::U64(0),
+            )
+            .build()
+            .await?;
+
+        let initial_epoch = {
+            let nodes = test_networks.hashi_network().nodes();
+            let mpc_key_futures: Vec<_> = nodes
+                .iter()
+                .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+                .collect();
+            let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+            for (i, result) in results.into_iter().enumerate() {
+                result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+            }
+            assert_eq!(
+                nodes[0]
+                    .hashi()
+                    .onchain_state()
+                    .mpc_presignature_derivation_version(),
+                0,
+                "the legacy-derivation override must have landed"
+            );
+            nodes[0].current_epoch().unwrap()
+        };
+
+        {
+            let nodes = test_networks.hashi_network().nodes();
+            let signing_manager = nodes[0]
+                .hashi()
+                .signing_manager_for(initial_epoch)
+                .expect("SigningManager for the initial epoch");
+            assert_pool_derivation(signing_manager.initial_presig_count(), &nodes[0], false);
+            let results = sign_on_all_nodes(
+                nodes,
+                b"derivation flip: privacy-threshold epoch",
+                initial_epoch,
+                sui_sdk_types::Address::new([0xD1; 32]),
+                0,
+                None,
+            )
+            .await;
+            assert_all_signatures_match(results);
+        }
+
+        force_rotate_and_assert_key_agreement(&mut test_networks, initial_epoch + 1).await;
+
+        {
+            let nodes = test_networks.hashi_network().nodes();
+            let epoch = initial_epoch + 1;
+            wait_for_signing_manager(nodes, epoch, DKG_TIMEOUT).await?;
+            let signing_manager = nodes[0]
+                .hashi()
+                .signing_manager_for(epoch)
+                .expect("SigningManager for the post-flip epoch");
+            assert_pool_derivation(signing_manager.initial_presig_count(), &nodes[0], true);
+            let results = sign_on_all_nodes(
+                nodes,
+                b"derivation flip: legacy epoch",
+                epoch,
+                sui_sdk_types::Address::new([0xD2; 32]),
+                0,
+                None,
+            )
+            .await;
+            assert_all_signatures_match(results);
+        }
         Ok(())
     }
 

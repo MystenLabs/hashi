@@ -228,6 +228,7 @@ const KEY_MPC_THRESHOLD_IN_BASIS_POINTS: &str = "mpc_threshold_in_basis_points";
 const KEY_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: &str = "mpc_weight_reduction_allowed_delta";
 const KEY_MPC_MAX_FAULTY_IN_BASIS_POINTS: &str = "mpc_max_faulty_in_basis_points";
 const KEY_MPC_NONCE_GENERATION_PROTOCOL: &str = "mpc_nonce_generation_protocol";
+const KEY_MPC_PRESIGNATURE_DERIVATION_VERSION: &str = "mpc_presignature_derivation_version";
 
 /// Default MPC threshold in basis points. Mirrors `DEFAULT_THRESHOLD_IN_BASIS_POINTS`
 /// in `mpc_config.move`.
@@ -238,6 +239,8 @@ pub const DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
 pub const DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS: u16 = 3333;
 /// Mirrors `VANILLA_NONCE_GENERATION_PROTOCOL` in `mpc_config.move`.
 pub const VANILLA_MPC_NONCE_GENERATION_PROTOCOL: u16 = 0;
+/// Mirrors `LEGACY_PRESIGNATURE_DERIVATION_VERSION` in `mpc_config.move`.
+pub const LEGACY_MPC_PRESIGNATURE_DERIVATION_VERSION: u16 = 0;
 
 /// Rust version of the Move hashi::config::Config type: a general-purpose,
 /// order-preserving key-value store (`VecMap<String, Value>`). Embedded both as
@@ -295,6 +298,7 @@ impl Config {
         weight_reduction_allowed_delta: u16,
         max_faulty_in_basis_points: u16,
         nonce_generation_protocol: u16,
+        presignature_derivation_version: u16,
     ) -> Self {
         Self(vec![
             (
@@ -312,6 +316,10 @@ impl Config {
             (
                 KEY_MPC_NONCE_GENERATION_PROTOCOL.to_string(),
                 ConfigValue::U64(nonce_generation_protocol as u64),
+            ),
+            (
+                KEY_MPC_PRESIGNATURE_DERIVATION_VERSION.to_string(),
+                ConfigValue::U64(presignature_derivation_version as u64),
             ),
         ])
     }
@@ -341,6 +349,13 @@ impl Config {
         self.mpc_param(
             KEY_MPC_NONCE_GENERATION_PROTOCOL,
             VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
+        )
+    }
+
+    pub fn mpc_presignature_derivation_version(&self) -> u16 {
+        self.mpc_param(
+            KEY_MPC_PRESIGNATURE_DERIVATION_VERSION,
+            LEGACY_MPC_PRESIGNATURE_DERIVATION_VERSION,
         )
     }
 
@@ -1549,7 +1564,7 @@ mod tests {
 
     #[test]
     fn committee_mpc_config_carried_verbatim_through_bcs() {
-        let committee = crate::committee::Committee::new(vec![], 5, 3334, 800, 3333, 1);
+        let committee = crate::committee::Committee::new(vec![], 5, 3334, 800, 3333, 1, 0);
         let move_committee = Committee::from(&committee);
 
         // Round-trip the serialized committee and confirm the verbatim config
@@ -1572,18 +1587,19 @@ mod tests {
     /// The expected vector must equal what Move's `mpc_config::pin` produces.
     #[test]
     fn committee_mpc_config_bcs_is_pinned() {
-        let mpc = Config::from_mpc_params(3334, 800, 3333, 1);
+        let mpc = Config::from_mpc_params(3334, 800, 3333, 1, 1);
         let bytes = bcs::to_bytes(&mpc).expect("serialize");
 
-        // VecMap<String,Value> = ULEB128 len (4) then, per entry, ULEB128 key
+        // VecMap<String,Value> = ULEB128 len (5) then, per entry, ULEB128 key
         // length, key bytes, 1-byte Value variant tag (U64 = 0), 8-byte LE u64.
         let expected: Vec<u8> = {
-            let mut v = vec![4u8];
+            let mut v = vec![5u8];
             for (key, val) in [
                 ("mpc_threshold_in_basis_points", 3334u64),
                 ("mpc_weight_reduction_allowed_delta", 800),
                 ("mpc_max_faulty_in_basis_points", 3333),
                 ("mpc_nonce_generation_protocol", 1),
+                ("mpc_presignature_derivation_version", 1),
             ] {
                 v.push(key.len() as u8);
                 v.extend_from_slice(key.as_bytes());
