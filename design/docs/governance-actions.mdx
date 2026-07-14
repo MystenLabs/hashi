@@ -29,4 +29,28 @@ active version cannot be disabled, to avoid bricking the protocol.
 ## `UpdateConfig`
 
 Updates a protocol configuration parameter by key. Supports any config
-key-value pair (for example, deposit fee, rate limits).
+key-value pair (for example, deposit fee, rate limits). See
+[Configuration](config.mdx) for the full list of keys and defaults.
+
+## `EmergencyPause`
+
+Pauses or unpauses deposit and withdrawal processing by setting the `paused`
+config flag. The two directions use different vote thresholds: pausing is
+deliberately cheap (`governance_emergency_pause_threshold_bps`, default 5% of
+committee weight) so a small fraction of the committee can quickly halt the
+system, while unpausing requires a supermajority
+(`governance_emergency_unpause_threshold_bps`, default two thirds).
+
+## `UpdateGuardian`
+
+Updates the guardian's URL in the global config. Only the URL is governable:
+the guardian's BTC public key is immutable once set, because rotating it would
+invalidate derived deposit addresses.
+
+## `AbortReconfig`
+
+Aborts a pending reconfiguration for a specific epoch, clearing the pending
+epoch change and removing the pending committee. Voted on by the **current**
+committed committee, which is the only committee with stable onchain voting
+power if the pending committee cannot complete DKG or key rotation. See
+[Reconfiguration](reconfiguration.mdx) for when and how this is used.
