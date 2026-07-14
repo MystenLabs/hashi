@@ -1893,15 +1893,17 @@ pub async fn build_register_or_update_validator_tx(
         .await
         .ok();
     let registering = onchain_member.is_none();
-    if onchain_member.is_none() {
+    if registering {
         tracing::info!(
             %validator_address,
             "Validator not found on-chain, will register"
         );
     } else {
-        tracing::info!(
+        // Debug, not info: this runs on every periodic metadata check, and
+        // most checks send nothing. Callers log the actual outcome.
+        tracing::debug!(
             %validator_address,
-            "Validator already registered, will update metadata"
+            "Validator already registered; checking for stale metadata"
         );
     }
 
