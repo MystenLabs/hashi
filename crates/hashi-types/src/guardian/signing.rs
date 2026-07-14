@@ -11,7 +11,6 @@ use super::GuardianError::InternalError;
 use super::GuardianError::InvalidInputs;
 use super::GuardianInfo;
 use super::GuardianResult;
-use super::LogMessage;
 use super::RotateKpsResponse;
 use super::SetupNewKeyResponse;
 use super::SingleProvisionerInitRequest;
@@ -33,7 +32,7 @@ use std::path::Path;
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IntentType {
-    /// Intent for all LogMessage's
+    /// Intent for key-bound guardian log records.
     LogMessage = 0,
     /// Intent for SetupNewKeyResponse
     SetupNewKeyResponse = 1,
@@ -48,6 +47,35 @@ pub enum IntentType {
 /// Trait for types that can be signed, providing domain separation via an intent.
 pub trait SigningIntent {
     const INTENT: IntentType;
+
+    /// Canonical bytes covered by this guardian signature. Most payloads use
+    /// the standard `(intent, data, timestamp)` layout; routing-sensitive
+    /// payloads may override this while retaining the central intent registry.
+    fn signing_bytes(&self, timestamp_ms: UnixMillis) -> Vec<u8>
+    where
+        Self: Serialize,
+    {
+        bcs::to_bytes(&(Self::INTENT, self, timestamp_ms)).expect("serialization should not fail")
+    }
+}
+
+pub(crate) fn sign_intent<T: Serialize + SigningIntent>(
+    data: &T,
+    timestamp_ms: UnixMillis,
+    signing_key: &SigningKey,
+) -> GuardianSignature {
+    signing_key.sign(&data.signing_bytes(timestamp_ms))
+}
+
+pub(crate) fn verify_intent<T: Serialize + SigningIntent>(
+    data: &T,
+    timestamp_ms: UnixMillis,
+    signature: &GuardianSignature,
+    pub_key: &VerificationKey,
+) -> GuardianResult<()> {
+    pub_key
+        .verify(signature, &data.signing_bytes(timestamp_ms))
+        .map_err(|_| InvalidInputs("signature invalid".into()))
 }
 
 /// All possible KP signing intent types.
@@ -66,10 +94,6 @@ pub enum KpSigningIntentType {
 /// Trait for KP-submitted request payloads that need detached signatures.
 pub trait KpSigningIntent {
     const INTENT: KpSigningIntentType;
-}
-
-impl SigningIntent for LogMessage {
-    const INTENT: IntentType = IntentType::LogMessage;
 }
 
 impl SigningIntent for SetupNewKeyResponse {
@@ -115,9 +139,7 @@ impl<T: Serialize + SigningIntent> GuardianSigned<T> {
     /// Create a new signed payload (used by enclave)
     /// Includes intent byte for domain separation to prevent cross-type signature attacks
     pub fn new(data: T, signing_key: &SigningKey, timestamp_ms: UnixMillis) -> Self {
-        let tuple = (T::INTENT, &data, timestamp_ms);
-        let signing_payload = bcs::to_bytes(&tuple).expect("serialization should not fail");
-        let signature = signing_key.sign(&signing_payload);
+        let signature = sign_intent(&data, timestamp_ms, signing_key);
         Self {
             data,
             timestamp_ms,
@@ -128,11 +150,7 @@ impl<T: Serialize + SigningIntent> GuardianSigned<T> {
     /// Verify signature and extract payload
     /// Checks intent byte to ensure signature is for the correct type
     pub fn verify(self, pub_key: &VerificationKey) -> GuardianResult<T> {
-        let tuple = (T::INTENT, &self.data, self.timestamp_ms);
-        let msg_bytes = bcs::to_bytes(&tuple).expect("serialization should not fail");
-        pub_key
-            .verify(&self.signature, &msg_bytes)
-            .map_err(|_| InvalidInputs("signature invalid".into()))?;
+        verify_intent(&self.data, self.timestamp_ms, &self.signature, pub_key)?;
         Ok(self.data)
     }
 }

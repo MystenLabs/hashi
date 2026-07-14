@@ -322,7 +322,7 @@ pub(crate) mod test_store {
         request_data.seq = seq;
 
         let signing_key = GuardianSignKeyPair::from([9u8; 32]);
-        let mut record = LogRecord::new(
+        let record = LogRecord::new_at_timestamp(
             "test-session".to_string(),
             LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Success {
                 txid: bitcoin::Txid::from_slice(&[3u8; 32]).unwrap(),
@@ -336,9 +336,9 @@ pub(crate) mod test_store {
                 },
             })),
             &signing_key,
+            timestamp_ms,
         );
-        record.timestamp_ms = timestamp_ms;
-        let key = record.object_key();
+        let key = record.object_key().to_string();
         (key, serde_json::to_vec(&record).unwrap())
     }
 
@@ -596,8 +596,8 @@ mod tests {
 
     #[test]
     fn wid_suffix_matches_the_real_key_shape() {
-        // The scanner's suffix filter must match `WithdrawalLogMessage::log_name`
-        // exactly; a drift here silently disables the durable tier.
+        // The scanner's suffix filter must match the withdrawal success-key
+        // pattern exactly; a drift here silently disables the durable tier.
         let w = wid(0xcd);
         let (key, _) = success_record_json(w, 7, TS_HOUR_A, mock_response());
         assert!(key.ends_with(&format!("-wid{w}.json")));

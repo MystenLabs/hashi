@@ -556,8 +556,8 @@ impl Enclave {
             .await
     }
 
-    pub async fn log_heartbeat(&self, seq: u64) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::Heartbeat { seq }).await
+    pub async fn log_heartbeat(&self, msg: HeartbeatLogMessage) -> GuardianResult<()> {
+        self.write_log_or_abort(LogMessage::Heartbeat(msg)).await
     }
 
     pub async fn log_ceremony(&self, state: CeremonyLogMessage) -> GuardianResult<()> {
@@ -574,11 +574,9 @@ impl Enclave {
         cert_seq: u64,
         encrypted_shares: KPEncryptedShares,
     ) -> GuardianResult<()> {
-        self.write_log_or_abort(LogMessage::KpShareState(Box::new(KpShareState::new(
-            sharing_seq,
-            cert_seq,
-            encrypted_shares,
-        ))))
+        self.write_log_or_abort(LogMessage::KpShareState(Box::new(
+            KpShareStateLogMessage::new(sharing_seq, cert_seq, encrypted_shares),
+        )))
         .await
     }
 

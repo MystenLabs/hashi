@@ -1,9 +1,20 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! The `LogMessage` family the enclave emits, and the per-message S3 key naming
-//! (`log_dir`/`log_name`). The `LogRecord` wrapper that carries these to S3 lives
-//! in `super::envelope`.
+//! The `LogMessage` family the enclave emits and its per-message S3 object-key
+//! rules. The `LogRecord` wrapper that carries these to S3 lives in
+//! `super::envelope`.
+//!
+//! Every message type exposes `object_key_pattern()`.
+//! Types with deterministic keys also expose `object_key()`, which returns the
+//! complete bucket-relative key. Types supporting batch reads may additionally
+//! expose `object_key_dir()`, a slash-terminated S3 key prefix.
+//!
+//! Writers call `LogRecord::new()`, which finalizes the pattern exactly once,
+//! stores the resulting key, and uses it for signing and upload.
+//! Readers either fetch a deterministic record using `object_key()` or list
+//! records in `object_key_dir()`. In both read paths, the S3 client rejects a
+//! record unless its signed key matches the actual key returned by S3.
 
 use super::S3_DIR_CEREMONY;
 use super::S3_DIR_COMMITTEE_UPDATE;
@@ -36,13 +47,54 @@ use serde::Serialize;
 /// Uses enum discriminator for automatic domain separation between variants.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum LogMessage {
-    Heartbeat { seq: u64 },
+    Heartbeat(HeartbeatLogMessage),
     Init(Box<InitLogMessage>),
     Withdrawal(Box<WithdrawalLogMessage>),
     Ceremony(Box<CeremonyLogMessage>),
-    KpShareState(Box<KpShareState>),
+    KpShareState(Box<KpShareStateLogMessage>),
     CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
     Genesis(Box<GenesisLogMessage>),
+}
+
+pub(super) enum ObjectKeyPattern {
+    Fixed(String),
+    /// Complete key prefix before the random suffix; finalize() appends the suffix.
+    RandomSuffix(String),
+}
+
+impl ObjectKeyPattern {
+    /// Finalizes the pattern into the complete S3 object key.
+    pub(super) fn finalize(self) -> String {
+        match self {
+            Self::Fixed(key) => key,
+            Self::RandomSuffix(prefix) => {
+                format!("{prefix}{:08x}.json", rand::random::<u32>())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct HeartbeatLogMessage {
+    pub seq: u64,
+}
+
+impl HeartbeatLogMessage {
+    pub fn new(seq: u64) -> Self {
+        Self { seq }
+    }
+
+    pub fn object_key(&self, session_id: &str, timestamp_ms: UnixMillis) -> String {
+        format!(
+            "{}{session_id}-{:020}.json",
+            S3HourScopedDirectory::new(S3_DIR_HEARTBEAT, unix_millis_to_seconds(timestamp_ms)),
+            self.seq,
+        )
+    }
+
+    fn object_key_pattern(&self, session_id: &str, timestamp_ms: UnixMillis) -> ObjectKeyPattern {
+        ObjectKeyPattern::Fixed(self.object_key(session_id, timestamp_ms))
+    }
 }
 
 /// Operator-trusted bootstrap committee used before any `committee-update/`
@@ -54,10 +106,12 @@ pub struct GenesisLogMessage {
 }
 
 impl GenesisLogMessage {
-    pub const LOG_NAME: &'static str = "record.json";
-
     pub fn object_key() -> String {
-        format!("{}/{}", S3_DIR_GENESIS, Self::LOG_NAME)
+        format!("{S3_DIR_GENESIS}/record.json")
+    }
+
+    fn object_key_pattern(&self) -> ObjectKeyPattern {
+        ObjectKeyPattern::Fixed(Self::object_key())
     }
 }
 
@@ -66,13 +120,13 @@ impl GenesisLogMessage {
 /// higher `cert_seq` entries for the same `sharing_seq` without changing the
 /// `ceremony/` instance.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct KpShareState {
+pub struct KpShareStateLogMessage {
     pub sharing_seq: u64,
     pub cert_seq: u64,
     pub encrypted_shares: KPEncryptedShares,
 }
 
-impl KpShareState {
+impl KpShareStateLogMessage {
     pub fn new(sharing_seq: u64, cert_seq: u64, encrypted_shares: KPEncryptedShares) -> Self {
         Self {
             sharing_seq,
@@ -81,9 +135,9 @@ impl KpShareState {
         }
     }
 
-    /// `kp-shares/{sharing_seq:020}/` — the prefix containing every cert-state
-    /// version for one `SecretSharingInstance`.
-    pub fn object_prefix(sharing_seq: u64) -> String {
+    /// `kp-shares/{sharing_seq:020}/` — the slash-terminated S3 key prefix
+    /// containing every cert-state version for one `SecretSharingInstance`.
+    pub fn object_key_dir(sharing_seq: u64) -> String {
         format!("{S3_DIR_KP_SHARES}/{sharing_seq:020}/")
     }
 
@@ -92,17 +146,17 @@ impl KpShareState {
     pub fn object_key(session_id: &str, sharing_seq: u64, cert_seq: u64) -> String {
         format!(
             "{}{:020}-{session_id}.json",
-            Self::object_prefix(sharing_seq),
+            Self::object_key_dir(sharing_seq),
             cert_seq
         )
     }
 
-    pub fn log_dir(&self) -> String {
-        Self::object_prefix(self.sharing_seq)
-    }
-
-    pub fn log_name(&self, session_id: &str) -> String {
-        format!("{:020}-{session_id}.json", self.cert_seq)
+    fn object_key_pattern(&self, session_id: &str) -> ObjectKeyPattern {
+        ObjectKeyPattern::Fixed(Self::object_key(
+            session_id,
+            self.sharing_seq,
+            self.cert_seq,
+        ))
     }
 }
 
@@ -135,6 +189,17 @@ impl CeremonyLogMessage {
             CeremonyLogMessage::NewKey { instance, .. } => instance.sharing_seq(),
             CeremonyLogMessage::Rotate { new_instance, .. } => new_instance.sharing_seq(),
         }
+    }
+
+    pub fn object_key(&self, session_id: &str) -> String {
+        format!(
+            "{S3_DIR_CEREMONY}/{:020}-{session_id}.json",
+            self.sharing_seq(),
+        )
+    }
+
+    fn object_key_pattern(&self, session_id: &str) -> ObjectKeyPattern {
+        ObjectKeyPattern::Fixed(self.object_key(session_id))
     }
 }
 
@@ -206,17 +271,19 @@ impl InitLogMessage {
     pub const PI_FULLY_INITIALIZED: &'static str = "pi-enclave-fully-initialized";
     pub const OA_ACTIVATED: &'static str = "oa-activated";
 
-    pub fn log_name(&self, prefix: &str) -> String {
+    pub fn object_key(&self, session_id: &str) -> String {
         let suffix = match self {
-            InitLogMessage::OIAttestationUnsigned { .. } => Self::OI_ATTEST_UNSIGNED.to_string(),
-            InitLogMessage::OIGuardianInfo(_) => Self::OI_GUARDIAN_INFO.to_string(),
-            InitLogMessage::PIEnclaveFullyInitialized { .. } => {
-                Self::PI_FULLY_INITIALIZED.to_string()
-            }
-            InitLogMessage::OAActivated { .. } => Self::OA_ACTIVATED.to_string(),
+            InitLogMessage::OIAttestationUnsigned { .. } => Self::OI_ATTEST_UNSIGNED,
+            InitLogMessage::OIGuardianInfo(_) => Self::OI_GUARDIAN_INFO,
+            InitLogMessage::PIEnclaveFullyInitialized { .. } => Self::PI_FULLY_INITIALIZED,
+            InitLogMessage::OAActivated { .. } => Self::OA_ACTIVATED,
         };
 
-        format!("{}-{}.json", prefix, suffix)
+        format!("{S3_DIR_INIT}/{session_id}-{suffix}.json")
+    }
+
+    fn object_key_pattern(&self, session_id: &str) -> ObjectKeyPattern {
+        ObjectKeyPattern::Fixed(self.object_key(session_id))
     }
 
     pub fn attestation_object_key(session_id: &str) -> String {
@@ -244,23 +311,18 @@ impl WithdrawalLogMessage {
     /// log, which the KP reads to recover limiter state. Failures don't have a
     /// meaningful seq (the request's seq may be stale), so they use a random
     /// suffix for dedup.
-    pub fn log_name(&self, prefix: &str) -> String {
+    fn object_key_pattern(&self, session_id: &str, timestamp_ms: UnixMillis) -> ObjectKeyPattern {
+        let directory =
+            S3HourScopedDirectory::new(S3_DIR_WITHDRAW, unix_millis_to_seconds(timestamp_ms));
         match self {
-            WithdrawalLogMessage::Success { request_data, .. } => format!(
-                "success-{:020}-{}-wid{}.json",
-                request_data.seq,
-                prefix,
-                self.wid()
-            ),
-            WithdrawalLogMessage::Failure { .. } => {
-                let random_suffix = rand::random::<u32>();
-                format!(
-                    "failure-{}-wid{}-{:08x}.json",
-                    prefix,
-                    self.wid(),
-                    random_suffix
-                )
-            }
+            Self::Success { request_data, .. } => ObjectKeyPattern::Fixed(format!(
+                "{directory}success-{:020}-{session_id}-wid{}.json",
+                request_data.seq, request_data.wid,
+            )),
+            Self::Failure { request_data, .. } => ObjectKeyPattern::RandomSuffix(format!(
+                "{directory}failure-{session_id}-wid{}-",
+                request_data.wid,
+            )),
         }
     }
 
@@ -277,18 +339,16 @@ impl CommitteeUpdateLogMessage {
     /// is epoch-sorted; failures lead with `failure-` so they sort after
     /// all successes, leaving the lex-last success key as the latest
     /// successfully-applied epoch.
-    pub fn log_name(&self, prefix: &str) -> String {
+    fn object_key_pattern(&self, session_id: &str) -> ObjectKeyPattern {
         match self {
-            CommitteeUpdateLogMessage::Success { new_committee, .. } => {
-                format!("{:020}-{}.json", new_committee.epoch, prefix)
-            }
-            CommitteeUpdateLogMessage::Failure { new_committee, .. } => {
-                let random_suffix = rand::random::<u32>();
-                format!(
-                    "failure-{:020}-{}-{:08x}.json",
-                    new_committee.epoch, prefix, random_suffix
-                )
-            }
+            Self::Success { new_committee, .. } => ObjectKeyPattern::Fixed(format!(
+                "{S3_DIR_COMMITTEE_UPDATE}/{:020}-{session_id}.json",
+                new_committee.epoch,
+            )),
+            Self::Failure { new_committee, .. } => ObjectKeyPattern::RandomSuffix(format!(
+                "{S3_DIR_COMMITTEE_UPDATE}/failure-{:020}-{session_id}-",
+                new_committee.epoch,
+            )),
         }
     }
 }
@@ -306,35 +366,19 @@ impl LogMessage {
         !self.is_allowed_unsigned()
     }
 
-    /// The directory under which logs are written. Ends with a slash.
-    pub fn log_dir(&self, timestamp_ms: UnixMillis) -> String {
+    pub(super) fn object_key_pattern(
+        &self,
+        session_id: &str,
+        timestamp_ms: UnixMillis,
+    ) -> ObjectKeyPattern {
         match self {
-            LogMessage::Init(_) => format!("{}/", S3_DIR_INIT),
-            LogMessage::Heartbeat { .. } => {
-                S3HourScopedDirectory::new(S3_DIR_HEARTBEAT, unix_millis_to_seconds(timestamp_ms))
-                    .to_string()
-            }
-            LogMessage::Withdrawal(..) => {
-                S3HourScopedDirectory::new(S3_DIR_WITHDRAW, unix_millis_to_seconds(timestamp_ms))
-                    .to_string()
-            }
-            LogMessage::Ceremony(..) => format!("{}/", S3_DIR_CEREMONY),
-            LogMessage::KpShareState(state) => state.log_dir(),
-            LogMessage::CommitteeUpdate(..) => format!("{}/", S3_DIR_COMMITTEE_UPDATE),
-            LogMessage::Genesis(..) => format!("{}/", S3_DIR_GENESIS),
-        }
-    }
-
-    /// The name of the log.
-    pub fn log_name(&self, prefix: &str) -> String {
-        match self {
-            LogMessage::Init(init_message) => init_message.log_name(prefix),
-            LogMessage::Heartbeat { seq } => format!("{}-{:020}.json", prefix, seq),
-            LogMessage::Withdrawal(withdrawal_message) => withdrawal_message.log_name(prefix),
-            LogMessage::Ceremony(ss) => format!("{:020}-{}.json", ss.sharing_seq(), prefix),
-            LogMessage::KpShareState(state) => state.log_name(prefix),
-            LogMessage::CommitteeUpdate(committee_message) => committee_message.log_name(prefix),
-            LogMessage::Genesis(_) => GenesisLogMessage::LOG_NAME.to_string(),
+            Self::Heartbeat(message) => message.object_key_pattern(session_id, timestamp_ms),
+            Self::Init(message) => message.object_key_pattern(session_id),
+            Self::Withdrawal(message) => message.object_key_pattern(session_id, timestamp_ms),
+            Self::Ceremony(message) => message.object_key_pattern(session_id),
+            Self::KpShareState(message) => message.object_key_pattern(session_id),
+            Self::CommitteeUpdate(message) => message.object_key_pattern(session_id),
+            Self::Genesis(message) => message.object_key_pattern(),
         }
     }
 

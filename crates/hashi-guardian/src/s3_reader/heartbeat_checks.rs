@@ -75,7 +75,7 @@ fn summarize_heartbeats_by_session(
     let mut map: BTreeMap<String, (UnixSeconds, UnixSeconds)> = BTreeMap::new();
 
     for log in logs {
-        if !matches!(log.message, LogMessage::Heartbeat { .. }) {
+        if !matches!(log.message, LogMessage::Heartbeat(..)) {
             anyhow::bail!("non-heartbeat logs found");
         }
 
@@ -144,6 +144,7 @@ fn validate_session_live_and_others_quiet(
 mod tests {
     use super::*;
     use hashi_types::guardian::BuildPcrs;
+    use hashi_types::guardian::HeartbeatLogMessage;
     use hashi_types::guardian::InitLogMessage;
 
     fn build_pcrs() -> BuildPcrs {
@@ -152,15 +153,17 @@ mod tests {
 
     fn heartbeat_log(session_id: &str, timestamp_secs: UnixSeconds) -> VerifiedLogRecord {
         VerifiedLogRecord {
+            object_key: format!("heartbeat/{session_id}.json"),
             session_id: session_id.to_string(),
             timestamp_ms: timestamp_secs * 1_000,
-            message: LogMessage::Heartbeat { seq: 0 },
+            message: LogMessage::Heartbeat(HeartbeatLogMessage::new(0)),
             build_pcrs: build_pcrs(),
         }
     }
 
     fn non_heartbeat_log() -> VerifiedLogRecord {
         VerifiedLogRecord {
+            object_key: "init/test-session-pi-enclave-fully-initialized.json".to_string(),
             session_id: "test-session".to_string(),
             timestamp_ms: 0,
             message: LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {

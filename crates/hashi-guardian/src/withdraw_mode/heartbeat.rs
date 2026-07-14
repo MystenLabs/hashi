@@ -3,6 +3,7 @@
 
 use crate::Enclave;
 use hashi_types::guardian::GuardianResult;
+use hashi_types::guardian::HeartbeatLogMessage;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,7 +33,9 @@ impl HeartbeatWriter {
             return Ok(());
         }
 
-        self.enclave.log_heartbeat(self.next_seq).await?;
+        self.enclave
+            .log_heartbeat(HeartbeatLogMessage::new(self.next_seq))
+            .await?;
         self.next_seq += 1;
         Ok(())
     }

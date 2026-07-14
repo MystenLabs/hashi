@@ -22,7 +22,7 @@ use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GenesisLogMessage;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianResult;
-use hashi_types::guardian::KpShareState;
+use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::PcrAllowlist;
@@ -126,7 +126,7 @@ impl GuardianReader {
     ) -> anyhow::Result<Vec<VerifiedLogRecord>> {
         let all_logs = self
             .s3
-            .list_all_objects_in_dir::<LogRecord>(dir)
+            .list_all_log_records_in_dir(dir)
             .await
             .with_context(|| format!("failed to list guardian logs in {dir}"))?;
 
@@ -227,13 +227,13 @@ impl GuardianReader {
         &mut self,
         sharing_seq: u64,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<Option<(SessionID, KpShareState)>> {
-        let prefix = KpShareState::object_prefix(sharing_seq);
+    ) -> anyhow::Result<Option<(SessionID, KpShareStateLogMessage)>> {
+        let prefix = KpShareStateLogMessage::object_key_dir(sharing_seq);
         let keys = self.s3.list_all_keys_in_dir(&prefix).await?;
         let Some(key) = keys.into_iter().max() else {
             return Ok(None);
         };
-        let record: LogRecord = self.s3.get_object_no_lock(&key).await?;
+        let record = self.s3.get_log_record_no_lock(&key).await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
         let session_id = record.session_id.clone();
         let build_pcrs = record.build_pcrs.clone();
@@ -241,10 +241,6 @@ impl GuardianReader {
         let LogMessage::KpShareState(msg) = record.message else {
             anyhow::bail!("expected a kp-shares log at {key}");
         };
-        let expected_key = KpShareState::object_key(&session_id, msg.sharing_seq, msg.cert_seq);
-        if key != expected_key {
-            anyhow::bail!("kp-shares key mismatch: expected {expected_key}, got {key}");
-        }
         if msg.sharing_seq != sharing_seq {
             anyhow::bail!(
                 "sharing_seq mismatch: {} != {}",
@@ -364,13 +360,14 @@ impl GuardianSessionCache {
         s3: &GuardianS3Client,
         record: LogRecord,
     ) -> anyhow::Result<VerifiedLogRecord> {
-        let session_info = self
-            .get_or_load_session_info(s3, &record.session_id)
-            .await?;
+        let object_key = record.object_key.clone();
+        let session_id = record.session_id.clone();
+        let session_info = self.get_or_load_session_info(s3, &session_id).await?;
         record
             .verify(&session_info.signing_pubkey)
             .map(|(session_id, timestamp_ms, message)| {
                 VerifiedLogRecord::new(
+                    object_key,
                     session_id,
                     timestamp_ms,
                     message,

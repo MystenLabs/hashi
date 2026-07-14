@@ -27,7 +27,7 @@ use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::guardian::KPEncryptedShare;
 use hashi_types::guardian::KPEncryptedShares;
 use hashi_types::guardian::KPFingerprint;
-use hashi_types::guardian::KpShareState;
+use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::SecretSharingParams;
@@ -162,7 +162,7 @@ impl VerifiedCeremonyState {
         ceremony_session_id: String,
         kp_share_session_id: String,
         secret_sharing_instance: SecretSharingInstance,
-        kp_share_state: KpShareState,
+        kp_share_state: KpShareStateLogMessage,
         btc_master_pubkey: BitcoinPubkey,
         expected_n: usize,
         expected_t: usize,
@@ -500,7 +500,7 @@ mod tests {
             "ceremony-session".into(),
             "kp-share-session".into(),
             resp.secret_sharing_instance,
-            KpShareState::new(1, 0, resp.encrypted_shares),
+            KpShareStateLogMessage::new(1, 0, resp.encrypted_shares),
             resp.btc_master_pubkey,
             3,
             2,
