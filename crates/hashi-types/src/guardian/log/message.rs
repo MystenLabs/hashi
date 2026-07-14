@@ -250,7 +250,13 @@ pub enum InitLogMessage {
         enclave_btc_pubkey: BitcoinPubkey,
     },
     /// Operator activation succeeded and installed live serving state.
-    OAActivated { state_hash: [u8; 32] },
+    OAActivated {
+        state_hash: [u8; 32],
+        config_hash: [u8; 32],
+        sharing_seq: u64,
+        committee_epoch: u64,
+        limiter_state: LimiterState,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

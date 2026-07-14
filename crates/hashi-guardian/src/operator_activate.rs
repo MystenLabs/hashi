@@ -85,6 +85,8 @@ pub async fn operator_activate(
         .await
         .map_err(|e| InvalidInputs(format!("recover limiter state: {e}")))?;
     let rate_limiter = RateLimiter::new(*init_config.limiter_config(), limiter_state)?;
+    let sharing_seq = armed_instance.sharing_seq();
+    let committee_epoch = committee.epoch();
 
     let activation_state = ActivationState::new(
         config_hash,
@@ -106,7 +108,13 @@ pub async fn operator_activate(
         .init(committee, rate_limiter)
         .expect("Unable to init activation state");
     enclave
-        .log_init(InitLogMessage::OAActivated { state_hash })
+        .log_init(InitLogMessage::OAActivated {
+            state_hash,
+            config_hash,
+            sharing_seq,
+            committee_epoch,
+            limiter_state,
+        })
         .await
         .expect("Unable to log operator activation");
     enclave
