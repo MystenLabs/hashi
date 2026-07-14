@@ -327,7 +327,8 @@ mod tests {
         let session = "sess-a";
 
         let domain_share = signed_share(1);
-        let request = SingleProvisionerInitRequest::new(session.to_string(), domain_share.clone());
+        let request =
+            SingleProvisionerInitRequest::new(session.to_string().into(), domain_share.clone());
         let signed_bytes = KpSigned::signed_bytes(&request);
         let good_sig = sign_detached_in_process(&secret_armored, &signed_bytes);
         let signed_request = KpSigned {
@@ -344,7 +345,8 @@ mod tests {
         verify_kp_submission(signed_request.clone(), &[from_config]).unwrap();
 
         let other_share = signed_share(2);
-        let other_request = SingleProvisionerInitRequest::new(session.to_string(), other_share);
+        let other_request =
+            SingleProvisionerInitRequest::new(session.to_string().into(), other_share);
         let signed_other_share = KpSigned {
             data: other_request,
             signer_cert: cert.clone(),
