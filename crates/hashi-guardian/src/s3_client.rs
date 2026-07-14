@@ -658,7 +658,7 @@ mod tests {
     use aws_smithy_mocks::mock;
     use aws_smithy_mocks::mock_client;
     use aws_smithy_mocks::RuleMode;
-    use hashi_types::guardian::GuardianSignKeyPair;
+    use hashi_types::guardian::{GuardianSignKeyPair, HeartbeatLogMessage, LogMessage};
 
     fn mk_logger_with_client(client: Client) -> GuardianS3Client {
         let config = S3Config {
@@ -813,7 +813,7 @@ mod tests {
         let signing_key = GuardianSignKeyPair::new(rand::thread_rng());
         let log = LogRecord::new(
             "session".to_string(),
-            LogMessage::Heartbeat { seq: 7 },
+            LogMessage::Heartbeat(HeartbeatLogMessage::new(7)),
             &signing_key,
         );
 
@@ -842,7 +842,7 @@ mod tests {
         let signing_key = GuardianSignKeyPair::new(rand::thread_rng());
         let log = LogRecord::new(
             "session".to_string(),
-            LogMessage::Heartbeat { seq: 7 },
+            LogMessage::Heartbeat(HeartbeatLogMessage::new(7)),
             &signing_key,
         );
 
