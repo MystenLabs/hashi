@@ -9,7 +9,7 @@ use crate::operator_init;
 use crate::withdraw_mode::committee_update;
 use crate::withdraw_mode::genesis;
 use crate::withdraw_mode::provisioner_init;
-use crate::withdraw_mode::standard;
+use crate::withdraw_mode::standard_withdrawal;
 use crate::Enclave;
 use hashi_types::guardian::proto_conversions;
 use hashi_types::guardian::proto_conversions::pb_to_signed_committee_transition;
@@ -193,9 +193,10 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
                 .map_err(to_status)?;
 
         // core withdraw call
-        let response = standard::standard_withdrawal(self.enclave.clone(), validated_req)
-            .await
-            .map_err(to_status)?;
+        let response =
+            standard_withdrawal::standard_withdrawal(self.enclave.clone(), validated_req)
+                .await
+                .map_err(to_status)?;
 
         // domain to proto
         let resp_pb = proto_conversions::standard_withdrawal_response_signed_to_pb(response);

@@ -1,6 +1,7 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::MAX_S3_WRITE_FAILURE_INTERVAL;
 use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_credential_types::CredentialsBuilder;
 use aws_sdk_s3::error::DisplayErrorContext;
@@ -28,8 +29,12 @@ use hashi_types::guardian::VerifiedSessionInfo;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tracing::info;
+use tracing::warn;
 
+/// Maximum attempts the AWS SDK makes before returning one write failure.
 const MAX_RETRY_ATTEMPTS: u32 = 5;
+/// Delay between application-level retries of an immutable S3 log write.
+const S3_WRITE_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct GuardianS3Client {
@@ -104,10 +109,57 @@ impl GuardianS3Client {
     // S3 Write
     // ========================================================================
 
+    /// Attempt one immutable log write, relying on the AWS SDK retry policy.
     pub async fn write_log_record(&self, log: LogRecord) -> GuardianResult<()> {
         let object_lock_duration = log.object_lock_duration();
         let key = log.object_key();
         self.write_at_key(&key, &log, object_lock_duration).await
+    }
+
+    /// Retry an immutable log write through the grace period, then abort. The
+    /// worker is detached so caller cancellation cannot abandon an in-flight PUT.
+    pub async fn write_log_record_or_abort(&self, log: LogRecord) -> GuardianResult<()> {
+        let writer = self.clone();
+        tokio::spawn(async move {
+            writer
+                .write_log_record_or_abort_inner(
+                    log,
+                    MAX_S3_WRITE_FAILURE_INTERVAL,
+                    S3_WRITE_RETRY_INTERVAL,
+                )
+                .await
+        })
+        .await
+        .expect("S3 log writer task failed")
+    }
+
+    async fn write_log_record_or_abort_inner(
+        &self,
+        log: LogRecord,
+        max_failure_interval: Duration,
+        retry_interval: Duration,
+    ) -> GuardianResult<()> {
+        let object_lock_duration = log.object_lock_duration();
+        let key = log.object_key();
+        let write_until_success = async {
+            loop {
+                match self.write_at_key(&key, &log, object_lock_duration).await {
+                    Ok(()) => return Ok(()),
+                    Err(error) => {
+                        warn!(%key, ?error, "S3 log write failed; retrying");
+                        tokio::time::sleep(retry_interval).await;
+                    }
+                }
+            }
+        };
+
+        match tokio::time::timeout(max_failure_interval, write_until_success).await {
+            Ok(result) => result,
+            Err(_) => panic!(
+                "S3 log {} was not written within {:?}",
+                key, max_failure_interval
+            ),
+        }
     }
 
     /// Write a value to S3 at an explicit key.
@@ -128,27 +180,36 @@ impl GuardianS3Client {
             .checked_add(object_lock_duration)
             .expect("Cant overflow");
 
-        let body = serde_json::to_string(value).expect("Cant serialize to JSON");
-        info!("Log message: {}", body);
+        let body = serde_json::to_vec(value).expect("Cant serialize to JSON");
 
-        // TODO(integration-test): Verify on a real S3 bucket with Object Lock enabled that an object written with `Compliance` + `retain_until` cannot be deleted/overwritten before expiry.
-        let _result = s3_client
+        // `If-None-Match: *` makes retries safe: a lost-ack write that already
+        // landed returns 412 instead of creating another version. A 412 is only
+        // success if the existing immutable object is exactly this record.
+        let result = s3_client
             .put_object()
             .bucket(s3_config.bucket_name())
             .key(key)
             .content_type("application/json")
             .object_lock_mode(ObjectLockMode::Compliance)
             .object_lock_retain_until_date(DateTime::from(expiry_time))
-            .body(ByteStream::from(body.into_bytes()))
+            .if_none_match("*")
+            .body(ByteStream::from(body.clone()))
             .send()
-            .await
-            // DisplayErrorContext displays the full error returned by the SDK
-            .map_err(|e| {
-                S3Error(format!(
+            .await;
+        if let Err(e) = result {
+            let already_written = e
+                .raw_response()
+                .is_some_and(|resp| resp.status().as_u16() == 412);
+            if !already_written {
+                // DisplayErrorContext displays the full error returned by the SDK
+                return Err(S3Error(format!(
                     "Failed to write to s3: {}",
                     DisplayErrorContext(&e)
-                ))
-            })?;
+                )));
+            }
+            self.verify_existing_write(key, &body).await?;
+            info!("Object {} already contains the intended record", key);
+        }
 
         info!("Logged entry to immutable storage");
         info!("Object locked until: {:?}", expiry_time);
@@ -157,6 +218,47 @@ impl GuardianS3Client {
             s3_config.bucket_name(),
             key
         );
+
+        Ok(())
+    }
+
+    /// Similar to `get_object_unsafe`, but compares the raw bytes and treats
+    /// invalid lock metadata as a fatal conflict at this write-once key.
+    async fn verify_existing_write(&self, key: &str, expected_body: &[u8]) -> GuardianResult<()> {
+        let response = self
+            .client
+            .get_object()
+            .bucket(self.config.bucket_name())
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| {
+                S3Error(format!(
+                    "Failed to get object {}: {}",
+                    key,
+                    DisplayErrorContext(&e)
+                ))
+            })?;
+        let has_compliance_lock = response.object_lock_mode() == Some(&ObjectLockMode::Compliance)
+            && response.object_lock_retain_until_date().is_some();
+        let actual_body = response.body.collect().await.map_err(|e| {
+            S3Error(format!(
+                "Failed to read object body for key {}: {}",
+                key,
+                DisplayErrorContext(&e)
+            ))
+        })?;
+
+        if actual_body.into_bytes().as_ref() != expected_body {
+            // A 412 revealed different content at this write-once key. Retrying
+            // cannot replace it, so continuing would violate log durability.
+            panic!("existing object {key} differs from the intended record");
+        }
+        if !has_compliance_lock {
+            // The intended record exists but is not immutable. Retrying cannot
+            // replace it, so it cannot satisfy the durable-write requirement.
+            panic!("existing object {key} is missing a valid compliance lock");
+        }
 
         Ok(())
     }
@@ -425,12 +527,10 @@ impl GuardianS3Client {
 
     /// Point read. This method is unsafe to use since the bucket operator might've overwritten objects.
     async fn get_object_unsafe<T: DeserializeOwned>(&self, key: &str) -> GuardianResult<T> {
-        let s3_client = &self.client;
-        let s3_config = &self.config;
-
-        let response = s3_client
+        let response = self
+            .client
             .get_object()
-            .bucket(s3_config.bucket_name())
+            .bucket(self.config.bucket_name())
             .key(key)
             .send()
             .await
@@ -593,11 +693,13 @@ impl GuardianS3Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aws_sdk_s3::operation::get_object::GetObjectOutput;
     use aws_sdk_s3::operation::put_object::PutObjectOutput;
     use aws_sdk_s3::Client;
     use aws_smithy_mocks::mock;
     use aws_smithy_mocks::mock_client;
     use aws_smithy_mocks::RuleMode;
+    use hashi_types::guardian::GuardianSignKeyPair;
 
     fn mk_logger_with_client(client: Client) -> GuardianS3Client {
         let config = S3Config {
@@ -626,6 +728,7 @@ mod tests {
                     && req.content_type() == Some("application/json")
                     && req.object_lock_mode() == Some(&ObjectLockMode::Compliance)
                     && req.object_lock_retain_until_date().is_some()
+                    && req.if_none_match() == Some("*")
             })
             .then_output(|| PutObjectOutput::builder().build());
 
@@ -641,6 +744,159 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(put_ok.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_412_accepts_identical_locked_object() {
+        let put_precondition_failed = mock!(Client::put_object)
+            .match_requests(|req| req.bucket() == Some("bucket"))
+            .sequence()
+            .http_status(412, None)
+            .build();
+        let get_existing = mock!(Client::get_object)
+            .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
+            .then_output(|| {
+                GetObjectOutput::builder()
+                    .object_lock_mode(ObjectLockMode::Compliance)
+                    .object_lock_retain_until_date(DateTime::from(
+                        SystemTime::now() + Duration::from_mins(5),
+                    ))
+                    .body(ByteStream::from_static(br#"{"a":1}"#))
+                    .build()
+            });
+
+        let client = mock_client!(
+            aws_sdk_s3,
+            RuleMode::MatchAny,
+            &[&put_precondition_failed, &get_existing],
+            |builder| builder.retry_config(RetryConfig::standard().with_max_attempts(1))
+        );
+        let logger = mk_logger_with_client(client);
+        logger
+            .write_at_key("key", &TestPayload { a: 1 }, Duration::from_mins(5))
+            .await
+            .unwrap();
+
+        assert_eq!(put_precondition_failed.num_calls(), 1);
+        assert_eq!(get_existing.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "differs from the intended record")]
+    async fn test_412_mismatch_panics() {
+        let put_precondition_failed = mock!(Client::put_object)
+            .match_requests(|req| req.bucket() == Some("bucket"))
+            .sequence()
+            .http_status(412, None)
+            .build();
+        let get_existing = mock!(Client::get_object)
+            .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
+            .then_output(|| {
+                GetObjectOutput::builder()
+                    .body(ByteStream::from_static(br#"{"a":2}"#))
+                    .build()
+            });
+
+        let client = mock_client!(
+            aws_sdk_s3,
+            RuleMode::MatchAny,
+            &[&put_precondition_failed, &get_existing],
+            |builder| builder.retry_config(RetryConfig::standard().with_max_attempts(1))
+        );
+        let logger = mk_logger_with_client(client);
+        logger
+            .write_at_key("key", &TestPayload { a: 1 }, Duration::from_mins(5))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "is missing a valid compliance lock")]
+    async fn test_412_identical_unlocked_object_panics() {
+        let put_precondition_failed = mock!(Client::put_object)
+            .match_requests(|req| req.bucket() == Some("bucket"))
+            .sequence()
+            .http_status(412, None)
+            .build();
+        let get_existing = mock!(Client::get_object)
+            .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
+            .then_output(|| {
+                GetObjectOutput::builder()
+                    .body(ByteStream::from_static(br#"{"a":1}"#))
+                    .build()
+            });
+
+        let client = mock_client!(
+            aws_sdk_s3,
+            RuleMode::MatchAny,
+            &[&put_precondition_failed, &get_existing],
+            |builder| builder.retry_config(RetryConfig::standard().with_max_attempts(1))
+        );
+        let logger = mk_logger_with_client(client);
+        logger
+            .write_at_key("key", &TestPayload { a: 1 }, Duration::from_mins(5))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_log_writer_retries_beyond_sdk_attempts() {
+        let put_flaky = mock!(Client::put_object)
+            .match_requests(|req| req.bucket() == Some("bucket"))
+            .sequence()
+            .http_status(500, None)
+            .times(5)
+            .output(|| PutObjectOutput::builder().build())
+            .build();
+        let client = mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&put_flaky], |b| b
+            .retry_config(RetryConfig::standard().with_max_attempts(1)));
+        let logger = mk_logger_with_client(client);
+        let signing_key = GuardianSignKeyPair::new(rand::thread_rng());
+        let log = LogRecord::new(
+            "session".to_string(),
+            LogMessage::Heartbeat { seq: 7 },
+            &signing_key,
+        );
+
+        // The generous deadline avoids CI timing sensitivity without slowing success;
+        // zero delay keeps the application-level retry sequence immediate.
+        logger
+            .write_log_record_or_abort_inner(log, Duration::from_secs(10), Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(put_flaky.num_calls(), 6);
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "was not written within")]
+    async fn test_log_writer_panics_after_failure_interval() {
+        let put_fail = mock!(Client::put_object)
+            .match_requests(|req| req.bucket() == Some("bucket"))
+            .sequence()
+            .http_status(500, None)
+            .times(100)
+            .build();
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_fail], |builder| {
+            builder.retry_config(RetryConfig::standard().with_max_attempts(1))
+        });
+        let logger = mk_logger_with_client(client);
+        let signing_key = GuardianSignKeyPair::new(rand::thread_rng());
+        let log = LogRecord::new(
+            "session".to_string(),
+            LogMessage::Heartbeat { seq: 7 },
+            &signing_key,
+        );
+
+        // The first PUT runs immediately, then retries every 5ms until the 50ms
+        // deadline panics (roughly 10 attempts; scheduling makes the count inexact).
+        logger
+            .write_log_record_or_abort_inner(
+                log,
+                Duration::from_millis(50),
+                Duration::from_millis(5),
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
