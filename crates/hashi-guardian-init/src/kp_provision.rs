@@ -36,15 +36,14 @@ use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::EncPubKey;
-use hashi_types::guardian::EnclaveMode;
 use hashi_types::guardian::GuardianEncryptedShare;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::KpSigned;
-use hashi_types::guardian::LifecycleStage;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::SingleProvisionerInitRequest;
 use hashi_types::guardian::VerifiedGuardianInfo;
+use hashi_types::guardian::WithdrawStage;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::load_certs;
 use hashi_types::proto as pb;
@@ -53,6 +52,7 @@ use rand::thread_rng;
 use tracing::info;
 
 use crate::config::Config;
+use crate::guardian_info::ensure_oi_info_matches_post_init;
 use crate::guardian_info::verified_live_guardian_info;
 use crate::kp_roster::VerifiedCeremonyState;
 use crate::kp_roster::decrypt_share;
@@ -158,8 +158,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         .get_session_info(&session_id, BuildPolicy::Current)
         .await?;
     let GuardianInfo {
-        enclave_mode,
-        lifecycle_stage,
+        lifecycle,
         secret_sharing_instance,
         bucket_info,
         encryption_pubkey: enclave_enc_pubkey_bytes,
@@ -172,12 +171,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         mpc_master_g,
     } = &guardian_info;
     anyhow::ensure!(
-        *enclave_mode == EnclaveMode::Withdraw,
-        "Guardian is in {enclave_mode:?} mode; expected withdraw"
-    );
-    anyhow::ensure!(
-        *lifecycle_stage == LifecycleStage::OperatorInitialized,
-        "Guardian lifecycle is {lifecycle_stage:?}; expected operator_initialized"
+        *lifecycle == WithdrawStage::OperatorInitialized.into(),
+        "Guardian lifecycle is {lifecycle:?}; expected withdraw/operator_initialized"
     );
     let enclave_ss_instance = secret_sharing_instance
         .as_ref()
@@ -240,21 +235,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         "Guardian has current_committee_epoch => operator activation already ran"
     );
     let oi_info = verified_session.info;
-    anyhow::ensure!(
-        oi_info.lifecycle_stage == LifecycleStage::Uninitialized,
-        "S3 OI GuardianInfo has an unexpected lifecycle stage"
-    );
-    // The S3 record is the pre-transition snapshot; only its lifecycle differs
-    // from the live post-OI snapshot.
-    let mut normalized_oi_info = oi_info.clone();
-    normalized_oi_info.lifecycle_stage = LifecycleStage::OperatorInitialized;
-    anyhow::ensure!(
-        normalized_oi_info == guardian_info,
-        "S3 GuardianInfo mismatch for session {}: endpoint {:?}, S3 {:?}",
-        session_id,
-        guardian_info,
-        oi_info
-    );
+    ensure_oi_info_matches_post_init(&oi_info, &guardian_info)
+        .with_context(|| format!("S3 GuardianInfo mismatch for session {session_id}"))?;
     anyhow::ensure!(
         &master_g == enclave_mpc_master_g,
         "MPC master g mismatch: expected {:?}, got {:?}",

@@ -572,8 +572,7 @@ mod tests {
     ) -> proto::GetGuardianInfoResponse {
         let signing_key = GuardianSignKeyPair::from([7u8; 32]);
         let info = GuardianInfo {
-            enclave_mode: hashi_types::guardian::EnclaveMode::Withdraw,
-            lifecycle_stage: hashi_types::guardian::LifecycleStage::Activated,
+            lifecycle: hashi_types::guardian::WithdrawStage::Activated.into(),
             secret_sharing_instance: None,
             bucket_info: None,
             encryption_pubkey: vec![0u8; 32],

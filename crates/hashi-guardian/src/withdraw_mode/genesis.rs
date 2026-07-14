@@ -10,6 +10,7 @@ use hashi_types::guardian::GenesisLogMessage;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::OperatorWriteGenesisRequest;
+use hashi_types::guardian::WithdrawStage;
 use tracing::info;
 
 /// Write the operator-trusted bootstrap committee at `genesis/record.json`.
@@ -24,11 +25,7 @@ pub async fn operator_write_genesis(
 ) -> GuardianResult<()> {
     let _guard = enclave.control_lock.lock().await;
 
-    if !enclave.is_operator_init_complete() {
-        return Err(InvalidInputs(
-            "operator_write_genesis requires operator_init".into(),
-        ));
-    }
+    enclave.require_lifecycle(WithdrawStage::OperatorInitialized.into())?;
 
     let init_config = enclave
         .init_config()

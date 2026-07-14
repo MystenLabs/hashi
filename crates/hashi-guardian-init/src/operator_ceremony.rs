@@ -19,10 +19,9 @@ use anyhow::anyhow;
 use anyhow::ensure;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
-use hashi_types::guardian::EnclaveMode;
+use hashi_types::guardian::CeremonyStage;
 use hashi_types::guardian::GuardianSigned;
 use hashi_types::guardian::KpShareStateLogMessage;
-use hashi_types::guardian::LifecycleStage;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
 use hashi_types::guardian::SetupNewKeyResponse;
@@ -118,12 +117,8 @@ pub async fn run(cfg: Config) -> Result<()> {
     let allowlist = cfg.kp_roster.pcr_allowlist();
     let verified = verified_live_guardian_info(&mut client, allowlist.current_build()).await?;
     ensure!(
-        verified.info.enclave_mode == EnclaveMode::Ceremony,
-        "guardian is not in ceremony mode"
-    );
-    ensure!(
-        verified.info.lifecycle_stage == LifecycleStage::OperatorInitialized,
-        "guardian is not operator initialized"
+        verified.info.lifecycle == CeremonyStage::OperatorInitialized.into(),
+        "guardian is not an operator-initialized ceremony enclave"
     );
     let signing_pub_key = verified.signing_pub_key;
     let session_id = verified.session_id;

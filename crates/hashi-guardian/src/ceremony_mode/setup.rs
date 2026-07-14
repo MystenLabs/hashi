@@ -4,7 +4,6 @@
 use crate::Enclave;
 use hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey;
 use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
-use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::*;
 use k256::SecretKey;
 use std::sync::Arc;
@@ -19,15 +18,8 @@ pub async fn setup_new_key(
     request: SetupNewKeyRequest,
 ) -> GuardianResult<GuardianSigned<SetupNewKeyResponse>> {
     info!("/setup_new_key - Received request.");
-    // Hold the ceremony guard across the whole flow so concurrent setup_new_key
-    // /rotate_kps callers can't both pass the completion check below and run.
-    let mut ceremony_complete = enclave.scratchpad.ceremony_complete.lock().await;
-    if !enclave.is_operator_init_complete() {
-        return Err(InvalidInputs("call operator_init first".into()));
-    }
-    if *ceremony_complete {
-        return Err(InvalidInputs("setup or rotation already complete".into()));
-    }
+    let _guard = enclave.control_lock.lock().await;
+    enclave.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
 
     let params = request.params();
     let n = params.num_shares();
@@ -73,7 +65,7 @@ pub async fn setup_new_key(
 
     enclave
         .set_latest_encrypted_shares(encrypted_shares.clone())
-        .expect("set_latest_encrypted_shares should work if ceremony_complete=false");
+        .expect("encrypted shares should only be set once");
 
     let response = enclave.sign(SetupNewKeyResponse {
         encrypted_shares,
@@ -81,7 +73,9 @@ pub async fn setup_new_key(
         btc_master_pubkey,
     });
 
-    *ceremony_complete = true;
+    enclave
+        .advance_lifecycle_into(CeremonyStage::Completed.into())
+        .expect("setup_new_key should complete a ceremony lifecycle");
     info!("Setup complete.");
     Ok(response)
 }
@@ -90,7 +84,6 @@ pub async fn setup_new_key(
 mod tests {
     use super::*;
     use crate::mock_logger_capturing;
-    use crate::OperatorInitTestArgs;
     use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::LogMessageV1;
     use hashi_types::guardian::LogRecord;
@@ -106,15 +99,12 @@ mod tests {
     #[tokio::test]
     async fn test_setup_new_key() {
         let (logger, captures) = mock_logger_capturing();
-        let enclave = Enclave::create_operator_initialized_with(
-            OperatorInitTestArgs::default().with_s3_logger(logger),
-        )
-        .await;
+        let enclave = Enclave::create_operator_initialized_ceremony(logger);
         let verification_key = &enclave.signing_pubkey();
         let request = mock_setup_new_key_request();
         let resp = setup_new_key(enclave.clone(), request).await.unwrap();
         let validated_resp = resp.verify(verification_key).unwrap();
-        assert_eq!(enclave.lifecycle_stage(), LifecycleStage::CeremonyCompleted);
+        assert_eq!(enclave.lifecycle(), CeremonyStage::Completed.into());
 
         // Response still carries the armored ciphertexts.
         assert_eq!(validated_resp.encrypted_shares.len(), TEST_N);

@@ -14,7 +14,6 @@ use super::HashiSigned;
 use super::InitConfig;
 use super::KPEncryptedShare;
 use super::KPEncryptedShares;
-use super::LifecycleStage;
 use super::LimiterConfig;
 use super::NitroAttestation;
 use super::OperatorInitRequest;
@@ -30,6 +29,7 @@ use super::ShareCommitment;
 use super::ShareCommitments;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
+use super::WithdrawStage;
 use super::WithdrawalID;
 pub use crate::pgp::test_utils::mock_pgp_certs;
 pub use crate::pgp::test_utils::mock_pgp_certs_armored;
@@ -83,8 +83,7 @@ impl GetGuardianInfoResponse {
         let signing_pub_key = signing_key.verification_key();
 
         let info = GuardianInfo {
-            enclave_mode: EnclaveMode::Withdraw,
-            lifecycle_stage: LifecycleStage::OperatorInitialized,
+            lifecycle: WithdrawStage::OperatorInitialized.into(),
             secret_sharing_instance: None,
             bucket_info: Some(super::S3BucketInfo {
                 bucket: "bucket".to_string(),

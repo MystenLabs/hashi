@@ -1789,12 +1789,20 @@ pub struct GuardianInfoData {
     /// guardian's own BTC key). Set after operator_init.
     #[prost(bytes = "bytes", optional, tag = "10")]
     pub mpc_master_g: ::core::option::Option<::prost::bytes::Bytes>,
-    /// Which flows this enclave serves. Fixed at boot.
-    #[prost(enumeration = "EnclaveMode", optional, tag = "11")]
-    pub enclave_mode: ::core::option::Option<i32>,
-    /// Current stage in this enclave mode's lifecycle.
-    #[prost(enumeration = "LifecycleStage", optional, tag = "12")]
-    pub lifecycle_stage: ::core::option::Option<i32>,
+    /// Signed enclave mode and its current lifecycle stage.
+    #[prost(oneof = "guardian_info_data::Lifecycle", tags = "11, 12")]
+    pub lifecycle: ::core::option::Option<guardian_info_data::Lifecycle>,
+}
+/// Nested message and enum types in `GuardianInfoData`.
+pub mod guardian_info_data {
+    /// Signed enclave mode and its current lifecycle stage.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Lifecycle {
+        #[prost(enumeration = "super::CeremonyStage", tag = "11")]
+        Ceremony(i32),
+        #[prost(enumeration = "super::WithdrawStage", tag = "12")]
+        Withdraw(i32),
+    }
 }
 /// Public description of the current BTC key's secret-sharing scheme.
 /// `commitments.len() == num_shares` and `2 <= threshold <= num_shares`.
@@ -2107,73 +2115,71 @@ pub struct UpdateCommitteeResponse {
     #[prost(uint64, optional, tag = "1")]
     pub current_committee_epoch: ::core::option::Option<u64>,
 }
-/// Which flows a guardian enclave serves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
-pub enum EnclaveMode {
+pub enum CeremonyStage {
     Unspecified = 0,
-    Ceremony = 1,
-    Withdraw = 2,
+    Uninitialized = 1,
+    OperatorInitialized = 2,
+    Completed = 3,
 }
-impl EnclaveMode {
+impl CeremonyStage {
     /// String value of the enum field names used in the ProtoBuf definition.
     ///
     /// The values are not transformed in any way and thus are considered stable
     /// (if the ProtoBuf definition does not change) and safe for programmatic use.
     pub fn as_str_name(&self) -> &'static str {
         match self {
-            Self::Unspecified => "ENCLAVE_MODE_UNSPECIFIED",
-            Self::Ceremony => "ENCLAVE_MODE_CEREMONY",
-            Self::Withdraw => "ENCLAVE_MODE_WITHDRAW",
+            Self::Unspecified => "CEREMONY_STAGE_UNSPECIFIED",
+            Self::Uninitialized => "CEREMONY_STAGE_UNINITIALIZED",
+            Self::OperatorInitialized => "CEREMONY_STAGE_OPERATOR_INITIALIZED",
+            Self::Completed => "CEREMONY_STAGE_COMPLETED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
     pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
         match value {
-            "ENCLAVE_MODE_UNSPECIFIED" => Some(Self::Unspecified),
-            "ENCLAVE_MODE_CEREMONY" => Some(Self::Ceremony),
-            "ENCLAVE_MODE_WITHDRAW" => Some(Self::Withdraw),
+            "CEREMONY_STAGE_UNSPECIFIED" => Some(Self::Unspecified),
+            "CEREMONY_STAGE_UNINITIALIZED" => Some(Self::Uninitialized),
+            "CEREMONY_STAGE_OPERATOR_INITIALIZED" => Some(Self::OperatorInitialized),
+            "CEREMONY_STAGE_COMPLETED" => Some(Self::Completed),
             _ => None,
         }
     }
 }
-/// Current stage in a guardian enclave's mode-specific lifecycle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
-pub enum LifecycleStage {
+pub enum WithdrawStage {
     Unspecified = 0,
     Uninitialized = 1,
     OperatorInitialized = 2,
-    CeremonyCompleted = 3,
-    ProvisionerInitialized = 4,
-    Activated = 5,
+    ProvisionerInitialized = 3,
+    Activated = 4,
 }
-impl LifecycleStage {
+impl WithdrawStage {
     /// String value of the enum field names used in the ProtoBuf definition.
     ///
     /// The values are not transformed in any way and thus are considered stable
     /// (if the ProtoBuf definition does not change) and safe for programmatic use.
     pub fn as_str_name(&self) -> &'static str {
         match self {
-            Self::Unspecified => "LIFECYCLE_STAGE_UNSPECIFIED",
-            Self::Uninitialized => "LIFECYCLE_STAGE_UNINITIALIZED",
-            Self::OperatorInitialized => "LIFECYCLE_STAGE_OPERATOR_INITIALIZED",
-            Self::CeremonyCompleted => "LIFECYCLE_STAGE_CEREMONY_COMPLETED",
-            Self::ProvisionerInitialized => "LIFECYCLE_STAGE_PROVISIONER_INITIALIZED",
-            Self::Activated => "LIFECYCLE_STAGE_ACTIVATED",
+            Self::Unspecified => "WITHDRAW_STAGE_UNSPECIFIED",
+            Self::Uninitialized => "WITHDRAW_STAGE_UNINITIALIZED",
+            Self::OperatorInitialized => "WITHDRAW_STAGE_OPERATOR_INITIALIZED",
+            Self::ProvisionerInitialized => "WITHDRAW_STAGE_PROVISIONER_INITIALIZED",
+            Self::Activated => "WITHDRAW_STAGE_ACTIVATED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
     pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
         match value {
-            "LIFECYCLE_STAGE_UNSPECIFIED" => Some(Self::Unspecified),
-            "LIFECYCLE_STAGE_UNINITIALIZED" => Some(Self::Uninitialized),
-            "LIFECYCLE_STAGE_OPERATOR_INITIALIZED" => Some(Self::OperatorInitialized),
-            "LIFECYCLE_STAGE_CEREMONY_COMPLETED" => Some(Self::CeremonyCompleted),
-            "LIFECYCLE_STAGE_PROVISIONER_INITIALIZED" => {
+            "WITHDRAW_STAGE_UNSPECIFIED" => Some(Self::Unspecified),
+            "WITHDRAW_STAGE_UNINITIALIZED" => Some(Self::Uninitialized),
+            "WITHDRAW_STAGE_OPERATOR_INITIALIZED" => Some(Self::OperatorInitialized),
+            "WITHDRAW_STAGE_PROVISIONER_INITIALIZED" => {
                 Some(Self::ProvisionerInitialized)
             }
-            "LIFECYCLE_STAGE_ACTIVATED" => Some(Self::Activated),
+            "WITHDRAW_STAGE_ACTIVATED" => Some(Self::Activated),
             _ => None,
         }
     }

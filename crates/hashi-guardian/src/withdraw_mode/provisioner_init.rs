@@ -32,12 +32,7 @@ pub async fn provisioner_init(
     // Serialize so concurrent callers can't race the check-then-finalize below.
     let _guard = enclave.control_lock.lock().await;
 
-    if !enclave.is_operator_init_complete() {
-        return Err(InvalidInputs("Do operator init first".into()));
-    }
-    if enclave.is_provisioner_init_complete() {
-        return Err(InvalidInputs("Provisioner init already complete".into()));
-    }
+    enclave.require_lifecycle(WithdrawStage::OperatorInitialized.into())?;
     info!("Enclave state validated.");
 
     let sk = enclave.encryption_secret_key();
@@ -78,10 +73,8 @@ pub async fn provisioner_init(
         .expect("Unable to log EnclaveFullyInitialized");
 
     enclave
-        .scratchpad
-        .provisioner_init_logging_complete
-        .set(())
-        .expect("provisioner_init_logging_complete should only be set once");
+        .advance_lifecycle_into(WithdrawStage::ProvisionerInitialized.into())
+        .expect("provisioner_init should advance an operator-initialized enclave");
 
     Ok(())
 }
@@ -160,13 +153,10 @@ mod tests {
             enclave.config.is_enclave_btc_keypair_set(),
             "Bitcoin key should be set after threshold"
         );
-        assert!(
-            enclave.is_provisioner_init_complete(),
-            "provisioner init complete"
-        );
         assert_eq!(
-            enclave.lifecycle_stage(),
-            LifecycleStage::ProvisionerInitialized
+            enclave.lifecycle(),
+            WithdrawStage::ProvisionerInitialized.into(),
+            "provisioner init complete"
         );
         assert!(!enclave.is_fully_initialized(), "not active before OA");
     }

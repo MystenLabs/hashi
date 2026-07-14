@@ -31,23 +31,21 @@ use hashi_types::committee::Committee as HashiCommittee;
 
 /// Enclave's config & state
 pub struct Enclave {
+    /// Authoritative mode-specific lifecycle, initialized at boot.
+    lifecycle: RwLock<EnclaveLifecycle>,
     /// Immutable config (set once during init)
     pub config: EnclaveConfig,
     /// Mutable state
     pub state: EnclaveState,
     /// Initialization scratchpad
     pub scratchpad: Scratchpad,
-    /// Serializes control-plane RPCs (operator_init, update_committee) so
-    /// concurrent callers can't race a check-then-set. Held across the handler.
-    /// TODO: fold provisioner_init / ceremony serialization in here too, once
-    /// their dual-purpose locks (share accumulator / one-shot bool) are untangled.
+    /// Serializes lifecycle and control-plane transitions so concurrent callers
+    /// cannot race a check-then-set. Held across each handler.
     pub control_lock: tokio::sync::Mutex<()>,
 }
 
 /// Configuration set during initialization (immutable after set)
 pub struct EnclaveConfig {
-    /// Enclave mode (set on boot).
-    mode: EnclaveMode,
     /// Ephemeral keypair (set on boot)
     eph_keys: EphemeralKeyPairs,
     /// S3 client & config (set in operator_init)
@@ -72,28 +70,13 @@ pub struct EnclaveState {
     rate_limiter: OnceLock<Arc<tokio::sync::Mutex<RateLimiter>>>,
 }
 
-/// Scratchpad used only during initialization. The OnceLock flags retain their
-/// state for the life of the enclave.
+/// Scratchpad used only during initialization.
 #[derive(Default)]
 pub struct Scratchpad {
     /// Stable withdraw-mode config set by operator_init.
     pub init_config: OnceLock<InitConfig>,
     /// Secret-sharing instance (commitments + N + T) set by operator_init.
     pub secret_sharing_instance: OnceLock<SecretSharingInstance>,
-    /// Set once operator_init has successfully written all logs to S3.
-    /// This prevents heartbeats from being emitted before operator_init logs.
-    pub operator_init_logging_complete: OnceLock<()>,
-    /// Set once the provisioner init flow has successfully logged EnclaveFullyInitialized.
-    /// operator_activate requires this so activation cannot happen before the PI log is durable.
-    pub provisioner_init_logging_complete: OnceLock<()>,
-    /// Set once operator_activate has installed live serving state and logged it.
-    pub operator_activate_logging_complete: OnceLock<()>,
-    /// Guards the single ceremony per enclave: `setup_new_key` (genesis) or
-    /// `rotate_kps` (rotation), never both. Each holds this guard across its
-    /// flow so the two can't interleave; the `bool` flips true once a ceremony
-    /// finalizes, making it one-shot per enclave instance (the operator
-    /// restarts to run another).
-    pub ceremony_complete: tokio::sync::Mutex<bool>,
     /// Encrypted shares produced by the ceremony (`setup_new_key` or
     /// `rotate_kps`), served to KPs from `get_guardian_info`. Set once.
     pub latest_encrypted_shares: OnceLock<KPEncryptedShares>,
@@ -105,13 +88,8 @@ pub struct EphemeralKeyPairs {
 }
 
 impl EnclaveConfig {
-    pub fn new(
-        signing_keys: GuardianSignKeyPair,
-        encryption_keys: GuardianEncKeyPair,
-        mode: EnclaveMode,
-    ) -> Self {
+    pub fn new(signing_keys: GuardianSignKeyPair, encryption_keys: GuardianEncKeyPair) -> Self {
         EnclaveConfig {
-            mode,
             eph_keys: EphemeralKeyPairs {
                 signing_keys,
                 encryption_keys,
@@ -361,7 +339,11 @@ impl Enclave {
         mode: EnclaveMode,
     ) -> Self {
         Enclave {
-            config: EnclaveConfig::new(signing_keys, encryption_keys, mode),
+            lifecycle: RwLock::new(match mode {
+                EnclaveMode::Ceremony => CeremonyStage::Uninitialized.into(),
+                EnclaveMode::Withdraw => WithdrawStage::Uninitialized.into(),
+            }),
+            config: EnclaveConfig::new(signing_keys, encryption_keys),
             state: EnclaveState {
                 committee: RwLock::new(None),
                 rate_limiter: OnceLock::new(),
@@ -373,53 +355,79 @@ impl Enclave {
 
     /// Which flows this enclave serves (fixed at boot).
     pub fn mode(&self) -> EnclaveMode {
-        self.config.mode
+        self.lifecycle().mode()
     }
 
-    /// Provisioner_init is complete: the reconstructed BTC keypair is set and
-    /// its installation has been logged.
-    pub fn is_provisioner_init_complete(&self) -> bool {
-        let logged = self
-            .scratchpad
-            .provisioner_init_logging_complete
-            .get()
-            .is_some();
+    pub fn lifecycle(&self) -> EnclaveLifecycle {
+        *self.lifecycle.read().expect("lifecycle lock poisoned")
+    }
+
+    /// Require an exact mode and lifecycle stage.
+    pub fn require_lifecycle(&self, expected: EnclaveLifecycle) -> GuardianResult<()> {
+        let actual = self.lifecycle();
+        if actual != expected {
+            return Err(InvalidInputs(format!(
+                "expected enclave lifecycle {expected:?}, got {actual:?}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Transition after the operation's durable log succeeds. The lifecycle is
+    /// the single source of completion state.
+    pub fn advance_lifecycle_into(&self, next: EnclaveLifecycle) -> GuardianResult<()> {
+        let expected = next
+            .predecessor()
+            .ok_or_else(|| InvalidInputs(format!("cannot advance lifecycle into {next:?}")))?;
+        let mut lifecycle = self.lifecycle.write().expect("lifecycle lock poisoned");
+        if *lifecycle != expected {
+            return Err(InvalidInputs(format!(
+                "expected enclave lifecycle {expected:?}, got {:?}",
+                *lifecycle
+            )));
+        }
+        self.assert_state_installed_for(next);
+        *lifecycle = next;
+        Ok(())
+    }
+
+    fn assert_state_installed_for(&self, next: EnclaveLifecycle) {
+        let installed = match next {
+            EnclaveLifecycle::Ceremony(CeremonyStage::Uninitialized)
+            | EnclaveLifecycle::Withdraw(WithdrawStage::Uninitialized) => {
+                unreachable!("cannot advance lifecycle into {next:?}")
+            }
+            EnclaveLifecycle::Ceremony(CeremonyStage::OperatorInitialized) => {
+                self.operator_init_state_installed(EnclaveMode::Ceremony)
+            }
+            EnclaveLifecycle::Withdraw(WithdrawStage::OperatorInitialized) => {
+                self.operator_init_state_installed(EnclaveMode::Withdraw)
+            }
+            EnclaveLifecycle::Ceremony(CeremonyStage::Completed) => {
+                self.scratchpad.latest_encrypted_shares.get().is_some()
+            }
+            EnclaveLifecycle::Withdraw(WithdrawStage::ProvisionerInitialized) => {
+                self.config.is_enclave_btc_keypair_set()
+            }
+            EnclaveLifecycle::Withdraw(WithdrawStage::Activated) => {
+                self.config.is_enclave_btc_keypair_set()
+                    && self.state.has_committee()
+                    && self.state.rate_limiter.get().is_some()
+            }
+        };
         assert!(
-            !logged
-                || (self.config.is_enclave_btc_keypair_set() && self.is_operator_init_complete()),
-            "provisioner_init_logging_complete set but provisioner_init state is incomplete"
+            installed,
+            "cannot advance lifecycle to {next:?}: state is incomplete"
         );
-        logged
     }
 
-    pub fn is_operator_init_complete(&self) -> bool {
-        let logged = self
-            .scratchpad
-            .operator_init_logging_complete
-            .get()
-            .is_some();
-        // commit_operator_init sets this flag last in an all-or-nothing commit, so
-        // a set flag implies every installed field is present. This backstop holds
-        // in prod too (a violation aborts via `abort_on_panic`) and never fires
-        // transiently, since the flag is the last thing set. The converse is NOT
-        // checked: a normal commit installs the state before its (slow) S3 logging
-        // completes, and a lock-free reader (e.g. the heartbeat) can observe that
-        // window with state present but the flag unset.
-        assert!(
-            !logged || self.operator_init_state_installed(),
-            "operator_init_logging_complete set but operator_init state is incomplete"
-        );
-        logged
-    }
-
-    /// Whether every field operator_init installs is present (mode-aware). Only
-    /// used to assert the `operator_init_logging_complete` invariant above.
-    fn operator_init_state_installed(&self) -> bool {
+    /// Whether every field operator_init installs is present (mode-aware).
+    fn operator_init_state_installed(&self, mode: EnclaveMode) -> bool {
         // Both modes install the S3 logger; a ceremony enclave installs nothing else.
         if self.config.s3_logger.get().is_none() {
             return false;
         }
-        match self.config.mode {
+        match mode {
             EnclaveMode::Ceremony => true,
             // Withdraw enclaves additionally install the stable InitConfig.
             EnclaveMode::Withdraw => {
@@ -432,56 +440,7 @@ impl Enclave {
     }
 
     pub fn is_fully_initialized(&self) -> bool {
-        self.is_active()
-    }
-
-    pub fn is_active(&self) -> bool {
-        let logged = self
-            .scratchpad
-            .operator_activate_logging_complete
-            .get()
-            .is_some();
-        assert!(
-            !logged
-                || (self.is_provisioner_init_complete()
-                    && self.state.has_committee()
-                    && self.state.rate_limiter.get().is_some()),
-            "operator_activate_logging_complete set but activation state is incomplete"
-        );
-        logged
-    }
-
-    /// Signed lifecycle stage reported by [`Self::info`]. Completion flags are
-    /// the source of truth; an in-progress ceremony still reports
-    /// `OperatorInitialized` until it releases the ceremony guard as complete.
-    pub fn lifecycle_stage(&self) -> LifecycleStage {
-        match self.mode() {
-            EnclaveMode::Ceremony => {
-                let ceremony_completed = self
-                    .scratchpad
-                    .ceremony_complete
-                    .try_lock()
-                    .is_ok_and(|complete| *complete);
-                if ceremony_completed {
-                    LifecycleStage::CeremonyCompleted
-                } else if self.is_operator_init_complete() {
-                    LifecycleStage::OperatorInitialized
-                } else {
-                    LifecycleStage::Uninitialized
-                }
-            }
-            EnclaveMode::Withdraw => {
-                if self.is_active() {
-                    LifecycleStage::Activated
-                } else if self.is_provisioner_init_complete() {
-                    LifecycleStage::ProvisionerInitialized
-                } else if self.is_operator_init_complete() {
-                    LifecycleStage::OperatorInitialized
-                } else {
-                    LifecycleStage::Uninitialized
-                }
-            }
-        }
+        self.lifecycle() == WithdrawStage::Activated.into()
     }
 
     // ========================================================================
@@ -515,8 +474,7 @@ impl Enclave {
 
     pub async fn info(&self) -> GuardianInfo {
         GuardianInfo {
-            enclave_mode: self.mode(),
-            lifecycle_stage: self.lifecycle_stage(),
+            lifecycle: self.lifecycle(),
             secret_sharing_instance: self.secret_sharing_instance().ok().cloned(),
             bucket_info: self
                 .config

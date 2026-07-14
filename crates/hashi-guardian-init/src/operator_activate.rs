@@ -11,15 +11,14 @@ use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::ActivationState;
 use hashi_types::guardian::BuildPcrs;
-use hashi_types::guardian::EnclaveMode;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::InitConfig;
-use hashi_types::guardian::LifecycleStage;
 use hashi_types::guardian::OperatorActivateRequest;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::VerifiedGuardianInfo;
+use hashi_types::guardian::WithdrawStage;
 use hashi_types::guardian::proto_conversions::operator_activate_request_to_pb;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
@@ -263,12 +262,8 @@ fn verify_provisioned_standby_info(
     master_g: &hashi_types::bitcoin::HashiMasterG,
 ) -> anyhow::Result<StandbyChecks> {
     ensure!(
-        info.enclave_mode == EnclaveMode::Withdraw,
-        "guardian is not in withdraw mode"
-    );
-    ensure!(
-        info.lifecycle_stage == LifecycleStage::ProvisionerInitialized,
-        "guardian is not provisioner initialized"
+        info.lifecycle == WithdrawStage::ProvisionerInitialized.into(),
+        "guardian is not a provisioner-initialized withdraw enclave"
     );
     let instance = info
         .secret_sharing_instance
@@ -345,15 +340,11 @@ fn verify_oi_info_matches_provisioned_standby(
     live_info: &GuardianInfo,
 ) -> anyhow::Result<()> {
     ensure!(
-        oi_info.enclave_mode == EnclaveMode::Withdraw,
-        "OI GuardianInfo is not for a withdraw enclave"
-    );
-    ensure!(
-        oi_info.lifecycle_stage == LifecycleStage::Uninitialized,
+        oi_info.lifecycle == WithdrawStage::Uninitialized.into(),
         "OI GuardianInfo has an unexpected lifecycle stage"
     );
     ensure!(
-        oi_info.enclave_mode == live_info.enclave_mode,
+        oi_info.lifecycle.mode() == live_info.lifecycle.mode(),
         "OI GuardianInfo enclave mode differs from live standby GuardianInfo"
     );
     ensure!(
@@ -419,12 +410,8 @@ fn verify_activated_info(
         "guardian signing key changed during operator activation"
     );
     ensure!(
-        post.info.enclave_mode == EnclaveMode::Withdraw,
-        "guardian is not in withdraw mode"
-    );
-    ensure!(
-        post.info.lifecycle_stage == LifecycleStage::Activated,
-        "guardian is not activated"
+        post.info.lifecycle == WithdrawStage::Activated.into(),
+        "guardian is not an activated withdraw enclave"
     );
     ensure!(
         post.info.config_hash == Some(expected_config_hash),

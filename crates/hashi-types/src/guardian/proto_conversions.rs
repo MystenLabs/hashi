@@ -6,9 +6,10 @@
 // ---------------------------------
 
 use super::BuildPcrs;
+use super::CeremonyStage;
 use super::Ciphertext;
 use super::CommitteeTransitionRequest;
-use super::EnclaveMode;
+use super::EnclaveLifecycle;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianError;
@@ -25,7 +26,6 @@ use super::InitConfig;
 use super::KPEncryptedShare;
 use super::KPEncryptedShares;
 use super::KpSigned;
-use super::LifecycleStage;
 use super::LimiterConfig;
 use super::LimiterState;
 use super::NitroAttestation;
@@ -48,6 +48,7 @@ use super::SingleProvisionerInitRequest;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalRequestWire;
 use super::StandardWithdrawalResponse;
+use super::WithdrawStage;
 use crate::bitcoin::BitcoinAddress;
 use crate::bitcoin::BitcoinPubkey;
 use crate::bitcoin::BitcoinSignature;
@@ -734,55 +735,55 @@ fn s3_bucket_info_to_pb(info: super::S3BucketInfo) -> pb::S3BucketInfo {
     }
 }
 
-fn pb_to_enclave_mode(mode: i32) -> GuardianResult<EnclaveMode> {
-    match pb::EnclaveMode::try_from(mode) {
-        Ok(pb::EnclaveMode::Ceremony) => Ok(EnclaveMode::Ceremony),
-        Ok(pb::EnclaveMode::Withdraw) => Ok(EnclaveMode::Withdraw),
-        Ok(pb::EnclaveMode::Unspecified) | Err(_) => {
-            Err(InvalidInputs(format!("invalid enclave_mode: {mode}")))
+fn pb_to_ceremony_stage(stage: i32) -> GuardianResult<CeremonyStage> {
+    match pb::CeremonyStage::try_from(stage) {
+        Ok(pb::CeremonyStage::Uninitialized) => Ok(CeremonyStage::Uninitialized),
+        Ok(pb::CeremonyStage::OperatorInitialized) => Ok(CeremonyStage::OperatorInitialized),
+        Ok(pb::CeremonyStage::Completed) => Ok(CeremonyStage::Completed),
+        Ok(pb::CeremonyStage::Unspecified) | Err(_) => {
+            Err(InvalidInputs(format!("invalid ceremony stage: {stage}")))
         }
     }
 }
 
-fn enclave_mode_to_pb(mode: EnclaveMode) -> i32 {
-    match mode {
-        EnclaveMode::Ceremony => pb::EnclaveMode::Ceremony as i32,
-        EnclaveMode::Withdraw => pb::EnclaveMode::Withdraw as i32,
-    }
-}
-
-fn pb_to_lifecycle_stage(stage: i32) -> GuardianResult<LifecycleStage> {
-    match pb::LifecycleStage::try_from(stage) {
-        Ok(pb::LifecycleStage::Uninitialized) => Ok(LifecycleStage::Uninitialized),
-        Ok(pb::LifecycleStage::OperatorInitialized) => Ok(LifecycleStage::OperatorInitialized),
-        Ok(pb::LifecycleStage::CeremonyCompleted) => Ok(LifecycleStage::CeremonyCompleted),
-        Ok(pb::LifecycleStage::ProvisionerInitialized) => {
-            Ok(LifecycleStage::ProvisionerInitialized)
-        }
-        Ok(pb::LifecycleStage::Activated) => Ok(LifecycleStage::Activated),
-        Ok(pb::LifecycleStage::Unspecified) | Err(_) => {
-            Err(InvalidInputs(format!("invalid lifecycle_stage: {stage}")))
-        }
-    }
-}
-
-fn lifecycle_stage_to_pb(stage: LifecycleStage) -> i32 {
+fn ceremony_stage_to_pb(stage: CeremonyStage) -> i32 {
     match stage {
-        LifecycleStage::Uninitialized => pb::LifecycleStage::Uninitialized as i32,
-        LifecycleStage::OperatorInitialized => pb::LifecycleStage::OperatorInitialized as i32,
-        LifecycleStage::CeremonyCompleted => pb::LifecycleStage::CeremonyCompleted as i32,
-        LifecycleStage::ProvisionerInitialized => pb::LifecycleStage::ProvisionerInitialized as i32,
-        LifecycleStage::Activated => pb::LifecycleStage::Activated as i32,
+        CeremonyStage::Uninitialized => pb::CeremonyStage::Uninitialized as i32,
+        CeremonyStage::OperatorInitialized => pb::CeremonyStage::OperatorInitialized as i32,
+        CeremonyStage::Completed => pb::CeremonyStage::Completed as i32,
+    }
+}
+
+fn pb_to_withdraw_stage(stage: i32) -> GuardianResult<WithdrawStage> {
+    match pb::WithdrawStage::try_from(stage) {
+        Ok(pb::WithdrawStage::Uninitialized) => Ok(WithdrawStage::Uninitialized),
+        Ok(pb::WithdrawStage::OperatorInitialized) => Ok(WithdrawStage::OperatorInitialized),
+        Ok(pb::WithdrawStage::ProvisionerInitialized) => Ok(WithdrawStage::ProvisionerInitialized),
+        Ok(pb::WithdrawStage::Activated) => Ok(WithdrawStage::Activated),
+        Ok(pb::WithdrawStage::Unspecified) | Err(_) => {
+            Err(InvalidInputs(format!("invalid withdraw stage: {stage}")))
+        }
+    }
+}
+
+fn withdraw_stage_to_pb(stage: WithdrawStage) -> i32 {
+    match stage {
+        WithdrawStage::Uninitialized => pb::WithdrawStage::Uninitialized as i32,
+        WithdrawStage::OperatorInitialized => pb::WithdrawStage::OperatorInitialized as i32,
+        WithdrawStage::ProvisionerInitialized => pb::WithdrawStage::ProvisionerInitialized as i32,
+        WithdrawStage::Activated => pb::WithdrawStage::Activated as i32,
     }
 }
 
 fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<GuardianInfo> {
-    let enclave_mode =
-        pb_to_enclave_mode(data.enclave_mode.ok_or_else(|| missing("enclave_mode"))?)?;
-    let lifecycle_stage = pb_to_lifecycle_stage(
-        data.lifecycle_stage
-            .ok_or_else(|| missing("lifecycle_stage"))?,
-    )?;
+    let lifecycle = match data.lifecycle.ok_or_else(|| missing("lifecycle"))? {
+        pb::guardian_info_data::Lifecycle::Ceremony(stage) => {
+            EnclaveLifecycle::Ceremony(pb_to_ceremony_stage(stage)?)
+        }
+        pb::guardian_info_data::Lifecycle::Withdraw(stage) => {
+            EnclaveLifecycle::Withdraw(pb_to_withdraw_stage(stage)?)
+        }
+    };
     let secret_sharing_instance = data
         .secret_sharing_instance
         .map(pb_to_secret_sharing_instance)
@@ -827,8 +828,7 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
         .transpose()?;
 
     Ok(GuardianInfo {
-        enclave_mode,
-        lifecycle_stage,
+        lifecycle,
         secret_sharing_instance,
         bucket_info,
         encryption_pubkey,
@@ -843,9 +843,16 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
 }
 
 fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
+    let lifecycle = match info.lifecycle {
+        EnclaveLifecycle::Ceremony(stage) => {
+            pb::guardian_info_data::Lifecycle::Ceremony(ceremony_stage_to_pb(stage))
+        }
+        EnclaveLifecycle::Withdraw(stage) => {
+            pb::guardian_info_data::Lifecycle::Withdraw(withdraw_stage_to_pb(stage))
+        }
+    };
     pb::GuardianInfoData {
-        enclave_mode: Some(enclave_mode_to_pb(info.enclave_mode)),
-        lifecycle_stage: Some(lifecycle_stage_to_pb(info.lifecycle_stage)),
+        lifecycle: Some(lifecycle),
         secret_sharing_instance: info
             .secret_sharing_instance
             .as_ref()
@@ -1340,8 +1347,7 @@ mod tests {
         let pk = kp.x_only_public_key().0;
 
         let info = GuardianInfo {
-            enclave_mode: EnclaveMode::Withdraw,
-            lifecycle_stage: LifecycleStage::ProvisionerInitialized,
+            lifecycle: WithdrawStage::ProvisionerInitialized.into(),
             secret_sharing_instance: None,
             bucket_info: None,
             encryption_pubkey: vec![0u8; 32],

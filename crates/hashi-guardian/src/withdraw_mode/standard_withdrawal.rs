@@ -17,6 +17,7 @@ use hashi_types::guardian::RateLimiter;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalResponse;
+use hashi_types::guardian::WithdrawStage;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::WithdrawalLogMessage;
 use std::sync::Arc;
@@ -217,10 +218,8 @@ mod tests {
             .unwrap();
 
         enclave
-            .scratchpad
-            .provisioner_init_logging_complete
-            .set(())
-            .expect("provisioner_init_logging_complete should only be set once");
+            .advance_lifecycle_into(WithdrawStage::ProvisionerInitialized.into())
+            .expect("test setup should advance provisioner init lifecycle");
         activate_enclave_for_testing(&enclave, committee, limiter_config, limiter_state)
             .expect("activate_enclave_for_testing should succeed on a fresh enclave");
 

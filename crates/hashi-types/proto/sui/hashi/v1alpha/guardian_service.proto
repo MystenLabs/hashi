@@ -68,21 +68,19 @@ message SignedGuardianInfo {
   optional bytes signature = 3;
 }
 
-// Which flows a guardian enclave serves.
-enum EnclaveMode {
-  ENCLAVE_MODE_UNSPECIFIED = 0;
-  ENCLAVE_MODE_CEREMONY = 1;
-  ENCLAVE_MODE_WITHDRAW = 2;
+enum CeremonyStage {
+  CEREMONY_STAGE_UNSPECIFIED = 0;
+  CEREMONY_STAGE_UNINITIALIZED = 1;
+  CEREMONY_STAGE_OPERATOR_INITIALIZED = 2;
+  CEREMONY_STAGE_COMPLETED = 3;
 }
 
-// Current stage in a guardian enclave's mode-specific lifecycle.
-enum LifecycleStage {
-  LIFECYCLE_STAGE_UNSPECIFIED = 0;
-  LIFECYCLE_STAGE_UNINITIALIZED = 1;
-  LIFECYCLE_STAGE_OPERATOR_INITIALIZED = 2;
-  LIFECYCLE_STAGE_CEREMONY_COMPLETED = 3;
-  LIFECYCLE_STAGE_PROVISIONER_INITIALIZED = 4;
-  LIFECYCLE_STAGE_ACTIVATED = 5;
+enum WithdrawStage {
+  WITHDRAW_STAGE_UNSPECIFIED = 0;
+  WITHDRAW_STAGE_UNINITIALIZED = 1;
+  WITHDRAW_STAGE_OPERATOR_INITIALIZED = 2;
+  WITHDRAW_STAGE_PROVISIONER_INITIALIZED = 3;
+  WITHDRAW_STAGE_ACTIVATED = 4;
 }
 
 // Information about the guardian enclave.
@@ -121,11 +119,11 @@ message GuardianInfoData {
   // guardian's own BTC key). Set after operator_init.
   optional bytes mpc_master_g = 10;
 
-  // Which flows this enclave serves. Fixed at boot.
-  optional EnclaveMode enclave_mode = 11;
-
-  // Current stage in this enclave mode's lifecycle.
-  optional LifecycleStage lifecycle_stage = 12;
+  // Signed enclave mode and its current lifecycle stage.
+  oneof lifecycle {
+    CeremonyStage ceremony = 11;
+    WithdrawStage withdraw = 12;
+  }
 }
 
 // Public description of the current BTC key's secret-sharing scheme.

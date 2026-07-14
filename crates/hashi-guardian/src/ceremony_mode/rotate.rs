@@ -22,15 +22,8 @@ pub async fn rotate_kps(
 ) -> GuardianResult<GuardianSigned<RotateKpsResponse>> {
     info!("/rotate_kps - Received request.");
 
-    // Hold the ceremony guard for the whole call: blocks a concurrent
-    // setup_new_key, and the flag rejects re-entry after one ceremony finalizes.
-    let mut ceremony_complete = enclave.scratchpad.ceremony_complete.lock().await;
-    if !enclave.is_operator_init_complete() {
-        return Err(InvalidInputs("call operator_init first".into()));
-    }
-    if *ceremony_complete {
-        return Err(InvalidInputs("setup or rotation already complete".into()));
-    }
+    let _guard = enclave.control_lock.lock().await;
+    enclave.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
 
     let (encrypted_old_shares, old_instance, state) = request.into_parts();
     let old_t = old_instance.threshold();
@@ -53,7 +46,9 @@ pub async fn rotate_kps(
     );
 
     let response = finalize_rotation(&enclave, &old_shares, &old_instance, state).await?;
-    *ceremony_complete = true;
+    enclave
+        .advance_lifecycle_into(CeremonyStage::Completed.into())
+        .expect("rotate_kps should complete a ceremony lifecycle");
     Ok(response)
 }
 
@@ -102,7 +97,7 @@ async fn finalize_rotation(
 
     enclave
         .set_latest_encrypted_shares(encrypted_shares.clone())
-        .expect("set_latest_encrypted_shares should work if ceremony_complete=false");
+        .expect("encrypted shares should only be set once");
 
     info!("Rotation complete.");
     Ok(enclave.sign(RotateKpsResponse { encrypted_shares }))
@@ -113,7 +108,6 @@ mod tests {
     use super::*;
     use crate::mock_logger_capturing;
     use crate::test_utils::CapturedPuts;
-    use crate::OperatorInitTestArgs;
     use hashi_types::guardian::crypto::split_secret;
     use hashi_types::guardian::test_utils::mock_pgp_certs;
     use hashi_types::guardian::LogMessage;
@@ -129,14 +123,8 @@ mod tests {
         let sk = SecretKey::random(&mut rand::thread_rng());
         let params = SecretSharingParams::new(TEST_N, TEST_T).unwrap();
         let shares = split_secret(&sk, &params, &mut rand::thread_rng());
-        let commitments = ShareCommitments::from_shares(&shares).unwrap();
         let (logger, captures) = mock_logger_capturing();
-        let enclave = Enclave::create_operator_initialized_with(
-            OperatorInitTestArgs::default()
-                .with_commitments(commitments)
-                .with_s3_logger(logger),
-        )
-        .await;
+        let enclave = Enclave::create_operator_initialized_ceremony(logger);
         (sk, shares, captures, enclave)
     }
 

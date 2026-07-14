@@ -4,6 +4,7 @@
 pub mod attestation;
 pub mod crypto;
 pub mod errors;
+pub mod lifecycle;
 pub mod log;
 pub mod proto_conversions;
 pub(crate) mod serde_utils;
@@ -19,6 +20,7 @@ pub use attestation::GitRevision;
 pub use attestation::NitroAttestation;
 pub use attestation::PcrAllowlist;
 pub use attestation::VerifiedSessionInfo;
+pub use lifecycle::*;
 pub use limiter::LimiterConfig;
 pub use limiter::LimiterState;
 pub use limiter::RateLimiter;
@@ -60,29 +62,6 @@ use serde::Serialize;
 use std::borrow::Borrow;
 use std::fmt;
 use std::ops::Deref;
-
-/// Which flows an enclave serves, fixed at boot. A `Ceremony` enclave runs
-/// `setup_new_key`/`rotate_kps`; a `Withdraw` enclave runs `provisioner_init` +
-/// `standard_withdrawal`. `operator_init`, `get_guardian_info` are enabled in both modes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EnclaveMode {
-    Ceremony,
-    Withdraw,
-}
-
-/// Signed lifecycle stage of an enclave session. Valid progressions depend on
-/// [`EnclaveMode`]: ceremony enclaves complete a ceremony, while withdraw
-/// enclaves reconstruct their key and then activate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LifecycleStage {
-    Uninitialized,
-    OperatorInitialized,
-    CeremonyCompleted,
-    ProvisionerInitialized,
-    Activated,
-}
 
 // ---------------------------------
 //    Common requests and responses
@@ -127,10 +106,8 @@ pub struct VerifiedGuardianInfo {
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct GuardianInfo {
-    /// Which flows this enclave serves. Fixed at boot.
-    pub enclave_mode: EnclaveMode,
-    /// Current stage in this enclave mode's lifecycle.
-    pub lifecycle_stage: LifecycleStage,
+    /// Signed enclave mode and its current lifecycle stage.
+    pub lifecycle: EnclaveLifecycle,
     /// Secret-sharing instance (if set). Used by KPs to check that the right key will be used.
     pub secret_sharing_instance: Option<SecretSharingInstance>,
     /// S3 bucket name (if set). Used by KPs to check S3 bucket info.
@@ -986,8 +963,7 @@ mod tests {
         ));
 
         let json = serde_json::to_value(&info).unwrap();
-        assert_eq!(json["enclave_mode"], "withdraw");
-        assert_eq!(json["lifecycle_stage"], "operator_initialized");
+        assert_eq!(json["lifecycle"]["withdraw"], "operator_initialized");
         assert_eq!(json["encryption_pubkey"], hex::encode([0u8; 32]));
         assert_eq!(json["config_hash"], hex::encode([0xab; 32]));
         let mpc_master_g = json["mpc_master_g"].as_str().unwrap();

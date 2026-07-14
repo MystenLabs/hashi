@@ -4,6 +4,7 @@
 use crate::Enclave;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::HeartbeatLogMessage;
+use hashi_types::guardian::WithdrawStage;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,7 +30,7 @@ impl HeartbeatWriter {
     /// The shared S3 writer retries failures and aborts the process if its grace
     /// period expires.
     pub async fn tick(&mut self) -> GuardianResult<()> {
-        if !self.enclave.is_operator_init_complete() {
+        if self.enclave.lifecycle() == WithdrawStage::Uninitialized.into() {
             return Ok(());
         }
 

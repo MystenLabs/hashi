@@ -6,14 +6,13 @@ use anyhow::anyhow;
 use anyhow::ensure;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
-use hashi_types::guardian::EnclaveMode;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::InitConfig;
-use hashi_types::guardian::LifecycleStage;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::OperatorWriteGenesisRequest;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::SecretSharingInstance;
+use hashi_types::guardian::WithdrawStage;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
 use hashi_types::guardian::proto_conversions::operator_write_genesis_request_to_pb;
 use hashi_types::pgp::load_certs;
@@ -21,6 +20,7 @@ use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use tracing::info;
 
 use crate::config::Config;
+use crate::guardian_info::ensure_oi_info_matches_post_init;
 use crate::guardian_info::verified_live_guardian_info;
 use crate::kp_roster::VerifiedCeremonyState;
 
@@ -263,18 +263,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
     );
     let oi_info = verified_session.info;
-    ensure!(
-        oi_info.lifecycle_stage == LifecycleStage::Uninitialized,
-        "S3 OI GuardianInfo has an unexpected lifecycle stage"
-    );
-    // The S3 record is the pre-transition snapshot; only its lifecycle differs
-    // from the live post-OI snapshot.
-    let mut normalized_oi_info = oi_info.clone();
-    normalized_oi_info.lifecycle_stage = LifecycleStage::OperatorInitialized;
-    ensure!(
-        normalized_oi_info == post.info,
-        "guardian S3 init GuardianInfo differs from post-OperatorInit gRPC GuardianInfo"
-    );
+    ensure_oi_info_matches_post_init(&oi_info, &post.info)?;
     info!(
         phase = "attestation pin",
         session_id = %session_id,
@@ -305,12 +294,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
 fn ensure_uninitialized(info: &GuardianInfo) -> anyhow::Result<()> {
     ensure!(
-        info.enclave_mode == EnclaveMode::Withdraw,
-        "guardian is not in withdraw mode"
-    );
-    ensure!(
-        info.lifecycle_stage == LifecycleStage::Uninitialized,
-        "guardian is not uninitialized"
+        info.lifecycle == WithdrawStage::Uninitialized.into(),
+        "guardian is not an uninitialized withdraw enclave"
     );
     ensure!(
         info.secret_sharing_instance.is_none(),
@@ -355,12 +340,8 @@ fn verify_initialized_info(
     expected_config_hash: [u8; 32],
 ) -> anyhow::Result<()> {
     ensure!(
-        info.enclave_mode == EnclaveMode::Withdraw,
-        "guardian is not in withdraw mode"
-    );
-    ensure!(
-        info.lifecycle_stage == LifecycleStage::OperatorInitialized,
-        "guardian is not operator initialized"
+        info.lifecycle == WithdrawStage::OperatorInitialized.into(),
+        "guardian is not an operator-initialized withdraw enclave"
     );
     let instance = info
         .secret_sharing_instance
