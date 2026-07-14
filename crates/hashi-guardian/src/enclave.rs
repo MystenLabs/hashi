@@ -575,11 +575,9 @@ impl Enclave {
         cert_seq: u64,
         encrypted_shares: KPEncryptedShares,
     ) -> GuardianResult<()> {
-        self.write_log(LogMessage::KpShareState(Box::new(KpShareState::new(
-            sharing_seq,
-            cert_seq,
-            encrypted_shares,
-        ))))
+        self.write_log(LogMessage::KpShareState(Box::new(
+            KpShareStateLogMessage::new(sharing_seq, cert_seq, encrypted_shares),
+        )))
         .await
     }
 

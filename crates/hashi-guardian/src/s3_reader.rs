@@ -22,7 +22,7 @@ use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GenesisLogMessage;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianResult;
-use hashi_types::guardian::KpShareState;
+use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::PcrAllowlist;
@@ -227,8 +227,8 @@ impl GuardianReader {
         &mut self,
         sharing_seq: u64,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<Option<(SessionID, KpShareState)>> {
-        let prefix = KpShareState::object_prefix(sharing_seq);
+    ) -> anyhow::Result<Option<(SessionID, KpShareStateLogMessage)>> {
+        let prefix = KpShareStateLogMessage::object_prefix(sharing_seq);
         let keys = self.s3.list_all_keys_in_dir(&prefix).await?;
         let Some(key) = keys.into_iter().max() else {
             return Ok(None);

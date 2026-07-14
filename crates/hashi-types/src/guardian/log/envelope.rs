@@ -13,6 +13,7 @@ use super::S3_OBJECT_LOCK_DURATION_INIT;
 use super::S3_OBJECT_LOCK_DURATION_KP_SHARES;
 use super::S3_OBJECT_LOCK_DURATION_WITHDRAW;
 use super::message::LogMessage;
+use super::message::ObjectKeyPattern;
 use crate::guardian::BuildPcrs;
 use crate::guardian::GuardianError::InvalidInputs;
 use crate::guardian::GuardianPubKey;
@@ -32,7 +33,8 @@ use std::time::Duration;
 
 pub const LOG_SCHEMA_VERSION: u8 = 1;
 
-/// Canonical log record written to S3.
+/// Write: `LogMessage` -> signed `LogRecord` with a finalized key -> JSON body.
+/// Read: S3 key + JSON body -> untrusted `LogRecord` -> `VerifiedLogRecord`.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LogRecord {
     pub schema_version: u8,
@@ -113,18 +115,15 @@ impl LogRecord {
         Self::new_at_timestamp(session_id, message, signing_key, now_timestamp_ms())
     }
 
-    fn new_at_timestamp(
+    pub fn new_at_timestamp(
         session_id: SessionID,
         message: LogMessage,
         signing_key: &GuardianSignKeyPair,
         timestamp_ms: UnixMillis,
     ) -> Self {
-        let object_key_nonce = message
-            .uses_random_object_key_suffix()
-            .then(rand::random::<u32>);
-        let object_key =
-            Self::derive_object_key(&session_id, timestamp_ms, &message, object_key_nonce)
-                .expect("new log record must have a valid object key nonce");
+        let object_key = message
+            .object_key_pattern(&session_id, timestamp_ms)
+            .finalize();
         if message.is_allowed_unsigned() {
             Self::unsigned(session_id, message, timestamp_ms, object_key)
         } else {
@@ -251,24 +250,23 @@ impl LogRecord {
                 self.schema_version
             )));
         }
-        if let Some(name_prefix) = self.message.random_object_key_name_prefix(&self.session_id) {
-            let expected_prefix =
-                format!("{}{name_prefix}", self.message.log_dir(self.timestamp_ms));
-            if !self.object_key.starts_with(&expected_prefix) {
+        match self
+            .message
+            .object_key_pattern(&self.session_id, self.timestamp_ms)
+        {
+            ObjectKeyPattern::Fixed(expected) if self.object_key != expected => {
                 return Err(InvalidInputs(format!(
-                    "non-canonical S3 object key: got {}, expected prefix {expected_prefix}",
+                    "non-canonical S3 object key: got {}, expected {expected}",
                     self.object_key
                 )));
             }
-        } else {
-            let canonical_key =
-                Self::derive_object_key(&self.session_id, self.timestamp_ms, &self.message, None)?;
-            if self.object_key != canonical_key {
+            ObjectKeyPattern::RandomSuffix(prefix) if !self.object_key.starts_with(&prefix) => {
                 return Err(InvalidInputs(format!(
-                    "non-canonical S3 object key: got {}, expected {canonical_key}",
+                    "non-canonical S3 object key: got {}, expected prefix {prefix}",
                     self.object_key
                 )));
             }
+            _ => {}
         }
         if let LogMessage::Init(init) = &self.message
             && let super::message::InitLogMessage::OIAttestationUnsigned {
@@ -284,17 +282,6 @@ impl LogRecord {
             }
         }
         Ok(())
-    }
-
-    fn derive_object_key(
-        session_id: &str,
-        timestamp_ms: UnixMillis,
-        message: &LogMessage,
-        object_key_nonce: Option<u32>,
-    ) -> GuardianResult<String> {
-        let dir = message.log_dir(timestamp_ms);
-        let log_name = message.log_name(session_id, object_key_nonce)?;
-        Ok(format!("{}{}", dir, log_name))
     }
 }
 
@@ -632,13 +619,13 @@ mod tests {
 
     #[test]
     fn object_key_and_lock_for_kp_share_state() {
-        use crate::guardian::KpShareState;
+        use crate::guardian::KpShareStateLogMessage;
 
         let session_id = "session-d".to_string();
         let signing_key = GuardianSignKeyPair::from([10u8; 32]);
         let log = LogRecord::new_at_timestamp(
             session_id,
-            LogMessage::KpShareState(Box::new(KpShareState::new(
+            LogMessage::KpShareState(Box::new(KpShareStateLogMessage::new(
                 7,
                 3,
                 KPEncryptedShares::new(vec![]).unwrap(),

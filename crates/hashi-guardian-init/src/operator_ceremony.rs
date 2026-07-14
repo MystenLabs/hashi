@@ -20,7 +20,7 @@ use anyhow::ensure;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::GuardianSigned;
-use hashi_types::guardian::KpShareState;
+use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
 use hashi_types::guardian::SetupNewKeyResponse;
@@ -230,7 +230,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         kp_share_session_id = %live.kp_share_session_id,
         sharing_seq = live.secret_sharing_instance.sharing_seq(),
         cert_seq = live.kp_share_cert_seq,
-        kp_shares_key = %KpShareState::object_key(
+        kp_shares_key = %KpShareStateLogMessage::object_key(
             &live.kp_share_session_id,
             live.secret_sharing_instance.sharing_seq(),
             live.kp_share_cert_seq
