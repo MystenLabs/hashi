@@ -360,15 +360,13 @@ impl GuardianSessionCache {
         s3: &GuardianS3Client,
         record: LogRecord,
     ) -> anyhow::Result<VerifiedLogRecord> {
-        let object_key = record.object_key.clone();
-        let session_info = self
-            .get_or_load_session_info(s3, &record.session_id)
-            .await?;
+        let object_key = record.object_key().to_string();
+        let session_id = record.session_id().clone();
+        let session_info = self.get_or_load_session_info(s3, &session_id).await?;
         record
             .verify(&session_info.signing_pubkey)
-            .map(|(schema_version, session_id, timestamp_ms, message)| {
+            .map(|(session_id, timestamp_ms, message)| {
                 VerifiedLogRecord::new(
-                    schema_version,
                     object_key,
                     session_id,
                     timestamp_ms,

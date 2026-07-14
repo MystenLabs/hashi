@@ -217,7 +217,7 @@ mod tests {
         );
 
         let record: LogRecord = serde_json::from_slice(body).unwrap();
-        let LogMessage::Ceremony(ceremony) = record.message else {
+        let LogMessage::Ceremony(ceremony) = record.into_message() else {
             panic!("expected Ceremony variant");
         };
         let CeremonyLogMessage::Rotate {
@@ -249,7 +249,7 @@ mod tests {
             "expected sharing_seq=1 cert_seq=0, got key {shares_key}"
         );
         let shares_record: LogRecord = serde_json::from_slice(shares_body).unwrap();
-        let LogMessage::KpShareState(shares) = shares_record.message else {
+        let LogMessage::KpShareState(shares) = shares_record.into_message() else {
             panic!("expected KpShareState variant");
         };
         assert_eq!(shares.sharing_seq, 1);
