@@ -508,7 +508,7 @@ impl Enclave {
 
     /// A unique session ID for the current enclave session.
     pub fn s3_session_id(&self) -> SessionID {
-        session_id_from_signing_pubkey(&self.signing_pubkey())
+        SessionID::from_signing_pubkey(&self.signing_pubkey())
     }
 
     async fn write_log(&self, message: LogMessageV1) -> GuardianResult<()> {

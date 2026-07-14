@@ -31,6 +31,7 @@ use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::SecretSharingParams;
+use hashi_types::guardian::SessionID;
 use hashi_types::guardian::SetupNewKeyResponse;
 use hashi_types::guardian::Share;
 use hashi_types::pgp::PgpPublicCert;
@@ -89,8 +90,8 @@ impl KpRosterConfig {
 /// `kp-shares/` logs (`key-provisioner ceremony`, `key-provisioner provision`).
 #[derive(Debug, PartialEq)]
 pub struct VerifiedCeremonyState {
-    pub ceremony_session_id: String,
-    pub kp_share_session_id: String,
+    pub ceremony_session_id: SessionID,
+    pub kp_share_session_id: SessionID,
     pub kp_share_cert_seq: u64,
     pub encrypted_shares: KPEncryptedShares,
     pub secret_sharing_instance: SecretSharingInstance,
@@ -100,7 +101,7 @@ pub struct VerifiedCeremonyState {
 impl VerifiedCeremonyState {
     pub fn from_response(
         response: SetupNewKeyResponse,
-        session_id: String,
+        session_id: SessionID,
         expected_sharing_seq: u64,
         expected_n: usize,
         expected_t: usize,
@@ -159,8 +160,8 @@ impl VerifiedCeremonyState {
     /// log and the kp-shares log). Use instead of [`Self::latest_from_s3`] when the
     /// caller has already read those objects and wants to avoid a second walk.
     pub fn from_scraped(
-        ceremony_session_id: String,
-        kp_share_session_id: String,
+        ceremony_session_id: SessionID,
+        kp_share_session_id: SessionID,
         secret_sharing_instance: SecretSharingInstance,
         kp_share_state: KpShareStateLogMessage,
         btc_master_pubkey: BitcoinPubkey,

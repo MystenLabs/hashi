@@ -360,7 +360,7 @@ impl GuardianSessionCache {
             let session_info = s3
                 .get_verified_session_info(session_id, &self.allowlist)
                 .await?;
-            self.sessions.insert(session_id.to_string(), session_info);
+            self.sessions.insert(session_id.into(), session_info);
         }
         Ok(&self.sessions[session_id])
     }

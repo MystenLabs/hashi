@@ -387,7 +387,7 @@ fn verify_activated_info(
     expected_limiter_state: hashi_types::guardian::LimiterState,
 ) -> anyhow::Result<()> {
     ensure!(
-        post.session_id == expected_session_id,
+        post.session_id.as_str() == expected_session_id,
         "guardian session changed during operator activation: started {}, now {}",
         expected_session_id,
         post.session_id

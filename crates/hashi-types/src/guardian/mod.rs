@@ -6,6 +6,7 @@ pub mod crypto;
 pub mod errors;
 pub mod log;
 pub mod proto_conversions;
+pub(crate) mod serde_utils;
 pub mod signing;
 pub mod test_utils;
 pub mod time_utils;
@@ -56,23 +57,9 @@ use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
-// ---------------------------------
-//          Constants
-// ---------------------------------
-
-/// Length of the session ID prefix (hex chars) used in S3 keys. 16 hex =
-/// 64 bits of the signing pubkey, comfortably below any collision risk for
-/// realistic session counts.
-pub const SESSION_ID_HEX_LEN: usize = 16;
-
-/// Canonical guardian session ID — a short prefix of the hex-encoded signing
-/// public key. Used as a per-session tag in S3 object keys; full pubkey
-/// verification still happens via the signed log payload.
-pub fn session_id_from_signing_pubkey(signing_pub_key: &GuardianPubKey) -> SessionID {
-    let mut s = ::hex::encode(signing_pub_key.as_bytes());
-    s.truncate(SESSION_ID_HEX_LEN);
-    s
-}
+use std::borrow::Borrow;
+use std::fmt;
+use std::ops::Deref;
 
 /// Which flows an enclave serves, fixed at boot. A `Ceremony` enclave runs
 /// `setup_new_key`/`rotate_kps`; a `Withdraw` enclave runs `provisioner_init` +
@@ -133,9 +120,11 @@ pub struct GuardianInfo {
     /// S3 bucket name (if set). Used by KPs to check S3 bucket info.
     pub bucket_info: Option<S3BucketInfo>,
     /// Encryption key. Used by KPs to encrypt their shares.
+    #[serde(with = "hex::serde")]
     pub encryption_pubkey: EncPubKeyBytes,
     /// Digest of the operator-supplied `InitConfig` (set after operator_init).
     /// KPs recompute it from their verified sources and match to confirm config.
+    #[serde(with = "crate::guardian::serde_utils::option_hex_32")]
     pub config_hash: Option<[u8; 32]>,
     /// Git revision of the guardian build. Untrusted (enclave-self-reported);
     /// verified out-of-band by reproducibly building at this revision and matching
@@ -152,6 +141,7 @@ pub struct GuardianInfo {
     pub current_committee_epoch: Option<u64>,
     /// MPC committee verifying key `G` (the derivation master, NOT the guardian's
     /// own BTC key). Set after operator_init; lets KPs verify it directly.
+    #[serde(with = "crate::guardian::serde_utils::option_mpc_master_g")]
     pub mpc_master_g: Option<HashiMasterG>,
     // TODO: report the full committee too, so its membership is directly
     // verifiable from GuardianInfo; it's large, though.
@@ -312,9 +302,70 @@ pub struct RotateKpsResponse {
 /// Used to correlate events across Sui, hashi nodes, and the guardian.
 pub type WithdrawalID = sui_sdk_types::Address;
 
-/// Guardian session identifier — a short prefix of the hex-encoded signing
-/// pubkey (see [`session_id_from_signing_pubkey`]). Tags per-session S3 objects.
-pub type SessionID = String;
+/// Guardian session identifier. Canonical IDs are short prefixes of the
+/// hex-encoded signing public key and tag per-session S3 objects.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(transparent)]
+pub struct SessionID(String);
+
+impl SessionID {
+    /// Length of the signing-public-key prefix used for canonical session IDs.
+    pub const HEX_LEN: usize = 16;
+
+    pub fn from_signing_pubkey(signing_pub_key: &GuardianPubKey) -> Self {
+        let mut session_id = ::hex::encode(signing_pub_key.as_bytes());
+        session_id.truncate(Self::HEX_LEN);
+        Self(session_id)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for SessionID {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for SessionID {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+impl From<SessionID> for String {
+    fn from(value: SessionID) -> Self {
+        value.0
+    }
+}
+
+impl AsRef<str> for SessionID {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Borrow<str> for SessionID {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Deref for SessionID {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for SessionID {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct S3Config {
@@ -600,7 +651,7 @@ impl SingleProvisionerInitRequest {
     }
 
     pub fn expected_session_id(&self) -> &str {
-        &self.expected_session_id
+        self.expected_session_id.as_str()
     }
 
     pub fn encrypted_share(&self) -> &GuardianEncryptedShare {
@@ -764,7 +815,7 @@ impl GetGuardianInfoResponse {
         Ok(VerifiedGuardianInfo {
             info,
             signing_pub_key: self.signing_pub_key,
-            session_id: session_id_from_signing_pubkey(&self.signing_pub_key),
+            session_id: SessionID::from_signing_pubkey(&self.signing_pub_key),
             encrypted_shares: self.encrypted_shares.clone(),
         })
     }
@@ -778,7 +829,7 @@ impl GetGuardianInfoResponse {
         Ok(VerifiedGuardianInfo {
             info,
             signing_pub_key: self.signing_pub_key,
-            session_id: session_id_from_signing_pubkey(&self.signing_pub_key),
+            session_id: SessionID::from_signing_pubkey(&self.signing_pub_key),
             encrypted_shares: self.encrypted_shares.clone(),
         })
     }
@@ -908,6 +959,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn guardian_info_json_encodes_binary_fields_as_strings() {
+        let mut info = GetGuardianInfoResponse::mock_for_testing().into_info_unchecked();
+        info.config_hash = Some([0xab; 32]);
+        let btc_pubkey = crate::bitcoin::create_btc_keypair_for_test(&[3u8; 32])
+            .x_only_public_key()
+            .0;
+        info.mpc_master_g = Some(crate::bitcoin::hashi_master_g_from_btc_xonly_for_test(
+            &btc_pubkey,
+        ));
+
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["encryption_pubkey"], hex::encode([0u8; 32]));
+        assert_eq!(json["config_hash"], hex::encode([0xab; 32]));
+        let mpc_master_g = json["mpc_master_g"].as_str().unwrap();
+        assert_eq!(mpc_master_g.len(), 66);
+        assert!(
+            mpc_master_g
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+
+        let from_json: GuardianInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(from_json, info);
+    }
+
+    #[test]
     fn get_guardian_info_verify_signed_info_passes_for_valid_signature() {
         let resp = GetGuardianInfoResponse::mock_for_testing();
         let verified = resp.verify_signed_info_without_attestation().unwrap();
@@ -915,7 +992,7 @@ mod tests {
         assert_eq!(verified.signing_pub_key, resp.signing_pub_key);
         assert_eq!(
             verified.session_id,
-            session_id_from_signing_pubkey(&resp.signing_pub_key)
+            SessionID::from_signing_pubkey(&resp.signing_pub_key)
         );
         assert_eq!(verified.info, resp.signed_info.data);
         assert_eq!(verified.encrypted_shares, resp.encrypted_shares);

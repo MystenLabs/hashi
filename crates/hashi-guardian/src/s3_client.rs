@@ -702,7 +702,7 @@ mod tests {
         let put_ok = mock!(Client::put_object)
             .match_requests(|req| {
                 req.bucket() == Some("bucket")
-                    && req.key() == Some("init/session-oi-attestation-unsigned.json")
+                    && req.key() == Some("init/session/01-oi-attestation-unsigned.json")
                     && req.content_type() == Some("application/json")
                     && req.object_lock_mode() == Some(&ObjectLockMode::Compliance)
                     && req.object_lock_retain_until_date().is_some()
@@ -715,7 +715,7 @@ mod tests {
         let object_lock_duration = Duration::from_mins(5);
         logger
             .write_at_key(
-                "init/session-oi-attestation-unsigned.json",
+                "init/session/01-oi-attestation-unsigned.json",
                 &TestPayload { a: 1 },
                 object_lock_duration,
             )
@@ -831,7 +831,7 @@ mod tests {
         let logger = mk_logger_with_client(client);
         let signing_key = GuardianSignKeyPair::new(rand::thread_rng());
         let log = LogRecord::new(
-            "session".to_string(),
+            "session".into(),
             LogMessageV1::Heartbeat(HeartbeatLogMessage::new(7)),
             &signing_key,
         );
@@ -860,7 +860,7 @@ mod tests {
         let logger = mk_logger_with_client(client);
         let signing_key = GuardianSignKeyPair::new(rand::thread_rng());
         let log = LogRecord::new(
-            "session".to_string(),
+            "session".into(),
             LogMessageV1::Heartbeat(HeartbeatLogMessage::new(7)),
             &signing_key,
         );
@@ -896,7 +896,7 @@ mod tests {
         let object_lock_duration = Duration::from_mins(5);
         logger
             .write_at_key(
-                "init/session-oi-attestation-unsigned.json",
+                "init/session/01-oi-attestation-unsigned.json",
                 &TestPayload { a: 1 },
                 object_lock_duration,
             )

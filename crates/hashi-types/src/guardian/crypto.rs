@@ -188,7 +188,9 @@ pub struct ShareCommitment {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct ShareCommitments(BTreeMap<ShareID, DigestBytes>);
+pub struct ShareCommitments(
+    #[serde(with = "crate::guardian::serde_utils::hex_map_values")] BTreeMap<ShareID, DigestBytes>,
+);
 
 /// Public description of the current BTC key's secret-sharing scheme.
 /// `sharing_seq` versions the instance: setup writes 0, each rotation bumps it by 1.
@@ -726,6 +728,19 @@ mod tests {
                 .collect(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn share_commitments_json_encodes_digests_as_hex() {
+        let commitments = test_commitments(&[1, 2]);
+        let json = serde_json::to_value(&commitments).unwrap();
+
+        assert_eq!(json["1"], "01");
+        assert_eq!(json["2"], "02");
+        assert_eq!(
+            serde_json::from_value::<ShareCommitments>(json).unwrap(),
+            commitments
+        );
     }
 
     fn test_kp_encrypted_share(id: u16) -> KPEncryptedShare {

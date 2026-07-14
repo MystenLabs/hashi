@@ -237,17 +237,29 @@ pub enum InitLogMessage {
     /// Attestation and signing public key posted in /operator_init
     OIAttestationUnsigned {
         attestation: NitroAttestation,
+        #[serde(with = "crate::guardian::serde_utils::guardian_pubkey")]
         signing_public_key: GuardianPubKey,
     },
     /// Signed GuardianInfo logged in /operator_init (secret-sharing instance,
     /// config_hash, encryption/BTC pubkeys). Boxed: much larger than the other
     /// variants (`clippy::large_enum_variant`).
     OIGuardianInfo(Box<GuardianInfo>),
-    /// Threshold reached — enclave BTC key reconstructed (happens once). Records
-    /// the ids of the shares that were combined.
-    PIEnclaveFullyInitialized { share_ids: Vec<ShareID> },
+    /// Threshold reached — enclave BTC key reconstructed (happens once).
+    PIEnclaveFullyInitialized {
+        sharing_seq: u64,
+        share_ids: Vec<ShareID>,
+        enclave_btc_pubkey: BitcoinPubkey,
+    },
     /// Operator activation succeeded and installed live serving state.
-    OAActivated { state_hash: [u8; 32] },
+    OAActivated {
+        #[serde(with = "hex::serde")]
+        state_hash: [u8; 32],
+        #[serde(with = "hex::serde")]
+        config_hash: [u8; 32],
+        sharing_seq: u64,
+        committee_epoch: u64,
+        limiter_state: LimiterState,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -291,10 +303,10 @@ pub enum CommitteeUpdateLogMessage {
 }
 
 impl InitLogMessage {
-    pub const OI_ATTEST_UNSIGNED: &'static str = "oi-attestation-unsigned";
-    pub const OI_GUARDIAN_INFO: &'static str = "oi-guardian-info";
-    pub const PI_FULLY_INITIALIZED: &'static str = "pi-enclave-fully-initialized";
-    pub const OA_ACTIVATED: &'static str = "oa-activated";
+    pub const OI_ATTEST_UNSIGNED: &'static str = "01-oi-attestation-unsigned";
+    pub const OI_GUARDIAN_INFO: &'static str = "02-oi-guardian-info";
+    pub const PI_FULLY_INITIALIZED: &'static str = "03-pi-enclave-fully-initialized";
+    pub const OA_ACTIVATED: &'static str = "04-oa-activated";
 
     pub fn object_key(&self, session_id: &str) -> String {
         let suffix = match self {
@@ -304,7 +316,7 @@ impl InitLogMessage {
             InitLogMessage::OAActivated { .. } => Self::OA_ACTIVATED,
         };
 
-        format!("{S3_DIR_INIT}/{session_id}-{suffix}.json")
+        Self::object_key_for_suffix(session_id, suffix)
     }
 
     fn object_key_pattern(&self, session_id: &str) -> ObjectKeyPattern {
@@ -312,21 +324,15 @@ impl InitLogMessage {
     }
 
     pub fn attestation_object_key(session_id: &str) -> String {
-        format!(
-            "{}/{}-{}.json",
-            S3_DIR_INIT,
-            session_id,
-            Self::OI_ATTEST_UNSIGNED
-        )
+        Self::object_key_for_suffix(session_id, Self::OI_ATTEST_UNSIGNED)
     }
 
     pub fn guardian_info_object_key(session_id: &str) -> String {
-        format!(
-            "{}/{}-{}.json",
-            S3_DIR_INIT,
-            session_id,
-            Self::OI_GUARDIAN_INFO
-        )
+        Self::object_key_for_suffix(session_id, Self::OI_GUARDIAN_INFO)
+    }
+
+    fn object_key_for_suffix(session_id: &str, suffix: &str) -> String {
+        format!("{S3_DIR_INIT}/{session_id}/{suffix}.json")
     }
 }
 

@@ -188,7 +188,7 @@ mod tests {
         };
         VerifiedLogRecord {
             object_key: format!("withdraw/success-{next_seq}.json"),
-            session_id: "test-session".to_string(),
+            session_id: "test-session".into(),
             timestamp_ms: 0,
             message: LogMessageV1::Withdrawal(Box::new(msg)).into(),
             build_pcrs: build_pcrs(),
@@ -205,7 +205,7 @@ mod tests {
         };
         VerifiedLogRecord {
             object_key: "withdraw/failure.json".to_string(),
-            session_id: "test-session".to_string(),
+            session_id: "test-session".into(),
             timestamp_ms: 0,
             message: LogMessageV1::Withdrawal(Box::new(msg)).into(),
             build_pcrs: build_pcrs(),
