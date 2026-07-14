@@ -121,7 +121,7 @@ async fn hour_bucket_has_success(
     bucket: &str,
 ) -> anyhow::Result<bool> {
     let keys = s3_client
-        .list_all_keys_in_dir(&format!("{bucket}success-"))
+        .validate_prefix_history_and_list_keys(&format!("{bucket}success-"))
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     Ok(!keys.is_empty())

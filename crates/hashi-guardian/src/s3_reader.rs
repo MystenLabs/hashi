@@ -12,6 +12,8 @@
 //! advances/retreats and feeds to [`GuardianReader::read_dir`].
 
 use crate::s3_client::GuardianS3Client;
+use crate::s3_client::HistoryCheck;
+use crate::s3_client::LockCheck;
 use anyhow::Context;
 use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
@@ -188,7 +190,7 @@ impl GuardianReader {
     ) -> anyhow::Result<Option<(SessionID, SecretSharingInstance, BitcoinPubkey)>> {
         let keys = self
             .s3
-            .list_all_keys_in_dir(&format!("{}/", S3_DIR_CEREMONY))
+            .validate_prefix_history_and_list_keys(&format!("{}/", S3_DIR_CEREMONY))
             .await?;
         let Some(key) = pick_latest_key(keys, S3_DIR_CEREMONY) else {
             return Ok(None);
@@ -230,11 +232,19 @@ impl GuardianReader {
         build_policy: BuildPolicy,
     ) -> anyhow::Result<Option<(SessionID, KpShareStateLogMessage)>> {
         let prefix = KpShareStateLogMessage::object_key_dir(sharing_seq);
-        let keys = self.s3.list_all_keys_in_dir(&prefix).await?;
+        let keys = self
+            .s3
+            .validate_prefix_history_and_list_keys(&prefix)
+            .await?;
         let Some(key) = keys.into_iter().max() else {
             return Ok(None);
         };
-        let record = self.s3.get_log_record_no_lock(&key).await?;
+        // The prefix history was checked above. KP-share locks are short-lived
+        // and expected to expire, so integrity comes from the signature below.
+        let record = self
+            .s3
+            .get_log_record_inner(&key, LockCheck::Skipped, HistoryCheck::AlreadyChecked)
+            .await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
         let session_id = record.session_id.clone();
         let build_pcrs = record.build_pcrs.clone();
@@ -277,7 +287,7 @@ impl GuardianReader {
     ) -> anyhow::Result<Option<Committee>> {
         let keys = self
             .s3
-            .list_all_keys_in_dir(&format!("{}/", S3_DIR_COMMITTEE_UPDATE))
+            .validate_prefix_history_and_list_keys(&format!("{}/", S3_DIR_COMMITTEE_UPDATE))
             .await?;
         let Some(key) = pick_latest_key(keys, S3_DIR_COMMITTEE_UPDATE) else {
             return Ok(None);
@@ -305,7 +315,7 @@ impl GuardianReader {
         let key = GenesisLogMessage::object_key();
         let keys = self
             .s3
-            .list_all_keys_in_dir(&format!("{}/", S3_DIR_GENESIS))
+            .validate_prefix_history_and_list_keys(&format!("{}/", S3_DIR_GENESIS))
             .await?;
         if keys.is_empty() {
             return Ok(None);
