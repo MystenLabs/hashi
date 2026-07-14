@@ -203,8 +203,14 @@ Because that key is typically in cold storage or a hardware wallet, use the **of
 hashi register --config /path/to/validator.toml \
   --operator-address 0x<operator-address> \
   --print-only
-# -> sign the printed base64 tx with the validator account key (cold/hardware) and broadcast
+
+# Sign the printed base64 with the validator account key, then broadcast.
+# If the account key lives in your local sui keystore:
+sui keytool sign --address 0x<validator-address> --data <TX_BYTES_BASE64>
+sui client execute-signed-tx --tx-bytes <TX_BYTES_BASE64> --signatures <SIGNATURE_BASE64>
 ```
+
+For hardware wallets or multisig accounts, produce the signature with your own signing tooling instead of `sui keytool sign`; the broadcast step is the same.
 
 `--operator-address` is the Sui address of the **fresh operator key** you generate in [2.4](#24-operator-key-day-to-day-signing). It is *not* your validator address. Passing it here delegates day-to-day signing in the same transaction, so the validator account key can go straight back to cold storage.
 
@@ -213,6 +219,8 @@ hashi register --config /path/to/validator.toml \
 ### 2.4 Operator key (day-to-day signing)
 
 Generate a fresh keypair for the operator and fund its address with SUI for gas. The running node (`hashi server`) signs **all** its day-to-day Sui transactions with this `operator-private-key`: MPC certificate submission, governance, and metadata updates.
+
+> **Fund the operator address with at least 2 SUI.** At startup the node moves 1 SUI into the account's address balance (used to pay gas for parallel transactions), so exactly 1 SUI cannot cover that bootstrap plus its own gas and the node fails with `InsufficientCoinBalance`.
 
 All three simple Sui key schemes (Ed25519, secp256k1, and secp256r1) are accepted, in any of the formats standard tooling produces. The value may be a file path or the key itself inline:
 
@@ -237,6 +245,13 @@ operator-private-key = "/path/to/hashi-operator-key.pem"
 # operator-private-key = "suiprivkey1..."
 ```
 
+**Finding the operator address.** You need the key's Sui address to fund it and to pass as `--operator-address`. With `sui keytool generate` the address is printed at generation (and is the name of the `.key` file it writes). For an existing openssl PEM, derive it from the public key (Ed25519 keys only; `0x00` is the Ed25519 scheme flag):
+
+```bash
+openssl pkey -in hashi-operator-key.pem -pubout -outform DER | tail -c 32 | \
+  python3 -c "import sys,hashlib; print('0x' + hashlib.blake2b(b'\x00' + sys.stdin.buffer.read(), digest_size=32).hexdigest())"
+```
+
 > A raw hex private key (the `hexWithoutFlag` output of `sui keytool convert`) is **not** accepted, because it does not carry the key-scheme flag. Convert it to one of the formats above with `sui keytool convert`.
 
 **Delegating to the operator key.** Delegation is set with `--operator-address`, normally passed during initial registration as shown in [2.3](#23-registration-must-be-signed-by-the-account-key), so one transaction registers *and* delegates. If you registered without it (or are rotating the operator key), run the same command again; it is idempotent and sends only the missing updates, but the transaction must again be signed by the validator account key:
@@ -249,6 +264,8 @@ hashi register --config /path/to/validator.toml \
 ```
 
 Onchain, every member action is authorized by `member_authorized(validator, sender)`, where the sender must be the member's validator key **or** its registered operator address. So once delegated, the operator key performs cert submission, governance voting, and metadata updates on its own, and **the validator account key can return to cold storage**. You need it again only to rotate the operator key or change registration metadata.
+
+Metadata maintenance is automatic once delegated: at startup the node compares its config against the on-chain member record and sends only what changed. To update your endpoint URL, TLS key, or other metadata, edit the config file and restart the node; no manual `hashi register` re-run is needed.
 
 **Operator-key rotation is validator-only.** Only the validator account key can change the operator address (onchain, `set_operator_address` requires the sender to be the validator). A compromised or lost operator key therefore cannot re-delegate or lock you out: pull the validator key from cold storage, run `hashi register --operator-address 0x<new-operator> --print-only`, sign offline, and this action revokes the previous operator key.
 
@@ -505,9 +522,10 @@ Registration must be authorized by your **Sui validator account key** (see [2.3]
 
 ```bash
 hashi register --config /path/to/validator.toml \
-  --operator-address 0x<your-operator-address> \
+  --operator-address 0x<operator-address> \
   --print-only
-# sign the printed base64 tx with the account key (cold/hardware) and broadcast
+# sign the printed base64 tx with the account key and broadcast; see 2.3 for
+# the sui keytool sign / sui client execute-signed-tx commands
 ```
 
 The registration transaction writes your BLS12-381 public key, Ed25519 TLS public key, ECIES encryption public key, endpoint URL, and operator address to the chain.
@@ -521,6 +539,8 @@ hashi server --config /path/to/validator.toml
 The node starts the gRPC+TLS server, connects to Sui (gRPC) and Bitcoin (RPC + P2P), registers its next-epoch keys onchain, and begins monitoring for the genesis trigger.
 
 Booting **before the launch step is expected and required** because the launch only happens once every validator has finished key registration, which nodes do on startup. In this pre-launch window the onchain config is not finalized yet, so the node logs two benign warnings: the `bitcoin_chain_id` cross-check is skipped (it re-verifies on any restart after launch), and the guardian client is deferred (it resolves automatically from onchain config once the launch lands).
+
+**This is the last genesis step performed by operators.** Steps 4 through 6 are handled by the admin and the network; keep your node running and watch the logs.
 
 ### 5.5 Step 4: launch (admin)
 
