@@ -187,16 +187,15 @@ impl LogRecord {
     }
 
     pub fn object_lock_duration(&self) -> Duration {
-        match &self.message {
-            LogMessage::V1(LogMessageV1::Init(..)) => S3_OBJECT_LOCK_DURATION_INIT,
-            LogMessage::V1(LogMessageV1::Heartbeat(..)) => S3_OBJECT_LOCK_DURATION_HEARTBEAT,
-            LogMessage::V1(LogMessageV1::Withdrawal(..)) => S3_OBJECT_LOCK_DURATION_WITHDRAW,
-            LogMessage::V1(LogMessageV1::Ceremony(..)) => S3_OBJECT_LOCK_DURATION_CEREMONY,
-            LogMessage::V1(LogMessageV1::KpShareState(..)) => S3_OBJECT_LOCK_DURATION_KP_SHARES,
-            LogMessage::V1(LogMessageV1::CommitteeUpdate(..)) => {
-                S3_OBJECT_LOCK_DURATION_COMMITTEE_UPDATE
-            }
-            LogMessage::V1(LogMessageV1::Genesis(..)) => S3_OBJECT_LOCK_DURATION_GENESIS,
+        let LogMessage::V1(message) = &self.message;
+        match message {
+            LogMessageV1::Init(..) => S3_OBJECT_LOCK_DURATION_INIT,
+            LogMessageV1::Heartbeat(..) => S3_OBJECT_LOCK_DURATION_HEARTBEAT,
+            LogMessageV1::Withdrawal(..) => S3_OBJECT_LOCK_DURATION_WITHDRAW,
+            LogMessageV1::Ceremony(..) => S3_OBJECT_LOCK_DURATION_CEREMONY,
+            LogMessageV1::KpShareState(..) => S3_OBJECT_LOCK_DURATION_KP_SHARES,
+            LogMessageV1::CommitteeUpdate(..) => S3_OBJECT_LOCK_DURATION_COMMITTEE_UPDATE,
+            LogMessageV1::Genesis(..) => S3_OBJECT_LOCK_DURATION_GENESIS,
         }
     }
 
