@@ -645,7 +645,10 @@ impl Hashi {
             self.config.bitcoin_rpc_auth(),
         )?;
 
-        let info = rpc.get_blockchain_info()?.into_model()?;
+        let info = rpc
+            .get_blockchain_info()
+            .map_err(bitcoind_rpc_error_with_version_hint)?
+            .into_model()?;
         let expected = self.config.bitcoin_network();
 
         anyhow::ensure!(
@@ -1085,6 +1088,21 @@ impl Hashi {
     }
 }
 
+/// Wrap a bitcoind response-decode failure with a version hint. A response
+/// that is valid JSON but does not match the v29 schema is almost always a
+/// pre-v29 bitcoind (`warnings` was a string, not an array, until Core v28),
+/// so name the real problem instead of surfacing a bare serde error.
+fn bitcoind_rpc_error_with_version_hint(e: corepc_client::client_sync::Error) -> anyhow::Error {
+    match &e {
+        corepc_client::client_sync::Error::JsonRpc(jsonrpc::Error::Json(_))
+        | corepc_client::client_sync::Error::Json(_) => anyhow!(
+            "unexpected getblockchaininfo response from bitcoind: {e}. Hashi requires \
+             Bitcoin Core v29 or newer; check the node's version with `bitcoin-cli getnetworkinfo`"
+        ),
+        _ => anyhow!(e),
+    }
+}
+
 #[derive(Clone)]
 pub struct ServerVersion {
     pub bin: &'static str,
@@ -1165,6 +1183,7 @@ mod test {
 
     use crate::Hashi;
     use crate::ServerVersion;
+    use crate::bitcoind_rpc_error_with_version_hint;
 
     use crate::config::Config;
     use crate::grpc::Client;
@@ -1177,6 +1196,24 @@ mod test {
         let registry = prometheus::Registry::new();
         let hashi = Hashi::new_with_registry(server_version, None, config, &registry).unwrap();
         (hashi, tmpdir)
+    }
+
+    #[test]
+    fn bitcoind_decode_errors_get_version_hint_but_transport_errors_do_not() {
+        // A pre-v29 bitcoind returns `"warnings": ""` where v29 has an array;
+        // the resulting serde error must be wrapped with the version hint.
+        let decode = serde_json::from_str::<Vec<String>>("\"\"").unwrap_err();
+        let e = corepc_client::client_sync::Error::JsonRpc(jsonrpc::Error::Json(decode));
+        let msg = bitcoind_rpc_error_with_version_hint(e).to_string();
+        assert!(msg.contains("Bitcoin Core v29 or newer"), "{msg}");
+
+        // Connectivity problems must not be misattributed to the version.
+        let transport = jsonrpc::Error::Transport(Box::new(std::io::Error::other(
+            "connection refused",
+        )));
+        let e = corepc_client::client_sync::Error::JsonRpc(transport);
+        let msg = bitcoind_rpc_error_with_version_hint(e).to_string();
+        assert!(!msg.contains("Bitcoin Core"), "{msg}");
     }
 
     #[test]
