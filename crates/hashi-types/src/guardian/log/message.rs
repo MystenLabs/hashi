@@ -46,7 +46,7 @@ use serde::Serialize;
 /// All log messages emitted by the guardian enclave.
 /// Uses enum discriminator for automatic domain separation between variants.
 #[derive(Debug, Serialize, Deserialize)]
-pub enum LogMessageV1 {
+pub enum LogMessage {
     Heartbeat(HeartbeatLogMessage),
     Init(Box<InitLogMessage>),
     Withdrawal(Box<WithdrawalLogMessage>),
@@ -55,9 +55,6 @@ pub enum LogMessageV1 {
     CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
     Genesis(Box<GenesisLogMessage>),
 }
-
-/// The message schema emitted by current writers.
-pub type LogMessage = LogMessageV1;
 
 pub(super) enum ObjectKeyPattern {
     Fixed(String),
@@ -356,7 +353,7 @@ impl CommitteeUpdateLogMessage {
     }
 }
 
-impl LogMessageV1 {
+impl LogMessage {
     pub fn is_allowed_unsigned(&self) -> bool {
         if let LogMessage::Init(init_message) = self {
             matches!(**init_message, InitLogMessage::OIAttestationUnsigned { .. })
