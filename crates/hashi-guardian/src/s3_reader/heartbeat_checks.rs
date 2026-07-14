@@ -6,6 +6,7 @@ use super::GuardianReader;
 use hashi_types::guardian::time_utils::now_timestamp_secs;
 use hashi_types::guardian::time_utils::unix_millis_to_seconds;
 use hashi_types::guardian::time_utils::UnixSeconds;
+use hashi_types::guardian::HeartbeatLogMessage;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::VerifiedLogRecord;
@@ -82,7 +83,7 @@ fn summarize_heartbeats_by_session(
     let mut map: BTreeMap<String, (UnixSeconds, UnixSeconds)> = BTreeMap::new();
 
     for log in logs {
-        if !matches!(log.message, LogMessage::Heartbeat { .. }) {
+        if !matches!(log.message, LogMessage::Heartbeat(..)) {
             anyhow::bail!("non-heartbeat logs found");
         }
 
@@ -163,7 +164,7 @@ mod tests {
             object_key: format!("heartbeat/{session_id}.json"),
             session_id: session_id.to_string(),
             timestamp_ms: timestamp_secs * 1_000,
-            message: LogMessage::Heartbeat { seq: 0 },
+            message: LogMessage::Heartbeat(HeartbeatLogMessage::new(0)),
             build_pcrs: build_pcrs(),
         }
     }

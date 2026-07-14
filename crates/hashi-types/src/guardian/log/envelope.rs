@@ -138,7 +138,7 @@ impl LogRecord {
     pub fn object_lock_duration(&self) -> Duration {
         match &self.message {
             LogMessage::Init(..) => S3_OBJECT_LOCK_DURATION_INIT,
-            LogMessage::Heartbeat { .. } => S3_OBJECT_LOCK_DURATION_HEARTBEAT,
+            LogMessage::Heartbeat(..) => S3_OBJECT_LOCK_DURATION_HEARTBEAT,
             LogMessage::Withdrawal(..) => S3_OBJECT_LOCK_DURATION_WITHDRAW,
             LogMessage::Ceremony(..) => S3_OBJECT_LOCK_DURATION_CEREMONY,
             LogMessage::KpShareState(..) => S3_OBJECT_LOCK_DURATION_KP_SHARES,
@@ -292,6 +292,7 @@ mod tests {
     use crate::guardian::GenesisLogMessage;
     use crate::guardian::GuardianError;
     use crate::guardian::GuardianSigned;
+    use crate::guardian::HeartbeatLogMessage;
     use crate::guardian::InitLogMessage;
     use crate::guardian::KPEncryptedShares;
     use crate::guardian::LimiterState;
@@ -309,7 +310,7 @@ mod tests {
         let signing_key = GuardianSignKeyPair::from([13u8; 32]);
         let record = LogRecord::new_at_timestamp(
             "session-key-binding".to_string(),
-            LogMessage::Heartbeat { seq: 42 },
+            LogMessage::Heartbeat(HeartbeatLogMessage::new(42)),
             &signing_key,
             timestamp_ms,
         );
@@ -396,7 +397,10 @@ mod tests {
 
         assert_eq!(schema_version, LOG_SCHEMA_VERSION);
         assert_eq!(timestamp_ms, 1_700_000_000_000);
-        assert!(matches!(message, LogMessage::Heartbeat { seq: 42 }));
+        assert!(matches!(
+            message,
+            LogMessage::Heartbeat(HeartbeatLogMessage { seq: 42 })
+        ));
     }
 
     #[test]
@@ -446,7 +450,7 @@ mod tests {
         let (_, log, signing_key) = signed_heartbeat(1_700_000_000_000);
         let mut tampered: LogRecord =
             serde_json::from_slice(&serde_json::to_vec(&log).unwrap()).unwrap();
-        tampered.message = LogMessage::Heartbeat { seq: 43 };
+        tampered.message = LogMessage::Heartbeat(HeartbeatLogMessage::new(43));
         let tampered_key = "heartbeat/2023/11/14/22/session-key-binding-00000000000000000043.json";
         tampered.object_key = tampered_key.to_owned();
 
@@ -606,7 +610,7 @@ mod tests {
 
         let log = LogRecord::new_at_timestamp(
             session_id.clone(),
-            LogMessage::Heartbeat { seq },
+            LogMessage::Heartbeat(HeartbeatLogMessage::new(seq)),
             &signing_key,
             timestamp_ms,
         );

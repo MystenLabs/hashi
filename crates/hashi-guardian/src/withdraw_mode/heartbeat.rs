@@ -4,6 +4,7 @@
 use crate::Enclave;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianResult;
+use hashi_types::guardian::HeartbeatLogMessage;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -44,7 +45,11 @@ impl HeartbeatWriter {
             return Ok(());
         }
 
-        match self.enclave.log_heartbeat(self.next_seq).await {
+        match self
+            .enclave
+            .log_heartbeat(HeartbeatLogMessage::new(self.next_seq))
+            .await
+        {
             Ok(()) => {
                 self.consecutive_failures = 0;
                 self.last_success_at = Some(now);

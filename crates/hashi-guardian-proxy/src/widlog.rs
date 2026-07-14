@@ -596,8 +596,8 @@ mod tests {
 
     #[test]
     fn wid_suffix_matches_the_real_key_shape() {
-        // The scanner's suffix filter must match `WithdrawalLogMessage::log_name`
-        // exactly; a drift here silently disables the durable tier.
+        // The scanner's suffix filter must match the withdrawal success-key
+        // pattern exactly; a drift here silently disables the durable tier.
         let w = wid(0xcd);
         let (key, _) = success_record_json(w, 7, TS_HOUR_A, mock_response());
         assert!(key.ends_with(&format!("-wid{w}.json")));
