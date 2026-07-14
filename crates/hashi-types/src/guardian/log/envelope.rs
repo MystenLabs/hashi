@@ -33,7 +33,7 @@ use std::time::Duration;
 
 pub const LOG_SCHEMA_VERSION: u8 = 1;
 
-/// Write: `LogMessage` -> signed `LogRecord` with a finalized key -> JSON body.
+/// Write: `LogMessage` -> `LogRecord` -> JSON body.
 /// Read: actual S3 key + JSON body -> untrusted `LogRecord` -> `VerifiedLogRecord`.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct LogRecord {
@@ -201,6 +201,7 @@ impl LogRecord {
                 "expected signed log record but message is unsigned".into(),
             ));
         }
+        self.validate_schema_version()?;
         self.validate_object_key()?;
         self.validate_session_id(pub_key)?;
         let timestamp_ms = self.timestamp_ms;
@@ -240,6 +241,7 @@ impl LogRecord {
                 "unsigned log record must not contain a signature".into(),
             ));
         }
+        self.validate_schema_version()?;
         self.validate_object_key()?;
         let LogMessage::Init(init) = &self.message else {
             unreachable!("is_allowed_unsigned only permits an init message");
@@ -271,13 +273,17 @@ impl LogRecord {
         Ok(())
     }
 
-    fn validate_object_key(&self) -> GuardianResult<()> {
+    fn validate_schema_version(&self) -> GuardianResult<()> {
         if self.schema_version != LOG_SCHEMA_VERSION {
             return Err(InvalidInputs(format!(
                 "unsupported log schema version: {}",
                 self.schema_version
             )));
         }
+        Ok(())
+    }
+
+    fn validate_object_key(&self) -> GuardianResult<()> {
         match self
             .message
             .object_key_pattern(&self.session_id, self.timestamp_ms)
@@ -522,13 +528,20 @@ mod tests {
         let suffix = u32::from_str_radix(suffix_hex, 16).unwrap();
         let relocated_key = format!("{prefix}-{:08x}.json", suffix ^ 1);
 
-        let record_read_from_s3: LogRecord =
+        let mut record_read_from_s3: LogRecord =
             serde_json::from_slice(&serde_json::to_vec(&log).unwrap()).unwrap();
         let err = record_read_from_s3
             .validate_actual_object_key(&relocated_key)
             .expect_err("changing only the random failure suffix must invalidate placement");
 
         assert!(format!("{err:?}").contains("S3 object key mismatch"));
+
+        record_read_from_s3.object_key = relocated_key;
+        let err = record_read_from_s3
+            .verify(&signing_key.verification_key())
+            .expect_err("the signature must authenticate the random failure suffix");
+
+        assert!(format!("{err:?}").contains("signature invalid"));
     }
 
     #[test]
@@ -585,7 +598,7 @@ mod tests {
     fn unsigned_log_rejects_replay_at_another_s3_key() {
         let signing_key = GuardianSignKeyPair::from([14u8; 32]);
         let session_id = session_id_from_signing_pubkey(&signing_key.verification_key());
-        let log = LogRecord::new_at_timestamp(
+        let mut log = LogRecord::new_at_timestamp(
             session_id,
             LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
                 attestation: NitroAttestation::new(vec![1, 2, 3]),
@@ -595,11 +608,14 @@ mod tests {
             1_700_000_000_000,
         );
 
+        log.object_key = "init/copied-attestation.json".to_string();
+        log.validate_actual_object_key("init/copied-attestation.json")
+            .expect("the operator can edit an unsigned record's embedded key");
         let err = log
-            .validate_actual_object_key("init/copied-attestation.json")
+            .validate_unsigned()
             .expect_err("unsigned record copied to another S3 key must be rejected");
 
-        assert!(format!("{err:?}").contains("S3 object key mismatch"));
+        assert!(format!("{err:?}").contains("non-canonical S3 object key"));
     }
 
     #[test]

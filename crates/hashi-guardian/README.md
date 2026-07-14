@@ -3,10 +3,11 @@
 Guardian enclave service that emits immutable S3 logs for audit/state-restart workflows.
 
 The S3 bucket operator is untrusted. Log signatures bind the intent, schema
-version, session ID, timestamp, actual object key, and event; readers reject
-relocated or non-canonical records. The key is S3 metadata, not JSON. Random
-failure suffixes are sampled once before signing. Unsigned OI attestations bind
-placement through their Nitro-authenticated signing key and derived session ID.
+version, session ID, timestamp, intended object key, and event. Readers compare
+the signed key in JSON with the actual S3 key and reject relocated or
+non-canonical records. Random failure suffixes are sampled once before signing.
+Unsigned OI attestations bind placement through their Nitro-authenticated
+signing key and derived session ID.
 
 ## S3 log key format
 
