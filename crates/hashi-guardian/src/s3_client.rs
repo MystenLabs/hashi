@@ -140,7 +140,7 @@ impl GuardianS3Client {
         let key = log.object_key();
         let write_until_success = async {
             loop {
-                match self.write_at_key(&key, &log, object_lock_duration).await {
+                match self.write_at_key(key, &log, object_lock_duration).await {
                     Ok(()) => return Ok(()),
                     Err(error) => {
                         warn!(%key, ?error, "S3 log write failed; retrying");
