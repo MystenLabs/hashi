@@ -26,7 +26,6 @@ use crate::guardian::SessionID;
 use crate::guardian::SigningIntent;
 use crate::guardian::UnixMillis;
 use crate::guardian::now_timestamp_ms;
-use crate::guardian::session_id_from_signing_pubkey;
 use crate::guardian::signing::sign_intent;
 use crate::guardian::signing::verify_intent;
 use serde::Deserialize;
@@ -323,7 +322,7 @@ impl LogRecord {
     }
 
     fn validate_session_id(&self, signing_public_key: &GuardianPubKey) -> GuardianResult<()> {
-        let canonical_session_id = session_id_from_signing_pubkey(signing_public_key);
+        let canonical_session_id = SessionID::from_signing_pubkey(signing_public_key);
         if self.session_id != canonical_session_id {
             return Err(InvalidInputs(format!(
                 "session ID mismatch: record contains {}, signing public key derives {canonical_session_id}",
@@ -365,7 +364,7 @@ mod tests {
     use bitcoin::hashes::Hash as _;
 
     fn heartbeat_session_id() -> SessionID {
-        session_id_from_signing_pubkey(&GuardianSignKeyPair::from([13u8; 32]).verification_key())
+        SessionID::from_signing_pubkey(&GuardianSignKeyPair::from([13u8; 32]).verification_key())
     }
 
     fn signed_heartbeat(timestamp_ms: UnixMillis) -> (String, LogRecord, GuardianSignKeyPair) {
@@ -412,7 +411,7 @@ mod tests {
     #[test]
     fn withdrawal_failure_writer_key_is_stable_and_verifies() {
         let signing_key = GuardianSignKeyPair::from([16u8; 32]);
-        let session_id = session_id_from_signing_pubkey(&signing_key.verification_key());
+        let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
         let signed_request = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
         let (request_sign, request_data) = signed_request.into_parts();
         let log = LogRecord::new(
@@ -431,7 +430,7 @@ mod tests {
     #[test]
     fn committee_update_failure_writer_key_is_stable_and_verifies() {
         let signing_key = GuardianSignKeyPair::from([17u8; 32]);
-        let session_id = session_id_from_signing_pubkey(&signing_key.verification_key());
+        let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
         let signed_request = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
         let (request_sign, _) = signed_request.into_parts();
         let log = LogRecord::new(
@@ -549,7 +548,7 @@ mod tests {
     #[test]
     fn signed_log_rejects_changed_failure_random_suffix_relocation() {
         let signing_key = GuardianSignKeyPair::from([18u8; 32]);
-        let session_id = session_id_from_signing_pubkey(&signing_key.verification_key());
+        let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
         let signed_request = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
         let (request_sign, request_data) = signed_request.into_parts();
         let log = LogRecord::new(
@@ -586,7 +585,7 @@ mod tests {
     #[test]
     fn signed_log_binds_session_even_when_key_does_not_contain_it() {
         let signing_key = GuardianSignKeyPair::from([19u8; 32]);
-        let session_id = session_id_from_signing_pubkey(&signing_key.verification_key());
+        let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
         let log = LogRecord::new_at_timestamp(
             session_id,
             LogMessageV1::Genesis(Box::new(GenesisLogMessage {
@@ -602,7 +601,7 @@ mod tests {
         );
         let mut aliased: LogRecord =
             serde_json::from_slice(&serde_json::to_vec(&log).unwrap()).unwrap();
-        aliased.session_id = "aliased-session".to_string();
+        aliased.session_id = "aliased-session".into();
         aliased.object_key = GenesisLogMessage::object_key();
 
         let err = aliased
@@ -615,7 +614,7 @@ mod tests {
     #[test]
     fn unsigned_log_rejects_replay_at_another_s3_key() {
         let signing_key = GuardianSignKeyPair::from([14u8; 32]);
-        let session_id = session_id_from_signing_pubkey(&signing_key.verification_key());
+        let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
         let mut log = LogRecord::new_at_timestamp(
             session_id,
             LogMessageV1::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
@@ -640,7 +639,7 @@ mod tests {
     fn unsigned_attestation_rejects_session_not_derived_from_signing_key() {
         let signing_key = GuardianSignKeyPair::from([15u8; 32]);
         let log = LogRecord::new_at_timestamp(
-            "forged-session".to_string(),
+            "forged-session".into(),
             LogMessageV1::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
                 attestation: NitroAttestation::new(vec![1, 2, 3]),
                 signing_public_key: signing_key.verification_key(),

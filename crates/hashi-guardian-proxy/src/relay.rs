@@ -117,7 +117,7 @@ impl Relay {
         let threshold = sharing.map(|i| i.threshold());
         let provisioned = verified.info.enclave_btc_pubkey.is_some();
         Ok(BackendStatus {
-            session_id: verified.session_id,
+            session_id: verified.session_id.into(),
             num_shares,
             threshold,
             provisioned,
@@ -212,7 +212,7 @@ impl GuardianRelayService for Relay {
         }
         // The share is HPKE-encrypted to the session the KP pinned; if the
         // backend has since restarted into a new session, the share is useless.
-        if expected_session_id != status.session_id {
+        if expected_session_id.as_str() != status.session_id {
             return Err(Status::failed_precondition(format!(
                 "session mismatch: KP pinned {}, backend live session is {} \
                  (guardian restarted? re-run the provision flow)",
@@ -371,7 +371,7 @@ mod tests {
         );
 
         let other_session_request =
-            SingleProvisionerInitRequest::new("other-session".to_string(), domain_share);
+            SingleProvisionerInitRequest::new("other-session".into(), domain_share);
         let other_bytes = KpSigned::signed_bytes(&other_session_request);
         let stale_sig = sign_detached_in_process(&secret_armored, &other_bytes);
         let stale_request = KpSigned {

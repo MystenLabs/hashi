@@ -56,23 +56,9 @@ use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
-// ---------------------------------
-//          Constants
-// ---------------------------------
-
-/// Length of the session ID prefix (hex chars) used in S3 keys. 16 hex =
-/// 64 bits of the signing pubkey, comfortably below any collision risk for
-/// realistic session counts.
-pub const SESSION_ID_HEX_LEN: usize = 16;
-
-/// Canonical guardian session ID — a short prefix of the hex-encoded signing
-/// public key. Used as a per-session tag in S3 object keys; full pubkey
-/// verification still happens via the signed log payload.
-pub fn session_id_from_signing_pubkey(signing_pub_key: &GuardianPubKey) -> SessionID {
-    let mut s = ::hex::encode(signing_pub_key.as_bytes());
-    s.truncate(SESSION_ID_HEX_LEN);
-    s
-}
+use std::borrow::Borrow;
+use std::fmt;
+use std::ops::Deref;
 
 /// Which flows an enclave serves, fixed at boot. A `Ceremony` enclave runs
 /// `setup_new_key`/`rotate_kps`; a `Withdraw` enclave runs `provisioner_init` +
@@ -312,9 +298,70 @@ pub struct RotateKpsResponse {
 /// Used to correlate events across Sui, hashi nodes, and the guardian.
 pub type WithdrawalID = sui_sdk_types::Address;
 
-/// Guardian session identifier — a short prefix of the hex-encoded signing
-/// pubkey (see [`session_id_from_signing_pubkey`]). Tags per-session S3 objects.
-pub type SessionID = String;
+/// Guardian session identifier. Canonical IDs are short prefixes of the
+/// hex-encoded signing public key and tag per-session S3 objects.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(transparent)]
+pub struct SessionID(String);
+
+impl SessionID {
+    /// Length of the signing-public-key prefix used for canonical session IDs.
+    pub const HEX_LEN: usize = 16;
+
+    pub fn from_signing_pubkey(signing_pub_key: &GuardianPubKey) -> Self {
+        let mut session_id = ::hex::encode(signing_pub_key.as_bytes());
+        session_id.truncate(Self::HEX_LEN);
+        Self(session_id)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for SessionID {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for SessionID {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+impl From<SessionID> for String {
+    fn from(value: SessionID) -> Self {
+        value.0
+    }
+}
+
+impl AsRef<str> for SessionID {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Borrow<str> for SessionID {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Deref for SessionID {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for SessionID {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct S3Config {
@@ -600,7 +647,7 @@ impl SingleProvisionerInitRequest {
     }
 
     pub fn expected_session_id(&self) -> &str {
-        &self.expected_session_id
+        self.expected_session_id.as_str()
     }
 
     pub fn encrypted_share(&self) -> &GuardianEncryptedShare {
@@ -764,7 +811,7 @@ impl GetGuardianInfoResponse {
         Ok(VerifiedGuardianInfo {
             info,
             signing_pub_key: self.signing_pub_key,
-            session_id: session_id_from_signing_pubkey(&self.signing_pub_key),
+            session_id: SessionID::from_signing_pubkey(&self.signing_pub_key),
             encrypted_shares: self.encrypted_shares.clone(),
         })
     }
@@ -778,7 +825,7 @@ impl GetGuardianInfoResponse {
         Ok(VerifiedGuardianInfo {
             info,
             signing_pub_key: self.signing_pub_key,
-            session_id: session_id_from_signing_pubkey(&self.signing_pub_key),
+            session_id: SessionID::from_signing_pubkey(&self.signing_pub_key),
             encrypted_shares: self.encrypted_shares.clone(),
         })
     }
@@ -915,7 +962,7 @@ mod tests {
         assert_eq!(verified.signing_pub_key, resp.signing_pub_key);
         assert_eq!(
             verified.session_id,
-            session_id_from_signing_pubkey(&resp.signing_pub_key)
+            SessionID::from_signing_pubkey(&resp.signing_pub_key)
         );
         assert_eq!(verified.info, resp.signed_info.data);
         assert_eq!(verified.encrypted_shares, resp.encrypted_shares);

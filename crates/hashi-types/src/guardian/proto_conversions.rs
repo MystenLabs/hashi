@@ -251,7 +251,8 @@ impl TryFrom<pb::SignedSingleProvisionerInitRequest> for KpSigned<SingleProvisio
         )?;
         let signer_cert =
             PgpPublicCert::new(req.signer_cert).map_err(|e| InvalidInputs(e.to_string()))?;
-        let request = SingleProvisionerInitRequest::new(req.expected_session_id, encrypted_share);
+        let request =
+            SingleProvisionerInitRequest::new(req.expected_session_id.into(), encrypted_share);
         Ok(KpSigned {
             data: request,
             signer_cert,
@@ -578,7 +579,7 @@ impl From<KpSigned<SingleProvisionerInitRequest>> for pb::SignedSingleProvisione
         let (expected_session_id, encrypted_share) = request.into_parts();
         Self {
             encrypted_share: Some(guardian_encrypted_share_to_pb(encrypted_share)),
-            expected_session_id,
+            expected_session_id: expected_session_id.into(),
             signer_cert: signer_cert.armored().to_string(),
             kp_signature: signature,
         }
@@ -1354,7 +1355,7 @@ mod tests {
             .pop()
             .unwrap();
         let request =
-            SingleProvisionerInitRequest::new("session-a".to_string(), encrypted_share.clone());
+            SingleProvisionerInitRequest::new("session-a".into(), encrypted_share.clone());
         let signature =
             sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&request));
         let signed = KpSigned {

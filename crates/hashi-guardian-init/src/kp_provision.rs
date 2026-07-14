@@ -507,8 +507,7 @@ async fn submit_provisioner_init_to_relay(
 
     // Detached-sign the exact (session, share) bytes with this KP's offline
     // key; the relay only buffers submissions signed by a rostered cert.
-    let request =
-        SingleProvisionerInitRequest::new(expected_session_id.to_string(), encrypted_share);
+    let request = SingleProvisionerInitRequest::new(expected_session_id.into(), encrypted_share);
     let signed_request = KpSigned::new(request, signer_cert.clone(), None)
         .map_err(anyhow::Error::msg)
         .context("sign the relay submission with the KP key")?;
@@ -551,7 +550,7 @@ async fn prechecks(
     );
 
     anyhow::ensure!(
-        actual_session_id == expected_session_id,
+        actual_session_id.as_str() == expected_session_id,
         "relay endpoint session mismatch: expected {}, got {}",
         expected_session_id,
         actual_session_id

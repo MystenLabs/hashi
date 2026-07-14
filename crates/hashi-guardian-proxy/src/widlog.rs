@@ -324,7 +324,7 @@ pub(crate) mod test_store {
 
         let signing_key = GuardianSignKeyPair::from([9u8; 32]);
         let record = LogRecord::new_at_timestamp(
-            "test-session".to_string(),
+            "test-session".into(),
             LogMessageV1::Withdrawal(Box::new(WithdrawalLogMessage::Success {
                 txid: bitcoin::Txid::from_slice(&[3u8; 32]).unwrap(),
                 request_data,
