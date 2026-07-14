@@ -36,10 +36,12 @@ use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::EncPubKey;
+use hashi_types::guardian::EnclaveMode;
 use hashi_types::guardian::GuardianEncryptedShare;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::KpSigned;
+use hashi_types::guardian::LifecycleStage;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::SingleProvisionerInitRequest;
 use hashi_types::guardian::VerifiedGuardianInfo;
@@ -156,6 +158,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         .get_session_info(&session_id, BuildPolicy::Current)
         .await?;
     let GuardianInfo {
+        enclave_mode,
+        lifecycle_stage,
         secret_sharing_instance,
         bucket_info,
         encryption_pubkey: enclave_enc_pubkey_bytes,
@@ -167,6 +171,14 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         current_committee_epoch: enclave_current_committee_epoch,
         mpc_master_g,
     } = &guardian_info;
+    anyhow::ensure!(
+        *enclave_mode == EnclaveMode::Withdraw,
+        "Guardian is in {enclave_mode:?} mode; expected withdraw"
+    );
+    anyhow::ensure!(
+        *lifecycle_stage == LifecycleStage::OperatorInitialized,
+        "Guardian lifecycle is {lifecycle_stage:?}; expected operator_initialized"
+    );
     let enclave_ss_instance = secret_sharing_instance
         .as_ref()
         .context("Guardian info missing secret_sharing_instance")?;
@@ -227,12 +239,21 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         enclave_current_committee_epoch.is_none(),
         "Guardian has current_committee_epoch => operator activation already ran"
     );
+    let oi_info = verified_session.info;
     anyhow::ensure!(
-        verified_session.info == guardian_info,
+        oi_info.lifecycle_stage == LifecycleStage::Uninitialized,
+        "S3 OI GuardianInfo has an unexpected lifecycle stage"
+    );
+    // The S3 record is the pre-transition snapshot; only its lifecycle differs
+    // from the live post-OI snapshot.
+    let mut normalized_oi_info = oi_info.clone();
+    normalized_oi_info.lifecycle_stage = LifecycleStage::OperatorInitialized;
+    anyhow::ensure!(
+        normalized_oi_info == guardian_info,
         "S3 GuardianInfo mismatch for session {}: endpoint {:?}, S3 {:?}",
         session_id,
         guardian_info,
-        verified_session.info
+        oi_info
     );
     anyhow::ensure!(
         &master_g == enclave_mpc_master_g,

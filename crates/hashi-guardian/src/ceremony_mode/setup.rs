@@ -114,6 +114,7 @@ mod tests {
         let request = mock_setup_new_key_request();
         let resp = setup_new_key(enclave.clone(), request).await.unwrap();
         let validated_resp = resp.verify(verification_key).unwrap();
+        assert_eq!(enclave.lifecycle_stage(), LifecycleStage::CeremonyCompleted);
 
         // Response still carries the armored ciphertexts.
         assert_eq!(validated_resp.encrypted_shares.len(), TEST_N);

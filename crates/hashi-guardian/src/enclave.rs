@@ -451,6 +451,39 @@ impl Enclave {
         logged
     }
 
+    /// Signed lifecycle stage reported by [`Self::info`]. Completion flags are
+    /// the source of truth; an in-progress ceremony still reports
+    /// `OperatorInitialized` until it releases the ceremony guard as complete.
+    pub fn lifecycle_stage(&self) -> LifecycleStage {
+        match self.mode() {
+            EnclaveMode::Ceremony => {
+                let ceremony_completed = self
+                    .scratchpad
+                    .ceremony_complete
+                    .try_lock()
+                    .is_ok_and(|complete| *complete);
+                if ceremony_completed {
+                    LifecycleStage::CeremonyCompleted
+                } else if self.is_operator_init_complete() {
+                    LifecycleStage::OperatorInitialized
+                } else {
+                    LifecycleStage::Uninitialized
+                }
+            }
+            EnclaveMode::Withdraw => {
+                if self.is_active() {
+                    LifecycleStage::Activated
+                } else if self.is_provisioner_init_complete() {
+                    LifecycleStage::ProvisionerInitialized
+                } else if self.is_operator_init_complete() {
+                    LifecycleStage::OperatorInitialized
+                } else {
+                    LifecycleStage::Uninitialized
+                }
+            }
+        }
+    }
+
     // ========================================================================
     // Ephemeral Keypairs (Encryption & Signing)
     // ========================================================================
@@ -482,6 +515,8 @@ impl Enclave {
 
     pub async fn info(&self) -> GuardianInfo {
         GuardianInfo {
+            enclave_mode: self.mode(),
+            lifecycle_stage: self.lifecycle_stage(),
             secret_sharing_instance: self.secret_sharing_instance().ok().cloned(),
             bucket_info: self
                 .config

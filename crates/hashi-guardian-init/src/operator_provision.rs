@@ -6,8 +6,10 @@ use anyhow::anyhow;
 use anyhow::ensure;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
+use hashi_types::guardian::EnclaveMode;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::InitConfig;
+use hashi_types::guardian::LifecycleStage;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::OperatorWriteGenesisRequest;
 use hashi_types::guardian::S3Config;
@@ -260,8 +262,17 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         verified_session.signing_pubkey == signing_pub_key,
         "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
     );
+    let oi_info = verified_session.info;
     ensure!(
-        verified_session.info == post.info,
+        oi_info.lifecycle_stage == LifecycleStage::Uninitialized,
+        "S3 OI GuardianInfo has an unexpected lifecycle stage"
+    );
+    // The S3 record is the pre-transition snapshot; only its lifecycle differs
+    // from the live post-OI snapshot.
+    let mut normalized_oi_info = oi_info.clone();
+    normalized_oi_info.lifecycle_stage = LifecycleStage::OperatorInitialized;
+    ensure!(
+        normalized_oi_info == post.info,
         "guardian S3 init GuardianInfo differs from post-OperatorInit gRPC GuardianInfo"
     );
     info!(
@@ -293,6 +304,14 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 }
 
 fn ensure_uninitialized(info: &GuardianInfo) -> anyhow::Result<()> {
+    ensure!(
+        info.enclave_mode == EnclaveMode::Withdraw,
+        "guardian is not in withdraw mode"
+    );
+    ensure!(
+        info.lifecycle_stage == LifecycleStage::Uninitialized,
+        "guardian is not uninitialized"
+    );
     ensure!(
         info.secret_sharing_instance.is_none(),
         "guardian already has a secret-sharing instance"
@@ -335,6 +354,14 @@ fn verify_initialized_info(
     expected_config: &InitConfig,
     expected_config_hash: [u8; 32],
 ) -> anyhow::Result<()> {
+    ensure!(
+        info.enclave_mode == EnclaveMode::Withdraw,
+        "guardian is not in withdraw mode"
+    );
+    ensure!(
+        info.lifecycle_stage == LifecycleStage::OperatorInitialized,
+        "guardian is not operator initialized"
+    );
     let instance = info
         .secret_sharing_instance
         .context("Guardian info missing secret-sharing instance")?;

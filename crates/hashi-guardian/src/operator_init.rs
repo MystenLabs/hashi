@@ -163,6 +163,8 @@ async fn commit_operator_init(
         .expect("Unable to log OperatorInitAttestationUnsigned");
 
     // 2) Share commitments help KPs confirm that the right private key will be constructed.
+    // This pre-transition snapshot reports `Uninitialized`; successfully
+    // writing it completes operator initialization.
     enclave
         .log_init(OIGuardianInfo(Box::new(enclave.info().await)))
         .await
@@ -208,11 +210,19 @@ mod tests {
     async fn commit_marks_operator_init_complete_withdraw_mode() {
         let enclave = commit_for_mode(EnclaveMode::Withdraw).await;
         assert!(enclave.is_operator_init_complete());
+        assert_eq!(
+            enclave.lifecycle_stage(),
+            LifecycleStage::OperatorInitialized
+        );
     }
 
     #[tokio::test]
     async fn commit_marks_operator_init_complete_ceremony_mode() {
         let enclave = commit_for_mode(EnclaveMode::Ceremony).await;
         assert!(enclave.is_operator_init_complete());
+        assert_eq!(
+            enclave.lifecycle_stage(),
+            LifecycleStage::OperatorInitialized
+        );
     }
 }

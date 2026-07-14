@@ -3,6 +3,7 @@
 
 use super::BuildPcrs;
 use super::Ciphertext;
+use super::EnclaveMode;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianInfo;
@@ -13,6 +14,7 @@ use super::HashiSigned;
 use super::InitConfig;
 use super::KPEncryptedShare;
 use super::KPEncryptedShares;
+use super::LifecycleStage;
 use super::LimiterConfig;
 use super::NitroAttestation;
 use super::OperatorInitRequest;
@@ -81,6 +83,8 @@ impl GetGuardianInfoResponse {
         let signing_pub_key = signing_key.verification_key();
 
         let info = GuardianInfo {
+            enclave_mode: EnclaveMode::Withdraw,
+            lifecycle_stage: LifecycleStage::OperatorInitialized,
             secret_sharing_instance: None,
             bucket_info: Some(super::S3BucketInfo {
                 bucket: "bucket".to_string(),

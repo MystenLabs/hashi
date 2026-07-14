@@ -1789,6 +1789,12 @@ pub struct GuardianInfoData {
     /// guardian's own BTC key). Set after operator_init.
     #[prost(bytes = "bytes", optional, tag = "10")]
     pub mpc_master_g: ::core::option::Option<::prost::bytes::Bytes>,
+    /// Which flows this enclave serves. Fixed at boot.
+    #[prost(enumeration = "EnclaveMode", optional, tag = "11")]
+    pub enclave_mode: ::core::option::Option<i32>,
+    /// Current stage in this enclave mode's lifecycle.
+    #[prost(enumeration = "LifecycleStage", optional, tag = "12")]
+    pub lifecycle_stage: ::core::option::Option<i32>,
 }
 /// Public description of the current BTC key's secret-sharing scheme.
 /// `commitments.len() == num_shares` and `2 <= threshold <= num_shares`.
@@ -2100,6 +2106,77 @@ pub struct UpdateCommitteeResponse {
     /// Guardian's committee epoch after the call (unchanged on no-op).
     #[prost(uint64, optional, tag = "1")]
     pub current_committee_epoch: ::core::option::Option<u64>,
+}
+/// Which flows a guardian enclave serves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum EnclaveMode {
+    Unspecified = 0,
+    Ceremony = 1,
+    Withdraw = 2,
+}
+impl EnclaveMode {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ENCLAVE_MODE_UNSPECIFIED",
+            Self::Ceremony => "ENCLAVE_MODE_CEREMONY",
+            Self::Withdraw => "ENCLAVE_MODE_WITHDRAW",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ENCLAVE_MODE_UNSPECIFIED" => Some(Self::Unspecified),
+            "ENCLAVE_MODE_CEREMONY" => Some(Self::Ceremony),
+            "ENCLAVE_MODE_WITHDRAW" => Some(Self::Withdraw),
+            _ => None,
+        }
+    }
+}
+/// Current stage in a guardian enclave's mode-specific lifecycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum LifecycleStage {
+    Unspecified = 0,
+    Uninitialized = 1,
+    OperatorInitialized = 2,
+    CeremonyCompleted = 3,
+    ProvisionerInitialized = 4,
+    Activated = 5,
+}
+impl LifecycleStage {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "LIFECYCLE_STAGE_UNSPECIFIED",
+            Self::Uninitialized => "LIFECYCLE_STAGE_UNINITIALIZED",
+            Self::OperatorInitialized => "LIFECYCLE_STAGE_OPERATOR_INITIALIZED",
+            Self::CeremonyCompleted => "LIFECYCLE_STAGE_CEREMONY_COMPLETED",
+            Self::ProvisionerInitialized => "LIFECYCLE_STAGE_PROVISIONER_INITIALIZED",
+            Self::Activated => "LIFECYCLE_STAGE_ACTIVATED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "LIFECYCLE_STAGE_UNSPECIFIED" => Some(Self::Unspecified),
+            "LIFECYCLE_STAGE_UNINITIALIZED" => Some(Self::Uninitialized),
+            "LIFECYCLE_STAGE_OPERATOR_INITIALIZED" => Some(Self::OperatorInitialized),
+            "LIFECYCLE_STAGE_CEREMONY_COMPLETED" => Some(Self::CeremonyCompleted),
+            "LIFECYCLE_STAGE_PROVISIONER_INITIALIZED" => {
+                Some(Self::ProvisionerInitialized)
+            }
+            "LIFECYCLE_STAGE_ACTIVATED" => Some(Self::Activated),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]

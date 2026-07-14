@@ -68,6 +68,23 @@ message SignedGuardianInfo {
   optional bytes signature = 3;
 }
 
+// Which flows a guardian enclave serves.
+enum EnclaveMode {
+  ENCLAVE_MODE_UNSPECIFIED = 0;
+  ENCLAVE_MODE_CEREMONY = 1;
+  ENCLAVE_MODE_WITHDRAW = 2;
+}
+
+// Current stage in a guardian enclave's mode-specific lifecycle.
+enum LifecycleStage {
+  LIFECYCLE_STAGE_UNSPECIFIED = 0;
+  LIFECYCLE_STAGE_UNINITIALIZED = 1;
+  LIFECYCLE_STAGE_OPERATOR_INITIALIZED = 2;
+  LIFECYCLE_STAGE_CEREMONY_COMPLETED = 3;
+  LIFECYCLE_STAGE_PROVISIONER_INITIALIZED = 4;
+  LIFECYCLE_STAGE_ACTIVATED = 5;
+}
+
 // Information about the guardian enclave.
 message GuardianInfoData {
   // Secret-sharing instance (if set).
@@ -103,6 +120,12 @@ message GuardianInfoData {
   // MPC committee verifying key `G` as `bcs(G)` (the derivation master, NOT the
   // guardian's own BTC key). Set after operator_init.
   optional bytes mpc_master_g = 10;
+
+  // Which flows this enclave serves. Fixed at boot.
+  optional EnclaveMode enclave_mode = 11;
+
+  // Current stage in this enclave mode's lifecycle.
+  optional LifecycleStage lifecycle_stage = 12;
 }
 
 // Public description of the current BTC key's secret-sharing scheme.

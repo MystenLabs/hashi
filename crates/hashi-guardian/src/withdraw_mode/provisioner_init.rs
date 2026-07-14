@@ -164,6 +164,10 @@ mod tests {
             enclave.is_provisioner_init_complete(),
             "provisioner init complete"
         );
+        assert_eq!(
+            enclave.lifecycle_stage(),
+            LifecycleStage::ProvisionerInitialized
+        );
         assert!(!enclave.is_fully_initialized(), "not active before OA");
     }
 

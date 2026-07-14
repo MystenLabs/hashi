@@ -8,6 +8,7 @@
 use super::BuildPcrs;
 use super::Ciphertext;
 use super::CommitteeTransitionRequest;
+use super::EnclaveMode;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianError;
@@ -24,6 +25,7 @@ use super::InitConfig;
 use super::KPEncryptedShare;
 use super::KPEncryptedShares;
 use super::KpSigned;
+use super::LifecycleStage;
 use super::LimiterConfig;
 use super::LimiterState;
 use super::NitroAttestation;
@@ -732,7 +734,55 @@ fn s3_bucket_info_to_pb(info: super::S3BucketInfo) -> pb::S3BucketInfo {
     }
 }
 
+fn pb_to_enclave_mode(mode: i32) -> GuardianResult<EnclaveMode> {
+    match pb::EnclaveMode::try_from(mode) {
+        Ok(pb::EnclaveMode::Ceremony) => Ok(EnclaveMode::Ceremony),
+        Ok(pb::EnclaveMode::Withdraw) => Ok(EnclaveMode::Withdraw),
+        Ok(pb::EnclaveMode::Unspecified) | Err(_) => {
+            Err(InvalidInputs(format!("invalid enclave_mode: {mode}")))
+        }
+    }
+}
+
+fn enclave_mode_to_pb(mode: EnclaveMode) -> i32 {
+    match mode {
+        EnclaveMode::Ceremony => pb::EnclaveMode::Ceremony as i32,
+        EnclaveMode::Withdraw => pb::EnclaveMode::Withdraw as i32,
+    }
+}
+
+fn pb_to_lifecycle_stage(stage: i32) -> GuardianResult<LifecycleStage> {
+    match pb::LifecycleStage::try_from(stage) {
+        Ok(pb::LifecycleStage::Uninitialized) => Ok(LifecycleStage::Uninitialized),
+        Ok(pb::LifecycleStage::OperatorInitialized) => Ok(LifecycleStage::OperatorInitialized),
+        Ok(pb::LifecycleStage::CeremonyCompleted) => Ok(LifecycleStage::CeremonyCompleted),
+        Ok(pb::LifecycleStage::ProvisionerInitialized) => {
+            Ok(LifecycleStage::ProvisionerInitialized)
+        }
+        Ok(pb::LifecycleStage::Activated) => Ok(LifecycleStage::Activated),
+        Ok(pb::LifecycleStage::Unspecified) | Err(_) => {
+            Err(InvalidInputs(format!("invalid lifecycle_stage: {stage}")))
+        }
+    }
+}
+
+fn lifecycle_stage_to_pb(stage: LifecycleStage) -> i32 {
+    match stage {
+        LifecycleStage::Uninitialized => pb::LifecycleStage::Uninitialized as i32,
+        LifecycleStage::OperatorInitialized => pb::LifecycleStage::OperatorInitialized as i32,
+        LifecycleStage::CeremonyCompleted => pb::LifecycleStage::CeremonyCompleted as i32,
+        LifecycleStage::ProvisionerInitialized => pb::LifecycleStage::ProvisionerInitialized as i32,
+        LifecycleStage::Activated => pb::LifecycleStage::Activated as i32,
+    }
+}
+
 fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<GuardianInfo> {
+    let enclave_mode =
+        pb_to_enclave_mode(data.enclave_mode.ok_or_else(|| missing("enclave_mode"))?)?;
+    let lifecycle_stage = pb_to_lifecycle_stage(
+        data.lifecycle_stage
+            .ok_or_else(|| missing("lifecycle_stage"))?,
+    )?;
     let secret_sharing_instance = data
         .secret_sharing_instance
         .map(pb_to_secret_sharing_instance)
@@ -777,6 +827,8 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
         .transpose()?;
 
     Ok(GuardianInfo {
+        enclave_mode,
+        lifecycle_stage,
         secret_sharing_instance,
         bucket_info,
         encryption_pubkey,
@@ -792,6 +844,8 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
 
 fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
     pb::GuardianInfoData {
+        enclave_mode: Some(enclave_mode_to_pb(info.enclave_mode)),
+        lifecycle_stage: Some(lifecycle_stage_to_pb(info.lifecycle_stage)),
         secret_sharing_instance: info
             .secret_sharing_instance
             .as_ref()
@@ -1286,6 +1340,8 @@ mod tests {
         let pk = kp.x_only_public_key().0;
 
         let info = GuardianInfo {
+            enclave_mode: EnclaveMode::Withdraw,
+            lifecycle_stage: LifecycleStage::ProvisionerInitialized,
             secret_sharing_instance: None,
             bucket_info: None,
             encryption_pubkey: vec![0u8; 32],
