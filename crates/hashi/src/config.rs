@@ -126,6 +126,12 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_batch_size_per_weight: Option<u16>,
 
+    /// Override the presignature-derivation activation epoch for testing the
+    /// epoch-boundary flip. Can only be set if `sui_chain_id` is not mainnet or
+    /// testnet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_presignature_derivation_activation_epoch: Option<u64>,
+
     /// URL of the screener gRPC service endpoint (e.g. `https://hashi-screener.mystenlabs.com`).
     /// When not set, AML screening is skipped.
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -105,6 +105,27 @@ impl NonceGenerationProtocol {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PresignatureDerivationVersion {
+    #[default]
+    Legacy,
+    PrivacyThreshold,
+}
+
+impl PresignatureDerivationVersion {
+    pub fn from_activation_epoch(epoch: u64, activation_epoch: u64) -> Self {
+        if epoch < activation_epoch {
+            Self::Legacy
+        } else {
+            Self::PrivacyThreshold
+        }
+    }
+
+    pub fn use_legacy(&self) -> bool {
+        matches!(self, Self::Legacy)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MpcConfig {
     pub epoch: u64,
@@ -114,6 +135,7 @@ pub struct MpcConfig {
     /// Maximum number of faulty validators (f)
     pub max_faulty: u16,
     pub nonce_generation_protocol: NonceGenerationProtocol,
+    pub presignature_derivation_version: PresignatureDerivationVersion,
 }
 
 impl MpcConfig {
@@ -123,6 +145,7 @@ impl MpcConfig {
         threshold: u16,
         max_faulty: u16,
         nonce_generation_protocol: NonceGenerationProtocol,
+        presignature_derivation_version: PresignatureDerivationVersion,
     ) -> Self {
         Self {
             epoch,
@@ -130,6 +153,7 @@ impl MpcConfig {
             threshold,
             max_faulty,
             nonce_generation_protocol,
+            presignature_derivation_version,
         }
     }
 }
@@ -1207,5 +1231,38 @@ mod tests {
             NonceGenerationProtocol::default(),
             NonceGenerationProtocol::Vanilla
         );
+    }
+
+    #[test]
+    fn presignature_derivation_version_from_activation_epoch() {
+        use PresignatureDerivationVersion::*;
+        assert_eq!(
+            PresignatureDerivationVersion::from_activation_epoch(4, 5),
+            Legacy
+        );
+        assert_eq!(
+            PresignatureDerivationVersion::from_activation_epoch(5, 5),
+            PrivacyThreshold
+        );
+        assert_eq!(
+            PresignatureDerivationVersion::from_activation_epoch(6, 5),
+            PrivacyThreshold
+        );
+        assert_eq!(
+            PresignatureDerivationVersion::from_activation_epoch(0, 0),
+            PrivacyThreshold
+        );
+        // The absent-key default: never activates.
+        assert_eq!(
+            PresignatureDerivationVersion::from_activation_epoch(u64::MAX, u64::MAX),
+            PrivacyThreshold
+        );
+        assert_eq!(
+            PresignatureDerivationVersion::from_activation_epoch(u64::MAX - 1, u64::MAX),
+            Legacy
+        );
+        assert!(Legacy.use_legacy());
+        assert!(!PrivacyThreshold.use_legacy());
+        assert_eq!(PresignatureDerivationVersion::default(), Legacy);
     }
 }
