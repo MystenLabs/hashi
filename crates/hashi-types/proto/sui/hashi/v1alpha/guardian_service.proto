@@ -68,6 +68,21 @@ message SignedGuardianInfo {
   optional bytes signature = 3;
 }
 
+enum CeremonyStage {
+  CEREMONY_STAGE_UNSPECIFIED = 0;
+  CEREMONY_STAGE_UNINITIALIZED = 1;
+  CEREMONY_STAGE_OPERATOR_INITIALIZED = 2;
+  CEREMONY_STAGE_COMPLETED = 3;
+}
+
+enum WithdrawStage {
+  WITHDRAW_STAGE_UNSPECIFIED = 0;
+  WITHDRAW_STAGE_UNINITIALIZED = 1;
+  WITHDRAW_STAGE_OPERATOR_INITIALIZED = 2;
+  WITHDRAW_STAGE_PROVISIONER_INITIALIZED = 3;
+  WITHDRAW_STAGE_ACTIVATED = 4;
+}
+
 // Information about the guardian enclave.
 message GuardianInfoData {
   // Secret-sharing instance (if set).
@@ -103,6 +118,12 @@ message GuardianInfoData {
   // MPC committee verifying key `G` as `bcs(G)` (the derivation master, NOT the
   // guardian's own BTC key). Set after operator_init.
   optional bytes mpc_master_g = 10;
+
+  // Signed enclave mode and its current lifecycle stage.
+  oneof lifecycle {
+    CeremonyStage ceremony = 11;
+    WithdrawStage withdraw = 12;
+  }
 }
 
 // Public description of the current BTC key's secret-sharing scheme.

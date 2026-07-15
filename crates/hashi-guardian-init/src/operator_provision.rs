@@ -12,6 +12,7 @@ use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::OperatorWriteGenesisRequest;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::SecretSharingInstance;
+use hashi_types::guardian::WithdrawStage;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
 use hashi_types::guardian::proto_conversions::operator_write_genesis_request_to_pb;
 use hashi_types::pgp::load_certs;
@@ -19,6 +20,7 @@ use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use tracing::info;
 
 use crate::config::Config;
+use crate::guardian_info::ensure_oi_info_matches_post_init;
 use crate::guardian_info::verified_live_guardian_info;
 use crate::kp_roster::VerifiedCeremonyState;
 
@@ -260,10 +262,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         verified_session.signing_pubkey == signing_pub_key,
         "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
     );
-    ensure!(
-        verified_session.info == post.info,
-        "guardian S3 init GuardianInfo differs from post-OperatorInit gRPC GuardianInfo"
-    );
+    let oi_info = verified_session.info;
+    ensure_oi_info_matches_post_init(&oi_info, &post.info)?;
     info!(
         phase = "attestation pin",
         session_id = %session_id,
@@ -293,6 +293,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 }
 
 fn ensure_uninitialized(info: &GuardianInfo) -> anyhow::Result<()> {
+    ensure!(
+        info.lifecycle == WithdrawStage::Uninitialized.into(),
+        "guardian is not an uninitialized withdraw enclave"
+    );
     ensure!(
         info.secret_sharing_instance.is_none(),
         "guardian already has a secret-sharing instance"
@@ -335,6 +339,10 @@ fn verify_initialized_info(
     expected_config: &InitConfig,
     expected_config_hash: [u8; 32],
 ) -> anyhow::Result<()> {
+    ensure!(
+        info.lifecycle == WithdrawStage::OperatorInitialized.into(),
+        "guardian is not an operator-initialized withdraw enclave"
+    );
     let instance = info
         .secret_sharing_instance
         .context("Guardian info missing secret-sharing instance")?;

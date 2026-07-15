@@ -105,9 +105,11 @@ pub async fn operator_init(
     // Serialize so concurrent callers can't race the check-then-commit below.
     let _guard = enclave.control_lock.lock().await;
 
-    if enclave.is_operator_init_complete() {
-        return Err(InvalidInputs("operator_init already complete".into()));
-    }
+    let uninitialized = match enclave.mode() {
+        EnclaveMode::Ceremony => CeremonyStage::Uninitialized.into(),
+        EnclaveMode::Withdraw => WithdrawStage::Uninitialized.into(),
+    };
+    enclave.require_lifecycle(uninitialized)?;
 
     // ---- Validate & build: Nothing in this phase mutates enclave state, so any
     // error here leaves the enclave untouched. ----
@@ -163,16 +165,20 @@ async fn commit_operator_init(
         .expect("Unable to log OperatorInitAttestationUnsigned");
 
     // 2) Share commitments help KPs confirm that the right private key will be constructed.
+    // This pre-transition snapshot reports `Uninitialized`; successfully
+    // writing it completes operator initialization.
     enclave
         .log_init(OIGuardianInfo(Box::new(enclave.info().await)))
         .await
         .expect("Unable to log GuardianInfo");
 
+    let initialized = match enclave.mode() {
+        EnclaveMode::Ceremony => CeremonyStage::OperatorInitialized.into(),
+        EnclaveMode::Withdraw => WithdrawStage::OperatorInitialized.into(),
+    };
     enclave
-        .scratchpad
-        .operator_init_logging_complete
-        .set(())
-        .expect("operator_init_logging_complete should only be set once");
+        .advance_lifecycle_into(initialized)
+        .expect("operator_init should advance an uninitialized enclave");
 
     info!("Operator initialization complete.");
 }
@@ -207,12 +213,18 @@ mod tests {
     #[tokio::test]
     async fn commit_marks_operator_init_complete_withdraw_mode() {
         let enclave = commit_for_mode(EnclaveMode::Withdraw).await;
-        assert!(enclave.is_operator_init_complete());
+        assert_eq!(
+            enclave.lifecycle(),
+            WithdrawStage::OperatorInitialized.into()
+        );
     }
 
     #[tokio::test]
     async fn commit_marks_operator_init_complete_ceremony_mode() {
         let enclave = commit_for_mode(EnclaveMode::Ceremony).await;
-        assert!(enclave.is_operator_init_complete());
+        assert_eq!(
+            enclave.lifecycle(),
+            CeremonyStage::OperatorInitialized.into()
+        );
     }
 }

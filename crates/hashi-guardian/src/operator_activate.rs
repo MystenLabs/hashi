@@ -15,6 +15,7 @@ use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::InitLogMessage;
 use hashi_types::guardian::OperatorActivateRequest;
 use hashi_types::guardian::RateLimiter;
+use hashi_types::guardian::WithdrawStage;
 use std::sync::Arc;
 use tracing::info;
 use GuardianError::InternalError;
@@ -28,14 +29,7 @@ pub async fn operator_activate(
 
     let _guard = enclave.control_lock.lock().await;
 
-    if !enclave.is_provisioner_init_complete() {
-        return Err(InvalidInputs(
-            "operator_activate requires provisioner_init complete".into(),
-        ));
-    }
-    if enclave.is_active() {
-        return Err(InvalidInputs("operator_activate already complete".into()));
-    }
+    enclave.require_lifecycle(WithdrawStage::ProvisionerInitialized.into())?;
 
     let init_config = enclave
         .init_config()
@@ -46,8 +40,7 @@ pub async fn operator_activate(
         .ok_or_else(|| InvalidInputs("config_hash not set".into()))?;
     let armed_instance = enclave
         .secret_sharing_instance()
-        .map_err(|_| InvalidInputs("secret-sharing instance not set".into()))?
-        .clone();
+        .map_err(|_| InvalidInputs("secret-sharing instance not set".into()))?;
 
     let s3 = enclave
         .config
@@ -117,11 +110,10 @@ pub async fn operator_activate(
         })
         .await
         .expect("Unable to log operator activation");
+    enclave.clear_initialization_state();
     enclave
-        .scratchpad
-        .operator_activate_logging_complete
-        .set(())
-        .expect("operator_activate_logging_complete should only be set once");
+        .advance_lifecycle_into(WithdrawStage::Activated.into())
+        .expect("operator_activate should advance a provisioner-initialized enclave");
 
     info!("Operator activation complete.");
     Ok(())

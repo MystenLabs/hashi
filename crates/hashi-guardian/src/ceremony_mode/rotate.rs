@@ -7,7 +7,6 @@ use hashi_types::guardian::crypto::decrypt_verify_shares;
 use hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey;
 use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
 use hashi_types::guardian::CeremonyLogMessage;
-use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::*;
 use std::sync::Arc;
@@ -22,15 +21,10 @@ pub async fn rotate_kps(
 ) -> GuardianResult<GuardianSigned<RotateKpsResponse>> {
     info!("/rotate_kps - Received request.");
 
-    // Hold the ceremony guard for the whole call: blocks a concurrent
-    // setup_new_key, and the flag rejects re-entry after one ceremony finalizes.
-    let mut ceremony_complete = enclave.scratchpad.ceremony_complete.lock().await;
-    if !enclave.is_operator_init_complete() {
-        return Err(InvalidInputs("call operator_init first".into()));
-    }
-    if *ceremony_complete {
-        return Err(InvalidInputs("setup or rotation already complete".into()));
-    }
+    // Serialize the whole ceremony. The exact lifecycle check prevents setup
+    // and rotation from interleaving and rejects another ceremony afterward.
+    let _guard = enclave.control_lock.lock().await;
+    enclave.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
 
     let (encrypted_old_shares, old_instance, state) = request.into_parts();
     let old_t = old_instance.threshold();
@@ -53,7 +47,9 @@ pub async fn rotate_kps(
     );
 
     let response = finalize_rotation(&enclave, &old_shares, &old_instance, state).await?;
-    *ceremony_complete = true;
+    enclave
+        .advance_lifecycle_into(CeremonyStage::Completed.into())
+        .expect("rotate_kps should complete a ceremony lifecycle");
     Ok(response)
 }
 
@@ -102,7 +98,7 @@ async fn finalize_rotation(
 
     enclave
         .set_latest_encrypted_shares(encrypted_shares.clone())
-        .expect("set_latest_encrypted_shares should work if ceremony_complete=false");
+        .expect("encrypted shares should only be set once");
 
     info!("Rotation complete.");
     Ok(enclave.sign(RotateKpsResponse { encrypted_shares }))
@@ -113,9 +109,9 @@ mod tests {
     use super::*;
     use crate::mock_logger_capturing;
     use crate::test_utils::CapturedPuts;
-    use crate::OperatorInitTestArgs;
     use hashi_types::guardian::crypto::split_secret;
     use hashi_types::guardian::test_utils::mock_pgp_certs;
+    use hashi_types::guardian::GuardianError::InvalidInputs;
     use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::LogMessageV1;
     use hashi_types::guardian::LogRecord;
@@ -124,20 +120,26 @@ mod tests {
     const TEST_N: usize = 5;
     const TEST_T: usize = 3;
 
-    /// Build (original sk, old shares, captures, enclave).
-    async fn setup_rotation_enclave() -> (SecretKey, Vec<Share>, CapturedPuts, Arc<Enclave>) {
+    /// Build (old shares, old instance, captures, enclave).
+    async fn setup_rotation_enclave() -> (
+        Vec<Share>,
+        SecretSharingInstance,
+        CapturedPuts,
+        Arc<Enclave>,
+    ) {
         let sk = SecretKey::random(&mut rand::thread_rng());
         let params = SecretSharingParams::new(TEST_N, TEST_T).unwrap();
         let shares = split_secret(&sk, &params, &mut rand::thread_rng());
-        let commitments = ShareCommitments::from_shares(&shares).unwrap();
-        let (logger, captures) = mock_logger_capturing();
-        let enclave = Enclave::create_operator_initialized_with(
-            OperatorInitTestArgs::default()
-                .with_commitments(commitments)
-                .with_s3_logger(logger),
+        let old_instance = SecretSharingInstance::new(
+            ShareCommitments::from_shares(&shares).unwrap(),
+            TEST_N,
+            TEST_T,
+            0,
         )
-        .await;
-        (sk, shares, captures, enclave)
+        .unwrap();
+        let (logger, captures) = mock_logger_capturing();
+        let enclave = Enclave::create_operator_initialized_ceremony(logger);
+        (shares, old_instance, captures, enclave)
     }
 
     fn build_state() -> RotateKpsState {
@@ -149,6 +151,7 @@ mod tests {
     fn build_request(
         shares: &[Share],
         enclave: &Enclave,
+        old_instance: &SecretSharingInstance,
         state: RotateKpsState,
     ) -> RotateKpsRequest {
         let submissions = shares
@@ -162,10 +165,7 @@ mod tests {
                 )
             })
             .collect();
-        // The old instance the operator would read from `ceremony/`; here it's the
-        // one the enclave was set up with (matches the shares being submitted).
-        let old_instance = enclave.secret_sharing_instance().unwrap().clone();
-        RotateKpsRequest::new(submissions, old_instance, state)
+        RotateKpsRequest::new(submissions, old_instance.clone(), state)
     }
 
     /// Run one rotation and return its verified response shares.
@@ -260,8 +260,8 @@ mod tests {
 
     #[tokio::test]
     async fn happy_path_threshold_reached() {
-        let (_sk, shares, captures, enclave) = setup_rotation_enclave().await;
-        let req = build_request(&shares[..TEST_T], &enclave, build_state());
+        let (shares, old_instance, captures, enclave) = setup_rotation_enclave().await;
+        let req = build_request(&shares[..TEST_T], &enclave, &old_instance, build_state());
         let response_shares = rotate_and_verify(&enclave, req).await;
         assert_rotation_output(&captures, response_shares.as_slice(), TEST_N, TEST_T);
     }
@@ -269,23 +269,23 @@ mod tests {
     #[tokio::test]
     async fn happy_path_asymmetric_n_t() {
         // Old (n=5, t=3); rotate to new (n=3, t=2).
-        let (_sk, shares, captures, enclave) = setup_rotation_enclave().await;
+        let (shares, old_instance, captures, enclave) = setup_rotation_enclave().await;
         let state = RotateKpsState::new(mock_pgp_certs(3), 3, 2).unwrap();
-        let req = build_request(&shares[..TEST_T], &enclave, state);
+        let req = build_request(&shares[..TEST_T], &enclave, &old_instance, state);
         let response_shares = rotate_and_verify(&enclave, req).await;
         assert_rotation_output(&captures, response_shares.as_slice(), 3, 2);
     }
 
     #[tokio::test]
     async fn rejects_second_call_after_complete() {
-        let (_sk, shares, captures, enclave) = setup_rotation_enclave().await;
+        let (shares, old_instance, captures, enclave) = setup_rotation_enclave().await;
 
         // First call reaches threshold and finalizes.
-        let req = build_request(&shares[..TEST_T], &enclave, build_state());
+        let req = build_request(&shares[..TEST_T], &enclave, &old_instance, build_state());
         rotate_kps(enclave.clone(), req).await.expect("ok");
 
         // A second call is rejected outright — no re-split.
-        let req2 = build_request(&shares[..TEST_T], &enclave, build_state());
+        let req2 = build_request(&shares[..TEST_T], &enclave, &old_instance, build_state());
         let err = rotate_kps(enclave, req2).await.expect_err("should reject");
         assert!(matches!(err, InvalidInputs(_)));
 
@@ -299,7 +299,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_duplicate_share_id_in_batch() {
-        let (_sk, shares, _captures, enclave) = setup_rotation_enclave().await;
+        let (shares, old_instance, _captures, enclave) = setup_rotation_enclave().await;
         let state = build_state();
         let mut rng = rand::thread_rng();
         // Two submissions from the same KP (same share id).
@@ -323,7 +323,6 @@ mod tests {
                 &mut rng,
             ),
         ];
-        let old_instance = enclave.secret_sharing_instance().unwrap().clone();
         let req = RotateKpsRequest::new(submissions, old_instance, state);
 
         let err = rotate_kps(enclave, req).await.expect_err("should fail");
@@ -332,9 +331,14 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_below_threshold() {
-        let (_sk, shares, _captures, enclave) = setup_rotation_enclave().await;
+        let (shares, old_instance, _captures, enclave) = setup_rotation_enclave().await;
         // Only T-1 submissions.
-        let req = build_request(&shares[..TEST_T - 1], &enclave, build_state());
+        let req = build_request(
+            &shares[..TEST_T - 1],
+            &enclave,
+            &old_instance,
+            build_state(),
+        );
         let err = rotate_kps(enclave, req).await.expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
     }
@@ -344,7 +348,7 @@ mod tests {
         // A submission bound to a different `state` won't decrypt under the
         // request's `state` AAD, so the whole request is rejected gracefully
         // (no panic — the old cross-call state-hash check is gone).
-        let (_sk, shares, _captures, enclave) = setup_rotation_enclave().await;
+        let (shares, old_instance, _captures, enclave) = setup_rotation_enclave().await;
         let state1 = build_state();
         let state2 = build_state();
         assert_ne!(state1.new_kp_pgp_certs(), state2.new_kp_pgp_certs());
@@ -370,7 +374,6 @@ mod tests {
                 &mut rng,
             ),
         ];
-        let old_instance = enclave.secret_sharing_instance().unwrap().clone();
         let req = RotateKpsRequest::new(submissions, old_instance, state2);
 
         let err = rotate_kps(enclave, req).await.expect_err("should fail");
@@ -379,12 +382,17 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_share_not_matching_commitments() {
-        let (_sk, _shares, _captures, enclave) = setup_rotation_enclave().await;
+        let (_shares, old_instance, _captures, enclave) = setup_rotation_enclave().await;
         let bogus_share = Share {
             id: std::num::NonZeroU16::new(1).unwrap(),
             value: k256::Scalar::from(42u32),
         };
-        let req = build_request(std::slice::from_ref(&bogus_share), &enclave, build_state());
+        let req = build_request(
+            std::slice::from_ref(&bogus_share),
+            &enclave,
+            &old_instance,
+            build_state(),
+        );
         let err = rotate_kps(enclave, req).await.expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
     }

@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Core enclave types: `Enclave` holds all guardian state (immutable config
-//! set during operator/provisioner-init, mutable runtime state, and the
-//! one-time init scratchpad). Lives in the library so external crates
+//! set during operator/provisioner-init, mutable runtime state, and
+//! initialization state). Lives in the library so external crates
 //! (integration test harnesses, ops tooling) can construct and drive an
 //! enclave without going through `main`.
 
@@ -35,19 +35,15 @@ pub struct Enclave {
     pub config: EnclaveConfig,
     /// Mutable state
     pub state: EnclaveState,
-    /// Initialization scratchpad
-    pub scratchpad: Scratchpad,
-    /// Serializes control-plane RPCs (operator_init, update_committee) so
-    /// concurrent callers can't race a check-then-set. Held across the handler.
-    /// TODO: fold provisioner_init / ceremony serialization in here too, once
-    /// their dual-purpose locks (share accumulator / one-shot bool) are untangled.
+    /// State produced or consumed by initialization flows.
+    init_state: InitializationState,
+    /// Serializes lifecycle and control-plane transitions so concurrent callers
+    /// cannot race a check-then-set. Held across each handler.
     pub control_lock: tokio::sync::Mutex<()>,
 }
 
 /// Configuration set during initialization (immutable after set)
 pub struct EnclaveConfig {
-    /// Enclave mode (set on boot).
-    mode: EnclaveMode,
     /// Ephemeral keypair (set on boot)
     eph_keys: EphemeralKeyPairs,
     /// S3 client & config (set in operator_init)
@@ -65,6 +61,8 @@ pub struct EnclaveConfig {
 /// Mutable state that changes during operation.
 /// Committee + rate limiter are installed during operator_activate.
 pub struct EnclaveState {
+    /// Authoritative mode-specific lifecycle, initialized at boot.
+    lifecycle: RwLock<EnclaveLifecycle>,
     /// Current Hashi committee.
     committee: RwLock<Option<Arc<HashiCommittee>>>,
     /// Rate limiter. Set once during operator_activate.
@@ -72,31 +70,30 @@ pub struct EnclaveState {
     rate_limiter: OnceLock<Arc<tokio::sync::Mutex<RateLimiter>>>,
 }
 
-/// Scratchpad used only during initialization. The OnceLock flags retain their
-/// state for the life of the enclave.
+/// State produced or consumed by initialization flows. Some artifacts remain
+/// available through `get_guardian_info` after the lifecycle advances.
 #[derive(Default)]
-pub struct Scratchpad {
-    /// Stable withdraw-mode config set by operator_init.
-    pub init_config: OnceLock<InitConfig>,
-    /// Secret-sharing instance (commitments + N + T) set by operator_init.
-    pub secret_sharing_instance: OnceLock<SecretSharingInstance>,
-    /// Set once operator_init has successfully written all logs to S3.
-    /// This prevents heartbeats from being emitted before operator_init logs.
-    pub operator_init_logging_complete: OnceLock<()>,
-    /// Set once the provisioner init flow has successfully logged EnclaveFullyInitialized.
-    /// operator_activate requires this so activation cannot happen before the PI log is durable.
-    pub provisioner_init_logging_complete: OnceLock<()>,
-    /// Set once operator_activate has installed live serving state and logged it.
-    pub operator_activate_logging_complete: OnceLock<()>,
-    /// Guards the single ceremony per enclave: `setup_new_key` (genesis) or
-    /// `rotate_kps` (rotation), never both. Each holds this guard across its
-    /// flow so the two can't interleave; the `bool` flips true once a ceremony
-    /// finalizes, making it one-shot per enclave instance (the operator
-    /// restarts to run another).
-    pub ceremony_complete: tokio::sync::Mutex<bool>,
-    /// Encrypted shares produced by the ceremony (`setup_new_key` or
-    /// `rotate_kps`), served to KPs from `get_guardian_info`. Set once.
-    pub latest_encrypted_shares: OnceLock<KPEncryptedShares>,
+struct InitializationState {
+    /// Withdraw-mode input: stable configuration installed by `operator_init`.
+    init_config: OnceLock<InitConfig>,
+    /// Withdraw-mode input: expected ceremony commitments and parameters,
+    /// installed by `operator_init` for `provisioner_init` to validate against.
+    secret_sharing_instance: RwLock<Option<SecretSharingInstance>>,
+    /// Ceremony-mode output: encrypted shares produced by `setup_new_key` or
+    /// `rotate_kps`, retained for KPs to fetch from `get_guardian_info`.
+    latest_encrypted_shares: OnceLock<KPEncryptedShares>,
+}
+
+impl InitializationState {
+    /// Drop withdraw-mode inputs that may become stale once the enclave is active.
+    /// Stable config and ceremony-mode output remain available.
+    fn clear(&self) {
+        self.secret_sharing_instance
+            .write()
+            .expect("secret-sharing instance lock poisoned")
+            .take()
+            .expect("secret-sharing instance must exist before activation");
+    }
 }
 
 pub struct EphemeralKeyPairs {
@@ -105,13 +102,8 @@ pub struct EphemeralKeyPairs {
 }
 
 impl EnclaveConfig {
-    pub fn new(
-        signing_keys: GuardianSignKeyPair,
-        encryption_keys: GuardianEncKeyPair,
-        mode: EnclaveMode,
-    ) -> Self {
+    pub fn new(signing_keys: GuardianSignKeyPair, encryption_keys: GuardianEncKeyPair) -> Self {
         EnclaveConfig {
-            mode,
             eph_keys: EphemeralKeyPairs {
                 signing_keys,
                 encryption_keys,
@@ -222,8 +214,7 @@ impl EnclaveState {
             .ok_or_else(|| InvalidInputs("committee not initialized".into()))
     }
 
-    /// Whether the committee is installed, without cloning the `Arc` — used by the
-    /// operator_init completeness check, which runs on the heartbeat/withdrawal path.
+    /// Whether the committee is installed, without cloning the `Arc`.
     fn has_committee(&self) -> bool {
         self.committee
             .read()
@@ -231,7 +222,7 @@ impl EnclaveState {
             .is_some()
     }
 
-    /// Set committee. Called only from `init` (operator_init).
+    /// Set committee. Called only from `init` during operator activation.
     fn set_committee(&self, committee: HashiCommittee) -> GuardianResult<()> {
         info!("Setting committee for epoch {}.", committee.epoch());
 
@@ -361,94 +352,119 @@ impl Enclave {
         mode: EnclaveMode,
     ) -> Self {
         Enclave {
-            config: EnclaveConfig::new(signing_keys, encryption_keys, mode),
+            config: EnclaveConfig::new(signing_keys, encryption_keys),
             state: EnclaveState {
+                lifecycle: RwLock::new(match mode {
+                    EnclaveMode::Ceremony => CeremonyStage::Uninitialized.into(),
+                    EnclaveMode::Withdraw => WithdrawStage::Uninitialized.into(),
+                }),
                 committee: RwLock::new(None),
                 rate_limiter: OnceLock::new(),
             },
-            scratchpad: Scratchpad::default(),
+            init_state: InitializationState::default(),
             control_lock: tokio::sync::Mutex::new(()),
         }
     }
 
     /// Which flows this enclave serves (fixed at boot).
     pub fn mode(&self) -> EnclaveMode {
-        self.config.mode
+        self.lifecycle().mode()
     }
 
-    /// Provisioner_init is complete: the reconstructed BTC keypair is set and
-    /// its installation has been logged.
-    pub fn is_provisioner_init_complete(&self) -> bool {
-        let logged = self
-            .scratchpad
-            .provisioner_init_logging_complete
-            .get()
-            .is_some();
+    pub fn lifecycle(&self) -> EnclaveLifecycle {
+        *self
+            .state
+            .lifecycle
+            .read()
+            .expect("lifecycle lock poisoned")
+    }
+
+    /// Require an exact mode and lifecycle stage.
+    pub fn require_lifecycle(&self, expected: EnclaveLifecycle) -> GuardianResult<()> {
+        let actual = self.lifecycle();
+        if actual != expected {
+            return Err(InvalidInputs(format!(
+                "expected enclave lifecycle {expected:?}, got {actual:?}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Transition after the operation's durable log succeeds. The lifecycle is
+    /// the single source of completion state.
+    pub fn advance_lifecycle_into(&self, next: EnclaveLifecycle) -> GuardianResult<()> {
+        let expected = next
+            .predecessor()
+            .ok_or_else(|| InvalidInputs(format!("cannot advance lifecycle into {next:?}")))?;
+        let mut lifecycle = self
+            .state
+            .lifecycle
+            .write()
+            .expect("lifecycle lock poisoned");
+        if *lifecycle != expected {
+            return Err(InvalidInputs(format!(
+                "expected enclave lifecycle {expected:?}, got {:?}",
+                *lifecycle
+            )));
+        }
+        self.assert_state_installed_for(next);
+        *lifecycle = next;
+        Ok(())
+    }
+
+    fn assert_state_installed_for(&self, next: EnclaveLifecycle) {
+        let installed = match next {
+            EnclaveLifecycle::Ceremony(CeremonyStage::Uninitialized)
+            | EnclaveLifecycle::Withdraw(WithdrawStage::Uninitialized) => {
+                unreachable!("cannot advance lifecycle into {next:?}")
+            }
+            EnclaveLifecycle::Ceremony(CeremonyStage::OperatorInitialized) => {
+                self.operator_init_state_installed(EnclaveMode::Ceremony)
+            }
+            EnclaveLifecycle::Withdraw(WithdrawStage::OperatorInitialized) => {
+                self.operator_init_state_installed(EnclaveMode::Withdraw)
+            }
+            EnclaveLifecycle::Ceremony(CeremonyStage::Completed) => {
+                self.init_state.latest_encrypted_shares.get().is_some()
+            }
+            EnclaveLifecycle::Withdraw(WithdrawStage::ProvisionerInitialized) => {
+                self.config.is_enclave_btc_keypair_set()
+            }
+            EnclaveLifecycle::Withdraw(WithdrawStage::Activated) => {
+                self.state.has_committee() && self.state.rate_limiter.get().is_some()
+            }
+        };
         assert!(
-            !logged
-                || (self.config.is_enclave_btc_keypair_set() && self.is_operator_init_complete()),
-            "provisioner_init_logging_complete set but provisioner_init state is incomplete"
+            installed,
+            "cannot advance lifecycle to {next:?}: state is incomplete"
         );
-        logged
     }
 
-    pub fn is_operator_init_complete(&self) -> bool {
-        let logged = self
-            .scratchpad
-            .operator_init_logging_complete
-            .get()
-            .is_some();
-        // commit_operator_init sets this flag last in an all-or-nothing commit, so
-        // a set flag implies every installed field is present. This backstop holds
-        // in prod too (a violation aborts via `abort_on_panic`) and never fires
-        // transiently, since the flag is the last thing set. The converse is NOT
-        // checked: a normal commit installs the state before its (slow) S3 logging
-        // completes, and a lock-free reader (e.g. the heartbeat) can observe that
-        // window with state present but the flag unset.
-        assert!(
-            !logged || self.operator_init_state_installed(),
-            "operator_init_logging_complete set but operator_init state is incomplete"
-        );
-        logged
-    }
-
-    /// Whether every field operator_init installs is present (mode-aware). Only
-    /// used to assert the `operator_init_logging_complete` invariant above.
-    fn operator_init_state_installed(&self) -> bool {
+    /// Whether every field operator_init installs is present (mode-aware).
+    fn operator_init_state_installed(&self, mode: EnclaveMode) -> bool {
         // Both modes install the S3 logger; a ceremony enclave installs nothing else.
         if self.config.s3_logger.get().is_none() {
             return false;
         }
-        match self.config.mode {
+        match mode {
             EnclaveMode::Ceremony => true,
             // Withdraw enclaves additionally install the stable InitConfig.
             EnclaveMode::Withdraw => {
                 self.config.btc_network.get().is_some()
-                    && self.scratchpad.init_config.get().is_some()
-                    && self.scratchpad.secret_sharing_instance.get().is_some()
+                    && self.init_state.init_config.get().is_some()
+                    && self
+                        .init_state
+                        .secret_sharing_instance
+                        .read()
+                        .expect("secret-sharing instance lock poisoned")
+                        .is_some()
                     && self.config.hashi_btc_master_pubkey.get().is_some()
             }
         }
     }
 
     pub fn is_fully_initialized(&self) -> bool {
-        self.is_active()
-    }
-
-    pub fn is_active(&self) -> bool {
-        let logged = self
-            .scratchpad
-            .operator_activate_logging_complete
-            .get()
-            .is_some();
-        assert!(
-            !logged
-                || (self.is_provisioner_init_complete()
-                    && self.state.has_committee()
-                    && self.state.rate_limiter.get().is_some()),
-            "operator_activate_logging_complete set but activation state is incomplete"
-        );
-        logged
+        self.lifecycle() == WithdrawStage::Activated.into()
     }
 
     // ========================================================================
@@ -482,7 +498,8 @@ impl Enclave {
 
     pub async fn info(&self) -> GuardianInfo {
         GuardianInfo {
-            secret_sharing_instance: self.secret_sharing_instance().ok().cloned(),
+            lifecycle: self.lifecycle(),
+            secret_sharing_instance: self.secret_sharing_instance().ok(),
             bucket_info: self
                 .config
                 .s3_logger()
@@ -581,13 +598,15 @@ impl Enclave {
     }
 
     // ========================================================================
-    // Scratchpad (Initialization-only data)
+    // Initialization state
     // ========================================================================
 
-    pub fn secret_sharing_instance(&self) -> GuardianResult<&SecretSharingInstance> {
-        self.scratchpad
+    pub fn secret_sharing_instance(&self) -> GuardianResult<SecretSharingInstance> {
+        self.init_state
             .secret_sharing_instance
-            .get()
+            .read()
+            .expect("secret-sharing instance lock poisoned")
+            .clone()
             .ok_or(InvalidInputs("Secret-sharing instance not set".into()))
     }
 
@@ -595,16 +614,26 @@ impl Enclave {
         &self,
         instance: SecretSharingInstance,
     ) -> GuardianResult<()> {
-        self.scratchpad
+        let mut slot = self
+            .init_state
             .secret_sharing_instance
-            .set(instance)
-            .map_err(|_| InvalidInputs("Secret-sharing instance already set".into()))
+            .write()
+            .expect("secret-sharing instance lock poisoned");
+        if slot.is_some() {
+            return Err(InvalidInputs("Secret-sharing instance already set".into()));
+        }
+        *slot = Some(instance);
+        Ok(())
+    }
+
+    pub fn clear_initialization_state(&self) {
+        self.init_state.clear();
     }
 
     /// Stash the ceremony's encrypted shares for KPs to fetch via
     /// `get_guardian_info`. One ceremony per enclave, so this is set once.
     pub fn set_latest_encrypted_shares(&self, shares: KPEncryptedShares) -> GuardianResult<()> {
-        self.scratchpad
+        self.init_state
             .latest_encrypted_shares
             .set(shares)
             .map_err(|_| InvalidInputs("Latest encrypted shares already set".into()))
@@ -612,7 +641,7 @@ impl Enclave {
 
     /// Encrypted shares from the ceremony, or empty if none has run.
     pub fn latest_encrypted_shares(&self) -> KPEncryptedShares {
-        self.scratchpad
+        self.init_state
             .latest_encrypted_shares
             .get()
             .cloned()
@@ -620,11 +649,11 @@ impl Enclave {
     }
 
     pub fn init_config(&self) -> Option<&InitConfig> {
-        self.scratchpad.init_config.get()
+        self.init_state.init_config.get()
     }
 
     pub fn set_init_config(&self, config: InitConfig) -> GuardianResult<()> {
-        self.scratchpad
+        self.init_state
             .init_config
             .set(config)
             .map_err(|_| InvalidInputs("Init config already set".into()))

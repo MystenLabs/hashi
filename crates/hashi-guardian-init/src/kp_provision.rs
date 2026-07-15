@@ -43,6 +43,7 @@ use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::SingleProvisionerInitRequest;
 use hashi_types::guardian::VerifiedGuardianInfo;
+use hashi_types::guardian::WithdrawStage;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::load_certs;
 use hashi_types::proto as pb;
@@ -51,6 +52,7 @@ use rand::thread_rng;
 use tracing::info;
 
 use crate::config::Config;
+use crate::guardian_info::ensure_oi_info_matches_post_init;
 use crate::guardian_info::verified_live_guardian_info;
 use crate::kp_roster::VerifiedCeremonyState;
 use crate::kp_roster::decrypt_share;
@@ -156,6 +158,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         .get_session_info(&session_id, BuildPolicy::Current)
         .await?;
     let GuardianInfo {
+        lifecycle,
         secret_sharing_instance,
         bucket_info,
         encryption_pubkey: enclave_enc_pubkey_bytes,
@@ -167,6 +170,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         current_committee_epoch: enclave_current_committee_epoch,
         mpc_master_g,
     } = &guardian_info;
+    anyhow::ensure!(
+        *lifecycle == WithdrawStage::OperatorInitialized.into(),
+        "Guardian lifecycle is {lifecycle:?}; expected withdraw/operator_initialized"
+    );
     let enclave_ss_instance = secret_sharing_instance
         .as_ref()
         .context("Guardian info missing secret_sharing_instance")?;
@@ -227,13 +234,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         enclave_current_committee_epoch.is_none(),
         "Guardian has current_committee_epoch => operator activation already ran"
     );
-    anyhow::ensure!(
-        verified_session.info == guardian_info,
-        "S3 GuardianInfo mismatch for session {}: endpoint {:?}, S3 {:?}",
-        session_id,
-        guardian_info,
-        verified_session.info
-    );
+    let oi_info = verified_session.info;
+    ensure_oi_info_matches_post_init(&oi_info, &guardian_info)
+        .with_context(|| format!("S3 GuardianInfo mismatch for session {session_id}"))?;
     anyhow::ensure!(
         &master_g == enclave_mpc_master_g,
         "MPC master g mismatch: expected {:?}, got {:?}",
