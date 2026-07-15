@@ -10991,16 +10991,17 @@ fn test_try_sign_avid_nonce_optimistic_confirms_and_persists() {
             .dealer_avid_nonce_outputs
             .contains_key(&(batch_index, dealer_addr))
     );
-    let state = receiver
-        .current_avid_round_state
-        .get(&(batch_index, dealer_addr))
-        .expect("round state persisted at confirm time")
-        .clone();
-
-    let r = receiver
-        .create_avid_nonce_receiver(dealer_addr, batch_index)
-        .unwrap();
-    assert!(r.verify_common_message(state.common).is_ok());
+    assert!(
+        receiver
+            .current_avid_round_state
+            .contains_key(&(batch_index, dealer_addr)),
+        "round state persisted at confirm time"
+    );
+    assert!(
+        receiver
+            .avid_round_verified_common(dealer_addr, batch_index)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -11334,7 +11335,7 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
                 .unwrap()
         })
         .collect();
-    let outcome = decoder
+    let (outcome, _) = decoder
         .decode_avid_nonce_share(
             fx.dealer_addr,
             batch_index,
@@ -12423,7 +12424,7 @@ fn test_decoded_shares_match_optimistic_shares() {
                 .unwrap()
         })
         .collect();
-    let outcome = decoder
+    let (outcome, _) = decoder
         .decode_avid_nonce_share(
             fx.dealer_addr,
             batch_index,
@@ -12792,7 +12793,7 @@ fn test_avid_voter_state_survives_restart() {
     let common = restarted
         .get_avid_round_common(batch_index, &dealer_addr)
         .unwrap();
-    let outcome = laggard
+    let (outcome, _) = laggard
         .decode_avid_nonce_share(
             dealer_addr,
             batch_index,
@@ -12927,7 +12928,7 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
                 .unwrap()
         })
         .collect();
-    let outcome = victim_mgr
+    let (outcome, _) = victim_mgr
         .decode_avid_nonce_share(
             dealer_addr,
             batch_index,

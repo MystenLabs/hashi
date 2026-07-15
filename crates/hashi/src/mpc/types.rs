@@ -860,11 +860,11 @@ mod tests {
         let dealer =
             batch_avss_avid::Dealer::new(nodes.clone(), 0, params, sid.clone(), batch).unwrap();
         let builder = dealer.create_avss_messages(&mut rng).unwrap();
-        let common = builder.message_for(0).unwrap().common;
+        let own_message = builder.message_for(0).unwrap();
         let cert = StubAvssCert {
             voters: voters.iter().copied().collect(),
             vote: batch_avss_avid::AvssVote {
-                common_message_hash: common.hash(),
+                common_message_hash: own_message.common.hash(),
             },
         };
         let messages = dealer.create_avid_messages(&builder, cert).unwrap();
@@ -872,7 +872,7 @@ mod tests {
         let receiver =
             batch_avss_avid::Receiver::new(nodes, 0, 0, params, sid, sks[0].clone(), batch)
                 .unwrap();
-        let verified_common = receiver.verify_common_message(common).unwrap();
+        let (_, _, verified_common) = receiver.process_avss_message(&own_message).unwrap();
         let (_, avid_vote) = receiver
             .process_avid_message(&verified_common, avid_message)
             .unwrap();
@@ -953,10 +953,10 @@ mod tests {
         let dealer =
             batch_avss_avid::Dealer::new(nodes.clone(), 0, params, sid.clone(), batch).unwrap();
         let builder = dealer.create_avss_messages(&mut rng).unwrap();
-        let common = builder.message_for(0).unwrap().common;
+        let own_message = builder.message_for(0).unwrap();
 
         // A real Confirm cert
-        let h_v = MessageHash::from(common.hash().digest);
+        let h_v = MessageHash::from(own_message.common.hash().digest);
         let confirmers: Vec<usize> = (0..=7).collect();
         let signed = dealer_cert(&committee, &keys, &confirmers, epoch, h_v);
         let confirm_cert = AvidCertificate::confirm(signed, Arc::new(committee)).unwrap();
@@ -967,7 +967,7 @@ mod tests {
         let receiver =
             batch_avss_avid::Receiver::new(nodes, 0, 0, params, sid, sks[0].clone(), batch)
                 .unwrap();
-        let verified_common = receiver.verify_common_message(common).unwrap();
+        let (_, _, verified_common) = receiver.process_avss_message(&own_message).unwrap();
         let processed =
             receiver.process_avid_message(&verified_common, messages.message_for(0).unwrap());
         assert!(processed.is_ok());

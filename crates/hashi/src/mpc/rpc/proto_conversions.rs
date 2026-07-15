@@ -700,9 +700,7 @@ mod avid_conversion_tests {
         let receiver =
             batch_avss_avid::Receiver::new(nodes, 0, 0, params, sid, sks[0].clone(), batch)
                 .unwrap();
-        let verified_common = receiver
-            .verify_common_message(own_message.common.clone())
-            .unwrap();
+        let (_, _, verified_common) = receiver.process_avss_message(&own_message).unwrap();
         let (echo_builder, _) = receiver
             .process_avid_message(&verified_common, avid_message)
             .unwrap();
