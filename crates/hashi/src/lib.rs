@@ -29,6 +29,7 @@ pub mod metrics;
 pub mod metrics_push;
 pub mod mpc;
 pub mod onchain;
+pub mod protocol_config;
 pub mod publish;
 pub mod storage;
 pub mod sui_tx_executor;

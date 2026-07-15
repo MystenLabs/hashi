@@ -230,6 +230,11 @@ const KEY_MPC_THRESHOLD_IN_BASIS_POINTS: &str = "mpc_threshold_in_basis_points";
 const KEY_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: &str = "mpc_weight_reduction_allowed_delta";
 const KEY_MPC_MAX_FAULTY_IN_BASIS_POINTS: &str = "mpc_max_faulty_in_basis_points";
 const KEY_MPC_NONCE_GENERATION_PROTOCOL: &str = "mpc_nonce_generation_protocol";
+const KEY_HASHI_PROTOCOL_VERSION: &str = "hashi_protocol_version";
+pub const GENESIS_HASHI_PROTOCOL_VERSION: u64 = 1;
+/// Reserved member-capability keys (mirrors `hashi::protocol_version`).
+pub const KEY_SUPPORTED_PROTOCOL_VERSION_MIN: &str = "supported_protocol_version_min";
+pub const KEY_SUPPORTED_PROTOCOL_VERSION_MAX: &str = "supported_protocol_version_max";
 
 /// Default MPC threshold in basis points. Mirrors `DEFAULT_THRESHOLD_IN_BASIS_POINTS`
 /// in `mpc_config.move`.
@@ -243,7 +248,7 @@ pub const VANILLA_MPC_NONCE_GENERATION_PROTOCOL: u16 = 0;
 
 /// Rust version of the Move hashi::config_registry::ConfigKeySpec type.
 /// Field order mirrors the Move struct (BCS).
-#[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct ConfigKeySpec {
     pub pinned: bool,
     pub updatable: bool,
@@ -370,6 +375,17 @@ impl Config {
             KEY_MPC_NONCE_GENERATION_PROTOCOL,
             VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
         )
+    }
+
+    pub fn hashi_protocol_version(&self) -> u64 {
+        self.get_u64(KEY_HASHI_PROTOCOL_VERSION, GENESIS_HASHI_PROTOCOL_VERSION)
+    }
+
+    pub fn try_u64(&self, key: &str) -> Option<u64> {
+        self.0.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
+            ConfigValue::U64(n) => Some(*n),
+            _ => None,
+        })
     }
 
     fn mpc_param(&self, key: &str, default: u16) -> u16 {
@@ -735,6 +751,35 @@ pub struct Proposal<T> {
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct UpdateConfig {
     pub entries: VecMap<String, ConfigValue>,
+}
+
+/// Rust version of the Move hashi::config_keys::AddConfigKey type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct AddConfigKey {
+    pub key: String,
+    pub value: ConfigValue,
+    pub spec: ConfigKeySpec,
+}
+
+/// Rust version of the Move hashi::config_keys::UpdateConfigKeySpec type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct UpdateConfigKeySpec {
+    pub key: String,
+    pub spec: ConfigKeySpec,
+}
+
+/// Rust version of the Move hashi::config_keys::RemoveConfigKey type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct RemoveConfigKey {
+    pub key: String,
+}
+
+/// Rust version of the Move hashi::config_keys::ScheduleConfigUpdate type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct ScheduleConfigUpdate {
+    pub key: String,
+    pub value: ConfigValue,
+    pub activate_at_epoch: u64,
 }
 
 /// Rust version of the Move hashi::enable_version::EnableVersion type.

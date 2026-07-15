@@ -253,6 +253,30 @@ impl LeaderService {
                     Identifier::from_static("UpdateConfig"),
                     vec![],
                 ))),
+ProposalType::AddConfigKey => TypeTag::Struct(Box::new(StructTag::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("config_keys"),
+                    Identifier::from_static("AddConfigKey"),
+                    vec![],
+                ))),
+ProposalType::UpdateConfigKeySpec => TypeTag::Struct(Box::new(StructTag::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("config_keys"),
+                    Identifier::from_static("UpdateConfigKeySpec"),
+                    vec![],
+                ))),
+ProposalType::RemoveConfigKey => TypeTag::Struct(Box::new(StructTag::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("config_keys"),
+                    Identifier::from_static("RemoveConfigKey"),
+                    vec![],
+                ))),
+ProposalType::ScheduleConfigUpdate => TypeTag::Struct(Box::new(StructTag::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("config_keys"),
+                    Identifier::from_static("ScheduleConfigUpdate"),
+                    vec![],
+                ))),
                 ProposalType::EnableVersion => TypeTag::Struct(Box::new(StructTag::new(
                     hashi_ids.package_id,
                     Identifier::from_static("enable_version"),

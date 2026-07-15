@@ -263,6 +263,9 @@ async fn handle_events(
                 if matches!(
                     parse_proposal_type_from_type_tag(&proposal_executed_event.proposal_type),
                     ProposalType::UpdateConfig
+                        | ProposalType::AddConfigKey
+                        | ProposalType::RemoveConfigKey
+                        | ProposalType::ScheduleConfigUpdate
                         | ProposalType::EmergencyPause
                         | ProposalType::UpdateGuardian
                 ) {

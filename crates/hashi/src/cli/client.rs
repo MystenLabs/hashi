@@ -295,6 +295,26 @@ impl HashiClient {
                             bcs::from_bytes(value_bytes).context("deserialize UpdateConfig")?;
                         (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
                     }
+                    ProposalType::AddConfigKey => {
+                        let p: move_types::Proposal<move_types::AddConfigKey> =
+                            bcs::from_bytes(value_bytes).context("deserialize AddConfigKey")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
+                    ProposalType::UpdateConfigKeySpec => {
+                        let p: move_types::Proposal<move_types::UpdateConfigKeySpec> =
+                            bcs::from_bytes(value_bytes).context("deserialize UpdateConfigKeySpec")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
+                    ProposalType::RemoveConfigKey => {
+                        let p: move_types::Proposal<move_types::RemoveConfigKey> =
+                            bcs::from_bytes(value_bytes).context("deserialize RemoveConfigKey")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
+                    ProposalType::ScheduleConfigUpdate => {
+                        let p: move_types::Proposal<move_types::ScheduleConfigUpdate> =
+                            bcs::from_bytes(value_bytes).context("deserialize ScheduleConfigUpdate")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
                     ProposalType::EnableVersion => {
                         let p: move_types::Proposal<move_types::EnableVersion> =
                             bcs::from_bytes(value_bytes).context("deserialize EnableVersion")?;
@@ -472,6 +492,14 @@ impl HashiClient {
 
         let module_name = match proposal_type {
             ProposalType::UpdateConfig => "update_config",
+            ProposalType::AddConfigKey
+            | ProposalType::UpdateConfigKeySpec
+            | ProposalType::RemoveConfigKey
+            | ProposalType::ScheduleConfigUpdate => {
+                anyhow::bail!(
+                    "config-key proposals are executed via their dedicated config_keys::execute_* entry"
+                );
+            }
             ProposalType::EnableVersion => "enable_version",
             ProposalType::DisableVersion => "disable_version",
             ProposalType::EmergencyPause => "emergency_pause",
@@ -877,6 +905,10 @@ pub fn get_proposal_type_arg(
     let (module, name) = match proposal_type {
         ProposalType::Upgrade => ("upgrade", "Upgrade"),
         ProposalType::UpdateConfig => ("update_config", "UpdateConfig"),
+        ProposalType::AddConfigKey => ("config_keys", "AddConfigKey"),
+        ProposalType::UpdateConfigKeySpec => ("config_keys", "UpdateConfigKeySpec"),
+        ProposalType::RemoveConfigKey => ("config_keys", "RemoveConfigKey"),
+        ProposalType::ScheduleConfigUpdate => ("config_keys", "ScheduleConfigUpdate"),
         ProposalType::EnableVersion => ("enable_version", "EnableVersion"),
         ProposalType::DisableVersion => ("disable_version", "DisableVersion"),
         ProposalType::EmergencyPause => ("emergency_pause", "EmergencyPause"),
