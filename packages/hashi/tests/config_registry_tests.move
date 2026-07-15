@@ -165,11 +165,13 @@ fun test_pin_snapshots_exactly_the_seeded_mpc_keys_in_order() {
     // Canonical order = registry insertion order; these bytes end up in the
     // signed committee, so this test is the Move-side order guard.
     let keys = pinned.keys();
-    assert!(keys.length() == 4);
+    assert!(keys.length() == 5);
     assert!(keys[0] == b"mpc_threshold_in_basis_points".to_string());
     assert!(keys[1] == b"mpc_weight_reduction_allowed_delta".to_string());
     assert!(keys[2] == b"mpc_max_faulty_in_basis_points".to_string());
     assert!(keys[3] == b"mpc_nonce_generation_protocol".to_string());
+    assert!(keys[4] == b"hashi_protocol_version".to_string());
+    assert!(pinned.get(b"hashi_protocol_version").as_u64() == 1);
 }
 
 #[test]
@@ -189,8 +191,8 @@ fun test_pin_appends_added_pinned_key_and_skips_absent_one() {
     let pinned = config.pin(&registry);
 
     let keys = pinned.keys();
-    assert!(keys.length() == 5);
-    assert!(keys[4] == b"example_pinned".to_string());
+    assert!(keys.length() == 6);
+    assert!(keys[5] == b"example_pinned".to_string());
     assert!(pinned.get(b"example_pinned").as_u64() == 7);
 }
 
@@ -198,10 +200,12 @@ fun seeded_parts(): (hashi::config::Config, config_registry::ConfigRegistry) {
     let mut config = hashi::config::create();
     hashi::btc_config::init_defaults(&mut config);
     hashi::mpc_config::init_defaults(&mut config);
+    hashi::protocol_version::init_defaults(&mut config);
     let mut registry = config_registry::empty();
     hashi::config::register_core_keys(&mut registry);
     hashi::btc_config::register_keys(&mut registry);
     hashi::mpc_config::register_keys(&mut registry);
+    hashi::protocol_version::register_keys(&mut registry);
     (config, registry)
 }
 

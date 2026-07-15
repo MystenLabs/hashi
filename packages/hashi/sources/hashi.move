@@ -308,6 +308,7 @@ fun init(ctx: &mut TxContext) {
             let mut config = hashi::config::create();
             hashi::btc_config::init_defaults(&mut config);
             hashi::mpc_config::init_defaults(&mut config);
+            hashi::protocol_version::init_defaults(&mut config);
             config
         },
         versioning: versioning::create(),
@@ -320,6 +321,7 @@ fun init(ctx: &mut TxContext) {
             hashi::config::register_core_keys(&mut registry);
             hashi::btc_config::register_keys(&mut registry);
             hashi::mpc_config::register_keys(&mut registry);
+            hashi::protocol_version::register_keys(&mut registry);
             registry
         },
         pending_config_updates: sui::vec_map::empty(),
@@ -372,6 +374,7 @@ public fun create_for_testing(
             hashi::config::register_core_keys(&mut registry);
             hashi::btc_config::register_keys(&mut registry);
             hashi::mpc_config::register_keys(&mut registry);
+            hashi::protocol_version::register_keys(&mut registry);
             registry
         },
         pending_config_updates: sui::vec_map::empty(),

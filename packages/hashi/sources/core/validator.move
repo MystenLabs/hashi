@@ -63,6 +63,22 @@ entry fun update_next_epoch_public_key(
     event::emit(ValidatorUpdated { validator });
 }
 
+/// Advertise the binary's capabilities (e.g. the supported protocol-version
+/// range) — merged into the member's extension slot and re-sent whenever the
+/// node re-registers keys. Public (not entry): VecMap arguments follow the
+/// update_config precedent.
+public fun update_capabilities(
+    self: &mut Hashi,
+    validator: address,
+    capabilities: sui::vec_map::VecMap<std::string::String, hashi::config_value::Value>,
+    ctx: &mut TxContext,
+) {
+    self.versioning().assert_version_enabled();
+    self.committee_set_mut().set_capabilities(validator, capabilities, ctx);
+
+    event::emit(ValidatorUpdated { validator });
+}
+
 entry fun update_operator_address(
     self: &mut Hashi,
     validator: address,

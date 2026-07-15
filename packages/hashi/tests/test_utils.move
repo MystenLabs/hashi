@@ -132,6 +132,7 @@ public fun create_hashi_with_weighted_committee(
     let mut config = hashi::config::create();
     hashi::btc_config::init_defaults(&mut config);
     hashi::mpc_config::init_defaults(&mut config);
+    hashi::protocol_version::init_defaults(&mut config);
 
     // Create versioning (version gating + upgrade cap)
     let versioning = hashi::versioning::create();
