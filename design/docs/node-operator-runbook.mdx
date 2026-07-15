@@ -145,13 +145,13 @@ The corresponding Hashi config pointers (full template in [3.1](#31-validator-co
 bitcoin-chain-id = "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6"  # signet genesis
 bitcoin-rpc = "http://127.0.0.1:38332"            # Hashi's own default is 8332 — you MUST override it
 bitcoin-trusted-peers = ["127.0.0.1:38333"]       # host:port (port is mandatory)
-# bitcoin-start-height = <a height at/below the first relevant Signet deposit>
+# bitcoin-start-height defaults to 297756 on Signet (deployment launch height); override only to change the anchor
 
 [bitcoin-rpc-auth]
 UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
 ```
 
-> Notes: ports `38332` (RPC) / `38333` (P2P) are Bitcoin Core **Signet** defaults. Hashi does not default to them (its default `bitcoin-rpc` is `http://localhost:8332`), so set them explicitly. The light client runs in *whitelist-only* mode and connects **only** to `bitcoin-trusted-peers`, so that list must be correct and reachable. `bitcoin-start-height` defaults to `800000` (Mainnet-oriented); set it for Signet so the light client does not skip early deposits.
+> Notes: ports `38332` (RPC) / `38333` (P2P) are Bitcoin Core **Signet** defaults. Hashi does not default to them (its default `bitcoin-rpc` is `http://localhost:8332`), so set them explicitly. The light client runs in *whitelist-only* mode and connects **only** to `bitcoin-trusted-peers`, so that list must be correct and reachable. `bitcoin-start-height` defaults per network — `297756` on Signet (the deployment's launch height, so the light client anchors near the first bridge deposit instead of re-syncing from genesis) and a post-Taproot height on Mainnet; override it only if you need a different anchor.
 
 **Verify your node:**
 
@@ -349,8 +349,8 @@ bitcoin-rpc = "http://127.0.0.1:38332"
 # Trusted Bitcoin P2P peers for the embedded BIP-157 light client (host:port; port mandatory)
 bitcoin-trusted-peers = ["127.0.0.1:38333"]
 
-# Block height the light client begins syncing from (default: 800000, mainnet-oriented)
-# bitcoin-start-height = <height at/below first relevant Signet deposit>
+# Light-client sync start height; defaults to 297756 on Signet, a post-Taproot height on Mainnet (override to change the anchor)
+# bitcoin-start-height = 297756
 
 # ── Storage ───────────────────────────────────────────────────────────
 
