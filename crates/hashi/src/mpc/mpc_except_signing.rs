@@ -2548,6 +2548,8 @@ impl MpcManager {
             })
     }
 
+    // TODO(IOP-506): This re-verifies the common on every call; consider caching the
+    // `VerifiedAvssCommonMessage` in memory.
     fn avid_round_verified_common(
         &self,
         dealer: Address,
