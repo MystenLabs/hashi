@@ -18,6 +18,8 @@ bitcoin.workspace = true
 corepc-client.workspace = true
 jsonrpc.workspace = true
 kyoto.workspace = true
+# Unused directly; enables minreq's `https` feature for the bitcoind RPC client.
+minreq.workspace = true
 lru.workspace = true
 
 # Dependencies for the protobuf definitions
