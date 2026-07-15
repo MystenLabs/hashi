@@ -382,10 +382,13 @@ impl Config {
     }
 
     pub fn try_u64(&self, key: &str) -> Option<u64> {
-        self.0.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
-            ConfigValue::U64(n) => Some(*n),
-            _ => None,
-        })
+        self.0
+            .iter()
+            .find(|(k, _)| k == key)
+            .and_then(|(_, v)| match v {
+                ConfigValue::U64(n) => Some(*n),
+                _ => None,
+            })
     }
 
     fn mpc_param(&self, key: &str, default: u16) -> u16 {

@@ -87,36 +87,27 @@ public(package) fun register(self: &mut ConfigRegistry, key: vector<u8>, spec: C
     self.specs.insert(key, spec);
 }
 
-/// Replace a registered key's spec. The value's type cannot change through
-/// this path (specs carry no type; the entry's `Value` variant stays), and a
-/// narrowed range does not retro-invalidate the current value — constraints
-/// are checked at update time only.
+/// In place: insertion order is the pinned snapshot's canonical order, so a
+/// spec update must not move the key. A narrowed range does not
+/// retro-invalidate the current value; constraints apply only at update time.
 public(package) fun update_spec(self: &mut ConfigRegistry, key: &String, spec: ConfigKeySpec) {
     assert!(self.specs.contains(key), EKeyNotRegistered);
-    // In place: the registry's insertion order is the pinned snapshot's
-    // canonical order, so a spec update must not move the key.
     *self.specs.get_mut(key) = spec;
 }
 
-/// Deregister a key. Requires `removable`, which `new_spec` guarantees is
-/// never set on a write-once key — so remove-then-re-add cannot bypass
-/// write-once.
+/// `new_spec` guarantees a write-once key is never `removable`, so
+/// remove-then-re-add cannot bypass write-once.
 public(package) fun remove(self: &mut ConfigRegistry, key: &String) {
     assert!(self.specs.contains(key), EKeyNotRegistered);
     assert!(self.specs.get(key).removable, EKeyNotRemovable);
     self.specs.remove(key);
 }
 
-public(package) fun contains(self: &ConfigRegistry, key: &String): bool {
-    self.specs.contains(key)
-}
-
 public(package) fun is_pinned(self: &ConfigRegistry, key: &String): bool {
     self.specs.contains(key) && self.specs.get(key).pinned
 }
 
-/// Keys flagged `pinned`, in registry insertion order — the canonical order
-/// of every epoch's pinned snapshot.
+/// Pinned keys in insertion order — the canonical order of every epoch's snapshot.
 public(package) fun pinned_keys(self: &ConfigRegistry): vector<String> {
     let mut keys = vector[];
     self.specs.keys().do!(|key| {
@@ -139,28 +130,13 @@ public(package) fun pending_activate_at_epoch(pending: &PendingUpdate): u64 {
     pending.activate_at_epoch
 }
 
-/// Whether governance may set `key` to `value`: the key must be registered
-/// and updatable, and the value must satisfy the spec's constraints. The
-/// value's type-stability against the existing entry is enforced separately
-/// (`config::is_valid_config_update`).
+/// Whether governance may set `key` to `value`: registered, updatable, and
+/// within the spec's constraints. Value type-stability is enforced separately
+/// by `config::is_valid_config_update`.
 public(package) fun is_valid_update(self: &ConfigRegistry, key: &String, value: &Value): bool {
     if (!self.specs.contains(key)) return false;
     let spec = self.specs.get(key);
     spec.updatable && spec.value_in_constraints(value)
-}
-
-// ~~~~~~~ Spec Accessors ~~~~~~~
-
-public(package) fun pinned(spec: &ConfigKeySpec): bool {
-    spec.pinned
-}
-
-public(package) fun updatable(spec: &ConfigKeySpec): bool {
-    spec.updatable
-}
-
-public(package) fun removable(spec: &ConfigKeySpec): bool {
-    spec.removable
 }
 
 public(package) fun value_in_constraints(spec: &ConfigKeySpec, value: &Value): bool {
@@ -179,11 +155,4 @@ public(package) fun value_in_constraints(spec: &ConfigKeySpec, value: &Value): b
         };
     };
     true
-}
-
-// ~~~~~~~ Test Helpers ~~~~~~~
-
-#[test_only]
-public(package) fun specs(self: &ConfigRegistry): &VecMap<String, ConfigKeySpec> {
-    &self.specs
 }

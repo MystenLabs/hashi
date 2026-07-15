@@ -179,13 +179,27 @@ fun test_pin_appends_added_pinned_key_and_skips_absent_one() {
     let (mut config, mut registry) = seeded_parts();
     registry.register(
         b"example_pinned",
-        config_registry::new_spec(true, true, false, option::none(), option::none(), option::none()),
+        config_registry::new_spec(
+            true,
+            true,
+            false,
+            option::none(),
+            option::none(),
+            option::none(),
+        ),
     );
     config.upsert(b"example_pinned", config_value::new_u64(7));
     // Registered + pinned but never written: must be skipped, not abort.
     registry.register(
         b"example_ghost",
-        config_registry::new_spec(true, true, false, option::none(), option::none(), option::none()),
+        config_registry::new_spec(
+            true,
+            true,
+            false,
+            option::none(),
+            option::none(),
+            option::none(),
+        ),
     );
 
     let pinned = config.pin(&registry);

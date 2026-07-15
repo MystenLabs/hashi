@@ -364,9 +364,8 @@ public(package) fun is_reconfiguring(self: &CommitteeSet): bool {
 
 // ~~~~~~~ Private Functions ~~~~~~~
 
-/// Merge advertised capabilities into the member's extension slot. Merge
-/// (not replace): reserved entries are refreshed on re-advertisement while
-/// unrelated future entries survive.
+/// Merge advertised capabilities into the member's extension slot: reserved
+/// entries are refreshed while unrelated future entries survive.
 public(package) fun set_capabilities(
     self: &mut CommitteeSet,
     validator_address: address,

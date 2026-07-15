@@ -818,13 +818,13 @@ impl MpcService {
             .get(&target_epoch)
             .map(|c| c.config().hashi_protocol_version())
             .unwrap_or(hashi_types::move_types::GENESIS_HASHI_PROTOCOL_VERSION);
-        if !crate::protocol_config::is_supported(pinned_version) {
+        if !crate::protocol_config::is_supported(&self.inner.config, pinned_version) {
             error!(
                 "refusing to participate in reconfig for epoch {target_epoch}: this binary \
                  supports protocol versions {}..={} but the epoch is pinned to {pinned_version}; \
                  upgrade the node",
                 crate::protocol_config::MIN_SUPPORTED_PROTOCOL_VERSION,
-                crate::protocol_config::MAX_SUPPORTED_PROTOCOL_VERSION,
+                crate::protocol_config::supported_max(&self.inner.config),
             );
             self.sleep_if_still_pending(target_epoch).await;
             return;

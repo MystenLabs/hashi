@@ -174,7 +174,13 @@ fun test_update_spec_widens_range_admitting_new_value() {
     );
     config_keys::execute_update_spec(&mut hashi, proposal_id, &clock);
 
-    update_value(&mut hashi, b"mpc_nonce_generation_protocol", config_value::new_u64(2), &clock, ctx);
+    update_value(
+        &mut hashi,
+        b"mpc_nonce_generation_protocol",
+        config_value::new_u64(2),
+        &clock,
+        ctx,
+    );
     assert!(hashi::mpc_config::nonce_generation_protocol(hashi.config()) == 2);
 
     clock::destroy_for_testing(clock);
@@ -314,7 +320,14 @@ fun test_schedule_commits_exactly_at_activation_epoch() {
     let mut hashi = setup(ctx);
     let clock = clock::create_for_testing(ctx);
 
-    schedule(&mut hashi, b"mpc_nonce_generation_protocol", config_value::new_u64(1), 2, &clock, ctx);
+    schedule(
+        &mut hashi,
+        b"mpc_nonce_generation_protocol",
+        config_value::new_u64(1),
+        2,
+        &clock,
+        ctx,
+    );
     assert!(hashi.pending_config_updates().size() == 1);
 
     hashi.commit_pending_config_updates(1);
@@ -335,8 +348,22 @@ fun test_schedule_replaces_on_repropose() {
     let mut hashi = setup(ctx);
     let clock = clock::create_for_testing(ctx);
 
-    schedule(&mut hashi, b"mpc_threshold_in_basis_points", config_value::new_u64(4000), 2, &clock, ctx);
-    schedule(&mut hashi, b"mpc_threshold_in_basis_points", config_value::new_u64(5000), 3, &clock, ctx);
+    schedule(
+        &mut hashi,
+        b"mpc_threshold_in_basis_points",
+        config_value::new_u64(4000),
+        2,
+        &clock,
+        ctx,
+    );
+    schedule(
+        &mut hashi,
+        b"mpc_threshold_in_basis_points",
+        config_value::new_u64(5000),
+        3,
+        &clock,
+        ctx,
+    );
     assert!(hashi.pending_config_updates().size() == 1);
 
     hashi.commit_pending_config_updates(2);
@@ -369,7 +396,14 @@ fun test_schedule_rejects_activation_at_current_epoch() {
     let mut hashi = setup(ctx);
     let clock = clock::create_for_testing(ctx);
 
-    schedule(&mut hashi, b"mpc_nonce_generation_protocol", config_value::new_u64(1), 0, &clock, ctx);
+    schedule(
+        &mut hashi,
+        b"mpc_nonce_generation_protocol",
+        config_value::new_u64(1),
+        0,
+        &clock,
+        ctx,
+    );
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
@@ -382,7 +416,14 @@ fun test_schedule_rejects_out_of_range_value() {
     let mut hashi = setup(ctx);
     let clock = clock::create_for_testing(ctx);
 
-    schedule(&mut hashi, b"mpc_nonce_generation_protocol", config_value::new_u64(5), 2, &clock, ctx);
+    schedule(
+        &mut hashi,
+        b"mpc_nonce_generation_protocol",
+        config_value::new_u64(5),
+        2,
+        &clock,
+        ctx,
+    );
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
@@ -394,7 +435,14 @@ fun test_commit_drops_entry_invalidated_by_later_spec_narrowing() {
     let mut hashi = setup(ctx);
     let clock = clock::create_for_testing(ctx);
 
-    schedule(&mut hashi, b"mpc_threshold_in_basis_points", config_value::new_u64(9000), 2, &clock, ctx);
+    schedule(
+        &mut hashi,
+        b"mpc_threshold_in_basis_points",
+        config_value::new_u64(9000),
+        2,
+        &clock,
+        ctx,
+    );
     let proposal_id = config_keys::propose_update_spec(
         &mut hashi,
         VOTER1,

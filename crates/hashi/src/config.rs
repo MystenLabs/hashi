@@ -132,6 +132,13 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_presignature_derivation_activation_epoch: Option<u64>,
 
+    /// Override this binary's max supported protocol version — both what it
+    /// advertises and what its reconfig latch accepts — so one build can
+    /// simulate a mixed fleet in the protocol-version flip test. Can only be
+    /// set if `sui_chain_id` is not mainnet or testnet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_supported_protocol_version_max: Option<u64>,
+
     /// URL of the screener gRPC service endpoint (e.g. `https://hashi-screener.mystenlabs.com`).
     /// When not set, AML screening is skipped.
     #[serde(skip_serializing_if = "Option::is_none")]

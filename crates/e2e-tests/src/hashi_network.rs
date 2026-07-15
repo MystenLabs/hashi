@@ -184,6 +184,17 @@ impl HashiNodeHandle {
             .map(|s| s.state().hashi().committees.epoch())
     }
 
+    pub fn pinned_protocol_version(&self, epoch: u64) -> Option<u64> {
+        let state = self.hashi().onchain_state_opt()?;
+        let guard = state.state();
+        guard
+            .hashi()
+            .committees
+            .committees()
+            .get(&epoch)
+            .map(|c| c.config().hashi_protocol_version())
+    }
+
     pub async fn wait_for_epoch(
         &self,
         target_epoch: u64,
@@ -330,6 +341,7 @@ pub struct HashiNetworkBuilder {
     pub num_initially_active_nodes: Option<usize>,
     pub test_batch_size_per_weight: Option<u16>,
     pub test_presignature_derivation_activation_epoch: Option<u64>,
+    pub test_supported_protocol_version_max: Option<u64>,
     /// `None` means full Sui voting power weights (no reduction).
     pub test_weight_divisor: Option<u16>,
     /// Overrides `withdrawal_batching_delay_ms` in each node's config.
@@ -353,6 +365,7 @@ impl HashiNetworkBuilder {
             num_initially_active_nodes: None,
             test_batch_size_per_weight: None,
             test_presignature_derivation_activation_epoch: None,
+            test_supported_protocol_version_max: None,
             test_weight_divisor: Some(TEST_WEIGHT_DIVISOR),
             withdrawal_batching_delay_ms: Some(0),
             withdrawal_max_batch_size: None,
@@ -383,6 +396,11 @@ impl HashiNetworkBuilder {
 
     pub fn with_presignature_derivation_activation_epoch(mut self, epoch: u64) -> Self {
         self.test_presignature_derivation_activation_epoch = Some(epoch);
+        self
+    }
+
+    pub fn with_supported_protocol_version_max(mut self, max: u64) -> Self {
+        self.test_supported_protocol_version_max = Some(max);
         self
     }
 
@@ -447,6 +465,7 @@ impl HashiNetworkBuilder {
             config.test_batch_size_per_weight = self.test_batch_size_per_weight;
             config.test_presignature_derivation_activation_epoch =
                 self.test_presignature_derivation_activation_epoch;
+            config.test_supported_protocol_version_max = self.test_supported_protocol_version_max;
             config.withdrawal_batching_delay_ms = self.withdrawal_batching_delay_ms;
             config.withdrawal_max_batch_size = self.withdrawal_max_batch_size;
             config.max_mempool_chain_depth = self.max_mempool_chain_depth;

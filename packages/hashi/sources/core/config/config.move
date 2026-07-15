@@ -68,7 +68,14 @@ public(package) fun empty(): Config {
 public(package) fun register_core_keys(registry: &mut ConfigRegistry) {
     registry.register(
         PAUSED_KEY,
-        config_registry::new_spec(false, true, false, option::none(), option::none(), option::none()),
+        config_registry::new_spec(
+            false,
+            true,
+            false,
+            option::none(),
+            option::none(),
+            option::none(),
+        ),
     );
     registry.register(
         EMERGENCY_PAUSE_THRESHOLD_BPS_KEY,
@@ -100,7 +107,14 @@ public(package) fun register_core_keys(registry: &mut ConfigRegistry) {
 public(package) fun register_guardian_keys(registry: &mut ConfigRegistry) {
     registry.register(
         GUARDIAN_URL_KEY,
-        config_registry::new_spec(false, true, false, option::none(), option::none(), option::none()),
+        config_registry::new_spec(
+            false,
+            true,
+            false,
+            option::none(),
+            option::none(),
+            option::none(),
+        ),
     );
     registry.register(
         GUARDIAN_BTC_PUBLIC_KEY_KEY,
@@ -152,12 +166,10 @@ public(package) fun upsert(self: &mut Config, key: vector<u8>, value: Value) {
     self.config.insert(key, value);
 }
 
-/// Snapshot every `pinned` registered key present in `self` into a fresh
-/// store, in registry insertion order — deterministic on-chain state; the
-/// committee's signed bytes are whatever this produces, carried verbatim by
-/// the off-chain pipeline. A registered-but-absent key (possible only through
-/// a removal) is skipped — unpinned for that epoch, node defaults apply —
-/// because aborting here would brick start_reconfig.
+/// Snapshot every `pinned` registered key present in `self`, in registry
+/// insertion order — the canonical order the off-chain pipeline carries
+/// verbatim into the signed committee. A registered-but-absent key (possible
+/// only via removal) is skipped, not aborted, so it can't brick reconfig.
 public(package) fun pin(self: &Config, registry: &ConfigRegistry): Config {
     let mut pinned = empty();
     registry.pinned_keys().do!(|key| {

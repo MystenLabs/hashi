@@ -58,7 +58,14 @@ public(package) fun register_keys(registry: &mut ConfigRegistry) {
 public(package) fun register_chain_id_key(registry: &mut ConfigRegistry) {
     registry.register(
         b"bitcoin_chain_id",
-        config_registry::new_spec(false, false, false, option::none(), option::none(), option::none()),
+        config_registry::new_spec(
+            false,
+            false,
+            false,
+            option::none(),
+            option::none(),
+            option::none(),
+        ),
     );
 }
 

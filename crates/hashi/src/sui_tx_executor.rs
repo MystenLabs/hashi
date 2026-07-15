@@ -1853,6 +1853,7 @@ pub fn build_cancel_withdrawal(
 fn build_protocol_version_capabilities(
     builder: &mut TransactionBuilder,
     package_id: Address,
+    supported_max: u64,
 ) -> sui_transaction_builder::Argument {
     let sui_framework = Address::from_static("0x2");
     let move_stdlib = Address::from_static("0x1");
@@ -1874,7 +1875,7 @@ fn build_protocol_version_capabilities(
             Identifier::from_static("vec_map"),
             Identifier::from_static("empty"),
         )
-            .with_type_args(vec![string_type.clone(), value_type.clone()]),
+        .with_type_args(vec![string_type.clone(), value_type.clone()]),
         vec![],
     );
     for (key, version) in [
@@ -1882,10 +1883,7 @@ fn build_protocol_version_capabilities(
             "supported_protocol_version_min",
             crate::protocol_config::MIN_SUPPORTED_PROTOCOL_VERSION,
         ),
-        (
-            "supported_protocol_version_max",
-            crate::protocol_config::MAX_SUPPORTED_PROTOCOL_VERSION,
-        ),
+        ("supported_protocol_version_max", supported_max),
     ] {
         let key_arg = builder.pure(&key.to_string());
         let version_arg = builder.pure(&version);
@@ -1903,7 +1901,7 @@ fn build_protocol_version_capabilities(
                 Identifier::from_static("vec_map"),
                 Identifier::from_static("insert"),
             )
-                .with_type_args(vec![string_type.clone(), value_type.clone()]),
+            .with_type_args(vec![string_type.clone(), value_type.clone()]),
             vec![map, key_arg, value],
         );
     }
@@ -2127,8 +2125,10 @@ pub async fn build_register_or_update_validator_tx(
     let advertised_max = onchain_member
         .as_ref()
         .and_then(|m| m.supported_protocol_version_max);
-    if advertised_max != Some(crate::protocol_config::MAX_SUPPORTED_PROTOCOL_VERSION) {
-        let capabilities_arg = build_protocol_version_capabilities(&mut builder, hashi_ids.package_id);
+    let supported_max = crate::protocol_config::supported_max(config);
+    if advertised_max != Some(supported_max) {
+        let capabilities_arg =
+            build_protocol_version_capabilities(&mut builder, hashi_ids.package_id, supported_max);
         builder.move_call(
             Function::new(
                 hashi_ids.package_id,

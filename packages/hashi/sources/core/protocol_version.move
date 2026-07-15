@@ -51,11 +51,25 @@ public(package) fun init_defaults(config: &mut Config) {
 public(package) fun register_keys(registry: &mut ConfigRegistry) {
     registry.register(
         KEY_PROTOCOL_VERSION,
-        config_registry::new_spec(true, false, false, option::none(), option::none(), option::none()),
+        config_registry::new_spec(
+            true,
+            false,
+            false,
+            option::none(),
+            option::none(),
+            option::none(),
+        ),
     );
     registry.register(
         KEY_CEILING,
-        config_registry::new_spec(false, true, false, option::none(), option::none(), option::none()),
+        config_registry::new_spec(
+            false,
+            true,
+            false,
+            option::none(),
+            option::none(),
+            option::none(),
+        ),
     );
     registry.register(
         KEY_BUFFER_BPS,

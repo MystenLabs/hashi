@@ -218,6 +218,11 @@ impl TestNetworksBuilder {
         self
     }
 
+    pub fn with_supported_protocol_version_max(mut self, max: u64) -> Self {
+        self.hashi_builder = self.hashi_builder.with_supported_protocol_version_max(max);
+        self
+    }
+
     pub fn with_full_voting_power(mut self) -> Self {
         self.hashi_builder = self.hashi_builder.with_full_voting_power();
         self
@@ -2408,6 +2413,65 @@ mod tests {
             )
             .await;
             assert_all_signatures_match(results);
+        }
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_protocol_version_advances_when_fleet_supports() -> Result<()> {
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_supported_protocol_version_max(2)
+            .build()
+            .await?;
+
+        let genesis_epoch = {
+            let nodes = test_networks.hashi_network().nodes();
+            let futures: Vec<_> = nodes
+                .iter()
+                .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+                .collect();
+            for (i, result) in futures::future::join_all(futures)
+                .await
+                .into_iter()
+                .enumerate()
+            {
+                result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+            }
+            nodes[0].current_epoch().unwrap()
+        };
+        assert_eq!(genesis_epoch, 0, "genesis expected at epoch 0");
+
+        {
+            let nodes = test_networks.hashi_network().nodes();
+            for (i, node) in nodes.iter().enumerate() {
+                assert_eq!(
+                    node.pinned_protocol_version(genesis_epoch),
+                    Some(2),
+                    "node {i}: genesis committee should pin protocol version 2",
+                );
+            }
+        }
+
+        force_rotate_and_assert_key_agreement(&mut test_networks, genesis_epoch + 1).await;
+        {
+            let nodes = test_networks.hashi_network().nodes();
+            for (i, node) in nodes.iter().enumerate() {
+                assert_eq!(
+                    node.pinned_protocol_version(genesis_epoch + 1),
+                    Some(2),
+                    "node {i}: rotated committee should still pin protocol version 2",
+                );
+            }
         }
         Ok(())
     }

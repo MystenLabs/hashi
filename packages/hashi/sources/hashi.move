@@ -49,12 +49,11 @@ public struct Hashi has key {
     /// Number of presignatures consumed in the current epoch.
     /// Used by recovering nodes to derive `(batch_index, index_in_batch)`.
     num_consumed_presigs: u64,
-    /// Governed metadata for config keys (pinning, updatability, constraints).
-    /// Appended (with the field below) so the Rust mirror, which deserializes
-    /// this struct by field order, only ever appends.
+    /// Governed metadata for config keys. Appended (with the field below) so
+    /// the Rust mirror, which deserializes by field order, only ever appends.
     config_registry: ConfigRegistry,
-    /// Governance-scheduled value changes, committed into `config` by the
-    /// first reconfig whose next epoch reaches each entry's activation epoch.
+    /// Scheduled value changes, committed into `config` by the reconfig whose
+    /// next epoch reaches each entry's activation epoch.
     pending_config_updates: sui::vec_map::VecMap<std::string::String, PendingUpdate>,
 }
 
@@ -96,9 +95,8 @@ entry fun finish_publish(
     self.config_mut().set_guardian_url(guardian_url);
     self.config_mut().set_guardian_btc_public_key(guardian_btc_public_key);
 
-    // Register the keys set above so the registry mirrors the config's key
-    // set at every point (registered => present). Registration aborts on
-    // duplicates, which also makes this function call-once along this path.
+    // Register the keys set above so the registry mirrors the config key set
+    // (registered => present); the duplicate-abort also makes this call-once.
     hashi::btc_config::register_chain_id_key(&mut self.config_registry);
     hashi::config::register_guardian_keys(&mut self.config_registry);
 
@@ -193,10 +191,9 @@ public(package) fun pending_config_updates_mut(
     &mut self.pending_config_updates
 }
 
-/// Commit every scheduled update whose activation epoch has arrived. Runs in
-/// start_reconfig before `pin`, so a value scheduled for epoch E is first
-/// snapshotted by exactly the reconfig that forms epoch E's committee; the
-/// global config stays the single source of truth for pinning.
+/// Commit scheduled updates due by `next_epoch` into the global config. Run
+/// before `pin` so a value scheduled for epoch E is snapshotted by the
+/// reconfig that forms E's committee.
 public(package) fun commit_pending_config_updates(self: &mut Hashi, next_epoch: u64) {
     let due = self.pending_config_updates.keys().filter!(|key| {
         hashi::config_registry::pending_activate_at_epoch(
@@ -206,10 +203,9 @@ public(package) fun commit_pending_config_updates(self: &mut Hashi, next_epoch: 
     due.do!(|key| {
         let (_, pending) = self.pending_config_updates.remove(&key);
         let value = hashi::config_registry::pending_value(&pending);
-        // Re-validate against the current spec: it may have narrowed (or the
-        // key been made write-once or removed) since scheduling. A stale
-        // entry is dropped rather than applied — fail closed toward the
-        // spec; aborting here would brick start_reconfig.
+        // Re-validate against the current spec (it may have narrowed or the
+        // key been removed since scheduling); drop stale entries rather than
+        // abort, which would brick start_reconfig.
         if (
             self.config.is_valid_config_update(&key, &value)
                 && self.config_registry.is_valid_update(&key, &value)
