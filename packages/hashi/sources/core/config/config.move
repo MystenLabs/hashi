@@ -13,7 +13,7 @@
 /// package's global config and is also pinned per-epoch onto a `Committee`.
 module hashi::config;
 
-use hashi::config_value::{Self, Value};
+use hashi::{config_registry::{Self, ConfigRegistry}, config_value::{Self, Value}};
 use std::string::String;
 use sui::vec_map::{Self, VecMap};
 
@@ -60,6 +60,59 @@ public(package) fun create(): Config {
 /// MPC parameters); the global config is built via `create`.
 public(package) fun empty(): Config {
     Config { config: vec_map::empty() }
+}
+
+/// Register the specs for the keys `create` seeds. `paused` is non-removable
+/// because `paused()` reads it with `get` (removal would abort every
+/// `assert_unpaused`); the emergency thresholds are basis points.
+public(package) fun register_core_keys(registry: &mut ConfigRegistry) {
+    registry.register(
+        PAUSED_KEY,
+        config_registry::new_spec(false, true, false, option::none(), option::none(), option::none()),
+    );
+    registry.register(
+        EMERGENCY_PAUSE_THRESHOLD_BPS_KEY,
+        config_registry::new_spec(
+            false,
+            true,
+            false,
+            option::none(),
+            option::some(10000),
+            option::none(),
+        ),
+    );
+    registry.register(
+        EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY,
+        config_registry::new_spec(
+            false,
+            true,
+            false,
+            option::none(),
+            option::some(10000),
+            option::none(),
+        ),
+    );
+}
+
+/// Register the specs for the guardian keys `finish_publish` sets. The BTC
+/// public key is write-once at the registry layer too: `update_config` must
+/// never bypass `set_guardian_btc_public_key`'s immutability or length check.
+public(package) fun register_guardian_keys(registry: &mut ConfigRegistry) {
+    registry.register(
+        GUARDIAN_URL_KEY,
+        config_registry::new_spec(false, true, false, option::none(), option::none(), option::none()),
+    );
+    registry.register(
+        GUARDIAN_BTC_PUBLIC_KEY_KEY,
+        config_registry::new_spec(
+            false,
+            false,
+            false,
+            option::none(),
+            option::none(),
+            option::some(GUARDIAN_BTC_PUBLIC_KEY_LEN),
+        ),
+    );
 }
 
 /// Read a config value by key. Exposed to other modules in the package

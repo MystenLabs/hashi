@@ -9,7 +9,7 @@
 /// governance changes never affect an active committee.
 module hashi::mpc_config;
 
-use hashi::{config::{Self, Config}, config_value};
+use hashi::{config::{Self, Config}, config_registry::{Self, ConfigRegistry}, config_value};
 
 // ~~~~~~~ Constants ~~~~~~~
 
@@ -30,20 +30,55 @@ const KEY_NONCE_GENERATION_PROTOCOL: vector<u8> = b"mpc_nonce_generation_protoco
 
 // ~~~~~~~ Package Functions ~~~~~~~
 
-#[allow(implicit_const_copy)]
-public(package) fun is_valid_value(key: &std::string::String, value: &config_value::Value): bool {
-    let k = key.as_bytes();
-    if (k == &KEY_THRESHOLD_IN_BASIS_POINTS) {
-        value.is_u64() && (*value).as_u64() > 0 && (*value).as_u64() <= MAX_BPS
-    } else if (k == &KEY_WEIGHT_REDUCTION_ALLOWED_DELTA) {
-        value.is_u64() && (*value).as_u64() <= MAX_BPS
-    } else if (k == &KEY_MAX_FAULTY_IN_BASIS_POINTS) {
-        value.is_u64() && (*value).as_u64() <= MAX_BPS
-    } else if (k == &KEY_NONCE_GENERATION_PROTOCOL) {
-        value.is_u64() && (*value).as_u64() <= 1
-    } else {
-        true
-    }
+/// Register the specs for the MPC parameter keys: epoch-pinned, with the
+/// value ranges previously enforced by the deleted `is_valid_value`.
+/// Non-removable: removal would silently revert nodes to the compiled
+/// defaults at the next reconfig.
+public(package) fun register_keys(registry: &mut ConfigRegistry) {
+    registry.register(
+        KEY_THRESHOLD_IN_BASIS_POINTS,
+        config_registry::new_spec(
+            true,
+            true,
+            false,
+            option::some(1),
+            option::some(MAX_BPS),
+            option::none(),
+        ),
+    );
+    registry.register(
+        KEY_WEIGHT_REDUCTION_ALLOWED_DELTA,
+        config_registry::new_spec(
+            true,
+            true,
+            false,
+            option::none(),
+            option::some(MAX_BPS),
+            option::none(),
+        ),
+    );
+    registry.register(
+        KEY_MAX_FAULTY_IN_BASIS_POINTS,
+        config_registry::new_spec(
+            true,
+            true,
+            false,
+            option::none(),
+            option::some(MAX_BPS),
+            option::none(),
+        ),
+    );
+    registry.register(
+        KEY_NONCE_GENERATION_PROTOCOL,
+        config_registry::new_spec(
+            true,
+            true,
+            false,
+            option::none(),
+            option::some(1),
+            option::none(),
+        ),
+    );
 }
 
 public(package) fun threshold_in_basis_points(config: &Config): u64 {

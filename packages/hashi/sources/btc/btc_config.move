@@ -5,7 +5,7 @@
 /// Operates on the shared Config store via public(package) get/upsert.
 module hashi::btc_config;
 
-use hashi::{config::Config, config_value};
+use hashi::{config::Config, config_registry::{Self, ConfigRegistry}, config_value};
 
 // ~~~~~~~ Constants ~~~~~~~
 
@@ -24,6 +24,42 @@ public(package) fun init_defaults(config: &mut Config) {
     config.upsert(b"bitcoin_withdrawal_minimum", config_value::new_u64(30_000));
     config.upsert(b"bitcoin_confirmation_threshold", config_value::new_u64(6));
     config.upsert(b"withdrawal_cancellation_cooldown_ms", config_value::new_u64(1000 * 60 * 60)); // 1 hour
+}
+
+/// Register the specs for the keys `init_defaults` seeds. No value ranges:
+/// these were previously type-checked only, and range policy is a governance
+/// decision (tighten later via UpdateConfigKeySpec).
+public(package) fun register_keys(registry: &mut ConfigRegistry) {
+    let keys = vector[
+        b"bitcoin_deposit_time_delay_ms",
+        b"bitcoin_deposit_minimum",
+        b"bitcoin_withdrawal_minimum",
+        b"bitcoin_confirmation_threshold",
+        b"withdrawal_cancellation_cooldown_ms",
+    ];
+    keys.do!(|key| {
+        registry.register(
+            key,
+            config_registry::new_spec(
+                false,
+                true,
+                false,
+                option::none(),
+                option::none(),
+                option::none(),
+            ),
+        );
+    });
+}
+
+/// Register the spec for `bitcoin_chain_id`, set once at `finish_publish`.
+/// Write-once: repointing the chain id on a live bridge would desynchronize
+/// every node's Bitcoin view, so governance must not be able to update it.
+public(package) fun register_chain_id_key(registry: &mut ConfigRegistry) {
+    registry.register(
+        b"bitcoin_chain_id",
+        config_registry::new_spec(false, false, false, option::none(), option::none(), option::none()),
+    );
 }
 
 // === Accessors ===

@@ -48,6 +48,7 @@ pub struct Hashi {
     pub tob: Bag,
     /// Number of presignatures consumed in the current epoch.
     pub num_consumed_presigs: u64,
+    pub config_registry: ConfigRegistry,
 }
 
 /// Rust version of the Move hashi::bitcoin_state::BitcoinStateKey type.
@@ -238,6 +239,25 @@ pub const DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
 pub const DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS: u16 = 3333;
 /// Mirrors `VANILLA_NONCE_GENERATION_PROTOCOL` in `mpc_config.move`.
 pub const VANILLA_MPC_NONCE_GENERATION_PROTOCOL: u16 = 0;
+
+/// Rust version of the Move hashi::config_registry::ConfigKeySpec type.
+/// Field order mirrors the Move struct (BCS).
+#[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct ConfigKeySpec {
+    pub pinned: bool,
+    pub updatable: bool,
+    pub removable: bool,
+    pub min: Option<u64>,
+    pub max: Option<u64>,
+    pub max_len: Option<u64>,
+    pub extensions: VecMap<String, ConfigValue>,
+}
+
+/// Rust version of the Move hashi::config_registry::ConfigRegistry type.
+#[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct ConfigRegistry {
+    pub specs: VecMap<String, ConfigKeySpec>,
+}
 
 /// Rust version of the Move hashi::config::Config type: a general-purpose,
 /// order-preserving key-value store (`VecMap<String, Value>`). Embedded both as

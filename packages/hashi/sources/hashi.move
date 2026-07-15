@@ -15,6 +15,7 @@ use hashi::{
     committee::{CertifiedMessage, Committee, CommitteeSignature},
     committee_set::CommitteeSet,
     config::Config,
+    config_registry::ConfigRegistry,
     proposals::{Self, Proposals},
     threshold,
     treasury::Treasury,
@@ -48,6 +49,9 @@ public struct Hashi has key {
     /// Number of presignatures consumed in the current epoch.
     /// Used by recovering nodes to derive `(batch_index, index_in_batch)`.
     num_consumed_presigs: u64,
+    /// Governed metadata for config keys (pinning, updatability, constraints).
+    /// Appended last: the Rust mirror deserializes this struct by field order.
+    config_registry: ConfigRegistry,
 }
 
 // ~~~~~~~ Entry Functions ~~~~~~~
@@ -87,6 +91,12 @@ entry fun finish_publish(
 
     self.config_mut().set_guardian_url(guardian_url);
     self.config_mut().set_guardian_btc_public_key(guardian_btc_public_key);
+
+    // Register the keys set above so the registry mirrors the config's key
+    // set at every point (registered => present). Registration aborts on
+    // duplicates, which also makes this function call-once along this path.
+    hashi::btc_config::register_chain_id_key(&mut self.config_registry);
+    hashi::config::register_guardian_keys(&mut self.config_registry);
 
     if (bitcoin_confirmation_threshold.is_some()) {
         hashi::btc_config::set_bitcoin_confirmation_threshold(
@@ -157,6 +167,10 @@ public(package) fun id(self: &Hashi): &UID {
 
 public(package) fun config(self: &Hashi): &Config {
     &self.config
+}
+
+public(package) fun config_registry(self: &Hashi): &ConfigRegistry {
+    &self.config_registry
 }
 
 public(package) fun config_mut(self: &mut Hashi): &mut Config {
@@ -255,6 +269,13 @@ fun init(ctx: &mut TxContext) {
         proposals: proposals::create(ctx),
         tob: bag::new(ctx),
         num_consumed_presigs: 0,
+        config_registry: {
+            let mut registry = hashi::config_registry::empty();
+            hashi::config::register_core_keys(&mut registry);
+            hashi::btc_config::register_keys(&mut registry);
+            hashi::mpc_config::register_keys(&mut registry);
+            registry
+        },
     };
 
     df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
@@ -297,9 +318,26 @@ public fun create_for_testing(
         proposals,
         tob,
         num_consumed_presigs: 0,
+        // Same registry as `init`; tests that need the post-launch keys call
+        // `register_launch_keys_for_testing` (or run finish_publish).
+        config_registry: {
+            let mut registry = hashi::config_registry::empty();
+            hashi::config::register_core_keys(&mut registry);
+            hashi::btc_config::register_keys(&mut registry);
+            hashi::mpc_config::register_keys(&mut registry);
+            registry
+        },
     };
     df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
     hashi
+}
+
+#[test_only]
+/// Registers the keys `finish_publish` would register, for tests that set
+/// launch keys via the config setters instead of running finish_publish.
+public fun register_launch_keys_for_testing(self: &mut Hashi) {
+    hashi::btc_config::register_chain_id_key(&mut self.config_registry);
+    hashi::config::register_guardian_keys(&mut self.config_registry);
 }
 
 #[test_only]
