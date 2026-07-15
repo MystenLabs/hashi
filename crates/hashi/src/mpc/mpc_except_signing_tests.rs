@@ -11019,8 +11019,68 @@ fn test_try_sign_avid_nonce_optimistic_confirms_and_persists() {
     );
     assert!(
         receiver
+            .current_avid_verified_common
+            .contains_key(&(batch_index, dealer_addr)),
+        "the verified common is cached at confirm time, so echo/vote never re-verifies"
+    );
+    assert!(
+        receiver
             .avid_round_verified_common(dealer_addr, batch_index)
             .is_ok()
+    );
+}
+
+#[test]
+fn test_avid_round_verified_common_is_cached() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new_avid(5);
+    let dealer = setup.create_manager(0);
+    let dealer_addr = setup.address(0);
+    let batch_index = 0u32;
+
+    let builder = dealer
+        .create_avid_nonce_dealer_builder(batch_index, &mut rng)
+        .unwrap();
+    let messages = dealer.avid_nonce_optimistic_messages(&builder, batch_index);
+
+    let receiver_idx = 1;
+    let mut receiver = setup.create_manager(receiver_idx);
+    let avss_msg = extract_optimistic(&messages[receiver_idx].1).clone();
+    receiver
+        .try_sign_avid_nonce_optimistic(dealer_addr, batch_index, &avss_msg)
+        .unwrap();
+
+    let verified = receiver
+        .avid_round_verified_common(dealer_addr, batch_index)
+        .unwrap();
+    assert!(
+        receiver
+            .current_avid_verified_common
+            .contains_key(&(batch_index, dealer_addr)),
+        "the verified common must be cached after the first call"
+    );
+
+    let probe_batch = batch_index + 100;
+    assert!(
+        receiver
+            .get_avid_round_state(probe_batch, &dealer_addr)
+            .unwrap()
+            .is_none(),
+        "the probe round must have no round state to re-derive from"
+    );
+    receiver
+        .current_avid_verified_common
+        .insert((probe_batch, dealer_addr), verified);
+    receiver
+        .avid_round_verified_common(dealer_addr, probe_batch)
+        .expect("a cached common must resolve without any round state");
+
+    receiver.current_avid_verified_common.clear();
+    assert!(
+        receiver
+            .avid_round_verified_common(dealer_addr, probe_batch)
+            .is_err(),
+        "with neither cache nor round state the common cannot be resolved"
     );
 }
 

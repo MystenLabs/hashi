@@ -147,6 +147,8 @@ pub struct MpcManager {
     pub current_rotation_messages: HashMap<Address, RotationMessages>,
     pub current_nonce_messages: HashMap<(u32, Address), NonceMessage>,
     pub current_avid_round_state: HashMap<(u32, Address), AvidRoundState>,
+    pub current_avid_verified_common:
+        HashMap<(u32, Address), batch_avss_avid::VerifiedAvssCommonMessage>,
     pub avid_held_echoes: HashMap<(u32, Address), HeldAvidEchoes>,
     pub message_responses: HashMap<MessageResponsesKey, MpcResult<SendMessagesResponse>>,
     pub complaints_to_process: HashMap<ComplaintsToProcessKey, ProtocolComplaint>,
@@ -308,6 +310,7 @@ impl MpcManager {
             current_rotation_messages: HashMap::new(),
             current_nonce_messages: HashMap::new(),
             current_avid_round_state: HashMap::new(),
+            current_avid_verified_common: HashMap::new(),
             avid_held_echoes: HashMap::new(),
             message_responses: HashMap::new(),
             complaints_to_process: HashMap::new(),
@@ -2265,11 +2268,13 @@ impl MpcManager {
         message: &batch_avss_avid::AvssMessage,
     ) -> MpcResult<BLS12381Signature> {
         let receiver = self.create_avid_nonce_receiver(dealer, batch_index)?;
-        let (output, avss_vote, _verified_common) = receiver
+        let (output, avss_vote, verified_common) = receiver
             .process_avss_message(message)
             .map_err(|e| MpcError::CryptoError(e.to_string()))?;
         self.dealer_avid_nonce_outputs
             .insert((batch_index, dealer), output);
+        self.current_avid_verified_common
+            .insert((batch_index, dealer), verified_common);
         let state = AvidRoundState {
             common: message.common.clone(),
             own_ciphertext: message.ciphertext.clone(),
@@ -2411,7 +2416,7 @@ impl MpcManager {
     }
 
     fn handle_avid_nonce_complaint_request(
-        &self,
+        &mut self,
         caller: Address,
         request: &ComplainRequest,
     ) -> MpcResult<ComplaintResponse> {
@@ -2555,13 +2560,17 @@ impl MpcManager {
             })
     }
 
-    // TODO(IOP-506): This re-verifies the common on every call; consider caching the
-    // `VerifiedAvssCommonMessage` in memory.
     fn avid_round_verified_common(
-        &self,
+        &mut self,
         dealer: Address,
         batch_index: u32,
     ) -> MpcResult<batch_avss_avid::VerifiedAvssCommonMessage> {
+        if let Some(verified) = self
+            .current_avid_verified_common
+            .get(&(batch_index, dealer))
+        {
+            return Ok(verified.clone());
+        }
         let state = self
             .get_avid_round_state(batch_index, &dealer)?
             .ok_or_else(|| {
@@ -2575,6 +2584,8 @@ impl MpcManager {
         let (_, _, verified_common) = receiver
             .process_avss_message(&message)
             .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+        self.current_avid_verified_common
+            .insert((batch_index, dealer), verified_common.clone());
         Ok(verified_common)
     }
 
@@ -3397,6 +3408,8 @@ impl MpcManager {
         let mut mgr = mpc_manager.write().unwrap();
         mgr.current_nonce_messages.retain(|(b, _), _| *b >= cutoff);
         mgr.current_avid_round_state
+            .retain(|(b, _), _| *b >= cutoff);
+        mgr.current_avid_verified_common
             .retain(|(b, _), _| *b >= cutoff);
         mgr.dealer_nonce_outputs.retain(|(b, _), _| *b >= cutoff);
         mgr.dealer_avid_nonce_outputs
