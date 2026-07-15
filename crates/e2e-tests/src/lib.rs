@@ -211,6 +211,13 @@ impl TestNetworksBuilder {
         self
     }
 
+    pub fn with_presignature_derivation_activation_epoch(mut self, epoch: u64) -> Self {
+        self.hashi_builder = self
+            .hashi_builder
+            .with_presignature_derivation_activation_epoch(epoch);
+        self
+    }
+
     pub fn with_full_voting_power(mut self) -> Self {
         self.hashi_builder = self.hashi_builder.with_full_voting_power();
         self
@@ -511,7 +518,6 @@ pub(crate) async fn apply_onchain_config_overrides(
                 max_faulty_bps: mpc_max_faulty_bps,
                 weight_reduction_allowed_delta: mpc_weight_reduction_allowed_delta,
                 nonce_generation_protocol: None,
-                presignature_derivation_version: None,
                 metadata: vec![],
             },
             update_config_type_tag.clone(),
@@ -2341,10 +2347,7 @@ mod tests {
 
         let mut test_networks = TestNetworksBuilder::new()
             .with_nodes(4)
-            .with_onchain_config(
-                "mpc_presignature_derivation_version",
-                hashi_types::move_types::ConfigValue::U64(0),
-            )
+            .with_presignature_derivation_activation_epoch(1)
             .build()
             .await?;
 
@@ -2358,16 +2361,12 @@ mod tests {
             for (i, result) in results.into_iter().enumerate() {
                 result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
             }
-            assert_eq!(
-                nodes[0]
-                    .hashi()
-                    .onchain_state()
-                    .mpc_presignature_derivation_version(),
-                0,
-                "the legacy-derivation override must have landed"
-            );
             nodes[0].current_epoch().unwrap()
         };
+        assert_eq!(
+            initial_epoch, 0,
+            "activation at epoch 1 assumes genesis at 0"
+        );
 
         {
             let nodes = test_networks.hashi_network().nodes();
@@ -2375,10 +2374,10 @@ mod tests {
                 .hashi()
                 .signing_manager_for(initial_epoch)
                 .expect("SigningManager for the initial epoch");
-            assert_pool_derivation(signing_manager.initial_presig_count(), &nodes[0], false);
+            assert_pool_derivation(signing_manager.initial_presig_count(), &nodes[0], true);
             let results = sign_on_all_nodes(
                 nodes,
-                b"derivation flip: privacy-threshold epoch",
+                b"derivation flip: legacy epoch",
                 initial_epoch,
                 sui_sdk_types::Address::new([0xD1; 32]),
                 0,
@@ -2397,11 +2396,11 @@ mod tests {
             let signing_manager = nodes[0]
                 .hashi()
                 .signing_manager_for(epoch)
-                .expect("SigningManager for the post-flip epoch");
-            assert_pool_derivation(signing_manager.initial_presig_count(), &nodes[0], true);
+                .expect("SigningManager for the post-activation epoch");
+            assert_pool_derivation(signing_manager.initial_presig_count(), &nodes[0], false);
             let results = sign_on_all_nodes(
                 nodes,
-                b"derivation flip: legacy epoch",
+                b"derivation flip: privacy-threshold epoch",
                 epoch,
                 sui_sdk_types::Address::new([0xD2; 32]),
                 0,

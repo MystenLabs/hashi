@@ -31,7 +31,6 @@ use crate::move_types::Config;
 pub use crate::move_types::DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS;
 pub use crate::move_types::DEFAULT_MPC_THRESHOLD_IN_BASIS_POINTS;
 pub use crate::move_types::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
-pub use crate::move_types::LEGACY_MPC_PRESIGNATURE_DERIVATION_VERSION;
 pub use crate::move_types::VANILLA_MPC_NONCE_GENERATION_PROTOCOL;
 
 // TODO: Read threshold from on-chain config once it is made configurable.
@@ -187,7 +186,6 @@ impl Committee {
         mpc_weight_reduction_allowed_delta: u16,
         mpc_max_faulty_in_basis_points: u16,
         mpc_nonce_generation_protocol: u16,
-        mpc_presignature_derivation_version: u16,
     ) -> Self {
         Self::with_config(
             members,
@@ -197,7 +195,6 @@ impl Committee {
                 mpc_weight_reduction_allowed_delta,
                 mpc_max_faulty_in_basis_points,
                 mpc_nonce_generation_protocol,
-                mpc_presignature_derivation_version,
             ),
         )
     }
@@ -255,10 +252,6 @@ impl Committee {
 
     pub fn mpc_nonce_generation_protocol(&self) -> u16 {
         self.config.mpc_nonce_generation_protocol()
-    }
-
-    pub fn mpc_presignature_derivation_version(&self) -> u16 {
-        self.config.mpc_presignature_derivation_version()
     }
 
     fn member(&self, address: &Address) -> Result<&CommitteeMember, SignatureError> {
@@ -854,7 +847,6 @@ mod test {
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             0,
-            0,
         );
 
         let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
@@ -959,7 +951,6 @@ mod test {
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             0,
-            0,
         );
 
         let mut aggregator = BlsSignatureAggregator::new(&committee, message.clone());
@@ -1006,7 +997,6 @@ mod test {
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             0,
-            0,
         );
         assert!(
             certificate
@@ -1042,7 +1032,6 @@ mod test {
             TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
-            0,
             0,
         );
 
@@ -1134,7 +1123,6 @@ mod test {
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
             0,
-            0,
         );
 
         // Create a certificate via aggregator
@@ -1217,7 +1205,6 @@ mod test {
             TEST_THRESHOLD_IN_BASIS_POINTS,
             TEST_WEIGHT_REDUCTION_ALLOWED_DELTA,
             TEST_MAX_FAULTY_IN_BASIS_POINTS,
-            0,
             0,
         );
 

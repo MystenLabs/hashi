@@ -28,10 +28,6 @@ fun mpc_nonce_generation_protocol_key(): std::string::String {
     b"mpc_nonce_generation_protocol".to_string()
 }
 
-fun mpc_presignature_derivation_version_key(): std::string::String {
-    b"mpc_presignature_derivation_version".to_string()
-}
-
 #[test]
 fun test_single_key_update_via_multikey_propose() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
@@ -90,41 +86,6 @@ fun test_update_nonce_generation_protocol() {
 
     clock::destroy_for_testing(clock);
     std::unit_test::destroy(hashi);
-}
-
-#[test]
-fun test_update_presignature_derivation_version() {
-    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
-    let voters = vector[VOTER1];
-    let mut hashi = test_utils::create_hashi_with_committee(voters, ctx);
-    let clock = clock::create_for_testing(ctx);
-
-    assert!(mpc_config::presignature_derivation_version(hashi.config()) == 1);
-
-    let mut entries = vec_map::empty();
-    entries.insert(mpc_presignature_derivation_version_key(), config_value::new_u64(0));
-    let proposal_id = update_config::propose(
-        &mut hashi,
-        VOTER1,
-        entries,
-        vec_map::empty(),
-        &clock,
-        ctx,
-    );
-    update_config::execute(&mut hashi, proposal_id, &clock);
-
-    assert!(mpc_config::presignature_derivation_version(hashi.config()) == 0);
-    assert!(mpc_config::nonce_generation_protocol(hashi.config()) == 0);
-
-    clock::destroy_for_testing(clock);
-    std::unit_test::destroy(hashi);
-}
-
-#[test]
-fun test_presignature_derivation_version_absent_defaults_to_legacy() {
-    let config = hashi::config::create();
-    assert!(mpc_config::presignature_derivation_version(&config) == 0);
-    std::unit_test::destroy(config);
 }
 
 #[test]
@@ -360,12 +321,6 @@ fun test_reject_allowed_delta_above_max() {
 #[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
 fun test_reject_nonce_protocol_above_one() {
     reject_single(mpc_nonce_generation_protocol_key(), config_value::new_u64(2));
-}
-
-#[test]
-#[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
-fun test_reject_presignature_derivation_version_above_one() {
-    reject_single(mpc_presignature_derivation_version_key(), config_value::new_u64(2));
 }
 
 #[test]

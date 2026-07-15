@@ -474,14 +474,12 @@ pub async fn create_update_config_proposal(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn create_update_mpc_config_proposal(
     config: &CliConfig,
     threshold_bps: Option<u64>,
     max_faulty_bps: Option<u64>,
     weight_reduction_allowed_delta: Option<u64>,
     nonce_generation_protocol: Option<u64>,
-    presignature_derivation_version: Option<u64>,
     metadata: Vec<(String, String)>,
     tx_opts: &TxOptions,
 ) -> Result<()> {
@@ -510,26 +508,19 @@ pub async fn create_update_mpc_config_proposal(
             "--nonce-generation-protocol must be 0 (vanilla) or 1 (avid), got {p}"
         );
     }
-    if let Some(v) = presignature_derivation_version {
-        anyhow::ensure!(
-            v <= 1,
-            "--presignature-derivation-version must be 0 (legacy) or 1 (privacy threshold), got {v}"
-        );
-    }
 
     let count = [
         threshold_bps,
         max_faulty_bps,
         weight_reduction_allowed_delta,
         nonce_generation_protocol,
-        presignature_derivation_version,
     ]
     .iter()
     .filter(|v| v.is_some())
     .count();
     if count == 0 {
         anyhow::bail!(
-            "must provide at least one of --threshold-bps, --max-faulty-bps, --weight-reduction-allowed-delta, --nonce-generation-protocol, --presignature-derivation-version"
+            "must provide at least one of --threshold-bps, --max-faulty-bps, --weight-reduction-allowed-delta, --nonce-generation-protocol"
         );
     }
 
@@ -541,7 +532,6 @@ pub async fn create_update_mpc_config_proposal(
         max_faulty_bps,
         weight_reduction_allowed_delta,
         nonce_generation_protocol,
-        presignature_derivation_version,
         metadata,
     })?;
 

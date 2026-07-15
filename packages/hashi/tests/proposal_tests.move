@@ -38,7 +38,7 @@ fun add_pending_committee_for_testing(hashi: &mut hashi::hashi::Hashi, epoch: u6
     let pending_committee = committee::new_committee(
         epoch,
         members,
-        mpc_config::new_for_testing(3334, 800, 3333, 0, 1),
+        mpc_config::new_for_testing(3334, 800, 3333, 0),
     );
     hashi.committee_set_mut().set_pending_reconfig_for_testing(pending_committee);
 }

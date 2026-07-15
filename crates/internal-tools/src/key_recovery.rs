@@ -191,9 +191,10 @@ pub async fn run(args: Args, onchain_state: &OnchainState, chain_id: &str) -> an
             dummy_signing_key.clone(),
             Box::new(store),
             chain_id,
-            None, // weight_divisor
-            0,    // batch_size_per_weight (unused for reconstruction)
-            None, // test_corrupt_shares_for
+            None,     // weight_divisor
+            0,        // batch_size_per_weight (unused for reconstruction)
+            None,     // test_corrupt_shares_for
+            u64::MAX, // presig derivation is unused for reconstruction
             &metrics,
         )
         .map_err(|e| anyhow!("failed to create MpcManager: {e}"))?;

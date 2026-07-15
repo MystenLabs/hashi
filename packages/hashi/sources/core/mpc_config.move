@@ -2,12 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// Governed MPC protocol parameters — signing threshold, weight-reduction
-/// allowed delta, max-faulty bound, nonce-generation protocol, and
-/// presignature-derivation version — each stored under a permanent config key
-/// with a compiled-in default. `pin` snapshots the full parameter set into a
-/// deterministic, canonically-ordered store that is attached to a `Committee`
-/// for its epoch, so mid-epoch governance changes never affect an active
-/// committee.
+/// allowed delta, max-faulty bound, and nonce-generation protocol — each
+/// stored under a permanent config key with a compiled-in default. `pin`
+/// snapshots the full parameter set into a deterministic, canonically-ordered
+/// store that is attached to a `Committee` for its epoch, so mid-epoch
+/// governance changes never affect an active committee.
 module hashi::mpc_config;
 
 use hashi::{config::{Self, Config}, config_value};
@@ -22,18 +21,12 @@ const DEFAULT_MAX_FAULTY_IN_BASIS_POINTS: u64 = 3333;
 
 const VANILLA_NONCE_GENERATION_PROTOCOL: u64 = 0;
 
-/// fastcrypto's legacy `W - f` extraction.
-const LEGACY_PRESIGNATURE_DERIVATION_VERSION: u64 = 0;
-/// The `W - (t - 1)` privacy-threshold extraction.
-const DEFAULT_PRESIGNATURE_DERIVATION_VERSION: u64 = 1;
-
 const MAX_BPS: u64 = 10000;
 
 const KEY_THRESHOLD_IN_BASIS_POINTS: vector<u8> = b"mpc_threshold_in_basis_points";
 const KEY_MAX_FAULTY_IN_BASIS_POINTS: vector<u8> = b"mpc_max_faulty_in_basis_points";
 const KEY_WEIGHT_REDUCTION_ALLOWED_DELTA: vector<u8> = b"mpc_weight_reduction_allowed_delta";
 const KEY_NONCE_GENERATION_PROTOCOL: vector<u8> = b"mpc_nonce_generation_protocol";
-const KEY_PRESIGNATURE_DERIVATION_VERSION: vector<u8> = b"mpc_presignature_derivation_version";
 
 // ~~~~~~~ Package Functions ~~~~~~~
 
@@ -47,8 +40,6 @@ public(package) fun is_valid_value(key: &std::string::String, value: &config_val
     } else if (k == &KEY_MAX_FAULTY_IN_BASIS_POINTS) {
         value.is_u64() && (*value).as_u64() <= MAX_BPS
     } else if (k == &KEY_NONCE_GENERATION_PROTOCOL) {
-        value.is_u64() && (*value).as_u64() <= 1
-    } else if (k == &KEY_PRESIGNATURE_DERIVATION_VERSION) {
         value.is_u64() && (*value).as_u64() <= 1
     } else {
         true
@@ -83,13 +74,6 @@ public(package) fun nonce_generation_protocol(config: &Config): u64 {
         .destroy_or!(VANILLA_NONCE_GENERATION_PROTOCOL)
 }
 
-public(package) fun presignature_derivation_version(config: &Config): u64 {
-    config
-        .try_get(KEY_PRESIGNATURE_DERIVATION_VERSION)
-        .map!(|v| v.as_u64())
-        .destroy_or!(LEGACY_PRESIGNATURE_DERIVATION_VERSION)
-}
-
 public(package) fun init_defaults(config: &mut Config) {
     config.upsert(
         KEY_THRESHOLD_IN_BASIS_POINTS,
@@ -106,10 +90,6 @@ public(package) fun init_defaults(config: &mut Config) {
     config.upsert(
         KEY_NONCE_GENERATION_PROTOCOL,
         config_value::new_u64(VANILLA_NONCE_GENERATION_PROTOCOL),
-    );
-    config.upsert(
-        KEY_PRESIGNATURE_DERIVATION_VERSION,
-        config_value::new_u64(DEFAULT_PRESIGNATURE_DERIVATION_VERSION),
     );
 }
 
@@ -137,10 +117,6 @@ public(package) fun pin(config: &Config): Config {
         KEY_NONCE_GENERATION_PROTOCOL,
         config_value::new_u64(nonce_generation_protocol(config)),
     );
-    mpc.upsert(
-        KEY_PRESIGNATURE_DERIVATION_VERSION,
-        config_value::new_u64(presignature_derivation_version(config)),
-    );
     mpc
 }
 
@@ -155,7 +131,6 @@ public(package) fun new_for_testing(
     weight_reduction_allowed_delta: u64,
     max_faulty_in_basis_points: u64,
     nonce_generation_protocol: u64,
-    presignature_derivation_version: u64,
 ): Config {
     let mut mpc = config::empty();
     mpc.upsert(KEY_THRESHOLD_IN_BASIS_POINTS, config_value::new_u64(threshold_in_basis_points));
@@ -165,9 +140,5 @@ public(package) fun new_for_testing(
     );
     mpc.upsert(KEY_MAX_FAULTY_IN_BASIS_POINTS, config_value::new_u64(max_faulty_in_basis_points));
     mpc.upsert(KEY_NONCE_GENERATION_PROTOCOL, config_value::new_u64(nonce_generation_protocol));
-    mpc.upsert(
-        KEY_PRESIGNATURE_DERIVATION_VERSION,
-        config_value::new_u64(presignature_derivation_version),
-    );
     mpc
 }

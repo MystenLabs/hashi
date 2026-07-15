@@ -1441,7 +1441,6 @@ mod tests {
             DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
             DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
             VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
-            0,
         );
         let new_committee = HashiCommittee::new(
             vec![member],
@@ -1450,7 +1449,6 @@ mod tests {
             DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA,
             DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS,
             VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
-            0,
         );
         let transition = CommitteeTransitionRequest {
             new_committee: crate::move_types::Committee::from(&new_committee),

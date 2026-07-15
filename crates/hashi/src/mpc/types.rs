@@ -113,13 +113,11 @@ pub enum PresignatureDerivationVersion {
 }
 
 impl PresignatureDerivationVersion {
-    pub fn from_onchain(value: u16) -> MpcResult<Self> {
-        match value {
-            0 => Ok(Self::Legacy),
-            1 => Ok(Self::PrivacyThreshold),
-            other => Err(MpcError::InvalidConfig(format!(
-                "unknown mpc_presignature_derivation_version: {other}"
-            ))),
+    pub fn from_activation_epoch(epoch: u64, activation_epoch: u64) -> Self {
+        if epoch < activation_epoch {
+            Self::Legacy
+        } else {
+            Self::PrivacyThreshold
         }
     }
 
@@ -839,7 +837,7 @@ mod tests {
                 )
             })
             .collect();
-        let committee = Committee::new(members, epoch, 3334u16, 0u16, 3333u16, 0, 0);
+        let committee = Committee::new(members, epoch, 3334u16, 0u16, 3333u16, 0);
         (committee, signing_keys)
     }
 
@@ -1142,7 +1140,7 @@ mod tests {
                 )
             })
             .collect();
-        let committee = Committee::new(members, epoch, 3334u16, 0u16, 3333u16, 0, 0);
+        let committee = Committee::new(members, epoch, 3334u16, 0u16, 3333u16, 0);
 
         // Create a DealerMessagesHash
         let dealer_address = Address::new([0u8; 32]);
@@ -1236,22 +1234,35 @@ mod tests {
     }
 
     #[test]
-    fn presignature_derivation_version_from_onchain() {
+    fn presignature_derivation_version_from_activation_epoch() {
+        use PresignatureDerivationVersion::*;
         assert_eq!(
-            PresignatureDerivationVersion::from_onchain(0).unwrap(),
-            PresignatureDerivationVersion::Legacy
+            PresignatureDerivationVersion::from_activation_epoch(4, 5),
+            Legacy
         );
         assert_eq!(
-            PresignatureDerivationVersion::from_onchain(1).unwrap(),
-            PresignatureDerivationVersion::PrivacyThreshold
+            PresignatureDerivationVersion::from_activation_epoch(5, 5),
+            PrivacyThreshold
         );
-        assert!(PresignatureDerivationVersion::from_onchain(2).is_err());
-        assert!(PresignatureDerivationVersion::from_onchain(u16::MAX).is_err());
-        assert!(PresignatureDerivationVersion::Legacy.use_legacy());
-        assert!(!PresignatureDerivationVersion::PrivacyThreshold.use_legacy());
         assert_eq!(
-            PresignatureDerivationVersion::default(),
-            PresignatureDerivationVersion::Legacy
+            PresignatureDerivationVersion::from_activation_epoch(6, 5),
+            PrivacyThreshold
         );
+        assert_eq!(
+            PresignatureDerivationVersion::from_activation_epoch(0, 0),
+            PrivacyThreshold
+        );
+        // The absent-key default: never activates.
+        assert_eq!(
+            PresignatureDerivationVersion::from_activation_epoch(u64::MAX, u64::MAX),
+            PrivacyThreshold
+        );
+        assert_eq!(
+            PresignatureDerivationVersion::from_activation_epoch(u64::MAX - 1, u64::MAX),
+            Legacy
+        );
+        assert!(Legacy.use_legacy());
+        assert!(!PrivacyThreshold.use_legacy());
+        assert_eq!(PresignatureDerivationVersion::default(), Legacy);
     }
 }

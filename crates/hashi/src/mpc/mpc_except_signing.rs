@@ -175,6 +175,7 @@ impl MpcManager {
         weight_divisor: Option<u16>,
         batch_size_per_weight: u16,
         test_corrupt_shares_for: Option<Address>,
+        presignature_derivation_activation_epoch: u64,
         metrics: &Metrics,
     ) -> MpcResult<Self> {
         if weight_divisor.is_some() {
@@ -200,9 +201,10 @@ impl MpcManager {
         let total_weight = nodes.total_weight();
         let nonce_generation_protocol =
             NonceGenerationProtocol::from_onchain(committee.mpc_nonce_generation_protocol())?;
-        let presignature_derivation_version = PresignatureDerivationVersion::from_onchain(
-            committee.mpc_presignature_derivation_version(),
-        )?;
+        let presignature_derivation_version = PresignatureDerivationVersion::from_activation_epoch(
+            epoch,
+            presignature_derivation_activation_epoch,
+        );
         let mpc_config = MpcConfig::new(
             epoch,
             nodes,

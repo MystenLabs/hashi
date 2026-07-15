@@ -543,13 +543,6 @@ impl OnchainState {
         self.state().hashi().config.mpc_nonce_generation_protocol()
     }
 
-    pub fn mpc_presignature_derivation_version(&self) -> u16 {
-        self.state()
-            .hashi()
-            .config
-            .mpc_presignature_derivation_version()
-    }
-
     pub fn mpc_weight_reduction_allowed_delta(&self) -> u16 {
         self.state()
             .hashi()

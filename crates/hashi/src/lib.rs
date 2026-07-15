@@ -553,6 +553,17 @@ impl Hashi {
                 "test_corrupt_shares_for",
             );
         }
+        let presignature_derivation_activation_epoch =
+            if let Some(epoch) = self.config.test_presignature_derivation_activation_epoch {
+                assert_test_only_config(
+                    chain_id,
+                    self.config.bitcoin_chain_id(),
+                    "test_presignature_derivation_activation_epoch",
+                );
+                epoch
+            } else {
+                constants::presignature_derivation_activation_epoch(chain_id)
+            };
         Ok(mpc::MpcManager::new(
             address,
             committee_set,
@@ -566,6 +577,7 @@ impl Hashi {
             self.config.test_weight_divisor,
             batch_size_per_weight,
             self.config.test_corrupt_shares_for,
+            presignature_derivation_activation_epoch,
             &self.metrics,
         )?)
     }
@@ -1358,7 +1370,6 @@ mod test {
             10_000,
             0,
             5_000,
-            0,
             0,
         )
     }
