@@ -410,9 +410,9 @@ hashi-object-id = "0x<hashi-object-id>"
 UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
 # CookieFile = "/home/USER/.bitcoin/signet/.cookie"
 
-# Optional: push metrics to the Mysten collection endpoint (see section 8.2)
-# [metrics-push]
-# push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
+# Push metrics to the Mysten collection endpoint (see section 8.2)
+[metrics-push]
+push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
 ```
 
 ### 3.2 CLI config
@@ -797,7 +797,7 @@ curl -s http://localhost:9180/metrics | grep hashi_
 
 ### 8.2 Metrics push
 
-The node can also push its metrics to a Mysten-operated collection endpoint, which gives the Hashi team fleet-wide visibility during Testnet. Add this section to your validator config and restart the node:
+Configure the node to push its metrics to the Mysten-operated collection endpoint. The Hashi team relies on this for fleet-wide visibility during Testnet, so every operator must include this section in the validator config:
 
 ```toml
 [metrics-push]
@@ -810,7 +810,7 @@ Notes:
 
 - `[metrics-push]` is a TOML table: keep it at the **end** of the config file with the other sections, per the field-order note in [3.1](#31-validator-config).
 - **No extra credentials are needed.** The push authenticates with your existing `tls-private-key` as a TLS client identity, verified against the TLS public key you registered onchain. It therefore only works after your registration is complete.
-- When the section is absent, the push task does not start and the local scrape endpoint above remains the only metrics surface.
+- The node does not fail without this section; it silently starts without the push task. Check your config if the team reports not seeing your metrics.
 
 ### 8.3 Key metrics
 
