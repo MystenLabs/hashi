@@ -173,6 +173,10 @@ public(package) fun config_registry(self: &Hashi): &ConfigRegistry {
     &self.config_registry
 }
 
+public(package) fun config_registry_mut(self: &mut Hashi): &mut ConfigRegistry {
+    &mut self.config_registry
+}
+
 public(package) fun config_mut(self: &mut Hashi): &mut Config {
     &mut self.config
 }

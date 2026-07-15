@@ -147,6 +147,12 @@ public(package) fun upsert(self: &mut Config, key: vector<u8>, value: Value) {
     self.config.insert(key, value);
 }
 
+/// Remove a key. Aborts if absent — callers guard existence via the registry
+/// (registered => present).
+public(package) fun remove(self: &mut Config, key: &String) {
+    self.config.remove(key);
+}
+
 /// Returns true when `key` exists in the config and `value` has the
 /// same type as the existing entry.
 public(package) fun is_valid_config_update(self: &Config, key: &String, value: &Value): bool {

@@ -20,6 +20,10 @@ const EWriteOnceMustNotBeRemovable: vector<u8> =
     b"A non-updatable (write-once) key must not be removable: remove + re-add would bypass write-once";
 #[error]
 const EKeyAlreadyRegistered: vector<u8> = b"Config key is already registered";
+#[error]
+const EKeyNotRegistered: vector<u8> = b"Config key is not registered";
+#[error]
+const EKeyNotRemovable: vector<u8> = b"Config key is not removable";
 
 // ~~~~~~~ Structs ~~~~~~~
 
@@ -76,6 +80,26 @@ public(package) fun register(self: &mut ConfigRegistry, key: vector<u8>, spec: C
     self.specs.insert(key, spec);
 }
 
+/// Replace a registered key's spec. The value's type cannot change through
+/// this path (specs carry no type; the entry's `Value` variant stays), and a
+/// narrowed range does not retro-invalidate the current value — constraints
+/// are checked at update time only.
+public(package) fun update_spec(self: &mut ConfigRegistry, key: &String, spec: ConfigKeySpec) {
+    assert!(self.specs.contains(key), EKeyNotRegistered);
+    // In place: the registry's insertion order is the pinned snapshot's
+    // canonical order, so a spec update must not move the key.
+    *self.specs.get_mut(key) = spec;
+}
+
+/// Deregister a key. Requires `removable`, which `new_spec` guarantees is
+/// never set on a write-once key — so remove-then-re-add cannot bypass
+/// write-once.
+public(package) fun remove(self: &mut ConfigRegistry, key: &String) {
+    assert!(self.specs.contains(key), EKeyNotRegistered);
+    assert!(self.specs.get(key).removable, EKeyNotRemovable);
+    self.specs.remove(key);
+}
+
 public(package) fun contains(self: &ConfigRegistry, key: &String): bool {
     self.specs.contains(key)
 }
@@ -104,9 +128,7 @@ public(package) fun removable(spec: &ConfigKeySpec): bool {
     spec.removable
 }
 
-// ~~~~~~~ Private Functions ~~~~~~~
-
-fun value_in_constraints(spec: &ConfigKeySpec, value: &Value): bool {
+public(package) fun value_in_constraints(spec: &ConfigKeySpec, value: &Value): bool {
     if (spec.min.is_some() || spec.max.is_some()) {
         if (!value.is_u64()) return false;
         let v = (*value).as_u64();
