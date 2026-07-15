@@ -2363,13 +2363,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "fastcrypto"
 version = "0.1.11"
-source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=a26cabb3aabc86e6453bc8aef8f59022bf9fd702#a26cabb3aabc86e6453bc8aef8f59022bf9fd702"
+source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=179ba6ca65f567efb297d0f8d449d78cdef6745c#179ba6ca65f567efb297d0f8d449d78cdef6745c"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2434,7 +2434,7 @@ dependencies = [
 [[package]]
 name = "fastcrypto-derive"
 version = "0.1.4"
-source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=a26cabb3aabc86e6453bc8aef8f59022bf9fd702#a26cabb3aabc86e6453bc8aef8f59022bf9fd702"
+source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=179ba6ca65f567efb297d0f8d449d78cdef6745c#179ba6ca65f567efb297d0f8d449d78cdef6745c"
 dependencies = [
  "quote",
  "syn 1.0.109",
@@ -2443,7 +2443,7 @@ dependencies = [
 [[package]]
 name = "fastcrypto-tbls"
 version = "0.1.0"
-source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=a26cabb3aabc86e6453bc8aef8f59022bf9fd702#a26cabb3aabc86e6453bc8aef8f59022bf9fd702"
+source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=179ba6ca65f567efb297d0f8d449d78cdef6745c#179ba6ca65f567efb297d0f8d449d78cdef6745c"
 dependencies = [
  "bcs",
  "digest 0.10.7",
@@ -2922,6 +2922,7 @@ dependencies = [
  "jiff",
  "jsonrpc",
  "lru 0.16.3",
+ "minreq",
  "prometheus",
  "prometheus-closure-metric",
  "proptest",
@@ -3371,7 +3372,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "tower-service",
- "webpki-roots",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]
@@ -3678,7 +3679,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4063,8 +4064,11 @@ version = "2.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05015102dad0f7d61691ca347e9d9d9006685a64aefb3d79eecf62665de2153d"
 dependencies = [
+ "rustls 0.21.12",
+ "rustls-webpki 0.101.7",
  "serde",
  "serde_json",
+ "webpki-roots 0.25.4",
 ]
 
 [[package]]
@@ -4119,7 +4123,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5102,7 +5106,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]
@@ -5257,7 +5261,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6196,7 +6200,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6205,7 +6209,7 @@ version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8c27177b12a6399ffc08b98f76f7c9a1f4fe9fc967c784c5a071fa8d93cf7e1"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6476,7 +6480,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
- "webpki-roots",
+ "webpki-roots 1.0.6",
  "zstd",
 ]
 
@@ -6972,6 +6976,12 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
+version = "0.25.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f20c57d8d7db6d3b86154206ae5d8fba62dd39573114de97c2cb0578251f8e1"
+
+[[package]]
+name = "webpki-roots"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22cfaf3c063993ff62e73cb4311efde4db1efb31ab78a3e5c457939ad5cc0bed"
@@ -7001,7 +7011,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

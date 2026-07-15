@@ -209,15 +209,16 @@ impl OperatorInitTestArgs {
 }
 
 impl Enclave {
-    /// Withdraw-mode enclave with fresh random keys.
-    pub fn create_with_random_keys() -> Arc<Self> {
+    /// Enclave in the requested mode with fresh random keys.
+    pub fn create_with_random_keys_for_mode(mode: EnclaveMode) -> Arc<Self> {
         let signing_keys = GuardianSignKeyPair::new(rand::thread_rng());
         let encryption_keys = GuardianEncKeyPair::random(&mut rand::thread_rng());
-        Arc::new(Enclave::new(
-            signing_keys,
-            encryption_keys,
-            EnclaveMode::Withdraw,
-        ))
+        Arc::new(Enclave::new(signing_keys, encryption_keys, mode))
+    }
+
+    /// Withdraw-mode enclave with fresh random keys.
+    pub fn create_with_random_keys() -> Arc<Self> {
+        Self::create_with_random_keys_for_mode(EnclaveMode::Withdraw)
     }
 
     /// Create an enclave post operator_init() but pre provisioner_init().
@@ -228,7 +229,10 @@ impl Enclave {
     pub async fn create_operator_initialized_with(args: OperatorInitTestArgs) -> Arc<Self> {
         let enclave = Self::create_with_random_keys();
         enclave.install_operator_init_for_testing(args);
-        assert!(enclave.is_operator_init_complete() && !enclave.is_provisioner_init_complete());
+        assert_eq!(
+            enclave.lifecycle(),
+            WithdrawStage::OperatorInitialized.into()
+        );
         enclave
     }
 
@@ -238,11 +242,17 @@ impl Enclave {
         self.config.set_s3_logger(args.s3_logger).unwrap();
         crate::operator_init::InitInstall::from_parts(args.config, args.secret_sharing_instance)
             .install_into(self);
+        self.advance_lifecycle_into(WithdrawStage::OperatorInitialized.into())
+            .expect("operator init test setup should advance lifecycle");
+    }
 
-        self.scratchpad
-            .operator_init_logging_complete
-            .set(())
-            .expect("operator_init_logging_complete should only be set once");
+    pub fn create_operator_initialized_ceremony(s3_logger: GuardianS3Client) -> Arc<Self> {
+        let enclave = Self::create_with_random_keys_for_mode(EnclaveMode::Ceremony);
+        enclave.config.set_s3_logger(s3_logger).unwrap();
+        enclave
+            .advance_lifecycle_into(CeremonyStage::OperatorInitialized.into())
+            .expect("ceremony operator init test setup should advance lifecycle");
+        enclave
     }
 }
 
@@ -285,14 +295,7 @@ pub fn set_or_get_enclave_btc_pubkey(enclave: &Arc<Enclave>) -> GuardianResult<B
 /// (idempotent).
 pub fn finalize_enclave(enclave: &Arc<Enclave>) -> GuardianResult<()> {
     let _ = set_or_get_enclave_btc_pubkey(enclave)?;
-
-    enclave
-        .scratchpad
-        .provisioner_init_logging_complete
-        .set(())
-        .map_err(|_| {
-            GuardianError::InvalidInputs("provisioner_init_logging_complete already set".into())
-        })?;
+    enclave.advance_lifecycle_into(WithdrawStage::ProvisionerInitialized.into())?;
     Ok(())
 }
 
@@ -306,13 +309,8 @@ pub fn activate_enclave_for_testing(
     let rate_limiter = RateLimiter::new(limiter_config, limiter_state)?;
 
     enclave.state.init(committee, rate_limiter)?;
-    enclave
-        .scratchpad
-        .operator_activate_logging_complete
-        .set(())
-        .map_err(|_| {
-            GuardianError::InvalidInputs("operator_activate_logging_complete already set".into())
-        })?;
+    enclave.clear_initialization_state();
+    enclave.advance_lifecycle_into(WithdrawStage::Activated.into())?;
     Ok(())
 }
 
@@ -336,5 +334,6 @@ pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc
         .expect("activate_enclave_for_testing should succeed on a fresh enclave");
 
     assert!(enclave.is_fully_initialized());
+    assert!(enclave.secret_sharing_instance().is_err());
     enclave
 }

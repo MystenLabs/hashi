@@ -27,11 +27,40 @@ pub fn is_production_sui_chain(chain_id: &str) -> bool {
     chain_id == SUI_MAINNET_CHAIN_ID || chain_id == SUI_TESTNET_CHAIN_ID
 }
 
+/// Epoch at which the privacy-threshold presignature extraction activates;
+/// earlier epochs use the legacy.
+/// All validators must agree on this value for every epoch they serve,
+/// so flipping testnet means shipping a release with a concrete epoch,
+/// chosen at least one epoch ahead and only after the whole fleet
+/// verifiably runs it.
+pub fn presignature_derivation_activation_epoch(chain_id: &str) -> u64 {
+    if chain_id == SUI_TESTNET_CHAIN_ID {
+        20
+    } else {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::btc_monitor::config::Network;
     use crate::btc_monitor::config::network_from_chain_id;
+
+    #[test]
+    fn presignature_derivation_activation_epoch_per_chain() {
+        assert_eq!(
+            presignature_derivation_activation_epoch(SUI_TESTNET_CHAIN_ID),
+            20,
+            "the scheduled testnet flip; every validator must update before this epoch"
+        );
+        assert_eq!(
+            presignature_derivation_activation_epoch(SUI_MAINNET_CHAIN_ID),
+            0,
+            "mainnet must never derive with the legacy extraction"
+        );
+        assert_eq!(presignature_derivation_activation_epoch("localnet"), 0);
+    }
 
     #[test]
     fn mainnet_chain_id_matches_network() {

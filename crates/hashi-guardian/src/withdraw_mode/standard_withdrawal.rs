@@ -183,6 +183,7 @@ mod tests {
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::StandardWithdrawalRequest;
+    use hashi_types::guardian::WithdrawStage;
 
     /// Sets up an enclave with a single committee and token bucket limiter.
     async fn setup_fully_initialized_enclave(
@@ -217,10 +218,8 @@ mod tests {
             .unwrap();
 
         enclave
-            .scratchpad
-            .provisioner_init_logging_complete
-            .set(())
-            .expect("provisioner_init_logging_complete should only be set once");
+            .advance_lifecycle_into(WithdrawStage::ProvisionerInitialized.into())
+            .expect("test setup should advance provisioner init lifecycle");
         activate_enclave_for_testing(&enclave, committee, limiter_config, limiter_state)
             .expect("activate_enclave_for_testing should succeed on a fresh enclave");
 

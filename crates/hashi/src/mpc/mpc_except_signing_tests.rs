@@ -290,6 +290,7 @@ impl TestSetup {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
+            u64::MAX,
             &test_metrics(),
         )
         .unwrap()
@@ -907,6 +908,7 @@ fn test_mpc_manager_new_from_committee_set() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        u64::MAX,
         &test_metrics(),
     )
     .expect("Should create manager from CommitteeSet");
@@ -972,6 +974,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        u64::MAX,
         &test_metrics(),
     );
 
@@ -1004,6 +1007,7 @@ fn test_mpc_manager_new_fails_on_encryption_key_mismatch() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        u64::MAX,
         &test_metrics(),
     );
 
@@ -1092,6 +1096,7 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        u64::MAX,
         &test_metrics(),
     )
     .expect("MpcManager::new should succeed across a committee gap");
@@ -1178,6 +1183,7 @@ fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        u64::MAX,
         &test_metrics(),
     )
     .expect(
@@ -7058,6 +7064,7 @@ async fn test_prepare_previous_output_for_new_member() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8358,6 +8365,7 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8536,6 +8544,7 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8670,6 +8679,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8698,6 +8708,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8801,6 +8812,7 @@ fn test_recover_current_dkg() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            u64::MAX,
             &test_metrics(),
         )
         .unwrap()
@@ -8952,6 +8964,7 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -9048,6 +9061,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
+            u64::MAX,
             &test_metrics(),
         )
         .unwrap();
@@ -9083,6 +9097,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
+            u64::MAX,
             &test_metrics(),
         )
         .unwrap();
@@ -9195,6 +9210,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -9281,6 +9297,7 @@ fn test_recover_current_rotation() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            u64::MAX,
             &test_metrics(),
         )
         .unwrap();
@@ -9356,6 +9373,7 @@ fn test_recover_current_rotation() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            u64::MAX,
             &test_metrics(),
         )
         .unwrap()
@@ -9477,6 +9495,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            u64::MAX,
             &test_metrics(),
         )
         .unwrap();
@@ -9557,6 +9576,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -10991,16 +11011,17 @@ fn test_try_sign_avid_nonce_optimistic_confirms_and_persists() {
             .dealer_avid_nonce_outputs
             .contains_key(&(batch_index, dealer_addr))
     );
-    let state = receiver
-        .current_avid_round_state
-        .get(&(batch_index, dealer_addr))
-        .expect("round state persisted at confirm time")
-        .clone();
-
-    let r = receiver
-        .create_avid_nonce_receiver(dealer_addr, batch_index)
-        .unwrap();
-    assert!(r.verify_common_message(state.common).is_ok());
+    assert!(
+        receiver
+            .current_avid_round_state
+            .contains_key(&(batch_index, dealer_addr)),
+        "round state persisted at confirm time"
+    );
+    assert!(
+        receiver
+            .avid_round_verified_common(dealer_addr, batch_index)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -11334,7 +11355,7 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
                 .unwrap()
         })
         .collect();
-    let outcome = decoder
+    let (outcome, _) = decoder
         .decode_avid_nonce_share(
             fx.dealer_addr,
             batch_index,
@@ -12423,7 +12444,7 @@ fn test_decoded_shares_match_optimistic_shares() {
                 .unwrap()
         })
         .collect();
-    let outcome = decoder
+    let (outcome, _) = decoder
         .decode_avid_nonce_share(
             fx.dealer_addr,
             batch_index,
@@ -12792,7 +12813,7 @@ fn test_avid_voter_state_survives_restart() {
     let common = restarted
         .get_avid_round_common(batch_index, &dealer_addr)
         .unwrap();
-    let outcome = laggard
+    let (outcome, _) = laggard
         .decode_avid_nonce_share(
             dealer_addr,
             batch_index,
@@ -12927,7 +12948,7 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
                 .unwrap()
         })
         .collect();
-    let outcome = victim_mgr
+    let (outcome, _) = victim_mgr
         .decode_avid_nonce_share(
             dealer_addr,
             batch_index,

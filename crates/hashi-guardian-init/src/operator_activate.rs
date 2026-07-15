@@ -18,6 +18,7 @@ use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::OperatorActivateRequest;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::VerifiedGuardianInfo;
+use hashi_types::guardian::WithdrawStage;
 use hashi_types::guardian::proto_conversions::operator_activate_request_to_pb;
 use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
@@ -260,6 +261,10 @@ fn verify_provisioned_standby_info(
     allowlist: &hashi_types::guardian::PcrAllowlist,
     master_g: &hashi_types::bitcoin::HashiMasterG,
 ) -> anyhow::Result<StandbyChecks> {
+    ensure!(
+        info.lifecycle == WithdrawStage::ProvisionerInitialized.into(),
+        "guardian is not a provisioner-initialized withdraw enclave"
+    );
     let instance = info
         .secret_sharing_instance
         .clone()
@@ -335,6 +340,14 @@ fn verify_oi_info_matches_provisioned_standby(
     live_info: &GuardianInfo,
 ) -> anyhow::Result<()> {
     ensure!(
+        oi_info.lifecycle == WithdrawStage::Uninitialized.into(),
+        "OI GuardianInfo has an unexpected lifecycle stage"
+    );
+    ensure!(
+        oi_info.lifecycle.mode() == live_info.lifecycle.mode(),
+        "OI GuardianInfo enclave mode differs from live standby GuardianInfo"
+    );
+    ensure!(
         oi_info.enclave_btc_pubkey.is_none(),
         "OI GuardianInfo unexpectedly has a BTC pubkey"
     );
@@ -395,6 +408,10 @@ fn verify_activated_info(
     ensure!(
         post.signing_pub_key == expected_signing_key,
         "guardian signing key changed during operator activation"
+    );
+    ensure!(
+        post.info.lifecycle == WithdrawStage::Activated.into(),
+        "guardian is not an activated withdraw enclave"
     );
     ensure!(
         post.info.config_hash == Some(expected_config_hash),

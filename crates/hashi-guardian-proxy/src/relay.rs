@@ -72,8 +72,9 @@ impl Accumulator {
 /// Live backend state the relay needs, read from `GetGuardianInfo`.
 struct BackendStatus {
     session_id: String,
-    /// `num_shares`/`threshold` are `Some` together, and only once `operator
-    /// provision` has created the `secret_sharing_instance`.
+    /// `num_shares`/`threshold` are `Some` together after `operator provision`
+    /// and until activation clears the initialization state. The relay needs
+    /// them only while `provisioned` is false.
     num_shares: Option<usize>,
     threshold: Option<usize>,
     provisioned: bool,

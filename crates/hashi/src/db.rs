@@ -955,9 +955,7 @@ pub(crate) mod tests {
         let receiver =
             batch_avss_avid::Receiver::new(nodes, 0, 0, params, sid, sks[0].clone(), batch)
                 .unwrap();
-        let verified_common = receiver
-            .verify_common_message(own_message.common.clone())
-            .unwrap();
+        let (_, _, verified_common) = receiver.process_avss_message(&own_message).unwrap();
         let (_echo_builder, avid_vote) = receiver
             .process_avid_message(&verified_common, avid_message)
             .unwrap();
@@ -1523,7 +1521,11 @@ pub(crate) mod tests {
         drop(db);
         let db = Database::open(tmpdir.path()).unwrap();
         let loaded = db.get_avid_round_state(1, 0, &dealer).unwrap().unwrap();
-        assert!(receiver.verify_common_message(loaded.common).is_ok());
+        let message = batch_avss_avid::AvssMessage {
+            common: loaded.common,
+            ciphertext: loaded.own_ciphertext,
+        };
+        assert!(receiver.process_avss_message(&message).is_ok());
     }
 
     #[test]

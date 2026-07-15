@@ -1048,9 +1048,13 @@ mod tests {
                             public_keys: nonces_for_dealer[j].0.clone(),
                         })
                         .collect();
-                    let presignatures =
-                        Presignatures::new(outputs, batch_size_per_weight, Parameters { t, f })
-                            .unwrap();
+                    let presignatures = Presignatures::new(
+                        outputs,
+                        batch_size_per_weight,
+                        Parameters { t, f },
+                        true,
+                    )
+                    .unwrap();
                     let mgr = SigningManager::new(
                         test_address(i),
                         committee.clone(),
@@ -1202,6 +1206,7 @@ mod tests {
                         t: self.t,
                         f: self.f,
                     },
+                    true,
                 )
                 .unwrap();
                 mgr.set_next_batch(presignatures);
@@ -1297,7 +1302,7 @@ mod tests {
                 })
                 .collect();
             let presigs: Vec<(Vec<S>, G)> =
-                Presignatures::new(outputs, batch_size_per_weight, Parameters { t, f })
+                Presignatures::new(outputs, batch_size_per_weight, Parameters { t, f }, true)
                     .unwrap()
                     .collect();
             let (pn, sigs) = generate_partial_signatures(
