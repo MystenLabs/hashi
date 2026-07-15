@@ -156,6 +156,55 @@ fun test_new_spec_rejects_write_once_removable() {
     );
 }
 
+#[test]
+fun test_pin_snapshots_exactly_the_seeded_mpc_keys_in_order() {
+    let (config, registry) = seeded_parts();
+
+    let pinned = config.pin(&registry);
+
+    // Canonical order = registry insertion order; these bytes end up in the
+    // signed committee, so this test is the Move-side order guard.
+    let keys = pinned.keys();
+    assert!(keys.length() == 4);
+    assert!(keys[0] == b"mpc_threshold_in_basis_points".to_string());
+    assert!(keys[1] == b"mpc_weight_reduction_allowed_delta".to_string());
+    assert!(keys[2] == b"mpc_max_faulty_in_basis_points".to_string());
+    assert!(keys[3] == b"mpc_nonce_generation_protocol".to_string());
+}
+
+#[test]
+fun test_pin_appends_added_pinned_key_and_skips_absent_one() {
+    let (mut config, mut registry) = seeded_parts();
+    registry.register(
+        b"example_pinned",
+        config_registry::new_spec(true, true, false, option::none(), option::none(), option::none()),
+    );
+    config.upsert(b"example_pinned", config_value::new_u64(7));
+    // Registered + pinned but never written: must be skipped, not abort.
+    registry.register(
+        b"example_ghost",
+        config_registry::new_spec(true, true, false, option::none(), option::none(), option::none()),
+    );
+
+    let pinned = config.pin(&registry);
+
+    let keys = pinned.keys();
+    assert!(keys.length() == 5);
+    assert!(keys[4] == b"example_pinned".to_string());
+    assert!(pinned.get(b"example_pinned").as_u64() == 7);
+}
+
+fun seeded_parts(): (hashi::config::Config, config_registry::ConfigRegistry) {
+    let mut config = hashi::config::create();
+    hashi::btc_config::init_defaults(&mut config);
+    hashi::mpc_config::init_defaults(&mut config);
+    let mut registry = config_registry::empty();
+    hashi::config::register_core_keys(&mut registry);
+    hashi::btc_config::register_keys(&mut registry);
+    hashi::mpc_config::register_keys(&mut registry);
+    (config, registry)
+}
+
 fun test_bytes32(fill: u8): vector<u8> {
     let mut bytes = vector[];
     32u64.do!(|_| bytes.push_back(fill));

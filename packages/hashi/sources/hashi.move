@@ -15,7 +15,7 @@ use hashi::{
     committee::{CertifiedMessage, Committee, CommitteeSignature},
     committee_set::CommitteeSet,
     config::Config,
-    config_registry::ConfigRegistry,
+    config_registry::{ConfigRegistry, PendingUpdate},
     proposals::{Self, Proposals},
     threshold,
     treasury::Treasury,
@@ -50,8 +50,12 @@ public struct Hashi has key {
     /// Used by recovering nodes to derive `(batch_index, index_in_batch)`.
     num_consumed_presigs: u64,
     /// Governed metadata for config keys (pinning, updatability, constraints).
-    /// Appended last: the Rust mirror deserializes this struct by field order.
+    /// Appended (with the field below) so the Rust mirror, which deserializes
+    /// this struct by field order, only ever appends.
     config_registry: ConfigRegistry,
+    /// Governance-scheduled value changes, committed into `config` by the
+    /// first reconfig whose next epoch reaches each entry's activation epoch.
+    pending_config_updates: sui::vec_map::VecMap<std::string::String, PendingUpdate>,
 }
 
 // ~~~~~~~ Entry Functions ~~~~~~~
@@ -177,6 +181,44 @@ public(package) fun config_registry_mut(self: &mut Hashi): &mut ConfigRegistry {
     &mut self.config_registry
 }
 
+public(package) fun pending_config_updates(
+    self: &Hashi,
+): &sui::vec_map::VecMap<std::string::String, PendingUpdate> {
+    &self.pending_config_updates
+}
+
+public(package) fun pending_config_updates_mut(
+    self: &mut Hashi,
+): &mut sui::vec_map::VecMap<std::string::String, PendingUpdate> {
+    &mut self.pending_config_updates
+}
+
+/// Commit every scheduled update whose activation epoch has arrived. Runs in
+/// start_reconfig before `pin`, so a value scheduled for epoch E is first
+/// snapshotted by exactly the reconfig that forms epoch E's committee; the
+/// global config stays the single source of truth for pinning.
+public(package) fun commit_pending_config_updates(self: &mut Hashi, next_epoch: u64) {
+    let due = self.pending_config_updates.keys().filter!(|key| {
+        hashi::config_registry::pending_activate_at_epoch(
+            self.pending_config_updates.get(key),
+        ) <= next_epoch
+    });
+    due.do!(|key| {
+        let (_, pending) = self.pending_config_updates.remove(&key);
+        let value = hashi::config_registry::pending_value(&pending);
+        // Re-validate against the current spec: it may have narrowed (or the
+        // key been made write-once or removed) since scheduling. A stale
+        // entry is dropped rather than applied — fail closed toward the
+        // spec; aborting here would brick start_reconfig.
+        if (
+            self.config.is_valid_config_update(&key, &value)
+                && self.config_registry.is_valid_update(&key, &value)
+        ) {
+            self.config.upsert(*key.as_bytes(), value);
+        };
+    });
+}
+
 public(package) fun config_mut(self: &mut Hashi): &mut Config {
     &mut self.config
 }
@@ -280,6 +322,7 @@ fun init(ctx: &mut TxContext) {
             hashi::mpc_config::register_keys(&mut registry);
             registry
         },
+        pending_config_updates: sui::vec_map::empty(),
     };
 
     df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
@@ -331,6 +374,7 @@ public fun create_for_testing(
             hashi::mpc_config::register_keys(&mut registry);
             registry
         },
+        pending_config_updates: sui::vec_map::empty(),
     };
     df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
     hashi

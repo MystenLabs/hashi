@@ -130,6 +130,11 @@ public(package) fun try_get(self: &Config, key: vector<u8>): Option<Value> {
     }
 }
 
+/// Keys in insertion order.
+public(package) fun keys(self: &Config): vector<String> {
+    self.config.keys()
+}
+
 /// Returns true if `key` is present.
 public(package) fun contains(self: &Config, key: vector<u8>): bool {
     self.config.contains(&key.to_string())
@@ -145,6 +150,20 @@ public(package) fun upsert(self: &mut Config, key: vector<u8>, value: Value) {
     };
 
     self.config.insert(key, value);
+}
+
+/// Snapshot every `pinned` registered key present in `self` into a fresh
+/// store, in registry insertion order — deterministic on-chain state; the
+/// committee's signed bytes are whatever this produces, carried verbatim by
+/// the off-chain pipeline. A registered-but-absent key (possible only through
+/// a removal) is skipped — unpinned for that epoch, node defaults apply —
+/// because aborting here would brick start_reconfig.
+public(package) fun pin(self: &Config, registry: &ConfigRegistry): Config {
+    let mut pinned = empty();
+    registry.pinned_keys().do!(|key| {
+        self.try_get(*key.as_bytes()).do!(|v| pinned.upsert(*key.as_bytes(), v));
+    });
+    pinned
 }
 
 /// Remove a key. Aborts if absent — callers guard existence via the registry

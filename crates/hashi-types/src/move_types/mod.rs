@@ -49,6 +49,7 @@ pub struct Hashi {
     /// Number of presignatures consumed in the current epoch.
     pub num_consumed_presigs: u64,
     pub config_registry: ConfigRegistry,
+    pub pending_config_updates: VecMap<String, PendingUpdate>,
 }
 
 /// Rust version of the Move hashi::bitcoin_state::BitcoinStateKey type.
@@ -251,6 +252,13 @@ pub struct ConfigKeySpec {
     pub max: Option<u64>,
     pub max_len: Option<u64>,
     pub extensions: VecMap<String, ConfigValue>,
+}
+
+/// Rust version of the Move hashi::config_registry::PendingUpdate type.
+#[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct PendingUpdate {
+    pub value: ConfigValue,
+    pub activate_at_epoch: u64,
 }
 
 /// Rust version of the Move hashi::config_registry::ConfigRegistry type.

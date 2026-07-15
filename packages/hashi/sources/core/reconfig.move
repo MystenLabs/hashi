@@ -65,9 +65,12 @@ entry fun start_reconfig(
     // Assert that we are not already reconfiguring
     assert!(!self.committee_set().is_reconfiguring());
     assert_genesis_launch_authorized(self);
-    // Pin the current MPC parameters so they stay fixed for the new epoch even
-    // if governance changes them mid-epoch.
-    let config = hashi::mpc_config::pin(self.config());
+    // Scheduled updates due at the next epoch land before the snapshot, so
+    // the epoch's committee pins exactly the values active for that epoch.
+    self.commit_pending_config_updates(ctx.epoch());
+    // Pin the governed epoch parameters so they stay fixed for the new epoch
+    // even if governance changes them mid-epoch.
+    let config = self.config().pin(self.config_registry());
     let epoch = self
         .committee_set_mut()
         .start_reconfig(

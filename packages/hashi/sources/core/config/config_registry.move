@@ -48,6 +48,13 @@ public struct ConfigRegistry has copy, drop, store {
     specs: VecMap<String, ConfigKeySpec>,
 }
 
+/// A governance-scheduled value change, applied to the global config by the
+/// first reconfig whose next epoch reaches `activate_at_epoch`.
+public struct PendingUpdate has copy, drop, store {
+    value: Value,
+    activate_at_epoch: u64,
+}
+
 // ~~~~~~~ Package Functions ~~~~~~~
 
 public(package) fun empty(): ConfigRegistry {
@@ -102,6 +109,34 @@ public(package) fun remove(self: &mut ConfigRegistry, key: &String) {
 
 public(package) fun contains(self: &ConfigRegistry, key: &String): bool {
     self.specs.contains(key)
+}
+
+public(package) fun is_pinned(self: &ConfigRegistry, key: &String): bool {
+    self.specs.contains(key) && self.specs.get(key).pinned
+}
+
+/// Keys flagged `pinned`, in registry insertion order — the canonical order
+/// of every epoch's pinned snapshot.
+public(package) fun pinned_keys(self: &ConfigRegistry): vector<String> {
+    let mut keys = vector[];
+    self.specs.keys().do!(|key| {
+        if (self.specs.get(&key).pinned) {
+            keys.push_back(key);
+        }
+    });
+    keys
+}
+
+public(package) fun new_pending_update(value: Value, activate_at_epoch: u64): PendingUpdate {
+    PendingUpdate { value, activate_at_epoch }
+}
+
+public(package) fun pending_value(pending: &PendingUpdate): Value {
+    pending.value
+}
+
+public(package) fun pending_activate_at_epoch(pending: &PendingUpdate): u64 {
+    pending.activate_at_epoch
 }
 
 /// Whether governance may set `key` to `value`: the key must be registered

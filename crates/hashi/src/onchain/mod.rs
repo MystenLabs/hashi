@@ -779,8 +779,9 @@ async fn scrape_hashi(
         proposals,
         tob,
         num_consumed_presigs,
-        // Chain-side validation metadata; nothing node-side consumes it yet.
+        // Chain-side governance metadata; nothing node-side consumes these yet.
         config_registry: _,
+        pending_config_updates: _,
     } = response.get_ref().object().contents().deserialize()?;
 
     // Fetch BitcoinState from dynamic field on Hashi
