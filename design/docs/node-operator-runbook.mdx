@@ -409,6 +409,10 @@ hashi-object-id = "0x<hashi-object-id>"
 [bitcoin-rpc-auth]
 UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
 # CookieFile = "/home/USER/.bitcoin/signet/.cookie"
+
+# Optional: push metrics to the Mysten collection endpoint (see section 8.2)
+# [metrics-push]
+# push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
 ```
 
 ### 3.2 CLI config
@@ -791,7 +795,24 @@ Metrics are served at `http://127.0.0.1:9180/metrics` (configurable through `met
 curl -s http://localhost:9180/metrics | grep hashi_
 ```
 
-### 8.2 Key metrics
+### 8.2 Metrics push
+
+The node can also push its metrics to a Mysten-operated collection endpoint, which gives the Hashi team fleet-wide visibility during Testnet. Add this section to your validator config and restart the node:
+
+```toml
+[metrics-push]
+push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
+# How often to push (default: 60)
+# push-interval-seconds = 60
+```
+
+Notes:
+
+- `[metrics-push]` is a TOML table: keep it at the **end** of the config file with the other sections, per the field-order note in [3.1](#31-validator-config).
+- **No extra credentials are needed.** The push authenticates with your existing `tls-private-key` as a TLS client identity, verified against the TLS public key you registered onchain. It therefore only works after your registration is complete.
+- When the section is absent, the push task does not start and the local scrape endpoint above remains the only metrics surface.
+
+### 8.3 Key metrics
 
 | Metric | Type | What to Watch |
 |--------|------|---------------|
@@ -813,7 +834,7 @@ curl -s http://localhost:9180/metrics | grep hashi_
 | `hashi_sui_tx_submissions_total` | counter | Sui tx submissions (by operation, status). |
 | `hashi_leader_retries_total` | counter | Leader operation retries (by operation, error kind). |
 
-### 8.3 Suggested alerts
+### 8.4 Suggested alerts
 
 | Condition | Severity | Action |
 |-----------|----------|--------|
