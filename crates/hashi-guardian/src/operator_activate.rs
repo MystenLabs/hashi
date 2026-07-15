@@ -40,8 +40,7 @@ pub async fn operator_activate(
         .ok_or_else(|| InvalidInputs("config_hash not set".into()))?;
     let armed_instance = enclave
         .secret_sharing_instance()
-        .map_err(|_| InvalidInputs("secret-sharing instance not set".into()))?
-        .clone();
+        .map_err(|_| InvalidInputs("secret-sharing instance not set".into()))?;
 
     let s3 = enclave
         .config
@@ -111,6 +110,7 @@ pub async fn operator_activate(
         })
         .await
         .expect("Unable to log operator activation");
+    enclave.clear_initialization_state();
     enclave
         .advance_lifecycle_into(WithdrawStage::Activated.into())
         .expect("operator_activate should advance a provisioner-initialized enclave");

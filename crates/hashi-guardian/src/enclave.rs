@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Core enclave types: `Enclave` holds all guardian state (immutable config
-//! set during operator/provisioner-init, mutable runtime state, and the
-//! one-time init scratchpad). Lives in the library so external crates
+//! set during operator/provisioner-init, mutable runtime state, and
+//! initialization state). Lives in the library so external crates
 //! (integration test harnesses, ops tooling) can construct and drive an
 //! enclave without going through `main`.
 
@@ -35,8 +35,8 @@ pub struct Enclave {
     pub config: EnclaveConfig,
     /// Mutable state
     pub state: EnclaveState,
-    /// Initialization scratchpad
-    pub scratchpad: Scratchpad,
+    /// State produced or consumed by initialization flows.
+    init_state: InitializationState,
     /// Serializes lifecycle and control-plane transitions so concurrent callers
     /// cannot race a check-then-set. Held across each handler.
     pub control_lock: tokio::sync::Mutex<()>,
@@ -70,16 +70,30 @@ pub struct EnclaveState {
     rate_limiter: OnceLock<Arc<tokio::sync::Mutex<RateLimiter>>>,
 }
 
-/// Scratchpad used only during initialization.
+/// State produced or consumed by initialization flows. Some artifacts remain
+/// available through `get_guardian_info` after the lifecycle advances.
 #[derive(Default)]
-pub struct Scratchpad {
-    /// Stable withdraw-mode config set by operator_init.
-    pub init_config: OnceLock<InitConfig>,
-    /// Secret-sharing instance (commitments + N + T) set by operator_init.
-    pub secret_sharing_instance: OnceLock<SecretSharingInstance>,
-    /// Encrypted shares produced by the ceremony (`setup_new_key` or
-    /// `rotate_kps`), served to KPs from `get_guardian_info`. Set once.
-    pub latest_encrypted_shares: OnceLock<KPEncryptedShares>,
+struct InitializationState {
+    /// Withdraw-mode input: stable configuration installed by `operator_init`.
+    init_config: OnceLock<InitConfig>,
+    /// Withdraw-mode input: expected ceremony commitments and parameters,
+    /// installed by `operator_init` for `provisioner_init` to validate against.
+    secret_sharing_instance: RwLock<Option<SecretSharingInstance>>,
+    /// Ceremony-mode output: encrypted shares produced by `setup_new_key` or
+    /// `rotate_kps`, retained for KPs to fetch from `get_guardian_info`.
+    latest_encrypted_shares: OnceLock<KPEncryptedShares>,
+}
+
+impl InitializationState {
+    /// Drop withdraw-mode inputs that may become stale once the enclave is active.
+    /// Stable config and ceremony-mode output remain available.
+    fn clear(&self) {
+        self.secret_sharing_instance
+            .write()
+            .expect("secret-sharing instance lock poisoned")
+            .take()
+            .expect("secret-sharing instance must exist before activation");
+    }
 }
 
 pub struct EphemeralKeyPairs {
@@ -347,7 +361,7 @@ impl Enclave {
                 committee: RwLock::new(None),
                 rate_limiter: OnceLock::new(),
             },
-            scratchpad: Scratchpad::default(),
+            init_state: InitializationState::default(),
             control_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -411,7 +425,7 @@ impl Enclave {
                 self.operator_init_state_installed(EnclaveMode::Withdraw)
             }
             EnclaveLifecycle::Ceremony(CeremonyStage::Completed) => {
-                self.scratchpad.latest_encrypted_shares.get().is_some()
+                self.init_state.latest_encrypted_shares.get().is_some()
             }
             EnclaveLifecycle::Withdraw(WithdrawStage::ProvisionerInitialized) => {
                 self.config.is_enclave_btc_keypair_set()
@@ -437,8 +451,13 @@ impl Enclave {
             // Withdraw enclaves additionally install the stable InitConfig.
             EnclaveMode::Withdraw => {
                 self.config.btc_network.get().is_some()
-                    && self.scratchpad.init_config.get().is_some()
-                    && self.scratchpad.secret_sharing_instance.get().is_some()
+                    && self.init_state.init_config.get().is_some()
+                    && self
+                        .init_state
+                        .secret_sharing_instance
+                        .read()
+                        .expect("secret-sharing instance lock poisoned")
+                        .is_some()
                     && self.config.hashi_btc_master_pubkey.get().is_some()
             }
         }
@@ -480,7 +499,7 @@ impl Enclave {
     pub async fn info(&self) -> GuardianInfo {
         GuardianInfo {
             lifecycle: self.lifecycle(),
-            secret_sharing_instance: self.secret_sharing_instance().ok().cloned(),
+            secret_sharing_instance: self.secret_sharing_instance().ok(),
             bucket_info: self
                 .config
                 .s3_logger()
@@ -579,13 +598,15 @@ impl Enclave {
     }
 
     // ========================================================================
-    // Scratchpad (Initialization-only data)
+    // Initialization state
     // ========================================================================
 
-    pub fn secret_sharing_instance(&self) -> GuardianResult<&SecretSharingInstance> {
-        self.scratchpad
+    pub fn secret_sharing_instance(&self) -> GuardianResult<SecretSharingInstance> {
+        self.init_state
             .secret_sharing_instance
-            .get()
+            .read()
+            .expect("secret-sharing instance lock poisoned")
+            .clone()
             .ok_or(InvalidInputs("Secret-sharing instance not set".into()))
     }
 
@@ -593,16 +614,26 @@ impl Enclave {
         &self,
         instance: SecretSharingInstance,
     ) -> GuardianResult<()> {
-        self.scratchpad
+        let mut slot = self
+            .init_state
             .secret_sharing_instance
-            .set(instance)
-            .map_err(|_| InvalidInputs("Secret-sharing instance already set".into()))
+            .write()
+            .expect("secret-sharing instance lock poisoned");
+        if slot.is_some() {
+            return Err(InvalidInputs("Secret-sharing instance already set".into()));
+        }
+        *slot = Some(instance);
+        Ok(())
+    }
+
+    pub fn clear_initialization_state(&self) {
+        self.init_state.clear();
     }
 
     /// Stash the ceremony's encrypted shares for KPs to fetch via
     /// `get_guardian_info`. One ceremony per enclave, so this is set once.
     pub fn set_latest_encrypted_shares(&self, shares: KPEncryptedShares) -> GuardianResult<()> {
-        self.scratchpad
+        self.init_state
             .latest_encrypted_shares
             .set(shares)
             .map_err(|_| InvalidInputs("Latest encrypted shares already set".into()))
@@ -610,7 +641,7 @@ impl Enclave {
 
     /// Encrypted shares from the ceremony, or empty if none has run.
     pub fn latest_encrypted_shares(&self) -> KPEncryptedShares {
-        self.scratchpad
+        self.init_state
             .latest_encrypted_shares
             .get()
             .cloned()
@@ -618,11 +649,11 @@ impl Enclave {
     }
 
     pub fn init_config(&self) -> Option<&InitConfig> {
-        self.scratchpad.init_config.get()
+        self.init_state.init_config.get()
     }
 
     pub fn set_init_config(&self, config: InitConfig) -> GuardianResult<()> {
-        self.scratchpad
+        self.init_state
             .init_config
             .set(config)
             .map_err(|_| InvalidInputs("Init config already set".into()))
