@@ -126,13 +126,10 @@ impl VerifiedCeremonyState {
 
     pub async fn latest_from_s3(
         reader: &mut GuardianReader,
+        build_policy: BuildPolicy,
         expected_n: usize,
         expected_t: usize,
     ) -> Result<Self> {
-        // TODO: KP-begins discovery for rotations needs to read the latest
-        // historical ceremony with `BuildPolicy::AnyAllowlisted` to learn N.
-        // Keep this helper current-build-only for target verification, and add
-        // a separate discovery path there.
         let CeremonyAndKpShareState {
             ceremony_session_id,
             kp_share_session_id,
@@ -140,7 +137,7 @@ impl VerifiedCeremonyState {
             btc_master_pubkey,
             kp_share_state,
         } = reader
-            .read_latest_ceremony_and_kp_share_state(BuildPolicy::Current)
+            .read_latest_ceremony_and_kp_share_state(build_policy)
             .await?
             .ok_or_else(|| anyhow!("no ceremony logs found in guardian S3 bucket"))?;
         Self::from_scraped(

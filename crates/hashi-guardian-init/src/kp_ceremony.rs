@@ -91,6 +91,7 @@ pub async fn run(cfg: Config) -> Result<()> {
     );
     let state = VerifiedCeremonyState::latest_from_s3(
         &mut reader,
+        BuildPolicy::Current,
         cfg.kp_roster.num_shares,
         cfg.kp_roster.threshold,
     )
