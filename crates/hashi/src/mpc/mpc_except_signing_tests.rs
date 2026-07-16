@@ -10539,6 +10539,35 @@ fn test_handle_complain_request_nonce_caches_response() {
     assert_eq!(party2.complaint_responses.len(), 1);
 }
 
+#[test]
+fn test_required_nonce_weight_follows_derivation_version() {
+    const THRESHOLD: u16 = 52;
+    const MAX_FAULTY: u16 = 20;
+
+    let setup = TestSetup::with_weights(&[25, 25, 25, 25]);
+    let mut mgr = setup.create_manager(0);
+    mgr.mpc_config.threshold = THRESHOLD;
+    mgr.mpc_config.max_faulty = MAX_FAULTY;
+    let total_weight = mgr.mpc_config.nodes.total_weight() as u32;
+
+    let legacy_gate = 2 * MAX_FAULTY as u32 + 1;
+    let privacy_gate = total_weight - MAX_FAULTY as u32;
+    assert_ne!(
+        legacy_gate, privacy_gate,
+        "params must distinguish the two gates or this test proves nothing"
+    );
+
+    mgr.mpc_config.presignature_derivation_version = PresignatureDerivationVersion::Legacy;
+    assert_eq!(mgr.required_nonce_weight(), legacy_gate);
+
+    mgr.mpc_config.presignature_derivation_version =
+        PresignatureDerivationVersion::PrivacyThreshold;
+    assert_eq!(mgr.required_nonce_weight(), privacy_gate);
+
+    assert!(legacy_gate < mgr.mpc_config.threshold as u32);
+    assert!(privacy_gate >= mgr.mpc_config.threshold as u32);
+}
+
 #[tokio::test]
 async fn test_run_nonce_generation() {
     let mut rng = rand::thread_rng();
@@ -10581,8 +10610,7 @@ async fn test_run_nonce_generation() {
 
     // Phase 3: Test run_as_nonce_dealer() and run_as_nonce_party() for validator 0
     let mut test_manager = managers.remove(0);
-    let max_faulty = test_manager.mpc_config.max_faulty;
-    let required_weight = 2 * max_faulty + 1;
+    let required_weight = test_manager.required_nonce_weight();
 
     // Create mock P2P channel with remaining managers
     let other_managers: HashMap<_, _> = managers
@@ -13228,7 +13256,7 @@ async fn test_run_as_nonce_party_loads_from_store_after_restart() {
     // Phase 3: Simulate restart — clear validator 0's in-memory nonce state
     // but keep the store intact (simulates restart where DB persists).
     let mut test_manager = managers.remove(0);
-    let required_weight = 2 * test_manager.mpc_config.max_faulty + 1;
+    let required_weight = test_manager.required_nonce_weight();
     test_manager.current_nonce_messages.clear();
     test_manager.dealer_nonce_outputs.clear();
     test_manager.message_responses.clear();
@@ -13524,8 +13552,7 @@ async fn test_run_nonce_generation_with_complaint_recovery() {
 
     // Phase 3: Run for validator 0
     let test_manager = managers.remove(0);
-    let max_faulty = test_manager.mpc_config.max_faulty;
-    let required_weight = 2 * max_faulty + 1;
+    let required_weight = test_manager.required_nonce_weight();
 
     let other_managers: HashMap<_, _> = managers
         .into_iter()
