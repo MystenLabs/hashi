@@ -255,17 +255,17 @@ async fn handle_events(
                     }
                 }
 
-                // When an UpdateConfig or EmergencyPause proposal executes,
-                // the Hashi object's config field changes on-chain. Re-fetch
-                // the config from the Hashi object to keep the in-memory
-                // state current. (The event now carries the typed `data`,
-                // so this could be applied directly in the future.)
+                // Proposals that mutate the Hashi object's global `config` at
+                // execution: re-fetch it to keep in-memory state current.
+                // UpdateConfigKeySpec (touches only the registry, not held in
+                // memory) and ScheduleConfigUpdate (writes only the pending
+                // map; its value targets a pinned key and lands via the
+                // committee snapshot at reconfig) are deliberately excluded.
                 if matches!(
                     parse_proposal_type_from_type_tag(&proposal_executed_event.proposal_type),
                     ProposalType::UpdateConfig
                         | ProposalType::AddConfigKey
                         | ProposalType::RemoveConfigKey
-                        | ProposalType::ScheduleConfigUpdate
                         | ProposalType::EmergencyPause
                         | ProposalType::UpdateGuardian
                 ) {
@@ -800,6 +800,10 @@ fn parse_proposal_type_from_type_tag(type_tag: &TypeTag) -> ProposalType {
 
     match (struct_tag.module().as_str(), struct_tag.name().as_str()) {
         ("update_config", "UpdateConfig") => ProposalType::UpdateConfig,
+        ("config_keys", "AddConfigKey") => ProposalType::AddConfigKey,
+        ("config_keys", "UpdateConfigKeySpec") => ProposalType::UpdateConfigKeySpec,
+        ("config_keys", "RemoveConfigKey") => ProposalType::RemoveConfigKey,
+        ("config_keys", "ScheduleConfigUpdate") => ProposalType::ScheduleConfigUpdate,
         ("enable_version", "EnableVersion") => ProposalType::EnableVersion,
         ("disable_version", "DisableVersion") => ProposalType::DisableVersion,
         ("upgrade", "Upgrade") => ProposalType::Upgrade,

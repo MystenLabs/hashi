@@ -816,8 +816,18 @@ impl MpcService {
             .committees
             .committees()
             .get(&target_epoch)
-            .map(|c| c.config().hashi_protocol_version())
-            .unwrap_or(hashi_types::move_types::GENESIS_HASHI_PROTOCOL_VERSION);
+            .map(|c| c.config().hashi_protocol_version());
+        // Fail closed: if the target committee is not yet observed locally we
+        // cannot confirm its pinned version is supported, so refuse and retry
+        // rather than assume genesis (a version every binary accepts).
+        let Some(pinned_version) = pinned_version else {
+            error!(
+                "refusing to participate in reconfig for epoch {target_epoch}: \
+                 target committee not yet observed locally; retrying"
+            );
+            self.sleep_if_still_pending(target_epoch).await;
+            return;
+        };
         if !crate::protocol_config::is_supported(&self.inner.config, pinned_version) {
             error!(
                 "refusing to participate in reconfig for epoch {target_epoch}: this binary \

@@ -2122,6 +2122,10 @@ pub async fn build_register_or_update_validator_tx(
         has_calls = true;
     }
 
+    // Gate on `max` only: the advertised `min` is pinned to
+    // MIN_SUPPORTED_PROTOCOL_VERSION (a constant), and on-chain `member_supports`
+    // treats an absent/genesis min as "no lower bound", so it never needs
+    // re-advertising. If MIN_SUPPORTED ever becomes dynamic, also gate on min.
     let advertised_max = onchain_member
         .as_ref()
         .and_then(|m| m.supported_protocol_version_max);
