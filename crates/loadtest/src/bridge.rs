@@ -75,6 +75,12 @@ impl Bridge {
         HashiClient::new(&self.config).await
     }
 
+    /// A new executor, and with it a new RPC connection.
+    ///
+    /// Built per call on purpose: the load a large run generates makes the peer
+    /// gRPC layer drop connections, and a retry that reused a broken one would
+    /// just fail again. Caching this would quietly cost the reconnect that
+    /// makes retries work.
     fn executor(&self) -> Result<SuiTxExecutor> {
         let signer = self
             .config
