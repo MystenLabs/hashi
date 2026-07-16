@@ -177,7 +177,9 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
 
             handle_events(&mut client, &state, timestamp_ms, &events).await;
 
-            if last_config_refresh.elapsed() >= state.config_poll_interval() {
+            if last_config_refresh.elapsed() >= state.config_poll_interval()
+                && launch_pending(&state)
+            {
                 refresh_config_if_changed(&client, &state).await;
                 last_config_refresh = std::time::Instant::now();
             }
@@ -199,6 +201,15 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
         tracing::warn!("checkpoint stream ended; reconnecting Sui client and rescraping");
         rescrape_state = true;
     }
+}
+
+/// The poll only exists to catch `finish_publish` (guardian url + BTC key,
+/// written with no event); every other config write emits `ProposalExecuted`.
+/// Once both fields are in the snapshot the launch has landed: stop polling.
+fn launch_pending(state: &OnchainState) -> bool {
+    let state = state.state();
+    let config = &state.hashi().config;
+    config.guardian_url().is_none() || config.guardian_btc_public_key().is_none()
 }
 
 /// Runs on the watcher task, so it can't race the event-driven config

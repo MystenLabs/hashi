@@ -207,9 +207,10 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdrawal_fee_conf_target: Option<u16>,
 
-    /// Interval (ms) between watcher polls of the on-chain Hashi config —
-    /// the safety net for config writes that emit no event (`finish_publish`
-    /// sets `guardian_url` and the guardian BTC key directly).
+    /// Interval (ms) between watcher polls of the on-chain Hashi config while
+    /// the launch is pending — the safety net for `finish_publish`, which sets
+    /// `guardian_url` and the guardian BTC key with no event. Polling stops
+    /// once both are on-chain.
     ///
     /// Defaults to 300,000 ms (5 minutes).
     #[serde(skip_serializing_if = "Option::is_none")]
