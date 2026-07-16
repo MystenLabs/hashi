@@ -3,13 +3,16 @@
 
 /// Governed MPC protocol parameters — signing threshold, weight-reduction
 /// allowed delta, max-faulty bound, and nonce-generation protocol — each
-/// stored under a permanent config key with a compiled-in default. `pin`
-/// snapshots the full parameter set into a deterministic, canonically-ordered
-/// store that is attached to a `Committee` for its epoch, so mid-epoch
-/// governance changes never affect an active committee.
+/// stored under a permanent config key with a compiled-in default. Registered
+/// as epoch-pinned, so `config::pin` snapshots them onto each epoch's
+/// `Committee` and mid-epoch governance changes never affect an active
+/// committee.
 module hashi::mpc_config;
 
-use hashi::{config::{Self, Config}, config_registry::{Self, ConfigRegistry}, config_value};
+use hashi::{config::Config, config_registry::{Self, ConfigRegistry}, config_value};
+
+#[test_only]
+use hashi::config;
 
 // ~~~~~~~ Constants ~~~~~~~
 
@@ -129,8 +132,8 @@ public(package) fun init_defaults(config: &mut Config) {
 
 #[test_only]
 /// Build a pinned MPC parameter store directly from explicit values, in the
-/// same canonical key order as `pin`. Used by tests that construct committees
-/// without a full governed config.
+/// canonical key order (matching `register_keys`). Used by tests that construct
+/// committees without a full governed config.
 public(package) fun new_for_testing(
     threshold_in_basis_points: u64,
     weight_reduction_allowed_delta: u64,

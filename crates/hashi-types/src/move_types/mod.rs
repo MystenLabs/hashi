@@ -224,7 +224,7 @@ pub enum ConfigValue {
     Bytes(Vec<u8>),
 }
 
-/// MPC parameter keys, in the canonical order Move's `mpc_config::pin` writes
+/// MPC parameter keys, in the canonical order Move's `config::pin` writes
 /// them. Load-bearing for [`Config::from_mpc_params`].
 const KEY_MPC_THRESHOLD_IN_BASIS_POINTS: &str = "mpc_threshold_in_basis_points";
 const KEY_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: &str = "mpc_weight_reduction_allowed_delta";
@@ -320,9 +320,9 @@ impl Config {
     // ===== MPC parameters (mirror Move's `mpc_config` accessors) =====
 
     /// Build a config holding the MPC parameters, inserting the full key set in
-    /// the same fixed order as Move's `mpc_config::pin`. For synthetic
-    /// committees only (tests, fallbacks); the scrape/wire paths carry the
-    /// on-chain config verbatim via [`Config::from_entries`].
+    /// the same fixed order as Move's `config::pin`. For synthetic committees
+    /// only (tests, fallbacks); the scrape/wire paths carry the on-chain config
+    /// verbatim via [`Config::from_entries`].
     pub fn from_mpc_params(
         threshold_in_basis_points: u16,
         weight_reduction_allowed_delta: u16,
@@ -1645,7 +1645,9 @@ mod tests {
     /// Pins the exact BCS bytes of a committee's pinned config so a change to the
     /// canonical key order, the `ConfigValue` encoding, or the entry set is
     /// caught here rather than silently breaking handoff-cert verification.
-    /// The expected vector must equal what Move's `mpc_config::pin` produces.
+    /// The expected vector must equal what Move's `config::pin` produces for
+    /// these MPC keys (the full pinned committee also carries the protocol
+    /// version).
     #[test]
     fn committee_mpc_config_bcs_is_pinned() {
         let mpc = Config::from_mpc_params(3334, 800, 3333, 1);

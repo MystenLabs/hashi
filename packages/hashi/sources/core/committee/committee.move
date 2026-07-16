@@ -134,12 +134,12 @@ public(package) fun epoch(self: &Committee): u64 {
     self.epoch
 }
 
-/// Returns the number of total_weight held by the committee.
 /// The config pinned for this epoch.
 public(package) fun config(self: &Committee): &Config {
     &self.config
 }
 
+/// Returns the number of total_weight held by the committee.
 public(package) fun total_weight(self: &Committee): u64 {
     self.total_weight
 }
