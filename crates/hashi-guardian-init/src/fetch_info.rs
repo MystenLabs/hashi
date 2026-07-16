@@ -53,7 +53,7 @@ pub async fn run(args: Args) -> Result<()> {
     let verified = GetGuardianInfoResponse::try_from(resp)
         .map_err(|e| anyhow!("decode GetGuardianInfoResponse: {e:?}"))?;
     let verified = verified
-        // TODO: Accept PCR config here and use `verify` for attestation/PCR checks.
+        // TODO: Accept PCR config here and use `verify_live` for attestation/PCR checks.
         .verify_signed_info_without_attestation()
         .map_err(|e| anyhow!("verify GuardianInfo signature: {e:?}"))?;
     match args.field {

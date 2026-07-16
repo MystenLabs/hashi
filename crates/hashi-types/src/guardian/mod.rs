@@ -790,11 +790,13 @@ impl GetGuardianInfoResponse {
         }
     }
 
-    /// Verify the response end to end and return the trusted guardian payload:
-    /// the attestation anchors `signing_pub_key`, `signed_info` must be signed by
-    /// it, the signed git revision must match `expected_build`, and PCR0 must
-    /// match `expected_build`.
-    pub fn verify(&self, expected_build: &BuildPcrs) -> GuardianResult<VerifiedGuardianInfo> {
+    /// Verify a live response end to end and return the trusted guardian payload.
+    /// "Live" means the Nitro certificate chain is checked at the verifier's
+    /// current time, unlike S3 replay verification, which checks the chain at the
+    /// document's COSE-signed timestamp. The attestation anchors `signing_pub_key`,
+    /// `signed_info` must be signed by it, the signed git revision must match
+    /// `expected_build`, and PCR0 must match `expected_build`.
+    pub fn verify_live(&self, expected_build: &BuildPcrs) -> GuardianResult<VerifiedGuardianInfo> {
         let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
         if info.untrusted_git_revision != expected_build.git_revision() {
             return Err(InvalidInputs(format!(
@@ -816,7 +818,7 @@ impl GetGuardianInfoResponse {
     /// Verify only the signed `GuardianInfo` payload.
     ///
     /// This does not authenticate the enclave image, the Nitro attestation, or
-    /// PCRs. Prefer [`Self::verify`] whenever the caller has PCR config.
+    /// PCRs. Prefer [`Self::verify_live`] whenever the caller has PCR config.
     pub fn verify_signed_info_without_attestation(&self) -> GuardianResult<VerifiedGuardianInfo> {
         let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
         Ok(VerifiedGuardianInfo {
@@ -993,14 +995,14 @@ mod tests {
     }
 
     #[test]
-    fn get_guardian_info_verify_uses_signed_info_verification() {
+    fn get_guardian_info_verify_live_uses_signed_info_verification() {
         let mut resp = GetGuardianInfoResponse::mock_for_testing();
         let mut sig_bytes: [u8; 64] = resp.signed_info.signature.to_bytes();
         sig_bytes[0] ^= 0xff;
         resp.signed_info.signature = GuardianSignature::from(sig_bytes);
 
         assert!(matches!(
-            resp.verify(&BuildPcrs::new("test-revision", vec![0]))
+            resp.verify_live(&BuildPcrs::new("test-revision", vec![0]))
                 .unwrap_err(),
             InvalidInputs(_)
         ));
