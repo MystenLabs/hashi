@@ -792,6 +792,9 @@ impl GetGuardianInfoResponse {
 
     /// Verify a live guardian response.
     ///
+    /// Used by operator and KP tooling while initializing a guardian (ceremony,
+    /// provisioning, and activation).
+    ///
     /// Checks:
     /// - `signed_info` is signed by `signing_pub_key`;
     /// - its git revision matches `expected_build`;
