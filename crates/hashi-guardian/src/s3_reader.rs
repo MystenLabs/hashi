@@ -66,6 +66,17 @@ pub enum BuildPolicy {
     AnyAllowlisted,
 }
 
+/// The latest ceremony record paired with the latest KP share state for that
+/// ceremony's secret-sharing instance.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CeremonyAndKpShareState {
+    pub ceremony_session_id: SessionID,
+    pub kp_share_session_id: SessionID,
+    pub secret_sharing_instance: SecretSharingInstance,
+    pub btc_master_pubkey: BitcoinPubkey,
+    pub kp_share_state: KpShareStateLogMessage,
+}
+
 impl BuildPolicy {
     fn enforce(self, allowlist: &PcrAllowlist, build_pcrs: &BuildPcrs) -> GuardianResult<()> {
         match self {
@@ -166,24 +177,13 @@ impl GuardianReader {
         Ok(self.get_session_info(session_id, build_policy).await?.info)
     }
 
-    /// The latest secret-sharing instance from `ceremony/` — the max-`sharing_seq`
-    /// (lex-last) entry, attestation- and signature-verified. `None` if no ceremony
-    /// has been logged yet. Written from initial setup onward, so present whenever a
-    /// key exists.
-    pub async fn read_latest_ceremony_instance(
-        &mut self,
-        build_policy: BuildPolicy,
-    ) -> anyhow::Result<Option<SecretSharingInstance>> {
-        Ok(self
-            .read_latest_ceremony(build_policy)
-            .await?
-            .map(|(_, instance, _)| instance))
-    }
-
-    /// Like [`Self::read_latest_ceremony_instance`], but also returns the writing
-    /// session id and BTC master pubkey. `kp-shares/` is read independently so
-    /// later KP cert rotations can advance `cert_seq` without rewriting the
-    /// `ceremony/` instance.
+    /// The latest ceremony from `ceremony/` — the max-`sharing_seq` (lex-last)
+    /// entry, attestation- and signature-verified. Returns its writing session,
+    /// secret-sharing instance, and BTC master pubkey. `None` if no ceremony has
+    /// been logged yet.
+    ///
+    /// `kp-shares/` is read independently so later KP cert rotations can advance
+    /// `cert_seq` without rewriting the `ceremony/` instance.
     pub async fn read_latest_ceremony(
         &mut self,
         build_policy: BuildPolicy,
@@ -260,6 +260,36 @@ impl GuardianReader {
             );
         }
         Ok(Some((session_id, *msg)))
+    }
+
+    /// Read the latest ceremony together with the latest KP share state for its
+    /// `sharing_seq`. `None` means no ceremony has been logged. Once a ceremony
+    /// exists, its matching KP share state must also exist: ceremony writers
+    /// publish `kp-shares/` before `ceremony/`.
+    pub async fn read_latest_ceremony_and_kp_share_state(
+        &mut self,
+        build_policy: BuildPolicy,
+    ) -> anyhow::Result<Option<CeremonyAndKpShareState>> {
+        let Some((ceremony_session_id, secret_sharing_instance, btc_master_pubkey)) =
+            self.read_latest_ceremony(build_policy).await?
+        else {
+            return Ok(None);
+        };
+        let sharing_seq = secret_sharing_instance.sharing_seq();
+        let (kp_share_session_id, kp_share_state) = self
+            .read_latest_kp_share_state(sharing_seq, build_policy)
+            .await?
+            .with_context(|| {
+                format!("no kp-shares log found for latest ceremony sharing_seq {sharing_seq}")
+            })?;
+
+        Ok(Some(CeremonyAndKpShareState {
+            ceremony_session_id,
+            kp_share_session_id,
+            secret_sharing_instance,
+            btc_master_pubkey,
+            kp_share_state,
+        }))
     }
 
     /// Latest serving committee, preferring `committee-update/` and falling back

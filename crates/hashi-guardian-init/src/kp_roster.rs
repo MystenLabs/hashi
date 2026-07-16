@@ -22,6 +22,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use hashi_guardian::s3_reader::BuildPolicy;
+use hashi_guardian::s3_reader::CeremonyAndKpShareState;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::guardian::KPEncryptedShare;
@@ -132,19 +133,16 @@ impl VerifiedCeremonyState {
         // historical ceremony with `BuildPolicy::AnyAllowlisted` to learn N.
         // Keep this helper current-build-only for target verification, and add
         // a separate discovery path there.
-        let (ceremony_session_id, instance, btc_master_pubkey) = reader
-            .read_latest_ceremony(BuildPolicy::Current)
+        let CeremonyAndKpShareState {
+            ceremony_session_id,
+            kp_share_session_id,
+            secret_sharing_instance: instance,
+            btc_master_pubkey,
+            kp_share_state,
+        } = reader
+            .read_latest_ceremony_and_kp_share_state(BuildPolicy::Current)
             .await?
             .ok_or_else(|| anyhow!("no ceremony logs found in guardian S3 bucket"))?;
-        let (kp_share_session_id, kp_share_state) = reader
-            .read_latest_kp_share_state(instance.sharing_seq(), BuildPolicy::Current)
-            .await?
-            .ok_or_else(|| {
-                anyhow!(
-                    "no kp-shares log found for sharing_seq {}",
-                    instance.sharing_seq()
-                )
-            })?;
         Self::from_scraped(
             ceremony_session_id,
             kp_share_session_id,

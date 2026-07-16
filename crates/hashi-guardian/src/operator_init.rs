@@ -8,6 +8,7 @@
 
 use crate::attestation::get_attestation;
 use crate::s3_reader::BuildPolicy;
+use crate::s3_reader::CeremonyAndKpShareState;
 use crate::s3_reader::GuardianReader;
 use crate::Enclave;
 use crate::GuardianS3Client;
@@ -35,18 +36,21 @@ impl InitInstall {
         }
     }
 
-    /// Build the arming bundle from the stable config and S3-derived ceremony
-    /// state. Shared by `operator_init` and tests.
+    /// Build the arming bundle from the stable config and S3-derived ceremony +
+    /// KP share state. Shared by `operator_init` and tests.
     pub(crate) async fn from_config(
         logger: &GuardianS3Client,
         config: InitConfig,
     ) -> GuardianResult<Self> {
         let mut reader =
             GuardianReader::from_s3_client(logger.clone(), config.pcr_allowlist().clone());
-        let (_, secret_sharing_instance, _) = reader
-            .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
+        let CeremonyAndKpShareState {
+            secret_sharing_instance,
+            ..
+        } = reader
+            .read_latest_ceremony_and_kp_share_state(BuildPolicy::AnyAllowlisted)
             .await
-            .map_err(|e| InvalidInputs(format!("read latest ceremony: {e}")))?
+            .map_err(|e| InvalidInputs(format!("read latest ceremony and KP share state: {e}")))?
             .ok_or_else(|| InvalidInputs("no ceremony log found for withdraw init".into()))?;
 
         Ok(Self::from_parts(config, secret_sharing_instance))

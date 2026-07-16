@@ -5,6 +5,7 @@ use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::ensure;
 use hashi_guardian::s3_reader::BuildPolicy;
+use hashi_guardian::s3_reader::CeremonyAndKpShareState;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::InitConfig;
@@ -138,17 +139,19 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     info!(
         phase = "ceremony instance",
-        "scraping authoritative ceremony/ log for the secret-sharing instance",
+        "scraping authoritative ceremony/ and kp-shares/ logs",
     );
-    let (ceremony_session, scraped_instance, btc_master_pubkey) = reader
-        .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
+    let CeremonyAndKpShareState {
+        ceremony_session_id: ceremony_session,
+        kp_share_session_id: kp_share_session,
+        secret_sharing_instance: scraped_instance,
+        btc_master_pubkey,
+        kp_share_state,
+    } = reader
+        .read_latest_ceremony_and_kp_share_state(BuildPolicy::AnyAllowlisted)
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;
     let sharing_seq = scraped_instance.sharing_seq();
-    let (kp_share_session, kp_share_state) = reader
-        .read_latest_kp_share_state(sharing_seq, BuildPolicy::AnyAllowlisted)
-        .await?
-        .context("no kp-shares log found in S3; key setup has not run")?;
     let ceremony_state = VerifiedCeremonyState::from_scraped(
         ceremony_session.clone(),
         kp_share_session.clone(),
