@@ -215,6 +215,36 @@ fun test_update_spec_rejects_unregistered_key() {
 }
 
 #[test]
+#[expected_failure(abort_code = config_registry::ECannotMakeWriteOnceUpdatable)]
+fun test_update_spec_cannot_unfreeze_write_once_key() {
+    let ctx = &mut test_utils::new_tx_context(VOTER1, 0);
+    let mut hashi = setup(ctx);
+    let clock = clock::create_for_testing(ctx);
+
+    // hashi_protocol_version is seeded write-once, steered only via the ceiling
+    // knob + advance rule; a spec update must not flip it updatable and open a
+    // direct-set bypass.
+    let proposal_id = config_keys::propose_update_spec(
+        &mut hashi,
+        VOTER1,
+        b"hashi_protocol_version".to_string(),
+        true,
+        true,
+        false,
+        option::none(),
+        option::none(),
+        option::none(),
+        vec_map::empty(),
+        &clock,
+        ctx,
+    );
+    config_keys::execute_update_spec(&mut hashi, proposal_id, &clock);
+
+    clock::destroy_for_testing(clock);
+    std::unit_test::destroy(hashi);
+}
+
+#[test]
 #[expected_failure(abort_code = update_config::EInvalidConfigEntry)]
 fun test_removed_key_is_gone_and_no_longer_updatable() {
     let ctx = &mut test_utils::new_tx_context(VOTER1, 0);

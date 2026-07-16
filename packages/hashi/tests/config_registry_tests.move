@@ -210,6 +210,115 @@ fun test_pin_appends_added_pinned_key_and_skips_absent_one() {
     assert!(pinned.get(b"example_pinned").as_u64() == 7);
 }
 
+#[test]
+#[expected_failure(abort_code = config_registry::ECannotMakeWriteOnceUpdatable)]
+fun test_update_spec_rejects_unfreezing_write_once_key() {
+    let mut registry = config_registry::empty();
+    registry.register(b"k", write_once_spec());
+    registry.update_spec(
+        &b"k".to_string(),
+        config_registry::new_spec(
+            false,
+            true,
+            false,
+            option::none(),
+            option::none(),
+            option::none(),
+        ),
+    );
+}
+
+#[test]
+#[expected_failure(abort_code = config_registry::ECannotUnpin)]
+fun test_update_spec_rejects_unpinning_key() {
+    let mut registry = config_registry::empty();
+    registry.register(
+        b"k",
+        config_registry::new_spec(
+            true,
+            true,
+            false,
+            option::none(),
+            option::none(),
+            option::none(),
+        ),
+    );
+    registry.update_spec(
+        &b"k".to_string(),
+        config_registry::new_spec(
+            false,
+            true,
+            false,
+            option::none(),
+            option::none(),
+            option::none(),
+        ),
+    );
+}
+
+#[test]
+#[expected_failure(abort_code = config_registry::ECannotMakePermanentRemovable)]
+fun test_update_spec_rejects_restoring_removable() {
+    let mut registry = config_registry::empty();
+    registry.register(
+        b"k",
+        config_registry::new_spec(
+            false,
+            true,
+            false,
+            option::none(),
+            option::none(),
+            option::none(),
+        ),
+    );
+    registry.update_spec(
+        &b"k".to_string(),
+        config_registry::new_spec(
+            false,
+            true,
+            true,
+            option::none(),
+            option::none(),
+            option::none(),
+        ),
+    );
+}
+
+#[test]
+fun test_update_spec_allows_tightening_and_range_change() {
+    let mut registry = config_registry::empty();
+    // Freely mutable, unpinned, removable.
+    registry.register(
+        b"k",
+        config_registry::new_spec(
+            false,
+            true,
+            true,
+            option::none(),
+            option::none(),
+            option::none(),
+        ),
+    );
+    // Strengthen every guarantee at once (pin, freeze, lock) and adjust the
+    // range — the monotonic direction, so it must apply.
+    registry.update_spec(
+        &b"k".to_string(),
+        config_registry::new_spec(
+            true,
+            false,
+            false,
+            option::some(1),
+            option::some(9),
+            option::none(),
+        ),
+    );
+    assert!(registry.is_pinned(&b"k".to_string()));
+}
+
+fun write_once_spec(): config_registry::ConfigKeySpec {
+    config_registry::new_spec(false, false, false, option::none(), option::none(), option::none())
+}
+
 fun seeded_parts(): (hashi::config::Config, config_registry::ConfigRegistry) {
     let mut config = hashi::config::create();
     hashi::btc_config::init_defaults(&mut config);

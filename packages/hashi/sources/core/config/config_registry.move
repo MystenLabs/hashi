@@ -24,6 +24,15 @@ const EKeyAlreadyRegistered: vector<u8> = b"Config key is already registered";
 const EKeyNotRegistered: vector<u8> = b"Config key is not registered";
 #[error]
 const EKeyNotRemovable: vector<u8> = b"Config key is not removable";
+#[error]
+const ECannotMakeWriteOnceUpdatable: vector<u8> =
+    b"A write-once (non-updatable) key must stay write-once: a spec update cannot make it updatable again";
+#[error]
+const ECannotMakePermanentRemovable: vector<u8> =
+    b"A non-removable key must stay non-removable: a spec update cannot make it removable again";
+#[error]
+const ECannotUnpin: vector<u8> =
+    b"A pinned key must stay pinned: a spec update cannot un-pin it (future committee snapshots would silently drop it)";
 
 // ~~~~~~~ Structs ~~~~~~~
 
@@ -88,10 +97,23 @@ public(package) fun register(self: &mut ConfigRegistry, key: vector<u8>, spec: C
 }
 
 /// In place: insertion order is the pinned snapshot's canonical order, so a
-/// spec update must not move the key. A narrowed range does not
-/// retro-invalidate the current value; constraints apply only at update time.
+/// spec update must not move the key. Structural guarantees only ratchet
+/// toward more protection — `updatable`/`removable` may be turned off but never
+/// back on, `pinned` may be turned on but never off — so a key's documented
+/// write-once / epoch-pinned status holds against this path too, not only at
+/// registration. Value constraints stay freely adjustable; a narrowed range
+/// does not retro-invalidate the current value.
 public(package) fun update_spec(self: &mut ConfigRegistry, key: &String, spec: ConfigKeySpec) {
     assert!(self.specs.contains(key), EKeyNotRegistered);
+    let current = self.specs.get(key);
+    let (was_updatable, was_removable, was_pinned) = (
+        current.updatable,
+        current.removable,
+        current.pinned,
+    );
+    assert!(was_updatable || !spec.updatable, ECannotMakeWriteOnceUpdatable);
+    assert!(was_removable || !spec.removable, ECannotMakePermanentRemovable);
+    assert!(!was_pinned || spec.pinned, ECannotUnpin);
     *self.specs.get_mut(key) = spec;
 }
 

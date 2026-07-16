@@ -30,10 +30,9 @@ const KEY_NONCE_GENERATION_PROTOCOL: vector<u8> = b"mpc_nonce_generation_protoco
 
 // ~~~~~~~ Package Functions ~~~~~~~
 
-/// Register the specs for the MPC parameter keys: epoch-pinned, with the
-/// value ranges previously enforced by the deleted `is_valid_value`.
-/// Non-removable: removal would silently revert nodes to the compiled
-/// defaults at the next reconfig.
+/// Register the specs for the MPC parameter keys: epoch-pinned, range-checked,
+/// non-removable (removal would silently revert nodes to the compiled defaults
+/// at the next reconfig).
 public(package) fun register_keys(registry: &mut ConfigRegistry) {
     registry.register(
         KEY_THRESHOLD_IN_BASIS_POINTS,
