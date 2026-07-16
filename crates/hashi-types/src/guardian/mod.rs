@@ -174,8 +174,8 @@ pub struct ActivationState {
 }
 
 /// The current KPs' signed share submissions, assembled by the relay once it has
-/// collected enough. The enclave verifies every KP signature, signer assignment,
-/// session pin, and config hash before decrypting the shares.
+/// collected enough. The enclave verifies every KP signature, session pin, and
+/// config hash before decrypting the shares.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProvisionerInitRequest(pub Vec<KpSigned<SingleProvisionerInitRequest>>);
 

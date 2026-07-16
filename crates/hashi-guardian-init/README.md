@@ -144,8 +144,7 @@ is held in this process' memory long enough to verify and re-encrypt it. It:
 7. Signs the exact `(session, config_hash, encrypted share)` submission and sends
    it to the configured relay endpoint. The relay pre-verifies and collects
    T-of-N distinct submissions; the enclave then authoritatively re-verifies
-   every signature and current share assignment before completing
-   `ProvisionerInit`.
+   every signature and request binding before completing `ProvisionerInit`.
 
 ```bash
 cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-init.sample.yaml

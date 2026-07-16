@@ -6,9 +6,9 @@
 //! Key provisioners submit signed, HPKE-encrypted shares one at a time; the relay
 //! pre-verifies and accumulates distinct submissions for the guardian's current
 //! session and, once it holds a threshold-many, forwards them unchanged in one
-//! batch `ProvisionerInit`. The enclave re-verifies every signature and current
-//! KP assignment, so the relay is liveness-only: it can stall provisioning but
-//! cannot read a share or forge a key.
+//! batch `ProvisionerInit`. The enclave re-verifies every signature, so the relay
+//! is liveness-only: it can stall provisioning but cannot read a share or forge
+//! a key.
 //!
 //! `Accumulator` holds the (pure, unit-tested) accumulation logic; a `tokio`
 //! mutex serializes it and keeps at most one `ProvisionerInit` in flight.
@@ -131,7 +131,7 @@ impl Relay {
 /// Pre-authenticate a submission: the signer's cert must be in the configured
 /// relay roster and its detached signature must cover these exact
 /// (session, config, share) bytes. This is only a DoS guard; the enclave repeats
-/// signature and current S3 roster verification authoritatively.
+/// signature verification authoritatively.
 fn verify_kp_submission(
     signed_request: &KpSigned<SingleProvisionerInitRequest>,
     authorized_kp_fingerprints: &[Fingerprint],
