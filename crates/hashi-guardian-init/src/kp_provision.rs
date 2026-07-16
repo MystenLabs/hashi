@@ -33,7 +33,6 @@
 
 use anyhow::Context;
 use hashi_guardian::s3_reader::BuildPolicy;
-use hashi_guardian::s3_reader::CeremonyAndKpShareState;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::EncPubKey;
@@ -55,9 +54,10 @@ use tracing::info;
 use crate::config::Config;
 use crate::guardian_info::ensure_oi_info_matches_post_init;
 use crate::guardian_info::verified_live_guardian_info;
-use crate::kp_roster::VerifiedCeremonyState;
 use crate::kp_roster::decrypt_share;
 use crate::kp_roster::ensure_cert_in_roster;
+use crate::kp_roster::validate_ceremony_state_shape;
+use crate::kp_roster::verify_encrypted_share_recipients;
 
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
@@ -256,36 +256,27 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         phase = "ceremony instance",
         "scraping authoritative ceremony/ and kp-shares/ logs",
     );
-    let CeremonyAndKpShareState {
-        ceremony_session_id: ceremony_session,
-        kp_share_session_id: kp_share_session,
-        secret_sharing_instance: scraped_instance,
-        btc_master_pubkey,
-        kp_share_state,
-    } = reader
+    let state = reader
         .read_latest_ceremony_and_kp_share_state(BuildPolicy::AnyAllowlisted)
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;
-    let sharing_seq = scraped_instance.sharing_seq();
+    let sharing_seq = state.secret_sharing_instance.sharing_seq();
     info!(
         phase = "ceremony instance",
-        ceremony_session = %ceremony_session,
         sharing_seq,
-        n = scraped_instance.num_shares(),
-        t = scraped_instance.threshold(),
+        n = state.secret_sharing_instance.num_shares(),
+        t = state.secret_sharing_instance.threshold(),
         "scraped latest ceremony entry",
     );
     anyhow::ensure!(
-        scraped_instance == *enclave_ss_instance,
+        state.secret_sharing_instance == *enclave_ss_instance,
         "Enclave secret sharing instance mismatch: expected {:?}, got {:?}",
-        scraped_instance,
+        state.secret_sharing_instance,
         enclave_ss_instance
     );
     info!(
         phase = "ceremony instance",
-        ceremony_session = %ceremony_session,
-        sharing_seq,
-        "ceremony instance matches enclave",
+        sharing_seq, "ceremony instance matches enclave",
     );
 
     // 4. Recompute the stable config the operator armed the enclave with; its
@@ -317,24 +308,13 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     //    read above.
     info!(
         phase = "share read",
-        ceremony_session = %ceremony_session,
-        sharing_seq,
-        "verifying this KP's encrypted share from kp-shares/",
+        sharing_seq, "verifying this KP's encrypted share from kp-shares/",
     );
-    let state = VerifiedCeremonyState::from_scraped(
-        ceremony_session.clone(),
-        kp_share_session.clone(),
-        scraped_instance.clone(),
-        kp_share_state,
-        btc_master_pubkey,
-        cfg.kp_roster.num_shares,
-        cfg.kp_roster.threshold,
-    )?;
-    state.verify_encrypted_share_recipients(&certs)?;
+    validate_ceremony_state_shape(&state, cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
+    verify_encrypted_share_recipients(&state, &certs)?;
     info!(
         phase = "share read",
-        kp_share_session = %kp_share_session,
-        cert_seq = state.kp_share_cert_seq,
+        cert_seq = state.cert_seq,
         share_count = state.encrypted_shares.len(),
         all_recipients_verified = true,
         "kp-shares log verified: every share is addressed only to its labeled KP cert",
@@ -424,7 +404,6 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     info!(
         phase = "summary",
         session_id = %session_id,
-        ceremony_session = %ceremony_session,
         share_id = decrypted.id.get(),
         fingerprint = %want_fp,
         sharing_seq,

@@ -6,15 +6,17 @@
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::load_certs;
 use tracing::info;
 
 use crate::config::Config;
-use crate::kp_roster::VerifiedCeremonyState;
 use crate::kp_roster::decrypt_share;
 use crate::kp_roster::ensure_cert_in_roster;
+use crate::kp_roster::validate_ceremony_state_shape;
+use crate::kp_roster::verify_encrypted_share_recipients;
 
 /// Verify this KP can fetch and decrypt its ceremony share.
 ///
@@ -89,19 +91,15 @@ pub async fn run(cfg: Config) -> Result<()> {
         phase = "ceremony scrape",
         "scraping latest ceremony/ + kp-shares/ logs (attestation-anchored)",
     );
-    let state = VerifiedCeremonyState::latest_from_s3(
-        &mut reader,
-        BuildPolicy::Current,
-        cfg.kp_roster.num_shares,
-        cfg.kp_roster.threshold,
-    )
-    .await?;
+    let state = reader
+        .read_latest_ceremony_and_kp_share_state(BuildPolicy::Current)
+        .await?
+        .context("no ceremony logs found in guardian S3 bucket")?;
+    validate_ceremony_state_shape(&state, cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     info!(
         phase = "ceremony scrape",
-        ceremony_session_id = %state.ceremony_session_id,
-        kp_share_session_id = %state.kp_share_session_id,
         sharing_seq = state.secret_sharing_instance.sharing_seq(),
-        cert_seq = state.kp_share_cert_seq,
+        cert_seq = state.cert_seq,
         n = state.secret_sharing_instance.num_shares(),
         t = state.secret_sharing_instance.threshold(),
         share_count = state.encrypted_shares.len(),
@@ -114,7 +112,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         share_count = state.encrypted_shares.len(),
         "verifying every share is addressed only to its labeled KP cert (without decrypting)",
     );
-    state.verify_encrypted_share_recipients(&certs)?;
+    verify_encrypted_share_recipients(&state, &certs)?;
     info!(
         phase = "roster verify",
         "ceremony/ and kp-shares/ logs verified against expected params and KP certs",
@@ -193,11 +191,9 @@ pub async fn run(cfg: Config) -> Result<()> {
 
     info!(
         phase = "summary",
-        ceremony_session_id = %state.ceremony_session_id,
-        kp_share_session_id = %state.kp_share_session_id,
         share_id = share_id.get(),
         sharing_seq = state.secret_sharing_instance.sharing_seq(),
-        cert_seq = state.kp_share_cert_seq,
+        cert_seq = state.cert_seq,
         fingerprint = %want_fp,
         commitment = hex::encode(&expected_commitment.digest),
         "ceremony share verified",

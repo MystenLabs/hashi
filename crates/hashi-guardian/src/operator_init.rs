@@ -8,7 +8,6 @@
 
 use crate::attestation::get_attestation;
 use crate::s3_reader::BuildPolicy;
-use crate::s3_reader::CeremonyAndKpShareState;
 use crate::s3_reader::GuardianReader;
 use crate::Enclave;
 use crate::GuardianS3Client;
@@ -44,7 +43,7 @@ impl InitInstall {
     ) -> GuardianResult<Self> {
         let mut reader =
             GuardianReader::from_s3_client(logger.clone(), config.pcr_allowlist().clone());
-        let CeremonyAndKpShareState {
+        let CeremonyState {
             secret_sharing_instance,
             ..
         } = reader

@@ -21,18 +21,13 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use hashi_guardian::s3_reader::BuildPolicy;
-use hashi_guardian::s3_reader::CeremonyAndKpShareState;
-use hashi_guardian::s3_reader::GuardianReader;
-use hashi_types::bitcoin::BitcoinPubkey;
+use hashi_types::guardian::CeremonyLogMessage;
+use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::KPEncryptedShare;
-use hashi_types::guardian::KPEncryptedShares;
 use hashi_types::guardian::KPFingerprint;
 use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::PcrAllowlist;
-use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::SecretSharingParams;
-use hashi_types::guardian::SessionID;
 use hashi_types::guardian::SetupNewKeyResponse;
 use hashi_types::guardian::Share;
 use hashi_types::pgp::PgpPublicCert;
@@ -86,194 +81,131 @@ impl KpRosterConfig {
     }
 }
 
-/// Validated ceremony state. May come from the live `SetupNewKeyResponse`
-/// (`operator ceremony`) or be reconstructed from the guardian's `ceremony/` +
-/// `kp-shares/` logs (`key-provisioner ceremony`, `key-provisioner provision`).
-#[derive(Debug, PartialEq)]
-pub struct VerifiedCeremonyState {
-    pub ceremony_session_id: SessionID,
-    pub kp_share_session_id: SessionID,
-    pub kp_share_cert_seq: u64,
-    pub encrypted_shares: KPEncryptedShares,
-    pub secret_sharing_instance: SecretSharingInstance,
-    pub btc_master_pubkey: BitcoinPubkey,
+/// Convert the live ceremony response into the same state shape read from S3.
+pub fn ceremony_state_from_response(
+    response: SetupNewKeyResponse,
+    expected_sharing_seq: u64,
+    expected_n: usize,
+    expected_t: usize,
+) -> Result<CeremonyState> {
+    let SetupNewKeyResponse {
+        encrypted_shares,
+        secret_sharing_instance,
+        btc_master_pubkey,
+    } = response;
+    let sharing_seq = secret_sharing_instance.sharing_seq();
+    anyhow::ensure!(
+        sharing_seq == expected_sharing_seq,
+        "ceremony sharing_seq ({sharing_seq}) differs from expected ({expected_sharing_seq})"
+    );
+    let state = CeremonyState::new(
+        CeremonyLogMessage::NewKey {
+            instance: secret_sharing_instance,
+            btc_master_pubkey,
+        },
+        KpShareStateLogMessage::new(sharing_seq, 0, encrypted_shares),
+    )?;
+    validate_ceremony_state_shape(&state, expected_n, expected_t)?;
+    Ok(state)
 }
 
-impl VerifiedCeremonyState {
-    pub fn from_response(
-        response: SetupNewKeyResponse,
-        session_id: SessionID,
-        expected_sharing_seq: u64,
-        expected_n: usize,
-        expected_t: usize,
-    ) -> Result<Self> {
-        let state = Self {
-            ceremony_session_id: session_id.clone(),
-            kp_share_session_id: session_id,
-            kp_share_cert_seq: 0,
-            encrypted_shares: response.encrypted_shares,
-            secret_sharing_instance: response.secret_sharing_instance,
-            btc_master_pubkey: response.btc_master_pubkey,
-        };
-        anyhow::ensure!(
-            state.secret_sharing_instance.sharing_seq() == expected_sharing_seq,
-            "ceremony sharing_seq ({}) differs from expected ({expected_sharing_seq})",
-            state.secret_sharing_instance.sharing_seq()
-        );
-        state.validate_shape(expected_n, expected_t)?;
-        Ok(state)
-    }
+/// Confirm the ceremony uses the expected sharing shape and carries exactly
+/// `expected_n` encrypted shares.
+pub fn validate_ceremony_state_shape(
+    state: &CeremonyState,
+    expected_n: usize,
+    expected_t: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        state.secret_sharing_instance.num_shares() == expected_n,
+        "ceremony num_shares ({}) differs from expected ({expected_n})",
+        state.secret_sharing_instance.num_shares()
+    );
+    anyhow::ensure!(
+        state.secret_sharing_instance.threshold() == expected_t,
+        "ceremony threshold ({}) differs from expected ({expected_t})",
+        state.secret_sharing_instance.threshold()
+    );
+    anyhow::ensure!(
+        state.encrypted_shares.len() == expected_n,
+        "expected {expected_n} encrypted shares, got {}",
+        state.encrypted_shares.len()
+    );
+    Ok(())
+}
 
-    pub async fn latest_from_s3(
-        reader: &mut GuardianReader,
-        build_policy: BuildPolicy,
-        expected_n: usize,
-        expected_t: usize,
-    ) -> Result<Self> {
-        let CeremonyAndKpShareState {
-            ceremony_session_id,
-            kp_share_session_id,
-            secret_sharing_instance: instance,
-            btc_master_pubkey,
-            kp_share_state,
-        } = reader
-            .read_latest_ceremony_and_kp_share_state(build_policy)
-            .await?
-            .ok_or_else(|| anyhow!("no ceremony logs found in guardian S3 bucket"))?;
-        Self::from_scraped(
-            ceremony_session_id,
-            kp_share_session_id,
-            instance,
-            kp_share_state,
-            btc_master_pubkey,
-            expected_n,
-            expected_t,
-        )
-    }
+/// For each encrypted share, confirm (a) its `recipient_fingerprint` label
+/// names exactly one of the operator-supplied certs, and (b) the ciphertext is
+/// actually encrypted only to that cert (parsed via PKESK without decrypting).
+///
+/// Identity is by fingerprint, not positional index — a share is matched to its
+/// cert by `recipient_fingerprint`, independent of ordering.
+pub fn verify_encrypted_share_recipients(
+    state: &CeremonyState,
+    certs: &[PgpPublicCert],
+) -> Result<()> {
+    let by_fingerprint: std::collections::HashMap<KPFingerprint, &PgpPublicCert> = certs
+        .iter()
+        .map(|c| (c.fingerprint().to_hex(), c))
+        .collect();
+    anyhow::ensure!(
+        by_fingerprint.len() == certs.len(),
+        "duplicate fingerprints among the supplied KP certs"
+    );
 
-    /// Assemble + validate from parts already scraped from S3 (the ceremony
-    /// log and the kp-shares log). Use instead of [`Self::latest_from_s3`] when the
-    /// caller has already read those objects and wants to avoid a second walk.
-    pub fn from_scraped(
-        ceremony_session_id: SessionID,
-        kp_share_session_id: SessionID,
-        secret_sharing_instance: SecretSharingInstance,
-        kp_share_state: KpShareStateLogMessage,
-        btc_master_pubkey: BitcoinPubkey,
-        expected_n: usize,
-        expected_t: usize,
-    ) -> Result<Self> {
-        anyhow::ensure!(
-            kp_share_state.sharing_seq == secret_sharing_instance.sharing_seq(),
-            "kp-shares sharing_seq ({}) differs from ceremony sharing_seq ({})",
-            kp_share_state.sharing_seq,
-            secret_sharing_instance.sharing_seq()
-        );
-        let state = Self {
-            ceremony_session_id,
-            kp_share_session_id,
-            kp_share_cert_seq: kp_share_state.cert_seq,
-            encrypted_shares: kp_share_state.encrypted_shares,
-            secret_sharing_instance,
-            btc_master_pubkey,
-        };
-        state.validate_shape(expected_n, expected_t)?;
-        Ok(state)
-    }
-
-    /// Confirm the state uses the expected sharing shape and carries exactly
-    /// `expected_n` encrypted shares.
-    pub fn validate_shape(&self, expected_n: usize, expected_t: usize) -> Result<()> {
-        anyhow::ensure!(
-            self.secret_sharing_instance.num_shares() == expected_n,
-            "ceremony num_shares ({}) differs from expected ({expected_n})",
-            self.secret_sharing_instance.num_shares()
-        );
-        anyhow::ensure!(
-            self.secret_sharing_instance.threshold() == expected_t,
-            "ceremony threshold ({}) differs from expected ({expected_t})",
-            self.secret_sharing_instance.threshold()
-        );
-        anyhow::ensure!(
-            self.encrypted_shares.len() == expected_n,
-            "expected {expected_n} encrypted shares, got {}",
-            self.encrypted_shares.len()
-        );
-        Ok(())
-    }
-
-    /// For each encrypted share, confirm (a) its `recipient_fingerprint` label
-    /// names exactly one of the operator-supplied certs, and (b) the ciphertext
-    /// is actually encrypted only to that cert (parsed via PKESK without
-    /// decrypting).
-    ///
-    /// Identity is by fingerprint, not positional index — a share is matched to
-    /// its cert by `recipient_fingerprint`, independent of ordering.
-    pub fn verify_encrypted_share_recipients(&self, certs: &[PgpPublicCert]) -> Result<()> {
-        let by_fingerprint: std::collections::HashMap<KPFingerprint, &PgpPublicCert> = certs
-            .iter()
-            .map(|c| (c.fingerprint().to_hex(), c))
-            .collect();
-        anyhow::ensure!(
-            by_fingerprint.len() == certs.len(),
-            "duplicate fingerprints among the supplied KP certs"
-        );
-
-        let mut expected_fingerprints: Vec<KPFingerprint> =
-            by_fingerprint.keys().cloned().collect();
-        expected_fingerprints.sort_unstable();
-        let mut labeled_fingerprints: Vec<KPFingerprint> = self
-            .encrypted_shares
-            .iter()
-            .map(|s| s.recipient_fingerprint.clone())
-            .collect();
-        labeled_fingerprints.sort_unstable();
-        anyhow::ensure!(
-            labeled_fingerprints == expected_fingerprints,
-            "encrypted share recipient roster differs from expected KP certs: expected \
+    let mut expected_fingerprints: Vec<KPFingerprint> = by_fingerprint.keys().cloned().collect();
+    expected_fingerprints.sort_unstable();
+    let mut labeled_fingerprints: Vec<KPFingerprint> = state
+        .encrypted_shares
+        .iter()
+        .map(|s| s.recipient_fingerprint.clone())
+        .collect();
+    labeled_fingerprints.sort_unstable();
+    anyhow::ensure!(
+        labeled_fingerprints == expected_fingerprints,
+        "encrypted share recipient roster differs from expected KP certs: expected \
              {expected_fingerprints:?}, got {labeled_fingerprints:?}"
-        );
+    );
 
-        for share in self.encrypted_shares.iter() {
-            let expected_cert = by_fingerprint
-                .get(&share.recipient_fingerprint)
-                .with_context(|| {
-                    format!(
-                        "share id {} is labeled for fingerprint {}, which is not among the \
+    for share in state.encrypted_shares.iter() {
+        let expected_cert = by_fingerprint
+            .get(&share.recipient_fingerprint)
+            .with_context(|| {
+                format!(
+                    "share id {} is labeled for fingerprint {}, which is not among the \
                              operator-supplied KP certs",
-                        share.id.get(),
-                        share.recipient_fingerprint
-                    )
-                })?;
-            let recipients = pgp_message_recipients(&share.armored_ciphertext)
-                .with_context(|| format!("parse PGP recipients for share id {}", share.id.get()))?;
-            anyhow::ensure!(
-                !recipients.is_empty(),
-                "share id {} has no PGP recipients",
-                share.id.get()
-            );
-            for handle in &recipients {
-                anyhow::ensure!(
-                    cert_owns_key_handle(expected_cert, handle),
-                    "share id {} (labeled {}) is encrypted to key {handle}, which is not in \
-                     that cert",
                     share.id.get(),
                     share.recipient_fingerprint
-                );
-            }
-            info!(
-                share_id = share.id.get(),
-                fingerprint = %share.recipient_fingerprint,
-                recipient_count = recipients.len(),
-                "verified share is encrypted only to its labeled cert"
+                )
+            })?;
+        let recipients = pgp_message_recipients(&share.armored_ciphertext)
+            .with_context(|| format!("parse PGP recipients for share id {}", share.id.get()))?;
+        anyhow::ensure!(
+            !recipients.is_empty(),
+            "share id {} has no PGP recipients",
+            share.id.get()
+        );
+        for handle in &recipients {
+            anyhow::ensure!(
+                cert_owns_key_handle(expected_cert, handle),
+                "share id {} (labeled {}) is encrypted to key {handle}, which is not in \
+                     that cert",
+                share.id.get(),
+                share.recipient_fingerprint
             );
         }
         info!(
-            "all {} KP share-state entries encrypted to their labeled certs",
-            self.encrypted_shares.len()
+            share_id = share.id.get(),
+            fingerprint = %share.recipient_fingerprint,
+            recipient_count = recipients.len(),
+            "verified share is encrypted only to its labeled cert"
         );
-        Ok(())
     }
+    info!(
+        "all {} KP share-state entries encrypted to their labeled certs",
+        state.encrypted_shares.len()
+    );
+    Ok(())
 }
 
 /// Confirm this KP's own cert is one of the operator-supplied roster certs.
@@ -343,6 +275,8 @@ fn scalar_from_decrypted_plaintext(plaintext: &[u8]) -> Result<Scalar> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hashi_types::guardian::KPEncryptedShares;
+    use hashi_types::guardian::SecretSharingInstance;
     use hashi_types::guardian::ShareCommitment;
     use hashi_types::guardian::ShareCommitments;
     use hashi_types::pgp::encrypt_armored;
@@ -430,14 +364,13 @@ mod tests {
     }
 
     #[test]
-    fn verified_ceremony_state_accepts_well_formed() {
+    fn ceremony_state_accepts_well_formed() {
         let resp = response(&[1, 2, 3], &[1, 2, 3]);
-        VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2)
-            .expect("well-formed response should pass");
+        ceremony_state_from_response(resp, 0, 3, 2).expect("well-formed response should pass");
     }
 
     #[test]
-    fn verified_ceremony_state_equality_covers_btc_pubkey() {
+    fn ceremony_state_equality_covers_btc_pubkey() {
         // operator_ceremony gates publishing on `logged == live` (S3 log vs
         // response), so the pubkey is only guarded if it's part of the equality.
         let other_pubkey = hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey(
@@ -448,7 +381,7 @@ mod tests {
         let state = |pubkey| {
             let mut resp = response(&[1, 2, 3], &[1, 2, 3]);
             resp.btc_master_pubkey = pubkey;
-            VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2).unwrap()
+            ceremony_state_from_response(resp, 0, 3, 2).unwrap()
         };
 
         assert_eq!(state(dummy_btc_pubkey()), state(dummy_btc_pubkey()));
@@ -456,50 +389,48 @@ mod tests {
     }
 
     #[test]
-    fn verified_ceremony_state_rejects_wrong_share_count() {
+    fn ceremony_state_rejects_wrong_share_count() {
         let resp = response(&[1, 2], &[1, 2, 3]);
-        let err =
-            VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2).unwrap_err();
+        let err = ceremony_state_from_response(resp, 0, 3, 2).unwrap_err();
         assert!(format!("{err}").contains("encrypted shares"), "{err}");
     }
 
     #[test]
-    fn verified_ceremony_state_rejects_wrong_instance_num_shares() {
+    fn ceremony_state_rejects_wrong_instance_num_shares() {
         let resp = response(&[1, 2], &[1, 2]);
-        let err =
-            VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2).unwrap_err();
+        let err = ceremony_state_from_response(resp, 0, 3, 2).unwrap_err();
         assert!(format!("{err}").contains("num_shares"), "{err}");
     }
 
     #[test]
-    fn verified_ceremony_state_rejects_wrong_instance_threshold() {
+    fn ceremony_state_rejects_wrong_instance_threshold() {
         let instance = SecretSharingInstance::new(commitments(&[1, 2, 3]), 3, 3, 0).unwrap();
         let resp = response_with_instance(&[1, 2, 3], instance);
-        let err =
-            VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2).unwrap_err();
+        let err = ceremony_state_from_response(resp, 0, 3, 2).unwrap_err();
         assert!(format!("{err}").contains("threshold"), "{err}");
     }
 
     #[test]
-    fn verified_ceremony_state_rejects_wrong_instance_sharing_seq() {
+    fn ceremony_state_rejects_wrong_instance_sharing_seq() {
         let instance = SecretSharingInstance::new(commitments(&[1, 2, 3]), 3, 2, 1).unwrap();
         let resp = response_with_instance(&[1, 2, 3], instance);
-        let err =
-            VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2).unwrap_err();
+        let err = ceremony_state_from_response(resp, 0, 3, 2).unwrap_err();
         assert!(format!("{err}").contains("sharing_seq"), "{err}");
     }
 
     #[test]
-    fn verified_ceremony_state_rejects_mismatched_kp_share_state_seq() {
-        let resp = response(&[3, 1, 2], &[1, 2, 3]);
-        let err = VerifiedCeremonyState::from_scraped(
-            "ceremony-session".into(),
-            "kp-share-session".into(),
-            resp.secret_sharing_instance,
-            KpShareStateLogMessage::new(1, 0, resp.encrypted_shares),
-            resp.btc_master_pubkey,
-            3,
-            2,
+    fn ceremony_state_rejects_mismatched_kp_share_state_seq() {
+        let SetupNewKeyResponse {
+            encrypted_shares,
+            secret_sharing_instance,
+            btc_master_pubkey,
+        } = response(&[3, 1, 2], &[1, 2, 3]);
+        let err = CeremonyState::new(
+            CeremonyLogMessage::NewKey {
+                instance: secret_sharing_instance,
+                btc_master_pubkey,
+            },
+            KpShareStateLogMessage::new(1, 0, encrypted_shares),
         )
         .unwrap_err();
         assert!(format!("{err}").contains("kp-shares sharing_seq"), "{err}");
@@ -511,11 +442,9 @@ mod tests {
         let cert2 = mock_cert();
         let cert3 = mock_cert();
         let resp = encrypted_response(&[&cert1, &cert2, &cert3]);
-        let state = VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2)
-            .expect("valid state");
+        let state = ceremony_state_from_response(resp, 0, 3, 2).expect("valid state");
 
-        state
-            .verify_encrypted_share_recipients(&[cert3, cert1, cert2])
+        verify_encrypted_share_recipients(&state, &[cert3, cert1, cert2])
             .expect("recipient validation should be by fingerprint, not config order");
     }
 
@@ -525,12 +454,9 @@ mod tests {
         let cert2 = mock_cert();
         let cert3 = mock_cert();
         let resp = encrypted_response(&[&cert1, &cert1, &cert3]);
-        let state = VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2)
-            .expect("valid state");
+        let state = ceremony_state_from_response(resp, 0, 3, 2).expect("valid state");
 
-        let err = state
-            .verify_encrypted_share_recipients(&[cert1, cert2, cert3])
-            .unwrap_err();
+        let err = verify_encrypted_share_recipients(&state, &[cert1, cert2, cert3]).unwrap_err();
         assert!(
             format!("{err}").contains("recipient roster differs"),
             "{err}"
@@ -544,12 +470,9 @@ mod tests {
         let cert3 = mock_cert();
         let unexpected = mock_cert();
         let resp = encrypted_response(&[&cert1, &cert2, &unexpected]);
-        let state = VerifiedCeremonyState::from_response(resp, "session".into(), 0, 3, 2)
-            .expect("valid state");
+        let state = ceremony_state_from_response(resp, 0, 3, 2).expect("valid state");
 
-        let err = state
-            .verify_encrypted_share_recipients(&[cert1, cert2, cert3])
-            .unwrap_err();
+        let err = verify_encrypted_share_recipients(&state, &[cert1, cert2, cert3]).unwrap_err();
         assert!(
             format!("{err}").contains("recipient roster differs"),
             "{err}"

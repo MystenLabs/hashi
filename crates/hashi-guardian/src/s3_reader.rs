@@ -19,6 +19,8 @@ use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use hashi_types::guardian::BuildPcrs;
+use hashi_types::guardian::CeremonyLogMessage;
+use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GenesisLogMessage;
 use hashi_types::guardian::GuardianInfo;
@@ -63,17 +65,6 @@ pub enum BuildPolicy {
     /// Accept either the configured current build or an explicitly allowlisted
     /// previous build. This is for historical log reads, not live-session checks.
     AnyAllowlisted,
-}
-
-/// The latest ceremony record paired with the latest KP share state for that
-/// ceremony's secret-sharing instance.
-#[derive(Clone, Debug, PartialEq)]
-pub struct CeremonyAndKpShareState {
-    pub ceremony_session_id: SessionID,
-    pub kp_share_session_id: SessionID,
-    pub secret_sharing_instance: SecretSharingInstance,
-    pub btc_master_pubkey: BitcoinPubkey,
-    pub kp_share_state: KpShareStateLogMessage,
 }
 
 impl BuildPolicy {
@@ -187,6 +178,18 @@ impl GuardianReader {
         &mut self,
         build_policy: BuildPolicy,
     ) -> anyhow::Result<Option<(SessionID, SecretSharingInstance, BitcoinPubkey)>> {
+        let Some((session_id, message)) = self.read_latest_ceremony_message(build_policy).await?
+        else {
+            return Ok(None);
+        };
+        let (instance, btc_master_pubkey) = message.into_instance_and_pubkey();
+        Ok(Some((session_id, instance, btc_master_pubkey)))
+    }
+
+    async fn read_latest_ceremony_message(
+        &mut self,
+        build_policy: BuildPolicy,
+    ) -> anyhow::Result<Option<(SessionID, CeremonyLogMessage)>> {
         let keys = self
             .s3
             .validate_prefix_history_and_list_keys(&format!("{}/", S3_DIR_CEREMONY))
@@ -203,7 +206,7 @@ impl GuardianReader {
         &mut self,
         key: &str,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<(SessionID, SecretSharingInstance, BitcoinPubkey)> {
+    ) -> anyhow::Result<(SessionID, CeremonyLogMessage)> {
         let record = self.s3.get_log_record(key).await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
         let session_id = record.session_id.clone();
@@ -212,8 +215,7 @@ impl GuardianReader {
         let LogMessage::V1(LogMessageV1::Ceremony(msg)) = record.message else {
             anyhow::bail!("expected a ceremony log at {key}");
         };
-        let (instance, btc_master_pubkey) = (*msg).into_instance_and_pubkey();
-        Ok((session_id, instance, btc_master_pubkey))
+        Ok((session_id, *msg))
     }
 
     /// Read + verify the latest encrypted KP share state for `sharing_seq`.
@@ -268,27 +270,18 @@ impl GuardianReader {
     pub async fn read_latest_ceremony_and_kp_share_state(
         &mut self,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<Option<CeremonyAndKpShareState>> {
-        let Some((ceremony_session_id, secret_sharing_instance, btc_master_pubkey)) =
-            self.read_latest_ceremony(build_policy).await?
-        else {
+    ) -> anyhow::Result<Option<CeremonyState>> {
+        let Some((_, ceremony)) = self.read_latest_ceremony_message(build_policy).await? else {
             return Ok(None);
         };
-        let sharing_seq = secret_sharing_instance.sharing_seq();
-        let (kp_share_session_id, kp_share_state) = self
+        let sharing_seq = ceremony.sharing_seq();
+        let (_, kp_share_state) = self
             .read_latest_kp_share_state(sharing_seq, build_policy)
             .await?
             .with_context(|| {
                 format!("no kp-shares log found for latest ceremony sharing_seq {sharing_seq}")
             })?;
-
-        Ok(Some(CeremonyAndKpShareState {
-            ceremony_session_id,
-            kp_share_session_id,
-            secret_sharing_instance,
-            btc_master_pubkey,
-            kp_share_state,
-        }))
+        Ok(Some(CeremonyState::new(ceremony, kp_share_state)?))
     }
 
     /// Latest serving committee, preferring `committee-update/` and falling back

@@ -5,7 +5,6 @@ use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::ensure;
 use hashi_guardian::s3_reader::BuildPolicy;
-use hashi_guardian::s3_reader::CeremonyAndKpShareState;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::InitConfig;
@@ -23,7 +22,8 @@ use tracing::info;
 use crate::config::Config;
 use crate::guardian_info::ensure_oi_info_matches_post_init;
 use crate::guardian_info::verified_live_guardian_info;
-use crate::kp_roster::VerifiedCeremonyState;
+use crate::kp_roster::validate_ceremony_state_shape;
+use crate::kp_roster::verify_encrypted_share_recipients;
 
 /// Initialize a fresh withdraw-mode guardian with operator-supplied stable config.
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
@@ -141,33 +141,22 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         phase = "ceremony instance",
         "scraping authoritative ceremony/ and kp-shares/ logs",
     );
-    let CeremonyAndKpShareState {
-        ceremony_session_id: ceremony_session,
-        kp_share_session_id: kp_share_session,
-        secret_sharing_instance: scraped_instance,
-        btc_master_pubkey,
-        kp_share_state,
-    } = reader
+    let ceremony_state = reader
         .read_latest_ceremony_and_kp_share_state(BuildPolicy::AnyAllowlisted)
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;
-    let sharing_seq = scraped_instance.sharing_seq();
-    let ceremony_state = VerifiedCeremonyState::from_scraped(
-        ceremony_session.clone(),
-        kp_share_session.clone(),
-        scraped_instance.clone(),
-        kp_share_state,
-        btc_master_pubkey,
+    validate_ceremony_state_shape(
+        &ceremony_state,
         cfg.kp_roster.num_shares,
         cfg.kp_roster.threshold,
     )?;
-    ceremony_state.verify_encrypted_share_recipients(&certs)?;
+    verify_encrypted_share_recipients(&ceremony_state, &certs)?;
+    let scraped_instance = ceremony_state.secret_sharing_instance.clone();
+    let sharing_seq = scraped_instance.sharing_seq();
     info!(
         phase = "ceremony instance",
-        ceremony_session = %ceremony_session,
-        kp_share_session = %kp_share_session,
         sharing_seq,
-        cert_seq = ceremony_state.kp_share_cert_seq,
+        cert_seq = ceremony_state.cert_seq,
         n = scraped_instance.num_shares(),
         t = scraped_instance.threshold(),
         share_count = ceremony_state.encrypted_shares.len(),
