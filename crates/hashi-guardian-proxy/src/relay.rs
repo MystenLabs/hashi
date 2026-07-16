@@ -195,9 +195,9 @@ impl GuardianRelayService for Relay {
             ));
         }
 
-        let signed_request =
-            KpSigned::<SingleProvisionerInitRequest>::try_from(request.into_inner())
-                .map_err(|e| Status::invalid_argument(format!("malformed request: {e}")))?;
+        let submission = request.into_inner();
+        let signed_request = KpSigned::<SingleProvisionerInitRequest>::try_from(submission.clone())
+            .map_err(|e| Status::invalid_argument(format!("malformed request: {e}")))?;
 
         // Authenticate before the lock or any backend read: junk submissions
         // can't poison the batch, hold the mutex, or cost enclave round-trips.
@@ -250,10 +250,7 @@ impl GuardianRelayService for Relay {
         if acc.completed {
             return Ok(done());
         }
-        acc.insert(
-            id,
-            proto::SignedSingleProvisionerInitRequest::from(signed_request),
-        );
+        acc.insert(id, submission);
         let have = acc.have();
         info!(
             share_id = id,
