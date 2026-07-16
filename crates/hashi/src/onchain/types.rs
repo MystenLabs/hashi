@@ -525,7 +525,7 @@ impl ProposalType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Config {
     pub config: BTreeMap<String, ConfigValue>,
     pub enabled_versions: BTreeSet<u64>,

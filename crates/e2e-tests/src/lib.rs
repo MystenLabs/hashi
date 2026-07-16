@@ -348,6 +348,26 @@ impl TestNetworksBuilder {
 
         tracing::info!("rpc url: {}", test_networks.sui_network().rpc_url);
 
+        // The launch tx writes guardian_url into the config with no event, so
+        // nodes that booted pre-launch only see it via the watcher's periodic
+        // config poll. Gate on it BEFORE the override proposals below: their
+        // ProposalExecuted events also refresh the config and would mask a
+        // broken poll path (which is how the testnet launch outage slipped by).
+        // Genesis end_reconfig losers rescrape and heal incidentally too, so
+        // only the race winner actually exercises the poll here.
+        if nodes_started {
+            futures::future::try_join_all(
+                test_networks
+                    .hashi_network
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.is_running())
+                    .map(|node| node.wait_for_guardian_client(std::time::Duration::from_secs(60))),
+            )
+            .await?;
+            tracing::info!("running hashi nodes resolved the guardian client from on-chain config");
+        }
+
         if nodes_started && !self.onchain_config_overrides.is_empty() {
             apply_onchain_config_overrides(&mut test_networks, &self.onchain_config_overrides)
                 .await?;

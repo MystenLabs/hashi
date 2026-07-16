@@ -178,6 +178,26 @@ impl HashiNodeHandle {
         }
     }
 
+    pub(crate) async fn wait_for_guardian_client(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        tokio::time::timeout(timeout, self.wait_for_guardian_client_inner())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("guardian client resolution timed out after {:?}", timeout)
+            })
+    }
+
+    async fn wait_for_guardian_client_inner(&self) {
+        loop {
+            if self.hashi().guardian_client().is_some() {
+                return;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
     pub fn current_epoch(&self) -> Option<u64> {
         self.hashi()
             .onchain_state_opt()
