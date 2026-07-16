@@ -5,13 +5,10 @@
 //! withdraw-mode standby guardian.
 
 use anyhow::Context;
-use anyhow::anyhow;
 use anyhow::ensure;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::ActivationState;
-use hashi_types::guardian::BuildPcrs;
-use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::InitConfig;
@@ -20,12 +17,11 @@ use hashi_types::guardian::S3Config;
 use hashi_types::guardian::VerifiedGuardianInfo;
 use hashi_types::guardian::WithdrawStage;
 use hashi_types::guardian::proto_conversions::operator_activate_request_to_pb;
-use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
-use tonic::transport::Channel;
 use tracing::info;
 
 use crate::config::Config;
+use crate::guardian_info::verified_live_guardian_info;
 
 /// Activate a provisioner-initialized standby guardian.
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
@@ -434,20 +430,4 @@ fn verify_activated_info(
         post.info.limiter_state
     );
     Ok(())
-}
-
-async fn verified_live_guardian_info(
-    client: &mut GuardianServiceClient<Channel>,
-    current_build: &BuildPcrs,
-) -> anyhow::Result<VerifiedGuardianInfo> {
-    let info_pb = client
-        .get_guardian_info(pb::GetGuardianInfoRequest {})
-        .await
-        .context("GetGuardianInfo RPC failed")?
-        .into_inner();
-    let info_resp = GetGuardianInfoResponse::try_from(info_pb)
-        .map_err(|e| anyhow!("decode GetGuardianInfoResponse: {e:?}"))?;
-    info_resp
-        .verify(current_build)
-        .map_err(|e| anyhow!("verify GuardianInfo attestation/signature: {e:?}"))
 }
