@@ -654,9 +654,11 @@ impl GuardianS3Client {
             .ok_or_else(|| S3Error(format!("expected OIGuardianInfo at key {info_key}")))?;
 
         // 3. Anchor the pubkey and pin PCR0 to the allowlist entry for the
-        //    reported build.
+        //    reported build. This replays a logged attestation whose short-lived
+        //    leaf cert has typically expired, so the chain is checked at the
+        //    document's own signed timestamp, not now.
         let build_pcrs = allowlist.resolve(&info.untrusted_git_revision)?.clone();
-        attestation.verify(&signing_pubkey, &build_pcrs)?;
+        attestation.verify_replay(&signing_pubkey, &build_pcrs)?;
 
         Ok(VerifiedSessionInfo {
             signing_pubkey,
