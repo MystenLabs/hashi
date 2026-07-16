@@ -208,6 +208,34 @@ pub enum CeremonyLogMessage {
 }
 
 impl CeremonyLogMessage {
+    /// Consume the ceremony result. `NewKey` yields its initial instance;
+    /// `Rotate` yields the new instance after verifying that it advances exactly
+    /// one `sharing_seq` from the consumed instance.
+    pub fn into_instance_and_pubkey(self) -> (SecretSharingInstance, BitcoinPubkey) {
+        match self {
+            Self::NewKey {
+                instance,
+                btc_master_pubkey,
+            } => (instance, btc_master_pubkey),
+            Self::Rotate {
+                old_instance,
+                new_instance,
+                btc_master_pubkey,
+            } => {
+                let expected = old_instance
+                    .sharing_seq()
+                    .checked_add(1)
+                    .expect("Rotate old sharing_seq must not be u64::MAX");
+                assert_eq!(
+                    new_instance.sharing_seq(),
+                    expected,
+                    "Rotate must advance sharing_seq by exactly one"
+                );
+                (new_instance, btc_master_pubkey)
+            }
+        }
+    }
+
     /// The resulting instance's `sharing_seq` — used as the `ceremony/` object key.
     pub fn sharing_seq(&self) -> u64 {
         match self {

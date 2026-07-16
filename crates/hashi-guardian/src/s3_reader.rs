@@ -19,7 +19,6 @@ use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use hashi_types::guardian::BuildPcrs;
-use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GenesisLogMessage;
 use hashi_types::guardian::GuardianInfo;
@@ -213,7 +212,7 @@ impl GuardianReader {
         let LogMessage::V1(LogMessageV1::Ceremony(msg)) = record.message else {
             anyhow::bail!("expected a ceremony log at {key}");
         };
-        let (instance, btc_master_pubkey) = ceremony_instance_and_pubkey(*msg, key)?;
+        let (instance, btc_master_pubkey) = (*msg).into_instance_and_pubkey();
         Ok((session_id, instance, btc_master_pubkey))
     }
 
@@ -417,38 +416,6 @@ impl GuardianSessionCache {
             })
             .with_context(|| "failed to verify guardian enclave signature")
     }
-}
-
-/// The resulting instance from a ceremony message: `NewKey` yields its instance;
-/// `Rotate` yields `new_instance`, asserting the rotation bumps `sharing_seq` by
-/// exactly one over the consumed `old_instance`.
-fn ceremony_instance_and_pubkey(
-    msg: CeremonyLogMessage,
-    key: &str,
-) -> anyhow::Result<(SecretSharingInstance, BitcoinPubkey)> {
-    Ok(match msg {
-        CeremonyLogMessage::NewKey {
-            instance,
-            btc_master_pubkey,
-        } => (instance, btc_master_pubkey),
-        CeremonyLogMessage::Rotate {
-            old_instance,
-            new_instance,
-            btc_master_pubkey,
-        } => {
-            let expected = old_instance
-                .sharing_seq()
-                .checked_add(1)
-                .ok_or_else(|| anyhow::anyhow!("Rotate old sharing_seq is u64::MAX at {key}"))?;
-            anyhow::ensure!(
-                new_instance.sharing_seq() == expected,
-                "Rotate ceremony log at {key} has non-contiguous sharing_seq: old={}, new={}",
-                old_instance.sharing_seq(),
-                new_instance.sharing_seq()
-            );
-            (new_instance, btc_master_pubkey)
-        }
-    })
 }
 
 /// Pick the lex-greatest key, skipping any whose name starts with `<dir>/failure-`.
