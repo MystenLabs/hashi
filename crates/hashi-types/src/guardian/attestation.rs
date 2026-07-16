@@ -28,9 +28,9 @@ impl NitroAttestation {
         self.0
     }
 
-    /// Verify this Nitro attestation document (COSE signature + AWS cert chain to the
-    /// Nitro root + freshness), that it commits to `signing_pubkey`, and that its
-    /// PCR0 matches `build_pcrs`.
+    /// Verify a LIVE attestation document (COSE signature + AWS cert chain to the
+    /// Nitro root, chain validity checked at the current time), that it commits to
+    /// `signing_pubkey`, and that its PCR0 matches `build_pcrs`.
     ///
     /// In non-enclave dev/test builds the enclave emits a mock document, so the
     /// attestation check is a no-op, mirroring `get_attestation` `non-enclave-dev`
@@ -40,9 +40,33 @@ impl NitroAttestation {
         signing_pubkey: &GuardianPubKey,
         build_pcrs: &BuildPcrs,
     ) -> GuardianResult<()> {
+        self.verify_at(signing_pubkey, build_pcrs, VerifyTime::Now)
+    }
+
+    /// Verify a REPLAYED attestation document read back from the S3 audit log.
+    ///
+    /// The Nitro leaf certificate lives only a few hours, so a replayed document
+    /// can never chain-validate at the current time. Anchor the chain check at the
+    /// document's own timestamp instead: it is inside the COSE-signed payload (so
+    /// it cannot be altered without breaking the signature just verified), and a
+    /// genuine document's chain was valid at the instant NSM produced it.
+    pub fn verify_replay(
+        &self,
+        signing_pubkey: &GuardianPubKey,
+        build_pcrs: &BuildPcrs,
+    ) -> GuardianResult<()> {
+        self.verify_at(signing_pubkey, build_pcrs, VerifyTime::DocumentTimestamp)
+    }
+
+    fn verify_at(
+        &self,
+        signing_pubkey: &GuardianPubKey,
+        build_pcrs: &BuildPcrs,
+        verify_time: VerifyTime,
+    ) -> GuardianResult<()> {
         #[cfg(any(test, feature = "non-enclave-dev"))]
         {
-            let _ = (signing_pubkey, build_pcrs);
+            let _ = (signing_pubkey, build_pcrs, verify_time);
             // Real attestation is stubbed here — announce it loudly (once) so a
             // `non-enclave-dev` binary can't be mistaken for a real enclave.
             // Gated off `test` so unit tests stay quiet.
@@ -68,7 +92,11 @@ impl NitroAttestation {
             let (signature, signed_message, doc) =
                 parse_nitro_attestation(&self.0, true, true, true)
                     .map_err(|e| InvalidInputs(format!("attestation parse failed: {e}")))?;
-            verify_nitro_attestation(&signature, &signed_message, &doc, now_timestamp_ms())
+            let timestamp_ms = match verify_time {
+                VerifyTime::Now => now_timestamp_ms(),
+                VerifyTime::DocumentTimestamp => doc.timestamp,
+            };
+            verify_nitro_attestation(&signature, &signed_message, &doc, timestamp_ms)
                 .map_err(|e| InvalidInputs(format!("attestation verification failed: {e}")))?;
 
             let attested = doc
@@ -89,6 +117,15 @@ impl NitroAttestation {
             Ok(())
         }
     }
+}
+
+/// When the attestation's cert chain validity is checked: at the current time
+/// (live RPC responses) or at the document's own COSE-signed timestamp
+/// (replays from the S3 audit log, where the short-lived leaf has expired).
+#[derive(Clone, Copy)]
+enum VerifyTime {
+    Now,
+    DocumentTimestamp,
 }
 
 /// A session's verified guardian info: the attestation-anchored signing pubkey,
