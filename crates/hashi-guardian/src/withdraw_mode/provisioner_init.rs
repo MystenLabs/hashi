@@ -106,7 +106,8 @@ fn verify_signed_submissions(
                 share_id = submission.encrypted_share().id.get(),
                 signer_fingerprint, "verified signed PI submission"
             );
-            Ok(submission.into_parts().2)
+            let (_, _, encrypted_share) = submission.into_parts();
+            Ok(encrypted_share)
         })
         .collect()
 }
