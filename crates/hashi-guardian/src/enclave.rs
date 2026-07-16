@@ -76,9 +76,9 @@ pub struct EnclaveState {
 struct InitializationState {
     /// Withdraw-mode input: stable configuration installed by `operator_init`.
     init_config: OnceLock<InitConfig>,
-    /// Withdraw-mode input: expected ceremony commitments and parameters,
-    /// installed by `operator_init` for `provisioner_init` to validate against.
-    secret_sharing_instance: RwLock<Option<SecretSharingInstance>>,
+    /// Withdraw-mode input: the ceremony instance and its share-to-KP assignment,
+    /// installed by `operator_init` for `provisioner_init` validation.
+    ceremony_state: RwLock<Option<CeremonyState>>,
     /// Ceremony-mode output: encrypted shares produced by `setup_new_key` or
     /// `rotate_kps`, retained for KPs to fetch from `get_guardian_info`.
     latest_encrypted_shares: OnceLock<KPEncryptedShares>,
@@ -88,11 +88,11 @@ impl InitializationState {
     /// Drop withdraw-mode inputs that may become stale once the enclave is active.
     /// Stable config and ceremony-mode output remain available.
     fn clear(&self) {
-        self.secret_sharing_instance
+        self.ceremony_state
             .write()
-            .expect("secret-sharing instance lock poisoned")
+            .expect("ceremony state lock poisoned")
             .take()
-            .expect("secret-sharing instance must exist before activation");
+            .expect("ceremony state must exist before activation");
     }
 }
 
@@ -454,9 +454,9 @@ impl Enclave {
                     && self.init_state.init_config.get().is_some()
                     && self
                         .init_state
-                        .secret_sharing_instance
+                        .ceremony_state
                         .read()
-                        .expect("secret-sharing instance lock poisoned")
+                        .expect("ceremony state lock poisoned")
                         .is_some()
                     && self.config.hashi_btc_master_pubkey.get().is_some()
             }
@@ -602,27 +602,28 @@ impl Enclave {
     // ========================================================================
 
     pub fn secret_sharing_instance(&self) -> GuardianResult<SecretSharingInstance> {
-        self.init_state
-            .secret_sharing_instance
-            .read()
-            .expect("secret-sharing instance lock poisoned")
-            .clone()
-            .ok_or(InvalidInputs("Secret-sharing instance not set".into()))
+        Ok(self.ceremony_state()?.secret_sharing_instance)
     }
 
-    pub fn set_secret_sharing_instance(
-        &self,
-        instance: SecretSharingInstance,
-    ) -> GuardianResult<()> {
+    pub fn ceremony_state(&self) -> GuardianResult<CeremonyState> {
+        self.init_state
+            .ceremony_state
+            .read()
+            .expect("ceremony state lock poisoned")
+            .clone()
+            .ok_or(InvalidInputs("Ceremony state not set".into()))
+    }
+
+    pub fn set_ceremony_state(&self, state: CeremonyState) -> GuardianResult<()> {
         let mut slot = self
             .init_state
-            .secret_sharing_instance
+            .ceremony_state
             .write()
-            .expect("secret-sharing instance lock poisoned");
+            .expect("ceremony state lock poisoned");
         if slot.is_some() {
-            return Err(InvalidInputs("Secret-sharing instance already set".into()));
+            return Err(InvalidInputs("Ceremony state already set".into()));
         }
-        *slot = Some(instance);
+        *slot = Some(state);
         Ok(())
     }
 

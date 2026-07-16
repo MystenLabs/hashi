@@ -21,17 +21,14 @@ use GuardianError::*;
 /// The withdraw-mode arming state to install, built from `InitConfig`.
 pub(crate) struct InitInstall {
     init_config: InitConfig,
-    secret_sharing_instance: SecretSharingInstance,
+    ceremony_state: CeremonyState,
 }
 
 impl InitInstall {
-    pub(crate) fn from_parts(
-        config: InitConfig,
-        secret_sharing_instance: SecretSharingInstance,
-    ) -> Self {
+    pub(crate) fn from_parts(config: InitConfig, ceremony_state: CeremonyState) -> Self {
         Self {
             init_config: config,
-            secret_sharing_instance,
+            ceremony_state,
         }
     }
 
@@ -43,16 +40,13 @@ impl InitInstall {
     ) -> GuardianResult<Self> {
         let mut reader =
             GuardianReader::from_s3_client(logger.clone(), config.pcr_allowlist().clone());
-        let CeremonyState {
-            secret_sharing_instance,
-            ..
-        } = reader
+        let ceremony_state = reader
             .read_latest_ceremony_and_kp_share_state(BuildPolicy::AnyAllowlisted)
             .await
             .map_err(|e| InvalidInputs(format!("read latest ceremony and KP share state: {e}")))?
             .ok_or_else(|| InvalidInputs("no ceremony log found for withdraw init".into()))?;
 
-        Ok(Self::from_parts(config, secret_sharing_instance))
+        Ok(Self::from_parts(config, ceremony_state))
     }
 
     /// Install the bundle onto a fresh enclave. Infallible by design (see the
@@ -69,13 +63,16 @@ impl InitInstall {
 
         info!(
             "Storing secret-sharing instance: n={}, t={}, {} commitments.",
-            self.secret_sharing_instance.num_shares(),
-            self.secret_sharing_instance.threshold(),
-            self.secret_sharing_instance.commitments().len()
+            self.ceremony_state.secret_sharing_instance.num_shares(),
+            self.ceremony_state.secret_sharing_instance.threshold(),
+            self.ceremony_state
+                .secret_sharing_instance
+                .commitments()
+                .len()
         );
         enclave
-            .set_secret_sharing_instance(self.secret_sharing_instance)
-            .expect("Unable to set secret-sharing instance");
+            .set_ceremony_state(self.ceremony_state)
+            .expect("Unable to set ceremony state");
 
         info!("Setting init config.");
         enclave
@@ -202,9 +199,8 @@ mod tests {
         let withdraw = match mode {
             EnclaveMode::Withdraw => {
                 let config = InitConfig::mock_for_testing(None);
-                let secret_sharing_instance =
-                    crate::test_utils::OperatorInitTestArgs::default().secret_sharing_instance;
-                Some(InitInstall::from_parts(config, secret_sharing_instance))
+                let args = crate::test_utils::OperatorInitTestArgs::default();
+                Some(InitInstall::from_parts(config, args.ceremony_state))
             }
             EnclaveMode::Ceremony => None,
         };
