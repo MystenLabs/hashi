@@ -3,11 +3,12 @@
 
 //! The provisioning relay: the out-of-enclave half of `single_provisioner_init`.
 //!
-//! Key provisioners submit HPKE-encrypted shares one at a time; the relay
-//! accumulates distinct shares for the guardian's current session and, once it
-//! holds a threshold-many, submits them in one batch `ProvisionerInit`. Shares
-//! are encrypted to the enclave session key, so the relay is liveness-only: it
-//! can stall provisioning but cannot read a share or forge a key.
+//! Key provisioners submit signed, HPKE-encrypted shares one at a time; the relay
+//! pre-verifies and accumulates distinct submissions for the guardian's current
+//! session and, once it holds a threshold-many, forwards them unchanged in one
+//! batch `ProvisionerInit`. The enclave re-verifies every signature and current
+//! KP assignment, so the relay is liveness-only: it can stall provisioning but
+//! cannot read a share or forge a key.
 //!
 //! `Accumulator` holds the (pure, unit-tested) accumulation logic; a `tokio`
 //! mutex serializes it and keeps at most one `ProvisionerInit` in flight.
@@ -15,7 +16,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use hashi_types::guardian::proto_conversions::guardian_encrypted_share_to_pb;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::KpSigned;
@@ -39,7 +39,7 @@ use tracing::warn;
 #[derive(Default)]
 struct Accumulator {
     session_id: Option<String>,
-    shares: BTreeMap<u32, proto::GuardianEncryptedShare>,
+    submissions: BTreeMap<u32, proto::SignedSingleProvisionerInitRequest>,
     completed: bool,
 }
 
@@ -48,25 +48,25 @@ impl Accumulator {
     fn sync_session(&mut self, live: &str) {
         if self.session_id.as_deref() != Some(live) {
             self.session_id = Some(live.to_string());
-            self.shares.clear();
+            self.submissions.clear();
             self.completed = false;
         }
     }
 
-    fn insert(&mut self, id: u32, share: proto::GuardianEncryptedShare) {
-        self.shares.insert(id, share);
+    fn insert(&mut self, id: u32, submission: proto::SignedSingleProvisionerInitRequest) {
+        self.submissions.insert(id, submission);
     }
 
     fn have(&self) -> usize {
-        self.shares.len()
+        self.submissions.len()
     }
 
-    fn batch(&self) -> Vec<proto::GuardianEncryptedShare> {
-        self.shares.values().cloned().collect()
+    fn batch(&self) -> Vec<proto::SignedSingleProvisionerInitRequest> {
+        self.submissions.values().cloned().collect()
     }
 
-    fn clear_shares(&mut self) {
-        self.shares.clear();
+    fn clear_submissions(&mut self) {
+        self.submissions.clear();
     }
 }
 
@@ -78,6 +78,7 @@ struct BackendStatus {
     /// them only while `provisioned` is false.
     num_shares: Option<usize>,
     threshold: Option<usize>,
+    config_hash: Option<[u8; 32]>,
     provisioned: bool,
 }
 
@@ -115,30 +116,37 @@ impl Relay {
         let sharing = info.secret_sharing_instance.as_ref();
         let num_shares = sharing.map(|i| i.num_shares());
         let threshold = sharing.map(|i| i.threshold());
+        let config_hash = info.config_hash;
         let provisioned = info.enclave_btc_pubkey.is_some();
         Ok(BackendStatus {
             session_id: session_id.into(),
             num_shares,
             threshold,
+            config_hash,
             provisioned,
         })
     }
 }
 
-/// Authenticate a submission: the signer's cert must be in the KP roster and
-/// its detached signature must cover these exact (session, share) bytes. A DoS
-/// guard only — the enclave still verifies every share against the commitments.
+/// Pre-authenticate a submission: the signer's cert must be in the configured
+/// relay roster and its detached signature must cover these exact
+/// (session, config, share) bytes. This is only a DoS guard; the enclave repeats
+/// signature and current S3 roster verification authoritatively.
 fn verify_kp_submission(
     signed_request: KpSigned<SingleProvisionerInitRequest>,
     authorized_kp_fingerprints: &[Fingerprint],
-) -> Result<SingleProvisionerInitRequest, Status> {
+) -> Result<KpSigned<SingleProvisionerInitRequest>, Status> {
     let fingerprint = signed_request.signer_fingerprint();
     if !authorized_kp_fingerprints.contains(&fingerprint) {
         return Err(Status::permission_denied(format!(
             "signer {fingerprint} is not in the relay's authorized KP roster"
         )));
     }
-    signed_request.verify().map_err(kp_signature_error_status)
+    signed_request
+        .clone()
+        .verify()
+        .map_err(kp_signature_error_status)?;
+    Ok(signed_request)
 }
 
 fn kp_signature_error_status(error: GuardianError) -> Status {
@@ -195,10 +203,11 @@ impl GuardianRelayService for Relay {
 
         // Authenticate before the lock or any backend read: junk submissions
         // can't poison the batch, hold the mutex, or cost enclave round-trips.
-        let req = verify_kp_submission(signed_request, &self.authorized_kp_fingerprints)?;
-        let (expected_session_id, encrypted_share) = req.into_parts();
-        let id = u32::from(encrypted_share.id.get());
-        let share = guardian_encrypted_share_to_pb(encrypted_share);
+        let signed_request =
+            verify_kp_submission(signed_request, &self.authorized_kp_fingerprints)?;
+        let expected_session_id = signed_request.data.expected_session_id().to_string();
+        let expected_config_hash = *signed_request.data.expected_config_hash();
+        let id = u32::from(signed_request.data.encrypted_share().id.get());
 
         // Hold the accumulator across the status read + batch submit so a racing
         // session change can't wipe a half-filled buffer, and only one runs at a time.
@@ -212,11 +221,23 @@ impl GuardianRelayService for Relay {
         }
         // The share is HPKE-encrypted to the session the KP pinned; if the
         // backend has since restarted into a new session, the share is useless.
-        if expected_session_id.as_str() != status.session_id {
+        if expected_session_id != status.session_id {
             return Err(Status::failed_precondition(format!(
                 "session mismatch: KP pinned {}, backend live session is {} \
                  (guardian restarted? re-run the provision flow)",
                 expected_session_id, status.session_id
+            )));
+        }
+        let live_config_hash = status.config_hash.ok_or_else(|| {
+            Status::failed_precondition(
+                "guardian has no config_hash yet; run `operator provision` first",
+            )
+        })?;
+        if expected_config_hash != live_config_hash {
+            return Err(Status::failed_precondition(format!(
+                "config hash mismatch: KP pinned {}, backend live config is {}",
+                hex::encode(expected_config_hash),
+                hex::encode(live_config_hash),
             )));
         }
         let (num_shares, threshold) =
@@ -232,7 +253,10 @@ impl GuardianRelayService for Relay {
         if acc.completed {
             return Ok(done());
         }
-        acc.insert(id, share);
+        acc.insert(
+            id,
+            proto::SignedSingleProvisionerInitRequest::from(signed_request),
+        );
         let have = acc.have();
         info!(
             share_id = id,
@@ -246,11 +270,11 @@ impl GuardianRelayService for Relay {
         }
 
         // Threshold reached: submit every buffered share in one batch.
-        let encrypted_shares = acc.batch();
+        let submissions = acc.batch();
         match self
             .client
             .clone()
-            .provisioner_init(proto::ProvisionerInitRequest { encrypted_shares })
+            .provisioner_init(proto::ProvisionerInitRequest { submissions })
             .await
         {
             Ok(_) => {
@@ -276,9 +300,9 @@ impl GuardianRelayService for Relay {
                         // the whole buffer and let the KPs resubmit a clean set.
                         warn!(
                             error = %e,
-                            "batch ProvisionerInit failed; clearing the share buffer for resubmission",
+                            "batch ProvisionerInit failed; clearing the submission buffer for resubmission",
                         );
-                        acc.clear_shares();
+                        acc.clear_submissions();
                         Err(Status::internal(format!(
                             "guardian ProvisionerInit failed: {e}"
                         )))
@@ -301,10 +325,16 @@ mod tests {
     use hashi_types::pgp::test_utils::sign_detached_in_process;
     use hashi_types::pgp::PgpPublicCert;
 
-    fn share(id: u32) -> proto::GuardianEncryptedShare {
-        proto::GuardianEncryptedShare {
-            id: Some(proto::GuardianShareId { id: Some(id) }),
-            ciphertext: None,
+    fn submission(id: u32) -> proto::SignedSingleProvisionerInitRequest {
+        proto::SignedSingleProvisionerInitRequest {
+            encrypted_share: Some(proto::GuardianEncryptedShare {
+                id: Some(proto::GuardianShareId { id: Some(id) }),
+                ciphertext: None,
+            }),
+            expected_session_id: "sess-a".into(),
+            signer_cert: "cert".into(),
+            kp_signature: "signature".into(),
+            expected_config_hash: Some(vec![7u8; 32].into()),
         }
     }
 
@@ -327,8 +357,12 @@ mod tests {
         let session = "sess-a";
 
         let domain_share = signed_share(1);
-        let request =
-            SingleProvisionerInitRequest::new(session.to_string().into(), domain_share.clone());
+        let config_hash = [7u8; 32];
+        let request = SingleProvisionerInitRequest::new(
+            session.to_string().into(),
+            config_hash,
+            domain_share.clone(),
+        );
         let signed_bytes = KpSigned::signed_bytes(&request);
         let good_sig = sign_detached_in_process(&secret_armored, &signed_bytes);
         let signed_request = KpSigned {
@@ -346,7 +380,7 @@ mod tests {
 
         let other_share = signed_share(2);
         let other_request =
-            SingleProvisionerInitRequest::new(session.to_string().into(), other_share);
+            SingleProvisionerInitRequest::new(session.to_string().into(), config_hash, other_share);
         let signed_other_share = KpSigned {
             data: other_request,
             signer_cert: cert.clone(),
@@ -373,7 +407,7 @@ mod tests {
         );
 
         let other_session_request =
-            SingleProvisionerInitRequest::new("other-session".into(), domain_share);
+            SingleProvisionerInitRequest::new("other-session".into(), config_hash, domain_share);
         let other_bytes = KpSigned::signed_bytes(&other_session_request);
         let stale_sig = sign_detached_in_process(&secret_armored, &other_bytes);
         let stale_request = KpSigned {
@@ -391,9 +425,9 @@ mod tests {
     fn dedupes_shares_by_id() {
         let mut acc = Accumulator::default();
         acc.sync_session("sess-a");
-        acc.insert(1, share(1));
-        acc.insert(1, share(1)); // same KP resubmits
-        acc.insert(2, share(2));
+        acc.insert(1, submission(1));
+        acc.insert(1, submission(1)); // same KP resubmits
+        acc.insert(2, submission(2));
         assert_eq!(acc.have(), 2);
         assert_eq!(acc.batch().len(), 2);
     }
@@ -402,8 +436,8 @@ mod tests {
     fn session_change_clears_buffer() {
         let mut acc = Accumulator::default();
         acc.sync_session("sess-a");
-        acc.insert(1, share(1));
-        acc.insert(2, share(2));
+        acc.insert(1, submission(1));
+        acc.insert(2, submission(2));
         acc.completed = true;
         // The backend restarted into a new session; old shares are useless.
         acc.sync_session("sess-b");
@@ -416,17 +450,17 @@ mod tests {
     fn same_session_preserves_buffer() {
         let mut acc = Accumulator::default();
         acc.sync_session("sess-a");
-        acc.insert(1, share(1));
+        acc.insert(1, submission(1));
         acc.sync_session("sess-a"); // repeated submit, same session
         assert_eq!(acc.have(), 1);
     }
 
     #[test]
-    fn clear_shares_empties_buffer_but_keeps_session() {
+    fn clear_submissions_empties_buffer_but_keeps_session() {
         let mut acc = Accumulator::default();
         acc.sync_session("sess-a");
-        acc.insert(1, share(1));
-        acc.clear_shares();
+        acc.insert(1, submission(1));
+        acc.clear_submissions();
         assert_eq!(acc.have(), 0);
         assert_eq!(acc.session_id.as_deref(), Some("sess-a"));
     }

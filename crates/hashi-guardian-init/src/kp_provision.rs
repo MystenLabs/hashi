@@ -23,13 +23,13 @@
 //! 6. The share is decrypted via the yubikey (`gpg --decrypt` over a pipe;
 //!    plaintext stays in memory) and verified against its commitment.
 //! 7. The decrypted share is HPKE-encrypted to the new guardian's
-//!    `encryption_pubkey` (from its `GuardianInfo`), with `config_hash` as AAD,
-//!    producing a `GuardianEncryptedShare` ready for `provisioner_init`.
+//!    `encryption_pubkey` (from its `GuardianInfo`), producing a
+//!    `GuardianEncryptedShare` ready for `provisioner_init`.
 //! 8. The share is submitted to the configured relay endpoint via
-//!    `SingleProvisionerInit`. The relay rejects if the backend session no
-//!    longer matches the session pinned above, otherwise it accumulates T-of-N
-//!    shares and calls the guardian's batch `provisioner_init` once it has
-//!    enough.
+//!    `SingleProvisionerInit`, signed together with the pinned session and
+//!    verified `config_hash`. The relay accumulates T-of-N signed submissions
+//!    and calls the guardian's batch `provisioner_init` once it has enough; the
+//!    enclave re-verifies every signature and binding.
 
 use anyhow::Context;
 use hashi_guardian::s3_reader::BuildPolicy;
@@ -279,7 +279,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     );
 
     // 4. Recompute the stable config the operator armed the enclave with; its
-    //    digest is the `config_hash` we bind as the share's AAD.
+    //    digest is the `config_hash` bound into the signed PI submission.
     info!(
         phase = "config hash",
         "recomputing config_hash from limiter config + master G + PCR allowlist + network",
@@ -375,23 +375,19 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         "decrypted share matches its commitment",
     );
 
-    // 7. HPKE-encrypt the decrypted share to the new guardian's pubkey, binding
-    //    the verified `config_hash` as AAD.
+    // 7. HPKE-encrypt the decrypted share to the new guardian's pubkey. The
+    //    signed relay request below binds it to the verified config hash.
     info!(
         phase = "share build",
         share_id = decrypted.id.get(),
         enc_pubkey = hex::encode(enclave_enc_pubkey_bytes),
         config_hash = hex::encode(config_hash),
-        "HPKE-encrypting share to new guardian's pubkey (config_hash AAD)",
+        "HPKE-encrypting share to new guardian's pubkey",
     );
     let guardian_pub_key =
         EncPubKey::from_bytes(enclave_enc_pubkey_bytes).map_err(anyhow::Error::msg)?;
-    let encrypted_share = ProvisionerInitRequest::build_from_share(
-        &decrypted,
-        &guardian_pub_key,
-        config_hash,
-        &mut thread_rng(),
-    );
+    let encrypted_share =
+        ProvisionerInitRequest::build_from_share(&decrypted, &guardian_pub_key, &mut thread_rng());
     info!(
         phase = "share build",
         share_id = encrypted_share.id.get(),
@@ -438,9 +434,9 @@ async fn verified_endpoint_guardian_info(
 
 /// Submit this KP's share to the relay endpoint. The relay fronts the
 /// guardian's current session and rejects `SingleProvisionerInit` if it no
-/// longer matches the session this KP pinned before encrypting the share. The
-/// relay collects T-of-N shares and calls the guardian's batch `provisioner_init`
-/// once it has enough.
+/// longer matches the session or config this KP signed. The relay collects
+/// T-of-N submissions and calls the guardian's batch `provisioner_init` once it
+/// has enough; the guardian re-verifies every signature.
 async fn submit_provisioner_init_to_relay(
     endpoint: &str,
     expected_session_id: &str,
@@ -469,7 +465,7 @@ async fn submit_provisioner_init_to_relay(
     prechecks(
         &mut client,
         expected_session_id,
-        expected_guardian_info,
+        &expected_guardian_info,
         current_build,
     )
     .await
@@ -488,9 +484,16 @@ async fn submit_provisioner_init_to_relay(
     .await
     .with_context(|| format!("failed to connect to relay endpoint {endpoint}"))?;
 
-    // Detached-sign the exact (session, share) bytes with this KP's offline
-    // key; the relay only buffers submissions signed by a rostered cert.
-    let request = SingleProvisionerInitRequest::new(expected_session_id.into(), encrypted_share);
+    // Detached-sign the exact (session, config, share) bytes with this KP's
+    // offline key. The relay pre-verifies the request before buffering it and
+    // the enclave authoritatively re-verifies it before using the share.
+    let request = SingleProvisionerInitRequest::new(
+        expected_session_id.into(),
+        expected_guardian_info
+            .config_hash
+            .expect("prechecks require GuardianInfo.config_hash"),
+        encrypted_share,
+    );
     let signed_request = KpSigned::new(request, signer_cert.clone(), None)
         .map_err(anyhow::Error::msg)
         .context("sign the relay submission with the KP key")?;
@@ -520,7 +523,7 @@ async fn submit_provisioner_init_to_relay(
 async fn prechecks(
     client: &mut pb::guardian_service_client::GuardianServiceClient<tonic::transport::Channel>,
     expected_session_id: &str,
-    expected_guardian_info: GuardianInfo,
+    expected_guardian_info: &GuardianInfo,
     current_build: &BuildPcrs,
 ) -> anyhow::Result<()> {
     let verified = verified_live_guardian_info(client, current_build).await?;
@@ -539,7 +542,7 @@ async fn prechecks(
         actual_session_id
     );
     anyhow::ensure!(
-        verified.info == expected_guardian_info,
+        &verified.info == expected_guardian_info,
         "relay endpoint GuardianInfo mismatch: expected {:?}, got {:?}",
         expected_guardian_info,
         verified.info

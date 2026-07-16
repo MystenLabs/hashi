@@ -180,12 +180,20 @@ impl OperatorInitRequest {
 impl ProvisionerInitRequest {
     // NOTE: Incorrect encryption is used. Fix later if needed.
     pub fn mock_for_testing() -> Self {
-        ProvisionerInitRequest::new(vec![GuardianEncryptedShare {
+        let encrypted_share = GuardianEncryptedShare {
             id: NonZeroU16::new(1).unwrap(),
             ciphertext: Ciphertext {
                 encapsulated_key: vec![0u8; 32],
                 aes_ciphertext: vec![0u8; 32],
             },
+        };
+        let (cert_armored, _) = crate::pgp::test_utils::mock_pgp_keypair();
+        let request =
+            SingleProvisionerInitRequest::new("mock-session".into(), [7u8; 32], encrypted_share);
+        ProvisionerInitRequest::new(vec![KpSigned {
+            data: request,
+            signer_cert: crate::pgp::PgpPublicCert::new(cert_armored).unwrap(),
+            signature: "mock-signature".into(),
         }])
     }
 }

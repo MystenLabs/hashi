@@ -25,7 +25,7 @@ service GuardianService {
   // Bootstrap genesis committee: operator-trusted, first deploy only.
   rpc OperatorWriteGenesis(OperatorWriteGenesisRequest) returns (OperatorWriteGenesisResponse);
 
-  // Provisioner initialization: submit encrypted share and readiness info.
+  // Provisioner initialization: submit the current KPs' signed share contributions.
   rpc ProvisionerInit(ProvisionerInitRequest) returns (ProvisionerInitResponse);
 
   // Operator activation: derive live serving state and make an armed standby active.
@@ -217,7 +217,7 @@ message OperatorInitRequest {
   S3Config s3_config = 1;
 
   // Withdraw-mode stable init config (absent for a ceremony enclave). The enclave
-  // binds this digest as the share-decryption AAD and exposes it via GuardianInfo.
+  // exposes its digest via GuardianInfo; KPs bind it into signed PI submissions.
   InitConfig init_config = 4;
 }
 
@@ -248,12 +248,32 @@ enum Network {
 //      ProvisionerInit
 // ==========================
 
-// Assembled from the current KPs' encrypted shares (in the relay model, by the
-// relay once it has collected enough). Each share's HPKE AAD binds the enclave's
-// config_hash, so a share only decrypts if the KP agreed on the operator-supplied
-// stable config.
+// One KP's signed contribution toward ProvisionerInit. The relay may pre-verify
+// and buffer these submissions, but the enclave is the authoritative verifier.
+message SignedSingleProvisionerInitRequest {
+  // This KP's share, HPKE-encrypted to the enclave session key without config
+  // AAD. The signature below binds the share to the expected config instead.
+  GuardianEncryptedShare encrypted_share = 1;
+
+  // The guardian session id the KP pinned before encrypting the share.
+  string expected_session_id = 2;
+
+  // Armored OpenPGP certificate of the submitting key provisioner.
+  string signer_cert = 3;
+
+  // Detached armored OpenPGP signature over the intent-tagged
+  // SingleProvisionerInitRequest payload.
+  string kp_signature = 4;
+
+  // The operator-init config hash the KP independently recomputed and verified.
+  optional bytes expected_config_hash = 5;
+}
+
+// Assembled from the current KPs' signed submissions by the relay once it has
+// collected enough. The enclave re-verifies every submission before using any
+// share.
 message ProvisionerInitRequest {
-  repeated GuardianEncryptedShare encrypted_shares = 1;
+  repeated SignedSingleProvisionerInitRequest submissions = 1;
 }
 
 message OperatorActivateRequest {

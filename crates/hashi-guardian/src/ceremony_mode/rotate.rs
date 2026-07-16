@@ -34,10 +34,14 @@ pub async fn rotate_kps(
 
     // Decrypt and verify every submission. A share only decrypts if its KP bound
     // this same `state` as AAD, so the decrypted shares all agree on the target.
+    // TODO: Move RotateKps to the PI model: collect typed, signed per-KP
+    // submissions and verify them in the enclave. That first requires a
+    // per-KP rotation submission/aggregation path; today the operator supplies
+    // this batch directly, so AAD remains its authorization binding.
     let old_shares = decrypt_verify_shares(
         &encrypted_old_shares,
         sk,
-        &state_hash,
+        Some(&state_hash),
         old_instance.commitments(),
         old_t,
     )?;

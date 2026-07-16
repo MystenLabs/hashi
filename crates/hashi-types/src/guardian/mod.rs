@@ -69,7 +69,7 @@ use std::ops::Deref;
 
 /// Operator-supplied bootstrap. A ceremony-mode enclave (setup/rotate) needs only
 /// `s3_config`; a withdraw-mode enclave additionally carries the stable
-/// `InitConfig` whose digest is the share-decryption AAD.
+/// `InitConfig` whose digest KPs verify and sign during provisioner init.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OperatorInitRequest {
     s3_config: S3Config,
@@ -145,8 +145,8 @@ pub struct GuardianInfo {
 // ---------------------------------------
 
 /// Stable operator-supplied config for arming a withdraw-mode standby. Its
-/// `digest()` is the `config_hash` bound as PI share AAD and exposed via
-/// `GuardianInfo`.
+/// `digest()` is the `config_hash` that KPs verify and sign in their PI
+/// submissions, and that the enclave exposes via `GuardianInfo`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InitConfig {
     /// Limiter config.
@@ -173,16 +173,12 @@ pub struct ActivationState {
     limiter_state: LimiterState,
 }
 
-/// The current KPs' encrypted key shares, assembled into one submission (in the
-/// relay model, by the relay once it has collected enough). Each share's HPKE AAD
-/// binds the enclave's `config_hash`, so a share only decrypts if the KP agreed
-/// on the stable operator-supplied config.
+/// The current KPs' signed share submissions, assembled by the relay once it has
+/// collected enough. The enclave verifies every KP signature, signer assignment,
+/// session pin, and config hash before decrypting the shares.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProvisionerInitRequest {
-    // TODO: Wrap submitted guardian shares in a domain type that rejects
-    // duplicate share ids. Unlike KP output shares, submitted shares are a
-    // threshold batch and need not be contiguous 1..=n.
-    encrypted_shares: Vec<GuardianEncryptedShare>,
+    submissions: Vec<KpSigned<SingleProvisionerInitRequest>>,
 }
 
 /// Relay-facing request carrying one KP's signed contribution toward
@@ -190,6 +186,8 @@ pub struct ProvisionerInitRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SingleProvisionerInitRequest {
     expected_session_id: SessionID,
+    #[serde(with = "hex::serde")]
+    expected_config_hash: [u8; 32],
     encrypted_share: GuardianEncryptedShare,
 }
 
@@ -600,7 +598,8 @@ impl InitConfig {
         self.network
     }
 
-    /// The `config_hash`: the digest KPs bind as their share-encryption AAD.
+    /// The `config_hash`: the digest KPs verify and bind into their signed PI
+    /// submissions.
     pub fn digest(&self) -> [u8; 32] {
         let bytes = bcs::to_bytes(&InitConfigRepr::from(self)).expect("serialization should work");
         Blake2b::<U32>::digest(bytes).into()
@@ -608,36 +607,39 @@ impl InitConfig {
 }
 
 impl ProvisionerInitRequest {
-    pub fn new(encrypted_shares: Vec<GuardianEncryptedShare>) -> Self {
-        Self { encrypted_shares }
+    pub fn new(submissions: Vec<KpSigned<SingleProvisionerInitRequest>>) -> Self {
+        Self { submissions }
     }
 
-    /// Encrypt one KP's `share` to the enclave's public key, binding `config_hash`
-    /// as HPKE AAD — so the enclave only decrypts shares from KPs that agreed on
-    /// the stable config. Each KP produces one of these; they are bundled into a
-    /// `ProvisionerInitRequest`.
+    /// Encrypt one KP's `share` to the enclave's session key. Agreement on the
+    /// stable config is authenticated by the KP signature over
+    /// [`SingleProvisionerInitRequest`], not by HPKE AAD.
     pub fn build_from_share<R: CryptoRng + RngCore>(
         share: &Share,
         enclave_pub_key: &EncPubKey,
-        config_hash: [u8; 32],
         rng: &mut R,
     ) -> GuardianEncryptedShare {
-        encrypt_share(share, enclave_pub_key, Some(&config_hash), rng)
+        encrypt_share(share, enclave_pub_key, None, rng)
     }
 
-    pub fn encrypted_shares(&self) -> &[GuardianEncryptedShare] {
-        &self.encrypted_shares
+    pub fn submissions(&self) -> &[KpSigned<SingleProvisionerInitRequest>] {
+        &self.submissions
     }
 
-    pub fn into_parts(self) -> Vec<GuardianEncryptedShare> {
-        self.encrypted_shares
+    pub fn into_parts(self) -> Vec<KpSigned<SingleProvisionerInitRequest>> {
+        self.submissions
     }
 }
 
 impl SingleProvisionerInitRequest {
-    pub fn new(expected_session_id: SessionID, encrypted_share: GuardianEncryptedShare) -> Self {
+    pub fn new(
+        expected_session_id: SessionID,
+        expected_config_hash: [u8; 32],
+        encrypted_share: GuardianEncryptedShare,
+    ) -> Self {
         Self {
             expected_session_id,
+            expected_config_hash,
             encrypted_share,
         }
     }
@@ -650,8 +652,16 @@ impl SingleProvisionerInitRequest {
         &self.encrypted_share
     }
 
-    pub fn into_parts(self) -> (SessionID, GuardianEncryptedShare) {
-        (self.expected_session_id, self.encrypted_share)
+    pub fn expected_config_hash(&self) -> &[u8; 32] {
+        &self.expected_config_hash
+    }
+
+    pub fn into_parts(self) -> (SessionID, [u8; 32], GuardianEncryptedShare) {
+        (
+            self.expected_session_id,
+            self.expected_config_hash,
+            self.encrypted_share,
+        )
     }
 }
 

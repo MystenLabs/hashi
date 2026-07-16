@@ -140,12 +140,12 @@ is held in this process' memory long enough to verify and re-encrypt it. It:
    the yubikey (`gpg --decrypt` over a pipe; the plaintext stays in memory and
    never touches disk), and verifies the decrypted share against its commitment.
 6. HPKE-encrypts the decrypted share to the new guardian's `encryption_pubkey`
-   (from its `GuardianInfo`), binding the verified `config_hash` as AAD — so the
-   share only decrypts on a guardian the KP agreed on the stable config with.
-7. Submits the share to the configured relay endpoint. The relay rejects if the
-   backend session no longer matches the pinned session, otherwise it collects
-   T-of-N shares before forwarding them to the guardian in one `ProvisionerInit`
-   call.
+   from its `GuardianInfo`.
+7. Signs the exact `(session, config_hash, encrypted share)` submission and sends
+   it to the configured relay endpoint. The relay pre-verifies and collects
+   T-of-N distinct submissions; the enclave then authoritatively re-verifies
+   every signature and current share assignment before completing
+   `ProvisionerInit`.
 
 ```bash
 cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-init.sample.yaml

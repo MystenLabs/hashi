@@ -1,11 +1,13 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! `provisioner_init` (withdraw mode): collects the current KPs' encrypted
-//! shares, decrypts/verifies them under the enclave's `config_hash`, and
-//! reconstructs the BTC key once threshold shares are present. Runs after the
-//! shared `crate::operator_init`.
+//! `provisioner_init` (withdraw mode): collects the current KPs' signed share
+//! submissions, verifies each signer against the latest S3 share distribution,
+//! and reconstructs the BTC key once threshold shares are present. Runs after
+//! the shared `crate::operator_init`.
 
+use crate::s3_reader::BuildPolicy;
+use crate::s3_reader::GuardianReader;
 use crate::Enclave;
 use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::guardian::crypto::combine_shares;
@@ -17,11 +19,10 @@ use hashi_types::guardian::*;
 use std::sync::Arc;
 use tracing::info;
 
-/// Receives the current KPs' encrypted shares in one submission. Decrypts each
-/// under the enclave's config_hash (set at operator_init) as AAD — so only shares
-/// from KPs that agreed on the operator-supplied stable config decrypt — verifies
-/// them against the commitments, and reconstructs the BTC key once threshold
-/// shares are present.
+/// Receives the current KPs' signed share submissions in one batch. The relay
+/// may pre-verify them as a DoS guard, but the enclave authoritatively verifies
+/// each signature, session/config binding, and current share assignment before
+/// decrypting and commitment-checking any share.
 pub async fn provisioner_init(
     enclave: Arc<Enclave>,
     request: ProvisionerInitRequest,
@@ -34,25 +35,76 @@ pub async fn provisioner_init(
     enclave.require_lifecycle(WithdrawStage::OperatorInitialized.into())?;
     info!("Enclave state validated.");
 
-    let sk = enclave.encryption_secret_key();
+    let instance = enclave
+        .secret_sharing_instance()
+        .expect("secret-sharing instance should be set after operator_init");
+    let sharing_seq = instance.sharing_seq();
+    let init_config = enclave
+        .init_config()
+        .ok_or_else(|| GuardianError::InvalidInputs("InitConfig not set".into()))?;
+    let logger = enclave.config.s3_logger()?.clone();
+    let mut reader = GuardianReader::from_s3_client(logger, init_config.pcr_allowlist().clone());
+
+    let (_, latest_instance, _) = reader
+        .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
+        .await
+        .map_err(|e| GuardianError::InternalError(format!("read latest ceremony: {e}")))?
+        .ok_or_else(|| GuardianError::InvalidInputs("no ceremony log found during PI".into()))?;
+    if latest_instance != instance {
+        return Err(GuardianError::InvalidInputs(format!(
+            "latest ceremony instance differs from armed instance: latest {latest_instance}, \
+             armed {instance}"
+        )));
+    }
+
+    let (_, latest_share_state) = reader
+        .read_latest_kp_share_state(sharing_seq, BuildPolicy::AnyAllowlisted)
+        .await
+        .map_err(|e| GuardianError::InternalError(format!("read latest KP share state: {e}")))?
+        .ok_or_else(|| {
+            GuardianError::InvalidInputs(format!(
+                "no kp-shares log found for sharing_seq {sharing_seq}"
+            ))
+        })?;
+    if latest_share_state.encrypted_shares.len() != instance.num_shares() {
+        return Err(GuardianError::InvalidInputs(format!(
+            "latest KP share state has {} shares, armed instance expects {}",
+            latest_share_state.encrypted_shares.len(),
+            instance.num_shares()
+        )));
+    }
+
+    provisioner_init_with_authorized_kps(
+        enclave.clone(),
+        request,
+        &latest_share_state.encrypted_shares,
+    )
+    .await
+}
+
+async fn provisioner_init_with_authorized_kps(
+    enclave: Arc<Enclave>,
+    request: ProvisionerInitRequest,
+    authorized_kp_shares: &KPEncryptedShares,
+) -> GuardianResult<()> {
+    enclave.require_lifecycle(WithdrawStage::OperatorInitialized.into())?;
+
     let instance = enclave
         .secret_sharing_instance()
         .expect("secret-sharing instance should be set after operator_init");
     let threshold = instance.threshold();
     let sharing_seq = instance.sharing_seq();
-    // Always set here: provisioner_init is withdraw-mode only, and the
-    // operator_init check above guarantees a withdraw-mode enclave installed it.
     let config_hash = enclave
         .config_hash()
         .expect("withdraw-mode operator_init installs the config_hash");
+    let session_id = enclave.s3_session_id();
 
-    // Decrypt and verify every submission. A share only decrypts if its KP bound
-    // the enclave's config_hash as AAD, so the decrypted shares all agree on the
-    // operator-supplied stable config.
+    let encrypted_shares =
+        verify_signed_submissions(request, &session_id, &config_hash, authorized_kp_shares)?;
     let shares = decrypt_verify_shares(
-        request.encrypted_shares(),
-        sk,
-        &config_hash,
+        &encrypted_shares,
+        enclave.encryption_secret_key(),
+        None,
         instance.commitments(),
         threshold,
     )?;
@@ -76,6 +128,62 @@ pub async fn provisioner_init(
         .expect("provisioner_init should advance an operator-initialized enclave");
 
     Ok(())
+}
+
+fn verify_signed_submissions(
+    request: ProvisionerInitRequest,
+    live_session_id: &SessionID,
+    live_config_hash: &[u8; 32],
+    authorized_kp_shares: &KPEncryptedShares,
+) -> GuardianResult<Vec<GuardianEncryptedShare>> {
+    request
+        .into_parts()
+        .into_iter()
+        .map(|signed| {
+            let signer_fingerprint = signed.signer_fingerprint().to_hex();
+            let submission = signed.verify()?;
+
+            if submission.expected_session_id() != live_session_id.as_str() {
+                return Err(GuardianError::InvalidInputs(format!(
+                    "PI submission expected guardian session {}, live session is {}",
+                    submission.expected_session_id(),
+                    live_session_id
+                )));
+            }
+            if submission.expected_config_hash() != live_config_hash {
+                return Err(GuardianError::InvalidInputs(format!(
+                    "PI submission expected config hash {}, live config hash is {}",
+                    hex::encode(submission.expected_config_hash()),
+                    hex::encode(live_config_hash)
+                )));
+            }
+
+            let encrypted_share = submission.encrypted_share();
+            let authorized_share = authorized_kp_shares
+                .iter()
+                .find(|share| share.recipient_fingerprint == signer_fingerprint)
+                .ok_or_else(|| {
+                    GuardianError::InvalidInputs(format!(
+                        "PI signer fingerprint {signer_fingerprint} is not present in the latest \
+                         KP share state"
+                    ))
+                })?;
+            if authorized_share.id != encrypted_share.id {
+                return Err(GuardianError::InvalidInputs(format!(
+                    "PI signer fingerprint {signer_fingerprint} is assigned share id {}, not \
+                     submitted share id {}",
+                    authorized_share.id.get(),
+                    encrypted_share.id.get()
+                )));
+            }
+
+            info!(
+                share_id = encrypted_share.id.get(),
+                signer_fingerprint, "verified signed PI submission"
+            );
+            Ok(submission.into_parts().2)
+        })
+        .collect()
 }
 
 /// Reconstruct the BTC key from the threshold shares and install it. Live
@@ -106,71 +214,136 @@ mod tests {
     use super::*;
     use crate::OperatorInitTestArgs;
     use hashi_types::guardian::GuardianError::InvalidInputs;
+    use hashi_types::pgp::test_utils::mock_pgp_keypair;
+    use hashi_types::pgp::test_utils::sign_detached_in_process;
+    use hashi_types::pgp::PgpPublicCert;
     use k256::SecretKey;
 
     const TEST_N: usize = 5;
     const TEST_T: usize = 3;
 
-    /// Helper: Generate test shares and initialized enclave
-    /// Returns (shares, enclave)
-    async fn setup_test_shares_and_enclave() -> (Vec<Share>, Arc<Enclave>) {
+    struct TestContext {
+        shares: Vec<Share>,
+        enclave: Arc<Enclave>,
+        kp_keys: Vec<(PgpPublicCert, String)>,
+        authorized_kp_shares: KPEncryptedShares,
+    }
+
+    async fn setup() -> TestContext {
         let sk = SecretKey::random(&mut rand::thread_rng());
         let params = SecretSharingParams::new(TEST_N, TEST_T).unwrap();
         let shares = split_secret(&sk, &params, &mut rand::thread_rng());
         let share_commitments = ShareCommitments::from_shares(&shares).unwrap();
+        let kp_keys = (0..TEST_N)
+            .map(|_| {
+                let (cert, secret) = mock_pgp_keypair();
+                (PgpPublicCert::new(cert).unwrap(), secret)
+            })
+            .collect::<Vec<_>>();
+        let authorized_kp_shares = KPEncryptedShares::new(
+            shares
+                .iter()
+                .zip(&kp_keys)
+                .map(|(share, (cert, _))| KPEncryptedShare {
+                    id: share.id,
+                    recipient_fingerprint: cert.fingerprint().to_hex(),
+                    armored_ciphertext: "not used by provisioner_init".into(),
+                })
+                .collect(),
+        )
+        .unwrap();
         let enclave = Enclave::create_operator_initialized_with(
             OperatorInitTestArgs::default().with_commitments(share_commitments),
         )
         .await;
-        (shares, enclave)
+        TestContext {
+            shares,
+            enclave,
+            kp_keys,
+            authorized_kp_shares,
+        }
     }
 
-    /// Bundle one submission per share, all bound to the enclave's config_hash as
-    /// AAD — i.e. what the relay assembles from the current KPs.
-    fn build_request(shares: &[Share], enclave: &Enclave) -> ProvisionerInitRequest {
-        let config_hash = enclave.config_hash().unwrap();
-        let submissions = shares
-            .iter()
-            .map(|s| {
-                ProvisionerInitRequest::build_from_share(
-                    s,
-                    enclave.encryption_public_key(),
-                    config_hash,
-                    &mut rand::thread_rng(),
-                )
-            })
-            .collect();
-        ProvisionerInitRequest::new(submissions)
+    impl TestContext {
+        fn signed_submission(
+            &self,
+            share: &Share,
+            signer_index: usize,
+            expected_session_id: SessionID,
+            expected_config_hash: [u8; 32],
+        ) -> KpSigned<SingleProvisionerInitRequest> {
+            let encrypted_share = ProvisionerInitRequest::build_from_share(
+                share,
+                self.enclave.encryption_public_key(),
+                &mut rand::thread_rng(),
+            );
+            let request = SingleProvisionerInitRequest::new(
+                expected_session_id,
+                expected_config_hash,
+                encrypted_share,
+            );
+            let (cert, secret) = &self.kp_keys[signer_index];
+            KpSigned {
+                signature: sign_detached_in_process(secret, &KpSigned::signed_bytes(&request)),
+                data: request,
+                signer_cert: cert.clone(),
+            }
+        }
+
+        fn request(&self, shares: &[Share]) -> ProvisionerInitRequest {
+            let session_id = self.enclave.s3_session_id();
+            let config_hash = self.enclave.config_hash().unwrap();
+            let submissions = shares
+                .iter()
+                .map(|share| {
+                    self.signed_submission(
+                        share,
+                        usize::from(share.id.get() - 1),
+                        session_id.clone(),
+                        config_hash,
+                    )
+                })
+                .collect();
+            ProvisionerInitRequest::new(submissions)
+        }
+
+        async fn provision(&self, request: ProvisionerInitRequest) -> GuardianResult<()> {
+            provisioner_init_with_authorized_kps(
+                self.enclave.clone(),
+                request,
+                &self.authorized_kp_shares,
+            )
+            .await
+        }
     }
 
     #[tokio::test]
     async fn happy_path_threshold_reached() {
-        let (shares, enclave) = setup_test_shares_and_enclave().await;
-        let req = build_request(&shares[..TEST_T], &enclave);
-
-        provisioner_init(enclave.clone(), req).await.expect("ok");
+        let ctx = setup().await;
+        ctx.provision(ctx.request(&ctx.shares[..TEST_T]))
+            .await
+            .expect("ok");
         assert!(
-            enclave.config.is_enclave_btc_keypair_set(),
+            ctx.enclave.config.is_enclave_btc_keypair_set(),
             "Bitcoin key should be set after threshold"
         );
         assert_eq!(
-            enclave.lifecycle(),
+            ctx.enclave.lifecycle(),
             WithdrawStage::ProvisionerInitialized.into(),
             "provisioner init complete"
         );
-        assert!(!enclave.is_fully_initialized(), "not active before OA");
+        assert!(!ctx.enclave.is_fully_initialized(), "not active before OA");
     }
 
     #[tokio::test]
     async fn rejects_second_call_after_complete() {
-        let (shares, enclave) = setup_test_shares_and_enclave().await;
+        let ctx = setup().await;
+        ctx.provision(ctx.request(&ctx.shares[..TEST_T]))
+            .await
+            .expect("ok");
 
-        let req = build_request(&shares[..TEST_T], &enclave);
-        provisioner_init(enclave.clone(), req).await.expect("ok");
-
-        // A second call is rejected outright (already complete).
-        let req2 = build_request(&shares[..TEST_T], &enclave);
-        let err = provisioner_init(enclave, req2)
+        let err = ctx
+            .provision(ctx.request(&ctx.shares[..TEST_T]))
             .await
             .expect_err("should reject");
         assert!(matches!(err, InvalidInputs(_)));
@@ -178,58 +351,99 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_below_threshold() {
-        let (shares, enclave) = setup_test_shares_and_enclave().await;
-        let req = build_request(&shares[..TEST_T - 1], &enclave);
-        let err = provisioner_init(enclave.clone(), req)
+        let ctx = setup().await;
+        let err = ctx
+            .provision(ctx.request(&ctx.shares[..TEST_T - 1]))
             .await
             .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
         assert!(
-            !enclave.config.is_enclave_btc_keypair_set(),
+            !ctx.enclave.config.is_enclave_btc_keypair_set(),
             "Bitcoin key should not be set below threshold"
         );
     }
 
     #[tokio::test]
     async fn rejects_before_operator_init() {
-        // Enclave without operator_init: rejected before any AAD is used.
         let enclave = Enclave::create_with_random_keys();
-        let share = Share {
-            id: std::num::NonZeroU16::new(1).unwrap(),
-            value: k256::Scalar::ONE,
-        };
-        let enc = ProvisionerInitRequest::build_from_share(
-            &share,
-            enclave.encryption_public_key(),
-            [0u8; 32],
-            &mut rand::thread_rng(),
-        );
-        let req = ProvisionerInitRequest::new(vec![enc]);
+        let authorized_kp_shares = KPEncryptedShares::new(vec![]).unwrap();
+        let err = provisioner_init_with_authorized_kps(
+            enclave,
+            ProvisionerInitRequest::new(vec![]),
+            &authorized_kp_shares,
+        )
+        .await
+        .expect_err("should fail");
+        assert!(matches!(err, InvalidInputs(_)));
+    }
 
-        let err = provisioner_init(enclave, req)
+    #[tokio::test]
+    async fn rejects_mismatched_config_hash() {
+        let ctx = setup().await;
+        let wrong_config_hash = [0xABu8; 32];
+        let submissions = ctx.shares[..TEST_T]
+            .iter()
+            .map(|share| {
+                ctx.signed_submission(
+                    share,
+                    usize::from(share.id.get() - 1),
+                    ctx.enclave.s3_session_id(),
+                    wrong_config_hash,
+                )
+            })
+            .collect();
+        let err = ctx
+            .provision(ProvisionerInitRequest::new(submissions))
             .await
             .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
     }
 
     #[tokio::test]
-    async fn rejects_share_with_mismatched_config_hash() {
-        let (shares, enclave) = setup_test_shares_and_enclave().await;
+    async fn rejects_mismatched_session() {
+        let ctx = setup().await;
+        let config_hash = ctx.enclave.config_hash().unwrap();
+        let submissions = ctx.shares[..TEST_T]
+            .iter()
+            .map(|share| {
+                ctx.signed_submission(
+                    share,
+                    usize::from(share.id.get() - 1),
+                    "other-session".into(),
+                    config_hash,
+                )
+            })
+            .collect();
+        let err = ctx
+            .provision(ProvisionerInitRequest::new(submissions))
+            .await
+            .expect_err("should fail");
+        assert!(matches!(err, InvalidInputs(_)));
+    }
 
-        // A KP that binds a config_hash differing from the enclave's (i.e. it
-        // disagreed on the operator-supplied stable config) produces a share
-        // that fails to decrypt — rejected gracefully, not via a panic.
-        let wrong_config_hash = [0xABu8; 32];
-        assert_ne!(wrong_config_hash, enclave.config_hash().unwrap());
-        let enc = ProvisionerInitRequest::build_from_share(
-            &shares[0],
-            enclave.encryption_public_key(),
-            wrong_config_hash,
-            &mut rand::thread_rng(),
+    #[tokio::test]
+    async fn rejects_invalid_signature() {
+        let ctx = setup().await;
+        let mut submissions = ctx.request(&ctx.shares[..TEST_T]).into_parts();
+        submissions[0].signature = "invalid signature".into();
+        let err = ctx
+            .provision(ProvisionerInitRequest::new(submissions))
+            .await
+            .expect_err("should fail");
+        assert!(matches!(err, InvalidInputs(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_signer_assigned_to_another_share() {
+        let ctx = setup().await;
+        let submission = ctx.signed_submission(
+            &ctx.shares[1],
+            0,
+            ctx.enclave.s3_session_id(),
+            ctx.enclave.config_hash().unwrap(),
         );
-        let req = ProvisionerInitRequest::new(vec![enc]);
-
-        let err = provisioner_init(enclave, req)
+        let err = ctx
+            .provision(ProvisionerInitRequest::new(vec![submission]))
             .await
             .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
@@ -237,16 +451,20 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_share_not_matching_commitments() {
-        let (_shares, enclave) = setup_test_shares_and_enclave().await;
-
-        // A bogus share decrypts (correct AAD) but fails the commitment check.
+        let ctx = setup().await;
         let bogus_share = Share {
             id: std::num::NonZeroU16::new(1).unwrap(),
             value: k256::Scalar::from(42u32),
         };
-        let req = build_request(std::slice::from_ref(&bogus_share), &enclave);
-
-        let err = provisioner_init(enclave, req)
+        let mut submissions = vec![ctx.signed_submission(
+            &bogus_share,
+            0,
+            ctx.enclave.s3_session_id(),
+            ctx.enclave.config_hash().unwrap(),
+        )];
+        submissions.extend(ctx.request(&ctx.shares[1..TEST_T]).into_parts());
+        let err = ctx
+            .provision(ProvisionerInitRequest::new(submissions))
             .await
             .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
@@ -254,12 +472,24 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_duplicate_share_id_in_batch() {
-        let (shares, enclave) = setup_test_shares_and_enclave().await;
-        // Two submissions from the same KP (same share id).
-        let dupes = [shares[0], shares[0], shares[1]];
-        let req = build_request(&dupes, &enclave);
-
-        let err = provisioner_init(enclave, req)
+        let ctx = setup().await;
+        let first = ctx.signed_submission(
+            &ctx.shares[0],
+            0,
+            ctx.enclave.s3_session_id(),
+            ctx.enclave.config_hash().unwrap(),
+        );
+        let err = ctx
+            .provision(ProvisionerInitRequest::new(vec![
+                first.clone(),
+                first,
+                ctx.signed_submission(
+                    &ctx.shares[1],
+                    1,
+                    ctx.enclave.s3_session_id(),
+                    ctx.enclave.config_hash().unwrap(),
+                ),
+            ]))
             .await
             .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
