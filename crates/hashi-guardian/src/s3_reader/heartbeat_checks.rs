@@ -3,7 +3,7 @@
 
 use super::heartbeat_cursor;
 use super::GuardianReader;
-use crate::LIVE_SESSION_MAX_AGE;
+use crate::LIVE_SESSION_LATEST_HEARTBEAT_MAX_AGE;
 use crate::OTHER_SESSION_QUIET_PERIOD;
 use hashi_types::guardian::time_utils::now_timestamp_secs;
 use hashi_types::guardian::time_utils::unix_millis_to_seconds;
@@ -31,7 +31,7 @@ impl GuardianReader {
             &summary,
             now,
             live_session,
-            LIVE_SESSION_MAX_AGE.as_secs(),
+            LIVE_SESSION_LATEST_HEARTBEAT_MAX_AGE.as_secs(),
             OTHER_SESSION_QUIET_PERIOD.as_secs(),
         )?;
 

@@ -7,8 +7,8 @@ use std::time::Duration;
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_mins(1);
 /// Maximum write failure interval before the enclave aborts.
 pub const MAX_S3_WRITE_FAILURE_INTERVAL: Duration = Duration::from_mins(5);
-/// Maximum acceptable heartbeat age for the activating standby session.
-pub const LIVE_SESSION_MAX_AGE: Duration = Duration::from_mins(3);
+/// The live session's latest heartbeat must be at most 3 minutes old.
+pub const LIVE_SESSION_LATEST_HEARTBEAT_MAX_AGE: Duration = Duration::from_mins(3);
 /// Silence required before another session is considered inactive.
 pub const OTHER_SESSION_QUIET_PERIOD: Duration = Duration::from_mins(10);
 
