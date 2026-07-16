@@ -133,10 +133,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         phase = "ceremony instance",
         "reading latest ceremony log for the activation instance",
     );
-    let (ceremony_session, latest_instance, _) = reader
+    let latest_ceremony = reader
         .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;
+    let (latest_instance, _) = latest_ceremony.into_instance_and_pubkey();
     ensure!(
         latest_instance == standby.secret_sharing_instance,
         "latest ceremony instance differs from armed instance: latest {}, armed {}",
@@ -145,7 +146,6 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     );
     info!(
         phase = "ceremony instance",
-        ceremony_session = %ceremony_session,
         sharing_seq = latest_instance.sharing_seq(),
         "latest ceremony instance matches the armed standby",
     );

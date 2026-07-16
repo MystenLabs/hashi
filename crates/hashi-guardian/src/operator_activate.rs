@@ -54,11 +54,12 @@ pub async fn operator_activate(
         .await
         .map_err(|e| InvalidInputs(format!("heartbeat activation check failed: {e}")))?;
 
-    let (_, latest_instance, _) = reader
+    let latest_ceremony = reader
         .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
         .await
         .map_err(|e| InternalError(format!("read latest ceremony: {e}")))?
         .ok_or_else(|| InvalidInputs("no ceremony log found during activation".into()))?;
+    let (latest_instance, _) = latest_ceremony.into_instance_and_pubkey();
     if latest_instance != armed_instance {
         return Err(InvalidInputs(format!(
             "latest ceremony instance differs from armed instance: latest {latest_instance}, armed {armed_instance}"

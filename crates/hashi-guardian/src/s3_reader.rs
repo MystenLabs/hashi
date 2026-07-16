@@ -15,7 +15,6 @@ use crate::s3_client::GuardianS3Client;
 use crate::s3_client::HistoryCheck;
 use crate::s3_client::LockCheck;
 use anyhow::Context;
-use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use hashi_types::guardian::BuildPcrs;
@@ -31,7 +30,6 @@ use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::S3Config;
-use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::VerifiedLogRecord;
 use hashi_types::guardian::VerifiedSessionInfo;
@@ -168,8 +166,7 @@ impl GuardianReader {
     }
 
     /// The latest ceremony from `ceremony/` — the max-`sharing_seq` (lex-last)
-    /// entry, attestation- and signature-verified. Returns its writing session,
-    /// secret-sharing instance, and BTC master pubkey. `None` if no ceremony has
+    /// entry, attestation- and signature-verified. `None` if no ceremony has
     /// been logged yet.
     ///
     /// `kp-shares/` is read independently so later KP cert rotations can advance
@@ -177,19 +174,7 @@ impl GuardianReader {
     pub async fn read_latest_ceremony(
         &mut self,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<Option<(SessionID, SecretSharingInstance, BitcoinPubkey)>> {
-        let Some((session_id, message)) = self.read_latest_ceremony_message(build_policy).await?
-        else {
-            return Ok(None);
-        };
-        let (instance, btc_master_pubkey) = message.into_instance_and_pubkey();
-        Ok(Some((session_id, instance, btc_master_pubkey)))
-    }
-
-    async fn read_latest_ceremony_message(
-        &mut self,
-        build_policy: BuildPolicy,
-    ) -> anyhow::Result<Option<(SessionID, CeremonyLogMessage)>> {
+    ) -> anyhow::Result<Option<CeremonyLogMessage>> {
         let keys = self
             .s3
             .validate_prefix_history_and_list_keys(&format!("{}/", S3_DIR_CEREMONY))
@@ -197,25 +182,14 @@ impl GuardianReader {
         let Some(key) = pick_latest_key(keys, S3_DIR_CEREMONY) else {
             return Ok(None);
         };
-        Ok(Some(self.read_ceremony_record(&key, build_policy).await?))
-    }
-
-    /// Read + verify the `ceremony/` record at `key`, returning its writing
-    /// session, resulting instance, and BTC master pubkey.
-    async fn read_ceremony_record(
-        &mut self,
-        key: &str,
-        build_policy: BuildPolicy,
-    ) -> anyhow::Result<(SessionID, CeremonyLogMessage)> {
-        let record = self.s3.get_log_record(key).await?;
+        let record = self.s3.get_log_record(&key).await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
-        let session_id = record.session_id.clone();
         let build_pcrs = record.build_pcrs.clone();
         self.enforce_build_policy("ceremony log", build_policy, &build_pcrs)?;
         let LogMessage::V1(LogMessageV1::Ceremony(msg)) = record.message else {
             anyhow::bail!("expected a ceremony log at {key}");
         };
-        Ok((session_id, *msg))
+        Ok(Some(*msg))
     }
 
     /// Read + verify the latest encrypted KP share state for `sharing_seq`.
@@ -271,7 +245,7 @@ impl GuardianReader {
         &mut self,
         build_policy: BuildPolicy,
     ) -> anyhow::Result<Option<CeremonyState>> {
-        let Some((_, ceremony)) = self.read_latest_ceremony_message(build_policy).await? else {
+        let Some(ceremony) = self.read_latest_ceremony(build_policy).await? else {
             return Ok(None);
         };
         let sharing_seq = ceremony.sharing_seq();
