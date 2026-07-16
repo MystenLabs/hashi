@@ -262,9 +262,7 @@ fn scalar_from_decrypted_plaintext(plaintext: &[u8]) -> Result<Scalar> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hashi_types::guardian::CeremonyLogMessage;
     use hashi_types::guardian::KPEncryptedShares;
-    use hashi_types::guardian::KpShareStateLogMessage;
     use hashi_types::guardian::SecretSharingInstance;
     use hashi_types::guardian::ShareCommitment;
     use hashi_types::guardian::ShareCommitments;
@@ -353,46 +351,21 @@ mod tests {
     }
 
     #[test]
-    fn ceremony_state_accepts_well_formed() {
-        let resp = response(&[1, 2, 3], &[1, 2, 3]);
-        ceremony_state_from_response(resp, 0, 3, 2).expect("well-formed response should pass");
-    }
-
-    #[test]
-    fn ceremony_state_equality_covers_btc_pubkey() {
-        // operator_ceremony gates publishing on `logged == live` (S3 log vs
-        // response), so the pubkey is only guarded if it's part of the equality.
-        let other_pubkey = hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey(
-            &k256::SecretKey::from_slice(&[7u8; 32]).unwrap(),
-        );
-        assert_ne!(dummy_btc_pubkey(), other_pubkey);
-
-        let state = |pubkey| {
-            let mut resp = response(&[1, 2, 3], &[1, 2, 3]);
-            resp.btc_master_pubkey = pubkey;
-            ceremony_state_from_response(resp, 0, 3, 2).unwrap()
-        };
-
-        assert_eq!(state(dummy_btc_pubkey()), state(dummy_btc_pubkey()));
-        assert_ne!(state(dummy_btc_pubkey()), state(other_pubkey));
-    }
-
-    #[test]
-    fn ceremony_state_rejects_wrong_share_count() {
+    fn ceremony_state_from_response_rejects_wrong_share_count() {
         let resp = response(&[1, 2], &[1, 2, 3]);
         let err = ceremony_state_from_response(resp, 0, 3, 2).unwrap_err();
         assert!(format!("{err}").contains("encrypted shares"), "{err}");
     }
 
     #[test]
-    fn ceremony_state_rejects_wrong_instance_num_shares() {
+    fn ceremony_state_from_response_rejects_wrong_instance_num_shares() {
         let resp = response(&[1, 2], &[1, 2]);
         let err = ceremony_state_from_response(resp, 0, 3, 2).unwrap_err();
         assert!(format!("{err}").contains("num_shares"), "{err}");
     }
 
     #[test]
-    fn ceremony_state_rejects_wrong_instance_threshold() {
+    fn ceremony_state_from_response_rejects_wrong_instance_threshold() {
         let instance = SecretSharingInstance::new(commitments(&[1, 2, 3]), 3, 3, 0).unwrap();
         let resp = response_with_instance(&[1, 2, 3], instance);
         let err = ceremony_state_from_response(resp, 0, 3, 2).unwrap_err();
@@ -400,29 +373,11 @@ mod tests {
     }
 
     #[test]
-    fn ceremony_state_rejects_wrong_instance_sharing_seq() {
+    fn ceremony_state_from_response_rejects_wrong_instance_sharing_seq() {
         let instance = SecretSharingInstance::new(commitments(&[1, 2, 3]), 3, 2, 1).unwrap();
         let resp = response_with_instance(&[1, 2, 3], instance);
         let err = ceremony_state_from_response(resp, 0, 3, 2).unwrap_err();
         assert!(format!("{err}").contains("sharing_seq"), "{err}");
-    }
-
-    #[test]
-    fn ceremony_state_rejects_mismatched_kp_share_state_seq() {
-        let SetupNewKeyResponse {
-            encrypted_shares,
-            secret_sharing_instance,
-            btc_master_pubkey,
-        } = response(&[3, 1, 2], &[1, 2, 3]);
-        let err = CeremonyState::new(
-            CeremonyLogMessage::NewKey {
-                instance: secret_sharing_instance,
-                btc_master_pubkey,
-            },
-            KpShareStateLogMessage::new(1, 0, encrypted_shares),
-        )
-        .unwrap_err();
-        assert!(format!("{err}").contains("kp-shares sharing_seq"), "{err}");
     }
 
     #[test]

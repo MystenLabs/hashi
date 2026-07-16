@@ -60,3 +60,24 @@ impl From<SetupNewKeyResponse> for CeremonyState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::guardian::GuardianSigned;
+
+    #[test]
+    fn new_rejects_mismatched_sharing_seq() {
+        let response = GuardianSigned::<SetupNewKeyResponse>::mock_for_testing().data;
+        let sharing_seq = response.secret_sharing_instance.sharing_seq();
+        let err = CeremonyState::new(
+            CeremonyLogMessage::NewKey {
+                instance: response.secret_sharing_instance,
+                btc_master_pubkey: response.btc_master_pubkey,
+            },
+            KpShareStateLogMessage::new(sharing_seq + 1, 0, response.encrypted_shares),
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("kp-shares sharing_seq"), "{err}");
+    }
+}
