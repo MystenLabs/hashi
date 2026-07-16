@@ -804,7 +804,7 @@ impl GetGuardianInfoResponse {
             )));
         }
         self.attestation
-            .verify(&self.signing_pub_key, expected_build)?;
+            .verify_live(&self.signing_pub_key, expected_build)?;
         Ok(VerifiedGuardianInfo {
             info,
             signing_pub_key: self.signing_pub_key,
