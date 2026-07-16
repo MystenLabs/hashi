@@ -37,12 +37,6 @@ use crate::withdrawals::withdrawal_limiter_consumption_amount;
 /// server silently stopped sending checkpoints.
 const CHECKPOINT_STREAM_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Re-poll the on-chain config this often. Config writes normally reach the
-/// snapshot via `ProposalExecuted` events, but `finish_publish` mutates the
-/// config directly with no event — a node booted pre-launch would otherwise
-/// never see `guardian_url`/`guardian_btc_public_key` land.
-const CONFIG_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
-
 #[tracing::instrument(name = "watcher", skip_all)]
 pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<Arc<Metrics>>) {
     let subscription_read_mask = FieldMask::from_paths([
@@ -183,7 +177,7 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
 
             handle_events(&mut client, &state, timestamp_ms, &events).await;
 
-            if last_config_refresh.elapsed() >= CONFIG_REFRESH_INTERVAL {
+            if last_config_refresh.elapsed() >= state.config_poll_interval() {
                 refresh_config_if_changed(&client, &state).await;
                 last_config_refresh = std::time::Instant::now();
             }
@@ -207,9 +201,8 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
     }
 }
 
-/// Re-fetch the Hashi config and swap it into the snapshot if it changed.
 /// Runs on the watcher task, so it can't race the event-driven config
-/// refresh. Bounded so a wedged connection can't hang the checkpoint loop.
+/// refresh; bounded so a wedged connection can't hang the checkpoint loop.
 async fn refresh_config_if_changed(client: &Client, state: &OnchainState) {
     let scrape = super::scrape_hashi_config(client.clone(), state.hashi_id());
     let config = match tokio::time::timeout(Duration::from_secs(10), scrape).await {

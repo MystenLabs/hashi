@@ -312,6 +312,7 @@ impl Hashi {
             self.config.tls_private_key().ok(),
             Some(self.config.grpc_max_decoding_message_size()),
             Some(self.metrics.clone()),
+            Some(self.config.onchain_config_poll_interval()),
         )
         .await?;
         self.onchain_state

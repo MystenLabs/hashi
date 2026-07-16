@@ -348,13 +348,10 @@ impl TestNetworksBuilder {
 
         tracing::info!("rpc url: {}", test_networks.sui_network().rpc_url);
 
-        // The launch tx writes guardian_url into the config with no event, so
-        // nodes that booted pre-launch only see it via the watcher's periodic
-        // config poll. Gate on it BEFORE the override proposals below: their
-        // ProposalExecuted events also refresh the config and would mask a
-        // broken poll path (which is how the testnet launch outage slipped by).
-        // Genesis end_reconfig losers rescrape and heal incidentally too, so
-        // only the race winner actually exercises the poll here.
+        // The launch tx writes guardian_url with no event; nodes booted
+        // pre-launch learn it only via the watcher's config poll. Gate BEFORE
+        // the override proposals — their config refresh would mask a broken
+        // poll (genesis end_reconfig losers rescrape and heal incidentally).
         if nodes_started {
             futures::future::try_join_all(
                 test_networks
@@ -1400,7 +1397,7 @@ mod tests {
         let ids = test_networks.hashi_network().ids();
 
         let (state, _service) =
-            hashi::onchain::OnchainState::new(sui_rpc_url, ids, None, None, None).await?;
+            hashi::onchain::OnchainState::new(sui_rpc_url, ids, None, None, None, None).await?;
 
         assert_eq!(state.state().hashi().committees.committees().len(), 1);
         assert_eq!(state.state().hashi().committees.members().len(), 1);
