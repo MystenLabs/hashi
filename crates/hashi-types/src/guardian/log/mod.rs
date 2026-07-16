@@ -2,14 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Guardian S3 logs. `message` holds the `LogMessage` family the enclave emits;
-//! `envelope` holds the `LogRecord` wrapper written to S3 and its keying/signing.
+//! `envelope` holds the `LogRecord` wrapper written to S3 and its keying/signing;
+//! `ceremony_state` combines the ceremony and KP-share messages for readers.
 //! The S3 layout constants (stream prefixes + object-lock durations) live here so
 //! the whole key/lock scheme reads from one place. See
 //! `crates/hashi-guardian/README.md` for the canonical key layout.
 
+pub mod ceremony_state;
 pub mod envelope;
 pub mod message;
 
+pub use ceremony_state::*;
 pub use envelope::*;
 pub use message::*;
 
