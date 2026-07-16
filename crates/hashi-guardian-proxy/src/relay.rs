@@ -133,9 +133,9 @@ impl Relay {
 /// (session, config, share) bytes. This is only a DoS guard; the enclave repeats
 /// signature and current S3 roster verification authoritatively.
 fn verify_kp_submission(
-    signed_request: KpSigned<SingleProvisionerInitRequest>,
+    signed_request: &KpSigned<SingleProvisionerInitRequest>,
     authorized_kp_fingerprints: &[Fingerprint],
-) -> Result<KpSigned<SingleProvisionerInitRequest>, Status> {
+) -> Result<(), Status> {
     let fingerprint = signed_request.signer_fingerprint();
     if !authorized_kp_fingerprints.contains(&fingerprint) {
         return Err(Status::permission_denied(format!(
@@ -143,10 +143,8 @@ fn verify_kp_submission(
         )));
     }
     signed_request
-        .clone()
-        .verify()
-        .map_err(kp_signature_error_status)?;
-    Ok(signed_request)
+        .verify_signature()
+        .map_err(kp_signature_error_status)
 }
 
 fn kp_signature_error_status(error: GuardianError) -> Status {
@@ -203,8 +201,7 @@ impl GuardianRelayService for Relay {
 
         // Authenticate before the lock or any backend read: junk submissions
         // can't poison the batch, hold the mutex, or cost enclave round-trips.
-        let signed_request =
-            verify_kp_submission(signed_request, &self.authorized_kp_fingerprints)?;
+        verify_kp_submission(&signed_request, &self.authorized_kp_fingerprints)?;
         let expected_session_id = signed_request.data.expected_session_id().to_string();
         let expected_config_hash = *signed_request.data.expected_config_hash();
         let id = u32::from(signed_request.data.encrypted_share().id.get());
@@ -372,11 +369,11 @@ mod tests {
         };
 
         // A rostered signer with a valid signature over the exact submission passes.
-        verify_kp_submission(signed_request.clone(), &roster).unwrap();
+        verify_kp_submission(&signed_request, &roster).unwrap();
 
         // A roster entry parsed from config text (lowercase bare hex) matches too.
         let from_config: Fingerprint = cert.fingerprint().to_hex().to_lowercase().parse().unwrap();
-        verify_kp_submission(signed_request.clone(), &[from_config]).unwrap();
+        verify_kp_submission(&signed_request, &[from_config]).unwrap();
 
         let other_share = signed_share(2);
         let other_request =
@@ -387,12 +384,12 @@ mod tests {
             signature: good_sig.clone(),
         };
         assert!(
-            verify_kp_submission(signed_other_share, &roster).is_err(),
+            verify_kp_submission(&signed_other_share, &roster).is_err(),
             "signature bound to another share must be rejected"
         );
 
         assert!(
-            verify_kp_submission(signed_request, &[]).is_err(),
+            verify_kp_submission(&signed_request, &[]).is_err(),
             "non-rostered signer must be rejected"
         );
 
@@ -402,7 +399,7 @@ mod tests {
             signature: String::new(),
         };
         assert!(
-            verify_kp_submission(missing_signature, &roster).is_err(),
+            verify_kp_submission(&missing_signature, &roster).is_err(),
             "missing signature must be rejected"
         );
 
@@ -416,7 +413,7 @@ mod tests {
             signature: stale_sig,
         };
         assert!(
-            verify_kp_submission(stale_request, &roster).is_err(),
+            verify_kp_submission(&stale_request, &roster).is_err(),
             "signature bound to another session must be rejected"
         );
     }
