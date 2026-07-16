@@ -9,9 +9,8 @@
 //! recorded on chain.
 //!
 //! TODO: Remove this bootstrap helper once deploy no longer records guardian
-//! keys by querying a live guardian. This command verifies the returned
-//! GuardianInfo signature, but it does not verify the guardian's Nitro
-//! attestation or PCRs.
+//! keys by querying a live guardian. This command does not verify the guardian's
+//! signature, Nitro attestation, or PCRs.
 
 use anyhow::Context;
 use anyhow::Result;
@@ -50,18 +49,16 @@ pub async fn run(args: Args) -> Result<()> {
         .await
         .context("GetGuardianInfo RPC failed")?
         .into_inner();
-    let verified = GetGuardianInfoResponse::try_from(resp)
+    let response = GetGuardianInfoResponse::try_from(resp)
         .map_err(|e| anyhow!("decode GetGuardianInfoResponse: {e:?}"))?;
-    let verified = verified
-        // TODO: Accept PCR config here and use `verify_live` for attestation/PCR checks.
-        .verify_signed_info_without_attestation()
-        .map_err(|e| anyhow!("verify GuardianInfo signature: {e:?}"))?;
+    // TODO: Accept PCR config here and use `verify_live` for attestation/PCR checks.
+    let (info, signing_pub_key) = response.into_info_unchecked();
     match args.field {
         Field::SigningPubKey => {
-            println!("{}", hex::encode(verified.signing_pub_key.as_bytes()));
+            println!("{}", hex::encode(signing_pub_key.as_bytes()));
         }
         Field::EnclaveBtcPubkey => {
-            let btc_pk = verified.info.enclave_btc_pubkey.ok_or_else(|| {
+            let btc_pk = info.enclave_btc_pubkey.ok_or_else(|| {
                 anyhow!(
                     "guardian /info did not return enclave_btc_pubkey; \
                      provisioner_init may not have completed"

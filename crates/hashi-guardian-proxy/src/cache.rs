@@ -238,7 +238,8 @@ where
             .map_err(|e| anyhow::anyhow!("parse guardian info: {e:?}"))?;
         // The proxy talks to the enclave over its own direct channel; like the
         // node, it does not re-verify the info envelope (worst case is liveness).
-        Ok(response.into_info_unchecked())
+        let (info, _) = response.into_info_unchecked();
+        Ok(info)
     }
 }
 
