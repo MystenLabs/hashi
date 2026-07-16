@@ -38,10 +38,9 @@ pub async fn operator_activate(
     let config_hash = enclave
         .config_hash()
         .ok_or_else(|| InvalidInputs("config_hash not set".into()))?;
-    let armed_ceremony_state = enclave
-        .ceremony_state()
-        .map_err(|_| InvalidInputs("ceremony state not set".into()))?;
-    let armed_instance = armed_ceremony_state.secret_sharing_instance.clone();
+    let armed_instance = enclave
+        .secret_sharing_instance()
+        .map_err(|_| InvalidInputs("secret-sharing instance not set".into()))?;
 
     let s3 = enclave
         .config
@@ -54,17 +53,6 @@ pub async fn operator_activate(
         .ensure_session_live_and_others_quiet(&enclave.s3_session_id())
         .await
         .map_err(|e| InvalidInputs(format!("heartbeat activation check failed: {e}")))?;
-
-    let latest_ceremony_state = reader
-        .read_latest_ceremony_and_kp_share_state(BuildPolicy::AnyAllowlisted)
-        .await
-        .map_err(|e| InternalError(format!("read latest ceremony state: {e}")))?
-        .ok_or_else(|| InvalidInputs("no ceremony state found during activation".into()))?;
-    if latest_ceremony_state != armed_ceremony_state {
-        return Err(InvalidInputs(
-            "latest ceremony state differs from armed state".into(),
-        ));
-    }
 
     let committee: HashiCommittee = reader
         .read_latest_committee(BuildPolicy::AnyAllowlisted)

@@ -130,28 +130,6 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         .context("heartbeat activation check failed")?;
 
     info!(
-        phase = "ceremony state",
-        "reading latest ceremony and KP share state for activation",
-    );
-    let latest_ceremony_state = reader
-        .read_latest_ceremony_and_kp_share_state(BuildPolicy::AnyAllowlisted)
-        .await?
-        .context("no ceremony state found in S3; key setup has not run")?;
-    let latest_instance = latest_ceremony_state.secret_sharing_instance;
-    ensure!(
-        latest_instance == standby.secret_sharing_instance,
-        "latest ceremony instance differs from armed instance: latest {}, armed {}",
-        latest_instance,
-        standby.secret_sharing_instance
-    );
-    info!(
-        phase = "ceremony state",
-        sharing_seq = latest_instance.sharing_seq(),
-        cert_seq = latest_ceremony_state.cert_seq,
-        "latest ceremony state matches the armed instance",
-    );
-
-    info!(
         phase = "activation state",
         "reading latest committee and recovering limiter state",
     );
@@ -169,7 +147,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         .context("recover limiter state")?;
     let activation_state = ActivationState::new(
         standby.config_hash,
-        latest_instance,
+        standby.secret_sharing_instance.clone(),
         committee,
         limiter_state,
     );
