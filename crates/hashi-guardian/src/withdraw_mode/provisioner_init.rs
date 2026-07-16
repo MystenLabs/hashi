@@ -272,15 +272,12 @@ mod tests {
             expected_session_id: SessionID,
             expected_config_hash: [u8; 32],
         ) -> KpSigned<SingleProvisionerInitRequest> {
-            let encrypted_share = SingleProvisionerInitRequest::build_from_share(
+            let request = SingleProvisionerInitRequest::build_from_share(
+                expected_session_id,
+                expected_config_hash,
                 share,
                 self.enclave.encryption_public_key(),
                 &mut rand::thread_rng(),
-            );
-            let request = SingleProvisionerInitRequest::new(
-                expected_session_id,
-                expected_config_hash,
-                encrypted_share,
             );
             let (cert, secret) = &self.kp_keys[signer_index];
             KpSigned {

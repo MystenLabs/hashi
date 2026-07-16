@@ -605,15 +605,21 @@ impl InitConfig {
 }
 
 impl SingleProvisionerInitRequest {
-    /// Encrypt one KP's `share` to the enclave's session key. Agreement on the
-    /// stable config is authenticated by the KP signature over this request,
-    /// not by HPKE AAD.
+    /// Build one KP's PI contribution, encrypting `share` to the enclave's
+    /// session key. Agreement on the stable config is authenticated by the KP
+    /// signature over this request, not by HPKE AAD.
     pub fn build_from_share<R: CryptoRng + RngCore>(
+        expected_session_id: SessionID,
+        expected_config_hash: [u8; 32],
         share: &Share,
         enclave_pub_key: &EncPubKey,
         rng: &mut R,
-    ) -> GuardianEncryptedShare {
-        encrypt_share(share, enclave_pub_key, None, rng)
+    ) -> Self {
+        Self::new(
+            expected_session_id,
+            expected_config_hash,
+            encrypt_share(share, enclave_pub_key, None, rng),
+        )
     }
 
     pub fn new(

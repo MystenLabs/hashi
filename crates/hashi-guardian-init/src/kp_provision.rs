@@ -23,11 +23,10 @@
 //! 6. The share is decrypted via the yubikey (`gpg --decrypt` over a pipe;
 //!    plaintext stays in memory) and verified against its commitment.
 //! 7. The decrypted share is HPKE-encrypted to the new guardian's
-//!    `encryption_pubkey` (from its `GuardianInfo`), producing a
-//!    `GuardianEncryptedShare` ready for `provisioner_init`.
-//! 8. The share is submitted to the configured relay endpoint via
-//!    `SingleProvisionerInit`, signed together with the pinned session and
-//!    verified `config_hash`. The relay accumulates T-of-N signed submissions
+//!    `encryption_pubkey` (from its `GuardianInfo`) while constructing a PI
+//!    request bound to the pinned session and verified `config_hash`.
+//! 8. The request is signed and submitted to the configured relay endpoint via
+//!    `SingleProvisionerInit`. The relay accumulates T-of-N signed submissions
 //!    and calls the guardian's batch `provisioner_init` once it has enough; the
 //!    enclave re-verifies every signature and binding.
 
@@ -36,7 +35,6 @@ use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::EncPubKey;
-use hashi_types::guardian::GuardianEncryptedShare;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::KpSigned;
@@ -385,15 +383,17 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     );
     let guardian_pub_key =
         EncPubKey::from_bytes(enclave_enc_pubkey_bytes).map_err(anyhow::Error::msg)?;
-    let encrypted_share = SingleProvisionerInitRequest::build_from_share(
+    let request = SingleProvisionerInitRequest::build_from_share(
+        session_id.clone(),
+        config_hash,
         &decrypted,
         &guardian_pub_key,
         &mut thread_rng(),
     );
     info!(
         phase = "share build",
-        share_id = encrypted_share.id.get(),
-        "built GuardianEncryptedShare ready for submission",
+        share_id = request.encrypted_share().id.get(),
+        "built SingleProvisionerInitRequest ready for signing",
     );
 
     // 8. Submit. The relay collects T-of-N shares before forwarding them to the
@@ -411,9 +411,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     );
     submit_provisioner_init_to_relay(
         &cfg.relay_endpoint,
-        &session_id,
         guardian_info,
-        encrypted_share,
+        request,
         &kp_cert,
         allowlist.current_build(),
     )
@@ -441,12 +440,12 @@ async fn verified_endpoint_guardian_info(
 /// has enough; the guardian re-verifies every signature.
 async fn submit_provisioner_init_to_relay(
     endpoint: &str,
-    expected_session_id: &str,
     expected_guardian_info: GuardianInfo,
-    encrypted_share: GuardianEncryptedShare,
+    request: SingleProvisionerInitRequest,
     signer_cert: &PgpPublicCert,
     current_build: &BuildPcrs,
 ) -> anyhow::Result<()> {
+    let expected_session_id = request.expected_session_id();
     info!(
         phase = "relay submit",
         endpoint = %endpoint,
@@ -472,7 +471,7 @@ async fn submit_provisioner_init_to_relay(
     )
     .await
     .with_context(|| "relay endpoint pre-check failed")?;
-    let share_id = encrypted_share.id.get();
+    let share_id = request.encrypted_share().id.get();
     info!(
         phase = "relay submit",
         endpoint = %endpoint,
@@ -489,13 +488,6 @@ async fn submit_provisioner_init_to_relay(
     // Detached-sign the exact (session, config, share) bytes with this KP's
     // offline key. The relay pre-verifies the request before buffering it and
     // the enclave authoritatively re-verifies it before using the share.
-    let request = SingleProvisionerInitRequest::new(
-        expected_session_id.into(),
-        expected_guardian_info
-            .config_hash
-            .expect("prechecks require GuardianInfo.config_hash"),
-        encrypted_share,
-    );
     let signed_request = KpSigned::new(request, signer_cert.clone(), None)
         .map_err(anyhow::Error::msg)
         .context("sign the relay submission with the KP key")?;
