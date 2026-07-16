@@ -32,9 +32,10 @@ pub async fn provisioner_init(
     enclave.require_lifecycle(WithdrawStage::OperatorInitialized.into())?;
     info!("Enclave state validated.");
 
-    let instance = enclave
-        .secret_sharing_instance()
-        .expect("secret-sharing instance should be set after operator_init");
+    let ceremony_state = enclave
+        .ceremony_state()
+        .expect("ceremony state should be set after operator_init");
+    let instance = &ceremony_state.secret_sharing_instance;
     let threshold = instance.threshold();
     let sharing_seq = instance.sharing_seq();
     let config_hash = enclave
@@ -42,7 +43,12 @@ pub async fn provisioner_init(
         .expect("withdraw-mode operator_init installs the config_hash");
     let session_id = enclave.s3_session_id();
 
-    let encrypted_shares = verify_signed_submissions(request, &session_id, &config_hash)?;
+    let encrypted_shares = verify_signed_submissions(
+        request,
+        &session_id,
+        &config_hash,
+        &ceremony_state.encrypted_shares,
+    )?;
     let shares = decrypt_verify_shares(
         &encrypted_shares,
         enclave.encryption_secret_key(),
@@ -76,10 +82,8 @@ fn verify_signed_submissions(
     request: ProvisionerInitRequest,
     live_session_id: &SessionID,
     live_config_hash: &[u8; 32],
+    expected_kp_encrypted_shares: &KPEncryptedShares,
 ) -> GuardianResult<Vec<GuardianEncryptedShare>> {
-    // TODO: Consider verifying that each signer fingerprint is assigned to its
-    // submitted share id once the enclave has an authoritative KP/certificate
-    // assignment model.
     request
         .0
         .into_iter()
@@ -102,8 +106,29 @@ fn verify_signed_submissions(
                 )));
             }
 
+            let share_id = submission.encrypted_share().id;
+            let expected_fingerprint = expected_kp_encrypted_shares
+                .as_slice()
+                .get(usize::from(share_id.get() - 1))
+                .ok_or_else(|| {
+                    GuardianError::InvalidInputs(format!(
+                        "PI submission share id {} has no KP assignment",
+                        share_id.get()
+                    ))
+                })?
+                .recipient_fingerprint
+                .as_str();
+            if signer_fingerprint != expected_fingerprint {
+                return Err(GuardianError::InvalidInputs(format!(
+                    "PI submission share id {} is assigned to KP {}, not signer {}",
+                    share_id.get(),
+                    expected_fingerprint,
+                    signer_fingerprint
+                )));
+            }
+
             info!(
-                share_id = submission.encrypted_share().id.get(),
+                share_id = share_id.get(),
                 signer_fingerprint, "verified signed PI submission"
             );
             let (_, _, encrypted_share) = submission.into_parts();
@@ -165,8 +190,22 @@ mod tests {
                 (PgpPublicCert::new(cert).unwrap(), secret)
             })
             .collect::<Vec<_>>();
+        let kp_encrypted_shares = KPEncryptedShares::new(
+            kp_keys
+                .iter()
+                .enumerate()
+                .map(|(i, (cert, _))| KPEncryptedShare {
+                    id: std::num::NonZeroU16::new((i + 1) as u16).unwrap(),
+                    recipient_fingerprint: cert.fingerprint().to_hex(),
+                    armored_ciphertext: "dummy".into(),
+                })
+                .collect(),
+        )
+        .unwrap();
         let enclave = Enclave::create_operator_initialized_with(
-            OperatorInitTestArgs::default().with_commitments(share_commitments),
+            OperatorInitTestArgs::default()
+                .with_commitments(share_commitments)
+                .with_kp_encrypted_shares(kp_encrypted_shares),
         )
         .await;
         TestContext {
@@ -330,6 +369,23 @@ mod tests {
             .await
             .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_signer_not_assigned_to_share() {
+        let ctx = setup().await;
+        let mut submissions = ctx.request(&ctx.shares[..TEST_T]).0;
+        submissions[0] = ctx.signed_submission(
+            &ctx.shares[0],
+            1,
+            ctx.enclave.s3_session_id(),
+            ctx.enclave.config_hash().unwrap(),
+        );
+        let err = ctx
+            .provision(ProvisionerInitRequest(submissions))
+            .await
+            .expect_err("should fail");
+        assert!(matches!(err, InvalidInputs(message) if message.contains("assigned to KP")));
     }
 
     #[tokio::test]
