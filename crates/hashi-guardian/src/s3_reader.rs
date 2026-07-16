@@ -255,7 +255,9 @@ impl GuardianReader {
             .with_context(|| {
                 format!("no kp-shares log found for latest ceremony sharing_seq {sharing_seq}")
             })?;
-        Ok(Some(CeremonyState::new(ceremony, kp_share_state)?))
+        Ok(Some(CeremonyState::new(ceremony, kp_share_state).expect(
+            "KP share state must match the requested ceremony sharing_seq",
+        )))
     }
 
     /// Latest serving committee, preferring `committee-update/` and falling back
