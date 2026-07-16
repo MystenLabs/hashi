@@ -21,11 +21,9 @@ use std::path::PathBuf;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::KPEncryptedShare;
 use hashi_types::guardian::KPFingerprint;
-use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::SecretSharingParams;
 use hashi_types::guardian::SetupNewKeyResponse;
@@ -88,23 +86,12 @@ pub fn ceremony_state_from_response(
     expected_n: usize,
     expected_t: usize,
 ) -> Result<CeremonyState> {
-    let SetupNewKeyResponse {
-        encrypted_shares,
-        secret_sharing_instance,
-        btc_master_pubkey,
-    } = response;
-    let sharing_seq = secret_sharing_instance.sharing_seq();
+    let state = CeremonyState::from(response);
+    let sharing_seq = state.secret_sharing_instance.sharing_seq();
     anyhow::ensure!(
         sharing_seq == expected_sharing_seq,
         "ceremony sharing_seq ({sharing_seq}) differs from expected ({expected_sharing_seq})"
     );
-    let state = CeremonyState::new(
-        CeremonyLogMessage::NewKey {
-            instance: secret_sharing_instance,
-            btc_master_pubkey,
-        },
-        KpShareStateLogMessage::new(sharing_seq, 0, encrypted_shares),
-    )?;
     validate_ceremony_state_shape(&state, expected_n, expected_t)?;
     Ok(state)
 }
@@ -275,7 +262,9 @@ fn scalar_from_decrypted_plaintext(plaintext: &[u8]) -> Result<Scalar> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hashi_types::guardian::CeremonyLogMessage;
     use hashi_types::guardian::KPEncryptedShares;
+    use hashi_types::guardian::KpShareStateLogMessage;
     use hashi_types::guardian::SecretSharingInstance;
     use hashi_types::guardian::ShareCommitment;
     use hashi_types::guardian::ShareCommitments;

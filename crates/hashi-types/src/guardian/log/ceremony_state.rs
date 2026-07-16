@@ -10,6 +10,7 @@ use crate::guardian::GuardianError;
 use crate::guardian::GuardianResult;
 use crate::guardian::KPEncryptedShares;
 use crate::guardian::SecretSharingInstance;
+use crate::guardian::SetupNewKeyResponse;
 
 /// The current ceremony result together with its latest encrypted KP share state.
 #[derive(Clone, Debug, PartialEq)]
@@ -41,5 +42,21 @@ impl CeremonyState {
             cert_seq: kp_share_state.cert_seq,
             encrypted_shares: kp_share_state.encrypted_shares,
         })
+    }
+}
+
+impl From<SetupNewKeyResponse> for CeremonyState {
+    fn from(response: SetupNewKeyResponse) -> Self {
+        let SetupNewKeyResponse {
+            encrypted_shares,
+            secret_sharing_instance,
+            btc_master_pubkey,
+        } = response;
+        Self {
+            secret_sharing_instance,
+            btc_master_pubkey,
+            cert_seq: 0,
+            encrypted_shares,
+        }
     }
 }
