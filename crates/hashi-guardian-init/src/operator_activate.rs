@@ -130,14 +130,14 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         .context("heartbeat activation check failed")?;
 
     info!(
-        phase = "ceremony instance",
-        "reading latest ceremony log for the activation instance",
+        phase = "ceremony state",
+        "reading latest ceremony and KP share state for activation",
     );
-    let latest_ceremony = reader
-        .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
+    let latest_ceremony_state = reader
+        .read_latest_ceremony_and_kp_share_state(BuildPolicy::AnyAllowlisted)
         .await?
-        .context("no ceremony log found in S3; key setup has not run")?;
-    let (latest_instance, _) = latest_ceremony.into_instance_and_pubkey();
+        .context("no ceremony state found in S3; key setup has not run")?;
+    let latest_instance = latest_ceremony_state.secret_sharing_instance;
     ensure!(
         latest_instance == standby.secret_sharing_instance,
         "latest ceremony instance differs from armed instance: latest {}, armed {}",
@@ -145,9 +145,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         standby.secret_sharing_instance
     );
     info!(
-        phase = "ceremony instance",
+        phase = "ceremony state",
         sharing_seq = latest_instance.sharing_seq(),
-        "latest ceremony instance matches the armed standby",
+        cert_seq = latest_ceremony_state.cert_seq,
+        "latest ceremony state matches the armed instance",
     );
 
     info!(

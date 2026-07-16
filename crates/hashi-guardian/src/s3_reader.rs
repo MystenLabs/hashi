@@ -171,7 +171,7 @@ impl GuardianReader {
     ///
     /// `kp-shares/` is read independently so later KP cert rotations can advance
     /// `cert_seq` without rewriting the `ceremony/` instance.
-    pub async fn read_latest_ceremony(
+    async fn read_latest_ceremony(
         &mut self,
         build_policy: BuildPolicy,
     ) -> anyhow::Result<Option<CeremonyLogMessage>> {
@@ -201,11 +201,11 @@ impl GuardianReader {
     /// expected to expire, and their integrity is the enclave signature checked
     /// below — not S3 immutability — so the immutable-log lock assertion in
     /// `get_log_record` doesn't apply.
-    pub async fn read_latest_kp_share_state(
+    async fn read_latest_kp_share_state(
         &mut self,
         sharing_seq: u64,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<Option<(SessionID, KpShareStateLogMessage)>> {
+    ) -> anyhow::Result<Option<KpShareStateLogMessage>> {
         let prefix = KpShareStateLogMessage::object_key_dir(sharing_seq);
         let keys = self
             .s3
@@ -221,7 +221,6 @@ impl GuardianReader {
             .get_log_record_inner(&key, LockCheck::Skipped, HistoryCheck::AlreadyChecked)
             .await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
-        let session_id = record.session_id.clone();
         let build_pcrs = record.build_pcrs.clone();
         self.enforce_build_policy("kp-shares log", build_policy, &build_pcrs)?;
         let LogMessage::V1(LogMessageV1::KpShareState(msg)) = record.message else {
@@ -234,7 +233,7 @@ impl GuardianReader {
                 sharing_seq
             );
         }
-        Ok(Some((session_id, *msg)))
+        Ok(Some(*msg))
     }
 
     /// Read the latest ceremony together with the latest KP share state for its
@@ -249,7 +248,7 @@ impl GuardianReader {
             return Ok(None);
         };
         let sharing_seq = ceremony.sharing_seq();
-        let (_, kp_share_state) = self
+        let kp_share_state = self
             .read_latest_kp_share_state(sharing_seq, build_policy)
             .await?
             .with_context(|| {
