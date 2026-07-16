@@ -228,7 +228,6 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     info!(
         phase = "summary",
         session_id = %session_id,
-        ceremony_session = %ceremony_session,
         committee_epoch,
         config_hash = hex::encode(standby.config_hash),
         state_hash = hex::encode(state_hash),

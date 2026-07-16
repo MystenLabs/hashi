@@ -265,7 +265,6 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     info!(
         phase = "summary",
         session_id = %session_id,
-        ceremony_session = %ceremony_session,
         sharing_seq,
         config_hash = hex::encode(config_hash),
         bitcoin_network = ?cfg.bitcoin_network,
