@@ -929,7 +929,8 @@ impl Hashi {
                 );
                 anyhow::anyhow!("parse GetGuardianInfoResponse: {e:?}")
             })?;
-        Ok(resp.into_info_unchecked())
+        let (info, _) = resp.into_info_unchecked();
+        Ok(info)
     }
 
     /// Fetch the guardian's authoritative `LimiterState` and the live local

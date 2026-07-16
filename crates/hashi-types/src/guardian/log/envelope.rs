@@ -448,7 +448,7 @@ mod tests {
         let encrypted_shares = GuardianSigned::<RotateKpsResponse>::mock_for_testing()
             .data
             .encrypted_shares;
-        let guardian_info = GetGuardianInfoResponse::mock_for_testing().into_info_unchecked();
+        let (guardian_info, _) = GetGuardianInfoResponse::mock_for_testing().into_info_unchecked();
         let committee_0: crate::move_types::Committee = (&committee_0).into();
         let mut committee_1 = committee_0.clone();
         committee_1.epoch = 1;

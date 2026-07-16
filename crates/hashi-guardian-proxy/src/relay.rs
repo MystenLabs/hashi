@@ -19,6 +19,7 @@ use hashi_types::guardian::proto_conversions::guardian_encrypted_share_to_pb;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::KpSigned;
+use hashi_types::guardian::SessionID;
 use hashi_types::guardian::SingleProvisionerInitRequest;
 use hashi_types::pgp::Fingerprint;
 use hashi_types::proto;
@@ -98,9 +99,8 @@ impl Relay {
         }
     }
 
-    /// Backend's live session, provisioning threshold, and provisioned flag.
-    /// Verifies the signed info's signature but not the Nitro attestation — the KP
-    /// anchored attestation before submitting, and the relay is liveness-only.
+    /// Backend's self-reported session, provisioning threshold, and provisioned flag.
+    /// The relay is liveness-only, so it does not verify the signature or attestation.
     async fn backend_status(&self) -> Result<BackendStatus, Status> {
         let pb = self
             .client
@@ -110,15 +110,14 @@ impl Relay {
             .into_inner();
         let resp = GetGuardianInfoResponse::try_from(pb)
             .map_err(|e| Status::internal(format!("decode backend GuardianInfo: {e:?}")))?;
-        let verified = resp
-            .verify_signed_info_without_attestation()
-            .map_err(|e| Status::internal(format!("verify backend GuardianInfo: {e:?}")))?;
-        let sharing = verified.info.secret_sharing_instance.as_ref();
+        let (info, signing_pub_key) = resp.into_info_unchecked();
+        let session_id = SessionID::from_signing_pubkey(&signing_pub_key);
+        let sharing = info.secret_sharing_instance.as_ref();
         let num_shares = sharing.map(|i| i.num_shares());
         let threshold = sharing.map(|i| i.threshold());
-        let provisioned = verified.info.enclave_btc_pubkey.is_some();
+        let provisioned = info.enclave_btc_pubkey.is_some();
         Ok(BackendStatus {
-            session_id: verified.session_id.into(),
+            session_id: session_id.into(),
             num_shares,
             threshold,
             provisioned,

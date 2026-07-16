@@ -24,7 +24,7 @@ pub async fn verified_live_guardian_info(
     let info_resp = GetGuardianInfoResponse::try_from(info_pb)
         .map_err(|e| anyhow!("decode GetGuardianInfoResponse: {e:?}"))?;
     info_resp
-        .verify(current_build)
+        .verify_live(current_build)
         .map_err(|e| anyhow!("verify GuardianInfo attestation/signature: {e:?}"))
 }
 

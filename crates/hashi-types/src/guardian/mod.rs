@@ -790,11 +790,18 @@ impl GetGuardianInfoResponse {
         }
     }
 
-    /// Verify the response end to end and return the trusted guardian payload:
-    /// the attestation anchors `signing_pub_key`, `signed_info` must be signed by
-    /// it, the signed git revision must match `expected_build`, and PCR0 must
-    /// match `expected_build`.
-    pub fn verify(&self, expected_build: &BuildPcrs) -> GuardianResult<VerifiedGuardianInfo> {
+    /// Verify a live guardian response.
+    ///
+    /// Used by operator and KP tooling while initializing a guardian (ceremony,
+    /// provisioning, and activation).
+    ///
+    /// Checks:
+    /// - `signed_info` is signed by `signing_pub_key`;
+    /// - its git revision matches `expected_build`;
+    /// - the Nitro attestation has a valid signature;
+    /// - the certificate chain is valid now;
+    /// - the attested public key and PCR0 match `signing_pub_key` and `expected_build`.
+    pub fn verify_live(&self, expected_build: &BuildPcrs) -> GuardianResult<VerifiedGuardianInfo> {
         let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
         if info.untrusted_git_revision != expected_build.git_revision() {
             return Err(InvalidInputs(format!(
@@ -804,7 +811,7 @@ impl GetGuardianInfoResponse {
             )));
         }
         self.attestation
-            .verify(&self.signing_pub_key, expected_build)?;
+            .verify_live(&self.signing_pub_key, expected_build)?;
         Ok(VerifiedGuardianInfo {
             info,
             signing_pub_key: self.signing_pub_key,
@@ -813,26 +820,10 @@ impl GetGuardianInfoResponse {
         })
     }
 
-    /// Verify only the signed `GuardianInfo` payload.
-    ///
-    /// This does not authenticate the enclave image, the Nitro attestation, or
-    /// PCRs. Prefer [`Self::verify`] whenever the caller has PCR config.
-    pub fn verify_signed_info_without_attestation(&self) -> GuardianResult<VerifiedGuardianInfo> {
-        let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
-        Ok(VerifiedGuardianInfo {
-            info,
-            signing_pub_key: self.signing_pub_key,
-            session_id: SessionID::from_signing_pubkey(&self.signing_pub_key),
-            encrypted_shares: self.encrypted_shares.clone(),
-        })
-    }
-
-    /// Extract the guardian's self-reported `GuardianInfo` WITHOUT verifying the
-    /// signature or attestation. The node uses this after authenticating the
-    /// guardian over TLS; withdrawals are gated by the on-chain BTC key, and the
-    /// ed25519 signing key is verified only by KPs/monitors on the S3 audit logs.
-    pub fn into_info_unchecked(self) -> GuardianInfo {
-        self.signed_info.into_data_unchecked()
+    /// Extract the guardian's self-reported info and signing key WITHOUT verifying
+    /// the signature or attestation.
+    pub fn into_info_unchecked(self) -> (GuardianInfo, GuardianPubKey) {
+        (self.signed_info.into_data_unchecked(), self.signing_pub_key)
     }
 }
 
@@ -953,7 +944,7 @@ mod tests {
 
     #[test]
     fn guardian_info_json_encodes_binary_fields_as_strings() {
-        let mut info = GetGuardianInfoResponse::mock_for_testing().into_info_unchecked();
+        let (mut info, _) = GetGuardianInfoResponse::mock_for_testing().into_info_unchecked();
         info.config_hash = Some([0xab; 32]);
         let btc_pubkey = crate::bitcoin::create_btc_keypair_for_test(&[3u8; 32])
             .x_only_public_key()
@@ -979,54 +970,26 @@ mod tests {
     }
 
     #[test]
-    fn get_guardian_info_verify_signed_info_passes_for_valid_signature() {
+    fn get_guardian_info_into_info_unchecked_returns_info_and_signing_key() {
         let resp = GetGuardianInfoResponse::mock_for_testing();
-        let verified = resp.verify_signed_info_without_attestation().unwrap();
+        let expected_info = resp.signed_info.data.clone();
+        let expected_signing_pub_key = resp.signing_pub_key;
+        let (info, signing_pub_key) = resp.into_info_unchecked();
 
-        assert_eq!(verified.signing_pub_key, resp.signing_pub_key);
-        assert_eq!(
-            verified.session_id,
-            SessionID::from_signing_pubkey(&resp.signing_pub_key)
-        );
-        assert_eq!(verified.info, resp.signed_info.data);
-        assert_eq!(verified.encrypted_shares, resp.encrypted_shares);
+        assert_eq!(info, expected_info);
+        assert_eq!(signing_pub_key, expected_signing_pub_key);
     }
 
     #[test]
-    fn get_guardian_info_verify_uses_signed_info_verification() {
+    fn get_guardian_info_verify_live_uses_signed_info_verification() {
         let mut resp = GetGuardianInfoResponse::mock_for_testing();
         let mut sig_bytes: [u8; 64] = resp.signed_info.signature.to_bytes();
         sig_bytes[0] ^= 0xff;
         resp.signed_info.signature = GuardianSignature::from(sig_bytes);
 
         assert!(matches!(
-            resp.verify(&BuildPcrs::new("test-revision", vec![0]))
+            resp.verify_live(&BuildPcrs::new("test-revision", vec![0]))
                 .unwrap_err(),
-            InvalidInputs(_)
-        ));
-    }
-
-    #[test]
-    fn get_guardian_info_verify_signed_info_fails_when_pubkey_did_not_sign() {
-        let mut resp = GetGuardianInfoResponse::mock_for_testing();
-        let wrong_signing_key = GuardianSignKeyPair::new(rand::thread_rng());
-        resp.signing_pub_key = wrong_signing_key.verification_key();
-
-        assert!(matches!(
-            resp.verify_signed_info_without_attestation().unwrap_err(),
-            InvalidInputs(_)
-        ));
-    }
-
-    #[test]
-    fn get_guardian_info_verify_signed_info_fails_when_signature_tampered() {
-        let mut resp = GetGuardianInfoResponse::mock_for_testing();
-        let mut sig_bytes: [u8; 64] = resp.signed_info.signature.to_bytes();
-        sig_bytes[0] ^= 0xff;
-        resp.signed_info.signature = GuardianSignature::from(sig_bytes);
-
-        assert!(matches!(
-            resp.verify_signed_info_without_attestation().unwrap_err(),
             InvalidInputs(_)
         ));
     }

@@ -35,7 +35,7 @@ impl NitroAttestation {
     /// In non-enclave dev/test builds the enclave emits a mock document, so the
     /// attestation check is a no-op, mirroring `get_attestation` `non-enclave-dev`
     /// stub behavior. Real verification runs only in enclave builds.
-    pub fn verify(
+    pub fn verify_live(
         &self,
         signing_pubkey: &GuardianPubKey,
         build_pcrs: &BuildPcrs,
