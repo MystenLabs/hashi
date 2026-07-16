@@ -137,7 +137,7 @@ fn verify_signed_submissions(
     authorized_kp_shares: &KPEncryptedShares,
 ) -> GuardianResult<Vec<GuardianEncryptedShare>> {
     request
-        .into_parts()
+        .0
         .into_iter()
         .map(|signed| {
             let signer_fingerprint = signed.signer_fingerprint().to_hex();
@@ -272,7 +272,7 @@ mod tests {
             expected_session_id: SessionID,
             expected_config_hash: [u8; 32],
         ) -> KpSigned<SingleProvisionerInitRequest> {
-            let encrypted_share = ProvisionerInitRequest::build_from_share(
+            let encrypted_share = SingleProvisionerInitRequest::build_from_share(
                 share,
                 self.enclave.encryption_public_key(),
                 &mut rand::thread_rng(),
@@ -304,7 +304,7 @@ mod tests {
                     )
                 })
                 .collect();
-            ProvisionerInitRequest::new(submissions)
+            ProvisionerInitRequest(submissions)
         }
 
         async fn provision(&self, request: ProvisionerInitRequest) -> GuardianResult<()> {
@@ -369,7 +369,7 @@ mod tests {
         let authorized_kp_shares = KPEncryptedShares::new(vec![]).unwrap();
         let err = provisioner_init_with_authorized_kps(
             enclave,
-            ProvisionerInitRequest::new(vec![]),
+            ProvisionerInitRequest(vec![]),
             &authorized_kp_shares,
         )
         .await
@@ -393,7 +393,7 @@ mod tests {
             })
             .collect();
         let err = ctx
-            .provision(ProvisionerInitRequest::new(submissions))
+            .provision(ProvisionerInitRequest(submissions))
             .await
             .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
@@ -415,7 +415,7 @@ mod tests {
             })
             .collect();
         let err = ctx
-            .provision(ProvisionerInitRequest::new(submissions))
+            .provision(ProvisionerInitRequest(submissions))
             .await
             .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
@@ -424,10 +424,10 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_signature() {
         let ctx = setup().await;
-        let mut submissions = ctx.request(&ctx.shares[..TEST_T]).into_parts();
+        let mut submissions = ctx.request(&ctx.shares[..TEST_T]).0;
         submissions[0].signature = "invalid signature".into();
         let err = ctx
-            .provision(ProvisionerInitRequest::new(submissions))
+            .provision(ProvisionerInitRequest(submissions))
             .await
             .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
@@ -443,7 +443,7 @@ mod tests {
             ctx.enclave.config_hash().unwrap(),
         );
         let err = ctx
-            .provision(ProvisionerInitRequest::new(vec![submission]))
+            .provision(ProvisionerInitRequest(vec![submission]))
             .await
             .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
@@ -462,9 +462,9 @@ mod tests {
             ctx.enclave.s3_session_id(),
             ctx.enclave.config_hash().unwrap(),
         )];
-        submissions.extend(ctx.request(&ctx.shares[1..TEST_T]).into_parts());
+        submissions.extend(ctx.request(&ctx.shares[1..TEST_T]).0);
         let err = ctx
-            .provision(ProvisionerInitRequest::new(submissions))
+            .provision(ProvisionerInitRequest(submissions))
             .await
             .expect_err("should fail");
         assert!(matches!(err, InvalidInputs(_)));
@@ -480,7 +480,7 @@ mod tests {
             ctx.enclave.config_hash().unwrap(),
         );
         let err = ctx
-            .provision(ProvisionerInitRequest::new(vec![
+            .provision(ProvisionerInitRequest(vec![
                 first.clone(),
                 first,
                 ctx.signed_submission(

@@ -69,7 +69,7 @@ use std::ops::Deref;
 
 /// Operator-supplied bootstrap. A ceremony-mode enclave (setup/rotate) needs only
 /// `s3_config`; a withdraw-mode enclave additionally carries the stable
-/// `InitConfig` whose digest KPs verify and sign during provisioner init.
+/// `InitConfig` whose digest KPs authenticate during provisioner init.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OperatorInitRequest {
     s3_config: S3Config,
@@ -145,8 +145,8 @@ pub struct GuardianInfo {
 // ---------------------------------------
 
 /// Stable operator-supplied config for arming a withdraw-mode standby. Its
-/// `digest()` is the `config_hash` that KPs verify and sign in their PI
-/// submissions, and that the enclave exposes via `GuardianInfo`.
+/// `digest()` is the `config_hash` that KPs authenticate in their PI submissions,
+/// and that the enclave exposes via `GuardianInfo`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InitConfig {
     /// Limiter config.
@@ -177,9 +177,7 @@ pub struct ActivationState {
 /// collected enough. The enclave verifies every KP signature, signer assignment,
 /// session pin, and config hash before decrypting the shares.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ProvisionerInitRequest {
-    submissions: Vec<KpSigned<SingleProvisionerInitRequest>>,
-}
+pub struct ProvisionerInitRequest(pub Vec<KpSigned<SingleProvisionerInitRequest>>);
 
 /// Relay-facing request carrying one KP's signed contribution toward
 /// `ProvisionerInit` for a specific guardian session.
@@ -598,7 +596,7 @@ impl InitConfig {
         self.network
     }
 
-    /// The `config_hash`: the digest KPs verify and bind into their signed PI
+    /// The `config_hash`: the digest KPs authenticate in their signed PI
     /// submissions.
     pub fn digest(&self) -> [u8; 32] {
         let bytes = bcs::to_bytes(&InitConfigRepr::from(self)).expect("serialization should work");
@@ -606,14 +604,10 @@ impl InitConfig {
     }
 }
 
-impl ProvisionerInitRequest {
-    pub fn new(submissions: Vec<KpSigned<SingleProvisionerInitRequest>>) -> Self {
-        Self { submissions }
-    }
-
+impl SingleProvisionerInitRequest {
     /// Encrypt one KP's `share` to the enclave's session key. Agreement on the
-    /// stable config is authenticated by the KP signature over
-    /// [`SingleProvisionerInitRequest`], not by HPKE AAD.
+    /// stable config is authenticated by the KP signature over this request,
+    /// not by HPKE AAD.
     pub fn build_from_share<R: CryptoRng + RngCore>(
         share: &Share,
         enclave_pub_key: &EncPubKey,
@@ -622,16 +616,6 @@ impl ProvisionerInitRequest {
         encrypt_share(share, enclave_pub_key, None, rng)
     }
 
-    pub fn submissions(&self) -> &[KpSigned<SingleProvisionerInitRequest>] {
-        &self.submissions
-    }
-
-    pub fn into_parts(self) -> Vec<KpSigned<SingleProvisionerInitRequest>> {
-        self.submissions
-    }
-}
-
-impl SingleProvisionerInitRequest {
     pub fn new(
         expected_session_id: SessionID,
         expected_config_hash: [u8; 32],

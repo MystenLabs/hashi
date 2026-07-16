@@ -40,7 +40,6 @@ use hashi_types::guardian::GuardianEncryptedShare;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::KpSigned;
-use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::SingleProvisionerInitRequest;
 use hashi_types::guardian::VerifiedGuardianInfo;
 use hashi_types::guardian::WithdrawStage;
@@ -386,8 +385,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     );
     let guardian_pub_key =
         EncPubKey::from_bytes(enclave_enc_pubkey_bytes).map_err(anyhow::Error::msg)?;
-    let encrypted_share =
-        ProvisionerInitRequest::build_from_share(&decrypted, &guardian_pub_key, &mut thread_rng());
+    let encrypted_share = SingleProvisionerInitRequest::build_from_share(
+        &decrypted,
+        &guardian_pub_key,
+        &mut thread_rng(),
+    );
     info!(
         phase = "share build",
         share_id = encrypted_share.id.get(),

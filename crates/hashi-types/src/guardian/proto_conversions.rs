@@ -231,7 +231,7 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
             .map(KpSigned::<SingleProvisionerInitRequest>::try_from)
             .collect::<GuardianResult<Vec<_>>>()?;
 
-        Ok(ProvisionerInitRequest::new(submissions))
+        Ok(ProvisionerInitRequest(submissions))
     }
 }
 
@@ -573,7 +573,7 @@ pub fn provisioner_init_request_to_pb(
 ) -> GuardianResult<pb::ProvisionerInitRequest> {
     Ok(pb::ProvisionerInitRequest {
         submissions: r
-            .into_parts()
+            .0
             .into_iter()
             .map(pb::SignedSingleProvisionerInitRequest::from)
             .collect(),
@@ -1422,7 +1422,7 @@ mod tests {
         let (cert_armored, secret_armored) = mock_pgp_keypair();
         let cert = PgpPublicCert::new(cert_armored).unwrap();
         let encrypted_share = ProvisionerInitRequest::mock_for_testing()
-            .into_parts()
+            .0
             .pop()
             .unwrap()
             .data
@@ -1449,7 +1449,7 @@ mod tests {
         assert_eq!(back.signer_cert.fingerprint(), cert.fingerprint());
         back.verify().unwrap();
 
-        let mut tampered = pb;
+        let mut tampered = pb.clone();
         tampered.expected_session_id = "other-session".to_string();
         let tampered = KpSigned::<SingleProvisionerInitRequest>::try_from(tampered).unwrap();
         assert!(

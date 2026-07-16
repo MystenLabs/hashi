@@ -13,6 +13,7 @@ use super::HashiSigned;
 use super::InitConfig;
 use super::KPEncryptedShare;
 use super::KPEncryptedShares;
+use super::KpSigned;
 use super::LimiterConfig;
 use super::NitroAttestation;
 use super::OperatorInitRequest;
@@ -26,6 +27,7 @@ use super::SetupNewKeyRequest;
 use super::SetupNewKeyResponse;
 use super::ShareCommitment;
 use super::ShareCommitments;
+use super::SingleProvisionerInitRequest;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
 use super::WithdrawStage;
@@ -190,7 +192,7 @@ impl ProvisionerInitRequest {
         let (cert_armored, _) = crate::pgp::test_utils::mock_pgp_keypair();
         let request =
             SingleProvisionerInitRequest::new("mock-session".into(), [7u8; 32], encrypted_share);
-        ProvisionerInitRequest::new(vec![KpSigned {
+        ProvisionerInitRequest(vec![KpSigned {
             data: request,
             signer_cert: crate::pgp::PgpPublicCert::new(cert_armored).unwrap(),
             signature: "mock-signature".into(),
