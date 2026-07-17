@@ -40,6 +40,7 @@ use hashi_types::guardian::S3_DIR_HEARTBEAT;
 use hashi_types::guardian::S3_DIR_WITHDRAW;
 use hashi_types::move_types::Committee;
 use std::collections::HashMap;
+use tracing::info;
 
 mod heartbeat_checks;
 mod limiter_recovery;
@@ -186,9 +187,11 @@ impl GuardianReader {
         let record = self.cache.verify_record(&self.s3, record).await?;
         let build_pcrs = record.build_pcrs.clone();
         self.enforce_build_policy("ceremony log", build_policy, &build_pcrs)?;
+        let session_id = record.session_id;
         let LogMessage::V1(LogMessageV1::Ceremony(msg)) = record.message else {
             anyhow::bail!("expected a ceremony log at {key}");
         };
+        log_verified_read(&key, &session_id);
         Ok(Some(*msg))
     }
 
@@ -223,6 +226,7 @@ impl GuardianReader {
         let record = self.cache.verify_record(&self.s3, record).await?;
         let build_pcrs = record.build_pcrs.clone();
         self.enforce_build_policy("kp-shares log", build_policy, &build_pcrs)?;
+        let session_id = record.session_id;
         let LogMessage::V1(LogMessageV1::KpShareState(msg)) = record.message else {
             anyhow::bail!("expected a kp-shares log at {key}");
         };
@@ -233,6 +237,7 @@ impl GuardianReader {
                 sharing_seq
             );
         }
+        log_verified_read(&key, &session_id);
         Ok(Some(*msg))
     }
 
@@ -292,15 +297,18 @@ impl GuardianReader {
         let record = self.s3.get_log_record(&key).await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
         self.enforce_build_policy("committee-update log", build_policy, &record.build_pcrs)?;
+        let session_id = record.session_id;
         let LogMessage::V1(LogMessageV1::CommitteeUpdate(msg)) = record.message else {
             anyhow::bail!("expected a committee-update log at {key}");
         };
-        match *msg {
-            CommitteeUpdateLogMessage::Success { new_committee, .. } => Ok(Some(new_committee)),
+        let committee = match *msg {
+            CommitteeUpdateLogMessage::Success { new_committee, .. } => new_committee,
             CommitteeUpdateLogMessage::Failure { .. } => {
                 anyhow::bail!("lex-last non-failure key resolved to a Failure log at {key}")
             }
-        }
+        };
+        log_verified_read(&key, &session_id);
+        Ok(Some(committee))
     }
 
     /// Fixed genesis record from `genesis/record.json`. `None` means the
@@ -323,11 +331,17 @@ impl GuardianReader {
         let record = self.s3.get_log_record(&key).await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
         self.enforce_build_policy("genesis log", build_policy, &record.build_pcrs)?;
+        let session_id = record.session_id;
         let LogMessage::V1(LogMessageV1::Genesis(msg)) = record.message else {
             anyhow::bail!("expected a genesis log at {key}");
         };
+        log_verified_read(&key, &session_id);
         Ok(Some(*msg))
     }
+}
+
+fn log_verified_read(key: &str, session_id: &SessionID) {
+    info!("Successfully read {key} from session {session_id}.");
 }
 
 /// Per-session [`VerifiedSessionInfo`] cache, internal to [`GuardianReader`]. The first
