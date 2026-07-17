@@ -5619,7 +5619,13 @@ impl MpcManager {
     }
 
     fn required_nonce_weight(&self) -> u32 {
-        2 * self.mpc_config.max_faulty as u32 + 1
+        let max_faulty = self.mpc_config.max_faulty as u32;
+        match self.mpc_config.presignature_derivation_version {
+            PresignatureDerivationVersion::Legacy => 2 * max_faulty + 1,
+            PresignatureDerivationVersion::PrivacyThreshold => {
+                self.mpc_config.nodes.total_weight() as u32 - max_faulty
+            }
+        }
     }
 
     fn maybe_corrupt_nodes_for_testing(

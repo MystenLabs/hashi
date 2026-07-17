@@ -2332,6 +2332,23 @@ mod tests {
             "pool of {pool_size} (height {height}) does not match the expected \
              derivation (c = {c_expected}); it implies output weight {w_out}"
         );
+        let gate = if expect_legacy {
+            2 * f + 1
+        } else {
+            w_total - f
+        };
+        let expected_w_out = w_node * gate.div_ceil(w_node);
+        assert_eq!(
+            w_out,
+            expected_w_out,
+            "pool of {pool_size} implies output weight {w_out}, but the \
+             {} gate ({gate}) should collect {expected_w_out}",
+            if expect_legacy {
+                "legacy 2f+1"
+            } else {
+                "privacy-threshold W-f"
+            }
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
