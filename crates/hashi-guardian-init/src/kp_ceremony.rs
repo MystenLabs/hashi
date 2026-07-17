@@ -15,7 +15,6 @@ use tracing::info;
 use crate::config::Config;
 use crate::kp_roster::decrypt_share;
 use crate::kp_roster::ensure_cert_in_roster;
-use crate::kp_roster::validate_ceremony_state_shape;
 use crate::kp_roster::verify_encrypted_share_recipients;
 
 /// Verify this KP can fetch and decrypt its ceremony share.
@@ -95,7 +94,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         .read_latest_ceremony_and_kp_share_state(BuildPolicy::Current)
         .await?
         .context("no ceremony logs found in guardian S3 bucket")?;
-    validate_ceremony_state_shape(&state, cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
+    state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     info!(
         phase = "ceremony scrape",
         sharing_seq = state.secret_sharing_instance.sharing_seq(),

@@ -260,7 +260,7 @@ impl GuardianReader {
                 format!("no kp-shares log found for latest ceremony sharing_seq {sharing_seq}")
             })?;
         Ok(Some(CeremonyState::new(ceremony, kp_share_state).expect(
-            "KP share state must match the requested ceremony sharing_seq",
+            "ceremony and KP share state must have a consistent shape",
         )))
     }
 

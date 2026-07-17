@@ -36,12 +36,54 @@ impl CeremonyState {
                 secret_sharing_instance.sharing_seq()
             )));
         }
+        Self::from_parts(
+            secret_sharing_instance,
+            btc_master_pubkey,
+            kp_share_state.cert_seq,
+            kp_share_state.encrypted_shares,
+        )
+    }
+
+    fn from_parts(
+        secret_sharing_instance: SecretSharingInstance,
+        btc_master_pubkey: BitcoinPubkey,
+        cert_seq: u64,
+        encrypted_shares: KPEncryptedShares,
+    ) -> GuardianResult<Self> {
+        if encrypted_shares.len() != secret_sharing_instance.num_shares() {
+            return Err(GuardianError::InternalError(format!(
+                "encrypted share count ({}) differs from ceremony num_shares ({})",
+                encrypted_shares.len(),
+                secret_sharing_instance.num_shares()
+            )));
+        }
         Ok(Self {
             secret_sharing_instance,
             btc_master_pubkey,
-            cert_seq: kp_share_state.cert_seq,
-            encrypted_shares: kp_share_state.encrypted_shares,
+            cert_seq,
+            encrypted_shares,
         })
+    }
+
+    /// Confirm the ceremony uses the expected secret-sharing parameters.
+    pub fn validate_sharing_params(
+        &self,
+        expected_n: usize,
+        expected_t: usize,
+    ) -> GuardianResult<()> {
+        if self.secret_sharing_instance.num_shares() != expected_n {
+            return Err(GuardianError::InvalidInputs(format!(
+                "ceremony num_shares ({}) differs from expected ({expected_n})",
+                self.secret_sharing_instance.num_shares()
+            )));
+        }
+        if self.secret_sharing_instance.threshold() != expected_t {
+            return Err(GuardianError::InvalidInputs(format!(
+                "ceremony threshold ({}) differs from expected ({expected_t})",
+                self.secret_sharing_instance.threshold()
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -52,12 +94,13 @@ impl From<SetupNewKeyResponse> for CeremonyState {
             secret_sharing_instance,
             btc_master_pubkey,
         } = response;
-        Self {
+        Self::from_parts(
             secret_sharing_instance,
             btc_master_pubkey,
-            cert_seq: 0,
+            0,
             encrypted_shares,
-        }
+        )
+        .expect("SetupNewKeyResponse must contain one encrypted share per participant")
     }
 }
 
@@ -79,5 +122,20 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err}").contains("kp-shares sharing_seq"), "{err}");
+    }
+
+    #[test]
+    fn new_rejects_mismatched_share_count() {
+        let response = GuardianSigned::<SetupNewKeyResponse>::mock_for_testing().data;
+        let sharing_seq = response.secret_sharing_instance.sharing_seq();
+        let err = CeremonyState::new(
+            CeremonyLogMessage::NewKey {
+                instance: response.secret_sharing_instance,
+                btc_master_pubkey: response.btc_master_pubkey,
+            },
+            KpShareStateLogMessage::new(sharing_seq, 0, KPEncryptedShares::new(vec![]).unwrap()),
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("encrypted share count"), "{err}");
     }
 }

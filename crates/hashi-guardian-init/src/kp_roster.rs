@@ -26,7 +26,6 @@ use hashi_types::guardian::KPEncryptedShare;
 use hashi_types::guardian::KPFingerprint;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::SecretSharingParams;
-use hashi_types::guardian::SetupNewKeyResponse;
 use hashi_types::guardian::Share;
 use hashi_types::pgp::PgpPublicCert;
 use hashi_types::pgp::cert_owns_key_handle;
@@ -77,48 +76,6 @@ impl KpRosterConfig {
     pub fn pcr_allowlist(&self) -> PcrAllowlist {
         self.pcr_allowlist.clone()
     }
-}
-
-/// Convert the live ceremony response into the same state shape read from S3.
-pub fn ceremony_state_from_response(
-    response: SetupNewKeyResponse,
-    expected_sharing_seq: u64,
-    expected_n: usize,
-    expected_t: usize,
-) -> Result<CeremonyState> {
-    let state = CeremonyState::from(response);
-    let sharing_seq = state.secret_sharing_instance.sharing_seq();
-    anyhow::ensure!(
-        sharing_seq == expected_sharing_seq,
-        "ceremony sharing_seq ({sharing_seq}) differs from expected ({expected_sharing_seq})"
-    );
-    validate_ceremony_state_shape(&state, expected_n, expected_t)?;
-    Ok(state)
-}
-
-/// Confirm the ceremony uses the expected sharing shape and carries exactly
-/// `expected_n` encrypted shares.
-pub fn validate_ceremony_state_shape(
-    state: &CeremonyState,
-    expected_n: usize,
-    expected_t: usize,
-) -> Result<()> {
-    anyhow::ensure!(
-        state.secret_sharing_instance.num_shares() == expected_n,
-        "ceremony num_shares ({}) differs from expected ({expected_n})",
-        state.secret_sharing_instance.num_shares()
-    );
-    anyhow::ensure!(
-        state.secret_sharing_instance.threshold() == expected_t,
-        "ceremony threshold ({}) differs from expected ({expected_t})",
-        state.secret_sharing_instance.threshold()
-    );
-    anyhow::ensure!(
-        state.encrypted_shares.len() == expected_n,
-        "expected {expected_n} encrypted shares, got {}",
-        state.encrypted_shares.len()
-    );
-    Ok(())
 }
 
 /// For each encrypted share, confirm (a) its `recipient_fingerprint` label
@@ -264,19 +221,12 @@ mod tests {
     use super::*;
     use hashi_types::guardian::KPEncryptedShares;
     use hashi_types::guardian::SecretSharingInstance;
+    use hashi_types::guardian::SetupNewKeyResponse;
     use hashi_types::guardian::ShareCommitment;
     use hashi_types::guardian::ShareCommitments;
     use hashi_types::pgp::encrypt_armored;
     use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use std::num::NonZeroU16;
-
-    fn share(id: u16) -> KPEncryptedShare {
-        KPEncryptedShare {
-            id: NonZeroU16::new(id).unwrap(),
-            recipient_fingerprint: format!("DUMMY FINGERPRINT {id}"),
-            armored_ciphertext: "dummy".into(),
-        }
-    }
 
     fn commitments(ids: &[u16]) -> ShareCommitments {
         let vec: Vec<ShareCommitment> = ids
@@ -293,26 +243,6 @@ mod tests {
         hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey(
             &k256::SecretKey::from_slice(&[9u8; 32]).unwrap(),
         )
-    }
-
-    fn response(shares: &[u16], commitment_ids: &[u16]) -> SetupNewKeyResponse {
-        response_with_instance(
-            shares,
-            SecretSharingInstance::new(commitments(commitment_ids), commitment_ids.len(), 2, 0)
-                .unwrap(),
-        )
-    }
-
-    fn response_with_instance(
-        shares: &[u16],
-        secret_sharing_instance: SecretSharingInstance,
-    ) -> SetupNewKeyResponse {
-        SetupNewKeyResponse {
-            encrypted_shares: KPEncryptedShares::new(shares.iter().map(|&i| share(i)).collect())
-                .unwrap(),
-            secret_sharing_instance,
-            btc_master_pubkey: dummy_btc_pubkey(),
-        }
     }
 
     fn mock_cert() -> PgpPublicCert {
@@ -351,42 +281,12 @@ mod tests {
     }
 
     #[test]
-    fn ceremony_state_from_response_rejects_wrong_share_count() {
-        let resp = response(&[1, 2], &[1, 2, 3]);
-        let err = ceremony_state_from_response(resp, 0, 3, 2).unwrap_err();
-        assert!(format!("{err}").contains("encrypted shares"), "{err}");
-    }
-
-    #[test]
-    fn ceremony_state_from_response_rejects_wrong_instance_num_shares() {
-        let resp = response(&[1, 2], &[1, 2]);
-        let err = ceremony_state_from_response(resp, 0, 3, 2).unwrap_err();
-        assert!(format!("{err}").contains("num_shares"), "{err}");
-    }
-
-    #[test]
-    fn ceremony_state_from_response_rejects_wrong_instance_threshold() {
-        let instance = SecretSharingInstance::new(commitments(&[1, 2, 3]), 3, 3, 0).unwrap();
-        let resp = response_with_instance(&[1, 2, 3], instance);
-        let err = ceremony_state_from_response(resp, 0, 3, 2).unwrap_err();
-        assert!(format!("{err}").contains("threshold"), "{err}");
-    }
-
-    #[test]
-    fn ceremony_state_from_response_rejects_wrong_instance_sharing_seq() {
-        let instance = SecretSharingInstance::new(commitments(&[1, 2, 3]), 3, 2, 1).unwrap();
-        let resp = response_with_instance(&[1, 2, 3], instance);
-        let err = ceremony_state_from_response(resp, 0, 3, 2).unwrap_err();
-        assert!(format!("{err}").contains("sharing_seq"), "{err}");
-    }
-
-    #[test]
     fn verify_encrypted_share_recipients_accepts_reordered_expected_certs() {
         let cert1 = mock_cert();
         let cert2 = mock_cert();
         let cert3 = mock_cert();
         let resp = encrypted_response(&[&cert1, &cert2, &cert3]);
-        let state = ceremony_state_from_response(resp, 0, 3, 2).expect("valid state");
+        let state = CeremonyState::from(resp);
 
         verify_encrypted_share_recipients(&state, &[cert3, cert1, cert2])
             .expect("recipient validation should be by fingerprint, not config order");
@@ -398,7 +298,7 @@ mod tests {
         let cert2 = mock_cert();
         let cert3 = mock_cert();
         let resp = encrypted_response(&[&cert1, &cert1, &cert3]);
-        let state = ceremony_state_from_response(resp, 0, 3, 2).expect("valid state");
+        let state = CeremonyState::from(resp);
 
         let err = verify_encrypted_share_recipients(&state, &[cert1, cert2, cert3]).unwrap_err();
         assert!(
@@ -414,7 +314,7 @@ mod tests {
         let cert3 = mock_cert();
         let unexpected = mock_cert();
         let resp = encrypted_response(&[&cert1, &cert2, &unexpected]);
-        let state = ceremony_state_from_response(resp, 0, 3, 2).expect("valid state");
+        let state = CeremonyState::from(resp);
 
         let err = verify_encrypted_share_recipients(&state, &[cert1, cert2, cert3]).unwrap_err();
         assert!(

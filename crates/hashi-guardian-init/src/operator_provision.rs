@@ -22,7 +22,6 @@ use tracing::info;
 use crate::config::Config;
 use crate::guardian_info::ensure_oi_info_matches_post_init;
 use crate::guardian_info::verified_live_guardian_info;
-use crate::kp_roster::validate_ceremony_state_shape;
 use crate::kp_roster::verify_encrypted_share_recipients;
 
 /// Initialize a fresh withdraw-mode guardian with operator-supplied stable config.
@@ -145,11 +144,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         .read_latest_ceremony_and_kp_share_state(BuildPolicy::AnyAllowlisted)
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;
-    validate_ceremony_state_shape(
-        &ceremony_state,
-        cfg.kp_roster.num_shares,
-        cfg.kp_roster.threshold,
-    )?;
+    ceremony_state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     verify_encrypted_share_recipients(&ceremony_state, &certs)?;
     let scraped_instance = ceremony_state.secret_sharing_instance.clone();
     let sharing_seq = scraped_instance.sharing_seq();

@@ -56,7 +56,6 @@ use crate::guardian_info::ensure_oi_info_matches_post_init;
 use crate::guardian_info::verified_live_guardian_info;
 use crate::kp_roster::decrypt_share;
 use crate::kp_roster::ensure_cert_in_roster;
-use crate::kp_roster::validate_ceremony_state_shape;
 use crate::kp_roster::verify_encrypted_share_recipients;
 
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
@@ -310,7 +309,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         phase = "share read",
         sharing_seq, "verifying this KP's encrypted share from kp-shares/",
     );
-    validate_ceremony_state_shape(&state, cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
+    state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     verify_encrypted_share_recipients(&state, &certs)?;
     info!(
         phase = "share read",

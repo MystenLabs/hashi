@@ -20,6 +20,7 @@ use anyhow::ensure;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::CeremonyStage;
+use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::GuardianSigned;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
@@ -32,8 +33,6 @@ use tracing::info;
 
 use crate::config::Config;
 use crate::guardian_info::verified_live_guardian_info;
-use crate::kp_roster::ceremony_state_from_response;
-use crate::kp_roster::validate_ceremony_state_shape;
 use crate::kp_roster::verify_encrypted_share_recipients;
 
 /// Run the one-time production guardian key ceremony.
@@ -176,16 +175,11 @@ pub async fn run(cfg: Config) -> Result<()> {
 
     // 7. Verify the response signature under the pinned session's signing key,
     //    and sanity-check the shape; keep the now-verified BTC master pubkey.
-    let sharing_seq = 0u64;
     let response = signed_resp
         .verify(&signing_pub_key)
         .map_err(|e| anyhow!("verify SetupNewKeyResponse signature: {e:?}"))?;
-    let live = ceremony_state_from_response(
-        response,
-        sharing_seq,
-        cfg.kp_roster.num_shares,
-        cfg.kp_roster.threshold,
-    )?;
+    let live = CeremonyState::from(response);
+    live.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     info!(
         phase = "setup_new_key",
         sharing_seq = live.secret_sharing_instance.sharing_seq(),
@@ -215,7 +209,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         .read_latest_ceremony_and_kp_share_state(BuildPolicy::Current)
         .await?
         .context("no ceremony logs found in guardian S3 bucket")?;
-    validate_ceremony_state_shape(&logged, cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
+    logged.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     anyhow::ensure!(
         logged == live,
         "ceremony/ and kp-shares/ logs differ from the SetupNewKeyResponse"
