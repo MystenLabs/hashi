@@ -103,6 +103,8 @@ struct Inner {
     /// Pinged by the watcher after a reconnect rescrape, so the reconcile
     /// loop can re-align the local limiter immediately.
     guardian_reconcile_notify: Arc<tokio::sync::Notify>,
+    /// Cadence of the watcher's on-chain config poll.
+    config_poll_interval: std::time::Duration,
 }
 
 #[derive(Debug)]
@@ -127,6 +129,7 @@ impl OnchainState {
         tls_private_key: Option<ed25519_dalek::SigningKey>,
         grpc_max_decoding_message_size: Option<usize>,
         metrics: Option<Arc<crate::metrics::Metrics>>,
+        config_poll_interval: Option<std::time::Duration>,
     ) -> Result<(Self, Service)> {
         let mut client = Client::new(sui_rpc_url)?;
         // The scrape client reads the full on-chain state (the largest
@@ -165,6 +168,9 @@ impl OnchainState {
             metrics: metrics.clone(),
             local_limiter: OnceLock::new(),
             guardian_reconcile_notify: Arc::new(tokio::sync::Notify::new()),
+            config_poll_interval: config_poll_interval.unwrap_or(std::time::Duration::from_millis(
+                crate::config::DEFAULT_ONCHAIN_CONFIG_POLL_INTERVAL_MS,
+            )),
         }
         .pipe(Arc::new)
         .pipe(Self);
@@ -186,6 +192,10 @@ impl OnchainState {
 
     pub(crate) fn grpc_max_decoding_message_size(&self) -> Option<usize> {
         self.0.grpc_max_decoding_message_size
+    }
+
+    pub(crate) fn config_poll_interval(&self) -> std::time::Duration {
+        self.0.config_poll_interval
     }
 
     fn notify(&self, notification: Notification) {

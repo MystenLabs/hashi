@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
             println!("Connecting to Sui RPC: {sui_rpc}");
             println!("Chain ID: {chain_id}");
             let (onchain_state, _watcher) =
-                OnchainState::new(sui_rpc, cfg.hashi_ids(), None, None, None)
+                OnchainState::new(sui_rpc, cfg.hashi_ids(), None, None, None, None)
                     .await
                     .context("failed to connect to Sui RPC")?;
             key_recovery::run(args, &onchain_state, chain_id).await

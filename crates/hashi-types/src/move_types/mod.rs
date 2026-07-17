@@ -199,7 +199,7 @@ pub struct Versioning {
 }
 
 /// Rust version of the Move sui::package::UpgradeCap type.
-#[derive(Debug, serde_derive::Deserialize)]
+#[derive(Debug, PartialEq, serde_derive::Deserialize)]
 pub struct UpgradeCap {
     pub id: Address,
     pub package: Address,

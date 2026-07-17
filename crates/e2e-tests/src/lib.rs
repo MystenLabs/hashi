@@ -348,6 +348,23 @@ impl TestNetworksBuilder {
 
         tracing::info!("rpc url: {}", test_networks.sui_network().rpc_url);
 
+        // The launch tx writes guardian_url with no event; nodes booted
+        // pre-launch learn it only via the watcher's config poll. Gate BEFORE
+        // the override proposals — their config refresh would mask a broken
+        // poll (genesis end_reconfig losers rescrape and heal incidentally).
+        if nodes_started {
+            futures::future::try_join_all(
+                test_networks
+                    .hashi_network
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.is_running())
+                    .map(|node| node.wait_for_guardian_client(std::time::Duration::from_secs(60))),
+            )
+            .await?;
+            tracing::info!("running hashi nodes resolved the guardian client from on-chain config");
+        }
+
         if nodes_started && !self.onchain_config_overrides.is_empty() {
             apply_onchain_config_overrides(&mut test_networks, &self.onchain_config_overrides)
                 .await?;
@@ -1380,7 +1397,7 @@ mod tests {
         let ids = test_networks.hashi_network().ids();
 
         let (state, _service) =
-            hashi::onchain::OnchainState::new(sui_rpc_url, ids, None, None, None).await?;
+            hashi::onchain::OnchainState::new(sui_rpc_url, ids, None, None, None, None).await?;
 
         assert_eq!(state.state().hashi().committees.committees().len(), 1);
         assert_eq!(state.state().hashi().committees.members().len(), 1);

@@ -58,6 +58,8 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
     ]);
 
     let mut rescrape_state = false;
+    // Boot scrape just populated the snapshot; start the poll clock from here.
+    let mut last_config_refresh = std::time::Instant::now();
 
     loop {
         // Reconnect with a fresh client each iteration. Re-subscribing on the
@@ -122,6 +124,7 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
 
             // Rescrape gapped the event-driven limiter; trigger an eager reconcile.
             state.request_limiter_reconcile();
+            last_config_refresh = std::time::Instant::now();
         }
 
         while let Ok(Some(item)) =
@@ -174,6 +177,13 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
 
             handle_events(&mut client, &state, timestamp_ms, &events).await;
 
+            if last_config_refresh.elapsed() >= state.config_poll_interval()
+                && launch_pending(&state)
+            {
+                refresh_config_if_changed(&client, &state).await;
+                last_config_refresh = std::time::Instant::now();
+            }
+
             // Finally update the latest checkpoint info
             state.update_latest_checkpoint_info(CheckpointInfo {
                 height: ckpt,
@@ -190,6 +200,37 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
         // re-subscribe, and rescrape to recover any gap we missed.
         tracing::warn!("checkpoint stream ended; reconnecting Sui client and rescraping");
         rescrape_state = true;
+    }
+}
+
+/// The poll only exists to catch `finish_publish` (guardian url + BTC key,
+/// written with no event); every other config write emits `ProposalExecuted`.
+/// Once both fields are in the snapshot the launch has landed: stop polling.
+fn launch_pending(state: &OnchainState) -> bool {
+    let state = state.state();
+    let config = &state.hashi().config;
+    config.guardian_url().is_none() || config.guardian_btc_public_key().is_none()
+}
+
+/// Runs on the watcher task, so it can't race the event-driven config
+/// refresh; bounded so a wedged connection can't hang the checkpoint loop.
+async fn refresh_config_if_changed(client: &Client, state: &OnchainState) {
+    let scrape = super::scrape_hashi_config(client.clone(), state.hashi_id());
+    let config = match tokio::time::timeout(Duration::from_secs(10), scrape).await {
+        Ok(Ok(config)) => config,
+        Ok(Err(e)) => {
+            tracing::warn!("error polling on-chain config: {e}");
+            return;
+        }
+        Err(_) => {
+            tracing::warn!("timed out polling on-chain config");
+            return;
+        }
+    };
+    let mut state = state.state_mut();
+    if state.hashi.config != config {
+        state.hashi.config = config;
+        tracing::info!("on-chain config changed; snapshot refreshed by periodic poll");
     }
 }
 
