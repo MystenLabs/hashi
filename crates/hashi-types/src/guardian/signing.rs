@@ -182,12 +182,18 @@ impl<T: Serialize + KpSigningIntent> KpSigned<T> {
         bcs::to_bytes(&tuple).expect("serialization should not fail")
     }
 
-    /// Verify signature and extract the payload.
-    /// Checks intent byte to ensure signature is for the correct request type.
-    pub fn verify(self) -> GuardianResult<T> {
+    /// Verify the signature without consuming the signed request.
+    /// Checks the intent byte to ensure the signature is for this request type.
+    pub fn verify_signature(&self) -> GuardianResult<()> {
         let msg_bytes = Self::signed_bytes(&self.data);
         verify_detached_signature(&msg_bytes, &self.signature, &self.signer_cert)
             .map_err(|e| InvalidInputs(format!("KP signature verification failed: {e}")))?;
+        Ok(())
+    }
+
+    /// Verify the signature and extract the payload.
+    pub fn verify(self) -> GuardianResult<T> {
+        self.verify_signature()?;
         Ok(self.data)
     }
 

@@ -1357,28 +1357,6 @@ pub mod bridge_service_server {
         const NAME: &'static str = SERVICE_NAME;
     }
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SignedSingleProvisionerInitRequest {
-    /// This KP's share, HPKE-encrypted to the enclave with the config_hash bound as
-    /// AAD (built exactly as for the guardian's batch ProvisionerInit).
-    #[prost(message, optional, tag = "1")]
-    pub encrypted_share: ::core::option::Option<GuardianEncryptedShare>,
-    /// The guardian session id the KP pinned (from the attestation it verified)
-    /// before building the share. The relay rejects the submission if its live
-    /// backend session differs — the share would be encrypted to a dead session.
-    #[prost(string, tag = "2")]
-    pub expected_session_id: ::prost::alloc::string::String,
-    /// Armored OpenPGP certificate of the submitting key provisioner. The relay
-    /// checks its fingerprint against its operator-configured KP roster before
-    /// doing any other work.
-    #[prost(string, tag = "3")]
-    pub signer_cert: ::prost::alloc::string::String,
-    /// Detached armored OpenPGP signature by the KP's offline key (e.g. a
-    /// yubikey) over the intent-tagged SingleProvisionerInitRequest payload —
-    /// proves a rostered KP made this exact submission.
-    #[prost(string, tag = "4")]
-    pub kp_signature: ::prost::alloc::string::String,
-}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SingleProvisionerInitResponse {
     /// Distinct shares the relay now holds for the current session.
@@ -1405,10 +1383,11 @@ pub mod guardian_relay_service_client {
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
     /// The provisioning relay. Served by the out-of-enclave guardian proxy, never by
-    /// the enclave itself. A key provisioner submits its single HPKE-encrypted share
-    /// here (after verifying the guardian's attestation directly); the relay
-    /// accumulates distinct shares and, once it holds a threshold-many, submits them
-    /// to the guardian's batch `ProvisionerInit` in one call.
+    /// the enclave itself. A key provisioner submits its signed HPKE-encrypted share
+    /// here after verifying the guardian's attestation directly. The relay
+    /// pre-verifies and accumulates distinct submissions and, once it holds a
+    /// threshold-many, forwards them unchanged to the guardian's batch
+    /// `ProvisionerInit` in one call.
     ///
     /// The relay is liveness-only: shares are end-to-end encrypted to the enclave
     /// session key, so a malicious or buggy relay can stall provisioning but cannot
@@ -1546,10 +1525,11 @@ pub mod guardian_relay_service_server {
         >;
     }
     /// The provisioning relay. Served by the out-of-enclave guardian proxy, never by
-    /// the enclave itself. A key provisioner submits its single HPKE-encrypted share
-    /// here (after verifying the guardian's attestation directly); the relay
-    /// accumulates distinct shares and, once it holds a threshold-many, submits them
-    /// to the guardian's batch `ProvisionerInit` in one call.
+    /// the enclave itself. A key provisioner submits its signed HPKE-encrypted share
+    /// here after verifying the guardian's attestation directly. The relay
+    /// pre-verifies and accumulates distinct submissions and, once it holds a
+    /// threshold-many, forwards them unchanged to the guardian's batch
+    /// `ProvisionerInit` in one call.
     ///
     /// The relay is liveness-only: shares are end-to-end encrypted to the enclave
     /// session key, so a malicious or buggy relay can stall provisioning but cannot
@@ -1911,7 +1891,7 @@ pub struct OperatorInitRequest {
     #[prost(message, optional, tag = "1")]
     pub s3_config: ::core::option::Option<S3Config>,
     /// Withdraw-mode stable init config (absent for a ceremony enclave). The enclave
-    /// binds this digest as the share-decryption AAD and exposes it via GuardianInfo.
+    /// exposes its digest via GuardianInfo; KPs bind it into signed PI submissions.
     #[prost(message, optional, tag = "4")]
     pub init_config: ::core::option::Option<InitConfig>,
 }
@@ -1937,14 +1917,35 @@ pub struct S3Config {
     #[prost(string, optional, tag = "5")]
     pub session_token: ::core::option::Option<::prost::alloc::string::String>,
 }
-/// Assembled from the current KPs' encrypted shares (in the relay model, by the
-/// relay once it has collected enough). Each share's HPKE AAD binds the enclave's
-/// config_hash, so a share only decrypts if the KP agreed on the operator-supplied
-/// stable config.
+/// One KP's signed contribution toward ProvisionerInit. The relay may pre-verify
+/// and buffer these submissions, but the enclave is the authoritative verifier.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignedSingleProvisionerInitRequest {
+    /// This KP's share, HPKE-encrypted to the enclave session key without config
+    /// AAD. The signature below binds the share to the expected config instead.
+    #[prost(message, optional, tag = "1")]
+    pub encrypted_share: ::core::option::Option<GuardianEncryptedShare>,
+    /// The guardian session id the KP pinned before encrypting the share.
+    #[prost(string, tag = "2")]
+    pub expected_session_id: ::prost::alloc::string::String,
+    /// Armored OpenPGP certificate of the submitting key provisioner.
+    #[prost(string, tag = "3")]
+    pub signer_cert: ::prost::alloc::string::String,
+    /// Detached armored OpenPGP signature over the intent-tagged
+    /// SingleProvisionerInitRequest payload.
+    #[prost(string, tag = "4")]
+    pub kp_signature: ::prost::alloc::string::String,
+    /// The operator-init config hash the KP independently recomputed and verified.
+    #[prost(bytes = "bytes", optional, tag = "5")]
+    pub expected_config_hash: ::core::option::Option<::prost::bytes::Bytes>,
+}
+/// Assembled from the current KPs' signed submissions by the relay once it has
+/// collected enough. The enclave re-verifies every submission before using any
+/// share.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ProvisionerInitRequest {
     #[prost(message, repeated, tag = "1")]
-    pub encrypted_shares: ::prost::alloc::vec::Vec<GuardianEncryptedShare>,
+    pub submissions: ::prost::alloc::vec::Vec<SignedSingleProvisionerInitRequest>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct OperatorActivateRequest {
@@ -2452,7 +2453,7 @@ pub mod guardian_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Provisioner initialization: submit encrypted share and readiness info.
+        /// Provisioner initialization: submit the current KPs' signed share contributions.
         pub async fn provisioner_init(
             &mut self,
             request: impl tonic::IntoRequest<super::ProvisionerInitRequest>,
@@ -2661,7 +2662,7 @@ pub mod guardian_service_server {
             tonic::Response<super::OperatorWriteGenesisResponse>,
             tonic::Status,
         >;
-        /// Provisioner initialization: submit encrypted share and readiness info.
+        /// Provisioner initialization: submit the current KPs' signed share contributions.
         async fn provisioner_init(
             &self,
             request: tonic::Request<super::ProvisionerInitRequest>,

@@ -225,13 +225,13 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
     type Error = GuardianError;
 
     fn try_from(req: pb::ProvisionerInitRequest) -> Result<Self, Self::Error> {
-        let encrypted_shares = req
-            .encrypted_shares
+        let submissions = req
+            .submissions
             .into_iter()
-            .map(pb_to_guardian_encrypted_share)
+            .map(KpSigned::<SingleProvisionerInitRequest>::try_from)
             .collect::<GuardianResult<Vec<_>>>()?;
 
-        Ok(ProvisionerInitRequest::new(encrypted_shares))
+        Ok(ProvisionerInitRequest(submissions))
     }
 }
 
@@ -248,14 +248,22 @@ impl TryFrom<pb::SignedSingleProvisionerInitRequest> for KpSigned<SingleProvisio
         if req.kp_signature.is_empty() {
             return Err(missing("kp_signature"));
         }
+        let expected_config_hash = req
+            .expected_config_hash
+            .ok_or_else(|| missing("expected_config_hash"))?;
+        let expected_config_hash = <[u8; 32]>::try_from(expected_config_hash.as_ref())
+            .map_err(|_| InvalidInputs("expected_config_hash must be 32 bytes".into()))?;
         let encrypted_share = pb_to_guardian_encrypted_share(
             req.encrypted_share
                 .ok_or_else(|| missing("encrypted_share"))?,
         )?;
         let signer_cert =
             PgpPublicCert::new(req.signer_cert).map_err(|e| InvalidInputs(e.to_string()))?;
-        let request =
-            SingleProvisionerInitRequest::new(req.expected_session_id.into(), encrypted_share);
+        let request = SingleProvisionerInitRequest::new(
+            req.expected_session_id.into(),
+            expected_config_hash,
+            encrypted_share,
+        );
         Ok(KpSigned {
             data: request,
             signer_cert,
@@ -564,10 +572,10 @@ pub fn provisioner_init_request_to_pb(
     r: ProvisionerInitRequest,
 ) -> GuardianResult<pb::ProvisionerInitRequest> {
     Ok(pb::ProvisionerInitRequest {
-        encrypted_shares: r
-            .into_parts()
+        submissions: r
+            .0
             .into_iter()
-            .map(guardian_encrypted_share_to_pb)
+            .map(pb::SignedSingleProvisionerInitRequest::from)
             .collect(),
     })
 }
@@ -579,12 +587,13 @@ impl From<KpSigned<SingleProvisionerInitRequest>> for pb::SignedSingleProvisione
             signer_cert,
             signature,
         } = r;
-        let (expected_session_id, encrypted_share) = request.into_parts();
+        let (expected_session_id, expected_config_hash, encrypted_share) = request.into_parts();
         Self {
             encrypted_share: Some(guardian_encrypted_share_to_pb(encrypted_share)),
             expected_session_id: expected_session_id.into(),
             signer_cert: signer_cert.armored().to_string(),
             kp_signature: signature,
+            expected_config_hash: Some(expected_config_hash.to_vec().into()),
         }
     }
 }
@@ -1413,11 +1422,17 @@ mod tests {
         let (cert_armored, secret_armored) = mock_pgp_keypair();
         let cert = PgpPublicCert::new(cert_armored).unwrap();
         let encrypted_share = ProvisionerInitRequest::mock_for_testing()
-            .into_parts()
+            .0
             .pop()
-            .unwrap();
-        let request =
-            SingleProvisionerInitRequest::new("session-a".into(), encrypted_share.clone());
+            .unwrap()
+            .data
+            .encrypted_share;
+        let expected_config_hash = [9u8; 32];
+        let request = SingleProvisionerInitRequest::new(
+            "session-a".into(),
+            expected_config_hash,
+            encrypted_share.clone(),
+        );
         let signature =
             sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&request));
         let signed = KpSigned {
@@ -1429,16 +1444,25 @@ mod tests {
         let pb = pb::SignedSingleProvisionerInitRequest::from(signed);
         let back = KpSigned::<SingleProvisionerInitRequest>::try_from(pb.clone()).unwrap();
         assert_eq!(back.data.expected_session_id(), "session-a");
+        assert_eq!(back.data.expected_config_hash(), &expected_config_hash);
         assert_eq!(back.data.encrypted_share(), &encrypted_share);
         assert_eq!(back.signer_cert.fingerprint(), cert.fingerprint());
         back.verify().unwrap();
 
-        let mut tampered = pb;
+        let mut tampered = pb.clone();
         tampered.expected_session_id = "other-session".to_string();
         let tampered = KpSigned::<SingleProvisionerInitRequest>::try_from(tampered).unwrap();
         assert!(
             tampered.verify().is_err(),
             "signature must bind the expected guardian session"
+        );
+
+        let mut tampered = pb;
+        tampered.expected_config_hash = Some(vec![8u8; 32].into());
+        let tampered = KpSigned::<SingleProvisionerInitRequest>::try_from(tampered).unwrap();
+        assert!(
+            tampered.verify().is_err(),
+            "signature must bind the expected operator-init config hash"
         );
     }
 

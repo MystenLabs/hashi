@@ -5,37 +5,17 @@ package sui.hashi.v1alpha;
 import "sui/hashi/v1alpha/guardian_service.proto";
 
 // The provisioning relay. Served by the out-of-enclave guardian proxy, never by
-// the enclave itself. A key provisioner submits its single HPKE-encrypted share
-// here (after verifying the guardian's attestation directly); the relay
-// accumulates distinct shares and, once it holds a threshold-many, submits them
-// to the guardian's batch `ProvisionerInit` in one call.
+// the enclave itself. A key provisioner submits its signed HPKE-encrypted share
+// here after verifying the guardian's attestation directly. The relay
+// pre-verifies and accumulates distinct submissions and, once it holds a
+// threshold-many, forwards them unchanged to the guardian's batch
+// `ProvisionerInit` in one call.
 //
 // The relay is liveness-only: shares are end-to-end encrypted to the enclave
 // session key, so a malicious or buggy relay can stall provisioning but cannot
 // read shares or forge a key.
 service GuardianRelayService {
   rpc SingleProvisionerInit(SignedSingleProvisionerInitRequest) returns (SingleProvisionerInitResponse);
-}
-
-message SignedSingleProvisionerInitRequest {
-  // This KP's share, HPKE-encrypted to the enclave with the config_hash bound as
-  // AAD (built exactly as for the guardian's batch ProvisionerInit).
-  GuardianEncryptedShare encrypted_share = 1;
-
-  // The guardian session id the KP pinned (from the attestation it verified)
-  // before building the share. The relay rejects the submission if its live
-  // backend session differs — the share would be encrypted to a dead session.
-  string expected_session_id = 2;
-
-  // Armored OpenPGP certificate of the submitting key provisioner. The relay
-  // checks its fingerprint against its operator-configured KP roster before
-  // doing any other work.
-  string signer_cert = 3;
-
-  // Detached armored OpenPGP signature by the KP's offline key (e.g. a
-  // yubikey) over the intent-tagged SingleProvisionerInitRequest payload —
-  // proves a rostered KP made this exact submission.
-  string kp_signature = 4;
 }
 
 message SingleProvisionerInitResponse {
