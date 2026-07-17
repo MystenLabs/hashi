@@ -1716,9 +1716,6 @@ pub struct GetGuardianInfoResponse {
     /// Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
     #[prost(message, optional, tag = "3")]
     pub signed_info: ::core::option::Option<SignedGuardianInfo>,
-    /// Encrypted shares from the latest ceremony (empty if none yet).
-    #[prost(message, repeated, tag = "4")]
-    pub encrypted_shares: ::prost::alloc::vec::Vec<KpEncryptedShare>,
 }
 /// Guardian-signed wrapper around `GuardianInfoData`.
 #[derive(Clone, PartialEq, ::prost::Message)]

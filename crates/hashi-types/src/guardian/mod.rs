@@ -91,9 +91,6 @@ pub struct GetGuardianInfoResponse {
     signing_pub_key: GuardianPubKey,
     /// Signed guardian info
     signed_info: GuardianSigned<GuardianInfo>,
-    /// Encrypted shares from the ceremony (empty in non-ceremony mode); KPs
-    /// fetch their share here and verify it against the instance commitments.
-    encrypted_shares: KPEncryptedShares,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -101,7 +98,6 @@ pub struct VerifiedGuardianInfo {
     pub info: GuardianInfo,
     pub signing_pub_key: GuardianPubKey,
     pub session_id: SessionID,
-    pub encrypted_shares: KPEncryptedShares,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -779,13 +775,11 @@ impl GetGuardianInfoResponse {
         attestation: NitroAttestation,
         signing_pub_key: GuardianPubKey,
         signed_info: GuardianSigned<GuardianInfo>,
-        encrypted_shares: KPEncryptedShares,
     ) -> Self {
         Self {
             attestation,
             signing_pub_key,
             signed_info,
-            encrypted_shares,
         }
     }
 
@@ -815,7 +809,6 @@ impl GetGuardianInfoResponse {
             info,
             signing_pub_key: self.signing_pub_key,
             session_id: SessionID::from_signing_pubkey(&self.signing_pub_key),
-            encrypted_shares: self.encrypted_shares.clone(),
         })
     }
 

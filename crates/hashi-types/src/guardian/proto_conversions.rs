@@ -416,18 +416,10 @@ impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
         let signed_info_pb = resp.signed_info.ok_or_else(|| missing("signed_info"))?;
         let signed_info = pb_to_signed_guardian_info(signed_info_pb)?;
 
-        let encrypted_shares = resp
-            .encrypted_shares
-            .into_iter()
-            .map(pb_to_kp_encrypted_share)
-            .collect::<GuardianResult<Vec<_>>>()?;
-        let encrypted_shares = KPEncryptedShares::new(encrypted_shares)?;
-
         Ok(GetGuardianInfoResponse::new(
             NitroAttestation::new(attestation.to_vec()),
             signing_pub_key,
             signed_info,
-            encrypted_shares,
         ))
     }
 }
@@ -649,12 +641,6 @@ pub fn get_guardian_info_response_to_pb(r: GetGuardianInfoResponse) -> pb::GetGu
         attestation: Some(r.attestation.into_bytes().into()),
         signing_pub_key: Some(r.signing_pub_key.to_bytes().to_vec().into()),
         signed_info: Some(signed_guardian_info_to_pb(r.signed_info)),
-        encrypted_shares: r
-            .encrypted_shares
-            .into_vec()
-            .into_iter()
-            .map(kp_encrypted_share_to_pb)
-            .collect(),
     }
 }
 

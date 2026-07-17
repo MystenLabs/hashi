@@ -44,6 +44,9 @@ service GuardianService {
 message GetGuardianInfoRequest {}
 
 message GetGuardianInfoResponse {
+  reserved 4;
+  reserved "encrypted_shares";
+
   // AWS Nitro attestation document.
   optional bytes attestation = 1;
 
@@ -52,9 +55,6 @@ message GetGuardianInfoResponse {
 
   // Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
   SignedGuardianInfo signed_info = 3;
-
-  // Encrypted shares from the latest ceremony (empty if none yet).
-  repeated KPEncryptedShare encrypted_shares = 4;
 }
 
 // Guardian-signed wrapper around `GuardianInfoData`.

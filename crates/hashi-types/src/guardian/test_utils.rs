@@ -104,7 +104,6 @@ impl GetGuardianInfoResponse {
             NitroAttestation::new("abcd".as_bytes().to_vec()),
             signing_pub_key,
             GuardianSigned::new(info, &signing_key, 1234),
-            dummy_encrypted_shares(),
         )
     }
 }

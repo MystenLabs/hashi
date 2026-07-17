@@ -70,8 +70,7 @@ pub struct EnclaveState {
     rate_limiter: OnceLock<Arc<tokio::sync::Mutex<RateLimiter>>>,
 }
 
-/// State produced or consumed by initialization flows. Some artifacts remain
-/// available through `get_guardian_info` after the lifecycle advances.
+/// State produced or consumed by initialization flows.
 #[derive(Default)]
 struct InitializationState {
     /// Withdraw-mode input: stable configuration installed by `operator_init`.
@@ -79,9 +78,6 @@ struct InitializationState {
     /// Withdraw-mode input: the ceremony instance and its share-to-KP assignment,
     /// installed by `operator_init` for `provisioner_init` validation.
     ceremony_state: RwLock<Option<CeremonyState>>,
-    /// Ceremony-mode output: encrypted shares produced by `setup_new_key` or
-    /// `rotate_kps`, retained for KPs to fetch from `get_guardian_info`.
-    latest_encrypted_shares: OnceLock<KPEncryptedShares>,
 }
 
 impl InitializationState {
@@ -424,9 +420,9 @@ impl Enclave {
             EnclaveLifecycle::Withdraw(WithdrawStage::OperatorInitialized) => {
                 self.operator_init_state_installed(EnclaveMode::Withdraw)
             }
-            EnclaveLifecycle::Ceremony(CeremonyStage::Completed) => {
-                self.init_state.latest_encrypted_shares.get().is_some()
-            }
+            // Ceremony handlers advance only after writing their output to S3.
+            // The lifecycle itself is the completion state.
+            EnclaveLifecycle::Ceremony(CeremonyStage::Completed) => return,
             EnclaveLifecycle::Withdraw(WithdrawStage::ProvisionerInitialized) => {
                 self.config.is_enclave_btc_keypair_set()
             }
@@ -629,24 +625,6 @@ impl Enclave {
 
     pub fn clear_initialization_state(&self) {
         self.init_state.clear();
-    }
-
-    /// Stash the ceremony's encrypted shares for KPs to fetch via
-    /// `get_guardian_info`. One ceremony per enclave, so this is set once.
-    pub fn set_latest_encrypted_shares(&self, shares: KPEncryptedShares) -> GuardianResult<()> {
-        self.init_state
-            .latest_encrypted_shares
-            .set(shares)
-            .map_err(|_| InvalidInputs("Latest encrypted shares already set".into()))
-    }
-
-    /// Encrypted shares from the ceremony, or empty if none has run.
-    pub fn latest_encrypted_shares(&self) -> KPEncryptedShares {
-        self.init_state
-            .latest_encrypted_shares
-            .get()
-            .cloned()
-            .unwrap_or_else(|| KPEncryptedShares::new(vec![]).expect("empty share list is valid"))
     }
 
     pub fn init_config(&self) -> Option<&InitConfig> {

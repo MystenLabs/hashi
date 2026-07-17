@@ -100,10 +100,6 @@ async fn finalize_rotation(
         })
         .await?;
 
-    enclave
-        .set_latest_encrypted_shares(encrypted_shares.clone())
-        .expect("encrypted shares should only be set once");
-
     info!("Rotation complete.");
     Ok(enclave.sign(RotateKpsResponse { encrypted_shares }))
 }
