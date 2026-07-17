@@ -13,6 +13,7 @@ use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::guardian::*;
 use rand::RngCore;
+use std::num::NonZeroU16;
 use std::sync::Arc;
 
 /// Mock S3 logger that returns success for every PutObject call.
@@ -160,12 +161,12 @@ pub fn mock_logger_with_layout(keys: impl IntoIterator<Item = String>) -> Guardi
 }
 
 /// Args for arming a withdraw-mode test enclave. `config` is the stable
-/// operator-init config; `secret_sharing_instance` mirrors the ceremony snapshot
-/// that production `operator_init` reads from S3.
+/// operator-init config; `ceremony_state` mirrors the snapshot that production
+/// `operator_init` reads from S3.
 pub struct OperatorInitTestArgs {
     pub s3_logger: GuardianS3Client,
     pub config: InitConfig,
-    pub secret_sharing_instance: SecretSharingInstance,
+    pub ceremony_state: CeremonyState,
 }
 
 const TEST_N: usize = 5;
@@ -179,12 +180,36 @@ fn dummy_secret_sharing_instance() -> SecretSharingInstance {
     SecretSharingInstance::new(commitments, TEST_N, TEST_T, 0).unwrap()
 }
 
+fn dummy_kp_encrypted_shares() -> KPEncryptedShares {
+    KPEncryptedShares::new(
+        (1..=TEST_N)
+            .map(|i| KPEncryptedShare {
+                id: NonZeroU16::new(i as u16).unwrap(),
+                recipient_fingerprint: format!("DUMMY FINGERPRINT {i}"),
+                armored_ciphertext: "dummy".into(),
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
+fn dummy_ceremony_state() -> CeremonyState {
+    CeremonyState {
+        secret_sharing_instance: dummy_secret_sharing_instance(),
+        btc_master_pubkey: crypto::k256_sk_to_btc_xonly_pubkey(
+            &k256::SecretKey::from_slice(&[7u8; 32]).unwrap(),
+        ),
+        cert_seq: 0,
+        encrypted_shares: dummy_kp_encrypted_shares(),
+    }
+}
+
 impl Default for OperatorInitTestArgs {
     fn default() -> Self {
         Self {
             s3_logger: mock_logger(),
             config: InitConfig::mock_for_testing(None),
-            secret_sharing_instance: dummy_secret_sharing_instance(),
+            ceremony_state: dummy_ceremony_state(),
         }
     }
 }
@@ -197,13 +222,18 @@ impl OperatorInitTestArgs {
 
     /// Set the ceremony snapshot to a different secret-sharing instance.
     pub fn with_commitments(mut self, commitments: ShareCommitments) -> Self {
-        self.secret_sharing_instance =
+        self.ceremony_state.secret_sharing_instance =
             SecretSharingInstance::new(commitments, TEST_N, TEST_T, 0).unwrap();
         self
     }
 
     pub fn with_s3_logger(mut self, s3_logger: GuardianS3Client) -> Self {
         self.s3_logger = s3_logger;
+        self
+    }
+
+    pub fn with_kp_encrypted_shares(mut self, shares: KPEncryptedShares) -> Self {
+        self.ceremony_state.encrypted_shares = shares;
         self
     }
 }
@@ -240,7 +270,7 @@ impl Enclave {
     /// withdraw-mode commit). Lets a harness defer operator-init until DKG output exists.
     pub fn install_operator_init_for_testing(&self, args: OperatorInitTestArgs) {
         self.config.set_s3_logger(args.s3_logger).unwrap();
-        crate::operator_init::InitInstall::from_parts(args.config, args.secret_sharing_instance)
+        crate::operator_init::InitInstall::from_parts(args.config, args.ceremony_state)
             .install_into(self);
         self.advance_lifecycle_into(WithdrawStage::OperatorInitialized.into())
             .expect("operator init test setup should advance lifecycle");

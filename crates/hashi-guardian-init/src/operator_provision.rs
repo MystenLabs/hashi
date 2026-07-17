@@ -22,7 +22,7 @@ use tracing::info;
 use crate::config::Config;
 use crate::guardian_info::ensure_oi_info_matches_post_init;
 use crate::guardian_info::verified_live_guardian_info;
-use crate::kp_roster::VerifiedCeremonyState;
+use crate::kp_roster::verify_encrypted_share_recipients;
 
 /// Initialize a fresh withdraw-mode guardian with operator-supplied stable config.
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
@@ -138,33 +138,20 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     info!(
         phase = "ceremony instance",
-        "scraping authoritative ceremony/ log for the secret-sharing instance",
+        "scraping authoritative ceremony/ and kp-shares/ logs",
     );
-    let (ceremony_session, scraped_instance, btc_master_pubkey) = reader
-        .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
+    let ceremony_state = reader
+        .read_latest_ceremony_state(BuildPolicy::AnyAllowlisted)
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;
+    ceremony_state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
+    verify_encrypted_share_recipients(&ceremony_state, &certs)?;
+    let scraped_instance = ceremony_state.secret_sharing_instance.clone();
     let sharing_seq = scraped_instance.sharing_seq();
-    let (kp_share_session, kp_share_state) = reader
-        .read_latest_kp_share_state(sharing_seq, BuildPolicy::AnyAllowlisted)
-        .await?
-        .context("no kp-shares log found in S3; key setup has not run")?;
-    let ceremony_state = VerifiedCeremonyState::from_scraped(
-        ceremony_session.clone(),
-        kp_share_session.clone(),
-        scraped_instance.clone(),
-        kp_share_state,
-        btc_master_pubkey,
-        cfg.kp_roster.num_shares,
-        cfg.kp_roster.threshold,
-    )?;
-    ceremony_state.verify_encrypted_share_recipients(&certs)?;
     info!(
         phase = "ceremony instance",
-        ceremony_session = %ceremony_session,
-        kp_share_session = %kp_share_session,
         sharing_seq,
-        cert_seq = ceremony_state.kp_share_cert_seq,
+        cert_seq = ceremony_state.cert_seq,
         n = scraped_instance.num_shares(),
         t = scraped_instance.threshold(),
         share_count = ceremony_state.encrypted_shares.len(),
@@ -273,7 +260,6 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     info!(
         phase = "summary",
         session_id = %session_id,
-        ceremony_session = %ceremony_session,
         sharing_seq,
         config_hash = hex::encode(config_hash),
         bitcoin_network = ?cfg.bitcoin_network,

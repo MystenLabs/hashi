@@ -57,9 +57,9 @@ impl GuardianReader {
         // Read the found bucket + one bucket back, then take max-seq across
         // both. The peek-back defends against sub-hour clock skew that may have
         // placed a higher-seq log in the prior hour bucket.
-        let hit = bucket_max_post_state(self.read_dir(&cursor).await?);
+        let hit = bucket_max_post_state(self.read_logs_in_dir(&cursor).await?);
         cursor = cursor.prev_dir();
-        let peek = bucket_max_post_state(self.read_dir(&cursor).await?);
+        let peek = bucket_max_post_state(self.read_logs_in_dir(&cursor).await?);
         let recovered_state = [hit, peek]
             .into_iter()
             .flatten()
