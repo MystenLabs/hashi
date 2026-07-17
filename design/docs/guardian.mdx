@@ -98,15 +98,18 @@ sequenceDiagram
     KPs->>Guardian: GetGuardianInfo via proxy
     Guardian-->>KPs: config_hash plus session_id plus n/t plus attestation
     KPs->>KPs: Verify PCRs and compare config_hash to local pin
-    KPs->>KPs: HPKE-encrypt local share with config_hash as AAD
-    KPs->>Proxy: SingleProvisionerInit(encrypted share, expected_session_id)
-    Proxy->>Guardian: Fetch live session and provisioning status
-    Guardian-->>Proxy: session_id, threshold, provisioned flag
+    KPs->>KPs: HPKE-encrypt local share to guardian session key (no AAD)
+    KPs->>KPs: Sign(session_id, config_hash, encrypted share)
+    KPs->>Proxy: SingleProvisionerInit(signed submission)
+    Proxy->>Proxy: Pre-verify KP signature and relay roster
+    Proxy->>Guardian: Fetch live session, config, and provisioning status
+    Guardian-->>Proxy: session_id, config_hash, n/t, provisioned flag
     alt fewer than threshold shares collected
-        Proxy-->>KPs: share accepted, waiting for threshold
+        Proxy-->>KPs: signed submission accepted, waiting for threshold
     else threshold reached
-        Proxy->>Guardian: ProvisionerInit(T encrypted shares)
-        Guardian->>Guardian: Decrypt with config_hash AAD and verify commitments
+        Proxy->>Guardian: ProvisionerInit(T signed submissions)
+        Guardian->>Guardian: Verify signatures, session/config pins, and KP assignments
+        Guardian->>Guardian: Decrypt without AAD and verify commitments
         Guardian->>Guardian: Reconstruct BTC key and mark armed standby
         Guardian->>S3: log(init fully-initialized)
         Proxy-->>KPs: standby armed
