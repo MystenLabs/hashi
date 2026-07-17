@@ -103,7 +103,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         n = state.secret_sharing_instance.num_shares(),
         t = state.secret_sharing_instance.threshold(),
         share_count = state.encrypted_shares.len(),
-        "discovered + validated latest ceremony session",
+        "discovered + validated latest ceremony state",
     );
 
     // 2. Confirm every share is addressed only to its labeled KP cert.

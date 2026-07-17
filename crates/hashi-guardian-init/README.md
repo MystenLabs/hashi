@@ -59,12 +59,12 @@ command uses `guardian_endpoint`, `hashi`, and `kp_roster`.
 
 Confirms a KP can fetch and decrypt their share from the latest setup or
 rotation ceremony. Trust is anchored to the guardian's S3 attestation log (no
-gRPC to the live guardian): it discovers the latest ceremony session from S3,
-loads that session's attested signing pubkey, verifies its `ceremony/` audit log
-and `kp-shares/` recovery log against the expected `n`/`t`, confirms every
-encrypted share is addressed only to its labeled KP cert, finds the share labeled
-for this KP's cert fingerprint, decrypts via the yubikey (`gpg --decrypt`), and
-verifies the decrypted share against its commitment.
+gRPC to the live guardian): it discovers the latest ceremony and KP-share state
+from S3, verifies each record against its writing session's attested signing
+pubkey and the expected `n`/`t`, confirms every encrypted share is addressed
+only to its labeled KP cert, finds the share labeled for this KP's cert
+fingerprint, decrypts via the yubikey (`gpg --decrypt`), and verifies the
+decrypted share against its commitment.
 
 The operator `run` command verifies live `/info` signed info and Nitro
 attestation against the configured current build before trusting the session
@@ -99,7 +99,7 @@ It:
 4. Builds the withdraw-mode `InitConfig` from limiter config, on-chain MPC
    master `G`, the KP PCR allowlist, and configured Bitcoin network.
 5. Calls withdraw-mode `OperatorInit` with guardian S3 config and `InitConfig`;
-   the enclave reads the latest ceremony instance from S3 before installing.
+   the enclave reads and pins the latest complete ceremony and KP-share state.
 6. On first deploy only, writes the on-chain committee to `genesis/record.json`
    through `OperatorWriteGenesis`.
 7. Verifies the live and S3-logged `GuardianInfo` match the installed ceremony
@@ -169,12 +169,10 @@ It:
    guardian.
 3. Checks that all other guardian sessions in the configured S3 bucket have
    been quiet long enough.
-4. Reads the latest `ceremony/` instance and requires it to match the armed
-   standby instance.
-5. Reads the latest `committee-update/` or `genesis/` record, recovers the
+4. Reads the latest `committee-update/` or `genesis/` record, recovers the
    limiter state from successful withdrawal logs, computes the expected
    `ActivationState` hash, and calls `OperatorActivate`.
-6. Verifies the guardian reports the expected active committee epoch and limiter
+5. Verifies the guardian reports the expected active committee epoch and limiter
    state.
 
 ```bash

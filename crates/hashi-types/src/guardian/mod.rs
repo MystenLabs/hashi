@@ -165,8 +165,7 @@ pub struct InitConfig {
 pub struct ActivationState {
     /// Binds the live activation state to the stable arming config.
     config_hash: [u8; 32],
-    /// Secret-sharing instance armed during OI/PI. Activation rejects if the
-    /// latest ceremony instance no longer matches it.
+    /// Secret-sharing instance pinned during OI and retained through activation.
     secret_sharing_instance: SecretSharingInstance,
     /// Current Hashi committee
     committee: HashiCommittee,
