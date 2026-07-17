@@ -85,7 +85,7 @@ impl GuardianWithdrawalsPoller {
             return Ok(PollOutcome::CursorUnmoved);
         }
 
-        let verified_logs = self.reader.read_dir(&self.cursor).await?;
+        let verified_logs = self.reader.read_logs_in_dir(&self.cursor).await?;
         // Withdrawal polling may replay historical buckets during an upgrade, so
         // this caller accepts any record whose session build verifies against the
         // configured allowlist. Add a cursor/cutoff policy here if tailing must

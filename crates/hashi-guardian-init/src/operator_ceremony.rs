@@ -206,7 +206,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         "cross-checking the latest guardian ceremony/ and kp-shares/ logs",
     );
     let logged = reader
-        .read_latest_ceremony_and_kp_share_state(BuildPolicy::Current)
+        .read_latest_ceremony_state(BuildPolicy::Current)
         .await?
         .context("no ceremony logs found in guardian S3 bucket")?;
     logged.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;

@@ -23,7 +23,7 @@ impl GuardianReader {
         &mut self,
         live_session: &str,
     ) -> anyhow::Result<()> {
-        let recent_heartbeats = self.read_recent_heartbeats().await?;
+        let recent_heartbeats = self.read_recent_heartbeat_logs().await?;
         let summary = summarize_heartbeats_by_session(recent_heartbeats)?;
         let now = now_timestamp_secs();
 
@@ -49,14 +49,14 @@ impl GuardianReader {
         Ok(())
     }
 
-    async fn read_recent_heartbeats(&mut self) -> anyhow::Result<Vec<VerifiedLogRecord>> {
+    async fn read_recent_heartbeat_logs(&mut self) -> anyhow::Result<Vec<VerifiedLogRecord>> {
         // Read from the previous, current, and next hour-scoped prefixes to
         // cover clock-boundary cases and moderate clock skew.
         let one_hour_ago = now_timestamp_secs().saturating_sub(60 * 60);
         let mut cursor = heartbeat_cursor(one_hour_ago);
         let mut logs = Vec::new();
         for _ in 0..3 {
-            logs.extend(self.read_dir(&cursor).await?);
+            logs.extend(self.read_logs_in_dir(&cursor).await?);
             cursor = cursor.next_dir();
         }
         Ok(logs)

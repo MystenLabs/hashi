@@ -9,7 +9,7 @@
 //! that records the build PCRs verified for each session. Streams are
 //! hour-partitioned (`withdraw/`/`heartbeat/`);
 //! [`withdraw_cursor`]/[`heartbeat_cursor`] open a cursor that the caller
-//! advances/retreats and feeds to [`GuardianReader::read_dir`].
+//! advances/retreats and feeds to [`GuardianReader::read_logs_in_dir`].
 
 use crate::s3_client::GuardianS3Client;
 use crate::s3_client::HistoryCheck;
@@ -47,7 +47,7 @@ mod limiter_recovery;
 
 /// Open an hour-scoped cursor at `start` over the `withdraw/` stream. Advance/
 /// retreat with [`S3HourScopedDirectory::next_dir`]/`prev_dir`, gate on
-/// `write_completion_time`, and read via [`GuardianReader::read_dir`].
+/// `write_completion_time`, and read via [`GuardianReader::read_logs_in_dir`].
 pub fn withdraw_cursor(start: UnixSeconds) -> S3HourScopedDirectory {
     S3HourScopedDirectory::new(S3_DIR_WITHDRAW, start)
 }
@@ -123,7 +123,7 @@ impl GuardianReader {
     /// signing pubkey via the cache. Batch readers can straddle upgrades, so
     /// callers that need current-only semantics must inspect each returned
     /// record's build PCRs with [`Self::require_current_build`].
-    pub async fn read_dir(
+    pub async fn read_logs_in_dir(
         &mut self,
         dir: &S3HourScopedDirectory,
     ) -> anyhow::Result<Vec<VerifiedLogRecord>> {
@@ -172,7 +172,7 @@ impl GuardianReader {
     ///
     /// `kp-shares/` is read independently so later KP cert rotations can advance
     /// `cert_seq` without rewriting the `ceremony/` instance.
-    async fn read_latest_ceremony(
+    async fn read_latest_ceremony_log(
         &mut self,
         build_policy: BuildPolicy,
     ) -> anyhow::Result<Option<CeremonyLogMessage>> {
@@ -204,7 +204,7 @@ impl GuardianReader {
     /// expected to expire, and their integrity is the enclave signature checked
     /// below — not S3 immutability — so the immutable-log lock assertion in
     /// `get_log_record` doesn't apply.
-    async fn read_latest_kp_share_state(
+    async fn read_latest_kp_share_state_log(
         &mut self,
         sharing_seq: u64,
         build_policy: BuildPolicy,
@@ -245,16 +245,16 @@ impl GuardianReader {
     /// `sharing_seq`. `None` means no ceremony has been logged. Once a ceremony
     /// exists, its matching KP share state must also exist: ceremony writers
     /// publish `kp-shares/` before `ceremony/`.
-    pub async fn read_latest_ceremony_and_kp_share_state(
+    pub async fn read_latest_ceremony_state(
         &mut self,
         build_policy: BuildPolicy,
     ) -> anyhow::Result<Option<CeremonyState>> {
-        let Some(ceremony) = self.read_latest_ceremony(build_policy).await? else {
+        let Some(ceremony) = self.read_latest_ceremony_log(build_policy).await? else {
             return Ok(None);
         };
         let sharing_seq = ceremony.sharing_seq();
         let kp_share_state = self
-            .read_latest_kp_share_state(sharing_seq, build_policy)
+            .read_latest_kp_share_state_log(sharing_seq, build_policy)
             .await?
             .with_context(|| {
                 format!("no kp-shares log found for latest ceremony sharing_seq {sharing_seq}")
@@ -275,7 +275,7 @@ impl GuardianReader {
             return Ok(Some(committee));
         }
         Ok(self
-            .read_genesis(build_policy)
+            .read_genesis_log(build_policy)
             .await?
             .map(|genesis| genesis.committee))
     }
@@ -313,7 +313,7 @@ impl GuardianReader {
 
     /// Fixed genesis record from `genesis/record.json`. `None` means the
     /// operator-trusted bootstrap record has not been written yet.
-    async fn read_genesis(
+    async fn read_genesis_log(
         &mut self,
         build_policy: BuildPolicy,
     ) -> anyhow::Result<Option<GenesisLogMessage>> {
