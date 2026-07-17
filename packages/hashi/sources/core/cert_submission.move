@@ -1,11 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-/// Entry points for submitting TOB dealer certificates. Committee members (or
-/// their delegated operators) post certified dealer-messages hashes for the
-/// DKG, key-rotation, and nonce-generation MPC ceremonies into per-(epoch,
-/// batch, protocol) buckets stored on `Hashi`, and garbage-collect buckets
-/// once they are old enough.
 module hashi::cert_submission;
 
 use hashi::{committee::CommitteeSignature, hashi::Hashi, tob::ProtocolType};
@@ -18,10 +13,11 @@ entry fun submit_dkg_cert(
     dealer: address,
     messages_hash: vector<u8>,
     cert: CommitteeSignature,
+    clock: &sui::clock::Clock,
     ctx: &mut TxContext,
 ) {
     let key = hashi::tob::tob_key(epoch, option::none(), hashi::tob::protocol_type_dkg());
-    submit_cert_internal(hashi, key, epoch, dealer, messages_hash, &cert, ctx);
+    submit_cert_internal(hashi, key, epoch, dealer, messages_hash, &cert, clock, ctx);
 }
 
 entry fun submit_rotation_cert(
@@ -30,10 +26,11 @@ entry fun submit_rotation_cert(
     dealer: address,
     messages_hash: vector<u8>,
     cert: CommitteeSignature,
+    clock: &sui::clock::Clock,
     ctx: &mut TxContext,
 ) {
     let key = hashi::tob::tob_key(epoch, option::none(), hashi::tob::protocol_type_key_rotation());
-    submit_cert_internal(hashi, key, epoch, dealer, messages_hash, &cert, ctx);
+    submit_cert_internal(hashi, key, epoch, dealer, messages_hash, &cert, clock, ctx);
 }
 
 entry fun submit_nonce_cert(
@@ -43,6 +40,7 @@ entry fun submit_nonce_cert(
     dealer: address,
     messages_hash: vector<u8>,
     cert: CommitteeSignature,
+    clock: &sui::clock::Clock,
     ctx: &mut TxContext,
 ) {
     let key = hashi::tob::tob_key(
@@ -50,7 +48,7 @@ entry fun submit_nonce_cert(
         option::some(batch_index),
         hashi::tob::protocol_type_nonce_generation(),
     );
-    submit_cert_internal(hashi, key, epoch, dealer, messages_hash, &cert, ctx);
+    submit_cert_internal(hashi, key, epoch, dealer, messages_hash, &cert, clock, ctx);
 }
 
 /// Garbage collection: deliberately NOT gated on pause/reconfig — cert
@@ -78,12 +76,10 @@ fun submit_cert_internal(
     dealer: address,
     messages_hash: vector<u8>,
     cert: &CommitteeSignature,
+    clock: &sui::clock::Clock,
     ctx: &mut TxContext,
 ) {
     hashi.versioning().assert_version_enabled();
-    // The dealer's own validator key, or the operator key it has delegated to,
-    // may submit the dealer's certificate. `member_authorized` also enforces
-    // that the dealer is a registered committee member.
     assert!(hashi.committee_set().member_authorized(dealer, ctx));
     let pending = hashi.committee_set().pending_epoch_change();
     assert!(epoch == hashi.committee_set().epoch() || pending.contains(&epoch));
@@ -94,5 +90,6 @@ fun submit_cert_internal(
         dealer,
         messages_hash,
         cert,
+        clock.timestamp_ms(),
     );
 }

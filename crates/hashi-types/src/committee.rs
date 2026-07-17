@@ -195,6 +195,7 @@ impl Committee {
                 mpc_weight_reduction_allowed_delta,
                 mpc_max_faulty_in_basis_points,
                 mpc_nonce_generation_protocol,
+                crate::move_types::DEFAULT_MPC_NONCE_ACCUMULATION_WINDOW_MS,
             ),
         )
     }

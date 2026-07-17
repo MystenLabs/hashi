@@ -1732,4 +1732,33 @@ mod tests {
         expected[0] = 0xc0;
         assert_eq!(pubkey.as_bytes(), expected.as_slice());
     }
+
+    #[test]
+    fn dealer_submission_bcs_round_trips_with_timestamp() {
+        use move_types::{
+            CommitteeSignature, DealerMessagesHashV1, DealerSubmissionV1, LinkedTableNode,
+        };
+        let dealer = Address::new([7u8; 32]);
+        let node: LinkedTableNode<Address, DealerSubmissionV1> = LinkedTableNode {
+            prev: None,
+            next: Some(dealer),
+            value: DealerSubmissionV1 {
+                message: DealerMessagesHashV1 {
+                    dealer_address: dealer,
+                    messages_hash: vec![1, 2, 3],
+                },
+                signature: CommitteeSignature {
+                    epoch: 9,
+                    signature: vec![0xaa],
+                    signers_bitmap: vec![0x01],
+                },
+                timestamp_ms: 123_456,
+            },
+        };
+        let bytes = bcs::to_bytes(&node).unwrap();
+        let decoded: LinkedTableNode<Address, DealerSubmissionV1> =
+            bcs::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.value.timestamp_ms, 123_456);
+        assert_eq!(decoded.next, Some(dealer));
+    }
 }

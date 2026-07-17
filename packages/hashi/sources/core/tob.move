@@ -1,12 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-/// Totally Ordered Broadcast (TOB) certificate storage for MPC ceremonies.
-/// Dealer submissions — a dealer-messages hash plus its committee signature —
-/// are bucketed per (epoch, optional batch, protocol type) in `EpochCertsV1`,
-/// first-submission-wins per dealer. Signature verification is deferred to
-/// off-chain readers, and a bucket may be destroyed once the current epoch is
-/// at least two past the bucket's epoch.
 module hashi::tob;
 
 use hashi::committee::CommitteeSignature;
@@ -34,7 +28,6 @@ public struct TobKey has copy, drop, store {
     protocol_type: ProtocolType,
 }
 
-/// Certificates for a single epoch.
 public struct EpochCertsV1 has store {
     epoch: u64,
     protocol_type: ProtocolType,
@@ -50,6 +43,7 @@ public struct DealerMessagesHashV1 has copy, drop, store {
 public struct DealerSubmissionV1 has copy, drop, store {
     message: DealerMessagesHashV1,
     signature: CommitteeSignature,
+    timestamp_ms: u64,
 }
 
 // ~~~~~~~ Package Functions ~~~~~~~
@@ -101,6 +95,7 @@ public(package) fun submit_cert(
     messages_hash: vector<u8>,
     signature: vector<u8>,
     signers_bitmap: vector<u8>,
+    timestamp_ms: u64,
 ) {
     assert!(epoch == epoch_certs.epoch, EWrongEpoch);
     if (epoch_certs.certs.contains(dealer)) {
@@ -108,24 +103,24 @@ public(package) fun submit_cert(
     };
     let message = DealerMessagesHashV1 { dealer_address: dealer, messages_hash };
     let sig = hashi::committee::new_committee_signature(epoch, signature, signers_bitmap);
-    let submission = DealerSubmissionV1 { message, signature: sig };
+    let submission = DealerSubmissionV1 { message, signature: sig, timestamp_ms };
     epoch_certs.certs.push_back(dealer, submission);
 }
 
-/// Submit a certificate using a CommitteeSignature (deferred verification).
 public(package) fun submit_cert_with_signature(
     epoch_certs: &mut EpochCertsV1,
     epoch: u64,
     dealer: address,
     messages_hash: vector<u8>,
     sig: &CommitteeSignature,
+    timestamp_ms: u64,
 ) {
     assert!(epoch == epoch_certs.epoch, EWrongEpoch);
     if (epoch_certs.certs.contains(dealer)) {
         return
     };
     let message = DealerMessagesHashV1 { dealer_address: dealer, messages_hash };
-    let submission = DealerSubmissionV1 { message, signature: *sig };
+    let submission = DealerSubmissionV1 { message, signature: *sig, timestamp_ms };
     epoch_certs.certs.push_back(dealer, submission);
 }
 
@@ -141,6 +136,11 @@ public(package) fun destroy_all(epoch_certs: EpochCertsV1, current_epoch: u64) {
 }
 
 // ~~~~~~~ Test Helpers ~~~~~~~
+
+#[test_only]
+public fun submission_timestamp_ms(self: &EpochCertsV1, dealer: address): u64 {
+    self.certs.borrow(dealer).timestamp_ms
+}
 
 #[test_only]
 public fun num_certs(self: &EpochCertsV1): u64 {

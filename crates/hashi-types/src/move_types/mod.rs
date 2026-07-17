@@ -228,6 +228,7 @@ const KEY_MPC_THRESHOLD_IN_BASIS_POINTS: &str = "mpc_threshold_in_basis_points";
 const KEY_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: &str = "mpc_weight_reduction_allowed_delta";
 const KEY_MPC_MAX_FAULTY_IN_BASIS_POINTS: &str = "mpc_max_faulty_in_basis_points";
 const KEY_MPC_NONCE_GENERATION_PROTOCOL: &str = "mpc_nonce_generation_protocol";
+const KEY_MPC_NONCE_ACCUMULATION_WINDOW_MS: &str = "mpc_nonce_accumulation_window_ms";
 
 /// Default MPC threshold in basis points. Mirrors `DEFAULT_THRESHOLD_IN_BASIS_POINTS`
 /// in `mpc_config.move`.
@@ -238,6 +239,8 @@ pub const DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
 pub const DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS: u16 = 3333;
 /// Mirrors `VANILLA_NONCE_GENERATION_PROTOCOL` in `mpc_config.move`.
 pub const VANILLA_MPC_NONCE_GENERATION_PROTOCOL: u16 = 0;
+/// Mirrors `DEFAULT_NONCE_ACCUMULATION_WINDOW_MS` in `mpc_config.move`.
+pub const DEFAULT_MPC_NONCE_ACCUMULATION_WINDOW_MS: u64 = 700;
 
 /// Rust version of the Move hashi::config::Config type: a general-purpose,
 /// order-preserving key-value store (`VecMap<String, Value>`). Embedded both as
@@ -295,6 +298,7 @@ impl Config {
         weight_reduction_allowed_delta: u16,
         max_faulty_in_basis_points: u16,
         nonce_generation_protocol: u16,
+        nonce_accumulation_window_ms: u64,
     ) -> Self {
         Self(vec![
             (
@@ -312,6 +316,10 @@ impl Config {
             (
                 KEY_MPC_NONCE_GENERATION_PROTOCOL.to_string(),
                 ConfigValue::U64(nonce_generation_protocol as u64),
+            ),
+            (
+                KEY_MPC_NONCE_ACCUMULATION_WINDOW_MS.to_string(),
+                ConfigValue::U64(nonce_accumulation_window_ms),
             ),
         ])
     }
@@ -341,6 +349,13 @@ impl Config {
         self.mpc_param(
             KEY_MPC_NONCE_GENERATION_PROTOCOL,
             VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
+        )
+    }
+
+    pub fn mpc_nonce_accumulation_window_ms(&self) -> u64 {
+        self.get_u64(
+            KEY_MPC_NONCE_ACCUMULATION_WINDOW_MS,
+            DEFAULT_MPC_NONCE_ACCUMULATION_WINDOW_MS,
         )
     }
 
@@ -814,6 +829,7 @@ pub struct CertifiedMessage<T> {
 pub struct DealerSubmissionV1 {
     pub message: DealerMessagesHashV1,
     pub signature: CommitteeSignature,
+    pub timestamp_ms: u64,
 }
 
 #[derive(Debug)]
@@ -1572,18 +1588,19 @@ mod tests {
     /// The expected vector must equal what Move's `mpc_config::pin` produces.
     #[test]
     fn committee_mpc_config_bcs_is_pinned() {
-        let mpc = Config::from_mpc_params(3334, 800, 3333, 1);
+        let mpc = Config::from_mpc_params(3334, 800, 3333, 1, 700);
         let bytes = bcs::to_bytes(&mpc).expect("serialize");
 
-        // VecMap<String,Value> = ULEB128 len (4) then, per entry, ULEB128 key
+        // VecMap<String,Value> = ULEB128 len (5) then, per entry, ULEB128 key
         // length, key bytes, 1-byte Value variant tag (U64 = 0), 8-byte LE u64.
         let expected: Vec<u8> = {
-            let mut v = vec![4u8];
+            let mut v = vec![5u8];
             for (key, val) in [
                 ("mpc_threshold_in_basis_points", 3334u64),
                 ("mpc_weight_reduction_allowed_delta", 800),
                 ("mpc_max_faulty_in_basis_points", 3333),
                 ("mpc_nonce_generation_protocol", 1),
+                ("mpc_nonce_accumulation_window_ms", 700),
             ] {
                 v.push(key.len() as u8);
                 v.extend_from_slice(key.as_bytes());
