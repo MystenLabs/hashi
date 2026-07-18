@@ -18,10 +18,6 @@ use tracing::debug;
 use tracing::error;
 use tracing::info;
 
-pub(super) struct PendingUtxoCleanup {
-    pub(super) utxo_ids: Vec<UtxoId>,
-}
-
 const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24; // 1 day
 const DEPOSIT_REQUEST_DELETE_DELAY_MS: u64 = 1000 * 60; // 1 minute
 const MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC: usize = 500;
@@ -172,14 +168,18 @@ impl LeaderService {
         })));
     }
 
-    /// If there are pending UTXO cleanups and no task in-flight, spawn a
-    /// background task to process the next one. When the queue is empty,
-    /// scans on-chain state for orphaned locked UTXOs whose withdrawal has
-    /// already been confirmed (handles the crash-between-confirm-and-cleanup
-    /// case).
+    /// If a cleanup scan is due and no task is in-flight, spawn a background
+    /// task that refreshes the UTXO-pool mirror from chain, scans it for
+    /// spent-but-uncleaned records, and cleans them. The scan is armed at
+    /// boot (crash-between-confirm-and-cleanup recovery), whenever a
+    /// withdrawal confirms on Sui, and after a task that did work or failed.
     pub(super) fn check_cleanup_spent_utxos(&mut self, checkpoint_timestamp_ms: u64) {
         if self.utxo_cleanup_gc_task.is_some() {
             debug!("UTXO cleanup GC task already in-flight, skipping");
+            return;
+        }
+
+        if !self.utxo_cleanup_scan_needed {
             return;
         }
 
@@ -188,66 +188,48 @@ impl LeaderService {
             return;
         }
 
-        if self.pending_utxo_cleanups.is_empty() && self.utxo_cleanup_scan_needed {
-            self.discover_orphaned_utxo_cleanups();
-            if self.pending_utxo_cleanups.is_empty() {
-                self.utxo_cleanup_scan_needed = false;
-            }
-        }
-
-        let Some(cleanup) = self.pending_utxo_cleanups.pop_front() else {
-            return;
-        };
-
-        info!(
-            utxo_count = cleanup.utxo_ids.len(),
-            "Scheduling UTXO cleanup for spent UTXOs",
-        );
-
+        self.utxo_cleanup_scan_needed = false;
         let inner = self.inner.clone();
         self.utxo_cleanup_gc_task = Some(AbortOnDropHandle::new(tokio::task::spawn(async move {
-            Self::cleanup_spent_utxos(inner, cleanup).await
+            Self::cleanup_spent_utxos(inner).await
         })));
     }
 
-    /// Scan local state for UTXOs with `spent_epoch` set — they have been
-    /// spent but their cleanup never ran (e.g. leader crashed).
-    fn discover_orphaned_utxo_cleanups(&mut self) {
-        let state = self.inner.onchain_state().state();
-        let utxo_records = state.hashi().utxo_pool.utxo_records();
+    /// Refresh the UTXO-pool mirror from chain, then clean every record the
+    /// refreshed mirror still shows as spent-but-uncleaned. Returns how many
+    /// UTXOs were cleaned so the caller can decide whether to re-arm the
+    /// scan (more work may exist past the per-GC cap).
+    ///
+    /// The refresh is what makes the tx worth paying for: the mirror
+    /// overstates pending cleanups whenever another leader cleaned records
+    /// (their prune is local to them), and submitting from a stale mirror
+    /// re-cleans those records as paid on-chain no-ops.
+    async fn cleanup_spent_utxos(inner: Arc<crate::Hashi>) -> anyhow::Result<usize> {
+        inner.onchain_state().refresh_utxo_pool().await?;
 
-        let orphaned_ids = find_spent_utxos_pending_cleanup(utxo_records);
-
-        if !orphaned_ids.is_empty() {
-            info!(
-                "Discovered {} spent UTXO(s) pending cleanup",
-                orphaned_ids.len(),
-            );
-            self.pending_utxo_cleanups.push_back(PendingUtxoCleanup {
-                utxo_ids: orphaned_ids,
-            });
+        let utxo_ids = {
+            let state = inner.onchain_state().state();
+            find_spent_utxos_pending_cleanup(state.hashi().utxo_pool.utxo_records())
+        };
+        if utxo_ids.is_empty() {
+            return Ok(0);
         }
-    }
 
-    async fn cleanup_spent_utxos(
-        inner: Arc<crate::Hashi>,
-        cleanup: PendingUtxoCleanup,
-    ) -> anyhow::Result<()> {
-        let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
-        executor
-            .execute_cleanup_spent_utxos(&cleanup.utxo_ids)
-            .await?;
-        // The Move call emits no event, so the watcher can't prune these
-        // records; without this the orphan scan rediscovers the same set and
-        // re-cleans it as a paid no-op forever.
-        inner
-            .onchain_state()
-            .remove_cleaned_utxo_records(&cleanup.utxo_ids);
         info!(
-            utxo_count = cleanup.utxo_ids.len(),
+            utxo_count = utxo_ids.len(),
+            "Cleaning up spent UTXO(s) pending cleanup",
+        );
+        let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
+        executor.execute_cleanup_spent_utxos(&utxo_ids).await?;
+        // The Move call emits no event, so the watcher can't prune these
+        // records; apply the cleanup to the local mirror here so the next
+        // scan doesn't rediscover and re-pay for the same set.
+        inner.onchain_state().remove_cleaned_utxo_records(&utxo_ids);
+        info!(
+            utxo_count = utxo_ids.len(),
             "Successfully cleaned up spent UTXOs",
         );
-        Ok(())
+        Ok(utxo_ids.len())
     }
 
     async fn delete_expired_proposals(

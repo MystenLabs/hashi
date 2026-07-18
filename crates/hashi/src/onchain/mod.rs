@@ -220,6 +220,22 @@ impl OnchainState {
         self.state_mut().hashi.utxo_pool.remove_cleaned(utxo_ids);
     }
 
+    /// Re-scrape the on-chain UTXO pool into the local mirror. The cleanup
+    /// GC calls this before submitting an orphan-scan batch: the mirror can
+    /// overstate pending cleanups (another leader's cleanup emits no event
+    /// the watcher could apply), and every overstated id becomes a paid
+    /// on-chain no-op. One table scan here is cheaper than paying to
+    /// re-clean records that are already gone.
+    pub(crate) async fn refresh_utxo_pool(&self) -> Result<()> {
+        let client = self.client();
+        let bitcoin_state =
+            fetch_bitcoin_state(client.clone(), self.hashi_id(), self.package_id_original())
+                .await?;
+        let utxo_pool = scrape_utxo_pool(client, bitcoin_state.utxo_pool).await?;
+        self.state_mut().hashi.utxo_pool = utxo_pool;
+        Ok(())
+    }
+
     pub fn subscribe_checkpoint(&self) -> watch::Receiver<CheckpointInfo> {
         self.0.checkpoint.subscribe()
     }
@@ -760,6 +776,43 @@ async fn scrape_package_versions(
     Ok(package_versions)
 }
 
+/// Fetch the `BitcoinState` dynamic field hanging off the Hashi object.
+async fn fetch_bitcoin_state(
+    mut client: Client,
+    hashi_object_id: Address,
+    package_id: Address,
+) -> Result<move_types::BitcoinState> {
+    let bitcoin_state_key = move_types::BitcoinStateKey { dummy_field: false };
+    let bitcoin_state_key_type = TypeTag::Struct(Box::new(StructTag::new(
+        package_id,
+        Identifier::from_static("bitcoin_state"),
+        Identifier::from_static("BitcoinStateKey"),
+        vec![],
+    )));
+    let bitcoin_state_field_id = hashi_object_id.derive_dynamic_child_id(
+        &bitcoin_state_key_type,
+        &bitcoin_state_key.to_bcs().unwrap(),
+    );
+    let bitcoin_state_response = client
+        .ledger_client()
+        .get_object(
+            GetObjectRequest::new(&bitcoin_state_field_id).with_read_mask(FieldMask::from_paths([
+                Object::path_builder().contents().finish(),
+            ])),
+        )
+        .await?;
+    let bitcoin_state_field: move_types::Field<
+        move_types::BitcoinStateKey,
+        move_types::BitcoinState,
+    > = bitcoin_state_response
+        .into_inner()
+        .object()
+        .contents()
+        .deserialize()
+        .map_err(|e| anyhow!("failed to deserialize BitcoinState: {e}"))?;
+    Ok(bitcoin_state_field.value)
+}
+
 async fn scrape_hashi(
     mut client: Client,
     hashi_object_id: Address,
@@ -799,36 +852,7 @@ async fn scrape_hashi(
         num_consumed_presigs,
     } = response.get_ref().object().contents().deserialize()?;
 
-    // Fetch BitcoinState from dynamic field on Hashi
-    let bitcoin_state_key = move_types::BitcoinStateKey { dummy_field: false };
-    let bitcoin_state_key_type = TypeTag::Struct(Box::new(StructTag::new(
-        package_id,
-        Identifier::from_static("bitcoin_state"),
-        Identifier::from_static("BitcoinStateKey"),
-        vec![],
-    )));
-    let bitcoin_state_field_id = id.derive_dynamic_child_id(
-        &bitcoin_state_key_type,
-        &bitcoin_state_key.to_bcs().unwrap(),
-    );
-    let bitcoin_state_response = client
-        .ledger_client()
-        .get_object(
-            GetObjectRequest::new(&bitcoin_state_field_id).with_read_mask(FieldMask::from_paths([
-                Object::path_builder().contents().finish(),
-            ])),
-        )
-        .await?;
-    let bitcoin_state_field: move_types::Field<
-        move_types::BitcoinStateKey,
-        move_types::BitcoinState,
-    > = bitcoin_state_response
-        .into_inner()
-        .object()
-        .contents()
-        .deserialize()
-        .map_err(|e| anyhow!("failed to deserialize BitcoinState: {e}"))?;
-    let bitcoin_state = bitcoin_state_field.value;
+    let bitcoin_state = fetch_bitcoin_state(client.clone(), id, package_id).await?;
 
     let (
         member_info,

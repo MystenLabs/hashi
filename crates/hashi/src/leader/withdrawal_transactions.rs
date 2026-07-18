@@ -6,8 +6,6 @@ use super::LeaderService;
 use super::parse_member_signature;
 use crate::Hashi;
 use crate::btc_monitor::monitor::TxStatus;
-use crate::leader::garbage_collection::PendingUtxoCleanup;
-use crate::onchain::types::UtxoId;
 use crate::onchain::types::WithdrawalTransaction;
 use crate::sui_tx_executor::SuiTxExecutor;
 use crate::withdrawals::MpcInputSignaturesMessage;
@@ -40,7 +38,7 @@ use tracing::trace;
 use tracing::warn;
 
 pub(super) enum WithdrawalBroadcastOutcome {
-    ConfirmedOnSui { utxo_ids: Vec<UtxoId> },
+    ConfirmedOnSui,
     WaitForNextBitcoinBlock,
 }
 
@@ -1048,11 +1046,14 @@ impl LeaderService {
         result: WithdrawalBroadcastResult,
     ) -> anyhow::Result<()> {
         match result {
-            Ok(WithdrawalBroadcastOutcome::ConfirmedOnSui { utxo_ids }) => {
+            Ok(WithdrawalBroadcastOutcome::ConfirmedOnSui) => {
                 self.withdrawal_broadcast_retry_tracker
                     .clear(&withdrawal_id);
-                self.pending_utxo_cleanups
-                    .push_back(PendingUtxoCleanup { utxo_ids });
+                // The confirm tx marked the input UTXOs spent on-chain; arm
+                // the cleanup scan rather than queueing the ids — the scan
+                // re-reads on-chain state before paying for a cleanup, which
+                // keeps stale or duplicated ids from becoming no-op txs.
+                self.utxo_cleanup_scan_needed = true;
             }
             Ok(WithdrawalBroadcastOutcome::WaitForNextBitcoinBlock) => {
                 self.withdrawal_broadcast_retry_tracker
@@ -1107,7 +1108,6 @@ impl LeaderService {
                     confirmations,
                     "Withdrawal tx confirmed, proceeding to on-chain confirmation"
                 );
-                let utxo_ids: Vec<UtxoId> = txn.inputs.iter().map(|u| u.id).collect();
                 Self::confirm_withdrawal_on_sui(&inner, &txn)
                     .await
                     .map_err(|e| {
@@ -1116,7 +1116,7 @@ impl LeaderService {
                             e,
                         )
                     })?;
-                return Ok(WithdrawalBroadcastOutcome::ConfirmedOnSui { utxo_ids });
+                return Ok(WithdrawalBroadcastOutcome::ConfirmedOnSui);
             }
             Ok(TxStatus::Confirmed { confirmations }) => {
                 debug!(

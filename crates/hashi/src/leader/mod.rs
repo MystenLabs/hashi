@@ -29,7 +29,6 @@ use futures::future::OptionFuture;
 use hashi_types::committee::MemberSignature;
 use hashi_types::proto::bridge_service_client::BridgeServiceClient;
 use std::collections::HashSet;
-use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -104,12 +103,12 @@ pub(crate) struct LeaderService {
     // Singleton task that deletes stale governance proposals.
     proposal_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
 
-    // UTXO cleanup requests discovered after withdrawals are confirmed on Sui.
-    pending_utxo_cleanups: VecDeque<garbage_collection::PendingUtxoCleanup>,
-    // Singleton task that cleans up spent withdrawal input UTXOs on-chain.
-    utxo_cleanup_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
+    // Singleton task that cleans up spent withdrawal input UTXOs on-chain;
+    // resolves to how many UTXOs it cleaned.
+    utxo_cleanup_gc_task: Option<AbortOnDropHandle<anyhow::Result<usize>>>,
     utxo_cleanup_retry: GlobalRetryTracker<garbage_collection::UtxoCleanupErrorKind>,
-    // Forces a fresh scan for UTXO cleanup work after cleanup state changes.
+    // Arms the cleanup scan: set at boot (crash recovery), when a withdrawal
+    // confirms on Sui, and after a cleanup task that did work or failed.
     utxo_cleanup_scan_needed: bool,
 
     // Singleton task that reconciles the guardian committee with the on-chain committee.
@@ -147,7 +146,6 @@ impl LeaderService {
             approved_deposit_retry_tracker: RetryTracker::new(),
             deposit_gc_task: None,
             proposal_gc_task: None,
-            pending_utxo_cleanups: VecDeque::new(),
             utxo_cleanup_gc_task: None,
             utxo_cleanup_retry: GlobalRetryTracker::new(),
             utxo_cleanup_scan_needed: true,
@@ -304,19 +302,28 @@ impl LeaderService {
                 }
                 Some(result) = OptionFuture::from(self.utxo_cleanup_gc_task.as_mut()) => {
                     self.utxo_cleanup_gc_task = None;
-                    match &result {
-                        Ok(Ok(())) => self.utxo_cleanup_retry.clear(),
-                        _ => self.utxo_cleanup_retry.record_failure(
-                            garbage_collection::UtxoCleanupErrorKind::Failed,
-                            checkpoint_rx.borrow().timestamp_ms,
-                        ),
-                    }
-                    Self::log_task_result("utxo_cleanup_gc", result);
-                    // Re-arm the scan and leave rescheduling to the
-                    // leader-gated checkpoint arm: respawning here ran
+                    // Re-arm the scan when the task did work (more may exist
+                    // past the per-GC cap, or new spends raced in) or failed
+                    // (retry after backoff); a barren scan stays disarmed
+                    // until a withdrawal confirms. Rescheduling is left to
+                    // the leader-gated checkpoint arm: respawning here ran
                     // ungated (leader or not) with no backoff, which kept a
                     // node resubmitting cleanups indefinitely.
-                    self.utxo_cleanup_scan_needed = true;
+                    match &result {
+                        Ok(Ok(0)) => self.utxo_cleanup_retry.clear(),
+                        Ok(Ok(_)) => {
+                            self.utxo_cleanup_retry.clear();
+                            self.utxo_cleanup_scan_needed = true;
+                        }
+                        _ => {
+                            self.utxo_cleanup_retry.record_failure(
+                                garbage_collection::UtxoCleanupErrorKind::Failed,
+                                checkpoint_rx.borrow().timestamp_ms,
+                            );
+                            self.utxo_cleanup_scan_needed = true;
+                        }
+                    }
+                    Self::log_task_result("utxo_cleanup_gc", result);
                 }
                 Some(result) = OptionFuture::from(self.guardian_committee_reconcile_task.as_mut()) => {
                     self.guardian_committee_reconcile_task = None;
@@ -333,9 +340,9 @@ impl LeaderService {
         }
     }
 
-    fn log_task_result(label: &str, result: Result<anyhow::Result<()>, tokio::task::JoinError>) {
+    fn log_task_result<T>(label: &str, result: Result<anyhow::Result<T>, tokio::task::JoinError>) {
         match result {
-            Ok(Ok(())) => {}
+            Ok(Ok(_)) => {}
             Ok(Err(err)) => error!("{label} task failed: {err:#?}"),
             Err(err) if err.is_panic() => error!("{label} task panicked: {err}"),
             Err(err) => error!("{label} task failed to join: {err}"),
