@@ -17,11 +17,13 @@
 //!    instance the new guardian was booted with; it must match.
 //! 4. The stable `InitConfig` is recomputed from limiter config, master G, PCR
 //!    allowlist, and network; its `config_hash` is confirmed.
-//! 5. This KP's encrypted share is read from the latest `kp-shares/{seq}/`
-//!    state (attestation-anchored), every share's recipients are verified
-//!    against the roster, and this KP's share is located by fingerprint.
-//! 6. The share is decrypted via the yubikey (`gpg --decrypt` over a pipe;
-//!    plaintext stays in memory) and verified against its commitment.
+//! 5. This KP's PGP-encrypted share is read from the latest
+//!    `kp-shares/{seq}/` state (attestation-anchored), every encrypted copy's
+//!    recipient is verified against the roster, and this KP's selected
+//!    ciphertext is located by fingerprint.
+//! 6. The selected ciphertext is decrypted via its yubikey (`gpg --decrypt`
+//!    over a pipe; plaintext stays in memory) and verified against the
+//!    commitment.
 //! 7. The decrypted share is HPKE-encrypted to the new guardian's
 //!    `encryption_pubkey` (from its `GuardianInfo`) while constructing a PI
 //!    request bound to the pinned session and verified `config_hash`.
@@ -42,7 +44,6 @@ use hashi_types::guardian::SingleProvisionerInitRequest;
 use hashi_types::guardian::VerifiedGuardianInfo;
 use hashi_types::guardian::WithdrawStage;
 use hashi_types::pgp::PgpPublicCert;
-use hashi_types::pgp::load_certs;
 use hashi_types::proto as pb;
 use hpke::Deserializable;
 use rand::thread_rng;
@@ -51,9 +52,8 @@ use tracing::info;
 use crate::config::Config;
 use crate::guardian_info::ensure_oi_info_matches_post_init;
 use crate::guardian_info::verified_live_guardian_info;
-use crate::kp_roster::decrypt_share;
-use crate::kp_roster::ensure_cert_in_roster;
-use crate::kp_roster::verify_encrypted_share_recipients;
+use crate::kp_roster::decrypt_kp_share_copies;
+use crate::kp_roster::load_kp_cert;
 
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
@@ -102,30 +102,33 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     info!(
         phase = "roster load",
-        cert_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
-        "loading + validating full KP cert roster",
+        share_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
+        certificate_count = cfg.kp_roster.cert_count(),
+        "loading + validating full KP certificate roster",
     );
-    let certs = load_certs(&cfg.kp_roster.kp_pgp_cert_paths)?;
+    let certs_roster = cfg.kp_roster.load_certs_roster()?;
     info!(
         phase = "roster load",
-        cert_count = certs.len(),
-        "KP cert roster loaded"
+        share_count = certs_roster.num_kps(),
+        certificate_count = cfg.kp_roster.cert_count(),
+        "KP certificate roster loaded"
     );
 
     let kp_pgp_cert_path = cfg.require_kp_pgp_cert_path("key-provisioner provision")?;
-    let kp_cert = PgpPublicCert::new(
-        std::fs::read_to_string(kp_pgp_cert_path)
-            .with_context(|| format!("read KP cert at {}", kp_pgp_cert_path.display()))?,
-    )
-    .with_context(|| format!("invalid PGP cert at {}", kp_pgp_cert_path.display()))?;
-    let want_fp = kp_cert.fingerprint();
+    let kp_cert = load_kp_cert(kp_pgp_cert_path)?;
+    let kp_fingerprint = kp_cert.fingerprint();
+    anyhow::ensure!(
+        certs_roster
+            .certs_for_fingerprint(&kp_fingerprint)
+            .is_some(),
+        "this KP's cert (fingerprint {kp_fingerprint}) is not among the configured \
+         kp_roster.kp_pgp_cert_paths"
+    );
     info!(
         phase = "setup",
-        fingerprint = %want_fp,
-        kp_cert_path = %kp_pgp_cert_path.display(),
-        "loaded this KP's cert",
+        fingerprint = %kp_fingerprint,
+        "loaded this KP's selected cert",
     );
-    ensure_cert_in_roster(&kp_cert, &certs)?;
 
     // 1. Ask the relay/standby endpoint which session KPs are provisioning.
     // Active guardian heartbeats may still exist, so identity comes from the
@@ -307,53 +310,18 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         sharing_seq, "verifying this KP's encrypted share from kp-shares/",
     );
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
-    verify_encrypted_share_recipients(&state, &certs)?;
+    state.encrypted_shares.verify_recipients(&certs_roster)?;
     info!(
         phase = "share read",
         cert_seq = state.cert_seq,
-        share_count = state.encrypted_shares.len(),
+        share_count = state.encrypted_shares.share_count(),
+        ciphertext_count = state.encrypted_shares.ciphertext_count(),
         all_recipients_verified = true,
-        "kp-shares log verified: every share is addressed only to its labeled KP cert",
+        "kp-shares log verified: every PGP-encrypted share matches the expected KP cert sets",
     );
 
-    // Find this KP's share by exact fingerprint match. Given the roster checks
-    // above, this should always succeed; keep the error for defensive clarity.
-    let want_fp_hex = want_fp.to_hex();
-    let kp_encrypted_share = state
-        .encrypted_shares
-        .iter()
-        .find(|s| s.recipient_fingerprint == want_fp_hex)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no share in the kp-shares log is labeled for this KP's fingerprint \
-                 {want_fp} (labeled fingerprints: {:?})",
-                state
-                    .encrypted_shares
-                    .iter()
-                    .map(|s| s.recipient_fingerprint.clone())
-                    .collect::<Vec<_>>()
-            )
-        })?;
-    info!(
-        phase = "share read",
-        share_id = kp_encrypted_share.id.get(),
-        fingerprint = %kp_encrypted_share.recipient_fingerprint,
-        "located this KP's encrypted share",
-    );
-
-    // 6. Decrypt via yubikey (gpg streams plaintext over a pipe — never hits
-    //    disk) and verify the decrypted share matches its commitment.
-    info!(
-        phase = "share decrypt",
-        share_id = kp_encrypted_share.id.get(),
-        "decrypting share via yubikey (ciphertext piped via stdin; plaintext in memory)",
-    );
-    let decrypted = decrypt_share(kp_encrypted_share)?;
-    state
-        .secret_sharing_instance
-        .commitments()
-        .verify_share(&decrypted)
-        .context("decrypted share does not match its commitment")?;
+    // 6. Decrypt and commitment-check the ciphertext selected by this KP.
+    let decrypted = decrypt_kp_share_copies(&state, std::slice::from_ref(&kp_cert))?;
     let expected_commitment = state
         .secret_sharing_instance
         .commitments()
@@ -398,11 +366,13 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     // 8. Submit. The relay collects T-of-N shares before forwarding them to the
     //    guardian in one `ProvisionerInit` call.
+    // The cert that decrypted the share also authorizes its relay submission.
+    let signer_cert = &kp_cert;
     info!(
         phase = "summary",
         session_id = %session_id,
         share_id = decrypted.id.get(),
-        fingerprint = %want_fp,
+        signer_fingerprint = %signer_cert.fingerprint(),
         sharing_seq,
         config_hash = hex::encode(config_hash),
         enc_pubkey = hex::encode(enclave_enc_pubkey_bytes),
@@ -413,7 +383,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         &cfg.relay_endpoint,
         guardian_info,
         request,
-        &kp_cert,
+        signer_cert,
         allowlist.current_build(),
     )
     .await?;

@@ -28,7 +28,7 @@ use crate::committee::CommitteeSignature;
 use crate::guardian::GuardianError;
 use crate::guardian::GuardianInfo;
 use crate::guardian::GuardianPubKey;
-use crate::guardian::KPEncryptedShares;
+use crate::guardian::KPEncryptedSharesRoster;
 use crate::guardian::LimiterState;
 use crate::guardian::NitroAttestation;
 use crate::guardian::SecretSharingInstance;
@@ -148,11 +148,11 @@ impl GenesisLogMessage {
 pub struct KpShareStateLogMessage {
     pub sharing_seq: u64,
     pub cert_seq: u64,
-    pub encrypted_shares: KPEncryptedShares,
+    pub encrypted_shares: KPEncryptedSharesRoster,
 }
 
 impl KpShareStateLogMessage {
-    pub fn new(sharing_seq: u64, cert_seq: u64, encrypted_shares: KPEncryptedShares) -> Self {
+    pub fn new(sharing_seq: u64, cert_seq: u64, encrypted_shares: KPEncryptedSharesRoster) -> Self {
         Self {
             sharing_seq,
             cert_seq,

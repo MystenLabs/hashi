@@ -585,7 +585,7 @@ impl Enclave {
         &self,
         sharing_seq: u64,
         cert_seq: u64,
-        encrypted_shares: KPEncryptedShares,
+        encrypted_shares: KPEncryptedSharesRoster,
     ) -> GuardianResult<()> {
         self.write_log_or_abort(LogMessageV1::KpShareState(Box::new(
             KpShareStateLogMessage::new(sharing_seq, cert_seq, encrypted_shares),

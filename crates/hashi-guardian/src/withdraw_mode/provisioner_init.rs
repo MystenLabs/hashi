@@ -82,7 +82,7 @@ fn verify_signed_submissions(
     request: ProvisionerInitRequest,
     live_session_id: &SessionID,
     live_config_hash: &[u8; 32],
-    expected_kp_encrypted_shares: &KPEncryptedShares,
+    expected_kp_encrypted_shares: &KPEncryptedSharesRoster,
 ) -> GuardianResult<Vec<GuardianEncryptedShare>> {
     request
         .0
@@ -107,23 +107,20 @@ fn verify_signed_submissions(
             }
 
             let share_id = submission.encrypted_share().id;
-            let expected_fingerprint = expected_kp_encrypted_shares
-                .as_slice()
-                .get(usize::from(share_id.get() - 1))
+            let (assigned_share, _) = expected_kp_encrypted_shares
+                .find_by_fingerprint(&signer_fingerprint)
                 .ok_or_else(|| {
                     GuardianError::InvalidInputs(format!(
-                        "PI submission share id {} has no KP assignment",
-                        share_id.get()
+                        "PI submission signer {signer_fingerprint} is not in the current KP \
+                         encrypted-share roster"
                     ))
-                })?
-                .recipient_fingerprint
-                .as_str();
-            if signer_fingerprint != expected_fingerprint {
+                })?;
+            if assigned_share.id != share_id {
                 return Err(GuardianError::InvalidInputs(format!(
-                    "PI submission share id {} is assigned to KP {}, not signer {}",
-                    share_id.get(),
-                    expected_fingerprint,
-                    signer_fingerprint
+                    "PI submission signer {signer_fingerprint} is assigned to KP share id {}, \
+                     not submitted share id {}",
+                    assigned_share.id.get(),
+                    share_id.get()
                 )));
             }
 
@@ -177,6 +174,7 @@ mod tests {
         shares: Vec<Share>,
         enclave: Arc<Enclave>,
         kp_keys: Vec<(PgpPublicCert, String)>,
+        alternate_first_kp_key: (PgpPublicCert, String),
     }
 
     async fn setup() -> TestContext {
@@ -190,14 +188,32 @@ mod tests {
                 (PgpPublicCert::new(cert).unwrap(), secret)
             })
             .collect::<Vec<_>>();
-        let kp_encrypted_shares = KPEncryptedShares::new(
+        let (alternate_cert, alternate_secret) = mock_pgp_keypair();
+        let alternate_first_kp_key = (
+            PgpPublicCert::new(alternate_cert).unwrap(),
+            alternate_secret,
+        );
+        let kp_encrypted_shares = KPEncryptedSharesRoster::new(
             kp_keys
                 .iter()
                 .enumerate()
-                .map(|(i, (cert, _))| KPEncryptedShare {
+                .map(|(i, (cert, _))| KPEncryptedShares {
                     id: std::num::NonZeroU16::new((i + 1) as u16).unwrap(),
-                    recipient_fingerprint: cert.fingerprint().to_hex(),
-                    armored_ciphertext: "dummy".into(),
+                    ciphertexts_by_fingerprint: if i == 0 {
+                        [
+                            (cert.fingerprint().to_hex(), "dummy".into()),
+                            (
+                                alternate_first_kp_key.0.fingerprint().to_hex(),
+                                "dummy".into(),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect()
+                    } else {
+                        [(cert.fingerprint().to_hex(), "dummy".into())]
+                            .into_iter()
+                            .collect()
+                    },
                 })
                 .collect(),
         )
@@ -212,6 +228,7 @@ mod tests {
             shares,
             enclave,
             kp_keys,
+            alternate_first_kp_key,
         }
     }
 
@@ -223,6 +240,21 @@ mod tests {
             expected_session_id: SessionID,
             expected_config_hash: [u8; 32],
         ) -> KpSigned<SingleProvisionerInitRequest> {
+            self.signed_submission_with_key(
+                share,
+                &self.kp_keys[signer_index],
+                expected_session_id,
+                expected_config_hash,
+            )
+        }
+
+        fn signed_submission_with_key(
+            &self,
+            share: &Share,
+            signer: &(PgpPublicCert, String),
+            expected_session_id: SessionID,
+            expected_config_hash: [u8; 32],
+        ) -> KpSigned<SingleProvisionerInitRequest> {
             let request = SingleProvisionerInitRequest::build_from_share(
                 expected_session_id,
                 expected_config_hash,
@@ -230,7 +262,7 @@ mod tests {
                 self.enclave.encryption_public_key(),
                 &mut rand::thread_rng(),
             );
-            let (cert, secret) = &self.kp_keys[signer_index];
+            let (cert, secret) = signer;
             KpSigned {
                 signature: sign_detached_in_process(secret, &KpSigned::signed_bytes(&request)),
                 data: request,
@@ -276,6 +308,22 @@ mod tests {
             "provisioner init complete"
         );
         assert!(!ctx.enclave.is_fully_initialized(), "not active before OA");
+    }
+
+    #[tokio::test]
+    async fn accepts_alternate_cert_assigned_to_same_share() {
+        let ctx = setup().await;
+        let mut submissions = vec![ctx.signed_submission_with_key(
+            &ctx.shares[0],
+            &ctx.alternate_first_kp_key,
+            ctx.enclave.s3_session_id(),
+            ctx.enclave.config_hash().unwrap(),
+        )];
+        submissions.extend(ctx.request(&ctx.shares[1..TEST_T]).0);
+
+        ctx.provision(ProvisionerInitRequest(submissions))
+            .await
+            .expect("either cert assigned to the share should authorize PI");
     }
 
     #[tokio::test]

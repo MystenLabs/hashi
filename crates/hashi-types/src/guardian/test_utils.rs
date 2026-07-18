@@ -11,8 +11,10 @@ use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
 use super::InitConfig;
-use super::KPEncryptedShare;
 use super::KPEncryptedShares;
+use super::KPEncryptedSharesRoster;
+use super::KpCerts;
+use super::KpCertsRoster;
 use super::KpSigned;
 use super::LimiterConfig;
 use super::NitroAttestation;
@@ -110,8 +112,19 @@ impl GetGuardianInfoResponse {
 
 impl SetupNewKeyRequest {
     pub fn mock_for_testing() -> Self {
-        SetupNewKeyRequest::new(mock_pgp_certs(TEST_N), TEST_N, TEST_T).unwrap()
+        SetupNewKeyRequest::new(mock_kp_certs_roster(TEST_N), TEST_N, TEST_T).unwrap()
     }
+}
+
+pub fn mock_kp_certs_roster(n: usize) -> KpCertsRoster {
+    KpCertsRoster::new(mock_kp_certs(n)).unwrap()
+}
+
+pub fn mock_kp_certs(n: usize) -> Vec<KpCerts> {
+    mock_pgp_certs(n)
+        .into_iter()
+        .map(|cert| KpCerts::new(vec![cert]).unwrap())
+        .collect()
 }
 
 fn dummy_commitments() -> ShareCommitments {
@@ -124,14 +137,17 @@ fn dummy_commitments() -> ShareCommitments {
     ShareCommitments::new(commitments).unwrap()
 }
 
-fn dummy_encrypted_shares() -> KPEncryptedShares {
-    KPEncryptedShares::new(
+fn dummy_encrypted_shares() -> KPEncryptedSharesRoster {
+    KPEncryptedSharesRoster::new(
         (0..TEST_N)
-            .map(|i| KPEncryptedShare {
+            .map(|i| KPEncryptedShares {
                 id: NonZeroU16::new((i + 1) as u16).unwrap(),
-                recipient_fingerprint: format!("DUMMY FINGERPRINT {i}"),
-                armored_ciphertext: "-----BEGIN PGP MESSAGE-----\n\n-----END PGP MESSAGE-----"
-                    .into(),
+                ciphertexts_by_fingerprint: [(
+                    format!("DUMMY FINGERPRINT {i}"),
+                    "-----BEGIN PGP MESSAGE-----\n\n-----END PGP MESSAGE-----".into(),
+                )]
+                .into_iter()
+                .collect(),
             })
             .collect(),
     )

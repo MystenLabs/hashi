@@ -145,13 +145,20 @@ message S3BucketInfo {
 //      SetupNewKey
 // =======================
 
+// One KP's accepted OpenPGP certs. A KP can have multiple certs for the
+// same secret-share id.
+message KpPgpCertSet {
+  // Armored OpenPGP certificates for one key provisioner.
+  repeated string pgp_certs = 1;
+}
+
 // Untrusted wire DTO. Converted to a validated domain request in the server.
 message SetupNewKeyRequest {
-  // Armored OpenPGP certificates for key provisioners. Length must equal `num_shares`.
-  repeated string key_provisioner_pgp_certs = 1;
+  // OpenPGP cert sets for key provisioners. Length must equal `num_shares`.
+  repeated KpPgpCertSet key_provisioner_pgp_cert_sets = 1;
 
-  // Total number of shares to split the new BTC key into. Must match
-  // `key_provisioner_pgp_certs.len()`.
+  // Total number of shares to split the new BTC key into. Must match the number
+  // of KP cert sets, not the total number of certs.
   optional uint32 num_shares = 2;
 
   // Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
@@ -175,12 +182,11 @@ message GuardianEncryptedShare {
   HPKECiphertext ciphertext = 2;
 }
 
-// OpenPGP-encrypted secret share sent to a key provisioner.
-message KPEncryptedShare {
+// All PGP-encrypted copies of one KP share.
+message SingleKPEncryptedShares {
   GuardianShareID id = 1;
-  optional string armored_ciphertext = 2;
-  // Fingerprint of the recipient PGP cert this share is encrypted to.
-  optional string recipient_fingerprint = 3;
+  // Recipient PGP fingerprint to armored ciphertext.
+  map<string, string> ciphertexts = 2;
 }
 
 // Commitment to a secret share.
@@ -191,7 +197,7 @@ message GuardianShareCommitment {
 
 // Unsigned response payload.
 message SetupNewKeyResponseData {
-  repeated KPEncryptedShare encrypted_shares = 1;
+  repeated SingleKPEncryptedShares encrypted_shares = 1;
   SecretSharingInstance secret_sharing_instance = 2;
   // x-only BTC master pubkey (32 bytes); lets the operator publish it on-chain pre-provision.
   bytes btc_master_pubkey = 3;
@@ -340,8 +346,8 @@ message ProvisionerInitResponse {}
 message RotateKpsRequest {
   repeated GuardianEncryptedShare encrypted_old_shares = 1;
 
-  // Armored OpenPGP certificates for the new KP set. Length must equal new_num_shares.
-  repeated string new_kp_pgp_certs = 2;
+  // OpenPGP cert sets for the new KP set. Length must equal new_num_shares.
+  repeated KpPgpCertSet new_kp_pgp_cert_sets = 2;
 
   optional uint32 new_num_shares = 3;
   optional uint32 new_threshold = 4;
@@ -353,7 +359,7 @@ message RotateKpsRequest {
 
 // Unsigned response payload.
 message RotateKpsResponseData {
-  repeated KPEncryptedShare encrypted_shares = 1;
+  repeated SingleKPEncryptedShares encrypted_shares = 1;
 }
 
 // Application-layer signed response.

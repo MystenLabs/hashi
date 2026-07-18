@@ -15,14 +15,12 @@ use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::WithdrawStage;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
 use hashi_types::guardian::proto_conversions::operator_write_genesis_request_to_pb;
-use hashi_types::pgp::load_certs;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use tracing::info;
 
 use crate::config::Config;
 use crate::guardian_info::ensure_oi_info_matches_post_init;
 use crate::guardian_info::verified_live_guardian_info;
-use crate::kp_roster::verify_encrypted_share_recipients;
 
 /// Initialize a fresh withdraw-mode guardian with operator-supplied stable config.
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
@@ -126,14 +124,16 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     info!(
         phase = "roster load",
-        cert_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
-        "loading + validating full KP cert roster",
+        share_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
+        certificate_count = cfg.kp_roster.cert_count(),
+        "loading + validating full KP certificate roster",
     );
-    let certs = load_certs(&cfg.kp_roster.kp_pgp_cert_paths)?;
+    let certs_roster = cfg.kp_roster.load_certs_roster()?;
     info!(
         phase = "roster load",
-        cert_count = certs.len(),
-        "KP cert roster loaded"
+        share_count = certs_roster.num_kps(),
+        certificate_count = cfg.kp_roster.cert_count(),
+        "KP certificate roster loaded"
     );
 
     info!(
@@ -145,7 +145,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;
     ceremony_state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
-    verify_encrypted_share_recipients(&ceremony_state, &certs)?;
+    ceremony_state
+        .encrypted_shares
+        .verify_recipients(&certs_roster)?;
     let scraped_instance = ceremony_state.secret_sharing_instance.clone();
     let sharing_seq = scraped_instance.sharing_seq();
     info!(
@@ -154,7 +156,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         cert_seq = ceremony_state.cert_seq,
         n = scraped_instance.num_shares(),
         t = scraped_instance.threshold(),
-        share_count = ceremony_state.encrypted_shares.len(),
+        share_count = ceremony_state.encrypted_shares.share_count(),
+        ciphertext_count = ceremony_state.encrypted_shares.ciphertext_count(),
         "ceremony instance and KP share state verified against expected roster",
     );
 

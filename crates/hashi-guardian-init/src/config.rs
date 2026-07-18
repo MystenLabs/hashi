@@ -28,8 +28,8 @@ pub struct Config {
     pub relay_endpoint: String,
     /// gRPC endpoint of the guardian.
     pub guardian_endpoint: String,
-    /// Path to this KP's armored OpenPGP public cert. Required by
-    /// key-provisioner commands.
+    /// Path to the armored OpenPGP public cert this KP uses to identify itself.
+    /// Required by key-provisioner commands.
     pub kp_pgp_cert_path: Option<PathBuf>,
 }
 

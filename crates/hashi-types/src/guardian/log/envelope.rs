@@ -355,7 +355,7 @@ mod tests {
     use crate::guardian::GuardianSigned;
     use crate::guardian::HeartbeatLogMessage;
     use crate::guardian::InitLogMessage;
-    use crate::guardian::KPEncryptedShares;
+    use crate::guardian::KPEncryptedSharesRoster;
     use crate::guardian::KpShareStateLogMessage;
     use crate::guardian::LimiterState;
     use crate::guardian::NitroAttestation;
@@ -940,7 +940,7 @@ mod tests {
             LogMessageV1::KpShareState(Box::new(KpShareStateLogMessage::new(
                 7,
                 3,
-                KPEncryptedShares::new(vec![]).unwrap(),
+                KPEncryptedSharesRoster::new(vec![]).unwrap(),
             ))),
             &signing_key,
             1_700_000_000_000,

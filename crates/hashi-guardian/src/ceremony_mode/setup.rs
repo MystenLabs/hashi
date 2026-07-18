@@ -27,11 +27,23 @@ pub async fn setup_new_key(
     let params = request.params();
     let n = params.num_shares();
     let t = params.threshold();
-    let key_provisioner_certs = request.pgp_certs();
+    let key_provisioner_certs_roster = request.kp_certs_roster();
+    let certificate_count: usize = key_provisioner_certs_roster
+        .iter()
+        .map(|set| set.pgp_certs().len())
+        .sum();
     info!(
-        "Received {} OpenPGP certificates.",
-        key_provisioner_certs.len()
+        share_count = key_provisioner_certs_roster.num_kps(),
+        certificate_count, "Received key provisioner OpenPGP certificate roster."
     );
+    for (index, cert_set) in key_provisioner_certs_roster.iter().enumerate() {
+        info!(
+            share_id = index + 1,
+            certificate_count = cert_set.pgp_certs().len(),
+            recipient_fingerprints = ?cert_set.fingerprints(),
+            "Received KP certificate set."
+        );
+    }
 
     info!("Generating new Bitcoin private key.");
     // Confine the !Send `ThreadRng` to a sync scope so the surrounding async
@@ -43,12 +55,14 @@ pub async fn setup_new_key(
         let btc_master_pubkey = k256_sk_to_btc_xonly_pubkey(&sk);
         info!("Splitting secret into {n} shares (threshold: {t}).");
         let (encrypted, commitments) =
-            split_and_encrypt_for_kps(&sk, key_provisioner_certs, params, &mut rng);
+            split_and_encrypt_for_kps(&sk, key_provisioner_certs_roster, params, &mut rng);
         (encrypted, commitments, fp, btc_master_pubkey)
     };
     info!(
-        "Bitcoin key generated with fingerprint {}; all {} shares encrypted.",
-        fingerprint_hex, n
+        bitcoin_key_fingerprint = %fingerprint_hex,
+        share_count = encrypted_shares.share_count(),
+        ciphertext_count = encrypted_shares.ciphertext_count(),
+        "Bitcoin key generated; encrypted each share once per KP certificate."
     );
 
     let ss_instance = SecretSharingInstance::new(share_commitments.clone(), n, t, 0)
@@ -83,16 +97,16 @@ pub async fn setup_new_key(
 mod tests {
     use super::*;
     use crate::mock_logger_capturing;
+    use hashi_types::guardian::test_utils::mock_kp_certs_roster;
     use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::LogMessageV1;
     use hashi_types::guardian::LogRecord;
-    use hashi_types::pgp::test_utils::mock_pgp_certs;
 
     const TEST_N: usize = 5;
     const TEST_T: usize = 3;
 
     fn mock_setup_new_key_request() -> SetupNewKeyRequest {
-        SetupNewKeyRequest::new(mock_pgp_certs(TEST_N), TEST_N, TEST_T).unwrap()
+        SetupNewKeyRequest::new(mock_kp_certs_roster(TEST_N), TEST_N, TEST_T).unwrap()
     }
 
     #[tokio::test]
@@ -106,7 +120,7 @@ mod tests {
         assert_eq!(enclave.lifecycle(), CeremonyStage::Completed.into());
 
         // Response still carries the armored ciphertexts.
-        assert_eq!(validated_resp.encrypted_shares.len(), TEST_N);
+        assert_eq!(validated_resp.encrypted_shares.share_count(), TEST_N);
         assert_eq!(validated_resp.secret_sharing_instance.num_shares(), TEST_N);
         assert_eq!(validated_resp.secret_sharing_instance.threshold(), TEST_T);
         assert_eq!(validated_resp.secret_sharing_instance.sharing_seq(), 0);
@@ -115,9 +129,9 @@ mod tests {
             TEST_N
         );
         for enc_share in validated_resp.encrypted_shares.iter() {
-            assert!(enc_share
-                .armored_ciphertext
-                .starts_with("-----BEGIN PGP MESSAGE-----"));
+            for ciphertext in enc_share.ciphertexts_by_fingerprint.values() {
+                assert!(ciphertext.starts_with("-----BEGIN PGP MESSAGE-----"));
+            }
         }
 
         // The ceremony log records the instance only — no ciphertexts.
@@ -175,7 +189,7 @@ mod tests {
         };
         assert_eq!(shares.sharing_seq, 0);
         assert_eq!(shares.cert_seq, 0);
-        assert_eq!(shares.encrypted_shares.len(), TEST_N);
+        assert_eq!(shares.encrypted_shares.share_count(), TEST_N);
         assert!(std::str::from_utf8(shares_body)
             .unwrap()
             .contains("BEGIN PGP MESSAGE"));
