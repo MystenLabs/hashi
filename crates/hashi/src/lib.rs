@@ -837,6 +837,7 @@ impl Hashi {
         let backup_service = backup_service.start();
         let mpc_service = mpc_service.start();
         let guardian_bootstrap_service = self.clone().start_guardian_bootstrap();
+        let sui_balance_service = self.clone().start_sui_balance_metric();
 
         let service = Service::new()
             .merge(onchain_service)
@@ -845,7 +846,8 @@ impl Hashi {
             .merge(leader_service)
             .merge(backup_service)
             .merge(mpc_service)
-            .merge(guardian_bootstrap_service);
+            .merge(guardian_bootstrap_service)
+            .merge(sui_balance_service);
 
         Ok(service)
     }
@@ -1035,6 +1037,47 @@ impl Hashi {
                 "Local guardian limiter bucket reconciled after watcher rescrape",
             );
         }
+    }
+
+    /// Poll the operator gas wallet's total SUI balance (owned coins plus
+    /// address balance — `sui client gas` misses the latter) into
+    /// `hashi_sui_balance`, so operators can alert on drain before
+    /// transactions start failing gas selection.
+    fn start_sui_balance_metric(self: Arc<Self>) -> Service {
+        const BALANCE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+        Service::new().spawn_aborting(async move {
+            let owner = match self.config.operator_private_key() {
+                Ok(key) => key.verifying_key().derive_address().to_string(),
+                Err(e) => {
+                    tracing::info!("SUI balance metric disabled; operator key unavailable: {e}");
+                    return Ok(());
+                }
+            };
+            let request = {
+                let mut request = sui_rpc::proto::sui::rpc::v2::GetBalanceRequest::default();
+                request.owner = Some(owner);
+                request.coin_type = Some("0x2::sui::SUI".to_string());
+                request
+            };
+            let mut client = self.onchain_state().client();
+            let mut interval = tokio::time::interval(BALANCE_POLL_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                match client.state_client().get_balance(request.clone()).await {
+                    Ok(response) => {
+                        if let Some(balance) =
+                            response.into_inner().balance.and_then(|b| b.balance)
+                        {
+                            self.metrics
+                                .sui_balance
+                                .set(balance.min(i64::MAX as u64) as i64);
+                        }
+                    }
+                    Err(e) => tracing::debug!("failed to fetch operator SUI balance: {e}"),
+                }
+            }
+        })
     }
 
     fn start_guardian_bootstrap(self: Arc<Self>) -> Service {

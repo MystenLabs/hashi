@@ -832,6 +832,7 @@ Notes:
 | `hashi_mpc_sign_failures_total` | counter | MPC signing failures. Investigate if increasing. |
 | `hashi_mpc_reconfig_total_duration_seconds` | histogram | DKG/rotation duration. |
 | `hashi_sui_tx_submissions_total` | counter | Sui tx submissions (by operation, status). |
+| `hashi_sui_balance` | gauge | Operator gas wallet SUI balance in MIST (owned coins + address balance). |
 | `hashi_leader_retries_total` | counter | Leader operation retries (by operation, error kind). |
 
 ### 8.4 Suggested alerts
@@ -843,6 +844,7 @@ Notes:
 | `hashi_kyoto_synced == 0` for > 5 min | Warning | Light client lost sync. Check Bitcoin RPC and P2P connectivity. |
 | `hashi_kyoto_connected_peers == 0` | Warning | No Bitcoin P2P peers. Check `bitcoin-trusted-peers` and reachability. |
 | `hashi_mpc_sign_failures_total` increasing | Warning | Investigate MPC protocol errors in logs. |
+| `hashi_sui_balance < 1e9` (1 SUI) | Warning | Gas wallet running low; the node stops landing Sui transactions when it empties. Top up the operator address. |
 | `up == 0` (Prometheus target down) | Critical | Node is down. Restart and check logs. |
 
 > **Coming soon:** A metrics **push** service for centralized collection. Details follow once it lands.
