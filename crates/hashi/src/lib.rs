@@ -1067,8 +1067,7 @@ impl Hashi {
                 interval.tick().await;
                 match client.state_client().get_balance(request.clone()).await {
                     Ok(response) => {
-                        if let Some(balance) =
-                            response.into_inner().balance.and_then(|b| b.balance)
+                        if let Some(balance) = response.into_inner().balance.and_then(|b| b.balance)
                         {
                             self.metrics
                                 .sui_balance
