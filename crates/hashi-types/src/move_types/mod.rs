@@ -240,7 +240,7 @@ pub const DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS: u16 = 3333;
 /// Mirrors `VANILLA_NONCE_GENERATION_PROTOCOL` in `mpc_config.move`.
 pub const VANILLA_MPC_NONCE_GENERATION_PROTOCOL: u16 = 0;
 /// Mirrors `DEFAULT_NONCE_ACCUMULATION_WINDOW_MS` in `mpc_config.move`.
-pub const DEFAULT_MPC_NONCE_ACCUMULATION_WINDOW_MS: u64 = 700;
+pub const DEFAULT_MPC_NONCE_ACCUMULATION_WINDOW_MS: u64 = 2000;
 
 /// Rust version of the Move hashi::config::Config type: a general-purpose,
 /// order-preserving key-value store (`VecMap<String, Value>`). Embedded both as

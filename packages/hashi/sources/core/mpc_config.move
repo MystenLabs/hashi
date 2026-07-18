@@ -15,7 +15,8 @@ const DEFAULT_MAX_FAULTY_IN_BASIS_POINTS: u64 = 3333;
 
 const VANILLA_NONCE_GENERATION_PROTOCOL: u64 = 0;
 
-const DEFAULT_NONCE_ACCUMULATION_WINDOW_MS: u64 = 700;
+/// How long nodes keep collecting nonce dealer certs past the `W − f` floor.
+const DEFAULT_NONCE_ACCUMULATION_WINDOW_MS: u64 = 2000;
 
 const MAX_BPS: u64 = 10000;
 

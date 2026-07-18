@@ -105,9 +105,14 @@ pub async fn fetch_certificates(
     };
     let mut certificates = Vec::with_capacity(raw_certs.len());
     for (dealer, cert) in raw_certs {
-        let inner_cert = DealerMessagesHash::from_onchain_cert(&cert, epoch)
-            .map_err(|e| TobError::InvalidCertificate(e.to_string()))?;
-        let cert = CertificateV1::new(protocol_type, batch_index, inner_cert);
+        let inner_cert = match DealerMessagesHash::from_onchain_cert(&cert, epoch) {
+            Ok(inner_cert) => inner_cert,
+            Err(e) => {
+                tracing::warn!("Skipping malformed dealer cert from {dealer}: {e}");
+                continue;
+            }
+        };
+        let cert = CertificateV1::new(protocol_type, batch_index, inner_cert, cert.timestamp_ms);
         certificates.push((dealer, cert));
     }
     Ok(certificates)
@@ -137,9 +142,10 @@ impl OrderedBroadcastChannel<CertificateV1> for PrefetchedTobChannel {
     }
 
     async fn receive(&mut self) -> ChannelResult<CertificateV1> {
-        self.certs
-            .pop_front()
-            .ok_or_else(|| ChannelError::Other("replayed certificate stream exhausted".into()))
+        match self.certs.pop_front() {
+            Some(cert) => Ok(cert),
+            None => std::future::pending().await,
+        }
     }
 
     async fn certified_dealers(&mut self) -> Vec<Address> {

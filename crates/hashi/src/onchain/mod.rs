@@ -1735,9 +1735,10 @@ mod tests {
 
     #[test]
     fn dealer_submission_bcs_round_trips_with_timestamp() {
-        use move_types::{
-            CommitteeSignature, DealerMessagesHashV1, DealerSubmissionV1, LinkedTableNode,
-        };
+        use move_types::CommitteeSignature;
+        use move_types::DealerMessagesHashV1;
+        use move_types::DealerSubmissionV1;
+        use move_types::LinkedTableNode;
         let dealer = Address::new([7u8; 32]);
         let node: LinkedTableNode<Address, DealerSubmissionV1> = LinkedTableNode {
             prev: None,

@@ -1,8 +1,6 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Core types for the DKG protocol
-
 use fastcrypto::error::FastCryptoError;
 use fastcrypto::error::FastCryptoResult;
 use fastcrypto::hash::Blake2b256;
@@ -136,6 +134,7 @@ pub struct MpcConfig {
     pub max_faulty: u16,
     pub nonce_generation_protocol: NonceGenerationProtocol,
     pub presignature_derivation_version: PresignatureDerivationVersion,
+    pub nonce_accumulation_window_ms: u64,
 }
 
 impl MpcConfig {
@@ -146,6 +145,7 @@ impl MpcConfig {
         max_faulty: u16,
         nonce_generation_protocol: NonceGenerationProtocol,
         presignature_derivation_version: PresignatureDerivationVersion,
+        nonce_accumulation_window_ms: u64,
     ) -> Self {
         Self {
             epoch,
@@ -154,6 +154,87 @@ impl MpcConfig {
             max_faulty,
             nonce_generation_protocol,
             presignature_derivation_version,
+            nonce_accumulation_window_ms,
+        }
+    }
+}
+
+pub struct NonceCollectionWindow {
+    required_weight: u32,
+    window_ms: u64,
+    weight: u32,
+    state: NonceCollectionState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NonceCollectionState {
+    Floor,
+    Window { cutoff_ms: u64 },
+    Closed { cutoff_ms: Option<u64> },
+}
+
+pub struct NonceCertAdmission {
+    timestamp_ms: u64,
+}
+
+impl NonceCollectionWindow {
+    pub fn new(required_weight: u32, window_ms: u64) -> Self {
+        Self {
+            required_weight,
+            window_ms,
+            weight: 0,
+            state: NonceCollectionState::Floor,
+        }
+    }
+
+    pub fn closed(&self) -> bool {
+        matches!(self.state, NonceCollectionState::Closed { .. })
+    }
+
+    pub fn floor_reached(&self) -> bool {
+        !matches!(self.state, NonceCollectionState::Floor)
+    }
+
+    pub fn weight(&self) -> u32 {
+        self.weight
+    }
+
+    pub fn cutoff_ms(&self) -> Option<u64> {
+        match self.state {
+            NonceCollectionState::Window { cutoff_ms } => Some(cutoff_ms),
+            NonceCollectionState::Closed { cutoff_ms } => cutoff_ms,
+            NonceCollectionState::Floor => None,
+        }
+    }
+
+    pub fn try_admit(&mut self, timestamp_ms: u64) -> Option<NonceCertAdmission> {
+        match self.state {
+            NonceCollectionState::Floor => Some(NonceCertAdmission { timestamp_ms }),
+            NonceCollectionState::Window { cutoff_ms } => {
+                if timestamp_ms > cutoff_ms {
+                    self.state = NonceCollectionState::Closed {
+                        cutoff_ms: Some(cutoff_ms),
+                    };
+                    None
+                } else {
+                    Some(NonceCertAdmission { timestamp_ms })
+                }
+            }
+            NonceCollectionState::Closed { .. } => None,
+        }
+    }
+
+    pub fn record(&mut self, admission: NonceCertAdmission, reduced_weight: u32) {
+        self.weight += reduced_weight;
+        if matches!(self.state, NonceCollectionState::Floor) && self.weight >= self.required_weight
+        {
+            self.state = if self.window_ms == 0 {
+                NonceCollectionState::Closed { cutoff_ms: None }
+            } else {
+                NonceCollectionState::Window {
+                    cutoff_ms: admission.timestamp_ms.saturating_add(self.window_ms),
+                }
+            };
         }
     }
 }
@@ -424,6 +505,7 @@ pub enum CertificateV1 {
     NonceGeneration {
         batch_index: u32,
         cert: DealerCertificate,
+        timestamp_ms: u64,
     },
 }
 
@@ -432,6 +514,7 @@ impl CertificateV1 {
         protocol_type: hashi_types::move_types::ProtocolType,
         batch_index: Option<u32>,
         cert: DealerCertificate,
+        timestamp_ms: u64,
     ) -> Self {
         match protocol_type {
             hashi_types::move_types::ProtocolType::Dkg => CertificateV1::Dkg(cert),
@@ -440,6 +523,7 @@ impl CertificateV1 {
                 CertificateV1::NonceGeneration {
                     batch_index: batch_index.expect("batch_index required for NonceGeneration"),
                     cert,
+                    timestamp_ms,
                 }
             }
         }
@@ -1266,5 +1350,57 @@ mod tests {
         assert!(Legacy.use_legacy());
         assert!(!PrivacyThreshold.use_legacy());
         assert_eq!(PresignatureDerivationVersion::default(), Legacy);
+    }
+
+    #[test]
+    fn nonce_collection_window_zero_is_floor_rule_verbatim() {
+        let mut window = NonceCollectionWindow::new(10, 0);
+        let admission = window.try_admit(100).unwrap();
+        window.record(admission, 6);
+        assert!(!window.closed());
+        let admission = window.try_admit(100).unwrap();
+        window.record(admission, 4);
+        assert!(window.closed());
+        assert_eq!(window.cutoff_ms(), None);
+        assert!(window.try_admit(100).is_none());
+    }
+
+    #[test]
+    fn nonce_collection_window_admits_through_cutoff_and_closes_after() {
+        let mut window = NonceCollectionWindow::new(10, 700);
+        let admission = window.try_admit(100).unwrap();
+        window.record(admission, 6);
+        let admission = window.try_admit(200).unwrap();
+        window.record(admission, 4);
+        assert!(!window.closed());
+        assert_eq!(window.cutoff_ms(), Some(900));
+        let admission = window.try_admit(900).unwrap();
+        window.record(admission, 3);
+        assert!(window.try_admit(901).is_none());
+        assert!(window.closed());
+        assert_eq!(window.cutoff_ms(), Some(900));
+        assert!(window.floor_reached());
+        assert!(window.try_admit(500).is_none());
+    }
+
+    #[test]
+    fn nonce_collection_window_cutoff_uses_crossing_stamp_not_later_ones() {
+        let mut window = NonceCollectionWindow::new(5, 700);
+        let admission = window.try_admit(1_000).unwrap();
+        window.record(admission, 5);
+        assert_eq!(window.cutoff_ms(), Some(1_700));
+        let admission = window.try_admit(1_600).unwrap();
+        window.record(admission, 2);
+        assert_eq!(window.cutoff_ms(), Some(1_700));
+    }
+
+    #[test]
+    fn nonce_collection_window_unrecorded_admission_leaves_state_unchanged() {
+        let mut window = NonceCollectionWindow::new(10, 700);
+        assert!(window.try_admit(100).is_some());
+        let admission = window.try_admit(100).unwrap();
+        window.record(admission, 6);
+        assert!(!window.floor_reached());
+        assert_eq!(window.weight(), 6);
     }
 }

@@ -1188,9 +1188,9 @@ impl SuiTxExecutor {
         let (inner_cert, function_name, batch_index) = match cert {
             CertificateV1::Dkg(c) => (c, "submit_dkg_cert", None),
             CertificateV1::Rotation(c) => (c, "submit_rotation_cert", None),
-            CertificateV1::NonceGeneration { batch_index, cert } => {
-                (cert, "submit_nonce_cert", Some(*batch_index))
-            }
+            CertificateV1::NonceGeneration {
+                batch_index, cert, ..
+            } => (cert, "submit_nonce_cert", Some(*batch_index)),
         };
         tracing::Span::current().record("cert_kind", function_name);
 

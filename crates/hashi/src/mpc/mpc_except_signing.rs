@@ -40,6 +40,8 @@ pub use crate::mpc::types::MpcError;
 pub use crate::mpc::types::MpcOutput;
 use crate::mpc::types::MpcOutputRecoveryOutcome;
 pub use crate::mpc::types::MpcResult;
+use crate::mpc::types::NonceCertAdmission;
+use crate::mpc::types::NonceCollectionWindow;
 use crate::mpc::types::NonceGenerationProtocol;
 pub use crate::mpc::types::NonceMessage;
 pub use crate::mpc::types::NonceReconstructionOutcome;
@@ -107,6 +109,7 @@ const PRUNE_KEEP_RECENT_BATCHES: u32 = 2;
 const HEDGED_RETRIEVE_INITIAL_ROUND_SIZE: usize = 2;
 const HEDGED_RETRIEVE_ROUND_GROWTH_FACTOR: usize = 2;
 const HEDGED_RETRIEVE_ROUND_TIMEOUT: Duration = Duration::from_secs(1);
+const NONCE_WINDOW_DRAIN_POLL: Duration = Duration::from_millis(600);
 
 type AvidEchoAndVote = (
     BLS12381Signature,
@@ -118,6 +121,16 @@ type AvidEchoAndVote = (
 enum CertKind {
     AvssVote,
     AvidVote,
+}
+
+#[allow(clippy::large_enum_variant)]
+enum WindowedNonceReceive {
+    Cert {
+        nonce_cert: DealerCertificate,
+        admission: NonceCertAdmission,
+    },
+    Skip,
+    Closed,
 }
 
 pub struct MpcManager {
@@ -214,6 +227,7 @@ impl MpcManager {
             max_faulty,
             nonce_generation_protocol,
             presignature_derivation_version,
+            committee.mpc_nonce_accumulation_window_ms(),
         );
         let party_id = committee
             .index_of(&address)
@@ -922,6 +936,7 @@ impl MpcManager {
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
+        chain_time_ms: &(dyn Fn() -> u64 + Send + Sync),
         metrics: &Metrics,
     ) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
         Self::prune_nonce_state(mpc_manager, batch_index);
@@ -982,6 +997,7 @@ impl MpcManager {
                     batch_index,
                     p2p_channel,
                     tob_channel,
+                    chain_time_ms,
                     metrics,
                 )
                 .await?
@@ -992,6 +1008,7 @@ impl MpcManager {
                     batch_index,
                     p2p_channel,
                     tob_channel,
+                    chain_time_ms,
                     metrics,
                 )
                 .await?
@@ -1036,7 +1053,13 @@ impl MpcManager {
         batch_index: u32,
         certs: &[(Address, hashi_types::move_types::DealerSubmissionV1)],
     ) -> MpcResult<NonceReconstructionOutcome> {
-        let certified_dealers = self.certified_nonce_dealers_from_certs(certs);
+        let (certified_dealers, window) = self.walk_nonce_certs(certs);
+        if !window.floor_reached() {
+            return Err(MpcError::NotEnoughParticipants {
+                expected: self.required_nonce_weight() as usize,
+                got: window.weight() as usize,
+            });
+        }
         let messages = self
             .public_messages_store
             .list_nonce_messages(batch_index)
@@ -1074,25 +1097,41 @@ impl MpcManager {
         ))
     }
 
-    fn certified_nonce_dealers_from_certs(
+    fn walk_nonce_certs(
         &self,
         certs: &[(Address, hashi_types::move_types::DealerSubmissionV1)],
-    ) -> HashSet<Address> {
-        let required_weight = self.required_nonce_weight();
-        let mut weight_sum = 0u32;
+    ) -> (HashSet<Address>, NonceCollectionWindow) {
+        let mut window = self.nonce_collection_window();
         let mut certified = HashSet::new();
-        for (dealer, _) in certs {
+        for (dealer, submission) in certs {
+            let Some(admission) = window.try_admit(submission.timestamp_ms) else {
+                break;
+            };
+            if self.verify_onchain_nonce_cert(dealer, submission).is_none() {
+                continue;
+            }
             if let Some(party_id) = self.committee.index_of(dealer)
                 && let Ok(w) = self.mpc_config.nodes.weight_of(party_id as u16)
             {
-                weight_sum += w as u32;
+                window.record(admission, w as u32);
                 certified.insert(*dealer);
-                if weight_sum >= required_weight {
-                    break;
-                }
             }
         }
-        certified
+        (certified, window)
+    }
+
+    pub(crate) fn verify_onchain_nonce_cert(
+        &self,
+        dealer: &Address,
+        submission: &hashi_types::move_types::DealerSubmissionV1,
+    ) -> Option<DealerCertificate> {
+        DealerMessagesHash::from_onchain_cert(submission, self.mpc_config.epoch)
+            .ok()
+            .filter(|cert| self.committee.verify_signature(cert).is_ok())
+            .or_else(|| {
+                tracing::warn!("Skipping invalid nonce cert from {dealer}");
+                None
+            })
     }
 
     async fn run_dkg_as_dealer(
@@ -1715,37 +1754,77 @@ impl MpcManager {
         Ok(())
     }
 
+    async fn receive_nonce_cert_in_window(
+        tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
+        window: &mut NonceCollectionWindow,
+        chain_time_ms: &(dyn Fn() -> u64 + Send + Sync),
+    ) -> MpcResult<WindowedNonceReceive> {
+        let cert = if let Some(cutoff_ms) = window.cutoff_ms() {
+            let closing = chain_time_ms() > cutoff_ms;
+            match tokio::time::timeout(NONCE_WINDOW_DRAIN_POLL, tob_channel.receive()).await {
+                Ok(received) => received.map_err(|e| MpcError::BroadcastError(e.to_string()))?,
+                Err(_) => {
+                    return Ok(if closing {
+                        WindowedNonceReceive::Closed
+                    } else {
+                        WindowedNonceReceive::Skip
+                    });
+                }
+            }
+        } else {
+            tob_channel
+                .receive()
+                .await
+                .map_err(|e| MpcError::BroadcastError(e.to_string()))?
+        };
+        let CertificateV1::NonceGeneration {
+            cert: nonce_cert,
+            timestamp_ms,
+            ..
+        } = cert
+        else {
+            return Ok(WindowedNonceReceive::Skip);
+        };
+        match window.try_admit(timestamp_ms) {
+            Some(admission) => Ok(WindowedNonceReceive::Cert {
+                nonce_cert,
+                admission,
+            }),
+            None => Ok(WindowedNonceReceive::Closed),
+        }
+    }
+
     async fn run_as_nonce_party(
         mpc_manager: &Arc<RwLock<Self>>,
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
+        chain_time_ms: &(dyn Fn() -> u64 + Send + Sync),
         metrics: &Metrics,
     ) -> MpcResult<HashSet<Address>> {
-        let required_weight = {
+        let mut window = {
             let mgr = mpc_manager.read().unwrap();
-            mgr.required_nonce_weight()
+            mgr.nonce_collection_window()
         };
         let mut certified_dealers = HashSet::new();
-        let mut dealer_weight_sum = 0u32;
         loop {
-            if dealer_weight_sum >= required_weight {
+            if window.closed() {
                 break;
             }
             let _timer = metrics
                 .mpc_tob_poll_duration_seconds
                 .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
                 .start_timer();
-            let cert = tob_channel
-                .receive()
-                .await
-                .map_err(|e| MpcError::BroadcastError(e.to_string()))?;
+            let received =
+                Self::receive_nonce_cert_in_window(tob_channel, &mut window, chain_time_ms).await?;
             drop(_timer);
-            let CertificateV1::NonceGeneration {
-                cert: nonce_cert, ..
-            } = cert
-            else {
-                continue;
+            let (nonce_cert, admission) = match received {
+                WindowedNonceReceive::Cert {
+                    nonce_cert,
+                    admission,
+                } => (nonce_cert, admission),
+                WindowedNonceReceive::Skip => continue,
+                WindowedNonceReceive::Closed => break,
             };
             let message = nonce_cert.message();
             let dealer = message.dealer_address;
@@ -1887,7 +1966,7 @@ impl MpcManager {
                     .weight_of(party_id)
                     .map_err(|_| MpcError::ProtocolFailed("Missing dealer weight".to_string()))?
             };
-            dealer_weight_sum += dealer_weight as u32;
+            window.record(admission, dealer_weight as u32);
             certified_dealers.insert(dealer);
         }
         Ok(certified_dealers)
@@ -3198,37 +3277,37 @@ impl MpcManager {
         batch_index: u32,
         p2p_channel: &impl P2PChannel,
         tob_channel: &mut impl OrderedBroadcastChannel<CertificateV1>,
+        chain_time_ms: &(dyn Fn() -> u64 + Send + Sync),
         metrics: &Metrics,
     ) -> MpcResult<HashSet<Address>> {
-        let (required_weight, total_reduced_weight, vote_quorum_weight) = {
+        let (mut window, total_reduced_weight, vote_quorum_weight) = {
             let mgr = mpc_manager.read().unwrap();
             let total = mgr.mpc_config.nodes.total_weight() as u32;
             (
-                mgr.required_nonce_weight(),
+                mgr.nonce_collection_window(),
                 total,
                 total - mgr.mpc_config.max_faulty as u32,
             )
         };
         let mut certified_dealers = HashSet::new();
-        let mut dealer_weight_sum = 0u32;
         loop {
-            if dealer_weight_sum >= required_weight {
+            if window.closed() {
                 break;
             }
             let _timer = metrics
                 .mpc_tob_poll_duration_seconds
                 .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
                 .start_timer();
-            let cert = tob_channel
-                .receive()
-                .await
-                .map_err(|e| MpcError::BroadcastError(e.to_string()))?;
+            let received =
+                Self::receive_nonce_cert_in_window(tob_channel, &mut window, chain_time_ms).await?;
             drop(_timer);
-            let CertificateV1::NonceGeneration {
-                cert: nonce_cert, ..
-            } = cert
-            else {
-                continue;
+            let (nonce_cert, admission) = match received {
+                WindowedNonceReceive::Cert {
+                    nonce_cert,
+                    admission,
+                } => (nonce_cert, admission),
+                WindowedNonceReceive::Skip => continue,
+                WindowedNonceReceive::Closed => break,
             };
             let dealer = nonce_cert.message().dealer_address;
             if certified_dealers.contains(&dealer) {
@@ -3338,7 +3417,7 @@ impl MpcManager {
                     CertKind::AvidVote => "vote",
                 }])
                 .inc();
-            dealer_weight_sum += dealer_weight as u32;
+            window.record(admission, dealer_weight as u32);
             certified_dealers.insert(dealer);
         }
         Ok(certified_dealers)
@@ -3350,7 +3429,11 @@ impl MpcManager {
         cert: DealerCertificate,
         metrics: &Metrics,
     ) -> MpcResult<()> {
-        let cert = CertificateV1::NonceGeneration { batch_index, cert };
+        let cert = CertificateV1::NonceGeneration {
+            batch_index,
+            cert,
+            timestamp_ms: 0,
+        };
         let _timer = metrics
             .mpc_cert_publish_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
@@ -5618,7 +5701,7 @@ impl MpcManager {
         }
     }
 
-    fn required_nonce_weight(&self) -> u32 {
+    pub(crate) fn required_nonce_weight(&self) -> u32 {
         let max_faulty = self.mpc_config.max_faulty as u32;
         match self.mpc_config.presignature_derivation_version {
             PresignatureDerivationVersion::Legacy => 2 * max_faulty + 1,
@@ -5626,6 +5709,47 @@ impl MpcManager {
                 self.mpc_config.nodes.total_weight() as u32 - max_faulty
             }
         }
+    }
+
+    fn nonce_collection_window(&self) -> NonceCollectionWindow {
+        let window_ms = match self.mpc_config.presignature_derivation_version {
+            PresignatureDerivationVersion::PrivacyThreshold => {
+                self.mpc_config.nonce_accumulation_window_ms
+            }
+            PresignatureDerivationVersion::Legacy => 0,
+        };
+        NonceCollectionWindow::new(self.required_nonce_weight(), window_ms)
+    }
+
+    pub(crate) fn nonce_collection_cutoff_ms(
+        &self,
+        certs: &[(Address, hashi_types::move_types::DealerSubmissionV1)],
+    ) -> Option<u64> {
+        self.walk_nonce_certs(certs).1.cutoff_ms()
+    }
+
+    pub(crate) fn assert_replay_reaches_nonce_floor(
+        &self,
+        certs: &[(Address, CertificateV1)],
+    ) -> MpcResult<()> {
+        let replay_weight: u32 = certs
+            .iter()
+            .filter_map(|(dealer, _)| {
+                let party_id = self.committee.index_of(dealer)? as u16;
+                self.mpc_config
+                    .nodes
+                    .weight_of(party_id)
+                    .ok()
+                    .map(|w| w as u32)
+            })
+            .sum();
+        if replay_weight < self.required_nonce_weight() {
+            return Err(MpcError::NotEnoughParticipants {
+                expected: self.required_nonce_weight() as usize,
+                got: replay_weight as usize,
+            });
+        }
+        Ok(())
     }
 
     fn maybe_corrupt_nodes_for_testing(
