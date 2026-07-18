@@ -28,6 +28,9 @@ service GuardianService {
   // Provisioner initialization: submit the current KPs' signed share contributions.
   rpc ProvisionerInit(ProvisionerInitRequest) returns (ProvisionerInitResponse);
 
+  // KP-facing: replace one OpenPGP cert wrapping an already-committed share.
+  rpc ProvisionerRotateCert(SignedProvisionerRotateCertRequest) returns (SignedProvisionerRotateCertResponse);
+
   // Operator activation: derive live serving state and make an armed standby active.
   rpc OperatorActivate(OperatorActivateRequest) returns (OperatorActivateResponse);
 
@@ -334,6 +337,49 @@ message LimiterConfig {
 }
 
 message ProvisionerInitResponse {}
+
+// ==========================
+//        ProvisionerRotateCert
+// ==========================
+
+// Replace one certificate in a KP roster entry. This does not change the BTC
+// key, sharing instance, commitments, share ids, or threshold.
+message SignedProvisionerRotateCertRequest {
+  // Armored replacement cert.
+  string new_kp_pgp_cert = 1;
+
+  // The same plaintext share, HPKE-encrypted to the guardian.
+  GuardianEncryptedShare encrypted_share = 2;
+
+  // The guardian session id the KP pinned before encrypting the share.
+  string expected_session_id = 3;
+
+  // Armored authorizing KP cert and detached signature over the intent-tagged
+  // ProvisionerRotateCertRequest payload.
+  string signer_cert = 4;
+  string kp_signature = 5;
+
+  // Latest kp-shares cert_seq observed and authorized by the caller.
+  optional uint64 expected_cert_seq = 6;
+
+  // Fingerprint of the current cert to replace. The signing cert may be this
+  // cert or another cert assigned to the same KP/share entry.
+  string target_kp_pgp_fingerprint = 7;
+}
+
+message SignedProvisionerRotateCertResponse {
+  // New cert_seq written under kp-shares/{sharing_seq}/.
+  optional uint64 cert_seq = 1;
+
+  // The changed KP entry after replacing one certificate ciphertext.
+  SingleKPEncryptedShares encrypted_shares = 2;
+
+  // Milliseconds since Unix epoch.
+  optional uint64 timestamp_ms = 3;
+
+  // Signature over (intent || data || timestamp).
+  optional bytes signature = 4;
+}
 
 // ==========================
 //        RotateKps

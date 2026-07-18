@@ -11,6 +11,8 @@ use super::GuardianError::InternalError;
 use super::GuardianError::InvalidInputs;
 use super::GuardianInfo;
 use super::GuardianResult;
+use super::ProvisionerRotateCertRequest;
+use super::ProvisionerRotateCertResponse;
 use super::RotateKpsResponse;
 use super::SetupNewKeyResponse;
 use super::SingleProvisionerInitRequest;
@@ -42,6 +44,8 @@ pub enum IntentType {
     GuardianInfo = 3,
     /// Intent for RotateKpsResponse
     RotateKpsResponse = 4,
+    /// Intent for ProvisionerRotateCertResponse
+    ProvisionerRotateCertResponse = 5,
 }
 
 /// Trait for types that can be signed, providing domain separation via an intent.
@@ -89,6 +93,8 @@ pub(crate) fn verify_intent<T: Serialize + SigningIntent>(
 pub enum KpSigningIntentType {
     /// One KP's share submission to the provisioning relay.
     ProvisionerInitRelaySubmission = 0,
+    /// One KP's request to replace one certificate wrapping its committed share.
+    ProvisionerRotateCertRequest = 1,
 }
 
 /// Trait for KP-submitted request payloads that need detached signatures.
@@ -112,8 +118,16 @@ impl SigningIntent for RotateKpsResponse {
     const INTENT: IntentType = IntentType::RotateKpsResponse;
 }
 
+impl SigningIntent for ProvisionerRotateCertResponse {
+    const INTENT: IntentType = IntentType::ProvisionerRotateCertResponse;
+}
+
 impl KpSigningIntent for SingleProvisionerInitRequest {
     const INTENT: KpSigningIntentType = KpSigningIntentType::ProvisionerInitRelaySubmission;
+}
+
+impl KpSigningIntent for ProvisionerRotateCertRequest {
+    const INTENT: KpSigningIntentType = KpSigningIntentType::ProvisionerRotateCertRequest;
 }
 
 /// KP-signed wrapper - adds signer cert and detached OpenPGP signature to any

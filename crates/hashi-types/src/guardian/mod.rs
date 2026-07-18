@@ -46,6 +46,7 @@ use crate::bitcoin::TxUTXOsWire;
 pub use crate::committee::Committee as HashiCommittee;
 pub use crate::committee::CommitteeMember as HashiCommitteeMember;
 pub use crate::committee::SignedMessage as HashiSigned;
+use crate::pgp::PgpPublicCert;
 use bitcoin::Network;
 use blake2::Blake2b;
 use blake2::Digest;
@@ -277,6 +278,27 @@ pub struct RotateKpsState {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RotateKpsResponse {
     pub encrypted_shares: KPEncryptedSharesRoster,
+}
+
+/// `KpSigned<ProvisionerRotateCertRequest>`. Replaces one certificate in a KP
+/// roster entry without changing the BTC key, sharing instance,
+/// commitments, share ids, or threshold. The signing certificate may be the
+/// target or another certificate assigned to the same KP/share entry.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProvisionerRotateCertRequest {
+    expected_session_id: SessionID,
+    expected_cert_seq: u64,
+    target_kp_pgp_fingerprint: KPFingerprint,
+    new_kp_pgp_cert: PgpPublicCert,
+    encrypted_share: GuardianEncryptedShare,
+}
+
+/// `GuardianSigned<ProvisionerRotateCertResponse>`. Returned after the guardian appends
+/// the next `kp-shares/` certificate-state snapshot.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ProvisionerRotateCertResponse {
+    pub cert_seq: u64,
+    pub encrypted_shares: KPEncryptedShares,
 }
 
 // ---------------------------------
@@ -722,6 +744,89 @@ impl RotateKpsRequest {
         RotateKpsState,
     ) {
         (self.encrypted_old_shares, self.old_instance, self.state)
+    }
+}
+
+impl ProvisionerRotateCertRequest {
+    pub fn new<R: CryptoRng + RngCore>(
+        expected_session_id: SessionID,
+        expected_cert_seq: u64,
+        target_kp_pgp_fingerprint: KPFingerprint,
+        new_kp_pgp_cert: PgpPublicCert,
+        share: &Share,
+        enclave_pub_key: &EncPubKey,
+        rng: &mut R,
+    ) -> Self {
+        let encrypted_share = encrypt_share(share, enclave_pub_key, None, rng);
+        Self {
+            expected_session_id,
+            expected_cert_seq,
+            target_kp_pgp_fingerprint,
+            new_kp_pgp_cert,
+            encrypted_share,
+        }
+    }
+
+    pub(crate) fn from_encrypted_share(
+        expected_session_id: SessionID,
+        expected_cert_seq: u64,
+        target_kp_pgp_fingerprint: KPFingerprint,
+        new_kp_pgp_cert: PgpPublicCert,
+        encrypted_share: GuardianEncryptedShare,
+    ) -> Self {
+        Self {
+            expected_session_id,
+            expected_cert_seq,
+            target_kp_pgp_fingerprint,
+            new_kp_pgp_cert,
+            encrypted_share,
+        }
+    }
+
+    pub fn share_id(&self) -> ShareID {
+        self.encrypted_share.id
+    }
+
+    pub fn new_kp_pgp_cert(&self) -> &PgpPublicCert {
+        &self.new_kp_pgp_cert
+    }
+
+    pub fn target_kp_pgp_fingerprint(&self) -> &str {
+        &self.target_kp_pgp_fingerprint
+    }
+
+    pub fn new_recipient_fingerprint(&self) -> KPFingerprint {
+        self.new_kp_pgp_cert.fingerprint().to_hex()
+    }
+
+    pub fn encrypted_share(&self) -> &GuardianEncryptedShare {
+        &self.encrypted_share
+    }
+
+    pub fn expected_session_id(&self) -> &SessionID {
+        &self.expected_session_id
+    }
+
+    pub fn expected_cert_seq(&self) -> u64 {
+        self.expected_cert_seq
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        SessionID,
+        u64,
+        KPFingerprint,
+        PgpPublicCert,
+        GuardianEncryptedShare,
+    ) {
+        (
+            self.expected_session_id,
+            self.expected_cert_seq,
+            self.target_kp_pgp_fingerprint,
+            self.new_kp_pgp_cert,
+            self.encrypted_share,
+        )
     }
 }
 

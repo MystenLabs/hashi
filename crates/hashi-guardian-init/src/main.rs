@@ -11,6 +11,7 @@ mod guardian_info;
 mod kp_ceremony;
 mod kp_provision;
 mod kp_roster;
+mod kp_rotate_cert;
 mod operator_activate;
 mod operator_ceremony;
 mod operator_provision;
@@ -66,6 +67,18 @@ enum OperatorCommand {
 
 #[derive(Subcommand)]
 enum KeyProvisionerCommand {
+    /// Replace one cert in this KP's roster entry.
+    RotateCert {
+        /// Path to key-provisioner YAML config file.
+        #[arg(long)]
+        config: PathBuf,
+        /// Fingerprint of the current OpenPGP cert being replaced.
+        #[arg(long)]
+        target_kp_pgp_fingerprint: String,
+        /// Path to the replacement armored OpenPGP public cert.
+        #[arg(long)]
+        new_kp_pgp_cert_path: PathBuf,
+    },
     /// Verify this KP can fetch and decrypt its encrypted ceremony share from guardian S3.
     Ceremony {
         /// Path to key-provisioner ceremony YAML config file.
@@ -126,6 +139,14 @@ async fn main() -> anyhow::Result<()> {
             KeyProvisionerCommand::Provision { config } => {
                 let cfg = config::Config::load_yaml(&config)?;
                 kp_provision::run(cfg).await?;
+            }
+            KeyProvisionerCommand::RotateCert {
+                config,
+                target_kp_pgp_fingerprint,
+                new_kp_pgp_cert_path,
+            } => {
+                let cfg = config::Config::load_yaml(&config)?;
+                kp_rotate_cert::run(cfg, target_kp_pgp_fingerprint, new_kp_pgp_cert_path).await?;
             }
         },
         Command::Tools { command } => match command {
