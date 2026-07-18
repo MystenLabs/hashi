@@ -1046,19 +1046,20 @@ impl Hashi {
     fn start_sui_balance_metric(self: Arc<Self>) -> Service {
         const BALANCE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
         Service::new().spawn_aborting(async move {
+            // -1 = never sampled; keeps a `0 <= balance < threshold` alert
+            // from firing on nodes where this poller is disabled or has not
+            // yet succeeded (the gauge would otherwise read a false 0).
+            self.metrics.sui_balance.set(-1);
             let owner = match self.config.operator_private_key() {
-                Ok(key) => key.verifying_key().derive_address().to_string(),
+                Ok(key) => key.verifying_key().derive_address(),
                 Err(e) => {
                     tracing::info!("SUI balance metric disabled; operator key unavailable: {e}");
                     return Ok(());
                 }
             };
-            let request = {
-                let mut request = sui_rpc::proto::sui::rpc::v2::GetBalanceRequest::default();
-                request.owner = Some(owner);
-                request.coin_type = Some("0x2::sui::SUI".to_string());
-                request
-            };
+            let request = sui_rpc::proto::sui::rpc::v2::GetBalanceRequest::default()
+                .with_owner(owner)
+                .with_coin_type(sui_sdk_types::StructTag::sui());
             let mut client = self.onchain_state().client();
             let mut interval = tokio::time::interval(BALANCE_POLL_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
