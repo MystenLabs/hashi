@@ -34,6 +34,33 @@ const PROPOSAL_DELETE_DELAY_MS: u64 = 1000 * 60 * 60 * 24; // 1 day
 // Mirrors `MAX_DEPOSIT_REQUEST_DELETIONS_PER_GC`.
 const MAX_PROPOSAL_DELETIONS_PER_GC: usize = 500;
 
+// Cap the orphan scan so one cleanup task stays bounded; a larger backlog
+// drains over successive checkpoints. Mirrors the two caps above.
+const MAX_UTXO_CLEANUPS_PER_GC: usize = 500;
+
+/// Failure kind for the UTXO cleanup GC. `max_retries` is unbounded: this is
+/// a singleton maintenance task that must never permanently give up (a
+/// drained gas wallet can heal by top-up), so it backs off to `max_delay_ms`
+/// instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum UtxoCleanupErrorKind {
+    Failed,
+}
+
+impl crate::leader::retry::RetryPolicy for UtxoCleanupErrorKind {
+    fn retry_base_delay_ms(self) -> u64 {
+        5_000
+    }
+
+    fn max_delay_ms(self) -> u64 {
+        5 * 60 * 1000
+    }
+
+    fn max_retries(self) -> u32 {
+        u32::MAX
+    }
+}
+
 impl LeaderService {
     /// Check for and delete expired deposit requests.
     /// Deposit requests are sorted by timestamp and deleted if they are older than
@@ -150,9 +177,14 @@ impl LeaderService {
     /// scans on-chain state for orphaned locked UTXOs whose withdrawal has
     /// already been confirmed (handles the crash-between-confirm-and-cleanup
     /// case).
-    pub(super) fn check_cleanup_spent_utxos(&mut self) {
+    pub(super) fn check_cleanup_spent_utxos(&mut self, checkpoint_timestamp_ms: u64) {
         if self.utxo_cleanup_gc_task.is_some() {
             debug!("UTXO cleanup GC task already in-flight, skipping");
+            return;
+        }
+
+        if self.utxo_cleanup_retry.should_skip(checkpoint_timestamp_ms) {
+            debug!("UTXO cleanup GC in backoff, skipping");
             return;
         }
 
@@ -201,10 +233,16 @@ impl LeaderService {
         inner: Arc<crate::Hashi>,
         cleanup: PendingUtxoCleanup,
     ) -> anyhow::Result<()> {
-        let mut executor = SuiTxExecutor::from_hashi(inner)?;
+        let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
         executor
             .execute_cleanup_spent_utxos(&cleanup.utxo_ids)
             .await?;
+        // The Move call emits no event, so the watcher can't prune these
+        // records; without this the orphan scan rediscovers the same set and
+        // re-cleans it as a paid no-op forever.
+        inner
+            .onchain_state()
+            .remove_cleaned_utxo_records(&cleanup.utxo_ids);
         info!(
             utxo_count = cleanup.utxo_ids.len(),
             "Successfully cleaned up spent UTXOs",
@@ -323,6 +361,8 @@ impl LeaderService {
 
 /// Return UTXO IDs whose `spent_epoch` is set — these are spent UTXOs
 /// still present in `utxo_records` that need to be cleaned up on-chain.
+/// Capped at [`MAX_UTXO_CLEANUPS_PER_GC`]; the remainder is picked up by a
+/// later scan.
 ///
 /// This is the pure-data core of [`LeaderService::discover_orphaned_utxo_cleanups`],
 /// extracted so it can be unit-tested without constructing a full `LeaderService`.
@@ -331,6 +371,7 @@ fn find_spent_utxos_pending_cleanup(utxo_records: &BTreeMap<UtxoId, UtxoRecord>)
         .iter()
         .filter(|(_, record)| record.spent_epoch.is_some())
         .map(|(id, _)| *id)
+        .take(MAX_UTXO_CLEANUPS_PER_GC)
         .collect()
 }
 
@@ -417,5 +458,15 @@ mod tests {
 
         let result = find_spent_utxos_pending_cleanup(&utxo_records);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn scan_is_capped_per_gc() {
+        let utxo_records: BTreeMap<UtxoId, UtxoRecord> = (0..MAX_UTXO_CLEANUPS_PER_GC as u32 + 7)
+            .map(|i| (utxo_id((i % 251) as u8, i), record(Some(1))))
+            .collect();
+
+        let result = find_spent_utxos_pending_cleanup(&utxo_records);
+        assert_eq!(result.len(), MAX_UTXO_CLEANUPS_PER_GC);
     }
 }

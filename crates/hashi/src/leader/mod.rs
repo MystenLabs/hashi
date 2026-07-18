@@ -108,6 +108,7 @@ pub(crate) struct LeaderService {
     pending_utxo_cleanups: VecDeque<garbage_collection::PendingUtxoCleanup>,
     // Singleton task that cleans up spent withdrawal input UTXOs on-chain.
     utxo_cleanup_gc_task: Option<AbortOnDropHandle<anyhow::Result<()>>>,
+    utxo_cleanup_retry: GlobalRetryTracker<garbage_collection::UtxoCleanupErrorKind>,
     // Forces a fresh scan for UTXO cleanup work after cleanup state changes.
     utxo_cleanup_scan_needed: bool,
 
@@ -148,6 +149,7 @@ impl LeaderService {
             proposal_gc_task: None,
             pending_utxo_cleanups: VecDeque::new(),
             utxo_cleanup_gc_task: None,
+            utxo_cleanup_retry: GlobalRetryTracker::new(),
             utxo_cleanup_scan_needed: true,
             guardian_committee_reconcile_task: None,
             last_guardian_reconcile_epoch: None,
@@ -243,7 +245,7 @@ impl LeaderService {
                     self.process_signed_withdrawal_txns();
                     self.check_delete_expired_deposit_requests(checkpoint_timestamp_ms);
                     self.check_delete_proposals(checkpoint_timestamp_ms);
-                    self.check_cleanup_spent_utxos();
+                    self.check_cleanup_spent_utxos(checkpoint_timestamp_ms);
                     self.process_stale_unapproved_deposits_if_new_epoch();
                     self.process_approved_deposit_requests();
                 }
@@ -302,9 +304,19 @@ impl LeaderService {
                 }
                 Some(result) = OptionFuture::from(self.utxo_cleanup_gc_task.as_mut()) => {
                     self.utxo_cleanup_gc_task = None;
+                    match &result {
+                        Ok(Ok(())) => self.utxo_cleanup_retry.clear(),
+                        _ => self.utxo_cleanup_retry.record_failure(
+                            garbage_collection::UtxoCleanupErrorKind::Failed,
+                            checkpoint_rx.borrow().timestamp_ms,
+                        ),
+                    }
                     Self::log_task_result("utxo_cleanup_gc", result);
+                    // Re-arm the scan and leave rescheduling to the
+                    // leader-gated checkpoint arm: respawning here ran
+                    // ungated (leader or not) with no backoff, which kept a
+                    // node resubmitting cleanups indefinitely.
                     self.utxo_cleanup_scan_needed = true;
-                    self.check_cleanup_spent_utxos();
                 }
                 Some(result) = OptionFuture::from(self.guardian_committee_reconcile_task.as_mut()) => {
                     self.guardian_committee_reconcile_task = None;

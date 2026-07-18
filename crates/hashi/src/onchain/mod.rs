@@ -212,6 +212,14 @@ impl OnchainState {
         self.0.state.write().unwrap()
     }
 
+    /// Prune UTXO records that a cleanup transaction has removed on-chain.
+    /// `cleanup_spent_utxos` emits no event the watcher could react to, so
+    /// the leader that executed the cleanup applies its effect to the local
+    /// mirror through this call.
+    pub(crate) fn remove_cleaned_utxo_records(&self, utxo_ids: &[types::UtxoId]) {
+        self.state_mut().hashi.utxo_pool.remove_cleaned(utxo_ids);
+    }
+
     pub fn subscribe_checkpoint(&self) -> watch::Receiver<CheckpointInfo> {
         self.0.checkpoint.subscribe()
     }
