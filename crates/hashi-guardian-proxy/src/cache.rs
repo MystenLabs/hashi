@@ -417,7 +417,6 @@ mod tests {
     use hashi_types::guardian::proto_conversions::signed_standard_withdrawal_request_to_pb;
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::GuardianSigned;
-    use hashi_types::guardian::KPEncryptedShares;
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::NitroAttestation;
     use hashi_types::guardian::StandardWithdrawalResponse;
@@ -594,7 +593,6 @@ mod tests {
             NitroAttestation::new(vec![1, 2, 3]),
             signing_key.verification_key(),
             signed_info,
-            KPEncryptedShares::new(vec![]).expect("empty shares"),
         );
         get_guardian_info_response_to_pb(domain)
     }

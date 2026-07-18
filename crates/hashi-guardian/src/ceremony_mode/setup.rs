@@ -66,10 +66,6 @@ pub async fn setup_new_key(
         })
         .await?;
 
-    enclave
-        .set_latest_encrypted_shares(encrypted_shares.clone())
-        .expect("encrypted shares should only be set once");
-
     let response = enclave.sign(SetupNewKeyResponse {
         encrypted_shares,
         secret_sharing_instance: ss_instance,
