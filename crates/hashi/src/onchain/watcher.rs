@@ -742,14 +742,15 @@ async fn handle_events(
                     .insert(utxo_spent_event.utxo_id, utxo_spent_event.spent_epoch);
             }
             HashiEvent::UtxoCleaned(utxo_cleaned_event) => {
-                // Prune the cleaned record so every node's orphan scanner —
+                // Prune the cleaned record so every node's cleanup scanner —
                 // not just the leader that executed the cleanup — stops
-                // rediscovering it.
-                state
-                    .state_mut()
-                    .hashi
-                    .utxo_pool
-                    .remove_cleaned(&[utxo_cleaned_event.utxo_id]);
+                // rediscovering it. The event's epoch is authoritative, so
+                // the tombstone lands even if the local record was missing
+                // or never marked spent.
+                state.state_mut().hashi.utxo_pool.apply_cleaned(
+                    utxo_cleaned_event.utxo_id,
+                    utxo_cleaned_event.spent_epoch,
+                );
             }
             HashiEvent::ReconfigStarted(start_reconfig_event) => {
                 let epoch = start_reconfig_event.epoch;
