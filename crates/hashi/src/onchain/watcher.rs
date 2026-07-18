@@ -741,6 +741,16 @@ async fn handle_events(
                     .spent_utxos
                     .insert(utxo_spent_event.utxo_id, utxo_spent_event.spent_epoch);
             }
+            HashiEvent::UtxoCleaned(utxo_cleaned_event) => {
+                // Prune the cleaned record so every node's orphan scanner —
+                // not just the leader that executed the cleanup — stops
+                // rediscovering it.
+                state
+                    .state_mut()
+                    .hashi
+                    .utxo_pool
+                    .remove_cleaned(&[utxo_cleaned_event.utxo_id]);
+            }
             HashiEvent::ReconfigStarted(start_reconfig_event) => {
                 let epoch = start_reconfig_event.epoch;
                 // Fetch new committee

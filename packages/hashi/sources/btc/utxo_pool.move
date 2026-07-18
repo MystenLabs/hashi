@@ -55,6 +55,14 @@ public struct UtxoSpent has copy, drop {
     spent_epoch: u64,
 }
 
+/// Emitted when `cleanup_spent` removes a spent UTXO's record. Nodes prune
+/// their local `utxo_records` mirror on this event; without it only the
+/// leader that executed the cleanup learns the record is gone.
+public struct UtxoCleaned has copy, drop {
+    utxo_id: UtxoId,
+    spent_epoch: u64,
+}
+
 // ~~~~~~~ Package Functions ~~~~~~~
 
 public(package) fun create(ctx: &mut TxContext): UtxoPool {
@@ -151,10 +159,16 @@ public(package) fun cleanup_spent(self: &mut UtxoPool, utxo_id: UtxoId) {
         let epoch = spent_epoch.destroy_some();
         utxo.delete();
         self.spent_utxos.add(utxo_id, epoch);
+        sui::event::emit(UtxoCleaned { utxo_id, spent_epoch: epoch });
     };
 }
 
 // ~~~~~~~ Test Helpers ~~~~~~~
+
+#[test_only]
+public(package) fun utxo_cleaned_fields(event: &UtxoCleaned): (UtxoId, u64) {
+    (event.utxo_id, event.spent_epoch)
+}
 
 #[test_only]
 public(package) fun has_active_record(self: &UtxoPool, utxo_id: UtxoId): bool {
