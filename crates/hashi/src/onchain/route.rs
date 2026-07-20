@@ -266,6 +266,79 @@ impl ObjectIndex {
     }
 }
 
+/// Everything a bootstrap scrape learns beyond the mirrored values:
+/// the routing table, the per-object index, and the minimum checkpoint
+/// height any scrape response was served at. Replaying the filtered
+/// transaction stream from `floor` (in order, through the tip)
+/// converges the mirror even where a page was served behind another —
+/// index versions make re-applied writes idempotent.
+#[derive(Debug)]
+pub(super) struct MirrorSeed {
+    pub routing: RoutingTable,
+    pub index: ObjectIndex,
+    pub floor: u64,
+}
+
+impl MirrorSeed {
+    pub(super) fn new(hashi_id: Address, bitcoin_state_field_id: Address) -> Self {
+        Self {
+            routing: RoutingTable::new(hashi_id, bitcoin_state_field_id),
+            index: ObjectIndex::new(),
+            floor: u64::MAX,
+        }
+    }
+
+    /// Fold one response's serving height into the replay floor.
+    pub(super) fn observe_height(&mut self, height: u64) {
+        self.floor = self.floor.min(height);
+    }
+
+    /// Merge the per-container seed entries a scrape helper produced.
+    pub(super) fn absorb(&mut self, seed: ContainerSeed) {
+        self.observe_height(seed.height);
+        for (id, version, kind) in seed.entries {
+            if let TrackedKind::DofWrapper { container } = &kind {
+                self.routing.register_wrapper(id, *container);
+            }
+            self.index.record(id, version, kind);
+        }
+        for (id, slot) in seed.interior {
+            self.routing.register_interior(id, slot);
+        }
+    }
+}
+
+/// One scrape helper's contribution to the [`MirrorSeed`].
+#[derive(Debug)]
+pub(super) struct ContainerSeed {
+    /// The minimum checkpoint height across this helper's pages.
+    pub height: u64,
+    /// (object id, version, meaning) triples for the index.
+    pub entries: Vec<(Address, u64, TrackedKind)>,
+    /// Interior containers discovered inside mirrored values.
+    pub interior: Vec<(Address, Slot)>,
+}
+
+impl Default for ContainerSeed {
+    fn default() -> Self {
+        Self {
+            // The neutral element for the min-fold: a helper that read
+            // no pages must not drag the replay floor down.
+            height: u64::MAX,
+            entries: Vec::new(),
+            interior: Vec::new(),
+        }
+    }
+}
+
+impl ContainerSeed {
+    pub(super) fn merge(&mut self, other: ContainerSeed) {
+        self.height = self.height.min(other.height);
+        self.entries.extend(other.entries);
+        self.interior.extend(other.interior);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

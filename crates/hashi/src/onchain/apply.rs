@@ -213,8 +213,14 @@ pub(super) fn apply_transaction(
         }
     }
 
-    // Pass 3: all other writes; committee handoffs are deferred.
+    // Pass 3: all other writes, in two rounds. Writes that register an
+    // interior container go first (a tob entry or per-user request bag
+    // is rewritten in the same transaction that touches its children,
+    // because the child mutation bumps the embedded container's size),
+    // so those children route as known-ignored instead of unrouted.
+    // Committee handoffs are deferred past both rounds.
     let mut handoffs: Vec<&Object> = Vec::new();
+    let mut deferred: Vec<&Object> = Vec::new();
     for change in &tx.changes {
         let TxChange::Written(obj) = change else {
             continue;
@@ -235,6 +241,18 @@ pub(super) fn apply_transaction(
             handoffs.push(obj);
             continue;
         }
+        let registers_interior = matches!(obj.owner(), Owner::Object(parent)
+        if matches!(
+            routing.resolve_owner(parent),
+            Some(Slot::Tob | Slot::UserRequests)
+        ));
+        if registers_interior {
+            apply_write(hashi, routing, index, obj, &mut out);
+        } else {
+            deferred.push(obj);
+        }
+    }
+    for obj in deferred {
         apply_write(hashi, routing, index, obj, &mut out);
     }
 
