@@ -5,6 +5,7 @@
 //! submissions and reconstructs the BTC key once threshold shares are present.
 //! Runs after the shared `crate::operator_init`.
 
+use crate::withdraw_mode::genesis::ensure_no_serving_committee;
 use crate::Enclave;
 use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::guardian::crypto::combine_shares;
@@ -42,11 +43,14 @@ pub async fn provisioner_init(
         .config_hash()
         .expect("withdraw-mode operator_init installs the config_hash");
     let session_id = enclave.s3_session_id();
+    let genesis_state = enclave.genesis_state();
+    let genesis_state_hash = genesis_state.as_ref().map(GenesisState::digest);
 
     let encrypted_shares = verify_signed_submissions(
-        request,
+        &request,
         &session_id,
         &config_hash,
+        genesis_state_hash,
         &ceremony_state.encrypted_shares,
     )?;
     let shares = decrypt_verify_shares(
@@ -58,8 +62,24 @@ pub async fn provisioner_init(
     )?;
     info!("Verified {} shares (threshold {threshold}).", shares.len());
 
+    if genesis_state.is_some() {
+        ensure_no_serving_committee(&enclave).await?;
+    }
+
     let share_ids = shares.iter().map(|s| s.id).collect();
     let enclave_btc_pubkey = finalize_init(&shares, threshold, &enclave).await;
+    if let Some(genesis_state) = genesis_state {
+        let committee = genesis_state.into_committee();
+        let epoch = committee.epoch;
+        enclave
+            .log_genesis(GenesisLogMessage {
+                committee,
+                approvals: request.0,
+            })
+            .await
+            .expect("Unable to log KP-authorized genesis state");
+        info!(epoch, "KP-authorized genesis committee written");
+    }
     // Log to S3 indicating that the BTC key has been reconstructed. OA waits for
     // this durable marker before activating the enclave for withdrawals.
     enclave
@@ -79,17 +99,19 @@ pub async fn provisioner_init(
 }
 
 fn verify_signed_submissions(
-    request: ProvisionerInitRequest,
+    request: &ProvisionerInitRequest,
     live_session_id: &SessionID,
     live_config_hash: &[u8; 32],
+    live_genesis_state_hash: Option<[u8; 32]>,
     expected_kp_encrypted_shares: &KPEncryptedSharesRoster,
 ) -> GuardianResult<Vec<GuardianEncryptedShare>> {
     request
         .0
-        .into_iter()
+        .iter()
         .map(|signed| {
             let signer_fingerprint = signed.signer_fingerprint().to_hex();
-            let submission = signed.verify()?;
+            signed.verify_signature()?;
+            let submission = &signed.data;
 
             if submission.expected_session_id() != live_session_id.as_str() {
                 return Err(GuardianError::InvalidInputs(format!(
@@ -103,6 +125,13 @@ fn verify_signed_submissions(
                     "PI submission expected config hash {}, live config hash is {}",
                     hex::encode(submission.expected_config_hash()),
                     hex::encode(live_config_hash)
+                )));
+            }
+            if submission.expected_genesis_state_hash() != live_genesis_state_hash {
+                return Err(GuardianError::InvalidInputs(format!(
+                    "PI submission expected genesis state hash {:?}, live genesis state hash is {:?}",
+                    submission.expected_genesis_state_hash().map(hex::encode),
+                    live_genesis_state_hash.map(hex::encode)
                 )));
             }
 
@@ -128,8 +157,7 @@ fn verify_signed_submissions(
                 share_id = share_id.get(),
                 signer_fingerprint, "verified signed PI submission"
             );
-            let (_, _, encrypted_share) = submission.into_parts();
-            Ok(encrypted_share)
+            Ok(submission.encrypted_share().clone())
         })
         .collect()
 }
@@ -240,11 +268,12 @@ mod tests {
             expected_session_id: SessionID,
             expected_config_hash: [u8; 32],
         ) -> KpSigned<SingleProvisionerInitRequest> {
-            self.signed_submission_with_key(
+            self.signed_submission_with_key_and_genesis_hash(
                 share,
                 &self.kp_keys[signer_index],
                 expected_session_id,
                 expected_config_hash,
+                self.enclave.genesis_state_hash(),
             )
         }
 
@@ -255,9 +284,44 @@ mod tests {
             expected_session_id: SessionID,
             expected_config_hash: [u8; 32],
         ) -> KpSigned<SingleProvisionerInitRequest> {
+            self.signed_submission_with_key_and_genesis_hash(
+                share,
+                signer,
+                expected_session_id,
+                expected_config_hash,
+                self.enclave.genesis_state_hash(),
+            )
+        }
+
+        fn signed_submission_with_genesis_hash(
+            &self,
+            share: &Share,
+            signer_index: usize,
+            expected_session_id: SessionID,
+            expected_config_hash: [u8; 32],
+            expected_genesis_state_hash: Option<[u8; 32]>,
+        ) -> KpSigned<SingleProvisionerInitRequest> {
+            self.signed_submission_with_key_and_genesis_hash(
+                share,
+                &self.kp_keys[signer_index],
+                expected_session_id,
+                expected_config_hash,
+                expected_genesis_state_hash,
+            )
+        }
+
+        fn signed_submission_with_key_and_genesis_hash(
+            &self,
+            share: &Share,
+            signer: &(PgpPublicCert, String),
+            expected_session_id: SessionID,
+            expected_config_hash: [u8; 32],
+            expected_genesis_state_hash: Option<[u8; 32]>,
+        ) -> KpSigned<SingleProvisionerInitRequest> {
             let request = SingleProvisionerInitRequest::build_from_share(
                 expected_session_id,
                 expected_config_hash,
+                expected_genesis_state_hash,
                 share,
                 self.enclave.encryption_public_key(),
                 &mut rand::thread_rng(),
@@ -375,6 +439,28 @@ mod tests {
                     usize::from(share.id.get() - 1),
                     ctx.enclave.s3_session_id(),
                     wrong_config_hash,
+                )
+            })
+            .collect();
+        let err = ctx
+            .provision(ProvisionerInitRequest(submissions))
+            .await
+            .expect_err("should fail");
+        assert!(matches!(err, InvalidInputs(_)));
+    }
+
+    #[tokio::test]
+    async fn rejects_mismatched_genesis_state_hash() {
+        let ctx = setup().await;
+        let submissions = ctx.shares[..TEST_T]
+            .iter()
+            .map(|share| {
+                ctx.signed_submission_with_genesis_hash(
+                    share,
+                    usize::from(share.id.get() - 1),
+                    ctx.enclave.s3_session_id(),
+                    ctx.enclave.config_hash().unwrap(),
+                    Some([0xAB; 32]),
                 )
             })
             .collect();

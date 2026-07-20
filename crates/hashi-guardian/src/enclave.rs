@@ -80,6 +80,9 @@ struct InitializationState {
     /// Withdraw-mode input: the ceremony instance and its share-to-KP assignment,
     /// installed by `operator_init` for `provisioner_init` validation.
     ceremony_state: RwLock<Option<CeremonyState>>,
+    /// Optional first-deploy state pinned during OI and retained through PI
+    /// until activation clears initialization state.
+    genesis_state: RwLock<Option<GenesisState>>,
 }
 
 impl InitializationState {
@@ -91,6 +94,10 @@ impl InitializationState {
             .expect("ceremony state lock poisoned")
             .take()
             .expect("ceremony state must exist before activation");
+        self.genesis_state
+            .write()
+            .expect("genesis state lock poisoned")
+            .take();
     }
 }
 
@@ -505,6 +512,7 @@ impl Enclave {
                 .map(|l| l.bucket_info().clone()),
             encryption_pubkey: self.encryption_public_key().to_bytes().to_vec(),
             config_hash: self.config_hash(),
+            genesis_state_hash: self.genesis_state_hash(),
             untrusted_git_revision: reported_git_revision(self.mode()),
             enclave_btc_pubkey: self.config.enclave_btc_pubkey().ok(),
             limiter_state: self.state.limiter_state().await,
@@ -626,6 +634,31 @@ impl Enclave {
         }
         *slot = Some(state);
         Ok(())
+    }
+
+    pub fn genesis_state(&self) -> Option<GenesisState> {
+        self.init_state
+            .genesis_state
+            .read()
+            .expect("genesis state lock poisoned")
+            .clone()
+    }
+
+    pub fn set_genesis_state(&self, state: GenesisState) -> GuardianResult<()> {
+        let mut slot = self
+            .init_state
+            .genesis_state
+            .write()
+            .expect("genesis state lock poisoned");
+        if slot.is_some() {
+            return Err(InvalidInputs("Genesis state already set".into()));
+        }
+        *slot = Some(state);
+        Ok(())
+    }
+
+    pub fn genesis_state_hash(&self) -> Option<[u8; 32]> {
+        self.genesis_state().as_ref().map(GenesisState::digest)
     }
 
     pub fn clear_initialization_state(&self) {

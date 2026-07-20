@@ -264,7 +264,7 @@ impl GuardianReader {
     }
 
     /// Latest serving committee, preferring `committee-update/` and falling back
-    /// to the operator-trusted `genesis/record.json` bootstrap record. `None`
+    /// to the KP-authorized `genesis/record.json` bootstrap record. `None`
     /// means neither source has been written yet.
     pub async fn read_latest_committee(
         &mut self,
@@ -311,7 +311,7 @@ impl GuardianReader {
     }
 
     /// Fixed genesis record from `genesis/record.json`. `None` means the
-    /// operator-trusted bootstrap record has not been written yet.
+    /// KP-authorized bootstrap record has not been written yet.
     async fn read_genesis_log(
         &mut self,
         build_policy: BuildPolicy,

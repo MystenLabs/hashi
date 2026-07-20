@@ -17,17 +17,19 @@
 //!    instance the new guardian was booted with; it must match.
 //! 4. The stable `InitConfig` is recomputed from limiter config, master G, PCR
 //!    allowlist, and network; its `config_hash` is confirmed.
-//! 5. This KP's PGP-encrypted share is read from the latest
+//! 5. The optional genesis state hash is independently derived from S3 and
+//!    current on-chain state and confirmed against the enclave's pin.
+//! 6. This KP's PGP-encrypted share is read from the latest
 //!    `kp-shares/{seq}/` state (attestation-anchored), every encrypted copy's
 //!    recipient is verified against the roster, and this KP's selected
 //!    ciphertext is located by fingerprint.
-//! 6. The selected ciphertext is decrypted via its yubikey (`gpg --decrypt`
+//! 7. The selected ciphertext is decrypted via its yubikey (`gpg --decrypt`
 //!    over a pipe; plaintext stays in memory) and verified against the
 //!    commitment.
-//! 7. The decrypted share is HPKE-encrypted to the new guardian's
+//! 8. The decrypted share is HPKE-encrypted to the new guardian's
 //!    `encryption_pubkey` (from its `GuardianInfo`) while constructing a PI
-//!    request bound to the pinned session and verified `config_hash`.
-//! 8. The request is signed and submitted to the configured relay endpoint via
+//!    request bound to the pinned session and verified config/genesis hashes.
+//! 9. The request is signed and submitted to the configured relay endpoint via
 //!    `SingleProvisionerInit`. The relay accumulates T-of-N signed submissions
 //!    and calls the guardian's batch `provisioner_init` once it has enough; the
 //!    enclave re-verifies every signature and binding.
@@ -37,6 +39,7 @@ use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::EncPubKey;
+use hashi_types::guardian::GenesisState;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::KpSigned;
@@ -163,6 +166,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         bucket_info,
         encryption_pubkey: enclave_enc_pubkey_bytes,
         config_hash,
+        genesis_state_hash,
         untrusted_git_revision: enclave_git_revision,
         enclave_btc_pubkey,
         limiter_state: enclave_limiter_state,
@@ -184,6 +188,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         .as_ref()
         .copied()
         .context("Guardian info missing config_hash")?;
+    let enclave_genesis_state_hash = *genesis_state_hash;
     let enclave_limiter_config = limiter_config
         .as_ref()
         .copied()
@@ -303,6 +308,32 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         "recomputed config_hash matches enclave",
     );
 
+    // Independently derive whether this is a first deploy and, if so, bind the
+    // current on-chain committee into this KP's signed PI submission.
+    let expected_genesis_state_hash = match reader
+        .read_latest_committee(BuildPolicy::AnyAllowlisted)
+        .await?
+    {
+        Some(_) => None,
+        None => {
+            let committee = onchain_state
+                .current_committee()
+                .context("no current committee on chain (DKG not yet complete?)")?;
+            Some(GenesisState::new(committee).digest())
+        }
+    };
+    anyhow::ensure!(
+        expected_genesis_state_hash == enclave_genesis_state_hash,
+        "genesis_state_hash mismatch: expected {:?}, got {:?}",
+        expected_genesis_state_hash.map(hex::encode),
+        enclave_genesis_state_hash.map(hex::encode)
+    );
+    info!(
+        phase = "genesis state hash",
+        genesis_state_hash = ?expected_genesis_state_hash.map(hex::encode),
+        "independently derived genesis state matches enclave",
+    );
+
     // 5. Verify this KP's encrypted share from the ceremony + KP-share state
     //    read above.
     info!(
@@ -354,6 +385,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let request = SingleProvisionerInitRequest::build_from_share(
         session_id.clone(),
         config_hash,
+        expected_genesis_state_hash,
         &decrypted,
         &guardian_pub_key,
         &mut thread_rng(),
@@ -375,6 +407,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         signer_fingerprint = %signer_cert.fingerprint(),
         sharing_seq,
         config_hash = hex::encode(config_hash),
+        genesis_state_hash = ?expected_genesis_state_hash.map(hex::encode),
         enc_pubkey = hex::encode(enclave_enc_pubkey_bytes),
         relay_endpoint = %cfg.relay_endpoint,
         "share built; submitting to relay",

@@ -79,6 +79,7 @@ struct BackendStatus {
     num_shares: Option<usize>,
     threshold: Option<usize>,
     config_hash: Option<[u8; 32]>,
+    genesis_state_hash: Option<[u8; 32]>,
     provisioned: bool,
 }
 
@@ -117,12 +118,14 @@ impl Relay {
         let num_shares = sharing.map(|i| i.num_shares());
         let threshold = sharing.map(|i| i.threshold());
         let config_hash = info.config_hash;
+        let genesis_state_hash = info.genesis_state_hash;
         let provisioned = info.enclave_btc_pubkey.is_some();
         Ok(BackendStatus {
             session_id: session_id.into(),
             num_shares,
             threshold,
             config_hash,
+            genesis_state_hash,
             provisioned,
         })
     }
@@ -204,6 +207,7 @@ impl GuardianRelayService for Relay {
         verify_kp_submission(&signed_request, &self.authorized_kp_fingerprints)?;
         let expected_session_id = signed_request.data.expected_session_id().to_string();
         let expected_config_hash = *signed_request.data.expected_config_hash();
+        let expected_genesis_state_hash = signed_request.data.expected_genesis_state_hash();
         let id = u32::from(signed_request.data.encrypted_share().id.get());
 
         // Hold the accumulator across the status read + batch submit so a racing
@@ -235,6 +239,13 @@ impl GuardianRelayService for Relay {
                 "config hash mismatch: KP pinned {}, backend live config is {}",
                 hex::encode(expected_config_hash),
                 hex::encode(live_config_hash),
+            )));
+        }
+        if expected_genesis_state_hash != status.genesis_state_hash {
+            return Err(Status::failed_precondition(format!(
+                "genesis state hash mismatch: KP pinned {:?}, backend live genesis state is {:?}",
+                expected_genesis_state_hash.map(hex::encode),
+                status.genesis_state_hash.map(hex::encode),
             )));
         }
         let (num_shares, threshold) =
@@ -329,6 +340,7 @@ mod tests {
             signer_cert: "cert".into(),
             kp_signature: "signature".into(),
             expected_config_hash: Some(vec![7u8; 32].into()),
+            expected_genesis_state_hash: None,
         }
     }
 
@@ -355,6 +367,7 @@ mod tests {
         let request = SingleProvisionerInitRequest::new(
             session.to_string().into(),
             config_hash,
+            None,
             domain_share.clone(),
         );
         let signed_bytes = KpSigned::signed_bytes(&request);
@@ -373,8 +386,12 @@ mod tests {
         verify_kp_submission(&signed_request, &[from_config]).unwrap();
 
         let other_share = signed_share(2);
-        let other_request =
-            SingleProvisionerInitRequest::new(session.to_string().into(), config_hash, other_share);
+        let other_request = SingleProvisionerInitRequest::new(
+            session.to_string().into(),
+            config_hash,
+            None,
+            other_share,
+        );
         let signed_other_share = KpSigned {
             data: other_request,
             signer_cert: cert.clone(),
@@ -400,8 +417,12 @@ mod tests {
             "missing signature must be rejected"
         );
 
-        let other_session_request =
-            SingleProvisionerInitRequest::new("other-session".into(), config_hash, domain_share);
+        let other_session_request = SingleProvisionerInitRequest::new(
+            "other-session".into(),
+            config_hash,
+            None,
+            domain_share,
+        );
         let other_bytes = KpSigned::signed_bytes(&other_session_request);
         let stale_sig = sign_detached_in_process(&secret_armored, &other_bytes);
         let stale_request = KpSigned {

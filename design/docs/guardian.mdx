@@ -88,40 +88,43 @@ sequenceDiagram
     Operator->>Operator: Gather master G from onchain state
     Operator->>Operator: Gather bucket plus limiter config plus PCR allowlist plus network
     Operator->>Operator: Build InitConfig
-    Operator->>Guardian: OperatorInit(S3 config, InitConfig)
+    Operator->>Operator: If no serving committee exists, build GenesisState from onchain state
+    Operator->>Guardian: OperatorInit(S3 config, InitConfig, optional GenesisState)
     Guardian->>S3: Read latest ceremony and KP-share state
     Guardian->>Guardian: Snapshot CeremonyState for this arming
-    Guardian->>S3: log(init GuardianInfo(config_hash, sharing instance))
+    Guardian->>S3: log(init GuardianInfo(config_hash, optional genesis_state_hash, sharing instance))
     Guardian->>S3: start heartbeat stream from OI onward
 
     Note over KPs,Guardian: Threshold share provisioning
     KPs->>Guardian: GetGuardianInfo via proxy
-    Guardian-->>KPs: config_hash plus session_id plus n/t plus attestation
-    KPs->>KPs: Verify PCRs and compare config_hash to local pin
+    Guardian-->>KPs: config_hash plus optional genesis_state_hash plus session_id plus n/t plus attestation
+    KPs->>KPs: Verify PCRs and independently derive both state hashes
     KPs->>KPs: HPKE-encrypt local share to guardian session key (no AAD)
-    KPs->>KPs: Sign(session_id, config_hash, encrypted share)
+    KPs->>KPs: Sign(session_id, config_hash, optional genesis_state_hash, encrypted share)
     KPs->>Proxy: SingleProvisionerInit(signed submission)
     Proxy->>Proxy: Pre-verify KP signature and relay roster
-    Proxy->>Guardian: Fetch live session, config, and provisioning status
-    Guardian-->>Proxy: session_id, config_hash, n/t, provisioned flag
+    Proxy->>Guardian: Fetch live session, config/genesis hashes, and provisioning status
+    Guardian-->>Proxy: session_id, config_hash, optional genesis_state_hash, n/t, provisioned flag
     alt fewer than threshold shares collected
         Proxy-->>KPs: signed submission accepted, waiting for threshold
     else threshold reached
         Proxy->>Guardian: ProvisionerInit(T signed submissions)
-        Guardian->>Guardian: Verify signatures, session/config pins, and KP assignments
+        Guardian->>Guardian: Verify signatures, session/config/genesis pins, and KP assignments
         Guardian->>Guardian: Decrypt without AAD and verify commitments
         Guardian->>Guardian: Reconstruct BTC key and mark armed standby
+        opt first deploy
+            Guardian->>S3: log(genesis committee plus exact KP-signed approvals)
+        end
         Guardian->>S3: log(init fully-initialized)
         Proxy-->>KPs: standby armed
     end
 ```
 
-First deploy also has a genesis bootstrap path not shown above: if the operator
-finds no `committee-update/` or `genesis/` record in S3, it reads the current
-committee from onchain state and calls the guardian's `OperatorWriteGenesis` RPC
-after `OperatorInit`. The enclave logs the operator-supplied committee to
-`genesis/` as-is; it is operator-trusted and used on first deploy only. Later
-deploys skip this step.
+On first deploy, the operator pins the current onchain committee as an optional
+`GenesisState` during `OperatorInit`. Each KP independently derives its hash and
+includes it in the normal signed PI submission. Once PI reaches threshold, the
+enclave writes `genesis/record.json` with the committee and the exact signed
+submissions that authorized it. Later deploys use `None` and do not write genesis.
 
 ## Standby activation flow
 

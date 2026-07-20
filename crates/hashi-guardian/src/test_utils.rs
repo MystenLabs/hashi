@@ -167,6 +167,7 @@ pub struct OperatorInitTestArgs {
     pub s3_logger: GuardianS3Client,
     pub config: InitConfig,
     pub ceremony_state: CeremonyState,
+    pub genesis_state: Option<GenesisState>,
 }
 
 const TEST_N: usize = 5;
@@ -211,11 +212,17 @@ impl Default for OperatorInitTestArgs {
             s3_logger: mock_logger(),
             config: InitConfig::mock_for_testing(None),
             ceremony_state: dummy_ceremony_state(),
+            genesis_state: None,
         }
     }
 }
 
 impl OperatorInitTestArgs {
+    pub fn with_genesis_state(mut self, genesis_state: GenesisState) -> Self {
+        self.genesis_state = Some(genesis_state);
+        self
+    }
+
     pub fn with_config(mut self, config: InitConfig) -> Self {
         self.config = config;
         self
@@ -271,8 +278,12 @@ impl Enclave {
     /// withdraw-mode commit). Lets a harness defer operator-init until DKG output exists.
     pub fn install_operator_init_for_testing(&self, args: OperatorInitTestArgs) {
         self.config.set_s3_logger(args.s3_logger).unwrap();
-        crate::operator_init::InitInstall::from_parts(args.config, args.ceremony_state)
-            .install_into(self);
+        crate::operator_init::InitInstall::from_parts(
+            args.config,
+            args.ceremony_state,
+            args.genesis_state,
+        )
+        .install_into(self);
         self.advance_lifecycle_into(WithdrawStage::OperatorInitialized.into())
             .expect("operator init test setup should advance lifecycle");
     }

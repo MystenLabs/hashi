@@ -585,6 +585,7 @@ mod tests {
                 "genesis",
                 LogMessage::Genesis(Box::new(GenesisLogMessage {
                     committee: committee_0,
+                    approvals: vec![],
                 })),
             ),
         ];
@@ -856,6 +857,7 @@ mod tests {
                     total_weight: 0,
                     config: crate::move_types::Config::default(),
                 },
+                approvals: vec![],
             })),
             &signing_key,
             1_700_000_000_000,
@@ -1033,6 +1035,7 @@ mod tests {
                     total_weight: 0,
                     config: crate::move_types::Config::default(),
                 },
+                approvals: vec![],
             })),
             &signing_key,
             1_700_000_000_000,

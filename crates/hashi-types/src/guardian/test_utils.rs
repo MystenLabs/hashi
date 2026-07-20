@@ -95,6 +95,7 @@ impl GetGuardianInfoResponse {
             }),
             encryption_pubkey: vec![0u8; 32],
             config_hash: None,
+            genesis_state_hash: None,
             untrusted_git_revision: "unknown".to_string(),
             enclave_btc_pubkey: None,
             limiter_state: None,
@@ -206,7 +207,7 @@ impl OperatorInitRequest {
                 region: "us-east-1".into(),
             },
         };
-        OperatorInitRequest::new_withdraw_mode(s3_config, InitConfig::mock_for_testing(None))
+        OperatorInitRequest::new_withdraw_mode(s3_config, InitConfig::mock_for_testing(None), None)
     }
 }
 
@@ -221,8 +222,12 @@ impl ProvisionerInitRequest {
             },
         };
         let (cert_armored, _) = crate::pgp::test_utils::mock_pgp_keypair();
-        let request =
-            SingleProvisionerInitRequest::new("mock-session".into(), [7u8; 32], encrypted_share);
+        let request = SingleProvisionerInitRequest::new(
+            "mock-session".into(),
+            [7u8; 32],
+            None,
+            encrypted_share,
+        );
         ProvisionerInitRequest(vec![KpSigned {
             data: request,
             signer_cert: crate::pgp::PgpPublicCert::new(cert_armored).unwrap(),

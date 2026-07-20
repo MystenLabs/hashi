@@ -6,15 +6,15 @@ use anyhow::anyhow;
 use anyhow::ensure;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
+use hashi_types::guardian::GenesisState;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::OperatorInitRequest;
-use hashi_types::guardian::OperatorWriteGenesisRequest;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::WithdrawStage;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
-use hashi_types::guardian::proto_conversions::operator_write_genesis_request_to_pb;
+use hashi_types::pgp::load_certs;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use tracing::info;
 
@@ -72,7 +72,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         phase = "committee",
         "checking latest committee-update/genesis record before operator_init",
     );
-    let genesis_bootstrap_committee = match reader
+    let genesis_state = match reader
         .read_latest_committee(BuildPolicy::AnyAllowlisted)
         .await?
     {
@@ -91,9 +91,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             info!(
                 phase = "committee",
                 epoch = committee.epoch(),
-                "no committee-update/genesis record; will write on-chain committee to genesis after operator_init",
+                "no committee-update/genesis record; pinning on-chain committee for KP authorization during provisioner_init",
             );
-            Some(committee)
+            Some(GenesisState::new(committee))
         }
     };
 
@@ -168,6 +168,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         cfg.bitcoin_network,
     )?;
     let config_hash = init_config.digest();
+    let genesis_state_hash = genesis_state.as_ref().map(GenesisState::digest);
     info!(
         phase = "config build",
         config_hash = hex::encode(config_hash),
@@ -182,6 +183,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let oi_req = operator_init_request_to_pb(OperatorInitRequest::new_withdraw_mode(
         guardian_s3.clone(),
         init_config.clone(),
+        genesis_state,
     ))
     .map_err(|e| anyhow!("encode OperatorInitRequest: {e:?}"))?;
     client
@@ -192,24 +194,6 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         phase = "operator_init",
         "operator_init complete; standby config installed"
     );
-
-    if let Some(committee) = genesis_bootstrap_committee {
-        info!(
-            phase = "operator_write_genesis",
-            epoch = committee.epoch(),
-            "writing operator-trusted genesis bootstrap committee"
-        );
-        let genesis_req =
-            operator_write_genesis_request_to_pb(OperatorWriteGenesisRequest::new(committee));
-        client
-            .operator_write_genesis(genesis_req)
-            .await
-            .context("OperatorWriteGenesis RPC failed")?;
-        info!(
-            phase = "operator_write_genesis",
-            "genesis bootstrap committee written"
-        );
-    }
 
     info!(
         phase = "guardian postcheck",
@@ -232,11 +216,13 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         &scraped_instance,
         &init_config,
         config_hash,
+        genesis_state_hash,
     )?;
     info!(
         phase = "guardian postcheck",
         session_id = %session_id,
         config_hash = hex::encode(config_hash),
+        genesis_state_hash = ?genesis_state_hash.map(hex::encode),
         "live GuardianInfo matches operator-supplied config",
     );
 
@@ -271,6 +257,12 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     println!("Guardian operator provision complete.");
     println!("  session_id:      {session_id}");
     println!("  config_hash:     {}", hex::encode(config_hash));
+    println!(
+        "  genesis_hash:    {}",
+        genesis_state_hash
+            .map(hex::encode)
+            .unwrap_or_else(|| "none".into())
+    );
     println!("  sharing_seq:     {sharing_seq}");
     println!("  num_shares:      {}", scraped_instance.num_shares());
     println!("  threshold:       {}", scraped_instance.threshold());
@@ -297,6 +289,10 @@ fn ensure_uninitialized(info: &GuardianInfo) -> anyhow::Result<()> {
     ensure!(
         info.config_hash.is_none(),
         "guardian already has config_hash"
+    );
+    ensure!(
+        info.genesis_state_hash.is_none(),
+        "guardian already has genesis_state_hash"
     );
     ensure!(
         info.enclave_btc_pubkey.is_none(),
@@ -327,6 +323,7 @@ fn verify_initialized_info(
     expected_instance: &SecretSharingInstance,
     expected_config: &InitConfig,
     expected_config_hash: [u8; 32],
+    expected_genesis_state_hash: Option<[u8; 32]>,
 ) -> anyhow::Result<()> {
     ensure!(
         info.lifecycle == WithdrawStage::OperatorInitialized.into(),
@@ -365,6 +362,12 @@ fn verify_initialized_info(
         "Guardian config_hash mismatch: expected {}, got {}",
         hex::encode(expected_config_hash),
         hex::encode(config_hash)
+    );
+    ensure!(
+        info.genesis_state_hash == expected_genesis_state_hash,
+        "Guardian genesis_state_hash mismatch: expected {:?}, got {:?}",
+        expected_genesis_state_hash.map(hex::encode),
+        info.genesis_state_hash.map(hex::encode)
     );
     ensure!(
         info.enclave_btc_pubkey.is_none(),
