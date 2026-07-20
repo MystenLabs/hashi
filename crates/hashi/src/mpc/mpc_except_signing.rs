@@ -145,6 +145,7 @@ pub struct MpcManager {
     pub dealer_outputs: HashMap<DealerOutputsKey, avss::AvssOutput>,
     pub current_dkg_messages: HashMap<Address, avss::Message>,
     pub current_rotation_messages: HashMap<Address, RotationMessages>,
+    pub rotation_ack_signatures: HashMap<Address, (MessageHash, BLS12381Signature)>,
     pub current_nonce_messages: HashMap<(u32, Address), NonceMessage>,
     pub current_avid_round_state: HashMap<(u32, Address), AvidRoundState>,
     pub current_avid_verified_common:
@@ -308,6 +309,7 @@ impl MpcManager {
             dealer_outputs: HashMap::new(),
             current_dkg_messages: HashMap::new(),
             current_rotation_messages: HashMap::new(),
+            rotation_ack_signatures: HashMap::new(),
             current_nonce_messages: HashMap::new(),
             current_avid_round_state: HashMap::new(),
             current_avid_verified_common: HashMap::new(),
@@ -4343,6 +4345,23 @@ impl MpcManager {
                 panic!("try_sign_rotation_messages called with non-rotation messages")
             }
         };
+        let messages_hash = compute_messages_hash(messages);
+        if let Some((acked_hash, ack)) = self.rotation_ack_signatures.get(&dealer) {
+            if *acked_hash == messages_hash {
+                tracing::info!("re-acking identical rotation batch from dealer {dealer}");
+                return Ok(ack.clone());
+            }
+            tracing::warn!(
+                "dealer {dealer} sent a rotation batch differing from the one already acked this \
+                 epoch (acked {}, got {}); rejecting — equivocation or lost persisted messages",
+                hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(acked_hash)),
+                hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(&messages_hash)),
+            );
+            return Err(MpcError::InvalidMessage {
+                sender: dealer,
+                reason: "Rotation batch differs from the previously acked batch".into(),
+            });
+        }
         let previous_committee = self.previous_committee.as_ref().ok_or_else(|| {
             MpcError::InvalidConfig("Key rotation requires previous committee".into())
         })?;
@@ -4407,15 +4426,18 @@ impl MpcManager {
             }
         }
         self.dealer_outputs.extend(outputs);
-        let messages_hash = compute_messages_hash(messages);
         let rotation_message = DealerMessagesHash {
             dealer_address: dealer,
             messages_hash,
         };
-        let signature =
-            self.signing_key
-                .sign(self.mpc_config.epoch, self.address, &rotation_message);
-        Ok(signature.signature().clone())
+        let signature = self
+            .signing_key
+            .sign(self.mpc_config.epoch, self.address, &rotation_message)
+            .signature()
+            .clone();
+        self.rotation_ack_signatures
+            .insert(dealer, (messages_hash, signature.clone()));
+        Ok(signature)
     }
 
     fn complete_key_rotation(
