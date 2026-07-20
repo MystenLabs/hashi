@@ -752,6 +752,17 @@ impl UtxoPool {
     pub fn spent_utxos(&self) -> &BTreeMap<UtxoId, u64> {
         &self.spent_utxos
     }
+
+    /// Apply a `UtxoCleaned` event to the local mirror: drop the record and
+    /// tombstone it in `spent_utxos`. The tombstone epoch comes from the
+    /// event — the on-chain cleanup is authoritative even when the local
+    /// record is missing or was never marked spent (e.g. a missed
+    /// `UtxoSpent`). This is the mirror's only cleanup-hygiene path; the
+    /// GC decides from a task-local chain snapshot and never writes here.
+    pub(crate) fn apply_cleaned(&mut self, utxo_id: UtxoId, spent_epoch: u64) {
+        self.utxo_records.remove(&utxo_id);
+        self.spent_utxos.insert(utxo_id, spent_epoch);
+    }
 }
 
 #[derive(Debug)]
@@ -896,5 +907,64 @@ mod tests {
     fn previous_committee_for_target_returns_none_when_no_earlier_committee() {
         let set = set_with(3, None, &[3]);
         assert_eq!(set.previous_committee_for_target(3).map(|(e, _)| e), None);
+    }
+
+    fn test_utxo_id(byte: u8) -> UtxoId {
+        let mut bytes = [0u8; 32];
+        bytes[0] = byte;
+        UtxoId {
+            txid: hashi_types::bitcoin_txid::BitcoinTxid::new(bytes),
+            vout: 0,
+        }
+    }
+
+    fn test_utxo_record(spent_epoch: Option<u64>) -> UtxoRecord {
+        UtxoRecord {
+            utxo: Utxo {
+                id: test_utxo_id(0),
+                amount: 1_000,
+                derivation_path: None,
+            },
+            produced_by: None,
+            spent_by: None,
+            spent_epoch,
+        }
+    }
+
+    fn utxo_pool(records: Vec<(UtxoId, UtxoRecord)>) -> UtxoPool {
+        UtxoPool {
+            utxo_records_id: Address::new([0u8; 32]),
+            utxo_records: records.into_iter().collect(),
+            spent_utxos_id: Address::new([0u8; 32]),
+            spent_utxos: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn apply_cleaned_drops_record_and_tombstones_it() {
+        let mut pool = utxo_pool(vec![
+            (test_utxo_id(1), test_utxo_record(Some(7))),
+            (test_utxo_id(2), test_utxo_record(None)),
+        ]);
+
+        pool.apply_cleaned(test_utxo_id(1), 7);
+
+        assert!(!pool.utxo_records.contains_key(&test_utxo_id(1)));
+        assert!(pool.utxo_records.contains_key(&test_utxo_id(2)));
+        assert_eq!(pool.spent_utxos.get(&test_utxo_id(1)), Some(&7));
+    }
+
+    #[test]
+    fn apply_cleaned_tombstones_even_without_local_spent_mark() {
+        let mut pool = utxo_pool(vec![(test_utxo_id(1), test_utxo_record(None))]);
+
+        // Local record never saw UtxoSpent; the event's epoch still lands.
+        pool.apply_cleaned(test_utxo_id(1), 9);
+        // Record entirely absent locally: tombstone alone is applied.
+        pool.apply_cleaned(test_utxo_id(2), 4);
+
+        assert!(pool.utxo_records.is_empty());
+        assert_eq!(pool.spent_utxos.get(&test_utxo_id(1)), Some(&9));
+        assert_eq!(pool.spent_utxos.get(&test_utxo_id(2)), Some(&4));
     }
 }

@@ -841,6 +841,7 @@ pub enum HashiEvent {
     WithdrawalPresigsReassigned(WithdrawalPresigsReassigned),
     WithdrawalConfirmed(WithdrawalConfirmed),
     UtxoSpent(UtxoSpent),
+    UtxoCleaned(UtxoCleaned),
     ReconfigStarted(ReconfigStarted),
     ReconfigEnded(ReconfigEnded),
 }
@@ -890,6 +891,7 @@ impl HashiEvent {
             }
             WithdrawalConfirmed::MODULE_NAME => WithdrawalConfirmed::from_bcs(bcs.value())?.into(),
             UtxoSpent::MODULE_NAME => UtxoSpent::from_bcs(bcs.value())?.into(),
+            UtxoCleaned::MODULE_NAME => UtxoCleaned::from_bcs(bcs.value())?.into(),
             ReconfigStarted::MODULE_NAME => ReconfigStarted::from_bcs(bcs.value())?.into(),
             ReconfigEnded::MODULE_NAME => ReconfigEnded::from_bcs(bcs.value())?.into(),
             PackageUpgraded::MODULE_NAME => PackageUpgraded::from_bcs(bcs.value())?.into(),
@@ -1425,6 +1427,23 @@ pub struct UtxoSpent {
 impl MoveType for UtxoSpent {
     const MODULE: &'static str = "utxo_pool";
     const NAME: &'static str = "UtxoSpent";
+}
+
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct UtxoCleaned {
+    pub utxo_id: UtxoId,
+    pub spent_epoch: u64,
+}
+
+impl MoveType for UtxoCleaned {
+    const MODULE: &'static str = "utxo_pool";
+    const NAME: &'static str = "UtxoCleaned";
+}
+
+impl From<UtxoCleaned> for HashiEvent {
+    fn from(value: UtxoCleaned) -> Self {
+        Self::UtxoCleaned(value)
+    }
 }
 
 impl From<UtxoSpent> for HashiEvent {
