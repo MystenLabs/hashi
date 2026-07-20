@@ -212,28 +212,33 @@ impl OnchainState {
         self.0.state.write().unwrap()
     }
 
-    /// Prune UTXO records that a cleanup transaction has removed on-chain.
-    /// `cleanup_spent_utxos` emits no event the watcher could react to, so
-    /// the leader that executed the cleanup applies its effect to the local
-    /// mirror through this call.
-    pub(crate) fn remove_cleaned_utxo_records(&self, utxo_ids: &[types::UtxoId]) {
-        self.state_mut().hashi.utxo_pool.remove_cleaned(utxo_ids);
-    }
-
-    /// Re-scrape the on-chain UTXO pool into the local mirror. The cleanup
-    /// GC calls this before submitting an orphan-scan batch: the mirror can
-    /// overstate pending cleanups (another leader's cleanup emits no event
-    /// the watcher could apply), and every overstated id becomes a paid
-    /// on-chain no-op. One table scan here is cheaper than paying to
-    /// re-clean records that are already gone.
-    pub(crate) async fn refresh_utxo_pool(&self) -> Result<()> {
+    /// Scrape the on-chain UTXO pool into a task-local snapshot for the
+    /// cleanup GC's use. Deliberately does NOT touch the shared mirror: the
+    /// watcher task is its sole writer, and installing an out-of-band
+    /// snapshot could revert mutations the watcher already applied from
+    /// newer checkpoints (e.g. a `spent_by` lock, whose loss would let coin
+    /// selection re-pick a locked input and pay for an aborted tx).
+    ///
+    /// The GC scans this snapshot instead of the mirror because the mirror
+    /// can overstate pending cleanups (`cleanup_spent_utxos` emits no event
+    /// the watcher could apply, so another leader's cleanup is invisible),
+    /// and every overstated id becomes a paid on-chain no-op. Errors if the
+    /// read is older than the watcher's checkpoint cursor (e.g. a
+    /// load-balanced endpoint serving a lagging fullnode) — the caller
+    /// should back off and retry rather than act on stale data.
+    pub(crate) async fn scrape_utxo_pool_snapshot(&self) -> Result<types::UtxoPool> {
         let client = self.client();
-        let bitcoin_state =
+        let (scrape_height, bitcoin_state) =
             fetch_bitcoin_state(client.clone(), self.hashi_id(), self.package_id_original())
                 .await?;
-        let utxo_pool = scrape_utxo_pool(client, bitcoin_state.utxo_pool).await?;
-        self.state_mut().hashi.utxo_pool = utxo_pool;
-        Ok(())
+        let watcher_height = self.latest_checkpoint_height();
+        if scrape_height < watcher_height {
+            anyhow::bail!(
+                "stale UTXO pool read: scrape at checkpoint {scrape_height} is behind the \
+                 watcher's cursor {watcher_height}"
+            );
+        }
+        scrape_utxo_pool(client, bitcoin_state.utxo_pool).await
     }
 
     pub fn subscribe_checkpoint(&self) -> watch::Receiver<CheckpointInfo> {
@@ -777,11 +782,13 @@ async fn scrape_package_versions(
 }
 
 /// Fetch the `BitcoinState` dynamic field hanging off the Hashi object.
+/// Returns the checkpoint height the response was served at alongside the
+/// state, so callers can judge the read's freshness.
 async fn fetch_bitcoin_state(
     mut client: Client,
     hashi_object_id: Address,
     package_id: Address,
-) -> Result<move_types::BitcoinState> {
+) -> Result<(u64, move_types::BitcoinState)> {
     let bitcoin_state_key = move_types::BitcoinStateKey { dummy_field: false };
     let bitcoin_state_key_type = TypeTag::Struct(Box::new(StructTag::new(
         package_id,
@@ -801,6 +808,9 @@ async fn fetch_bitcoin_state(
             ])),
         )
         .await?;
+    let checkpoint_height = bitcoin_state_response
+        .checkpoint_height()
+        .ok_or_else(|| anyhow!("response missing X_SUI_CHECKPOINT_HEIGHT header"))?;
     let bitcoin_state_field: move_types::Field<
         move_types::BitcoinStateKey,
         move_types::BitcoinState,
@@ -810,7 +820,7 @@ async fn fetch_bitcoin_state(
         .contents()
         .deserialize()
         .map_err(|e| anyhow!("failed to deserialize BitcoinState: {e}"))?;
-    Ok(bitcoin_state_field.value)
+    Ok((checkpoint_height, bitcoin_state_field.value))
 }
 
 async fn scrape_hashi(
@@ -852,7 +862,7 @@ async fn scrape_hashi(
         num_consumed_presigs,
     } = response.get_ref().object().contents().deserialize()?;
 
-    let bitcoin_state = fetch_bitcoin_state(client.clone(), id, package_id).await?;
+    let (_, bitcoin_state) = fetch_bitcoin_state(client.clone(), id, package_id).await?;
 
     let (
         member_info,

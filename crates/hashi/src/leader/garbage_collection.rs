@@ -195,22 +195,20 @@ impl LeaderService {
         })));
     }
 
-    /// Refresh the UTXO-pool mirror from chain, then clean every record the
-    /// refreshed mirror still shows as spent-but-uncleaned. Returns how many
+    /// Scrape a fresh task-local snapshot of the on-chain UTXO pool, then
+    /// clean every record it shows as spent-but-uncleaned. Returns how many
     /// UTXOs were cleaned so the caller can decide whether to re-arm the
     /// scan (more work may exist past the per-GC cap).
     ///
-    /// The refresh is what makes the tx worth paying for: the mirror
-    /// overstates pending cleanups whenever another leader cleaned records
-    /// (their prune is local to them), and submitting from a stale mirror
-    /// re-cleans those records as paid on-chain no-ops.
+    /// Deciding from a fresh chain read — never from the shared mirror — is
+    /// what makes the tx worth paying for: the mirror overstates pending
+    /// cleanups whenever another leader cleaned records (`cleanup_spent`
+    /// emits no event), and submitting from it re-cleans those records as
+    /// paid on-chain no-ops. The mirror itself is left untouched; the
+    /// watcher task is its sole writer.
     async fn cleanup_spent_utxos(inner: Arc<crate::Hashi>) -> anyhow::Result<usize> {
-        inner.onchain_state().refresh_utxo_pool().await?;
-
-        let utxo_ids = {
-            let state = inner.onchain_state().state();
-            find_spent_utxos_pending_cleanup(state.hashi().utxo_pool.utxo_records())
-        };
+        let pool = inner.onchain_state().scrape_utxo_pool_snapshot().await?;
+        let utxo_ids = find_spent_utxos_pending_cleanup(pool.utxo_records());
         if utxo_ids.is_empty() {
             return Ok(0);
         }
@@ -219,12 +217,8 @@ impl LeaderService {
             utxo_count = utxo_ids.len(),
             "Cleaning up spent UTXO(s) pending cleanup",
         );
-        let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
+        let mut executor = SuiTxExecutor::from_hashi(inner)?;
         executor.execute_cleanup_spent_utxos(&utxo_ids).await?;
-        // The Move call emits no event, so the watcher can't prune these
-        // records; apply the cleanup to the local mirror here so the next
-        // scan doesn't rediscover and re-pay for the same set.
-        inner.onchain_state().remove_cleaned_utxo_records(&utxo_ids);
         info!(
             utxo_count = utxo_ids.len(),
             "Successfully cleaned up spent UTXOs",

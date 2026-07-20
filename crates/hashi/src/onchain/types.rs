@@ -752,21 +752,6 @@ impl UtxoPool {
     pub fn spent_utxos(&self) -> &BTreeMap<UtxoId, u64> {
         &self.spent_utxos
     }
-
-    /// Apply a successful on-chain `cleanup_spent_utxos` to the local mirror:
-    /// drop the records and tombstone them in `spent_utxos`. The Move call
-    /// emits no event, so the executor that lands the cleanup must apply it
-    /// here — a stale record would be rediscovered by the orphan scan and
-    /// re-cleaned as a paid no-op forever.
-    pub(crate) fn remove_cleaned(&mut self, utxo_ids: &[UtxoId]) {
-        for id in utxo_ids {
-            if let Some(record) = self.utxo_records.remove(id)
-                && let Some(epoch) = record.spent_epoch
-            {
-                self.spent_utxos.insert(*id, epoch);
-            }
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -911,61 +896,5 @@ mod tests {
     fn previous_committee_for_target_returns_none_when_no_earlier_committee() {
         let set = set_with(3, None, &[3]);
         assert_eq!(set.previous_committee_for_target(3).map(|(e, _)| e), None);
-    }
-
-    fn test_utxo_id(byte: u8) -> UtxoId {
-        let mut bytes = [0u8; 32];
-        bytes[0] = byte;
-        UtxoId {
-            txid: hashi_types::bitcoin_txid::BitcoinTxid::new(bytes),
-            vout: 0,
-        }
-    }
-
-    fn test_utxo_record(spent_epoch: Option<u64>) -> UtxoRecord {
-        UtxoRecord {
-            utxo: Utxo {
-                id: test_utxo_id(0),
-                amount: 1_000,
-                derivation_path: None,
-            },
-            produced_by: None,
-            spent_by: None,
-            spent_epoch,
-        }
-    }
-
-    fn utxo_pool(records: Vec<(UtxoId, UtxoRecord)>) -> UtxoPool {
-        UtxoPool {
-            utxo_records_id: Address::new([0u8; 32]),
-            utxo_records: records.into_iter().collect(),
-            spent_utxos_id: Address::new([0u8; 32]),
-            spent_utxos: BTreeMap::new(),
-        }
-    }
-
-    #[test]
-    fn remove_cleaned_drops_records_and_tombstones_them() {
-        let mut pool = utxo_pool(vec![
-            (test_utxo_id(1), test_utxo_record(Some(7))),
-            (test_utxo_id(2), test_utxo_record(None)),
-        ]);
-
-        pool.remove_cleaned(&[test_utxo_id(1)]);
-
-        assert!(!pool.utxo_records.contains_key(&test_utxo_id(1)));
-        assert!(pool.utxo_records.contains_key(&test_utxo_id(2)));
-        assert_eq!(pool.spent_utxos.get(&test_utxo_id(1)), Some(&7));
-    }
-
-    #[test]
-    fn remove_cleaned_is_idempotent_for_absent_records() {
-        let mut pool = utxo_pool(vec![(test_utxo_id(1), test_utxo_record(Some(3)))]);
-
-        pool.remove_cleaned(&[test_utxo_id(1)]);
-        pool.remove_cleaned(&[test_utxo_id(1), test_utxo_id(9)]);
-
-        assert!(pool.utxo_records.is_empty());
-        assert_eq!(pool.spent_utxos.len(), 1);
     }
 }
