@@ -925,3 +925,62 @@ The following capabilities are planned but not yet available.
 ### Cloud backup integration
 
 > **Coming soon:** Support for automatically uploading encrypted backups to cloud storage (for example, S3).
+
+---
+
+## 12. Publishing a release (Mysten)
+
+This section is for **Mysten release engineers**; operators can ignore it. A release is cut at a commit sha on `main` and ships on two channels: the container image (Artifact Registry for Mysten-managed deploys, Docker Hub for everyone else) and the deterministic binary (§1.3).
+
+### 12.1 Container image
+
+Dispatch `hashi-build-image.yml` in sui-operations at the release commit:
+
+```bash
+gh workflow run hashi-build-image.yml -R MystenLabs/sui-operations --ref main \
+  -f hashi_commit=<sha> \
+  -f push_to_dockerhub=true
+```
+
+A single run builds the image once and pushes both `us-central1-docker.pkg.dev/cryptic-bolt-398315/hashi/hashi:<sha>` and the public `mysten/hashi:<sha>`, and drops the raw binary at `https://storage.googleapis.com/mysten-hashi-binaries/<sha>/hashi` (public). Artifact Registry rejects anonymous pulls — Docker Hub is the operator-facing channel; bare-metal operators use the deterministic binary (§12.2), and the GCS drop is internal. Confirm the tag is live:
+
+```bash
+curl -s https://hub.docker.com/v2/repositories/mysten/hashi/tags/<sha> | jq -r .digest
+```
+
+### 12.2 Deterministic binary
+
+Dispatch `deterministic-build.yml` in this repo at the same commit; it builds `out/hashi` on two runner generations and fails on any hash mismatch. Publish the artifacts under the sui-releases convention:
+
+```bash
+gh workflow run deterministic-build.yml -R MystenLabs/hashi --ref main
+gh run download <run-id> -R MystenLabs/hashi \
+  -n hashi-ubuntu-latest-binary -n hashi-ubuntu-latest-sha256
+aws s3 cp hashi-ubuntu-latest-binary/hashi        s3://sui-releases/<sha>/hashi
+aws s3 cp hashi-ubuntu-latest-sha256/hashi.sha256 s3://sui-releases/<sha>/hashi.sha256
+```
+
+Operators download from `https://sui-releases.s3.us-east-1.amazonaws.com/<sha>/hashi` and can reproduce the checksum themselves (§1.3).
+
+### 12.3 Rolling the Mysten testnet nodes
+
+The six Mysten validators (`mysten1`–`mysten6`) are single-replica Deployments in namespace `hashi-testnet` on `workloads-secondary-use4`, managed by the `mysten/testnet` stack of `pulumi/services/hashi-server` in sui-operations. Each mounts a ReadWriteOnce PVC, which is why the Deployments use the `Recreate` strategy — never switch them back to `RollingUpdate`; a surge pod would double-mount the DB volume.
+
+Set `hashi-server:image.image_ref` to the release sha in `pulumi/services/hashi-server/Pulumi.testnet.yaml` (land it as a PR), then roll **one node at a time**:
+
+```bash
+cd pulumi/services/hashi-server && pulumi stack select mysten/testnet
+
+# For each N in 1..6, in order:
+pulumi up --yes --target "urn:pulumi:testnet::hashi-server::kubernetes:apps/v1:Deployment::mysten<N>"
+kubectl -n hashi-testnet rollout status deploy/mysten<N> --timeout=600s
+kubectl -n hashi-testnet logs deploy/mysten<N> | grep -m1 "Guardian bootstrap complete"
+```
+
+Proceed to the next node only after all three checks pass. If a node does not come back healthy, stop and investigate before touching the next — every additional node down eats into the committee's 2/3 signing margin (§9).
+
+Rollout gotchas:
+
+- **Serialize the updates.** Wait for each `pulumi up` to exit before starting the next; concurrent targeted ups conflict on the stack lock (409).
+- **Don't trust the pod label for readiness.** `kubectl wait --for=condition=Ready pod -l hashi-node=mysten<N>` also matches the still-terminating old pod.
+- **Unhealthy fleet, different gates.** Mid-incident (for example a reconfiguration stall, §9.3) no pod turns Ready, so `rollout status` never completes and pulumi's readiness await reports the Deployment as errored even though the image update applied. Gate on the pod reaching `Running` with no restarts plus the guardian bootstrap log line, and re-run the targeted `pulumi up` after recovery to reconcile state.
