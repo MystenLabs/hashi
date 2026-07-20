@@ -3819,6 +3819,32 @@ fn test_prepare_rotation_dealer_flow_survives_restart() {
 }
 
 #[test]
+fn test_prepare_rotation_dealer_flow_survives_same_process_retry() {
+    let mut rng = rand::thread_rng();
+    let rotation_setup = RotationTestSetup::new();
+    let (mut manager, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
+    manager.session_id = SessionId::new(
+        TEST_CHAIN_ID,
+        rotation_setup.setup.epoch(),
+        &ProtocolType::KeyRotation,
+    );
+
+    let flow1 = manager
+        .prepare_rotation_dealer_flow(&dkg_output, &mut rng)
+        .unwrap();
+
+    let flow2 = manager
+        .prepare_rotation_dealer_flow(&dkg_output, &mut rng)
+        .expect("same-process dealer retry must re-ack its own batch, not reject it");
+
+    assert_eq!(
+        compute_messages_hash(&flow1.request.messages),
+        compute_messages_hash(&flow2.request.messages),
+        "dealer batch must be identical across a same-process retry",
+    );
+}
+
+#[test]
 fn test_prepare_nonce_dealer_flow_survives_restart() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
@@ -6121,47 +6147,103 @@ fn test_try_sign_rotation_messages_all_or_nothing() {
 }
 
 #[test]
-fn test_try_sign_rotation_messages_rejects_already_processed_share_index() {
+fn test_try_sign_rotation_messages_re_acks_identical_re_deal() {
     let rotation_setup = RotationTestSetup::new();
-
-    // Create receiver (party 2 with weight=4)
     let (mut receiver_manager, receiver_dkg_output) =
         rotation_setup.create_receiver_with_completed_dkg(2);
-
-    // Create rotation dealer (party 0 with weight=3)
     let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(0);
     let rotation_dealer_addr = rotation_setup.setup.address(0);
 
-    // First call should succeed
+    let first = receiver_manager
+        .try_sign_rotation_messages(
+            &receiver_dkg_output,
+            rotation_dealer_addr,
+            &rotation_messages,
+        )
+        .expect("first call should succeed");
+
+    let second = receiver_manager
+        .try_sign_rotation_messages(
+            &receiver_dkg_output,
+            rotation_dealer_addr,
+            &rotation_messages,
+        )
+        .expect("identical re-deal should be re-acked, not rejected");
+
+    assert_eq!(
+        first.as_ref(),
+        second.as_ref(),
+        "re-ack must return the same signature",
+    );
+}
+
+#[test]
+fn test_try_sign_rotation_messages_rejects_differing_re_deal() {
+    let rotation_setup = RotationTestSetup::new();
+    let (mut receiver_manager, receiver_dkg_output) =
+        rotation_setup.create_receiver_with_completed_dkg(2);
+    let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(0);
+    let rotation_dealer_addr = rotation_setup.setup.address(0);
+
+    receiver_manager
+        .try_sign_rotation_messages(
+            &receiver_dkg_output,
+            rotation_dealer_addr,
+            &rotation_messages,
+        )
+        .expect("first call should succeed");
+
+    let (_, _, other_messages) = rotation_setup.create_rotation_dealer(1);
     let result = receiver_manager.try_sign_rotation_messages(
         &receiver_dkg_output,
         rotation_dealer_addr,
-        &rotation_messages,
-    );
-    assert!(result.is_ok(), "First call should succeed");
-
-    // Second call with same messages should fail (share indices already processed)
-    let result = receiver_manager.try_sign_rotation_messages(
-        &receiver_dkg_output,
-        rotation_dealer_addr,
-        &rotation_messages,
+        &other_messages,
     );
 
-    assert!(
-        result.is_err(),
-        "Should reject already-processed share indices"
-    );
-    let err = result.unwrap_err();
-    match err {
-        MpcError::InvalidMessage { reason, .. } => {
+    match result {
+        Err(MpcError::InvalidMessage { reason, .. }) => {
             assert!(
-                reason.contains("already processed"),
-                "Error should mention already processed: {}",
-                reason
+                reason.contains("differs from the previously acked batch"),
+                "unexpected reason: {reason}",
             );
         }
-        _ => panic!("Expected InvalidMessage error, got: {:?}", err),
+        other => panic!("expected InvalidMessage rejecting the differing batch, got: {other:?}"),
     }
+}
+
+#[test]
+fn test_try_sign_rotation_messages_re_acks_after_restart() {
+    let rotation_setup = RotationTestSetup::new();
+    let (mut receiver_manager, receiver_dkg_output) =
+        rotation_setup.create_receiver_with_completed_dkg(2);
+    let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(0);
+    let rotation_dealer_addr = rotation_setup.setup.address(0);
+
+    let first = receiver_manager
+        .try_sign_rotation_messages(
+            &receiver_dkg_output,
+            rotation_dealer_addr,
+            &rotation_messages,
+        )
+        .expect("first call should succeed");
+
+    // Simulate a restart
+    receiver_manager.dealer_outputs.clear();
+    receiver_manager.rotation_ack_signatures.clear();
+
+    let after_restart = receiver_manager
+        .try_sign_rotation_messages(
+            &receiver_dkg_output,
+            rotation_dealer_addr,
+            &rotation_messages,
+        )
+        .expect("re-ack after restart should succeed");
+
+    assert_eq!(
+        first.as_ref(),
+        after_restart.as_ref(),
+        "ack must be identical across a restart",
+    );
 }
 
 #[test]
