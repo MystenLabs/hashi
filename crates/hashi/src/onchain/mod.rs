@@ -383,21 +383,30 @@ impl OnchainState {
         self.0.checkpoint.send_replace(info);
     }
 
+    fn try_advance_checkpoint(&self, info: CheckpointInfo) -> bool {
+        self.0.checkpoint.send_if_modified(|current| {
+            if scrape_is_stale(info.height, current.height) {
+                return false;
+            }
+            *current = info;
+            true
+        })
+    }
+
     fn install_scraped_state(
         &self,
         checkpoint_info: CheckpointInfo,
         hashi: types::Hashi,
     ) -> Result<()> {
-        let floor = self.latest_checkpoint_height();
-        if scrape_is_stale(checkpoint_info.height, floor) {
+        if !self.try_advance_checkpoint(checkpoint_info) {
             anyhow::bail!(
                 "stale full-state rescrape: scrape at checkpoint {} is behind the \
-                 freshness floor {floor}",
+                 freshness floor {}",
                 checkpoint_info.height,
+                self.latest_checkpoint_height(),
             );
         }
         self.replace_hashi_state(hashi);
-        self.update_latest_checkpoint_info(checkpoint_info);
         Ok(())
     }
 
