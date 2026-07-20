@@ -15,10 +15,6 @@
 //! notifications) are returned as [`Effect`]s derived from state
 //! transitions; the caller owns acting on them.
 
-// Wired into the watcher in a follow-up PR; exercised by unit tests
-// until then.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 use anyhow::Context;
@@ -43,7 +39,12 @@ use super::types;
 /// payload into `sui_sdk_types` values.
 #[derive(Debug)]
 pub(super) struct TxView {
+    // The checkpoint position and timestamp are consumed at cutover
+    // (limiter advance and duration metrics use the transaction's
+    // checkpoint time); the shadow only applies `changes`.
+    #[allow(dead_code)]
     pub checkpoint: u64,
+    #[allow(dead_code)]
     pub timestamp_ms: u64,
     pub changes: Vec<TxChange>,
 }
@@ -60,15 +61,44 @@ pub(super) enum TxChange {
     Deleted { id: Address },
 }
 
+/// Objects keyed by (id, version), BCS-decoded from a proto
+/// `ObjectSet`. The set carries both input and output versions of the
+/// same id, so the version is part of the key; each changed object is
+/// paired with its output version.
+pub(super) type ObjectPool = HashMap<(Address, u64), Object>;
+
+/// Decode a proto `ObjectSet` (checkpoint-level or per-transaction)
+/// into an [`ObjectPool`]. Requires the `bcs` field in the read mask.
+pub(super) fn decode_object_pool(set: Option<&proto::ObjectSet>) -> anyhow::Result<ObjectPool> {
+    let mut objects = ObjectPool::new();
+    let Some(set) = set else {
+        return Ok(objects);
+    };
+    for obj in &set.objects {
+        let Some(bytes) = obj.bcs.as_ref().and_then(|b| b.value.as_ref()) else {
+            continue;
+        };
+        let object: Object =
+            bcs::from_bytes(bytes).context("failed to BCS-decode an object from an object set")?;
+        objects.insert((object.object_id(), object.version()), object);
+    }
+    Ok(objects)
+}
+
 impl TxView {
-    /// Decode a proto `ExecutedTransaction` into a `TxView`. Returns
-    /// `Ok(None)` for transactions that did not execute successfully —
-    /// their object changes are gas-only and carry no Hashi state.
-    ///
-    /// Requires a read mask covering `effects.status`,
-    /// `effects.changed_objects`, `checkpoint`, `timestamp`, and
-    /// `objects.objects.bcs`.
-    pub(super) fn from_proto(tx: &proto::ExecutedTransaction) -> anyhow::Result<Option<Self>> {
+    /// Decode a proto `ExecutedTransaction` into a `TxView`, sourcing
+    /// post-state objects from `pool` (a checkpoint-level pool merged
+    /// with any per-transaction set). Written objects are removed from
+    /// the pool — each (id, output version) belongs to exactly one
+    /// transaction. Returns `Ok(None)` for transactions that did not
+    /// execute successfully — their object changes are gas-only and
+    /// carry no Hashi state.
+    pub(super) fn from_pool(
+        tx: &proto::ExecutedTransaction,
+        pool: &mut ObjectPool,
+        checkpoint: u64,
+        timestamp_ms: u64,
+    ) -> anyhow::Result<Option<Self>> {
         let effects = tx
             .effects
             .as_ref()
@@ -80,21 +110,6 @@ impl TxView {
             .success()
         {
             return Ok(None);
-        }
-
-        // The object set carries both input and output versions of the
-        // same id, so index by (id, version) and pair each changed
-        // object with its output version.
-        let mut objects: HashMap<(Address, u64), Object> = HashMap::new();
-        if let Some(set) = tx.objects.as_ref() {
-            for obj in &set.objects {
-                let Some(bytes) = obj.bcs.as_ref().and_then(|b| b.value.as_ref()) else {
-                    continue;
-                };
-                let object: Object = bcs::from_bytes(bytes)
-                    .context("failed to BCS-decode an object from the transaction object set")?;
-                objects.insert((object.object_id(), object.version()), object);
-            }
         }
 
         let mut changes = Vec::new();
@@ -114,10 +129,10 @@ impl TxView {
                     let version = changed
                         .output_version
                         .context("written ChangedObject is missing output_version")?;
-                    let object = objects.remove(&(id, version)).with_context(|| {
+                    let object = pool.remove(&(id, version)).with_context(|| {
                         format!(
-                            "object {id} v{version} not in the transaction object set — \
-                             the read mask needs objects.objects.bcs"
+                            "object {id} v{version} not in the object set — the read \
+                             mask needs objects.objects.bcs"
                         )
                     })?;
                     changes.push(TxChange::Written(Box::new(object)));
@@ -130,18 +145,34 @@ impl TxView {
         }
 
         Ok(Some(Self {
-            checkpoint: tx.checkpoint(),
-            timestamp_ms: tx
-                .timestamp
-                .and_then(|t| proto_to_timestamp_ms(t).ok())
-                .unwrap_or(0),
+            checkpoint,
+            timestamp_ms,
             changes,
         }))
+    }
+
+    /// Decode a standalone proto `ExecutedTransaction` (as delivered by
+    /// the filtered transaction stream, once available) using its own
+    /// per-transaction object set and checkpoint/timestamp fields.
+    // Unused until the filtered SubscribeTransactions transport lands
+    // (server-side Sui v1.76); kept alongside from_pool so the swap is
+    // one call-site change.
+    #[allow(dead_code)]
+    pub(super) fn from_proto(tx: &proto::ExecutedTransaction) -> anyhow::Result<Option<Self>> {
+        let mut pool = decode_object_pool(tx.objects.as_ref())?;
+        let timestamp_ms = tx
+            .timestamp
+            .and_then(|t| proto_to_timestamp_ms(t).ok())
+            .unwrap_or(0);
+        Self::from_pool(tx, &mut pool, tx.checkpoint(), timestamp_ms)
     }
 }
 
 /// A side effect derived from a state transition during apply. The
 /// caller (the watcher) owns notifications, the limiter, and metrics.
+// The payloads are Debug-logged in shadow mode and consumed at cutover,
+// when effects replace the event handlers' side channels.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(super) enum Effect {
     /// A member's `MemberInfo` entry was written.

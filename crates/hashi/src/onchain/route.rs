@@ -13,10 +13,6 @@
 //! can retire the right mirror entry without needing the object's
 //! pre-deletion contents).
 
-// Wired into the watcher in a follow-up PR; exercised by unit tests
-// until then.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 
 use sui_sdk_types::Address;
@@ -56,31 +52,6 @@ pub(super) enum Slot {
     UserRequests,
     /// One per-user `Bag` stored as a `user_requests` value.
     UserRequestBag,
-}
-
-impl Slot {
-    /// Whether objects routed to this slot update the mirror.
-    pub(super) fn is_mirrored(self) -> bool {
-        match self {
-            Slot::Members
-            | Slot::Committees
-            | Slot::UtxoRecords
-            | Slot::SpentUtxos
-            | Slot::DepositRequests
-            | Slot::WithdrawalRequests
-            | Slot::WithdrawalTxns
-            | Slot::Treasury
-            | Slot::ProposalsActive
-            | Slot::ProposalsExecuted => true,
-            Slot::DepositProcessed
-            | Slot::WithdrawalProcessed
-            | Slot::ConfirmedTxns
-            | Slot::Tob
-            | Slot::TobCerts
-            | Slot::UserRequests
-            | Slot::UserRequestBag => false,
-        }
-    }
 }
 
 /// Container UIDs and DOF wrappers, resolved to slots.
