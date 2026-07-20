@@ -50,7 +50,10 @@ impl BridgeService for HttpService {
         &self,
         _request: Request<GetServiceInfoRequest>,
     ) -> Result<Response<GetServiceInfoResponse>, Status> {
-        Ok(Response::new(GetServiceInfoResponse::default()))
+        Ok(Response::new(GetServiceInfoResponse {
+            server: Some(self.inner.server_version.to_string()),
+            ..Default::default()
+        }))
     }
 
     /// Validate and sign a confirmation of a bitcoin deposit request.
