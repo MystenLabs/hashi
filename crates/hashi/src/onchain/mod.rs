@@ -103,6 +103,10 @@ struct Inner {
     /// Pinged by the watcher after a reconnect rescrape, so the reconcile
     /// loop can re-align the local limiter immediately.
     guardian_reconcile_notify: Arc<tokio::sync::Notify>,
+    /// Checkpoint floor for cleanup-GC scrapes: raised to the checkpoint of
+    /// each landed cleanup tx so the next scrape cannot be served state
+    /// from before it (the watcher cursor alone may lag that checkpoint).
+    utxo_scrape_floor: std::sync::atomic::AtomicU64,
     /// Cadence of the watcher's on-chain config poll.
     config_poll_interval: std::time::Duration,
 }
@@ -171,6 +175,7 @@ impl OnchainState {
             config_poll_interval: config_poll_interval.unwrap_or(std::time::Duration::from_millis(
                 crate::config::DEFAULT_ONCHAIN_CONFIG_POLL_INTERVAL_MS,
             )),
+            utxo_scrape_floor: std::sync::atomic::AtomicU64::new(0),
         }
         .pipe(Arc::new)
         .pipe(Self);
@@ -233,6 +238,15 @@ impl OnchainState {
     /// in a lagging fullnode) errors out so the caller backs off and
     /// retries rather than paying to re-clean records a fresh page would
     /// have shown as already gone.
+    /// Raise the cleanup-scrape freshness floor to `checkpoint` (monotonic).
+    /// Called after a cleanup tx lands so the next scrape cannot be served
+    /// pre-cleanup state and re-pay for records the tx already removed.
+    pub(crate) fn raise_utxo_scrape_floor(&self, checkpoint: u64) {
+        self.0
+            .utxo_scrape_floor
+            .fetch_max(checkpoint, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub(crate) async fn scrape_utxo_records_snapshot(
         &self,
     ) -> Result<BTreeMap<types::UtxoId, types::UtxoRecord>> {
@@ -240,11 +254,15 @@ impl OnchainState {
         let (scrape_height, bitcoin_state) =
             fetch_bitcoin_state(client.clone(), self.hashi_id(), self.package_id_original())
                 .await?;
-        let watcher_height = self.latest_checkpoint_height();
-        if scrape_height < watcher_height {
+        let floor = self
+            .0
+            .utxo_scrape_floor
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .max(self.latest_checkpoint_height());
+        if scrape_height < floor {
             anyhow::bail!(
                 "stale UTXO pool read: scrape at checkpoint {scrape_height} is behind the \
-                 watcher's cursor {watcher_height}"
+                 freshness floor {floor}"
             );
         }
 
@@ -252,17 +270,24 @@ impl OnchainState {
         let mut records = BTreeMap::new();
         let mut page_token: Option<bytes::Bytes> = None;
         // Monotonic floor over every height observed in this scrape,
-        // seeded by the wrapper read: heights must never move backward
-        // across responses, or a page could miss a cleanup that an
-        // earlier response's serving node had already seen.
+        // seeded by the wrapper read (already >= the persistent floor):
+        // heights must never move backward across responses, or a page
+        // could miss a cleanup that an earlier response's serving node had
+        // already seen.
         let mut min_height = scrape_height;
         loop {
             let mut request = ListDynamicFieldsRequest::default()
                 .with_parent(utxo_records_id)
                 .with_page_size(SCRAPE_PAGE_SIZE)
-                .with_read_mask(FieldMask::from_paths([DynamicField::path_builder()
-                    .value()
-                    .finish()]));
+                .with_read_mask(FieldMask::from_paths([
+                    // `name` is load-bearing even though we only read
+                    // `value`: the fullnode's `should_load_field` does not
+                    // recognize a value-only mask and would return fields
+                    // with `value` unset (main's scrape_utxo_records
+                    // requests both for the same reason).
+                    DynamicField::path_builder().name().finish(),
+                    DynamicField::path_builder().value().finish(),
+                ]));
             if let Some(token) = page_token.take() {
                 request = request.with_page_token(token);
             }
@@ -281,8 +306,8 @@ impl OnchainState {
             min_height = min_height.max(self.latest_checkpoint_height());
             if page_height < min_height {
                 anyhow::bail!(
-                    "stale UTXO pool read: page at checkpoint {page_height} is behind \
-                     checkpoint {min_height} already observed by this scrape"
+                    "stale UTXO pool read: page at checkpoint {page_height} is behind the \
+                     freshness floor {min_height}"
                 );
             }
             min_height = page_height;

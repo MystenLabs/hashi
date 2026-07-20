@@ -169,10 +169,11 @@ impl LeaderService {
     }
 
     /// If a cleanup scan is due and no task is in-flight, spawn a background
-    /// task that refreshes the UTXO-pool mirror from chain, scans it for
-    /// spent-but-uncleaned records, and cleans them. The scan is armed at
-    /// boot (crash-between-confirm-and-cleanup recovery), whenever a
-    /// withdrawal confirms on Sui, and after a task that did work or failed.
+    /// task that scrapes a task-local snapshot of the on-chain UTXO records,
+    /// scans it for spent-but-uncleaned entries, and cleans them. The scan
+    /// is armed at boot (crash-between-confirm-and-cleanup recovery),
+    /// whenever a withdrawal confirms on Sui, and after a task that did
+    /// work or failed.
     pub(super) fn check_cleanup_spent_utxos(&mut self, checkpoint_timestamp_ms: u64) {
         if self.utxo_cleanup_gc_task.is_some() {
             debug!("UTXO cleanup GC task already in-flight, skipping");
@@ -217,8 +218,11 @@ impl LeaderService {
             utxo_count = utxo_ids.len(),
             "Cleaning up spent UTXO(s) pending cleanup",
         );
-        let mut executor = SuiTxExecutor::from_hashi(inner)?;
-        executor.execute_cleanup_spent_utxos(&utxo_ids).await?;
+        let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
+        let landed_at = executor.execute_cleanup_spent_utxos(&utxo_ids).await?;
+        // Floor the next scrape past this cleanup's checkpoint so a lagging
+        // read can't re-show (and re-pay for) the records it just removed.
+        inner.onchain_state().raise_utxo_scrape_floor(landed_at);
         info!(
             utxo_count = utxo_ids.len(),
             "Successfully cleaned up spent UTXOs",
@@ -340,8 +344,8 @@ impl LeaderService {
 /// Capped at [`MAX_UTXO_CLEANUPS_PER_GC`]; the remainder is picked up by a
 /// later scan.
 ///
-/// This is the pure-data core of [`LeaderService::discover_orphaned_utxo_cleanups`],
-/// extracted so it can be unit-tested without constructing a full `LeaderService`.
+/// Pure-data core of the cleanup task's scan over its scraped snapshot,
+/// extracted so it can be unit-tested without RPC or a full `LeaderService`.
 fn find_spent_utxos_pending_cleanup(utxo_records: &BTreeMap<UtxoId, UtxoRecord>) -> Vec<UtxoId> {
     utxo_records
         .iter()
