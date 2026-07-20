@@ -245,13 +245,6 @@ impl LogRecord {
         self,
         pub_key: &GuardianPubKey,
     ) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
-        self.verify_preserving_envelope(pub_key)?;
-
-        Ok((self.session_id, self.timestamp_ms, self.message))
-    }
-
-    /// Verify this signed record without consuming its S3 envelope.
-    pub fn verify_preserving_envelope(&self, pub_key: &GuardianPubKey) -> GuardianResult<()> {
         if self.message.is_allowed_unsigned() {
             return Err(InvalidInputs(
                 "expected signed log record but message is unsigned".into(),
@@ -265,7 +258,8 @@ impl LogRecord {
             .as_ref()
             .ok_or_else(|| InvalidInputs("missing log signature".into()))?;
         verify_intent(&self.signing_payload(), timestamp_ms, signature, pub_key)?;
-        Ok(())
+
+        Ok((self.session_id, timestamp_ms, self.message))
     }
 
     /// Validates the unsigned OI-attestation record's envelope and canonical
@@ -393,18 +387,6 @@ mod tests {
         );
         let object_key = record.object_key().to_string();
         (object_key, record, signing_key)
-    }
-
-    #[test]
-    fn verify_preserving_envelope_retains_signed_record() {
-        let (_, record, signing_key) = signed_heartbeat(1_700_000_000_000);
-        let before = serde_json::to_value(&record).unwrap();
-
-        record
-            .verify_preserving_envelope(&signing_key.verification_key())
-            .unwrap();
-
-        assert_eq!(serde_json::to_value(&record).unwrap(), before);
     }
 
     fn assert_writer_key_is_stable_and_verifies(log: LogRecord, signing_key: &GuardianSignKeyPair) {

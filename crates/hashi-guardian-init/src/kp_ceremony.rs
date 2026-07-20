@@ -25,7 +25,7 @@ use crate::kp_roster::verify_encrypted_share_recipients;
 /// reader cache, and both the `ceremony/` audit entry and `kp-shares/` recovery
 /// entry are verified under it. Each step is logged.
 ///
-/// Security: the signed encrypted-share record is saved to the requested path.
+/// Security: the ceremony state containing the encrypted shares is saved to the requested path.
 /// The selected ciphertext is piped into `gpg --decrypt` over stdin and the
 /// plaintext streams back over stdout without being written to disk.
 pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
@@ -91,8 +91,8 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
         phase = "ceremony scrape",
         "scraping latest ceremony/ + kp-shares/ logs (attestation-anchored)",
     );
-    let (state, encrypted_shares_record) = reader
-        .read_latest_ceremony_state_with_kp_share_record(BuildPolicy::Current)
+    let state = reader
+        .read_latest_ceremony_state(BuildPolicy::Current)
         .await?
         .context("no ceremony logs found in guardian S3 bucket")?;
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
@@ -189,22 +189,20 @@ pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
         "decrypted share matches its commitment",
     );
 
-    // 6. Save the complete signed kp-shares S3 record only after every
-    //    verification step succeeds.
-    let encrypted_shares_bytes = serde_json::to_vec(&encrypted_shares_record)
-        .context("serialize signed encrypted-shares record")?;
-    std::fs::write(encrypted_shares_path, encrypted_shares_bytes).with_context(|| {
+    // 6. Save the ceremony state only after every verification step succeeds.
+    let ceremony_state_bytes =
+        serde_json::to_vec(&state).context("serialize ceremony state with encrypted shares")?;
+    std::fs::write(encrypted_shares_path, ceremony_state_bytes).with_context(|| {
         format!(
-            "write encrypted-shares record to {}",
+            "write ceremony state with encrypted shares to {}",
             encrypted_shares_path.display()
         )
     })?;
     info!(
         phase = "share save",
         path = %encrypted_shares_path.display(),
-        object_key = %encrypted_shares_record.object_key,
         share_count = state.encrypted_shares.len(),
-        "saved signed encrypted-shares record",
+        "saved ceremony state with encrypted shares",
     );
 
     info!(

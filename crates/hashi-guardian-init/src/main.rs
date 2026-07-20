@@ -71,7 +71,7 @@ enum KeyProvisionerCommand {
         /// Path to key-provisioner ceremony YAML config file.
         #[arg(long)]
         config: PathBuf,
-        /// Path at which to save the signed encrypted-shares S3 record.
+        /// Path at which to save the ceremony state containing the encrypted shares.
         #[arg(long)]
         encrypted_shares_path: PathBuf,
     },

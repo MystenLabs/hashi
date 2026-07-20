@@ -64,9 +64,8 @@ from S3, verifies each record against its writing session's attested signing
 pubkey and the expected `n`/`t`, confirms every encrypted share is addressed
 only to its labeled KP cert, finds the share labeled for this KP's cert
 fingerprint, decrypts via the yubikey (`gpg --decrypt`), verifies the decrypted
-share against its commitment, and then saves the complete signed `kp-shares/`
-S3 record. The saved record includes every KP's encrypted share and the enclave
-signature.
+share against its commitment, and then saves the verified ceremony state. The
+saved state includes every KP's encrypted share and the public ceremony data.
 
 The operator `run` command verifies live `/info` signed info and Nitro
 attestation against the configured current build before trusting the session
@@ -74,9 +73,9 @@ signing key. The KP `verify` command anchors trust to the S3 `init/`
 attestation log before verifying the ceremony and share logs under that
 attested session key.
 
-Only the signed record containing the **encrypted shares** is written to disk.
-The selected ciphertext is piped to gpg over stdin, and the decrypted scalar
-lives only in memory.
+Only the ceremony state containing the **encrypted shares** and public ceremony
+data is written to disk. The selected ciphertext is piped to gpg over stdin,
+and the decrypted scalar lives only in memory.
 
 ```bash
 cargo run -p hashi-guardian-init -- key-provisioner ceremony --config guardian-init.sample.yaml --encrypted-shares-path /secure/path/kp-shares.json
