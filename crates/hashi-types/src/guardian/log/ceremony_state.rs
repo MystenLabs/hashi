@@ -11,9 +11,10 @@ use crate::guardian::GuardianResult;
 use crate::guardian::KPEncryptedShares;
 use crate::guardian::SecretSharingInstance;
 use crate::guardian::SetupNewKeyResponse;
+use serde::Serialize;
 
 /// The current ceremony result together with its latest encrypted KP share state.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CeremonyState {
     pub secret_sharing_instance: SecretSharingInstance,
     pub btc_master_pubkey: BitcoinPubkey,
@@ -108,6 +109,20 @@ impl From<SetupNewKeyResponse> for CeremonyState {
 mod tests {
     use super::*;
     use crate::guardian::GuardianSigned;
+
+    #[test]
+    fn serialization_includes_all_encrypted_shares() {
+        let response = GuardianSigned::<SetupNewKeyResponse>::mock_for_testing().data;
+        let expected_share_count = response.encrypted_shares.len();
+        let state = CeremonyState::from(response);
+
+        let json = serde_json::to_value(&state).unwrap();
+
+        assert_eq!(
+            json["encrypted_shares"].as_array().unwrap().len(),
+            expected_share_count
+        );
+    }
 
     #[test]
     fn new_rejects_mismatched_sharing_seq() {

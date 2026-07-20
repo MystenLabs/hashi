@@ -71,6 +71,9 @@ enum KeyProvisionerCommand {
         /// Path to key-provisioner ceremony YAML config file.
         #[arg(long)]
         config: PathBuf,
+        /// Path at which to save the ceremony state containing the encrypted shares.
+        #[arg(long)]
+        encrypted_shares_path: PathBuf,
     },
     /// Run a key provisioner's init checks and submit its share to the relay.
     Provision {
@@ -113,9 +116,12 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Command::KeyProvisioner { command } => match command {
-            KeyProvisionerCommand::Ceremony { config } => {
+            KeyProvisionerCommand::Ceremony {
+                config,
+                encrypted_shares_path,
+            } => {
                 let cfg = config::Config::load_yaml(&config)?;
-                kp_ceremony::run(cfg).await?;
+                kp_ceremony::run(cfg, &encrypted_shares_path).await?;
             }
             KeyProvisionerCommand::Provision { config } => {
                 let cfg = config::Config::load_yaml(&config)?;
@@ -127,4 +133,49 @@ async fn main() -> anyhow::Result<()> {
         },
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_provisioner_ceremony_requires_encrypted_shares_path() {
+        let result = Cli::try_parse_from([
+            "hashi-guardian-init",
+            "key-provisioner",
+            "ceremony",
+            "--config",
+            "config.yaml",
+        ]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn key_provisioner_ceremony_accepts_encrypted_shares_path() {
+        let cli = Cli::try_parse_from([
+            "hashi-guardian-init",
+            "key-provisioner",
+            "ceremony",
+            "--config",
+            "config.yaml",
+            "--encrypted-shares-path",
+            "kp-shares.json",
+        ])
+        .unwrap();
+
+        let Command::KeyProvisioner {
+            command:
+                KeyProvisionerCommand::Ceremony {
+                    config,
+                    encrypted_shares_path,
+                },
+        } = cli.command
+        else {
+            panic!("expected key-provisioner ceremony command");
+        };
+        assert_eq!(config, PathBuf::from("config.yaml"));
+        assert_eq!(encrypted_shares_path, PathBuf::from("kp-shares.json"));
+    }
 }
