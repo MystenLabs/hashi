@@ -130,9 +130,17 @@ impl TxView {
                         .output_version
                         .context("written ChangedObject is missing output_version")?;
                     let object = pool.remove(&(id, version)).with_context(|| {
+                        let mut available: Vec<String> = pool
+                            .keys()
+                            .map(|(id, version)| format!("{id}@v{version}"))
+                            .collect();
+                        available.sort();
+                        available.truncate(8);
                         format!(
-                            "object {id} v{version} not in the object set — the read \
-                             mask needs objects.objects.bcs"
+                            "object {id} v{version} not in the object set ({} present: \
+                             [{}]) — the read mask needs objects.objects.bcs",
+                            pool.len(),
+                            available.join(", ")
                         )
                     })?;
                     changes.push(TxChange::Written(Box::new(object)));
@@ -353,6 +361,11 @@ fn apply_root(
             package: new.package,
         });
     }
+    // The cap always points at the latest package version; keep the
+    // hashi-package set (the mirror-gap tripwire's scope) current.
+    if let Some(cap) = &new_config.upgrade_cap {
+        routing.register_package(cap.package);
+    }
     hashi.config = new_config;
     hashi.num_consumed_presigs = num_consumed_presigs;
 
@@ -408,15 +421,18 @@ fn apply_wrapper(
             .push((id, "DOF wrapper not object-owned".into()));
         return;
     };
+    // Our container set is closed and known a priori (root and
+    // BitcoinState inner UIDs), so a wrapper under an unknown container
+    // belongs to some foreign object a root-touching transaction also
+    // mutated. Don't register or track it.
+    if routing.slot_of_container(container).is_none() {
+        tracing::debug!(wrapper = %id, container = %container,
+            "ignoring a DOF wrapper under a foreign container");
+        return;
+    }
     // Registration is idempotent, so it runs even for stale replayed
     // writes — the mapping must exist for value routing regardless.
     routing.register_wrapper(id, *container);
-    if routing.slot_of_container(container).is_none() {
-        out.unrouted.push((
-            id,
-            format!("DOF wrapper under unknown container {container}"),
-        ));
-    }
     if index.is_stale_write(&id, obj.version()) {
         return;
     }
@@ -453,11 +469,24 @@ fn apply_write(
             // the id to be.
             None => index.get(&id).and_then(|e| slot_for_kind(&e.kind)),
         },
-        // The only shared object is the root, handled in pass 1.
-        _ => None,
+        // The only hashi shared object is the root, handled in pass 1;
+        // other shared objects a root-touching transaction mutates
+        // (e.g. the system CoinRegistry) are foreign state.
+        _ => {
+            tracing::debug!(object = %id, "ignoring a foreign shared object");
+            return;
+        }
     };
     let Some(slot) = slot else {
-        out.unrouted.push((id, struct_.object_type().to_string()));
+        // An unroutable object is a mirror gap only when it carries a
+        // hashi-package type; foreign objects under foreign owners are
+        // expected companions of root-touching transactions.
+        if routing.is_hashi_package(struct_.object_type().address()) {
+            out.unrouted.push((id, struct_.object_type().to_string()));
+        } else {
+            tracing::debug!(object = %id, r#type = %struct_.object_type(),
+                "ignoring a foreign object-owned write");
+        }
         return;
     };
 
@@ -887,6 +916,7 @@ mod tests {
             let mut routing = RoutingTable::new(hashi_id(), bs_field_id());
             routing.set_root_containers(&move_root(0, None, None));
             routing.set_bitcoin_state_containers(&move_bitcoin_state());
+            routing.register_package(addr(PACKAGE));
 
             let hashi = types::Hashi {
                 id: hashi_id(),
@@ -1464,6 +1494,40 @@ mod tests {
             addr(0x70).as_bytes().to_vec(),
         ))]));
         assert_eq!(out.unrouted.len(), 1);
+    }
+
+    #[test]
+    fn foreign_objects_do_not_trip_the_unrouted_counter() {
+        let mut fixture = Fixture::new();
+        // A foreign-typed object under a foreign owner (e.g. a system
+        // registry's child), as `finish_publish` legitimately produces.
+        let out = fixture.apply(&tx(vec![written(obj(
+            tag(Address::TWO, "coin_registry", "Currency", vec![TypeTag::U64]),
+            1,
+            Owner::Object(addr(0x98)),
+            addr(0x72).as_bytes().to_vec(),
+        ))]));
+        assert!(out.unrouted.is_empty());
+
+        // A foreign shared object (the registry itself).
+        let out = fixture.apply(&tx(vec![written(obj(
+            tag(Address::TWO, "coin_registry", "CoinRegistry", vec![]),
+            1,
+            Owner::Shared(1),
+            addr(0x73).as_bytes().to_vec(),
+        ))]));
+        assert!(out.unrouted.is_empty());
+
+        // A foreign DOF wrapper under a foreign container is neither
+        // registered nor tracked.
+        let out = fixture.apply(&tx(vec![written(wrapper_object(
+            addr(0x74),
+            addr(0x75),
+            1,
+            addr(0x99),
+        ))]));
+        assert!(out.unrouted.is_empty());
+        assert_eq!(fixture.index.len(), 0);
     }
 
     #[test]

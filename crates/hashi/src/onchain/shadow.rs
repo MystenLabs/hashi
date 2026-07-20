@@ -4,18 +4,28 @@
 //! Shadow object mirror — the lossless watcher running alongside the
 //! event-driven one, not yet load-bearing.
 //!
-//! The shadow consumes the checkpoint subscription with the
-//! checkpoint-level object set and applies every successful
-//! transaction's changed objects through [`super::apply`], so mirror
-//! correctness does not depend on events. Gap detection is checkpoint
-//! sequence continuity; recovery from any break is a re-bootstrap from
-//! scrape (the same guarantee as the legacy reconnect rescrape).
+//! The transport is checkpoint-granular and filtered:
+//! `SubscribeCheckpoints` with an `affected_object == hashi root`
+//! filter delivers full payloads (including the checkpoint-level object
+//! set) only for checkpoints containing a Hashi-touching transaction —
+//! every other checkpoint arrives as a cursor-only progress frame, so
+//! liveness and coverage remain continuously observable.
+//! `ListCheckpoints` with the same filter replays any range the stream
+//! missed, making reconnects gap-free without rescraping. Within a
+//! matching checkpoint, only transactions whose effects touch the root
+//! are applied (the Move audit established that every state-mutating
+//! call takes `&mut Hashi`); everything else in the checkpoint is
+//! skipped without touching the unrouted tripwire.
 //!
-//! Once the filtered `SubscribeTransactions` / `ListTransactions` APIs
-//! are live server-side (Sui v1.76), this transport switches to the
-//! filtered stream with watermark-cursor replay and the re-bootstrap
-//! demotes to a fallback; the apply/route layers are unchanged by that
-//! swap.
+//! Per-transaction object sets are not populated by the server as of
+//! Sui v1.76 (`render_executed_transaction` builds the set internally
+//! for effects rendering but never emits it), so the finer-grained
+//! `SubscribeTransactions`/`ListTransactions` transport is not usable
+//! yet; `TxView::from_proto` stays staged for it. On pre-1.76 servers
+//! the subscription filter field is ignored (the stream is simply
+//! unfiltered — same protocol, more traffic) and the replay API is
+//! unimplemented, in which case a break falls back to re-bootstrapping
+//! from a scrape.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -28,8 +38,13 @@ use sui_rpc::Client;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::proto_to_timestamp_ms;
+use sui_rpc::proto::sui::rpc::v2 as proto;
 use sui_rpc::proto::sui::rpc::v2::Checkpoint;
+use sui_rpc::proto::sui::rpc::v2::ListCheckpointsRequest;
+use sui_rpc::proto::sui::rpc::v2::QueryEndReason;
 use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
+use sui_rpc::proto::sui::rpc::v2::TransactionFilter;
+use sui_rpc::proto::sui::rpc::v2::filter::transaction as tx_filter;
 
 use crate::metrics::Metrics;
 
@@ -38,11 +53,22 @@ use super::apply;
 use super::route;
 use super::types;
 
-/// Reconnect if the checkpoint stream goes silent this long; same
-/// rationale as the legacy watcher's stall timeout.
+/// Reconnect if the checkpoint stream goes silent this long. Progress
+/// frames arrive for every checkpoint even when nothing matches the
+/// filter, so silence genuinely means a broken stream.
 const STREAM_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 const RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Read mask for the checkpoint stream and the replay list.
+const CHECKPOINT_READ_MASK: [&str; 6] = [
+    "sequence_number",
+    "summary.timestamp",
+    "transactions.digest",
+    "transactions.effects.status",
+    "transactions.effects.changed_objects",
+    "objects.objects.bcs",
+];
 
 /// The object-driven mirror plus the bookkeeping the transport needs.
 pub(super) struct ShadowMirror {
@@ -65,7 +91,7 @@ pub(super) async fn run(
 ) {
     loop {
         if let Err(e) = run_once(&sui_rpc_url, &state, &shadow, metrics.as_deref()).await {
-            tracing::warn!("shadow watcher stream ended: {e:#}; re-bootstrapping");
+            tracing::warn!("shadow watcher stream ended: {e:#}; reconnecting");
         }
         tokio::time::sleep(RECONNECT_DELAY).await;
     }
@@ -84,43 +110,101 @@ async fn run_once(
         client = client.with_max_decoding_message_size(limit);
     }
 
-    let read_mask = FieldMask::from_paths([
-        "sequence_number",
-        "summary.timestamp",
-        "transactions.digest",
-        "transactions.effects.status",
-        "transactions.effects.changed_objects",
-        "objects.objects.bcs",
-    ]);
+    let filter = TransactionFilter::matching(tx_filter::affected_object(state.hashi_id()));
+    let mut subscribe_request = SubscribeCheckpointsRequest::default()
+        .with_read_mask(FieldMask::from_paths(CHECKPOINT_READ_MASK));
+    subscribe_request.filter = Some(filter.clone());
     let mut subscription = client
         .subscription_client()
-        .subscribe_checkpoints(SubscribeCheckpointsRequest::default().with_read_mask(read_mask))
-        .await?
+        .subscribe_checkpoints(subscribe_request)
+        .await
+        .context("subscribe_checkpoints failed")?
         .into_inner();
 
-    // Read the first frame before scraping so the scrape's freshness
-    // can be checked against the subscription's start: a scrape page
-    // served behind the first delivered checkpoint could hide writes
-    // that the buffered frames don't cover either.
+    // The first frame bounds the replay: everything before its cursor
+    // comes from the list, everything from it onward from this stream.
     let first = tokio::time::timeout(STREAM_STALL_TIMEOUT, subscription.next())
         .await
         .context("timed out waiting for the first checkpoint frame")?
         .context("checkpoint stream closed before the first frame")??;
     let first_cursor = first.cursor();
 
+    ensure_bootstrapped(&client, state, shadow).await?;
+
+    match replay(&mut client, &filter, shadow, metrics, first_cursor).await {
+        Ok(()) => {}
+        Err(e) if is_unimplemented(&e) => {
+            // Pre-1.76 server: no filtered list replay. The scrape must
+            // then be provably fresh relative to the stream start, or
+            // the mirror is rebuilt.
+            let floor = watermark(shadow)?;
+            if floor < first_cursor {
+                *shadow.lock().unwrap() = None;
+                anyhow::bail!(
+                    "no replay API and the scrape floor {floor} is behind the stream \
+                     start {first_cursor}; re-bootstrapping"
+                );
+            }
+            tracing::debug!(
+                "checkpoint replay unavailable (pre-1.76 server); relying on scrape freshness"
+            );
+        }
+        Err(e) => {
+            // A failed replay leaves an unknowable gap; rebuild.
+            *shadow.lock().unwrap() = None;
+            return Err(e).context("replay failed; shadow mirror reset for re-bootstrap");
+        }
+    }
+
+    tracing::info!(
+        first_cursor,
+        "shadow mirror caught up; consuming the filtered checkpoint stream"
+    );
+
+    handle_frame(shadow, first.checkpoint.as_ref(), first_cursor, metrics)?;
+    let mut last_cursor = first_cursor;
+    loop {
+        let item = tokio::time::timeout(STREAM_STALL_TIMEOUT, subscription.next())
+            .await
+            .context("checkpoint stream stalled")?;
+        let response = item.context("checkpoint stream closed")??;
+        let cursor = response.cursor();
+        // gRPC streams deliver in order without loss, so a cursor jump
+        // means the skipped checkpoints matched nothing; only a
+        // backward cursor indicates a broken server.
+        anyhow::ensure!(
+            cursor > last_cursor,
+            "checkpoint cursor moved backward: {cursor} after {last_cursor}"
+        );
+        handle_frame(shadow, response.checkpoint.as_ref(), cursor, metrics)?;
+        last_cursor = cursor;
+    }
+}
+
+/// True when the error chain bottoms out in a gRPC `Unimplemented`
+/// status — the server predates the filtered list APIs.
+fn is_unimplemented(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<tonic::Status>())
+        .any(|status| status.code() == tonic::Code::Unimplemented)
+}
+
+/// Bootstrap the mirror from a scrape if it isn't populated yet.
+async fn ensure_bootstrapped(
+    client: &Client,
+    state: &OnchainState,
+    shadow: &SharedShadow,
+) -> Result<()> {
+    if shadow.lock().unwrap().is_some() {
+        return Ok(());
+    }
     let (_, hashi, seed) = super::scrape_hashi(
         client.clone(),
         state.hashi_id(),
         state.package_id_original(),
     )
     .await?;
-    if seed.floor < first_cursor {
-        anyhow::bail!(
-            "scrape floor {} is behind the subscription start {first_cursor}; \
-             a lagging fullnode served part of the scrape — retrying",
-            seed.floor
-        );
-    }
     let mirror = ShadowMirror {
         hashi,
         routing: seed.routing,
@@ -133,30 +217,126 @@ async fn run_once(
         "shadow mirror bootstrapped from scrape"
     );
     *shadow.lock().unwrap() = Some(mirror);
+    Ok(())
+}
 
-    // The buffered first frame is older than the scrape; version guards
-    // make re-applying it a no-op where the scrape already caught up.
-    apply_checkpoint_frame(shadow, first.checkpoint.as_ref(), first_cursor, metrics)?;
-    let mut next_expected = first_cursor + 1;
+fn watermark(shadow: &SharedShadow) -> Result<u64> {
+    shadow
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|mirror| mirror.watermark_checkpoint)
+        .ok_or_else(|| anyhow!("shadow mirror missing"))
+}
 
+/// Replay matching checkpoints from the mirror's watermark until
+/// coverage reaches `target` (exclusive) — the live stream's first
+/// cursor.
+async fn replay(
+    client: &mut Client,
+    filter: &TransactionFilter,
+    shadow: &SharedShadow,
+    metrics: Option<&Metrics>,
+    target: u64,
+) -> Result<()> {
     loop {
-        let item = tokio::time::timeout(STREAM_STALL_TIMEOUT, subscription.next())
-            .await
-            .context("checkpoint stream stalled")?;
-        let response = item.context("checkpoint stream closed")??;
-        let cursor = response.cursor();
-        if cursor != next_expected {
-            anyhow::bail!(
-                "checkpoint stream gap: expected {next_expected}, got {cursor}; \
-                 the mirror can no longer be lossless without a replay"
-            );
+        let from = watermark(shadow)?;
+        if from + 1 >= target {
+            return Ok(());
         }
-        apply_checkpoint_frame(shadow, response.checkpoint.as_ref(), cursor, metrics)?;
-        next_expected = cursor + 1;
+        let mut request = ListCheckpointsRequest::default();
+        request.read_mask = Some(FieldMask::from_paths(CHECKPOINT_READ_MASK));
+        // Start at the watermark itself: re-covering the boundary
+        // checkpoint is idempotent, and the u64 bound avoids carrying
+        // an opaque cursor across reconnects.
+        request.start_checkpoint = Some(from);
+        request.end_checkpoint = Some(target);
+        request.filter = Some(filter.clone());
+        let mut stream = client
+            .ledger_client()
+            .list_checkpoints(request)
+            .await
+            .context("list_checkpoints failed")?
+            .into_inner();
+
+        let mut end_reason = None;
+        while let Some(item) = stream.next().await {
+            let response = item.context("replay stream errored")?;
+            if let Some(checkpoint) = response.checkpoint.as_ref() {
+                let cursor = checkpoint.sequence_number();
+                apply_checkpoint_frame(shadow, Some(checkpoint), cursor, metrics)?;
+            }
+            if let Some(watermark) = response.watermark.as_ref()
+                && let Some(covered) = watermark.checkpoint
+            {
+                advance_watermark(shadow, covered, metrics);
+            }
+            if let Some(end) = response.end.as_ref() {
+                end_reason = end.reason.and_then(|r| QueryEndReason::try_from(r).ok());
+            }
+        }
+        let reached = watermark(shadow)?;
+        match end_reason {
+            // The requested bound was reached, or the indexed tip
+            // already covers the target.
+            Some(QueryEndReason::CheckpointBound) => return Ok(()),
+            Some(QueryEndReason::LedgerTip) if reached + 1 >= target => return Ok(()),
+            Some(QueryEndReason::LedgerTip) => {
+                // The list index trails the live stream; give it a beat.
+                tracing::debug!(reached, target, "replay at indexed tip but short of target");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            // Item or scan limits: resume from the advanced watermark.
+            Some(_) => {}
+            None => anyhow::bail!("replay stream ended without a QueryEnd frame"),
+        }
     }
 }
 
-/// Apply one checkpoint's transactions to the shadow mirror.
+/// Handle one subscription frame: a payload checkpoint is applied, a
+/// cursor-only progress frame just advances coverage (nothing in that
+/// checkpoint matched the filter).
+fn handle_frame(
+    shadow: &SharedShadow,
+    checkpoint: Option<&Checkpoint>,
+    cursor: u64,
+    metrics: Option<&Metrics>,
+) -> Result<()> {
+    match checkpoint {
+        Some(checkpoint) => apply_checkpoint_frame(shadow, Some(checkpoint), cursor, metrics),
+        None => {
+            advance_watermark(shadow, cursor, metrics);
+            Ok(())
+        }
+    }
+}
+
+fn advance_watermark(shadow: &SharedShadow, covered: u64, metrics: Option<&Metrics>) {
+    let mut guard = shadow.lock().unwrap();
+    let Some(mirror) = guard.as_mut() else {
+        return;
+    };
+    mirror.watermark_checkpoint = mirror.watermark_checkpoint.max(covered);
+    if let Some(metrics) = metrics {
+        metrics
+            .shadow_watermark_checkpoint
+            .set(mirror.watermark_checkpoint as i64);
+    }
+}
+
+/// True when the transaction's effects include a change to the Hashi
+/// root — the sound and complete signal for "this transaction mutated
+/// bridge state" (every mutating Move entry point takes `&mut Hashi`).
+fn touches_root(tx: &proto::ExecutedTransaction, root: &str) -> bool {
+    tx.effects.as_ref().is_some_and(|effects| {
+        effects
+            .changed_objects
+            .iter()
+            .any(|c| c.object_id() == root)
+    })
+}
+
+/// Apply one checkpoint's Hashi-touching transactions to the mirror.
 fn apply_checkpoint_frame(
     shadow: &SharedShadow,
     checkpoint: Option<&Checkpoint>,
@@ -177,8 +357,15 @@ fn apply_checkpoint_frame(
     let mirror = guard
         .as_mut()
         .ok_or_else(|| anyhow!("shadow mirror missing while frames are flowing"))?;
+    let root = mirror.routing.hashi_id().to_string();
 
     for tx in checkpoint.transactions() {
+        // A matching checkpoint (and every checkpoint on an unfiltered
+        // pre-1.76 server) also carries unrelated transactions; only
+        // root-touching ones belong to the mirror.
+        if !touches_root(tx, &root) {
+            continue;
+        }
         // Per-transaction object sets, if the server chose to populate
         // them instead of the checkpoint-level set, layer into the pool.
         if let Some(set) = tx.objects.as_ref() {
@@ -187,35 +374,39 @@ fn apply_checkpoint_frame(
         let Some(view) = apply::TxView::from_pool(tx, &mut pool, cursor, timestamp_ms)? else {
             continue;
         };
-        if view.changes.is_empty() {
-            continue;
-        }
         let out = apply::apply_transaction(
             &mut mirror.hashi,
             &mut mirror.routing,
             &mut mirror.index,
             &view,
         );
-        for (id, type_) in &out.unrouted {
-            tracing::warn!(object = %id, r#type = %type_, digest = tx.digest(),
-                "shadow mirror could not route a changed object");
-            if let Some(metrics) = metrics {
-                metrics.shadow_unrouted_objects_total.inc();
-            }
-        }
-        for effect in &out.effects {
-            tracing::debug!(?effect, "shadow mirror effect (shadow mode; not acted on)");
-        }
+        report_outcome(&out, tx.digest(), metrics);
         if let Some(metrics) = metrics {
             metrics.shadow_applied_txns_total.inc();
         }
     }
 
-    mirror.watermark_checkpoint = cursor;
+    mirror.watermark_checkpoint = mirror.watermark_checkpoint.max(cursor);
     if let Some(metrics) = metrics {
-        metrics.shadow_watermark_checkpoint.set(cursor as i64);
+        metrics
+            .shadow_watermark_checkpoint
+            .set(mirror.watermark_checkpoint as i64);
     }
     Ok(())
+}
+
+/// Log and count an apply outcome's unrouted objects and effects.
+fn report_outcome(out: &apply::ApplyOutcome, digest: &str, metrics: Option<&Metrics>) {
+    for (id, type_) in &out.unrouted {
+        tracing::warn!(object = %id, r#type = %type_, digest,
+            "shadow mirror could not route a changed object");
+        if let Some(metrics) = metrics {
+            metrics.shadow_unrouted_objects_total.inc();
+        }
+    }
+    for effect in &out.effects {
+        tracing::debug!(?effect, "shadow mirror effect (shadow mode; not acted on)");
+    }
 }
 
 /// Compare a freshly scraped mirror against the shadow. Returns `None`
