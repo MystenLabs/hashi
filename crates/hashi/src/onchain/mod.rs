@@ -51,6 +51,7 @@ const SCRAPE_PAGE_SIZE: u32 = 1000;
 
 mod apply;
 mod route;
+mod shadow;
 pub mod types;
 mod watcher;
 

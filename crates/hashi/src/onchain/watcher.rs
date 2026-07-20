@@ -43,8 +43,29 @@ const CHECKPOINT_STREAM_STALL_TIMEOUT: std::time::Duration = std::time::Duration
 /// can persist.
 const PERIODIC_RESCRAPE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
-#[tracing::instrument(name = "watcher", skip_all)]
+/// Run the event-driven watcher (production state) and the shadow
+/// object mirror side by side. The shadow is not yet load-bearing; the
+/// periodic rescrape audits it against fresh chain state.
 pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<Arc<Metrics>>) {
+    let shadow = super::shadow::SharedShadow::default();
+    tokio::join!(
+        event_watcher(
+            sui_rpc_url.clone(),
+            state.clone(),
+            metrics.clone(),
+            shadow.clone(),
+        ),
+        super::shadow::run(sui_rpc_url, state, shadow, metrics),
+    );
+}
+
+#[tracing::instrument(name = "watcher", skip_all)]
+async fn event_watcher(
+    sui_rpc_url: String,
+    state: OnchainState,
+    metrics: Option<Arc<Metrics>>,
+    shadow: super::shadow::SharedShadow,
+) {
     let subscription_read_mask = FieldMask::from_paths([
         Checkpoint::path_builder().sequence_number(),
         Checkpoint::path_builder().summary().timestamp(),
@@ -108,7 +129,7 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
 
         // Rescrape the chain state in the event our subscription broke
         if rescrape_state {
-            if let Err(e) = rescrape_hashi_state(&client, &state, metrics.as_ref()).await {
+            if let Err(e) = rescrape_hashi_state(&client, &state, metrics.as_ref(), &shadow).await {
                 tracing::warn!("error trying to rescrape hashi's state: {e}");
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 continue;
@@ -191,7 +212,9 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
             // re-applies them as no-ops. On failure, just wait for the next
             // interval — the reconnect rescrape still guards correctness.
             if last_rescrape.elapsed() >= PERIODIC_RESCRAPE_INTERVAL {
-                if let Err(e) = rescrape_hashi_state(&client, &state, metrics.as_ref()).await {
+                if let Err(e) =
+                    rescrape_hashi_state(&client, &state, metrics.as_ref(), &shadow).await
+                {
                     tracing::warn!("periodic rescrape of hashi's state failed: {e}");
                 } else {
                     last_config_refresh = std::time::Instant::now();
@@ -210,10 +233,15 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
 /// Scrape the full on-chain state and install it as the new snapshot. Used
 /// both after a reconnect (to recover any gap the stream missed) and on the
 /// periodic rescrape interval (to heal drift from eventless writes).
+///
+/// The fresh scrape doubles as the shadow mirror's divergence audit:
+/// any slot where the object-driven mirror disagrees with the scrape is
+/// logged and counted before the scrape is installed.
 async fn rescrape_hashi_state(
     client: &Client,
     state: &OnchainState,
     metrics: Option<&Arc<Metrics>>,
+    shadow: &super::shadow::SharedShadow,
 ) -> anyhow::Result<()> {
     let (checkpoint_info, hashi, _seed) = super::scrape_hashi(
         client.clone(),
@@ -221,6 +249,27 @@ async fn rescrape_hashi_state(
         state.package_id_original(),
     )
     .await?;
+    if let Some(mirror) = shadow.lock().unwrap().as_ref() {
+        match super::shadow::compare_with_scrape(&hashi, mirror, checkpoint_info.height) {
+            None => tracing::debug!(
+                watermark = mirror.watermark_checkpoint,
+                scrape_height = checkpoint_info.height,
+                "shadow mirror behind the scrape; skipping the divergence audit"
+            ),
+            Some(diffs) if diffs.is_empty() => {
+                tracing::debug!("shadow mirror matches the fresh scrape");
+            }
+            Some(diffs) => {
+                for diff in &diffs {
+                    tracing::warn!(divergence = %diff, "shadow mirror diverged from the fresh scrape");
+                }
+                if let Some(metrics) = metrics {
+                    metrics.shadow_divergence_total.inc_by(diffs.len() as u64);
+                }
+            }
+        }
+    }
+
     state.install_scraped_state(checkpoint_info, hashi)?;
     if let Some(metrics) = metrics {
         metrics.update_onchain_state(state);

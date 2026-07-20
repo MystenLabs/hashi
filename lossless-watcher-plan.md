@@ -94,6 +94,19 @@ The bump is a version-number change, not a migration.
 
 ## Design
 
+> **Server availability caveat (2026-07-20):** the filtered
+> `SubscribeTransactions` and `ListTransactions` APIs ship server-side
+> in Sui v1.76, which is not deployed yet. Until it is, the shadow
+> watcher runs in an interim mode: the unfiltered checkpoint
+> subscription with `objects.objects.bcs` (the checkpoint-level deduped
+> object set) supplies every transaction's changed objects, gap
+> detection is checkpoint-sequence continuity, and recovery from any
+> break is a full re-bootstrap from scrape (the same guarantee as
+> today's reconnect rescrape). The apply/route/scrape layers are
+> transport-agnostic; switching to the filtered stream plus watermark
+> replay is a contained change in the shadow transport once v1.76 is
+> live.
+
 ### Two streams
 
 1. **Clock stream** — unfiltered `subscribe_checkpoints` with a minimal
@@ -257,10 +270,16 @@ mirror instead of on-demand fetches.
 
 ## Verification items (before or during step 3)
 
-1. Confirm every state-mutating entry point in the Move package takes the
-   Hashi root (shared) object, so `affected_object(root)` captures all
-   mutations — including TOB dealer submissions and guardian paths. Any
-   exception needs an extra OR term in the filter.
+1. ~~Confirm every state-mutating entry point in the Move package takes
+   the Hashi root (shared) object.~~ **Verified 2026-07-20.** `Hashi` is
+   the package's only shared object (shared once in `init`); every
+   transaction-callable mutating function takes `&mut Hashi`, including
+   `finish_publish`, all TOB cert submissions, `cleanup_spent_utxos`,
+   `reallocate_presigs`, and both phases of the upgrade flow (the
+   ticket/receipt are hot-potato values consumed within one PTB). There
+   are no custom capability objects and no owned-intermediate two-step
+   flows. Because a shared object taken by `&mut` is always a mutated
+   input, `affected_object(root)` can over-match but never miss.
 2. Confirm the per-transaction `ObjectSet` includes unchanged loaded
    runtime objects (the DOF wrappers) like `Checkpoint.objects` does; the
    `wrapper_parents` fallback covers it either way, but inline resolution
