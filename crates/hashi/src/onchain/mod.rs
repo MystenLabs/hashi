@@ -212,21 +212,30 @@ impl OnchainState {
         self.0.state.write().unwrap()
     }
 
-    /// Scrape the on-chain UTXO pool into a task-local snapshot for the
-    /// cleanup GC's use. Deliberately does NOT touch the shared mirror: the
-    /// watcher task is its sole writer, and installing an out-of-band
-    /// snapshot could revert mutations the watcher already applied from
-    /// newer checkpoints (e.g. a `spent_by` lock, whose loss would let coin
-    /// selection re-pick a locked input and pay for an aborted tx).
+    /// Scrape the on-chain `utxo_records` table into a task-local snapshot
+    /// for the cleanup GC's use. Deliberately does NOT touch the shared
+    /// mirror: the watcher task is its sole writer, and installing an
+    /// out-of-band snapshot could revert mutations the watcher already
+    /// applied from newer checkpoints (e.g. a `spent_by` lock, whose loss
+    /// would let coin selection re-pick a locked input and pay for an
+    /// aborted tx).
     ///
     /// The GC scans this snapshot instead of the mirror because the mirror
     /// can overstate pending cleanups (`cleanup_spent_utxos` emits no event
     /// the watcher could apply, so another leader's cleanup is invisible),
-    /// and every overstated id becomes a paid on-chain no-op. Errors if the
-    /// read is older than the watcher's checkpoint cursor (e.g. a
-    /// load-balanced endpoint serving a lagging fullnode) — the caller
-    /// should back off and retry rather than act on stale data.
-    pub(crate) async fn scrape_utxo_pool_snapshot(&self) -> Result<types::UtxoPool> {
+    /// and every overstated id becomes a paid on-chain no-op. Only
+    /// `utxo_records` is fetched — cleanup never consults the ever-growing
+    /// `spent_utxos` tombstone history.
+    ///
+    /// Every response — the `BitcoinState` wrapper AND each pagination page
+    /// — must be at or past the watcher's checkpoint cursor, re-sampled per
+    /// page; a page served behind it (e.g. a load-balanced endpoint mixing
+    /// in a lagging fullnode) errors out so the caller backs off and
+    /// retries rather than paying to re-clean records a fresh page would
+    /// have shown as already gone.
+    pub(crate) async fn scrape_utxo_records_snapshot(
+        &self,
+    ) -> Result<BTreeMap<types::UtxoId, types::UtxoRecord>> {
         let client = self.client();
         let (scrape_height, bitcoin_state) =
             fetch_bitcoin_state(client.clone(), self.hashi_id(), self.package_id_original())
@@ -238,7 +247,51 @@ impl OnchainState {
                  watcher's cursor {watcher_height}"
             );
         }
-        scrape_utxo_pool(client, bitcoin_state.utxo_pool).await
+
+        let utxo_records_id = bitcoin_state.utxo_pool.utxo_records.id;
+        let mut records = BTreeMap::new();
+        let mut page_token: Option<bytes::Bytes> = None;
+        loop {
+            let mut request = ListDynamicFieldsRequest::default()
+                .with_parent(utxo_records_id)
+                .with_page_size(SCRAPE_PAGE_SIZE)
+                .with_read_mask(FieldMask::from_paths([DynamicField::path_builder()
+                    .value()
+                    .finish()]));
+            if let Some(token) = page_token.take() {
+                request = request.with_page_token(token);
+            }
+            let response = client
+                .clone()
+                .state_client()
+                .list_dynamic_fields(request)
+                .await?;
+            let page_height = response
+                .checkpoint_height()
+                .ok_or_else(|| anyhow!("response missing X_SUI_CHECKPOINT_HEIGHT header"))?;
+            // Re-sample the cursor: it advances while we paginate, and a
+            // page must not predate anything this node has already seen.
+            let watcher_height = self.latest_checkpoint_height();
+            if page_height < watcher_height {
+                anyhow::bail!(
+                    "stale UTXO pool read: page at checkpoint {page_height} is behind the \
+                     watcher's cursor {watcher_height}"
+                );
+            }
+            let page = response.into_inner();
+            for field in &page.dynamic_fields {
+                let record: types::UtxoRecord = field
+                    .value()
+                    .deserialize()
+                    .map_err(|e| anyhow!("failed to deserialize UtxoRecord: {e}"))?;
+                records.insert(record.utxo.id, record);
+            }
+            match page.next_page_token {
+                Some(token) => page_token = Some(token),
+                None => break,
+            }
+        }
+        Ok(records)
     }
 
     pub fn subscribe_checkpoint(&self) -> watch::Receiver<CheckpointInfo> {

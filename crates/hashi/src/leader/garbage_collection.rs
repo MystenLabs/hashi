@@ -207,8 +207,8 @@ impl LeaderService {
     /// paid on-chain no-ops. The mirror itself is left untouched; the
     /// watcher task is its sole writer.
     async fn cleanup_spent_utxos(inner: Arc<crate::Hashi>) -> anyhow::Result<usize> {
-        let pool = inner.onchain_state().scrape_utxo_pool_snapshot().await?;
-        let utxo_ids = find_spent_utxos_pending_cleanup(pool.utxo_records());
+        let utxo_records = inner.onchain_state().scrape_utxo_records_snapshot().await?;
+        let utxo_ids = find_spent_utxos_pending_cleanup(&utxo_records);
         if utxo_ids.is_empty() {
             return Ok(0);
         }
