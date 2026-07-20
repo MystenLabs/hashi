@@ -383,6 +383,24 @@ impl OnchainState {
         self.0.checkpoint.send_replace(info);
     }
 
+    fn install_scraped_state(
+        &self,
+        checkpoint_info: CheckpointInfo,
+        hashi: types::Hashi,
+    ) -> Result<()> {
+        let floor = self.latest_checkpoint_height();
+        if scrape_is_stale(checkpoint_info.height, floor) {
+            anyhow::bail!(
+                "stale full-state rescrape: scrape at checkpoint {} is behind the \
+                 freshness floor {floor}",
+                checkpoint_info.height,
+            );
+        }
+        self.replace_hashi_state(hashi);
+        self.update_latest_checkpoint_info(checkpoint_info);
+        Ok(())
+    }
+
     pub fn package_id_original(&self) -> Address {
         self.0.ids.package_id
     }
@@ -390,9 +408,7 @@ impl OnchainState {
     pub async fn rescrape(&self) -> Result<()> {
         let (checkpoint_info, hashi) =
             scrape_hashi(self.client(), self.hashi_id(), self.package_id_original()).await?;
-        self.replace_hashi_state(hashi);
-        self.update_latest_checkpoint_info(checkpoint_info);
-        Ok(())
+        self.install_scraped_state(checkpoint_info, hashi)
     }
 
     /// Apply committee config from `Inner` to the given hashi state and replace the current
@@ -907,6 +923,10 @@ async fn fetch_bitcoin_state(
         .deserialize()
         .map_err(|e| anyhow!("failed to deserialize BitcoinState: {e}"))?;
     Ok((checkpoint_height, bitcoin_state_field.value))
+}
+
+fn scrape_is_stale(scrape_height: u64, floor: u64) -> bool {
+    scrape_height < floor
 }
 
 async fn scrape_hashi(
