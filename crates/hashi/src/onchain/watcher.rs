@@ -221,8 +221,7 @@ async fn rescrape_hashi_state(
         state.package_id_original(),
     )
     .await?;
-    state.replace_hashi_state(hashi);
-    state.update_latest_checkpoint_info(checkpoint_info);
+    state.install_scraped_state(checkpoint_info, hashi)?;
     if let Some(metrics) = metrics {
         metrics.update_onchain_state(state);
     }
