@@ -96,6 +96,7 @@ pub struct Metrics {
     pub withdrawals_finalized_total: IntCounter,
     pub presig_pool_remaining: IntGauge,
     pub sui_tx_submissions_total: IntCounterVec,
+    pub sui_balance: IntGauge,
 
     pub is_leader: IntGauge,
     pub leader_retries_total: IntCounterVec,
@@ -615,6 +616,13 @@ impl Metrics {
                 "hashi_sui_tx_submissions_total",
                 "Total Sui transaction submissions by operation and outcome",
                 &["operation", "status"],
+                registry,
+            )
+            .unwrap(),
+            sui_balance: register_int_gauge_with_registry!(
+                "hashi_sui_balance",
+                "Operator gas wallet SUI balance in MIST, totaled across owned \
+                 coins and the address balance",
                 registry,
             )
             .unwrap(),
