@@ -482,10 +482,6 @@ impl OperatorInitRequest {
         self.init_config.as_ref()
     }
 
-    pub fn genesis_state(&self) -> Option<&GenesisState> {
-        self.genesis_state.as_ref()
-    }
-
     /// `init_config` must be present iff the enclave runs in withdraw mode;
     /// optional genesis state is withdraw-only.
     pub fn validate(&self, mode: EnclaveMode) -> GuardianResult<()> {
@@ -518,10 +514,6 @@ impl GenesisState {
 
     pub fn from_move_committee(committee: crate::move_types::Committee) -> Self {
         Self { committee }
-    }
-
-    pub fn committee(&self) -> &crate::move_types::Committee {
-        &self.committee
     }
 
     pub fn into_committee(self) -> crate::move_types::Committee {
