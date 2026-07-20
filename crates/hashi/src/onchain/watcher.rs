@@ -215,7 +215,7 @@ async fn rescrape_hashi_state(
     state: &OnchainState,
     metrics: Option<&Arc<Metrics>>,
 ) -> anyhow::Result<()> {
-    let (checkpoint_info, hashi) = super::scrape_hashi(
+    let (checkpoint_info, hashi, _seed) = super::scrape_hashi(
         client.clone(),
         state.hashi_id(),
         state.package_id_original(),
@@ -802,7 +802,7 @@ async fn handle_events(
                     super::scrape_committees(client.clone(), committees_id).await;
                 let mut state = state.state_mut();
                 match scraped_committees {
-                    Ok((committees, committee_handoffs)) => {
+                    Ok((_seed, (committees, committee_handoffs))) => {
                         state
                             .hashi
                             .committees
