@@ -14,6 +14,7 @@
 //! pre-deletion contents).
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use sui_sdk_types::Address;
 use sui_sdk_types::TypeTag;
@@ -68,6 +69,12 @@ pub(super) struct RoutingTable {
     /// needed to route values. Maintained from wrapper writes/deletes
     /// in the stream and populated wholesale by the scrape.
     wrapper_parents: BTreeMap<Address, Address>,
+    /// Hashi package ids (the original plus upgraded versions). An
+    /// unroutable object only trips the mirror-gap tripwire when its
+    /// type comes from one of these; a root-touching transaction can
+    /// also legitimately mutate foreign state (e.g. the system
+    /// CoinRegistry), which is not ours to mirror.
+    packages: BTreeSet<Address>,
 }
 
 impl RoutingTable {
@@ -77,7 +84,16 @@ impl RoutingTable {
             bitcoin_state_field_id,
             containers: BTreeMap::new(),
             wrapper_parents: BTreeMap::new(),
+            packages: BTreeSet::new(),
         }
+    }
+
+    pub(super) fn register_package(&mut self, package: Address) {
+        self.packages.insert(package);
+    }
+
+    pub(super) fn is_hashi_package(&self, package: &Address) -> bool {
+        self.packages.contains(package)
     }
 
     pub(super) fn hashi_id(&self) -> Address {

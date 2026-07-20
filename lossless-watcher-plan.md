@@ -94,18 +94,27 @@ The bump is a version-number change, not a migration.
 
 ## Design
 
-> **Server availability caveat (2026-07-20):** the filtered
-> `SubscribeTransactions` and `ListTransactions` APIs ship server-side
-> in Sui v1.76, which is not deployed yet. Until it is, the shadow
-> watcher runs in an interim mode: the unfiltered checkpoint
-> subscription with `objects.objects.bcs` (the checkpoint-level deduped
-> object set) supplies every transaction's changed objects, gap
-> detection is checkpoint-sequence continuity, and recovery from any
-> break is a full re-bootstrap from scrape (the same guarantee as
-> today's reconnect rescrape). The apply/route/scrape layers are
-> transport-agnostic; switching to the filtered stream plus watermark
-> replay is a contained change in the shadow transport once v1.76 is
-> live.
+> **Transport reality check (2026-07-20, verified against Sui
+> v1.76.0):** the per-transaction `ObjectSet` is not populated by the
+> server — `render_executed_transaction` builds the set internally for
+> effects rendering but never emits it — so the transaction-granular
+> `SubscribeTransactions`/`ListTransactions` transport described below
+> is not usable yet (worth an upstream issue; the fix looks small).
+> The shadow instead runs checkpoint-granular and filtered:
+> `SubscribeCheckpoints(filter: affected_object(root))` delivers full
+> payloads (with the checkpoint-level object set) only for checkpoints
+> containing a Hashi transaction, cursor-only progress frames otherwise
+> (observed continuously, so stall detection works); `ListCheckpoints`
+> with the same filter replays gaps from the u64 watermark, making
+> reconnects lossless. Within a matching checkpoint, only transactions
+> whose effects touch the root are applied, and the unrouted tripwire
+> only fires for hashi-package types (a root-touching transaction also
+> legitimately mutates foreign state such as the CoinRegistry). On
+> pre-1.76 servers the subscription filter is ignored (same protocol,
+> unfiltered) and replay is unimplemented, in which case a break falls
+> back to re-bootstrap from scrape. Verified on localnet e2e (deposit
+> and withdrawal flows): zero unrouted objects, zero stream breaks, and
+> all transition effects observed.
 
 ### Two streams
 
