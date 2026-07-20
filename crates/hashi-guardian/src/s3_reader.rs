@@ -208,7 +208,7 @@ impl GuardianReader {
         &mut self,
         sharing_seq: u64,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<Option<KpShareStateLogMessage>> {
+    ) -> anyhow::Result<Option<(KpShareStateLogMessage, LogRecord)>> {
         let prefix = KpShareStateLogMessage::object_key_dir(sharing_seq);
         let keys = self
             .s3
@@ -223,11 +223,13 @@ impl GuardianReader {
             .s3
             .get_log_record_inner(&key, LockCheck::Skipped, HistoryCheck::AlreadyChecked)
             .await?;
-        let record = self.cache.verify_record(&self.s3, record).await?;
-        let build_pcrs = record.build_pcrs.clone();
+        let (record, build_pcrs) = self
+            .cache
+            .verify_record_preserving_envelope(&self.s3, record)
+            .await?;
         self.enforce_build_policy("kp-shares log", build_policy, &build_pcrs)?;
-        let session_id = record.session_id;
-        let LogMessage::V1(LogMessageV1::KpShareState(msg)) = record.message else {
+        let session_id = record.session_id.clone();
+        let LogMessage::V1(LogMessageV1::KpShareState(msg)) = &record.message else {
             anyhow::bail!("expected a kp-shares log at {key}");
         };
         if msg.sharing_seq != sharing_seq {
@@ -238,7 +240,7 @@ impl GuardianReader {
             );
         }
         log_verified_read(&key, &session_id);
-        Ok(Some(*msg))
+        Ok(Some(((**msg).clone(), record)))
     }
 
     /// Read the latest ceremony together with the latest KP share state for its
@@ -249,19 +251,31 @@ impl GuardianReader {
         &mut self,
         build_policy: BuildPolicy,
     ) -> anyhow::Result<Option<CeremonyState>> {
+        Ok(self
+            .read_latest_ceremony_state_with_kp_share_record(build_policy)
+            .await?
+            .map(|(state, _)| state))
+    }
+
+    /// Read the latest ceremony state and retain the complete signed
+    /// `kp-shares/` S3 record from which its encrypted shares were derived.
+    pub async fn read_latest_ceremony_state_with_kp_share_record(
+        &mut self,
+        build_policy: BuildPolicy,
+    ) -> anyhow::Result<Option<(CeremonyState, LogRecord)>> {
         let Some(ceremony) = self.read_latest_ceremony_log(build_policy).await? else {
             return Ok(None);
         };
         let sharing_seq = ceremony.sharing_seq();
-        let kp_share_state = self
+        let (kp_share_state, kp_share_record) = self
             .read_latest_kp_share_state_log(sharing_seq, build_policy)
             .await?
             .with_context(|| {
                 format!("no kp-shares log found for latest ceremony sharing_seq {sharing_seq}")
             })?;
-        Ok(Some(CeremonyState::new(ceremony, kp_share_state).expect(
-            "ceremony and KP share state must have a consistent shape",
-        )))
+        let state = CeremonyState::new(ceremony, kp_share_state)
+            .expect("ceremony and KP share state must have a consistent shape");
+        Ok(Some((state, kp_share_record)))
     }
 
     /// Latest serving committee, preferring `committee-update/` and falling back
@@ -382,21 +396,27 @@ impl GuardianSessionCache {
         s3: &GuardianS3Client,
         record: LogRecord,
     ) -> anyhow::Result<VerifiedLogRecord> {
-        let object_key = record.object_key.clone();
+        let (record, build_pcrs) = self.verify_record_preserving_envelope(s3, record).await?;
+        Ok(VerifiedLogRecord::new(
+            record.object_key,
+            record.session_id,
+            record.timestamp_ms,
+            record.message,
+            build_pcrs,
+        ))
+    }
+
+    async fn verify_record_preserving_envelope(
+        &mut self,
+        s3: &GuardianS3Client,
+        record: LogRecord,
+    ) -> anyhow::Result<(LogRecord, BuildPcrs)> {
         let session_id = record.session_id.clone();
         let session_info = self.get_or_load_session_info(s3, &session_id).await?;
         record
-            .verify(&session_info.signing_pubkey)
-            .map(|(session_id, timestamp_ms, message)| {
-                VerifiedLogRecord::new(
-                    object_key,
-                    session_id,
-                    timestamp_ms,
-                    message,
-                    session_info.build_pcrs.clone(),
-                )
-            })
-            .with_context(|| "failed to verify guardian enclave signature")
+            .verify_preserving_envelope(&session_info.signing_pubkey)
+            .with_context(|| "failed to verify guardian enclave signature")?;
+        Ok((record, session_info.build_pcrs.clone()))
     }
 }
 
