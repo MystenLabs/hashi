@@ -296,16 +296,23 @@ async fn handle_events(
                     }
                 }
 
-                // When an UpdateConfig or EmergencyPause proposal executes,
-                // the Hashi object's config field changes on-chain. Re-fetch
-                // the config from the Hashi object to keep the in-memory
-                // state current. (The event now carries the typed `data`,
-                // so this could be applied directly in the future.)
+                // When a proposal that mutates the Hashi object's config,
+                // enabled versions, or upgrade cap executes, re-fetch the
+                // config snapshot to keep the in-memory state current.
+                // EnableVersion/DisableVersion/Upgrade matter because
+                // `types::Config` also carries `enabled_versions` and
+                // `upgrade_cap`; without them a node keeps stale version
+                // gating until a stream reconnect. (The event now carries
+                // the typed `data`, so this could be applied directly in
+                // the future.)
                 if matches!(
                     parse_proposal_type_from_type_tag(&proposal_executed_event.proposal_type),
                     ProposalType::UpdateConfig
                         | ProposalType::EmergencyPause
                         | ProposalType::UpdateGuardian
+                        | ProposalType::EnableVersion
+                        | ProposalType::DisableVersion
+                        | ProposalType::Upgrade
                 ) {
                     match super::scrape_hashi_config(client.clone(), state.hashi_id()).await {
                         Ok(config) => {
@@ -752,6 +759,24 @@ async fn handle_events(
                     .hashi
                     .utxo_pool
                     .apply_cleaned(utxo_cleaned_event.utxo_id, utxo_cleaned_event.spent_epoch);
+            }
+            HashiEvent::LaunchCompleted(_) => {
+                // finish_publish writes guardian_url and the guardian BTC
+                // key directly into the config with no proposal event; this
+                // is the launch stall of 2026-07-16, where nodes booted
+                // pre-launch never learned either. Refresh the snapshot and
+                // kick the guardian reconcile so the BTC-key pin lands
+                // without waiting for an unrelated interaction.
+                match super::scrape_hashi_config(client.clone(), state.hashi_id()).await {
+                    Ok(config) => {
+                        state.state_mut().hashi.config = config;
+                        state.request_limiter_reconcile();
+                        tracing::info!("on-chain config refreshed after LaunchCompleted");
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to refresh config after LaunchCompleted: {e}")
+                    }
+                }
             }
             HashiEvent::ReconfigStarted(start_reconfig_event) => {
                 let epoch = start_reconfig_event.epoch;

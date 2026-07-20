@@ -42,6 +42,35 @@ fun test_finish_publish_stores_upgrade_cap() {
 }
 
 #[test]
+/// The launch emits exactly one LaunchCompleted carrying the pinned
+/// guardian config; node watchers refresh their config snapshot on it.
+fun test_finish_publish_emits_launch_completed() {
+    let ctx = &mut test_utils::new_tx_context(PUBLISHER, 0);
+    let mut hashi = test_utils::create_hashi_with_committee(vector[PUBLISHER], ctx);
+    let mut registry = registry_for_testing();
+    let this_package_id = std::type_name::original_id<Hashi>().to_id();
+    let cap = sui::package::test_publish(this_package_id, ctx);
+
+    hashi.finish_publish_for_testing(
+        cap,
+        @0xb17c,
+        b"http://guardian.example:3000".to_string(),
+        guardian_btc_public_key(),
+        &mut registry,
+        ctx,
+    );
+
+    let events = sui::event::events_by_type<hashi::LaunchCompleted>();
+    assert!(events.length() == 1);
+    let (url, btc_key) = hashi::launch_completed_fields(&events[0]);
+    assert!(url == b"http://guardian.example:3000".to_string());
+    assert!(btc_key == guardian_btc_public_key());
+
+    std::unit_test::destroy(hashi);
+    std::unit_test::destroy(registry);
+}
+
+#[test]
 #[expected_failure(abort_code = hashi::EWrongUpgradeCap)]
 fun test_finish_publish_rejects_wrong_cap() {
     let ctx = &mut test_utils::new_tx_context(PUBLISHER, 0);

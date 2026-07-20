@@ -65,6 +65,15 @@ public struct Hashi has key {
 // load-bearing component of every deposit address (2-of-2 taproot leaf)
 // and every withdrawal signature, so a deploy without them would produce
 // a non-functional bridge.
+/// Emitted once when `finish_publish` flips the launch switch. The config
+/// fields it writes (notably the guardian url and BTC key) land without a
+/// proposal event, so nodes listen for this to refresh their config
+/// snapshot instead of discovering the launch by polling.
+public struct LaunchCompleted has copy, drop {
+    guardian_url: String,
+    guardian_btc_public_key: vector<u8>,
+}
+
 entry fun finish_publish(
     self: &mut Hashi,
     upgrade_cap: sui::package::UpgradeCap,
@@ -109,6 +118,8 @@ entry fun finish_publish(
     let (treasury_cap, metadata_cap) = hashi::btc::create(coin_registry, ctx);
     self.treasury.register_treasury_cap(treasury_cap);
     self.treasury.register_metadata_cap(metadata_cap);
+
+    sui::event::emit(LaunchCompleted { guardian_url, guardian_btc_public_key });
 }
 
 // ~~~~~~~ Package Functions ~~~~~~~
@@ -306,6 +317,11 @@ public fun create_for_testing(
 /// Forwards to `finish_publish` so its guards can be exercised from
 /// `hashi::finish_publish_tests` (non-public entry functions are not
 /// callable from other modules).
+#[test_only]
+public fun launch_completed_fields(event: &LaunchCompleted): (String, vector<u8>) {
+    (event.guardian_url, event.guardian_btc_public_key)
+}
+
 public fun finish_publish_for_testing(
     self: &mut Hashi,
     upgrade_cap: sui::package::UpgradeCap,

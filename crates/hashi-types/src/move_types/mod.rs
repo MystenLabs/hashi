@@ -842,6 +842,7 @@ pub enum HashiEvent {
     WithdrawalConfirmed(WithdrawalConfirmed),
     UtxoSpent(UtxoSpent),
     UtxoCleaned(UtxoCleaned),
+    LaunchCompleted(LaunchCompleted),
     ReconfigStarted(ReconfigStarted),
     ReconfigEnded(ReconfigEnded),
 }
@@ -892,6 +893,7 @@ impl HashiEvent {
             WithdrawalConfirmed::MODULE_NAME => WithdrawalConfirmed::from_bcs(bcs.value())?.into(),
             UtxoSpent::MODULE_NAME => UtxoSpent::from_bcs(bcs.value())?.into(),
             UtxoCleaned::MODULE_NAME => UtxoCleaned::from_bcs(bcs.value())?.into(),
+            LaunchCompleted::MODULE_NAME => LaunchCompleted::from_bcs(bcs.value())?.into(),
             ReconfigStarted::MODULE_NAME => ReconfigStarted::from_bcs(bcs.value())?.into(),
             ReconfigEnded::MODULE_NAME => ReconfigEnded::from_bcs(bcs.value())?.into(),
             PackageUpgraded::MODULE_NAME => PackageUpgraded::from_bcs(bcs.value())?.into(),
@@ -1438,6 +1440,23 @@ pub struct UtxoCleaned {
 impl MoveType for UtxoCleaned {
     const MODULE: &'static str = "utxo_pool";
     const NAME: &'static str = "UtxoCleaned";
+}
+
+#[derive(Debug, serde_derive::Deserialize)]
+pub struct LaunchCompleted {
+    pub guardian_url: String,
+    pub guardian_btc_public_key: Vec<u8>,
+}
+
+impl MoveType for LaunchCompleted {
+    const MODULE: &'static str = "hashi";
+    const NAME: &'static str = "LaunchCompleted";
+}
+
+impl From<LaunchCompleted> for HashiEvent {
+    fn from(value: LaunchCompleted) -> Self {
+        Self::LaunchCompleted(value)
+    }
 }
 
 impl From<UtxoCleaned> for HashiEvent {
