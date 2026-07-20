@@ -1800,13 +1800,6 @@ pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
     }
 }
 
-pub trait MoveType {
-    const PACKAGE_VERSION: u64 = 1;
-    const MODULE: &'static str;
-    const NAME: &'static str;
-    const MODULE_NAME: (&'static str, &'static str) = (Self::MODULE, Self::NAME);
-}
-
 #[cfg(test)]
 mod tests {
     use fastcrypto::serde_helpers::ToFromByteArray;
