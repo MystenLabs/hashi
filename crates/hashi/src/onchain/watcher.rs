@@ -712,7 +712,13 @@ async fn handle_events(
 
                     // Promote the change UTXOs from pending to confirmed by
                     // clearing `produced_by`. The UTXOs were already inserted at
-                    // commit time; input UTXOs are removed via UtxoSpent.
+                    // commit time; input UTXOs are marked spent via UtxoSpent
+                    // and their records then stay in the mirror until a full
+                    // rescrape (reconnect or restart) — nothing prunes them.
+                    // The cleanup GC deliberately decides from a fresh chain
+                    // snapshot rather than these records, so the staleness is
+                    // cosmetic (spent_by stays set, excluding them from coin
+                    // selection).
                     for change_utxo_id in &event.change_utxo_ids {
                         if let Some(record) =
                             state.hashi.utxo_pool.utxo_records.get_mut(change_utxo_id)
