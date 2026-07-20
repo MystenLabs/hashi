@@ -48,6 +48,8 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 /// the gRPC decode limit; the SDK still pages through every entry.
 const SCRAPE_PAGE_SIZE: u32 = 1000;
 
+mod apply;
+mod route;
 pub mod types;
 mod watcher;
 
@@ -119,7 +121,7 @@ pub struct State {
     withdrawal_signed_at_ms: BTreeMap<Address, u64>,
 }
 
-#[derive(serde_derive::Serialize)]
+#[derive(serde_derive::Serialize, serde_derive::Deserialize)]
 struct TobKey {
     epoch: u64,
     batch_index: Option<u32>,
@@ -1146,6 +1148,31 @@ pub(super) async fn fetch_treasury_cap(
         .ok_or_else(|| anyhow!("failed to parse TreasuryCap from object {treasury_cap_id}"))
 }
 
+/// Convert the raw Move `MemberInfo` into the enriched mirror shape
+/// (parsed BLS key, URI, TLS key, and encryption key).
+fn convert_move_member_info(info: move_types::MemberInfo) -> types::MemberInfo {
+    let move_types::MemberInfo {
+        validator_address,
+        operator_address,
+        next_epoch_public_key,
+        endpoint_url,
+        tls_public_key,
+        next_epoch_encryption_public_key,
+        extra_fields: _,
+    } = info;
+    types::MemberInfo {
+        validator_address,
+        operator_address,
+        next_epoch_public_key: convert_move_uncompressed_g1_pubkey(&next_epoch_public_key),
+        endpoint_url: endpoint_url.try_into().ok(),
+        tls_public_key: tls_public_key.as_slice().try_into().ok(),
+        next_epoch_encryption_public_key: parse_encryption_public_key(
+            next_epoch_encryption_public_key.as_slice(),
+        )
+        .map(Into::into),
+    }
+}
+
 async fn scrape_all_member_info(
     client: Client,
     member_info_id: Address,
@@ -1168,33 +1195,10 @@ async fn scrape_all_member_info(
 
             Ok(info)
         })
-        .map_ok(
-            |move_types::MemberInfo {
-                 validator_address,
-                 operator_address,
-                 next_epoch_public_key,
-                 endpoint_url,
-                 tls_public_key,
-                 next_epoch_encryption_public_key,
-                 extra_fields: _,
-             }| {
-                let info = types::MemberInfo {
-                    validator_address,
-                    operator_address,
-                    next_epoch_public_key: convert_move_uncompressed_g1_pubkey(
-                        &next_epoch_public_key,
-                    ),
-                    endpoint_url: endpoint_url.try_into().ok(),
-                    tls_public_key: tls_public_key.as_slice().try_into().ok(),
-                    next_epoch_encryption_public_key: parse_encryption_public_key(
-                        next_epoch_encryption_public_key.as_slice(),
-                    )
-                    .map(Into::into),
-                };
-
-                (info.validator_address, info)
-            },
-        )
+        .map_ok(|info| {
+            let info = convert_move_member_info(info);
+            (info.validator_address, info)
+        })
         .try_collect()
         .await?;
     Ok(member_info)
@@ -1227,28 +1231,7 @@ pub(crate) async fn scrape_member_info(
         .deserialize()
         .map_err(|e| tonic::Status::from_error(e.into()))?;
 
-    let move_types::MemberInfo {
-        validator_address,
-        operator_address,
-        next_epoch_public_key,
-        endpoint_url,
-        tls_public_key,
-        next_epoch_encryption_public_key,
-        extra_fields: _,
-    } = field.value;
-
-    let info = types::MemberInfo {
-        validator_address,
-        operator_address,
-        next_epoch_public_key: convert_move_uncompressed_g1_pubkey(&next_epoch_public_key),
-        endpoint_url: endpoint_url.try_into().ok(),
-        tls_public_key: tls_public_key.as_slice().try_into().ok(),
-        next_epoch_encryption_public_key: parse_encryption_public_key(
-            next_epoch_encryption_public_key.as_slice(),
-        )
-        .map(Into::into),
-    };
-    Ok(info)
+    Ok(convert_move_member_info(field.value))
 }
 
 async fn scrape_committees(
@@ -1710,64 +1693,43 @@ async fn scrape_proposal_bag(
                 continue;
             }
         };
-        let proposal_type = parse_proposal_type(&type_tag);
-
-        // Deserialize proposal based on the proposal type
-        let contents: &[u8] = field.child_object().contents().value();
-        let result: Option<(Address, u64)> = match &proposal_type {
-            types::ProposalType::UpdateConfig => {
-                bcs::from_bytes::<move_types::Proposal<move_types::UpdateConfig>>(contents)
-                    .ok()
-                    .map(|p| (p.id, p.created_timestamp_ms))
-            }
-            types::ProposalType::EnableVersion => {
-                bcs::from_bytes::<move_types::Proposal<move_types::EnableVersion>>(contents)
-                    .ok()
-                    .map(|p| (p.id, p.created_timestamp_ms))
-            }
-            types::ProposalType::DisableVersion => {
-                bcs::from_bytes::<move_types::Proposal<move_types::DisableVersion>>(contents)
-                    .ok()
-                    .map(|p| (p.id, p.created_timestamp_ms))
-            }
-            types::ProposalType::Upgrade => {
-                bcs::from_bytes::<move_types::Proposal<move_types::Upgrade>>(contents)
-                    .ok()
-                    .map(|p| (p.id, p.created_timestamp_ms))
-            }
-            types::ProposalType::EmergencyPause => {
-                bcs::from_bytes::<move_types::Proposal<move_types::EmergencyPause>>(contents)
-                    .ok()
-                    .map(|p| (p.id, p.created_timestamp_ms))
-            }
-            types::ProposalType::AbortReconfig => {
-                bcs::from_bytes::<move_types::Proposal<move_types::AbortReconfig>>(contents)
-                    .ok()
-                    .map(|p| (p.id, p.created_timestamp_ms))
-            }
-            types::ProposalType::UpdateGuardian => {
-                bcs::from_bytes::<move_types::Proposal<move_types::UpdateGuardian>>(contents)
-                    .ok()
-                    .map(|p| (p.id, p.created_timestamp_ms))
-            }
-            types::ProposalType::Unknown(_) => None,
-        };
-
-        if let Some((id, timestamp_ms)) = result {
-            proposals.insert(
-                id,
-                types::Proposal {
-                    id,
-                    timestamp_ms,
-                    proposal_type,
-                },
-            );
+        if let Some(proposal) = decode_proposal(&type_tag, field.child_object().contents().value())
+        {
+            proposals.insert(proposal.id, proposal);
         } else {
             tracing::warn!("Failed to deserialize proposal with type {:?}", type_tag);
         }
     }
 
     Ok(proposals)
+}
+
+/// Decode a `Proposal<T>` object into the lightweight mirror shape,
+/// dispatching the BCS layout on the type parameter `T`. Returns `None`
+/// for unknown proposal types or undecodable contents.
+fn decode_proposal(type_tag: &TypeTag, contents: &[u8]) -> Option<types::Proposal> {
+    fn parse<T: serde::de::DeserializeOwned>(contents: &[u8]) -> Option<(Address, u64)> {
+        bcs::from_bytes::<move_types::Proposal<T>>(contents)
+            .ok()
+            .map(|p| (p.id, p.created_timestamp_ms))
+    }
+
+    let proposal_type = parse_proposal_type(type_tag);
+    let (id, timestamp_ms) = match &proposal_type {
+        types::ProposalType::UpdateConfig => parse::<move_types::UpdateConfig>(contents),
+        types::ProposalType::EnableVersion => parse::<move_types::EnableVersion>(contents),
+        types::ProposalType::DisableVersion => parse::<move_types::DisableVersion>(contents),
+        types::ProposalType::Upgrade => parse::<move_types::Upgrade>(contents),
+        types::ProposalType::EmergencyPause => parse::<move_types::EmergencyPause>(contents),
+        types::ProposalType::AbortReconfig => parse::<move_types::AbortReconfig>(contents),
+        types::ProposalType::UpdateGuardian => parse::<move_types::UpdateGuardian>(contents),
+        types::ProposalType::Unknown(_) => None,
+    }?;
+    Some(types::Proposal {
+        id,
+        timestamp_ms,
+        proposal_type,
+    })
 }
 
 pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
