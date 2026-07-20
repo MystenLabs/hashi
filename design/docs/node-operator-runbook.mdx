@@ -942,7 +942,7 @@ gh workflow run hashi-build-image.yml -R MystenLabs/sui-operations --ref main \
   -f push_to_dockerhub=true
 ```
 
-A single run builds the image once and pushes both `us-central1-docker.pkg.dev/cryptic-bolt-398315/hashi/hashi:<sha>` and the public `mysten/hashi:<sha>`, and drops the raw binary at `https://storage.googleapis.com/mysten-hashi-binaries/<sha>/hashi` (public). Artifact Registry rejects anonymous pulls — Docker Hub and the GCS binary are the operator-facing channels. Confirm the tag is live:
+A single run builds the image once and pushes both `us-central1-docker.pkg.dev/cryptic-bolt-398315/hashi/hashi:<sha>` and the public `mysten/hashi:<sha>`, and drops the raw binary at `https://storage.googleapis.com/mysten-hashi-binaries/<sha>/hashi` (public). Artifact Registry rejects anonymous pulls — Docker Hub is the operator-facing channel; bare-metal operators use the deterministic binary (§12.2), and the GCS drop is internal. Confirm the tag is live:
 
 ```bash
 curl -s https://hub.docker.com/v2/repositories/mysten/hashi/tags/<sha> | jq -r .digest
@@ -977,4 +977,10 @@ kubectl -n hashi-testnet rollout status deploy/mysten<N> --timeout=600s
 kubectl -n hashi-testnet logs deploy/mysten<N> | grep -m1 "Guardian bootstrap complete"
 ```
 
-Proceed to the next node only after all three checks pass, and wait for each `pulumi up` to exit before starting the next — concurrent targeted ups conflict on the stack lock (409). Do not gate on `kubectl wait --for=condition=Ready pod -l hashi-node=mysten<N>` — the label also matches the still-terminating old pod. If the fleet is unhealthy to begin with (for example mid reconfiguration stall, §9.3), `rollout status` never sees Ready; gate on the pod reaching `Running` with no restarts plus the guardian bootstrap log line instead. A node that fails to come back healthy means stop and investigate before touching the next — every additional node down eats into the committee's 2/3 signing margin (§9).
+Proceed to the next node only after all three checks pass. If a node does not come back healthy, stop and investigate before touching the next — every additional node down eats into the committee's 2/3 signing margin (§9).
+
+Rollout gotchas:
+
+- **Serialize the updates.** Wait for each `pulumi up` to exit before starting the next; concurrent targeted ups conflict on the stack lock (409).
+- **Don't trust the pod label for readiness.** `kubectl wait --for=condition=Ready pod -l hashi-node=mysten<N>` also matches the still-terminating old pod.
+- **Unhealthy fleet, different gates.** Mid-incident (for example a reconfiguration stall, §9.3) no pod turns Ready, so `rollout status` never completes and pulumi's readiness await reports the Deployment as errored even though the image update applied. Gate on the pod reaching `Running` with no restarts plus the guardian bootstrap log line, and re-run the targeted `pulumi up` after recovery to reconcile state.
