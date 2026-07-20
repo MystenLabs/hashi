@@ -1456,7 +1456,8 @@ mod test {
         config.db = Some(tmpdir.path().into());
         let tls_public_key = config.tls_public_key().unwrap();
 
-        let hashi = Hashi::new(server_version, None, config).unwrap();
+        let registry = prometheus::Registry::new();
+        let hashi = Hashi::new_with_registry(server_version, None, config, &registry).unwrap();
 
         let (local_addr, _http_service) = crate::grpc::HttpService::new(hashi).start().await;
 
@@ -1467,10 +1468,19 @@ mod test {
         let client_auth_server = Client::new(&address, client_tls_config).unwrap();
         let client_no_auth = Client::new_no_auth(&address).unwrap();
 
-        let resp = client_auth_server.get_service_info().await.unwrap();
-        dbg!(resp);
-        let resp = client_no_auth.get_service_info().await.unwrap();
-        dbg!(resp);
+        let resp = client_auth_server
+            .get_service_info()
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.server.as_deref(), Some("unknown/unknown"));
+
+        let resp = client_no_auth
+            .get_service_info()
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.server.as_deref(), Some("unknown/unknown"));
 
         //         loop {
         //             let resp = client
