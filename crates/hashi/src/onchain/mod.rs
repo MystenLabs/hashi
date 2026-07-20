@@ -251,6 +251,11 @@ impl OnchainState {
         let utxo_records_id = bitcoin_state.utxo_pool.utxo_records.id;
         let mut records = BTreeMap::new();
         let mut page_token: Option<bytes::Bytes> = None;
+        // Monotonic floor over every height observed in this scrape,
+        // seeded by the wrapper read: heights must never move backward
+        // across responses, or a page could miss a cleanup that an
+        // earlier response's serving node had already seen.
+        let mut min_height = scrape_height;
         loop {
             let mut request = ListDynamicFieldsRequest::default()
                 .with_parent(utxo_records_id)
@@ -269,15 +274,18 @@ impl OnchainState {
             let page_height = response
                 .checkpoint_height()
                 .ok_or_else(|| anyhow!("response missing X_SUI_CHECKPOINT_HEIGHT header"))?;
-            // Re-sample the cursor: it advances while we paginate, and a
-            // page must not predate anything this node has already seen.
-            let watcher_height = self.latest_checkpoint_height();
-            if page_height < watcher_height {
+            // Re-sample the cursor (it advances while we paginate) and
+            // fold it into the floor: a page must not predate anything
+            // this node — or any earlier response in this scrape — has
+            // already seen.
+            min_height = min_height.max(self.latest_checkpoint_height());
+            if page_height < min_height {
                 anyhow::bail!(
-                    "stale UTXO pool read: page at checkpoint {page_height} is behind the \
-                     watcher's cursor {watcher_height}"
+                    "stale UTXO pool read: page at checkpoint {page_height} is behind \
+                     checkpoint {min_height} already observed by this scrape"
                 );
             }
+            min_height = page_height;
             let page = response.into_inner();
             for field in &page.dynamic_fields {
                 let record: types::UtxoRecord = field
