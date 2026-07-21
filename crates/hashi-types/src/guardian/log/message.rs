@@ -31,12 +31,10 @@ use crate::guardian::GuardianPubKey;
 use crate::guardian::KPEncryptedShares;
 use crate::guardian::KPEncryptedSharesRoster;
 use crate::guardian::KPFingerprint;
-use crate::guardian::KpSigned;
 use crate::guardian::LimiterState;
 use crate::guardian::NitroAttestation;
 use crate::guardian::SecretSharingInstance;
 use crate::guardian::ShareID;
-use crate::guardian::SingleProvisionerInitRequest;
 use crate::guardian::StandardWithdrawalRequestWire;
 use crate::guardian::StandardWithdrawalResponse;
 use crate::guardian::UnixMillis;
@@ -171,13 +169,11 @@ impl HeartbeatLogMessage {
     }
 }
 
-/// First-deploy committee and the exact KP-signed PI submissions that authorized
-/// it. Written at `genesis/record.json` once PI reaches threshold.
+/// First-deploy committee written at `genesis/record.json` once KP-authorized PI
+/// reaches threshold.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct GenesisLogMessage {
     pub committee: crate::move_types::Committee,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub approvals: Vec<KpSigned<SingleProvisionerInitRequest>>,
 }
 
 impl GenesisLogMessage {

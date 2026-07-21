@@ -72,10 +72,7 @@ pub async fn provisioner_init(
         let committee = genesis_state.into_committee();
         let epoch = committee.epoch;
         enclave
-            .log_genesis(GenesisLogMessage {
-                committee,
-                approvals: request.0,
-            })
+            .log_genesis(GenesisLogMessage { committee })
             .await
             .expect("Unable to log KP-authorized genesis state");
         info!(epoch, "KP-authorized genesis committee written");

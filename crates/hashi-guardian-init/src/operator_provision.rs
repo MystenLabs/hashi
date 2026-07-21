@@ -14,7 +14,6 @@ use hashi_types::guardian::S3Config;
 use hashi_types::guardian::SecretSharingInstance;
 use hashi_types::guardian::WithdrawStage;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
-use hashi_types::pgp::load_certs;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use tracing::info;
 

@@ -18,6 +18,9 @@ cargo run -p hashi-guardian-init -- operator activate --config guardian-init.sam
 cargo run -p hashi-guardian-init -- key-provisioner rotate-cert --config guardian-init.sample.yaml --target-kp-pgp-fingerprint 0123456789ABCDEF0123456789ABCDEF01234567 --new-kp-pgp-cert-path /path/to/kp3-new.asc
 ```
 
+On first deploy, add `--do-genesis` to the `operator provision` command and
+every `key-provisioner provision` command. Omit it for replacement deployments.
+
 Each KP generates one or more PGP keys on yubikeys and exports the public certs
 to the operator; the key ceremony and provisioning flow is then driven through
 these commands. All production commands read the same unified config file; see
@@ -134,10 +137,11 @@ command uses `guardian_endpoint`, `guardian_s3`, `bitcoin_network`, `hashi`,
 
 ## key-provisioner provision
 
-A one-shot flow run by a key provisioner when a new guardian instance is
-brought up to replace one that went down. Each KP decrypts through their
-yubikey-backed gpg setup; plaintext never touches disk, but the raw share scalar
-is held in this process' memory long enough to verify and re-encrypt it. It:
+A one-shot flow run by a key provisioner for a new guardian instance, either on
+first deploy or when replacing a guardian that went down. Each KP decrypts
+through their yubikey-backed gpg setup; plaintext never touches disk, but the
+raw share scalar is held in this process' memory long enough to verify and
+re-encrypt it. It:
 
 1. Fetches and verifies the relay/standby endpoint's signed `GuardianInfo`
    (attestation-anchored), pinning the standby session.
@@ -166,8 +170,8 @@ is held in this process' memory long enough to verify and re-encrypt it. It:
    encrypted share)` submission and sends it to the configured relay endpoint.
    The relay pre-verifies and collects T-of-N distinct submissions; the enclave
    then authoritatively re-verifies every signature and request binding before
-   completing `ProvisionerInit`. On first deploy, that same threshold writes the
-   committee and exact signed approvals to `genesis/record.json`.
+   completing `ProvisionerInit`. On first deploy, that same threshold authorizes
+   writing the committee to `genesis/record.json`.
 
 ```bash
 cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-init.sample.yaml

@@ -100,7 +100,7 @@ sequenceDiagram
     KPs->>Guardian: GetGuardianInfo via proxy
     Guardian-->>KPs: config_hash plus optional genesis_state_hash plus session_id plus n/t plus attestation
     KPs->>KPs: Require S3 state to match --do-genesis intent
-    KPs->>KPs: Verify PCRs and independently derive both state hashes
+    KPs->>KPs: Verify PCRs and derive config hash plus optional genesis-state hash
     KPs->>KPs: HPKE-encrypt local share to guardian session key (no AAD)
     KPs->>KPs: Sign(session_id, config_hash, optional genesis_state_hash, encrypted share)
     KPs->>Proxy: SingleProvisionerInit(signed submission)
@@ -115,20 +115,20 @@ sequenceDiagram
         Guardian->>Guardian: Decrypt without AAD and verify commitments
         Guardian->>Guardian: Reconstruct BTC key and mark armed standby
         opt first deploy
-            Guardian->>S3: log(genesis committee plus exact KP-signed approvals)
+            Guardian->>S3: log(genesis committee after threshold KP authorization)
         end
         Guardian->>S3: log(init fully-initialized)
         Proxy-->>KPs: standby armed
     end
 ```
 
-On first deploy, the operator and each KP pass `--do-genesis`. This is purely an
+On first deploy, the operator and every KP pass `--do-genesis`. This is purely an
 explicit intent marker: callers fail if it disagrees with the observed S3
 committee state. The operator pins the current onchain committee as an optional
 `GenesisState` during `OperatorInit`, and each KP independently derives its hash
 and includes it in the normal signed PI submission. Once PI reaches threshold,
-the enclave writes `genesis/record.json` with the committee and the exact signed
-submissions that authorized it. Later deploys use `None` and do not pass the flag.
+the enclave writes the committee to `genesis/record.json`. Later deploys use
+`None` and do not pass the flag.
 
 ## Standby activation flow
 
