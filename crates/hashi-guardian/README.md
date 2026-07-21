@@ -9,6 +9,12 @@ non-canonical records. Random failure suffixes are sampled once before signing.
 Unsigned OI attestations bind placement through their Nitro-authenticated
 signing key and derived session ID.
 
+Guardians emit schema V2 records. Readers still deserialize V1 records and
+verify their signatures over the original V1 payload before normalizing them to
+V2 for callers. In particular, V1 KP-share logs carry one fingerprint and
+ciphertext per share, while V2 carries a fingerprint-to-ciphertext map per
+share so one KP can rotate between multiple accepted certificates.
+
 ## S3 log key format
 
 Canonical key layout:

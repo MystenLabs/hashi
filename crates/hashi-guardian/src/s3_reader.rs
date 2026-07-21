@@ -26,7 +26,6 @@ use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::KpShareStateLogMessage;
 use hashi_types::guardian::LogMessage;
-use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::S3Config;
@@ -188,7 +187,7 @@ impl GuardianReader {
         let build_pcrs = record.build_pcrs.clone();
         self.enforce_build_policy("ceremony log", build_policy, &build_pcrs)?;
         let session_id = record.session_id;
-        let LogMessage::V1(LogMessageV1::Ceremony(msg)) = record.message else {
+        let LogMessage::Ceremony(msg) = record.message else {
             anyhow::bail!("expected a ceremony log at {key}");
         };
         log_verified_read(&key, &session_id);
@@ -227,7 +226,7 @@ impl GuardianReader {
         let build_pcrs = record.build_pcrs.clone();
         self.enforce_build_policy("kp-shares log", build_policy, &build_pcrs)?;
         let session_id = record.session_id;
-        let LogMessage::V1(LogMessageV1::KpShareState(msg)) = record.message else {
+        let LogMessage::KpShareState(msg) = record.message else {
             anyhow::bail!("expected a kp-shares log at {key}");
         };
         if msg.sharing_seq != sharing_seq {
@@ -298,7 +297,7 @@ impl GuardianReader {
         let record = self.cache.verify_record(&self.s3, record).await?;
         self.enforce_build_policy("committee-update log", build_policy, &record.build_pcrs)?;
         let session_id = record.session_id;
-        let LogMessage::V1(LogMessageV1::CommitteeUpdate(msg)) = record.message else {
+        let LogMessage::CommitteeUpdate(msg) = record.message else {
             anyhow::bail!("expected a committee-update log at {key}");
         };
         let committee = match *msg {
@@ -332,7 +331,7 @@ impl GuardianReader {
         let record = self.cache.verify_record(&self.s3, record).await?;
         self.enforce_build_policy("genesis log", build_policy, &record.build_pcrs)?;
         let session_id = record.session_id;
-        let LogMessage::V1(LogMessageV1::Genesis(msg)) = record.message else {
+        let LogMessage::Genesis(msg) = record.message else {
             anyhow::bail!("expected a genesis log at {key}");
         };
         log_verified_read(&key, &session_id);

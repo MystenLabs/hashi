@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn serialization_includes_all_encrypted_shares() {
         let response = GuardianSigned::<SetupNewKeyResponse>::mock_for_testing().data;
-        let expected_share_count = response.encrypted_shares.len();
+        let expected_share_count = response.encrypted_shares.share_count();
         let state = CeremonyState::from(response);
 
         let json = serde_json::to_value(&state).unwrap();
