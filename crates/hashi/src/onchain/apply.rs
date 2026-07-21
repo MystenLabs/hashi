@@ -1502,7 +1502,12 @@ mod tests {
         // A foreign-typed object under a foreign owner (e.g. a system
         // registry's child), as `finish_publish` legitimately produces.
         let out = fixture.apply(&tx(vec![written(obj(
-            tag(Address::TWO, "coin_registry", "Currency", vec![TypeTag::U64]),
+            tag(
+                Address::TWO,
+                "coin_registry",
+                "Currency",
+                vec![TypeTag::U64],
+            ),
             1,
             Owner::Object(addr(0x98)),
             addr(0x72).as_bytes().to_vec(),
