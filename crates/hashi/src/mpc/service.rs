@@ -546,11 +546,19 @@ impl MpcService {
                 },
             )
         };
-        // Walk through batches to find the one containing `num_consumed`.
+        // Walk through batches until the one containing `num_consumed`.
         // Each batch can have a different size with unequal committee weights.
+        // Every walked batch is retained, not just the last one: presig
+        // indices are allocated on-chain at withdrawal commit time by
+        // advancing `num_consumed_presigs`, so a still-pending withdrawal can
+        // reference indices in any batch up to the allocation cursor.
+        // Dropping the earlier batches here would make those withdrawals
+        // unsignable until the next epoch. Retention is bounded by the epoch:
+        // the cursor resets to zero on reconfig.
         let mut batch_start = 0u64;
         let mut batch_index = 0u32;
-        let presignatures = loop {
+        let mut recovered = Vec::new();
+        loop {
             let presigs = self
                 .recover_presignatures_from_certs(
                     &mpc_manager,
@@ -561,13 +569,16 @@ impl MpcService {
                 )
                 .await?;
             let size = presigs.len() as u64;
+            recovered.push(presigs);
             if num_consumed < batch_start + size {
-                break presigs;
+                break;
             }
             batch_start += size;
             batch_index += 1;
-        };
-        let batch_size = presignatures.len();
+        }
+        let batch_size = recovered.last().expect("loop pushes before breaking").len();
+        let num_batches = recovered.len();
+        let mut batches = recovered.into_iter();
         let address = self.inner.config.validator_address()?;
         let signing_manager = SigningManager::new(
             address,
@@ -575,17 +586,20 @@ impl MpcService {
             output.threshold,
             output.key_shares.clone(),
             output.public_key,
-            presignatures,
-            batch_index,
-            batch_start,
+            batches.next().expect("at least one batch was recovered"),
+            0, // batch_index
+            0, // batch_start_index
             PRESIG_REFILL_DIVISOR,
             self.refill_tx.clone(),
         );
+        for presigs in batches {
+            signing_manager.push_batch(presigs);
+        }
         self.inner.store_signing_manager(signing_manager);
         info!(
-            "Recovered presigning state: batch_index={batch_index}, \
-             batch_start={batch_start}, batch_size={batch_size} \
-             (num_consumed_presigs={num_consumed})."
+            "Recovered presigning state: {num_batches} batch(es), latest \
+             batch_index={batch_index}, batch_start={batch_start}, \
+             batch_size={batch_size} (num_consumed_presigs={num_consumed})."
         );
         Ok(())
     }

@@ -154,6 +154,34 @@ impl SigningManager {
         self.state.write().unwrap().next_batch = Some(presignatures);
     }
 
+    /// Append a batch contiguous with the current last batch. Used by
+    /// recovery to retain every batch of the current epoch: presig indices
+    /// are allocated on-chain at withdrawal commit time, so still-pending
+    /// withdrawals can reference indices in any batch up to the allocation
+    /// cursor, not just the batch containing it.
+    pub fn push_batch(&self, presignatures: Presignatures) {
+        let mut state = self.state.write().unwrap();
+        let latest = state
+            .batches
+            .last()
+            .expect("a SigningManager always holds at least one batch");
+        let start_index = latest.end_index();
+        let batch_index = latest.batch_index + 1;
+        let pool: Vec<Option<(Vec<S>, G)>> = presignatures.map(Some).collect();
+        tracing::info!(
+            "Presig batch installed: address={}, batch_index={batch_index}, \
+             start_index={start_index}, size={}, fingerprint={}",
+            self.config.address,
+            pool.len(),
+            presig_pool_fingerprint(pool.iter().flatten().map(|(_, nonce)| nonce)),
+        );
+        state.batches.push(PresigBatch {
+            pool,
+            start_index,
+            batch_index,
+        });
+    }
+
     pub fn has_next_batch(&self) -> bool {
         self.state.read().unwrap().next_batch.is_some()
     }
@@ -1163,8 +1191,31 @@ mod tests {
 
         /// Build fresh presignatures and set as next_batch on all managers.
         fn set_next_batch_on_all(&self) {
+            for (mgr, presignatures) in self
+                .managers
+                .iter()
+                .zip(self.build_presignatures_for_all(99))
+            {
+                mgr.set_next_batch(presignatures);
+            }
+        }
+
+        /// Build fresh presignatures and push them as an installed batch on
+        /// all managers, mirroring the shape recovery produces.
+        fn push_batch_on_all(&self, seed: u64) {
+            for (mgr, presignatures) in self
+                .managers
+                .iter()
+                .zip(self.build_presignatures_for_all(seed))
+            {
+                mgr.push_batch(presignatures);
+            }
+        }
+
+        /// Build one consistent set of fresh presignatures per manager.
+        fn build_presignatures_for_all(&self, seed: u64) -> Vec<Presignatures> {
             let batch_size_per_weight: u16 = 10;
-            let mut rng = StdRng::seed_from_u64(99);
+            let mut rng = StdRng::seed_from_u64(seed);
             let nonces_for_dealer: Vec<_> = (0..self.n)
                 .map(|_| {
                     let nonces: Vec<S> = (0..batch_size_per_weight)
@@ -1183,34 +1234,35 @@ mod tests {
                     (public_keys, nonce_shares)
                 })
                 .collect();
-            for (i, mgr) in self.managers.iter().enumerate() {
-                let index = ShareIndex::new(i as u16 + 1).unwrap();
-                let outputs: Vec<batch_avss::ReceiverOutput> = (0..self.n as usize)
-                    .map(|j| batch_avss::ReceiverOutput {
-                        my_shares: batch_avss::SharesForNode {
-                            shares: vec![batch_avss::ShareBatch {
-                                index,
-                                batch: (0..batch_size_per_weight as usize)
-                                    .map(|l| nonces_for_dealer[j].1[l][i])
-                                    .collect(),
-                                blinding_share: S::zero(),
-                            }],
+            (0..self.managers.len())
+                .map(|i| {
+                    let index = ShareIndex::new(i as u16 + 1).unwrap();
+                    let outputs: Vec<batch_avss::ReceiverOutput> = (0..self.n as usize)
+                        .map(|j| batch_avss::ReceiverOutput {
+                            my_shares: batch_avss::SharesForNode {
+                                shares: vec![batch_avss::ShareBatch {
+                                    index,
+                                    batch: (0..batch_size_per_weight as usize)
+                                        .map(|l| nonces_for_dealer[j].1[l][i])
+                                        .collect(),
+                                    blinding_share: S::zero(),
+                                }],
+                            },
+                            public_keys: nonces_for_dealer[j].0.clone(),
+                        })
+                        .collect();
+                    Presignatures::new(
+                        outputs,
+                        batch_size_per_weight,
+                        Parameters {
+                            t: self.t,
+                            f: self.f,
                         },
-                        public_keys: nonces_for_dealer[j].0.clone(),
-                    })
-                    .collect();
-                let presignatures = Presignatures::new(
-                    outputs,
-                    batch_size_per_weight,
-                    Parameters {
-                        t: self.t,
-                        f: self.f,
-                    },
-                    true,
-                )
-                .unwrap();
-                mgr.set_next_batch(presignatures);
-            }
+                        true,
+                    )
+                    .unwrap()
+                })
+                .collect()
         }
 
         /// Manually advance peers (skip manager at `caller_index`) by
@@ -1845,6 +1897,56 @@ mod tests {
         verify_schnorr(&setup.verifying_key, b"swap", &sig);
         assert_eq!(setup.managers[0].batch_index(), 1);
         assert!(!setup.managers[0].has_next_batch());
+    }
+
+    #[tokio::test]
+    async fn test_pushed_batches_sign_out_of_order_across_batches() {
+        // Recovery shape: managers rebuilt with batch 0 plus a pushed batch 1
+        // must sign indices from both batches, in either order. This is the
+        // in-memory half of the regression where restart recovery dropped
+        // older batches still referenced by pending withdrawals.
+        let setup = SigningTestSetup::new(4);
+        let batch_size = setup.managers[0].initial_presig_count() as u64;
+        setup.push_batch_on_all(99);
+        assert_eq!(setup.managers[0].batch_index(), 1);
+
+        // Sign with a presig from the later batch first.
+        let batch1_req = Address::new([0xAA; 32]);
+        setup.prepare_all(b"later batch", &S::zero(), batch1_req, batch_size, Some(0));
+        let p2p = setup.mock_p2p_for(0);
+        let sig = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            batch1_req,
+            b"later batch",
+            batch_size, // first presig of batch 1
+            &S::zero(),
+            None,
+            Duration::from_secs(30),
+            &test_metrics(),
+        )
+        .await
+        .unwrap();
+        verify_schnorr(&setup.verifying_key, b"later batch", &sig);
+
+        // Then sign with a presig from the earlier batch.
+        let batch0_req = Address::new([0xBB; 32]);
+        setup.prepare_all(b"earlier batch", &S::zero(), batch0_req, 0, Some(0));
+        let p2p = setup.mock_p2p_for(0);
+        let sig = SigningManager::sign_one(
+            &setup.managers[0],
+            &p2p,
+            batch0_req,
+            b"earlier batch",
+            0, // first presig of batch 0
+            &S::zero(),
+            None,
+            Duration::from_secs(30),
+            &test_metrics(),
+        )
+        .await
+        .unwrap();
+        verify_schnorr(&setup.verifying_key, b"earlier batch", &sig);
     }
 
     #[tokio::test]
