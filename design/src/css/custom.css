@@ -111,16 +111,16 @@ code {
 
 /* Navbar */
 :root {
-  --ifm-navbar-height: 5rem;
+  --ifm-navbar-height: 3.75rem;
 }
 
 .navbar {
-  padding-top: 0.75em;
-  padding-bottom: 0.75em;
+  padding-top: 0.4em;
+  padding-bottom: 0.4em;
 }
 
 .navbar__logo {
-  height: 3.25rem;
+  height: 2.5rem;
 }
 
 .navbar__title {
@@ -443,7 +443,9 @@ table {
    docusaurus.config.js and does not follow the theme). Also make the bar a
    little taller with larger text than the Docusaurus default. */
 :root {
-  --docusaurus-announcement-bar-height: 6.5rem;
+  /* 4x the sui.io "Register for Sui Basecamp" pencil banner (48px / ~12px
+     text). */
+  --docusaurus-announcement-bar-height: 192px;
 }
 
 div[class^='announcementBar_'] {
@@ -451,9 +453,9 @@ div[class^='announcementBar_'] {
 }
 
 div[class^='announcementBarContent_'] {
-  font-size: 1.75rem;
+  font-size: 3.25rem;
   line-height: 1.4;
-  padding: 1.25rem 2rem;
+  padding: 0 2rem;
 }
 
 div[class^='announcementBar_'] a {
@@ -473,9 +475,9 @@ div[class^='announcementBar_'] .close {
 
 /* Copy-page button (docusaurus-plugin-copy-page-button): on content pages it
    docks into the table-of-contents sidebar, which is fine. On pages without an
-   article/TOC — the custom homepage and short docs like Introduction — the
-   plugin falls back to a fixed floating button in the top-right corner. Hide
-   that floating fallback; keep the docked TOC button on real content pages. */
+   article/TOC — the search page and short docs like Introduction — the plugin
+   falls back to a fixed floating button in the top-right corner. Hide that
+   floating fallback; keep the docked TOC button on real content pages. */
 html.plugin-pages #copy-page-button-container,
 #copy-page-button-container[style*='position: fixed'] {
   display: none !important;

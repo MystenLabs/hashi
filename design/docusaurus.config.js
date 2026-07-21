@@ -146,6 +146,12 @@ const config = {
     [
       '@docusaurus/plugin-client-redirects',
       {
+        redirects: [
+          // The Introduction page briefly lived at /introduction while a custom
+          // landing page occupied the root. Introduction is back at / now, so
+          // keep the old path working for anything that linked it in between.
+          { from: '/introduction', to: '/' },
+        ],
         createRedirects(existingPath) {
           if (existingPath === '/' || existingPath.endsWith('.html')) {
             return undefined;
