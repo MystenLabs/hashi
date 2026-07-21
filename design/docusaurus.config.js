@@ -240,7 +240,19 @@ const config = {
     /** @type {import('@docusaurus/preset-classic').ThemeConfig} */
     ({
       colorMode: {
-        respectPrefersColorScheme: true,
+        defaultMode: 'dark',
+        respectPrefersColorScheme: false,
+      },
+      announcementBar: {
+        // Changing the message later? Bump this id so visitors who dismissed
+        // the old bar see the new one (dismissal is stored per id).
+        id: 'hashi-testnet-live',
+        content:
+          'Hashi is now <strong>LIVE on Testnet</strong>. ' +
+          '<a target="_blank" rel="noopener noreferrer" href="https://testnet.hashi.sui.io">Get started &rarr;</a>',
+        backgroundColor: '#298DFF',
+        textColor: '#FFFFFF',
+        isCloseable: true,
       },
       navbar: {
         title: 'Hashi',

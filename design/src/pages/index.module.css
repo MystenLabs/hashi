@@ -1,0 +1,175 @@
+/*
+// Copyright (c) Mysten Labs, Inc.
+// SPDX-License-Identifier: Apache-2.0
+*/
+
+/* Brand tokens mirror src/css/cards.module.css so the landing page matches the
+   rest of the site in both themes. */
+.main {
+  --hashi-blue: #298DFF;
+  --hashi-blue-hover: #185FA5;
+  --hashi-surface: #F4F5F7;
+  --hashi-surface-hover: #E0E2E6;
+  --hashi-border: #E0E2E6;
+  --hashi-title: #298DFF;
+  --hashi-copy: #4B515B;
+  --hashi-muted: #6C7584;
+}
+
+[data-theme='dark'] .main {
+  --hashi-blue: #5CA9FF;
+  --hashi-blue-hover: #8FCBFF;
+  --hashi-surface: #222529;
+  --hashi-surface-hover: #343940;
+  --hashi-border: #343940;
+  --hashi-title: #5CA9FF;
+  --hashi-copy: #E0E2E6;
+  --hashi-muted: #89919F;
+}
+
+/* ---- Hero ---- */
+.hero {
+  padding: 4.5rem 1rem 3rem;
+  text-align: center;
+}
+
+.heroInner {
+  max-width: 780px;
+  margin: 0 auto;
+}
+
+.heroTitle {
+  font-size: clamp(2.25rem, 5vw, 3.25rem);
+  line-height: 1.1;
+  margin: 0 0 1rem;
+  font-weight: 600;
+}
+
+.heroTagline {
+  font-size: clamp(1.0625rem, 2.2vw, 1.25rem);
+  line-height: 1.6;
+  color: var(--hashi-muted);
+  margin: 0 auto;
+  max-width: 680px;
+}
+
+/* Inline token: official BTC / hBTC coin icon followed by its ticker. The
+   ticker is normal tagline text (same color and weight as the surrounding
+   copy); only the icon is an image. Keeping it plain inline text — rather than
+   an inline-flex box — keeps the label on the text baseline instead of
+   floating above it. */
+.token {
+  white-space: nowrap;
+}
+
+.tokenIcon {
+  width: 1.1em;
+  height: 1.1em;
+  vertical-align: -0.2em;
+  margin-right: 0.25em;
+}
+
+/* ---- Sections ---- */
+.sections {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 1rem 4rem;
+}
+
+.section {
+  margin-top: 3rem;
+}
+
+.section:first-child {
+  margin-top: 1rem;
+}
+
+.sectionHeader {
+  margin-bottom: 1.25rem;
+}
+
+.sectionTitle {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin: 0 0 0.25rem;
+}
+
+.sectionSubtitle {
+  font-size: 0.9375rem;
+  color: var(--hashi-muted);
+  margin: 0;
+}
+
+.cardGrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 1.25rem 1.5rem;
+  border-radius: 0;
+  border: 1px solid var(--hashi-border);
+  background: var(--hashi-surface);
+  text-decoration: none;
+  transition: all 0.2s ease;
+  height: 100%;
+}
+
+.card:hover {
+  background: var(--hashi-surface-hover);
+  border-color: var(--hashi-blue);
+  text-decoration: none;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--hashi-blue) 14%, transparent);
+}
+
+.cardTitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 1.0625rem;
+  font-weight: 500;
+  color: var(--hashi-title);
+  margin: 0;
+}
+
+.cardArrow {
+  color: var(--hashi-title);
+  opacity: 0;
+  transform: translateX(-4px);
+  transition: all 0.2s ease;
+}
+
+.card:hover .cardArrow {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.cardCopy {
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--hashi-copy);
+  margin: 0;
+}
+
+/* ---- Responsive ---- */
+@media (max-width: 996px) {
+  .cardGrid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 768px) {
+  .hero {
+    padding: 3rem 1rem 2rem;
+  }
+
+  .cardGrid {
+    grid-template-columns: 1fr;
+  }
+}

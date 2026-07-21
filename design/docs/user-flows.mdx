@@ -7,6 +7,13 @@ keywords: [ user flow, deposit, withdraw, BTC, hBTC, Sui ]
 There are two main user flows for interacting with `hashi`: deposits and
 withdrawals.
 
+:::info
+The only coin the Hashi protocol creates is `hBTC`, the Bitcoin-backed asset it
+mints on deposit. There is no `$HASHI` token: Hashi has no governance, utility,
+or airdrop token, and committee members govern the protocol by voting onchain
+with their validator stake weight. Treat any `$HASHI` token offering, presale,
+or airdrop as an imitation.
+:::
 
 ## Deposit flow
 
@@ -66,7 +73,7 @@ For a detailed breakdown of each phase, see [Deposit](deposit.mdx).
 
 ### Running a test deposit on Testnet
 
-Hashi's Testnet deployment uses **Bitcoin Signet**, so a test deposit needs Signet BTC. Signet coins have no value and cannot be bought or mined in any practical sense; they are handed out by faucets.
+Hashi's Testnet deployment uses **Bitcoin Signet**, so a test deposit needs Signet BTC. Signet coins have no value, and you cannot buy or mine them in any practical sense; you get them from a faucet.
 
 :::caution
 The Signet faucets below are **third-party services, not operated or verified by the Hashi team**. Availability, rate limits, and URLs change without notice, and this page makes no guarantee that any of them work at the time you read it. Never send real BTC to a Signet faucet or a Signet address.
@@ -75,10 +82,10 @@ The Signet faucets below are **third-party services, not operated or verified by
 Commonly used public faucets for the default Signet network include [signetfaucet.com](https://signetfaucet.com/) and its alternate at [alt.signetfaucet.com](https://alt.signetfaucet.com/). Confirm that a faucet serves **default Signet** before using it. Some communities run custom signets whose coins are not valid on the network Hashi's Testnet uses.
 
 :::info
-Your own Signet node cannot create spendable coins for you. Signet block production is centrally signed, so a faucet is the normal way to obtain test BTC.
+Your own Signet node cannot create spendable coins for you. A central authority signs Signet blocks, so a faucet is the normal way to get test BTC.
 :::
 
-Once you hold Signet BTC, the deposit loop is the one described above, driven through the CLI. Global options attach to the first-level subcommand, so `-c` goes after `deposit` (see the [CLI reference](node-operator-runbook.mdx#61-global-options)):
+Once you hold Signet BTC, run the deposit loop described above through the CLI. Global options attach to the first-level subcommand, so `-c` goes after `deposit` (see the [CLI reference](node-operator-runbook.mdx#61-global-options)):
 
 ```bash
 # 1. Get the deposit address derived from your Sui address
@@ -95,7 +102,7 @@ hashi deposit -c hashi-cli.toml status <request-id>
 hashi balance -c hashi-cli.toml 0x<sui-address>
 ```
 
-The deposit must meet Bitcoin's dust minimum, and Hashi waits for a confirmation threshold before minting, so expect to wait for several Signet blocks between steps 3 and 5. See [Deposit](deposit.mdx) for the request, approve, confirm, and mint phases in detail.
+The deposit must meet Bitcoin's dust minimum, and Hashi waits for a confirmation threshold before minting, so expect to wait for several Signet blocks between steps 3 and 4. See [Deposit](deposit.mdx) for the request, approve, confirm, and mint phases in detail.
 
 ## Withdraw flow
 

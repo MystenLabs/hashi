@@ -110,18 +110,29 @@ code {
 }
 
 /* Navbar */
+:root {
+  --ifm-navbar-height: 5rem;
+}
+
 .navbar {
-  padding-top: 0.6em;
-  padding-bottom: 0.6em;
+  padding-top: 0.75em;
+  padding-bottom: 0.75em;
 }
 
 .navbar__logo {
-  height: 2.5rem;
+  height: 3.25rem;
 }
 
 .navbar__title {
+  font-size: 1.375rem;
   font-weight: 500;
   letter-spacing: -0.02em;
+}
+
+/* Right-side navbar links (GitHub, etc.) */
+.navbar__item,
+.navbar__link {
+  font-size: 1.0625rem;
 }
 
 /* "Ask Hashi AI" launcher button in the navbar (mirrors the Sui-docs and
@@ -129,13 +140,13 @@ code {
 .kapa-trigger-btn {
   display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.4rem 0.95rem;
+  gap: 0.6rem;
+  padding: 0.6rem 1.25rem;
   margin-left: 0.5rem;
   background: #ffffff;
   color: #0f0f0f;
   font-family: inherit;
-  font-size: 0.875rem;
+  font-size: 1.0625rem;
   font-weight: 500;
   line-height: 1;
   border: 1px solid #E0E2E6;
@@ -154,8 +165,8 @@ code {
 
 .kapa-trigger-btn img {
   display: block;
-  width: 20px;
-  height: 20px;
+  width: 26px;
+  height: 26px;
   flex-shrink: 0;
 }
 
@@ -174,13 +185,13 @@ code {
 .search-launcher-btn {
   display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.4rem 0.95rem;
+  gap: 0.6rem;
+  padding: 0.6rem 1.25rem;
   margin: 0 0.25rem;
   background: #ffffff;
   color: #0f0f0f;
   font-family: inherit;
-  font-size: 0.875rem;
+  font-size: 1.0625rem;
   font-weight: 500;
   line-height: 1;
   border: 1px solid #E0E2E6;
@@ -212,6 +223,10 @@ code {
 
 .search-launcher-btn__kbd kbd {
   background: transparent;
+  /* The pill is always white in both themes, so pin a dark key color.
+     Without this, Infima's default kbd color turns near-white in dark mode
+     and the keys become illegible on the white pill. */
+  color: #6C7584;
   border: 1px solid #E0E2E6;
   border-radius: 4px;
   padding: 0 4px;
@@ -421,4 +436,47 @@ table {
 
 .DocSearch-NoResults {
   padding: 1.5rem;
+}
+
+/* Announcement bar: keep the link and close button legible on the blue
+   background in both light and dark themes (the bar color is set in
+   docusaurus.config.js and does not follow the theme). Also make the bar a
+   little taller with larger text than the Docusaurus default. */
+:root {
+  --docusaurus-announcement-bar-height: 6.5rem;
+}
+
+div[class^='announcementBar_'] {
+  font-weight: 500;
+}
+
+div[class^='announcementBarContent_'] {
+  font-size: 1.75rem;
+  line-height: 1.4;
+  padding: 1.25rem 2rem;
+}
+
+div[class^='announcementBar_'] a {
+  color: #ffffff;
+  text-decoration: underline;
+}
+
+div[class^='announcementBar_'] a:hover {
+  color: #ffffff;
+  opacity: 0.85;
+}
+
+div[class^='announcementBar_'] .close {
+  color: #ffffff;
+  opacity: 0.8;
+}
+
+/* Copy-page button (docusaurus-plugin-copy-page-button): on content pages it
+   docks into the table-of-contents sidebar, which is fine. On pages without an
+   article/TOC — the custom homepage and short docs like Introduction — the
+   plugin falls back to a fixed floating button in the top-right corner. Hide
+   that floating fallback; keep the docked TOC button on real content pages. */
+html.plugin-pages #copy-page-button-container,
+#copy-page-button-container[style*='position: fixed'] {
+  display: none !important;
 }
