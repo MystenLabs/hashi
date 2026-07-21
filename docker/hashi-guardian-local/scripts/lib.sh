@@ -66,7 +66,7 @@ render_config() {
   : "${PACKAGE_ID:?PACKAGE_ID must be set (from hashi-localnet state.json)}"
   : "${HASHI_OBJECT_ID:?HASHI_OBJECT_ID must be set (from hashi-localnet state.json)}"
 
-  # Build the YAML list of cert paths (2-space indent under kp_pgp_cert_paths).
+  # Build the YAML list of KP cert path sets (2-space indent under kp_pgp_cert_paths).
   # `i` must be local — callers (e.g. provision.sh's KP loop) use `i` too, and
   # bash's dynamic scoping would otherwise let this loop clobber theirs.
   local kp_cert_paths_yaml="" i

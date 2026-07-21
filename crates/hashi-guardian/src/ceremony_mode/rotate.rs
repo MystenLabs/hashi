@@ -71,17 +71,39 @@ async fn finalize_rotation(
     // Rotation re-shares the same key, so its x-only pubkey is unchanged; record it.
     let btc_master_pubkey = k256_sk_to_btc_xonly_pubkey(&k256_sk);
 
-    let (new_certs, new_params) = state.into_parts();
+    let (new_certs_roster, new_params) = state.into_parts();
     let n = new_params.num_shares();
     let t = new_params.threshold();
-    info!("Re-splitting for {n} new KPs (threshold: {t}).");
+    let certificate_count: usize = new_certs_roster
+        .iter()
+        .map(|set| set.pgp_certs().len())
+        .sum();
+    info!(
+        share_count = n,
+        threshold = t,
+        certificate_count,
+        "Received new key provisioner OpenPGP certificate roster."
+    );
+    for (index, cert_set) in new_certs_roster.iter().enumerate() {
+        info!(
+            share_id = index + 1,
+            certificate_count = cert_set.pgp_certs().len(),
+            recipient_fingerprints = ?cert_set.fingerprints(),
+            "Received new KP certificate set."
+        );
+    }
 
     // Confine the !Send `ThreadRng` to a sync scope so the surrounding async
     // future stays Send.
     let (encrypted_shares, share_commitments) = {
         let mut rng = rand::thread_rng();
-        split_and_encrypt_for_kps(&k256_sk, &new_certs, &new_params, &mut rng)
+        split_and_encrypt_for_kps(&k256_sk, &new_certs_roster, &new_params, &mut rng)
     };
+    info!(
+        share_count = encrypted_shares.share_count(),
+        ciphertext_count = encrypted_shares.ciphertext_count(),
+        "Re-encrypted each share once per new KP certificate."
+    );
 
     let new_sharing_seq = old_instance.sharing_seq() + 1;
     let new_instance = SecretSharingInstance::new(share_commitments, n, t, new_sharing_seq)?;
@@ -110,11 +132,11 @@ mod tests {
     use crate::mock_logger_capturing;
     use crate::test_utils::CapturedPuts;
     use hashi_types::guardian::crypto::split_secret;
-    use hashi_types::guardian::test_utils::mock_pgp_certs;
+    use hashi_types::guardian::test_utils::mock_kp_certs_roster;
     use hashi_types::guardian::GuardianError::InvalidInputs;
     use hashi_types::guardian::LogMessage;
-    use hashi_types::guardian::LogMessageV1;
     use hashi_types::guardian::LogRecord;
+    use hashi_types::guardian::VersionedLogMessage;
     use k256::SecretKey;
 
     const TEST_N: usize = 5;
@@ -143,7 +165,7 @@ mod tests {
     }
 
     fn build_state() -> RotateKpsState {
-        RotateKpsState::new(mock_pgp_certs(TEST_N), TEST_N, TEST_T).unwrap()
+        RotateKpsState::new(mock_kp_certs_roster(TEST_N), TEST_N, TEST_T).unwrap()
     }
 
     /// Bundle one submission per share, all bound to `state.digest()` as AAD —
@@ -169,7 +191,10 @@ mod tests {
     }
 
     /// Run one rotation and return its verified response shares.
-    async fn rotate_and_verify(enclave: &Arc<Enclave>, req: RotateKpsRequest) -> KPEncryptedShares {
+    async fn rotate_and_verify(
+        enclave: &Arc<Enclave>,
+        req: RotateKpsRequest,
+    ) -> KPEncryptedSharesRoster {
         let signed = rotate_kps(enclave.clone(), req).await.expect("ok");
         signed
             .verify(&enclave.signing_pubkey())
@@ -186,17 +211,18 @@ mod tests {
     /// original BTC key, once a PGP-decrypt test helper exists.
     fn assert_rotation_output(
         captures: &CapturedPuts,
-        response_shares: &[KPEncryptedShare],
+        response_shares: &KPEncryptedSharesRoster,
         new_n: usize,
         new_t: usize,
     ) {
-        assert_eq!(response_shares.len(), new_n);
-        for enc in response_shares {
-            assert!(
-                enc.armored_ciphertext
-                    .starts_with("-----BEGIN PGP MESSAGE-----"),
-                "expected a PGP-armored share in the response"
-            );
+        assert_eq!(response_shares.share_count(), new_n);
+        for enc in response_shares.iter() {
+            for ciphertext in enc.ciphertexts_by_fingerprint.values() {
+                assert!(
+                    ciphertext.starts_with("-----BEGIN PGP MESSAGE-----"),
+                    "expected a PGP-armored share in the response"
+                );
+            }
         }
 
         let captured = captures.lock().unwrap();
@@ -218,8 +244,8 @@ mod tests {
         );
 
         let record: LogRecord = serde_json::from_slice(body).unwrap();
-        let LogMessage::V1(LogMessageV1::Ceremony(ceremony)) = record.message else {
-            panic!("expected Ceremony variant");
+        let VersionedLogMessage::V2(LogMessage::Ceremony(ceremony)) = record.message else {
+            panic!("expected V2 Ceremony variant");
         };
         let CeremonyLogMessage::Rotate {
             old_instance,
@@ -250,12 +276,13 @@ mod tests {
             "expected sharing_seq=1 cert_seq=0, got key {shares_key}"
         );
         let shares_record: LogRecord = serde_json::from_slice(shares_body).unwrap();
-        let LogMessage::V1(LogMessageV1::KpShareState(shares)) = shares_record.message else {
-            panic!("expected KpShareState variant");
+        let VersionedLogMessage::V2(LogMessage::KpShareState(shares)) = shares_record.message
+        else {
+            panic!("expected V2 KpShareState variant");
         };
         assert_eq!(shares.sharing_seq, 1);
         assert_eq!(shares.cert_seq, 0);
-        assert_eq!(shares.encrypted_shares.len(), new_n);
+        assert_eq!(shares.encrypted_shares.share_count(), new_n);
     }
 
     #[tokio::test]
@@ -263,17 +290,17 @@ mod tests {
         let (shares, old_instance, captures, enclave) = setup_rotation_enclave().await;
         let req = build_request(&shares[..TEST_T], &enclave, &old_instance, build_state());
         let response_shares = rotate_and_verify(&enclave, req).await;
-        assert_rotation_output(&captures, response_shares.as_slice(), TEST_N, TEST_T);
+        assert_rotation_output(&captures, &response_shares, TEST_N, TEST_T);
     }
 
     #[tokio::test]
     async fn happy_path_asymmetric_n_t() {
         // Old (n=5, t=3); rotate to new (n=3, t=2).
         let (shares, old_instance, captures, enclave) = setup_rotation_enclave().await;
-        let state = RotateKpsState::new(mock_pgp_certs(3), 3, 2).unwrap();
+        let state = RotateKpsState::new(mock_kp_certs_roster(3), 3, 2).unwrap();
         let req = build_request(&shares[..TEST_T], &enclave, &old_instance, state);
         let response_shares = rotate_and_verify(&enclave, req).await;
-        assert_rotation_output(&captures, response_shares.as_slice(), 3, 2);
+        assert_rotation_output(&captures, &response_shares, 3, 2);
     }
 
     #[tokio::test]
@@ -351,7 +378,7 @@ mod tests {
         let (shares, old_instance, _captures, enclave) = setup_rotation_enclave().await;
         let state1 = build_state();
         let state2 = build_state();
-        assert_ne!(state1.new_kp_pgp_certs(), state2.new_kp_pgp_certs());
+        assert_ne!(state1.new_kp_certs_roster(), state2.new_kp_certs_roster());
 
         let mut rng = rand::thread_rng();
         let submissions = vec![

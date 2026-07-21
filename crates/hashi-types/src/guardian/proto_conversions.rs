@@ -23,8 +23,10 @@ use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
 use super::InitConfig;
-use super::KPEncryptedShare;
 use super::KPEncryptedShares;
+use super::KPEncryptedSharesRoster;
+use super::KpCerts;
+use super::KpCertsRoster;
 use super::KpSigned;
 use super::LimiterConfig;
 use super::LimiterState;
@@ -77,16 +79,21 @@ use crate::move_types::Config;
 //      Proto -> Domain (deserialization)
 // --------------------------------------------
 
-fn pb_to_kp_encrypted_share(pb: pb::KpEncryptedShare) -> GuardianResult<KPEncryptedShare> {
-    Ok(KPEncryptedShare {
+fn pb_to_kp_encrypted_shares(pb: pb::SingleKpEncryptedShares) -> GuardianResult<KPEncryptedShares> {
+    Ok(KPEncryptedShares {
         id: pb_to_share_id(pb.id)?,
-        recipient_fingerprint: pb
-            .recipient_fingerprint
-            .ok_or_else(|| missing("recipient_fingerprint"))?,
-        armored_ciphertext: pb
-            .armored_ciphertext
-            .ok_or_else(|| missing("armored_ciphertext"))?,
+        ciphertexts_by_fingerprint: pb.ciphertexts.into_iter().collect(),
     })
+}
+
+fn pb_to_kp_cert_set(pb: pb::KpPgpCertSet) -> GuardianResult<KpCerts> {
+    let certs = pb
+        .pgp_certs
+        .iter()
+        .cloned()
+        .map(|cert| PgpPublicCert::new(cert).map_err(|e| InvalidInputs(e.to_string())))
+        .collect::<GuardianResult<Vec<_>>>()?;
+    KpCerts::new(certs)
 }
 
 pub fn pb_to_guardian_encrypted_share(
@@ -102,17 +109,17 @@ impl TryFrom<pb::SetupNewKeyRequest> for SetupNewKeyRequest {
     type Error = GuardianError;
 
     fn try_from(req: pb::SetupNewKeyRequest) -> Result<Self, Self::Error> {
-        let certs = req
-            .key_provisioner_pgp_certs
+        let cert_sets = req
+            .key_provisioner_pgp_cert_sets
             .iter()
             .cloned()
-            .map(|cert| PgpPublicCert::new(cert).map_err(|e| InvalidInputs(e.to_string())))
+            .map(pb_to_kp_cert_set)
             .collect::<GuardianResult<Vec<_>>>()?;
 
         let num_shares = req.num_shares.ok_or_else(|| missing("num_shares"))? as usize;
         let threshold = req.threshold.ok_or_else(|| missing("threshold"))? as usize;
 
-        SetupNewKeyRequest::new(certs, num_shares, threshold)
+        SetupNewKeyRequest::new(KpCertsRoster::new(cert_sets)?, num_shares, threshold)
     }
 }
 
@@ -130,9 +137,9 @@ impl TryFrom<pb::SignedSetupNewKeyResponse> for GuardianSigned<SetupNewKeyRespon
         let encrypted_shares = data
             .encrypted_shares
             .into_iter()
-            .map(pb_to_kp_encrypted_share)
+            .map(pb_to_kp_encrypted_shares)
             .collect::<GuardianResult<Vec<_>>>()?;
-        let encrypted_shares = KPEncryptedShares::new(encrypted_shares)?;
+        let encrypted_shares = KPEncryptedSharesRoster::new(encrypted_shares)?;
 
         let secret_sharing_instance = pb_to_secret_sharing_instance(
             data.secret_sharing_instance
@@ -287,12 +294,16 @@ impl TryFrom<pb::RotateKpsRequest> for RotateKpsRequest {
             .ok_or_else(|| missing("new_num_shares"))? as usize;
         let new_threshold = req.new_threshold.ok_or_else(|| missing("new_threshold"))? as usize;
 
-        let new_kp_pgp_certs = req
-            .new_kp_pgp_certs
+        let new_kp_pgp_cert_sets = req
+            .new_kp_pgp_cert_sets
             .into_iter()
-            .map(|cert| PgpPublicCert::new(cert).map_err(|e| InvalidInputs(e.to_string())))
+            .map(pb_to_kp_cert_set)
             .collect::<GuardianResult<Vec<_>>>()?;
-        let state = RotateKpsState::new(new_kp_pgp_certs, new_num_shares, new_threshold)?;
+        let state = RotateKpsState::new(
+            KpCertsRoster::new(new_kp_pgp_cert_sets)?,
+            new_num_shares,
+            new_threshold,
+        )?;
 
         let old_instance = pb_to_secret_sharing_instance(
             req.old_instance.ok_or_else(|| missing("old_instance"))?,
@@ -318,9 +329,9 @@ impl TryFrom<pb::SignedRotateKpsResponse> for GuardianSigned<RotateKpsResponse> 
         let encrypted_shares = data
             .encrypted_shares
             .into_iter()
-            .map(pb_to_kp_encrypted_share)
+            .map(pb_to_kp_encrypted_shares)
             .collect::<GuardianResult<Vec<_>>>()?;
-        let encrypted_shares = KPEncryptedShares::new(encrypted_shares)?;
+        let encrypted_shares = KPEncryptedSharesRoster::new(encrypted_shares)?;
 
         let timestamp_ms = resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?;
 
@@ -515,7 +526,7 @@ pub fn rotate_kps_response_signed_to_pb(
                 .encrypted_shares
                 .into_vec()
                 .into_iter()
-                .map(kp_encrypted_share_to_pb)
+                .map(kp_encrypted_shares_to_pb)
                 .collect(),
         }),
         timestamp_ms: Some(s.timestamp_ms),
@@ -525,10 +536,11 @@ pub fn rotate_kps_response_signed_to_pb(
 
 pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequest {
     pb::SetupNewKeyRequest {
-        key_provisioner_pgp_certs: s
-            .pgp_certs()
+        key_provisioner_pgp_cert_sets: s
+            .kp_certs_roster()
             .iter()
-            .map(|cert| cert.armored().to_string())
+            .cloned()
+            .map(kp_cert_set_to_pb)
             .collect(),
         num_shares: Some(s.num_shares() as u32),
         threshold: Some(s.threshold() as u32),
@@ -620,19 +632,30 @@ fn pcr_allowlist_to_pb(allowlist: PcrAllowlist) -> pb::PcrAllowlist {
 
 pub fn rotate_kps_request_to_pb(r: RotateKpsRequest) -> pb::RotateKpsRequest {
     let (encrypted_old_shares, old_instance, state) = r.into_parts();
-    let (new_kp_pgp_certs, new_params) = state.into_parts();
+    let (new_kp_certs_roster, new_params) = state.into_parts();
     pb::RotateKpsRequest {
         encrypted_old_shares: encrypted_old_shares
             .into_iter()
             .map(guardian_encrypted_share_to_pb)
             .collect(),
-        new_kp_pgp_certs: new_kp_pgp_certs
+        new_kp_pgp_cert_sets: new_kp_certs_roster
+            .into_vec()
             .into_iter()
-            .map(|cert| cert.armored().to_string())
+            .map(kp_cert_set_to_pb)
             .collect(),
         new_num_shares: Some(new_params.num_shares() as u32),
         new_threshold: Some(new_params.threshold() as u32),
         old_instance: Some(secret_sharing_instance_to_pb(&old_instance)),
+    }
+}
+
+fn kp_cert_set_to_pb(set: KpCerts) -> pb::KpPgpCertSet {
+    pb::KpPgpCertSet {
+        pgp_certs: set
+            .into_pgp_certs()
+            .into_iter()
+            .map(|cert| cert.armored().to_string())
+            .collect(),
     }
 }
 
@@ -988,11 +1011,10 @@ fn ciphertext_to_pb(c: Ciphertext) -> pb::HpkeCiphertext {
     }
 }
 
-pub fn kp_encrypted_share_to_pb(s: KPEncryptedShare) -> pb::KpEncryptedShare {
-    pb::KpEncryptedShare {
+pub fn kp_encrypted_shares_to_pb(s: KPEncryptedShares) -> pb::SingleKpEncryptedShares {
+    pb::SingleKpEncryptedShares {
         id: Some(share_id_to_pb(s.id)),
-        armored_ciphertext: Some(s.armored_ciphertext),
-        recipient_fingerprint: Some(s.recipient_fingerprint),
+        ciphertexts: s.ciphertexts_by_fingerprint.into_iter().collect(),
     }
 }
 
@@ -1016,7 +1038,7 @@ pub fn setup_new_key_response_to_pb(r: SetupNewKeyResponse) -> pb::SetupNewKeyRe
             .encrypted_shares
             .into_vec()
             .into_iter()
-            .map(kp_encrypted_share_to_pb)
+            .map(kp_encrypted_shares_to_pb)
             .collect(),
         secret_sharing_instance: Some(secret_sharing_instance_to_pb(&r.secret_sharing_instance)),
         btc_master_pubkey: r.btc_master_pubkey.serialize().to_vec().into(),

@@ -9,7 +9,6 @@ use crate::domain::WithdrawalEventType;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_guardian::s3_reader::withdraw_cursor;
 use hashi_types::guardian::LogMessage;
-use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::VerifiedLogRecord;
 use hashi_types::guardian::WithdrawalLogMessage;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
@@ -28,7 +27,7 @@ impl TryFrom<VerifiedLogRecord> for VerifiedWithdrawal {
     type Error = anyhow::Error;
 
     fn try_from(log: VerifiedLogRecord) -> Result<Self, Self::Error> {
-        let LogMessage::V1(LogMessageV1::Withdrawal(withdrawal_message)) = log.message else {
+        let LogMessage::Withdrawal(withdrawal_message) = log.message else {
             anyhow::bail!("non-withdrawal logs found");
         };
 

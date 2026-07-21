@@ -19,9 +19,11 @@ relay_endpoint: "http://localhost:50051"
 # One of: mainnet, testnet, regtest, signet.
 bitcoin_network: "signet"
 
-# Path to this KP's armored OpenPGP public cert. Optional for operator commands;
-# required by key-provisioner commands.
-kp_pgp_cert_path: /path/to/kp3.asc
+# Path to the armored OpenPGP public cert this KP uses to identify itself.
+# Optional for operator commands. KP ceremony uses it to select this KP's full
+# roster entry and verifies every cert there; provisioning decrypts and signs
+# with only this cert/YubiKey.
+kp_pgp_cert_path: /path/to/kp3-a.asc
 
 # S3 config for the guardian's log bucket. Must have object-lock enabled.
 # If access_key and secret_key are omitted, guardian-init uses the default AWS
@@ -45,13 +47,15 @@ kp_roster:
   num_shares: 5
   threshold: 3
 
-  # Paths to every KP's armored OpenPGP public cert from the expected ceremony roster.
+  # Paths to each KP's armored OpenPGP public cert set from the expected ceremony
+  # roster. Each entry is one KP/share id and may contain multiple certs
+  # for that KP.
   kp_pgp_cert_paths:
-    - /path/to/kp1.asc
-    - /path/to/kp2.asc
-    - /path/to/kp3.asc
-    - /path/to/kp4.asc
-    - /path/to/kp5.asc
+    - [/path/to/kp1-a.asc, /path/to/kp1-b.asc]
+    - [/path/to/kp2-a.asc, /path/to/kp2-b.asc]
+    - [/path/to/kp3-a.asc, /path/to/kp3-b.asc]
+    - [/path/to/kp4-a.asc, /path/to/kp4-b.asc]
+    - [/path/to/kp5-a.asc, /path/to/kp5-b.asc]
 
   # Expected enclave build: git revision + PCR0 (hex).
   current_build:

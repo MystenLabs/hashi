@@ -180,13 +180,14 @@ fn dummy_secret_sharing_instance() -> SecretSharingInstance {
     SecretSharingInstance::new(commitments, TEST_N, TEST_T, 0).unwrap()
 }
 
-fn dummy_kp_encrypted_shares() -> KPEncryptedShares {
-    KPEncryptedShares::new(
+fn dummy_kp_encrypted_shares() -> KPEncryptedSharesRoster {
+    KPEncryptedSharesRoster::new(
         (1..=TEST_N)
-            .map(|i| KPEncryptedShare {
+            .map(|i| KPEncryptedShares {
                 id: NonZeroU16::new(i as u16).unwrap(),
-                recipient_fingerprint: format!("DUMMY FINGERPRINT {i}"),
-                armored_ciphertext: "dummy".into(),
+                ciphertexts_by_fingerprint: [(format!("DUMMY FINGERPRINT {i}"), "dummy".into())]
+                    .into_iter()
+                    .collect(),
             })
             .collect(),
     )
@@ -232,7 +233,7 @@ impl OperatorInitTestArgs {
         self
     }
 
-    pub fn with_kp_encrypted_shares(mut self, shares: KPEncryptedShares) -> Self {
+    pub fn with_kp_encrypted_shares(mut self, shares: KPEncryptedSharesRoster) -> Self {
         self.ceremony_state.encrypted_shares = shares;
         self
     }

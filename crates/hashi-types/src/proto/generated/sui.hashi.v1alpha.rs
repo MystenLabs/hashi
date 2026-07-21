@@ -1802,16 +1802,22 @@ pub struct S3BucketInfo {
     #[prost(string, optional, tag = "2")]
     pub region: ::core::option::Option<::prost::alloc::string::String>,
 }
-/// Untrusted wire DTO. Converted to a validated domain request in the server.
+/// One KP's accepted OpenPGP certs. A KP can have multiple certs for the
+/// same secret-share id.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SetupNewKeyRequest {
-    /// Armored OpenPGP certificates for key provisioners. Length must equal `num_shares`.
+pub struct KpPgpCertSet {
+    /// Armored OpenPGP certificates for one key provisioner.
     #[prost(string, repeated, tag = "1")]
-    pub key_provisioner_pgp_certs: ::prost::alloc::vec::Vec<
-        ::prost::alloc::string::String,
-    >,
-    /// Total number of shares to split the new BTC key into. Must match
-    /// `key_provisioner_pgp_certs.len()`.
+    pub pgp_certs: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// Untrusted wire DTO. Converted to a validated domain request in the server.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetupNewKeyRequest {
+    /// OpenPGP cert sets for key provisioners. Length must equal `num_shares`.
+    #[prost(message, repeated, tag = "1")]
+    pub key_provisioner_pgp_cert_sets: ::prost::alloc::vec::Vec<KpPgpCertSet>,
+    /// Total number of shares to split the new BTC key into. Must match the number
+    /// of KP cert sets, not the total number of certs.
     #[prost(uint32, optional, tag = "2")]
     pub num_shares: ::core::option::Option<u32>,
     /// Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
@@ -1840,16 +1846,17 @@ pub struct GuardianEncryptedShare {
     #[prost(message, optional, tag = "2")]
     pub ciphertext: ::core::option::Option<HpkeCiphertext>,
 }
-/// OpenPGP-encrypted secret share sent to a key provisioner.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct KpEncryptedShare {
+/// All PGP-encrypted copies of one KP share.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SingleKpEncryptedShares {
     #[prost(message, optional, tag = "1")]
     pub id: ::core::option::Option<GuardianShareId>,
-    #[prost(string, optional, tag = "2")]
-    pub armored_ciphertext: ::core::option::Option<::prost::alloc::string::String>,
-    /// Fingerprint of the recipient PGP cert this share is encrypted to.
-    #[prost(string, optional, tag = "3")]
-    pub recipient_fingerprint: ::core::option::Option<::prost::alloc::string::String>,
+    /// Recipient PGP fingerprint to armored ciphertext.
+    #[prost(map = "string, string", tag = "2")]
+    pub ciphertexts: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::prost::alloc::string::String,
+    >,
 }
 /// Commitment to a secret share.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1863,7 +1870,7 @@ pub struct GuardianShareCommitment {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SetupNewKeyResponseData {
     #[prost(message, repeated, tag = "1")]
-    pub encrypted_shares: ::prost::alloc::vec::Vec<KpEncryptedShare>,
+    pub encrypted_shares: ::prost::alloc::vec::Vec<SingleKpEncryptedShares>,
     #[prost(message, optional, tag = "2")]
     pub secret_sharing_instance: ::core::option::Option<SecretSharingInstance>,
     /// x-only BTC master pubkey (32 bytes); lets the operator publish it on-chain pre-provision.
@@ -2013,9 +2020,9 @@ pub struct ProvisionerInitResponse {}
 pub struct RotateKpsRequest {
     #[prost(message, repeated, tag = "1")]
     pub encrypted_old_shares: ::prost::alloc::vec::Vec<GuardianEncryptedShare>,
-    /// Armored OpenPGP certificates for the new KP set. Length must equal new_num_shares.
-    #[prost(string, repeated, tag = "2")]
-    pub new_kp_pgp_certs: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// OpenPGP cert sets for the new KP set. Length must equal new_num_shares.
+    #[prost(message, repeated, tag = "2")]
+    pub new_kp_pgp_cert_sets: ::prost::alloc::vec::Vec<KpPgpCertSet>,
     #[prost(uint32, optional, tag = "3")]
     pub new_num_shares: ::core::option::Option<u32>,
     #[prost(uint32, optional, tag = "4")]
@@ -2029,7 +2036,7 @@ pub struct RotateKpsRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RotateKpsResponseData {
     #[prost(message, repeated, tag = "1")]
-    pub encrypted_shares: ::prost::alloc::vec::Vec<KpEncryptedShare>,
+    pub encrypted_shares: ::prost::alloc::vec::Vec<SingleKpEncryptedShares>,
 }
 /// Application-layer signed response.
 #[derive(Clone, PartialEq, ::prost::Message)]

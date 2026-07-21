@@ -17,9 +17,9 @@ cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-
 cargo run -p hashi-guardian-init -- operator activate --config guardian-init.sample.yaml
 ```
 
-Each KP generates a PGP key on a yubikey and exports the public cert to the
-operator; the key ceremony and provisioning flow is then driven through these
-commands. All production commands read the same unified config file; see
+Each KP generates one or more PGP keys on yubikeys and exports the public certs
+to the operator; the key ceremony and provisioning flow is then driven through
+these commands. All production commands read the same unified config file; see
 [`guardian-init.sample.yaml`](guardian-init.sample.yaml).
 
 For a fully-local end-to-end run of this flow (local sui node + a dockerized
@@ -41,12 +41,14 @@ ceremony commands both read it.
 Drives a fresh **ceremony-mode** guardian through the one-time genesis BTC key
 setup (`sharing_seq = 0`). It connects over gRPC and: `operator_init` (ceremony mode, S3-only) →
 `setup_new_key` → verifies the response signature and shape → confirms each
-encrypted share is addressed only to its labeled KP cert (PKESK recipients,
-parsed without decrypting) → cross-checks the guardian's `ceremony/` audit log
-and `kp-shares/` recovery log.
+share's recipient roster matches its expected KP cert set and each
+PGP-encrypted ciphertext targets its keyed cert (parsed without decrypting) →
+cross-checks the guardian's `ceremony/` audit log and `kp-shares/` recovery log.
 
-Each share is labeled with its recipient cert's `recipient_fingerprint`, so a KP
-finds their share by fingerprint (not positional index).
+`kp_roster.kp_pgp_cert_paths` has one entry per KP/share id; each entry
+may contain multiple PGP cert paths for that KP. Each encrypted copy is keyed
+by its recipient cert's fingerprint, so a KP finds its encrypted share by
+fingerprint.
 
 ```bash
 cargo run -p hashi-guardian-init -- operator ceremony --config guardian-init.sample.yaml
@@ -61,11 +63,12 @@ Confirms a KP can fetch and decrypt their share from the latest setup or
 rotation ceremony. Trust is anchored to the guardian's S3 attestation log (no
 gRPC to the live guardian): it discovers the latest ceremony and KP-share state
 from S3, verifies each record against its writing session's attested signing
-pubkey and the expected `n`/`t`, confirms every encrypted share is addressed
-only to its labeled KP cert, finds the share labeled for this KP's cert
-fingerprint, decrypts via the yubikey (`gpg --decrypt`), verifies the decrypted
-share against its commitment, and then saves the verified ceremony state. The
-saved state includes every KP's encrypted share and the public ceremony data.
+pubkey and the expected `n`/`t`, and confirms each share's recipient roster and
+PGP-encrypted ciphertexts match the expected KP cert sets. It then uses
+`kp_pgp_cert_path` to identify this KP's roster entry and decrypts and
+commitment-checks the copy for every cert in that entry. After verification it
+saves the full ceremony state, including every KP's encrypted shares and the
+public ceremony data, to the requested path.
 
 The operator `run` command verifies live `/info` signed info and Nitro
 attestation against the configured current build before trusting the session
@@ -73,9 +76,13 @@ signing key. The KP `verify` command anchors trust to the S3 `init/`
 attestation log before verifying the ceremony and share logs under that
 attested session key.
 
-Only the ceremony state containing the **encrypted shares** and public ceremony
-data is written to disk. The selected ciphertext is piped to gpg over stdin,
-and the decrypted scalar lives only in memory.
+Each ciphertext in the selected roster entry is piped from memory to `gpg` over
+stdin. No temporary ciphertext or plaintext file is written locally; only the
+verified ceremony state containing the encrypted shares is persisted.
+
+The selected `kp_pgp_cert_path` must name one member of the KP/share entry.
+Ceremony validation derives the complete cert set from `kp_roster`, so a local
+subset cannot accidentally skip one of this KP's configured YubiKeys.
 
 ```bash
 cargo run -p hashi-guardian-init -- key-provisioner ceremony --config guardian-init.sample.yaml --encrypted-shares-path /secure/path/kp-shares.json
@@ -136,11 +143,11 @@ is held in this process' memory long enough to verify and re-encrypt it. It:
 4. Recomputes the stable `InitConfig` from limiter config, on-chain MPC master
    `G`, PCR allowlist, and network, then confirms its `config_hash` matches the
    enclave.
-5. Reads this KP's encrypted share from the latest `kp-shares/{seq}/` state,
-   verifies every share's recipients against the
-   roster, finds the one labeled for this KP's cert fingerprint, decrypts it via
-   the yubikey (`gpg --decrypt` over a pipe; the plaintext stays in memory and
-   never touches disk), and verifies the decrypted share against its commitment.
+5. Reads this KP's PGP-encrypted share from the latest `kp-shares/{seq}/`
+   state, verifies each encrypted copy's recipient against the roster, then
+   decrypts and commitment-checks only the copy selected by
+   `kp_pgp_cert_path` (`gpg --decrypt` over a pipe; the plaintext stays in
+   memory and never touches disk).
 6. HPKE-encrypts the decrypted share to the new guardian's `encryption_pubkey`
    from its `GuardianInfo`.
 7. Signs the exact `(session, config_hash, encrypted share)` submission and sends

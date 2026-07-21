@@ -9,6 +9,12 @@ non-canonical records. Random failure suffixes are sampled once before signing.
 Unsigned OI attestations bind placement through their Nitro-authenticated
 signing key and derived session ID.
 
+Guardians emit schema V2 records. Readers still deserialize V1 records and
+verify their signatures over the original V1 payload before normalizing them to
+V2 for callers. In particular, V1 KP-share logs carry one fingerprint and
+ciphertext per share, while V2 carries a fingerprint-to-ciphertext map per
+share so one KP can rotate between multiple accepted certificates.
+
 ## S3 log key format
 
 Canonical key layout:
@@ -42,7 +48,7 @@ Where:
 - `heartbeat` logs are hour-partitioned and strictly ordered per session.
 - `withdraw` logs are hour-partitioned. Successes are seq-sorted within a bucket so the KP rotating in the next enclave can recover limiter state by reading the lexicographically last success key.
 - `ceremony` logs are flat (not date-partitioned). Each entry is a `CeremonyLogMessage` — `NewKey { instance }` written by `setup_new_key` (genesis, `sharing_seq=0`) or `Rotate { old_instance, new_instance }` written by `rotate_kps` (each rotation, `sharing_seq=prev+1`). A rotation records the `old_instance` it consumed so the chain is auditable from the log alone (each entry's `old_instance` should match the prior entry's instance). KPs read the lexicographically last entry to learn the current authoritative instance (commitments + N + T). The log does not carry encrypted shares or a separate recipient roster.
-- `kp-shares` logs carry the current encrypted KP share state for a `sharing_seq`. Written by `setup_new_key` (`sharing_seq=0, cert_seq=0`) and each `rotate_kps` (`cert_seq=0` for the new instance). Future cert rotations can append higher `cert_seq` entries under the same `sharing_seq`; readers take the lexicographically last entry under `kp-shares/{sharing_seq:020}/`. The recipient roster is derived from the share labels (`recipient_fingerprint` ordered by share id). Integrity is the enclave signature, not S3 immutability, so these get only a short object lock (a fetch-window guarantee) and stay readable until purged.
+- `kp-shares` logs carry the current encrypted KP share state for a `sharing_seq`. Written by `setup_new_key` (`sharing_seq=0, cert_seq=0`) and each `rotate_kps` (`cert_seq=0` for the new instance). Each share id has one or more PGP-encrypted copies, one per accepted recipient cert for that KP. Future cert rotations can append higher `cert_seq` entries under the same `sharing_seq`; readers take the lexicographically last entry under `kp-shares/{sharing_seq:020}/`. The recipient roster is derived from the ciphertext map's fingerprint keys, grouped by share id. Integrity is the enclave signature, not S3 immutability, so these get only a short object lock (a fetch-window guarantee) and stay readable until purged.
 - `genesis` is a fixed singleton record carrying the operator-trusted bootstrap committee before any `committee-update/` success exists.
 - `committee-update` logs are flat (not date-partitioned). Successes are epoch-sorted; failures lead with `failure-` so all successes sort first — the lex-last non-`failure-` key is the latest successfully-applied epoch.
 

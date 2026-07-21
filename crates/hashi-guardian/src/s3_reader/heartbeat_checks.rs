@@ -9,7 +9,6 @@ use hashi_types::guardian::time_utils::now_timestamp_secs;
 use hashi_types::guardian::time_utils::unix_millis_to_seconds;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use hashi_types::guardian::LogMessage;
-use hashi_types::guardian::LogMessageV1;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::VerifiedLogRecord;
 use std::collections::BTreeMap;
@@ -76,7 +75,7 @@ fn summarize_heartbeats_by_session(
     let mut map: BTreeMap<SessionID, (UnixSeconds, UnixSeconds)> = BTreeMap::new();
 
     for log in logs {
-        if !matches!(log.message, LogMessage::V1(LogMessageV1::Heartbeat(..))) {
+        if !matches!(log.message, LogMessage::Heartbeat(..)) {
             anyhow::bail!("non-heartbeat logs found");
         }
 
@@ -157,7 +156,7 @@ mod tests {
             object_key: format!("heartbeat/{session_id}.json"),
             session_id: session_id.into(),
             timestamp_ms: timestamp_secs * 1_000,
-            message: LogMessageV1::Heartbeat(HeartbeatLogMessage::new(0)).into(),
+            message: LogMessage::Heartbeat(HeartbeatLogMessage::new(0)),
             build_pcrs: build_pcrs(),
         }
     }
@@ -167,14 +166,13 @@ mod tests {
             object_key: "init/test-session/03-pi-enclave-fully-initialized.json".to_string(),
             session_id: "test-session".into(),
             timestamp_ms: 0,
-            message: LogMessageV1::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
+            message: LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
                 sharing_seq: 0,
                 share_ids: vec![],
                 enclave_btc_pubkey: hashi_types::bitcoin::create_btc_keypair_for_test(&[1; 32])
                     .x_only_public_key()
                     .0,
-            }))
-            .into(),
+            })),
             build_pcrs: build_pcrs(),
         }
     }

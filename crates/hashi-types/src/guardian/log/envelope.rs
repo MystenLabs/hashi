@@ -14,7 +14,9 @@ use super::S3_OBJECT_LOCK_DURATION_KP_SHARES;
 use super::S3_OBJECT_LOCK_DURATION_WITHDRAW;
 use super::message::LogMessage;
 use super::message::LogMessageV1;
+use super::message::LogType;
 use super::message::ObjectKeyPattern;
+use super::message::VersionedLogMessage;
 use crate::guardian::BuildPcrs;
 use crate::guardian::GuardianError::InvalidInputs;
 use crate::guardian::GuardianPubKey;
@@ -43,7 +45,7 @@ pub struct LogRecord {
     pub object_key: String,
     pub session_id: SessionID,
     pub timestamp_ms: UnixMillis,
-    pub message: LogMessage,
+    pub message: VersionedLogMessage,
     /// Present for signed logs; omitted for unsigned logs (currently only OIAttestationUnsigned).
     pub signature: Option<GuardianSignature>,
 }
@@ -53,7 +55,7 @@ struct LogSigningPayload<'a> {
     schema_version: u64,
     session_id: &'a SessionID,
     object_key: &'a str,
-    message: &'a LogMessage,
+    message: &'a VersionedLogMessage,
 }
 
 impl Serialize for LogRecord {
@@ -73,8 +75,17 @@ impl Serialize for LogRecord {
         }
 
         match &self.message {
-            LogMessage::V1(message) => LogRecordWire {
-                schema_version: LogMessage::SCHEMA_VERSION_V1,
+            VersionedLogMessage::V1(message) => LogRecordWire {
+                schema_version: VersionedLogMessage::SCHEMA_VERSION_V1,
+                object_key: &self.object_key,
+                session_id: &self.session_id,
+                timestamp_ms: self.timestamp_ms,
+                message,
+                signature: &self.signature,
+            }
+            .serialize(serializer),
+            VersionedLogMessage::V2(message) => LogRecordWire {
+                schema_version: VersionedLogMessage::SCHEMA_VERSION_V2,
                 object_key: &self.object_key,
                 session_id: &self.session_id,
                 timestamp_ms: self.timestamp_ms,
@@ -104,9 +115,16 @@ impl<'de> Deserialize<'de> for LogRecord {
 
         let raw = LogRecordWire::deserialize(deserializer)?;
         let message = match raw.schema_version {
-            LogMessage::SCHEMA_VERSION_V1 => serde_json::from_value::<LogMessageV1>(raw.message)
-                .map(LogMessage::V1)
-                .map_err(D::Error::custom)?,
+            VersionedLogMessage::SCHEMA_VERSION_V1 => {
+                serde_json::from_value::<LogMessageV1>(raw.message)
+                    .map(VersionedLogMessage::V1)
+                    .map_err(D::Error::custom)?
+            }
+            VersionedLogMessage::SCHEMA_VERSION_V2 => {
+                serde_json::from_value::<LogMessage>(raw.message)
+                    .map(VersionedLogMessage::V2)
+                    .map_err(D::Error::custom)?
+            }
             version => {
                 return Err(D::Error::custom(format!(
                     "unsupported log schema version: {version}"
@@ -129,7 +147,9 @@ impl SigningIntent for LogSigningPayload<'_> {
 }
 
 /// A log record whose message signature and writing session's attestation/PCRs
-/// have both been verified.
+/// have both been verified. Its message is normalized to the current schema.
+/// If a future schema cannot be converted losslessly, this type should retain
+/// `VersionedLogMessage` and leave version acceptance to callers instead.
 #[derive(Debug)]
 pub struct VerifiedLogRecord {
     pub object_key: String,
@@ -160,7 +180,7 @@ impl VerifiedLogRecord {
 impl LogRecord {
     pub fn new(
         session_id: SessionID,
-        message: impl Into<LogMessage>,
+        message: LogMessage,
         signing_key: &GuardianSignKeyPair,
     ) -> Self {
         Self::new_at_timestamp(session_id, message, signing_key, now_timestamp_ms())
@@ -168,11 +188,11 @@ impl LogRecord {
 
     pub fn new_at_timestamp(
         session_id: SessionID,
-        message: impl Into<LogMessage>,
+        message: LogMessage,
         signing_key: &GuardianSignKeyPair,
         timestamp_ms: UnixMillis,
     ) -> Self {
-        let message = message.into();
+        let message = VersionedLogMessage::V2(message);
         let object_key = message
             .object_key_pattern(&session_id, timestamp_ms)
             .finalize();
@@ -188,21 +208,20 @@ impl LogRecord {
     }
 
     pub fn object_lock_duration(&self) -> Duration {
-        let LogMessage::V1(message) = &self.message;
-        match message {
-            LogMessageV1::Init(..) => S3_OBJECT_LOCK_DURATION_INIT,
-            LogMessageV1::Heartbeat(..) => S3_OBJECT_LOCK_DURATION_HEARTBEAT,
-            LogMessageV1::Withdrawal(..) => S3_OBJECT_LOCK_DURATION_WITHDRAW,
-            LogMessageV1::Ceremony(..) => S3_OBJECT_LOCK_DURATION_CEREMONY,
-            LogMessageV1::KpShareState(..) => S3_OBJECT_LOCK_DURATION_KP_SHARES,
-            LogMessageV1::CommitteeUpdate(..) => S3_OBJECT_LOCK_DURATION_COMMITTEE_UPDATE,
-            LogMessageV1::Genesis(..) => S3_OBJECT_LOCK_DURATION_GENESIS,
+        match self.message.log_type() {
+            LogType::Init => S3_OBJECT_LOCK_DURATION_INIT,
+            LogType::Heartbeat => S3_OBJECT_LOCK_DURATION_HEARTBEAT,
+            LogType::Withdrawal => S3_OBJECT_LOCK_DURATION_WITHDRAW,
+            LogType::Ceremony => S3_OBJECT_LOCK_DURATION_CEREMONY,
+            LogType::KpShareState => S3_OBJECT_LOCK_DURATION_KP_SHARES,
+            LogType::CommitteeUpdate => S3_OBJECT_LOCK_DURATION_COMMITTEE_UPDATE,
+            LogType::Genesis => S3_OBJECT_LOCK_DURATION_GENESIS,
         }
     }
 
     fn signed(
         session_id: SessionID,
-        message: LogMessage,
+        message: VersionedLogMessage,
         signing_key: &GuardianSignKeyPair,
         timestamp_ms: UnixMillis,
         object_key: String,
@@ -224,7 +243,7 @@ impl LogRecord {
 
     fn unsigned(
         session_id: SessionID,
-        message: LogMessage,
+        message: VersionedLogMessage,
         timestamp_ms: UnixMillis,
         object_key: String,
     ) -> Self {
@@ -259,7 +278,7 @@ impl LogRecord {
             .ok_or_else(|| InvalidInputs("missing log signature".into()))?;
         verify_intent(&self.signing_payload(), timestamp_ms, signature, pub_key)?;
 
-        Ok((self.session_id, timestamp_ms, self.message))
+        Ok((self.session_id, timestamp_ms, self.message.into_current()?))
     }
 
     /// Validates the unsigned OI-attestation record's envelope and canonical
@@ -276,8 +295,10 @@ impl LogRecord {
             ));
         }
         self.validate_object_key()?;
-        let LogMessage::V1(LogMessageV1::Init(init)) = &self.message else {
-            unreachable!("is_allowed_unsigned only permits an init message");
+        let init = match &self.message {
+            VersionedLogMessage::V1(LogMessageV1::Init(init)) => init,
+            VersionedLogMessage::V2(LogMessage::Init(init)) => init,
+            _ => unreachable!("is_allowed_unsigned only permits an init message"),
         };
         let super::message::InitLogMessage::OIAttestationUnsigned {
             signing_public_key, ..
@@ -286,7 +307,11 @@ impl LogRecord {
             unreachable!("is_allowed_unsigned only permits OIAttestationUnsigned");
         };
         self.validate_session_id(signing_public_key)?;
-        Ok((self.session_id, self.timestamp_ms, self.message))
+        Ok((
+            self.session_id,
+            self.timestamp_ms,
+            self.message.into_current()?,
+        ))
     }
 
     /// Rejects a record whose signed intended key differs from the key at which
@@ -355,9 +380,10 @@ mod tests {
     use crate::guardian::GuardianSigned;
     use crate::guardian::HeartbeatLogMessage;
     use crate::guardian::InitLogMessage;
-    use crate::guardian::KPEncryptedShares;
+    use crate::guardian::KPEncryptedSharesRoster;
     use crate::guardian::KpShareStateLogMessage;
     use crate::guardian::LimiterState;
+    use crate::guardian::LogMessageV2;
     use crate::guardian::NitroAttestation;
     use crate::guardian::RotateKpsResponse;
     use crate::guardian::SecretSharingInstance;
@@ -381,7 +407,7 @@ mod tests {
         let signing_key = GuardianSignKeyPair::from([13u8; 32]);
         let record = LogRecord::new_at_timestamp(
             heartbeat_session_id(),
-            LogMessageV1::Heartbeat(HeartbeatLogMessage::new(42)),
+            LogMessage::Heartbeat(HeartbeatLogMessage::new(42)),
             &signing_key,
             timestamp_ms,
         );
@@ -456,24 +482,24 @@ mod tests {
         let cases = vec![
             (
                 "heartbeat",
-                LogMessageV1::Heartbeat(HeartbeatLogMessage::new(1)),
+                LogMessage::Heartbeat(HeartbeatLogMessage::new(1)),
             ),
             (
                 "init OI attestation",
-                LogMessageV1::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
+                LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
                     attestation: NitroAttestation::new(vec![1, 2, 3]),
                     signing_public_key: signing_key.verification_key(),
                 })),
             ),
             (
                 "init OI guardian info",
-                LogMessageV1::Init(Box::new(InitLogMessage::OIGuardianInfo(Box::new(
+                LogMessage::Init(Box::new(InitLogMessage::OIGuardianInfo(Box::new(
                     guardian_info,
                 )))),
             ),
             (
                 "init PI complete",
-                LogMessageV1::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
+                LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
                     sharing_seq: 0,
                     share_ids: vec![NonZeroU16::new(1).unwrap()],
                     enclave_btc_pubkey: btc_master_pubkey,
@@ -481,7 +507,7 @@ mod tests {
             ),
             (
                 "init OA activated",
-                LogMessageV1::Init(Box::new(InitLogMessage::OAActivated {
+                LogMessage::Init(Box::new(InitLogMessage::OAActivated {
                     state_hash: [1; 32],
                     config_hash: [2; 32],
                     sharing_seq: 0,
@@ -495,7 +521,7 @@ mod tests {
             ),
             (
                 "withdrawal success",
-                LogMessageV1::Withdrawal(Box::new(WithdrawalLogMessage::Success {
+                LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Success {
                     txid: Txid::from_slice(&[3; 32]).unwrap(),
                     request_data: request_data.clone(),
                     request_sign: request_sign.clone(),
@@ -509,7 +535,7 @@ mod tests {
             ),
             (
                 "withdrawal failure",
-                LogMessageV1::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
+                LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
                     request_data,
                     request_sign: request_sign.clone(),
                     error: GuardianError::RateLimitExceeded,
@@ -517,14 +543,14 @@ mod tests {
             ),
             (
                 "ceremony new key",
-                LogMessageV1::Ceremony(Box::new(CeremonyLogMessage::NewKey {
+                LogMessage::Ceremony(Box::new(CeremonyLogMessage::NewKey {
                     instance: instance_0.clone(),
                     btc_master_pubkey,
                 })),
             ),
             (
                 "ceremony rotate",
-                LogMessageV1::Ceremony(Box::new(CeremonyLogMessage::Rotate {
+                LogMessage::Ceremony(Box::new(CeremonyLogMessage::Rotate {
                     old_instance: instance_0,
                     new_instance: instance_1,
                     btc_master_pubkey,
@@ -532,7 +558,7 @@ mod tests {
             ),
             (
                 "KP share state",
-                LogMessageV1::KpShareState(Box::new(KpShareStateLogMessage::new(
+                LogMessage::KpShareState(Box::new(KpShareStateLogMessage::new(
                     0,
                     0,
                     encrypted_shares,
@@ -540,7 +566,7 @@ mod tests {
             ),
             (
                 "committee update success",
-                LogMessageV1::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Success {
+                LogMessage::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Success {
                     from_epoch: 0,
                     new_committee: committee_1.clone(),
                     request_sign: request_sign.clone(),
@@ -548,7 +574,7 @@ mod tests {
             ),
             (
                 "committee update failure",
-                LogMessageV1::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Failure {
+                LogMessage::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Failure {
                     from_epoch: 0,
                     new_committee: committee_1,
                     request_sign,
@@ -557,7 +583,7 @@ mod tests {
             ),
             (
                 "genesis",
-                LogMessageV1::Genesis(Box::new(GenesisLogMessage {
+                LogMessage::Genesis(Box::new(GenesisLogMessage {
                     committee: committee_0,
                 })),
             ),
@@ -596,6 +622,44 @@ mod tests {
     }
 
     #[test]
+    fn deployed_v1_kp_share_state_verifies_and_normalizes() {
+        let fixture = r#"{"schema_version":1,"object_key":"kp-shares/00000000000000000000/00000000000000000000-916c711a5e81c2b0.json","session_id":"916c711a5e81c2b0","timestamp_ms":1784219535816,"message":{"KpShareState":{"sharing_seq":0,"cert_seq":0,"encrypted_shares":[{"id":1,"recipient_fingerprint":"010AFFD5514AE454CA0D56DAA40FE24388998D2A","armored_ciphertext":"-----BEGIN PGP MESSAGE-----\n\nwV4DT5hsKqzbvdwSAQdACnLThsK4Jq+u0g98VJzmYXrG05xLKgM1ki4FSGrOljkw\ndnHArbGaerEC8lBXZPVNhxMB8rOAfvgqxOUtt7SIMmjGIZMy7tzwfbM1YL45wgac\n0lkBE7TsICEPN/B/EwheDv/Ooid3NTDsoIsUGGuqtzUPCVYJTGPR+LWVY+F2xZxb\nHaLZO65VgrA3pcnyLsUy8iN3giOrIxmiZy/GjQBUwkeSCbVuopTZ2mpxPg==\n=7m3k\n-----END PGP MESSAGE-----\n"},{"id":2,"recipient_fingerprint":"69A798B4CD1FE3F7C827381BC56DF2575EC846C3","armored_ciphertext":"-----BEGIN PGP MESSAGE-----\n\nwV4DIHt6s8jZpqASAQdALWbHtxu0R/ANnNighIV7VtFgkIX3CGJzfW51GkSJkBQw\n7Ec2Y2wBmo4sDM2VGmxqK5ADvGVSYgLvIlByRdRV2NaJ1xkjHUoA39PDTqCvwCOK\n0lkBOZPrJPrBInDax3ceQwDkC/rkJrQXT8oVWGxNjxp244q66jhMdOBZSEc8T/oZ\noAdjEccCcDLYt+S+bEVZeuNhZowDSx14soiALI16hrzbDqJq04e7K9W0uQ==\n=tfbb\n-----END PGP MESSAGE-----\n"},{"id":3,"recipient_fingerprint":"8D798722C24B2A15C15036A1DEFA2C01C4350A31","armored_ciphertext":"-----BEGIN PGP MESSAGE-----\n\nwV4DZcZnV1kFupoSAQdA4X4hRbapAgL8eAouMEM0aRE4frVwmQZVHsXB6aOOxgkw\nsc2w0UU8bLzgt3aCe4HqBA9/v3jlKqK4STYVRFzG6o8fa+tb2qX94g6bCcIE07x4\n0lkBeTRYLlUlg7Jl2s7X9d9Ns60O8A2DQKwSYtQZV1pEwX44UQPz8Od/C9nIPeLP\nQEIA1BYRghu0ePQaqsfKohRXUunOrgVpYSCNFoupOKoVTl0qFgeDz5dw7Q==\n=giUp\n-----END PGP MESSAGE-----\n"},{"id":4,"recipient_fingerprint":"5551B442C80AB4D9CF3C95B90DA471909B35BFE9","armored_ciphertext":"-----BEGIN PGP MESSAGE-----\n\nwV4DJ51dk/19HSASAQdAgq4QrNM43HykXcLxDfRtHHRtd4BdVJBirC2esDoXEjkw\nF7YLVWrMoXUtwOxFqXGkoUhEhfPAzdLG3WyuZQDnOdPBl0r/2qxmlmZIjFFBGXVc\n0lkBLfdxmJ8BOQYcaiEhBODpY7o2xO13agT28X6Uyv3rc5qw5km1WDw5+AlTLKZj\nw7aathIK+Qof15Tj7VxzSzRmo/pIf/Plcz9JoBNOYPgz/ewuzsPzDQ9+Qw==\n=iAGD\n-----END PGP MESSAGE-----\n"},{"id":5,"recipient_fingerprint":"354807E1940BFC2763D15EBB8E7048E384EBBC7A","armored_ciphertext":"-----BEGIN PGP MESSAGE-----\n\nwV4D6mDrwWj9BrASAQdAazktC+Jd2EMtE8Gav7ROlkVmL+Ty1duA3RttbKQ5eAEw\nbKIxkq1Jp9J4ZqcvjfxcBzVOfZPQwdhxXxDv2pOUG7ioZuDTRlGNNbsiyodvmlgy\n0lkB8eaGI0/LBZ++1vbGsZ/uQ7phGVFkPdcZzXm0pyD1poDKhTTyiHpAgDub2yph\nAAWsEIYzjLQWJvuOw0JXzwu1HBy+z5QTY4nK+wKrh6ojcLKjjyRVehhtTw==\n=m9Mm\n-----END PGP MESSAGE-----\n"},{"id":6,"recipient_fingerprint":"CB27C30ABAAC7EEDE92E71C6017C4627E937F5B0","armored_ciphertext":"-----BEGIN PGP MESSAGE-----\n\nwV4DuqwfDzk48aQSAQdAoJevGCVjo+1pD/WVPkWza4qGxBU9tsXbqE/kaSynsGYw\nskjzNOD5oY+/S0CMeH+6xspbLUZ9uZFy98fWOKMi9nbftH1nWXtKRdCNweaaCAPu\n0lkBR4DxLFCydQKfFzENlKRl9qc4m5NkVnjWaGR+cgK1U2UAPf/p82eRggyf6Obp\nNcdOnAfu0aLB70FESJEHtDFj36QCyC0SwTdtZwXUfCOo0AykDph9rTYVpA==\n=DQ4F\n-----END PGP MESSAGE-----\n"}]}},"signature":"2895193893f1feaea65fb6b441c011815c937df33cde136e4721f4173db86c1fe44a2095a6f8753fecbdaa5c99b744a22368f41ab8ca01edff99fafb6710a304"}"#;
+        let record: LogRecord = serde_json::from_str(fixture).unwrap();
+        assert!(matches!(
+            &record.message,
+            VersionedLogMessage::V1(LogMessageV1::KpShareState(..))
+        ));
+        assert_eq!(serde_json::to_string(&record).unwrap(), fixture);
+        record
+            .validate_actual_object_key(
+                "kp-shares/00000000000000000000/00000000000000000000-916c711a5e81c2b0.json",
+            )
+            .unwrap();
+
+        let signing_pubkey =
+            hex::decode("916c711a5e81c2b032f15952b515205a20ef2a16f8a88da504885f392e314dca")
+                .unwrap();
+        let signing_pubkey = GuardianPubKey::try_from(signing_pubkey.as_slice()).unwrap();
+        let (session_id, timestamp_ms, LogMessageV2::KpShareState(message)) = record
+            .verify(&signing_pubkey)
+            .expect("the deployed V1 signature must verify before normalization")
+        else {
+            panic!("expected normalized KP share state");
+        };
+        assert_eq!(session_id.as_str(), "916c711a5e81c2b0");
+        assert_eq!(timestamp_ms, 1_784_219_535_816);
+        assert_eq!(message.sharing_seq, 0);
+        assert_eq!(message.cert_seq, 0);
+        assert_eq!(message.encrypted_shares.share_count(), 6);
+        let (share, ciphertext) = message
+            .encrypted_shares
+            .find_by_fingerprint("010AFFD5514AE454CA0D56DAA40FE24388998D2A")
+            .expect("legacy ciphertext must be retained");
+        assert_eq!(share.id.get(), 1);
+        assert!(ciphertext.starts_with("-----BEGIN PGP MESSAGE-----"));
+    }
+
+    #[test]
     fn withdrawal_failure_writer_key_is_stable_and_verifies() {
         let signing_key = GuardianSignKeyPair::from([16u8; 32]);
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
@@ -603,7 +667,7 @@ mod tests {
         let (request_sign, request_data) = signed_request.into_parts();
         let log = LogRecord::new(
             session_id,
-            LogMessageV1::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
+            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
                 request_data: request_data.into(),
                 request_sign,
                 error: GuardianError::RateLimitExceeded,
@@ -622,7 +686,7 @@ mod tests {
         let (request_sign, _) = signed_request.into_parts();
         let log = LogRecord::new(
             session_id,
-            LogMessageV1::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Failure {
+            LogMessage::CommitteeUpdate(Box::new(CommitteeUpdateLogMessage::Failure {
                 from_epoch: 6,
                 new_committee: crate::move_types::Committee {
                     epoch: 7,
@@ -650,7 +714,7 @@ mod tests {
         assert_eq!(timestamp_ms, 1_700_000_000_000);
         assert!(matches!(
             message,
-            LogMessage::V1(LogMessageV1::Heartbeat(HeartbeatLogMessage { seq: 42 }))
+            LogMessage::Heartbeat(HeartbeatLogMessage { seq: 42 })
         ));
     }
 
@@ -658,7 +722,7 @@ mod tests {
     fn object_key_is_signed_and_serialized() {
         let (object_key, log, signing_key) = signed_heartbeat(1_700_000_000_000);
         let json = serde_json::to_value(&log).unwrap();
-        assert_eq!(json.get("schema_version").unwrap(), 1);
+        assert_eq!(json.get("schema_version").unwrap(), 2);
         assert_eq!(json.get("object_key").unwrap(), &object_key);
         let signature = json["signature"].as_str().unwrap();
         assert_eq!(signature.len(), 128);
@@ -684,12 +748,12 @@ mod tests {
     fn unsupported_schema_version_is_rejected() {
         let (_, log, _) = signed_heartbeat(1_700_000_000_000);
         let mut json = serde_json::to_value(log).unwrap();
-        json["schema_version"] = serde_json::json!(2);
+        json["schema_version"] = serde_json::json!(3);
 
         let err = serde_json::from_value::<LogRecord>(json).unwrap_err();
         assert!(
             err.to_string()
-                .contains("unsupported log schema version: 2")
+                .contains("unsupported log schema version: 3")
         );
     }
 
@@ -729,7 +793,7 @@ mod tests {
         let (_, log, signing_key) = signed_heartbeat(1_700_000_000_000);
         let mut tampered: LogRecord =
             serde_json::from_slice(&serde_json::to_vec(&log).unwrap()).unwrap();
-        tampered.message = LogMessageV1::Heartbeat(HeartbeatLogMessage::new(43)).into();
+        tampered.message = LogMessage::Heartbeat(HeartbeatLogMessage::new(43)).into();
         tampered.object_key = format!(
             "heartbeat/2023/11/14/22/{}-00000000000000000043.json",
             heartbeat_session_id()
@@ -750,7 +814,7 @@ mod tests {
         let (request_sign, request_data) = signed_request.into_parts();
         let log = LogRecord::new(
             session_id,
-            LogMessageV1::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
+            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Failure {
                 request_data: request_data.into(),
                 request_sign,
                 error: GuardianError::RateLimitExceeded,
@@ -785,7 +849,7 @@ mod tests {
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
         let log = LogRecord::new_at_timestamp(
             session_id,
-            LogMessageV1::Genesis(Box::new(GenesisLogMessage {
+            LogMessage::Genesis(Box::new(GenesisLogMessage {
                 committee: crate::move_types::Committee {
                     epoch: 0,
                     members: vec![],
@@ -814,7 +878,7 @@ mod tests {
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
         let mut log = LogRecord::new_at_timestamp(
             session_id,
-            LogMessageV1::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
+            LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
                 attestation: NitroAttestation::new(vec![1, 2, 3]),
                 signing_public_key: signing_key.verification_key(),
             })),
@@ -837,7 +901,7 @@ mod tests {
         let signing_key = GuardianSignKeyPair::from([15u8; 32]);
         let log = LogRecord::new_at_timestamp(
             "forged-session".into(),
-            LogMessageV1::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
+            LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
                 attestation: NitroAttestation::new(vec![1, 2, 3]),
                 signing_public_key: signing_key.verification_key(),
             })),
@@ -857,7 +921,7 @@ mod tests {
         let signing_key = GuardianSignKeyPair::from([7u8; 32]);
         let log = LogRecord::new_at_timestamp(
             session_id.clone(),
-            LogMessageV1::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
+            LogMessage::Init(Box::new(InitLogMessage::OIAttestationUnsigned {
                 attestation: NitroAttestation::new(vec![1, 2, 3]),
                 signing_public_key: signing_key.verification_key(),
             })),
@@ -887,7 +951,7 @@ mod tests {
         let session_id = SessionID::from_signing_pubkey(&signing_key.verification_key());
         let log = LogRecord::new_at_timestamp(
             session_id,
-            LogMessageV1::Init(Box::new(InitLogMessage::OAActivated {
+            LogMessage::Init(Box::new(InitLogMessage::OAActivated {
                 state_hash: [0xab; 32],
                 config_hash: [0xcd; 32],
                 sharing_seq: 7,
@@ -920,7 +984,7 @@ mod tests {
 
         let log = LogRecord::new_at_timestamp(
             session_id.clone(),
-            LogMessageV1::Heartbeat(HeartbeatLogMessage::new(seq)),
+            LogMessage::Heartbeat(HeartbeatLogMessage::new(seq)),
             &signing_key,
             timestamp_ms,
         );
@@ -937,10 +1001,10 @@ mod tests {
         let signing_key = GuardianSignKeyPair::from([10u8; 32]);
         let log = LogRecord::new_at_timestamp(
             session_id,
-            LogMessageV1::KpShareState(Box::new(KpShareStateLogMessage::new(
+            LogMessage::KpShareState(Box::new(KpShareStateLogMessage::new(
                 7,
                 3,
-                KPEncryptedShares::new(vec![]).unwrap(),
+                KPEncryptedSharesRoster::new(vec![]).unwrap(),
             ))),
             &signing_key,
             1_700_000_000_000,
@@ -962,7 +1026,7 @@ mod tests {
         let signing_key = GuardianSignKeyPair::from([12u8; 32]);
         let log = LogRecord::new_at_timestamp(
             session_id,
-            LogMessageV1::Genesis(Box::new(GenesisLogMessage {
+            LogMessage::Genesis(Box::new(GenesisLogMessage {
                 committee: crate::move_types::Committee {
                     epoch: 0,
                     members: vec![],
@@ -993,7 +1057,7 @@ mod tests {
 
         let log = LogRecord::new_at_timestamp(
             session_id.clone(),
-            LogMessageV1::Withdrawal(Box::new(WithdrawalLogMessage::Success {
+            LogMessage::Withdrawal(Box::new(WithdrawalLogMessage::Success {
                 txid: Txid::from_slice(&[3u8; 32]).expect("valid txid"),
                 request_data,
                 request_sign,

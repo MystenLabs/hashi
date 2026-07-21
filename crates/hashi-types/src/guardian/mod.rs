@@ -4,6 +4,7 @@
 pub mod attestation;
 pub mod crypto;
 pub mod errors;
+pub mod kp_certs_roster;
 pub mod lifecycle;
 pub mod log;
 pub mod proto_conversions;
@@ -45,7 +46,6 @@ use crate::bitcoin::TxUTXOsWire;
 pub use crate::committee::Committee as HashiCommittee;
 pub use crate::committee::CommitteeMember as HashiCommitteeMember;
 pub use crate::committee::SignedMessage as HashiSigned;
-use crate::pgp::PgpPublicCert;
 use bitcoin::Network;
 use blake2::Blake2b;
 use blake2::Digest;
@@ -55,6 +55,7 @@ pub use ed25519_consensus::Signature as GuardianSignature;
 pub use ed25519_consensus::SigningKey as GuardianSignKeyPair;
 pub use ed25519_consensus::VerificationKey as GuardianPubKey;
 pub use errors::*;
+pub use kp_certs_roster::*;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
@@ -235,14 +236,14 @@ impl crate::intent::IntentMessage for CommitteeTransitionRequest {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetupNewKeyRequest {
-    key_provisioner_pgp_certs: Vec<PgpPublicCert>,
+    key_provisioner_certs_roster: KpCertsRoster,
     params: SecretSharingParams,
 }
 
 /// `EnclaveSigned<T>`
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SetupNewKeyResponse {
-    pub encrypted_shares: KPEncryptedShares,
+    pub encrypted_shares: KPEncryptedSharesRoster,
     pub secret_sharing_instance: SecretSharingInstance,
     /// x-only BTC master pubkey, surfaced so the operator can publish it on-chain
     /// as `guardian_btc_public_key` before the guardian is provisioned.
@@ -266,16 +267,16 @@ pub struct RotateKpsRequest {
 /// ones that agree on it. Old/new (`n`, `t`) may differ.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RotateKpsState {
-    /// OpenPGP certs for the new KP set, sorted to a canonical order
-    /// (see `RotateKpsState::new`). Length equals `new_params.num_shares()`.
-    new_kp_pgp_certs: Vec<PgpPublicCert>,
+    /// Ordered OpenPGP certificate roster for the new KPs. Its length equals
+    /// `new_params.num_shares()`.
+    new_kp_certs_roster: KpCertsRoster,
     new_params: SecretSharingParams,
 }
 
 /// `EnclaveSigned<T>`. The new KP set's encrypted shares, returned by `rotate_kps`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RotateKpsResponse {
-    pub encrypted_shares: KPEncryptedShares,
+    pub encrypted_shares: KPEncryptedSharesRoster,
 }
 
 // ---------------------------------
@@ -381,27 +382,26 @@ impl S3Config {
 
 impl SetupNewKeyRequest {
     pub fn new(
-        pgp_certs: Vec<PgpPublicCert>,
+        kp_certs_roster: KpCertsRoster,
         num_shares: usize,
         threshold: usize,
     ) -> GuardianResult<Self> {
         let params = SecretSharingParams::new(num_shares, threshold)?;
-        if pgp_certs.len() != params.num_shares() {
+        if kp_certs_roster.num_kps() != params.num_shares() {
             return Err(InvalidInputs(format!(
-                "expected {} OpenPGP certificates, got {}",
+                "expected {} KP OpenPGP cert roster entries, got {}",
                 params.num_shares(),
-                pgp_certs.len()
+                kp_certs_roster.num_kps()
             )));
         }
-        ensure_unique_pgp_cert_fingerprints(&pgp_certs)?;
         Ok(Self {
-            key_provisioner_pgp_certs: pgp_certs,
+            key_provisioner_certs_roster: kp_certs_roster,
             params,
         })
     }
 
-    pub fn pgp_certs(&self) -> &[PgpPublicCert] {
-        &self.key_provisioner_pgp_certs
+    pub fn kp_certs_roster(&self) -> &KpCertsRoster {
+        &self.key_provisioner_certs_roster
     }
 
     pub fn params(&self) -> &SecretSharingParams {
@@ -415,19 +415,6 @@ impl SetupNewKeyRequest {
     pub fn threshold(&self) -> usize {
         self.params.threshold()
     }
-}
-
-fn ensure_unique_pgp_cert_fingerprints(pgp_certs: &[PgpPublicCert]) -> GuardianResult<()> {
-    let mut seen = std::collections::HashSet::with_capacity(pgp_certs.len());
-    for cert in pgp_certs {
-        let fingerprint = cert.fingerprint();
-        if !seen.insert(fingerprint.clone()) {
-            return Err(InvalidInputs(format!(
-                "duplicate OpenPGP certificate fingerprint {fingerprint}"
-            )));
-        }
-    }
-    Ok(())
 }
 
 impl OperatorInitRequest {
@@ -653,39 +640,34 @@ impl SingleProvisionerInitRequest {
 
 impl RotateKpsState {
     pub fn new(
-        new_kp_pgp_certs: Vec<PgpPublicCert>,
+        new_kp_certs_roster: KpCertsRoster,
         new_num_shares: usize,
         new_threshold: usize,
     ) -> GuardianResult<Self> {
         let new_params = SecretSharingParams::new(new_num_shares, new_threshold)?;
-        if new_kp_pgp_certs.len() != new_params.num_shares() {
+        if new_kp_certs_roster.num_kps() != new_params.num_shares() {
             return Err(InvalidInputs(format!(
-                "expected {} new KP certs, got {}",
+                "expected {} new KP cert roster entries, got {}",
                 new_params.num_shares(),
-                new_kp_pgp_certs.len()
+                new_kp_certs_roster.num_kps()
             )));
         }
-        ensure_unique_pgp_cert_fingerprints(&new_kp_pgp_certs)?;
-        // Sort to a canonical order so the serialized state's digest (which all
-        // T old KPs must agree on) is independent of submission order.
-        let mut new_kp_pgp_certs = new_kp_pgp_certs;
-        new_kp_pgp_certs.sort();
         Ok(Self {
-            new_kp_pgp_certs,
+            new_kp_certs_roster,
             new_params,
         })
     }
 
-    pub fn new_kp_pgp_certs(&self) -> &[PgpPublicCert] {
-        &self.new_kp_pgp_certs
+    pub fn new_kp_certs_roster(&self) -> &KpCertsRoster {
+        &self.new_kp_certs_roster
     }
 
     pub fn new_params(&self) -> &SecretSharingParams {
         &self.new_params
     }
 
-    pub fn into_parts(self) -> (Vec<PgpPublicCert>, SecretSharingParams) {
-        (self.new_kp_pgp_certs, self.new_params)
+    pub fn into_parts(self) -> (KpCertsRoster, SecretSharingParams) {
+        (self.new_kp_certs_roster, self.new_params)
     }
 
     pub fn digest(&self) -> [u8; 32] {
@@ -988,32 +970,23 @@ mod tests {
 
     #[test]
     fn rotate_kps_state_new_rejects_wrong_cert_count() {
-        let mut certs = test_utils::mock_pgp_certs(5);
-        certs.pop();
+        let mut cert_sets = test_utils::mock_kp_certs(5);
+        cert_sets.pop();
+        let certs_roster = KpCertsRoster::new(cert_sets).unwrap();
         assert!(matches!(
-            RotateKpsState::new(certs, 5, 3).unwrap_err(),
+            RotateKpsState::new(certs_roster, 5, 3).unwrap_err(),
             InvalidInputs(_)
         ));
     }
 
     #[test]
-    fn rotate_kps_state_new_rejects_duplicate_certs() {
-        let mut certs = test_utils::mock_pgp_certs(5);
-        certs[1] = certs[0].clone();
+    fn kp_certs_roster_rejects_duplicate_certs() {
+        let mut cert_sets = test_utils::mock_kp_certs(5);
+        cert_sets[1] = cert_sets[0].clone();
         assert!(matches!(
-            RotateKpsState::new(certs, 5, 3).unwrap_err(),
+            KpCertsRoster::new(cert_sets).unwrap_err(),
             InvalidInputs(_)
         ));
-    }
-
-    #[test]
-    fn setup_new_key_request_rejects_duplicate_cert_fingerprints() {
-        let mut certs = test_utils::mock_pgp_certs(5);
-        certs[1] = certs[0].clone();
-        let err = SetupNewKeyRequest::new(certs, 5, 3).unwrap_err();
-        assert!(
-            matches!(err, InvalidInputs(msg) if msg.contains("duplicate OpenPGP certificate fingerprint"))
-        );
     }
 
     #[test]
@@ -1086,13 +1059,12 @@ mod tests {
     }
 
     #[test]
-    fn rotate_kps_state_digest_is_order_independent() {
-        let certs = test_utils::mock_pgp_certs(5);
-        let reversed: Vec<PgpPublicCert> = certs.iter().rev().cloned().collect();
-        let a = RotateKpsState::new(certs, 5, 3).unwrap();
-        let b = RotateKpsState::new(reversed, 5, 3).unwrap();
-        // Same set, different input order ⇒ identical canonical form and digest.
-        assert_eq!(a.new_kp_pgp_certs(), b.new_kp_pgp_certs());
-        assert_eq!(a.digest(), b.digest());
+    fn rotate_kps_state_digest_commits_to_roster_order() {
+        let cert_sets = test_utils::mock_kp_certs(5);
+        let reversed: Vec<KpCerts> = cert_sets.iter().rev().cloned().collect();
+        let a = RotateKpsState::new(KpCertsRoster::new(cert_sets).unwrap(), 5, 3).unwrap();
+        let b = RotateKpsState::new(KpCertsRoster::new(reversed).unwrap(), 5, 3).unwrap();
+        assert_ne!(a.new_kp_certs_roster(), b.new_kp_certs_roster());
+        assert_ne!(a.digest(), b.digest());
     }
 }

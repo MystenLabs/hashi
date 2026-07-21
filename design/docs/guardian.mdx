@@ -63,13 +63,13 @@ sequenceDiagram
 
     Operator->>Guardian: OperatorInit(S3 config)
     Guardian->>S3: log(init attestation + GuardianInfo)
-    Operator->>Guardian: SetupNewKey(KP PGP certs, n, t)
-    Guardian->>S3: log(ceremony/NewKey + shares)
-    Guardian-->>Operator: encrypted KP shares + guardian BTC pubkey
+    Operator->>Guardian: SetupNewKey(KP PGP cert sets, n, t)
+    Guardian->>S3: log(ceremony/NewKey + kp-shares state)
+    Guardian-->>Operator: encrypted KP share state + guardian BTC pubkey
 
-    KPs->>S3: Read init, ceremony, and shares logs
-    S3-->>KPs: encrypted share addressed to this KP
-    KPs->>KPs: Decrypt share and verify attestation, recipients, commitment
+    KPs->>S3: Read init, ceremony, and kp-shares logs
+    S3-->>KPs: PGP-encrypted share keyed by this KP cert fingerprint
+    KPs->>KPs: Decrypt encrypted share and verify attestation, recipients, commitment
 ```
 
 ## Withdraw-mode provisioning flow

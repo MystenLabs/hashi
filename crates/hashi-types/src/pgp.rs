@@ -141,6 +141,15 @@ fn validate_pgp_cert(cert: &openpgp::Cert) -> Result<()> {
         .for_transport_encryption()
         .next()
         .ok_or_else(|| anyhow::anyhow!("OpenPGP certificate has no usable encryption key"))?;
+
+    cert.keys()
+        .with_policy(&*POLICY, None)
+        .supported()
+        .alive()
+        .revoked(false)
+        .for_signing()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("OpenPGP certificate has no usable signing key"))?;
     Ok(())
 }
 
@@ -706,6 +715,9 @@ pub mod test_utils {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sequoia_openpgp::cert::prelude::CertBuilder;
+    use sequoia_openpgp::serialize::Serialize;
+    use sequoia_openpgp::types::KeyFlags;
     use std::fs;
     use std::io;
     use std::process::Command;
@@ -745,6 +757,24 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("must not contain secret key material"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_public_cert_rejects_cert_without_signing_key() {
+        let (cert, _) = CertBuilder::new()
+            .set_primary_key_flags(KeyFlags::empty().set_certification())
+            .add_transport_encryption_subkey()
+            .generate()
+            .unwrap();
+        let mut public = Vec::new();
+        cert.armored().export(&mut public).unwrap();
+
+        let err = PgpPublicCert::new(String::from_utf8(public).unwrap()).unwrap_err();
+
+        assert!(
+            err.to_string().contains("has no usable signing key"),
             "unexpected error: {err}"
         );
     }

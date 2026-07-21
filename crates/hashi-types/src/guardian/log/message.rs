@@ -29,6 +29,8 @@ use crate::guardian::GuardianError;
 use crate::guardian::GuardianInfo;
 use crate::guardian::GuardianPubKey;
 use crate::guardian::KPEncryptedShares;
+use crate::guardian::KPEncryptedSharesRoster;
+use crate::guardian::KPFingerprint;
 use crate::guardian::LimiterState;
 use crate::guardian::NitroAttestation;
 use crate::guardian::SecretSharingInstance;
@@ -42,49 +44,94 @@ use crate::guardian::unix_millis_to_seconds;
 use bitcoin::Txid;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::BTreeMap;
 
-/// The versioned message stored in a [`super::LogRecord`]. Its version is
-/// serialized as the record's sibling `schema_version` field rather than as an
-/// additional JSON enum layer.
+/// The wire message stored in a [`super::LogRecord`]. Its version is serialized
+/// as the record's sibling `schema_version` field rather than as an additional
+/// JSON enum layer.
 #[derive(Debug)]
-pub enum LogMessage {
+pub enum VersionedLogMessage {
     V1(LogMessageV1),
+    V2(LogMessageV2),
 }
 
-impl From<LogMessageV1> for LogMessage {
+impl From<LogMessageV1> for VersionedLogMessage {
     fn from(message: LogMessageV1) -> Self {
         Self::V1(message)
     }
 }
 
-impl Serialize for LogMessage {
+impl From<LogMessageV2> for VersionedLogMessage {
+    fn from(message: LogMessageV2) -> Self {
+        Self::V2(message)
+    }
+}
+
+impl Serialize for VersionedLogMessage {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         match self {
             Self::V1(message) => message.serialize(serializer),
+            Self::V2(message) => message.serialize(serializer),
         }
     }
 }
 
-/// All schema-version-1 log messages emitted by the guardian enclave.
-/// Uses an enum discriminator for automatic domain separation between variants.
+/// Schema-version-1 log messages. Its legacy KP-share payload is retained so
+/// readers can verify signatures over records emitted before KP shares
+/// supported multiple certificates.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum LogMessageV1 {
     Heartbeat(HeartbeatLogMessage),
     Init(Box<InitLogMessage>),
     Withdrawal(Box<WithdrawalLogMessage>),
     Ceremony(Box<CeremonyLogMessage>),
-    KpShareState(Box<KpShareStateLogMessage>),
+    KpShareState(Box<KpShareStateLogMessageV1>),
     CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
     Genesis(Box<GenesisLogMessage>),
 }
+
+/// Current log schema emitted by the guardian enclave.
+/// Uses an enum discriminator for automatic domain separation between variants.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum LogMessageV2 {
+    Heartbeat(HeartbeatLogMessage),
+    Init(Box<InitLogMessage>),
+    Withdrawal(Box<WithdrawalLogMessage>),
+    Ceremony(Box<CeremonyLogMessage>),
+    KpShareState(Box<KpShareStateLogMessageV2>),
+    CommitteeUpdate(Box<CommitteeUpdateLogMessage>),
+    Genesis(Box<GenesisLogMessage>),
+}
+
+/// The current normalized log-message shape exposed to writers and verified
+/// readers. Wire-version handling remains internal to [`VersionedLogMessage`].
+pub type LogMessage = LogMessageV2;
 
 pub(super) enum ObjectKeyPattern {
     Fixed(String),
     /// Complete key prefix before the random suffix; finalize() appends the suffix.
     RandomSuffix(String),
+}
+
+pub(super) enum LogType {
+    Heartbeat,
+    Init,
+    Withdrawal,
+    Ceremony,
+    KpShareState,
+    CommitteeUpdate,
+    Genesis,
+}
+
+trait LogMessageSchema {
+    fn is_allowed_unsigned(&self) -> bool;
+
+    fn log_type(&self) -> LogType;
+
+    fn object_key_pattern(&self, session_id: &str, timestamp_ms: UnixMillis) -> ObjectKeyPattern;
 }
 
 impl ObjectKeyPattern {
@@ -145,14 +192,103 @@ impl GenesisLogMessage {
 /// higher `cert_seq` entries for the same `sharing_seq` without changing the
 /// `ceremony/` instance.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct KpShareStateLogMessage {
+pub struct KpShareStateLogMessageV2 {
     pub sharing_seq: u64,
     pub cert_seq: u64,
-    pub encrypted_shares: KPEncryptedShares,
+    pub encrypted_shares: KPEncryptedSharesRoster,
 }
 
-impl KpShareStateLogMessage {
-    pub fn new(sharing_seq: u64, cert_seq: u64, encrypted_shares: KPEncryptedShares) -> Self {
+/// The current normalized KP-share state exposed to writers and verified
+/// readers.
+pub type KpShareStateLogMessage = KpShareStateLogMessageV2;
+
+/// V1 encrypted share state: exactly one certificate and ciphertext per KP.
+/// Kept solely for reading and authenticating existing V1 logs.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct KpShareStateLogMessageV1 {
+    pub sharing_seq: u64,
+    pub cert_seq: u64,
+    pub encrypted_shares: KPEncryptedSharesV1,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct KPEncryptedShareV1 {
+    pub id: ShareID,
+    pub recipient_fingerprint: KPFingerprint,
+    pub armored_ciphertext: String,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct KPEncryptedSharesV1(Vec<KPEncryptedShareV1>);
+
+impl KPEncryptedSharesV1 {
+    fn new(mut shares: Vec<KPEncryptedShareV1>) -> Result<Self, GuardianError> {
+        if shares.len() > crate::guardian::crypto::MAX_NUM_SHARES {
+            return Err(GuardianError::InvalidInputs(format!(
+                "{} encrypted shares must be at most u16::MAX",
+                shares.len()
+            )));
+        }
+
+        shares.sort_by_key(|share| share.id);
+        let ids = shares
+            .iter()
+            .map(|share| share.id.get())
+            .collect::<Vec<_>>();
+        let expected = (1..=shares.len() as u16).collect::<Vec<_>>();
+        if ids != expected {
+            return Err(GuardianError::InvalidInputs(format!(
+                "encrypted share ids are not exactly 1..={}: got {ids:?}",
+                shares.len()
+            )));
+        }
+
+        Ok(Self(shares))
+    }
+}
+
+impl<'de> Deserialize<'de> for KPEncryptedSharesV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let shares = Vec::<KPEncryptedShareV1>::deserialize(deserializer)?;
+        Self::new(shares).map_err(serde::de::Error::custom)
+    }
+}
+
+impl KpShareStateLogMessageV1 {
+    fn object_key_pattern(&self, session_id: &str) -> ObjectKeyPattern {
+        ObjectKeyPattern::Fixed(KpShareStateLogMessageV2::object_key(
+            session_id,
+            self.sharing_seq,
+            self.cert_seq,
+        ))
+    }
+
+    fn into_current(self) -> Result<KpShareStateLogMessageV2, GuardianError> {
+        let shares = self
+            .encrypted_shares
+            .0
+            .into_iter()
+            .map(|share| KPEncryptedShares {
+                id: share.id,
+                ciphertexts_by_fingerprint: BTreeMap::from([(
+                    share.recipient_fingerprint,
+                    share.armored_ciphertext,
+                )]),
+            })
+            .collect();
+        Ok(KpShareStateLogMessageV2::new(
+            self.sharing_seq,
+            self.cert_seq,
+            KPEncryptedSharesRoster::new(shares)?,
+        ))
+    }
+}
+
+impl KpShareStateLogMessageV2 {
+    pub fn new(sharing_seq: u64, cert_seq: u64, encrypted_shares: KPEncryptedSharesRoster) -> Self {
         Self {
             sharing_seq,
             cert_seq,
@@ -412,60 +548,110 @@ impl CommitteeUpdateLogMessage {
     }
 }
 
+macro_rules! impl_log_message_schema {
+    ($schema:ty) => {
+        impl LogMessageSchema for $schema {
+            fn is_allowed_unsigned(&self) -> bool {
+                matches!(
+                    self,
+                    Self::Init(init_message)
+                        if matches!(
+                            **init_message,
+                            InitLogMessage::OIAttestationUnsigned { .. }
+                        )
+                )
+            }
+
+            fn log_type(&self) -> LogType {
+                match self {
+                    Self::Heartbeat(..) => LogType::Heartbeat,
+                    Self::Init(..) => LogType::Init,
+                    Self::Withdrawal(..) => LogType::Withdrawal,
+                    Self::Ceremony(..) => LogType::Ceremony,
+                    Self::KpShareState(..) => LogType::KpShareState,
+                    Self::CommitteeUpdate(..) => LogType::CommitteeUpdate,
+                    Self::Genesis(..) => LogType::Genesis,
+                }
+            }
+
+            fn object_key_pattern(
+                &self,
+                session_id: &str,
+                timestamp_ms: UnixMillis,
+            ) -> ObjectKeyPattern {
+                match self {
+                    Self::Heartbeat(message) => {
+                        message.object_key_pattern(session_id, timestamp_ms)
+                    }
+                    Self::Init(message) => message.object_key_pattern(session_id),
+                    Self::Withdrawal(message) => {
+                        message.object_key_pattern(session_id, timestamp_ms)
+                    }
+                    Self::Ceremony(message) => message.object_key_pattern(session_id),
+                    Self::KpShareState(message) => message.object_key_pattern(session_id),
+                    Self::CommitteeUpdate(message) => message.object_key_pattern(session_id),
+                    Self::Genesis(message) => message.object_key_pattern(),
+                }
+            }
+        }
+    };
+}
+
+impl_log_message_schema!(LogMessageV1);
+impl_log_message_schema!(LogMessageV2);
+
 impl LogMessageV1 {
-    pub fn is_allowed_unsigned(&self) -> bool {
-        if let LogMessageV1::Init(init_message) = self {
-            matches!(**init_message, InitLogMessage::OIAttestationUnsigned { .. })
-        } else {
-            false
-        }
+    fn into_current(self) -> Result<LogMessage, GuardianError> {
+        Ok(match self {
+            LogMessageV1::Heartbeat(message) => LogMessage::Heartbeat(message),
+            LogMessageV1::Init(message) => LogMessage::Init(message),
+            LogMessageV1::Withdrawal(message) => LogMessage::Withdrawal(message),
+            LogMessageV1::Ceremony(message) => LogMessage::Ceremony(message),
+            LogMessageV1::KpShareState(message) => {
+                LogMessage::KpShareState(Box::new((*message).into_current()?))
+            }
+            LogMessageV1::CommitteeUpdate(message) => LogMessage::CommitteeUpdate(message),
+            LogMessageV1::Genesis(message) => LogMessage::Genesis(message),
+        })
     }
+}
 
-    pub fn must_be_signed(&self) -> bool {
-        !self.is_allowed_unsigned()
-    }
-
-    pub(super) fn object_key_pattern(
-        &self,
-        session_id: &str,
-        timestamp_ms: UnixMillis,
-    ) -> ObjectKeyPattern {
-        match self {
-            Self::Heartbeat(message) => message.object_key_pattern(session_id, timestamp_ms),
-            Self::Init(message) => message.object_key_pattern(session_id),
-            Self::Withdrawal(message) => message.object_key_pattern(session_id, timestamp_ms),
-            Self::Ceremony(message) => message.object_key_pattern(session_id),
-            Self::KpShareState(message) => message.object_key_pattern(session_id),
-            Self::CommitteeUpdate(message) => message.object_key_pattern(session_id),
-            Self::Genesis(message) => message.object_key_pattern(),
-        }
-    }
-
+impl LogMessageV2 {
     pub fn into_init_log(self) -> Option<InitLogMessage> {
         match self {
-            LogMessageV1::Init(init_message) => Some(*init_message),
+            Self::Init(init_message) => Some(*init_message),
             _ => None,
         }
     }
 }
 
-impl LogMessage {
+impl VersionedLogMessage {
     pub const SCHEMA_VERSION_V1: u64 = 1;
+    pub const SCHEMA_VERSION_V2: u64 = 2;
 
     pub fn schema_version(&self) -> u64 {
         match self {
             Self::V1(_) => Self::SCHEMA_VERSION_V1,
+            Self::V2(_) => Self::SCHEMA_VERSION_V2,
         }
     }
 
     pub fn is_allowed_unsigned(&self) -> bool {
         match self {
             Self::V1(message) => message.is_allowed_unsigned(),
+            Self::V2(message) => message.is_allowed_unsigned(),
         }
     }
 
     pub fn must_be_signed(&self) -> bool {
         !self.is_allowed_unsigned()
+    }
+
+    pub(super) fn log_type(&self) -> LogType {
+        match self {
+            Self::V1(message) => message.log_type(),
+            Self::V2(message) => message.log_type(),
+        }
     }
 
     pub(super) fn object_key_pattern(
@@ -475,12 +661,14 @@ impl LogMessage {
     ) -> ObjectKeyPattern {
         match self {
             Self::V1(message) => message.object_key_pattern(session_id, timestamp_ms),
+            Self::V2(message) => message.object_key_pattern(session_id, timestamp_ms),
         }
     }
 
-    pub fn into_v1(self) -> Option<LogMessageV1> {
+    pub fn into_current(self) -> Result<LogMessage, GuardianError> {
         match self {
-            Self::V1(message) => Some(message),
+            Self::V1(message) => message.into_current(),
+            Self::V2(message) => Ok(message),
         }
     }
 }
