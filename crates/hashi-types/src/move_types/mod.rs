@@ -1607,12 +1607,7 @@ mod tests {
 
     use sui_sdk_types::Identifier;
 
-    fn tag(
-        address: Address,
-        module: &str,
-        name: &str,
-        type_params: Vec<TypeTag>,
-    ) -> StructTag {
+    fn tag(address: Address, module: &str, name: &str, type_params: Vec<TypeTag>) -> StructTag {
         StructTag::new(
             address,
             Identifier::new(module).unwrap(),
@@ -1715,7 +1710,11 @@ mod tests {
             "committee_set",
             "MemberInfo"
         ));
-        assert!(!is_field_with_value(&member_field, "committee", "Committee"));
+        assert!(!is_field_with_value(
+            &member_field,
+            "committee",
+            "Committee"
+        ));
 
         // A primitive value side never matches a struct query.
         let primitive_value = field_tag(TypeTag::Address, TypeTag::U64);
