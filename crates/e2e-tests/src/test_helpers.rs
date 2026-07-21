@@ -173,7 +173,7 @@ pub async fn create_deposit_and_wait(
     info!("Creating deposit request on Sui...");
     let vout = lookup_vout(networks, txid, deposit_address, amount_sats)?;
     let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
-        .with_signer(user_key.clone());
+        .with_signer(user_key.clone().into());
     let request_id = executor
         .execute_create_deposit_request(
             txid_to_address(&txid),

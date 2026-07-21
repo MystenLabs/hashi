@@ -15,7 +15,7 @@ use hashi::{
         EOutputBelowDust,
         EOutputAmountMismatch,
         EOutputAddressMismatch,
-        EMinerFeeExceedsMax
+        EMinerFeeExceedsMax,
     }
 };
 use sui::clock;

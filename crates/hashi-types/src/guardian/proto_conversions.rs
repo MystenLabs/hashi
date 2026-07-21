@@ -6,8 +6,10 @@
 // ---------------------------------
 
 use super::BuildPcrs;
+use super::CeremonyStage;
 use super::Ciphertext;
 use super::CommitteeTransitionRequest;
+use super::EnclaveLifecycle;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianError;
@@ -21,8 +23,10 @@ use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
 use super::InitConfig;
-use super::KPEncryptedShare;
 use super::KPEncryptedShares;
+use super::KPEncryptedSharesRoster;
+use super::KpCerts;
+use super::KpCertsRoster;
 use super::KpSigned;
 use super::LimiterConfig;
 use super::LimiterState;
@@ -46,6 +50,7 @@ use super::SingleProvisionerInitRequest;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalRequestWire;
 use super::StandardWithdrawalResponse;
+use super::WithdrawStage;
 use crate::bitcoin::BitcoinAddress;
 use crate::bitcoin::BitcoinPubkey;
 use crate::bitcoin::BitcoinSignature;
@@ -74,16 +79,21 @@ use crate::move_types::Config;
 //      Proto -> Domain (deserialization)
 // --------------------------------------------
 
-fn pb_to_kp_encrypted_share(pb: pb::KpEncryptedShare) -> GuardianResult<KPEncryptedShare> {
-    Ok(KPEncryptedShare {
+fn pb_to_kp_encrypted_shares(pb: pb::SingleKpEncryptedShares) -> GuardianResult<KPEncryptedShares> {
+    Ok(KPEncryptedShares {
         id: pb_to_share_id(pb.id)?,
-        recipient_fingerprint: pb
-            .recipient_fingerprint
-            .ok_or_else(|| missing("recipient_fingerprint"))?,
-        armored_ciphertext: pb
-            .armored_ciphertext
-            .ok_or_else(|| missing("armored_ciphertext"))?,
+        ciphertexts_by_fingerprint: pb.ciphertexts.into_iter().collect(),
     })
+}
+
+fn pb_to_kp_cert_set(pb: pb::KpPgpCertSet) -> GuardianResult<KpCerts> {
+    let certs = pb
+        .pgp_certs
+        .iter()
+        .cloned()
+        .map(|cert| PgpPublicCert::new(cert).map_err(|e| InvalidInputs(e.to_string())))
+        .collect::<GuardianResult<Vec<_>>>()?;
+    KpCerts::new(certs)
 }
 
 pub fn pb_to_guardian_encrypted_share(
@@ -99,17 +109,17 @@ impl TryFrom<pb::SetupNewKeyRequest> for SetupNewKeyRequest {
     type Error = GuardianError;
 
     fn try_from(req: pb::SetupNewKeyRequest) -> Result<Self, Self::Error> {
-        let certs = req
-            .key_provisioner_pgp_certs
+        let cert_sets = req
+            .key_provisioner_pgp_cert_sets
             .iter()
             .cloned()
-            .map(|cert| PgpPublicCert::new(cert).map_err(|e| InvalidInputs(e.to_string())))
+            .map(pb_to_kp_cert_set)
             .collect::<GuardianResult<Vec<_>>>()?;
 
         let num_shares = req.num_shares.ok_or_else(|| missing("num_shares"))? as usize;
         let threshold = req.threshold.ok_or_else(|| missing("threshold"))? as usize;
 
-        SetupNewKeyRequest::new(certs, num_shares, threshold)
+        SetupNewKeyRequest::new(KpCertsRoster::new(cert_sets)?, num_shares, threshold)
     }
 }
 
@@ -127,9 +137,9 @@ impl TryFrom<pb::SignedSetupNewKeyResponse> for GuardianSigned<SetupNewKeyRespon
         let encrypted_shares = data
             .encrypted_shares
             .into_iter()
-            .map(pb_to_kp_encrypted_share)
+            .map(pb_to_kp_encrypted_shares)
             .collect::<GuardianResult<Vec<_>>>()?;
-        let encrypted_shares = KPEncryptedShares::new(encrypted_shares)?;
+        let encrypted_shares = KPEncryptedSharesRoster::new(encrypted_shares)?;
 
         let secret_sharing_instance = pb_to_secret_sharing_instance(
             data.secret_sharing_instance
@@ -222,13 +232,13 @@ impl TryFrom<pb::ProvisionerInitRequest> for ProvisionerInitRequest {
     type Error = GuardianError;
 
     fn try_from(req: pb::ProvisionerInitRequest) -> Result<Self, Self::Error> {
-        let encrypted_shares = req
-            .encrypted_shares
+        let submissions = req
+            .submissions
             .into_iter()
-            .map(pb_to_guardian_encrypted_share)
+            .map(KpSigned::<SingleProvisionerInitRequest>::try_from)
             .collect::<GuardianResult<Vec<_>>>()?;
 
-        Ok(ProvisionerInitRequest::new(encrypted_shares))
+        Ok(ProvisionerInitRequest(submissions))
     }
 }
 
@@ -245,13 +255,22 @@ impl TryFrom<pb::SignedSingleProvisionerInitRequest> for KpSigned<SingleProvisio
         if req.kp_signature.is_empty() {
             return Err(missing("kp_signature"));
         }
+        let expected_config_hash = req
+            .expected_config_hash
+            .ok_or_else(|| missing("expected_config_hash"))?;
+        let expected_config_hash = <[u8; 32]>::try_from(expected_config_hash.as_ref())
+            .map_err(|_| InvalidInputs("expected_config_hash must be 32 bytes".into()))?;
         let encrypted_share = pb_to_guardian_encrypted_share(
             req.encrypted_share
                 .ok_or_else(|| missing("encrypted_share"))?,
         )?;
         let signer_cert =
             PgpPublicCert::new(req.signer_cert).map_err(|e| InvalidInputs(e.to_string()))?;
-        let request = SingleProvisionerInitRequest::new(req.expected_session_id, encrypted_share);
+        let request = SingleProvisionerInitRequest::new(
+            req.expected_session_id.into(),
+            expected_config_hash,
+            encrypted_share,
+        );
         Ok(KpSigned {
             data: request,
             signer_cert,
@@ -275,12 +294,16 @@ impl TryFrom<pb::RotateKpsRequest> for RotateKpsRequest {
             .ok_or_else(|| missing("new_num_shares"))? as usize;
         let new_threshold = req.new_threshold.ok_or_else(|| missing("new_threshold"))? as usize;
 
-        let new_kp_pgp_certs = req
-            .new_kp_pgp_certs
+        let new_kp_pgp_cert_sets = req
+            .new_kp_pgp_cert_sets
             .into_iter()
-            .map(|cert| PgpPublicCert::new(cert).map_err(|e| InvalidInputs(e.to_string())))
+            .map(pb_to_kp_cert_set)
             .collect::<GuardianResult<Vec<_>>>()?;
-        let state = RotateKpsState::new(new_kp_pgp_certs, new_num_shares, new_threshold)?;
+        let state = RotateKpsState::new(
+            KpCertsRoster::new(new_kp_pgp_cert_sets)?,
+            new_num_shares,
+            new_threshold,
+        )?;
 
         let old_instance = pb_to_secret_sharing_instance(
             req.old_instance.ok_or_else(|| missing("old_instance"))?,
@@ -306,9 +329,9 @@ impl TryFrom<pb::SignedRotateKpsResponse> for GuardianSigned<RotateKpsResponse> 
         let encrypted_shares = data
             .encrypted_shares
             .into_iter()
-            .map(pb_to_kp_encrypted_share)
+            .map(pb_to_kp_encrypted_shares)
             .collect::<GuardianResult<Vec<_>>>()?;
-        let encrypted_shares = KPEncryptedShares::new(encrypted_shares)?;
+        let encrypted_shares = KPEncryptedSharesRoster::new(encrypted_shares)?;
 
         let timestamp_ms = resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?;
 
@@ -404,18 +427,10 @@ impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
         let signed_info_pb = resp.signed_info.ok_or_else(|| missing("signed_info"))?;
         let signed_info = pb_to_signed_guardian_info(signed_info_pb)?;
 
-        let encrypted_shares = resp
-            .encrypted_shares
-            .into_iter()
-            .map(pb_to_kp_encrypted_share)
-            .collect::<GuardianResult<Vec<_>>>()?;
-        let encrypted_shares = KPEncryptedShares::new(encrypted_shares)?;
-
         Ok(GetGuardianInfoResponse::new(
             NitroAttestation::new(attestation.to_vec()),
             signing_pub_key,
             signed_info,
-            encrypted_shares,
         ))
     }
 }
@@ -511,7 +526,7 @@ pub fn rotate_kps_response_signed_to_pb(
                 .encrypted_shares
                 .into_vec()
                 .into_iter()
-                .map(kp_encrypted_share_to_pb)
+                .map(kp_encrypted_shares_to_pb)
                 .collect(),
         }),
         timestamp_ms: Some(s.timestamp_ms),
@@ -521,10 +536,11 @@ pub fn rotate_kps_response_signed_to_pb(
 
 pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequest {
     pb::SetupNewKeyRequest {
-        key_provisioner_pgp_certs: s
-            .pgp_certs()
+        key_provisioner_pgp_cert_sets: s
+            .kp_certs_roster()
             .iter()
-            .map(|cert| cert.armored().to_string())
+            .cloned()
+            .map(kp_cert_set_to_pb)
             .collect(),
         num_shares: Some(s.num_shares() as u32),
         threshold: Some(s.threshold() as u32),
@@ -560,10 +576,10 @@ pub fn provisioner_init_request_to_pb(
     r: ProvisionerInitRequest,
 ) -> GuardianResult<pb::ProvisionerInitRequest> {
     Ok(pb::ProvisionerInitRequest {
-        encrypted_shares: r
-            .into_parts()
+        submissions: r
+            .0
             .into_iter()
-            .map(guardian_encrypted_share_to_pb)
+            .map(pb::SignedSingleProvisionerInitRequest::from)
             .collect(),
     })
 }
@@ -575,12 +591,13 @@ impl From<KpSigned<SingleProvisionerInitRequest>> for pb::SignedSingleProvisione
             signer_cert,
             signature,
         } = r;
-        let (expected_session_id, encrypted_share) = request.into_parts();
+        let (expected_session_id, expected_config_hash, encrypted_share) = request.into_parts();
         Self {
             encrypted_share: Some(guardian_encrypted_share_to_pb(encrypted_share)),
-            expected_session_id,
+            expected_session_id: expected_session_id.into(),
             signer_cert: signer_cert.armored().to_string(),
             kp_signature: signature,
+            expected_config_hash: Some(expected_config_hash.to_vec().into()),
         }
     }
 }
@@ -615,19 +632,30 @@ fn pcr_allowlist_to_pb(allowlist: PcrAllowlist) -> pb::PcrAllowlist {
 
 pub fn rotate_kps_request_to_pb(r: RotateKpsRequest) -> pb::RotateKpsRequest {
     let (encrypted_old_shares, old_instance, state) = r.into_parts();
-    let (new_kp_pgp_certs, new_params) = state.into_parts();
+    let (new_kp_certs_roster, new_params) = state.into_parts();
     pb::RotateKpsRequest {
         encrypted_old_shares: encrypted_old_shares
             .into_iter()
             .map(guardian_encrypted_share_to_pb)
             .collect(),
-        new_kp_pgp_certs: new_kp_pgp_certs
+        new_kp_pgp_cert_sets: new_kp_certs_roster
+            .into_vec()
             .into_iter()
-            .map(|cert| cert.armored().to_string())
+            .map(kp_cert_set_to_pb)
             .collect(),
         new_num_shares: Some(new_params.num_shares() as u32),
         new_threshold: Some(new_params.threshold() as u32),
         old_instance: Some(secret_sharing_instance_to_pb(&old_instance)),
+    }
+}
+
+fn kp_cert_set_to_pb(set: KpCerts) -> pb::KpPgpCertSet {
+    pb::KpPgpCertSet {
+        pgp_certs: set
+            .into_pgp_certs()
+            .into_iter()
+            .map(|cert| cert.armored().to_string())
+            .collect(),
     }
 }
 
@@ -636,12 +664,6 @@ pub fn get_guardian_info_response_to_pb(r: GetGuardianInfoResponse) -> pb::GetGu
         attestation: Some(r.attestation.into_bytes().into()),
         signing_pub_key: Some(r.signing_pub_key.to_bytes().to_vec().into()),
         signed_info: Some(signed_guardian_info_to_pb(r.signed_info)),
-        encrypted_shares: r
-            .encrypted_shares
-            .into_vec()
-            .into_iter()
-            .map(kp_encrypted_share_to_pb)
-            .collect(),
     }
 }
 
@@ -731,7 +753,55 @@ fn s3_bucket_info_to_pb(info: super::S3BucketInfo) -> pb::S3BucketInfo {
     }
 }
 
+fn pb_to_ceremony_stage(stage: i32) -> GuardianResult<CeremonyStage> {
+    match pb::CeremonyStage::try_from(stage) {
+        Ok(pb::CeremonyStage::Uninitialized) => Ok(CeremonyStage::Uninitialized),
+        Ok(pb::CeremonyStage::OperatorInitialized) => Ok(CeremonyStage::OperatorInitialized),
+        Ok(pb::CeremonyStage::Completed) => Ok(CeremonyStage::Completed),
+        Ok(pb::CeremonyStage::Unspecified) | Err(_) => {
+            Err(InvalidInputs(format!("invalid ceremony stage: {stage}")))
+        }
+    }
+}
+
+fn ceremony_stage_to_pb(stage: CeremonyStage) -> i32 {
+    match stage {
+        CeremonyStage::Uninitialized => pb::CeremonyStage::Uninitialized as i32,
+        CeremonyStage::OperatorInitialized => pb::CeremonyStage::OperatorInitialized as i32,
+        CeremonyStage::Completed => pb::CeremonyStage::Completed as i32,
+    }
+}
+
+fn pb_to_withdraw_stage(stage: i32) -> GuardianResult<WithdrawStage> {
+    match pb::WithdrawStage::try_from(stage) {
+        Ok(pb::WithdrawStage::Uninitialized) => Ok(WithdrawStage::Uninitialized),
+        Ok(pb::WithdrawStage::OperatorInitialized) => Ok(WithdrawStage::OperatorInitialized),
+        Ok(pb::WithdrawStage::ProvisionerInitialized) => Ok(WithdrawStage::ProvisionerInitialized),
+        Ok(pb::WithdrawStage::Activated) => Ok(WithdrawStage::Activated),
+        Ok(pb::WithdrawStage::Unspecified) | Err(_) => {
+            Err(InvalidInputs(format!("invalid withdraw stage: {stage}")))
+        }
+    }
+}
+
+fn withdraw_stage_to_pb(stage: WithdrawStage) -> i32 {
+    match stage {
+        WithdrawStage::Uninitialized => pb::WithdrawStage::Uninitialized as i32,
+        WithdrawStage::OperatorInitialized => pb::WithdrawStage::OperatorInitialized as i32,
+        WithdrawStage::ProvisionerInitialized => pb::WithdrawStage::ProvisionerInitialized as i32,
+        WithdrawStage::Activated => pb::WithdrawStage::Activated as i32,
+    }
+}
+
 fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<GuardianInfo> {
+    let lifecycle = match data.lifecycle.ok_or_else(|| missing("lifecycle"))? {
+        pb::guardian_info_data::Lifecycle::Ceremony(stage) => {
+            EnclaveLifecycle::Ceremony(pb_to_ceremony_stage(stage)?)
+        }
+        pb::guardian_info_data::Lifecycle::Withdraw(stage) => {
+            EnclaveLifecycle::Withdraw(pb_to_withdraw_stage(stage)?)
+        }
+    };
     let secret_sharing_instance = data
         .secret_sharing_instance
         .map(pb_to_secret_sharing_instance)
@@ -776,6 +846,7 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
         .transpose()?;
 
     Ok(GuardianInfo {
+        lifecycle,
         secret_sharing_instance,
         bucket_info,
         encryption_pubkey,
@@ -790,7 +861,16 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
 }
 
 fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
+    let lifecycle = match info.lifecycle {
+        EnclaveLifecycle::Ceremony(stage) => {
+            pb::guardian_info_data::Lifecycle::Ceremony(ceremony_stage_to_pb(stage))
+        }
+        EnclaveLifecycle::Withdraw(stage) => {
+            pb::guardian_info_data::Lifecycle::Withdraw(withdraw_stage_to_pb(stage))
+        }
+    };
     pb::GuardianInfoData {
+        lifecycle: Some(lifecycle),
         secret_sharing_instance: info
             .secret_sharing_instance
             .as_ref()
@@ -931,11 +1011,10 @@ fn ciphertext_to_pb(c: Ciphertext) -> pb::HpkeCiphertext {
     }
 }
 
-pub fn kp_encrypted_share_to_pb(s: KPEncryptedShare) -> pb::KpEncryptedShare {
-    pb::KpEncryptedShare {
+pub fn kp_encrypted_shares_to_pb(s: KPEncryptedShares) -> pb::SingleKpEncryptedShares {
+    pb::SingleKpEncryptedShares {
         id: Some(share_id_to_pb(s.id)),
-        armored_ciphertext: Some(s.armored_ciphertext),
-        recipient_fingerprint: Some(s.recipient_fingerprint),
+        ciphertexts: s.ciphertexts_by_fingerprint.into_iter().collect(),
     }
 }
 
@@ -959,7 +1038,7 @@ pub fn setup_new_key_response_to_pb(r: SetupNewKeyResponse) -> pb::SetupNewKeyRe
             .encrypted_shares
             .into_vec()
             .into_iter()
-            .map(kp_encrypted_share_to_pb)
+            .map(kp_encrypted_shares_to_pb)
             .collect(),
         secret_sharing_instance: Some(secret_sharing_instance_to_pb(&r.secret_sharing_instance)),
         btc_master_pubkey: r.btc_master_pubkey.serialize().to_vec().into(),
@@ -1285,6 +1364,7 @@ mod tests {
         let pk = kp.x_only_public_key().0;
 
         let info = GuardianInfo {
+            lifecycle: WithdrawStage::ProvisionerInitialized.into(),
             secret_sharing_instance: None,
             bucket_info: None,
             encryption_pubkey: vec![0u8; 32],
@@ -1350,11 +1430,17 @@ mod tests {
         let (cert_armored, secret_armored) = mock_pgp_keypair();
         let cert = PgpPublicCert::new(cert_armored).unwrap();
         let encrypted_share = ProvisionerInitRequest::mock_for_testing()
-            .into_parts()
+            .0
             .pop()
-            .unwrap();
-        let request =
-            SingleProvisionerInitRequest::new("session-a".to_string(), encrypted_share.clone());
+            .unwrap()
+            .data
+            .encrypted_share;
+        let expected_config_hash = [9u8; 32];
+        let request = SingleProvisionerInitRequest::new(
+            "session-a".into(),
+            expected_config_hash,
+            encrypted_share.clone(),
+        );
         let signature =
             sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&request));
         let signed = KpSigned {
@@ -1366,16 +1452,25 @@ mod tests {
         let pb = pb::SignedSingleProvisionerInitRequest::from(signed);
         let back = KpSigned::<SingleProvisionerInitRequest>::try_from(pb.clone()).unwrap();
         assert_eq!(back.data.expected_session_id(), "session-a");
+        assert_eq!(back.data.expected_config_hash(), &expected_config_hash);
         assert_eq!(back.data.encrypted_share(), &encrypted_share);
         assert_eq!(back.signer_cert.fingerprint(), cert.fingerprint());
         back.verify().unwrap();
 
-        let mut tampered = pb;
+        let mut tampered = pb.clone();
         tampered.expected_session_id = "other-session".to_string();
         let tampered = KpSigned::<SingleProvisionerInitRequest>::try_from(tampered).unwrap();
         assert!(
             tampered.verify().is_err(),
             "signature must bind the expected guardian session"
+        );
+
+        let mut tampered = pb;
+        tampered.expected_config_hash = Some(vec![8u8; 32].into());
+        let tampered = KpSigned::<SingleProvisionerInitRequest>::try_from(tampered).unwrap();
+        assert!(
+            tampered.verify().is_err(),
+            "signature must bind the expected operator-init config hash"
         );
     }
 

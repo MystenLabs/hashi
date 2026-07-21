@@ -5,26 +5,23 @@
 //! withdraw-mode standby guardian.
 
 use anyhow::Context;
-use anyhow::anyhow;
 use anyhow::ensure;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::ActivationState;
-use hashi_types::guardian::BuildPcrs;
-use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::OperatorActivateRequest;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::VerifiedGuardianInfo;
+use hashi_types::guardian::WithdrawStage;
 use hashi_types::guardian::proto_conversions::operator_activate_request_to_pb;
-use hashi_types::proto as pb;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
-use tonic::transport::Channel;
 use tracing::info;
 
 use crate::config::Config;
+use crate::guardian_info::verified_live_guardian_info;
 
 /// Activate a provisioner-initialized standby guardian.
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
@@ -129,27 +126,6 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         .context("heartbeat activation check failed")?;
 
     info!(
-        phase = "ceremony instance",
-        "reading latest ceremony log for the activation instance",
-    );
-    let (ceremony_session, latest_instance, _) = reader
-        .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
-        .await?
-        .context("no ceremony log found in S3; key setup has not run")?;
-    ensure!(
-        latest_instance == standby.secret_sharing_instance,
-        "latest ceremony instance differs from armed instance: latest {}, armed {}",
-        latest_instance,
-        standby.secret_sharing_instance
-    );
-    info!(
-        phase = "ceremony instance",
-        ceremony_session = %ceremony_session,
-        sharing_seq = latest_instance.sharing_seq(),
-        "latest ceremony instance matches the armed standby",
-    );
-
-    info!(
         phase = "activation state",
         "reading latest committee and recovering limiter state",
     );
@@ -167,7 +143,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         .context("recover limiter state")?;
     let activation_state = ActivationState::new(
         standby.config_hash,
-        latest_instance,
+        standby.secret_sharing_instance.clone(),
         committee,
         limiter_state,
     );
@@ -227,7 +203,6 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     info!(
         phase = "summary",
         session_id = %session_id,
-        ceremony_session = %ceremony_session,
         committee_epoch,
         config_hash = hex::encode(standby.config_hash),
         state_hash = hex::encode(state_hash),
@@ -260,6 +235,10 @@ fn verify_provisioned_standby_info(
     allowlist: &hashi_types::guardian::PcrAllowlist,
     master_g: &hashi_types::bitcoin::HashiMasterG,
 ) -> anyhow::Result<StandbyChecks> {
+    ensure!(
+        info.lifecycle == WithdrawStage::ProvisionerInitialized.into(),
+        "guardian is not a provisioner-initialized withdraw enclave"
+    );
     let instance = info
         .secret_sharing_instance
         .clone()
@@ -335,6 +314,14 @@ fn verify_oi_info_matches_provisioned_standby(
     live_info: &GuardianInfo,
 ) -> anyhow::Result<()> {
     ensure!(
+        oi_info.lifecycle == WithdrawStage::Uninitialized.into(),
+        "OI GuardianInfo has an unexpected lifecycle stage"
+    );
+    ensure!(
+        oi_info.lifecycle.mode() == live_info.lifecycle.mode(),
+        "OI GuardianInfo enclave mode differs from live standby GuardianInfo"
+    );
+    ensure!(
         oi_info.enclave_btc_pubkey.is_none(),
         "OI GuardianInfo unexpectedly has a BTC pubkey"
     );
@@ -387,7 +374,7 @@ fn verify_activated_info(
     expected_limiter_state: hashi_types::guardian::LimiterState,
 ) -> anyhow::Result<()> {
     ensure!(
-        post.session_id == expected_session_id,
+        post.session_id.as_str() == expected_session_id,
         "guardian session changed during operator activation: started {}, now {}",
         expected_session_id,
         post.session_id
@@ -395,6 +382,10 @@ fn verify_activated_info(
     ensure!(
         post.signing_pub_key == expected_signing_key,
         "guardian signing key changed during operator activation"
+    );
+    ensure!(
+        post.info.lifecycle == WithdrawStage::Activated.into(),
+        "guardian is not an activated withdraw enclave"
     );
     ensure!(
         post.info.config_hash == Some(expected_config_hash),
@@ -417,20 +408,4 @@ fn verify_activated_info(
         post.info.limiter_state
     );
     Ok(())
-}
-
-async fn verified_live_guardian_info(
-    client: &mut GuardianServiceClient<Channel>,
-    current_build: &BuildPcrs,
-) -> anyhow::Result<VerifiedGuardianInfo> {
-    let info_pb = client
-        .get_guardian_info(pb::GetGuardianInfoRequest {})
-        .await
-        .context("GetGuardianInfo RPC failed")?
-        .into_inner();
-    let info_resp = GetGuardianInfoResponse::try_from(info_pb)
-        .map_err(|e| anyhow!("decode GetGuardianInfoResponse: {e:?}"))?;
-    info_resp
-        .verify(current_build)
-        .map_err(|e| anyhow!("verify GuardianInfo attestation/signature: {e:?}"))
 }

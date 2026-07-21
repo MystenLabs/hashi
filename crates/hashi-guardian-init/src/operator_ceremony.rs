@@ -4,10 +4,10 @@
 //! Production guardian key ceremony commands.
 //!
 //! `operator ceremony` drives a fresh ceremony-mode guardian through genesis BTC key setup:
-//! [`OperatorInit`] (ceremony mode, S3-only) -> [`SetupNewKey`] -> inspect each
-//! returned encrypted share to confirm it is addressed to the expected KP cert
-//! (without decrypting) -> cross-check the guardian's `ceremony/` audit log and
-//! `kp-shares/` recovery log.
+//! [`OperatorInit`] (ceremony mode, S3-only) -> [`SetupNewKey`] -> confirm each
+//! share's recipient roster matches its expected KP cert set and every
+//! ciphertext targets its keyed cert (without decrypting) -> cross-check the
+//! guardian's `ceremony/` audit log and `kp-shares/` recovery log.
 //!
 //! [`OperatorInit`]: hashi_types::guardian::OperatorInitRequest
 //! [`SetupNewKey`]: hashi_types::guardian::SetupNewKeyRequest
@@ -19,20 +19,19 @@ use anyhow::anyhow;
 use anyhow::ensure;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
+use hashi_types::guardian::CeremonyStage;
+use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::GuardianSigned;
-use hashi_types::guardian::KpShareState;
 use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
 use hashi_types::guardian::SetupNewKeyResponse;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
 use hashi_types::guardian::proto_conversions::setup_new_key_request_to_pb;
-use hashi_types::pgp::load_certs;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use tracing::info;
 
 use crate::config::Config;
 use crate::guardian_info::verified_live_guardian_info;
-use crate::kp_roster::VerifiedCeremonyState;
 
 /// Run the one-time production guardian key ceremony.
 ///
@@ -43,9 +42,9 @@ pub async fn run(cfg: Config) -> Result<()> {
 
     info!(
         phase = "setup",
-        num_shares = cfg.kp_roster.num_shares,
+        share_count = cfg.kp_roster.num_shares,
         threshold = cfg.kp_roster.threshold,
-        cert_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
+        certificate_count = cfg.kp_roster.cert_count(),
         bucket = guardian_s3.bucket_name(),
         region = guardian_s3.region(),
         endpoint = %cfg.guardian_endpoint,
@@ -60,20 +59,22 @@ pub async fn run(cfg: Config) -> Result<()> {
     //    SetupNewKeyRequest::new).
     cfg.kp_roster.validate()?;
 
-    // 2. Load + validate each KP's PGP cert.
+    // 2. Load + validate each KP's PGP cert set.
     info!(
         phase = "roster load",
-        cert_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
-        "loading + validating full KP cert roster",
+        share_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
+        certificate_count = cfg.kp_roster.cert_count(),
+        "loading + validating full KP certificate roster",
     );
-    let certs = load_certs(&cfg.kp_roster.kp_pgp_cert_paths)?;
+    let certs_roster = cfg.kp_roster.load_certs_roster()?;
     info!(
         phase = "roster load",
-        cert_count = certs.len(),
-        "KP cert roster loaded"
+        share_count = certs_roster.num_kps(),
+        certificate_count = cfg.kp_roster.cert_count(),
+        "KP certificate roster loaded"
     );
     let setup_req = SetupNewKeyRequest::new(
-        certs.clone(),
+        certs_roster.clone(),
         cfg.kp_roster.num_shares,
         cfg.kp_roster.threshold,
     )
@@ -115,6 +116,10 @@ pub async fn run(cfg: Config) -> Result<()> {
     info!(phase = "guardian info", "calling GetGuardianInfo");
     let allowlist = cfg.kp_roster.pcr_allowlist();
     let verified = verified_live_guardian_info(&mut client, allowlist.current_build()).await?;
+    ensure!(
+        verified.info.lifecycle == CeremonyStage::OperatorInitialized.into(),
+        "guardian is not an operator-initialized ceremony enclave"
+    );
     let signing_pub_key = verified.signing_pub_key;
     let session_id = verified.session_id;
     info!(
@@ -164,42 +169,36 @@ pub async fn run(cfg: Config) -> Result<()> {
         phase = "setup_new_key",
         n = cfg.kp_roster.num_shares,
         t = cfg.kp_roster.threshold,
-        encrypted_share_count = signed_resp.data.encrypted_shares.len(),
+        share_count = signed_resp.data.encrypted_shares.share_count(),
+        ciphertext_count = signed_resp.data.encrypted_shares.ciphertext_count(),
         "setup_new_key response received",
     );
 
     // 7. Verify the response signature under the pinned session's signing key,
     //    and sanity-check the shape; keep the now-verified BTC master pubkey.
-    let sharing_seq = 0u64;
     let response = signed_resp
         .verify(&signing_pub_key)
         .map_err(|e| anyhow!("verify SetupNewKeyResponse signature: {e:?}"))?;
-    let live = VerifiedCeremonyState::from_response(
-        response,
-        session_id.clone(),
-        sharing_seq,
-        cfg.kp_roster.num_shares,
-        cfg.kp_roster.threshold,
-    )?;
+    let live = CeremonyState::from(response);
+    live.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     info!(
         phase = "setup_new_key",
-        ceremony_session_id = %live.ceremony_session_id,
-        kp_share_session_id = %live.kp_share_session_id,
         sharing_seq = live.secret_sharing_instance.sharing_seq(),
         "verified SetupNewKeyResponse signature + shape",
     );
 
-    // 8. Inspect each encrypted share's PGP recipients WITHOUT decrypting, and
-    //    confirm every share is addressed only to its expected cert.
+    // 8. Inspect each share's recipient roster and every ciphertext
+    //    WITHOUT decrypting.
     info!(
         phase = "roster verify",
-        share_count = live.encrypted_shares.len(),
-        "verifying every returned share is addressed only to its labeled KP cert (without decrypting)",
+        share_count = live.encrypted_shares.share_count(),
+        ciphertext_count = live.encrypted_shares.ciphertext_count(),
+        "verifying every returned PGP-encrypted share ciphertext against the expected KP cert sets (without decrypting)",
     );
-    live.verify_encrypted_share_recipients(&certs)?;
+    live.encrypted_shares.verify_recipients(&certs_roster)?;
     info!(
         phase = "roster verify",
-        "all returned shares verified against expected KP certs",
+        "all returned PGP-encrypted share ciphertexts verified against expected KP certificates",
     );
 
     // 9. Cross-check the latest guardian ceremony/ and kp-shares/ logs.
@@ -208,12 +207,11 @@ pub async fn run(cfg: Config) -> Result<()> {
         phase = "log cross-check",
         "cross-checking the latest guardian ceremony/ and kp-shares/ logs",
     );
-    let logged = VerifiedCeremonyState::latest_from_s3(
-        &mut reader,
-        cfg.kp_roster.num_shares,
-        cfg.kp_roster.threshold,
-    )
-    .await?;
+    let logged = reader
+        .read_latest_ceremony_state(BuildPolicy::Current)
+        .await?
+        .context("no ceremony logs found in guardian S3 bucket")?;
+    logged.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
     anyhow::ensure!(
         logged == live,
         "ceremony/ and kp-shares/ logs differ from the SetupNewKeyResponse"
@@ -226,15 +224,8 @@ pub async fn run(cfg: Config) -> Result<()> {
     // 10. Summary.
     info!(
         phase = "summary",
-        ceremony_session_id = %live.ceremony_session_id,
-        kp_share_session_id = %live.kp_share_session_id,
         sharing_seq = live.secret_sharing_instance.sharing_seq(),
-        cert_seq = live.kp_share_cert_seq,
-        kp_shares_key = %KpShareState::object_key(
-            &live.kp_share_session_id,
-            live.secret_sharing_instance.sharing_seq(),
-            live.kp_share_cert_seq
-        ),
+        cert_seq = live.cert_seq,
         n = live.secret_sharing_instance.num_shares(),
         t = live.secret_sharing_instance.threshold(),
         "guardian key ceremony complete",

@@ -15,6 +15,7 @@ use hashi_types::guardian::HashiCommittee;
 use hashi_types::guardian::InitLogMessage;
 use hashi_types::guardian::OperatorActivateRequest;
 use hashi_types::guardian::RateLimiter;
+use hashi_types::guardian::WithdrawStage;
 use std::sync::Arc;
 use tracing::info;
 use GuardianError::InternalError;
@@ -28,14 +29,7 @@ pub async fn operator_activate(
 
     let _guard = enclave.control_lock.lock().await;
 
-    if !enclave.is_provisioner_init_complete() {
-        return Err(InvalidInputs(
-            "operator_activate requires provisioner_init complete".into(),
-        ));
-    }
-    if enclave.is_active() {
-        return Err(InvalidInputs("operator_activate already complete".into()));
-    }
+    enclave.require_lifecycle(WithdrawStage::ProvisionerInitialized.into())?;
 
     let init_config = enclave
         .init_config()
@@ -46,8 +40,7 @@ pub async fn operator_activate(
         .ok_or_else(|| InvalidInputs("config_hash not set".into()))?;
     let armed_instance = enclave
         .secret_sharing_instance()
-        .map_err(|_| InvalidInputs("secret-sharing instance not set".into()))?
-        .clone();
+        .map_err(|_| InvalidInputs("secret-sharing instance not set".into()))?;
 
     let s3 = enclave
         .config
@@ -60,17 +53,6 @@ pub async fn operator_activate(
         .ensure_session_live_and_others_quiet(&enclave.s3_session_id())
         .await
         .map_err(|e| InvalidInputs(format!("heartbeat activation check failed: {e}")))?;
-
-    let (_, latest_instance, _) = reader
-        .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
-        .await
-        .map_err(|e| InternalError(format!("read latest ceremony: {e}")))?
-        .ok_or_else(|| InvalidInputs("no ceremony log found during activation".into()))?;
-    if latest_instance != armed_instance {
-        return Err(InvalidInputs(format!(
-            "latest ceremony instance differs from armed instance: latest {latest_instance}, armed {armed_instance}"
-        )));
-    }
 
     let committee: HashiCommittee = reader
         .read_latest_committee(BuildPolicy::AnyAllowlisted)
@@ -85,6 +67,8 @@ pub async fn operator_activate(
         .await
         .map_err(|e| InvalidInputs(format!("recover limiter state: {e}")))?;
     let rate_limiter = RateLimiter::new(*init_config.limiter_config(), limiter_state)?;
+    let sharing_seq = armed_instance.sharing_seq();
+    let committee_epoch = committee.epoch();
 
     let activation_state = ActivationState::new(
         config_hash,
@@ -106,14 +90,19 @@ pub async fn operator_activate(
         .init(committee, rate_limiter)
         .expect("Unable to init activation state");
     enclave
-        .log_init(InitLogMessage::OAActivated { state_hash })
+        .log_init(InitLogMessage::OAActivated {
+            state_hash,
+            config_hash,
+            sharing_seq,
+            committee_epoch,
+            limiter_state,
+        })
         .await
         .expect("Unable to log operator activation");
+    enclave.clear_initialization_state();
     enclave
-        .scratchpad
-        .operator_activate_logging_complete
-        .set(())
-        .expect("operator_activate_logging_complete should only be set once");
+        .advance_lifecycle_into(WithdrawStage::Activated.into())
+        .expect("operator_activate should advance a provisioner-initialized enclave");
 
     info!("Operator activation complete.");
     Ok(())

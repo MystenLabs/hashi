@@ -7,14 +7,14 @@
 // Usage:
 //   node scripts/fetch-sdk-readme.js
 //
-// hashi-ts-sdk is a PRIVATE repo, so fetching needs a GitHub token. The token
-// is read from GITHUB_TOKEN / GH_TOKEN; if neither is set the script falls back
-// to the `gh` CLI (which uses your `gh auth login` credentials). When no
-// credentials are available — e.g. an external contributor or a docs CI that
-// can't see the private repo — the script logs a notice and leaves the existing
-// committed docs/ts-sdk.mdx in place, so builds never break. Because of that the
-// generated file IS committed; rerun this script (npm run fetch-sdk-readme) to
-// refresh it whenever the SDK README changes.
+// hashi-ts-sdk is a PUBLIC repo, so the README is fetched anonymously over HTTPS
+// — no GitHub token or `gh` CLI needed. If the fetch fails (offline build, a
+// transient network/GitHub error), the script logs a notice and leaves the
+// existing committed docs/ts-sdk.mdx in place, so builds never break. Because of
+// that the generated file IS committed and serves as the offline fallback; the
+// .github/workflows/refresh-sdk-docs.yml workflow keeps it fresh automatically
+// (nightly + on SDK release), and you can rerun this script by hand
+// (npm run fetch-sdk-readme, from design/) any time.
 //
 // Formatting applied to the raw README markdown:
 //   - drops the leading H1 (the title comes from front matter instead)
@@ -27,12 +27,12 @@
 
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
 
 const REPO = "MystenLabs/hashi-ts-sdk";
 const BRANCH = "main";
 const REPO_BLOB = `https://github.com/${REPO}/blob/${BRANCH}`;
 const REPO_RAW = `https://raw.githubusercontent.com/${REPO}/${BRANCH}`;
+const README_URL = `${REPO_RAW}/README.md`;
 
 const SITE_ROOT = path.resolve(__dirname, ".."); // design/
 const OUT_FILE = path.join(SITE_ROOT, "docs/ts-sdk.mdx");
@@ -50,36 +50,14 @@ const ALERT_ADMONITION = {
 // ---------------------------------------------------------------------------
 
 async function fetchReadme() {
-  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
-  if (token) {
-    const res = await fetch(`https://api.github.com/repos/${REPO}/readme`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github.raw",
-        "User-Agent": "hashi-docs-fetch-sdk-readme",
-      },
-    });
-    if (!res.ok) {
-      throw new Error(`GitHub API responded ${res.status} ${res.statusText}`);
-    }
-    return await res.text();
-  }
-
-  // No token in the environment — fall back to the gh CLI.
-  return execSync(`gh api repos/${REPO}/readme -H "Accept: application/vnd.github.raw"`, {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
+  // hashi-ts-sdk is public, so the raw README is fetchable anonymously.
+  const res = await fetch(README_URL, {
+    headers: { "User-Agent": "hashi-docs-fetch-sdk-readme" },
   });
-}
-
-function hasCredentials() {
-  if (process.env.GITHUB_TOKEN || process.env.GH_TOKEN) return true;
-  try {
-    execSync("gh auth status", { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
+  if (!res.ok) {
+    throw new Error(`GET ${README_URL} responded ${res.status} ${res.statusText}`);
   }
+  return await res.text();
 }
 
 // ---------------------------------------------------------------------------
@@ -183,19 +161,6 @@ function format(readme) {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  if (!hasCredentials()) {
-    if (fs.existsSync(OUT_FILE)) {
-      console.log(
-        "ℹ️  fetch-sdk-readme: no GitHub credentials; keeping committed docs/ts-sdk.mdx",
-      );
-      return;
-    }
-    console.warn(
-      "⚠️  fetch-sdk-readme: no GitHub credentials and no committed docs/ts-sdk.mdx to fall back on.",
-    );
-    return;
-  }
-
   console.log(`📥 fetch-sdk-readme: importing ${REPO}@${BRANCH} README`);
 
   try {

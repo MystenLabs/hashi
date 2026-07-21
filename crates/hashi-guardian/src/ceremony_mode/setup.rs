@@ -4,7 +4,6 @@
 use crate::Enclave;
 use hashi_types::guardian::crypto::k256_sk_to_btc_xonly_pubkey;
 use hashi_types::guardian::crypto::split_and_encrypt_for_kps;
-use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::*;
 use k256::SecretKey;
 use std::sync::Arc;
@@ -19,24 +18,32 @@ pub async fn setup_new_key(
     request: SetupNewKeyRequest,
 ) -> GuardianResult<GuardianSigned<SetupNewKeyResponse>> {
     info!("/setup_new_key - Received request.");
-    // Hold the ceremony guard across the whole flow so concurrent setup_new_key
-    // /rotate_kps callers can't both pass the completion check below and run.
-    let mut ceremony_complete = enclave.scratchpad.ceremony_complete.lock().await;
-    if !enclave.is_operator_init_complete() {
-        return Err(InvalidInputs("call operator_init first".into()));
-    }
-    if *ceremony_complete {
-        return Err(InvalidInputs("setup or rotation already complete".into()));
-    }
+
+    // Serialize the whole ceremony. The exact lifecycle check prevents setup
+    // and rotation from interleaving and rejects another ceremony afterward.
+    let _guard = enclave.control_lock.lock().await;
+    enclave.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
 
     let params = request.params();
     let n = params.num_shares();
     let t = params.threshold();
-    let key_provisioner_certs = request.pgp_certs();
+    let key_provisioner_certs_roster = request.kp_certs_roster();
+    let certificate_count: usize = key_provisioner_certs_roster
+        .iter()
+        .map(|set| set.pgp_certs().len())
+        .sum();
     info!(
-        "Received {} OpenPGP certificates.",
-        key_provisioner_certs.len()
+        share_count = key_provisioner_certs_roster.num_kps(),
+        certificate_count, "Received key provisioner OpenPGP certificate roster."
     );
+    for (index, cert_set) in key_provisioner_certs_roster.iter().enumerate() {
+        info!(
+            share_id = index + 1,
+            certificate_count = cert_set.pgp_certs().len(),
+            recipient_fingerprints = ?cert_set.fingerprints(),
+            "Received KP certificate set."
+        );
+    }
 
     info!("Generating new Bitcoin private key.");
     // Confine the !Send `ThreadRng` to a sync scope so the surrounding async
@@ -48,12 +55,14 @@ pub async fn setup_new_key(
         let btc_master_pubkey = k256_sk_to_btc_xonly_pubkey(&sk);
         info!("Splitting secret into {n} shares (threshold: {t}).");
         let (encrypted, commitments) =
-            split_and_encrypt_for_kps(&sk, key_provisioner_certs, params, &mut rng);
+            split_and_encrypt_for_kps(&sk, key_provisioner_certs_roster, params, &mut rng);
         (encrypted, commitments, fp, btc_master_pubkey)
     };
     info!(
-        "Bitcoin key generated with fingerprint {}; all {} shares encrypted.",
-        fingerprint_hex, n
+        bitcoin_key_fingerprint = %fingerprint_hex,
+        share_count = encrypted_shares.share_count(),
+        ciphertext_count = encrypted_shares.ciphertext_count(),
+        "Bitcoin key generated; encrypted each share once per KP certificate."
     );
 
     let ss_instance = SecretSharingInstance::new(share_commitments.clone(), n, t, 0)
@@ -71,17 +80,15 @@ pub async fn setup_new_key(
         })
         .await?;
 
-    enclave
-        .set_latest_encrypted_shares(encrypted_shares.clone())
-        .expect("set_latest_encrypted_shares should work if ceremony_complete=false");
-
     let response = enclave.sign(SetupNewKeyResponse {
         encrypted_shares,
         secret_sharing_instance: ss_instance,
         btc_master_pubkey,
     });
 
-    *ceremony_complete = true;
+    enclave
+        .advance_lifecycle_into(CeremonyStage::Completed.into())
+        .expect("setup_new_key should complete a ceremony lifecycle");
     info!("Setup complete.");
     Ok(response)
 }
@@ -90,32 +97,30 @@ pub async fn setup_new_key(
 mod tests {
     use super::*;
     use crate::mock_logger_capturing;
-    use crate::OperatorInitTestArgs;
+    use hashi_types::guardian::test_utils::mock_kp_certs_roster;
     use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::LogRecord;
-    use hashi_types::pgp::test_utils::mock_pgp_certs;
+    use hashi_types::guardian::VersionedLogMessage;
 
     const TEST_N: usize = 5;
     const TEST_T: usize = 3;
 
     fn mock_setup_new_key_request() -> SetupNewKeyRequest {
-        SetupNewKeyRequest::new(mock_pgp_certs(TEST_N), TEST_N, TEST_T).unwrap()
+        SetupNewKeyRequest::new(mock_kp_certs_roster(TEST_N), TEST_N, TEST_T).unwrap()
     }
 
     #[tokio::test]
     async fn test_setup_new_key() {
         let (logger, captures) = mock_logger_capturing();
-        let enclave = Enclave::create_operator_initialized_with(
-            OperatorInitTestArgs::default().with_s3_logger(logger),
-        )
-        .await;
+        let enclave = Enclave::create_operator_initialized_ceremony(logger);
         let verification_key = &enclave.signing_pubkey();
         let request = mock_setup_new_key_request();
         let resp = setup_new_key(enclave.clone(), request).await.unwrap();
         let validated_resp = resp.verify(verification_key).unwrap();
+        assert_eq!(enclave.lifecycle(), CeremonyStage::Completed.into());
 
         // Response still carries the armored ciphertexts.
-        assert_eq!(validated_resp.encrypted_shares.len(), TEST_N);
+        assert_eq!(validated_resp.encrypted_shares.share_count(), TEST_N);
         assert_eq!(validated_resp.secret_sharing_instance.num_shares(), TEST_N);
         assert_eq!(validated_resp.secret_sharing_instance.threshold(), TEST_T);
         assert_eq!(validated_resp.secret_sharing_instance.sharing_seq(), 0);
@@ -124,9 +129,9 @@ mod tests {
             TEST_N
         );
         for enc_share in validated_resp.encrypted_shares.iter() {
-            assert!(enc_share
-                .armored_ciphertext
-                .starts_with("-----BEGIN PGP MESSAGE-----"));
+            for ciphertext in enc_share.ciphertexts_by_fingerprint.values() {
+                assert!(ciphertext.starts_with("-----BEGIN PGP MESSAGE-----"));
+            }
         }
 
         // The ceremony log records the instance only — no ciphertexts.
@@ -145,8 +150,8 @@ mod tests {
         );
 
         let record: LogRecord = serde_json::from_slice(body).unwrap();
-        let LogMessage::Ceremony(ceremony) = record.message else {
-            panic!("expected Ceremony variant");
+        let VersionedLogMessage::V2(LogMessage::Ceremony(ceremony)) = record.message else {
+            panic!("expected V2 Ceremony variant");
         };
         let CeremonyLogMessage::NewKey {
             instance,
@@ -179,12 +184,13 @@ mod tests {
             )
         );
         let shares_record: LogRecord = serde_json::from_slice(shares_body).unwrap();
-        let LogMessage::KpShareState(shares) = shares_record.message else {
-            panic!("expected KpShareState variant");
+        let VersionedLogMessage::V2(LogMessage::KpShareState(shares)) = shares_record.message
+        else {
+            panic!("expected V2 KpShareState variant");
         };
         assert_eq!(shares.sharing_seq, 0);
         assert_eq!(shares.cert_seq, 0);
-        assert_eq!(shares.encrypted_shares.len(), TEST_N);
+        assert_eq!(shares.encrypted_shares.share_count(), TEST_N);
         assert!(std::str::from_utf8(shares_body)
             .unwrap()
             .contains("BEGIN PGP MESSAGE"));

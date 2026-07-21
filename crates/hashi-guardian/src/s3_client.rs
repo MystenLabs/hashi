@@ -1,10 +1,10 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::MAX_S3_WRITE_FAILURE_INTERVAL;
 use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_credential_types::CredentialsBuilder;
 use aws_sdk_s3::error::DisplayErrorContext;
-use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::S3BucketInfo;
 use hashi_types::guardian::S3Config;
@@ -20,16 +20,18 @@ use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::Client as S3Client;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::GuardianError::S3Error;
-use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::InitLogMessage;
 use hashi_types::guardian::PcrAllowlist;
 use hashi_types::guardian::VerifiedSessionInfo;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tracing::info;
+use tracing::warn;
 
+/// Maximum attempts the AWS SDK makes before returning one write failure.
 const MAX_RETRY_ATTEMPTS: u32 = 5;
+/// Delay between application-level retries of an immutable S3 log write.
+const S3_WRITE_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct GuardianS3Client {
@@ -104,10 +106,57 @@ impl GuardianS3Client {
     // S3 Write
     // ========================================================================
 
+    /// Attempt one immutable log write, relying on the AWS SDK retry policy.
     pub async fn write_log_record(&self, log: LogRecord) -> GuardianResult<()> {
+        let key = log.object_key().to_string();
+        let object_lock_duration = log.object_lock_duration();
+        self.write_at_key(&key, &log, object_lock_duration).await
+    }
+
+    /// Retry an immutable log write through the grace period, then abort. The
+    /// worker is detached so caller cancellation cannot abandon an in-flight PUT.
+    pub async fn write_log_record_or_abort(&self, log: LogRecord) -> GuardianResult<()> {
+        let writer = self.clone();
+        tokio::spawn(async move {
+            writer
+                .write_log_record_or_abort_inner(
+                    log,
+                    MAX_S3_WRITE_FAILURE_INTERVAL,
+                    S3_WRITE_RETRY_INTERVAL,
+                )
+                .await
+        })
+        .await
+        .expect("S3 log writer task failed")
+    }
+
+    async fn write_log_record_or_abort_inner(
+        &self,
+        log: LogRecord,
+        max_failure_interval: Duration,
+        retry_interval: Duration,
+    ) -> GuardianResult<()> {
         let object_lock_duration = log.object_lock_duration();
         let key = log.object_key();
-        self.write_at_key(&key, &log, object_lock_duration).await
+        let write_until_success = async {
+            loop {
+                match self.write_at_key(key, &log, object_lock_duration).await {
+                    Ok(()) => return Ok(()),
+                    Err(error) => {
+                        warn!(%key, ?error, "S3 log write failed; retrying");
+                        tokio::time::sleep(retry_interval).await;
+                    }
+                }
+            }
+        };
+
+        match tokio::time::timeout(max_failure_interval, write_until_success).await {
+            Ok(result) => result,
+            Err(_) => panic!(
+                "S3 log {} was not written within {:?}",
+                key, max_failure_interval
+            ),
+        }
     }
 
     /// Write a value to S3 at an explicit key.
@@ -128,27 +177,36 @@ impl GuardianS3Client {
             .checked_add(object_lock_duration)
             .expect("Cant overflow");
 
-        let body = serde_json::to_string(value).expect("Cant serialize to JSON");
-        info!("Log message: {}", body);
+        let body = serde_json::to_vec(value).expect("Cant serialize to JSON");
 
-        // TODO(integration-test): Verify on a real S3 bucket with Object Lock enabled that an object written with `Compliance` + `retain_until` cannot be deleted/overwritten before expiry.
-        let _result = s3_client
+        // `If-None-Match: *` makes retries safe: a lost-ack write that already
+        // landed returns 412 instead of creating another version. A 412 is only
+        // success if the existing immutable object is exactly this record.
+        let result = s3_client
             .put_object()
             .bucket(s3_config.bucket_name())
             .key(key)
             .content_type("application/json")
             .object_lock_mode(ObjectLockMode::Compliance)
             .object_lock_retain_until_date(DateTime::from(expiry_time))
-            .body(ByteStream::from(body.into_bytes()))
+            .if_none_match("*")
+            .body(ByteStream::from(body.clone()))
             .send()
-            .await
-            // DisplayErrorContext displays the full error returned by the SDK
-            .map_err(|e| {
-                S3Error(format!(
+            .await;
+        if let Err(e) = result {
+            let already_written = e
+                .raw_response()
+                .is_some_and(|resp| resp.status().as_u16() == 412);
+            if !already_written {
+                // DisplayErrorContext displays the full error returned by the SDK
+                return Err(S3Error(format!(
                     "Failed to write to s3: {}",
                     DisplayErrorContext(&e)
-                ))
-            })?;
+                )));
+            }
+            self.verify_existing_write(key, &body).await?;
+            info!("Object {} already contains the intended record", key);
+        }
 
         info!("Logged entry to immutable storage");
         info!("Object locked until: {:?}", expiry_time);
@@ -157,6 +215,47 @@ impl GuardianS3Client {
             s3_config.bucket_name(),
             key
         );
+
+        Ok(())
+    }
+
+    /// Similar to `get_object_unsafe`, but compares the raw bytes and treats
+    /// invalid lock metadata as a fatal conflict at this write-once key.
+    async fn verify_existing_write(&self, key: &str, expected_body: &[u8]) -> GuardianResult<()> {
+        let response = self
+            .client
+            .get_object()
+            .bucket(self.config.bucket_name())
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| {
+                S3Error(format!(
+                    "Failed to get object {}: {}",
+                    key,
+                    DisplayErrorContext(&e)
+                ))
+            })?;
+        let has_compliance_lock = response.object_lock_mode() == Some(&ObjectLockMode::Compliance)
+            && response.object_lock_retain_until_date().is_some();
+        let actual_body = response.body.collect().await.map_err(|e| {
+            S3Error(format!(
+                "Failed to read object body for key {}: {}",
+                key,
+                DisplayErrorContext(&e)
+            ))
+        })?;
+
+        if actual_body.into_bytes().as_ref() != expected_body {
+            // A 412 revealed different content at this write-once key. Retrying
+            // cannot replace it, so continuing would violate log durability.
+            panic!("existing object {key} differs from the intended record");
+        }
+        if !has_compliance_lock {
+            // The intended record exists but is not immutable. Retrying cannot
+            // replace it, so it cannot satisfy the durable-write requirement.
+            panic!("existing object {key} is missing a valid compliance lock");
+        }
 
         Ok(())
     }
@@ -265,20 +364,30 @@ impl GuardianS3Client {
 
         Ok(())
     }
+}
 
+/// Controls whether an S3 read requires Compliance-mode object-lock metadata.
+pub(crate) enum LockCheck {
+    /// Reject the object unless Compliance lock metadata is present.
+    Required,
+    /// Do not inspect lock metadata. Used for signed records whose short lock
+    /// is expected to expire, such as KP-share state.
+    Skipped,
+}
+
+/// Controls whether an S3 read validates that the key has no overwrite or
+/// deletion history.
+pub(crate) enum HistoryCheck {
+    /// Validate the exact key's history before fetching it.
+    Required,
+    /// The caller already validated the history of the enclosing prefix.
+    AlreadyChecked,
+}
+
+impl GuardianS3Client {
     // ========================================================================
     // S3 Reads
     // ========================================================================
-
-    /// Lists every key under `prefix`, refusing to proceed if the bucket has any
-    /// delete markers or non-latest versions in scope (which would indicate
-    /// tampering / lock-expiry beyond what the immutable-log model allows).
-    /// Returned keys are unique and sorted lexicographically.
-    ///
-    /// Keys-only counterpart to [`Self::list_all_objects_in_dir`].
-    pub async fn list_all_keys_in_dir(&self, prefix: &str) -> GuardianResult<Vec<String>> {
-        self.ensure_no_duplicates_or_deletions(prefix).await
-    }
 
     /// Lists immediate subdirectories under `prefix` (S3 `CommonPrefixes`,
     /// returned by `list_objects_v2` with `delimiter='/'`). Used to tree-walk
@@ -324,11 +433,13 @@ impl GuardianS3Client {
         Ok(out.into_iter().collect())
     }
 
-    /// Checks that all matching object keys do not have either deletions or overwrites.
-    /// The prefix can either correspond to a directory or a complete object key.
-    ///
-    /// Returns: list of keys.
-    async fn ensure_no_duplicates_or_deletions(&self, prefix: &str) -> GuardianResult<Vec<String>> {
+    /// Lists every key under `prefix`, refusing to proceed if any matching
+    /// object has a delete marker or non-latest version. The prefix may be a
+    /// directory or a complete object key. Returned keys are unique and sorted.
+    pub async fn validate_prefix_history_and_list_keys(
+        &self,
+        prefix: &str,
+    ) -> GuardianResult<Vec<String>> {
         let s3_client = &self.client;
         let s3_config = &self.config;
 
@@ -408,72 +519,46 @@ impl GuardianS3Client {
     /// Batch read. Callers must ensure that all objects with prefix `dir.to_string()` have
     /// unexpired compliance-mode object locks.
     ///
-    /// Returns: List of objects.
-    pub async fn list_all_objects_in_dir<T: DeserializeOwned>(
+    /// Each returned record's signed object key is checked against the actual
+    /// S3 key from which it was read.
+    pub async fn list_all_log_records_in_dir(
         &self,
         dir: &S3HourScopedDirectory,
-    ) -> GuardianResult<Vec<T>> {
+    ) -> GuardianResult<Vec<LogRecord>> {
         let prefix = dir.to_string();
-        let keys = self.ensure_no_duplicates_or_deletions(&prefix).await?;
+        let keys = self.validate_prefix_history_and_list_keys(&prefix).await?;
         let mut out = Vec::with_capacity(keys.len());
-        for key in &keys {
-            let obj: T = self.get_object_unsafe(key).await?;
-            out.push(obj);
+        for key in keys {
+            // The prefix history was checked above. Immutable batch logs are
+            // also expected to remain under Compliance lock.
+            out.push(
+                self.get_log_record_inner(&key, LockCheck::Required, HistoryCheck::AlreadyChecked)
+                    .await?,
+            );
         }
         Ok(out)
     }
 
-    /// Point read. This method is unsafe to use since the bucket operator might've overwritten objects.
-    async fn get_object_unsafe<T: DeserializeOwned>(&self, key: &str) -> GuardianResult<T> {
-        let s3_client = &self.client;
-        let s3_config = &self.config;
-
-        let response = s3_client
-            .get_object()
-            .bucket(s3_config.bucket_name())
-            .key(key)
-            .send()
-            .await
-            .map_err(|e| {
-                S3Error(format!(
-                    "Failed to get object {}: {}",
-                    key,
-                    DisplayErrorContext(&e)
-                ))
-            })?;
-
-        // NOTE: Here we are explicitly assuming locks are unexpired.
-        if response.object_lock_mode() != Some(&ObjectLockMode::Compliance)
-            || response.object_lock_retain_until_date().is_none()
-        {
-            return Err(S3Error(format!(
-                "Missing or invalid object lock metadata for key {}",
-                key
-            )));
+    /// Fetches and deserializes a record with explicit S3 integrity checks,
+    /// always rejecting a mismatch between its signed intended key and the
+    /// actual S3 key. `HistoryCheck::AlreadyChecked` requires the caller to have
+    /// validated the key's enclosing prefix.
+    pub(crate) async fn get_log_record_inner(
+        &self,
+        key: &str,
+        lock_check: LockCheck,
+        history_check: HistoryCheck,
+    ) -> GuardianResult<LogRecord> {
+        if matches!(history_check, HistoryCheck::Required) {
+            let keys = self.validate_prefix_history_and_list_keys(key).await?;
+            if keys.len() != 1 || keys[0] != key {
+                return Err(S3Error(format!(
+                    "expected exactly one object for key {}, found {:?}",
+                    key, keys
+                )));
+            }
         }
 
-        let bytes = response.body.collect().await.map_err(|e| {
-            S3Error(format!(
-                "Failed to read object body for key {}: {}",
-                key,
-                DisplayErrorContext(&e)
-            ))
-        })?;
-
-        serde_json::from_slice::<T>(&bytes.into_bytes()).map_err(|e| {
-            S3Error(format!(
-                "Failed to deserialize object {} into target type: {}",
-                key, e
-            ))
-        })
-    }
-
-    /// Plain point read + deserialize, with no object-lock assertion and no
-    /// version/deletion check. For objects whose integrity comes from their own
-    /// signature rather than S3 immutability (e.g. `kp-shares/`, which carry only a
-    /// short lock that is expected to expire). A tampered object fails the
-    /// caller's signature check; a purged one surfaces as a get error.
-    pub async fn get_object_no_lock<T: DeserializeOwned>(&self, key: &str) -> GuardianResult<T> {
         let response = self
             .client
             .get_object()
@@ -489,6 +574,17 @@ impl GuardianS3Client {
                 ))
             })?;
 
+        // NOTE: When required, we are explicitly assuming locks are unexpired.
+        if matches!(lock_check, LockCheck::Required)
+            && (response.object_lock_mode() != Some(&ObjectLockMode::Compliance)
+                || response.object_lock_retain_until_date().is_none())
+        {
+            return Err(S3Error(format!(
+                "Missing or invalid object lock metadata for key {}",
+                key
+            )));
+        }
+
         let bytes = response.body.collect().await.map_err(|e| {
             S3Error(format!(
                 "Failed to read object body for key {}: {}",
@@ -497,47 +593,24 @@ impl GuardianS3Client {
             ))
         })?;
 
-        serde_json::from_slice::<T>(&bytes.into_bytes()).map_err(|e| {
+        let record = serde_json::from_slice::<LogRecord>(&bytes.into_bytes()).map_err(|e| {
             S3Error(format!(
                 "Failed to deserialize object {} into target type: {}",
                 key, e
             ))
-        })
+        })?;
+        record.validate_actual_object_key(key)?;
+        Ok(record)
     }
 
     /// Reads an immutable-log object, asserting its Compliance lock metadata is
     /// present but not that it is unexpired.
     /// TODO: also reject when `retain_until <= now` — once the lock lapses the
     /// version check below no longer detects tampering (see
-    /// `ensure_no_duplicates_or_deletions`).
+    /// `validate_prefix_history_and_list_keys`).
     pub(crate) async fn get_log_record(&self, key: &str) -> GuardianResult<LogRecord> {
-        let keys = self.ensure_no_duplicates_or_deletions(key).await?;
-        if keys.len() != 1 || keys[0] != key {
-            return Err(S3Error(format!(
-                "expected exactly one object for key {}, found {:?}",
-                key, keys
-            )));
-        }
-
-        self.get_object_unsafe::<LogRecord>(key).await
-    }
-
-    /// Note: Callers must set signing_pubkey to None only for unsigned messages.
-    async fn get_verified_log_record(
-        &self,
-        key: &str,
-        expected_session_id: &str,
-        signing_pubkey: Option<&GuardianPubKey>,
-    ) -> GuardianResult<LogMessage> {
-        let log = self.get_log_record(key).await?;
-        if log.session_id != expected_session_id {
-            return Err(S3Error(format!("log session_id mismatch for key {}", key)));
-        }
-        let (_, _, message) = match signing_pubkey {
-            Some(pk) => log.verify(pk),
-            None => log.verify_unsigned(),
-        }?;
-        Ok(message)
+        self.get_log_record_inner(key, LockCheck::Required, HistoryCheck::Required)
+            .await
     }
 
     /// Resolve a session's [`VerifiedSessionInfo`]: read the AWS-self-signed
@@ -552,9 +625,9 @@ impl GuardianS3Client {
         // 1. Attestation (unsigned: authenticated by AWS, not the enclave key) →
         //    the signing pubkey it commits to.
         let att_key = InitLogMessage::attestation_object_key(session_id);
-        let (attestation, signing_pubkey) = self
-            .get_verified_log_record(&att_key, session_id, None)
-            .await?
+        let attestation_record = self.get_log_record(&att_key).await?;
+        let (_, _, attestation_message) = attestation_record.validate_unsigned()?;
+        let (attestation, signing_pubkey) = attestation_message
             .into_init_log()
             .and_then(|x| match x {
                 InitLogMessage::OIAttestationUnsigned {
@@ -567,9 +640,9 @@ impl GuardianS3Client {
 
         // 2. GuardianInfo, signature-verified under that pubkey → the reported build.
         let info_key = InitLogMessage::guardian_info_object_key(session_id);
-        let info = self
-            .get_verified_log_record(&info_key, session_id, Some(&signing_pubkey))
-            .await?
+        let info_record = self.get_log_record(&info_key).await?;
+        let (_, _, info_message) = info_record.verify(&signing_pubkey)?;
+        let info = info_message
             .into_init_log()
             .and_then(|x| match x {
                 InitLogMessage::OIGuardianInfo(info) => Some(*info),
@@ -578,9 +651,11 @@ impl GuardianS3Client {
             .ok_or_else(|| S3Error(format!("expected OIGuardianInfo at key {info_key}")))?;
 
         // 3. Anchor the pubkey and pin PCR0 to the allowlist entry for the
-        //    reported build.
+        //    reported build. This replays a logged attestation whose short-lived
+        //    leaf cert has typically expired, so the chain is checked at the
+        //    document's own signed timestamp, not now.
         let build_pcrs = allowlist.resolve(&info.untrusted_git_revision)?.clone();
-        attestation.verify(&signing_pubkey, &build_pcrs)?;
+        attestation.verify_replay(&signing_pubkey, &build_pcrs)?;
 
         Ok(VerifiedSessionInfo {
             signing_pubkey,
@@ -593,11 +668,15 @@ impl GuardianS3Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aws_sdk_s3::operation::get_object::GetObjectOutput;
     use aws_sdk_s3::operation::put_object::PutObjectOutput;
     use aws_sdk_s3::Client;
     use aws_smithy_mocks::mock;
     use aws_smithy_mocks::mock_client;
     use aws_smithy_mocks::RuleMode;
+    use hashi_types::guardian::GuardianSignKeyPair;
+    use hashi_types::guardian::HeartbeatLogMessage;
+    use hashi_types::guardian::LogMessage;
 
     fn mk_logger_with_client(client: Client) -> GuardianS3Client {
         let config = S3Config {
@@ -622,10 +701,11 @@ mod tests {
         let put_ok = mock!(Client::put_object)
             .match_requests(|req| {
                 req.bucket() == Some("bucket")
-                    && req.key() == Some("init/session-oi-attestation-unsigned.json")
+                    && req.key() == Some("init/session/01-oi-attestation-unsigned.json")
                     && req.content_type() == Some("application/json")
                     && req.object_lock_mode() == Some(&ObjectLockMode::Compliance)
                     && req.object_lock_retain_until_date().is_some()
+                    && req.if_none_match() == Some("*")
             })
             .then_output(|| PutObjectOutput::builder().build());
 
@@ -634,13 +714,166 @@ mod tests {
         let object_lock_duration = Duration::from_mins(5);
         logger
             .write_at_key(
-                "init/session-oi-attestation-unsigned.json",
+                "init/session/01-oi-attestation-unsigned.json",
                 &TestPayload { a: 1 },
                 object_lock_duration,
             )
             .await
             .unwrap();
         assert_eq!(put_ok.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_412_accepts_identical_locked_object() {
+        let put_precondition_failed = mock!(Client::put_object)
+            .match_requests(|req| req.bucket() == Some("bucket"))
+            .sequence()
+            .http_status(412, None)
+            .build();
+        let get_existing = mock!(Client::get_object)
+            .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
+            .then_output(|| {
+                GetObjectOutput::builder()
+                    .object_lock_mode(ObjectLockMode::Compliance)
+                    .object_lock_retain_until_date(DateTime::from(
+                        SystemTime::now() + Duration::from_mins(5),
+                    ))
+                    .body(ByteStream::from_static(br#"{"a":1}"#))
+                    .build()
+            });
+
+        let client = mock_client!(
+            aws_sdk_s3,
+            RuleMode::MatchAny,
+            &[&put_precondition_failed, &get_existing],
+            |builder| builder.retry_config(RetryConfig::standard().with_max_attempts(1))
+        );
+        let logger = mk_logger_with_client(client);
+        logger
+            .write_at_key("key", &TestPayload { a: 1 }, Duration::from_mins(5))
+            .await
+            .unwrap();
+
+        assert_eq!(put_precondition_failed.num_calls(), 1);
+        assert_eq!(get_existing.num_calls(), 1);
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "differs from the intended record")]
+    async fn test_412_mismatch_panics() {
+        let put_precondition_failed = mock!(Client::put_object)
+            .match_requests(|req| req.bucket() == Some("bucket"))
+            .sequence()
+            .http_status(412, None)
+            .build();
+        let get_existing = mock!(Client::get_object)
+            .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
+            .then_output(|| {
+                GetObjectOutput::builder()
+                    .body(ByteStream::from_static(br#"{"a":2}"#))
+                    .build()
+            });
+
+        let client = mock_client!(
+            aws_sdk_s3,
+            RuleMode::MatchAny,
+            &[&put_precondition_failed, &get_existing],
+            |builder| builder.retry_config(RetryConfig::standard().with_max_attempts(1))
+        );
+        let logger = mk_logger_with_client(client);
+        logger
+            .write_at_key("key", &TestPayload { a: 1 }, Duration::from_mins(5))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "is missing a valid compliance lock")]
+    async fn test_412_identical_unlocked_object_panics() {
+        let put_precondition_failed = mock!(Client::put_object)
+            .match_requests(|req| req.bucket() == Some("bucket"))
+            .sequence()
+            .http_status(412, None)
+            .build();
+        let get_existing = mock!(Client::get_object)
+            .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
+            .then_output(|| {
+                GetObjectOutput::builder()
+                    .body(ByteStream::from_static(br#"{"a":1}"#))
+                    .build()
+            });
+
+        let client = mock_client!(
+            aws_sdk_s3,
+            RuleMode::MatchAny,
+            &[&put_precondition_failed, &get_existing],
+            |builder| builder.retry_config(RetryConfig::standard().with_max_attempts(1))
+        );
+        let logger = mk_logger_with_client(client);
+        logger
+            .write_at_key("key", &TestPayload { a: 1 }, Duration::from_mins(5))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_log_writer_retries_beyond_sdk_attempts() {
+        let put_flaky = mock!(Client::put_object)
+            .match_requests(|req| req.bucket() == Some("bucket"))
+            .sequence()
+            .http_status(500, None)
+            .times(5)
+            .output(|| PutObjectOutput::builder().build())
+            .build();
+        let client = mock_client!(aws_sdk_s3, RuleMode::Sequential, &[&put_flaky], |b| b
+            .retry_config(RetryConfig::standard().with_max_attempts(1)));
+        let logger = mk_logger_with_client(client);
+        let signing_key = GuardianSignKeyPair::new(rand::thread_rng());
+        let log = LogRecord::new(
+            "session".into(),
+            LogMessage::Heartbeat(HeartbeatLogMessage::new(7)),
+            &signing_key,
+        );
+
+        // The generous deadline avoids CI timing sensitivity without slowing success;
+        // zero delay keeps the application-level retry sequence immediate.
+        logger
+            .write_log_record_or_abort_inner(log, Duration::from_secs(10), Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(put_flaky.num_calls(), 6);
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "was not written within")]
+    async fn test_log_writer_panics_after_failure_interval() {
+        let put_fail = mock!(Client::put_object)
+            .match_requests(|req| req.bucket() == Some("bucket"))
+            .sequence()
+            .http_status(500, None)
+            .times(100)
+            .build();
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&put_fail], |builder| {
+            builder.retry_config(RetryConfig::standard().with_max_attempts(1))
+        });
+        let logger = mk_logger_with_client(client);
+        let signing_key = GuardianSignKeyPair::new(rand::thread_rng());
+        let log = LogRecord::new(
+            "session".into(),
+            LogMessage::Heartbeat(HeartbeatLogMessage::new(7)),
+            &signing_key,
+        );
+
+        // The first PUT runs immediately, then retries every 5ms until the 50ms
+        // deadline panics (roughly 10 attempts; scheduling makes the count inexact).
+        logger
+            .write_log_record_or_abort_inner(
+                log,
+                Duration::from_millis(50),
+                Duration::from_millis(5),
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -662,7 +895,7 @@ mod tests {
         let object_lock_duration = Duration::from_mins(5);
         logger
             .write_at_key(
-                "init/session-oi-attestation-unsigned.json",
+                "init/session/01-oi-attestation-unsigned.json",
                 &TestPayload { a: 1 },
                 object_lock_duration,
             )

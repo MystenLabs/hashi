@@ -113,7 +113,7 @@ For the **JSON-RPC** channel you can run your own archival Signet node or use a 
 
 The **P2P / BIP-157** channel (the embedded light client's compact-filter sync) needs a peer that serves filters (`peerblockfilters=1`). Run your own Signet node for this, or use a provider that exposes Signet P2P with compact-filter serving. The simplest setup that satisfies both channels is a single self-hosted archival Signet node.
 
-**RPC methods Hashi calls** (so you can scope RPC permissions): `getrawtransaction` (verbose), `sendrawtransaction`, `estimatesmartfee`, `gettxout`, `getblockchaininfo`, `getblockheader` (verbose). Hashi targets **Bitcoin Core v29**.
+**RPC methods Hashi calls** (so you can scope RPC permissions): `getrawtransaction` (verbose), `sendrawtransaction`, `estimatesmartfee`, `gettxout`, `getblockchaininfo`, `getblockheader` (verbose). Hashi requires **Bitcoin Core v29 or newer**; the latest release works fine.
 
 **`bitcoin.conf`, run as an archival, non-pruned node** (Signet shown; for another network use its ports and network flag from the [Networks](#networks) table):
 
@@ -178,11 +178,17 @@ bitcoin-cli -signet getnetworkinfo                        # NODE_COMPACT_FILTERS
 
 ### 2.2 TLS key (dedicated)
 
-Generate a fresh Ed25519 TLS key dedicated to your Hashi node, separate from your Sui validator's TLS key, for clean separation of concerns. This key authenticates your Hashi node to other committee members, and the node registers the corresponding public key onchain during registration. Set `tls-private-key` to a PKCS#8 PEM/DER file path or an inline PEM string.
+Generate a fresh Ed25519 TLS key dedicated to your Hashi node, separate from your Sui validator's TLS key, for clean separation of concerns. This key authenticates your Hashi node to other committee members, and the node registers the corresponding public key onchain during registration. Set `tls-private-key` to a PKCS#8 PEM/DER file path or an inline PEM string:
+
+```bash
+openssl genpkey -algorithm ed25519 -out tls-private-key.pem
+```
 
 ```toml
 tls-private-key = "/path/to/tls-private-key.pem"
 ```
+
+Make sure the file is readable by the user running `hashi` (for example, `chmod 600` owned by that user). `hashi register` needs it to include your TLS public key in the registration transaction.
 
 > A planned enhancement is for the node to generate its TLS key on startup, removing this manual step.
 
@@ -195,22 +201,60 @@ Because that key is typically in cold storage or a hardware wallet, use the **of
 ```bash
 # Emit the unsigned registration tx (no private key required)
 hashi register --config /path/to/validator.toml \
-  --operator-address 0x<your-operator-address> \
+  --operator-address 0x<operator-address> \
   --print-only
-# -> sign the printed base64 tx with the validator account key (cold/hardware) and broadcast
+
+# Sign the printed base64 with the validator account key, then broadcast.
+# If the account key lives in your local sui keystore:
+sui keytool sign --address 0x<validator-address> --data <TX_BYTES_BASE64>
+sui client execute-signed-tx --tx-bytes <TX_BYTES_BASE64> --signatures <SIGNATURE_BASE64>
 ```
+
+For hardware wallets or multisig accounts, produce the signature with your own signing tooling instead of `sui keytool sign`; the broadcast step is the same.
+
+`--operator-address` is the Sui address of the **fresh operator key** you generate in [2.4](#24-operator-key-day-to-day-signing). It is **not** your validator address. Passing it here delegates day-to-day signing in the same transaction, so the validator account key can go straight back to cold storage.
 
 > Do **not** rely on the plain `hashi register` (execute) path for the first registration unless your configured `operator-private-key` *is* the validator account key. The builder forces the sender to the validator address while the execute path signs with the operator key, producing a signer/sender mismatch.
 
 ### 2.4 Operator key (day-to-day signing)
 
-Generate a fresh Ed25519 keypair for the operator and fund its address with SUI for gas. The running node (`hashi server`) signs **all** its day-to-day Sui transactions with this `operator-private-key`: MPC certificate submission, governance, and metadata updates.
+Generate a fresh keypair for the operator and fund its address with SUI for gas. The running node (`hashi server`) signs **all** its day-to-day Sui transactions with this `operator-private-key`: MPC certificate submission, governance, and metadata updates.
+
+> **Fund the operator address with at least 2 SUI.** At startup the node moves 1 SUI into the account's address balance (used to pay gas for parallel transactions), so exactly 1 SUI cannot cover that bootstrap plus its own gas and the node fails with `InsufficientCoinBalance`.
+
+All three simple Sui key schemes (Ed25519, secp256k1, and secp256r1) are accepted, in any of the formats standard tooling produces. The value may be a file path or the key itself inline:
+
+| Format | Produced by |
+| --- | --- |
+| Bech32 `suiprivkey...` string | `sui keytool generate` / `export` / `convert` |
+| Base64 keystore entry | `sui.keystore` entries, `sui keytool convert` |
+| PKCS#8 PEM | `openssl genpkey -algorithm ed25519` |
+| PKCS#8 DER (file path only) | `openssl genpkey ... -outform DER` |
+
+```bash
+# Option A: sui keytool (writes <address>.key to the current directory)
+sui keytool generate ed25519
+
+# Option B: openssl
+openssl genpkey -algorithm ed25519 -out hashi-operator-key.pem
+```
 
 ```toml
 operator-private-key = "/path/to/hashi-operator-key.pem"
+# or inline, e.g.:
+# operator-private-key = "suiprivkey1..."
 ```
 
-**Delegating to the operator key.** After registration (signed by the validator account key, see [2.3](#23-registration-must-be-signed-by-the-account-key)), authorize the operator key by setting it as the member's operator address with `--operator-address`:
+**Finding the operator address.** You need the key's Sui address to fund it and to pass as `--operator-address`. With `sui keytool generate` the address is printed at generation (and is the name of the `.key` file it writes). For an existing openssl PEM, derive it from the public key (Ed25519 keys only; `0x00` is the Ed25519 scheme flag):
+
+```bash
+openssl pkey -in hashi-operator-key.pem -pubout -outform DER | tail -c 32 | \
+  python3 -c "import sys,hashlib; print('0x' + hashlib.blake2b(b'\x00' + sys.stdin.buffer.read(), digest_size=32).hexdigest())"
+```
+
+> A raw hex private key (the `hexWithoutFlag` output of `sui keytool convert`) is **not** accepted, because it does not carry the key-scheme flag. Convert it to one of the formats above with `sui keytool convert`.
+
+**Delegating to the operator key.** Delegation is set with `--operator-address`, normally passed during initial registration as shown in [2.3](#23-registration-must-be-signed-by-the-account-key), so one transaction registers **and** delegates. If you registered without it (or are rotating the operator key), run the same command again; it is idempotent and sends only the missing updates, but the transaction must again be signed by the validator account key:
 
 ```bash
 hashi register --config /path/to/validator.toml \
@@ -220,6 +264,8 @@ hashi register --config /path/to/validator.toml \
 ```
 
 Onchain, every member action is authorized by `member_authorized(validator, sender)`, where the sender must be the member's validator key **or** its registered operator address. So once delegated, the operator key performs cert submission, governance voting, and metadata updates on its own, and **the validator account key can return to cold storage**. You need it again only to rotate the operator key or change registration metadata.
+
+Metadata maintenance is automatic once delegated: at startup the node compares its config against the onchain member record and sends only what changed. To update your endpoint URL, TLS key, or other metadata, edit the config file and restart the node; no manual `hashi register` re-run is needed.
 
 **Operator-key rotation is validator-only.** Only the validator account key can change the operator address (onchain, `set_operator_address` requires the sender to be the validator). A compromised or lost operator key therefore cannot re-delegate or lock you out: pull the validator key from cold storage, run `hashi register --operator-address 0x<new-operator> --print-only`, sign offline, and this action revokes the previous operator key.
 
@@ -232,7 +278,7 @@ Hashi creates encrypted backups of critical state (MPC key shares, DB, config) e
 - **Option 1 (recommended): YubiKey.** Generate the key on the device; the private key never leaves it.
 - **Option 2: local OpenPGP key.** Generate with `sq` or `gpg`.
 
-Set the armored public certificate (inline or a path) in the node config:
+Set the armored public certificate (a file path or inline armored text) in the node config:
 
 ```toml
 backup-pgp-cert = "/path/to/hashi-backup-cert.asc"   # armored OpenPGP public cert, or inline armored text
@@ -254,14 +300,17 @@ Hashi uses two configuration files:
 
 All fields use kebab-case. Optional fields show their defaults in comments.
 
+> **Field order matters.** In TOML, every key that appears after a `[section]` header belongs to that section. Keep all top-level keys **above** the `[hashi-ids]` and `[bitcoin-rpc-auth]` sections (as in the template below); a top-level key placed after a section header is rejected at startup with an unknown-field error.
+
 ```toml
 # ── Identity ──────────────────────────────────────────────────────────
 
 # Ed25519 TLS private key (PEM file path, DER file path, or inline PEM)
 tls-private-key = "/path/to/tls-private-key.pem"
 
-# Ed25519 operator private key for signing the node's Sui transactions
-# (see the delegation caveat in section 2.4)
+# Operator private key for signing the node's Sui transactions: a file
+# path or an inline key, in any format listed in section 2.4 (PKCS#8
+# PEM/DER, suiprivkey, or Base64 keystore)
 operator-private-key = "/path/to/operator-key.pem"
 
 # Your Sui validator address
@@ -351,7 +400,7 @@ db = "/var/lib/hashi/db"
 # TOML table headers apply to every following key until the next table,
 # so keep all root-level settings above this section.
 
-# Hashi package and object IDs (provided after package publication)
+# Hashi package and object IDs. Use your network's values from the Networks table.
 [hashi-ids]
 package-id = "0x<package-id>"
 hashi-object-id = "0x<hashi-object-id>"
@@ -360,6 +409,10 @@ hashi-object-id = "0x<hashi-object-id>"
 [bitcoin-rpc-auth]
 UserPass = ["YOUR_RPC_USER", "YOUR_STRONG_RPC_PASSWORD"]
 # CookieFile = "/home/USER/.bitcoin/signet/.cookie"
+
+# Push metrics to the Mysten collection endpoint (see section 8.2)
+[metrics-push]
+push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
 ```
 
 ### 3.2 CLI config
@@ -380,7 +433,8 @@ package_id = "0x<package-id>"
 # Hashi shared object ID
 hashi_object_id = "0x<hashi-object-id>"
 
-# Path to Ed25519 keypair for signing CLI transactions
+# Path to the keypair for signing CLI transactions, in any format
+# listed in section 2.4
 keypair_path = "/path/to/operator-key.pem"
 
 [bitcoin]
@@ -472,9 +526,10 @@ Registration must be authorized by your **Sui validator account key** (see [2.3]
 
 ```bash
 hashi register --config /path/to/validator.toml \
-  --operator-address 0x<your-operator-address> \
+  --operator-address 0x<operator-address> \
   --print-only
-# sign the printed base64 tx with the account key (cold/hardware) and broadcast
+# sign the printed base64 tx with the account key and broadcast; see 2.3 for
+# the sui keytool sign / sui client execute-signed-tx commands
 ```
 
 The registration transaction writes your BLS12-381 public key, Ed25519 TLS public key, ECIES encryption public key, endpoint URL, and operator address to the chain.
@@ -488,6 +543,8 @@ hashi server --config /path/to/validator.toml
 The node starts the gRPC+TLS server, connects to Sui (gRPC) and Bitcoin (RPC + P2P), registers its next-epoch keys onchain, and begins monitoring for the genesis trigger.
 
 Booting **before the launch step is expected and required** because the launch only happens once every validator has finished key registration, which nodes do on startup. In this pre-launch window the onchain config is not finalized yet, so the node logs two benign warnings: the `bitcoin_chain_id` cross-check is skipped (it re-verifies on any restart after launch), and the guardian client is deferred (it resolves automatically from onchain config once the launch lands).
+
+**This is the last genesis step performed by operators.** Steps 4 through 6 are handled by the admin and the network; keep your node running and watch the logs.
 
 ### 5.5 Step 4: launch (admin)
 
@@ -738,7 +795,24 @@ Metrics are served at `http://127.0.0.1:9180/metrics` (configurable through `met
 curl -s http://localhost:9180/metrics | grep hashi_
 ```
 
-### 8.2 Key metrics
+### 8.2 Metrics push
+
+Configure the node to push its metrics to the Mysten-operated collection endpoint. The Hashi team relies on this for fleet-wide visibility during Testnet, so every operator must include this section in the validator config:
+
+```toml
+[metrics-push]
+push-url = "https://metrics-proxy.testnet.sui.io:8443/publish/metrics"
+# How often to push (default: 60)
+# push-interval-seconds = 60
+```
+
+Notes:
+
+- `[metrics-push]` is a TOML table: keep it at the **end** of the config file with the other sections, per the field-order note in [3.1](#31-validator-config).
+- **No extra credentials are needed.** The push authenticates with your existing `tls-private-key` as a TLS client identity, verified against the TLS public key you registered onchain. It therefore only works after your registration is complete.
+- The node does not fail without this section; it silently starts without the push task. Check your config if the team reports not seeing your metrics.
+
+### 8.3 Key metrics
 
 | Metric | Type | What to Watch |
 |--------|------|---------------|
@@ -758,9 +832,10 @@ curl -s http://localhost:9180/metrics | grep hashi_
 | `hashi_mpc_sign_failures_total` | counter | MPC signing failures. Investigate if increasing. |
 | `hashi_mpc_reconfig_total_duration_seconds` | histogram | DKG/rotation duration. |
 | `hashi_sui_tx_submissions_total` | counter | Sui tx submissions (by operation, status). |
+| `hashi_sui_balance` | gauge | Operator gas wallet SUI balance in MIST (owned coins + address balance). `-1` until the first successful sample. |
 | `hashi_leader_retries_total` | counter | Leader operation retries (by operation, error kind). |
 
-### 8.3 Suggested alerts
+### 8.4 Suggested alerts
 
 | Condition | Severity | Action |
 |-----------|----------|--------|
@@ -769,6 +844,7 @@ curl -s http://localhost:9180/metrics | grep hashi_
 | `hashi_kyoto_synced == 0` for > 5 min | Warning | Light client lost sync. Check Bitcoin RPC and P2P connectivity. |
 | `hashi_kyoto_connected_peers == 0` | Warning | No Bitcoin P2P peers. Check `bitcoin-trusted-peers` and reachability. |
 | `hashi_mpc_sign_failures_total` increasing | Warning | Investigate MPC protocol errors in logs. |
+| `hashi_sui_balance < 1e9 and hashi_sui_balance >= 0` (below 1 SUI) | Warning | Gas wallet running low; the node stops landing Sui transactions when it empties. Top up the operator address. (`-1` means not yet sampled, not empty.) |
 | `up == 0` (Prometheus target down) | Critical | Node is down. Restart and check logs. |
 
 > **Coming soon:** A metrics **push** service for centralized collection. Details follow once it lands.
@@ -849,3 +925,62 @@ The following capabilities are planned but not yet available.
 ### Cloud backup integration
 
 > **Coming soon:** Support for automatically uploading encrypted backups to cloud storage (for example, S3).
+
+---
+
+## 12. Publishing a release (Mysten)
+
+This section is for **Mysten release engineers**; operators can ignore it. A release is cut at a commit sha on `main` and ships on two channels: the container image (Artifact Registry for Mysten-managed deploys, Docker Hub for everyone else) and the deterministic binary (§1.3).
+
+### 12.1 Container image
+
+Dispatch `hashi-build-image.yml` in sui-operations at the release commit:
+
+```bash
+gh workflow run hashi-build-image.yml -R MystenLabs/sui-operations --ref main \
+  -f hashi_commit=<sha> \
+  -f push_to_dockerhub=true
+```
+
+A single run builds the image once and pushes both `us-central1-docker.pkg.dev/cryptic-bolt-398315/hashi/hashi:<sha>` and the public `mysten/hashi:<sha>`, and drops the raw binary at `https://storage.googleapis.com/mysten-hashi-binaries/<sha>/hashi` (public). Artifact Registry rejects anonymous pulls — Docker Hub is the operator-facing channel; bare-metal operators use the deterministic binary (§12.2), and the GCS drop is internal. Confirm the tag is live:
+
+```bash
+curl -s https://hub.docker.com/v2/repositories/mysten/hashi/tags/<sha> | jq -r .digest
+```
+
+### 12.2 Deterministic binary
+
+Dispatch `deterministic-build.yml` in this repo at the same commit; it builds `out/hashi` on two runner generations and fails on any hash mismatch. Publish the artifacts under the sui-releases convention:
+
+```bash
+gh workflow run deterministic-build.yml -R MystenLabs/hashi --ref main
+gh run download <run-id> -R MystenLabs/hashi \
+  -n hashi-ubuntu-latest-binary -n hashi-ubuntu-latest-sha256
+aws s3 cp hashi-ubuntu-latest-binary/hashi        s3://sui-releases/<sha>/hashi
+aws s3 cp hashi-ubuntu-latest-sha256/hashi.sha256 s3://sui-releases/<sha>/hashi.sha256
+```
+
+Operators download from `https://sui-releases.s3.us-east-1.amazonaws.com/<sha>/hashi` and can reproduce the checksum themselves (§1.3).
+
+### 12.3 Rolling the Mysten testnet nodes
+
+The six Mysten validators (`mysten1`–`mysten6`) are single-replica Deployments in namespace `hashi-testnet` on `workloads-secondary-use4`, managed by the `mysten/testnet` stack of `pulumi/services/hashi-server` in sui-operations. Each mounts a ReadWriteOnce PVC, which is why the Deployments use the `Recreate` strategy — never switch them back to `RollingUpdate`; a surge pod would double-mount the DB volume.
+
+Set `hashi-server:image.image_ref` to the release sha in `pulumi/services/hashi-server/Pulumi.testnet.yaml` (land it as a PR), then roll **one node at a time**:
+
+```bash
+cd pulumi/services/hashi-server && pulumi stack select mysten/testnet
+
+# For each N in 1..6, in order:
+pulumi up --yes --target "urn:pulumi:testnet::hashi-server::kubernetes:apps/v1:Deployment::mysten<N>"
+kubectl -n hashi-testnet rollout status deploy/mysten<N> --timeout=600s
+kubectl -n hashi-testnet logs deploy/mysten<N> | grep -m1 "Guardian bootstrap complete"
+```
+
+Proceed to the next node only after all three checks pass. If a node does not come back healthy, stop and investigate before touching the next — every additional node down eats into the committee's 2/3 signing margin (§9).
+
+Rollout gotchas:
+
+- **Serialize the updates.** Wait for each `pulumi up` to exit before starting the next; concurrent targeted ups conflict on the stack lock (409).
+- **Don't trust the pod label for readiness.** `kubectl wait --for=condition=Ready pod -l hashi-node=mysten<N>` also matches the still-terminating old pod.
+- **Unhealthy fleet, different gates.** Mid-incident (for example a reconfiguration stall, §9.3) no pod turns Ready, so `rollout status` never completes and pulumi's readiness await reports the Deployment as errored even though the image update applied. Gate on the pod reaching `Running` with no restarts plus the guardian bootstrap log line, and re-run the targeted `pulumi up` after recovery to reconcile state.

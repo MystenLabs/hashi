@@ -12,15 +12,15 @@ use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::OperatorWriteGenesisRequest;
 use hashi_types::guardian::S3Config;
 use hashi_types::guardian::SecretSharingInstance;
+use hashi_types::guardian::WithdrawStage;
 use hashi_types::guardian::proto_conversions::operator_init_request_to_pb;
 use hashi_types::guardian::proto_conversions::operator_write_genesis_request_to_pb;
-use hashi_types::pgp::load_certs;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use tracing::info;
 
 use crate::config::Config;
+use crate::guardian_info::ensure_oi_info_matches_post_init;
 use crate::guardian_info::verified_live_guardian_info;
-use crate::kp_roster::VerifiedCeremonyState;
 
 /// Initialize a fresh withdraw-mode guardian with operator-supplied stable config.
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
@@ -124,48 +124,40 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     info!(
         phase = "roster load",
-        cert_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
-        "loading + validating full KP cert roster",
+        share_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
+        certificate_count = cfg.kp_roster.cert_count(),
+        "loading + validating full KP certificate roster",
     );
-    let certs = load_certs(&cfg.kp_roster.kp_pgp_cert_paths)?;
+    let certs_roster = cfg.kp_roster.load_certs_roster()?;
     info!(
         phase = "roster load",
-        cert_count = certs.len(),
-        "KP cert roster loaded"
+        share_count = certs_roster.num_kps(),
+        certificate_count = cfg.kp_roster.cert_count(),
+        "KP certificate roster loaded"
     );
 
     info!(
         phase = "ceremony instance",
-        "scraping authoritative ceremony/ log for the secret-sharing instance",
+        "scraping authoritative ceremony/ and kp-shares/ logs",
     );
-    let (ceremony_session, scraped_instance, btc_master_pubkey) = reader
-        .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
+    let ceremony_state = reader
+        .read_latest_ceremony_state(BuildPolicy::AnyAllowlisted)
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;
+    ceremony_state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
+    ceremony_state
+        .encrypted_shares
+        .verify_recipients(&certs_roster)?;
+    let scraped_instance = ceremony_state.secret_sharing_instance.clone();
     let sharing_seq = scraped_instance.sharing_seq();
-    let (kp_share_session, kp_share_state) = reader
-        .read_latest_kp_share_state(sharing_seq, BuildPolicy::AnyAllowlisted)
-        .await?
-        .context("no kp-shares log found in S3; key setup has not run")?;
-    let ceremony_state = VerifiedCeremonyState::from_scraped(
-        ceremony_session.clone(),
-        kp_share_session.clone(),
-        scraped_instance.clone(),
-        kp_share_state,
-        btc_master_pubkey,
-        cfg.kp_roster.num_shares,
-        cfg.kp_roster.threshold,
-    )?;
-    ceremony_state.verify_encrypted_share_recipients(&certs)?;
     info!(
         phase = "ceremony instance",
-        ceremony_session = %ceremony_session,
-        kp_share_session = %kp_share_session,
         sharing_seq,
-        cert_seq = ceremony_state.kp_share_cert_seq,
+        cert_seq = ceremony_state.cert_seq,
         n = scraped_instance.num_shares(),
         t = scraped_instance.threshold(),
-        share_count = ceremony_state.encrypted_shares.len(),
+        share_count = ceremony_state.encrypted_shares.share_count(),
+        ciphertext_count = ceremony_state.encrypted_shares.ciphertext_count(),
         "ceremony instance and KP share state verified against expected roster",
     );
 
@@ -260,10 +252,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         verified_session.signing_pubkey == signing_pub_key,
         "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
     );
-    ensure!(
-        verified_session.info == post.info,
-        "guardian S3 init GuardianInfo differs from post-OperatorInit gRPC GuardianInfo"
-    );
+    let oi_info = verified_session.info;
+    ensure_oi_info_matches_post_init(&oi_info, &post.info)?;
     info!(
         phase = "attestation pin",
         session_id = %session_id,
@@ -273,7 +263,6 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     info!(
         phase = "summary",
         session_id = %session_id,
-        ceremony_session = %ceremony_session,
         sharing_seq,
         config_hash = hex::encode(config_hash),
         bitcoin_network = ?cfg.bitcoin_network,
@@ -293,6 +282,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 }
 
 fn ensure_uninitialized(info: &GuardianInfo) -> anyhow::Result<()> {
+    ensure!(
+        info.lifecycle == WithdrawStage::Uninitialized.into(),
+        "guardian is not an uninitialized withdraw enclave"
+    );
     ensure!(
         info.secret_sharing_instance.is_none(),
         "guardian already has a secret-sharing instance"
@@ -335,6 +328,10 @@ fn verify_initialized_info(
     expected_config: &InitConfig,
     expected_config_hash: [u8; 32],
 ) -> anyhow::Result<()> {
+    ensure!(
+        info.lifecycle == WithdrawStage::OperatorInitialized.into(),
+        "guardian is not an operator-initialized withdraw enclave"
+    );
     let instance = info
         .secret_sharing_instance
         .context("Guardian info missing secret-sharing instance")?;

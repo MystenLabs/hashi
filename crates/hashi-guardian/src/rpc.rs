@@ -9,13 +9,12 @@ use crate::operator_init;
 use crate::withdraw_mode::committee_update;
 use crate::withdraw_mode::genesis;
 use crate::withdraw_mode::provisioner_init;
-use crate::withdraw_mode::standard;
+use crate::withdraw_mode::standard_withdrawal;
 use crate::Enclave;
 use hashi_types::guardian::proto_conversions;
 use hashi_types::guardian::proto_conversions::pb_to_signed_committee_transition;
 use hashi_types::guardian::proto_conversions::pb_to_signed_standard_withdrawal_request_wire;
 use hashi_types::guardian::AddressValidation;
-use hashi_types::guardian::EnclaveMode;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::*;
 use hashi_types::guardian::HashiSigned;
@@ -46,26 +45,6 @@ fn to_status(e: GuardianError) -> Status {
     }
 }
 
-impl GuardianGrpc {
-    fn require_ceremony_mode(&self, endpoint: &str) -> Result<(), Status> {
-        if self.enclave.mode() != EnclaveMode::Ceremony {
-            return Err(Status::failed_precondition(format!(
-                "{endpoint} is disabled when CEREMONY_MODE=false"
-            )));
-        }
-        Ok(())
-    }
-
-    fn require_normal_mode(&self, endpoint: &str) -> Result<(), Status> {
-        if self.enclave.mode() != EnclaveMode::Withdraw {
-            return Err(Status::failed_precondition(format!(
-                "{endpoint} is disabled when CEREMONY_MODE=true"
-            )));
-        }
-        Ok(())
-    }
-}
-
 #[tonic::async_trait]
 impl proto::guardian_service_server::GuardianService for GuardianGrpc {
     async fn get_guardian_info(
@@ -85,8 +64,6 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         request: Request<proto::SetupNewKeyRequest>,
     ) -> anyhow::Result<Response<proto::SignedSetupNewKeyResponse>, Status> {
-        self.require_ceremony_mode("setup_new_key")?;
-
         let domain_req: SetupNewKeyRequest = request.into_inner().try_into().map_err(to_status)?;
 
         let signed = setup::setup_new_key(self.enclave.clone(), domain_req)
@@ -102,8 +79,6 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         request: Request<proto::RotateKpsRequest>,
     ) -> Result<Response<proto::SignedRotateKpsResponse>, Status> {
-        self.require_ceremony_mode("rotate_kps")?;
-
         let domain_req: RotateKpsRequest = request.into_inner().try_into().map_err(to_status)?;
 
         let signed = rotate::rotate_kps(self.enclave.clone(), domain_req)
@@ -115,7 +90,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         Ok(Response::new(resp))
     }
 
-    // Note: operator_init should be available both in setup and normal modes.
+    // operator_init is available in both ceremony and withdraw modes.
     async fn operator_init(
         &self,
         request: Request<proto::OperatorInitRequest>,
@@ -133,8 +108,6 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         request: Request<proto::OperatorWriteGenesisRequest>,
     ) -> Result<Response<proto::OperatorWriteGenesisResponse>, Status> {
-        self.require_normal_mode("operator_write_genesis")?;
-
         let domain_req: OperatorWriteGenesisRequest =
             request.into_inner().try_into().map_err(to_status)?;
 
@@ -149,8 +122,6 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         request: Request<proto::ProvisionerInitRequest>,
     ) -> Result<Response<proto::ProvisionerInitResponse>, Status> {
-        self.require_normal_mode("provisioner_init")?;
-
         let domain_req = request.into_inner().try_into().map_err(to_status)?;
 
         provisioner_init::provisioner_init(self.enclave.clone(), domain_req)
@@ -164,8 +135,6 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         request: Request<proto::OperatorActivateRequest>,
     ) -> Result<Response<proto::OperatorActivateResponse>, Status> {
-        self.require_normal_mode("operator_activate")?;
-
         let domain_req: OperatorActivateRequest =
             request.into_inner().try_into().map_err(to_status)?;
 
@@ -180,8 +149,6 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         request: Request<proto::SignedStandardWithdrawalRequest>,
     ) -> Result<Response<proto::SignedStandardWithdrawalResponse>, Status> {
-        self.require_normal_mode("standard_withdrawal")?;
-
         // proto to domain
         let domain_req = pb_to_signed_standard_withdrawal_request_wire(request.into_inner())
             .map_err(to_status)?;
@@ -193,9 +160,10 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
                 .map_err(to_status)?;
 
         // core withdraw call
-        let response = standard::standard_withdrawal(self.enclave.clone(), validated_req)
-            .await
-            .map_err(to_status)?;
+        let response =
+            standard_withdrawal::standard_withdrawal(self.enclave.clone(), validated_req)
+                .await
+                .map_err(to_status)?;
 
         // domain to proto
         let resp_pb = proto_conversions::standard_withdrawal_response_signed_to_pb(response);
@@ -206,8 +174,6 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         request: Request<proto::SignedCommitteeTransition>,
     ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
-        self.require_normal_mode("update_committee")?;
-
         let signed = pb_to_signed_committee_transition(request.into_inner()).map_err(to_status)?;
         let current_committee_epoch =
             committee_update::update_committee(self.enclave.clone(), signed)
@@ -223,8 +189,6 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         request: Request<proto::UpdateCommitteeChainRequest>,
     ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
-        self.require_normal_mode("update_committee_chain")?;
-
         let transitions = request
             .into_inner()
             .transitions

@@ -25,7 +25,7 @@ service GuardianService {
   // Bootstrap genesis committee: operator-trusted, first deploy only.
   rpc OperatorWriteGenesis(OperatorWriteGenesisRequest) returns (OperatorWriteGenesisResponse);
 
-  // Provisioner initialization: submit encrypted share and readiness info.
+  // Provisioner initialization: submit the current KPs' signed share contributions.
   rpc ProvisionerInit(ProvisionerInitRequest) returns (ProvisionerInitResponse);
 
   // Operator activation: derive live serving state and make an armed standby active.
@@ -44,6 +44,9 @@ service GuardianService {
 message GetGuardianInfoRequest {}
 
 message GetGuardianInfoResponse {
+  reserved 4;
+  reserved "encrypted_shares";
+
   // AWS Nitro attestation document.
   optional bytes attestation = 1;
 
@@ -52,9 +55,6 @@ message GetGuardianInfoResponse {
 
   // Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
   SignedGuardianInfo signed_info = 3;
-
-  // Encrypted shares from the latest ceremony (empty if none yet).
-  repeated KPEncryptedShare encrypted_shares = 4;
 }
 
 // Guardian-signed wrapper around `GuardianInfoData`.
@@ -66,6 +66,21 @@ message SignedGuardianInfo {
 
   // Guardian signature over (intent || data || timestamp).
   optional bytes signature = 3;
+}
+
+enum CeremonyStage {
+  CEREMONY_STAGE_UNSPECIFIED = 0;
+  CEREMONY_STAGE_UNINITIALIZED = 1;
+  CEREMONY_STAGE_OPERATOR_INITIALIZED = 2;
+  CEREMONY_STAGE_COMPLETED = 3;
+}
+
+enum WithdrawStage {
+  WITHDRAW_STAGE_UNSPECIFIED = 0;
+  WITHDRAW_STAGE_UNINITIALIZED = 1;
+  WITHDRAW_STAGE_OPERATOR_INITIALIZED = 2;
+  WITHDRAW_STAGE_PROVISIONER_INITIALIZED = 3;
+  WITHDRAW_STAGE_ACTIVATED = 4;
 }
 
 // Information about the guardian enclave.
@@ -103,6 +118,12 @@ message GuardianInfoData {
   // MPC committee verifying key `G` as `bcs(G)` (the derivation master, NOT the
   // guardian's own BTC key). Set after operator_init.
   optional bytes mpc_master_g = 10;
+
+  // Signed enclave mode and its current lifecycle stage.
+  oneof lifecycle {
+    CeremonyStage ceremony = 11;
+    WithdrawStage withdraw = 12;
+  }
 }
 
 // Public description of the current BTC key's secret-sharing scheme.
@@ -124,13 +145,20 @@ message S3BucketInfo {
 //      SetupNewKey
 // =======================
 
+// One KP's accepted OpenPGP certs. A KP can have multiple certs for the
+// same secret-share id.
+message KpPgpCertSet {
+  // Armored OpenPGP certificates for one key provisioner.
+  repeated string pgp_certs = 1;
+}
+
 // Untrusted wire DTO. Converted to a validated domain request in the server.
 message SetupNewKeyRequest {
-  // Armored OpenPGP certificates for key provisioners. Length must equal `num_shares`.
-  repeated string key_provisioner_pgp_certs = 1;
+  // OpenPGP cert sets for key provisioners. Length must equal `num_shares`.
+  repeated KpPgpCertSet key_provisioner_pgp_cert_sets = 1;
 
-  // Total number of shares to split the new BTC key into. Must match
-  // `key_provisioner_pgp_certs.len()`.
+  // Total number of shares to split the new BTC key into. Must match the number
+  // of KP cert sets, not the total number of certs.
   optional uint32 num_shares = 2;
 
   // Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
@@ -154,12 +182,11 @@ message GuardianEncryptedShare {
   HPKECiphertext ciphertext = 2;
 }
 
-// OpenPGP-encrypted secret share sent to a key provisioner.
-message KPEncryptedShare {
+// All PGP-encrypted copies of one KP share.
+message SingleKPEncryptedShares {
   GuardianShareID id = 1;
-  optional string armored_ciphertext = 2;
-  // Fingerprint of the recipient PGP cert this share is encrypted to.
-  optional string recipient_fingerprint = 3;
+  // Recipient PGP fingerprint to armored ciphertext.
+  map<string, string> ciphertexts = 2;
 }
 
 // Commitment to a secret share.
@@ -170,7 +197,7 @@ message GuardianShareCommitment {
 
 // Unsigned response payload.
 message SetupNewKeyResponseData {
-  repeated KPEncryptedShare encrypted_shares = 1;
+  repeated SingleKPEncryptedShares encrypted_shares = 1;
   SecretSharingInstance secret_sharing_instance = 2;
   // x-only BTC master pubkey (32 bytes); lets the operator publish it on-chain pre-provision.
   bytes btc_master_pubkey = 3;
@@ -196,7 +223,7 @@ message OperatorInitRequest {
   S3Config s3_config = 1;
 
   // Withdraw-mode stable init config (absent for a ceremony enclave). The enclave
-  // binds this digest as the share-decryption AAD and exposes it via GuardianInfo.
+  // exposes its digest via GuardianInfo; KPs bind it into signed PI submissions.
   InitConfig init_config = 4;
 }
 
@@ -227,12 +254,32 @@ enum Network {
 //      ProvisionerInit
 // ==========================
 
-// Assembled from the current KPs' encrypted shares (in the relay model, by the
-// relay once it has collected enough). Each share's HPKE AAD binds the enclave's
-// config_hash, so a share only decrypts if the KP agreed on the operator-supplied
-// stable config.
+// One KP's signed contribution toward ProvisionerInit. The relay may pre-verify
+// and buffer these submissions, but the enclave is the authoritative verifier.
+message SignedSingleProvisionerInitRequest {
+  // This KP's share, HPKE-encrypted to the enclave session key without config
+  // AAD. The signature below binds the share to the expected config instead.
+  GuardianEncryptedShare encrypted_share = 1;
+
+  // The guardian session id the KP pinned before encrypting the share.
+  string expected_session_id = 2;
+
+  // Armored OpenPGP certificate of the submitting key provisioner.
+  string signer_cert = 3;
+
+  // Detached armored OpenPGP signature over the intent-tagged
+  // SingleProvisionerInitRequest payload.
+  string kp_signature = 4;
+
+  // The operator-init config hash the KP independently recomputed and verified.
+  optional bytes expected_config_hash = 5;
+}
+
+// Assembled from the current KPs' signed submissions by the relay once it has
+// collected enough. The enclave re-verifies every submission before using any
+// share.
 message ProvisionerInitRequest {
-  repeated GuardianEncryptedShare encrypted_shares = 1;
+  repeated SignedSingleProvisionerInitRequest submissions = 1;
 }
 
 message OperatorActivateRequest {
@@ -299,8 +346,8 @@ message ProvisionerInitResponse {}
 message RotateKpsRequest {
   repeated GuardianEncryptedShare encrypted_old_shares = 1;
 
-  // Armored OpenPGP certificates for the new KP set. Length must equal new_num_shares.
-  repeated string new_kp_pgp_certs = 2;
+  // OpenPGP cert sets for the new KP set. Length must equal new_num_shares.
+  repeated KpPgpCertSet new_kp_pgp_cert_sets = 2;
 
   optional uint32 new_num_shares = 3;
   optional uint32 new_threshold = 4;
@@ -312,7 +359,7 @@ message RotateKpsRequest {
 
 // Unsigned response payload.
 message RotateKpsResponseData {
-  repeated KPEncryptedShare encrypted_shares = 1;
+  repeated SingleKPEncryptedShares encrypted_shares = 1;
 }
 
 // Application-layer signed response.

@@ -178,6 +178,26 @@ impl HashiNodeHandle {
         }
     }
 
+    pub(crate) async fn wait_for_guardian_client(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        tokio::time::timeout(timeout, self.wait_for_guardian_client_inner())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("guardian client resolution timed out after {:?}", timeout)
+            })
+    }
+
+    async fn wait_for_guardian_client_inner(&self) {
+        loop {
+            if self.hashi().guardian_client().is_some() {
+                return;
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
     pub fn current_epoch(&self) -> Option<u64> {
         self.hashi()
             .onchain_state_opt()
@@ -274,7 +294,7 @@ impl HashiNetwork {
 
         hashi::publish::finish_publish(
             client,
-            publisher,
+            &publisher.clone().into(),
             &self.ids,
             self.upgrade_cap_id,
             hashi::constants::BITCOIN_REGTEST_CHAIN_ID,
@@ -329,6 +349,7 @@ pub struct HashiNetworkBuilder {
     /// `None` means all `num_nodes` are active (default).
     pub num_initially_active_nodes: Option<usize>,
     pub test_batch_size_per_weight: Option<u16>,
+    pub test_presignature_derivation_activation_epoch: Option<u64>,
     /// `None` means full Sui voting power weights (no reduction).
     pub test_weight_divisor: Option<u16>,
     /// Overrides `withdrawal_batching_delay_ms` in each node's config.
@@ -351,6 +372,7 @@ impl HashiNetworkBuilder {
             num_nodes: 1,
             num_initially_active_nodes: None,
             test_batch_size_per_weight: None,
+            test_presignature_derivation_activation_epoch: None,
             test_weight_divisor: Some(TEST_WEIGHT_DIVISOR),
             withdrawal_batching_delay_ms: Some(0),
             withdrawal_max_batch_size: None,
@@ -376,6 +398,11 @@ impl HashiNetworkBuilder {
 
     pub fn with_corrupt_shares_target(mut self, target_node_index: usize) -> Self {
         self.test_corrupt_shares_target = Some(target_node_index);
+        self
+    }
+
+    pub fn with_presignature_derivation_activation_epoch(mut self, epoch: u64) -> Self {
+        self.test_presignature_derivation_activation_epoch = Some(epoch);
         self
     }
 
@@ -438,6 +465,8 @@ impl HashiNetworkBuilder {
             let mut config = HashiConfig::new_for_testing();
             config.test_weight_divisor = self.test_weight_divisor;
             config.test_batch_size_per_weight = self.test_batch_size_per_weight;
+            config.test_presignature_derivation_activation_epoch =
+                self.test_presignature_derivation_activation_epoch;
             config.withdrawal_batching_delay_ms = self.withdrawal_batching_delay_ms;
             config.withdrawal_max_batch_size = self.withdrawal_max_batch_size;
             config.max_mempool_chain_depth = self.max_mempool_chain_depth;
@@ -451,6 +480,9 @@ impl HashiNetworkBuilder {
             // the guardian client lazily from the on-chain guardian_url set
             // by the launch tx, so every e2e run exercises the
             // guardian-set-up-last path.
+            // Fast config poll so the guardian gate in `build()` isn't
+            // waiting out the 5-minute default.
+            config.onchain_config_poll_interval_ms = Some(5_000);
             config.hashi_ids = Some(hashi_ids);
             config.validator_address = Some(*validator_address);
             config.operator_private_key = Some(private_key.to_pem()?);

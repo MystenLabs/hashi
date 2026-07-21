@@ -735,13 +735,13 @@ dependencies = [
  "aws-smithy-types",
  "bytes",
  "h2 0.3.27",
- "h2 0.4.13",
+ "h2 0.4.15",
  "http 0.2.12",
  "http 1.4.0",
  "http-body 0.4.6",
  "http-body 1.0.1",
  "hyper 0.14.32",
- "hyper 1.9.0",
+ "hyper 1.10.1",
  "hyper-rustls 0.24.2",
  "hyper-rustls 0.27.7",
  "hyper-util",
@@ -923,7 +923,7 @@ dependencies = [
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
- "hyper 1.9.0",
+ "hyper 1.10.1",
  "hyper-util",
  "itoa",
  "matchit",
@@ -2369,7 +2369,7 @@ dependencies = [
 [[package]]
 name = "fastcrypto"
 version = "0.1.11"
-source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=a26cabb3aabc86e6453bc8aef8f59022bf9fd702#a26cabb3aabc86e6453bc8aef8f59022bf9fd702"
+source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=179ba6ca65f567efb297d0f8d449d78cdef6745c#179ba6ca65f567efb297d0f8d449d78cdef6745c"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2434,7 +2434,7 @@ dependencies = [
 [[package]]
 name = "fastcrypto-derive"
 version = "0.1.4"
-source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=a26cabb3aabc86e6453bc8aef8f59022bf9fd702#a26cabb3aabc86e6453bc8aef8f59022bf9fd702"
+source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=179ba6ca65f567efb297d0f8d449d78cdef6745c#179ba6ca65f567efb297d0f8d449d78cdef6745c"
 dependencies = [
  "quote",
  "syn 1.0.109",
@@ -2443,7 +2443,7 @@ dependencies = [
 [[package]]
 name = "fastcrypto-tbls"
 version = "0.1.0"
-source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=a26cabb3aabc86e6453bc8aef8f59022bf9fd702#a26cabb3aabc86e6453bc8aef8f59022bf9fd702"
+source = "git+https://github.com/MystenLabs/fastcrypto.git?rev=179ba6ca65f567efb297d0f8d449d78cdef6745c#179ba6ca65f567efb297d0f8d449d78cdef6745c"
 dependencies = [
  "bcs",
  "digest 0.10.7",
@@ -2809,9 +2809,9 @@ dependencies = [
 
 [[package]]
 name = "h2"
-version = "0.4.13"
+version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f44da3a8150a6703ed5d34e164b875fd14c2cdab9af1252a9a1020bde2bdc54"
+checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -2923,6 +2923,7 @@ dependencies = [
  "jiff",
  "jsonrpc",
  "lru 0.16.3",
+ "minreq",
  "prometheus",
  "prometheus-closure-metric",
  "proptest",
@@ -3009,6 +3010,7 @@ dependencies = [
  "k256",
  "rand 0.8.5",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tokio",
  "tonic",
@@ -3150,6 +3152,9 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "hex-conservative"
@@ -3319,15 +3324,15 @@ dependencies = [
 
 [[package]]
 name = "hyper"
-version = "1.9.0"
+version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6299f016b246a94207e63da54dbe807655bf9e00044f73ded42c3ac5305fbcca"
+checksum = "55281c53a1894c864990125767da440a4e630446785086f52523b20033b74498"
 dependencies = [
  "atomic-waker",
  "bytes",
  "futures-channel",
  "futures-core",
- "h2 0.4.13",
+ "h2 0.4.15",
  "http 1.4.0",
  "http-body 1.0.1",
  "httparse",
@@ -3361,7 +3366,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3c93eb611681b207e1fe55d5a71ecf91572ec8a6705cdb6857f7d8d5242cf58"
 dependencies = [
  "http 1.4.0",
- "hyper 1.9.0",
+ "hyper 1.10.1",
  "hyper-util",
  "rustls 0.23.37",
  "rustls-native-certs",
@@ -3369,7 +3374,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "tower-service",
- "webpki-roots",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]
@@ -3378,7 +3383,7 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b90d566bffbce6a75bd8b09a05aa8c2cb1fabb6cb348f8840c9e4c90a0d83b0"
 dependencies = [
- "hyper 1.9.0",
+ "hyper 1.10.1",
  "hyper-util",
  "pin-project-lite",
  "tokio",
@@ -3397,12 +3402,12 @@ dependencies = [
  "futures-util",
  "http 1.4.0",
  "http-body 1.0.1",
- "hyper 1.9.0",
+ "hyper 1.10.1",
  "ipnet",
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tokio",
  "tower-service",
  "tracing",
@@ -4061,8 +4066,11 @@ version = "2.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05015102dad0f7d61691ca347e9d9d9006685a64aefb3d79eecf62665de2153d"
 dependencies = [
+ "rustls 0.21.12",
+ "rustls-webpki 0.101.7",
  "serde",
  "serde_json",
+ "webpki-roots 0.25.4",
 ]
 
 [[package]]
@@ -4834,7 +4842,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.37",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4871,7 +4879,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.59.0",
 ]
@@ -5073,11 +5081,11 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "futures-core",
- "h2 0.4.13",
+ "h2 0.4.15",
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
- "hyper 1.9.0",
+ "hyper 1.10.1",
  "hyper-rustls 0.27.7",
  "hyper-util",
  "js-sys",
@@ -5100,7 +5108,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
- "webpki-roots",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]
@@ -5521,7 +5529,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "argon2",
- "base64 0.21.7",
+ "base64 0.22.1",
  "block-padding",
  "blowfish",
  "buffered-reader",
@@ -5995,8 +6003,10 @@ checksum = "734676eb262c623cec13c3155096e08d1f8f29adce39ba17948b18dad1e54142"
 [[package]]
 name = "sui-crypto"
 version = "0.3.0"
-source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1#210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1"
+source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=5b4525bd569ed8450f57423bc296c31a98760426#5b4525bd569ed8450f57423bc296c31a98760426"
 dependencies = [
+ "base64ct",
+ "bech32 0.11.1",
  "ed25519-dalek",
  "k256",
  "p256 0.13.2",
@@ -6022,16 +6032,16 @@ dependencies = [
 
 [[package]]
 name = "sui-http"
-version = "0.2.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4bfea7568dcf01ad7d41749c071492b29d2fd450a720db1e3d063c557028d50"
+checksum = "b6b46940575ea7ee7eaf2a7000da28d82a61b76f8d4160590674946263975782"
 dependencies = [
  "bytes",
  "futures-core",
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
- "hyper 1.9.0",
+ "hyper 1.10.1",
  "hyper-util",
  "pin-project-lite",
  "socket2 0.6.3",
@@ -6044,8 +6054,8 @@ dependencies = [
 
 [[package]]
 name = "sui-rpc"
-version = "0.3.0"
-source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1#210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1"
+version = "0.3.1"
+source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=5b4525bd569ed8450f57423bc296c31a98760426#5b4525bd569ed8450f57423bc296c31a98760426"
 dependencies = [
  "base64 0.22.1",
  "bcs",
@@ -6053,6 +6063,7 @@ dependencies = [
  "futures",
  "http 1.4.0",
  "http-body 1.0.1",
+ "hyper 1.10.1",
  "prost",
  "prost-types",
  "serde",
@@ -6067,8 +6078,8 @@ dependencies = [
 
 [[package]]
 name = "sui-sdk-types"
-version = "0.3.0"
-source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1#210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1"
+version = "0.3.1"
+source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=5b4525bd569ed8450f57423bc296c31a98760426#5b4525bd569ed8450f57423bc296c31a98760426"
 dependencies = [
  "base64ct",
  "bcs",
@@ -6088,8 +6099,8 @@ dependencies = [
 
 [[package]]
 name = "sui-transaction-builder"
-version = "0.3.0"
-source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1#210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1"
+version = "0.3.1"
+source = "git+https://github.com/MystenLabs/sui-rust-sdk.git?rev=5b4525bd569ed8450f57423bc296c31a98760426#5b4525bd569ed8450f57423bc296c31a98760426"
 dependencies = [
  "async-trait",
  "bcs",
@@ -6454,11 +6465,11 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
- "h2 0.4.13",
+ "h2 0.4.15",
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
- "hyper 1.9.0",
+ "hyper 1.10.1",
  "hyper-timeout",
  "hyper-util",
  "percent-encoding",
@@ -6472,7 +6483,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
- "webpki-roots",
+ "webpki-roots 1.0.6",
  "zstd",
 ]
 
@@ -6550,11 +6561,11 @@ checksum = "9b2874b26095e47313b6126f9e8144580a916af2151f778a4fec01a0120fed85"
 dependencies = [
  "async-stream",
  "bytes",
- "h2 0.4.13",
+ "h2 0.4.15",
  "http 1.4.0",
  "http-body 1.0.1",
  "http-body-util",
- "hyper 1.9.0",
+ "hyper 1.10.1",
  "hyper-timeout",
  "hyper-util",
  "pin-project",
@@ -6965,6 +6976,12 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "webpki-roots"
+version = "0.25.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f20c57d8d7db6d3b86154206ae5d8fba62dd39573114de97c2cb0578251f8e1"
 
 [[package]]
 name = "webpki-roots"

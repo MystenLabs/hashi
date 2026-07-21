@@ -5,70 +5,19 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
 
-use sui_crypto::ed25519::Ed25519PrivateKey;
+use anyhow::Context as _;
+
+use sui_crypto::simple::SimpleKeypair;
 use sui_sdk_types::Address;
 
 use crate::constants::SUI_MAINNET_CHAIN_ID;
 
 const DEFAULT_WITHDRAWAL_SIGNING_CONCURRENCY: usize = 25;
 const DEFAULT_MPC_SIGNING_CHUNK_SIZE: usize = 64;
+pub(crate) const DEFAULT_ONCHAIN_CONFIG_POLL_INTERVAL_MS: u64 = 300_000;
 /// Tonic's 4 MiB default is too small to scrape a large on-chain state or
 /// receive large MPC round messages.
 pub(crate) const DEFAULT_GRPC_MAX_DECODING_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
-
-/// Load an Ed25519 private key from a file path or inline PEM string.
-///
-/// Supported formats:
-/// - DER-encoded binary file
-/// - PEM-encoded text file
-/// - Inline PEM string (if not a valid file path)
-pub fn load_ed25519_private_key(path_or_pem: &str) -> anyhow::Result<Ed25519PrivateKey> {
-    load_ed25519_private_key_from_path(Path::new(path_or_pem))
-        .or_else(|_| {
-            Ed25519PrivateKey::from_pem(path_or_pem)
-                .map_err(|e| anyhow::anyhow!("PEM parse error: {}", e))
-        })
-        .map_err(|_: anyhow::Error| {
-            anyhow::anyhow!(
-                "unable to load Ed25519 private key from '{}' — expected a PKCS#8 PEM/DER \
-                 file path or an inline PEM string (`sui keytool` output is not supported)",
-                redact_key_source(path_or_pem)
-            )
-        })
-}
-
-/// The configured value may be inline key material rather than a file path —
-/// never echo anything that could be a secret into errors or logs.
-fn redact_key_source(value: &str) -> &str {
-    let looks_like_path =
-        !value.contains('\n') && value.len() <= 128 && !value.starts_with("suiprivkey");
-    if looks_like_path {
-        value
-    } else {
-        "<inline value (redacted)>"
-    }
-}
-
-/// Load an Ed25519 private key from a file path.
-///
-/// Supported formats:
-/// - DER-encoded binary file
-/// - PEM-encoded text file
-pub fn load_ed25519_private_key_from_path(path: &Path) -> anyhow::Result<Ed25519PrivateKey> {
-    let contents = std::fs::read(path)?;
-
-    if let Ok(pk) = Ed25519PrivateKey::from_der(&contents) {
-        return Ok(pk);
-    }
-
-    if let Ok(contents_str) = std::str::from_utf8(&contents)
-        && let Ok(pk) = Ed25519PrivateKey::from_pem(contents_str)
-    {
-        return Ok(pk);
-    }
-
-    anyhow::bail!("unsupported key format in '{}'", path.display())
-}
 
 fn deserialize_backup_pgp_cert<'de, D>(
     deserializer: D,
@@ -178,6 +127,12 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub test_batch_size_per_weight: Option<u16>,
 
+    /// Override the presignature-derivation activation epoch for testing the
+    /// epoch-boundary flip. Can only be set if `sui_chain_id` is not mainnet or
+    /// testnet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_presignature_derivation_activation_epoch: Option<u64>,
+
     /// URL of the screener gRPC service endpoint (e.g. `https://hashi-screener.mystenlabs.com`).
     /// When not set, AML screening is skipped.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -251,6 +206,15 @@ pub struct Config {
     /// Defaults to 3.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdrawal_fee_conf_target: Option<u16>,
+
+    /// Interval (ms) between watcher polls of the on-chain Hashi config while
+    /// the launch is pending — the safety net for `finish_publish`, which sets
+    /// `guardian_url` and the guardian BTC key with no event. Polling stops
+    /// once both are on-chain.
+    ///
+    /// Defaults to 300,000 ms (5 minutes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub onchain_config_poll_interval_ms: Option<u64>,
 
     /// Test-only: corrupt AVSS shares sent to this address, triggering the
     /// complaint recovery flow. Must not be set on mainnet or testnet.
@@ -329,14 +293,17 @@ impl Config {
         Ok(ed25519_dalek::VerifyingKey::from(&tls_private_key))
     }
 
-    //TODO support more than just Ed25519
-    pub fn operator_private_key(&self) -> Result<Ed25519PrivateKey, anyhow::Error> {
+    /// Load the operator signing keypair from `operator-private-key`.
+    ///
+    /// The configured value may be a file path or an inline key; see
+    /// [`crate::keys::load_keypair`] for the accepted formats.
+    pub fn operator_private_key(&self) -> Result<SimpleKeypair, anyhow::Error> {
         let raw = self
             .operator_private_key
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("no operator_private_key configured"))?;
 
-        load_ed25519_private_key(raw)
+        crate::keys::load_keypair(raw).context("unable to load the operator private key")
     }
 
     pub fn validator_address(&self) -> Result<Address, anyhow::Error> {
@@ -452,6 +419,13 @@ impl Config {
         self.withdrawal_batching_delay_ms.unwrap_or(300_000)
     }
 
+    pub fn onchain_config_poll_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            self.onchain_config_poll_interval_ms
+                .unwrap_or(DEFAULT_ONCHAIN_CONFIG_POLL_INTERVAL_MS),
+        )
+    }
+
     pub fn withdrawal_max_batch_size(&self) -> usize {
         self.withdrawal_max_batch_size
             .unwrap_or(crate::utxo_pool::CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS)
@@ -553,23 +527,6 @@ fn get_ephemeral_port() -> std::io::Result<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn key_load_error_names_missing_path_but_redacts_key_material() {
-        // A plain (missing) path is useful context and safe to echo.
-        let err = load_ed25519_private_key("/nonexistent/key.pem").unwrap_err();
-        assert!(err.to_string().contains("/nonexistent/key.pem"));
-
-        // Inline PEM, bech32 sui keys, and long blobs must never be echoed.
-        let bad_pem = "-----BEGIN PRIVATE KEY-----\nnot-actually-valid\n-----END PRIVATE KEY-----";
-        let suiprivkey = "suiprivkey1qzabcdefabcdefabcdefabcdefabcdefabcdef";
-        let long_blob = "A".repeat(200);
-        for secret in [bad_pem, suiprivkey, long_blob.as_str()] {
-            let msg = load_ed25519_private_key(secret).unwrap_err().to_string();
-            assert!(!msg.contains(secret), "error echoed key material: {msg}");
-            assert!(msg.contains("redacted"));
-        }
-    }
 
     #[test]
     fn test_new_for_testing() {

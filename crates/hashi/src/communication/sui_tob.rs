@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use hashi_types::move_types::ProtocolType;
-use sui_crypto::ed25519::Ed25519PrivateKey;
+use sui_crypto::simple::SimpleKeypair;
 use sui_sdk_types::Address;
 use thiserror::Error;
 
@@ -52,7 +52,7 @@ pub struct SuiTobChannel {
     epoch: u64,
     batch_index: Option<u32>,
     protocol_type: ProtocolType,
-    signer: Ed25519PrivateKey,
+    signer: SimpleKeypair,
     /// Dealers we've already returned certificates for
     seen_dealers: HashSet<Address>,
     /// Cached certificates not yet returned
@@ -66,7 +66,7 @@ impl SuiTobChannel {
         epoch: u64,
         batch_index: Option<u32>,
         protocol_type: ProtocolType,
-        signer: Ed25519PrivateKey,
+        signer: SimpleKeypair,
     ) -> Self {
         Self {
             hashi_ids,

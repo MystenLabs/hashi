@@ -28,8 +28,8 @@ pub struct Config {
     pub relay_endpoint: String,
     /// gRPC endpoint of the guardian.
     pub guardian_endpoint: String,
-    /// Path to this KP's armored OpenPGP public cert. Required by
-    /// key-provisioner commands.
+    /// Path to the armored OpenPGP public cert this KP uses to identify itself.
+    /// Required by key-provisioner commands.
     pub kp_pgp_cert_path: Option<PathBuf>,
 }
 
@@ -104,9 +104,10 @@ impl<'de> Deserialize<'de> for HashiOnchainConfig {
 
 impl HashiOnchainConfig {
     pub async fn onchain_state(&self) -> anyhow::Result<OnchainState> {
-        let (state, _watcher) = OnchainState::new(&self.sui_rpc, self.hashi_ids, None, None, None)
-            .await
-            .with_context(|| format!("failed to connect to Sui RPC at {}", self.sui_rpc))?;
+        let (state, _watcher) =
+            OnchainState::new(&self.sui_rpc, self.hashi_ids, None, None, None, None)
+                .await
+                .with_context(|| format!("failed to connect to Sui RPC at {}", self.sui_rpc))?;
         Ok(state)
     }
 }

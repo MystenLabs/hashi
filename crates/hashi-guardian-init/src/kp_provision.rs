@@ -17,44 +17,43 @@
 //!    instance the new guardian was booted with; it must match.
 //! 4. The stable `InitConfig` is recomputed from limiter config, master G, PCR
 //!    allowlist, and network; its `config_hash` is confirmed.
-//! 5. This KP's encrypted share is read from the latest `kp-shares/{seq}/`
-//!    state (attestation-anchored), every share's recipients are verified
-//!    against the roster, and this KP's share is located by fingerprint.
-//! 6. The share is decrypted via the yubikey (`gpg --decrypt` over a pipe;
-//!    plaintext stays in memory) and verified against its commitment.
+//! 5. This KP's PGP-encrypted share is read from the latest
+//!    `kp-shares/{seq}/` state (attestation-anchored), every encrypted copy's
+//!    recipient is verified against the roster, and this KP's selected
+//!    ciphertext is located by fingerprint.
+//! 6. The selected ciphertext is decrypted via its yubikey (`gpg --decrypt`
+//!    over a pipe; plaintext stays in memory) and verified against the
+//!    commitment.
 //! 7. The decrypted share is HPKE-encrypted to the new guardian's
-//!    `encryption_pubkey` (from its `GuardianInfo`), with `config_hash` as AAD,
-//!    producing a `GuardianEncryptedShare` ready for `provisioner_init`.
-//! 8. The share is submitted to the configured relay endpoint via
-//!    `SingleProvisionerInit`. The relay rejects if the backend session no
-//!    longer matches the session pinned above, otherwise it accumulates T-of-N
-//!    shares and calls the guardian's batch `provisioner_init` once it has
-//!    enough.
+//!    `encryption_pubkey` (from its `GuardianInfo`) while constructing a PI
+//!    request bound to the pinned session and verified `config_hash`.
+//! 8. The request is signed and submitted to the configured relay endpoint via
+//!    `SingleProvisionerInit`. The relay accumulates T-of-N signed submissions
+//!    and calls the guardian's batch `provisioner_init` once it has enough; the
+//!    enclave re-verifies every signature and binding.
 
 use anyhow::Context;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
 use hashi_types::guardian::BuildPcrs;
 use hashi_types::guardian::EncPubKey;
-use hashi_types::guardian::GuardianEncryptedShare;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::InitConfig;
 use hashi_types::guardian::KpSigned;
-use hashi_types::guardian::ProvisionerInitRequest;
 use hashi_types::guardian::SingleProvisionerInitRequest;
 use hashi_types::guardian::VerifiedGuardianInfo;
+use hashi_types::guardian::WithdrawStage;
 use hashi_types::pgp::PgpPublicCert;
-use hashi_types::pgp::load_certs;
 use hashi_types::proto as pb;
 use hpke::Deserializable;
 use rand::thread_rng;
 use tracing::info;
 
 use crate::config::Config;
+use crate::guardian_info::ensure_oi_info_matches_post_init;
 use crate::guardian_info::verified_live_guardian_info;
-use crate::kp_roster::VerifiedCeremonyState;
-use crate::kp_roster::decrypt_share;
-use crate::kp_roster::ensure_cert_in_roster;
+use crate::kp_roster::decrypt_kp_share_copies;
+use crate::kp_roster::load_kp_cert;
 
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
@@ -103,30 +102,33 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     info!(
         phase = "roster load",
-        cert_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
-        "loading + validating full KP cert roster",
+        share_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
+        certificate_count = cfg.kp_roster.cert_count(),
+        "loading + validating full KP certificate roster",
     );
-    let certs = load_certs(&cfg.kp_roster.kp_pgp_cert_paths)?;
+    let certs_roster = cfg.kp_roster.load_certs_roster()?;
     info!(
         phase = "roster load",
-        cert_count = certs.len(),
-        "KP cert roster loaded"
+        share_count = certs_roster.num_kps(),
+        certificate_count = cfg.kp_roster.cert_count(),
+        "KP certificate roster loaded"
     );
 
     let kp_pgp_cert_path = cfg.require_kp_pgp_cert_path("key-provisioner provision")?;
-    let kp_cert = PgpPublicCert::new(
-        std::fs::read_to_string(kp_pgp_cert_path)
-            .with_context(|| format!("read KP cert at {}", kp_pgp_cert_path.display()))?,
-    )
-    .with_context(|| format!("invalid PGP cert at {}", kp_pgp_cert_path.display()))?;
-    let want_fp = kp_cert.fingerprint();
+    let kp_cert = load_kp_cert(kp_pgp_cert_path)?;
+    let kp_fingerprint = kp_cert.fingerprint();
+    anyhow::ensure!(
+        certs_roster
+            .certs_for_fingerprint(&kp_fingerprint)
+            .is_some(),
+        "this KP's cert (fingerprint {kp_fingerprint}) is not among the configured \
+         kp_roster.kp_pgp_cert_paths"
+    );
     info!(
         phase = "setup",
-        fingerprint = %want_fp,
-        kp_cert_path = %kp_pgp_cert_path.display(),
-        "loaded this KP's cert",
+        fingerprint = %kp_fingerprint,
+        "loaded this KP's selected cert",
     );
-    ensure_cert_in_roster(&kp_cert, &certs)?;
 
     // 1. Ask the relay/standby endpoint which session KPs are provisioning.
     // Active guardian heartbeats may still exist, so identity comes from the
@@ -156,6 +158,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         .get_session_info(&session_id, BuildPolicy::Current)
         .await?;
     let GuardianInfo {
+        lifecycle,
         secret_sharing_instance,
         bucket_info,
         encryption_pubkey: enclave_enc_pubkey_bytes,
@@ -167,6 +170,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         current_committee_epoch: enclave_current_committee_epoch,
         mpc_master_g,
     } = &guardian_info;
+    anyhow::ensure!(
+        *lifecycle == WithdrawStage::OperatorInitialized.into(),
+        "Guardian lifecycle is {lifecycle:?}; expected withdraw/operator_initialized"
+    );
     let enclave_ss_instance = secret_sharing_instance
         .as_ref()
         .context("Guardian info missing secret_sharing_instance")?;
@@ -227,13 +234,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         enclave_current_committee_epoch.is_none(),
         "Guardian has current_committee_epoch => operator activation already ran"
     );
-    anyhow::ensure!(
-        verified_session.info == guardian_info,
-        "S3 GuardianInfo mismatch for session {}: endpoint {:?}, S3 {:?}",
-        session_id,
-        guardian_info,
-        verified_session.info
-    );
+    let oi_info = verified_session.info;
+    ensure_oi_info_matches_post_init(&oi_info, &guardian_info)
+        .with_context(|| format!("S3 GuardianInfo mismatch for session {session_id}"))?;
     anyhow::ensure!(
         &master_g == enclave_mpc_master_g,
         "MPC master g mismatch: expected {:?}, got {:?}",
@@ -246,40 +249,37 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         "guardian info checks passed (bucket, limiter config, mpc_master_g, standby not activated)",
     );
 
-    // 3. Confirm the new guardian was booted with the same secret-sharing
-    //    instance the authoritative `ceremony/` log records.
+    // 3. Read the ceremony + KP share state and confirm the new guardian was
+    //    booted with the same secret-sharing instance.
     info!(
         phase = "ceremony instance",
-        "scraping authoritative ceremony/ log for the secret-sharing instance",
+        "scraping authoritative ceremony/ and kp-shares/ logs",
     );
-    let (ceremony_session, scraped_instance, btc_master_pubkey) = reader
-        .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
+    let state = reader
+        .read_latest_ceremony_state(BuildPolicy::AnyAllowlisted)
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;
-    let sharing_seq = scraped_instance.sharing_seq();
+    let sharing_seq = state.secret_sharing_instance.sharing_seq();
     info!(
         phase = "ceremony instance",
-        ceremony_session = %ceremony_session,
         sharing_seq,
-        n = scraped_instance.num_shares(),
-        t = scraped_instance.threshold(),
+        n = state.secret_sharing_instance.num_shares(),
+        t = state.secret_sharing_instance.threshold(),
         "scraped latest ceremony entry",
     );
     anyhow::ensure!(
-        scraped_instance == *enclave_ss_instance,
+        state.secret_sharing_instance == *enclave_ss_instance,
         "Enclave secret sharing instance mismatch: expected {:?}, got {:?}",
-        scraped_instance,
+        state.secret_sharing_instance,
         enclave_ss_instance
     );
     info!(
         phase = "ceremony instance",
-        ceremony_session = %ceremony_session,
-        sharing_seq,
-        "ceremony instance matches enclave",
+        sharing_seq, "ceremony instance matches enclave",
     );
 
     // 4. Recompute the stable config the operator armed the enclave with; its
-    //    digest is the `config_hash` we bind as the share's AAD.
+    //    digest is the `config_hash` bound into the signed PI submission.
     info!(
         phase = "config hash",
         "recomputing config_hash from limiter config + master G + PCR allowlist + network",
@@ -303,76 +303,25 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         "recomputed config_hash matches enclave",
     );
 
-    // 5. Read + verify this KP's encrypted share. The ceremony state is
-    //    constructed directly from the S3 log reads above so we don't pay for a
-    //    second ceremony/ + kp-shares/ walk.
+    // 5. Verify this KP's encrypted share from the ceremony + KP-share state
+    //    read above.
     info!(
         phase = "share read",
-        ceremony_session = %ceremony_session,
-        sharing_seq,
-        "reading + verifying this KP's encrypted share from kp-shares/",
+        sharing_seq, "verifying this KP's encrypted share from kp-shares/",
     );
-    let (kp_share_session, kp_share_state) = reader
-        .read_latest_kp_share_state(sharing_seq, BuildPolicy::AnyAllowlisted)
-        .await?
-        .context("no kp-shares log found in S3; key setup has not run")?;
-    let state = VerifiedCeremonyState::from_scraped(
-        ceremony_session.clone(),
-        kp_share_session.clone(),
-        scraped_instance.clone(),
-        kp_share_state,
-        btc_master_pubkey,
-        cfg.kp_roster.num_shares,
-        cfg.kp_roster.threshold,
-    )?;
-    state.verify_encrypted_share_recipients(&certs)?;
+    state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
+    state.encrypted_shares.verify_recipients(&certs_roster)?;
     info!(
         phase = "share read",
-        kp_share_session = %kp_share_session,
-        cert_seq = state.kp_share_cert_seq,
-        share_count = state.encrypted_shares.len(),
+        cert_seq = state.cert_seq,
+        share_count = state.encrypted_shares.share_count(),
+        ciphertext_count = state.encrypted_shares.ciphertext_count(),
         all_recipients_verified = true,
-        "kp-shares log verified: every share is addressed only to its labeled KP cert",
+        "kp-shares log verified: every PGP-encrypted share matches the expected KP cert sets",
     );
 
-    // Find this KP's share by exact fingerprint match. Given the roster checks
-    // above, this should always succeed; keep the error for defensive clarity.
-    let want_fp_hex = want_fp.to_hex();
-    let kp_encrypted_share = state
-        .encrypted_shares
-        .iter()
-        .find(|s| s.recipient_fingerprint == want_fp_hex)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no share in the kp-shares log is labeled for this KP's fingerprint \
-                 {want_fp} (labeled fingerprints: {:?})",
-                state
-                    .encrypted_shares
-                    .iter()
-                    .map(|s| s.recipient_fingerprint.clone())
-                    .collect::<Vec<_>>()
-            )
-        })?;
-    info!(
-        phase = "share read",
-        share_id = kp_encrypted_share.id.get(),
-        fingerprint = %kp_encrypted_share.recipient_fingerprint,
-        "located this KP's encrypted share",
-    );
-
-    // 6. Decrypt via yubikey (gpg streams plaintext over a pipe — never hits
-    //    disk) and verify the decrypted share matches its commitment.
-    info!(
-        phase = "share decrypt",
-        share_id = kp_encrypted_share.id.get(),
-        "decrypting share via yubikey (ciphertext piped via stdin; plaintext in memory)",
-    );
-    let decrypted = decrypt_share(kp_encrypted_share)?;
-    state
-        .secret_sharing_instance
-        .commitments()
-        .verify_share(&decrypted)
-        .context("decrypted share does not match its commitment")?;
+    // 6. Decrypt and commitment-check the ciphertext selected by this KP.
+    let decrypted = decrypt_kp_share_copies(&state, std::slice::from_ref(&kp_cert))?;
     let expected_commitment = state
         .secret_sharing_instance
         .commitments()
@@ -391,37 +340,39 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         "decrypted share matches its commitment",
     );
 
-    // 7. HPKE-encrypt the decrypted share to the new guardian's pubkey, binding
-    //    the verified `config_hash` as AAD.
+    // 7. HPKE-encrypt the decrypted share to the new guardian's pubkey. The
+    //    signed relay request below binds it to the verified config hash.
     info!(
         phase = "share build",
         share_id = decrypted.id.get(),
         enc_pubkey = hex::encode(enclave_enc_pubkey_bytes),
         config_hash = hex::encode(config_hash),
-        "HPKE-encrypting share to new guardian's pubkey (config_hash AAD)",
+        "HPKE-encrypting share to new guardian's pubkey",
     );
     let guardian_pub_key =
         EncPubKey::from_bytes(enclave_enc_pubkey_bytes).map_err(anyhow::Error::msg)?;
-    let encrypted_share = ProvisionerInitRequest::build_from_share(
+    let request = SingleProvisionerInitRequest::build_from_share(
+        session_id.clone(),
+        config_hash,
         &decrypted,
         &guardian_pub_key,
-        config_hash,
         &mut thread_rng(),
     );
     info!(
         phase = "share build",
-        share_id = encrypted_share.id.get(),
-        "built GuardianEncryptedShare ready for submission",
+        share_id = request.encrypted_share().id.get(),
+        "built SingleProvisionerInitRequest ready for signing",
     );
 
     // 8. Submit. The relay collects T-of-N shares before forwarding them to the
     //    guardian in one `ProvisionerInit` call.
+    // The cert that decrypted the share also authorizes its relay submission.
+    let signer_cert = &kp_cert;
     info!(
         phase = "summary",
         session_id = %session_id,
-        ceremony_session = %ceremony_session,
         share_id = decrypted.id.get(),
-        fingerprint = %want_fp,
+        signer_fingerprint = %signer_cert.fingerprint(),
         sharing_seq,
         config_hash = hex::encode(config_hash),
         enc_pubkey = hex::encode(enclave_enc_pubkey_bytes),
@@ -430,10 +381,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     );
     submit_provisioner_init_to_relay(
         &cfg.relay_endpoint,
-        &session_id,
         guardian_info,
-        encrypted_share,
-        &kp_cert,
+        request,
+        signer_cert,
         allowlist.current_build(),
     )
     .await?;
@@ -455,17 +405,17 @@ async fn verified_endpoint_guardian_info(
 
 /// Submit this KP's share to the relay endpoint. The relay fronts the
 /// guardian's current session and rejects `SingleProvisionerInit` if it no
-/// longer matches the session this KP pinned before encrypting the share. The
-/// relay collects T-of-N shares and calls the guardian's batch `provisioner_init`
-/// once it has enough.
+/// longer matches the session or config this KP signed. The relay collects
+/// T-of-N submissions and calls the guardian's batch `provisioner_init` once it
+/// has enough; the guardian re-verifies every signature.
 async fn submit_provisioner_init_to_relay(
     endpoint: &str,
-    expected_session_id: &str,
     expected_guardian_info: GuardianInfo,
-    encrypted_share: GuardianEncryptedShare,
+    request: SingleProvisionerInitRequest,
     signer_cert: &PgpPublicCert,
     current_build: &BuildPcrs,
 ) -> anyhow::Result<()> {
+    let expected_session_id = request.expected_session_id();
     info!(
         phase = "relay submit",
         endpoint = %endpoint,
@@ -486,12 +436,12 @@ async fn submit_provisioner_init_to_relay(
     prechecks(
         &mut client,
         expected_session_id,
-        expected_guardian_info,
+        &expected_guardian_info,
         current_build,
     )
     .await
     .with_context(|| "relay endpoint pre-check failed")?;
-    let share_id = encrypted_share.id.get();
+    let share_id = request.encrypted_share().id.get();
     info!(
         phase = "relay submit",
         endpoint = %endpoint,
@@ -505,10 +455,9 @@ async fn submit_provisioner_init_to_relay(
     .await
     .with_context(|| format!("failed to connect to relay endpoint {endpoint}"))?;
 
-    // Detached-sign the exact (session, share) bytes with this KP's offline
-    // key; the relay only buffers submissions signed by a rostered cert.
-    let request =
-        SingleProvisionerInitRequest::new(expected_session_id.to_string(), encrypted_share);
+    // Detached-sign the exact (session, config, share) bytes with this KP's
+    // offline key. The relay pre-verifies the request before buffering it and
+    // the enclave authoritatively re-verifies it before using the share.
     let signed_request = KpSigned::new(request, signer_cert.clone(), None)
         .map_err(anyhow::Error::msg)
         .context("sign the relay submission with the KP key")?;
@@ -538,7 +487,7 @@ async fn submit_provisioner_init_to_relay(
 async fn prechecks(
     client: &mut pb::guardian_service_client::GuardianServiceClient<tonic::transport::Channel>,
     expected_session_id: &str,
-    expected_guardian_info: GuardianInfo,
+    expected_guardian_info: &GuardianInfo,
     current_build: &BuildPcrs,
 ) -> anyhow::Result<()> {
     let verified = verified_live_guardian_info(client, current_build).await?;
@@ -551,13 +500,13 @@ async fn prechecks(
     );
 
     anyhow::ensure!(
-        actual_session_id == expected_session_id,
+        actual_session_id.as_str() == expected_session_id,
         "relay endpoint session mismatch: expected {}, got {}",
         expected_session_id,
         actual_session_id
     );
     anyhow::ensure!(
-        verified.info == expected_guardian_info,
+        &verified.info == expected_guardian_info,
         "relay endpoint GuardianInfo mismatch: expected {:?}, got {:?}",
         expected_guardian_info,
         verified.info

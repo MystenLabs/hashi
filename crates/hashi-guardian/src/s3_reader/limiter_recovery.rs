@@ -56,9 +56,9 @@ impl GuardianReader {
         // Read the found bucket + one bucket back, then take max-seq across
         // both. The peek-back defends against sub-hour clock skew that may have
         // placed a higher-seq log in the prior hour bucket.
-        let hit = bucket_max_post_state(self.read_dir(&cursor).await?);
+        let hit = bucket_max_post_state(self.read_logs_in_dir(&cursor).await?);
         cursor = cursor.prev_dir();
-        let peek = bucket_max_post_state(self.read_dir(&cursor).await?);
+        let peek = bucket_max_post_state(self.read_logs_in_dir(&cursor).await?);
         let recovered_state = [hit, peek]
             .into_iter()
             .flatten()
@@ -120,7 +120,7 @@ async fn hour_bucket_has_success(
     bucket: &str,
 ) -> anyhow::Result<bool> {
     let keys = s3_client
-        .list_all_keys_in_dir(&format!("{bucket}success-"))
+        .validate_prefix_history_and_list_keys(&format!("{bucket}success-"))
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
     Ok(!keys.is_empty())
@@ -186,7 +186,8 @@ mod tests {
             post_state: state_with_seq(next_seq),
         };
         VerifiedLogRecord {
-            session_id: "test-session".to_string(),
+            object_key: format!("withdraw/success-{next_seq}.json"),
+            session_id: "test-session".into(),
             timestamp_ms: 0,
             message: LogMessage::Withdrawal(Box::new(msg)),
             build_pcrs: build_pcrs(),
@@ -202,7 +203,8 @@ mod tests {
             error: GuardianError::RateLimitExceeded,
         };
         VerifiedLogRecord {
-            session_id: "test-session".to_string(),
+            object_key: "withdraw/failure.json".to_string(),
+            session_id: "test-session".into(),
             timestamp_ms: 0,
             message: LogMessage::Withdrawal(Box::new(msg)),
             build_pcrs: build_pcrs(),

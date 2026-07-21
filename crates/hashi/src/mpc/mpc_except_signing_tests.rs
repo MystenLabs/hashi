@@ -290,6 +290,7 @@ impl TestSetup {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
+            u64::MAX,
             &test_metrics(),
         )
         .unwrap()
@@ -907,6 +908,7 @@ fn test_mpc_manager_new_from_committee_set() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        u64::MAX,
         &test_metrics(),
     )
     .expect("Should create manager from CommitteeSet");
@@ -972,6 +974,7 @@ fn test_mpc_manager_new_fails_if_no_committee_for_epoch() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        u64::MAX,
         &test_metrics(),
     );
 
@@ -1004,6 +1007,7 @@ fn test_mpc_manager_new_fails_on_encryption_key_mismatch() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        u64::MAX,
         &test_metrics(),
     );
 
@@ -1092,6 +1096,7 @@ fn test_mpc_manager_new_finds_input_committee_across_gap() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        u64::MAX,
         &test_metrics(),
     )
     .expect("MpcManager::new should succeed across a committee gap");
@@ -1178,6 +1183,7 @@ fn test_mpc_manager_new_uses_explicit_epoch_not_committee_set_recompute() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        u64::MAX,
         &test_metrics(),
     )
     .expect(
@@ -3813,6 +3819,32 @@ fn test_prepare_rotation_dealer_flow_survives_restart() {
 }
 
 #[test]
+fn test_prepare_rotation_dealer_flow_survives_same_process_retry() {
+    let mut rng = rand::thread_rng();
+    let rotation_setup = RotationTestSetup::new();
+    let (mut manager, dkg_output) = rotation_setup.create_receiver_with_memory_store(0);
+    manager.session_id = SessionId::new(
+        TEST_CHAIN_ID,
+        rotation_setup.setup.epoch(),
+        &ProtocolType::KeyRotation,
+    );
+
+    let flow1 = manager
+        .prepare_rotation_dealer_flow(&dkg_output, &mut rng)
+        .unwrap();
+
+    let flow2 = manager
+        .prepare_rotation_dealer_flow(&dkg_output, &mut rng)
+        .expect("same-process dealer retry must re-ack its own batch, not reject it");
+
+    assert_eq!(
+        compute_messages_hash(&flow1.request.messages),
+        compute_messages_hash(&flow2.request.messages),
+        "dealer batch must be identical across a same-process retry",
+    );
+}
+
+#[test]
 fn test_prepare_nonce_dealer_flow_survives_restart() {
     let mut rng = rand::thread_rng();
     let setup = TestSetup::new(5);
@@ -6115,47 +6147,103 @@ fn test_try_sign_rotation_messages_all_or_nothing() {
 }
 
 #[test]
-fn test_try_sign_rotation_messages_rejects_already_processed_share_index() {
+fn test_try_sign_rotation_messages_re_acks_identical_re_deal() {
     let rotation_setup = RotationTestSetup::new();
-
-    // Create receiver (party 2 with weight=4)
     let (mut receiver_manager, receiver_dkg_output) =
         rotation_setup.create_receiver_with_completed_dkg(2);
-
-    // Create rotation dealer (party 0 with weight=3)
     let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(0);
     let rotation_dealer_addr = rotation_setup.setup.address(0);
 
-    // First call should succeed
+    let first = receiver_manager
+        .try_sign_rotation_messages(
+            &receiver_dkg_output,
+            rotation_dealer_addr,
+            &rotation_messages,
+        )
+        .expect("first call should succeed");
+
+    let second = receiver_manager
+        .try_sign_rotation_messages(
+            &receiver_dkg_output,
+            rotation_dealer_addr,
+            &rotation_messages,
+        )
+        .expect("identical re-deal should be re-acked, not rejected");
+
+    assert_eq!(
+        first.as_ref(),
+        second.as_ref(),
+        "re-ack must return the same signature",
+    );
+}
+
+#[test]
+fn test_try_sign_rotation_messages_rejects_differing_re_deal() {
+    let rotation_setup = RotationTestSetup::new();
+    let (mut receiver_manager, receiver_dkg_output) =
+        rotation_setup.create_receiver_with_completed_dkg(2);
+    let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(0);
+    let rotation_dealer_addr = rotation_setup.setup.address(0);
+
+    receiver_manager
+        .try_sign_rotation_messages(
+            &receiver_dkg_output,
+            rotation_dealer_addr,
+            &rotation_messages,
+        )
+        .expect("first call should succeed");
+
+    let (_, _, other_messages) = rotation_setup.create_rotation_dealer(1);
     let result = receiver_manager.try_sign_rotation_messages(
         &receiver_dkg_output,
         rotation_dealer_addr,
-        &rotation_messages,
-    );
-    assert!(result.is_ok(), "First call should succeed");
-
-    // Second call with same messages should fail (share indices already processed)
-    let result = receiver_manager.try_sign_rotation_messages(
-        &receiver_dkg_output,
-        rotation_dealer_addr,
-        &rotation_messages,
+        &other_messages,
     );
 
-    assert!(
-        result.is_err(),
-        "Should reject already-processed share indices"
-    );
-    let err = result.unwrap_err();
-    match err {
-        MpcError::InvalidMessage { reason, .. } => {
+    match result {
+        Err(MpcError::InvalidMessage { reason, .. }) => {
             assert!(
-                reason.contains("already processed"),
-                "Error should mention already processed: {}",
-                reason
+                reason.contains("differs from the previously acked batch"),
+                "unexpected reason: {reason}",
             );
         }
-        _ => panic!("Expected InvalidMessage error, got: {:?}", err),
+        other => panic!("expected InvalidMessage rejecting the differing batch, got: {other:?}"),
     }
+}
+
+#[test]
+fn test_try_sign_rotation_messages_re_acks_after_restart() {
+    let rotation_setup = RotationTestSetup::new();
+    let (mut receiver_manager, receiver_dkg_output) =
+        rotation_setup.create_receiver_with_completed_dkg(2);
+    let (_, _, rotation_messages) = rotation_setup.create_rotation_dealer(0);
+    let rotation_dealer_addr = rotation_setup.setup.address(0);
+
+    let first = receiver_manager
+        .try_sign_rotation_messages(
+            &receiver_dkg_output,
+            rotation_dealer_addr,
+            &rotation_messages,
+        )
+        .expect("first call should succeed");
+
+    // Simulate a restart
+    receiver_manager.dealer_outputs.clear();
+    receiver_manager.rotation_ack_signatures.clear();
+
+    let after_restart = receiver_manager
+        .try_sign_rotation_messages(
+            &receiver_dkg_output,
+            rotation_dealer_addr,
+            &rotation_messages,
+        )
+        .expect("re-ack after restart should succeed");
+
+    assert_eq!(
+        first.as_ref(),
+        after_restart.as_ref(),
+        "ack must be identical across a restart",
+    );
 }
 
 #[test]
@@ -7058,6 +7146,7 @@ async fn test_prepare_previous_output_for_new_member() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8358,6 +8447,7 @@ fn test_reconstruct_previous_dkg_output_with_shifted_party_ids() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8536,6 +8626,7 @@ fn test_reconstruct_previous_dkg_output_stops_at_threshold() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8670,6 +8761,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8698,6 +8790,7 @@ fn test_reconstruct_previous_dkg_output_uses_previous_encryption_key() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -8801,6 +8894,7 @@ fn test_recover_current_dkg() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            u64::MAX,
             &test_metrics(),
         )
         .unwrap()
@@ -8952,6 +9046,7 @@ fn test_recover_current_dkg_not_applicable_on_certified_dealer_complaint() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -9048,6 +9143,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
+            u64::MAX,
             &test_metrics(),
         )
         .unwrap();
@@ -9083,6 +9179,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None, // test_corrupt_shares_for
+            u64::MAX,
             &test_metrics(),
         )
         .unwrap();
@@ -9195,6 +9292,7 @@ fn test_reconstruct_previous_rotation_output_with_shifted_party_ids() {
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None, // test_corrupt_shares_for
+        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -9281,6 +9379,7 @@ fn test_recover_current_rotation() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            u64::MAX,
             &test_metrics(),
         )
         .unwrap();
@@ -9356,6 +9455,7 @@ fn test_recover_current_rotation() {
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            u64::MAX,
             &test_metrics(),
         )
         .unwrap()
@@ -9477,6 +9577,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
             None,
             TEST_BATCH_SIZE_PER_WEIGHT,
             None,
+            u64::MAX,
             &test_metrics(),
         )
         .unwrap();
@@ -9557,6 +9658,7 @@ fn test_recover_current_rotation_not_applicable_on_certified_dealer_complaint() 
         None,
         TEST_BATCH_SIZE_PER_WEIGHT,
         None,
+        u64::MAX,
         &test_metrics(),
     )
     .unwrap();
@@ -10519,6 +10621,35 @@ fn test_handle_complain_request_nonce_caches_response() {
     assert_eq!(party2.complaint_responses.len(), 1);
 }
 
+#[test]
+fn test_required_nonce_weight_follows_derivation_version() {
+    const THRESHOLD: u16 = 52;
+    const MAX_FAULTY: u16 = 20;
+
+    let setup = TestSetup::with_weights(&[25, 25, 25, 25]);
+    let mut mgr = setup.create_manager(0);
+    mgr.mpc_config.threshold = THRESHOLD;
+    mgr.mpc_config.max_faulty = MAX_FAULTY;
+    let total_weight = mgr.mpc_config.nodes.total_weight() as u32;
+
+    let legacy_gate = 2 * MAX_FAULTY as u32 + 1;
+    let privacy_gate = total_weight - MAX_FAULTY as u32;
+    assert_ne!(
+        legacy_gate, privacy_gate,
+        "params must distinguish the two gates or this test proves nothing"
+    );
+
+    mgr.mpc_config.presignature_derivation_version = PresignatureDerivationVersion::Legacy;
+    assert_eq!(mgr.required_nonce_weight(), legacy_gate);
+
+    mgr.mpc_config.presignature_derivation_version =
+        PresignatureDerivationVersion::PrivacyThreshold;
+    assert_eq!(mgr.required_nonce_weight(), privacy_gate);
+
+    assert!(legacy_gate < mgr.mpc_config.threshold as u32);
+    assert!(privacy_gate >= mgr.mpc_config.threshold as u32);
+}
+
 #[tokio::test]
 async fn test_run_nonce_generation() {
     let mut rng = rand::thread_rng();
@@ -10561,8 +10692,7 @@ async fn test_run_nonce_generation() {
 
     // Phase 3: Test run_as_nonce_dealer() and run_as_nonce_party() for validator 0
     let mut test_manager = managers.remove(0);
-    let max_faulty = test_manager.mpc_config.max_faulty;
-    let required_weight = 2 * max_faulty + 1;
+    let required_weight = test_manager.required_nonce_weight();
 
     // Create mock P2P channel with remaining managers
     let other_managers: HashMap<_, _> = managers
@@ -10991,16 +11121,77 @@ fn test_try_sign_avid_nonce_optimistic_confirms_and_persists() {
             .dealer_avid_nonce_outputs
             .contains_key(&(batch_index, dealer_addr))
     );
-    let state = receiver
-        .current_avid_round_state
-        .get(&(batch_index, dealer_addr))
-        .expect("round state persisted at confirm time")
-        .clone();
+    assert!(
+        receiver
+            .current_avid_round_state
+            .contains_key(&(batch_index, dealer_addr)),
+        "round state persisted at confirm time"
+    );
+    assert!(
+        receiver
+            .current_avid_verified_common
+            .contains_key(&(batch_index, dealer_addr)),
+        "the verified common is cached at confirm time, so echo/vote never re-verifies"
+    );
+    assert!(
+        receiver
+            .avid_round_verified_common(dealer_addr, batch_index)
+            .is_ok()
+    );
+}
 
-    let r = receiver
-        .create_avid_nonce_receiver(dealer_addr, batch_index)
+#[test]
+fn test_avid_round_verified_common_is_cached() {
+    let mut rng = rand::thread_rng();
+    let setup = TestSetup::new_avid(5);
+    let dealer = setup.create_manager(0);
+    let dealer_addr = setup.address(0);
+    let batch_index = 0u32;
+
+    let builder = dealer
+        .create_avid_nonce_dealer_builder(batch_index, &mut rng)
         .unwrap();
-    assert!(r.verify_common_message(state.common).is_ok());
+    let messages = dealer.avid_nonce_optimistic_messages(&builder, batch_index);
+
+    let receiver_idx = 1;
+    let mut receiver = setup.create_manager(receiver_idx);
+    let avss_msg = extract_optimistic(&messages[receiver_idx].1).clone();
+    receiver
+        .try_sign_avid_nonce_optimistic(dealer_addr, batch_index, &avss_msg)
+        .unwrap();
+
+    let verified = receiver
+        .avid_round_verified_common(dealer_addr, batch_index)
+        .unwrap();
+    assert!(
+        receiver
+            .current_avid_verified_common
+            .contains_key(&(batch_index, dealer_addr)),
+        "the verified common must be cached after the first call"
+    );
+
+    let probe_batch = batch_index + 100;
+    assert!(
+        receiver
+            .get_avid_round_state(probe_batch, &dealer_addr)
+            .unwrap()
+            .is_none(),
+        "the probe round must have no round state to re-derive from"
+    );
+    receiver
+        .current_avid_verified_common
+        .insert((probe_batch, dealer_addr), verified);
+    receiver
+        .avid_round_verified_common(dealer_addr, probe_batch)
+        .expect("a cached common must resolve without any round state");
+
+    receiver.current_avid_verified_common.clear();
+    assert!(
+        receiver
+            .avid_round_verified_common(dealer_addr, probe_batch)
+            .is_err(),
+        "with neither cache nor round state the common cannot be resolved"
+    );
 }
 
 #[test]
@@ -11334,7 +11525,7 @@ fn test_decode_avid_nonce_share_reconstructs_from_echoes() {
                 .unwrap()
         })
         .collect();
-    let outcome = decoder
+    let (outcome, _) = decoder
         .decode_avid_nonce_share(
             fx.dealer_addr,
             batch_index,
@@ -12423,7 +12614,7 @@ fn test_decoded_shares_match_optimistic_shares() {
                 .unwrap()
         })
         .collect();
-    let outcome = decoder
+    let (outcome, _) = decoder
         .decode_avid_nonce_share(
             fx.dealer_addr,
             batch_index,
@@ -12792,7 +12983,7 @@ fn test_avid_voter_state_survives_restart() {
     let common = restarted
         .get_avid_round_common(batch_index, &dealer_addr)
         .unwrap();
-    let outcome = laggard
+    let (outcome, _) = laggard
         .decode_avid_nonce_share(
             dealer_addr,
             batch_index,
@@ -12927,7 +13118,7 @@ fn test_handle_avid_nonce_complaint_responds_and_gates() {
                 .unwrap()
         })
         .collect();
-    let outcome = victim_mgr
+    let (outcome, _) = victim_mgr
         .decode_avid_nonce_share(
             dealer_addr,
             batch_index,
@@ -13147,7 +13338,7 @@ async fn test_run_as_nonce_party_loads_from_store_after_restart() {
     // Phase 3: Simulate restart — clear validator 0's in-memory nonce state
     // but keep the store intact (simulates restart where DB persists).
     let mut test_manager = managers.remove(0);
-    let required_weight = 2 * test_manager.mpc_config.max_faulty + 1;
+    let required_weight = test_manager.required_nonce_weight();
     test_manager.current_nonce_messages.clear();
     test_manager.dealer_nonce_outputs.clear();
     test_manager.message_responses.clear();
@@ -13443,8 +13634,7 @@ async fn test_run_nonce_generation_with_complaint_recovery() {
 
     // Phase 3: Run for validator 0
     let test_manager = managers.remove(0);
-    let max_faulty = test_manager.mpc_config.max_faulty;
-    let required_weight = 2 * max_faulty + 1;
+    let required_weight = test_manager.required_nonce_weight();
 
     let other_managers: HashMap<_, _> = managers
         .into_iter()

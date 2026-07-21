@@ -43,6 +43,7 @@ pub use crate::mpc::types::MpcResult;
 use crate::mpc::types::NonceGenerationProtocol;
 pub use crate::mpc::types::NonceMessage;
 pub use crate::mpc::types::NonceReconstructionOutcome;
+use crate::mpc::types::PresignatureDerivationVersion;
 pub use crate::mpc::types::ProtocolComplaint;
 pub use crate::mpc::types::ProtocolType;
 pub use crate::mpc::types::ProtocolTypeIndicator;
@@ -144,8 +145,11 @@ pub struct MpcManager {
     pub dealer_outputs: HashMap<DealerOutputsKey, avss::AvssOutput>,
     pub current_dkg_messages: HashMap<Address, avss::Message>,
     pub current_rotation_messages: HashMap<Address, RotationMessages>,
+    pub rotation_ack_signatures: HashMap<Address, (MessageHash, BLS12381Signature)>,
     pub current_nonce_messages: HashMap<(u32, Address), NonceMessage>,
     pub current_avid_round_state: HashMap<(u32, Address), AvidRoundState>,
+    pub current_avid_verified_common:
+        HashMap<(u32, Address), batch_avss_avid::VerifiedAvssCommonMessage>,
     pub avid_held_echoes: HashMap<(u32, Address), HeldAvidEchoes>,
     pub message_responses: HashMap<MessageResponsesKey, MpcResult<SendMessagesResponse>>,
     pub complaints_to_process: HashMap<ComplaintsToProcessKey, ProtocolComplaint>,
@@ -174,6 +178,7 @@ impl MpcManager {
         weight_divisor: Option<u16>,
         batch_size_per_weight: u16,
         test_corrupt_shares_for: Option<Address>,
+        presignature_derivation_activation_epoch: u64,
         metrics: &Metrics,
     ) -> MpcResult<Self> {
         if weight_divisor.is_some() {
@@ -199,12 +204,17 @@ impl MpcManager {
         let total_weight = nodes.total_weight();
         let nonce_generation_protocol =
             NonceGenerationProtocol::from_onchain(committee.mpc_nonce_generation_protocol())?;
+        let presignature_derivation_version = PresignatureDerivationVersion::from_activation_epoch(
+            epoch,
+            presignature_derivation_activation_epoch,
+        );
         let mpc_config = MpcConfig::new(
             epoch,
             nodes,
             threshold,
             max_faulty,
             nonce_generation_protocol,
+            presignature_derivation_version,
         );
         let party_id = committee
             .index_of(&address)
@@ -299,8 +309,10 @@ impl MpcManager {
             dealer_outputs: HashMap::new(),
             current_dkg_messages: HashMap::new(),
             current_rotation_messages: HashMap::new(),
+            rotation_ack_signatures: HashMap::new(),
             current_nonce_messages: HashMap::new(),
             current_avid_round_state: HashMap::new(),
+            current_avid_verified_common: HashMap::new(),
             avid_held_echoes: HashMap::new(),
             message_responses: HashMap::new(),
             complaints_to_process: HashMap::new(),
@@ -2258,11 +2270,13 @@ impl MpcManager {
         message: &batch_avss_avid::AvssMessage,
     ) -> MpcResult<BLS12381Signature> {
         let receiver = self.create_avid_nonce_receiver(dealer, batch_index)?;
-        let (output, avss_vote, _verified_common) = receiver
-            .process_avss_message(message, None)
+        let (output, avss_vote, verified_common) = receiver
+            .process_avss_message(message)
             .map_err(|e| MpcError::CryptoError(e.to_string()))?;
         self.dealer_avid_nonce_outputs
             .insert((batch_index, dealer), output);
+        self.current_avid_verified_common
+            .insert((batch_index, dealer), verified_common);
         let state = AvidRoundState {
             common: message.common.clone(),
             own_ciphertext: message.ciphertext.clone(),
@@ -2355,9 +2369,7 @@ impl MpcManager {
         }
         self.ensure_avid_nonce_output(dealer, batch_index)?;
         let receiver = self.create_avid_nonce_receiver(dealer, batch_index)?;
-        let verified_common = receiver
-            .verify_common_message(common)
-            .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+        let verified_common = self.avid_round_verified_common(dealer, batch_index)?;
         let avid_confirm =
             AvidCertificate::confirm(confirm_cert, Arc::new(self.committee.clone()))?;
         let avid_message = batch_avss_avid::AvidMessage {
@@ -2406,7 +2418,7 @@ impl MpcManager {
     }
 
     fn handle_avid_nonce_complaint_request(
-        &self,
+        &mut self,
         caller: Address,
         request: &ComplainRequest,
     ) -> MpcResult<ComplaintResponse> {
@@ -2436,22 +2448,12 @@ impl MpcManager {
                     reason: "complainer not in committee".into(),
                 })? as PartyId;
         let state = self
-            .current_avid_round_state
-            .get(&(batch_index, request.dealer))
-            .cloned()
-            .map(Ok)
-            .unwrap_or_else(|| {
-                self.public_messages_store
-                    .get_avid_round_state(self.mpc_config.epoch, batch_index, &request.dealer)
-                    .map_err(|e| MpcError::StorageError(e.to_string()))?
-                    .ok_or_else(|| {
-                        MpcError::NotFound("no AVID round state for the complained round".into())
-                    })
+            .get_avid_round_state(batch_index, &request.dealer)?
+            .ok_or_else(|| {
+                MpcError::NotFound("no AVID round state for the complained round".into())
             })?;
         let receiver = self.create_avid_nonce_receiver(request.dealer, batch_index)?;
-        let verified_common = receiver
-            .verify_common_message(state.common)
-            .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+        let verified_common = self.avid_round_verified_common(request.dealer, batch_index)?;
         let mut rng = rand::thread_rng();
         let response = match &request.complaint {
             ProtocolComplaint::AvidReveal(complaint) => receiver
@@ -2516,17 +2518,9 @@ impl MpcManager {
             return Ok(());
         }
         let state = self
-            .current_avid_round_state
-            .get(&(batch_index, dealer))
-            .cloned()
-            .map(Ok)
-            .unwrap_or_else(|| {
-                self.public_messages_store
-                    .get_avid_round_state(self.mpc_config.epoch, batch_index, &dealer)
-                    .map_err(|e| MpcError::StorageError(e.to_string()))?
-                    .ok_or_else(|| {
-                        MpcError::NotReady("no verified common message for this AVID round".into())
-                    })
+            .get_avid_round_state(batch_index, &dealer)?
+            .ok_or_else(|| {
+                MpcError::NotReady("no verified common message for this AVID round".into())
             })?;
         let message = batch_avss_avid::AvssMessage {
             common: state.common,
@@ -2546,16 +2540,55 @@ impl MpcManager {
         batch_index: u32,
         dealer: &Address,
     ) -> Option<batch_avss_avid::AvssCommonMessage> {
+        self.get_avid_round_state(batch_index, dealer)
+            .ok()
+            .flatten()
+            .map(|s| s.common)
+    }
+
+    fn get_avid_round_state(
+        &self,
+        batch_index: u32,
+        dealer: &Address,
+    ) -> MpcResult<Option<AvidRoundState>> {
         self.current_avid_round_state
             .get(&(batch_index, *dealer))
-            .map(|s| s.common.clone())
-            .or_else(|| {
+            .cloned()
+            .map(|s| Ok(Some(s)))
+            .unwrap_or_else(|| {
                 self.public_messages_store
                     .get_avid_round_state(self.mpc_config.epoch, batch_index, dealer)
-                    .ok()
-                    .flatten()
-                    .map(|s| s.common)
+                    .map_err(|e| MpcError::StorageError(e.to_string()))
             })
+    }
+
+    fn avid_round_verified_common(
+        &mut self,
+        dealer: Address,
+        batch_index: u32,
+    ) -> MpcResult<batch_avss_avid::VerifiedAvssCommonMessage> {
+        if let Some(verified) = self
+            .current_avid_verified_common
+            .get(&(batch_index, dealer))
+        {
+            return Ok(verified.clone());
+        }
+        let state = self
+            .get_avid_round_state(batch_index, &dealer)?
+            .ok_or_else(|| {
+                MpcError::NotReady("no verified common message for this AVID round".into())
+            })?;
+        let receiver = self.create_avid_nonce_receiver(dealer, batch_index)?;
+        let message = batch_avss_avid::AvssMessage {
+            common: state.common,
+            ciphertext: state.own_ciphertext,
+        };
+        let (_, _, verified_common) = receiver
+            .process_avss_message(&message)
+            .map_err(|e| MpcError::CryptoError(e.to_string()))?;
+        self.current_avid_verified_common
+            .insert((batch_index, dealer), verified_common.clone());
+        Ok(verified_common)
     }
 
     fn handle_avid_nonce_message(
@@ -3000,19 +3033,25 @@ impl MpcManager {
                 &vote_cert,
                 &mut rng,
             ) {
-                Ok(batch_avss_avid::DecodeAndDecryptOutcome::Valid(..)) => {
+                Ok((batch_avss_avid::DecodeAndDecryptOutcome::Valid(..), _)) => {
                     tracing::info!(
                         "AVID laggard decode completed: dealer {:?}, batch_index={batch_index}",
                         dealer
                     );
                 }
-                Ok(batch_avss_avid::DecodeAndDecryptOutcome::InvalidDecryption(complaint)) => {
+                Ok((
+                    batch_avss_avid::DecodeAndDecryptOutcome::InvalidDecryption(complaint),
+                    verified_common,
+                )) => {
                     return Ok((
                         CertKind::AvidVote,
-                        Some((ProtocolComplaint::AvidReveal(complaint), common)),
+                        Some((ProtocolComplaint::AvidReveal(complaint), verified_common)),
                     ));
                 }
-                Ok(batch_avss_avid::DecodeAndDecryptOutcome::InvalidDispersal(complaint)) => {
+                Ok((
+                    batch_avss_avid::DecodeAndDecryptOutcome::InvalidDispersal(complaint),
+                    verified_common,
+                )) => {
                     return Ok((
                         CertKind::AvidVote,
                         Some((
@@ -3020,7 +3059,7 @@ impl MpcManager {
                                 complaint,
                                 vote_cert: nonce_cert,
                             },
-                            common,
+                            verified_common,
                         )),
                     ));
                 }
@@ -3032,12 +3071,12 @@ impl MpcManager {
         })
         .await?;
         let (kind, complaint) = outcome;
-        if let Some((complaint, common)) = complaint
+        if let Some((complaint, verified_common)) = complaint
             && let Err(e) = Self::recover_avid_nonce_shares_via_complaint(
                 mpc_manager,
                 dealer,
                 batch_index,
-                common,
+                verified_common,
                 complaint,
                 complaint_signers,
                 p2p_channel,
@@ -3059,7 +3098,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         dealer: Address,
         batch_index: u32,
-        common: batch_avss_avid::AvssCommonMessage,
+        verified_common: batch_avss_avid::VerifiedAvssCommonMessage,
         complaint: ProtocolComplaint,
         signers: Vec<Address>,
         p2p_channel: &impl P2PChannel,
@@ -3077,15 +3116,12 @@ impl MpcManager {
             protocol_type: ProtocolTypeIndicator::NonceGeneration,
             epoch,
         };
-        let (receiver, verified_common) = {
+        let receiver = {
             let mgr = Arc::clone(mpc_manager);
-            spawn_blocking(move || -> MpcResult<_> {
-                let mgr = mgr.read().unwrap();
-                let receiver = mgr.create_avid_nonce_receiver(dealer, batch_index)?;
-                let verified_common = receiver
-                    .verify_common_message(common)
-                    .map_err(|e| MpcError::CryptoError(e.to_string()))?;
-                Ok((receiver, verified_common))
+            spawn_blocking(move || {
+                mgr.read()
+                    .unwrap()
+                    .create_avid_nonce_receiver(dealer, batch_index)
             })
             .await?
         };
@@ -3348,19 +3384,22 @@ impl MpcManager {
         echoes: &[batch_avss_avid::VerifiedEcho],
         vote_cert: &VerifiedAvidVoteCert,
         rng: &mut impl fastcrypto::traits::AllowedRng,
-    ) -> MpcResult<batch_avss_avid::DecodeAndDecryptOutcome> {
+    ) -> MpcResult<(
+        batch_avss_avid::DecodeAndDecryptOutcome,
+        batch_avss_avid::VerifiedAvssCommonMessage,
+    )> {
         let receiver = self.create_avid_nonce_receiver(dealer, batch_index)?;
         let verified_common = receiver
-            .verify_common_message(common)
+            .verify_common_message(vote_cert, common)
             .map_err(|e| MpcError::CryptoError(e.to_string()))?;
         let outcome = receiver
-            .decode_and_decrypt(echoes, &verified_common, vote_cert, rng)
+            .decode_and_decrypt(echoes, &verified_common, rng)
             .map_err(|e| MpcError::CryptoError(e.to_string()))?;
-        if let batch_avss_avid::DecodeAndDecryptOutcome::Valid(_, output) = &outcome {
+        if let batch_avss_avid::DecodeAndDecryptOutcome::Valid(output) = &outcome {
             self.dealer_avid_nonce_outputs
                 .insert((batch_index, dealer), output.clone());
         }
-        Ok(outcome)
+        Ok((outcome, verified_common))
     }
 
     fn prune_nonce_state(mpc_manager: &Arc<RwLock<Self>>, batch_index: u32) {
@@ -3371,6 +3410,8 @@ impl MpcManager {
         let mut mgr = mpc_manager.write().unwrap();
         mgr.current_nonce_messages.retain(|(b, _), _| *b >= cutoff);
         mgr.current_avid_round_state
+            .retain(|(b, _), _| *b >= cutoff);
+        mgr.current_avid_verified_common
             .retain(|(b, _), _| *b >= cutoff);
         mgr.dealer_nonce_outputs.retain(|(b, _), _| *b >= cutoff);
         mgr.dealer_avid_nonce_outputs
@@ -4304,6 +4345,23 @@ impl MpcManager {
                 panic!("try_sign_rotation_messages called with non-rotation messages")
             }
         };
+        let messages_hash = compute_messages_hash(messages);
+        if let Some((acked_hash, ack)) = self.rotation_ack_signatures.get(&dealer) {
+            if *acked_hash == messages_hash {
+                tracing::info!("re-acking identical rotation batch from dealer {dealer}");
+                return Ok(ack.clone());
+            }
+            tracing::warn!(
+                "dealer {dealer} sent a rotation batch differing from the one already acked this \
+                 epoch (acked {}, got {}); rejecting — equivocation or lost persisted messages",
+                hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(acked_hash)),
+                hex::encode(<MessageHash as AsRef<[u8; 32]>>::as_ref(&messages_hash)),
+            );
+            return Err(MpcError::InvalidMessage {
+                sender: dealer,
+                reason: "Rotation batch differs from the previously acked batch".into(),
+            });
+        }
         let previous_committee = self.previous_committee.as_ref().ok_or_else(|| {
             MpcError::InvalidConfig("Key rotation requires previous committee".into())
         })?;
@@ -4368,15 +4426,18 @@ impl MpcManager {
             }
         }
         self.dealer_outputs.extend(outputs);
-        let messages_hash = compute_messages_hash(messages);
         let rotation_message = DealerMessagesHash {
             dealer_address: dealer,
             messages_hash,
         };
-        let signature =
-            self.signing_key
-                .sign(self.mpc_config.epoch, self.address, &rotation_message);
-        Ok(signature.signature().clone())
+        let signature = self
+            .signing_key
+            .sign(self.mpc_config.epoch, self.address, &rotation_message)
+            .signature()
+            .clone();
+        self.rotation_ack_signatures
+            .insert(dealer, (messages_hash, signature.clone()));
+        Ok(signature)
     }
 
     fn complete_key_rotation(
@@ -5580,7 +5641,13 @@ impl MpcManager {
     }
 
     fn required_nonce_weight(&self) -> u32 {
-        2 * self.mpc_config.max_faulty as u32 + 1
+        let max_faulty = self.mpc_config.max_faulty as u32;
+        match self.mpc_config.presignature_derivation_version {
+            PresignatureDerivationVersion::Legacy => 2 * max_faulty + 1,
+            PresignatureDerivationVersion::PrivacyThreshold => {
+                self.mpc_config.nodes.total_weight() as u32 - max_faulty
+            }
+        }
     }
 
     fn maybe_corrupt_nodes_for_testing(

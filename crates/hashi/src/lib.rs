@@ -23,6 +23,7 @@ pub mod db;
 pub mod deposits;
 pub mod grpc;
 pub mod guardian_limiter;
+pub mod keys;
 pub mod leader;
 pub mod metrics;
 pub mod metrics_push;
@@ -312,6 +313,7 @@ impl Hashi {
             self.config.tls_private_key().ok(),
             Some(self.config.grpc_max_decoding_message_size()),
             Some(self.metrics.clone()),
+            Some(self.config.onchain_config_poll_interval()),
         )
         .await?;
         self.onchain_state
@@ -553,6 +555,17 @@ impl Hashi {
                 "test_corrupt_shares_for",
             );
         }
+        let presignature_derivation_activation_epoch =
+            if let Some(epoch) = self.config.test_presignature_derivation_activation_epoch {
+                assert_test_only_config(
+                    chain_id,
+                    self.config.bitcoin_chain_id(),
+                    "test_presignature_derivation_activation_epoch",
+                );
+                epoch
+            } else {
+                constants::presignature_derivation_activation_epoch(chain_id)
+            };
         Ok(mpc::MpcManager::new(
             address,
             committee_set,
@@ -566,6 +579,7 @@ impl Hashi {
             self.config.test_weight_divisor,
             batch_size_per_weight,
             self.config.test_corrupt_shares_for,
+            presignature_derivation_activation_epoch,
             &self.metrics,
         )?)
     }
@@ -645,7 +659,10 @@ impl Hashi {
             self.config.bitcoin_rpc_auth(),
         )?;
 
-        let info = rpc.get_blockchain_info()?.into_model()?;
+        let info = rpc
+            .get_blockchain_info()
+            .map_err(bitcoind_rpc_error_with_version_hint)?
+            .into_model()?;
         let expected = self.config.bitcoin_network();
 
         anyhow::ensure!(
@@ -821,6 +838,7 @@ impl Hashi {
         let backup_service = backup_service.start();
         let mpc_service = mpc_service.start();
         let guardian_bootstrap_service = self.clone().start_guardian_bootstrap();
+        let sui_balance_service = self.clone().start_sui_balance_metric();
 
         let service = Service::new()
             .merge(onchain_service)
@@ -829,7 +847,8 @@ impl Hashi {
             .merge(leader_service)
             .merge(backup_service)
             .merge(mpc_service)
-            .merge(guardian_bootstrap_service);
+            .merge(guardian_bootstrap_service)
+            .merge(sui_balance_service);
 
         Ok(service)
     }
@@ -914,7 +933,8 @@ impl Hashi {
                 );
                 anyhow::anyhow!("parse GetGuardianInfoResponse: {e:?}")
             })?;
-        Ok(resp.into_info_unchecked())
+        let (info, _) = resp.into_info_unchecked();
+        Ok(info)
     }
 
     /// Fetch the guardian's authoritative `LimiterState` and the live local
@@ -1020,6 +1040,47 @@ impl Hashi {
         }
     }
 
+    /// Poll the operator gas wallet's total SUI balance (owned coins plus
+    /// address balance — `sui client gas` misses the latter) into
+    /// `hashi_sui_balance`, so operators can alert on drain before
+    /// transactions start failing gas selection.
+    fn start_sui_balance_metric(self: Arc<Self>) -> Service {
+        const BALANCE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+        Service::new().spawn_aborting(async move {
+            // -1 = never sampled; keeps a `0 <= balance < threshold` alert
+            // from firing on nodes where this poller is disabled or has not
+            // yet succeeded (the gauge would otherwise read a false 0).
+            self.metrics.sui_balance.set(-1);
+            let owner = match self.config.operator_private_key() {
+                Ok(key) => key.verifying_key().derive_address(),
+                Err(e) => {
+                    tracing::info!("SUI balance metric disabled; operator key unavailable: {e}");
+                    return Ok(());
+                }
+            };
+            let request = sui_rpc::proto::sui::rpc::v2::GetBalanceRequest::default()
+                .with_owner(owner)
+                .with_coin_type(sui_sdk_types::StructTag::sui());
+            let mut client = self.onchain_state().client();
+            let mut interval = tokio::time::interval(BALANCE_POLL_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                match client.state_client().get_balance(request.clone()).await {
+                    Ok(response) => {
+                        if let Some(balance) = response.into_inner().balance.and_then(|b| b.balance)
+                        {
+                            self.metrics
+                                .sui_balance
+                                .set(balance.min(i64::MAX as u64) as i64);
+                        }
+                    }
+                    Err(e) => tracing::debug!("failed to fetch operator SUI balance: {e}"),
+                }
+            }
+        })
+    }
+
     fn start_guardian_bootstrap(self: Arc<Self>) -> Service {
         use backon::Retryable;
         // Cadence for the limiter reconciliation safety net below.
@@ -1082,6 +1143,21 @@ impl Hashi {
         self.onchain_state()
             .current_committee()
             .is_some_and(|c| c.index_of(&address).is_some())
+    }
+}
+
+/// Wrap a bitcoind response-decode failure with a version hint. A response
+/// that is valid JSON but does not match the v29 schema is almost always a
+/// pre-v29 bitcoind (`warnings` was a string, not an array, until Core v28),
+/// so name the real problem instead of surfacing a bare serde error.
+fn bitcoind_rpc_error_with_version_hint(e: corepc_client::client_sync::Error) -> anyhow::Error {
+    match &e {
+        corepc_client::client_sync::Error::JsonRpc(jsonrpc::Error::Json(_))
+        | corepc_client::client_sync::Error::Json(_) => anyhow!(
+            "unexpected getblockchaininfo response from bitcoind: {e}. Hashi requires \
+             Bitcoin Core v29 or newer; check the node's version with `bitcoin-cli getnetworkinfo`"
+        ),
+        _ => anyhow!(e),
     }
 }
 
@@ -1165,6 +1241,7 @@ mod test {
 
     use crate::Hashi;
     use crate::ServerVersion;
+    use crate::bitcoind_rpc_error_with_version_hint;
 
     use crate::config::Config;
     use crate::grpc::Client;
@@ -1177,6 +1254,23 @@ mod test {
         let registry = prometheus::Registry::new();
         let hashi = Hashi::new_with_registry(server_version, None, config, &registry).unwrap();
         (hashi, tmpdir)
+    }
+
+    #[test]
+    fn bitcoind_decode_errors_get_version_hint_but_transport_errors_do_not() {
+        // A pre-v29 bitcoind returns `"warnings": ""` where v29 has an array;
+        // the resulting serde error must be wrapped with the version hint.
+        let decode = serde_json::from_str::<Vec<String>>("\"\"").unwrap_err();
+        let e = corepc_client::client_sync::Error::JsonRpc(jsonrpc::Error::Json(decode));
+        let msg = bitcoind_rpc_error_with_version_hint(e).to_string();
+        assert!(msg.contains("Bitcoin Core v29 or newer"), "{msg}");
+
+        // Connectivity problems must not be misattributed to the version.
+        let transport =
+            jsonrpc::Error::Transport(Box::new(std::io::Error::other("connection refused")));
+        let e = corepc_client::client_sync::Error::JsonRpc(transport);
+        let msg = bitcoind_rpc_error_with_version_hint(e).to_string();
+        assert!(!msg.contains("Bitcoin Core"), "{msg}");
     }
 
     #[test]
@@ -1406,7 +1500,8 @@ mod test {
         config.db = Some(tmpdir.path().into());
         let tls_public_key = config.tls_public_key().unwrap();
 
-        let hashi = Hashi::new(server_version, None, config).unwrap();
+        let registry = prometheus::Registry::new();
+        let hashi = Hashi::new_with_registry(server_version, None, config, &registry).unwrap();
 
         let (local_addr, _http_service) = crate::grpc::HttpService::new(hashi).start().await;
 
@@ -1417,10 +1512,19 @@ mod test {
         let client_auth_server = Client::new(&address, client_tls_config).unwrap();
         let client_no_auth = Client::new_no_auth(&address).unwrap();
 
-        let resp = client_auth_server.get_service_info().await.unwrap();
-        dbg!(resp);
-        let resp = client_no_auth.get_service_info().await.unwrap();
-        dbg!(resp);
+        let resp = client_auth_server
+            .get_service_info()
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.server.as_deref(), Some("unknown/unknown"));
+
+        let resp = client_no_auth
+            .get_service_info()
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.server.as_deref(), Some("unknown/unknown"));
 
         //         loop {
         //             let resp = client

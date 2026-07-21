@@ -105,6 +105,27 @@ impl NonceGenerationProtocol {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PresignatureDerivationVersion {
+    #[default]
+    Legacy,
+    PrivacyThreshold,
+}
+
+impl PresignatureDerivationVersion {
+    pub fn from_activation_epoch(epoch: u64, activation_epoch: u64) -> Self {
+        if epoch < activation_epoch {
+            Self::Legacy
+        } else {
+            Self::PrivacyThreshold
+        }
+    }
+
+    pub fn use_legacy(&self) -> bool {
+        matches!(self, Self::Legacy)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MpcConfig {
     pub epoch: u64,
@@ -114,6 +135,7 @@ pub struct MpcConfig {
     /// Maximum number of faulty validators (f)
     pub max_faulty: u16,
     pub nonce_generation_protocol: NonceGenerationProtocol,
+    pub presignature_derivation_version: PresignatureDerivationVersion,
 }
 
 impl MpcConfig {
@@ -123,6 +145,7 @@ impl MpcConfig {
         threshold: u16,
         max_faulty: u16,
         nonce_generation_protocol: NonceGenerationProtocol,
+        presignature_derivation_version: PresignatureDerivationVersion,
     ) -> Self {
         Self {
             epoch,
@@ -130,6 +153,7 @@ impl MpcConfig {
             threshold,
             max_faulty,
             nonce_generation_protocol,
+            presignature_derivation_version,
         }
     }
 }
@@ -860,11 +884,11 @@ mod tests {
         let dealer =
             batch_avss_avid::Dealer::new(nodes.clone(), 0, params, sid.clone(), batch).unwrap();
         let builder = dealer.create_avss_messages(&mut rng).unwrap();
-        let common = builder.message_for(0).unwrap().common;
+        let own_message = builder.message_for(0).unwrap();
         let cert = StubAvssCert {
             voters: voters.iter().copied().collect(),
             vote: batch_avss_avid::AvssVote {
-                common_message_hash: common.hash(),
+                common_message_hash: own_message.common.hash(),
             },
         };
         let messages = dealer.create_avid_messages(&builder, cert).unwrap();
@@ -872,7 +896,7 @@ mod tests {
         let receiver =
             batch_avss_avid::Receiver::new(nodes, 0, 0, params, sid, sks[0].clone(), batch)
                 .unwrap();
-        let verified_common = receiver.verify_common_message(common).unwrap();
+        let (_, _, verified_common) = receiver.process_avss_message(&own_message).unwrap();
         let (_, avid_vote) = receiver
             .process_avid_message(&verified_common, avid_message)
             .unwrap();
@@ -953,10 +977,10 @@ mod tests {
         let dealer =
             batch_avss_avid::Dealer::new(nodes.clone(), 0, params, sid.clone(), batch).unwrap();
         let builder = dealer.create_avss_messages(&mut rng).unwrap();
-        let common = builder.message_for(0).unwrap().common;
+        let own_message = builder.message_for(0).unwrap();
 
         // A real Confirm cert
-        let h_v = MessageHash::from(common.hash().digest);
+        let h_v = MessageHash::from(own_message.common.hash().digest);
         let confirmers: Vec<usize> = (0..=7).collect();
         let signed = dealer_cert(&committee, &keys, &confirmers, epoch, h_v);
         let confirm_cert = AvidCertificate::confirm(signed, Arc::new(committee)).unwrap();
@@ -967,7 +991,7 @@ mod tests {
         let receiver =
             batch_avss_avid::Receiver::new(nodes, 0, 0, params, sid, sks[0].clone(), batch)
                 .unwrap();
-        let verified_common = receiver.verify_common_message(common).unwrap();
+        let (_, _, verified_common) = receiver.process_avss_message(&own_message).unwrap();
         let processed =
             receiver.process_avid_message(&verified_common, messages.message_for(0).unwrap());
         assert!(processed.is_ok());
@@ -1207,5 +1231,38 @@ mod tests {
             NonceGenerationProtocol::default(),
             NonceGenerationProtocol::Vanilla
         );
+    }
+
+    #[test]
+    fn presignature_derivation_version_from_activation_epoch() {
+        use PresignatureDerivationVersion::*;
+        assert_eq!(
+            PresignatureDerivationVersion::from_activation_epoch(4, 5),
+            Legacy
+        );
+        assert_eq!(
+            PresignatureDerivationVersion::from_activation_epoch(5, 5),
+            PrivacyThreshold
+        );
+        assert_eq!(
+            PresignatureDerivationVersion::from_activation_epoch(6, 5),
+            PrivacyThreshold
+        );
+        assert_eq!(
+            PresignatureDerivationVersion::from_activation_epoch(0, 0),
+            PrivacyThreshold
+        );
+        // The absent-key default: never activates.
+        assert_eq!(
+            PresignatureDerivationVersion::from_activation_epoch(u64::MAX, u64::MAX),
+            PrivacyThreshold
+        );
+        assert_eq!(
+            PresignatureDerivationVersion::from_activation_epoch(u64::MAX - 1, u64::MAX),
+            Legacy
+        );
+        assert!(Legacy.use_legacy());
+        assert!(!PrivacyThreshold.use_legacy());
+        assert_eq!(PresignatureDerivationVersion::default(), Legacy);
     }
 }

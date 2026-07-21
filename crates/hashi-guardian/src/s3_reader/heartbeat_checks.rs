@@ -3,6 +3,8 @@
 
 use super::heartbeat_cursor;
 use super::GuardianReader;
+use crate::LIVE_SESSION_LATEST_HEARTBEAT_MAX_AGE;
+use crate::OTHER_SESSION_QUIET_PERIOD;
 use hashi_types::guardian::time_utils::now_timestamp_secs;
 use hashi_types::guardian::time_utils::unix_millis_to_seconds;
 use hashi_types::guardian::time_utils::UnixSeconds;
@@ -10,16 +12,7 @@ use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::VerifiedLogRecord;
 use std::collections::BTreeMap;
-use std::time::Duration;
 use tracing::info;
-
-/// Maximum acceptable heartbeat age for the activating standby session.
-/// Set to HEARTBEAT_INTERVAL + grace period to account for clock skew and retries.
-const LIVE_SESSION_MAX_AGE: Duration = Duration::from_mins(3);
-
-/// A non-ignored session with a heartbeat inside this window is considered
-/// active, so standby activation must fail.
-const OTHER_SESSION_QUIET_PERIOD: Duration = Duration::from_mins(10);
 
 impl GuardianReader {
     /// Enforces that `live_session` has heartbeated recently, while every other
@@ -29,7 +22,7 @@ impl GuardianReader {
         &mut self,
         live_session: &str,
     ) -> anyhow::Result<()> {
-        let recent_heartbeats = self.read_recent_heartbeats().await?;
+        let recent_heartbeats = self.read_recent_heartbeat_logs().await?;
         let summary = summarize_heartbeats_by_session(recent_heartbeats)?;
         let now = now_timestamp_secs();
 
@@ -37,13 +30,13 @@ impl GuardianReader {
             &summary,
             now,
             live_session,
-            LIVE_SESSION_MAX_AGE.as_secs(),
+            LIVE_SESSION_LATEST_HEARTBEAT_MAX_AGE.as_secs(),
             OTHER_SESSION_QUIET_PERIOD.as_secs(),
         )?;
 
         let live_session_info = summary
             .iter()
-            .find(|s| s.session_id == live_session)
+            .find(|s| s.session_id.as_str() == live_session)
             .expect("validated live session must be present");
         info!(
             session_id = %live_session,
@@ -55,14 +48,14 @@ impl GuardianReader {
         Ok(())
     }
 
-    async fn read_recent_heartbeats(&mut self) -> anyhow::Result<Vec<VerifiedLogRecord>> {
+    async fn read_recent_heartbeat_logs(&mut self) -> anyhow::Result<Vec<VerifiedLogRecord>> {
         // Read from the previous, current, and next hour-scoped prefixes to
         // cover clock-boundary cases and moderate clock skew.
         let one_hour_ago = now_timestamp_secs().saturating_sub(60 * 60);
         let mut cursor = heartbeat_cursor(one_hour_ago);
         let mut logs = Vec::new();
         for _ in 0..3 {
-            logs.extend(self.read_dir(&cursor).await?);
+            logs.extend(self.read_logs_in_dir(&cursor).await?);
             cursor = cursor.next_dir();
         }
         Ok(logs)
@@ -79,10 +72,10 @@ struct GuardianSessionInfo {
 fn summarize_heartbeats_by_session(
     logs: Vec<VerifiedLogRecord>,
 ) -> anyhow::Result<Vec<GuardianSessionInfo>> {
-    let mut map: BTreeMap<String, (UnixSeconds, UnixSeconds)> = BTreeMap::new();
+    let mut map: BTreeMap<SessionID, (UnixSeconds, UnixSeconds)> = BTreeMap::new();
 
     for log in logs {
-        if !matches!(log.message, LogMessage::Heartbeat { .. }) {
+        if !matches!(log.message, LogMessage::Heartbeat(..)) {
             anyhow::bail!("non-heartbeat logs found");
         }
 
@@ -116,7 +109,7 @@ fn validate_session_live_and_others_quiet(
 ) -> anyhow::Result<()> {
     let live_session_info = summary
         .iter()
-        .find(|s| s.session_id == live_session)
+        .find(|s| s.session_id.as_str() == live_session)
         .ok_or_else(|| anyhow::anyhow!("no heartbeat logs found for session {live_session}"))?;
     let live_session_age_secs = now.saturating_sub(live_session_info.last_heartbeat);
     if live_session_age_secs > live_session_max_age_secs {
@@ -130,7 +123,7 @@ fn validate_session_live_and_others_quiet(
 
     let active_sessions = summary
         .iter()
-        .filter(|s| s.session_id != live_session)
+        .filter(|s| s.session_id.as_str() != live_session)
         .filter_map(|s| {
             let age_secs = now.saturating_sub(s.last_heartbeat);
             (age_secs < other_session_quiet_secs)
@@ -151,6 +144,7 @@ fn validate_session_live_and_others_quiet(
 mod tests {
     use super::*;
     use hashi_types::guardian::BuildPcrs;
+    use hashi_types::guardian::HeartbeatLogMessage;
     use hashi_types::guardian::InitLogMessage;
 
     fn build_pcrs() -> BuildPcrs {
@@ -159,19 +153,25 @@ mod tests {
 
     fn heartbeat_log(session_id: &str, timestamp_secs: UnixSeconds) -> VerifiedLogRecord {
         VerifiedLogRecord {
-            session_id: session_id.to_string(),
+            object_key: format!("heartbeat/{session_id}.json"),
+            session_id: session_id.into(),
             timestamp_ms: timestamp_secs * 1_000,
-            message: LogMessage::Heartbeat { seq: 0 },
+            message: LogMessage::Heartbeat(HeartbeatLogMessage::new(0)),
             build_pcrs: build_pcrs(),
         }
     }
 
     fn non_heartbeat_log() -> VerifiedLogRecord {
         VerifiedLogRecord {
-            session_id: "test-session".to_string(),
+            object_key: "init/test-session/03-pi-enclave-fully-initialized.json".to_string(),
+            session_id: "test-session".into(),
             timestamp_ms: 0,
             message: LogMessage::Init(Box::new(InitLogMessage::PIEnclaveFullyInitialized {
+                sharing_seq: 0,
                 share_ids: vec![],
+                enclave_btc_pubkey: hashi_types::bitcoin::create_btc_keypair_for_test(&[1; 32])
+                    .x_only_public_key()
+                    .0,
             })),
             build_pcrs: build_pcrs(),
         }
@@ -187,9 +187,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(summary.len(), 2);
-        assert_eq!(summary[0].session_id, "a");
+        assert_eq!(summary[0].session_id.as_str(), "a");
         assert_eq!(summary[0].last_heartbeat, 30);
-        assert_eq!(summary[1].session_id, "b");
+        assert_eq!(summary[1].session_id.as_str(), "b");
         assert_eq!(summary[1].last_heartbeat, 20);
     }
 
@@ -204,12 +204,12 @@ mod tests {
     fn validate_session_live_and_others_quiet_accepts_live_session() {
         let summary = vec![
             GuardianSessionInfo {
-                session_id: "live".to_string(),
+                session_id: "live".into(),
                 first_heartbeat: 990,
                 last_heartbeat: 990,
             },
             GuardianSessionInfo {
-                session_id: "old".to_string(),
+                session_id: "old".into(),
                 first_heartbeat: 200,
                 last_heartbeat: 200,
             },
@@ -222,7 +222,7 @@ mod tests {
     #[test]
     fn validate_session_live_and_others_quiet_fails_when_live_session_missing() {
         let summary = vec![GuardianSessionInfo {
-            session_id: "old".to_string(),
+            session_id: "old".into(),
             first_heartbeat: 200,
             last_heartbeat: 200,
         }];
@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn validate_session_live_and_others_quiet_fails_when_live_session_stale() {
         let summary = vec![GuardianSessionInfo {
-            session_id: "live".to_string(),
+            session_id: "live".into(),
             first_heartbeat: 800,
             last_heartbeat: 800,
         }];
@@ -249,12 +249,12 @@ mod tests {
     fn validate_session_live_and_others_quiet_fails_when_other_session_active() {
         let summary = vec![
             GuardianSessionInfo {
-                session_id: "live".to_string(),
+                session_id: "live".into(),
                 first_heartbeat: 990,
                 last_heartbeat: 990,
             },
             GuardianSessionInfo {
-                session_id: "other".to_string(),
+                session_id: "other".into(),
                 first_heartbeat: 950,
                 last_heartbeat: 950,
             },

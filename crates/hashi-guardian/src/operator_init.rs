@@ -21,35 +21,32 @@ use GuardianError::*;
 /// The withdraw-mode arming state to install, built from `InitConfig`.
 pub(crate) struct InitInstall {
     init_config: InitConfig,
-    secret_sharing_instance: SecretSharingInstance,
+    ceremony_state: CeremonyState,
 }
 
 impl InitInstall {
-    pub(crate) fn from_parts(
-        config: InitConfig,
-        secret_sharing_instance: SecretSharingInstance,
-    ) -> Self {
+    pub(crate) fn from_parts(config: InitConfig, ceremony_state: CeremonyState) -> Self {
         Self {
             init_config: config,
-            secret_sharing_instance,
+            ceremony_state,
         }
     }
 
-    /// Build the arming bundle from the stable config and S3-derived ceremony
-    /// state. Shared by `operator_init` and tests.
+    /// Build the arming bundle from the stable config and S3-derived ceremony +
+    /// KP share state. Shared by `operator_init` and tests.
     pub(crate) async fn from_config(
         logger: &GuardianS3Client,
         config: InitConfig,
     ) -> GuardianResult<Self> {
         let mut reader =
             GuardianReader::from_s3_client(logger.clone(), config.pcr_allowlist().clone());
-        let (_, secret_sharing_instance, _) = reader
-            .read_latest_ceremony(BuildPolicy::AnyAllowlisted)
+        let ceremony_state = reader
+            .read_latest_ceremony_state(BuildPolicy::AnyAllowlisted)
             .await
-            .map_err(|e| InvalidInputs(format!("read latest ceremony: {e}")))?
+            .map_err(|e| InvalidInputs(format!("read latest ceremony and KP share state: {e}")))?
             .ok_or_else(|| InvalidInputs("no ceremony log found for withdraw init".into()))?;
 
-        Ok(Self::from_parts(config, secret_sharing_instance))
+        Ok(Self::from_parts(config, ceremony_state))
     }
 
     /// Install the bundle onto a fresh enclave. Infallible by design (see the
@@ -66,13 +63,16 @@ impl InitInstall {
 
         info!(
             "Storing secret-sharing instance: n={}, t={}, {} commitments.",
-            self.secret_sharing_instance.num_shares(),
-            self.secret_sharing_instance.threshold(),
-            self.secret_sharing_instance.commitments().len()
+            self.ceremony_state.secret_sharing_instance.num_shares(),
+            self.ceremony_state.secret_sharing_instance.threshold(),
+            self.ceremony_state
+                .secret_sharing_instance
+                .commitments()
+                .len()
         );
         enclave
-            .set_secret_sharing_instance(self.secret_sharing_instance)
-            .expect("Unable to set secret-sharing instance");
+            .set_ceremony_state(self.ceremony_state)
+            .expect("Unable to set ceremony state");
 
         info!("Setting init config.");
         enclave
@@ -105,9 +105,11 @@ pub async fn operator_init(
     // Serialize so concurrent callers can't race the check-then-commit below.
     let _guard = enclave.control_lock.lock().await;
 
-    if enclave.is_operator_init_complete() {
-        return Err(InvalidInputs("operator_init already complete".into()));
-    }
+    let uninitialized = match enclave.mode() {
+        EnclaveMode::Ceremony => CeremonyStage::Uninitialized.into(),
+        EnclaveMode::Withdraw => WithdrawStage::Uninitialized.into(),
+    };
+    enclave.require_lifecycle(uninitialized)?;
 
     // ---- Validate & build: Nothing in this phase mutates enclave state, so any
     // error here leaves the enclave untouched. ----
@@ -163,16 +165,20 @@ async fn commit_operator_init(
         .expect("Unable to log OperatorInitAttestationUnsigned");
 
     // 2) Share commitments help KPs confirm that the right private key will be constructed.
+    // This pre-transition snapshot reports `Uninitialized`; successfully
+    // writing it completes operator initialization.
     enclave
         .log_init(OIGuardianInfo(Box::new(enclave.info().await)))
         .await
         .expect("Unable to log GuardianInfo");
 
+    let initialized = match enclave.mode() {
+        EnclaveMode::Ceremony => CeremonyStage::OperatorInitialized.into(),
+        EnclaveMode::Withdraw => WithdrawStage::OperatorInitialized.into(),
+    };
     enclave
-        .scratchpad
-        .operator_init_logging_complete
-        .set(())
-        .expect("operator_init_logging_complete should only be set once");
+        .advance_lifecycle_into(initialized)
+        .expect("operator_init should advance an uninitialized enclave");
 
     info!("Operator initialization complete.");
 }
@@ -193,9 +199,8 @@ mod tests {
         let withdraw = match mode {
             EnclaveMode::Withdraw => {
                 let config = InitConfig::mock_for_testing(None);
-                let secret_sharing_instance =
-                    crate::test_utils::OperatorInitTestArgs::default().secret_sharing_instance;
-                Some(InitInstall::from_parts(config, secret_sharing_instance))
+                let args = crate::test_utils::OperatorInitTestArgs::default();
+                Some(InitInstall::from_parts(config, args.ceremony_state))
             }
             EnclaveMode::Ceremony => None,
         };
@@ -207,12 +212,18 @@ mod tests {
     #[tokio::test]
     async fn commit_marks_operator_init_complete_withdraw_mode() {
         let enclave = commit_for_mode(EnclaveMode::Withdraw).await;
-        assert!(enclave.is_operator_init_complete());
+        assert_eq!(
+            enclave.lifecycle(),
+            WithdrawStage::OperatorInitialized.into()
+        );
     }
 
     #[tokio::test]
     async fn commit_marks_operator_init_complete_ceremony_mode() {
         let enclave = commit_for_mode(EnclaveMode::Ceremony).await;
-        assert!(enclave.is_operator_init_complete());
+        assert_eq!(
+            enclave.lifecycle(),
+            CeremonyStage::OperatorInitialized.into()
+        );
     }
 }

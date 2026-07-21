@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::verify_hashi_cert;
-use crate::enclave::LimiterGuard;
 use crate::Enclave;
 use bitcoin::Txid;
 use hashi_types::committee::certificate_threshold;
@@ -14,12 +13,14 @@ use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::GuardianSigned;
 use hashi_types::guardian::HashiSigned;
+use hashi_types::guardian::RateLimiter;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::StandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalResponse;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::guardian::WithdrawalLogMessage;
 use std::sync::Arc;
+use tokio::sync::OwnedMutexGuard;
 use tracing::error;
 use tracing::info;
 
@@ -44,7 +45,7 @@ pub async fn standard_withdrawal(
                 response: response.clone(),
                 post_state,
             };
-            log_withdrawal_success(enclave.as_ref(), wid, msg, limiter_guard).await?;
+            log_withdrawal_success(enclave.clone(), wid, msg, limiter_guard).await?;
             // <-- Limiter guard drops upon log_withdrawal_success return. Next withdrawal can begin.
             Ok(enclave.sign(response))
         }
@@ -64,7 +65,11 @@ pub async fn standard_withdrawal(
 async fn normal_withdrawal_inner(
     enclave: Arc<Enclave>,
     signed_request: HashiSigned<StandardWithdrawalRequest>,
-) -> GuardianResult<(Txid, StandardWithdrawalResponse, LimiterGuard)> {
+) -> GuardianResult<(
+    Txid,
+    StandardWithdrawalResponse,
+    OwnedMutexGuard<RateLimiter>,
+)> {
     // 0) Validation
     if !enclave.is_fully_initialized() {
         return Err(EnclaveUninitialized);
@@ -82,7 +87,7 @@ async fn normal_withdrawal_inner(
 
     // 2) Rate limits: acquire exclusive lock on limiter, consume tokens.
     //    The returned guard holds the mutex — no other withdrawal can proceed
-    //    until this one is committed or reverted.
+    //    until this one is durably logged or the enclave aborts.
     //
     // Reject timestamps too far in the future (clock skew protection).
     // Old timestamps are safe — the limiter's monotonicity check prevents replay,
@@ -127,25 +132,25 @@ async fn normal_withdrawal_inner(
 }
 
 async fn log_withdrawal_success(
-    enclave: &Enclave,
+    enclave: Arc<Enclave>,
     wid: WithdrawalID,
     msg: WithdrawalLogMessage,
-    limiter_guard: LimiterGuard,
+    limiter_guard: OwnedMutexGuard<RateLimiter>,
 ) -> GuardianResult<()> {
-    match enclave.log_withdraw(msg).await {
-        Ok(_) => {
-            info!("Withdrawal {} logged.", wid);
-            // Commit limiter consumption only after we've successfully logged.
-            limiter_guard.commit();
-            Ok(())
-        }
-        Err(e) => {
-            // Logging failed => return Err (do not return signatures).
-            // Note that LimiterGuard::Drop will revert the limiter
-            error!("Logging withdrawal {} to S3 failed: {:?}", wid, e);
-            Err(e)
-        }
-    }
+    // The task owns the limiter guard and continues if the RPC future is cancelled.
+    // In production, exhausting the write grace period panics and the process-wide
+    // panic hook aborts the enclave.
+    tokio::spawn(async move {
+        enclave
+            .log_withdraw(msg)
+            .await
+            .expect("withdrawal log write failed");
+        info!("Withdrawal {} logged.", wid);
+        drop(limiter_guard);
+    })
+    .await
+    .expect("withdrawal log task failed");
+    Ok(())
 }
 
 async fn log_withdrawal_failure(
@@ -178,6 +183,7 @@ mod tests {
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::StandardWithdrawalRequest;
+    use hashi_types::guardian::WithdrawStage;
 
     /// Sets up an enclave with a single committee and token bucket limiter.
     async fn setup_fully_initialized_enclave(
@@ -212,10 +218,8 @@ mod tests {
             .unwrap();
 
         enclave
-            .scratchpad
-            .provisioner_init_logging_complete
-            .set(())
-            .expect("provisioner_init_logging_complete should only be set once");
+            .advance_lifecycle_into(WithdrawStage::ProvisionerInitialized.into())
+            .expect("test setup should advance provisioner init lifecycle");
         activate_enclave_for_testing(&enclave, committee, limiter_config, limiter_state)
             .expect("activate_enclave_for_testing should succeed on a fresh enclave");
 

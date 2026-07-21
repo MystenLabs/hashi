@@ -13,6 +13,7 @@ use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::guardian::*;
 use rand::RngCore;
+use std::num::NonZeroU16;
 use std::sync::Arc;
 
 /// Mock S3 logger that returns success for every PutObject call.
@@ -160,12 +161,12 @@ pub fn mock_logger_with_layout(keys: impl IntoIterator<Item = String>) -> Guardi
 }
 
 /// Args for arming a withdraw-mode test enclave. `config` is the stable
-/// operator-init config; `secret_sharing_instance` mirrors the ceremony snapshot
-/// that production `operator_init` reads from S3.
+/// operator-init config; `ceremony_state` mirrors the snapshot that production
+/// `operator_init` reads from S3.
 pub struct OperatorInitTestArgs {
     pub s3_logger: GuardianS3Client,
     pub config: InitConfig,
-    pub secret_sharing_instance: SecretSharingInstance,
+    pub ceremony_state: CeremonyState,
 }
 
 const TEST_N: usize = 5;
@@ -179,12 +180,37 @@ fn dummy_secret_sharing_instance() -> SecretSharingInstance {
     SecretSharingInstance::new(commitments, TEST_N, TEST_T, 0).unwrap()
 }
 
+fn dummy_kp_encrypted_shares() -> KPEncryptedSharesRoster {
+    KPEncryptedSharesRoster::new(
+        (1..=TEST_N)
+            .map(|i| KPEncryptedShares {
+                id: NonZeroU16::new(i as u16).unwrap(),
+                ciphertexts_by_fingerprint: [(format!("DUMMY FINGERPRINT {i}"), "dummy".into())]
+                    .into_iter()
+                    .collect(),
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
+fn dummy_ceremony_state() -> CeremonyState {
+    CeremonyState {
+        secret_sharing_instance: dummy_secret_sharing_instance(),
+        btc_master_pubkey: crypto::k256_sk_to_btc_xonly_pubkey(
+            &k256::SecretKey::from_slice(&[7u8; 32]).unwrap(),
+        ),
+        cert_seq: 0,
+        encrypted_shares: dummy_kp_encrypted_shares(),
+    }
+}
+
 impl Default for OperatorInitTestArgs {
     fn default() -> Self {
         Self {
             s3_logger: mock_logger(),
             config: InitConfig::mock_for_testing(None),
-            secret_sharing_instance: dummy_secret_sharing_instance(),
+            ceremony_state: dummy_ceremony_state(),
         }
     }
 }
@@ -197,7 +223,7 @@ impl OperatorInitTestArgs {
 
     /// Set the ceremony snapshot to a different secret-sharing instance.
     pub fn with_commitments(mut self, commitments: ShareCommitments) -> Self {
-        self.secret_sharing_instance =
+        self.ceremony_state.secret_sharing_instance =
             SecretSharingInstance::new(commitments, TEST_N, TEST_T, 0).unwrap();
         self
     }
@@ -206,18 +232,24 @@ impl OperatorInitTestArgs {
         self.s3_logger = s3_logger;
         self
     }
+
+    pub fn with_kp_encrypted_shares(mut self, shares: KPEncryptedSharesRoster) -> Self {
+        self.ceremony_state.encrypted_shares = shares;
+        self
+    }
 }
 
 impl Enclave {
-    /// Withdraw-mode enclave with fresh random keys.
-    pub fn create_with_random_keys() -> Arc<Self> {
+    /// Enclave in the requested mode with fresh random keys.
+    pub fn create_with_random_keys_for_mode(mode: EnclaveMode) -> Arc<Self> {
         let signing_keys = GuardianSignKeyPair::new(rand::thread_rng());
         let encryption_keys = GuardianEncKeyPair::random(&mut rand::thread_rng());
-        Arc::new(Enclave::new(
-            signing_keys,
-            encryption_keys,
-            EnclaveMode::Withdraw,
-        ))
+        Arc::new(Enclave::new(signing_keys, encryption_keys, mode))
+    }
+
+    /// Withdraw-mode enclave with fresh random keys.
+    pub fn create_with_random_keys() -> Arc<Self> {
+        Self::create_with_random_keys_for_mode(EnclaveMode::Withdraw)
     }
 
     /// Create an enclave post operator_init() but pre provisioner_init().
@@ -228,7 +260,10 @@ impl Enclave {
     pub async fn create_operator_initialized_with(args: OperatorInitTestArgs) -> Arc<Self> {
         let enclave = Self::create_with_random_keys();
         enclave.install_operator_init_for_testing(args);
-        assert!(enclave.is_operator_init_complete() && !enclave.is_provisioner_init_complete());
+        assert_eq!(
+            enclave.lifecycle(),
+            WithdrawStage::OperatorInitialized.into()
+        );
         enclave
     }
 
@@ -236,13 +271,19 @@ impl Enclave {
     /// withdraw-mode commit). Lets a harness defer operator-init until DKG output exists.
     pub fn install_operator_init_for_testing(&self, args: OperatorInitTestArgs) {
         self.config.set_s3_logger(args.s3_logger).unwrap();
-        crate::operator_init::InitInstall::from_parts(args.config, args.secret_sharing_instance)
+        crate::operator_init::InitInstall::from_parts(args.config, args.ceremony_state)
             .install_into(self);
+        self.advance_lifecycle_into(WithdrawStage::OperatorInitialized.into())
+            .expect("operator init test setup should advance lifecycle");
+    }
 
-        self.scratchpad
-            .operator_init_logging_complete
-            .set(())
-            .expect("operator_init_logging_complete should only be set once");
+    pub fn create_operator_initialized_ceremony(s3_logger: GuardianS3Client) -> Arc<Self> {
+        let enclave = Self::create_with_random_keys_for_mode(EnclaveMode::Ceremony);
+        enclave.config.set_s3_logger(s3_logger).unwrap();
+        enclave
+            .advance_lifecycle_into(CeremonyStage::OperatorInitialized.into())
+            .expect("ceremony operator init test setup should advance lifecycle");
+        enclave
     }
 }
 
@@ -285,14 +326,7 @@ pub fn set_or_get_enclave_btc_pubkey(enclave: &Arc<Enclave>) -> GuardianResult<B
 /// (idempotent).
 pub fn finalize_enclave(enclave: &Arc<Enclave>) -> GuardianResult<()> {
     let _ = set_or_get_enclave_btc_pubkey(enclave)?;
-
-    enclave
-        .scratchpad
-        .provisioner_init_logging_complete
-        .set(())
-        .map_err(|_| {
-            GuardianError::InvalidInputs("provisioner_init_logging_complete already set".into())
-        })?;
+    enclave.advance_lifecycle_into(WithdrawStage::ProvisionerInitialized.into())?;
     Ok(())
 }
 
@@ -306,13 +340,8 @@ pub fn activate_enclave_for_testing(
     let rate_limiter = RateLimiter::new(limiter_config, limiter_state)?;
 
     enclave.state.init(committee, rate_limiter)?;
-    enclave
-        .scratchpad
-        .operator_activate_logging_complete
-        .set(())
-        .map_err(|_| {
-            GuardianError::InvalidInputs("operator_activate_logging_complete already set".into())
-        })?;
+    enclave.clear_initialization_state();
+    enclave.advance_lifecycle_into(WithdrawStage::Activated.into())?;
     Ok(())
 }
 
@@ -336,5 +365,6 @@ pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc
         .expect("activate_enclave_for_testing should succeed on a fresh enclave");
 
     assert!(enclave.is_fully_initialized());
+    assert!(enclave.secret_sharing_instance().is_err());
     enclave
 }

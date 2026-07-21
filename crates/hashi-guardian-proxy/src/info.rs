@@ -29,9 +29,10 @@ use axum::routing::get;
 use axum::Json;
 use axum::Router;
 use hashi_types::guardian::GetGuardianInfoResponse;
+use hashi_types::guardian::GuardianInfo;
+use hashi_types::guardian::GuardianPubKey;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
-use hashi_types::guardian::VerifiedGuardianInfo;
 use hashi_types::proto;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use serde::Serialize;
@@ -81,7 +82,7 @@ struct LimiterConfigView {
 enum InfoError {
     /// The enclave gRPC call failed (unreachable / deadline / transport).
     Unreachable(String),
-    /// The response decoded but failed signature verification.
+    /// The response could not be converted to the guardian domain type.
     Invalid(String),
 }
 
@@ -120,13 +121,12 @@ impl InfoSource for GrpcInfoSource {
 
         // Read the signing timestamp off the raw proto; the domain conversion drops it.
         let signed_at_ms = raw.signed_info.as_ref().and_then(|s| s.timestamp_ms);
-        let verified = GetGuardianInfoResponse::try_from(raw)
-            .and_then(|resp| resp.verify_signed_info_without_attestation())
-            .map_err(|e| {
-                error!(error = ?e, "GetGuardianInfo could not be decoded/verified for /info");
-                InfoError::Invalid(format!("{e:?}"))
-            })?;
-        Ok(project(&verified, signed_at_ms))
+        let response = GetGuardianInfoResponse::try_from(raw).map_err(|e| {
+            error!(error = ?e, "GetGuardianInfo could not be decoded for /info");
+            InfoError::Invalid(format!("{e:?}"))
+        })?;
+        let (info, signing_pub_key) = response.into_info_unchecked();
+        Ok(project(&info, &signing_pub_key, signed_at_ms))
     }
 }
 
@@ -262,8 +262,11 @@ fn unavailable(error: &str, detail: &str) -> Response {
         .into_response()
 }
 
-fn project(verified: &VerifiedGuardianInfo, signed_at_ms: Option<u64>) -> GuardianInfoView {
-    let info = &verified.info;
+fn project(
+    info: &GuardianInfo,
+    signing_pub_key: &GuardianPubKey,
+    signed_at_ms: Option<u64>,
+) -> GuardianInfoView {
     GuardianInfoView {
         limiter: limiter_view(info.limiter_state, info.limiter_config),
         git_revision: info.untrusted_git_revision.clone(),
@@ -272,7 +275,7 @@ fn project(verified: &VerifiedGuardianInfo, signed_at_ms: Option<u64>) -> Guardi
             .enclave_btc_pubkey
             .as_ref()
             .map(|pk| hex::encode(pk.serialize())),
-        signing_pub_key: hex::encode(verified.signing_pub_key.as_bytes()),
+        signing_pub_key: hex::encode(signing_pub_key.as_bytes()),
         signed_at_ms: signed_at_ms.map(|t| t.to_string()),
     }
 }

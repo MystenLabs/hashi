@@ -11,8 +11,11 @@ use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
 use super::InitConfig;
-use super::KPEncryptedShare;
 use super::KPEncryptedShares;
+use super::KPEncryptedSharesRoster;
+use super::KpCerts;
+use super::KpCertsRoster;
+use super::KpSigned;
 use super::LimiterConfig;
 use super::NitroAttestation;
 use super::OperatorInitRequest;
@@ -26,8 +29,10 @@ use super::SetupNewKeyRequest;
 use super::SetupNewKeyResponse;
 use super::ShareCommitment;
 use super::ShareCommitments;
+use super::SingleProvisionerInitRequest;
 use super::StandardWithdrawalRequest;
 use super::StandardWithdrawalResponse;
+use super::WithdrawStage;
 use super::WithdrawalID;
 pub use crate::pgp::test_utils::mock_pgp_certs;
 pub use crate::pgp::test_utils::mock_pgp_certs_armored;
@@ -81,6 +86,7 @@ impl GetGuardianInfoResponse {
         let signing_pub_key = signing_key.verification_key();
 
         let info = GuardianInfo {
+            lifecycle: WithdrawStage::OperatorInitialized.into(),
             secret_sharing_instance: None,
             bucket_info: Some(super::S3BucketInfo {
                 bucket: "bucket".to_string(),
@@ -100,15 +106,25 @@ impl GetGuardianInfoResponse {
             NitroAttestation::new("abcd".as_bytes().to_vec()),
             signing_pub_key,
             GuardianSigned::new(info, &signing_key, 1234),
-            dummy_encrypted_shares(),
         )
     }
 }
 
 impl SetupNewKeyRequest {
     pub fn mock_for_testing() -> Self {
-        SetupNewKeyRequest::new(mock_pgp_certs(TEST_N), TEST_N, TEST_T).unwrap()
+        SetupNewKeyRequest::new(mock_kp_certs_roster(TEST_N), TEST_N, TEST_T).unwrap()
     }
+}
+
+pub fn mock_kp_certs_roster(n: usize) -> KpCertsRoster {
+    KpCertsRoster::new(mock_kp_certs(n)).unwrap()
+}
+
+pub fn mock_kp_certs(n: usize) -> Vec<KpCerts> {
+    mock_pgp_certs(n)
+        .into_iter()
+        .map(|cert| KpCerts::new(vec![cert]).unwrap())
+        .collect()
 }
 
 fn dummy_commitments() -> ShareCommitments {
@@ -121,14 +137,17 @@ fn dummy_commitments() -> ShareCommitments {
     ShareCommitments::new(commitments).unwrap()
 }
 
-fn dummy_encrypted_shares() -> KPEncryptedShares {
-    KPEncryptedShares::new(
+fn dummy_encrypted_shares() -> KPEncryptedSharesRoster {
+    KPEncryptedSharesRoster::new(
         (0..TEST_N)
-            .map(|i| KPEncryptedShare {
+            .map(|i| KPEncryptedShares {
                 id: NonZeroU16::new((i + 1) as u16).unwrap(),
-                recipient_fingerprint: format!("DUMMY FINGERPRINT {i}"),
-                armored_ciphertext: "-----BEGIN PGP MESSAGE-----\n\n-----END PGP MESSAGE-----"
-                    .into(),
+                ciphertexts_by_fingerprint: [(
+                    format!("DUMMY FINGERPRINT {i}"),
+                    "-----BEGIN PGP MESSAGE-----\n\n-----END PGP MESSAGE-----".into(),
+                )]
+                .into_iter()
+                .collect(),
             })
             .collect(),
     )
@@ -178,12 +197,20 @@ impl OperatorInitRequest {
 impl ProvisionerInitRequest {
     // NOTE: Incorrect encryption is used. Fix later if needed.
     pub fn mock_for_testing() -> Self {
-        ProvisionerInitRequest::new(vec![GuardianEncryptedShare {
+        let encrypted_share = GuardianEncryptedShare {
             id: NonZeroU16::new(1).unwrap(),
             ciphertext: Ciphertext {
                 encapsulated_key: vec![0u8; 32],
                 aes_ciphertext: vec![0u8; 32],
             },
+        };
+        let (cert_armored, _) = crate::pgp::test_utils::mock_pgp_keypair();
+        let request =
+            SingleProvisionerInitRequest::new("mock-session".into(), [7u8; 32], encrypted_share);
+        ProvisionerInitRequest(vec![KpSigned {
+            data: request,
+            signer_cert: crate::pgp::PgpPublicCert::new(cert_armored).unwrap(),
+            signature: "mock-signature".into(),
         }])
     }
 }

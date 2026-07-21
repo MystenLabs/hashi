@@ -238,7 +238,8 @@ where
             .map_err(|e| anyhow::anyhow!("parse guardian info: {e:?}"))?;
         // The proxy talks to the enclave over its own direct channel; like the
         // node, it does not re-verify the info envelope (worst case is liveness).
-        Ok(response.into_info_unchecked())
+        let (info, _) = response.into_info_unchecked();
+        Ok(info)
     }
 }
 
@@ -416,7 +417,6 @@ mod tests {
     use hashi_types::guardian::proto_conversions::signed_standard_withdrawal_request_to_pb;
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::GuardianSigned;
-    use hashi_types::guardian::KPEncryptedShares;
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::NitroAttestation;
     use hashi_types::guardian::StandardWithdrawalResponse;
@@ -572,6 +572,7 @@ mod tests {
     ) -> proto::GetGuardianInfoResponse {
         let signing_key = GuardianSignKeyPair::from([7u8; 32]);
         let info = GuardianInfo {
+            lifecycle: hashi_types::guardian::WithdrawStage::Activated.into(),
             secret_sharing_instance: None,
             bucket_info: None,
             encryption_pubkey: vec![0u8; 32],
@@ -592,7 +593,6 @@ mod tests {
             NitroAttestation::new(vec![1, 2, 3]),
             signing_key.verification_key(),
             signed_info,
-            KPEncryptedShares::new(vec![]).expect("empty shares"),
         );
         get_guardian_info_response_to_pb(domain)
     }

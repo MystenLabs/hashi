@@ -4,8 +4,11 @@
 pub mod attestation;
 pub mod crypto;
 pub mod errors;
+pub mod kp_certs_roster;
+pub mod lifecycle;
 pub mod log;
 pub mod proto_conversions;
+pub(crate) mod serde_utils;
 pub mod signing;
 pub mod test_utils;
 pub mod time_utils;
@@ -18,6 +21,7 @@ pub use attestation::GitRevision;
 pub use attestation::NitroAttestation;
 pub use attestation::PcrAllowlist;
 pub use attestation::VerifiedSessionInfo;
+pub use lifecycle::*;
 pub use limiter::LimiterConfig;
 pub use limiter::LimiterState;
 pub use limiter::RateLimiter;
@@ -42,7 +46,6 @@ use crate::bitcoin::TxUTXOsWire;
 pub use crate::committee::Committee as HashiCommittee;
 pub use crate::committee::CommitteeMember as HashiCommitteeMember;
 pub use crate::committee::SignedMessage as HashiSigned;
-use crate::pgp::PgpPublicCert;
 use bitcoin::Network;
 use blake2::Blake2b;
 use blake2::Digest;
@@ -52,36 +55,14 @@ pub use ed25519_consensus::Signature as GuardianSignature;
 pub use ed25519_consensus::SigningKey as GuardianSignKeyPair;
 pub use ed25519_consensus::VerificationKey as GuardianPubKey;
 pub use errors::*;
+pub use kp_certs_roster::*;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
-// ---------------------------------
-//          Constants
-// ---------------------------------
-
-/// Length of the session ID prefix (hex chars) used in S3 keys. 16 hex =
-/// 64 bits of the signing pubkey, comfortably below any collision risk for
-/// realistic session counts.
-pub const SESSION_ID_HEX_LEN: usize = 16;
-
-/// Canonical guardian session ID — a short prefix of the hex-encoded signing
-/// public key. Used as a per-session tag in S3 object keys; full pubkey
-/// verification still happens via the signed log payload.
-pub fn session_id_from_signing_pubkey(signing_pub_key: &GuardianPubKey) -> SessionID {
-    let mut s = ::hex::encode(signing_pub_key.as_bytes());
-    s.truncate(SESSION_ID_HEX_LEN);
-    s
-}
-
-/// Which flows an enclave serves, fixed at boot. A `Ceremony` enclave runs
-/// `setup_new_key`/`rotate_kps`; a `Withdraw` enclave runs `provisioner_init` +
-/// `standard_withdrawal`. `operator_init`, `get_guardian_info` are enabled in both modes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EnclaveMode {
-    Ceremony,
-    Withdraw,
-}
+use std::borrow::Borrow;
+use std::fmt;
+use std::ops::Deref;
 
 // ---------------------------------
 //    Common requests and responses
@@ -89,7 +70,7 @@ pub enum EnclaveMode {
 
 /// Operator-supplied bootstrap. A ceremony-mode enclave (setup/rotate) needs only
 /// `s3_config`; a withdraw-mode enclave additionally carries the stable
-/// `InitConfig` whose digest is the share-decryption AAD.
+/// `InitConfig` whose digest KPs authenticate during provisioner init.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OperatorInitRequest {
     s3_config: S3Config,
@@ -111,9 +92,6 @@ pub struct GetGuardianInfoResponse {
     signing_pub_key: GuardianPubKey,
     /// Signed guardian info
     signed_info: GuardianSigned<GuardianInfo>,
-    /// Encrypted shares from the ceremony (empty in non-ceremony mode); KPs
-    /// fetch their share here and verify it against the instance commitments.
-    encrypted_shares: KPEncryptedShares,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -121,21 +99,22 @@ pub struct VerifiedGuardianInfo {
     pub info: GuardianInfo,
     pub signing_pub_key: GuardianPubKey,
     pub session_id: SessionID,
-    pub encrypted_shares: KPEncryptedShares,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct GuardianInfo {
-    // TODO: expose the enclave `EnclaveMode` here so clients can assert they
-    // are talking to a ceremony-mode or withdraw-mode guardian from signed info.
+    /// Signed enclave mode and its current lifecycle stage.
+    pub lifecycle: EnclaveLifecycle,
     /// Secret-sharing instance (if set). Used by KPs to check that the right key will be used.
     pub secret_sharing_instance: Option<SecretSharingInstance>,
     /// S3 bucket name (if set). Used by KPs to check S3 bucket info.
     pub bucket_info: Option<S3BucketInfo>,
     /// Encryption key. Used by KPs to encrypt their shares.
+    #[serde(with = "hex::serde")]
     pub encryption_pubkey: EncPubKeyBytes,
     /// Digest of the operator-supplied `InitConfig` (set after operator_init).
     /// KPs recompute it from their verified sources and match to confirm config.
+    #[serde(with = "crate::guardian::serde_utils::option_hex_32")]
     pub config_hash: Option<[u8; 32]>,
     /// Git revision of the guardian build. Untrusted (enclave-self-reported);
     /// verified out-of-band by reproducibly building at this revision and matching
@@ -152,6 +131,7 @@ pub struct GuardianInfo {
     pub current_committee_epoch: Option<u64>,
     /// MPC committee verifying key `G` (the derivation master, NOT the guardian's
     /// own BTC key). Set after operator_init; lets KPs verify it directly.
+    #[serde(with = "crate::guardian::serde_utils::option_mpc_master_g")]
     pub mpc_master_g: Option<HashiMasterG>,
     // TODO: report the full committee too, so its membership is directly
     // verifiable from GuardianInfo; it's large, though.
@@ -162,8 +142,8 @@ pub struct GuardianInfo {
 // ---------------------------------------
 
 /// Stable operator-supplied config for arming a withdraw-mode standby. Its
-/// `digest()` is the `config_hash` bound as PI share AAD and exposed via
-/// `GuardianInfo`.
+/// `digest()` is the `config_hash` that KPs authenticate in their PI submissions,
+/// and that the enclave exposes via `GuardianInfo`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InitConfig {
     /// Limiter config.
@@ -182,8 +162,7 @@ pub struct InitConfig {
 pub struct ActivationState {
     /// Binds the live activation state to the stable arming config.
     config_hash: [u8; 32],
-    /// Secret-sharing instance armed during OI/PI. Activation rejects if the
-    /// latest ceremony instance no longer matches it.
+    /// Secret-sharing instance pinned during OI and retained through activation.
     secret_sharing_instance: SecretSharingInstance,
     /// Current Hashi committee
     committee: HashiCommittee,
@@ -191,23 +170,19 @@ pub struct ActivationState {
     limiter_state: LimiterState,
 }
 
-/// The current KPs' encrypted key shares, assembled into one submission (in the
-/// relay model, by the relay once it has collected enough). Each share's HPKE AAD
-/// binds the enclave's `config_hash`, so a share only decrypts if the KP agreed
-/// on the stable operator-supplied config.
+/// The current KPs' signed share submissions, assembled by the relay once it has
+/// collected enough. The enclave verifies every KP signature, session pin, and
+/// config hash before decrypting the shares.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ProvisionerInitRequest {
-    // TODO: Wrap submitted guardian shares in a domain type that rejects
-    // duplicate share ids. Unlike KP output shares, submitted shares are a
-    // threshold batch and need not be contiguous 1..=n.
-    encrypted_shares: Vec<GuardianEncryptedShare>,
-}
+pub struct ProvisionerInitRequest(pub Vec<KpSigned<SingleProvisionerInitRequest>>);
 
 /// Relay-facing request carrying one KP's signed contribution toward
 /// `ProvisionerInit` for a specific guardian session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SingleProvisionerInitRequest {
     expected_session_id: SessionID,
+    #[serde(with = "hex::serde")]
+    expected_config_hash: [u8; 32],
     encrypted_share: GuardianEncryptedShare,
 }
 
@@ -261,14 +236,14 @@ impl crate::intent::IntentMessage for CommitteeTransitionRequest {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetupNewKeyRequest {
-    key_provisioner_pgp_certs: Vec<PgpPublicCert>,
+    key_provisioner_certs_roster: KpCertsRoster,
     params: SecretSharingParams,
 }
 
 /// `EnclaveSigned<T>`
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SetupNewKeyResponse {
-    pub encrypted_shares: KPEncryptedShares,
+    pub encrypted_shares: KPEncryptedSharesRoster,
     pub secret_sharing_instance: SecretSharingInstance,
     /// x-only BTC master pubkey, surfaced so the operator can publish it on-chain
     /// as `guardian_btc_public_key` before the guardian is provisioned.
@@ -292,16 +267,16 @@ pub struct RotateKpsRequest {
 /// ones that agree on it. Old/new (`n`, `t`) may differ.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RotateKpsState {
-    /// OpenPGP certs for the new KP set, sorted to a canonical order
-    /// (see `RotateKpsState::new`). Length equals `new_params.num_shares()`.
-    new_kp_pgp_certs: Vec<PgpPublicCert>,
+    /// Ordered OpenPGP certificate roster for the new KPs. Its length equals
+    /// `new_params.num_shares()`.
+    new_kp_certs_roster: KpCertsRoster,
     new_params: SecretSharingParams,
 }
 
 /// `EnclaveSigned<T>`. The new KP set's encrypted shares, returned by `rotate_kps`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RotateKpsResponse {
-    pub encrypted_shares: KPEncryptedShares,
+    pub encrypted_shares: KPEncryptedSharesRoster,
 }
 
 // ---------------------------------
@@ -312,9 +287,70 @@ pub struct RotateKpsResponse {
 /// Used to correlate events across Sui, hashi nodes, and the guardian.
 pub type WithdrawalID = sui_sdk_types::Address;
 
-/// Guardian session identifier — a short prefix of the hex-encoded signing
-/// pubkey (see [`session_id_from_signing_pubkey`]). Tags per-session S3 objects.
-pub type SessionID = String;
+/// Guardian session identifier. Canonical IDs are short prefixes of the
+/// hex-encoded signing public key and tag per-session S3 objects.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(transparent)]
+pub struct SessionID(String);
+
+impl SessionID {
+    /// Length of the signing-public-key prefix used for canonical session IDs.
+    pub const HEX_LEN: usize = 16;
+
+    pub fn from_signing_pubkey(signing_pub_key: &GuardianPubKey) -> Self {
+        let mut session_id = ::hex::encode(signing_pub_key.as_bytes());
+        session_id.truncate(Self::HEX_LEN);
+        Self(session_id)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for SessionID {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&str> for SessionID {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+impl From<SessionID> for String {
+    fn from(value: SessionID) -> Self {
+        value.0
+    }
+}
+
+impl AsRef<str> for SessionID {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Borrow<str> for SessionID {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl Deref for SessionID {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+impl fmt::Display for SessionID {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct S3Config {
@@ -346,27 +382,26 @@ impl S3Config {
 
 impl SetupNewKeyRequest {
     pub fn new(
-        pgp_certs: Vec<PgpPublicCert>,
+        kp_certs_roster: KpCertsRoster,
         num_shares: usize,
         threshold: usize,
     ) -> GuardianResult<Self> {
         let params = SecretSharingParams::new(num_shares, threshold)?;
-        if pgp_certs.len() != params.num_shares() {
+        if kp_certs_roster.num_kps() != params.num_shares() {
             return Err(InvalidInputs(format!(
-                "expected {} OpenPGP certificates, got {}",
+                "expected {} KP OpenPGP cert roster entries, got {}",
                 params.num_shares(),
-                pgp_certs.len()
+                kp_certs_roster.num_kps()
             )));
         }
-        ensure_unique_pgp_cert_fingerprints(&pgp_certs)?;
         Ok(Self {
-            key_provisioner_pgp_certs: pgp_certs,
+            key_provisioner_certs_roster: kp_certs_roster,
             params,
         })
     }
 
-    pub fn pgp_certs(&self) -> &[PgpPublicCert] {
-        &self.key_provisioner_pgp_certs
+    pub fn kp_certs_roster(&self) -> &KpCertsRoster {
+        &self.key_provisioner_certs_roster
     }
 
     pub fn params(&self) -> &SecretSharingParams {
@@ -380,19 +415,6 @@ impl SetupNewKeyRequest {
     pub fn threshold(&self) -> usize {
         self.params.threshold()
     }
-}
-
-fn ensure_unique_pgp_cert_fingerprints(pgp_certs: &[PgpPublicCert]) -> GuardianResult<()> {
-    let mut seen = std::collections::HashSet::with_capacity(pgp_certs.len());
-    for cert in pgp_certs {
-        let fingerprint = cert.fingerprint();
-        if !seen.insert(fingerprint.clone()) {
-            return Err(InvalidInputs(format!(
-                "duplicate OpenPGP certificate fingerprint {fingerprint}"
-            )));
-        }
-    }
-    Ok(())
 }
 
 impl OperatorInitRequest {
@@ -557,96 +579,95 @@ impl InitConfig {
         self.network
     }
 
-    /// The `config_hash`: the digest KPs bind as their share-encryption AAD.
+    /// The `config_hash`: the digest KPs authenticate in their signed PI
+    /// submissions.
     pub fn digest(&self) -> [u8; 32] {
         let bytes = bcs::to_bytes(&InitConfigRepr::from(self)).expect("serialization should work");
         Blake2b::<U32>::digest(bytes).into()
     }
 }
 
-impl ProvisionerInitRequest {
-    pub fn new(encrypted_shares: Vec<GuardianEncryptedShare>) -> Self {
-        Self { encrypted_shares }
-    }
-
-    /// Encrypt one KP's `share` to the enclave's public key, binding `config_hash`
-    /// as HPKE AAD — so the enclave only decrypts shares from KPs that agreed on
-    /// the stable config. Each KP produces one of these; they are bundled into a
-    /// `ProvisionerInitRequest`.
+impl SingleProvisionerInitRequest {
+    /// Build one KP's PI contribution, encrypting `share` to the enclave's
+    /// session key. Agreement on the stable config is authenticated by the KP
+    /// signature over this request, not by HPKE AAD.
     pub fn build_from_share<R: CryptoRng + RngCore>(
+        expected_session_id: SessionID,
+        expected_config_hash: [u8; 32],
         share: &Share,
         enclave_pub_key: &EncPubKey,
-        config_hash: [u8; 32],
         rng: &mut R,
-    ) -> GuardianEncryptedShare {
-        encrypt_share(share, enclave_pub_key, Some(&config_hash), rng)
+    ) -> Self {
+        Self::new(
+            expected_session_id,
+            expected_config_hash,
+            encrypt_share(share, enclave_pub_key, None, rng),
+        )
     }
 
-    pub fn encrypted_shares(&self) -> &[GuardianEncryptedShare] {
-        &self.encrypted_shares
-    }
-
-    pub fn into_parts(self) -> Vec<GuardianEncryptedShare> {
-        self.encrypted_shares
-    }
-}
-
-impl SingleProvisionerInitRequest {
-    pub fn new(expected_session_id: SessionID, encrypted_share: GuardianEncryptedShare) -> Self {
+    pub fn new(
+        expected_session_id: SessionID,
+        expected_config_hash: [u8; 32],
+        encrypted_share: GuardianEncryptedShare,
+    ) -> Self {
         Self {
             expected_session_id,
+            expected_config_hash,
             encrypted_share,
         }
     }
 
     pub fn expected_session_id(&self) -> &str {
-        &self.expected_session_id
+        self.expected_session_id.as_str()
     }
 
     pub fn encrypted_share(&self) -> &GuardianEncryptedShare {
         &self.encrypted_share
     }
 
-    pub fn into_parts(self) -> (SessionID, GuardianEncryptedShare) {
-        (self.expected_session_id, self.encrypted_share)
+    pub fn expected_config_hash(&self) -> &[u8; 32] {
+        &self.expected_config_hash
+    }
+
+    pub fn into_parts(self) -> (SessionID, [u8; 32], GuardianEncryptedShare) {
+        (
+            self.expected_session_id,
+            self.expected_config_hash,
+            self.encrypted_share,
+        )
     }
 }
 
 impl RotateKpsState {
     pub fn new(
-        new_kp_pgp_certs: Vec<PgpPublicCert>,
+        new_kp_certs_roster: KpCertsRoster,
         new_num_shares: usize,
         new_threshold: usize,
     ) -> GuardianResult<Self> {
         let new_params = SecretSharingParams::new(new_num_shares, new_threshold)?;
-        if new_kp_pgp_certs.len() != new_params.num_shares() {
+        if new_kp_certs_roster.num_kps() != new_params.num_shares() {
             return Err(InvalidInputs(format!(
-                "expected {} new KP certs, got {}",
+                "expected {} new KP cert roster entries, got {}",
                 new_params.num_shares(),
-                new_kp_pgp_certs.len()
+                new_kp_certs_roster.num_kps()
             )));
         }
-        ensure_unique_pgp_cert_fingerprints(&new_kp_pgp_certs)?;
-        // Sort to a canonical order so the serialized state's digest (which all
-        // T old KPs must agree on) is independent of submission order.
-        let mut new_kp_pgp_certs = new_kp_pgp_certs;
-        new_kp_pgp_certs.sort();
         Ok(Self {
-            new_kp_pgp_certs,
+            new_kp_certs_roster,
             new_params,
         })
     }
 
-    pub fn new_kp_pgp_certs(&self) -> &[PgpPublicCert] {
-        &self.new_kp_pgp_certs
+    pub fn new_kp_certs_roster(&self) -> &KpCertsRoster {
+        &self.new_kp_certs_roster
     }
 
     pub fn new_params(&self) -> &SecretSharingParams {
         &self.new_params
     }
 
-    pub fn into_parts(self) -> (Vec<PgpPublicCert>, SecretSharingParams) {
-        (self.new_kp_pgp_certs, self.new_params)
+    pub fn into_parts(self) -> (KpCertsRoster, SecretSharingParams) {
+        (self.new_kp_certs_roster, self.new_params)
     }
 
     pub fn digest(&self) -> [u8; 32] {
@@ -736,21 +757,26 @@ impl GetGuardianInfoResponse {
         attestation: NitroAttestation,
         signing_pub_key: GuardianPubKey,
         signed_info: GuardianSigned<GuardianInfo>,
-        encrypted_shares: KPEncryptedShares,
     ) -> Self {
         Self {
             attestation,
             signing_pub_key,
             signed_info,
-            encrypted_shares,
         }
     }
 
-    /// Verify the response end to end and return the trusted guardian payload:
-    /// the attestation anchors `signing_pub_key`, `signed_info` must be signed by
-    /// it, the signed git revision must match `expected_build`, and PCR0 must
-    /// match `expected_build`.
-    pub fn verify(&self, expected_build: &BuildPcrs) -> GuardianResult<VerifiedGuardianInfo> {
+    /// Verify a live guardian response.
+    ///
+    /// Used by operator and KP tooling while initializing a guardian (ceremony,
+    /// provisioning, and activation).
+    ///
+    /// Checks:
+    /// - `signed_info` is signed by `signing_pub_key`;
+    /// - its git revision matches `expected_build`;
+    /// - the Nitro attestation has a valid signature;
+    /// - the certificate chain is valid now;
+    /// - the attested public key and PCR0 match `signing_pub_key` and `expected_build`.
+    pub fn verify_live(&self, expected_build: &BuildPcrs) -> GuardianResult<VerifiedGuardianInfo> {
         let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
         if info.untrusted_git_revision != expected_build.git_revision() {
             return Err(InvalidInputs(format!(
@@ -760,35 +786,18 @@ impl GetGuardianInfoResponse {
             )));
         }
         self.attestation
-            .verify(&self.signing_pub_key, expected_build)?;
+            .verify_live(&self.signing_pub_key, expected_build)?;
         Ok(VerifiedGuardianInfo {
             info,
             signing_pub_key: self.signing_pub_key,
-            session_id: session_id_from_signing_pubkey(&self.signing_pub_key),
-            encrypted_shares: self.encrypted_shares.clone(),
+            session_id: SessionID::from_signing_pubkey(&self.signing_pub_key),
         })
     }
 
-    /// Verify only the signed `GuardianInfo` payload.
-    ///
-    /// This does not authenticate the enclave image, the Nitro attestation, or
-    /// PCRs. Prefer [`Self::verify`] whenever the caller has PCR config.
-    pub fn verify_signed_info_without_attestation(&self) -> GuardianResult<VerifiedGuardianInfo> {
-        let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
-        Ok(VerifiedGuardianInfo {
-            info,
-            signing_pub_key: self.signing_pub_key,
-            session_id: session_id_from_signing_pubkey(&self.signing_pub_key),
-            encrypted_shares: self.encrypted_shares.clone(),
-        })
-    }
-
-    /// Extract the guardian's self-reported `GuardianInfo` WITHOUT verifying the
-    /// signature or attestation. The node uses this after authenticating the
-    /// guardian over TLS; withdrawals are gated by the on-chain BTC key, and the
-    /// ed25519 signing key is verified only by KPs/monitors on the S3 audit logs.
-    pub fn into_info_unchecked(self) -> GuardianInfo {
-        self.signed_info.into_data_unchecked()
+    /// Extract the guardian's self-reported info and signing key WITHOUT verifying
+    /// the signature or attestation.
+    pub fn into_info_unchecked(self) -> (GuardianInfo, GuardianPubKey) {
+        (self.signed_info.into_data_unchecked(), self.signing_pub_key)
     }
 }
 
@@ -908,86 +917,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn get_guardian_info_verify_signed_info_passes_for_valid_signature() {
-        let resp = GetGuardianInfoResponse::mock_for_testing();
-        let verified = resp.verify_signed_info_without_attestation().unwrap();
+    fn guardian_info_json_encodes_binary_fields_as_strings() {
+        let (mut info, _) = GetGuardianInfoResponse::mock_for_testing().into_info_unchecked();
+        info.config_hash = Some([0xab; 32]);
+        let btc_pubkey = crate::bitcoin::create_btc_keypair_for_test(&[3u8; 32])
+            .x_only_public_key()
+            .0;
+        info.mpc_master_g = Some(crate::bitcoin::hashi_master_g_from_btc_xonly_for_test(
+            &btc_pubkey,
+        ));
 
-        assert_eq!(verified.signing_pub_key, resp.signing_pub_key);
-        assert_eq!(
-            verified.session_id,
-            session_id_from_signing_pubkey(&resp.signing_pub_key)
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["lifecycle"]["withdraw"], "operator_initialized");
+        assert_eq!(json["encryption_pubkey"], hex::encode([0u8; 32]));
+        assert_eq!(json["config_hash"], hex::encode([0xab; 32]));
+        let mpc_master_g = json["mpc_master_g"].as_str().unwrap();
+        assert_eq!(mpc_master_g.len(), 66);
+        assert!(
+            mpc_master_g
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         );
-        assert_eq!(verified.info, resp.signed_info.data);
-        assert_eq!(verified.encrypted_shares, resp.encrypted_shares);
+
+        let from_json: GuardianInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(from_json, info);
     }
 
     #[test]
-    fn get_guardian_info_verify_uses_signed_info_verification() {
+    fn get_guardian_info_into_info_unchecked_returns_info_and_signing_key() {
+        let resp = GetGuardianInfoResponse::mock_for_testing();
+        let expected_info = resp.signed_info.data.clone();
+        let expected_signing_pub_key = resp.signing_pub_key;
+        let (info, signing_pub_key) = resp.into_info_unchecked();
+
+        assert_eq!(info, expected_info);
+        assert_eq!(signing_pub_key, expected_signing_pub_key);
+    }
+
+    #[test]
+    fn get_guardian_info_verify_live_uses_signed_info_verification() {
         let mut resp = GetGuardianInfoResponse::mock_for_testing();
         let mut sig_bytes: [u8; 64] = resp.signed_info.signature.to_bytes();
         sig_bytes[0] ^= 0xff;
         resp.signed_info.signature = GuardianSignature::from(sig_bytes);
 
         assert!(matches!(
-            resp.verify(&BuildPcrs::new("test-revision", vec![0]))
+            resp.verify_live(&BuildPcrs::new("test-revision", vec![0]))
                 .unwrap_err(),
             InvalidInputs(_)
         ));
     }
 
     #[test]
-    fn get_guardian_info_verify_signed_info_fails_when_pubkey_did_not_sign() {
-        let mut resp = GetGuardianInfoResponse::mock_for_testing();
-        let wrong_signing_key = GuardianSignKeyPair::new(rand::thread_rng());
-        resp.signing_pub_key = wrong_signing_key.verification_key();
-
-        assert!(matches!(
-            resp.verify_signed_info_without_attestation().unwrap_err(),
-            InvalidInputs(_)
-        ));
-    }
-
-    #[test]
-    fn get_guardian_info_verify_signed_info_fails_when_signature_tampered() {
-        let mut resp = GetGuardianInfoResponse::mock_for_testing();
-        let mut sig_bytes: [u8; 64] = resp.signed_info.signature.to_bytes();
-        sig_bytes[0] ^= 0xff;
-        resp.signed_info.signature = GuardianSignature::from(sig_bytes);
-
-        assert!(matches!(
-            resp.verify_signed_info_without_attestation().unwrap_err(),
-            InvalidInputs(_)
-        ));
-    }
-
-    #[test]
     fn rotate_kps_state_new_rejects_wrong_cert_count() {
-        let mut certs = test_utils::mock_pgp_certs(5);
-        certs.pop();
+        let mut cert_sets = test_utils::mock_kp_certs(5);
+        cert_sets.pop();
+        let certs_roster = KpCertsRoster::new(cert_sets).unwrap();
         assert!(matches!(
-            RotateKpsState::new(certs, 5, 3).unwrap_err(),
+            RotateKpsState::new(certs_roster, 5, 3).unwrap_err(),
             InvalidInputs(_)
         ));
     }
 
     #[test]
-    fn rotate_kps_state_new_rejects_duplicate_certs() {
-        let mut certs = test_utils::mock_pgp_certs(5);
-        certs[1] = certs[0].clone();
+    fn kp_certs_roster_rejects_duplicate_certs() {
+        let mut cert_sets = test_utils::mock_kp_certs(5);
+        cert_sets[1] = cert_sets[0].clone();
         assert!(matches!(
-            RotateKpsState::new(certs, 5, 3).unwrap_err(),
+            KpCertsRoster::new(cert_sets).unwrap_err(),
             InvalidInputs(_)
         ));
-    }
-
-    #[test]
-    fn setup_new_key_request_rejects_duplicate_cert_fingerprints() {
-        let mut certs = test_utils::mock_pgp_certs(5);
-        certs[1] = certs[0].clone();
-        let err = SetupNewKeyRequest::new(certs, 5, 3).unwrap_err();
-        assert!(
-            matches!(err, InvalidInputs(msg) if msg.contains("duplicate OpenPGP certificate fingerprint"))
-        );
     }
 
     #[test]
@@ -1060,13 +1059,12 @@ mod tests {
     }
 
     #[test]
-    fn rotate_kps_state_digest_is_order_independent() {
-        let certs = test_utils::mock_pgp_certs(5);
-        let reversed: Vec<PgpPublicCert> = certs.iter().rev().cloned().collect();
-        let a = RotateKpsState::new(certs, 5, 3).unwrap();
-        let b = RotateKpsState::new(reversed, 5, 3).unwrap();
-        // Same set, different input order ⇒ identical canonical form and digest.
-        assert_eq!(a.new_kp_pgp_certs(), b.new_kp_pgp_certs());
-        assert_eq!(a.digest(), b.digest());
+    fn rotate_kps_state_digest_commits_to_roster_order() {
+        let cert_sets = test_utils::mock_kp_certs(5);
+        let reversed: Vec<KpCerts> = cert_sets.iter().rev().cloned().collect();
+        let a = RotateKpsState::new(KpCertsRoster::new(cert_sets).unwrap(), 5, 3).unwrap();
+        let b = RotateKpsState::new(KpCertsRoster::new(reversed).unwrap(), 5, 3).unwrap();
+        assert_ne!(a.new_kp_certs_roster(), b.new_kp_certs_roster());
+        assert_ne!(a.digest(), b.digest());
     }
 }

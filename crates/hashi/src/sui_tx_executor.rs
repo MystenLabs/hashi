@@ -186,7 +186,7 @@ fn uleb128_len(value: usize) -> usize {
 }
 
 use sui_crypto::SuiSigner;
-use sui_crypto::ed25519::Ed25519PrivateKey;
+use sui_crypto::simple::SimpleKeypair;
 use sui_rpc::Client;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
@@ -307,7 +307,7 @@ impl TransactionExecutionError {
 /// transaction for a multisig sender.
 pub async fn finalize(
     client: &mut Client,
-    signer: Option<&Ed25519PrivateKey>,
+    signer: Option<&SimpleKeypair>,
     mut builder: TransactionBuilder,
     sender: Option<Address>,
     gas: &GasOverrides,
@@ -315,7 +315,7 @@ pub async fn finalize(
     timeout: Duration,
 ) -> anyhow::Result<TxOutcome> {
     let sender = sender
-        .or_else(|| signer.map(|s| s.public_key().derive_address()))
+        .or_else(|| signer.map(|s| s.verifying_key().derive_address()))
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "no sender available: pass --sender <address> \
@@ -365,14 +365,14 @@ pub async fn finalize(
 /// automatically.
 pub struct SuiTxExecutor {
     client: Client,
-    signer: Ed25519PrivateKey,
+    signer: SimpleKeypair,
     hashi_ids: HashiIds,
     timeout: Duration,
 }
 
 impl SuiTxExecutor {
     /// Create a new executor with minimal dependencies.
-    pub fn new(client: Client, signer: Ed25519PrivateKey, hashi_ids: HashiIds) -> Self {
+    pub fn new(client: Client, signer: SimpleKeypair, hashi_ids: HashiIds) -> Self {
         Self {
             client,
             signer,
@@ -402,7 +402,7 @@ impl SuiTxExecutor {
     }
 
     /// Override the signer.
-    pub fn with_signer(mut self, signer: Ed25519PrivateKey) -> Self {
+    pub fn with_signer(mut self, signer: SimpleKeypair) -> Self {
         self.signer = signer;
         self
     }
@@ -415,12 +415,12 @@ impl SuiTxExecutor {
 
     /// Get the sender address (derived from the signer's public key).
     pub fn sender(&self) -> Address {
-        self.signer.public_key().derive_address()
+        self.signer.verifying_key().derive_address()
     }
 
     /// Borrow the signer (e.g. so a shared finalizer can sign on this
     /// executor's behalf).
-    pub fn signer(&self) -> &Ed25519PrivateKey {
+    pub fn signer(&self) -> &SimpleKeypair {
         &self.signer
     }
 
@@ -1137,7 +1137,7 @@ impl SuiTxExecutor {
         next_epoch_encryption_public_key: Option<&EncryptionPublicKey>,
         next_epoch_signing_key: Option<&Bls12381PrivateKey>,
     ) -> anyhow::Result<bool> {
-        let sender = self.signer.public_key().derive_address();
+        let sender = self.signer.verifying_key().derive_address();
         let transaction = build_register_or_update_validator_tx(
             &mut self.client,
             &self.hashi_ids,
@@ -1611,9 +1611,15 @@ impl SuiTxExecutor {
         skip_all,
         fields(utxo_count = utxo_ids.len()),
     )]
-    pub async fn execute_cleanup_spent_utxos(&mut self, utxo_ids: &[UtxoId]) -> anyhow::Result<()> {
+    /// Returns the highest checkpoint the cleanup transactions landed in,
+    /// so the caller can floor subsequent freshness checks past them.
+    pub async fn execute_cleanup_spent_utxos(
+        &mut self,
+        utxo_ids: &[UtxoId],
+    ) -> anyhow::Result<u64> {
         const MAX_PER_TX: usize = 400;
 
+        let mut max_checkpoint = 0;
         for chunk in utxo_ids.chunks(MAX_PER_TX) {
             let mut builder = TransactionBuilder::new();
             let hashi_arg = builder.object(
@@ -1663,8 +1669,12 @@ impl SuiTxExecutor {
                     response.transaction().effects().status()
                 );
             }
+            let checkpoint = response.transaction().checkpoint_opt().ok_or_else(|| {
+                anyhow::anyhow!("cleanup_spent_utxos response missing checkpoint")
+            })?;
+            max_checkpoint = max_checkpoint.max(checkpoint);
         }
-        Ok(())
+        Ok(max_checkpoint)
     }
 }
 
@@ -1893,15 +1903,17 @@ pub async fn build_register_or_update_validator_tx(
         .await
         .ok();
     let registering = onchain_member.is_none();
-    if onchain_member.is_none() {
+    if registering {
         tracing::info!(
             %validator_address,
             "Validator not found on-chain, will register"
         );
     } else {
-        tracing::info!(
+        // Debug, not info: this runs on every periodic metadata check, and
+        // most checks send nothing. Callers log the actual outcome.
+        tracing::debug!(
             %validator_address,
-            "Validator already registered, will update metadata"
+            "Validator already registered; checking for stale metadata"
         );
     }
 
@@ -2080,7 +2092,7 @@ pub async fn build_register_or_update_validator_tx(
 /// Sweeps SUI coins into the account's Address Balance
 pub async fn sweep_to_address_balance(client: &mut Client, config: &Config) -> anyhow::Result<()> {
     let signer = config.operator_private_key()?;
-    let sender = signer.public_key().derive_address();
+    let sender = signer.verifying_key().derive_address();
 
     // First we need to sweep any SUI into the account's AB so that subsequent txn can all be done
     // in parallel, using its AB to pay for gas fees.

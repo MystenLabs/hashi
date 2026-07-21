@@ -4,16 +4,20 @@ members = ["crates/*"]
 
 [workspace.dependencies]
 # sui sdk crates
-sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1", features = ["serde", "hash"] }
-sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1", features = ["ed25519", "secp256k1", "secp256r1", "pem"] }
-sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1" }
-sui-transaction-builder = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "210e734ab50ab9a562e9a8ecf2ff5cfdb8c0f1b1" }
+sui-sdk-types = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "5b4525bd569ed8450f57423bc296c31a98760426", features = ["serde", "hash"] }
+sui-crypto = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "5b4525bd569ed8450f57423bc296c31a98760426", features = ["ed25519", "secp256k1", "secp256r1", "pem", "bech32"] }
+sui-rpc = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "5b4525bd569ed8450f57423bc296c31a98760426" }
+sui-transaction-builder = { git = "https://github.com/MystenLabs/sui-rust-sdk.git", rev = "5b4525bd569ed8450f57423bc296c31a98760426" }
 
-sui-http = "0.2.0"
+sui-http = "0.3.1"
 bitcoin = { version = "0.32.8", features =["serde"] }
 corepc-client = { version = "0.10.0", features = ["client-sync"] }
 jsonrpc = "0.18.0"
 kyoto = { package = "bip157", version = "0.6.0" }
+# Direct dependency only to turn on minreq's rustls-based `https` feature for
+# the bitcoind JSON-RPC transport (jsonrpc's `minreq_http` does not expose it,
+# and without it any https:// bitcoin-rpc URL fails at runtime).
+minreq = { version = "2", features = ["https"] }
 lru = "0.16"
 
 # Dependencies for grpc and protobuf
@@ -69,7 +73,7 @@ serde_json = "1.0.145"
 fjall = { version = "3.0.0", features = ["bytes_1"] }
 async-trait = "0.1"
 thiserror = "1.0"
-hex = "0.4"
+hex = { version = "0.4", features = ["serde"] }
 bcs = "0.1.6"
 rand = "0.8"
 tap = "1.0.1"
@@ -84,8 +88,8 @@ aws-credential-types = "1"
 aws-sdk-s3 = "1.12.0"
 
 # fastcrypto — pinned to a `main` rev.
-fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "a26cabb3aabc86e6453bc8aef8f59022bf9fd702" }
-fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "a26cabb3aabc86e6453bc8aef8f59022bf9fd702" }
+fastcrypto = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "179ba6ca65f567efb297d0f8d449d78cdef6745c" }
+fastcrypto-tbls = { git = "https://github.com/MystenLabs/fastcrypto.git", rev = "179ba6ca65f567efb297d0f8d449d78cdef6745c" }
 
 # Sui monorepo deps
 bin-version = { git = "https://github.com/MystenLabs/sui.git", rev = "77a42de4be99383b98518541e0c6002d720cafc8" }
