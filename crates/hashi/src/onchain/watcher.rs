@@ -778,19 +778,24 @@ async fn handle_events(
                 // Fetch new committee
                 let committees_id = state.state().hashi().committees.committees_id();
                 //TODO maybe include info in the event
-                let committee = super::scrape_committee(client.clone(), committees_id, epoch)
-                    .await
-                    .unwrap();
-                {
-                    let mut state = state.state_mut();
-                    state
-                        .hashi
-                        .committees
-                        .committees_mut()
-                        .insert(epoch, committee);
-                    state.hashi.committees.set_pending_epoch_change(Some(epoch));
+                match super::scrape_committee(client.clone(), committees_id, epoch).await {
+                    Ok(committee) => {
+                        {
+                            let mut state = state.state_mut();
+                            state
+                                .hashi
+                                .committees
+                                .committees_mut()
+                                .insert(epoch, committee);
+                            state.hashi.committees.set_pending_epoch_change(Some(epoch));
+                        }
+                        state.notify(Notification::StartReconfig(epoch));
+                    }
+                    Err(e) => tracing::error!(
+                        epoch,
+                        "failed to scrape committee on ReconfigStarted; skipping (rescrape recovers): {e}"
+                    ),
                 }
-                state.notify(Notification::StartReconfig(epoch));
             }
             HashiEvent::ReconfigEnded(end_reconfig_event) => {
                 let committees_id = state.state().hashi().committees.committees_id();
