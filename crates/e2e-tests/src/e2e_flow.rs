@@ -11,6 +11,7 @@ mod tests {
     use futures::StreamExt;
     use hashi::sui_tx_executor::SuiTxExecutor;
     use hashi_types::bitcoin::BitcoinAddress;
+    use hashi_types::move_types::MpcSig;
     use hashi_types::move_types::WithdrawalConfirmed;
     use hashi_types::move_types::WithdrawalPickedForProcessing;
     use hashi_types::move_types::WithdrawalSigned;
@@ -865,6 +866,200 @@ mod tests {
             withdrawal_amount_sats,
         )
         .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_presigning_recovery_retains_pending_older_batch() -> Result<()> {
+        init_test_logging();
+
+        let mut networks = setup_test_networks(
+            TestNetworksBuilder::new()
+                .with_nodes(4)
+                .with_batch_size_per_weight(1)
+                .with_weight_divisor(2_500)
+                .with_mpc_signing_chunk_size(1),
+        )
+        .await?;
+        let nodes = networks.hashi_network.nodes();
+        let epoch = nodes[0]
+            .current_epoch()
+            .ok_or_else(|| anyhow!("no current Hashi epoch"))?;
+        let manager_deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        while !nodes
+            .iter()
+            .all(|node| node.hashi().signing_manager_for(epoch).is_some())
+        {
+            if tokio::time::Instant::now() >= manager_deadline {
+                return Err(anyhow!("Timed out waiting for initial SigningManagers"));
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        let managers: Vec<_> = nodes
+            .iter()
+            .map(|node| {
+                node.hashi()
+                    .signing_manager_for(epoch)
+                    .unwrap_or_else(|| panic!("SigningManager not initialized for epoch {epoch}"))
+            })
+            .collect();
+        let batch_size = managers[0].initial_presig_count() as u64;
+        assert!(batch_size > 0, "test requires a non-empty presig batch");
+
+        // Recovery needs certified material for both sides of the boundary.
+        for manager in &managers {
+            manager.trigger_refill();
+        }
+        let refill_deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            if managers.iter().all(|manager| manager.has_next_batch()) {
+                break;
+            }
+            if tokio::time::Instant::now() >= refill_deadline {
+                return Err(anyhow!("Timed out waiting for certified presig refill"));
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        drop(managers);
+
+        // Low-fee consolidation pulls these equal deposits into one withdrawal,
+        // forcing its input allocation to cross from batch 0 into batch 1.
+        const DEPOSIT_SATS: u64 = 50_000;
+        for _ in 0..=batch_size {
+            create_deposit_and_wait(&mut networks, DEPOSIT_SATS).await?;
+        }
+
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        let user_key = networks.sui_network.user_keys.first().unwrap().clone();
+        let btc_destination = networks.bitcoin_node.get_new_address()?;
+        let mut executor = SuiTxExecutor::from_config(&hashi.config, hashi.onchain_state())?
+            .with_signer(user_key.into());
+        let recovery_hashis: Vec<_> = networks
+            .hashi_network
+            .nodes()
+            .iter()
+            .map(|node| node.hashi().clone())
+            .collect();
+        for hashi in &recovery_hashis {
+            hashi.clear_signing_manager_for_test();
+        }
+        let (stop_clear_tx, mut stop_clear_rx) = tokio::sync::watch::channel(false);
+        let clear_task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    result = stop_clear_rx.changed() => {
+                        if result.is_err() || *stop_clear_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {
+                        for hashi in &recovery_hashis {
+                            hashi.clear_signing_manager_for_test();
+                        }
+                    }
+                }
+            }
+        });
+        let mut picked_client = networks.sui_network.client.clone();
+        let picked_task = tokio::spawn(async move {
+            wait_for_withdrawal_picked(&mut picked_client, Duration::from_secs(120)).await
+        });
+        executor
+            .execute_create_withdrawal_request(30_000, extract_witness_program(&btc_destination)?)
+            .await?;
+        let picked = picked_task.await??;
+        assert!(
+            picked.inputs.len() as u64 > batch_size,
+            "withdrawal needs more than one presig batch, but selected {} inputs for a batch of {batch_size}",
+            picked.inputs.len(),
+        );
+
+        let staged = tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                let staged = {
+                    let state = hashi.onchain_state().state();
+                    let hashi_state = state.hashi();
+                    hashi_state
+                        .withdrawal_queue
+                        .withdrawal_txns()
+                        .get(&picked.withdrawal_txn_id)
+                        .map(|txn| {
+                            let pending: Vec<_> = txn
+                                .signing
+                                .signatures
+                                .iter()
+                                .filter_map(|signature| match signature {
+                                    MpcSig::Pending(index) => Some(*index),
+                                    MpcSig::Signed(_) => None,
+                                })
+                                .collect();
+                            (txn.id, txn.signing_epoch(), pending)
+                        })
+                };
+                if let Some(staged) = staged {
+                    break staged;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        let (withdrawal_id, signing_epoch, pending) = staged.map_err(|_| {
+            anyhow!("Timed out staging pending older-batch presigs past the allocation boundary")
+        })?;
+        assert_eq!(signing_epoch, epoch);
+        assert!(pending.iter().any(|index| *index < batch_size));
+
+        drop(executor);
+        drop(hashi);
+        for node in networks.hashi_network_mut().nodes_mut() {
+            node.shutdown().await;
+        }
+        stop_clear_tx.send(true)?;
+        clear_task.await?;
+        for node in networks.hashi_network_mut().nodes_mut() {
+            node.start().await?;
+        }
+
+        let recovery_deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            if networks.hashi_network.nodes().iter().all(|node| {
+                node.hashi()
+                    .signing_manager_for(epoch)
+                    .is_some_and(|manager| manager.batch_index() >= 1)
+            }) {
+                break;
+            }
+            if tokio::time::Instant::now() >= recovery_deadline {
+                return Err(anyhow!(
+                    "Timed out waiting for certified SigningManager recovery"
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        let hashi = networks.hashi_network.nodes()[0].hashi().clone();
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                let completed_epoch = {
+                    let state = hashi.onchain_state().state();
+                    state
+                        .hashi()
+                        .withdrawal_queue
+                        .withdrawal_txns()
+                        .get(&withdrawal_id)
+                        .filter(|txn| txn.signing.is_complete())
+                        .map(|txn| txn.signing_epoch())
+                };
+                if let Some(completed_epoch) = completed_epoch {
+                    assert_eq!(completed_epoch, signing_epoch);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow!("Recovered managers did not complete the original withdrawal"))?;
+
         Ok(())
     }
 

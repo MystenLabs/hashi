@@ -49,6 +49,12 @@ struct PresigBatch {
     batch_index: u32,
 }
 
+pub(crate) struct RecoveredPresigBatch {
+    pub presignatures: Presignatures,
+    pub start_index: u64,
+    pub batch_index: u32,
+}
+
 impl PresigBatch {
     fn end_index(&self) -> u64 {
         self.start_index + self.pool.len() as u64
@@ -120,18 +126,12 @@ impl SigningManager {
         refill_divisor: usize,
         refill_tx: Arc<watch::Sender<u32>>,
     ) -> Self {
-        let pool: Vec<Option<(Vec<S>, G)>> = presignatures.map(Some).collect();
-        tracing::info!(
-            "Presig batch installed: address={address}, batch_index={batch_index}, \
-             start_index={batch_start_index}, size={}, fingerprint={}",
-            pool.len(),
-            presig_pool_fingerprint(pool.iter().flatten().map(|(_, nonce)| nonce)),
-        );
-        let batch = PresigBatch {
-            pool,
-            start_index: batch_start_index,
+        let batch = Self::make_batch(
+            address,
+            presignatures.map(Some).collect(),
             batch_index,
-        };
+            batch_start_index,
+        );
         Self {
             config: Arc::new(SigningEpochConfig {
                 address,
@@ -147,6 +147,125 @@ impl SigningManager {
                 next_batch: None,
             }),
             refill_tx,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_recovered(
+        address: Address,
+        committee: Committee,
+        threshold: u16,
+        key_shares: avss::SharesForNode,
+        verifying_key: G,
+        recovered_batches: Vec<RecoveredPresigBatch>,
+        num_consumed_presigs: u64,
+        pending_presig_indices: &HashSet<u64>,
+        refill_divisor: usize,
+        refill_tx: Arc<watch::Sender<u32>>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(!recovered_batches.is_empty(), "no recovered presig batches");
+        anyhow::ensure!(
+            pending_presig_indices
+                .iter()
+                .all(|index| *index < num_consumed_presigs),
+            "pending presig index is not below allocation cursor {num_consumed_presigs}",
+        );
+
+        let mut expected_start = recovered_batches[0].start_index;
+        anyhow::ensure!(
+            expected_start <= num_consumed_presigs,
+            "recovered batches start at {expected_start}, beyond allocation cursor {num_consumed_presigs}",
+        );
+        let mut expected_batch_index = recovered_batches[0].batch_index;
+        let mut covered_pending = HashSet::new();
+        let mut batches = Vec::with_capacity(recovered_batches.len());
+        for recovered in recovered_batches {
+            anyhow::ensure!(
+                recovered.start_index == expected_start,
+                "recovered presig batches are not contiguous: expected start {expected_start}, got {}",
+                recovered.start_index,
+            );
+            anyhow::ensure!(
+                recovered.batch_index == expected_batch_index,
+                "recovered presig batch index mismatch: expected {expected_batch_index}, got {}",
+                recovered.batch_index,
+            );
+
+            let pool = recovered
+                .presignatures
+                .enumerate()
+                .map(|(position, presig)| {
+                    let global_index = recovered
+                        .start_index
+                        .checked_add(position as u64)
+                        .ok_or_else(|| anyhow::anyhow!("recovered presig index overflow"))?;
+                    if pending_presig_indices.contains(&global_index) {
+                        covered_pending.insert(global_index);
+                    }
+                    Ok((global_index >= num_consumed_presigs
+                        || pending_presig_indices.contains(&global_index))
+                    .then_some(presig))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            anyhow::ensure!(!pool.is_empty(), "recovered presig batch is empty");
+            let batch =
+                Self::make_batch(address, pool, recovered.batch_index, recovered.start_index);
+            expected_start = batch
+                .start_index
+                .checked_add(batch.pool.len() as u64)
+                .ok_or_else(|| anyhow::anyhow!("recovered presig batch end overflow"))?;
+            expected_batch_index = expected_batch_index
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("recovered presig batch index overflow"))?;
+            batches.push(batch);
+        }
+
+        anyhow::ensure!(
+            covered_pending.len() == pending_presig_indices.len(),
+            "recovered batches cover {} of {} pending presig indices",
+            covered_pending.len(),
+            pending_presig_indices.len(),
+        );
+        anyhow::ensure!(
+            num_consumed_presigs <= expected_start,
+            "allocation cursor {num_consumed_presigs} is beyond recovered batch end {expected_start}",
+        );
+
+        Ok(Self {
+            config: Arc::new(SigningEpochConfig {
+                address,
+                committee,
+                threshold,
+                key_shares,
+                verifying_key,
+                refill_divisor,
+            }),
+            state: RwLock::new(SigningPoolState {
+                batches,
+                partial_signing_outputs: HashMap::new(),
+                next_batch: None,
+            }),
+            refill_tx,
+        })
+    }
+
+    fn make_batch(
+        address: Address,
+        pool: Vec<Option<(Vec<S>, G)>>,
+        batch_index: u32,
+        start_index: u64,
+    ) -> PresigBatch {
+        tracing::info!(
+            "Presig batch installed: address={address}, batch_index={batch_index}, \
+             start_index={start_index}, size={}, remaining={}, fingerprint={}",
+            pool.len(),
+            pool.iter().filter(|presig| presig.is_some()).count(),
+            presig_pool_fingerprint(pool.iter().flatten().map(|(_, nonce)| nonce)),
+        );
+        PresigBatch {
+            pool,
+            start_index,
+            batch_index,
         }
     }
 
@@ -186,6 +305,10 @@ impl SigningManager {
             .batches
             .last()
             .map_or(0, |b| b.batch_index)
+    }
+
+    pub(crate) fn active_batch_count(&self) -> usize {
+        self.state.read().unwrap().batches.len()
     }
 
     pub fn available_presig_end_index(&self) -> u64 {
@@ -1237,6 +1360,45 @@ mod tests {
         }
     }
 
+    fn test_presignatures(n: u16, t: u16, f: u16, node_index: usize, seed: u64) -> Presignatures {
+        let batch_size_per_weight: u16 = 10;
+        let mut rng = StdRng::seed_from_u64(seed);
+        let nonces_for_dealer: Vec<_> = (0..n)
+            .map(|_| {
+                let nonces: Vec<S> = (0..batch_size_per_weight)
+                    .map(|_| S::rand(&mut rng))
+                    .collect();
+                let public_keys: Vec<G> = nonces.iter().map(|s| G::generator() * *s).collect();
+                let nonce_shares: Vec<Vec<S>> = nonces
+                    .iter()
+                    .map(|&nonce| {
+                        mock_shares(&mut rng, nonce, t, n)
+                            .iter()
+                            .map(|eval| eval.value)
+                            .collect()
+                    })
+                    .collect();
+                (public_keys, nonce_shares)
+            })
+            .collect();
+        let index = ShareIndex::new(node_index as u16 + 1).unwrap();
+        let outputs = (0..n as usize)
+            .map(|dealer| batch_avss::ReceiverOutput {
+                my_shares: batch_avss::SharesForNode {
+                    shares: vec![batch_avss::ShareBatch {
+                        index,
+                        batch: (0..batch_size_per_weight as usize)
+                            .map(|position| nonces_for_dealer[dealer].1[position][node_index])
+                            .collect(),
+                        blinding_share: S::zero(),
+                    }],
+                },
+                public_keys: nonces_for_dealer[dealer].0.clone(),
+            })
+            .collect();
+        Presignatures::new(outputs, batch_size_per_weight, Parameters { t, f }, true).unwrap()
+    }
+
     /// Pre-built partial sigs for aggregate_signatures_with_recovery tests.
     struct AggregateTestData {
         partial_sigs: Vec<Eval<S>>,
@@ -2060,6 +2222,81 @@ mod tests {
             result.is_ok(),
             "signing from a retained previous batch should succeed"
         );
+    }
+
+    #[test]
+    fn test_recovered_manager_only_enables_live_and_unallocated_presigs() {
+        let setup = SigningTestSetup::new(4);
+        let original = &setup.managers[0];
+        let batch0 = test_presignatures(setup.n, setup.t, setup.f, 0, 100);
+        let batch_size = batch0.len() as u64;
+        let batch1 = test_presignatures(setup.n, setup.t, setup.f, 0, 101);
+        assert_eq!(batch1.len() as u64, batch_size);
+        let pending = HashSet::from([1, batch_size + 1]);
+        let num_consumed = batch_size + 2;
+        let (refill_tx, _) = watch::channel(0u32);
+
+        let recovered = SigningManager::new_recovered(
+            original.config.address,
+            original.config.committee.clone(),
+            original.config.threshold,
+            original.config.key_shares.clone(),
+            original.config.verifying_key,
+            vec![
+                RecoveredPresigBatch {
+                    presignatures: batch0,
+                    start_index: 0,
+                    batch_index: 0,
+                },
+                RecoveredPresigBatch {
+                    presignatures: batch1,
+                    start_index: batch_size,
+                    batch_index: 1,
+                },
+            ],
+            num_consumed,
+            &pending,
+            crate::constants::PRESIG_REFILL_DIVISOR,
+            Arc::new(refill_tx),
+        )
+        .unwrap();
+
+        let state = recovered.state.read().unwrap();
+        assert_eq!(state.batches.len(), 2);
+        assert!(state.batches[0].pool[0].is_none());
+        assert!(state.batches[0].pool[1].is_some());
+        assert!(state.batches[1].pool[0].is_none());
+        assert!(state.batches[1].pool[1].is_some());
+        assert!(state.batches[1].pool[2].is_some());
+    }
+
+    #[test]
+    fn test_recovered_manager_rejects_uncovered_pending_presig() {
+        let setup = SigningTestSetup::new(4);
+        let original = &setup.managers[0];
+        let batch = test_presignatures(setup.n, setup.t, setup.f, 0, 102);
+        let batch_size = batch.len() as u64;
+        let pending = HashSet::from([batch_size]);
+        let (refill_tx, _) = watch::channel(0u32);
+
+        let result = SigningManager::new_recovered(
+            original.config.address,
+            original.config.committee.clone(),
+            original.config.threshold,
+            original.config.key_shares.clone(),
+            original.config.verifying_key,
+            vec![RecoveredPresigBatch {
+                presignatures: batch,
+                start_index: 0,
+                batch_index: 0,
+            }],
+            batch_size + 1,
+            &pending,
+            crate::constants::PRESIG_REFILL_DIVISOR,
+            Arc::new(refill_tx),
+        );
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]

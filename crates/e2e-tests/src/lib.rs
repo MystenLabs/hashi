@@ -249,6 +249,16 @@ impl TestNetworksBuilder {
         self
     }
 
+    pub fn with_mpc_signing_chunk_size(mut self, size: usize) -> Self {
+        self.hashi_builder = self.hashi_builder.with_mpc_signing_chunk_size(size);
+        self
+    }
+
+    pub fn with_weight_divisor(mut self, divisor: u16) -> Self {
+        self.hashi_builder = self.hashi_builder.with_weight_divisor(divisor);
+        self
+    }
+
     pub fn with_withdrawal_max_batch_size(mut self, size: usize) -> Self {
         self.hashi_builder = self.hashi_builder.with_withdrawal_max_batch_size(size);
         self

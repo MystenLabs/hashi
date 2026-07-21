@@ -358,6 +358,8 @@ pub struct HashiNetworkBuilder {
     /// Overrides `withdrawal_max_batch_size` in each node's config.
     /// `None` uses the production default (70).
     pub withdrawal_max_batch_size: Option<usize>,
+    /// Overrides `mpc_signing_chunk_size` in each node's config.
+    pub mpc_signing_chunk_size: Option<usize>,
     /// Overrides `max_mempool_chain_depth` in each node's config.
     /// `None` uses the production default (5).
     pub max_mempool_chain_depth: Option<usize>,
@@ -376,6 +378,7 @@ impl HashiNetworkBuilder {
             test_weight_divisor: Some(TEST_WEIGHT_DIVISOR),
             withdrawal_batching_delay_ms: Some(0),
             withdrawal_max_batch_size: None,
+            mpc_signing_chunk_size: None,
             max_mempool_chain_depth: None,
             test_corrupt_shares_target: None,
         }
@@ -411,6 +414,11 @@ impl HashiNetworkBuilder {
         self
     }
 
+    pub fn with_weight_divisor(mut self, divisor: u16) -> Self {
+        self.test_weight_divisor = Some(divisor);
+        self
+    }
+
     pub fn with_withdrawal_batching_delay_ms(mut self, ms: u64) -> Self {
         self.withdrawal_batching_delay_ms = Some(ms);
         self
@@ -418,6 +426,11 @@ impl HashiNetworkBuilder {
 
     pub fn with_withdrawal_max_batch_size(mut self, size: usize) -> Self {
         self.withdrawal_max_batch_size = Some(size);
+        self
+    }
+
+    pub fn with_mpc_signing_chunk_size(mut self, size: usize) -> Self {
+        self.mpc_signing_chunk_size = Some(size);
         self
     }
 
@@ -469,6 +482,7 @@ impl HashiNetworkBuilder {
                 self.test_presignature_derivation_activation_epoch;
             config.withdrawal_batching_delay_ms = self.withdrawal_batching_delay_ms;
             config.withdrawal_max_batch_size = self.withdrawal_max_batch_size;
+            config.mpc_signing_chunk_size = self.mpc_signing_chunk_size;
             config.max_mempool_chain_depth = self.max_mempool_chain_depth;
             // All nodes EXCEPT the target corrupt shares for the target.
             if let Some(target_addr) = corrupt_target_address

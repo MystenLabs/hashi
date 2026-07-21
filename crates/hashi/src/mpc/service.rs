@@ -3,6 +3,7 @@
 
 //! MPC (Multi-Party Computation) Service
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,6 +32,7 @@ use crate::mpc::MpcManager;
 use crate::mpc::MpcOutput;
 use crate::mpc::SigningManager;
 use crate::mpc::rpc::RpcP2PChannel;
+use crate::mpc::signing::RecoveredPresigBatch;
 use crate::mpc::types::CertificateV1;
 use crate::mpc::types::MpcOutputRecoveryOutcome;
 use crate::mpc::types::NonceGenerationProtocol;
@@ -519,19 +521,8 @@ impl MpcService {
     }
 
     async fn recover_presigning_state(&self, output: &MpcOutput) -> anyhow::Result<()> {
-        let (num_consumed, epoch, committee) = {
-            let state = self.inner.onchain_state().state();
-            let hashi = state.hashi();
-            let num_consumed = hashi.num_consumed_presigs;
-            let epoch = hashi.committees.epoch();
-            let committee = hashi
-                .committees
-                .committees()
-                .get(&epoch)
-                .ok_or_else(|| anyhow::anyhow!("No committee found for epoch {epoch}"))?
-                .clone();
-            (num_consumed, epoch, committee)
-        };
+        let (num_consumed, epoch, committee, pending_presig_indices) =
+            self.presigning_recovery_snapshot()?;
         let mpc_manager = self
             .inner
             .mpc_manager()
@@ -546,12 +537,15 @@ impl MpcService {
                 },
             )
         };
-        // Walk through batches to find the one containing `num_consumed`.
-        // Each batch can have a different size with unequal committee weights.
+        // Batch sizes can differ, so recover from batch zero to establish the
+        // global boundaries. Retain the contiguous range from the earliest live
+        // pending index through the allocation frontier.
         let mut batch_start = 0u64;
         let mut batch_index = 0u32;
-        let presignatures = loop {
-            let presigs = self
+        let mut first_live_batch = None;
+        let mut recovered_batches = Vec::new();
+        loop {
+            let presignatures = self
                 .recover_presignatures_from_certs(
                     &mpc_manager,
                     epoch,
@@ -560,34 +554,102 @@ impl MpcService {
                     params,
                 )
                 .await?;
-            let size = presigs.len() as u64;
-            if num_consumed < batch_start + size {
-                break presigs;
+            let size = presignatures.len() as u64;
+            let batch_end = batch_start
+                .checked_add(size)
+                .ok_or_else(|| anyhow::anyhow!("recovered presig batch end overflow"))?;
+            if first_live_batch.is_none()
+                && pending_presig_indices
+                    .iter()
+                    .any(|index| *index >= batch_start && *index < batch_end)
+            {
+                first_live_batch = Some(recovered_batches.len());
             }
-            batch_start += size;
-            batch_index += 1;
-        };
-        let batch_size = presignatures.len();
+            recovered_batches.push(RecoveredPresigBatch {
+                presignatures,
+                start_index: batch_start,
+                batch_index,
+            });
+            if num_consumed <= batch_end {
+                break;
+            }
+            batch_start = batch_end;
+            batch_index = batch_index
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("presig batch index overflow"))?;
+        }
+
+        let first_retained = first_live_batch.unwrap_or(recovered_batches.len() - 1);
+        recovered_batches.drain(..first_retained);
+
+        let (latest_num_consumed, latest_epoch, _, latest_pending) =
+            self.presigning_recovery_snapshot()?;
+        anyhow::ensure!(
+            epoch == latest_epoch
+                && num_consumed == latest_num_consumed
+                && pending_presig_indices == latest_pending,
+            "on-chain presigning state changed during recovery",
+        );
+
         let address = self.inner.config.validator_address()?;
-        let signing_manager = SigningManager::new(
+        let signing_manager = SigningManager::new_recovered(
             address,
             committee,
             output.threshold,
             output.key_shares.clone(),
             output.public_key,
-            presignatures,
-            batch_index,
-            batch_start,
+            recovered_batches,
+            num_consumed,
+            &pending_presig_indices,
             PRESIG_REFILL_DIVISOR,
             self.refill_tx.clone(),
-        );
+        )?;
+        let latest_batch = signing_manager.batch_index();
+        let active_batches = signing_manager.active_batch_count();
+        let available_end = signing_manager.available_presig_end_index();
         self.inner.store_signing_manager(signing_manager);
         info!(
-            "Recovered presigning state: batch_index={batch_index}, \
-             batch_start={batch_start}, batch_size={batch_size} \
-             (num_consumed_presigs={num_consumed})."
+            "Recovered presigning state: epoch={epoch}, num_consumed_presigs={num_consumed}, \
+             pending_presigs={}, active_batches={active_batches}, latest_batch={latest_batch}, \
+             available_end={available_end}.",
+            pending_presig_indices.len(),
         );
         Ok(())
+    }
+
+    fn presigning_recovery_snapshot(&self) -> anyhow::Result<(u64, u64, Committee, HashSet<u64>)> {
+        let (num_consumed, epoch, committee, pending_presig_indices) = {
+            let state = self.inner.onchain_state().state();
+            let hashi = state.hashi();
+            let num_consumed = hashi.num_consumed_presigs;
+            let epoch = hashi.committees.epoch();
+            let committee = hashi
+                .committees
+                .committees()
+                .get(&epoch)
+                .ok_or_else(|| anyhow::anyhow!("No committee found for epoch {epoch}"))?
+                .clone();
+            let mut pending_presig_indices = HashSet::new();
+            for txn in hashi.withdrawal_queue.withdrawal_txns().values() {
+                if txn.signing_epoch() != epoch {
+                    continue;
+                }
+                for signature in &txn.signing.signatures {
+                    if let move_types::MpcSig::Pending(index) = signature {
+                        anyhow::ensure!(
+                            *index < num_consumed,
+                            "pending presig index {index} is not below allocation cursor {num_consumed}",
+                        );
+                        anyhow::ensure!(
+                            pending_presig_indices.insert(*index),
+                            "pending presig index {index} is assigned more than once",
+                        );
+                    }
+                }
+            }
+            (num_consumed, epoch, committee, pending_presig_indices)
+        };
+        Ok((num_consumed, epoch, committee, pending_presig_indices))
     }
 
     async fn sync_if_stale(&self) {
@@ -619,6 +681,18 @@ impl MpcService {
                 info!("sync_if_stale: recovered epoch {epoch} via certs path");
             }
             Err(certs_err) => {
+                let fallback_is_safe = self.presigning_recovery_snapshot().is_ok_and(
+                    |(num_consumed, snapshot_epoch, _, pending)| {
+                        snapshot_epoch == epoch && num_consumed == 0 && pending.is_empty()
+                    },
+                );
+                if !fallback_is_safe {
+                    error!(
+                        "sync_if_stale: certified presig recovery failed for epoch {epoch} \
+                         with allocated presigs; refusing unsafe fresh protocol fallback: {certs_err}"
+                    );
+                    return;
+                }
                 info!(
                     "sync_if_stale: certs path failed for epoch {epoch} ({certs_err}), \
                      falling back to protocol"
