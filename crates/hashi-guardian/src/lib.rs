@@ -23,7 +23,6 @@ pub mod attestation;
 pub mod ceremony_mode;
 pub mod enclave;
 pub mod info;
-pub mod operator_activate;
 pub mod operator_init;
 pub mod rpc;
 pub mod s3_client; // used by the monitor

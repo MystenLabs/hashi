@@ -15,7 +15,9 @@ use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::bitcoin::BitcoinSignature;
 use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::bitcoin::TxUTXOs;
+use hashi_types::guardian::GuardianError::InternalError;
 use hashi_types::guardian::GuardianError::InvalidInputs;
+use hashi_types::guardian::GuardianError::Unavailable;
 use hashi_types::guardian::*;
 use hpke::Serializable;
 use serde::Serialize;
@@ -281,8 +283,23 @@ impl EnclaveState {
     }
 
     /// Timeout for acquiring the limiter lock. If a withdrawal is in progress and
-    /// takes longer than this, we bail rather than queue up requests indefinitely.
+    /// takes longer than this, callers bail rather than wait indefinitely.
     const LIMITER_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// Acquire exclusive access to the limiter, bounded by
+    /// `LIMITER_LOCK_TIMEOUT`.
+    async fn lock_limiter(&self) -> GuardianResult<OwnedMutexGuard<RateLimiter>> {
+        let rate_limiter = self
+            .rate_limiter
+            .get()
+            .ok_or_else(|| InternalError("rate limiter not initialized".into()))?;
+        tokio::time::timeout(
+            Self::LIMITER_LOCK_TIMEOUT,
+            rate_limiter.clone().lock_owned(),
+        )
+        .await
+        .map_err(|_| Unavailable("timed out waiting for rate limiter lock".into()))
+    }
 
     /// Acquire exclusive access to the limiter, consume tokens, and return a guard.
     /// The guard is held through signing and durable logging so no other withdrawal
@@ -293,56 +310,21 @@ impl EnclaveState {
         timestamp: u64,
         amount_sats: u64,
     ) -> GuardianResult<OwnedMutexGuard<RateLimiter>> {
-        let rate_limiter = self
-            .rate_limiter
-            .get()
-            .ok_or_else(|| InvalidInputs("rate_limiter not initialized".into()))?;
-        let mut guard = tokio::time::timeout(
-            Self::LIMITER_LOCK_TIMEOUT,
-            rate_limiter.clone().lock_owned(),
-        )
-        .await
-        .map_err(|_| InvalidInputs("timed out waiting for rate limiter lock".into()))?;
+        let mut guard = self.lock_limiter().await?;
         guard.consume(seq, timestamp, amount_sats)?;
         Ok(guard)
     }
 
+    /// Return the limiter state for status reporting, or `None` if the limiter
+    /// is uninitialized or remains locked through the acquisition deadline.
     pub async fn limiter_state(&self) -> Option<LimiterState> {
-        Some(*self.lock_limiter_for_read().await?.state())
+        Some(*self.lock_limiter().await.ok()?.state())
     }
 
+    /// Return the limiter config for status reporting, or `None` if the limiter
+    /// is uninitialized or remains locked through the acquisition deadline.
     pub async fn limiter_config(&self) -> Option<LimiterConfig> {
-        Some(*self.lock_limiter_for_read().await?.config())
-    }
-
-    /// Lock the limiter for a read-only status query, bounded by
-    /// `LIMITER_LOCK_TIMEOUT` so an in-flight durable write cannot stall `info`
-    /// for minutes. Returns None if uninitialized or the lock is still held at
-    /// the deadline.
-    async fn lock_limiter_for_read(&self) -> Option<OwnedMutexGuard<RateLimiter>> {
-        let rate_limiter = self.rate_limiter.get()?;
-        tokio::time::timeout(
-            Self::LIMITER_LOCK_TIMEOUT,
-            rate_limiter.clone().lock_owned(),
-        )
-        .await
-        .ok()
-    }
-}
-
-/// Build identity for `GuardianInfo.untrusted_git_revision` / the `PcrAllowlist`
-/// key. A real ceremony enclave is a distinct measured build (its own PCR0) from
-/// the same-commit withdraw enclave, so it reports a distinct identity — the
-/// allowlist forbids two entries per revision, so otherwise the withdraw enclave
-/// and KPs couldn't pin both PCR0s. `test`/`non-enclave-dev` skip attestation and
-/// share one entry, so the suffix is compiled out (existing mock flow unchanged).
-fn reported_git_revision(mode: EnclaveMode) -> String {
-    // Injected at build time (docker/CI); defaults outside a real build.
-    let base = option_env!("GIT_REVISION").unwrap_or("unknown");
-    if cfg!(not(any(test, feature = "non-enclave-dev"))) && mode == EnclaveMode::Ceremony {
-        format!("{base}-ceremony")
-    } else {
-        base.to_string()
+        Some(*self.lock_limiter().await.ok()?.config())
     }
 }
 
@@ -501,6 +483,24 @@ impl Enclave {
     // Enclave Info
     // ========================================================================
 
+    /// Build identity for `GuardianInfo.untrusted_git_revision` / the
+    /// `PcrAllowlist` key. A real ceremony enclave is a distinct measured build
+    /// (its own PCR0) from the same-commit withdraw enclave, so it reports a
+    /// distinct identity — the allowlist forbids two entries per revision, so
+    /// otherwise the withdraw enclave and KPs couldn't pin both PCR0s.
+    /// `test`/`non-enclave-dev` skip attestation and share one entry, so the
+    /// suffix is compiled out (existing mock flow unchanged).
+    fn reported_git_revision(&self) -> String {
+        // Injected at build time (docker/CI); defaults outside a real build.
+        let base = option_env!("GIT_REVISION").unwrap_or("unknown");
+        if cfg!(not(any(test, feature = "non-enclave-dev"))) && self.mode() == EnclaveMode::Ceremony
+        {
+            format!("{base}-ceremony")
+        } else {
+            base.to_string()
+        }
+    }
+
     pub async fn info(&self) -> GuardianInfo {
         GuardianInfo {
             lifecycle: self.lifecycle(),
@@ -513,7 +513,7 @@ impl Enclave {
             encryption_pubkey: self.encryption_public_key().to_bytes().to_vec(),
             config_hash: self.config_hash(),
             genesis_state_hash: self.genesis_state_hash(),
-            untrusted_git_revision: reported_git_revision(self.mode()),
+            untrusted_git_revision: self.reported_git_revision(),
             enclave_btc_pubkey: self.config.enclave_btc_pubkey().ok(),
             limiter_state: self.state.limiter_state().await,
             limiter_config: match self.state.limiter_config().await {

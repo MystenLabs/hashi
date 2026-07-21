@@ -12,6 +12,10 @@ pub enum GuardianError {
     InvalidInputs(String),
     EnclaveUninitialized,
     RateLimitExceeded,
+    /// A temporary service condition that callers may retry.
+    // TODO: Audit other transient guardian failures and map retryable cases to
+    // `Unavailable` where appropriate.
+    Unavailable(String),
 }
 
 pub type GuardianResult<T> = Result<T, GuardianError>;
@@ -20,6 +24,7 @@ impl std::fmt::Display for GuardianError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GuardianError::InternalError(e) => write!(f, "InternalError: {}", e),
+            GuardianError::Unavailable(e) => write!(f, "Unavailable: {}", e),
             GuardianError::InvalidInputs(e) => write!(f, "InvalidInputs: {}", e),
             GuardianError::S3Error(e) => write!(f, "S3Error: {}", e),
             GuardianError::EnclaveUninitialized => write!(f, "Enclave is not fully initialized"),
