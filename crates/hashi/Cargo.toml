@@ -90,3 +90,4 @@ ed25519-dalek.workspace = true
 test-strategy.workspace = true
 proptest.workspace = true
 tracing-test = "0.2"
+http-body = "1"

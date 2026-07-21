@@ -86,7 +86,7 @@ async fn request(
         .context("Withdrawal address does not match the configured Bitcoin network")?;
     let destination_bytes = witness_program_from_address(&btc_addr)?;
 
-    let mut client = sui_rpc::Client::new(&config.sui_rpc_url)?;
+    let mut client = crate::sui_rpc_client::new_sui_rpc_client(&config.sui_rpc_url)?;
 
     // A single request supports all tx modes (execute / dry-run /
     // serialize-unsigned) via the builder + finalize path.
@@ -206,7 +206,7 @@ async fn cancel(config: &CliConfig, tx_opts: &TxOptions, request_id: &str) -> Re
         TxMode::Execute => print_info("Cancelling withdrawal..."),
     }
 
-    let mut client = sui_rpc::Client::new(&config.sui_rpc_url)?;
+    let mut client = crate::sui_rpc_client::new_sui_rpc_client(&config.sui_rpc_url)?;
     let outcome = crate::sui_tx_executor::finalize(
         &mut client,
         signer.as_ref(),

@@ -73,7 +73,7 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
         // same channel can reuse a wedged h2 connection — the one whose stream
         // just stalled — and silently hang again; a new client forces a clean
         // connection. Reconnects are rare, so the extra setup cost is fine.
-        let mut client = match Client::new(&sui_rpc_url) {
+        let mut client = match crate::sui_rpc_client::new_sui_rpc_client(&sui_rpc_url) {
             Ok(client) => client,
             Err(e) => {
                 tracing::warn!("error creating Sui RPC client: {e}");

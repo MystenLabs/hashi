@@ -135,7 +135,7 @@ impl OnchainState {
         metrics: Option<Arc<crate::metrics::Metrics>>,
         config_poll_interval: Option<std::time::Duration>,
     ) -> Result<(Self, Service)> {
-        let mut client = Client::new(sui_rpc_url)?;
+        let mut client = crate::sui_rpc_client::new_sui_rpc_client(sui_rpc_url)?;
         // The scrape client reads the full on-chain state (the largest
         // responses), so it needs the decode limit too — not just `committees`.
         if let Some(limit) = grpc_max_decoding_message_size {

@@ -22,7 +22,7 @@ pub async fn run(config: &CliConfig, address: &str, output_format: OutputFormat)
     let btc_type = format!("{}::btc::BTC", config.package_id());
     let btc_struct_tag: StructTag = btc_type.parse().context("Failed to parse hBTC coin type")?;
 
-    let mut client = sui_rpc::Client::new(&config.sui_rpc_url)?;
+    let mut client = crate::sui_rpc_client::new_sui_rpc_client(&config.sui_rpc_url)?;
 
     let response = client
         .state_client()

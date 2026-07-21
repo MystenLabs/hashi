@@ -31,6 +31,7 @@ pub mod mpc;
 pub mod onchain;
 pub mod publish;
 pub mod storage;
+pub mod sui_rpc_client;
 pub mod sui_tx_executor;
 pub mod tls;
 pub mod utxo_pool;
@@ -588,7 +589,7 @@ impl Hashi {
         use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
 
         let sui_rpc_url = self.config.sui_rpc.as_deref().unwrap();
-        let mut client = sui_rpc::Client::new(sui_rpc_url)?;
+        let mut client = sui_rpc_client::new_sui_rpc_client(sui_rpc_url)?;
 
         let service_info = client
             .ledger_client()
