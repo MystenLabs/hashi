@@ -537,9 +537,13 @@ impl MpcService {
                 },
             )
         };
-        // Batch sizes can differ, so recover from batch zero to establish the
-        // global boundaries. Retain the contiguous range from the earliest live
-        // pending index through the allocation frontier.
+        // `num_consumed_presigs` is an allocation cursor, not a liveness
+        // watermark: committing a withdrawal advances it before that withdrawal
+        // is necessarily signed. Batch sizes can also differ, so recover from
+        // batch zero to establish the global boundaries, then retain the
+        // contiguous range from the earliest live pending index through the
+        // allocation frontier. Retention is bounded by the epoch because stale
+        // withdrawals are reallocated after reconfiguration resets the cursor.
         let mut batch_start = 0u64;
         let mut batch_index = 0u32;
         let mut first_live_batch = None;

@@ -1286,8 +1286,19 @@ mod tests {
 
         /// Build fresh presignatures and set as next_batch on all managers.
         fn set_next_batch_on_all(&self) {
+            for (manager, presignatures) in self
+                .managers
+                .iter()
+                .zip(self.build_presignatures_for_all(99))
+            {
+                manager.set_next_batch(presignatures);
+            }
+        }
+
+        /// Build one consistent set of fresh presignatures per manager.
+        fn build_presignatures_for_all(&self, seed: u64) -> Vec<Presignatures> {
             let batch_size_per_weight: u16 = 10;
-            let mut rng = StdRng::seed_from_u64(99);
+            let mut rng = StdRng::seed_from_u64(seed);
             let nonces_for_dealer: Vec<_> = (0..self.n)
                 .map(|_| {
                     let nonces: Vec<S> = (0..batch_size_per_weight)
@@ -1306,34 +1317,35 @@ mod tests {
                     (public_keys, nonce_shares)
                 })
                 .collect();
-            for (i, mgr) in self.managers.iter().enumerate() {
-                let index = ShareIndex::new(i as u16 + 1).unwrap();
-                let outputs: Vec<batch_avss::ReceiverOutput> = (0..self.n as usize)
-                    .map(|j| batch_avss::ReceiverOutput {
-                        my_shares: batch_avss::SharesForNode {
-                            shares: vec![batch_avss::ShareBatch {
-                                index,
-                                batch: (0..batch_size_per_weight as usize)
-                                    .map(|l| nonces_for_dealer[j].1[l][i])
-                                    .collect(),
-                                blinding_share: S::zero(),
-                            }],
+            (0..self.managers.len())
+                .map(|i| {
+                    let index = ShareIndex::new(i as u16 + 1).unwrap();
+                    let outputs: Vec<batch_avss::ReceiverOutput> = (0..self.n as usize)
+                        .map(|j| batch_avss::ReceiverOutput {
+                            my_shares: batch_avss::SharesForNode {
+                                shares: vec![batch_avss::ShareBatch {
+                                    index,
+                                    batch: (0..batch_size_per_weight as usize)
+                                        .map(|l| nonces_for_dealer[j].1[l][i])
+                                        .collect(),
+                                    blinding_share: S::zero(),
+                                }],
+                            },
+                            public_keys: nonces_for_dealer[j].0.clone(),
+                        })
+                        .collect();
+                    Presignatures::new(
+                        outputs,
+                        batch_size_per_weight,
+                        Parameters {
+                            t: self.t,
+                            f: self.f,
                         },
-                        public_keys: nonces_for_dealer[j].0.clone(),
-                    })
-                    .collect();
-                let presignatures = Presignatures::new(
-                    outputs,
-                    batch_size_per_weight,
-                    Parameters {
-                        t: self.t,
-                        f: self.f,
-                    },
-                    true,
-                )
-                .unwrap();
-                mgr.set_next_batch(presignatures);
-            }
+                        true,
+                    )
+                    .unwrap()
+                })
+                .collect()
         }
 
         /// Manually advance peers (skip manager at `caller_index`) by
@@ -1358,45 +1370,6 @@ mod tests {
                 });
             }
         }
-    }
-
-    fn test_presignatures(n: u16, t: u16, f: u16, node_index: usize, seed: u64) -> Presignatures {
-        let batch_size_per_weight: u16 = 10;
-        let mut rng = StdRng::seed_from_u64(seed);
-        let nonces_for_dealer: Vec<_> = (0..n)
-            .map(|_| {
-                let nonces: Vec<S> = (0..batch_size_per_weight)
-                    .map(|_| S::rand(&mut rng))
-                    .collect();
-                let public_keys: Vec<G> = nonces.iter().map(|s| G::generator() * *s).collect();
-                let nonce_shares: Vec<Vec<S>> = nonces
-                    .iter()
-                    .map(|&nonce| {
-                        mock_shares(&mut rng, nonce, t, n)
-                            .iter()
-                            .map(|eval| eval.value)
-                            .collect()
-                    })
-                    .collect();
-                (public_keys, nonce_shares)
-            })
-            .collect();
-        let index = ShareIndex::new(node_index as u16 + 1).unwrap();
-        let outputs = (0..n as usize)
-            .map(|dealer| batch_avss::ReceiverOutput {
-                my_shares: batch_avss::SharesForNode {
-                    shares: vec![batch_avss::ShareBatch {
-                        index,
-                        batch: (0..batch_size_per_weight as usize)
-                            .map(|position| nonces_for_dealer[dealer].1[position][node_index])
-                            .collect(),
-                        blinding_share: S::zero(),
-                    }],
-                },
-                public_keys: nonces_for_dealer[dealer].0.clone(),
-            })
-            .collect();
-        Presignatures::new(outputs, batch_size_per_weight, Parameters { t, f }, true).unwrap()
     }
 
     /// Pre-built partial sigs for aggregate_signatures_with_recovery tests.
@@ -2228,9 +2201,9 @@ mod tests {
     fn test_recovered_manager_only_enables_live_and_unallocated_presigs() {
         let setup = SigningTestSetup::new(4);
         let original = &setup.managers[0];
-        let batch0 = test_presignatures(setup.n, setup.t, setup.f, 0, 100);
+        let batch0 = setup.build_presignatures_for_all(100).remove(0);
         let batch_size = batch0.len() as u64;
-        let batch1 = test_presignatures(setup.n, setup.t, setup.f, 0, 101);
+        let batch1 = setup.build_presignatures_for_all(101).remove(0);
         assert_eq!(batch1.len() as u64, batch_size);
         let pending = HashSet::from([1, batch_size + 1]);
         let num_consumed = batch_size + 2;
@@ -2270,11 +2243,90 @@ mod tests {
         assert!(state.batches[1].pool[2].is_some());
     }
 
+    #[tokio::test]
+    async fn test_recovered_batches_sign_out_of_order() {
+        let mut setup = SigningTestSetup::new(4);
+        let batch0 = setup.build_presignatures_for_all(103);
+        let batch1 = setup.build_presignatures_for_all(104);
+        let batch_size = batch0[0].len() as u64;
+        let pending = HashSet::from([0, batch_size]);
+
+        setup.managers = setup
+            .managers
+            .iter()
+            .zip(batch0)
+            .zip(batch1)
+            .map(|((original, batch0), batch1)| {
+                let (refill_tx, _) = watch::channel(0u32);
+                SigningManager::new_recovered(
+                    original.config.address,
+                    original.config.committee.clone(),
+                    original.config.threshold,
+                    original.config.key_shares.clone(),
+                    original.config.verifying_key,
+                    vec![
+                        RecoveredPresigBatch {
+                            presignatures: batch0,
+                            start_index: 0,
+                            batch_index: 0,
+                        },
+                        RecoveredPresigBatch {
+                            presignatures: batch1,
+                            start_index: batch_size,
+                            batch_index: 1,
+                        },
+                    ],
+                    batch_size + 1,
+                    &pending,
+                    crate::constants::PRESIG_REFILL_DIVISOR,
+                    Arc::new(refill_tx),
+                )
+                .map(Arc::new)
+                .unwrap()
+            })
+            .collect();
+
+        let beacon = S::zero();
+        let later_id = Address::new([0xAA; 32]);
+        setup.prepare_all(b"later batch", &beacon, later_id, batch_size, Some(0));
+        let signature = SigningManager::sign_one(
+            &setup.managers[0],
+            &setup.mock_p2p_for(0),
+            later_id,
+            b"later batch",
+            batch_size,
+            &beacon,
+            None,
+            Duration::from_secs(30),
+            &test_metrics(),
+        )
+        .await
+        .unwrap();
+        verify_schnorr(&setup.verifying_key, b"later batch", &signature);
+
+        let earlier_id = Address::new([0xBB; 32]);
+        setup.prepare_all(b"earlier batch", &beacon, earlier_id, 0, Some(0));
+        let signature = SigningManager::sign_one(
+            &setup.managers[0],
+            &setup.mock_p2p_for(0),
+            earlier_id,
+            b"earlier batch",
+            0,
+            &beacon,
+            None,
+            Duration::from_secs(30),
+            &test_metrics(),
+        )
+        .await
+        .unwrap();
+        verify_schnorr(&setup.verifying_key, b"earlier batch", &signature);
+    }
+
     #[test]
     fn test_recovered_manager_rejects_uncovered_pending_presig() {
         let setup = SigningTestSetup::new(4);
         let original = &setup.managers[0];
-        let batch = test_presignatures(setup.n, setup.t, setup.f, 0, 102);
+        let batch = setup.build_presignatures_for_all(102).remove(0);
         let batch_size = batch.len() as u64;
         let pending = HashSet::from([batch_size]);
         let (refill_tx, _) = watch::channel(0u32);
