@@ -23,7 +23,7 @@ use crate::guardian_info::ensure_oi_info_matches_post_init;
 use crate::guardian_info::verified_live_guardian_info;
 
 /// Initialize a fresh withdraw-mode guardian with operator-supplied stable config.
-pub async fn run(cfg: Config) -> anyhow::Result<()> {
+pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
     let guardian_s3 = cfg.guardian_s3.resolve().await?;
     let allowlist = cfg.kp_roster.pcr_allowlist();
@@ -38,6 +38,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         threshold = cfg.kp_roster.threshold,
         limiter_refill_rate = cfg.limiter_config.refill_rate,
         limiter_max_capacity = cfg.limiter_config.max_bucket_capacity,
+        do_genesis,
         "running operator provision flow",
     );
 
@@ -72,11 +73,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         phase = "committee",
         "checking latest committee-update/genesis record before operator_init",
     );
-    let genesis_state = match reader
+    let latest_committee = reader
         .read_latest_committee(BuildPolicy::AnyAllowlisted)
-        .await?
-    {
-        Some(committee) => {
+        .await?;
+    let genesis_state = match (do_genesis, latest_committee) {
+        (false, Some(committee)) => {
             info!(
                 phase = "committee",
                 epoch = committee.epoch,
@@ -84,7 +85,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             );
             None
         }
-        None => {
+        (true, None) => {
             let committee = onchain_state
                 .current_committee()
                 .context("no current committee on chain (DKG not yet complete?)")?;
@@ -95,6 +96,13 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             );
             Some(GenesisState::new(committee))
         }
+        (true, Some(committee)) => anyhow::bail!(
+            "--do-genesis was supplied, but a serving committee already exists at epoch {}",
+            committee.epoch
+        ),
+        (false, None) => anyhow::bail!(
+            "no serving committee exists; re-run with --do-genesis to explicitly bootstrap genesis"
+        ),
     };
 
     info!(

@@ -58,7 +58,7 @@ use crate::guardian_info::verified_live_guardian_info;
 use crate::kp_roster::decrypt_kp_share_copies;
 use crate::kp_roster::load_kp_cert;
 
-pub async fn run(cfg: Config) -> anyhow::Result<()> {
+pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
     let guardian_s3 = cfg.guardian_s3.resolve().await?;
 
@@ -69,6 +69,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         num_shares = cfg.kp_roster.num_shares,
         threshold = cfg.kp_roster.threshold,
         relay_endpoint = %cfg.relay_endpoint,
+        do_genesis,
         "running provision flow",
     );
 
@@ -308,19 +309,26 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         "recomputed config_hash matches enclave",
     );
 
-    // Independently derive whether this is a first deploy and, if so, bind the
-    // current on-chain committee into this KP's signed PI submission.
-    let expected_genesis_state_hash = match reader
+    // Require the explicit intent marker to match S3 state. For genesis, bind
+    // the independently read on-chain committee into this KP's signed PI submission.
+    let latest_committee = reader
         .read_latest_committee(BuildPolicy::AnyAllowlisted)
-        .await?
-    {
-        Some(_) => None,
-        None => {
+        .await?;
+    let expected_genesis_state_hash = match (do_genesis, latest_committee) {
+        (false, Some(_)) => None,
+        (true, None) => {
             let committee = onchain_state
                 .current_committee()
                 .context("no current committee on chain (DKG not yet complete?)")?;
             Some(GenesisState::new(committee).digest())
         }
+        (true, Some(committee)) => anyhow::bail!(
+            "--do-genesis was supplied, but a serving committee already exists at epoch {}",
+            committee.epoch
+        ),
+        (false, None) => anyhow::bail!(
+            "no serving committee exists; re-run with --do-genesis to explicitly authorize genesis"
+        ),
     };
     anyhow::ensure!(
         expected_genesis_state_hash == enclave_genesis_state_hash,

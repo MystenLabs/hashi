@@ -108,8 +108,10 @@ It:
    `genesis/` record if one already exists.
 4. Builds the withdraw-mode `InitConfig` from limiter config, on-chain MPC
    master `G`, the KP PCR allowlist, and configured Bitcoin network.
-5. If no serving committee exists, builds an optional `GenesisState` from the
-   current on-chain committee.
+5. Requires the observed serving-committee state to agree with the
+   `--do-genesis` intent marker. On first deploy, the flag causes it to build an
+   optional `GenesisState` from the current on-chain committee; otherwise a
+   serving committee must already exist.
 6. Calls withdraw-mode `OperatorInit` with guardian S3 config, `InitConfig`, and
    the optional genesis state; the enclave pins all three inputs plus the latest
    complete ceremony and KP-share state.
@@ -121,6 +123,10 @@ It:
 ```bash
 cargo run -p hashi-guardian-init -- operator provision --config guardian-init.sample.yaml
 ```
+
+On first deploy, add `--do-genesis`. The flag is purely an explicit intent
+marker; the committee still comes from on-chain state and requires threshold KP
+authorization during PI.
 
 Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
 command uses `guardian_endpoint`, `guardian_s3`, `bitcoin_network`, `hashi`,
@@ -145,9 +151,10 @@ is held in this process' memory long enough to verify and re-encrypt it. It:
 4. Recomputes the stable `InitConfig` from limiter config, on-chain MPC master
    `G`, PCR allowlist, and network, then confirms its `config_hash` matches the
    enclave.
-5. Independently determines whether genesis is needed from S3 and, if so,
-   derives the current on-chain committee's `genesis_state_hash`; confirms the
-   optional hash matches the enclave.
+5. Requires the observed serving-committee state to agree with the
+   `--do-genesis` intent marker. With the flag, independently derives the
+   current on-chain committee's `genesis_state_hash`; confirms the optional hash
+   matches the enclave.
 6. Reads this KP's PGP-encrypted share from the latest `kp-shares/{seq}/`
    state, verifies each encrypted copy's recipient against the roster, then
    decrypts and commitment-checks only the copy selected by
@@ -165,6 +172,9 @@ is held in this process' memory long enough to verify and re-encrypt it. It:
 ```bash
 cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-init.sample.yaml
 ```
+
+On first deploy, each KP adds `--do-genesis`. The flag is purely an intent
+marker; the signed optional genesis hash remains the authorization.
 
 See [`guardian-init.sample.yaml`](guardian-init.sample.yaml) for the unified
 config. This command uses `kp_pgp_cert_path`, `relay_endpoint`, `hashi`,

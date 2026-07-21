@@ -88,7 +88,8 @@ sequenceDiagram
     Operator->>Operator: Gather master G from onchain state
     Operator->>Operator: Gather bucket plus limiter config plus PCR allowlist plus network
     Operator->>Operator: Build InitConfig
-    Operator->>Operator: If no serving committee exists, build GenesisState from onchain state
+    Operator->>Operator: Require S3 state to match --do-genesis intent
+    Operator->>Operator: With flag, build GenesisState from onchain state
     Operator->>Guardian: OperatorInit(S3 config, InitConfig, optional GenesisState)
     Guardian->>S3: Read latest ceremony and KP-share state
     Guardian->>Guardian: Snapshot CeremonyState for this arming
@@ -98,6 +99,7 @@ sequenceDiagram
     Note over KPs,Guardian: Threshold share provisioning
     KPs->>Guardian: GetGuardianInfo via proxy
     Guardian-->>KPs: config_hash plus optional genesis_state_hash plus session_id plus n/t plus attestation
+    KPs->>KPs: Require S3 state to match --do-genesis intent
     KPs->>KPs: Verify PCRs and independently derive both state hashes
     KPs->>KPs: HPKE-encrypt local share to guardian session key (no AAD)
     KPs->>KPs: Sign(session_id, config_hash, optional genesis_state_hash, encrypted share)
@@ -120,11 +122,13 @@ sequenceDiagram
     end
 ```
 
-On first deploy, the operator pins the current onchain committee as an optional
-`GenesisState` during `OperatorInit`. Each KP independently derives its hash and
-includes it in the normal signed PI submission. Once PI reaches threshold, the
-enclave writes `genesis/record.json` with the committee and the exact signed
-submissions that authorized it. Later deploys use `None` and do not write genesis.
+On first deploy, the operator and each KP pass `--do-genesis`. This is purely an
+explicit intent marker: callers fail if it disagrees with the observed S3
+committee state. The operator pins the current onchain committee as an optional
+`GenesisState` during `OperatorInit`, and each KP independently derives its hash
+and includes it in the normal signed PI submission. Once PI reaches threshold,
+the enclave writes `genesis/record.json` with the committee and the exact signed
+submissions that authorized it. Later deploys use `None` and do not pass the flag.
 
 ## Standby activation flow
 
