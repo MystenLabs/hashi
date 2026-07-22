@@ -83,6 +83,7 @@ pub struct AvidRoundState {
 pub(crate) type HeldAvidEchoes = (batch_avss_avid::AvidVote, Vec<(Address, Messages)>);
 
 // Domain separation constants for RandomOracle
+// Ben: what is 754526047e6e997e6c348e7c3491c57b79e22c3efab204b9f0e72c85249c5959? 
 const DOMAIN_HASHI: &str =
     "754526047e6e997e6c348e7c3491c57b79e22c3efab204b9f0e72c85249c5959::hashi";
 
@@ -129,10 +130,10 @@ impl PresignatureDerivationVersion {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MpcConfig {
     pub epoch: u64,
-    pub nodes: Nodes<EncryptionGroupElement>,
+    pub nodes: Nodes<EncryptionGroupElement>, // TODO: reduced weights? comment that
     /// Threshold for signing (t)
     pub threshold: u16,
-    /// Maximum number of faulty validators (f)
+    /// Maximum number of byzantine validators (f)
     pub max_faulty: u16,
     pub nonce_generation_protocol: NonceGenerationProtocol,
     pub presignature_derivation_version: PresignatureDerivationVersion,
@@ -171,6 +172,8 @@ pub enum ProtocolType {
     Signing { message_hash: MessageHash },
 }
 
+// Ben: strange that one can call new with any protocol but we only use it for DKG or key rotation, and use nonce_dealer_session_id otherwise.
+// Would be safer to have instead new_for_dkg and new_for_key_rotation, instead of new.
 impl SessionId {
     pub fn new(chain_id: &str, epoch: u64, protocol_identifer: &ProtocolType) -> Self {
         let oracle = RandomOracle::new(DOMAIN_HASHI);
@@ -196,7 +199,7 @@ impl SessionId {
         base.dealer_session_id(dealer)
     }
 
-    pub fn rotation_session_id(&self, dealer: &Address, share_index: ShareIndex) -> SessionId {
+    pub fn dealer_and_index_session_id(&self, dealer: &Address, share_index: ShareIndex) -> SessionId {
         let oracle = RandomOracle::new(&hex::encode(self.0));
         SessionId(oracle.evaluate(&(dealer, share_index.get())))
     }
@@ -220,8 +223,8 @@ pub struct PublicMpcOutput {
     pub commitments: BTreeMap<ShareIndex, G>,
 }
 
-impl PublicMpcOutput {
-    pub fn from_mpc_output(output: &MpcOutput) -> Self {
+impl From<&MpcOutput> for PublicMpcOutput {
+    fn from(output: &MpcOutput) -> Self {
         Self {
             public_key: output.public_key,
             commitments: output.commitments.clone(),
@@ -241,7 +244,7 @@ pub struct GetPublicMpcOutputResponse {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)]
-pub enum Messages {
+pub enum Messages { // nit - this is actually one message, rename?
     Dkg(avss::Message),
     Rotation(RotationMessages),
     NonceGeneration(NonceMessage),
@@ -263,7 +266,7 @@ impl Messages {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SendMessagesRequest {
-    pub messages: Messages,
+    pub messages: Messages, // Ben: rename to message?
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -288,7 +291,7 @@ pub struct RetrieveMessagesRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RetrieveMessagesResponse {
-    pub messages: Messages,
+    pub messages: Messages, // Ben: rename?
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -339,7 +342,7 @@ pub enum NonceReconstructionOutcome {
     NeedsComplaintRecovery {
         dealer_address: Address,
         complaint: complaint::Complaint,
-        batch_index: u32,
+        batch_index: u32, // nit - should be after dealer_address
     },
 }
 
@@ -356,12 +359,13 @@ pub enum ProtocolComplaint {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ComplainRequest {
+pub struct ComplainRequest { 
+    // nit - order of fields better be more consistent, and be from the most general to the most specific (epoch, dealer, batch_index, etc)
     pub dealer: Address,
     pub share_index: Option<ShareIndex>, // Only for key rotation
     pub batch_index: Option<u32>,        // Only for nonce generation
     pub complaint: ProtocolComplaint,
-    pub protocol_type: ProtocolTypeIndicator,
+    pub protocol_type: ProtocolTypeIndicator, // Ben: is this needed? it is implied from complaint
     pub epoch: u64,
 }
 
@@ -377,7 +381,7 @@ pub enum ComplaintResponse {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DealerMessagesHash {
     pub dealer_address: Address,
-    pub messages_hash: MessageHash,
+    pub messages_hash: MessageHash, // here it is MessageHash :)
 }
 
 impl hashi_types::intent::IntentMessage for DealerMessagesHash {
@@ -1113,8 +1117,8 @@ mod tests {
         let share2 = NonZeroU16::new(2).unwrap();
 
         // Different share indices should have different session IDs
-        let session_d1_s1 = sid.rotation_session_id(&dealer, share1);
-        let session_d1_s2 = sid.rotation_session_id(&dealer, share2);
+        let session_d1_s1 = sid.dealer_and_index_session_id(&dealer, share1);
+        let session_d1_s2 = sid.dealer_and_index_session_id(&dealer, share2);
         assert_ne!(session_d1_s1, session_d1_s2);
     }
 

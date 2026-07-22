@@ -175,19 +175,19 @@ impl MpcManager {
         signing_key: Bls12381PrivateKey,
         public_message_store: Box<dyn PublicMessagesStore>,
         chain_id: &str,
-        weight_divisor: Option<u16>,
+        weight_divisor_for_testing: Option<u16>,
         batch_size_per_weight: u16,
         test_corrupt_shares_for: Option<Address>,
         presignature_derivation_activation_epoch: u64,
         metrics: &Metrics,
     ) -> MpcResult<Self> {
-        if weight_divisor.is_some() {
+        if weight_divisor_for_testing.is_some() {
             assert!(
                 !is_production_sui_chain(chain_id),
                 "weight_divisor must not be set on mainnet or testnet"
             );
         }
-        let weight_divisor = weight_divisor.unwrap_or(1);
+        let weight_divisor = weight_divisor_for_testing.unwrap_or(1);
         let committee = committee_set
             .committees()
             .get(&epoch)
@@ -684,7 +684,7 @@ impl MpcManager {
                 )?;
                 let session_id = self
                     .base_session_id_for_epoch(request.epoch, &ProtocolType::KeyRotation)
-                    .rotation_session_id(&request.dealer, complained_share_index);
+                    .dealer_and_index_session_id(&request.dealer, complained_share_index);
                 let receiver = avss::Receiver::new(
                     nodes,
                     party_id,
@@ -773,7 +773,7 @@ impl MpcManager {
             ))
         })?;
         Ok(GetPublicMpcOutputResponse {
-            output: PublicMpcOutput::from_mpc_output(output),
+            output: PublicMpcOutput::from(output),
         })
     }
 
@@ -1083,6 +1083,7 @@ impl MpcManager {
         let required_weight = self.required_nonce_weight();
         let mut weight_sum = 0u32;
         let mut certified = HashSet::new();
+        // Ben: we didnt verify the certs
         for (dealer, _) in certs {
             if let Some(party_id) = self.committee.index_of(dealer)
                 && let Ok(w) = self.mpc_config.nodes.weight_of(party_id as u16)
@@ -1130,6 +1131,7 @@ impl MpcManager {
             .mpc_p2p_broadcast_duration_seconds
             .with_label_values(&[MPC_LABEL_DKG])
             .start_timer();
+        // Ben: join_all? why not wait for t+f + timeout? or at least have fewer retries?
         let results = send_to_many(
             dealer_data.recipients.iter().copied(),
             dealer_data.request,
@@ -1208,7 +1210,7 @@ impl MpcManager {
                 let cert = dkg_cert.clone();
                 let verified = spawn_blocking(move || {
                     let mgr = mgr.read().unwrap();
-                    mgr.committee.verify_signature(&cert)
+                    mgr.committee.verify_signature(&cert) // Ben: no weights?
                 })
                 .await;
                 drop(_timer);
@@ -1479,7 +1481,7 @@ impl MpcManager {
                 let cert = rotation_cert.clone();
                 let verified = spawn_blocking(move || {
                     let mgr = mgr.read().unwrap();
-                    mgr.committee.verify_signature(&cert)
+                    mgr.committee.verify_signature(&cert) // Ben: no weights?
                 })
                 .await;
                 drop(_timer);
@@ -1763,7 +1765,7 @@ impl MpcManager {
                 let cert = nonce_cert.clone();
                 let verified = spawn_blocking(move || {
                     let mgr = mgr.read().unwrap();
-                    mgr.committee.verify_signature(&cert)
+                    mgr.committee.verify_signature(&cert) // Ben: no weights?
                 })
                 .await;
                 drop(_timer);
@@ -1895,7 +1897,7 @@ impl MpcManager {
         Ok(certified_dealers)
     }
 
-    fn create_dealer_message(
+    fn create_dealer_dkg_message(
         &self,
         rng: &mut impl fastcrypto::traits::AllowedRng,
     ) -> avss::Message {
@@ -3526,7 +3528,7 @@ impl MpcManager {
             }
             let session_id = self
                 .session_id
-                .rotation_session_id(dealer, share_index)
+                .dealer_and_index_session_id(dealer, share_index)
                 .to_vec();
             let commitment = previous_dkg_output.commitments.get(&share_index).copied();
             self.process_and_store_message(
@@ -3753,7 +3755,7 @@ impl MpcManager {
                     Messages::Dkg(msg)
                 }
                 Ok(None) => {
-                    let msg = self.create_dealer_message(rng);
+                    let msg = self.create_dealer_dkg_message(rng);
                     self.cache_and_persist_dkg_message(self.mpc_config.epoch, self.address, &msg)?;
                     Messages::Dkg(msg)
                 }
@@ -4274,7 +4276,7 @@ impl MpcManager {
                         ))
                     })?
                     .clone();
-                let session_id = base_sid.rotation_session_id(dealer, share_index);
+                let session_id = base_sid.dealer_and_index_session_id(dealer, share_index);
                 let receiver = avss::Receiver::new(
                     nodes.clone(),
                     party_id,
@@ -4311,7 +4313,7 @@ impl MpcManager {
             .map(|share| {
                 let sid = self
                     .session_id
-                    .rotation_session_id(&self.address, share.index);
+                    .dealer_and_index_session_id(&self.address, share.index);
                 let nodes = self.maybe_corrupt_nodes_for_testing(&self.mpc_config.nodes);
                 let dealer = avss::Dealer::new(
                     Some(share.value),
@@ -4400,7 +4402,7 @@ impl MpcManager {
                     reason: format!("Share index {} already processed", share_index),
                 });
             }
-            let session_id = self.session_id.rotation_session_id(&dealer, share_index);
+            let session_id = self.session_id.dealer_and_index_session_id(&dealer, share_index);
             let commitment = previous_dkg_output.commitments.get(&share_index).copied();
             let receiver = avss::Receiver::new(
                 self.mpc_config.nodes.clone(),
@@ -4685,6 +4687,7 @@ impl MpcManager {
         certificates: &[CertificateV1],
         complaint_cache: &HashMap<DealerOutputsKey, avss::AvssOutput>,
     ) -> MpcResult<ReconstructionOutcome> {
+        // Ben: why not use base_session_id_for_epoch? we need more consistency with session ids
         let source_session_id = SessionId::new(&self.chain_id, context.epoch, &ProtocolType::Dkg);
         let mut outputs: HashMap<PartyId, avss::AvssOutput> = HashMap::new();
         let mut dealer_weight_sum = 0u32;
@@ -4701,6 +4704,7 @@ impl MpcManager {
             };
             let msg = dkg_cert.message();
             let dealer_address = msg.dealer_address;
+            // Ben: what about the case we see a cert for a message we don't have?
             let message = self
                 .public_messages_store
                 .get_dealer_message(context.epoch, &dealer_address)
@@ -4713,6 +4717,7 @@ impl MpcManager {
                 })?;
             let messages = Messages::Dkg(message.clone());
             let actual_hash = compute_messages_hash(&messages);
+            // Ben: what if we stored a message from a dealer but a different message was certified? we should retrieve the right message
             if actual_hash != msg.messages_hash {
                 return Err(MpcError::ProtocolFailed(format!(
                     "Message hash mismatch for dealer {:?}: stored message does not match certificate",
@@ -4726,7 +4731,7 @@ impl MpcManager {
                 as PartyId;
             let session_id = source_session_id
                 .dealer_session_id(&dealer_address)
-                .to_vec();
+                .to_vec(); // Ben: why?
             if let Some(output) = complaint_cache.get(&DealerOutputsKey::Dkg(dealer_address)) {
                 outputs.insert(dealer_party_id, output.clone());
                 let dealer_weight = context
@@ -4752,6 +4757,7 @@ impl MpcManager {
                     outputs.insert(dealer_party_id, output);
                 }
                 avss::ProcessedMessage::Complaint(complaint) => {
+                    // Ben: who will trigger recovery afterwards? and why won't it fail again then (we don't check )
                     return Ok(ReconstructionOutcome::NeedsDkgComplaintRecovery {
                         dealer_address,
                         complaint,
@@ -4896,7 +4902,7 @@ impl MpcManager {
                     continue;
                 }
                 let session_id = source_session_id
-                    .rotation_session_id(&dealer_address, share_index)
+                    .dealer_and_index_session_id(&dealer_address, share_index)
                     .to_vec();
                 match process_avss_message(
                     context.encryption_key,
@@ -5470,7 +5476,7 @@ impl MpcManager {
 
     fn base_session_id_for_epoch(&self, epoch: u64, protocol_type: &ProtocolType) -> SessionId {
         if epoch == self.mpc_config.epoch {
-            self.session_id.clone()
+            self.session_id.clone() // Ben: but this one might have used a different protocol type
         } else {
             SessionId::new(&self.chain_id, self.previous_epoch, protocol_type)
         }
@@ -5511,6 +5517,7 @@ impl MpcManager {
         if epoch == self.mpc_config.epoch {
             Ok(&self.committee)
         } else {
+            // Ben: assert epoch == mpc_config.epoch-1
             self.previous_committee.as_ref().ok_or_else(|| {
                 MpcError::InvalidConfig("No previous committee for cross-epoch complaint".into())
             })
@@ -5599,7 +5606,7 @@ impl MpcManager {
         }
         let (nodes, party_id, params) = self.config_for_epoch(epoch)?;
         let base_sid = self.base_session_id_for_epoch(epoch, &ProtocolType::KeyRotation);
-        let session_id = base_sid.rotation_session_id(dealer, share_index);
+        let session_id = base_sid.dealer_and_index_session_id(dealer, share_index);
         match process_avss_message(
             self.encryption_key_for_epoch(epoch)?,
             nodes,
@@ -5785,28 +5792,28 @@ fn process_avss_message(
     nodes: Nodes<EncryptionGroupElement>,
     party_id: u16,
     params: Parameters,
-    session_id: Vec<u8>,
+    session_id: Vec<u8>, // Ben: should be SessionId
     message: &avss::Message,
     commitment: Option<G>,
 ) -> MpcResult<avss::ProcessedMessage> {
-    let commitment_hex = commitment
-        .as_ref()
-        .map(|c| hex::encode(c.to_byte_array()))
-        .unwrap_or_else(|| "None".to_string());
-    let session_id_hex = hex::encode(&session_id);
     let total_weight = nodes.total_weight();
     let num_nodes = nodes.num_nodes();
     let receiver = avss::Receiver::new(
         nodes,
         party_id,
         params,
-        session_id,
+        session_id.clone(),
         commitment,
         encryption_key.clone(),
     )?;
     match receiver.process_message(message, &mut rand::thread_rng()) {
         Ok(pm) => Ok(pm),
         Err(e) => {
+            let commitment_hex = commitment
+                .as_ref()
+                .map(|c| hex::encode(c.to_byte_array()))
+                .unwrap_or_else(|| "None".to_string());
+            let session_id_hex = hex::encode(session_id);
             tracing::error!(
                 "process_avss_message failed: err={e}, \
                  total_weight={total_weight}, num_nodes={num_nodes}, \
@@ -5817,6 +5824,7 @@ fn process_avss_message(
     }
 }
 
+// Ben: make this a function of Messages struct
 fn compute_messages_hash(messages: &Messages) -> MessageHash {
     let bytes = bcs::to_bytes(messages).expect(EXPECT_SERIALIZATION_SUCCESS);
     MessageHash::from(Blake2b256::digest(&bytes).digest)

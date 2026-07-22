@@ -13,6 +13,8 @@ use std::time::Duration;
 use sui_sdk_types::Address;
 
 // TODO: Use lower thresholds for unit tests.
+// Ben: should we continue to retry for longer? why stop after 10 retries? i suppose it depends on the context:
+// For dealer needing t+f responses, we should retry for longer, but afterwards wait just a bit more.
 pub const RETRY_MIN_DELAY: Duration = Duration::from_millis(100);
 pub const RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
 pub const MAX_RETRIES: usize = 10;

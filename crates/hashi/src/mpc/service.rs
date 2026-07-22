@@ -283,6 +283,7 @@ impl MpcService {
             .map_err(|e| {
                 anyhow::anyhow!("failed to fetch reconfig certs for epoch {epoch}: {e}")
             })?;
+        // Ben: we didnt verify the certs...
         let is_key_rotation = matches!(certs.first(), Some((_, CertificateV1::Rotation(_))));
         let onchain_mpc_key = onchain_state.mpc_public_key();
         info!(
@@ -320,6 +321,7 @@ impl MpcService {
             .inner
             .mpc_manager()
             .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized for DKG recovery"))?;
+        // Ben: we didnt verify the certs (maybe we should define VerifiedCertificateV1 type to enforce this?)
         match MpcManager::reconstruct_current_dkg_output(&mpc_manager, &certs, onchain_mpc_key) {
             MpcOutputRecoveryOutcome::Recovered(output) => {
                 info!(
@@ -376,6 +378,7 @@ impl MpcService {
                 .into_iter()
                 .map(|(_, cert)| cert)
                 .collect();
+        // Ben: we didnt verify the certs
         match MpcManager::reconstruct_current_rotation_output(
             &mpc_manager,
             &current_certs,
