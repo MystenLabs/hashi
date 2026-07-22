@@ -662,6 +662,45 @@ hashi server [--config <path>]
 
 Run the Hashi validator daemon. Uses the validator config.
 
+**Running as a standalone service (systemd).** Operators who run the binary directly rather than a container can manage it with systemd. Install the verified binary at `/usr/local/bin/hashi` (confirm its sha256 first, see [1.3](#13-software-dependencies)), place your config at `/etc/hashi/validator.toml`, and run the daemon under a dedicated unprivileged user:
+
+```ini
+# /etc/systemd/system/hashi.service
+[Unit]
+Description=Hashi validator node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hashi
+Group=hashi
+ExecStart=/usr/local/bin/hashi server --config /etc/hashi/validator.toml
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+# The node binds to :443 by default (the listen-address field). This grants the
+# non-root process the one privileged-port capability it needs. Drop this line if
+# you set listen-address to a port at or above 1024 and front it with a proxy.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable it, start it, and follow the logs:
+
+```bash
+sudo systemctl enable --now hashi
+journalctl -u hashi -f
+```
+
+Notes:
+
+- The `hashi` user needs read access to the config and key files (keep key files `chmod 600`) and write access to the `db` path, which must be on persistent storage.
+- The node writes structured JSON logs to stdout, so journald captures everything and there is no separate log file to rotate.
+- This is an alternative to containerizing the process (see [1.1](#11-resources)), not an addition. Run one or the other.
+
 ### 6.3 Register
 
 ```bash
