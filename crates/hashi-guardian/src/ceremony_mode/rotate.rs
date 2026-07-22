@@ -307,6 +307,7 @@ mod tests {
         };
         assert_eq!(shares.sharing_seq, 1);
         assert_eq!(shares.cert_seq, 0);
+        assert_eq!(shares.encrypted_shares, *response_shares);
         assert_eq!(shares.encrypted_shares.share_count(), new_n);
     }
 

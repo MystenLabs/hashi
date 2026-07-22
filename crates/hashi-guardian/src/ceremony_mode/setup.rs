@@ -175,6 +175,7 @@ mod tests {
         else {
             panic!("expected NewKey variant");
         };
+        assert_eq!(instance, validated_resp.secret_sharing_instance);
         assert_eq!(instance.sharing_seq(), 0);
         assert_eq!(instance.num_shares(), TEST_N);
         assert_eq!(instance.threshold(), TEST_T);
@@ -205,6 +206,7 @@ mod tests {
         };
         assert_eq!(shares.sharing_seq, 0);
         assert_eq!(shares.cert_seq, 0);
+        assert_eq!(shares.encrypted_shares, validated_resp.encrypted_shares);
         assert_eq!(shares.encrypted_shares.share_count(), TEST_N);
         assert!(std::str::from_utf8(shares_body)
             .unwrap()
