@@ -239,12 +239,13 @@ async fn run_transactions(
         .context("subscribe_transactions failed")?
         .into_inner();
 
-    // Wait for the first frame: it proves the stream is live. Its
-    // watermark carries only the opaque cursor on current servers
-    // (`Watermark.checkpoint` is unset), so the replay target comes
-    // from the clock instead: sampled after the subscription opened,
-    // the clock height upper-bounds the subscription's start, and the
-    // position ratchet absorbs the overlap between replay and stream.
+    // Wait for the first frame: it proves the stream is live. The
+    // initial frame's watermark never carries `checkpoint` (verified
+    // against testnet v1.76 — only later progress frames claim
+    // coverage), so the replay target comes from the clock instead:
+    // sampled after the subscription opened, the clock height
+    // upper-bounds the subscription's start, and the position ratchet
+    // absorbs the overlap between replay and stream.
     let first = tokio::time::timeout(STREAM_STALL_TIMEOUT, subscription.next())
         .await
         .context("timed out waiting for the first transaction frame")?
@@ -283,12 +284,10 @@ async fn run_transactions(
             response.watermark.as_ref(),
             metrics,
         )?;
-        // Frames arrive for every checkpoint; each one proves the
-        // subscription has processed close to the clock. Until the
-        // server fills `Watermark.checkpoint`, coverage advances from
-        // the clock — an approximation bounded by roughly a checkpoint,
-        // which only gates the divergence audit.
-        advance_watermark(shadow, state.latest_checkpoint_height(), metrics);
+        // Coverage advances from the server's own watermark claims:
+        // progress frames carry `Watermark.checkpoint` periodically
+        // (observed every 25 checkpoints on quiet filters); the initial
+        // frame and transaction-bearing frames carry only the cursor.
     }
 }
 
@@ -385,6 +384,11 @@ fn handle_tx_frame(
         apply_tx_frame(shadow, tx, metrics)?;
     }
     if let Some(watermark) = frame_watermark {
+        if tx.is_none()
+            && let Some(checkpoint) = watermark.checkpoint
+        {
+            tracing::debug!(checkpoint, "transaction stream coverage claim");
+        }
         let mut guard = shadow.lock().unwrap();
         if let Some(mirror) = guard.as_mut() {
             if let Some(cursor) = watermark.cursor.as_ref() {
