@@ -179,8 +179,8 @@ It:
    different certs when replacing a lost YubiKey. The replacement cert must not
    collide with another roster fingerprint.
 2. Fetches and verifies the active guardian's `GuardianInfo` through
-   `relay_endpoint`, then requires its sharing instance to match the latest
-   attested `ceremony/` log.
+   `relay_endpoint`, then requires its BTC public key to match the latest
+   attested `ceremony/` log and uses that log's sharing instance.
 3. Reads and verifies the latest `kp-shares/{sharing_seq}/` state against the
    current roster, decrypts the signing cert's copy, and verifies the share
    commitment.
