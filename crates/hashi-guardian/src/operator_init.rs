@@ -20,13 +20,13 @@ use tracing::info;
 use GuardianError::*;
 
 /// Complete operator-init state ready for its fail-stop commit.
-pub(crate) struct OIInstall {
+pub struct OIInstall {
     logger: GuardianS3Client,
     withdraw_mode: Option<OIWithdrawModeInstall>,
 }
 
 /// Withdraw-mode arming state built from `InitConfig` and the ceremony logs.
-pub(crate) struct OIWithdrawModeInstall {
+pub struct OIWithdrawModeInstall {
     init_config: InitConfig,
     ceremony_state: CeremonyState,
     genesis_state: Option<GenesisState>,
@@ -42,7 +42,7 @@ impl OIInstall {
 }
 
 impl OIWithdrawModeInstall {
-    pub(crate) fn from_parts(
+    pub fn from_parts(
         init_config: InitConfig,
         ceremony_state: CeremonyState,
         genesis_state: Option<GenesisState>,
@@ -56,7 +56,7 @@ impl OIWithdrawModeInstall {
 
     /// Build the arming bundle from the stable config and S3-derived ceremony +
     /// KP share state.
-    pub(crate) async fn from_config(
+    pub async fn from_config(
         logger: &GuardianS3Client,
         config: InitConfig,
         genesis_state: Option<GenesisState>,
@@ -74,7 +74,7 @@ impl OIWithdrawModeInstall {
 
     /// Install the bundle onto a fresh enclave. Infallible by design (see the
     /// `operator_init` invariant): every set runs once on a fresh enclave.
-    pub(crate) fn install_into(self, enclave: &Enclave) {
+    pub fn install_into(self, enclave: &Enclave) {
         let config_hash = self.init_config.digest();
         let (limiter_config, hashi_btc_master_pubkey, pcr_allowlist, network) =
             self.init_config.into_parts();
@@ -123,14 +123,13 @@ impl OIWithdrawModeInstall {
 /// untouched and retryable. The mutation then happens entirely in
 /// `commit_operator_init`, which returns `()` — it cannot report an error, so a
 /// half-mutated enclave is never observed via an `Err`.
+/// Validate and commit operator initialization under the cancellation-safe
+/// control lock so concurrent callers cannot race the check-then-commit.
 pub async fn operator_init(
     enclave: Arc<Enclave>,
     request: OperatorInitRequest,
 ) -> GuardianResult<()> {
     info!("/operator_init - Received request.");
-
-    // Serialize so concurrent callers can't race the check-then-commit below.
-    let _guard = enclave.control_lock.lock().await;
 
     let uninitialized = match enclave.mode() {
         EnclaveMode::Ceremony => CeremonyStage::Uninitialized.into(),

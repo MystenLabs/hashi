@@ -21,9 +21,6 @@ pub async fn rotate_kps(
 ) -> GuardianResult<GuardianSigned<RotateKpsResponse>> {
     info!("/rotate_kps - Received request.");
 
-    // Serialize the whole ceremony. The exact lifecycle check prevents setup
-    // and rotation from interleaving and rejects another ceremony afterward.
-    let _guard = enclave.control_lock.lock().await;
     enclave.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
 
     let (encrypted_old_shares, old_instance, state) = request.into_parts();

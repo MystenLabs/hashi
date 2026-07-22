@@ -44,8 +44,9 @@ pub async fn standard_withdrawal(
                 response: response.clone(),
                 post_state,
             };
-            log_withdrawal_success(enclave.clone(), wid, msg, limiter_guard).await?;
-            // <-- Limiter guard drops upon log_withdrawal_success return. Next withdrawal can begin.
+            log_withdrawal_success(enclave.as_ref(), wid, msg, limiter_guard).await?;
+            // The limiter guard is retained through the durable log and released
+            // when `log_withdrawal_success` returns. The next withdrawal may now begin.
             Ok(enclave.sign(response))
         }
         Err(withdraw_err) => {
@@ -130,24 +131,19 @@ async fn normal_withdrawal_inner(
 }
 
 async fn log_withdrawal_success(
-    enclave: Arc<Enclave>,
+    enclave: &Enclave,
     wid: WithdrawalID,
     msg: WithdrawalLogMessage,
     limiter_guard: OwnedMutexGuard<RateLimiter>,
 ) -> GuardianResult<()> {
-    // The task owns the limiter guard and continues if the RPC future is cancelled.
-    // In production, exhausting the write grace period panics and the process-wide
-    // panic hook aborts the enclave.
-    tokio::spawn(async move {
-        enclave
-            .log_withdraw(msg)
-            .await
-            .expect("withdrawal log write failed");
-        info!("Withdrawal {} logged.", wid);
-        drop(limiter_guard);
-    })
-    .await
-    .expect("withdrawal log task failed");
+    enclave
+        .log_withdraw(msg)
+        .await
+        .expect("withdrawal log write failed");
+    info!("Withdrawal {} logged.", wid);
+    // Rust would drop this guard at function exit; the explicit drop documents
+    // that the next withdrawal may enter only after this one is durably logged.
+    drop(limiter_guard);
     Ok(())
 }
 

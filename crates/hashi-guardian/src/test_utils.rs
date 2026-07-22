@@ -47,14 +47,12 @@ pub type CapturedPuts = Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
 
 /// Mock OpenPGP secret keys keyed by the corresponding public-cert fingerprint.
 #[cfg(test)]
-pub(crate) type MockKpSecretKeys = BTreeMap<String, String>;
+pub type MockKpSecretKeys = BTreeMap<String, String>;
 
 /// Build a one-certificate-per-KP roster while retaining the matching secret
 /// keys so tests can prove the returned armored shares are decryptable.
 #[cfg(test)]
-pub(crate) fn mock_kp_certs_roster_with_secrets(
-    num_kps: usize,
-) -> (KpCertsRoster, MockKpSecretKeys) {
+pub fn mock_kp_certs_roster_with_secrets(num_kps: usize) -> (KpCertsRoster, MockKpSecretKeys) {
     let mut secret_keys = MockKpSecretKeys::new();
     let cert_sets = (0..num_kps)
         .map(|_| {
@@ -78,7 +76,7 @@ pub(crate) fn mock_kp_certs_roster_with_secrets(
 /// If a share has multiple recipient certs, all ciphertexts must decrypt to the
 /// same scalar.
 #[cfg(test)]
-pub(crate) fn decrypt_kp_shares(
+pub fn decrypt_kp_shares(
     encrypted_shares: &KPEncryptedSharesRoster,
     secret_keys: &MockKpSecretKeys,
 ) -> Vec<Share> {
