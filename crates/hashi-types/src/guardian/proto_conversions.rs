@@ -81,30 +81,39 @@ use crate::move_types::Config;
 //      Proto -> Domain (deserialization)
 // --------------------------------------------
 
-fn pb_to_kp_encrypted_shares(pb: pb::SingleKpEncryptedShares) -> GuardianResult<KPEncryptedShares> {
-    Ok(KPEncryptedShares {
-        id: pb_to_share_id(pb.id)?,
-        ciphertexts_by_fingerprint: pb.ciphertexts.into_iter().collect(),
-    })
+impl TryFrom<pb::SingleKpEncryptedShares> for KPEncryptedShares {
+    type Error = GuardianError;
+
+    fn try_from(pb: pb::SingleKpEncryptedShares) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: pb_to_share_id(pb.id)?,
+            ciphertexts_by_fingerprint: pb.ciphertexts.into_iter().collect(),
+        })
+    }
 }
 
-fn pb_to_kp_cert_set(pb: pb::KpPgpCertSet) -> GuardianResult<KpCerts> {
-    let certs = pb
-        .pgp_certs
-        .iter()
-        .cloned()
-        .map(|cert| PgpPublicCert::new(cert).map_err(|e| InvalidInputs(e.to_string())))
-        .collect::<GuardianResult<Vec<_>>>()?;
-    KpCerts::new(certs)
+impl TryFrom<pb::KpPgpCertSet> for KpCerts {
+    type Error = GuardianError;
+
+    fn try_from(pb: pb::KpPgpCertSet) -> Result<Self, Self::Error> {
+        let certs = pb
+            .pgp_certs
+            .into_iter()
+            .map(|cert| PgpPublicCert::new(cert).map_err(|e| InvalidInputs(e.to_string())))
+            .collect::<GuardianResult<Vec<_>>>()?;
+        Self::new(certs)
+    }
 }
 
-pub fn pb_to_guardian_encrypted_share(
-    pb: pb::GuardianEncryptedShare,
-) -> GuardianResult<GuardianEncryptedShare> {
-    Ok(GuardianEncryptedShare {
-        id: pb_to_share_id(pb.id)?,
-        ciphertext: pb_to_ciphertext(pb.ciphertext)?,
-    })
+impl TryFrom<pb::GuardianEncryptedShare> for GuardianEncryptedShare {
+    type Error = GuardianError;
+
+    fn try_from(pb: pb::GuardianEncryptedShare) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: pb_to_share_id(pb.id)?,
+            ciphertext: Ciphertext::try_from(pb.ciphertext.ok_or_else(|| missing("ciphertext"))?)?,
+        })
+    }
 }
 
 impl TryFrom<pb::SetupNewKeyRequest> for SetupNewKeyRequest {
@@ -113,9 +122,8 @@ impl TryFrom<pb::SetupNewKeyRequest> for SetupNewKeyRequest {
     fn try_from(req: pb::SetupNewKeyRequest) -> Result<Self, Self::Error> {
         let cert_sets = req
             .key_provisioner_pgp_cert_sets
-            .iter()
-            .cloned()
-            .map(pb_to_kp_cert_set)
+            .into_iter()
+            .map(KpCerts::try_from)
             .collect::<GuardianResult<Vec<_>>>()?;
 
         let num_shares = req.num_shares.ok_or_else(|| missing("num_shares"))? as usize;
@@ -139,11 +147,11 @@ impl TryFrom<pb::SignedSetupNewKeyResponse> for GuardianSigned<SetupNewKeyRespon
         let encrypted_shares = data
             .encrypted_shares
             .into_iter()
-            .map(pb_to_kp_encrypted_shares)
+            .map(KPEncryptedShares::try_from)
             .collect::<GuardianResult<Vec<_>>>()?;
         let encrypted_shares = KPEncryptedSharesRoster::new(encrypted_shares)?;
 
-        let secret_sharing_instance = pb_to_secret_sharing_instance(
+        let secret_sharing_instance = SecretSharingInstance::try_from(
             data.secret_sharing_instance
                 .ok_or_else(|| missing("secret_sharing_instance"))?,
         )?;
@@ -169,14 +177,15 @@ impl TryFrom<pb::OperatorInitRequest> for OperatorInitRequest {
     type Error = GuardianError;
 
     fn try_from(req: pb::OperatorInitRequest) -> Result<Self, Self::Error> {
-        let s3_config = pb_to_s3_config(req.s3_config.ok_or_else(|| missing("s3_config"))?)?;
+        let s3_config =
+            super::S3Config::try_from(req.s3_config.ok_or_else(|| missing("s3_config"))?)?;
         let genesis_state = req
             .genesis_state
             .map(|state| {
                 let committee = state.committee.ok_or_else(|| missing("committee"))?;
-                Ok(GenesisState::from_move_committee(pb_to_move_committee(
-                    committee,
-                )?))
+                Ok(GenesisState::from_move_committee(
+                    crate::move_types::Committee::try_from(committee)?,
+                ))
             })
             .transpose()?;
         // `init_config` present ⇔ withdraw mode; absent ⇔ ceremony (S3 only).
@@ -209,14 +218,16 @@ impl TryFrom<pb::OperatorActivateRequest> for OperatorActivateRequest {
     }
 }
 
-pub fn pb_to_secret_sharing_instance(
-    pb: pb::SecretSharingInstance,
-) -> GuardianResult<SecretSharingInstance> {
-    let commitments = pb_share_commitments_to_domain(&pb.commitments)?;
-    let num_shares = pb.num_shares.ok_or_else(|| missing("num_shares"))? as usize;
-    let threshold = pb.threshold.ok_or_else(|| missing("threshold"))? as usize;
-    let sharing_seq = pb.sharing_seq.ok_or_else(|| missing("sharing_seq"))?;
-    SecretSharingInstance::new(commitments, num_shares, threshold, sharing_seq)
+impl TryFrom<pb::SecretSharingInstance> for SecretSharingInstance {
+    type Error = GuardianError;
+
+    fn try_from(pb: pb::SecretSharingInstance) -> Result<Self, Self::Error> {
+        let commitments = ShareCommitments::try_from(pb.commitments)?;
+        let num_shares = pb.num_shares.ok_or_else(|| missing("num_shares"))? as usize;
+        let threshold = pb.threshold.ok_or_else(|| missing("threshold"))? as usize;
+        let sharing_seq = pb.sharing_seq.ok_or_else(|| missing("sharing_seq"))?;
+        Self::new(commitments, num_shares, threshold, sharing_seq)
+    }
 }
 
 pub fn secret_sharing_instance_to_pb(
@@ -274,7 +285,7 @@ impl TryFrom<pb::SignedSingleProvisionerInitRequest> for KpSigned<SingleProvisio
                 })
             })
             .transpose()?;
-        let encrypted_share = pb_to_guardian_encrypted_share(
+        let encrypted_share = GuardianEncryptedShare::try_from(
             req.encrypted_share
                 .ok_or_else(|| missing("encrypted_share"))?,
         )?;
@@ -316,7 +327,7 @@ impl TryFrom<pb::SignedProvisionerRotateCertRequest> for KpSigned<ProvisionerRot
 
         let new_kp_pgp_cert = PgpPublicCert::new(req.new_kp_pgp_cert)
             .map_err(|e| InvalidInputs(format!("invalid new_kp_pgp_cert: {e}")))?;
-        let encrypted_share = pb_to_guardian_encrypted_share(
+        let encrypted_share = GuardianEncryptedShare::try_from(
             req.encrypted_share
                 .ok_or_else(|| missing("encrypted_share"))?,
         )?;
@@ -345,7 +356,7 @@ impl TryFrom<pb::RotateKpsRequest> for RotateKpsRequest {
         let encrypted_old_shares = req
             .encrypted_old_shares
             .into_iter()
-            .map(pb_to_guardian_encrypted_share)
+            .map(GuardianEncryptedShare::try_from)
             .collect::<GuardianResult<Vec<_>>>()?;
 
         let new_num_shares = req
@@ -356,7 +367,7 @@ impl TryFrom<pb::RotateKpsRequest> for RotateKpsRequest {
         let new_kp_pgp_cert_sets = req
             .new_kp_pgp_cert_sets
             .into_iter()
-            .map(pb_to_kp_cert_set)
+            .map(KpCerts::try_from)
             .collect::<GuardianResult<Vec<_>>>()?;
         let state = RotateKpsState::new(
             KpCertsRoster::new(new_kp_pgp_cert_sets)?,
@@ -364,7 +375,7 @@ impl TryFrom<pb::RotateKpsRequest> for RotateKpsRequest {
             new_threshold,
         )?;
 
-        let old_instance = pb_to_secret_sharing_instance(
+        let old_instance = SecretSharingInstance::try_from(
             req.old_instance.ok_or_else(|| missing("old_instance"))?,
         )?;
 
@@ -388,7 +399,7 @@ impl TryFrom<pb::SignedRotateKpsResponse> for GuardianSigned<RotateKpsResponse> 
         let encrypted_shares = data
             .encrypted_shares
             .into_iter()
-            .map(pb_to_kp_encrypted_shares)
+            .map(KPEncryptedShares::try_from)
             .collect::<GuardianResult<Vec<_>>>()?;
         let encrypted_shares = KPEncryptedSharesRoster::new(encrypted_shares)?;
 
@@ -412,7 +423,7 @@ impl TryFrom<pb::SignedProvisionerRotateCertResponse>
         let signature = GuardianSignature::try_from(signature_bytes.as_ref())
             .map_err(|e| InvalidInputs(format!("invalid signature: {e}")))?;
         let timestamp_ms = resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?;
-        let encrypted_shares = pb_to_kp_encrypted_shares(
+        let encrypted_shares = KPEncryptedShares::try_from(
             resp.encrypted_shares
                 .ok_or_else(|| missing("encrypted_shares"))?,
         )?;
@@ -465,7 +476,7 @@ impl TryFrom<pb::InitConfig> for InitConfig {
         let limiter_config_pb = config_pb
             .limiter_config
             .ok_or_else(|| missing("limiter_config"))?;
-        let limiter_config = pb_to_limiter_config(limiter_config_pb)?;
+        let limiter_config = LimiterConfig::try_from(limiter_config_pb)?;
 
         let master_pk_bytes = config_pb
             .hashi_btc_master_pubkey
@@ -510,7 +521,7 @@ impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
             .map_err(|e| InvalidInputs(format!("invalid signing_pub_key: {e}")))?;
 
         let signed_info_pb = resp.signed_info.ok_or_else(|| missing("signed_info"))?;
-        let signed_info = pb_to_signed_guardian_info(signed_info_pb)?;
+        let signed_info = GuardianSigned::<GuardianInfo>::try_from(signed_info_pb)?;
 
         Ok(GetGuardianInfoResponse::new(
             NitroAttestation::new(attestation.to_vec()),
@@ -520,39 +531,36 @@ impl TryFrom<pb::GetGuardianInfoResponse> for GetGuardianInfoResponse {
     }
 }
 
-// TODO: Replace with TryFrom<> after moving it to hashi-types.
-pub fn pb_to_signed_standard_withdrawal_request_wire(
-    req: pb::SignedStandardWithdrawalRequest,
-) -> GuardianResult<SignedStandardWithdrawalRequestWire> {
-    let data = req.data.ok_or_else(|| missing("data"))?;
-    let committee_signature_pb = req
-        .committee_signature
-        .ok_or_else(|| missing("committee_signature"))?;
-    let (epoch, signature, bitmap) = pb_to_committee_signature(committee_signature_pb)?;
+impl TryFrom<pb::SignedStandardWithdrawalRequest> for SignedStandardWithdrawalRequestWire {
+    type Error = GuardianError;
 
-    let wid_bytes = data.wid.ok_or_else(|| missing("wid"))?;
-    let wid = super::WithdrawalID::from_bytes(wid_bytes.as_ref())
-        .map_err(|_| InvalidInputs(format!("wid must be 32 bytes, got {}", wid_bytes.len())))?;
-    let utxos_pb = data.utxos.ok_or_else(|| missing("utxos"))?;
-    let utxos_wire = pb_to_tx_utxos_wire(utxos_pb)?;
-    let timestamp_secs = data
-        .timestamp_secs
-        .ok_or_else(|| missing("timestamp_secs"))?;
-    let seq = data.seq.ok_or_else(|| missing("seq"))?;
+    fn try_from(req: pb::SignedStandardWithdrawalRequest) -> Result<Self, Self::Error> {
+        let data = req.data.ok_or_else(|| missing("data"))?;
+        let committee_signature_pb = req
+            .committee_signature
+            .ok_or_else(|| missing("committee_signature"))?;
+        let signature = CommitteeSignature::try_from(committee_signature_pb)?;
 
-    Ok(SignedStandardWithdrawalRequestWire {
-        data: StandardWithdrawalRequestWire {
-            wid,
-            utxos: utxos_wire,
-            timestamp_secs,
-            seq,
-        },
-        signature: CommitteeSignature {
-            epoch,
+        let wid_bytes = data.wid.ok_or_else(|| missing("wid"))?;
+        let wid = super::WithdrawalID::from_bytes(wid_bytes.as_ref())
+            .map_err(|_| InvalidInputs(format!("wid must be 32 bytes, got {}", wid_bytes.len())))?;
+        let utxos_pb = data.utxos.ok_or_else(|| missing("utxos"))?;
+        let utxos_wire = TxUTXOsWire::try_from(utxos_pb)?;
+        let timestamp_secs = data
+            .timestamp_secs
+            .ok_or_else(|| missing("timestamp_secs"))?;
+        let seq = data.seq.ok_or_else(|| missing("seq"))?;
+
+        Ok(Self {
+            data: StandardWithdrawalRequestWire {
+                wid,
+                utxos: utxos_wire,
+                timestamp_secs,
+                seq,
+            },
             signature,
-            signers_bitmap: bitmap,
-        },
-    })
+        })
+    }
 }
 
 impl TryFrom<pb::SignedStandardWithdrawalResponse> for GuardianSigned<StandardWithdrawalResponse> {
@@ -833,41 +841,53 @@ fn missing(field: &str) -> GuardianError {
     InvalidInputs(format!("missing {field}"))
 }
 
-fn pb_to_committee_signature(s: pb::CommitteeSignature) -> GuardianResult<(u64, Vec<u8>, Vec<u8>)> {
-    let epoch = s.epoch.ok_or_else(|| missing("epoch"))?;
-    let signature_bytes = s.signature.ok_or_else(|| missing("signature"))?;
-    let signer_bitmap_bytes = s.bitmap.ok_or_else(|| missing("signer_bitmap"))?;
+impl TryFrom<pb::CommitteeSignature> for CommitteeSignature {
+    type Error = GuardianError;
 
-    Ok((
-        epoch,
-        signature_bytes.to_vec(),
-        signer_bitmap_bytes.to_vec(),
-    ))
-}
-
-pub fn pb_share_commitments_to_domain(
-    commitments: &[pb::GuardianShareCommitment],
-) -> GuardianResult<ShareCommitments> {
-    let commitments = commitments
-        .iter()
-        .map(|c| {
-            let digest_hex = c.digest_hex.clone().ok_or_else(|| missing("digest_hex"))?;
-            let digest = hex::decode(&digest_hex)
-                .map_err(|e| InvalidInputs(format!("invalid digest_hex: {e}")))?;
-            Ok(ShareCommitment {
-                id: pb_to_share_id(c.id)?,
-                digest,
-            })
+    fn try_from(s: pb::CommitteeSignature) -> Result<Self, Self::Error> {
+        Ok(Self {
+            epoch: s.epoch.ok_or_else(|| missing("epoch"))?,
+            signature: s.signature.ok_or_else(|| missing("signature"))?.to_vec(),
+            signers_bitmap: s.bitmap.ok_or_else(|| missing("signer_bitmap"))?.to_vec(),
         })
-        .collect::<GuardianResult<Vec<_>>>()?;
-
-    ShareCommitments::new(commitments)
+    }
 }
 
-fn pb_to_s3_bucket_info(info: pb::S3BucketInfo) -> GuardianResult<super::S3BucketInfo> {
-    let bucket = info.bucket.ok_or_else(|| missing("bucket"))?;
-    let region = info.region.ok_or_else(|| missing("region"))?;
-    Ok(super::S3BucketInfo { bucket, region })
+impl TryFrom<pb::GuardianShareCommitment> for ShareCommitment {
+    type Error = GuardianError;
+
+    fn try_from(commitment: pb::GuardianShareCommitment) -> Result<Self, Self::Error> {
+        let digest_hex = commitment.digest_hex.ok_or_else(|| missing("digest_hex"))?;
+        let digest = hex::decode(&digest_hex)
+            .map_err(|e| InvalidInputs(format!("invalid digest_hex: {e}")))?;
+        Ok(Self {
+            id: pb_to_share_id(commitment.id)?,
+            digest,
+        })
+    }
+}
+
+impl TryFrom<Vec<pb::GuardianShareCommitment>> for ShareCommitments {
+    type Error = GuardianError;
+
+    fn try_from(commitments: Vec<pb::GuardianShareCommitment>) -> Result<Self, Self::Error> {
+        let commitments = commitments
+            .into_iter()
+            .map(ShareCommitment::try_from)
+            .collect::<GuardianResult<Vec<_>>>()?;
+
+        Self::new(commitments)
+    }
+}
+
+impl TryFrom<pb::S3BucketInfo> for super::S3BucketInfo {
+    type Error = GuardianError;
+
+    fn try_from(info: pb::S3BucketInfo) -> Result<Self, Self::Error> {
+        let bucket = info.bucket.ok_or_else(|| missing("bucket"))?;
+        let region = info.region.ok_or_else(|| missing("region"))?;
+        Ok(Self { bucket, region })
+    }
 }
 
 fn s3_bucket_info_to_pb(info: super::S3BucketInfo) -> pb::S3BucketInfo {
@@ -877,13 +897,17 @@ fn s3_bucket_info_to_pb(info: super::S3BucketInfo) -> pb::S3BucketInfo {
     }
 }
 
-fn pb_to_ceremony_stage(stage: i32) -> GuardianResult<CeremonyStage> {
-    match pb::CeremonyStage::try_from(stage) {
-        Ok(pb::CeremonyStage::Uninitialized) => Ok(CeremonyStage::Uninitialized),
-        Ok(pb::CeremonyStage::OperatorInitialized) => Ok(CeremonyStage::OperatorInitialized),
-        Ok(pb::CeremonyStage::Completed) => Ok(CeremonyStage::Completed),
-        Ok(pb::CeremonyStage::Unspecified) | Err(_) => {
-            Err(InvalidInputs(format!("invalid ceremony stage: {stage}")))
+impl TryFrom<i32> for CeremonyStage {
+    type Error = GuardianError;
+
+    fn try_from(stage: i32) -> Result<Self, Self::Error> {
+        match pb::CeremonyStage::try_from(stage) {
+            Ok(pb::CeremonyStage::Uninitialized) => Ok(Self::Uninitialized),
+            Ok(pb::CeremonyStage::OperatorInitialized) => Ok(Self::OperatorInitialized),
+            Ok(pb::CeremonyStage::Completed) => Ok(Self::Completed),
+            Ok(pb::CeremonyStage::Unspecified) | Err(_) => {
+                Err(InvalidInputs(format!("invalid ceremony stage: {stage}")))
+            }
         }
     }
 }
@@ -896,14 +920,18 @@ fn ceremony_stage_to_pb(stage: CeremonyStage) -> i32 {
     }
 }
 
-fn pb_to_withdraw_stage(stage: i32) -> GuardianResult<WithdrawStage> {
-    match pb::WithdrawStage::try_from(stage) {
-        Ok(pb::WithdrawStage::Uninitialized) => Ok(WithdrawStage::Uninitialized),
-        Ok(pb::WithdrawStage::OperatorInitialized) => Ok(WithdrawStage::OperatorInitialized),
-        Ok(pb::WithdrawStage::ProvisionerInitialized) => Ok(WithdrawStage::ProvisionerInitialized),
-        Ok(pb::WithdrawStage::Activated) => Ok(WithdrawStage::Activated),
-        Ok(pb::WithdrawStage::Unspecified) | Err(_) => {
-            Err(InvalidInputs(format!("invalid withdraw stage: {stage}")))
+impl TryFrom<i32> for WithdrawStage {
+    type Error = GuardianError;
+
+    fn try_from(stage: i32) -> Result<Self, Self::Error> {
+        match pb::WithdrawStage::try_from(stage) {
+            Ok(pb::WithdrawStage::Uninitialized) => Ok(Self::Uninitialized),
+            Ok(pb::WithdrawStage::OperatorInitialized) => Ok(Self::OperatorInitialized),
+            Ok(pb::WithdrawStage::ProvisionerInitialized) => Ok(Self::ProvisionerInitialized),
+            Ok(pb::WithdrawStage::Activated) => Ok(Self::Activated),
+            Ok(pb::WithdrawStage::Unspecified) | Err(_) => {
+                Err(InvalidInputs(format!("invalid withdraw stage: {stage}")))
+            }
         }
     }
 }
@@ -917,80 +945,90 @@ fn withdraw_stage_to_pb(stage: WithdrawStage) -> i32 {
     }
 }
 
-fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<GuardianInfo> {
-    let lifecycle = match data.lifecycle.ok_or_else(|| missing("lifecycle"))? {
-        pb::guardian_info_data::Lifecycle::Ceremony(stage) => {
-            EnclaveLifecycle::Ceremony(pb_to_ceremony_stage(stage)?)
-        }
-        pb::guardian_info_data::Lifecycle::Withdraw(stage) => {
-            EnclaveLifecycle::Withdraw(pb_to_withdraw_stage(stage)?)
-        }
-    };
-    let secret_sharing_instance = data
-        .secret_sharing_instance
-        .map(pb_to_secret_sharing_instance)
-        .transpose()?;
+impl TryFrom<pb::GuardianInfoData> for GuardianInfo {
+    type Error = GuardianError;
 
-    let bucket_info = data.bucket_info.map(pb_to_s3_bucket_info).transpose()?;
+    fn try_from(data: pb::GuardianInfoData) -> Result<Self, Self::Error> {
+        let lifecycle = match data.lifecycle.ok_or_else(|| missing("lifecycle"))? {
+            pb::guardian_info_data::Lifecycle::Ceremony(stage) => {
+                EnclaveLifecycle::Ceremony(CeremonyStage::try_from(stage)?)
+            }
+            pb::guardian_info_data::Lifecycle::Withdraw(stage) => {
+                EnclaveLifecycle::Withdraw(WithdrawStage::try_from(stage)?)
+            }
+        };
+        let secret_sharing_instance = data
+            .secret_sharing_instance
+            .map(SecretSharingInstance::try_from)
+            .transpose()?;
 
-    let encryption_pubkey = data
-        .encryption_pubkey
-        .ok_or_else(|| missing("encryption_pubkey"))?
-        .to_vec();
+        let bucket_info = data
+            .bucket_info
+            .map(super::S3BucketInfo::try_from)
+            .transpose()?;
 
-    let untrusted_git_revision = data
-        .untrusted_git_revision
-        .ok_or_else(|| missing("untrusted_git_revision"))?;
+        let encryption_pubkey = data
+            .encryption_pubkey
+            .ok_or_else(|| missing("encryption_pubkey"))?
+            .to_vec();
 
-    let config_hash = data
-        .config_hash
-        .map(|b| {
-            <[u8; 32]>::try_from(b.as_ref())
-                .map_err(|_| InvalidInputs("config_hash must be 32 bytes".into()))
+        let untrusted_git_revision = data
+            .untrusted_git_revision
+            .ok_or_else(|| missing("untrusted_git_revision"))?;
+
+        let config_hash = data
+            .config_hash
+            .map(|b| {
+                <[u8; 32]>::try_from(b.as_ref())
+                    .map_err(|_| InvalidInputs("config_hash must be 32 bytes".into()))
+            })
+            .transpose()?;
+
+        let genesis_state_hash = data
+            .genesis_state_hash
+            .map(|b| {
+                <[u8; 32]>::try_from(b.as_ref())
+                    .map_err(|_| InvalidInputs("genesis_state_hash must be 32 bytes".into()))
+            })
+            .transpose()?;
+
+        let enclave_btc_pubkey = data
+            .enclave_btc_pubkey
+            .map(|bytes| {
+                BitcoinPubkey::from_slice(bytes.as_ref())
+                    .map_err(|e| InvalidInputs(format!("invalid enclave_btc_pubkey: {e}")))
+            })
+            .transpose()?;
+
+        let limiter_state = data.limiter_state.map(LimiterState::try_from).transpose()?;
+        let limiter_config = data
+            .limiter_config
+            .map(LimiterConfig::try_from)
+            .transpose()?;
+
+        let mpc_master_g = data
+            .mpc_master_g
+            .map(|b| {
+                bcs::from_bytes(b.as_ref())
+                    .map_err(|e| InvalidInputs(format!("invalid mpc_master_g: {e}")))
+            })
+            .transpose()?;
+
+        Ok(Self {
+            lifecycle,
+            secret_sharing_instance,
+            bucket_info,
+            encryption_pubkey,
+            config_hash,
+            genesis_state_hash,
+            untrusted_git_revision,
+            enclave_btc_pubkey,
+            limiter_state,
+            limiter_config,
+            current_committee_epoch: data.current_committee_epoch,
+            mpc_master_g,
         })
-        .transpose()?;
-
-    let genesis_state_hash = data
-        .genesis_state_hash
-        .map(|b| {
-            <[u8; 32]>::try_from(b.as_ref())
-                .map_err(|_| InvalidInputs("genesis_state_hash must be 32 bytes".into()))
-        })
-        .transpose()?;
-
-    let enclave_btc_pubkey = data
-        .enclave_btc_pubkey
-        .map(|bytes| {
-            BitcoinPubkey::from_slice(bytes.as_ref())
-                .map_err(|e| InvalidInputs(format!("invalid enclave_btc_pubkey: {e}")))
-        })
-        .transpose()?;
-
-    let limiter_state = data.limiter_state.map(pb_to_limiter_state).transpose()?;
-    let limiter_config = data.limiter_config.map(pb_to_limiter_config).transpose()?;
-
-    let mpc_master_g = data
-        .mpc_master_g
-        .map(|b| {
-            bcs::from_bytes(b.as_ref())
-                .map_err(|e| InvalidInputs(format!("invalid mpc_master_g: {e}")))
-        })
-        .transpose()?;
-
-    Ok(GuardianInfo {
-        lifecycle,
-        secret_sharing_instance,
-        bucket_info,
-        encryption_pubkey,
-        config_hash,
-        genesis_state_hash,
-        untrusted_git_revision,
-        enclave_btc_pubkey,
-        limiter_state,
-        limiter_config,
-        current_committee_epoch: data.current_committee_epoch,
-        mpc_master_g,
-    })
+    }
 }
 
 fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
@@ -1025,25 +1063,27 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
     }
 }
 
-fn pb_to_signed_guardian_info(
-    s: pb::SignedGuardianInfo,
-) -> GuardianResult<GuardianSigned<GuardianInfo>> {
-    let data_pb = s.data.ok_or_else(|| missing("signed_info.data"))?;
-    let timestamp_ms = s
-        .timestamp_ms
-        .ok_or_else(|| missing("signed_info.timestamp_ms"))?;
-    let signature_bytes = s
-        .signature
-        .ok_or_else(|| missing("signed_info.signature"))?;
+impl TryFrom<pb::SignedGuardianInfo> for GuardianSigned<GuardianInfo> {
+    type Error = GuardianError;
 
-    let signature = GuardianSignature::try_from(signature_bytes.as_ref())
-        .map_err(|e| InvalidInputs(format!("invalid signed_info.signature: {e}")))?;
+    fn try_from(s: pb::SignedGuardianInfo) -> Result<Self, Self::Error> {
+        let data_pb = s.data.ok_or_else(|| missing("signed_info.data"))?;
+        let timestamp_ms = s
+            .timestamp_ms
+            .ok_or_else(|| missing("signed_info.timestamp_ms"))?;
+        let signature_bytes = s
+            .signature
+            .ok_or_else(|| missing("signed_info.signature"))?;
 
-    Ok(GuardianSigned {
-        data: pb_to_guardian_info_data(data_pb)?,
-        timestamp_ms,
-        signature,
-    })
+        let signature = GuardianSignature::try_from(signature_bytes.as_ref())
+            .map_err(|e| InvalidInputs(format!("invalid signed_info.signature: {e}")))?;
+
+        Ok(Self {
+            data: GuardianInfo::try_from(data_pb)?,
+            timestamp_ms,
+            signature,
+        })
+    }
 }
 
 fn signed_guardian_info_to_pb(s: GuardianSigned<GuardianInfo>) -> pb::SignedGuardianInfo {
@@ -1074,21 +1114,25 @@ fn share_id_to_pb(id: ShareID) -> pb::GuardianShareId {
     }
 }
 
-fn pb_to_s3_config(cfg: pb::S3Config) -> GuardianResult<super::S3Config> {
-    let access_key = cfg.access_key.ok_or_else(|| missing("access_key"))?;
-    let secret_key = cfg.secret_key.ok_or_else(|| missing("secret_key"))?;
-    let bucket_name = cfg.bucket_name.ok_or_else(|| missing("bucket_name"))?;
-    let region = cfg.region.ok_or_else(|| missing("region"))?;
+impl TryFrom<pb::S3Config> for super::S3Config {
+    type Error = GuardianError;
 
-    Ok(super::S3Config {
-        access_key: access_key.to_string(),
-        secret_key: secret_key.to_string(),
-        session_token: cfg.session_token.map(|token| token.to_string()),
-        bucket_info: super::S3BucketInfo {
-            bucket: bucket_name.to_string(),
-            region: region.to_string(),
-        },
-    })
+    fn try_from(cfg: pb::S3Config) -> Result<Self, Self::Error> {
+        let access_key = cfg.access_key.ok_or_else(|| missing("access_key"))?;
+        let secret_key = cfg.secret_key.ok_or_else(|| missing("secret_key"))?;
+        let bucket_name = cfg.bucket_name.ok_or_else(|| missing("bucket_name"))?;
+        let region = cfg.region.ok_or_else(|| missing("region"))?;
+
+        Ok(Self {
+            access_key,
+            secret_key,
+            session_token: cfg.session_token,
+            bucket_info: super::S3BucketInfo {
+                bucket: bucket_name,
+                region,
+            },
+        })
+    }
 }
 
 fn s3_config_to_pb(cfg: super::S3Config) -> pb::S3Config {
@@ -1121,21 +1165,23 @@ fn network_to_pb(n: super::Network) -> GuardianResult<i32> {
     }
 }
 
-fn pb_to_ciphertext(ciphertext_pb_opt: Option<pb::HpkeCiphertext>) -> GuardianResult<Ciphertext> {
-    let ciphertext_pb = ciphertext_pb_opt.ok_or_else(|| missing("ciphertext"))?;
+impl TryFrom<pb::HpkeCiphertext> for Ciphertext {
+    type Error = GuardianError;
 
-    let encapsulated_key = ciphertext_pb
-        .encapsulated_key
-        .ok_or_else(|| missing("encapsulated_key"))?;
+    fn try_from(ciphertext_pb: pb::HpkeCiphertext) -> Result<Self, Self::Error> {
+        let encapsulated_key = ciphertext_pb
+            .encapsulated_key
+            .ok_or_else(|| missing("encapsulated_key"))?;
 
-    let aes_ciphertext = ciphertext_pb
-        .aes_ciphertext
-        .ok_or_else(|| missing("aes_ciphertext"))?;
+        let aes_ciphertext = ciphertext_pb
+            .aes_ciphertext
+            .ok_or_else(|| missing("aes_ciphertext"))?;
 
-    Ok(Ciphertext {
-        encapsulated_key: encapsulated_key.to_vec(),
-        aes_ciphertext: aes_ciphertext.to_vec(),
-    })
+        Ok(Self {
+            encapsulated_key: encapsulated_key.to_vec(),
+            aes_ciphertext: aes_ciphertext.to_vec(),
+        })
+    }
 }
 
 fn ciphertext_to_pb(c: Ciphertext) -> pb::HpkeCiphertext {
@@ -1179,18 +1225,22 @@ pub fn setup_new_key_response_to_pb(r: SetupNewKeyResponse) -> pb::SetupNewKeyRe
     }
 }
 
-fn pb_to_limiter_config(cfg: pb::LimiterConfig) -> GuardianResult<LimiterConfig> {
-    let refill_rate = cfg
-        .refill_rate_sats_per_sec
-        .ok_or_else(|| missing("refill_rate_sats_per_sec"))?;
-    let max_bucket_capacity = cfg
-        .max_bucket_capacity_sats
-        .ok_or_else(|| missing("max_bucket_capacity_sats"))?;
+impl TryFrom<pb::LimiterConfig> for LimiterConfig {
+    type Error = GuardianError;
 
-    Ok(LimiterConfig {
-        refill_rate,
-        max_bucket_capacity,
-    })
+    fn try_from(cfg: pb::LimiterConfig) -> Result<Self, Self::Error> {
+        let refill_rate = cfg
+            .refill_rate_sats_per_sec
+            .ok_or_else(|| missing("refill_rate_sats_per_sec"))?;
+        let max_bucket_capacity = cfg
+            .max_bucket_capacity_sats
+            .ok_or_else(|| missing("max_bucket_capacity_sats"))?;
+
+        Ok(Self {
+            refill_rate,
+            max_bucket_capacity,
+        })
+    }
 }
 
 fn limiter_config_to_pb(cfg: LimiterConfig) -> pb::LimiterConfig {
@@ -1200,20 +1250,24 @@ fn limiter_config_to_pb(cfg: LimiterConfig) -> pb::LimiterConfig {
     }
 }
 
-fn pb_to_limiter_state(limiter: pb::LimiterState) -> GuardianResult<LimiterState> {
-    let num_tokens_available = limiter
-        .num_tokens_available_sats
-        .ok_or_else(|| missing("num_tokens_available_sats"))?;
-    let last_updated_at = limiter
-        .last_updated_at_secs
-        .ok_or_else(|| missing("last_updated_at_secs"))?;
-    let next_seq = limiter.next_seq.ok_or_else(|| missing("next_seq"))?;
+impl TryFrom<pb::LimiterState> for LimiterState {
+    type Error = GuardianError;
 
-    Ok(LimiterState {
-        num_tokens_available,
-        last_updated_at,
-        next_seq,
-    })
+    fn try_from(limiter: pb::LimiterState) -> Result<Self, Self::Error> {
+        let num_tokens_available = limiter
+            .num_tokens_available_sats
+            .ok_or_else(|| missing("num_tokens_available_sats"))?;
+        let last_updated_at = limiter
+            .last_updated_at_secs
+            .ok_or_else(|| missing("last_updated_at_secs"))?;
+        let next_seq = limiter.next_seq.ok_or_else(|| missing("next_seq"))?;
+
+        Ok(Self {
+            num_tokens_available,
+            last_updated_at,
+            next_seq,
+        })
+    }
 }
 
 fn limiter_state_to_pb(state: LimiterState) -> pb::LimiterState {
@@ -1224,128 +1278,149 @@ fn limiter_state_to_pb(state: LimiterState) -> pb::LimiterState {
     }
 }
 
-fn pb_to_hashi_committee(c: pb::Committee) -> GuardianResult<HashiCommittee> {
-    let epoch = c.epoch.ok_or_else(|| missing("epoch"))?;
+impl TryFrom<pb::Committee> for HashiCommittee {
+    type Error = GuardianError;
 
-    let members: Vec<HashiCommitteeMember> = c
-        .members
-        .into_iter()
-        .map(pb_to_hashi_committee_member)
-        .collect::<GuardianResult<Vec<_>>>()?;
+    fn try_from(c: pb::Committee) -> Result<Self, Self::Error> {
+        let epoch = c.epoch.ok_or_else(|| missing("epoch"))?;
 
-    let total_weight = c.total_weight.ok_or_else(|| missing("total_weight"))?;
+        let members: Vec<HashiCommitteeMember> = c
+            .members
+            .into_iter()
+            .map(HashiCommitteeMember::try_from)
+            .collect::<GuardianResult<Vec<_>>>()?;
 
-    // The pinned config is carried verbatim as BCS bytes so the committee's
-    // signed bytes survive the wire without reconstruction.
-    let config_bytes = c.config.ok_or_else(|| missing("config"))?;
-    let config: Config = bcs::from_bytes(&config_bytes)
-        .map_err(|e| InvalidInputs(format!("invalid config: {e}")))?;
-    let committee = HashiCommittee::with_config(members, epoch, config);
+        let total_weight = c.total_weight.ok_or_else(|| missing("total_weight"))?;
 
-    if committee.total_weight() != total_weight {
-        return Err(InvalidInputs(format!(
-            "invalid total_weight: expected {total_weight}, computed {}",
-            committee.total_weight()
-        )));
+        // The pinned config is carried verbatim as BCS bytes so the committee's
+        // signed bytes survive the wire without reconstruction.
+        let config_bytes = c.config.ok_or_else(|| missing("config"))?;
+        let config: Config = bcs::from_bytes(&config_bytes)
+            .map_err(|e| InvalidInputs(format!("invalid config: {e}")))?;
+        let committee = Self::with_config(members, epoch, config);
+
+        if committee.total_weight() != total_weight {
+            return Err(InvalidInputs(format!(
+                "invalid total_weight: expected {total_weight}, computed {}",
+                committee.total_weight()
+            )));
+        }
+
+        Ok(committee)
     }
-
-    Ok(committee)
 }
 
-fn pb_to_hashi_committee_member(m: pb::CommitteeMember) -> GuardianResult<HashiCommitteeMember> {
-    let address = m.address.ok_or_else(|| missing("address"))?;
-    let validator_address = sui_sdk_types::Address::from_str(&address)
-        .map_err(|e| InvalidInputs(format!("invalid address: {e}")))?;
+impl TryFrom<pb::CommitteeMember> for HashiCommitteeMember {
+    type Error = GuardianError;
 
-    let public_key = m.public_key.ok_or_else(|| missing("public_key"))?;
-    let encryption_public_key = m
-        .encryption_public_key
-        .ok_or_else(|| missing("encryption_public_key"))?;
+    fn try_from(m: pb::CommitteeMember) -> Result<Self, Self::Error> {
+        let address = m.address.ok_or_else(|| missing("address"))?;
+        let validator_address = sui_sdk_types::Address::from_str(&address)
+            .map_err(|e| InvalidInputs(format!("invalid address: {e}")))?;
 
-    let weight = m.weight.ok_or_else(|| missing("weight"))?;
+        let public_key = m.public_key.ok_or_else(|| missing("public_key"))?;
+        let encryption_public_key = m
+            .encryption_public_key
+            .ok_or_else(|| missing("encryption_public_key"))?;
 
-    let x = crate::move_types::CommitteeMember {
-        validator_address,
-        public_key: public_key.to_vec(),
-        encryption_public_key: encryption_public_key.to_vec(),
-        weight,
-    };
+        let weight = m.weight.ok_or_else(|| missing("weight"))?;
 
-    HashiCommitteeMember::try_from(x)
-        .map_err(|e| InvalidInputs(format!("invalid committee member: {e}")))
+        let member = crate::move_types::CommitteeMember {
+            validator_address,
+            public_key: public_key.to_vec(),
+            encryption_public_key: encryption_public_key.to_vec(),
+            weight,
+        };
+
+        Self::try_from(member).map_err(|e| InvalidInputs(format!("invalid committee member: {e}")))
+    }
 }
 
 // -----------------------------------------
 //    Standard Withdrawal Helper Functions
 // -----------------------------------------
 
-fn pb_to_tx_utxos_wire(utxos_pb: pb::TxUtxos) -> GuardianResult<TxUTXOsWire> {
-    let inputs = utxos_pb
-        .inputs
-        .into_iter()
-        .map(pb_to_input_utxo)
-        .collect::<GuardianResult<Vec<_>>>()?;
+impl TryFrom<pb::TxUtxos> for TxUTXOsWire {
+    type Error = GuardianError;
 
-    let outputs = utxos_pb
-        .outputs
-        .into_iter()
-        .map(pb_to_output_utxo_wire)
-        .collect::<GuardianResult<Vec<_>>>()?;
+    fn try_from(utxos_pb: pb::TxUtxos) -> Result<Self, Self::Error> {
+        let inputs = utxos_pb
+            .inputs
+            .into_iter()
+            .map(InputUTXO::try_from)
+            .collect::<GuardianResult<Vec<_>>>()?;
 
-    Ok(TxUTXOsWire { inputs, outputs })
+        let outputs = utxos_pb
+            .outputs
+            .into_iter()
+            .map(OutputUTXOWire::try_from)
+            .collect::<GuardianResult<Vec<_>>>()?;
+
+        Ok(Self { inputs, outputs })
+    }
 }
 
-fn pb_to_input_utxo(input_pb: pb::InputUtxo) -> GuardianResult<InputUTXO> {
-    let outpoint_pb = input_pb.outpoint.ok_or_else(|| missing("outpoint"))?;
-    let txid_bytes = outpoint_pb.txid.ok_or_else(|| missing("txid"))?;
-    let vout = outpoint_pb.vout.ok_or_else(|| missing("vout"))?;
+impl TryFrom<pb::InputUtxo> for InputUTXO {
+    type Error = GuardianError;
 
-    let txid = Txid::from_slice(txid_bytes.as_ref())
-        .map_err(|e| InvalidInputs(format!("invalid txid: {e}")))?;
-    let outpoint = OutPoint { txid, vout };
+    fn try_from(input_pb: pb::InputUtxo) -> Result<Self, Self::Error> {
+        let outpoint_pb = input_pb.outpoint.ok_or_else(|| missing("outpoint"))?;
+        let txid_bytes = outpoint_pb.txid.ok_or_else(|| missing("txid"))?;
+        let vout = outpoint_pb.vout.ok_or_else(|| missing("vout"))?;
 
-    let amount = input_pb.amount.ok_or_else(|| missing("amount"))?;
+        let txid = Txid::from_slice(txid_bytes.as_ref())
+            .map_err(|e| InvalidInputs(format!("invalid txid: {e}")))?;
+        let outpoint = OutPoint { txid, vout };
 
-    let path_bytes = input_pb
-        .derivation_path
-        .ok_or_else(|| missing("derivation_path"))?;
-    let derivation_path = DerivationPath::from_bytes(path_bytes.as_ref())
-        .map_err(|_| InvalidInputs("invalid derivation_path: expected 32 bytes".into()))?;
+        let amount = input_pb.amount.ok_or_else(|| missing("amount"))?;
 
-    Ok(InputUTXO::new(
-        outpoint,
-        Amount::from_sat(amount),
-        derivation_path,
-    ))
+        let path_bytes = input_pb
+            .derivation_path
+            .ok_or_else(|| missing("derivation_path"))?;
+        let derivation_path = DerivationPath::from_bytes(path_bytes.as_ref())
+            .map_err(|_| InvalidInputs("invalid derivation_path: expected 32 bytes".into()))?;
+
+        Ok(Self::new(
+            outpoint,
+            Amount::from_sat(amount),
+            derivation_path,
+        ))
+    }
 }
 
-fn pb_to_output_utxo_wire(output_pb: pb::OutputUtxo) -> GuardianResult<OutputUTXOWire> {
-    let output = output_pb.output.ok_or_else(|| missing("output"))?;
+impl TryFrom<pb::OutputUtxo> for OutputUTXOWire {
+    type Error = GuardianError;
 
-    match output {
-        pb::output_utxo::Output::External(ext) => {
-            let address_str = ext.address.ok_or_else(|| missing("address"))?;
-            let address = BitcoinAddress::<NetworkUnchecked>::from_str(&address_str)
-                .map_err(|e| InvalidInputs(format!("invalid address: {e}")))?;
-            let amount = ext.amount.ok_or_else(|| missing("amount"))?;
+    fn try_from(output_pb: pb::OutputUtxo) -> Result<Self, Self::Error> {
+        let output = output_pb.output.ok_or_else(|| missing("output"))?;
 
-            Ok(OutputUTXOWire::External(ExternalOutputUTXOWire {
-                address,
-                amount: Amount::from_sat(amount),
-            }))
-        }
-        pb::output_utxo::Output::Internal(int) => {
-            let path_bytes = int
-                .derivation_path
-                .ok_or_else(|| missing("derivation_path"))?;
-            let derivation_path = DerivationPath::from_bytes(path_bytes.as_ref())
-                .map_err(|_| InvalidInputs("invalid derivation_path: expected 32 bytes".into()))?;
-            let amount = int.amount.ok_or_else(|| missing("amount"))?;
+        match output {
+            pb::output_utxo::Output::External(ext) => {
+                let address_str = ext.address.ok_or_else(|| missing("address"))?;
+                let address = BitcoinAddress::<NetworkUnchecked>::from_str(&address_str)
+                    .map_err(|e| InvalidInputs(format!("invalid address: {e}")))?;
+                let amount = ext.amount.ok_or_else(|| missing("amount"))?;
 
-            Ok(OutputUTXOWire::Internal(InternalOutputUTXO::new(
-                derivation_path,
-                Amount::from_sat(amount),
-            )))
+                Ok(Self::External(ExternalOutputUTXOWire {
+                    address,
+                    amount: Amount::from_sat(amount),
+                }))
+            }
+            pb::output_utxo::Output::Internal(int) => {
+                let path_bytes = int
+                    .derivation_path
+                    .ok_or_else(|| missing("derivation_path"))?;
+                let derivation_path =
+                    DerivationPath::from_bytes(path_bytes.as_ref()).map_err(|_| {
+                        InvalidInputs("invalid derivation_path: expected 32 bytes".into())
+                    })?;
+                let amount = int.amount.ok_or_else(|| missing("amount"))?;
+
+                Ok(Self::Internal(InternalOutputUTXO::new(
+                    derivation_path,
+                    Amount::from_sat(amount),
+                )))
+            }
         }
     }
 }
@@ -1411,9 +1486,13 @@ fn output_utxo_wire_to_pb(output: OutputUTXOWire) -> pb::OutputUtxo {
 /// Decode the wire `Committee` into the BCS-stable `move_types::Committee`,
 /// going through `HashiCommittee` so member keys and `total_weight` are
 /// validated before we project back.
-fn pb_to_move_committee(c: pb::Committee) -> GuardianResult<crate::move_types::Committee> {
-    let hashi_committee = pb_to_hashi_committee(c)?;
-    Ok(crate::move_types::Committee::from(&hashi_committee))
+impl TryFrom<pb::Committee> for crate::move_types::Committee {
+    type Error = GuardianError;
+
+    fn try_from(c: pb::Committee) -> Result<Self, Self::Error> {
+        let hashi_committee = HashiCommittee::try_from(c)?;
+        Ok(Self::from(&hashi_committee))
+    }
 }
 
 fn move_committee_to_pb(c: &crate::move_types::Committee) -> pb::Committee {
@@ -1440,12 +1519,14 @@ pub fn committee_transition_to_pb(t: &CommitteeTransitionRequest) -> pb::Committ
     }
 }
 
-pub fn pb_to_committee_transition(
-    t: pb::CommitteeTransition,
-) -> GuardianResult<CommitteeTransitionRequest> {
-    let new_committee_pb = t.new_committee.ok_or_else(|| missing("new_committee"))?;
-    let new_committee = pb_to_move_committee(new_committee_pb)?;
-    Ok(CommitteeTransitionRequest { new_committee })
+impl TryFrom<pb::CommitteeTransition> for CommitteeTransitionRequest {
+    type Error = GuardianError;
+
+    fn try_from(t: pb::CommitteeTransition) -> Result<Self, Self::Error> {
+        let new_committee_pb = t.new_committee.ok_or_else(|| missing("new_committee"))?;
+        let new_committee = crate::move_types::Committee::try_from(new_committee_pb)?;
+        Ok(Self { new_committee })
+    }
 }
 
 pub fn signed_committee_transition_to_pb(
@@ -1461,19 +1542,26 @@ pub fn signed_committee_transition_to_pb(
     }
 }
 
-pub fn pb_to_signed_committee_transition(
-    req: pb::SignedCommitteeTransition,
-) -> GuardianResult<HashiSigned<CommitteeTransitionRequest>> {
-    let data_pb = req.data.ok_or_else(|| missing("data"))?;
-    let transition = pb_to_committee_transition(data_pb)?;
+impl TryFrom<pb::SignedCommitteeTransition> for HashiSigned<CommitteeTransitionRequest> {
+    type Error = GuardianError;
 
-    let committee_signature_pb = req
-        .committee_signature
-        .ok_or_else(|| missing("committee_signature"))?;
-    let (epoch, signature, bitmap) = pb_to_committee_signature(committee_signature_pb)?;
+    fn try_from(req: pb::SignedCommitteeTransition) -> Result<Self, Self::Error> {
+        let data_pb = req.data.ok_or_else(|| missing("data"))?;
+        let transition = CommitteeTransitionRequest::try_from(data_pb)?;
 
-    HashiSigned::<CommitteeTransitionRequest>::new(epoch, transition, &signature, &bitmap)
+        let committee_signature_pb = req
+            .committee_signature
+            .ok_or_else(|| missing("committee_signature"))?;
+        let signature = CommitteeSignature::try_from(committee_signature_pb)?;
+
+        Self::new(
+            signature.epoch,
+            transition,
+            &signature.signature,
+            &signature.signers_bitmap,
+        )
         .map_err(|e| InvalidInputs(format!("invalid signed committee transition: {e}")))
+    }
 }
 
 #[cfg(test)]
@@ -1512,7 +1600,7 @@ mod tests {
             mpc_master_g: None,
         };
         let pb = guardian_info_data_to_pb(info.clone());
-        let back = pb_to_guardian_info_data(pb).unwrap();
+        let back = GuardianInfo::try_from(pb).unwrap();
         assert_eq!(info, back);
         assert_eq!(back.enclave_btc_pubkey, Some(pk));
     }
@@ -1632,7 +1720,7 @@ mod tests {
         let signed_pb = signed_standard_withdrawal_request_to_pb(&signed_domain);
 
         // 3) Convert back from pb -> wire.
-        let signed_wire = pb_to_signed_standard_withdrawal_request_wire(signed_pb).unwrap();
+        let signed_wire = SignedStandardWithdrawalRequestWire::try_from(signed_pb).unwrap();
 
         // 4) Convert wire -> HashiSigned<StandardWithdrawalRequest> using AddressValidation.
         let signed_back =
@@ -1702,7 +1790,7 @@ mod tests {
         let signed = agg.finish().expect("threshold met");
 
         let pb = signed_committee_transition_to_pb(&signed);
-        let back = pb_to_signed_committee_transition(pb).expect("round-trip");
+        let back = HashiSigned::<CommitteeTransitionRequest>::try_from(pb).expect("round-trip");
         assert_eq!(signed.epoch(), back.epoch());
         assert_eq!(signed.signature_bytes(), back.signature_bytes());
         assert_eq!(signed.signers_bitmap_bytes(), back.signers_bitmap_bytes());

@@ -49,6 +49,8 @@ impl GuardianReader {
         limiter_config: &LimiterConfig,
     ) -> anyhow::Result<LimiterState> {
         let Some(mut cursor) = find_latest_success_bucket(self.s3()).await? else {
+            // The search covers the complete S3 withdrawal history, so this
+            // branch is reachable only if no withdrawal has ever succeeded.
             info!("no successful withdrawal logs found; using genesis limiter state");
             return Ok(LimiterState::genesis(limiter_config));
         };

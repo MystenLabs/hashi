@@ -216,19 +216,11 @@ impl GuardianReader {
         let Some(key) = keys.into_iter().max() else {
             return Ok(None);
         };
-        // The prefix history was checked above. KP-share locks are short-lived
-        // and expected to expire, so integrity comes from the signature below.
-        let record = self
-            .s3
-            .get_log_record_inner(&key, LockCheck::Skipped, HistoryCheck::AlreadyChecked)
+        // The enclosing prefix's version history was checked while listing the
+        // candidate keys above, so the selected key does not need another check.
+        let msg = self
+            .read_kp_share_state_log_at_key(&key, build_policy, HistoryCheck::AlreadyChecked)
             .await?;
-        let record = self.cache.verify_record(&self.s3, record).await?;
-        let build_pcrs = record.build_pcrs.clone();
-        self.enforce_build_policy("kp-shares log", build_policy, &build_pcrs)?;
-        let session_id = record.session_id;
-        let LogMessage::KpShareState(msg) = record.message else {
-            anyhow::bail!("expected a kp-shares log at {key}");
-        };
         if msg.sharing_seq != sharing_seq {
             anyhow::bail!(
                 "sharing_seq mismatch: {} != {}",
@@ -236,8 +228,49 @@ impl GuardianReader {
                 sharing_seq
             );
         }
-        log_verified_read(&key, &session_id);
-        Ok(Some(*msg))
+        Ok(Some(msg))
+    }
+
+    /// Read and verify one exact encrypted KP-share snapshot.
+    ///
+    /// The object key binds the writing guardian session and the two sequence
+    /// numbers. This lets callers verify the snapshot produced by one request
+    /// even if a later request has already advanced the latest state.
+    pub async fn read_kp_share_state_log(
+        &mut self,
+        session_id: &SessionID,
+        sharing_seq: u64,
+        cert_seq: u64,
+        build_policy: BuildPolicy,
+    ) -> anyhow::Result<KpShareStateLogMessage> {
+        let key = KpShareStateLogMessage::object_key(session_id, sharing_seq, cert_seq);
+        // Unlike the latest-state path, this direct read has not already
+        // checked an enclosing prefix, so validate this exact key's history.
+        self.read_kp_share_state_log_at_key(&key, build_policy, HistoryCheck::Required)
+            .await
+    }
+
+    /// Shared verification path for both latest and exact KP-share reads.
+    async fn read_kp_share_state_log_at_key(
+        &mut self,
+        key: &str,
+        build_policy: BuildPolicy,
+        history_check: HistoryCheck,
+    ) -> anyhow::Result<KpShareStateLogMessage> {
+        // KP-share locks are short-lived and expected to expire. Their contents
+        // remain authenticatable through the enclave signature verified below.
+        let record = self
+            .s3
+            .get_log_record_inner(key, LockCheck::Skipped, history_check)
+            .await?;
+        let record = self.cache.verify_record(&self.s3, record).await?;
+        self.enforce_build_policy("kp-shares log", build_policy, &record.build_pcrs)?;
+        let session_id = record.session_id;
+        let LogMessage::KpShareState(msg) = record.message else {
+            anyhow::bail!("expected a kp-shares log at {key}");
+        };
+        log_verified_read(key, &session_id);
+        Ok(*msg)
     }
 
     /// Read the latest ceremony together with the latest KP share state for its

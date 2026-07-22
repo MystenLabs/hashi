@@ -32,11 +32,6 @@ pub struct LimiterState {
 impl LimiterState {
     /// Genesis state for a freshly bootstrapped enclave: a full bucket, no
     /// consumes yet, no refill timestamp.
-    ///
-    /// TODO: if the provisioner-init rotation path falls back here (no Success
-    /// logs in the prior enclave's walk-back window), `next_seq = 0` may not
-    /// match Hashi's current seq counter. Recover the real seq from a
-    /// separate source instead of falling back to 0.
     pub fn genesis(config: &super::LimiterConfig) -> Self {
         Self {
             num_tokens_available: config.max_bucket_capacity,

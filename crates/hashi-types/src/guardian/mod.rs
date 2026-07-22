@@ -137,8 +137,6 @@ pub struct GuardianInfo {
         with = "crate::guardian::serde_utils::option_hex_32"
     )]
     pub genesis_state_hash: Option<[u8; 32]>,
-    // TODO: report the full committee too, so its membership is directly
-    // verifiable from GuardianInfo; it's large, though.
 }
 
 // ---------------------------------------
@@ -216,8 +214,6 @@ pub struct StandardWithdrawalRequest {
     /// Timestamp in unix seconds (used for rate limiting)
     timestamp_secs: u64,
     /// Monotonic sequence number for ordering
-    /// TODO: rename to `withdraw_seq` (and `LimiterState.next_seq` →
-    /// `next_withdraw_seq`) to disambiguate from `SecretSharingInstance.sharing_seq`.
     seq: u64,
 }
 
@@ -268,8 +264,6 @@ pub struct SetupNewKeyResponse {
 /// rotation target `state`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RotateKpsRequest {
-    // TODO: Use the same unique-id wrapper as ProvisionerInitRequest once we
-    // centralize validation for submitted guardian share batches.
     encrypted_old_shares: Vec<GuardianEncryptedShare>,
     old_instance: SecretSharingInstance,
     state: RotateKpsState,
