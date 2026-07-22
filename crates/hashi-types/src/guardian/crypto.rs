@@ -21,11 +21,11 @@ use hpke::aead::AesGcm256;
 use hpke::kdf::HkdfSha384;
 use hpke::kem::X25519HkdfSha256;
 use k256::CompressedPoint;
-use k256::FieldBytes;
 use k256::ProjectivePoint;
 use k256::Scalar;
+use k256::Secp256k1;
 use k256::elliptic_curve::Field;
-use k256::elliptic_curve::PrimeField;
+use k256::elliptic_curve::ScalarPrimitive;
 use k256::elliptic_curve::group::GroupEncoding;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
@@ -751,15 +751,13 @@ pub fn decrypt_share(
     aad: Option<&[u8; 32]>,
 ) -> GuardianResult<Share> {
     let serialized_share = decrypt(&encrypted_share.ciphertext, sk, aad)?;
-    let result: Option<Scalar> =
-        Scalar::from_repr(*FieldBytes::from_slice(&serialized_share)).into();
-    match result {
-        Some(x) => Ok(Share {
-            id: encrypted_share.id,
-            value: x,
-        }),
-        None => Err(InvalidInputs("Failed to deserialize share".into())),
-    }
+    let value = ScalarPrimitive::<Secp256k1>::from_slice(&serialized_share)
+        .map(Scalar::from)
+        .map_err(|_| InvalidInputs("Failed to deserialize share".into()))?;
+    Ok(Share {
+        id: encrypted_share.id,
+        value,
+    })
 }
 
 /// Decrypt each submission under optional `aad`, verify it against `commitments`,
@@ -819,6 +817,28 @@ mod tests {
             decrypt(&ciphertext, keypair.secret_key(), wrong_aad)
                 .is_err_and(|x| matches!(x, InvalidInputs(_)))
         );
+    }
+
+    #[test]
+    fn decrypt_share_rejects_wrong_plaintext_length() {
+        let keypair = GuardianEncKeyPair::random(&mut rand::thread_rng());
+        for len in [31, 33] {
+            let encrypted_share = GuardianEncryptedShare {
+                id: ShareID::new(1).unwrap(),
+                ciphertext: encrypt(
+                    &vec![0; len],
+                    keypair.public_key(),
+                    None,
+                    &mut rand::thread_rng(),
+                )
+                .unwrap(),
+            };
+
+            let Err(err) = decrypt_share(&encrypted_share, keypair.secret_key(), None) else {
+                panic!("{len}-byte plaintext must be rejected");
+            };
+            assert!(matches!(err, InvalidInputs(_)), "{err:?}");
+        }
     }
 
     // Verify secret reconstruction with varying number of shares (0 to n).
