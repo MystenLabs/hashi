@@ -95,6 +95,8 @@ pub enum LogMessageV1 {
 
 /// Current log schema emitted by the guardian enclave.
 /// Uses an enum discriminator for automatic domain separation between variants.
+// TODO(testnet-wipe): Collapse the V1/V2 compatibility layer into a single log
+// schema once existing testnet records no longer need to be read.
 #[derive(Debug, Serialize, Deserialize)]
 pub enum LogMessageV2 {
     Heartbeat(HeartbeatLogMessage),

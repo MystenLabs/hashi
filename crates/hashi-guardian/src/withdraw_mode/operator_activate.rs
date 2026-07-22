@@ -6,7 +6,6 @@
 //! operator-pinned `ActivationState` hash.
 
 use crate::s3_reader::BuildPolicy;
-use crate::s3_reader::GuardianReader;
 use crate::Enclave;
 use hashi_types::guardian::ActivationState;
 use hashi_types::guardian::GuardianError;
@@ -37,23 +36,14 @@ impl OAInstall {
         enclave: &Enclave,
         request: OperatorActivateRequest,
     ) -> GuardianResult<Self> {
-        let init_config = enclave
-            .init_config()
-            .ok_or_else(|| InvalidInputs("InitConfig not set".into()))?
-            .clone();
-        let config_hash = enclave
-            .config_hash()
-            .ok_or_else(|| InvalidInputs("config_hash not set".into()))?;
-        let armed_instance = enclave
-            .secret_sharing_instance()
-            .map_err(|_| InvalidInputs("secret-sharing instance not set".into()))?;
+        let limiter_config = enclave.limiter_config()?;
+        let initialization = enclave
+            .temporary_init_state()
+            .map_err(|_| InvalidInputs("temporary initialization state not set".into()))?;
+        let config_hash = initialization.config_hash;
+        let armed_instance = initialization.ceremony_state.secret_sharing_instance;
 
-        let s3 = enclave
-            .config
-            .s3_logger()
-            .map_err(|_| InvalidInputs("S3 logger not set".into()))?
-            .clone();
-        let mut reader = GuardianReader::from_s3_client(s3, init_config.pcr_allowlist().clone());
+        let mut reader = enclave.new_guardian_reader()?;
 
         reader
             .ensure_session_live_and_others_quiet(&enclave.s3_session_id())
@@ -69,10 +59,10 @@ impl OAInstall {
             .map_err(|e| InvalidInputs(format!("invalid serving committee: {e}")))?;
 
         let limiter_state = reader
-            .recover_limiter_state(init_config.limiter_config())
+            .recover_limiter_state(&limiter_config)
             .await
             .map_err(|e| InvalidInputs(format!("recover limiter state: {e}")))?;
-        let rate_limiter = RateLimiter::new(*init_config.limiter_config(), limiter_state)?;
+        let rate_limiter = RateLimiter::new(limiter_config, limiter_state)?;
         let sharing_seq = armed_instance.sharing_seq();
         let committee_epoch = committee.epoch();
 
@@ -142,7 +132,7 @@ async fn commit_operator_activate(enclave: &Enclave, install: OAInstall) {
         .await
         .expect("Unable to log operator activation");
 
-    enclave.clear_initialization_state();
+    enclave.clear_temporary_init_state();
 
     enclave
         .advance_lifecycle_into(WithdrawStage::Activated.into())

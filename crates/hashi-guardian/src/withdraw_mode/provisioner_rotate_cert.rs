@@ -8,7 +8,6 @@
 use std::sync::Arc;
 
 use crate::s3_reader::BuildPolicy;
-use crate::s3_reader::GuardianReader;
 use crate::Enclave;
 use hashi_types::guardian::crypto::decrypt_share;
 use hashi_types::guardian::crypto::encrypt_share_for_provisioner;
@@ -53,15 +52,7 @@ pub async fn provisioner_rotate_cert(
     let new_recipient_fingerprint = request.new_recipient_fingerprint();
     let encrypted_share = request.encrypted_share().clone();
 
-    let init_config = enclave
-        .init_config()
-        .ok_or_else(|| InvalidInputs("InitConfig not set".into()))?;
-    let s3 = enclave
-        .config
-        .s3_logger()
-        .map_err(|_| InvalidInputs("S3 logger not set".into()))?
-        .clone();
-    let mut reader = GuardianReader::from_s3_client(s3, init_config.pcr_allowlist().clone());
+    let mut reader = enclave.new_guardian_reader()?;
 
     let latest_state = reader
         .read_latest_ceremony_state(BuildPolicy::AnyAllowlisted)

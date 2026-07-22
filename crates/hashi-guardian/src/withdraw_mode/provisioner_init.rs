@@ -31,17 +31,16 @@ impl PIInstall {
         enclave: &Enclave,
         request: ProvisionerInitRequest,
     ) -> GuardianResult<Self> {
-        let ceremony_state = enclave
-            .ceremony_state()
-            .expect("ceremony state should be set after operator_init");
+        let initialization = enclave
+            .temporary_init_state()
+            .expect("temporary initialization state should be set after operator_init");
+        let ceremony_state = &initialization.ceremony_state;
         let instance = &ceremony_state.secret_sharing_instance;
         let threshold = instance.threshold();
         let sharing_seq = instance.sharing_seq();
-        let config_hash = enclave
-            .config_hash()
-            .expect("withdraw-mode operator_init installs the config_hash");
+        let config_hash = initialization.config_hash;
         let session_id = enclave.s3_session_id();
-        let genesis_state = enclave.genesis_state();
+        let genesis_state = initialization.genesis_state.clone();
         let genesis_state_hash = genesis_state.as_ref().map(GenesisState::digest);
 
         let encrypted_shares = verify_signed_submissions(
@@ -280,6 +279,13 @@ mod tests {
     }
 
     impl TestContext {
+        fn config_hash(&self) -> [u8; 32] {
+            self.enclave
+                .temporary_init_state()
+                .expect("test enclave should retain temporary initialization state")
+                .config_hash
+        }
+
         fn signed_submission(
             &self,
             share: &Share,
@@ -292,7 +298,12 @@ mod tests {
                 &self.kp_keys[signer_index],
                 expected_session_id,
                 expected_config_hash,
-                self.enclave.genesis_state_hash(),
+                self.enclave
+                    .temporary_init_state()
+                    .expect("test enclave should retain temporary initialization state")
+                    .genesis_state
+                    .as_ref()
+                    .map(GenesisState::digest),
             )
         }
 
@@ -308,7 +319,12 @@ mod tests {
                 signer,
                 expected_session_id,
                 expected_config_hash,
-                self.enclave.genesis_state_hash(),
+                self.enclave
+                    .temporary_init_state()
+                    .expect("test enclave should retain temporary initialization state")
+                    .genesis_state
+                    .as_ref()
+                    .map(GenesisState::digest),
             )
         }
 
@@ -355,7 +371,7 @@ mod tests {
 
         fn request(&self, shares: &[Share]) -> ProvisionerInitRequest {
             let session_id = self.enclave.s3_session_id();
-            let config_hash = self.enclave.config_hash().unwrap();
+            let config_hash = self.config_hash();
             let submissions = shares
                 .iter()
                 .map(|share| {
@@ -400,7 +416,7 @@ mod tests {
             &ctx.shares[0],
             &ctx.alternate_first_kp_key,
             ctx.enclave.s3_session_id(),
-            ctx.enclave.config_hash().unwrap(),
+            ctx.config_hash(),
         )];
         submissions.extend(ctx.request(&ctx.shares[1..TEST_T]).0);
 
@@ -487,7 +503,7 @@ mod tests {
                     share,
                     usize::from(share.id.get() - 1),
                     ctx.enclave.s3_session_id(),
-                    ctx.enclave.config_hash().unwrap(),
+                    ctx.config_hash(),
                     Some([0xAB; 32]),
                 )
             })
@@ -502,7 +518,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_mismatched_session() {
         let ctx = setup().await;
-        let config_hash = ctx.enclave.config_hash().unwrap();
+        let config_hash = ctx.config_hash();
         let submissions = ctx.shares[..TEST_T]
             .iter()
             .map(|share| {
@@ -541,7 +557,7 @@ mod tests {
             &ctx.shares[0],
             1,
             ctx.enclave.s3_session_id(),
-            ctx.enclave.config_hash().unwrap(),
+            ctx.config_hash(),
         );
         let err = ctx
             .provision(ProvisionerInitRequest(submissions))
@@ -561,7 +577,7 @@ mod tests {
             &bogus_share,
             0,
             ctx.enclave.s3_session_id(),
-            ctx.enclave.config_hash().unwrap(),
+            ctx.config_hash(),
         )];
         submissions.extend(ctx.request(&ctx.shares[1..TEST_T]).0);
         let err = ctx
@@ -578,7 +594,7 @@ mod tests {
             &ctx.shares[0],
             0,
             ctx.enclave.s3_session_id(),
-            ctx.enclave.config_hash().unwrap(),
+            ctx.config_hash(),
         );
         let err = ctx
             .provision(ProvisionerInitRequest(vec![
@@ -588,7 +604,7 @@ mod tests {
                     &ctx.shares[1],
                     1,
                     ctx.enclave.s3_session_id(),
-                    ctx.enclave.config_hash().unwrap(),
+                    ctx.config_hash(),
                 ),
             ]))
             .await
