@@ -597,6 +597,9 @@ impl Enclave {
     // Initialization state
     // ========================================================================
 
+    // TODO: This accessor is valid only before operator activation. Activation
+    // clears `ceremony_state`, so calls in the Activated lifecycle always fail.
+    // Remove it when lifecycle-specific state owns the initialization data.
     pub fn secret_sharing_instance(&self) -> GuardianResult<SecretSharingInstance> {
         Ok(self.ceremony_state()?.secret_sharing_instance)
     }
