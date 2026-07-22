@@ -7,15 +7,82 @@
 
 use crate::withdraw_mode::genesis::ensure_no_serving_committee;
 use crate::Enclave;
-use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::guardian::crypto::combine_shares;
 use hashi_types::guardian::crypto::decrypt_verify_shares;
 use hashi_types::guardian::crypto::k256_sk_to_btc_keypair;
-use hashi_types::guardian::crypto::Share;
 use hashi_types::guardian::InitLogMessage::PIEnclaveFullyInitialized;
 use hashi_types::guardian::*;
 use std::sync::Arc;
 use tracing::info;
+
+/// Validated provisioner-init state ready for its fail-stop commit.
+///
+/// Construction performs every request-dependent fallible operation without
+/// mutating the enclave. Once built, installation must either complete or abort
+/// the enclave process.
+struct PIInstall {
+    enclave_btc_keypair: bitcoin::secp256k1::Keypair,
+    genesis_log: Option<GenesisLogMessage>,
+    completion_log: InitLogMessage,
+}
+
+impl PIInstall {
+    async fn from_request(
+        enclave: &Enclave,
+        request: ProvisionerInitRequest,
+    ) -> GuardianResult<Self> {
+        let ceremony_state = enclave
+            .ceremony_state()
+            .expect("ceremony state should be set after operator_init");
+        let instance = &ceremony_state.secret_sharing_instance;
+        let threshold = instance.threshold();
+        let sharing_seq = instance.sharing_seq();
+        let config_hash = enclave
+            .config_hash()
+            .expect("withdraw-mode operator_init installs the config_hash");
+        let session_id = enclave.s3_session_id();
+        let genesis_state = enclave.genesis_state();
+        let genesis_state_hash = genesis_state.as_ref().map(GenesisState::digest);
+
+        let encrypted_shares = verify_signed_submissions(
+            &request,
+            &session_id,
+            &config_hash,
+            genesis_state_hash,
+            &ceremony_state.encrypted_shares,
+        )?;
+        let shares = decrypt_verify_shares(
+            &encrypted_shares,
+            enclave.encryption_secret_key(),
+            None,
+            instance.commitments(),
+            threshold,
+        )?;
+        info!("Verified {} shares (threshold {threshold}).", shares.len());
+
+        info!("Threshold reached, combining shares.");
+        let enclave_k256_sk = combine_shares(&shares, threshold)?;
+        let enclave_btc_keypair = k256_sk_to_btc_keypair(&enclave_k256_sk);
+        let enclave_btc_pubkey = enclave_btc_keypair.x_only_public_key().0;
+        let share_ids = shares.iter().map(|share| share.id).collect();
+
+        if genesis_state.is_some() {
+            ensure_no_serving_committee(enclave).await?;
+        }
+
+        Ok(Self {
+            enclave_btc_keypair,
+            genesis_log: genesis_state.map(|state| GenesisLogMessage {
+                committee: state.into_committee(),
+            }),
+            completion_log: PIEnclaveFullyInitialized {
+                sharing_seq,
+                share_ids,
+                enclave_btc_pubkey,
+            },
+        })
+    }
+}
 
 /// Receives the current KPs' signed share submissions in one batch. The relay
 /// may pre-verify them as a DoS guard, but the enclave authoritatively verifies
@@ -31,68 +98,46 @@ pub async fn provisioner_init(
     let _guard = enclave.control_lock.lock().await;
 
     enclave.require_lifecycle(WithdrawStage::OperatorInitialized.into())?;
-    info!("Enclave state validated.");
+    info!("Lifecycle stage validated.");
 
-    let ceremony_state = enclave
-        .ceremony_state()
-        .expect("ceremony state should be set after operator_init");
-    let instance = &ceremony_state.secret_sharing_instance;
-    let threshold = instance.threshold();
-    let sharing_seq = instance.sharing_seq();
-    let config_hash = enclave
-        .config_hash()
-        .expect("withdraw-mode operator_init installs the config_hash");
-    let session_id = enclave.s3_session_id();
-    let genesis_state = enclave.genesis_state();
-    let genesis_state_hash = genesis_state.as_ref().map(GenesisState::digest);
+    // ---- Validate & build: Nothing in this phase mutates enclave state, so any
+    // error here leaves the enclave untouched. ----
+    let install = PIInstall::from_request(&enclave, request).await?;
 
-    let encrypted_shares = verify_signed_submissions(
-        &request,
-        &session_id,
-        &config_hash,
-        genesis_state_hash,
-        &ceremony_state.encrypted_shares,
-    )?;
-    let shares = decrypt_verify_shares(
-        &encrypted_shares,
-        enclave.encryption_secret_key(),
-        None,
-        instance.commitments(),
-        threshold,
-    )?;
-    info!("Verified {} shares (threshold {threshold}).", shares.len());
+    // ---- All-or-nothing Commit: Nothing in this phase errors out. ----
+    info!("Committing enclave BTC keypair.");
+    commit_provisioner_init(&enclave, install).await;
 
-    if genesis_state.is_some() {
-        ensure_no_serving_committee(&enclave).await?;
-    }
+    info!("Provisioner initialization complete.");
+    Ok(())
+}
 
-    let share_ids = shares.iter().map(|s| s.id).collect();
-    let enclave_btc_pubkey = finalize_init(&shares, threshold, &enclave).await;
-    if let Some(genesis_state) = genesis_state {
-        let committee = genesis_state.into_committee();
-        let epoch = committee.epoch;
+/// Install the prepared key, durably mark PI complete, and then expose the new
+/// lifecycle. This fail-stop phase never returns an error after mutation begins.
+async fn commit_provisioner_init(enclave: &Enclave, install: PIInstall) {
+    enclave
+        .config
+        .set_btc_keypair(install.enclave_btc_keypair)
+        .expect("Unable to set enclave keypair");
+
+    if let Some(genesis_log) = install.genesis_log {
+        let epoch = genesis_log.committee.epoch;
         enclave
-            .log_genesis(GenesisLogMessage { committee })
+            .log_genesis(genesis_log)
             .await
             .expect("Unable to log KP-authorized genesis state");
         info!(epoch, "KP-authorized genesis committee written");
     }
-    // Log to S3 indicating that the BTC key has been reconstructed. OA waits for
-    // this durable marker before activating the enclave for withdrawals.
+
+    // OA waits for this durable marker before activating the enclave.
     enclave
-        .log_init(PIEnclaveFullyInitialized {
-            sharing_seq,
-            share_ids,
-            enclave_btc_pubkey,
-        })
+        .log_init(install.completion_log)
         .await
         .expect("Unable to log EnclaveFullyInitialized");
 
     enclave
         .advance_lifecycle_into(WithdrawStage::ProvisionerInitialized.into())
         .expect("provisioner_init should advance an operator-initialized enclave");
-
-    Ok(())
 }
 
 fn verify_signed_submissions(
@@ -157,29 +202,6 @@ fn verify_signed_submissions(
             Ok(submission.encrypted_share().clone())
         })
         .collect()
-}
-
-/// Reconstruct the BTC key from the threshold shares and install it. Live
-/// serving state is installed later by operator_activate.
-/// Panics upon an error as the enclaves state is irrecoverable at this point.
-async fn finalize_init(
-    shares: &[Share],
-    threshold: usize,
-    enclave: &Arc<Enclave>,
-) -> BitcoinPubkey {
-    info!("Threshold reached, combining shares.");
-    let enclave_k256_sk = combine_shares(shares, threshold).expect("Unable to combine shares");
-    let enclave_btc_keypair = k256_sk_to_btc_keypair(&enclave_k256_sk);
-    let enclave_btc_pubkey = enclave_btc_keypair.x_only_public_key().0;
-
-    info!("Setting enclave keypair.");
-    enclave
-        .config
-        .set_btc_keypair(enclave_btc_keypair)
-        .expect("Unable to set enclave keypair");
-
-    info!("Enclave initialization complete.");
-    enclave_btc_pubkey
 }
 
 #[cfg(test)]
@@ -413,6 +435,15 @@ mod tests {
             !ctx.enclave.config.is_enclave_btc_keypair_set(),
             "Bitcoin key should not be set below threshold"
         );
+        assert_eq!(
+            ctx.enclave.lifecycle(),
+            WithdrawStage::OperatorInitialized.into(),
+            "failed preparation should not advance the lifecycle"
+        );
+
+        ctx.provision(ctx.request(&ctx.shares[..TEST_T]))
+            .await
+            .expect("valid retry should succeed");
     }
 
     #[tokio::test]

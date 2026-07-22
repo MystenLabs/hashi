@@ -4,7 +4,6 @@
 use super::verify_hashi_cert;
 use crate::Enclave;
 use bitcoin::Txid;
-use hashi_types::committee::certificate_threshold;
 use hashi_types::guardian::now_timestamp_secs;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::EnclaveUninitialized;
@@ -77,10 +76,9 @@ async fn normal_withdrawal_inner(
 
     // 1) Verify certificate (before acquiring limiter lock)
     let committee = enclave.state.get_committee()?;
-    let threshold = certificate_threshold(committee.total_weight());
 
     info!("Verifying request certificate.");
-    verify_hashi_cert(committee, threshold, &signed_request)?;
+    verify_hashi_cert(&committee, &signed_request)?;
     info!("Request certificate verified.");
 
     let (_, request) = signed_request.into_parts();

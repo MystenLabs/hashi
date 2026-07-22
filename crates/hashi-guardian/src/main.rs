@@ -40,12 +40,6 @@ async fn main() -> Result<()> {
         EnclaveMode::Withdraw
     };
 
-    if ceremony_mode {
-        info!("Ceremony mode: setup_new_key/rotate_kps enabled; provisioner_init/standard_withdrawal disabled.");
-    } else {
-        info!("Withdraw mode: provisioner_init/standard_withdrawal enabled; setup_new_key/rotate_kps disabled.");
-    }
-
     let mut rng = rand::thread_rng();
     let signing_keys = GuardianSignKeyPair::new(&mut rng);
     let encryption_keys = GuardianEncKeyPair::random(&mut rng);

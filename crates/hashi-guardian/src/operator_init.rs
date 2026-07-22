@@ -18,28 +18,43 @@ use std::sync::Arc;
 use tracing::info;
 use GuardianError::*;
 
-/// The withdraw-mode arming state to install, built from `InitConfig`.
-pub(crate) struct InitInstall {
+/// Complete operator-init state ready for its fail-stop commit.
+pub(crate) struct OIInstall {
+    logger: GuardianS3Client,
+    withdraw_mode: Option<OIWithdrawModeInstall>,
+}
+
+/// Withdraw-mode arming state built from `InitConfig` and the ceremony logs.
+pub(crate) struct OIWithdrawModeInstall {
     init_config: InitConfig,
     ceremony_state: CeremonyState,
     genesis_state: Option<GenesisState>,
 }
 
-impl InitInstall {
+impl OIInstall {
+    fn new(logger: GuardianS3Client, withdraw_mode: Option<OIWithdrawModeInstall>) -> Self {
+        Self {
+            logger,
+            withdraw_mode,
+        }
+    }
+}
+
+impl OIWithdrawModeInstall {
     pub(crate) fn from_parts(
-        config: InitConfig,
+        init_config: InitConfig,
         ceremony_state: CeremonyState,
         genesis_state: Option<GenesisState>,
     ) -> Self {
         Self {
-            init_config: config,
+            init_config,
             ceremony_state,
             genesis_state,
         }
     }
 
     /// Build the arming bundle from the stable config and S3-derived ceremony +
-    /// KP share state. Shared by `operator_init` and tests.
+    /// KP share state.
     pub(crate) async fn from_config(
         logger: &GuardianS3Client,
         config: InitConfig,
@@ -62,14 +77,14 @@ impl InitInstall {
         let network = self.init_config.network();
         let hashi_btc_master_pubkey = self.init_config.hashi_btc_master_pubkey();
 
-        info!("Setting bitcoin network to {:?}.", network);
+        info!("Setting Bitcoin network to {:?}.", network);
         enclave
             .config
             .set_bitcoin_network(network)
             .expect("Unable to set network");
 
         info!(
-            "Storing secret-sharing instance: n={}, t={}, {} commitments.",
+            "Setting secret-sharing instance: n={}, t={}, {} commitments.",
             self.ceremony_state.secret_sharing_instance.num_shares(),
             self.ceremony_state.secret_sharing_instance.threshold(),
             self.ceremony_state
@@ -96,7 +111,7 @@ impl InitInstall {
             .set_init_config(self.init_config)
             .expect("Unable to set init config");
 
-        info!("Setting hashi BTC master pubkey.");
+        info!("Setting Hashi BTC master pubkey.");
         enclave
             .config
             .set_hashi_btc_pk(hashi_btc_master_pubkey)
@@ -127,6 +142,7 @@ pub async fn operator_init(
         EnclaveMode::Withdraw => WithdrawStage::Uninitialized.into(),
     };
     enclave.require_lifecycle(uninitialized)?;
+    info!("Lifecycle stage validated.");
 
     // ---- Validate & build: Nothing in this phase mutates enclave state, so any
     // error here leaves the enclave untouched. ----
@@ -139,13 +155,19 @@ pub async fn operator_init(
     info!("S3 connectivity check complete.");
 
     // Build the withdraw-mode install bundle up front; `None` for a ceremony enclave.
-    let withdraw = match init_config {
-        Some(config) => Some(InitInstall::from_config(&logger, config, genesis_state).await?),
+    let withdraw_mode = match init_config {
+        Some(config) => {
+            Some(OIWithdrawModeInstall::from_config(&logger, config, genesis_state).await?)
+        }
         None => None,
     };
+    let install = OIInstall::new(logger, withdraw_mode);
 
     // ---- All-or-nothing Commit: Nothing in this phase errors out. ----
-    commit_operator_init(&enclave, logger, withdraw).await;
+    info!("Committing S3 logger and mode-specific initialization state.");
+    commit_operator_init(&enclave, install).await;
+
+    info!("Operator initialization complete.");
     Ok(())
 }
 
@@ -153,21 +175,20 @@ pub async fn operator_init(
 /// Infallible by design (returns `()`, see the `operator_init` invariant): every
 /// `set` here runs on a fresh enclave under the control lock, and the I/O steps
 /// (attestation, S3 logging) panic on failure rather than return.
-async fn commit_operator_init(
-    enclave: &Enclave,
-    logger: GuardianS3Client,
-    withdraw: Option<InitInstall>,
-) {
-    info!("Storing S3 configuration.");
+async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
+    let OIInstall {
+        logger,
+        withdraw_mode,
+    } = install;
+
     enclave
         .config
         .set_s3_logger(logger)
         .expect("Unable to set logger");
 
-    // Withdraw-mode arming state (InitConfig, BTC master pubkey, instance,
-    // network, config_hash); a ceremony enclave installs none of it.
-    if let Some(install) = withdraw {
-        install.install_into(enclave);
+    // A ceremony enclave has no withdraw-mode arming state.
+    if let Some(withdraw_mode) = withdraw_mode {
+        withdraw_mode.install_into(enclave);
     }
 
     // Log to S3!
@@ -196,8 +217,6 @@ async fn commit_operator_init(
     enclave
         .advance_lifecycle_into(initialized)
         .expect("operator_init should advance an uninitialized enclave");
-
-    info!("Operator initialization complete.");
 }
 
 #[cfg(test)]
@@ -213,16 +232,24 @@ mod tests {
             mode,
         ));
 
-        let withdraw = match mode {
+        let logger = crate::test_utils::mock_logger();
+        let install = match mode {
             EnclaveMode::Withdraw => {
                 let config = InitConfig::mock_for_testing(None);
                 let args = crate::test_utils::OperatorInitTestArgs::default();
-                Some(InitInstall::from_parts(config, args.ceremony_state, None))
+                OIInstall::new(
+                    logger,
+                    Some(OIWithdrawModeInstall::from_parts(
+                        config,
+                        args.ceremony_state,
+                        None,
+                    )),
+                )
             }
-            EnclaveMode::Ceremony => None,
+            EnclaveMode::Ceremony => OIInstall::new(logger, None),
         };
 
-        commit_operator_init(&enclave, crate::test_utils::mock_logger(), withdraw).await;
+        commit_operator_init(&enclave, install).await;
         enclave
     }
 

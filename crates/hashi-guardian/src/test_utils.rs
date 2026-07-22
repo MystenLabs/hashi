@@ -278,7 +278,7 @@ impl Enclave {
     /// withdraw-mode commit). Lets a harness defer operator-init until DKG output exists.
     pub fn install_operator_init_for_testing(&self, args: OperatorInitTestArgs) {
         self.config.set_s3_logger(args.s3_logger).unwrap();
-        crate::operator_init::InitInstall::from_parts(
+        crate::operator_init::OIWithdrawModeInstall::from_parts(
             args.config,
             args.ceremony_state,
             args.genesis_state,

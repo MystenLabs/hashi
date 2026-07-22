@@ -4,9 +4,9 @@
 use crate::ceremony_mode::rotate;
 use crate::ceremony_mode::setup;
 use crate::info;
-use crate::operator_activate;
 use crate::operator_init;
 use crate::withdraw_mode::committee_update;
+use crate::withdraw_mode::operator_activate;
 use crate::withdraw_mode::provisioner_init;
 use crate::withdraw_mode::provisioner_rotate_cert;
 use crate::withdraw_mode::standard_withdrawal;
@@ -40,6 +40,7 @@ fn to_status(e: GuardianError) -> Status {
     match e {
         InvalidInputs(msg) => Status::invalid_argument(msg),
         InternalError(msg) => Status::internal(msg),
+        Unavailable(msg) => Status::unavailable(msg),
         S3Error(msg) => Status::internal(msg),
         EnclaveUninitialized => Status::failed_precondition("Enclave is not fully initialized"),
         RateLimitExceeded => Status::internal("Rate limit exceeded"),
