@@ -43,7 +43,18 @@ public struct DealerMessagesHashV1 has copy, drop, store {
 public struct DealerSubmissionV1 has copy, drop, store {
     message: DealerMessagesHashV1,
     signature: CommitteeSignature,
+}
+
+public struct StampedDealerSubmissionV1 has copy, drop, store {
+    submission: DealerSubmissionV1,
     timestamp_ms: u64,
+}
+
+public struct StampedEpochCertsV1 has store {
+    epoch: u64,
+    protocol_type: ProtocolType,
+    /// Stamped nonce submissions indexed by dealer address (first-submission-wins).
+    certs: LinkedTable<address, StampedDealerSubmissionV1>,
 }
 
 // ~~~~~~~ Package Functions ~~~~~~~
@@ -58,6 +69,13 @@ public(package) fun protocol_type_key_rotation(): ProtocolType {
 
 public(package) fun protocol_type_nonce_generation(): ProtocolType {
     ProtocolType::NonceGeneration
+}
+
+public(package) fun is_nonce_generation(self: &ProtocolType): bool {
+    match (self) {
+        ProtocolType::NonceGeneration => true,
+        _ => false,
+    }
 }
 
 public(package) fun tob_key(
@@ -88,6 +106,18 @@ public(package) fun create(
     }
 }
 
+public(package) fun create_stamped(
+    epoch: u64,
+    protocol_type: ProtocolType,
+    ctx: &mut TxContext,
+): StampedEpochCertsV1 {
+    StampedEpochCertsV1 {
+        epoch,
+        protocol_type,
+        certs: linked_table::new(ctx),
+    }
+}
+
 public(package) fun submit_cert(
     epoch_certs: &mut EpochCertsV1,
     epoch: u64,
@@ -95,7 +125,6 @@ public(package) fun submit_cert(
     messages_hash: vector<u8>,
     signature: vector<u8>,
     signers_bitmap: vector<u8>,
-    timestamp_ms: u64,
 ) {
     assert!(epoch == epoch_certs.epoch, EWrongEpoch);
     if (epoch_certs.certs.contains(dealer)) {
@@ -103,12 +132,28 @@ public(package) fun submit_cert(
     };
     let message = DealerMessagesHashV1 { dealer_address: dealer, messages_hash };
     let sig = hashi::committee::new_committee_signature(epoch, signature, signers_bitmap);
-    let submission = DealerSubmissionV1 { message, signature: sig, timestamp_ms };
+    let submission = DealerSubmissionV1 { message, signature: sig };
     epoch_certs.certs.push_back(dealer, submission);
 }
 
 public(package) fun submit_cert_with_signature(
     epoch_certs: &mut EpochCertsV1,
+    epoch: u64,
+    dealer: address,
+    messages_hash: vector<u8>,
+    sig: &CommitteeSignature,
+) {
+    assert!(epoch == epoch_certs.epoch, EWrongEpoch);
+    if (epoch_certs.certs.contains(dealer)) {
+        return
+    };
+    let message = DealerMessagesHashV1 { dealer_address: dealer, messages_hash };
+    let submission = DealerSubmissionV1 { message, signature: *sig };
+    epoch_certs.certs.push_back(dealer, submission);
+}
+
+public(package) fun submit_stamped_cert_with_signature(
+    epoch_certs: &mut StampedEpochCertsV1,
     epoch: u64,
     dealer: address,
     messages_hash: vector<u8>,
@@ -120,8 +165,9 @@ public(package) fun submit_cert_with_signature(
         return
     };
     let message = DealerMessagesHashV1 { dealer_address: dealer, messages_hash };
-    let submission = DealerSubmissionV1 { message, signature: *sig, timestamp_ms };
-    epoch_certs.certs.push_back(dealer, submission);
+    let submission = DealerSubmissionV1 { message, signature: *sig };
+    let stamped = StampedDealerSubmissionV1 { submission, timestamp_ms };
+    epoch_certs.certs.push_back(dealer, stamped);
 }
 
 /// Remove all certificates and destroy the EpochCertsV1 in one transaction.
@@ -135,14 +181,30 @@ public(package) fun destroy_all(epoch_certs: EpochCertsV1, current_epoch: u64) {
     certs.destroy_empty();
 }
 
+/// Remove all stamped certificates and destroy the StampedEpochCertsV1.
+/// Can only be called when current_epoch >= epoch + 2.
+public(package) fun destroy_all_stamped(epoch_certs: StampedEpochCertsV1, current_epoch: u64) {
+    let StampedEpochCertsV1 { epoch, protocol_type: _, mut certs } = epoch_certs;
+    assert!(current_epoch >= epoch + 2, ETooEarlyToDestroy);
+    while (!certs.is_empty()) {
+        let (_, _) = certs.pop_front();
+    };
+    certs.destroy_empty();
+}
+
 // ~~~~~~~ Test Helpers ~~~~~~~
 
 #[test_only]
-public fun submission_timestamp_ms(self: &EpochCertsV1, dealer: address): u64 {
+public fun submission_timestamp_ms(self: &StampedEpochCertsV1, dealer: address): u64 {
     self.certs.borrow(dealer).timestamp_ms
 }
 
 #[test_only]
 public fun num_certs(self: &EpochCertsV1): u64 {
+    self.certs.length()
+}
+
+#[test_only]
+public fun num_stamped_certs(self: &StampedEpochCertsV1): u64 {
     self.certs.length()
 }

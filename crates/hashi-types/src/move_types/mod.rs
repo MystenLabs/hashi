@@ -783,6 +783,16 @@ pub struct EpochCertsV1 {
     pub certs: LinkedTable<Address>,
 }
 
+/// Rust version of the Move hashi::tob::StampedEpochCertsV1 type.
+#[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct StampedEpochCertsV1 {
+    pub epoch: u64,
+    pub protocol_type: ProtocolType,
+    /// Stamped nonce submissions indexed by dealer address (first-submission-wins).
+    // LinkedTable<address, StampedDealerSubmissionV1>
+    pub certs: LinkedTable<Address>,
+}
+
 /// Rust version of the Move sui::linked_table::LinkedTable type.
 #[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct LinkedTable<K> {
@@ -829,6 +839,12 @@ pub struct CertifiedMessage<T> {
 pub struct DealerSubmissionV1 {
     pub message: DealerMessagesHashV1,
     pub signature: CommitteeSignature,
+}
+
+/// Rust version of the Move hashi::tob::StampedDealerSubmissionV1 type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct StampedDealerSubmissionV1 {
+    pub submission: DealerSubmissionV1,
     pub timestamp_ms: u64,
 }
 

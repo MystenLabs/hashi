@@ -605,15 +605,28 @@ impl OnchainState {
             .map(|c| c.mpc_service_client())
     }
 
-    /// Fetches the EpochCertsV1 for the given key from on-chain.
-    /// Returns None if no certs exist for this key.
     // TODO: Cache this data in State and update via watcher events instead of fetching on-demand.
-    pub async fn fetch_epoch_certs(
+    pub async fn fetch_certs(
         &self,
         epoch: u64,
         batch_index: Option<u32>,
         protocol_type: move_types::ProtocolType,
-    ) -> Result<Option<move_types::EpochCertsV1>> {
+    ) -> Result<Option<Vec<(Address, move_types::DealerSubmissionV1)>>> {
+        let Some(epoch_certs) = self
+            .fetch_epoch_certs_bucket::<move_types::EpochCertsV1>(epoch, batch_index, protocol_type)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(self.fetch_cert_table(&epoch_certs.certs).await?))
+    }
+
+    async fn fetch_epoch_certs_bucket<T: serde::de::DeserializeOwned>(
+        &self,
+        epoch: u64,
+        batch_index: Option<u32>,
+        protocol_type: move_types::ProtocolType,
+    ) -> Result<Option<T>> {
         let tob_id = self.tob_id();
         let key = TobKey {
             epoch,
@@ -637,42 +650,28 @@ impl OnchainState {
             .pipe(Box::pin);
         while let Some(field) = stream.try_next().await? {
             if field.name().value() == key_bcs.as_slice() {
-                let epoch_certs: move_types::EpochCertsV1 = field.value().deserialize()?;
-                return Ok(Some(epoch_certs));
+                return Ok(Some(field.value().deserialize()?));
             }
         }
         Ok(None)
     }
 
-    /// Fetches all raw certificates for the given `(epoch, batch_index, protocol_type)`
-    /// bucket from on-chain; caller is responsible for conversion.
-    pub async fn fetch_certs(
+    async fn fetch_cert_table<V: serde::de::DeserializeOwned>(
         &self,
-        epoch: u64,
-        batch_index: Option<u32>,
-        protocol_type: move_types::ProtocolType,
-    ) -> Result<Option<Vec<(Address, move_types::DealerSubmissionV1)>>> {
-        let epoch_certs = match self
-            .fetch_epoch_certs(epoch, batch_index, protocol_type)
-            .await?
-        {
-            Some(certs) => certs,
-            None => return Ok(None),
+        table: &move_types::LinkedTable<Address>,
+    ) -> Result<Vec<(Address, V)>> {
+        let Some(head) = table.head else {
+            return Ok(vec![]);
         };
-        let Some(head) = epoch_certs.certs.head else {
-            return Ok(Some(vec![]));
-        };
-        let mut nodes: std::collections::HashMap<
-            Address,
-            move_types::LinkedTableNode<Address, move_types::DealerSubmissionV1>,
-        > = std::collections::HashMap::new();
+        let mut nodes: std::collections::HashMap<Address, move_types::LinkedTableNode<Address, V>> =
+            std::collections::HashMap::new();
         let mut stream = self
             .0
             .client
             .clone()
             .list_dynamic_fields(
                 ListDynamicFieldsRequest::default()
-                    .with_parent(epoch_certs.certs.id)
+                    .with_parent(table.id)
                     .with_page_size(SCRAPE_PAGE_SIZE)
                     .with_read_mask(FieldMask::from_paths([
                         DynamicField::path_builder().name().finish(),
@@ -686,16 +685,35 @@ impl OnchainState {
             nodes.insert(dealer, node);
         }
         // Traverse in insertion order following LinkedTable's linked list
-        let mut certificates = Vec::with_capacity(nodes.len());
+        let mut entries = Vec::with_capacity(nodes.len());
         let mut current = Some(head);
         while let Some(dealer) = current {
             let Some(node) = nodes.remove(&dealer) else {
                 break;
             };
-            certificates.push((dealer, node.value));
+            entries.push((dealer, node.value));
             current = node.next;
         }
-        Ok(Some(certificates))
+        Ok(entries)
+    }
+
+    pub async fn fetch_stamped_certs(
+        &self,
+        epoch: u64,
+        batch_index: Option<u32>,
+        protocol_type: move_types::ProtocolType,
+    ) -> Result<Option<Vec<(Address, move_types::StampedDealerSubmissionV1)>>> {
+        let Some(epoch_certs) = self
+            .fetch_epoch_certs_bucket::<move_types::StampedEpochCertsV1>(
+                epoch,
+                batch_index,
+                protocol_type,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(self.fetch_cert_table(&epoch_certs.certs).await?))
     }
 }
 
@@ -1734,32 +1752,36 @@ mod tests {
     }
 
     #[test]
-    fn dealer_submission_bcs_round_trips_with_timestamp() {
+    fn stamped_dealer_submission_bcs_round_trips_with_timestamp() {
         use move_types::CommitteeSignature;
         use move_types::DealerMessagesHashV1;
         use move_types::DealerSubmissionV1;
         use move_types::LinkedTableNode;
+        use move_types::StampedDealerSubmissionV1;
         let dealer = Address::new([7u8; 32]);
-        let node: LinkedTableNode<Address, DealerSubmissionV1> = LinkedTableNode {
+        let node: LinkedTableNode<Address, StampedDealerSubmissionV1> = LinkedTableNode {
             prev: None,
             next: Some(dealer),
-            value: DealerSubmissionV1 {
-                message: DealerMessagesHashV1 {
-                    dealer_address: dealer,
-                    messages_hash: vec![1, 2, 3],
-                },
-                signature: CommitteeSignature {
-                    epoch: 9,
-                    signature: vec![0xaa],
-                    signers_bitmap: vec![0x01],
+            value: StampedDealerSubmissionV1 {
+                submission: DealerSubmissionV1 {
+                    message: DealerMessagesHashV1 {
+                        dealer_address: dealer,
+                        messages_hash: vec![1, 2, 3],
+                    },
+                    signature: CommitteeSignature {
+                        epoch: 9,
+                        signature: vec![0xaa],
+                        signers_bitmap: vec![0x01],
+                    },
                 },
                 timestamp_ms: 123_456,
             },
         };
         let bytes = bcs::to_bytes(&node).unwrap();
-        let decoded: LinkedTableNode<Address, DealerSubmissionV1> =
+        let decoded: LinkedTableNode<Address, StampedDealerSubmissionV1> =
             bcs::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.value.timestamp_ms, 123_456);
+        assert_eq!(decoded.value.submission.message.dealer_address, dealer);
         assert_eq!(decoded.next, Some(dealer));
     }
 }

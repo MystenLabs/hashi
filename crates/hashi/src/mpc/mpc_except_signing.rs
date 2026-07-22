@@ -1051,7 +1051,7 @@ impl MpcManager {
     pub fn reconstruct_presignatures(
         &self,
         batch_index: u32,
-        certs: &[(Address, hashi_types::move_types::DealerSubmissionV1)],
+        certs: &[(Address, hashi_types::move_types::StampedDealerSubmissionV1)],
     ) -> MpcResult<NonceReconstructionOutcome> {
         let (certified_dealers, window) = self.walk_nonce_certs(certs);
         if !window.floor_reached() {
@@ -1099,15 +1099,18 @@ impl MpcManager {
 
     fn walk_nonce_certs(
         &self,
-        certs: &[(Address, hashi_types::move_types::DealerSubmissionV1)],
+        certs: &[(Address, hashi_types::move_types::StampedDealerSubmissionV1)],
     ) -> (HashSet<Address>, NonceCollectionWindow) {
         let mut window = self.nonce_collection_window();
         let mut certified = HashSet::new();
-        for (dealer, submission) in certs {
-            let Some(admission) = window.try_admit(submission.timestamp_ms) else {
+        for (dealer, stamped) in certs {
+            let Some(admission) = window.try_admit(stamped.timestamp_ms) else {
                 break;
             };
-            if self.verify_onchain_nonce_cert(dealer, submission).is_none() {
+            if self
+                .verify_onchain_nonce_cert(dealer, &stamped.submission)
+                .is_none()
+            {
                 continue;
             }
             if let Some(party_id) = self.committee.index_of(dealer)
@@ -5356,7 +5359,7 @@ impl MpcManager {
         mpc_manager: &Arc<RwLock<Self>>,
         epoch: u64,
         batch_index: u32,
-        certs: &[(Address, hashi_types::move_types::DealerSubmissionV1)],
+        certs: &[(Address, hashi_types::move_types::StampedDealerSubmissionV1)],
         p2p_channel: &impl P2PChannel,
     ) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
         loop {
@@ -5389,7 +5392,8 @@ impl MpcManager {
                             .find(|(addr, _)| *addr == dealer_address)
                             .map(|(_, cert)| {
                                 let members = mgr.committee.members();
-                                cert.signature
+                                cert.submission
+                                    .signature
                                     .signers_bitmap
                                     .iter()
                                     .filter_map(|&idx| {
@@ -5723,7 +5727,7 @@ impl MpcManager {
 
     pub(crate) fn nonce_collection_cutoff_ms(
         &self,
-        certs: &[(Address, hashi_types::move_types::DealerSubmissionV1)],
+        certs: &[(Address, hashi_types::move_types::StampedDealerSubmissionV1)],
     ) -> Option<u64> {
         self.walk_nonce_certs(certs).1.cutoff_ms()
     }

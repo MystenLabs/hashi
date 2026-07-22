@@ -1254,7 +1254,6 @@ mod tests {
                 signature: signed_message.signature_bytes().to_vec(),
                 signers_bitmap: signed_message.signers_bitmap_bytes().to_vec(),
             },
-            timestamp_ms: 0,
         };
 
         // Parse back using from_onchain_cert
@@ -1288,7 +1287,6 @@ mod tests {
                 signature: vec![],
                 signers_bitmap: vec![],
             },
-            timestamp_ms: 0,
         };
 
         let result = DealerMessagesHash::from_onchain_cert(&onchain_cert, epoch);

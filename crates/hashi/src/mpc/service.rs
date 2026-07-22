@@ -655,10 +655,15 @@ impl MpcService {
         mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
         epoch: u64,
         batch_index: u32,
-    ) -> anyhow::Result<Vec<(sui_sdk_types::Address, move_types::DealerSubmissionV1)>> {
+    ) -> anyhow::Result<
+        Vec<(
+            sui_sdk_types::Address,
+            move_types::StampedDealerSubmissionV1,
+        )>,
+    > {
         loop {
             let certs = onchain_state
-                .fetch_certs(
+                .fetch_stamped_certs(
                     epoch,
                     Some(batch_index),
                     move_types::ProtocolType::NonceGeneration,
@@ -728,14 +733,15 @@ impl MpcService {
                     let mgr = mpc_manager.read().unwrap();
                     certs
                         .iter()
-                        .filter_map(|(dealer, submission)| {
-                            let cert = mgr.verify_onchain_nonce_cert(dealer, submission)?;
+                        .filter_map(|(dealer, stamped)| {
+                            let cert =
+                                mgr.verify_onchain_nonce_cert(dealer, &stamped.submission)?;
                             Some((
                                 *dealer,
                                 CertificateV1::NonceGeneration {
                                     batch_index,
                                     cert,
-                                    timestamp_ms: submission.timestamp_ms,
+                                    timestamp_ms: stamped.timestamp_ms,
                                 },
                             ))
                         })

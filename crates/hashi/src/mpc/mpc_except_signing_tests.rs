@@ -10572,7 +10572,7 @@ fn valid_dealer_submission(
     setup: &TestSetup,
     dealer_idx: usize,
     timestamp_ms: u64,
-) -> (Address, hashi_types::move_types::DealerSubmissionV1) {
+) -> (Address, hashi_types::move_types::StampedDealerSubmissionV1) {
     let dealer = setup.address(dealer_idx);
     let hash_bytes = [7u8; 32];
     let target = DealerMessagesHash {
@@ -10590,15 +10590,17 @@ fn valid_dealer_submission(
     let signed = aggregator.finish().unwrap();
     (
         dealer,
-        hashi_types::move_types::DealerSubmissionV1 {
-            message: hashi_types::move_types::DealerMessagesHashV1 {
-                dealer_address: dealer,
-                messages_hash: hash_bytes.to_vec(),
-            },
-            signature: hashi_types::move_types::CommitteeSignature {
-                epoch,
-                signature: signed.signature_bytes().to_vec(),
-                signers_bitmap: signed.signers_bitmap_bytes().to_vec(),
+        hashi_types::move_types::StampedDealerSubmissionV1 {
+            submission: hashi_types::move_types::DealerSubmissionV1 {
+                message: hashi_types::move_types::DealerMessagesHashV1 {
+                    dealer_address: dealer,
+                    messages_hash: hash_bytes.to_vec(),
+                },
+                signature: hashi_types::move_types::CommitteeSignature {
+                    epoch,
+                    signature: signed.signature_bytes().to_vec(),
+                    signers_bitmap: signed.signers_bitmap_bytes().to_vec(),
+                },
             },
             timestamp_ms,
         },
@@ -10669,7 +10671,7 @@ fn test_walk_nonce_certs_skips_unverified_certs() {
         .map(|i| valid_dealer_submission(&setup, i, 1_000))
         .collect();
 
-    certs[1].1.signature.signature = certs[0].1.signature.signature.clone();
+    certs[1].1.submission.signature.signature = certs[0].1.submission.signature.signature.clone();
 
     let (certified, window) = mgr.walk_nonce_certs(&certs);
     assert!(window.floor_reached(), "three valid certs reach the floor");
