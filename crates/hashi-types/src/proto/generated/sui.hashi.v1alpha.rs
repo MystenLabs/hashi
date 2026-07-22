@@ -1766,6 +1766,9 @@ pub struct GuardianInfoData {
     /// guardian's own BTC key). Set after operator_init.
     #[prost(bytes = "bytes", optional, tag = "10")]
     pub mpc_master_g: ::core::option::Option<::prost::bytes::Bytes>,
+    /// Digest of the optional GenesisState pinned during operator_init.
+    #[prost(bytes = "bytes", optional, tag = "13")]
+    pub genesis_state_hash: ::core::option::Option<::prost::bytes::Bytes>,
     /// Signed enclave mode and its current lifecycle stage.
     #[prost(oneof = "guardian_info_data::Lifecycle", tags = "11, 12")]
     pub lifecycle: ::core::option::Option<guardian_info_data::Lifecycle>,
@@ -1898,16 +1901,17 @@ pub struct OperatorInitRequest {
     /// exposes its digest via GuardianInfo; KPs bind it into signed PI submissions.
     #[prost(message, optional, tag = "4")]
     pub init_config: ::core::option::Option<InitConfig>,
+    /// First-deploy state to be authorized by KPs during provisioner_init.
+    #[prost(message, optional, tag = "5")]
+    pub genesis_state: ::core::option::Option<GenesisState>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct OperatorInitResponse {}
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct OperatorWriteGenesisRequest {
+pub struct GenesisState {
     #[prost(message, optional, tag = "1")]
     pub committee: ::core::option::Option<Committee>,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct OperatorWriteGenesisResponse {}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct S3Config {
     #[prost(string, optional, tag = "1")]
@@ -1942,6 +1946,9 @@ pub struct SignedSingleProvisionerInitRequest {
     /// The operator-init config hash the KP independently recomputed and verified.
     #[prost(bytes = "bytes", optional, tag = "5")]
     pub expected_config_hash: ::core::option::Option<::prost::bytes::Bytes>,
+    /// The optional genesis state hash the KP independently recomputed and verified.
+    #[prost(bytes = "bytes", optional, tag = "6")]
+    pub expected_genesis_state_hash: ::core::option::Option<::prost::bytes::Bytes>,
 }
 /// Assembled from the current KPs' signed submissions by the relay once it has
 /// collected enough. The enclave re-verifies every submission before using any
@@ -2469,36 +2476,6 @@ pub mod guardian_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Bootstrap genesis committee: operator-trusted, first deploy only.
-        pub async fn operator_write_genesis(
-            &mut self,
-            request: impl tonic::IntoRequest<super::OperatorWriteGenesisRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::OperatorWriteGenesisResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/sui.hashi.v1alpha.GuardianService/OperatorWriteGenesis",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new(
-                        "sui.hashi.v1alpha.GuardianService",
-                        "OperatorWriteGenesis",
-                    ),
-                );
-            self.inner.unary(req, path, codec).await
-        }
         /// Provisioner initialization: submit the current KPs' signed share contributions.
         pub async fn provisioner_init(
             &mut self,
@@ -2728,14 +2705,6 @@ pub mod guardian_service_server {
             request: tonic::Request<super::OperatorInitRequest>,
         ) -> std::result::Result<
             tonic::Response<super::OperatorInitResponse>,
-            tonic::Status,
-        >;
-        /// Bootstrap genesis committee: operator-trusted, first deploy only.
-        async fn operator_write_genesis(
-            &self,
-            request: tonic::Request<super::OperatorWriteGenesisRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::OperatorWriteGenesisResponse>,
             tonic::Status,
         >;
         /// Provisioner initialization: submit the current KPs' signed share contributions.
@@ -3029,55 +2998,6 @@ pub mod guardian_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = OperatorInitSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
-                "/sui.hashi.v1alpha.GuardianService/OperatorWriteGenesis" => {
-                    #[allow(non_camel_case_types)]
-                    struct OperatorWriteGenesisSvc<T: GuardianService>(pub Arc<T>);
-                    impl<
-                        T: GuardianService,
-                    > tonic::server::UnaryService<super::OperatorWriteGenesisRequest>
-                    for OperatorWriteGenesisSvc<T> {
-                        type Response = super::OperatorWriteGenesisResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::OperatorWriteGenesisRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as GuardianService>::operator_write_genesis(
-                                        &inner,
-                                        request,
-                                    )
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = OperatorWriteGenesisSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

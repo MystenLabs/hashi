@@ -10,6 +10,7 @@ use super::CeremonyStage;
 use super::Ciphertext;
 use super::CommitteeTransitionRequest;
 use super::EnclaveLifecycle;
+use super::GenesisState;
 use super::GetGuardianInfoResponse;
 use super::GuardianEncryptedShare;
 use super::GuardianError;
@@ -33,7 +34,6 @@ use super::LimiterState;
 use super::NitroAttestation;
 use super::OperatorActivateRequest;
 use super::OperatorInitRequest;
-use super::OperatorWriteGenesisRequest;
 use super::PcrAllowlist;
 use super::ProvisionerInitRequest;
 use super::ProvisionerRotateCertRequest;
@@ -170,13 +170,28 @@ impl TryFrom<pb::OperatorInitRequest> for OperatorInitRequest {
 
     fn try_from(req: pb::OperatorInitRequest) -> Result<Self, Self::Error> {
         let s3_config = pb_to_s3_config(req.s3_config.ok_or_else(|| missing("s3_config"))?)?;
+        let genesis_state = req
+            .genesis_state
+            .map(|state| {
+                let committee = state.committee.ok_or_else(|| missing("committee"))?;
+                Ok(GenesisState::from_move_committee(pb_to_move_committee(
+                    committee,
+                )?))
+            })
+            .transpose()?;
         // `init_config` present ⇔ withdraw mode; absent ⇔ ceremony (S3 only).
         match req.init_config.map(InitConfig::try_from).transpose()? {
             Some(init_config) => Ok(OperatorInitRequest::new_withdraw_mode(
                 s3_config,
                 init_config,
+                genesis_state,
             )),
-            None => Ok(OperatorInitRequest::new_ceremony_mode(s3_config)),
+            None if genesis_state.is_none() => {
+                Ok(OperatorInitRequest::new_ceremony_mode(s3_config))
+            }
+            None => Err(InvalidInputs(
+                "genesis_state requires a withdraw-mode InitConfig".into(),
+            )),
         }
     }
 }
@@ -191,17 +206,6 @@ impl TryFrom<pb::OperatorActivateRequest> for OperatorActivateRequest {
         let expected_state_hash = <[u8; 32]>::try_from(expected_state_hash.as_ref())
             .map_err(|_| InvalidInputs("expected_state_hash must be 32 bytes".into()))?;
         Ok(OperatorActivateRequest::new(expected_state_hash))
-    }
-}
-
-impl TryFrom<pb::OperatorWriteGenesisRequest> for OperatorWriteGenesisRequest {
-    type Error = GuardianError;
-
-    fn try_from(req: pb::OperatorWriteGenesisRequest) -> Result<Self, Self::Error> {
-        let committee_pb = req.committee.ok_or_else(|| missing("committee"))?;
-        Ok(OperatorWriteGenesisRequest::from_move_committee(
-            pb_to_move_committee(committee_pb)?,
-        ))
     }
 }
 
@@ -262,6 +266,14 @@ impl TryFrom<pb::SignedSingleProvisionerInitRequest> for KpSigned<SingleProvisio
             .ok_or_else(|| missing("expected_config_hash"))?;
         let expected_config_hash = <[u8; 32]>::try_from(expected_config_hash.as_ref())
             .map_err(|_| InvalidInputs("expected_config_hash must be 32 bytes".into()))?;
+        let expected_genesis_state_hash = req
+            .expected_genesis_state_hash
+            .map(|hash| {
+                <[u8; 32]>::try_from(hash.as_ref()).map_err(|_| {
+                    InvalidInputs("expected_genesis_state_hash must be 32 bytes".into())
+                })
+            })
+            .transpose()?;
         let encrypted_share = pb_to_guardian_encrypted_share(
             req.encrypted_share
                 .ok_or_else(|| missing("encrypted_share"))?,
@@ -271,6 +283,7 @@ impl TryFrom<pb::SignedSingleProvisionerInitRequest> for KpSigned<SingleProvisio
         let request = SingleProvisionerInitRequest::new(
             req.expected_session_id.into(),
             expected_config_hash,
+            expected_genesis_state_hash,
             encrypted_share,
         );
         Ok(KpSigned {
@@ -634,24 +647,19 @@ pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequ
 pub fn operator_init_request_to_pb(
     r: OperatorInitRequest,
 ) -> GuardianResult<pb::OperatorInitRequest> {
-    let (s3_config, init_config) = r.into_parts();
+    let (s3_config, init_config, genesis_state) = r.into_parts();
     Ok(pb::OperatorInitRequest {
         s3_config: Some(s3_config_to_pb(s3_config)),
         init_config: init_config.map(init_config_to_pb).transpose()?,
+        genesis_state: genesis_state.map(|state| pb::GenesisState {
+            committee: Some(move_committee_to_pb(&state.into_committee())),
+        }),
     })
 }
 
 pub fn operator_activate_request_to_pb(r: OperatorActivateRequest) -> pb::OperatorActivateRequest {
     pb::OperatorActivateRequest {
         expected_state_hash: Some(r.expected_state_hash().to_vec().into()),
-    }
-}
-
-pub fn operator_write_genesis_request_to_pb(
-    r: OperatorWriteGenesisRequest,
-) -> pb::OperatorWriteGenesisRequest {
-    pb::OperatorWriteGenesisRequest {
-        committee: Some(move_committee_to_pb(&r.into_committee())),
     }
 }
 
@@ -674,13 +682,20 @@ impl From<KpSigned<SingleProvisionerInitRequest>> for pb::SignedSingleProvisione
             signer_cert,
             signature,
         } = r;
-        let (expected_session_id, expected_config_hash, encrypted_share) = request.into_parts();
+        let (
+            expected_session_id,
+            expected_config_hash,
+            expected_genesis_state_hash,
+            encrypted_share,
+        ) = request.into_parts();
         Self {
             encrypted_share: Some(guardian_encrypted_share_to_pb(encrypted_share)),
             expected_session_id: expected_session_id.into(),
             signer_cert: signer_cert.armored().to_string(),
             kp_signature: signature,
             expected_config_hash: Some(expected_config_hash.to_vec().into()),
+            expected_genesis_state_hash: expected_genesis_state_hash
+                .map(|hash| hash.to_vec().into()),
         }
     }
 }
@@ -935,6 +950,14 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
         })
         .transpose()?;
 
+    let genesis_state_hash = data
+        .genesis_state_hash
+        .map(|b| {
+            <[u8; 32]>::try_from(b.as_ref())
+                .map_err(|_| InvalidInputs("genesis_state_hash must be 32 bytes".into()))
+        })
+        .transpose()?;
+
     let enclave_btc_pubkey = data
         .enclave_btc_pubkey
         .map(|bytes| {
@@ -960,6 +983,7 @@ fn pb_to_guardian_info_data(data: pb::GuardianInfoData) -> GuardianResult<Guardi
         bucket_info,
         encryption_pubkey,
         config_hash,
+        genesis_state_hash,
         untrusted_git_revision,
         enclave_btc_pubkey,
         limiter_state,
@@ -987,6 +1011,7 @@ fn guardian_info_data_to_pb(info: GuardianInfo) -> pb::GuardianInfoData {
         bucket_info: info.bucket_info.map(s3_bucket_info_to_pb),
         encryption_pubkey: Some(info.encryption_pubkey.into()),
         config_hash: info.config_hash.map(|h| h.to_vec().into()),
+        genesis_state_hash: info.genesis_state_hash.map(|h| h.to_vec().into()),
         untrusted_git_revision: Some(info.untrusted_git_revision),
         enclave_btc_pubkey: info
             .enclave_btc_pubkey
@@ -1478,6 +1503,7 @@ mod tests {
             bucket_info: None,
             encryption_pubkey: vec![0u8; 32],
             config_hash: None,
+            genesis_state_hash: None,
             untrusted_git_revision: "unknown".to_string(),
             enclave_btc_pubkey: Some(pk),
             limiter_state: None,
@@ -1553,9 +1579,11 @@ mod tests {
             .data
             .encrypted_share;
         let expected_config_hash = [9u8; 32];
+        let expected_genesis_state_hash = Some([10u8; 32]);
         let request = SingleProvisionerInitRequest::new(
             "session-a".into(),
             expected_config_hash,
+            expected_genesis_state_hash,
             encrypted_share.clone(),
         );
         let signature =
@@ -1570,6 +1598,10 @@ mod tests {
         let back = KpSigned::<SingleProvisionerInitRequest>::try_from(pb.clone()).unwrap();
         assert_eq!(back.data.expected_session_id(), "session-a");
         assert_eq!(back.data.expected_config_hash(), &expected_config_hash);
+        assert_eq!(
+            back.data.expected_genesis_state_hash(),
+            expected_genesis_state_hash
+        );
         assert_eq!(back.data.encrypted_share(), &encrypted_share);
         assert_eq!(back.signer_cert.fingerprint(), cert.fingerprint());
         back.verify().unwrap();

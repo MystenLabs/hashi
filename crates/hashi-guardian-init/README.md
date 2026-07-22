@@ -18,6 +18,9 @@ cargo run -p hashi-guardian-init -- operator activate --config guardian-init.sam
 cargo run -p hashi-guardian-init -- key-provisioner rotate-cert --config guardian-init.sample.yaml --target-kp-pgp-fingerprint 0123456789ABCDEF0123456789ABCDEF01234567 --new-kp-pgp-cert-path /path/to/kp3-new.asc
 ```
 
+On first deploy, add `--do-genesis` to the `operator provision` command and
+every `key-provisioner provision` command. Omit it for replacement deployments.
+
 Each KP generates one or more PGP keys on yubikeys and exports the public certs
 to the operator; the key ceremony and provisioning flow is then driven through
 these commands. All production commands read the same unified config file; see
@@ -108,18 +111,25 @@ It:
    `genesis/` record if one already exists.
 4. Builds the withdraw-mode `InitConfig` from limiter config, on-chain MPC
    master `G`, the KP PCR allowlist, and configured Bitcoin network.
-5. Calls withdraw-mode `OperatorInit` with guardian S3 config and `InitConfig`;
-   the enclave reads and pins the latest complete ceremony and KP-share state.
-6. On first deploy only, writes the on-chain committee to `genesis/record.json`
-   through `OperatorWriteGenesis`.
+5. Requires the observed serving-committee state to agree with the
+   `--do-genesis` intent marker. On first deploy, the flag causes it to build an
+   optional `GenesisState` from the current on-chain committee; otherwise a
+   serving committee must already exist.
+6. Calls withdraw-mode `OperatorInit` with guardian S3 config, `InitConfig`, and
+   the optional genesis state; the enclave pins all three inputs plus the latest
+   complete ceremony and KP-share state.
 7. Verifies the live and S3-logged `GuardianInfo` match the installed ceremony
    instance and stable config.
-8. Prints the `config_hash` that key provisioners must verify before submitting
-   shares.
+8. Prints the config and optional genesis hashes that key provisioners must
+   verify before submitting shares.
 
 ```bash
 cargo run -p hashi-guardian-init -- operator provision --config guardian-init.sample.yaml
 ```
+
+On first deploy, add `--do-genesis`. The flag is purely an explicit intent
+marker; the committee still comes from on-chain state and requires threshold KP
+authorization during PI.
 
 Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
 command uses `guardian_endpoint`, `guardian_s3`, `bitcoin_network`, `hashi`,
@@ -127,10 +137,11 @@ command uses `guardian_endpoint`, `guardian_s3`, `bitcoin_network`, `hashi`,
 
 ## key-provisioner provision
 
-A one-shot flow run by a key provisioner when a new guardian instance is
-brought up to replace one that went down. Each KP decrypts through their
-yubikey-backed gpg setup; plaintext never touches disk, but the raw share scalar
-is held in this process' memory long enough to verify and re-encrypt it. It:
+A one-shot flow run by a key provisioner for a new guardian instance, either on
+first deploy or when replacing a guardian that went down. Each KP decrypts
+through their yubikey-backed gpg setup; plaintext never touches disk, but the
+raw share scalar is held in this process' memory long enough to verify and
+re-encrypt it. It:
 
 1. Fetches and verifies the relay/standby endpoint's signed `GuardianInfo`
    (attestation-anchored), pinning the standby session.
@@ -144,21 +155,30 @@ is held in this process' memory long enough to verify and re-encrypt it. It:
 4. Recomputes the stable `InitConfig` from limiter config, on-chain MPC master
    `G`, PCR allowlist, and network, then confirms its `config_hash` matches the
    enclave.
-5. Reads this KP's PGP-encrypted share from the latest `kp-shares/{seq}/`
+5. Requires the observed serving-committee state to agree with the
+   `--do-genesis` intent marker. With the flag, independently derives the
+   current on-chain committee's `genesis_state_hash`; confirms the optional hash
+   matches the enclave.
+6. Reads this KP's PGP-encrypted share from the latest `kp-shares/{seq}/`
    state, verifies each encrypted copy's recipient against the roster, then
    decrypts and commitment-checks only the copy selected by
    `kp_pgp_cert_path` (`gpg --decrypt` over a pipe; the plaintext stays in
    memory and never touches disk).
-6. HPKE-encrypts the decrypted share to the new guardian's `encryption_pubkey`
+7. HPKE-encrypts the decrypted share to the new guardian's `encryption_pubkey`
    from its `GuardianInfo`.
-7. Signs the exact `(session, config_hash, encrypted share)` submission and sends
-   it to the configured relay endpoint. The relay pre-verifies and collects
-   T-of-N distinct submissions; the enclave then authoritatively re-verifies
-   every signature and request binding before completing `ProvisionerInit`.
+8. Signs the exact `(session, config_hash, optional genesis_state_hash,
+   encrypted share)` submission and sends it to the configured relay endpoint.
+   The relay pre-verifies and collects T-of-N distinct submissions; the enclave
+   then authoritatively re-verifies every signature and request binding before
+   completing `ProvisionerInit`. On first deploy, that same threshold authorizes
+   writing the committee to `genesis/record.json`.
 
 ```bash
 cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-init.sample.yaml
 ```
+
+On first deploy, each KP adds `--do-genesis`. The flag is purely an intent
+marker; the signed optional genesis hash remains the authorization.
 
 See [`guardian-init.sample.yaml`](guardian-init.sample.yaml) for the unified
 config. This command uses `kp_pgp_cert_path`, `relay_endpoint`, `hashi`,

@@ -7,7 +7,6 @@ use crate::info;
 use crate::operator_activate;
 use crate::operator_init;
 use crate::withdraw_mode::committee_update;
-use crate::withdraw_mode::genesis;
 use crate::withdraw_mode::provisioner_init;
 use crate::withdraw_mode::provisioner_rotate_cert;
 use crate::withdraw_mode::standard_withdrawal;
@@ -22,7 +21,6 @@ use hashi_types::guardian::HashiSigned;
 use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::OperatorActivateRequest;
 use hashi_types::guardian::OperatorInitRequest;
-use hashi_types::guardian::OperatorWriteGenesisRequest;
 use hashi_types::guardian::ProvisionerRotateCertRequest;
 use hashi_types::guardian::RotateKpsRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
@@ -105,20 +103,6 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
             .map_err(to_status)?;
 
         Ok(Response::new(proto::OperatorInitResponse {}))
-    }
-
-    async fn operator_write_genesis(
-        &self,
-        request: Request<proto::OperatorWriteGenesisRequest>,
-    ) -> Result<Response<proto::OperatorWriteGenesisResponse>, Status> {
-        let domain_req: OperatorWriteGenesisRequest =
-            request.into_inner().try_into().map_err(to_status)?;
-
-        genesis::operator_write_genesis(self.enclave.clone(), domain_req)
-            .await
-            .map_err(to_status)?;
-
-        Ok(Response::new(proto::OperatorWriteGenesisResponse {}))
     }
 
     async fn provisioner_init(

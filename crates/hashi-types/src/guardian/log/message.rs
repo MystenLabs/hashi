@@ -169,9 +169,8 @@ impl HeartbeatLogMessage {
     }
 }
 
-/// Operator-trusted bootstrap committee used before any `committee-update/`
-/// history exists. Written at `genesis/record.json`; callers must source it from
-/// on-chain state during first deploy.
+/// First-deploy committee written at `genesis/record.json` once KP-authorized PI
+/// reaches threshold.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct GenesisLogMessage {
     pub committee: crate::move_types::Committee,

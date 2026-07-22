@@ -56,6 +56,9 @@ enum OperatorCommand {
         /// Path to operator provision YAML config file.
         #[arg(long)]
         config: PathBuf,
+        /// Explicitly bootstrap the first serving committee during PI.
+        #[arg(long)]
+        do_genesis: bool,
     },
     /// Activate a provisioner-initialized withdraw-mode guardian.
     Activate {
@@ -93,6 +96,9 @@ enum KeyProvisionerCommand {
         /// Path to key-provisioner provision YAML config file.
         #[arg(long)]
         config: PathBuf,
+        /// Explicitly authorize first-deploy genesis in this PI submission.
+        #[arg(long)]
+        do_genesis: bool,
     },
 }
 
@@ -119,9 +125,9 @@ async fn main() -> anyhow::Result<()> {
                 let cfg = config::Config::load_yaml(&config)?;
                 operator_ceremony::run(cfg).await?;
             }
-            OperatorCommand::Provision { config } => {
+            OperatorCommand::Provision { config, do_genesis } => {
                 let cfg = config::Config::load_yaml(&config)?;
-                operator_provision::run(cfg).await?;
+                operator_provision::run(cfg, do_genesis).await?;
             }
             OperatorCommand::Activate { config } => {
                 let cfg = config::Config::load_yaml(&config)?;
@@ -136,9 +142,9 @@ async fn main() -> anyhow::Result<()> {
                 let cfg = config::Config::load_yaml(&config)?;
                 kp_ceremony::run(cfg, &encrypted_shares_path).await?;
             }
-            KeyProvisionerCommand::Provision { config } => {
+            KeyProvisionerCommand::Provision { config, do_genesis } => {
                 let cfg = config::Config::load_yaml(&config)?;
-                kp_provision::run(cfg).await?;
+                kp_provision::run(cfg, do_genesis).await?;
             }
             KeyProvisionerCommand::RotateCert {
                 config,

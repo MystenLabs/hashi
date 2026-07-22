@@ -22,13 +22,19 @@ use GuardianError::*;
 pub(crate) struct InitInstall {
     init_config: InitConfig,
     ceremony_state: CeremonyState,
+    genesis_state: Option<GenesisState>,
 }
 
 impl InitInstall {
-    pub(crate) fn from_parts(config: InitConfig, ceremony_state: CeremonyState) -> Self {
+    pub(crate) fn from_parts(
+        config: InitConfig,
+        ceremony_state: CeremonyState,
+        genesis_state: Option<GenesisState>,
+    ) -> Self {
         Self {
             init_config: config,
             ceremony_state,
+            genesis_state,
         }
     }
 
@@ -37,6 +43,7 @@ impl InitInstall {
     pub(crate) async fn from_config(
         logger: &GuardianS3Client,
         config: InitConfig,
+        genesis_state: Option<GenesisState>,
     ) -> GuardianResult<Self> {
         let mut reader =
             GuardianReader::from_s3_client(logger.clone(), config.pcr_allowlist().clone());
@@ -46,7 +53,7 @@ impl InitInstall {
             .map_err(|e| InvalidInputs(format!("read latest ceremony and KP share state: {e}")))?
             .ok_or_else(|| InvalidInputs("no ceremony log found for withdraw init".into()))?;
 
-        Ok(Self::from_parts(config, ceremony_state))
+        Ok(Self::from_parts(config, ceremony_state, genesis_state))
     }
 
     /// Install the bundle onto a fresh enclave. Infallible by design (see the
@@ -73,6 +80,16 @@ impl InitInstall {
         enclave
             .set_ceremony_state(self.ceremony_state)
             .expect("Unable to set ceremony state");
+
+        if let Some(genesis_state) = self.genesis_state {
+            info!(
+                genesis_state_hash = hex::encode(genesis_state.digest()),
+                "Storing genesis state."
+            );
+            enclave
+                .set_genesis_state(genesis_state)
+                .expect("Unable to set genesis state");
+        }
 
         info!("Setting init config.");
         enclave
@@ -117,13 +134,13 @@ pub async fn operator_init(
     // A withdraw-mode enclave must carry the config and a ceremony enclave must not.
     request.validate(enclave.mode())?;
 
-    let (s3_config, init_config) = request.into_parts();
+    let (s3_config, init_config, genesis_state) = request.into_parts();
     let logger = GuardianS3Client::new_checked(&s3_config).await?;
     info!("S3 connectivity check complete.");
 
     // Build the withdraw-mode install bundle up front; `None` for a ceremony enclave.
     let withdraw = match init_config {
-        Some(config) => Some(InitInstall::from_config(&logger, config).await?),
+        Some(config) => Some(InitInstall::from_config(&logger, config, genesis_state).await?),
         None => None,
     };
 
@@ -200,7 +217,7 @@ mod tests {
             EnclaveMode::Withdraw => {
                 let config = InitConfig::mock_for_testing(None);
                 let args = crate::test_utils::OperatorInitTestArgs::default();
-                Some(InitInstall::from_parts(config, args.ceremony_state))
+                Some(InitInstall::from_parts(config, args.ceremony_state, None))
             }
             EnclaveMode::Ceremony => None,
         };

@@ -350,6 +350,10 @@ fn verify_oi_info_matches_provisioned_standby(
         "OI GuardianInfo config_hash differs from live standby GuardianInfo"
     );
     ensure!(
+        oi_info.genesis_state_hash == live_info.genesis_state_hash,
+        "OI GuardianInfo genesis_state_hash differs from live standby GuardianInfo"
+    );
+    ensure!(
         oi_info.untrusted_git_revision == live_info.untrusted_git_revision,
         "OI GuardianInfo git revision differs from live standby GuardianInfo"
     );

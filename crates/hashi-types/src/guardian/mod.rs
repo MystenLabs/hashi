@@ -76,13 +76,7 @@ use std::ops::Deref;
 pub struct OperatorInitRequest {
     s3_config: S3Config,
     init_config: Option<InitConfig>,
-}
-
-/// Operator-trusted one-time bootstrap request for `genesis/record.json`.
-/// The operator must source the committee from on-chain state during first deploy.
-#[derive(Debug, Clone, PartialEq)]
-pub struct OperatorWriteGenesisRequest {
-    committee: crate::move_types::Committee,
+    genesis_state: Option<GenesisState>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -134,6 +128,15 @@ pub struct GuardianInfo {
     /// own BTC key). Set after operator_init; lets KPs verify it directly.
     #[serde(with = "crate::guardian::serde_utils::option_mpc_master_g")]
     pub mpc_master_g: Option<HashiMasterG>,
+    /// Digest of the optional genesis state pinned during operator init. KPs
+    /// independently derive and bind it into their signed PI submissions.
+    /// Trailing and omitted when absent to preserve pre-genesis signing bytes.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::guardian::serde_utils::option_hex_32"
+    )]
+    pub genesis_state_hash: Option<[u8; 32]>,
     // TODO: report the full committee too, so its membership is directly
     // verifiable from GuardianInfo; it's large, though.
 }
@@ -155,6 +158,13 @@ pub struct InitConfig {
     pcr_allowlist: PcrAllowlist,
     /// BTC network.
     network: Network,
+}
+
+/// Optional first-deploy state pinned by the operator during OI and authorized
+/// by KPs as part of their signed PI submissions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GenesisState {
+    committee: crate::move_types::Committee,
 }
 
 /// Live serving state derived during operator activation. Its `digest()` is the
@@ -184,6 +194,8 @@ pub struct SingleProvisionerInitRequest {
     expected_session_id: SessionID,
     #[serde(with = "hex::serde")]
     expected_config_hash: [u8; 32],
+    #[serde(with = "crate::guardian::serde_utils::option_hex_32")]
+    expected_genesis_state_hash: Option<[u8; 32]>,
     encrypted_share: GuardianEncryptedShare,
 }
 
@@ -445,14 +457,20 @@ impl OperatorInitRequest {
         Self {
             s3_config,
             init_config: None,
+            genesis_state: None,
         }
     }
 
     /// Build a withdraw-mode request carrying the stable operator config.
-    pub fn new_withdraw_mode(s3_config: S3Config, init_config: InitConfig) -> Self {
+    pub fn new_withdraw_mode(
+        s3_config: S3Config,
+        init_config: InitConfig,
+        genesis_state: Option<GenesisState>,
+    ) -> Self {
         Self {
             s3_config,
             init_config: Some(init_config),
+            genesis_state,
         }
     }
 
@@ -464,25 +482,30 @@ impl OperatorInitRequest {
         self.init_config.as_ref()
     }
 
-    /// `init_config` must be present iff the enclave runs in withdraw mode.
+    /// `init_config` must be present iff the enclave runs in withdraw mode;
+    /// optional genesis state is withdraw-only.
     pub fn validate(&self, mode: EnclaveMode) -> GuardianResult<()> {
-        match (mode, self.init_config.is_some()) {
-            (EnclaveMode::Withdraw, false) => Err(InvalidInputs(
+        match (
+            mode,
+            self.init_config.is_some(),
+            self.genesis_state.is_some(),
+        ) {
+            (EnclaveMode::Withdraw, false, _) => Err(InvalidInputs(
                 "withdraw-mode operator_init requires an InitConfig".into(),
             )),
-            (EnclaveMode::Ceremony, true) => Err(InvalidInputs(
-                "ceremony-mode operator_init must carry only S3 config".into(),
-            )),
+            (EnclaveMode::Ceremony, true, _) | (EnclaveMode::Ceremony, false, true) => Err(
+                InvalidInputs("ceremony-mode operator_init must carry only S3 config".into()),
+            ),
             _ => Ok(()),
         }
     }
 
-    pub fn into_parts(self) -> (S3Config, Option<InitConfig>) {
-        (self.s3_config, self.init_config)
+    pub fn into_parts(self) -> (S3Config, Option<InitConfig>, Option<GenesisState>) {
+        (self.s3_config, self.init_config, self.genesis_state)
     }
 }
 
-impl OperatorWriteGenesisRequest {
+impl GenesisState {
     pub fn new(committee: HashiCommittee) -> Self {
         Self {
             committee: (&committee).into(),
@@ -493,12 +516,13 @@ impl OperatorWriteGenesisRequest {
         Self { committee }
     }
 
-    pub fn committee(&self) -> &crate::move_types::Committee {
-        &self.committee
-    }
-
     pub fn into_committee(self) -> crate::move_types::Committee {
         self.committee
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        let bytes = bcs::to_bytes(self).expect("serialization should work");
+        Blake2b::<U32>::digest(bytes).into()
     }
 }
 
@@ -616,6 +640,7 @@ impl SingleProvisionerInitRequest {
     pub fn build_from_share<R: CryptoRng + RngCore>(
         expected_session_id: SessionID,
         expected_config_hash: [u8; 32],
+        expected_genesis_state_hash: Option<[u8; 32]>,
         share: &Share,
         enclave_pub_key: &EncPubKey,
         rng: &mut R,
@@ -623,6 +648,7 @@ impl SingleProvisionerInitRequest {
         Self::new(
             expected_session_id,
             expected_config_hash,
+            expected_genesis_state_hash,
             encrypt_share(share, enclave_pub_key, None, rng),
         )
     }
@@ -630,11 +656,13 @@ impl SingleProvisionerInitRequest {
     pub fn new(
         expected_session_id: SessionID,
         expected_config_hash: [u8; 32],
+        expected_genesis_state_hash: Option<[u8; 32]>,
         encrypted_share: GuardianEncryptedShare,
     ) -> Self {
         Self {
             expected_session_id,
             expected_config_hash,
+            expected_genesis_state_hash,
             encrypted_share,
         }
     }
@@ -651,10 +679,22 @@ impl SingleProvisionerInitRequest {
         &self.expected_config_hash
     }
 
-    pub fn into_parts(self) -> (SessionID, [u8; 32], GuardianEncryptedShare) {
+    pub fn expected_genesis_state_hash(&self) -> Option<[u8; 32]> {
+        self.expected_genesis_state_hash
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        SessionID,
+        [u8; 32],
+        Option<[u8; 32]>,
+        GuardianEncryptedShare,
+    ) {
         (
             self.expected_session_id,
             self.expected_config_hash,
+            self.expected_genesis_state_hash,
             self.encrypted_share,
         )
     }

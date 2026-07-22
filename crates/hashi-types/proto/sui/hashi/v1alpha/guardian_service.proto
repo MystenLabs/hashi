@@ -22,9 +22,6 @@ service GuardianService {
   // Operator initialization: provide stable config before provisioning.
   rpc OperatorInit(OperatorInitRequest) returns (OperatorInitResponse);
 
-  // Bootstrap genesis committee: operator-trusted, first deploy only.
-  rpc OperatorWriteGenesis(OperatorWriteGenesisRequest) returns (OperatorWriteGenesisResponse);
-
   // Provisioner initialization: submit the current KPs' signed share contributions.
   rpc ProvisionerInit(ProvisionerInitRequest) returns (ProvisionerInitResponse);
 
@@ -127,6 +124,9 @@ message GuardianInfoData {
     CeremonyStage ceremony = 11;
     WithdrawStage withdraw = 12;
   }
+
+  // Digest of the optional GenesisState pinned during operator_init.
+  optional bytes genesis_state_hash = 13;
 }
 
 // Public description of the current BTC key's secret-sharing scheme.
@@ -228,15 +228,16 @@ message OperatorInitRequest {
   // Withdraw-mode stable init config (absent for a ceremony enclave). The enclave
   // exposes its digest via GuardianInfo; KPs bind it into signed PI submissions.
   InitConfig init_config = 4;
+
+  // First-deploy state to be authorized by KPs during provisioner_init.
+  GenesisState genesis_state = 5;
 }
 
 message OperatorInitResponse {}
 
-message OperatorWriteGenesisRequest {
+message GenesisState {
   Committee committee = 1;
 }
-
-message OperatorWriteGenesisResponse {}
 
 message S3Config {
   optional string access_key = 1;
@@ -276,6 +277,9 @@ message SignedSingleProvisionerInitRequest {
 
   // The operator-init config hash the KP independently recomputed and verified.
   optional bytes expected_config_hash = 5;
+
+  // The optional genesis state hash the KP independently recomputed and verified.
+  optional bytes expected_genesis_state_hash = 6;
 }
 
 // Assembled from the current KPs' signed submissions by the relay once it has
