@@ -39,6 +39,8 @@ pub struct Enclave {
     init_state: InitializationState,
     /// Serializes lifecycle and control-plane transitions so concurrent callers
     /// cannot race a check-then-set. Held across each handler.
+    /// TODO: Ensure this lock is not released if the RPC is cancelled while a
+    /// detached state mutation is still being persisted.
     pub control_lock: tokio::sync::Mutex<()>,
 }
 
