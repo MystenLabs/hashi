@@ -5073,16 +5073,20 @@ impl MpcManager {
         p2p_channel: &impl P2PChannel,
         metrics: &Metrics,
     ) -> MpcResult<(MpcOutput, bool)> {
-        let (is_member_of_previous_committee, threshold_opt) = {
+        let (is_member_of_previous_committee, has_previous_key, threshold_opt) = {
             let mgr = mpc_manager.read().unwrap();
             let is_member = mgr
                 .previous_committee
                 .as_ref()
                 .and_then(|c| c.index_of(&mgr.address))
                 .is_some();
-            (is_member, mgr.previous_reconfig_output_threshold)
+            (
+                is_member,
+                mgr.previous_encryption_key.is_some(),
+                mgr.previous_reconfig_output_threshold,
+            )
         };
-        let previous = if is_member_of_previous_committee {
+        let previous = if is_member_of_previous_committee && has_previous_key {
             let reconstruction_result = async {
                 let _retrieve_timer = metrics
                     .mpc_prepare_previous_retrieve_duration_seconds

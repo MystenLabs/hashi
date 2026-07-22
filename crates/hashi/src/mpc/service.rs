@@ -4,6 +4,7 @@
 //! MPC (Multi-Party Computation) Service
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -97,6 +98,7 @@ pub struct MpcService {
     refill_rx: watch::Receiver<u32>,
     reconciling: Arc<tokio::sync::Mutex<()>>,
     backup_handle: crate::backup::BackupHandle,
+    replacement_keys_target_epoch: Mutex<Option<u64>>,
 }
 
 impl MpcService {
@@ -110,12 +112,12 @@ impl MpcService {
             refill_rx,
             reconciling: Arc::new(tokio::sync::Mutex::new(())),
             backup_handle,
+            replacement_keys_target_epoch: Mutex::new(None),
         };
         let handle = MpcHandle { key_ready_rx };
         (service, handle)
     }
 
-    /// Start the MPC service and return a `Service` for lifecycle management.
     pub fn start(self) -> Service {
         Service::new().spawn_aborting(async move {
             self.run().await;
@@ -746,6 +748,7 @@ impl MpcService {
             Ok(output) => output,
             Err(e) => {
                 error!("sync_if_stale: recover_mpc_state failed for epoch {epoch}: {e}");
+                self.re_register_encryption_key_if_lost().await;
                 return;
             }
         };
@@ -779,6 +782,48 @@ impl MpcService {
             }
         }
         let _ = self.key_ready_tx.send(Some(output.public_key));
+    }
+
+    async fn re_register_encryption_key_if_lost(&self) {
+        let committee = self
+            .inner
+            .onchain_state()
+            .state()
+            .hashi()
+            .committees
+            .current_committee()
+            .cloned();
+        let Some(committee) = committee else { return };
+        let Ok(me) = self.inner.config.validator_address() else {
+            return;
+        };
+        if !self.inner.committee_encryption_key_lost(&committee, me) {
+            return;
+        }
+        self.inner.metrics.mpc_encryption_key_lost_total.inc();
+        let target = match self.inner.next_reconfig_epoch().await {
+            Ok(target) => target,
+            Err(e) => {
+                warn!("cannot determine next reconfig epoch for key re-registration: {e}");
+                return;
+            }
+        };
+        if *self.replacement_keys_target_epoch.lock().unwrap() == Some(target) {
+            return;
+        }
+        warn!(
+            "no DB encryption key matches the current committee record; registering a \
+             fresh key for epoch {target} so the node rejoins at that reconfig"
+        );
+        match self.inner.prepare_and_register_keys(target).await {
+            Ok(()) => {
+                info!("replacement keys in place for epoch {target}");
+                *self.replacement_keys_target_epoch.lock().unwrap() = Some(target);
+            }
+            Err(e) => {
+                warn!("failed to register replacement keys for epoch {target}: {e}; will retry");
+            }
+        }
     }
 
     async fn refill_presignatures(&self, batch_index: u32) -> anyhow::Result<()> {
