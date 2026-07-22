@@ -103,6 +103,28 @@ pub async fn run(
     );
     let session_id = endpoint_verified.session_id;
     let signing_pub_key = endpoint_verified.signing_pub_key;
+    let endpoint_bucket_info = endpoint_verified
+        .info
+        .bucket_info
+        .as_ref()
+        .context("active GuardianInfo missing bucket_info")?;
+    anyhow::ensure!(
+        &guardian_s3.bucket_info == endpoint_bucket_info,
+        "Guardian bucket info mismatch: expected {:?}, got {:?}",
+        guardian_s3.bucket_info,
+        endpoint_bucket_info
+    );
+    let verified_session = reader
+        .get_session_info(&session_id, BuildPolicy::Current)
+        .await?;
+    anyhow::ensure!(
+        verified_session.signing_pubkey == signing_pub_key,
+        "guardian S3 attestation signing pubkey differs from gRPC signing pubkey"
+    );
+    anyhow::ensure!(
+        verified_session.info.bucket_info.as_ref() == Some(endpoint_bucket_info),
+        "guardian S3 session bucket info differs from live GuardianInfo"
+    );
     let endpoint_btc_pubkey = endpoint_verified
         .info
         .enclave_btc_pubkey
@@ -188,6 +210,9 @@ pub async fn run(
         "ProvisionerRotateCert response changed ciphertexts other than the requested certificate"
     );
 
+    // TODO: Read and verify the exact (sharing_seq, response.cert_seq, session_id)
+    // kp-shares snapshot. Reading the global latest state can report a false
+    // failure if another certificate rotation commits before this post-check.
     let updated_state = reader
         .read_latest_ceremony_state(BuildPolicy::AnyAllowlisted)
         .await?
