@@ -40,6 +40,7 @@ pub use crate::mpc::types::MpcError;
 pub use crate::mpc::types::MpcOutput;
 use crate::mpc::types::MpcOutputRecoveryOutcome;
 pub use crate::mpc::types::MpcResult;
+use crate::mpc::types::NonceCertToVerify;
 use crate::mpc::types::NonceGenerationProtocol;
 pub use crate::mpc::types::NonceMessage;
 pub use crate::mpc::types::NonceReconstructionOutcome;
@@ -1038,7 +1039,7 @@ impl MpcManager {
         batch_index: u32,
         certs: &[(Address, hashi_types::move_types::DealerSubmissionV1)],
     ) -> MpcResult<NonceReconstructionOutcome> {
-        let certified_dealers = self.certified_nonce_dealers_from_certs(certs);
+        let (certified_dealers, _) = self.certified_nonce_dealers_from_certs(certs);
         let messages = self
             .public_messages_store
             .list_nonce_messages(batch_index)
@@ -1076,10 +1077,10 @@ impl MpcManager {
         ))
     }
 
-    fn certified_nonce_dealers_from_certs(
+    pub(crate) fn certified_nonce_dealers_from_certs<T>(
         &self,
-        certs: &[(Address, hashi_types::move_types::DealerSubmissionV1)],
-    ) -> HashSet<Address> {
+        certs: &[(Address, T)],
+    ) -> (HashSet<Address>, u32) {
         let required_weight = self.required_nonce_weight();
         let mut weight_sum = 0u32;
         let mut certified = HashSet::new();
@@ -1094,7 +1095,39 @@ impl MpcManager {
                 }
             }
         }
-        certified
+        (certified, weight_sum)
+    }
+
+    pub(crate) async fn verified_nonce_certs<T>(
+        mpc_manager: &Arc<RwLock<Self>>,
+        epoch: u64,
+        certs: Vec<(Address, T)>,
+    ) -> Vec<(Address, T)>
+    where
+        T: NonceCertToVerify,
+    {
+        let mut verified = Vec::with_capacity(certs.len());
+        for (dealer, cert) in certs {
+            let dealer_cert = match cert.to_dealer_certificate(epoch) {
+                Ok(dealer_cert) => dealer_cert,
+                Err(e) => {
+                    tracing::info!("recovery: dropping malformed nonce cert from {dealer:?}: {e}");
+                    continue;
+                }
+            };
+            let mgr = Arc::clone(mpc_manager);
+            let verification = spawn_blocking(move || {
+                mgr.read().unwrap().committee.verify_signature(&dealer_cert)
+            })
+            .await;
+            match verification {
+                Ok(()) => verified.push((dealer, cert)),
+                Err(e) => tracing::info!(
+                    "recovery: dropping nonce cert with invalid signature from {dealer:?}: {e}"
+                ),
+            }
+        }
+        verified
     }
 
     async fn run_dkg_as_dealer(
@@ -5298,6 +5331,7 @@ impl MpcManager {
         certs: &[(Address, hashi_types::move_types::DealerSubmissionV1)],
         p2p_channel: &impl P2PChannel,
     ) -> MpcResult<Vec<batch_avss::ReceiverOutput>> {
+        Self::retrieve_missing_nonce_messages(mpc_manager, batch_index, certs, p2p_channel).await?;
         loop {
             let outcome = mpc_manager
                 .read()
@@ -5350,6 +5384,78 @@ impl MpcManager {
                 }
             }
         }
+    }
+
+    async fn retrieve_missing_nonce_messages(
+        mpc_manager: &Arc<RwLock<Self>>,
+        batch_index: u32,
+        certs: &[(Address, hashi_types::move_types::DealerSubmissionV1)],
+        p2p_channel: &impl P2PChannel,
+    ) -> MpcResult<()> {
+        let (certified_dealers, _) = mpc_manager
+            .read()
+            .unwrap()
+            .certified_nonce_dealers_from_certs(certs);
+        for (dealer, cert) in certs {
+            if !certified_dealers.contains(dealer) {
+                continue;
+            }
+            let expected_hash = sui_sdk_types::Digest::from_bytes(&cert.message.messages_hash)
+                .map_err(|e| {
+                    MpcError::InvalidCertificate(format!(
+                        "malformed nonce message hash for dealer {dealer:?}: {e}"
+                    ))
+                })?;
+            let needs_retrieval = mpc_manager.write().unwrap().needs_nonce_retrieval(
+                *dealer,
+                batch_index,
+                &expected_hash,
+            );
+            if !needs_retrieval {
+                continue;
+            }
+            let (request, signers) = {
+                let mgr = mpc_manager.read().unwrap();
+                let members = mgr.committee.members();
+                let signers: Vec<Address> = cert
+                    .signature
+                    .signers_bitmap
+                    .iter()
+                    .filter_map(|&idx| members.get(idx as usize).map(|m| m.validator_address()))
+                    .collect();
+                let request = RetrieveMessagesRequest {
+                    dealer: *dealer,
+                    protocol_type: ProtocolTypeIndicator::NonceGeneration,
+                    epoch: mgr.mpc_config.epoch,
+                    batch_index: Some(batch_index),
+                };
+                (request, signers)
+            };
+            tracing::info!(
+                "Nonce message for certified dealer {dealer:?} missing locally during recovery, \
+                 retrieving from signers"
+            );
+            let messages = hedged_retrieve(signers, p2p_channel, &request, expected_hash)
+                .await
+                .ok_or_else(|| {
+                    MpcError::PairwiseCommunicationError(format!(
+                        "Could not retrieve nonce message for dealer {dealer:?} from any signer \
+                         during recovery"
+                    ))
+                })?;
+            let Messages::NonceGeneration(ref nonce) = messages else {
+                return Err(MpcError::ProtocolFailed(format!(
+                    "Retrieved non-nonce message for dealer {dealer:?} during recovery"
+                )));
+            };
+            let mut mgr = mpc_manager.write().unwrap();
+            let epoch = mgr.mpc_config.epoch;
+            mgr.cache_and_persist_nonce_message(epoch, *dealer, nonce)?;
+            // Drop any output derived from the previously stored (hash-mismatching)
+            // message so reconstruction reprocesses the retrieved certified message.
+            mgr.dealer_nonce_outputs.remove(&(batch_index, *dealer));
+        }
+        Ok(())
     }
 
     async fn retrieve_missing_previous_messages(
@@ -5640,7 +5746,7 @@ impl MpcManager {
         }
     }
 
-    fn required_nonce_weight(&self) -> u32 {
+    pub(crate) fn required_nonce_weight(&self) -> u32 {
         let max_faulty = self.mpc_config.max_faulty as u32;
         match self.mpc_config.presignature_derivation_version {
             PresignatureDerivationVersion::Legacy => 2 * max_faulty + 1,
