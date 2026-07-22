@@ -210,30 +210,22 @@ pub async fn run(
         "ProvisionerRotateCert response changed ciphertexts other than the requested certificate"
     );
 
-    // TODO: Read and verify the exact (sharing_seq, response.cert_seq, session_id)
-    // kp-shares snapshot. Reading the global latest state can report a false
-    // failure if another certificate rotation commits before this post-check.
     let updated_state = reader
-        .read_latest_ceremony_state(BuildPolicy::AnyAllowlisted)
-        .await?
-        .context("no ceremony log found after certificate rotation")?;
-    anyhow::ensure!(
-        updated_state.secret_sharing_instance == state.secret_sharing_instance,
-        "latest ceremony changed while rotating the KP certificate"
-    );
-    anyhow::ensure!(
-        updated_state.cert_seq == response.cert_seq,
-        "latest kp-shares cert_seq {} does not match ProvisionerRotateCert response {}",
-        updated_state.cert_seq,
-        response.cert_seq
-    );
+        .read_kp_share_state_log(
+            &session_id,
+            sharing_seq,
+            response.cert_seq,
+            BuildPolicy::Current,
+        )
+        .await
+        .context("read the certificate-rotation kp-shares snapshot")?;
     updated_state
         .encrypted_shares
         .verify_recipients(&expected_certs_roster)
-        .context("verify updated kp-shares state against the rotated certificate roster")?;
+        .context("verify persisted kp-shares snapshot against the rotated certificate roster")?;
     anyhow::ensure!(
         updated_state.encrypted_shares == expected_encrypted_shares,
-        "updated kp-shares state changed entries other than the requested certificate rotation"
+        "persisted kp-shares snapshot changed entries other than the requested certificate rotation"
     );
 
     println!(
