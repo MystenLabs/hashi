@@ -103,11 +103,6 @@ pub async fn run(
     );
     let session_id = endpoint_verified.session_id;
     let signing_pub_key = endpoint_verified.signing_pub_key;
-    let endpoint_instance = endpoint_verified
-        .info
-        .secret_sharing_instance
-        .as_ref()
-        .context("active GuardianInfo missing secret_sharing_instance")?;
     let endpoint_btc_pubkey = endpoint_verified
         .info
         .enclave_btc_pubkey
@@ -121,13 +116,6 @@ pub async fn run(
         .await?
         .context("no ceremony log found in S3; key setup has not run")?;
     state.validate_sharing_params(cfg.kp_roster.num_shares, cfg.kp_roster.threshold)?;
-    anyhow::ensure!(
-        state.secret_sharing_instance == *endpoint_instance,
-        "active guardian secret-sharing instance differs from latest ceremony log: active {}, \
-         latest {}",
-        endpoint_instance,
-        state.secret_sharing_instance
-    );
     anyhow::ensure!(
         &state.btc_master_pubkey == endpoint_btc_pubkey,
         "active guardian BTC pubkey differs from latest ceremony log: active \

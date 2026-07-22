@@ -68,14 +68,6 @@ pub async fn provisioner_rotate_cert(
         .await
         .map_err(|e| InternalError(format!("read latest ceremony state: {e}")))?
         .ok_or_else(|| InvalidInputs("no ceremony log found during cert rotation".into()))?;
-    let active_instance = enclave.secret_sharing_instance()?;
-    if latest_state.secret_sharing_instance != active_instance {
-        return Err(InvalidInputs(format!(
-            "latest ceremony instance {} differs from the active guardian instance \
-             {active_instance}",
-            latest_state.secret_sharing_instance
-        )));
-    }
     let enclave_btc_pubkey = enclave.config.enclave_btc_pubkey()?;
     if latest_state.btc_master_pubkey != enclave_btc_pubkey {
         return Err(InvalidInputs(format!(
@@ -94,6 +86,7 @@ pub async fn provisioner_rotate_cert(
         )));
     }
 
+    let latest_instance = latest_state.secret_sharing_instance;
     let encrypted_shares = latest_state.encrypted_shares;
     let signer_share_id = encrypted_shares
         .find_by_fingerprint(&signer_fingerprint)
@@ -140,7 +133,7 @@ pub async fn provisioner_rotate_cert(
             share_id.get()
         )));
     }
-    active_instance.commitments().verify_share(&share)?;
+    latest_instance.commitments().verify_share(&share)?;
 
     let replacement_ciphertext = encrypt_share_for_provisioner(&share, request.new_kp_pgp_cert());
     let (encrypted_shares, changed_entry) = encrypted_shares.replace_recipient(
