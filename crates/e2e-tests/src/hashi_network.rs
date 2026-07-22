@@ -480,9 +480,6 @@ impl HashiNetworkBuilder {
             // the guardian client lazily from the on-chain guardian_url set
             // by the launch tx, so every e2e run exercises the
             // guardian-set-up-last path.
-            // Fast config poll so the guardian gate in `build()` isn't
-            // waiting out the 5-minute default.
-            config.onchain_config_poll_interval_ms = Some(5_000);
             config.hashi_ids = Some(hashi_ids);
             config.validator_address = Some(*validator_address);
             config.operator_private_key = Some(private_key.to_pem()?);

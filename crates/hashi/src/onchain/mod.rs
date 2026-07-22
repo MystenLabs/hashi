@@ -8,7 +8,6 @@ use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use futures::TryStreamExt;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
@@ -49,8 +48,8 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 const SCRAPE_PAGE_SIZE: u32 = 1000;
 
 mod apply;
+mod mirror;
 mod route;
-mod shadow;
 pub mod types;
 mod watcher;
 
@@ -93,8 +92,14 @@ struct Inner {
     ids: HashiIds,
     client: Client,
     sender: broadcast::Sender<Notification>,
-    /// The checkpoint information that this state is recent to
+    /// The clock position: the latest checkpoint the unfiltered clock
+    /// stream has observed. Drives the leader tick, timestamps, and Sui
+    /// epoch-change detection; advances regardless of Hashi activity.
     checkpoint: watch::Sender<CheckpointInfo>,
+    /// The state watermark: the checkpoint through which the object
+    /// mirror has applied every Hashi transaction. Never reported ahead
+    /// of what has been applied; drives `wait_until_checkpoint`.
+    state_watermark: watch::Sender<u64>,
     state: RwLock<State>,
     tls_private_key: Option<ed25519_dalek::SigningKey>,
     grpc_max_decoding_message_size: Option<usize>,
@@ -103,21 +108,20 @@ struct Inner {
     /// `LocalLimiter` carries its own `RwLock<LimiterState>`, so we just
     /// need set-once semantics for the slot itself.
     local_limiter: OnceLock<Arc<crate::guardian_limiter::LocalLimiter>>,
-    /// Pinged by the watcher after a reconnect rescrape, so the reconcile
-    /// loop can re-align the local limiter immediately.
+    /// Pinged by the watcher after a mirror re-bootstrap (the replay
+    /// failure fallback), so the reconcile loop can re-align the local
+    /// limiter immediately — a re-bootstrap can swallow the fully-signed
+    /// transitions that advance it.
     guardian_reconcile_notify: Arc<tokio::sync::Notify>,
     /// Checkpoint floor for cleanup-GC scrapes: raised to the checkpoint of
     /// each landed cleanup tx so the next scrape cannot be served state
     /// from before it (the watcher cursor alone may lag that checkpoint).
     utxo_scrape_floor: std::sync::atomic::AtomicU64,
-    /// Cadence of the watcher's on-chain config poll.
-    config_poll_interval: std::time::Duration,
 }
 
 #[derive(Debug)]
 pub struct State {
     package_versions: BTreeMap<u64, Address>,
-    package_ids: BTreeSet<Address>,
     hashi: types::Hashi,
     withdrawal_signed_at_ms: BTreeMap<Address, u64>,
 }
@@ -136,7 +140,6 @@ impl OnchainState {
         tls_private_key: Option<ed25519_dalek::SigningKey>,
         grpc_max_decoding_message_size: Option<usize>,
         metrics: Option<Arc<crate::metrics::Metrics>>,
-        config_poll_interval: Option<std::time::Duration>,
     ) -> Result<(Self, Service)> {
         let mut client = crate::sui_rpc_client::new_sui_rpc_client(sui_rpc_url)?;
         // The scrape client reads the full on-chain state (the largest
@@ -145,7 +148,7 @@ impl OnchainState {
             client = client.with_max_decoding_message_size(limit);
         }
 
-        let (mut state, checkpoint) = State::scrape(client.clone(), ids).await?;
+        let (mut state, checkpoint, seed) = State::scrape(client.clone(), ids).await?;
         if let Some(tls_private_key) = &tls_private_key {
             state
                 .hashi
@@ -164,20 +167,19 @@ impl OnchainState {
 
         let (sender, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let (checkpoint, _) = watch::channel(checkpoint);
+        let (state_watermark, _) = watch::channel(seed.floor);
         let state = Inner {
             ids,
             client: client.clone(),
             sender,
             checkpoint,
+            state_watermark,
             state: RwLock::new(state),
             tls_private_key,
             grpc_max_decoding_message_size,
             metrics: metrics.clone(),
             local_limiter: OnceLock::new(),
             guardian_reconcile_notify: Arc::new(tokio::sync::Notify::new()),
-            config_poll_interval: config_poll_interval.unwrap_or(std::time::Duration::from_millis(
-                crate::config::DEFAULT_ONCHAIN_CONFIG_POLL_INTERVAL_MS,
-            )),
             utxo_scrape_floor: std::sync::atomic::AtomicU64::new(0),
         }
         .pipe(Arc::new)
@@ -187,7 +189,7 @@ impl OnchainState {
         // The watcher rebuilds its client on every reconnect, so hand it the URL.
         let sui_rpc_url = sui_rpc_url.to_owned();
         let service = Service::new().spawn_aborting(async move {
-            watcher::watcher(sui_rpc_url, watcher_state, metrics).await;
+            watcher::watcher(sui_rpc_url, watcher_state, seed, metrics).await;
             Ok(())
         });
 
@@ -200,10 +202,6 @@ impl OnchainState {
 
     pub(crate) fn grpc_max_decoding_message_size(&self) -> Option<usize> {
         self.0.grpc_max_decoding_message_size
-    }
-
-    pub(crate) fn config_poll_interval(&self) -> std::time::Duration {
-        self.0.config_poll_interval
     }
 
     fn notify(&self, notification: Notification) {
@@ -228,12 +226,13 @@ impl OnchainState {
     /// would let coin selection re-pick a locked input and pay for an
     /// aborted tx).
     ///
-    /// The GC scans this snapshot instead of the mirror because the mirror
-    /// can overstate pending cleanups (`cleanup_spent_utxos` emits no event
-    /// the watcher could apply, so another leader's cleanup is invisible),
-    /// and every overstated id becomes a paid on-chain no-op. Only
-    /// `utxo_records` is fetched — cleanup never consults the ever-growing
-    /// `spent_utxos` tombstone history.
+    /// With the object mirror applying `cleanup_spent_utxos` deletions
+    /// directly, this out-of-band read is obsolete — the cleanup step of
+    /// the lossless-watcher plan switches the GC to decide from the
+    /// mirror (gated on `wait_until_checkpoint`) and deletes this scrape
+    /// and the `utxo_scrape_floor` machinery. Only `utxo_records` is
+    /// fetched — cleanup never consults the ever-growing `spent_utxos`
+    /// tombstone history.
     ///
     /// Every response — the `BitcoinState` wrapper AND each pagination page
     /// — must be at or past the watcher's checkpoint cursor, re-sampled per
@@ -338,11 +337,47 @@ impl OnchainState {
         self.0.checkpoint.borrow().height
     }
 
-    /// Wait until the watcher reaches `target_seq`. Caller wraps with
+    /// The checkpoint through which the object mirror has applied every
+    /// Hashi transaction.
+    pub fn state_watermark(&self) -> u64 {
+        *self.0.state_watermark.borrow()
+    }
+
+    /// Advance the state watermark (monotonic). Only the mirror loop
+    /// calls this, from server coverage claims and applied transactions.
+    fn advance_state_watermark(&self, covered: u64) {
+        self.0.state_watermark.send_if_modified(|current| {
+            if covered <= *current {
+                return false;
+            }
+            *current = covered;
+            true
+        });
+        if let Some(metrics) = &self.0.metrics {
+            metrics
+                .watcher_state_watermark
+                .set(self.state_watermark() as i64);
+        }
+    }
+
+    /// Wait until the object mirror reflects every Hashi transaction
+    /// through checkpoint `target_seq`. Caller wraps with
     /// `tokio::time::timeout` for a bound.
+    ///
+    /// One deliberate softness: a transaction applied at checkpoint C
+    /// counts C as covered even though later Hashi transactions of the
+    /// same checkpoint may still be in flight in the same delivery
+    /// burst (they apply milliseconds later). Callers waiting on the
+    /// checkpoint of a transaction they themselves executed therefore
+    /// resolve as soon as that checkpoint's first Hashi transaction
+    /// lands, which in the common single-transaction case is exactly
+    /// their own.
     pub async fn wait_until_checkpoint(&self, target_seq: u64) {
-        let mut rx = self.subscribe_checkpoint();
-        while rx.borrow().height < target_seq {
+        let mut rx = self.0.state_watermark.subscribe();
+        loop {
+            if *rx.borrow_and_update() >= target_seq {
+                return;
+            }
             if rx.changed().await.is_err() {
                 return;
             }
@@ -386,41 +421,8 @@ impl OnchainState {
         self.0.checkpoint.send_replace(info);
     }
 
-    fn try_advance_checkpoint(&self, info: CheckpointInfo) -> bool {
-        self.0.checkpoint.send_if_modified(|current| {
-            if scrape_is_stale(info.height, current.height) {
-                return false;
-            }
-            *current = info;
-            true
-        })
-    }
-
-    fn install_scraped_state(
-        &self,
-        checkpoint_info: CheckpointInfo,
-        hashi: types::Hashi,
-    ) -> Result<()> {
-        if !self.try_advance_checkpoint(checkpoint_info) {
-            anyhow::bail!(
-                "stale full-state rescrape: scrape at checkpoint {} is behind the \
-                 freshness floor {}",
-                checkpoint_info.height,
-                self.latest_checkpoint_height(),
-            );
-        }
-        self.replace_hashi_state(hashi);
-        Ok(())
-    }
-
     pub fn package_id_original(&self) -> Address {
         self.0.ids.package_id
-    }
-
-    pub async fn rescrape(&self) -> Result<()> {
-        let (checkpoint_info, hashi, _seed) =
-            scrape_hashi(self.client(), self.hashi_id(), self.package_id_original()).await?;
-        self.install_scraped_state(checkpoint_info, hashi)
     }
 
     pub(crate) async fn scrape_committee_for_epoch(&self, epoch: u64) -> Result<Option<Committee>> {
@@ -451,11 +453,11 @@ impl OnchainState {
         self.state_mut().hashi = hashi;
     }
 
-    fn add_package_version(&self, version: u64, package_id: Address) {
-        let mut state = self.state_mut();
-        //TODO should we assert that this version is exactly the next one?
-        state.package_versions.insert(version, package_id);
-        state.package_ids.insert(package_id);
+    /// Replace the package-version map after an on-chain upgrade. The
+    /// mirror's `PackageUpgraded` effect carries only the new package
+    /// id; versions are reconciled from `list_package_versions`.
+    fn set_package_versions(&self, package_versions: BTreeMap<u64, Address>) {
+        self.state_mut().package_versions = package_versions;
     }
 
     pub fn client(&self) -> Client {
@@ -862,24 +864,23 @@ impl State {
         &self.hashi
     }
 
-    async fn scrape(client: Client, ids: HashiIds) -> Result<(Self, CheckpointInfo)> {
-        // The mirror seed is dropped here for now; the object-driven
-        // watcher takes ownership of it when it wires in.
-        let (package_versions, (checkpoint_info, hashi, _seed)) = tokio::try_join!(
+    async fn scrape(
+        client: Client,
+        ids: HashiIds,
+    ) -> Result<(Self, CheckpointInfo, route::MirrorSeed)> {
+        let (package_versions, (checkpoint_info, hashi, seed)) = tokio::try_join!(
             scrape_package_versions(client.clone(), ids.package_id),
             scrape_hashi(client, ids.hashi_object_id, ids.package_id),
         )?;
 
-        let package_ids = package_versions.values().cloned().collect();
-
         Ok((
             State {
                 package_versions,
-                package_ids,
                 hashi,
                 withdrawal_signed_at_ms: BTreeMap::new(),
             },
             checkpoint_info,
+            seed,
         ))
     }
 }
@@ -996,10 +997,6 @@ async fn fetch_bitcoin_state(
         .deserialize()
         .map_err(|e| anyhow!("failed to deserialize BitcoinState: {e}"))?;
     Ok((checkpoint_height, version, bitcoin_state_field.value))
-}
-
-fn scrape_is_stale(scrape_height: u64, floor: u64) -> bool {
-    scrape_height < floor
 }
 
 async fn scrape_hashi(
@@ -1154,31 +1151,6 @@ async fn scrape_tob_entries(client: Client, tob_id: Address) -> Result<route::Co
     Ok(seed)
 }
 
-/// Re-fetch only the `config` field from the Hashi Move object.
-///
-/// This is a lightweight alternative to the full `scrape_hashi` that avoids
-/// re-reading all nested dynamic fields (members, committees, treasury, etc.).
-/// Used by the watcher to refresh in-memory config when an `UpdateConfig`
-/// proposal is executed.
-pub(crate) async fn scrape_hashi_config(
-    mut client: Client,
-    hashi_object_id: Address,
-) -> Result<types::Config> {
-    let response =
-        client
-            .ledger_client()
-            .get_object(GetObjectRequest::new(&hashi_object_id).with_read_mask(
-                FieldMask::from_paths([Object::path_builder().contents().finish()]),
-            ))
-            .await?;
-
-    let move_types::Hashi {
-        config, versioning, ..
-    } = response.get_ref().object().contents().deserialize()?;
-
-    Ok(convert_move_config(config, versioning))
-}
-
 fn convert_move_config(
     config: move_types::Config,
     versioning: move_types::Versioning,
@@ -1266,26 +1238,6 @@ async fn scrape_treasury(
     ))
 }
 
-pub(super) async fn fetch_treasury_cap(
-    client: &mut Client,
-    treasury_cap_id: Address,
-) -> Result<types::TreasuryCap> {
-    let response =
-        client
-            .ledger_client()
-            .get_object(GetObjectRequest::new(&treasury_cap_id).with_read_mask(
-                FieldMask::from_paths([Object::path_builder().contents().finish()]),
-            ))
-            .await?;
-
-    let object = response.into_inner();
-    let type_tag = object.object().contents().name().parse()?;
-    let contents = object.object().contents().value();
-
-    types::TreasuryCap::try_from_contents(&type_tag, contents)
-        .ok_or_else(|| anyhow!("failed to parse TreasuryCap from object {treasury_cap_id}"))
-}
-
 /// Convert the raw Move `MemberInfo` into the enriched mirror shape
 /// (parsed BLS key, URI, TLS key, and encryption key).
 fn convert_move_member_info(info: move_types::MemberInfo) -> types::MemberInfo {
@@ -1344,6 +1296,9 @@ async fn scrape_all_member_info(
     Ok((seed, member_info))
 }
 
+/// Fetch a single validator's `MemberInfo` dynamic field. Not part of
+/// the watcher: used by transaction building to decide between
+/// registering and updating a validator.
 pub(crate) async fn scrape_member_info(
     mut client: Client,
     member_info_id: Address,
@@ -1372,6 +1327,39 @@ pub(crate) async fn scrape_member_info(
         .map_err(|e| tonic::Status::from_error(e.into()))?;
 
     Ok(convert_move_member_info(field.value))
+}
+
+/// Fetch a single epoch's `Committee` dynamic field. Not part of the
+/// watcher: used by the fresh-member rejoin path to read a committee
+/// the mirror may not hold. Surfaces the gRPC `NotFound` status so the
+/// caller can distinguish a missing committee from a failed read.
+async fn scrape_committee(
+    mut client: Client,
+    committees_id: Address,
+    epoch: u64,
+) -> Result<Committee> {
+    let field_id = committees_id.derive_dynamic_child_id(&TypeTag::U64, &epoch.to_bcs().unwrap());
+
+    let response = client
+        .ledger_client()
+        .get_object(
+            GetObjectRequest::new(&field_id).with_read_mask(FieldMask::from_paths([
+                Object::path_builder().owner().finish(),
+                Object::path_builder().contents().finish(),
+                Object::path_builder().object_id(),
+                Object::path_builder().version(),
+            ])),
+        )
+        .await?
+        .into_inner();
+
+    let field: move_types::Field<u64, move_types::Committee> = response
+        .object()
+        .contents()
+        .deserialize()
+        .map_err(|e| tonic::Status::from_error(e.into()))?;
+
+    Ok(convert_move_committee(field.value))
 }
 
 async fn scrape_committees(
@@ -1466,35 +1454,6 @@ async fn scrape_committees(
         .collect();
 
     Ok((seed, (committees, handoffs)))
-}
-
-async fn scrape_committee(
-    mut client: Client,
-    committees_id: Address,
-    epoch: u64,
-) -> Result<Committee> {
-    let field_id = committees_id.derive_dynamic_child_id(&TypeTag::U64, &epoch.to_bcs().unwrap());
-
-    let response = client
-        .ledger_client()
-        .get_object(
-            GetObjectRequest::new(&field_id).with_read_mask(FieldMask::from_paths([
-                Object::path_builder().owner().finish(),
-                Object::path_builder().contents().finish(),
-                Object::path_builder().object_id(),
-                Object::path_builder().version(),
-            ])),
-        )
-        .await?
-        .into_inner();
-
-    let field: move_types::Field<u64, move_types::Committee> = response
-        .object()
-        .contents()
-        .deserialize()
-        .map_err(|e| tonic::Status::from_error(e.into()))?;
-
-    Ok(convert_move_committee(field.value))
 }
 
 fn convert_move_committee_member(
@@ -1647,30 +1606,6 @@ async fn scrape_withdrawal_queue(
             confirmed_txns_id: withdrawal_queue.confirmed_txns.id,
         },
     ))
-}
-
-/// Fetch a single WithdrawalTransaction by its object ID.
-/// WithdrawalTransaction has `key`, so it's stored as a child object in the
-/// ObjectBag and can be fetched directly by its ID.
-pub(super) async fn fetch_withdrawal_txn(
-    client: &mut Client,
-    withdrawal_txn_id: Address,
-) -> Result<types::WithdrawalTransaction> {
-    let response = client
-        .ledger_client()
-        .get_object(GetObjectRequest::new(&withdrawal_txn_id).with_read_mask(
-            FieldMask::from_paths([Object::path_builder().contents().finish()]),
-        ))
-        .await?;
-
-    let txn: types::WithdrawalTransaction = response
-        .into_inner()
-        .object()
-        .contents()
-        .deserialize()
-        .map_err(|e| anyhow!("failed to deserialize WithdrawalTransaction: {e}"))?;
-
-    Ok(txn)
 }
 
 async fn scrape_utxo_pool(

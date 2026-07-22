@@ -349,9 +349,9 @@ impl TestNetworksBuilder {
         tracing::info!("rpc url: {}", test_networks.sui_network().rpc_url);
 
         // The launch tx writes guardian_url with no event; nodes booted
-        // pre-launch learn it only via the watcher's config poll. Gate BEFORE
-        // the override proposals — their config refresh would mask a broken
-        // poll (genesis end_reconfig losers rescrape and heal incidentally).
+        // pre-launch learn it from the object mirror applying the root
+        // write. Gate BEFORE the override proposals so a broken mirror
+        // path can't hide behind their config-refreshing writes.
         if nodes_started {
             futures::future::try_join_all(
                 test_networks
@@ -1397,7 +1397,7 @@ mod tests {
         let ids = test_networks.hashi_network().ids();
 
         let (state, _service) =
-            hashi::onchain::OnchainState::new(sui_rpc_url, ids, None, None, None, None).await?;
+            hashi::onchain::OnchainState::new(sui_rpc_url, ids, None, None, None).await?;
 
         assert_eq!(state.state().hashi().committees.committees().len(), 1);
         assert_eq!(state.state().hashi().committees.members().len(), 1);
@@ -1436,15 +1436,16 @@ mod tests {
         Ok(())
     }
 
-    /// Verify that rescraping on-chain state correctly deserializes deposit
+    /// Verify that the bootstrap scrape correctly deserializes deposit
     /// requests from ObjectBag dynamic fields.
     ///
-    /// This catches BCS mismatches between the subscription path (which builds
-    /// objects from events) and the scrape path (which reads from ObjectBag
-    /// child objects). The subscription path may work while the scrape path
-    /// fails if the deserialization code uses the wrong field access method.
+    /// This catches BCS mismatches between the streaming path (which decodes
+    /// objects from transaction object sets) and the scrape path (which reads
+    /// from ObjectBag child objects). The streaming path may work while the
+    /// scrape path fails if the deserialization code uses the wrong field
+    /// access method.
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_rescrape_with_existing_requests() -> Result<()> {
+    async fn test_scrape_with_existing_requests() -> Result<()> {
         let test_networks = TestNetworksBuilder::new()
             .with_nodes(4)
             .with_full_voting_power()
@@ -1468,18 +1469,15 @@ mod tests {
             .execute_create_deposit_request(dummy_txid, 0, 50_000, Some(hbtc_recipient))
             .await?;
 
-        // Wait briefly for the subscription path to pick up the event
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-        // Now rescrape from chain — this exercises the ObjectBag deserialization
-        // path that reads child objects, not the subscription/event path.
-        hashi.onchain_state().rescrape().await?;
-
-        // Verify the deposit request survived the rescrape.
-        let deposit_requests = hashi.onchain_state().deposit_requests();
+        // Boot a fresh OnchainState now that the request exists on-chain:
+        // its bootstrap scrape must find the request in the ObjectBag.
+        let sui_rpc_url = &test_networks.sui_network().rpc_url;
+        let ids = test_networks.hashi_network().ids();
+        let (state, _service) =
+            hashi::onchain::OnchainState::new(sui_rpc_url, ids, None, None, None).await?;
         assert!(
-            !deposit_requests.is_empty(),
-            "Rescrape should find the deposit request in the ObjectBag"
+            !state.deposit_requests().is_empty(),
+            "The bootstrap scrape should find the deposit request in the ObjectBag"
         );
 
         Ok(())

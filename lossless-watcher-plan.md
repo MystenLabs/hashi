@@ -94,6 +94,15 @@ The bump is a version-number change, not a migration.
 
 ## Design
 
+> **Status (2026-07-22): cut over.** The object mirror is the
+> production state: the mirror loop applies filtered transactions
+> directly into `OnchainState`, transition-derived effects drive the
+> limiter, notifications, and metrics, and the event-driven watcher,
+> its bespoke fetchers, the config poll, and the rescrape mechanisms
+> are deleted. `wait_until_checkpoint` now waits on the state
+> watermark. The GC's out-of-band scrape remains until the cleanup
+> step.
+>
 > **Transport status (2026-07-22, verified against a patched Sui
 > v1.76.0):** the transaction-granular transport is live as the
 > primary. The stock v1.76 server never populated the per-transaction
@@ -340,10 +349,12 @@ revertible.
    existing 10-minute rescrape tick becomes the divergence audit between
    legacy state, shadow state, and fresh scrape. e2e parity assertion in
    the harness (the chain-watcher branch's parity test is prior art).
-6. **Cutover.** The shadow path becomes the mirror; `handle_events` state
-   mutations and bespoke fetchers are deleted; the config poll dies;
-   rescrape survives only as the replay-failure fallback and optional
-   audit. Notifications and the limiter now come from apply's `Effect`s.
+6. **Cutover.** Done. The shadow path became the mirror; `handle_events`,
+   the bespoke fetchers, and the config poll are deleted; rescrape
+   survives only as the replay-failure fallback (the periodic audit was
+   dropped after clean burn-in). Notifications and the limiter now come
+   from apply's `Effect`s; `wait_until_checkpoint` waits on the state
+   watermark.
 7. **Cleanup and follow-ups.** Drop events from the read mask (keep
    parsing only for logs if wanted); switch the cleanup GC to decide
    from the mirror and delete `scrape_utxo_records_snapshot`,

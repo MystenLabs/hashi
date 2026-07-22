@@ -47,7 +47,6 @@ pub struct Metrics {
     pub guardian_limiter_validate_total: IntCounterVec,
     pub guardian_limiter_apply_total: IntCounterVec,
     pub guardian_limiter_anchor_events_total: IntCounter,
-    pub guardian_limiter_anchor_events_skipped_total: IntCounter,
     pub guardian_limiter_batch_truncated_total: IntCounter,
     pub guardian_limiter_batch_stuck_head_total: IntCounter,
     pub guardian_finalize_deferred_total: IntCounter,
@@ -58,11 +57,10 @@ pub struct Metrics {
     /// Guardian's committee epoch as of the leader's last reconcile.
     pub guardian_current_committee_epoch: IntGauge,
 
-    // Lossless shadow-mirror metrics
-    pub shadow_applied_txns_total: IntCounter,
-    pub shadow_unrouted_objects_total: IntCounter,
-    pub shadow_divergence_total: IntCounter,
-    pub shadow_watermark_checkpoint: IntGauge,
+    // Lossless object-mirror metrics
+    pub watcher_applied_txns_total: IntCounter,
+    pub watcher_unrouted_objects_total: IntCounter,
+    pub watcher_state_watermark: IntGauge,
 
     // Kyoto (Bitcoin light client) metrics
     pub kyoto_connected_peers: IntGauge,
@@ -289,27 +287,21 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            shadow_applied_txns_total: register_int_counter_with_registry!(
-                "hashi_shadow_applied_txns_total",
-                "Hashi-relevant transactions applied to the shadow object mirror",
+            watcher_applied_txns_total: register_int_counter_with_registry!(
+                "hashi_watcher_applied_txns_total",
+                "Hashi-relevant transactions applied to the object mirror",
                 registry,
             )
             .unwrap(),
-            shadow_unrouted_objects_total: register_int_counter_with_registry!(
-                "hashi_shadow_unrouted_objects_total",
-                "Changed objects the shadow mirror could not route to a known container",
+            watcher_unrouted_objects_total: register_int_counter_with_registry!(
+                "hashi_watcher_unrouted_objects_total",
+                "Changed objects the object mirror could not route to a known container",
                 registry,
             )
             .unwrap(),
-            shadow_divergence_total: register_int_counter_with_registry!(
-                "hashi_shadow_divergence_total",
-                "Divergent slots found when auditing the shadow mirror against a fresh scrape",
-                registry,
-            )
-            .unwrap(),
-            shadow_watermark_checkpoint: register_int_gauge_with_registry!(
-                "hashi_shadow_watermark_checkpoint",
-                "Checkpoint through which the shadow object mirror is complete",
+            watcher_state_watermark: register_int_gauge_with_registry!(
+                "hashi_watcher_state_watermark",
+                "Checkpoint through which the object mirror is complete",
                 registry,
             )
             .unwrap(),
@@ -392,13 +384,7 @@ impl Metrics {
             .unwrap(),
             guardian_limiter_anchor_events_total: register_int_counter_with_registry!(
                 "hashi_guardian_limiter_anchor_events_total",
-                "Total on-chain WithdrawalSigned observations applied to the local guardian-limiter",
-                registry,
-            )
-            .unwrap(),
-            guardian_limiter_anchor_events_skipped_total: register_int_counter_with_registry!(
-                "hashi_guardian_limiter_anchor_events_skipped_total",
-                "WithdrawalSigned observations skipped as duplicates (checkpoint redelivery or bootstrap replay)",
+                "Total on-chain fully-signed transitions applied to the local guardian-limiter",
                 registry,
             )
             .unwrap(),

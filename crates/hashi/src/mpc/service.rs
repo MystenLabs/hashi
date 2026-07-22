@@ -227,6 +227,23 @@ impl MpcService {
         }
     }
 
+    /// Wait (bounded) for the object mirror to reflect the epoch change
+    /// another node's `end_reconfig` completed. The lossless watcher
+    /// applies the winning transaction as a root object write within a
+    /// few checkpoints; clock ticks pace the re-checks.
+    async fn wait_for_epoch_change_visibility(&self, epoch: u64) {
+        const VISIBILITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+        let mut checkpoint_rx = self.inner.onchain_state().subscribe_checkpoint();
+        let _ = tokio::time::timeout(VISIBILITY_TIMEOUT, async {
+            while self.get_pending_epoch_change() == Some(epoch) {
+                if checkpoint_rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await;
+    }
+
     fn get_pending_epoch_change(&self) -> Option<u64> {
         self.inner
             .onchain_state()
@@ -1410,15 +1427,15 @@ impl MpcService {
                 Err(e) => match classify_reconfig_submission_error(&e) {
                     ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted => {
                         warn!(
-                            "end_reconfig submission for epoch {epoch} found reconfig already completed; rescraping on-chain state: {e}"
+                            "end_reconfig submission for epoch {epoch} found reconfig already completed; waiting for the watcher to observe it: {e}"
                         );
-                        self.inner.onchain_state().rescrape().await?;
+                        self.wait_for_epoch_change_visibility(epoch).await;
                         if self.get_pending_epoch_change() != Some(epoch) {
                             return Ok(());
                         }
                         Err(e).with_context(|| {
                             format!(
-                                "end_reconfig submission for epoch {epoch} failed with ENotReconfiguring, but epoch is still pending after rescrape"
+                                "end_reconfig submission for epoch {epoch} failed with ENotReconfiguring, but epoch is still pending after waiting for the watcher"
                             )
                         })?;
                     }
