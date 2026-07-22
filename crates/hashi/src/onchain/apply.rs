@@ -39,14 +39,25 @@ use super::types;
 /// payload into `sui_sdk_types` values.
 #[derive(Debug)]
 pub(super) struct TxView {
-    // The checkpoint position and timestamp are consumed at cutover
-    // (limiter advance and duration metrics use the transaction's
-    // checkpoint time); the shadow only applies `changes`.
-    #[allow(dead_code)]
     pub checkpoint: u64,
+    /// Zero-based position within the checkpoint. Together with
+    /// `checkpoint` this is the transaction's total order on the chain;
+    /// the watcher ratchets over `(checkpoint, transaction_index)` so a
+    /// transaction delivered by both replay and the live stream applies
+    /// exactly once.
+    pub transaction_index: u64,
+    // Consumed at cutover (limiter advance and duration metrics use
+    // the transaction's checkpoint time); the shadow only logs it.
     #[allow(dead_code)]
     pub timestamp_ms: u64,
     pub changes: Vec<TxChange>,
+}
+
+impl TxView {
+    /// The transaction's position in the chain's total order.
+    pub(super) fn position(&self) -> (u64, u64) {
+        (self.checkpoint, self.transaction_index)
+    }
 }
 
 #[derive(Debug)]
@@ -97,6 +108,7 @@ impl TxView {
         tx: &proto::ExecutedTransaction,
         pool: &mut ObjectPool,
         checkpoint: u64,
+        transaction_index: u64,
         timestamp_ms: u64,
     ) -> anyhow::Result<Option<Self>> {
         let effects = tx
@@ -154,25 +166,28 @@ impl TxView {
 
         Ok(Some(Self {
             checkpoint,
+            transaction_index,
             timestamp_ms,
             changes,
         }))
     }
 
     /// Decode a standalone proto `ExecutedTransaction` (as delivered by
-    /// the filtered transaction stream, once available) using its own
-    /// per-transaction object set and checkpoint/timestamp fields.
-    // Unused until the filtered SubscribeTransactions transport lands
-    // (server-side Sui v1.76); kept alongside from_pool so the swap is
-    // one call-site change.
-    #[allow(dead_code)]
+    /// the filtered transaction stream) using its own per-transaction
+    /// object set and checkpoint/index/timestamp fields.
     pub(super) fn from_proto(tx: &proto::ExecutedTransaction) -> anyhow::Result<Option<Self>> {
         let mut pool = decode_object_pool(tx.objects.as_ref())?;
         let timestamp_ms = tx
             .timestamp
             .and_then(|t| proto_to_timestamp_ms(t).ok())
             .unwrap_or(0);
-        Self::from_pool(tx, &mut pool, tx.checkpoint(), timestamp_ms)
+        Self::from_pool(
+            tx,
+            &mut pool,
+            tx.checkpoint(),
+            tx.transaction_index(),
+            timestamp_ms,
+        )
     }
 }
 
@@ -894,6 +909,7 @@ mod tests {
     fn tx(changes: Vec<TxChange>) -> TxView {
         TxView {
             checkpoint: 1,
+            transaction_index: 0,
             timestamp_ms: 1_000,
             changes,
         }

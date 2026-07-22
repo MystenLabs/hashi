@@ -94,27 +94,29 @@ The bump is a version-number change, not a migration.
 
 ## Design
 
-> **Transport reality check (2026-07-20, verified against Sui
-> v1.76.0):** the per-transaction `ObjectSet` is not populated by the
-> server — `render_executed_transaction` builds the set internally for
-> effects rendering but never emits it — so the transaction-granular
-> `SubscribeTransactions`/`ListTransactions` transport described below
-> is not usable yet (worth an upstream issue; the fix looks small).
-> The shadow instead runs checkpoint-granular and filtered:
-> `SubscribeCheckpoints(filter: affected_object(root))` delivers full
-> payloads (with the checkpoint-level object set) only for checkpoints
-> containing a Hashi transaction, cursor-only progress frames otherwise
-> (observed continuously, so stall detection works); `ListCheckpoints`
-> with the same filter replays gaps from the u64 watermark, making
-> reconnects lossless. Within a matching checkpoint, only transactions
-> whose effects touch the root are applied, and the unrouted tripwire
-> only fires for hashi-package types (a root-touching transaction also
-> legitimately mutates foreign state such as the CoinRegistry). On
-> pre-1.76 servers the subscription filter is ignored (same protocol,
-> unfiltered) and replay is unimplemented, in which case a break falls
-> back to re-bootstrap from scrape. Verified on localnet e2e (deposit
-> and withdrawal flows): zero unrouted objects, zero stream breaks, and
-> all transition effects observed.
+> **Transport status (2026-07-22, verified against a patched Sui
+> v1.76.0):** the transaction-granular transport is live as the
+> primary. The stock v1.76 server never populated the per-transaction
+> `ObjectSet` (`render_executed_transaction` builds it internally but
+> doesn't emit it); with the local patch, `SubscribeTransactions` and
+> `ListTransactions` render each matching transaction with its object
+> set, checkpoint, and `transaction_index`. Transactions arrive in
+> chain order, and the shadow ratchets over
+> `(checkpoint, transaction_index)` so replay/live overlap applies
+> exactly once. Caveats found empirically: `Watermark.checkpoint` is
+> unset on this build (only the opaque cursor is populated), so the
+> replay target comes from the clock sampled after subscribing, replay
+> completion is proven by the response's indexed-height header at
+> LedgerTip, and coverage advances from applied transactions' own
+> checkpoints plus clock heartbeats — all replaced by
+> `Watermark.checkpoint` when the server fills it. The
+> checkpoint-granular transport (filtered `SubscribeCheckpoints` +
+> `ListCheckpoints`) remains as an automatic sticky fallback for
+> servers that are older or lack the object-set patch, detected via
+> gRPC Unimplemented or the missing-object decode error. Verified on
+> localnet e2e (deposit and withdrawal): all four nodes on the
+> transaction stream, zero unrouted objects, zero stream breaks, all
+> transition effects observed.
 
 ### Two streams
 
