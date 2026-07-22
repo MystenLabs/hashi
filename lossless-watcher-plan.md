@@ -274,10 +274,20 @@ Deleted at cutover: `handle_events`'s state mutations,
 `fetch_withdrawal_txn`, `fetch_treasury_cap`, `scrape_member_info`,
 `scrape_committee` (single-epoch), `scrape_hashi_config` + the config
 poll (`launch_pending`), rescrape-on-reconnect, the periodic rescrape as a
-correctness mechanism. Later candidates: the GC's out-of-band
-`scrape_utxo_records_snapshot` (the mirror plus the watermark floor now
-provides the same freshness guarantee), and caching TOB certs in the
-mirror instead of on-demand fetches.
+correctness mechanism.
+
+Deleted in cleanup: the GC's out-of-band UTXO scraping —
+`scrape_utxo_records_snapshot`, `raise_utxo_scrape_floor`, and the
+`utxo_scrape_floor` machinery. The cleanup GC reads a fresh snapshot
+today only because the event-driven mirror overstates pending cleanups:
+`cleanup_spent_utxos` emits no event, so another leader's cleanup is
+invisible locally and every overstated id becomes a paid on-chain no-op.
+The object mirror applies those Field deletions directly, so the mirror
+is the snapshot; the freshness guarantee the per-page checkpoint-height
+floor provides today (never decide from state older than a landed
+cleanup) is supplied by waiting for the mirror's watermark to pass the
+cleanup transaction's checkpoint. A later candidate: caching TOB certs
+in the mirror instead of on-demand fetches.
 
 ## Verification items (before or during step 3)
 
@@ -336,8 +346,11 @@ revertible.
    rescrape survives only as the replay-failure fallback and optional
    audit. Notifications and the limiter now come from apply's `Effect`s.
 7. **Cleanup and follow-ups.** Drop events from the read mask (keep
-   parsing only for logs if wanted), reconsider the GC snapshot path,
-   decide on TOB cert mirroring, remove dead scrape helpers.
+   parsing only for logs if wanted); switch the cleanup GC to decide
+   from the mirror and delete `scrape_utxo_records_snapshot`,
+   `raise_utxo_scrape_floor`, and the `utxo_scrape_floor` field (the
+   mirror's watermark replaces the per-page freshness floor); decide on
+   TOB cert mirroring; remove dead scrape helpers.
 
 ## Testing
 
