@@ -1,13 +1,18 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 //
-// Imports the README from MystenLabs/hashi-ts-sdk and formats it into a
+// Imports the README of the @mysten/hashi package and formats it into a
 // Docusaurus page at docs/ts-sdk.mdx.
 //
 // Usage:
 //   node scripts/fetch-sdk-readme.js
 //
-// hashi-ts-sdk is a PUBLIC repo, so the README is fetched anonymously over HTTPS
+// The SDK used to live in its own MystenLabs/hashi-ts-sdk repo. It has since
+// moved into the MystenLabs/ts-sdks monorepo under packages/hashi, which is what
+// this script now reads; the old repo is deprecated and its README carries only
+// a "no longer active" notice.
+//
+// ts-sdks is a PUBLIC repo, so the README is fetched anonymously over HTTPS
 // — no GitHub token or `gh` CLI needed. If the fetch fails (offline build, a
 // transient network/GitHub error), the script logs a notice and leaves the
 // existing committed docs/ts-sdk.mdx in place, so builds never break. Because of
@@ -20,7 +25,8 @@
 //   - drops the leading H1 (the title comes from front matter instead)
 //   - derives the page description from the first prose paragraph
 //   - converts GitHub alerts (`> [!WARNING]`) to Docusaurus admonitions
-//   - rewrites any relative links/images to absolute hashi-ts-sdk URLs
+//   - rewrites any relative links/images to absolute URLs against the package
+//     directory in the monorepo
 //   - wraps everything in Docusaurus front matter + an AUTO-GENERATED banner
 // The source README must stay MDX-friendly (no bare `<` / `{` outside code
 // fences); fenced code blocks are passed through untouched.
@@ -28,10 +34,13 @@
 const fs = require("fs");
 const path = require("path");
 
-const REPO = "MystenLabs/hashi-ts-sdk";
+const REPO = "MystenLabs/ts-sdks";
 const BRANCH = "main";
-const REPO_BLOB = `https://github.com/${REPO}/blob/${BRANCH}`;
-const REPO_RAW = `https://raw.githubusercontent.com/${REPO}/${BRANCH}`;
+// The SDK is one package inside the ts-sdks monorepo. Relative links in its
+// README resolve against this directory, not the repo root.
+const PACKAGE_DIR = "packages/hashi";
+const REPO_BLOB = `https://github.com/${REPO}/blob/${BRANCH}/${PACKAGE_DIR}`;
+const REPO_RAW = `https://raw.githubusercontent.com/${REPO}/${BRANCH}/${PACKAGE_DIR}`;
 const README_URL = `${REPO_RAW}/README.md`;
 
 const SITE_ROOT = path.resolve(__dirname, ".."); // design/
@@ -50,7 +59,7 @@ const ALERT_ADMONITION = {
 // ---------------------------------------------------------------------------
 
 async function fetchReadme() {
-  // hashi-ts-sdk is public, so the raw README is fetchable anonymously.
+  // ts-sdks is public, so the raw README is fetchable anonymously.
   const res = await fetch(README_URL, {
     headers: { "User-Agent": "hashi-docs-fetch-sdk-readme" },
   });
@@ -95,13 +104,17 @@ function convertAlerts(text) {
   const lines = text.split("\n");
   const out = [];
   for (let i = 0; i < lines.length; i++) {
-    const m = /^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*$/i.exec(lines[i]);
+    // GitHub accepts the alert body starting on the marker line itself
+    // (`> [!WARNING] text`) as well as on the lines below it. Handle both.
+    const m = /^>\s*\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*(.*)$/i.exec(lines[i]);
     if (!m) {
       out.push(lines[i]);
       continue;
     }
     const admonition = ALERT_ADMONITION[m[1].toUpperCase()];
     const content = [];
+    const inline = m[2].trim();
+    if (inline) content.push(inline);
     let j = i + 1;
     for (; j < lines.length && /^>\s?/.test(lines[j]); j++) {
       content.push(lines[j].replace(/^>\s?/, ""));
@@ -150,7 +163,7 @@ function format(readme) {
   ].join("\n");
 
   const banner =
-    `{/* AUTO-GENERATED from ${REPO} README — do not edit by hand. */}\n` +
+    `{/* AUTO-GENERATED from ${REPO} (${PACKAGE_DIR}) README — do not edit by hand. */}\n` +
     `{/* Refresh with: npm run fetch-sdk-readme (from design/). */}`;
 
   return `${frontMatter}\n\n${banner}\n\n${body}\n`;
@@ -161,7 +174,7 @@ function format(readme) {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  console.log(`📥 fetch-sdk-readme: importing ${REPO}@${BRANCH} README`);
+  console.log(`📥 fetch-sdk-readme: importing ${REPO}@${BRANCH} ${PACKAGE_DIR} README`);
 
   try {
     const readme = await fetchReadme();
