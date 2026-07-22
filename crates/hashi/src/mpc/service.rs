@@ -55,6 +55,7 @@ const START_RECONFIG_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const MPC_RECONFIG_TIMEOUT: Duration = Duration::from_secs(600);
 const RECONCILE_TICK: Duration = Duration::from_secs(15);
 const MAX_KEY_REREGISTRATION_BUMPS: u32 = 3;
+const ARM_TIMEOUT: Duration = Duration::from_secs(900);
 /// Move `hashi::reconfig::ENotReconfiguring`, matched by its clever-error
 /// constant name (the `#[error]` abort code encodes a source line, so the
 /// numeric code is not stable).
@@ -100,6 +101,12 @@ pub struct MpcService {
     reconciling: Arc<tokio::sync::Mutex<()>>,
     backup_handle: crate::backup::BackupHandle,
     replacement_keys_target_epoch: Mutex<Option<u64>>,
+}
+
+async fn timeboxed(label: &str, fut: impl Future<Output = ()>) {
+    if tokio::time::timeout(ARM_TIMEOUT, fut).await.is_err() {
+        warn!("{label} exceeded {ARM_TIMEOUT:?} and was aborted to keep the MPC loop responsive");
+    }
 }
 
 impl MpcService {
@@ -148,7 +155,7 @@ impl MpcService {
                     self.handle_reconfig(epoch).await;
                     continue;
                 }
-                self.sync_if_stale().await;
+                timeboxed("sync_if_stale", self.sync_if_stale()).await;
                 let epoch = self.inner.onchain_state().epoch();
                 if self.inner.signing_manager_for(epoch).is_some() {
                     break;
@@ -176,7 +183,11 @@ impl MpcService {
                                 self.handle_reconfig(epoch).await;
                             }
                             Notification::SuiEpochChanged(sui_epoch) => {
-                                self.try_submit_start_reconfig(sui_epoch).await;
+                                timeboxed(
+                                    "try_submit_start_reconfig",
+                                    self.try_submit_start_reconfig(sui_epoch),
+                                )
+                                .await;
                             }
                             _ => {}
                         },
@@ -187,25 +198,29 @@ impl MpcService {
                     }
                 }
                 Ok(()) = checkpoint_rx.changed() => {
-                    self.sync_if_stale().await;
+                    timeboxed("sync_if_stale", self.sync_if_stale()).await;
                 }
                 _ = reconcile_tick.tick() => {
-                    self.sync_if_stale().await;
+                    timeboxed("sync_if_stale", self.sync_if_stale()).await;
                 }
                 Ok(()) = self.refill_rx.changed() => {
                     let next_batch = *self.refill_rx.borrow();
-                    for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
-                        match self.refill_presignatures(next_batch).await {
-                            Ok(()) => break,
-                            Err(e) => {
-                                error!(
-                                    "Presignature refill attempt {attempt}/{MAX_PROTOCOL_ATTEMPTS} failed: {e}"
-                                );
-                                if attempt < MAX_PROTOCOL_ATTEMPTS {
-                                    tokio::time::sleep(RETRY_INTERVAL).await;
-                                }
-                            }
-                        }
+                    timeboxed("presignature refill", self.refill_with_retries(next_batch)).await;
+                }
+            }
+        }
+    }
+
+    async fn refill_with_retries(&self, next_batch: u32) {
+        for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
+            match self.refill_presignatures(next_batch).await {
+                Ok(()) => break,
+                Err(e) => {
+                    error!(
+                        "Presignature refill attempt {attempt}/{MAX_PROTOCOL_ATTEMPTS} failed: {e}"
+                    );
+                    if attempt < MAX_PROTOCOL_ATTEMPTS {
+                        tokio::time::sleep(RETRY_INTERVAL).await;
                     }
                 }
             }
@@ -1223,7 +1238,17 @@ impl MpcService {
             .with_label_values(&[protocol_label])
             .start_timer();
         for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
-            match self.prepare_signing(target_epoch, &output).await {
+            let attempt_result = tokio::time::timeout(
+                ARM_TIMEOUT,
+                self.prepare_signing(target_epoch, &output),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                Err(anyhow::anyhow!(
+                    "prepare_signing exceeded {ARM_TIMEOUT:?}; aborted (sync_if_stale recovers)"
+                ))
+            });
+            match attempt_result {
                 Ok(()) => break,
                 Err(e) => {
                     error!(

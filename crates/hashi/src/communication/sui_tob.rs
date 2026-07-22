@@ -203,6 +203,18 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                 }
             }
             if self.pending_certs.is_empty() {
+                let (onchain_epoch, pending) = {
+                    let state = self.onchain_state.state();
+                    let committees = &state.hashi().committees;
+                    (committees.epoch(), committees.pending_epoch_change())
+                };
+                if tob_wait_superseded(self.protocol_type, self.epoch, onchain_epoch, pending) {
+                    return Err(ChannelError::Superseded(format!(
+                        "{:?} TOB wait for epoch {} (onchain epoch {onchain_epoch}, \
+                         pending epoch change {pending:?})",
+                        self.protocol_type, self.epoch,
+                    )));
+                }
                 tokio::time::sleep(POLL_INTERVAL).await;
             }
         }
@@ -225,5 +237,47 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
             }
         }
         self.seen_dealers.iter().copied().collect()
+    }
+}
+
+fn tob_wait_superseded(
+    protocol_type: ProtocolType,
+    channel_epoch: u64,
+    onchain_epoch: u64,
+    pending_epoch_change: Option<u64>,
+) -> bool {
+    match protocol_type {
+        ProtocolType::NonceGeneration => {
+            matches!(pending_epoch_change, Some(p) if p != channel_epoch)
+                || onchain_epoch > channel_epoch
+        }
+        ProtocolType::Dkg | ProtocolType::KeyRotation => {
+            pending_epoch_change != Some(channel_epoch)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nonce_wait_superseded_only_by_other_reconfig_or_passed_epoch() {
+        let p = ProtocolType::NonceGeneration;
+        assert!(!tob_wait_superseded(p, 5, 5, None));
+        assert!(!tob_wait_superseded(p, 5, 4, Some(5)));
+        assert!(!tob_wait_superseded(p, 5, 4, None));
+        assert!(tob_wait_superseded(p, 5, 5, Some(6)));
+        assert!(tob_wait_superseded(p, 5, 4, Some(6)));
+        assert!(tob_wait_superseded(p, 5, 6, None));
+    }
+
+    #[test]
+    fn rotation_wait_bound_to_its_own_pending_target() {
+        for p in [ProtocolType::KeyRotation, ProtocolType::Dkg] {
+            assert!(!tob_wait_superseded(p, 6, 5, Some(6)));
+            assert!(tob_wait_superseded(p, 6, 5, None));
+            assert!(tob_wait_superseded(p, 6, 5, Some(7)));
+        }
     }
 }
