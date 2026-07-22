@@ -76,11 +76,11 @@ pub(super) enum TxChange {
 /// `ObjectSet`. The set carries both input and output versions of the
 /// same id, so the version is part of the key; each changed object is
 /// paired with its output version.
-pub(super) type ObjectPool = HashMap<(Address, u64), Object>;
+type ObjectPool = HashMap<(Address, u64), Object>;
 
-/// Decode a proto `ObjectSet` (checkpoint-level or per-transaction)
-/// into an [`ObjectPool`]. Requires the `bcs` field in the read mask.
-pub(super) fn decode_object_pool(set: Option<&proto::ObjectSet>) -> anyhow::Result<ObjectPool> {
+/// Decode a transaction's proto `ObjectSet` into an [`ObjectPool`].
+/// Requires the `bcs` field in the read mask.
+fn decode_object_pool(set: Option<&proto::ObjectSet>) -> anyhow::Result<ObjectPool> {
     let mut objects = ObjectPool::new();
     let Some(set) = set else {
         return Ok(objects);
@@ -97,20 +97,13 @@ pub(super) fn decode_object_pool(set: Option<&proto::ObjectSet>) -> anyhow::Resu
 }
 
 impl TxView {
-    /// Decode a proto `ExecutedTransaction` into a `TxView`, sourcing
-    /// post-state objects from `pool` (a checkpoint-level pool merged
-    /// with any per-transaction set). Written objects are removed from
-    /// the pool — each (id, output version) belongs to exactly one
-    /// transaction. Returns `Ok(None)` for transactions that did not
-    /// execute successfully — their object changes are gas-only and
-    /// carry no Hashi state.
-    pub(super) fn from_pool(
-        tx: &proto::ExecutedTransaction,
-        pool: &mut ObjectPool,
-        checkpoint: u64,
-        transaction_index: u64,
-        timestamp_ms: u64,
-    ) -> anyhow::Result<Option<Self>> {
+    /// Decode a proto `ExecutedTransaction` (as delivered by the
+    /// filtered transaction stream) into a `TxView`, sourcing
+    /// post-state objects from its per-transaction object set. Returns
+    /// `Ok(None)` for transactions that did not execute successfully —
+    /// their object changes are gas-only and carry no Hashi state.
+    pub(super) fn from_proto(tx: &proto::ExecutedTransaction) -> anyhow::Result<Option<Self>> {
+        let mut pool = decode_object_pool(tx.objects.as_ref())?;
         let effects = tx
             .effects
             .as_ref()
@@ -165,29 +158,14 @@ impl TxView {
         }
 
         Ok(Some(Self {
-            checkpoint,
-            transaction_index,
-            timestamp_ms,
+            checkpoint: tx.checkpoint(),
+            transaction_index: tx.transaction_index(),
+            timestamp_ms: tx
+                .timestamp
+                .and_then(|t| proto_to_timestamp_ms(t).ok())
+                .unwrap_or(0),
             changes,
         }))
-    }
-
-    /// Decode a standalone proto `ExecutedTransaction` (as delivered by
-    /// the filtered transaction stream) using its own per-transaction
-    /// object set and checkpoint/index/timestamp fields.
-    pub(super) fn from_proto(tx: &proto::ExecutedTransaction) -> anyhow::Result<Option<Self>> {
-        let mut pool = decode_object_pool(tx.objects.as_ref())?;
-        let timestamp_ms = tx
-            .timestamp
-            .and_then(|t| proto_to_timestamp_ms(t).ok())
-            .unwrap_or(0);
-        Self::from_pool(
-            tx,
-            &mut pool,
-            tx.checkpoint(),
-            tx.transaction_index(),
-            timestamp_ms,
-        )
     }
 }
 

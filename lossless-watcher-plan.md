@@ -110,13 +110,12 @@ The bump is a version-number change, not a migration.
 > LedgerTip, and coverage advances from applied transactions' own
 > checkpoints plus clock heartbeats — all replaced by
 > `Watermark.checkpoint` when the server fills it. The
-> checkpoint-granular transport (filtered `SubscribeCheckpoints` +
-> `ListCheckpoints`) remains as an automatic sticky fallback for
-> servers that are older or lack the object-set patch, detected via
-> gRPC Unimplemented or the missing-object decode error. Verified on
-> localnet e2e (deposit and withdrawal): all four nodes on the
-> transaction stream, zero unrouted objects, zero stream breaks, all
-> transition effects observed.
+> checkpoint-granular fallback transport was removed once the
+> object-set fix rolled out to the fleet; servers without the filtered
+> transaction APIs are unsupported. Verified on localnet e2e (deposit
+> and withdrawal): all four nodes on the transaction stream, zero
+> unrouted objects, zero stream breaks, all transition effects
+> observed.
 
 ### Two streams
 
