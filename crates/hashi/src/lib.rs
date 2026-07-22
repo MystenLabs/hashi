@@ -431,6 +431,27 @@ impl Hashi {
             })
     }
 
+    pub(crate) fn committee_signing_key_lost(
+        &self,
+        committee: &hashi_types::committee::Committee,
+        validator_address: sui_sdk_types::Address,
+    ) -> bool {
+        committee
+            .members()
+            .iter()
+            .find(|m| m.validator_address() == validator_address)
+            .is_some_and(|m| matches!(self.db.find_signing_key_matching(m.public_key()), Ok(None)))
+    }
+
+    pub(crate) fn committee_key_lost(
+        &self,
+        committee: &hashi_types::committee::Committee,
+        validator_address: sui_sdk_types::Address,
+    ) -> bool {
+        self.committee_encryption_key_lost(committee, validator_address)
+            || self.committee_signing_key_lost(committee, validator_address)
+    }
+
     pub fn prepare_signing_key(&self, epoch: u64) -> anyhow::Result<Bls12381PrivateKey> {
         if let Some(existing) = self.db.get_signing_key(epoch)? {
             return Ok(existing);
@@ -1515,6 +1536,29 @@ mod test {
         let enc_pub = hashi.prepare_encryption_key(5).unwrap();
         let committee = one_member_committee(5, validator_address, bls_pub, enc_pub);
         assert!(!hashi.committee_encryption_key_lost(&committee, validator_address));
+    }
+
+    #[test]
+    fn committee_signing_key_lost_detects_missing_key() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let validator_address = Address::new([1u8; 32]);
+        let unknown_bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
+        let enc_pub = hashi.prepare_encryption_key(5).unwrap();
+        let committee = one_member_committee(5, validator_address, unknown_bls_pub, enc_pub);
+        assert!(hashi.committee_signing_key_lost(&committee, validator_address));
+        assert!(hashi.committee_key_lost(&committee, validator_address));
+        assert!(!hashi.committee_encryption_key_lost(&committee, validator_address));
+    }
+
+    #[test]
+    fn committee_signing_key_lost_false_when_key_present() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let validator_address = Address::new([1u8; 32]);
+        let bls_pub = hashi.prepare_signing_key(5).unwrap().public_key();
+        let enc_pub = hashi.prepare_encryption_key(5).unwrap();
+        let committee = one_member_committee(5, validator_address, bls_pub, enc_pub);
+        assert!(!hashi.committee_signing_key_lost(&committee, validator_address));
+        assert!(!hashi.committee_key_lost(&committee, validator_address));
     }
 
     #[test]

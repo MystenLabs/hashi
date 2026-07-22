@@ -143,6 +143,10 @@ impl MpcService {
             self.try_submit_genesis_reconfig().await;
         } else if self.inner.is_in_current_committee() {
             loop {
+                if let Some(epoch) = self.get_pending_epoch_change() {
+                    self.handle_reconfig(epoch).await;
+                    continue;
+                }
                 self.sync_if_stale().await;
                 let epoch = self.inner.onchain_state().epoch();
                 if self.inner.signing_manager_for(epoch).is_some() {
@@ -748,7 +752,7 @@ impl MpcService {
             Ok(output) => output,
             Err(e) => {
                 error!("sync_if_stale: recover_mpc_state failed for epoch {epoch}: {e}");
-                self.re_register_encryption_key_if_lost().await;
+                self.re_register_keys_if_lost().await;
                 return;
             }
         };
@@ -784,7 +788,7 @@ impl MpcService {
         let _ = self.key_ready_tx.send(Some(output.public_key));
     }
 
-    async fn re_register_encryption_key_if_lost(&self) {
+    async fn re_register_keys_if_lost(&self) {
         let committee = self
             .inner
             .onchain_state()
@@ -797,10 +801,10 @@ impl MpcService {
         let Ok(me) = self.inner.config.validator_address() else {
             return;
         };
-        if !self.inner.committee_encryption_key_lost(&committee, me) {
+        if !self.inner.committee_key_lost(&committee, me) {
             return;
         }
-        self.inner.metrics.mpc_encryption_key_lost_total.inc();
+        self.inner.metrics.mpc_committee_key_lost_total.inc();
         let target = match self.inner.next_reconfig_epoch().await {
             Ok(target) => target,
             Err(e) => {
@@ -808,12 +812,28 @@ impl MpcService {
                 return;
             }
         };
+        let target = {
+            let state = self.inner.onchain_state().state();
+            let committees = &state.hashi().committees;
+            match committees.pending_epoch_change() {
+                Some(p)
+                    if p == target
+                        && committees
+                            .committees()
+                            .get(&p)
+                            .is_some_and(|c| self.inner.committee_key_lost(c, me)) =>
+                {
+                    p + 1
+                }
+                _ => target,
+            }
+        };
         if *self.replacement_keys_target_epoch.lock().unwrap() == Some(target) {
             return;
         }
         warn!(
-            "no DB encryption key matches the current committee record; registering a \
-             fresh key for epoch {target} so the node rejoins at that reconfig"
+            "no DB encryption or signing key matches the current committee record; \
+             registering fresh keys for epoch {target} so the node rejoins at that reconfig"
         );
         match self.inner.prepare_and_register_keys(target).await {
             Ok(()) => {

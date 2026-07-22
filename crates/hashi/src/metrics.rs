@@ -115,7 +115,7 @@ pub struct Metrics {
     /// Post-restart key recoveries that found suspicious local state
     pub mpc_recovery_suspicious_total: IntCounter,
     /// Ticks where no DB encryption key matched the current committee record
-    pub mpc_encryption_key_lost_total: IntCounter,
+    pub mpc_committee_key_lost_total: IntCounter,
     pub mpc_avid_rounds_total: IntCounterVec,
     pub mpc_avid_complaints_recovered_total: IntCounter,
 
@@ -695,10 +695,10 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
-            mpc_encryption_key_lost_total: register_int_counter_with_registry!(
-                "hashi_mpc_encryption_key_lost_total",
-                "Ticks where no DB encryption key matched the node's current committee record \
-                 (replacement keys are registered for the next epoch)",
+            mpc_committee_key_lost_total: register_int_counter_with_registry!(
+                "hashi_mpc_committee_key_lost_total",
+                "Ticks where no DB encryption or signing key matched the node's current \
+                 committee record (replacement keys are registered for the next epoch)",
                 registry,
             )
             .unwrap(),

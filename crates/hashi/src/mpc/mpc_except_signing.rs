@@ -5020,21 +5020,28 @@ impl MpcManager {
         p2p_channel: &impl P2PChannel,
         previous_committee_threshold: u64,
     ) -> MpcResult<PublicMpcOutput> {
-        let (previous_committee, epoch) = {
+        let (previous_committee, previous_nodes, epoch) = {
             let mgr = mpc_manager.read().unwrap();
             let previous_committee = mgr
                 .previous_committee
                 .clone()
                 .expect("key rotation requires previous committee");
-            (previous_committee, mgr.previous_epoch)
+            let previous_nodes = mgr.previous_nodes.clone().ok_or_else(|| {
+                MpcError::InvalidConfig("previous_nodes required for public-output quorum".into())
+            })?;
+            (previous_committee, previous_nodes, mgr.previous_epoch)
         };
         let request = GetPublicMpcOutputRequest { epoch };
         let mut futures: FuturesUnordered<_> = previous_committee
             .members()
             .iter()
-            .map(|member| {
+            .enumerate()
+            .map(|(party_id, member)| {
                 let addr = member.validator_address();
-                let weight = member.weight();
+                let weight = previous_nodes
+                    .share_ids_of(party_id as u16)
+                    .map(|ids| ids.len() as u64)
+                    .unwrap_or(0);
                 let req = request.clone();
                 async move {
                     let result = p2p_channel.get_public_mpc_output(&addr, &req).await;
