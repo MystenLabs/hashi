@@ -46,9 +46,8 @@ pub(super) struct TxView {
     /// transaction delivered by both replay and the live stream applies
     /// exactly once.
     pub transaction_index: u64,
-    // Consumed at cutover (limiter advance and duration metrics use
-    // the transaction's checkpoint time); the shadow only logs it.
-    #[allow(dead_code)]
+    /// The transaction's checkpoint timestamp; drives the limiter
+    /// advance and the withdrawal duration metrics.
     pub timestamp_ms: u64,
     pub changes: Vec<TxChange>,
 }
@@ -171,9 +170,6 @@ impl TxView {
 
 /// A side effect derived from a state transition during apply. The
 /// caller (the watcher) owns notifications, the limiter, and metrics.
-// The payloads are Debug-logged in shadow mode and consumed at cutover,
-// when effects replace the event handlers' side channels.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(super) enum Effect {
     /// A member's `MemberInfo` entry was written.
