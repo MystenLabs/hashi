@@ -7,6 +7,7 @@
 //! `withdraw::provisioner_init`.
 
 use crate::attestation::get_attestation;
+use crate::enclave::TemporaryInitState;
 use crate::s3_reader::BuildPolicy;
 use crate::s3_reader::GuardianReader;
 use crate::Enclave;
@@ -74,14 +75,9 @@ impl OIWithdrawModeInstall {
     /// Install the bundle onto a fresh enclave. Infallible by design (see the
     /// `operator_init` invariant): every set runs once on a fresh enclave.
     pub(crate) fn install_into(self, enclave: &Enclave) {
-        let network = self.init_config.network();
-        let hashi_btc_master_pubkey = self.init_config.hashi_btc_master_pubkey();
-
-        info!("Setting Bitcoin network to {:?}.", network);
-        enclave
-            .config
-            .set_bitcoin_network(network)
-            .expect("Unable to set network");
+        let config_hash = self.init_config.digest();
+        let (limiter_config, hashi_btc_master_pubkey, pcr_allowlist, network) =
+            self.init_config.into_parts();
 
         info!(
             "Setting secret-sharing instance: n={}, t={}, {} commitments.",
@@ -92,30 +88,29 @@ impl OIWithdrawModeInstall {
                 .commitments()
                 .len()
         );
-        enclave
-            .set_ceremony_state(self.ceremony_state)
-            .expect("Unable to set ceremony state");
-
-        if let Some(genesis_state) = self.genesis_state {
+        if let Some(genesis_state) = &self.genesis_state {
             info!(
                 genesis_state_hash = hex::encode(genesis_state.digest()),
                 "Storing genesis state."
             );
-            enclave
-                .set_genesis_state(genesis_state)
-                .expect("Unable to set genesis state");
         }
-
-        info!("Setting init config.");
         enclave
-            .set_init_config(self.init_config)
-            .expect("Unable to set init config");
+            .set_temporary_init_state(TemporaryInitState {
+                ceremony_state: self.ceremony_state,
+                genesis_state: self.genesis_state,
+                config_hash,
+            })
+            .expect("Unable to set temporary initialization state");
 
-        info!("Setting Hashi BTC master pubkey.");
+        info!(?network, "Setting enclave configuration.");
         enclave
-            .config
-            .set_hashi_btc_pk(hashi_btc_master_pubkey)
-            .expect("Unable to set hashi BTC master pubkey");
+            .install_config(
+                network,
+                hashi_btc_master_pubkey,
+                pcr_allowlist,
+                limiter_config,
+            )
+            .expect("Unable to set enclave configuration");
     }
 }
 
@@ -205,6 +200,9 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
     // 2) Share commitments help KPs confirm that the right private key will be constructed.
     // This pre-transition snapshot reports `Uninitialized`; successfully
     // writing it completes operator initialization.
+    // TODO(testnet-wipe): Replace the full GuardianInfo snapshot with a
+    // purpose-built OI payload containing only the data readers and KPs need;
+    // the evolving status response should not define the durable log schema.
     enclave
         .log_init(OIGuardianInfo(Box::new(enclave.info().await)))
         .await

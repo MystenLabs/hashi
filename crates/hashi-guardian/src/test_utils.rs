@@ -351,7 +351,7 @@ pub fn activate_enclave_for_testing(
     let rate_limiter = RateLimiter::new(limiter_config, limiter_state)?;
 
     enclave.state.init(committee, rate_limiter)?;
-    enclave.clear_initialization_state();
+    enclave.clear_temporary_init_state();
     enclave.advance_lifecycle_into(WithdrawStage::Activated.into())?;
     Ok(())
 }
@@ -376,6 +376,6 @@ pub async fn create_fully_initialized_enclave(args: FullyInitializedArgs) -> Arc
         .expect("activate_enclave_for_testing should succeed on a fresh enclave");
 
     assert!(enclave.is_fully_initialized());
-    assert!(enclave.secret_sharing_instance().is_err());
+    assert!(enclave.temporary_init_state().is_err());
     enclave
 }
