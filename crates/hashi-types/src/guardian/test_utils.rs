@@ -21,6 +21,7 @@ use super::NitroAttestation;
 use super::OperatorInitRequest;
 use super::PcrAllowlist;
 use super::ProvisionerInitRequest;
+use super::ProvisionerRotateCertResponse;
 use super::RotateKpsResponse;
 use super::S3BucketInfo;
 use super::S3Config;
@@ -176,6 +177,21 @@ impl GuardianSigned<RotateKpsResponse> {
         };
         let signing_kp = SigningKey::from([1u8; 32]);
         GuardianSigned::new(resp, &signing_kp, 0)
+    }
+}
+
+impl GuardianSigned<ProvisionerRotateCertResponse> {
+    pub fn mock_for_testing() -> Self {
+        let response = ProvisionerRotateCertResponse {
+            cert_seq: 7,
+            encrypted_shares: dummy_encrypted_shares()
+                .into_vec()
+                .into_iter()
+                .next()
+                .expect("dummy shares should be non-empty"),
+        };
+        let signing_key = SigningKey::from([1u8; 32]);
+        GuardianSigned::new(response, &signing_key, 0)
     }
 }
 

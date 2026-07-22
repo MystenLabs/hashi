@@ -21,11 +21,11 @@ use hpke::aead::AesGcm256;
 use hpke::kdf::HkdfSha384;
 use hpke::kem::X25519HkdfSha256;
 use k256::CompressedPoint;
-use k256::FieldBytes;
 use k256::ProjectivePoint;
 use k256::Scalar;
+use k256::Secp256k1;
 use k256::elliptic_curve::Field;
-use k256::elliptic_curve::PrimeField;
+use k256::elliptic_curve::ScalarPrimitive;
 use k256::elliptic_curve::group::GroupEncoding;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
@@ -390,6 +390,52 @@ impl KPEncryptedSharesRoster {
         })
     }
 
+    /// Replace one certificate-specific ciphertext while preserving every
+    /// other KP/share entry and revalidating global fingerprint uniqueness.
+    pub fn replace_recipient(
+        self,
+        current_fingerprint: &str,
+        new_fingerprint: KPFingerprint,
+        new_ciphertext: String,
+    ) -> GuardianResult<(Self, KPEncryptedShares)> {
+        if new_fingerprint == current_fingerprint {
+            return Err(InvalidInputs(format!(
+                "replacement KP fingerprint {new_fingerprint} must differ from the current \
+                 fingerprint"
+            )));
+        }
+        if self.find_by_fingerprint(&new_fingerprint).is_some() {
+            return Err(InvalidInputs(format!(
+                "new KP fingerprint {new_fingerprint} is already present in the encrypted share \
+                 roster"
+            )));
+        }
+
+        let mut shares = self.0;
+        let share = shares
+            .iter_mut()
+            .find(|share| {
+                share
+                    .ciphertexts_by_fingerprint
+                    .contains_key(current_fingerprint)
+            })
+            .ok_or_else(|| {
+                InvalidInputs(format!(
+                    "current KP fingerprint {current_fingerprint} is not present in the \
+                     encrypted share roster"
+                ))
+            })?;
+        share
+            .ciphertexts_by_fingerprint
+            .remove(current_fingerprint)
+            .expect("the current fingerprint was located in this entry");
+        share
+            .ciphertexts_by_fingerprint
+            .insert(new_fingerprint, new_ciphertext);
+        let changed_share = share.clone();
+        Ok((Self::new(shares)?, changed_share))
+    }
+
     /// Recipient PGP fingerprints grouped by share id.
     pub fn recipient_roster(&self) -> Vec<Vec<KPFingerprint>> {
         let mut grouped: Vec<Vec<KPFingerprint>> = Vec::with_capacity(self.share_count());
@@ -705,15 +751,13 @@ pub fn decrypt_share(
     aad: Option<&[u8; 32]>,
 ) -> GuardianResult<Share> {
     let serialized_share = decrypt(&encrypted_share.ciphertext, sk, aad)?;
-    let result: Option<Scalar> =
-        Scalar::from_repr(*FieldBytes::from_slice(&serialized_share)).into();
-    match result {
-        Some(x) => Ok(Share {
-            id: encrypted_share.id,
-            value: x,
-        }),
-        None => Err(InvalidInputs("Failed to deserialize share".into())),
-    }
+    let value = ScalarPrimitive::<Secp256k1>::from_slice(&serialized_share)
+        .map(Scalar::from)
+        .map_err(|_| InvalidInputs("Failed to deserialize share".into()))?;
+    Ok(Share {
+        id: encrypted_share.id,
+        value,
+    })
 }
 
 /// Decrypt each submission under optional `aad`, verify it against `commitments`,
@@ -773,6 +817,28 @@ mod tests {
             decrypt(&ciphertext, keypair.secret_key(), wrong_aad)
                 .is_err_and(|x| matches!(x, InvalidInputs(_)))
         );
+    }
+
+    #[test]
+    fn decrypt_share_rejects_wrong_plaintext_length() {
+        let keypair = GuardianEncKeyPair::random(&mut rand::thread_rng());
+        for len in [31, 33] {
+            let encrypted_share = GuardianEncryptedShare {
+                id: ShareID::new(1).unwrap(),
+                ciphertext: encrypt(
+                    &vec![0; len],
+                    keypair.public_key(),
+                    None,
+                    &mut rand::thread_rng(),
+                )
+                .unwrap(),
+            };
+
+            let Err(err) = decrypt_share(&encrypted_share, keypair.secret_key(), None) else {
+                panic!("{len}-byte plaintext must be rejected");
+            };
+            assert!(matches!(err, InvalidInputs(_)), "{err:?}");
+        }
     }
 
     // Verify secret reconstruction with varying number of shares (0 to n).
@@ -1053,6 +1119,45 @@ mod tests {
         ])
         .expect_err("ids [1, 2, 4] are not exactly 1..=n");
         assert!(format!("{err}").contains("share ids"), "{err}");
+    }
+
+    #[test]
+    fn kp_encrypted_shares_roster_replaces_one_recipient_and_preserves_the_rest() {
+        let shares = KPEncryptedSharesRoster::new(vec![
+            test_kp_encrypted_shares_for_fingerprints(1, vec!["a".into(), "b".into()]),
+            test_kp_encrypted_shares_for_fingerprints(2, vec!["c".into()]),
+        ])
+        .unwrap();
+
+        let (rotated, changed) = shares
+            .clone()
+            .replace_recipient("a", "d".into(), "new ciphertext".into())
+            .unwrap();
+        assert_eq!(changed.id.get(), 1);
+        assert_eq!(
+            changed
+                .ciphertexts_by_fingerprint
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["b", "d"]
+        );
+        assert_eq!(rotated.ciphertext_count(), 3);
+        assert!(rotated.find_by_fingerprint("a").is_none());
+        assert!(rotated.find_by_fingerprint("b").is_some());
+        assert!(rotated.find_by_fingerprint("c").is_some());
+        assert!(rotated.find_by_fingerprint("d").is_some());
+
+        let err = shares
+            .clone()
+            .replace_recipient("a", "c".into(), "collision".into())
+            .unwrap_err();
+        assert!(format!("{err}").contains("already present"), "{err}");
+
+        let err = shares
+            .replace_recipient("a", "a".into(), "same fingerprint".into())
+            .unwrap_err();
+        assert!(format!("{err}").contains("must differ"), "{err}");
     }
 
     #[test]

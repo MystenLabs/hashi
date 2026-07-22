@@ -1,19 +1,20 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared KP-roster config + ceremony-state verification, used by both the
-//! `key-provisioner ceremony` and `key-provisioner provision` commands.
+//! Shared KP-roster config and ceremony-state verification for key-provisioner
+//! commands.
 //!
-//! Both commands need to:
+//! These commands need to:
 //! - load a roster of KP OpenPGP certs
 //! - discover the latest attested ceremony from S3
 //! - validate the ceremony's `secret_sharing_instance` against expected params
 //! - confirm every PGP-encrypted share in `kp-shares/` matches the
 //!   expected certificates for that KP/share id (without decrypting)
 //!
-//! `ceremony` decrypts every copy in this KP's roster entry, while `provision`
-//! decrypts only the copy selected by `kp_pgp_cert_path`. The decryption helper
-//! lives here so both commands share the same gpg-streaming pattern.
+//! `ceremony` decrypts every copy in this KP's roster entry. `provision` and
+//! `rotate-cert` decrypt only the copy selected by `kp_pgp_cert_path`. The
+//! decryption helper lives here so all commands share the same gpg-streaming
+//! pattern.
 
 use std::ops::Deref;
 use std::path::Path;

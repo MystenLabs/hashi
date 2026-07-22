@@ -15,6 +15,7 @@ cargo run -p hashi-guardian-init -- key-provisioner ceremony --config guardian-i
 cargo run -p hashi-guardian-init -- operator provision --config guardian-init.sample.yaml
 cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-init.sample.yaml
 cargo run -p hashi-guardian-init -- operator activate --config guardian-init.sample.yaml
+cargo run -p hashi-guardian-init -- key-provisioner rotate-cert --config guardian-init.sample.yaml --target-kp-pgp-fingerprint 0123456789ABCDEF0123456789ABCDEF01234567 --new-kp-pgp-cert-path /path/to/kp3-new.asc
 ```
 
 Each KP generates one or more PGP keys on yubikeys and exports the public certs
@@ -163,6 +164,41 @@ See [`guardian-init.sample.yaml`](guardian-init.sample.yaml) for the unified
 config. This command uses `kp_pgp_cert_path`, `relay_endpoint`, `hashi`,
 `kp_roster`, and `limiter_config`. The MPC committee verifying key `G` is fetched
 from on-chain Hashi state.
+
+## key-provisioner rotate-cert
+
+Replaces one OpenPGP cert in this KP's roster entry for the active guardian
+without changing the BTC key, sharing instance, threshold, share id, or any of
+the KP's other certificates.
+
+It:
+
+1. Loads the signing cert from `kp_pgp_cert_path` and the current roster from
+   `kp_roster`. The signing cert and target fingerprint must belong to the same
+   KP/share entry. They may identify the same cert for a planned rotation or
+   different certs when replacing a lost YubiKey. The replacement cert must not
+   collide with another roster fingerprint.
+2. Fetches and verifies the active guardian's `GuardianInfo` through
+   `relay_endpoint`, then requires its BTC public key to match the latest
+   attested `ceremony/` log and uses that log's sharing instance.
+3. Reads and verifies the latest `kp-shares/{sharing_seq}/` state against the
+   current roster, decrypts the signing cert's copy, and verifies the share
+   commitment.
+4. HPKE-encrypts the same share to the guardian, signs the request with the
+   signing cert, binds the target fingerprint and observed `cert_seq` to reject
+   stale updates, and calls `ProvisionerRotateCert` through the relay.
+5. Verifies the guardian-signed response and the next `kp-shares/` snapshot,
+   including that only the targeted certificate ciphertext changed.
+
+```bash
+cargo run -p hashi-guardian-init -- key-provisioner rotate-cert \
+  --config guardian-init.sample.yaml \
+  --target-kp-pgp-fingerprint 0123456789ABCDEF0123456789ABCDEF01234567 \
+  --new-kp-pgp-cert-path /path/to/kp3-new.asc
+```
+
+After success, replace the path matching the target fingerprint with the new
+path in `kp_roster`. If `kp_pgp_cert_path` names the target cert, update it too.
 
 ## operator activate
 

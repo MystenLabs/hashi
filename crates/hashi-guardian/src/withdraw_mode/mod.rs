@@ -10,6 +10,7 @@ pub mod committee_update;
 pub mod genesis;
 pub mod heartbeat;
 pub mod provisioner_init;
+pub mod provisioner_rotate_cert;
 pub mod standard_withdrawal;
 
 use hashi_types::guardian::GuardianError::InvalidInputs;

@@ -36,6 +36,8 @@ use super::OperatorInitRequest;
 use super::OperatorWriteGenesisRequest;
 use super::PcrAllowlist;
 use super::ProvisionerInitRequest;
+use super::ProvisionerRotateCertRequest;
+use super::ProvisionerRotateCertResponse;
 use super::RotateKpsRequest;
 use super::RotateKpsResponse;
 use super::RotateKpsState;
@@ -279,6 +281,50 @@ impl TryFrom<pb::SignedSingleProvisionerInitRequest> for KpSigned<SingleProvisio
     }
 }
 
+impl TryFrom<pb::SignedProvisionerRotateCertRequest> for KpSigned<ProvisionerRotateCertRequest> {
+    type Error = GuardianError;
+
+    fn try_from(req: pb::SignedProvisionerRotateCertRequest) -> Result<Self, Self::Error> {
+        if req.new_kp_pgp_cert.is_empty() {
+            return Err(missing("new_kp_pgp_cert"));
+        }
+        if req.expected_session_id.is_empty() {
+            return Err(missing("expected_session_id"));
+        }
+        if req.target_kp_pgp_fingerprint.is_empty() {
+            return Err(missing("target_kp_pgp_fingerprint"));
+        }
+        if req.signer_cert.is_empty() {
+            return Err(missing("signer_cert"));
+        }
+        if req.kp_signature.is_empty() {
+            return Err(missing("kp_signature"));
+        }
+
+        let new_kp_pgp_cert = PgpPublicCert::new(req.new_kp_pgp_cert)
+            .map_err(|e| InvalidInputs(format!("invalid new_kp_pgp_cert: {e}")))?;
+        let encrypted_share = pb_to_guardian_encrypted_share(
+            req.encrypted_share
+                .ok_or_else(|| missing("encrypted_share"))?,
+        )?;
+        let signer_cert =
+            PgpPublicCert::new(req.signer_cert).map_err(|e| InvalidInputs(e.to_string()))?;
+        let request = ProvisionerRotateCertRequest::from_encrypted_share(
+            req.expected_session_id.into(),
+            req.expected_cert_seq
+                .ok_or_else(|| missing("expected_cert_seq"))?,
+            req.target_kp_pgp_fingerprint,
+            new_kp_pgp_cert,
+            encrypted_share,
+        );
+        Ok(KpSigned {
+            data: request,
+            signer_cert,
+            signature: req.kp_signature,
+        })
+    }
+}
+
 impl TryFrom<pb::RotateKpsRequest> for RotateKpsRequest {
     type Error = GuardianError;
 
@@ -337,6 +383,32 @@ impl TryFrom<pb::SignedRotateKpsResponse> for GuardianSigned<RotateKpsResponse> 
 
         Ok(GuardianSigned {
             data: RotateKpsResponse { encrypted_shares },
+            timestamp_ms,
+            signature,
+        })
+    }
+}
+
+impl TryFrom<pb::SignedProvisionerRotateCertResponse>
+    for GuardianSigned<ProvisionerRotateCertResponse>
+{
+    type Error = GuardianError;
+
+    fn try_from(resp: pb::SignedProvisionerRotateCertResponse) -> Result<Self, Self::Error> {
+        let signature_bytes = resp.signature.ok_or_else(|| missing("signature"))?;
+        let signature = GuardianSignature::try_from(signature_bytes.as_ref())
+            .map_err(|e| InvalidInputs(format!("invalid signature: {e}")))?;
+        let timestamp_ms = resp.timestamp_ms.ok_or_else(|| missing("timestamp_ms"))?;
+        let encrypted_shares = pb_to_kp_encrypted_shares(
+            resp.encrypted_shares
+                .ok_or_else(|| missing("encrypted_shares"))?,
+        )?;
+
+        Ok(GuardianSigned {
+            data: ProvisionerRotateCertResponse {
+                cert_seq: resp.cert_seq.ok_or_else(|| missing("cert_seq"))?,
+                encrypted_shares,
+            },
             timestamp_ms,
             signature,
         })
@@ -534,6 +606,17 @@ pub fn rotate_kps_response_signed_to_pb(
     }
 }
 
+pub fn provisioner_rotate_cert_response_signed_to_pb(
+    s: GuardianSigned<ProvisionerRotateCertResponse>,
+) -> pb::SignedProvisionerRotateCertResponse {
+    pb::SignedProvisionerRotateCertResponse {
+        cert_seq: Some(s.data.cert_seq),
+        encrypted_shares: Some(kp_encrypted_shares_to_pb(s.data.encrypted_shares)),
+        timestamp_ms: Some(s.timestamp_ms),
+        signature: Some(s.signature.to_bytes().to_vec().into()),
+    }
+}
+
 pub fn setup_new_key_request_to_pb(s: SetupNewKeyRequest) -> pb::SetupNewKeyRequest {
     pb::SetupNewKeyRequest {
         key_provisioner_pgp_cert_sets: s
@@ -598,6 +681,32 @@ impl From<KpSigned<SingleProvisionerInitRequest>> for pb::SignedSingleProvisione
             signer_cert: signer_cert.armored().to_string(),
             kp_signature: signature,
             expected_config_hash: Some(expected_config_hash.to_vec().into()),
+        }
+    }
+}
+
+impl From<KpSigned<ProvisionerRotateCertRequest>> for pb::SignedProvisionerRotateCertRequest {
+    fn from(r: KpSigned<ProvisionerRotateCertRequest>) -> Self {
+        let KpSigned {
+            data: request,
+            signer_cert,
+            signature,
+        } = r;
+        let (
+            expected_session_id,
+            expected_cert_seq,
+            target_kp_pgp_fingerprint,
+            new_kp_pgp_cert,
+            encrypted_share,
+        ) = request.into_parts();
+        Self {
+            new_kp_pgp_cert: new_kp_pgp_cert.armored().to_string(),
+            encrypted_share: Some(guardian_encrypted_share_to_pb(encrypted_share)),
+            expected_session_id: expected_session_id.into(),
+            signer_cert: signer_cert.armored().to_string(),
+            kp_signature: signature,
+            expected_cert_seq: Some(expected_cert_seq),
+            target_kp_pgp_fingerprint,
         }
     }
 }
@@ -1404,6 +1513,14 @@ mod tests {
         let pb = rotate_kps_response_signed_to_pb(resp.clone());
         let back = GuardianSigned::<RotateKpsResponse>::try_from(pb).unwrap();
         assert_eq!(resp, back);
+    }
+
+    #[test]
+    fn signed_provisioner_rotate_cert_response_round_trip() {
+        let response = GuardianSigned::<ProvisionerRotateCertResponse>::mock_for_testing();
+        let pb = provisioner_rotate_cert_response_signed_to_pb(response.clone());
+        let round_trip = GuardianSigned::<ProvisionerRotateCertResponse>::try_from(pb).unwrap();
+        assert_eq!(response, round_trip);
     }
 
     #[test]

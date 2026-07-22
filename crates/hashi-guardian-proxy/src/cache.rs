@@ -343,6 +343,13 @@ where
         self.inner.provisioner_init(request).await
     }
 
+    async fn provisioner_rotate_cert(
+        &self,
+        request: Request<proto::SignedProvisionerRotateCertRequest>,
+    ) -> Result<Response<proto::SignedProvisionerRotateCertResponse>, Status> {
+        self.inner.provisioner_rotate_cert(request).await
+    }
+
     async fn operator_activate(
         &self,
         request: Request<proto::OperatorActivateRequest>,
@@ -496,6 +503,12 @@ mod tests {
             &self,
             _: Request<proto::ProvisionerInitRequest>,
         ) -> Result<Response<proto::ProvisionerInitResponse>, Status> {
+            unimplemented!("not exercised by tests")
+        }
+        async fn provisioner_rotate_cert(
+            &self,
+            _: Request<proto::SignedProvisionerRotateCertRequest>,
+        ) -> Result<Response<proto::SignedProvisionerRotateCertResponse>, Status> {
             unimplemented!("not exercised by tests")
         }
         async fn operator_activate(

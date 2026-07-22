@@ -2012,6 +2012,48 @@ pub struct LimiterConfig {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProvisionerInitResponse {}
+/// Replace one certificate in a KP roster entry. This does not change the BTC
+/// key, sharing instance, commitments, share ids, or threshold.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignedProvisionerRotateCertRequest {
+    /// Armored replacement cert.
+    #[prost(string, tag = "1")]
+    pub new_kp_pgp_cert: ::prost::alloc::string::String,
+    /// The same plaintext share, HPKE-encrypted to the guardian.
+    #[prost(message, optional, tag = "2")]
+    pub encrypted_share: ::core::option::Option<GuardianEncryptedShare>,
+    /// The guardian session id the KP pinned before encrypting the share.
+    #[prost(string, tag = "3")]
+    pub expected_session_id: ::prost::alloc::string::String,
+    /// Armored authorizing KP cert and detached signature over the intent-tagged
+    /// ProvisionerRotateCertRequest payload.
+    #[prost(string, tag = "4")]
+    pub signer_cert: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub kp_signature: ::prost::alloc::string::String,
+    /// Latest kp-shares cert_seq observed and authorized by the caller.
+    #[prost(uint64, optional, tag = "6")]
+    pub expected_cert_seq: ::core::option::Option<u64>,
+    /// Fingerprint of the current cert to replace. The signing cert may be this
+    /// cert or another cert assigned to the same KP/share entry.
+    #[prost(string, tag = "7")]
+    pub target_kp_pgp_fingerprint: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SignedProvisionerRotateCertResponse {
+    /// New cert_seq written under kp-shares/{sharing_seq}/.
+    #[prost(uint64, optional, tag = "1")]
+    pub cert_seq: ::core::option::Option<u64>,
+    /// The changed KP entry after replacing one certificate ciphertext.
+    #[prost(message, optional, tag = "2")]
+    pub encrypted_shares: ::core::option::Option<SingleKpEncryptedShares>,
+    /// Milliseconds since Unix epoch.
+    #[prost(uint64, optional, tag = "3")]
+    pub timestamp_ms: ::core::option::Option<u64>,
+    /// Signature over (intent || data || timestamp).
+    #[prost(bytes = "bytes", optional, tag = "4")]
+    pub signature: ::core::option::Option<::prost::bytes::Bytes>,
+}
 /// Assembled by the operator from the current KPs' encrypted old shares plus the
 /// shared rotation target. Each old share binds the same state digest as HPKE
 /// AAD, so the enclave only decrypts submissions that agree on the target.
@@ -2487,6 +2529,36 @@ pub mod guardian_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        /// KP-facing: replace one OpenPGP cert wrapping an already-committed share.
+        pub async fn provisioner_rotate_cert(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SignedProvisionerRotateCertRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignedProvisionerRotateCertResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.GuardianService/ProvisionerRotateCert",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.GuardianService",
+                        "ProvisionerRotateCert",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         /// Operator activation: derive live serving state and make an armed standby active.
         pub async fn operator_activate(
             &mut self,
@@ -2672,6 +2744,14 @@ pub mod guardian_service_server {
             request: tonic::Request<super::ProvisionerInitRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ProvisionerInitResponse>,
+            tonic::Status,
+        >;
+        /// KP-facing: replace one OpenPGP cert wrapping an already-committed share.
+        async fn provisioner_rotate_cert(
+            &self,
+            request: tonic::Request<super::SignedProvisionerRotateCertRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignedProvisionerRotateCertResponse>,
             tonic::Status,
         >;
         /// Operator activation: derive live serving state and make an armed standby active.
@@ -3044,6 +3124,58 @@ pub mod guardian_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = ProvisionerInitSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.GuardianService/ProvisionerRotateCert" => {
+                    #[allow(non_camel_case_types)]
+                    struct ProvisionerRotateCertSvc<T: GuardianService>(pub Arc<T>);
+                    impl<
+                        T: GuardianService,
+                    > tonic::server::UnaryService<
+                        super::SignedProvisionerRotateCertRequest,
+                    > for ProvisionerRotateCertSvc<T> {
+                        type Response = super::SignedProvisionerRotateCertResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::SignedProvisionerRotateCertRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as GuardianService>::provisioner_rotate_cert(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ProvisionerRotateCertSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

@@ -39,6 +39,8 @@ pub struct Enclave {
     init_state: InitializationState,
     /// Serializes lifecycle and control-plane transitions so concurrent callers
     /// cannot race a check-then-set. Held across each handler.
+    /// TODO: Ensure this lock is not released if the RPC is cancelled while a
+    /// detached state mutation is still being persisted.
     pub control_lock: tokio::sync::Mutex<()>,
 }
 
@@ -597,6 +599,9 @@ impl Enclave {
     // Initialization state
     // ========================================================================
 
+    // TODO: This accessor is valid only before operator activation. Activation
+    // clears `ceremony_state`, so calls in the Activated lifecycle always fail.
+    // Remove it when lifecycle-specific state owns the initialization data.
     pub fn secret_sharing_instance(&self) -> GuardianResult<SecretSharingInstance> {
         Ok(self.ceremony_state()?.secret_sharing_instance)
     }

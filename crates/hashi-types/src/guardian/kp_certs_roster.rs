@@ -69,6 +69,34 @@ impl KpCerts {
             .map(|cert| cert.fingerprint().to_hex())
             .collect()
     }
+
+    /// Replace one certificate identified by its current primary-key
+    /// fingerprint, then revalidate and canonicalize this KP's certificate set.
+    pub fn replace_cert(
+        self,
+        current_fingerprint: &Fingerprint,
+        new_cert: PgpPublicCert,
+    ) -> GuardianResult<Self> {
+        let mut pgp_certs = self.0;
+        let cert = pgp_certs
+            .iter_mut()
+            .find(|cert| cert.fingerprint() == *current_fingerprint)
+            .ok_or_else(|| {
+                InvalidInputs(format!(
+                    "OpenPGP certificate fingerprint {current_fingerprint} is not in this KP \
+                    certificate set"
+                ))
+            })?;
+        let new_fingerprint = new_cert.fingerprint();
+        if new_fingerprint == *current_fingerprint {
+            return Err(InvalidInputs(format!(
+                "replacement OpenPGP certificate fingerprint {new_fingerprint} must differ from \
+                 the current fingerprint"
+            )));
+        }
+        *cert = new_cert;
+        Self::new(pgp_certs)
+    }
 }
 
 impl KpCertsRoster {
@@ -116,6 +144,32 @@ impl KpCertsRoster {
     pub fn into_vec(self) -> Vec<KpCerts> {
         self.0
     }
+
+    /// Replace one certificate in the roster while preserving the KP/share
+    /// ordering and global fingerprint-uniqueness invariant.
+    pub fn replace_cert(
+        self,
+        current_fingerprint: &Fingerprint,
+        new_cert: PgpPublicCert,
+    ) -> GuardianResult<Self> {
+        let mut kp_certs = self.0;
+        let certs = kp_certs
+            .iter_mut()
+            .find(|certs| {
+                certs
+                    .pgp_certs()
+                    .iter()
+                    .any(|cert| cert.fingerprint() == *current_fingerprint)
+            })
+            .ok_or_else(|| {
+                InvalidInputs(format!(
+                    "OpenPGP certificate fingerprint {current_fingerprint} is not in the KP \
+                     certificate roster"
+                ))
+            })?;
+        *certs = certs.clone().replace_cert(current_fingerprint, new_cert)?;
+        Self::new(kp_certs)
+    }
 }
 
 #[cfg(test)]
@@ -126,6 +180,43 @@ mod tests {
     fn cert() -> PgpPublicCert {
         let (public, _) = mock_pgp_keypair();
         PgpPublicCert::new(public).unwrap()
+    }
+
+    #[test]
+    fn replace_cert_preserves_kp_grouping_and_rejects_fingerprint_collisions() {
+        let old = cert();
+        let sibling = cert();
+        let other_kp = cert();
+        let replacement = cert();
+        let roster = KpCertsRoster::new(vec![
+            KpCerts::new(vec![old.clone(), sibling.clone()]).unwrap(),
+            KpCerts::new(vec![other_kp.clone()]).unwrap(),
+        ])
+        .unwrap();
+
+        let rotated = roster
+            .clone()
+            .replace_cert(&old.fingerprint(), replacement.clone())
+            .unwrap();
+        assert_eq!(rotated.num_kps(), 2);
+        assert_eq!(
+            rotated.fingerprints(),
+            vec![
+                KpCerts::new(vec![sibling.clone(), replacement])
+                    .unwrap()
+                    .fingerprints(),
+                vec![other_kp.fingerprint().to_hex()],
+            ]
+        );
+
+        let err = roster
+            .clone()
+            .replace_cert(&old.fingerprint(), sibling)
+            .unwrap_err();
+        assert!(format!("{err}").contains("duplicate"), "{err}");
+
+        let err = roster.replace_cert(&old.fingerprint(), old).unwrap_err();
+        assert!(format!("{err}").contains("must differ"), "{err}");
     }
 
     #[test]
