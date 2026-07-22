@@ -12,9 +12,8 @@ use crate::withdraw_mode::provisioner_rotate_cert;
 use crate::withdraw_mode::standard_withdrawal;
 use crate::Enclave;
 use hashi_types::guardian::proto_conversions;
-use hashi_types::guardian::proto_conversions::pb_to_signed_committee_transition;
-use hashi_types::guardian::proto_conversions::pb_to_signed_standard_withdrawal_request_wire;
 use hashi_types::guardian::AddressValidation;
+use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::*;
 use hashi_types::guardian::HashiSigned;
@@ -24,6 +23,7 @@ use hashi_types::guardian::OperatorInitRequest;
 use hashi_types::guardian::ProvisionerRotateCertRequest;
 use hashi_types::guardian::RotateKpsRequest;
 use hashi_types::guardian::SetupNewKeyRequest;
+use hashi_types::guardian::SignedStandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::proto;
 use std::sync::Arc;
@@ -154,7 +154,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         request: Request<proto::SignedStandardWithdrawalRequest>,
     ) -> Result<Response<proto::SignedStandardWithdrawalResponse>, Status> {
         // proto to domain
-        let domain_req = pb_to_signed_standard_withdrawal_request_wire(request.into_inner())
+        let domain_req = SignedStandardWithdrawalRequestWire::try_from(request.into_inner())
             .map_err(to_status)?;
 
         // validate address with network
@@ -178,7 +178,8 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         &self,
         request: Request<proto::SignedCommitteeTransition>,
     ) -> Result<Response<proto::UpdateCommitteeResponse>, Status> {
-        let signed = pb_to_signed_committee_transition(request.into_inner()).map_err(to_status)?;
+        let signed = HashiSigned::<CommitteeTransitionRequest>::try_from(request.into_inner())
+            .map_err(to_status)?;
         let current_committee_epoch =
             committee_update::update_committee(self.enclave.clone(), signed)
                 .await
@@ -197,7 +198,7 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
             .into_inner()
             .transitions
             .into_iter()
-            .map(pb_to_signed_committee_transition)
+            .map(HashiSigned::<CommitteeTransitionRequest>::try_from)
             .collect::<Result<Vec<_>, _>>()
             .map_err(to_status)?;
         let current_committee_epoch =

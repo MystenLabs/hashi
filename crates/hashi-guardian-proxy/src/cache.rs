@@ -35,11 +35,11 @@ use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::bitcoin::BitcoinSignature;
 use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::bitcoin::BTC_LIB;
-use hashi_types::guardian::proto_conversions::pb_to_signed_standard_withdrawal_request_wire;
 use hashi_types::guardian::AddressValidation;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::HashiSigned;
+use hashi_types::guardian::SignedStandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::proto;
@@ -252,7 +252,7 @@ fn verify_recorded_signatures(
     master_g: &HashiMasterG,
     network: Network,
 ) -> anyhow::Result<()> {
-    let wire = pb_to_signed_standard_withdrawal_request_wire(request.clone())
+    let wire = SignedStandardWithdrawalRequestWire::try_from(request.clone())
         .map_err(|e| anyhow::anyhow!("parse request: {e:?}"))?;
     let signed = HashiSigned::<StandardWithdrawalRequest>::validate_addr(wire, network)
         .map_err(|e| anyhow::anyhow!("validate request: {e:?}"))?;
