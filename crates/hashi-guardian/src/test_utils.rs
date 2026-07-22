@@ -12,7 +12,19 @@ use bitcoin::Network;
 use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::guardian::*;
+#[cfg(test)]
+use hashi_types::pgp::decrypt_with_secret_key;
+#[cfg(test)]
+use hashi_types::pgp::PgpPublicCert;
+#[cfg(test)]
+use k256::elliptic_curve::ScalarPrimitive;
+#[cfg(test)]
+use k256::Secp256k1 as K256Secp256k1;
 use rand::RngCore;
+#[cfg(test)]
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::io::Read;
 use std::num::NonZeroU16;
 use std::sync::Arc;
 
@@ -33,14 +45,83 @@ pub fn mock_logger() -> GuardianS3Client {
 /// Captured `(key, body)` pairs from a `mock_logger_capturing()` logger.
 pub type CapturedPuts = Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
 
+/// Mock OpenPGP secret keys keyed by the corresponding public-cert fingerprint.
+#[cfg(test)]
+pub(crate) type MockKpSecretKeys = BTreeMap<String, String>;
+
+/// Build a one-certificate-per-KP roster while retaining the matching secret
+/// keys so tests can prove the returned armored shares are decryptable.
+#[cfg(test)]
+pub(crate) fn mock_kp_certs_roster_with_secrets(
+    num_kps: usize,
+) -> (KpCertsRoster, MockKpSecretKeys) {
+    let mut secret_keys = MockKpSecretKeys::new();
+    let cert_sets = (0..num_kps)
+        .map(|_| {
+            let (public, secret) = hashi_types::pgp::test_utils::mock_pgp_keypair();
+            let cert = PgpPublicCert::new(public).expect("mock public cert should parse");
+            let fingerprint = cert.fingerprint().to_hex();
+            assert!(
+                secret_keys.insert(fingerprint, secret).is_none(),
+                "mock PGP fingerprints should be unique"
+            );
+            KpCerts::new(vec![cert]).expect("one mock cert forms a valid KP cert set")
+        })
+        .collect();
+    (
+        KpCertsRoster::new(cert_sets).expect("mock cert sets form a valid roster"),
+        secret_keys,
+    )
+}
+
+/// Decrypt every ciphertext in a KP-share roster and return one share per ID.
+/// If a share has multiple recipient certs, all ciphertexts must decrypt to the
+/// same scalar.
+#[cfg(test)]
+pub(crate) fn decrypt_kp_shares(
+    encrypted_shares: &KPEncryptedSharesRoster,
+    secret_keys: &MockKpSecretKeys,
+) -> Vec<Share> {
+    encrypted_shares
+        .iter()
+        .map(|encrypted_share| {
+            let mut share_value = None;
+            for (fingerprint, ciphertext) in &encrypted_share.ciphertexts_by_fingerprint {
+                let secret_key = secret_keys
+                    .get(fingerprint)
+                    .expect("every ciphertext should have a matching mock secret key");
+                let mut decryptor = decrypt_with_secret_key(
+                    std::io::Cursor::new(ciphertext.clone().into_bytes()),
+                    secret_key.as_bytes(),
+                )
+                .expect("mock KP should decrypt its armored share");
+                let mut plaintext = Vec::new();
+                decryptor
+                    .read_to_end(&mut plaintext)
+                    .expect("decrypted share should be readable");
+                let value = ScalarPrimitive::<K256Secp256k1>::from_slice(&plaintext)
+                    .map(k256::Scalar::from)
+                    .expect("decrypted share should be a valid scalar");
+                if let Some(expected) = share_value {
+                    assert_eq!(
+                        value, expected,
+                        "all recipients must receive the same share"
+                    );
+                } else {
+                    share_value = Some(value);
+                }
+            }
+            Share {
+                id: encrypted_share.id,
+                value: share_value.expect("each encrypted share should have a recipient"),
+            }
+        })
+        .collect()
+}
+
 /// Mock S3 logger that captures every PutObject's (key, body) into the returned
 /// Vec. Lets tests assert on what was written. Body is captured via `match_requests`
 /// (same Mutex side-channel trick as `mock_logger_with_layout`).
-///
-/// TODO: retrofit `setup_new_key`, `operator_init`/`provisioner_init`,
-/// `withdraw`, and `heartbeat` tests to use this — they currently rely on
-/// in-process side effects and the response payload, leaving the on-S3 log
-/// shape unverified.
 pub fn mock_logger_capturing() -> (GuardianS3Client, CapturedPuts) {
     use aws_sdk_s3::operation::put_object::PutObjectOutput;
     use aws_sdk_s3::Client;

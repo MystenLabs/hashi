@@ -97,7 +97,9 @@ pub async fn setup_new_key(
 mod tests {
     use super::*;
     use crate::mock_logger_capturing;
-    use hashi_types::guardian::test_utils::mock_kp_certs_roster;
+    use crate::test_utils::decrypt_kp_shares;
+    use crate::test_utils::mock_kp_certs_roster_with_secrets;
+    use hashi_types::guardian::crypto::combine_shares;
     use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::VersionedLogMessage;
@@ -105,8 +107,12 @@ mod tests {
     const TEST_N: usize = 5;
     const TEST_T: usize = 3;
 
-    fn mock_setup_new_key_request() -> SetupNewKeyRequest {
-        SetupNewKeyRequest::new(mock_kp_certs_roster(TEST_N), TEST_N, TEST_T).unwrap()
+    fn mock_setup_new_key_request() -> (SetupNewKeyRequest, crate::test_utils::MockKpSecretKeys) {
+        let (roster, secret_keys) = mock_kp_certs_roster_with_secrets(TEST_N);
+        (
+            SetupNewKeyRequest::new(roster, TEST_N, TEST_T).unwrap(),
+            secret_keys,
+        )
     }
 
     #[tokio::test]
@@ -114,7 +120,7 @@ mod tests {
         let (logger, captures) = mock_logger_capturing();
         let enclave = Enclave::create_operator_initialized_ceremony(logger);
         let verification_key = &enclave.signing_pubkey();
-        let request = mock_setup_new_key_request();
+        let (request, secret_keys) = mock_setup_new_key_request();
         let resp = setup_new_key(enclave.clone(), request).await.unwrap();
         let validated_resp = resp.verify(verification_key).unwrap();
         assert_eq!(enclave.lifecycle(), CeremonyStage::Completed.into());
@@ -128,11 +134,20 @@ mod tests {
             validated_resp.secret_sharing_instance.commitments().len(),
             TEST_N
         );
-        for enc_share in validated_resp.encrypted_shares.iter() {
-            for ciphertext in enc_share.ciphertexts_by_fingerprint.values() {
-                assert!(ciphertext.starts_with("-----BEGIN PGP MESSAGE-----"));
-            }
+        let decrypted_shares = decrypt_kp_shares(&validated_resp.encrypted_shares, &secret_keys);
+        for share in &decrypted_shares {
+            validated_resp
+                .secret_sharing_instance
+                .commitments()
+                .verify_share(share)
+                .expect("decrypted setup share should match its commitment");
         }
+        let reconstructed = combine_shares(&decrypted_shares[..TEST_T], TEST_T).unwrap();
+        assert_eq!(
+            k256_sk_to_btc_xonly_pubkey(&reconstructed),
+            validated_resp.btc_master_pubkey,
+            "threshold decrypted setup shares should reconstruct the ceremony key"
+        );
 
         // The ceremony log records the instance only — no ciphertexts.
         let captured = captures.lock().unwrap();

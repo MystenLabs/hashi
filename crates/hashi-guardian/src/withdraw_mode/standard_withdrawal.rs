@@ -180,7 +180,10 @@ mod tests {
     use hashi_types::guardian::InitConfig;
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
+    use hashi_types::guardian::LogMessage;
+    use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::StandardWithdrawalRequest;
+    use hashi_types::guardian::VersionedLogMessage;
     use hashi_types::guardian::WithdrawStage;
 
     /// Sets up an enclave with a single committee and token bucket limiter.
@@ -188,7 +191,7 @@ mod tests {
         network: Network,
         committee: HashiCommittee,
         max_bucket_capacity_sats: u64,
-    ) -> Arc<Enclave> {
+    ) -> (Arc<Enclave>, crate::test_utils::CapturedPuts) {
         let hashi_kp = create_btc_keypair_for_test(&[6u8; 32]);
         let hashi_btc_master_pubkey =
             hashi_master_g_from_btc_xonly_for_test(&hashi_kp.x_only_public_key().0);
@@ -204,8 +207,11 @@ mod tests {
 
         // operator_init installs standby config; test activation installs the
         // committee and limiter before withdrawals.
+        let (logger, captures) = crate::test_utils::mock_logger_capturing();
         let enclave = Enclave::create_operator_initialized_with(
-            OperatorInitTestArgs::default().with_config(config),
+            OperatorInitTestArgs::default()
+                .with_s3_logger(logger)
+                .with_config(config),
         )
         .await;
 
@@ -222,7 +228,7 @@ mod tests {
             .expect("activate_enclave_for_testing should succeed on a fresh enclave");
 
         assert!(enclave.is_fully_initialized());
-        enclave
+        (enclave, captures)
     }
 
     #[tokio::test]
@@ -243,7 +249,7 @@ mod tests {
             .gross_outflow_amount()
             .to_sat();
         // Set request amount as the max bucket capacity
-        let enclave =
+        let (enclave, _captures) =
             setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
 
         let result = normal_withdrawal_inner(enclave, signed_request).await;
@@ -260,7 +266,7 @@ mod tests {
         );
         let amount_sats = req1.message().utxos().gross_outflow_amount().to_sat();
         // Bucket capacity == one withdrawal, so second will be rejected.
-        let enclave =
+        let (enclave, captures) =
             setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
 
         let first = standard_withdrawal(enclave.clone(), req1).await;
@@ -278,5 +284,44 @@ mod tests {
             second.unwrap_err(),
             GuardianError::RateLimitExceeded
         ));
+
+        let captured = captures.lock().unwrap();
+        assert_eq!(
+            captured.len(),
+            2,
+            "both withdrawal outcomes should be logged"
+        );
+        let success: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
+        assert_eq!(captured[0].0, success.object_key());
+        let VersionedLogMessage::V2(LogMessage::Withdrawal(message)) = success.message else {
+            panic!("expected V2 withdrawal record");
+        };
+        let WithdrawalLogMessage::Success {
+            request_data,
+            post_state,
+            ..
+        } = *message
+        else {
+            panic!("expected successful withdrawal record");
+        };
+        assert_eq!(request_data.seq, 0);
+        assert_eq!(post_state.next_seq, 1);
+        assert_eq!(post_state.num_tokens_available, 0);
+
+        let failure: LogRecord = serde_json::from_slice(&captured[1].1).unwrap();
+        assert_eq!(captured[1].0, failure.object_key());
+        let VersionedLogMessage::V2(LogMessage::Withdrawal(message)) = failure.message else {
+            panic!("expected V2 withdrawal record");
+        };
+        let WithdrawalLogMessage::Failure {
+            request_data,
+            error,
+            ..
+        } = *message
+        else {
+            panic!("expected failed withdrawal record");
+        };
+        assert_eq!(request_data.seq, 1);
+        assert_eq!(error, GuardianError::RateLimitExceeded);
     }
 }

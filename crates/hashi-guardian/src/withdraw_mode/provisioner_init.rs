@@ -219,6 +219,7 @@ mod tests {
     struct TestContext {
         shares: Vec<Share>,
         enclave: Arc<Enclave>,
+        captures: crate::test_utils::CapturedPuts,
         kp_keys: Vec<(PgpPublicCert, String)>,
         alternate_first_kp_key: (PgpPublicCert, String),
     }
@@ -264,8 +265,10 @@ mod tests {
                 .collect(),
         )
         .unwrap();
+        let (logger, captures) = crate::test_utils::mock_logger_capturing();
         let enclave = Enclave::create_operator_initialized_with(
             OperatorInitTestArgs::default()
+                .with_s3_logger(logger)
                 .with_commitments(share_commitments)
                 .with_kp_encrypted_shares(kp_encrypted_shares),
         )
@@ -273,6 +276,7 @@ mod tests {
         TestContext {
             shares,
             enclave,
+            captures,
             kp_keys,
             alternate_first_kp_key,
         }
@@ -407,6 +411,41 @@ mod tests {
             "provisioner init complete"
         );
         assert!(!ctx.enclave.is_fully_initialized(), "not active before OA");
+
+        let captured = ctx.captures.lock().unwrap();
+        assert_eq!(
+            captured.len(),
+            1,
+            "provisioner init should write one record"
+        );
+        let record: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
+        let VersionedLogMessage::V2(LogMessage::Init(message)) = record.message else {
+            panic!("expected V2 init record");
+        };
+        assert_eq!(
+            captured[0].0,
+            message.object_key(&ctx.enclave.s3_session_id())
+        );
+        let PIEnclaveFullyInitialized {
+            sharing_seq,
+            share_ids,
+            enclave_btc_pubkey,
+        } = *message
+        else {
+            panic!("expected provisioner-init completion record");
+        };
+        assert_eq!(sharing_seq, 0);
+        assert_eq!(
+            share_ids,
+            ctx.shares[..TEST_T]
+                .iter()
+                .map(|share| share.id)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            enclave_btc_pubkey,
+            ctx.enclave.config.enclave_btc_pubkey().unwrap()
+        );
     }
 
     #[tokio::test]

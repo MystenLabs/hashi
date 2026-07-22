@@ -220,17 +220,18 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::CapturedPuts;
 
     /// Run commit_operator_init on a fresh enclave for the given mode (withdraw =>
     /// carries the InitConfig install bundle; ceremony => none).
-    async fn commit_for_mode(mode: EnclaveMode) -> Arc<Enclave> {
+    async fn commit_for_mode(mode: EnclaveMode) -> (Arc<Enclave>, CapturedPuts) {
         let enclave = Arc::new(Enclave::new(
             GuardianSignKeyPair::new(rand::thread_rng()),
             GuardianEncKeyPair::random(&mut rand::thread_rng()),
             mode,
         ));
 
-        let logger = crate::test_utils::mock_logger();
+        let (logger, captures) = crate::test_utils::mock_logger_capturing();
         let install = match mode {
             EnclaveMode::Withdraw => {
                 let config = InitConfig::mock_for_testing(None);
@@ -248,24 +249,60 @@ mod tests {
         };
 
         commit_operator_init(&enclave, install).await;
-        enclave
+        (enclave, captures)
+    }
+
+    fn assert_operator_init_logs(
+        enclave: &Enclave,
+        captures: &CapturedPuts,
+        expected_lifecycle: EnclaveLifecycle,
+    ) {
+        let captured = captures.lock().unwrap();
+        assert_eq!(captured.len(), 2, "operator init should write two records");
+        let session_id = enclave.s3_session_id();
+        assert_eq!(
+            captured[0].0,
+            InitLogMessage::attestation_object_key(&session_id)
+        );
+        assert_eq!(
+            captured[1].0,
+            InitLogMessage::guardian_info_object_key(&session_id)
+        );
+
+        let attestation: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
+        assert!(matches!(
+            attestation.message,
+            VersionedLogMessage::V2(LogMessage::Init(message))
+                if matches!(*message, OIAttestationUnsigned { .. })
+        ));
+
+        let guardian_info: LogRecord = serde_json::from_slice(&captured[1].1).unwrap();
+        let VersionedLogMessage::V2(LogMessage::Init(message)) = guardian_info.message else {
+            panic!("expected V2 init record");
+        };
+        let OIGuardianInfo(info) = *message else {
+            panic!("expected operator-init GuardianInfo record");
+        };
+        assert_eq!(info.lifecycle, expected_lifecycle);
     }
 
     #[tokio::test]
     async fn commit_marks_operator_init_complete_withdraw_mode() {
-        let enclave = commit_for_mode(EnclaveMode::Withdraw).await;
+        let (enclave, captures) = commit_for_mode(EnclaveMode::Withdraw).await;
         assert_eq!(
             enclave.lifecycle(),
             WithdrawStage::OperatorInitialized.into()
         );
+        assert_operator_init_logs(&enclave, &captures, WithdrawStage::Uninitialized.into());
     }
 
     #[tokio::test]
     async fn commit_marks_operator_init_complete_ceremony_mode() {
-        let enclave = commit_for_mode(EnclaveMode::Ceremony).await;
+        let (enclave, captures) = commit_for_mode(EnclaveMode::Ceremony).await;
         assert_eq!(
             enclave.lifecycle(),
             CeremonyStage::OperatorInitialized.into()
         );
+        assert_operator_init_logs(&enclave, &captures, CeremonyStage::Uninitialized.into());
     }
 }
