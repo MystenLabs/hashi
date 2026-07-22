@@ -416,6 +416,27 @@ impl DealerMessagesHash {
 
 pub type DealerCertificate = SignedMessage<DealerMessagesHash>;
 
+pub(crate) trait NonceCertToVerify {
+    fn to_dealer_certificate(&self, epoch: u64) -> MpcResult<DealerCertificate>;
+}
+
+impl NonceCertToVerify for DealerSubmissionV1 {
+    fn to_dealer_certificate(&self, epoch: u64) -> MpcResult<DealerCertificate> {
+        DealerMessagesHash::from_onchain_cert(self, epoch)
+    }
+}
+
+impl NonceCertToVerify for CertificateV1 {
+    fn to_dealer_certificate(&self, _epoch: u64) -> MpcResult<DealerCertificate> {
+        match self {
+            CertificateV1::NonceGeneration { cert, .. } => Ok(cert.clone()),
+            _ => Err(MpcError::InvalidCertificate(
+                "expected a nonce-generation certificate".into(),
+            )),
+        }
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum CertificateV1 {

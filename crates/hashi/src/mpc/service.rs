@@ -599,6 +599,10 @@ impl MpcService {
             batch_start += size as u64;
             batch_index += 1;
         }
+        anyhow::ensure!(
+            !boundaries.is_empty(),
+            "no certified nonce batches to recover for epoch {epoch} at cursor {num_consumed}",
+        );
         let recovered_end = boundaries
             .last()
             .map_or(0, |&(_, start, size)| start + size as u64);
@@ -692,6 +696,7 @@ impl MpcService {
                 else {
                     return Ok(None);
                 };
+                let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
                 certified_nonce_weight(mpc_manager, &certs)
             }
             NonceGenerationProtocol::Avid => {
@@ -705,6 +710,7 @@ impl MpcService {
                 if certs.is_empty() {
                     return Ok(None);
                 }
+                let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
                 certified_nonce_weight(mpc_manager, &certs)
             }
         };
@@ -803,12 +809,26 @@ impl MpcService {
             epoch,
             MPC_LABEL_NONCE_GENERATION,
         );
-        let (protocol, use_legacy) = {
+        let (protocol, use_legacy, floor) = {
             let mgr = mpc_manager.read().unwrap();
             (
                 mgr.mpc_config.nonce_generation_protocol,
                 mgr.mpc_config.presignature_derivation_version.use_legacy(),
+                mgr.required_nonce_weight(),
             )
+        };
+        let expected_from = |weight: u32| -> anyhow::Result<usize> {
+            anyhow::ensure!(
+                weight >= floor,
+                "nonce batch {batch_index} for epoch {epoch} refetched below floor \
+                 ({weight} < {floor}); certificate set shrank during recovery",
+            );
+            Ok(presig_count(
+                weight as usize,
+                params,
+                use_legacy,
+                batch_size_per_weight,
+            ))
         };
         let (outputs, expected_size) = match protocol {
             NonceGenerationProtocol::Vanilla => {
@@ -824,12 +844,8 @@ impl MpcService {
                             "No nonce gen certificates on TOB for epoch {epoch} batch {batch_index}"
                         )
                     })?;
-                let expected_size = presig_count(
-                    certified_nonce_weight(mpc_manager, &certs) as usize,
-                    params,
-                    use_legacy,
-                    batch_size_per_weight,
-                );
+                let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
+                let expected_size = expected_from(certified_nonce_weight(mpc_manager, &certs))?;
                 let outputs = MpcManager::reconstruct_presignatures_with_complaint_recovery(
                     mpc_manager,
                     epoch,
@@ -853,12 +869,8 @@ impl MpcService {
                         "No nonce gen certificates on TOB for epoch {epoch} batch {batch_index}"
                     ));
                 }
-                let expected_size = presig_count(
-                    certified_nonce_weight(mpc_manager, &certs) as usize,
-                    params,
-                    use_legacy,
-                    batch_size_per_weight,
-                );
+                let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
+                let expected_size = expected_from(certified_nonce_weight(mpc_manager, &certs))?;
                 let mut prefetched = PrefetchedTobChannel::new(certs);
                 let outputs = MpcManager::run_nonce_generation(
                     mpc_manager,
@@ -1458,7 +1470,7 @@ pub(crate) fn presig_count(
     } else {
         params.t as usize - 1
     };
-    (total_weight - consumed) * batch_size_per_weight as usize
+    total_weight.saturating_sub(consumed) * batch_size_per_weight as usize
 }
 
 fn certified_nonce_weight<T>(
@@ -1534,5 +1546,12 @@ mod presig_count_tests {
         // height = W - f
         assert_eq!(presig_count(5, params, true, 2), (5 - 1) * 2);
         assert_eq!(presig_count(10, params, true, 4), (10 - 1) * 4);
+    }
+
+    #[test]
+    fn saturates_below_floor_without_underflow() {
+        let params = Parameters { t: 3, f: 1 };
+        assert_eq!(presig_count(1, params, false, 2), 0);
+        assert_eq!(presig_count(0, params, true, 5), 0);
     }
 }

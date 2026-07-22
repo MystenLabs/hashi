@@ -40,6 +40,7 @@ pub use crate::mpc::types::MpcError;
 pub use crate::mpc::types::MpcOutput;
 use crate::mpc::types::MpcOutputRecoveryOutcome;
 pub use crate::mpc::types::MpcResult;
+use crate::mpc::types::NonceCertToVerify;
 use crate::mpc::types::NonceGenerationProtocol;
 pub use crate::mpc::types::NonceMessage;
 pub use crate::mpc::types::NonceReconstructionOutcome;
@@ -1095,6 +1096,38 @@ impl MpcManager {
             }
         }
         (certified, weight_sum)
+    }
+
+    pub(crate) async fn verified_nonce_certs<T>(
+        mpc_manager: &Arc<RwLock<Self>>,
+        epoch: u64,
+        certs: Vec<(Address, T)>,
+    ) -> Vec<(Address, T)>
+    where
+        T: NonceCertToVerify,
+    {
+        let mut verified = Vec::with_capacity(certs.len());
+        for (dealer, cert) in certs {
+            let dealer_cert = match cert.to_dealer_certificate(epoch) {
+                Ok(dealer_cert) => dealer_cert,
+                Err(e) => {
+                    tracing::info!("recovery: dropping malformed nonce cert from {dealer:?}: {e}");
+                    continue;
+                }
+            };
+            let mgr = Arc::clone(mpc_manager);
+            let verification = spawn_blocking(move || {
+                mgr.read().unwrap().committee.verify_signature(&dealer_cert)
+            })
+            .await;
+            match verification {
+                Ok(()) => verified.push((dealer, cert)),
+                Err(e) => tracing::info!(
+                    "recovery: dropping nonce cert with invalid signature from {dealer:?}: {e}"
+                ),
+            }
+        }
+        verified
     }
 
     async fn run_dkg_as_dealer(
@@ -5418,6 +5451,9 @@ impl MpcManager {
             let mut mgr = mpc_manager.write().unwrap();
             let epoch = mgr.mpc_config.epoch;
             mgr.cache_and_persist_nonce_message(epoch, *dealer, nonce)?;
+            // Drop any output derived from the previously stored (hash-mismatching)
+            // message so reconstruction reprocesses the retrieved certified message.
+            mgr.dealer_nonce_outputs.remove(&(batch_index, *dealer));
         }
         Ok(())
     }
