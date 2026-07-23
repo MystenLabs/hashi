@@ -782,6 +782,13 @@ impl MpcService {
         let output = match self.recover_mpc_state().await {
             Ok(output) => output,
             Err(e) => {
+                if let Some(p) = self.get_pending_epoch_change() {
+                    info!(
+                        "sync_if_stale: recover_mpc_state for epoch {epoch} superseded by \
+                         pending reconfig to {p} ({e})"
+                    );
+                    return;
+                }
                 error!("sync_if_stale: recover_mpc_state failed for epoch {epoch}: {e}");
                 self.re_register_keys_if_lost().await;
                 return;

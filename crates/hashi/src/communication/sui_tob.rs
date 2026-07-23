@@ -24,6 +24,7 @@ use crate::sui_tx_executor::SuiTxExecutor;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
+const FETCH_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Error)]
 pub enum TobError {
@@ -196,14 +197,28 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                 return Ok(cert);
             }
             // TODO: Optimize by checking table size first to avoid redundant fetches.
-            let all_certs = fetch_certificates(
-                &self.onchain_state,
-                self.epoch,
-                self.batch_index,
-                self.protocol_type,
+            let all_certs = match tokio::time::timeout(
+                FETCH_STALL_TIMEOUT,
+                fetch_certificates(
+                    &self.onchain_state,
+                    self.epoch,
+                    self.batch_index,
+                    self.protocol_type,
+                ),
             )
             .await
-            .map_err(ChannelError::from)?;
+            {
+                Ok(result) => result.map_err(ChannelError::from)?,
+                Err(_) => {
+                    tracing::warn!(
+                        "{:?} TOB cert fetch for epoch {} stalled >{:?}; retrying",
+                        self.protocol_type,
+                        self.epoch,
+                        FETCH_STALL_TIMEOUT,
+                    );
+                    Vec::new()
+                }
+            };
             for (dealer, cert) in all_certs {
                 if !self.seen_dealers.contains(&dealer) {
                     self.seen_dealers.insert(dealer);
@@ -248,11 +263,14 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     }
 
     async fn certified_dealers(&mut self) -> Vec<Address> {
-        if let Ok(all_certs) = fetch_certificates(
-            &self.onchain_state,
-            self.epoch,
-            self.batch_index,
-            self.protocol_type,
+        if let Ok(Ok(all_certs)) = tokio::time::timeout(
+            FETCH_STALL_TIMEOUT,
+            fetch_certificates(
+                &self.onchain_state,
+                self.epoch,
+                self.batch_index,
+                self.protocol_type,
+            ),
         )
         .await
         {
