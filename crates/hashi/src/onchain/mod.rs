@@ -420,6 +420,17 @@ impl OnchainState {
         self.install_scraped_state(checkpoint_info, hashi)
     }
 
+    pub(crate) async fn scrape_committee_for_epoch(&self, epoch: u64) -> Result<Option<Committee>> {
+        let committees_id = self.state().hashi().committees.committees_id();
+        match scrape_committee(self.client(), committees_id, epoch).await {
+            Ok(committee) => Ok(Some(committee)),
+            Err(e) => match e.downcast_ref::<tonic::Status>() {
+                Some(status) if status.code() == tonic::Code::NotFound => Ok(None),
+                _ => Err(e),
+            },
+        }
+    }
+
     /// Apply committee config from `Inner` to the given hashi state and replace the current
     /// state in a single write lock acquisition.
     fn replace_hashi_state(&self, mut hashi: types::Hashi) {
