@@ -43,6 +43,33 @@ fn to_status(e: GuardianError) -> Status {
         LimiterSequenceMismatch { expected, actual } => Status::aborted(format!(
             "limiter sequence mismatch: expected {expected}, got {actual}"
         )),
+        CurrentSessionHeartbeatNotLive {
+            session_id,
+            heartbeat_age_secs,
+            retry_after_secs,
+        } => {
+            let detail = match heartbeat_age_secs {
+                Some(heartbeat_age_secs) => {
+                    format!("last heartbeated {heartbeat_age_secs}s ago")
+                }
+                None => "has no heartbeat in the recent scan".into(),
+            };
+            Status::unavailable(format!(
+                "operator_activate blocked: current guardian session {session_id} {detail}; \
+                 expected a heartbeat within {}s; retry in {retry_after_secs}s",
+                crate::LIVE_SESSION_LATEST_HEARTBEAT_MAX_AGE.as_secs()
+            ))
+        }
+        PriorSessionHeartbeatStillRecent {
+            session_id,
+            heartbeat_age_secs,
+            required_quiet_secs,
+        } => Status::unavailable(format!(
+            "operator_activate blocked: prior guardian session {session_id} heartbeated \
+             {heartbeat_age_secs}s ago; required quiet period is {required_quiet_secs}s; retry in \
+             {}s",
+            required_quiet_secs.saturating_sub(heartbeat_age_secs)
+        )),
         RateLimitExceeded => Status::resource_exhausted("Rate limit exceeded"),
         S3Error(msg) => Status::internal(msg),
         InvalidS3Log(msg) => Status::internal(msg),
@@ -210,5 +237,40 @@ impl proto::guardian_service_server::GuardianService for GuardianGrpc {
         Ok(Response::new(proto::UpdateCommitteeResponse {
             current_committee_epoch: Some(current_committee_epoch),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn heartbeat_readiness_errors_have_actionable_status_codes() {
+        let missing_error = CurrentSessionHeartbeatNotLive {
+            session_id: "current".into(),
+            heartbeat_age_secs: None,
+            retry_after_secs: 60,
+        };
+        assert_eq!(missing_error.retry_after_secs(), Some(60));
+        let missing = to_status(missing_error);
+        assert_eq!(missing.code(), tonic::Code::Unavailable);
+
+        let stale_error = CurrentSessionHeartbeatNotLive {
+            session_id: "current".into(),
+            heartbeat_age_secs: Some(200),
+            retry_after_secs: 60,
+        };
+        assert_eq!(stale_error.retry_after_secs(), Some(60));
+        let stale = to_status(stale_error);
+        assert_eq!(stale.code(), tonic::Code::Unavailable);
+
+        let prior_error = PriorSessionHeartbeatStillRecent {
+            session_id: "prior".into(),
+            heartbeat_age_secs: 30,
+            required_quiet_secs: 600,
+        };
+        assert_eq!(prior_error.retry_after_secs(), Some(570));
+        let prior = to_status(prior_error);
+        assert_eq!(prior.code(), tonic::Code::Unavailable);
     }
 }

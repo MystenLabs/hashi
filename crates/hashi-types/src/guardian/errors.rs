@@ -4,7 +4,9 @@
 use serde::Deserialize;
 use serde::Serialize;
 
+use super::SessionID;
 use super::lifecycle::EnclaveLifecycle;
+use super::time_utils::UnixSeconds;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GuardianError {
@@ -35,12 +37,43 @@ pub enum GuardianError {
         expected: u64,
         actual: u64,
     },
+    /// The standby session has no heartbeat recent enough for activation.
+    CurrentSessionHeartbeatNotLive {
+        session_id: SessionID,
+        /// `None` means no heartbeat was found in the recent scan.
+        heartbeat_age_secs: Option<UnixSeconds>,
+        retry_after_secs: UnixSeconds,
+    },
+    /// A prior session remains inside the activation quiet period.
+    PriorSessionHeartbeatStillRecent {
+        session_id: SessionID,
+        heartbeat_age_secs: UnixSeconds,
+        required_quiet_secs: UnixSeconds,
+    },
     RateLimitExceeded,
     /// A service condition known to be temporary and safe for callers to retry.
     Unavailable(String),
 }
 
 pub type GuardianResult<T> = Result<T, GuardianError>;
+
+impl GuardianError {
+    /// Returns how long a caller should wait before retrying, when the error
+    /// describes a condition that becomes ready on a known schedule.
+    pub fn retry_after_secs(&self) -> Option<UnixSeconds> {
+        match self {
+            Self::CurrentSessionHeartbeatNotLive {
+                retry_after_secs, ..
+            } => Some(*retry_after_secs),
+            Self::PriorSessionHeartbeatStillRecent {
+                heartbeat_age_secs,
+                required_quiet_secs,
+                ..
+            } => Some(required_quiet_secs.saturating_sub(*heartbeat_age_secs)),
+            _ => None,
+        }
+    }
+}
 
 /// Low-level error returned by signature and attestation verifiers.
 ///
@@ -87,6 +120,33 @@ impl std::fmt::Display for GuardianError {
             GuardianError::LimiterSequenceMismatch { expected, actual } => write!(
                 f,
                 "LimiterSequenceMismatch: expected {expected}, got {actual}"
+            ),
+            GuardianError::CurrentSessionHeartbeatNotLive {
+                session_id,
+                heartbeat_age_secs,
+                retry_after_secs,
+            } => match heartbeat_age_secs {
+                Some(heartbeat_age_secs) => write!(
+                    f,
+                    "CurrentSessionHeartbeatNotLive: session {session_id} last heartbeated \
+                     {heartbeat_age_secs}s ago; retry in {retry_after_secs}s"
+                ),
+                None => write!(
+                    f,
+                    "CurrentSessionHeartbeatNotLive: no recent heartbeat found for session \
+                     {session_id}; retry in {retry_after_secs}s"
+                ),
+            },
+            GuardianError::PriorSessionHeartbeatStillRecent {
+                session_id,
+                heartbeat_age_secs,
+                required_quiet_secs,
+            } => write!(
+                f,
+                "PriorSessionHeartbeatStillRecent: session {session_id} heartbeated \
+                 {heartbeat_age_secs}s ago; required quiet period is {required_quiet_secs}s; retry \
+                 in {}s",
+                required_quiet_secs.saturating_sub(*heartbeat_age_secs)
             ),
             GuardianError::RateLimitExceeded => write!(f, "Rate limit exceeded"),
             GuardianError::Unavailable(e) => write!(f, "Unavailable: {}", e),

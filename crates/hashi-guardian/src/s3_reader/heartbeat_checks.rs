@@ -3,13 +3,15 @@
 
 use super::heartbeat_cursor;
 use super::GuardianReader;
+use crate::HEARTBEAT_INTERVAL;
 use crate::LIVE_SESSION_LATEST_HEARTBEAT_MAX_AGE;
 use crate::OTHER_SESSION_QUIET_PERIOD;
 use hashi_types::guardian::time_utils::now_timestamp_secs;
 use hashi_types::guardian::time_utils::unix_millis_to_seconds;
 use hashi_types::guardian::time_utils::UnixSeconds;
-use hashi_types::guardian::GuardianError::InvalidInputs;
+use hashi_types::guardian::GuardianError::CurrentSessionHeartbeatNotLive;
 use hashi_types::guardian::GuardianError::InvalidS3Log;
+use hashi_types::guardian::GuardianError::PriorSessionHeartbeatStillRecent;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::SessionID;
@@ -33,7 +35,6 @@ impl GuardianReader {
             &summary,
             now,
             live_session,
-            LIVE_SESSION_LATEST_HEARTBEAT_MAX_AGE.as_secs(),
             OTHER_SESSION_QUIET_PERIOD.as_secs(),
         )?;
 
@@ -109,40 +110,38 @@ fn validate_session_live_and_others_quiet(
     summary: &[GuardianSessionInfo],
     now: UnixSeconds,
     live_session: &str,
-    live_session_max_age_secs: UnixSeconds,
     other_session_quiet_secs: UnixSeconds,
 ) -> GuardianResult<()> {
     let live_session_info = summary
         .iter()
         .find(|s| s.session_id.as_str() == live_session)
-        .ok_or_else(|| {
-            InvalidInputs(format!(
-                "no heartbeat logs found for session {live_session}"
-            ))
+        .ok_or_else(|| CurrentSessionHeartbeatNotLive {
+            session_id: live_session.into(),
+            heartbeat_age_secs: None,
+            retry_after_secs: HEARTBEAT_INTERVAL.as_secs(),
         })?;
     let live_session_age_secs = now.saturating_sub(live_session_info.last_heartbeat);
-    if live_session_age_secs > live_session_max_age_secs {
-        return Err(InvalidInputs(format!(
-            "session {} is stale: last heartbeat {}s ago (expected <= {}s)",
-            live_session, live_session_age_secs, live_session_max_age_secs
-        )));
+    if live_session_age_secs > LIVE_SESSION_LATEST_HEARTBEAT_MAX_AGE.as_secs() {
+        return Err(CurrentSessionHeartbeatNotLive {
+            session_id: live_session.into(),
+            heartbeat_age_secs: Some(live_session_age_secs),
+            retry_after_secs: HEARTBEAT_INTERVAL.as_secs(),
+        });
     }
 
-    let active_sessions = summary
+    if let Some(most_recent_other_session) = summary
         .iter()
         .filter(|s| s.session_id.as_str() != live_session)
-        .filter_map(|s| {
-            let age_secs = now.saturating_sub(s.last_heartbeat);
-            (age_secs < other_session_quiet_secs)
-                .then(|| format!("{} ({}s ago)", s.session_id, age_secs))
-        })
-        .collect::<Vec<_>>();
-    if !active_sessions.is_empty() {
-        return Err(InvalidInputs(format!(
-            "sessions are still active within {}s: {}",
-            other_session_quiet_secs,
-            active_sessions.join(", ")
-        )));
+        .max_by_key(|s| s.last_heartbeat)
+    {
+        let heartbeat_age_secs = now.saturating_sub(most_recent_other_session.last_heartbeat);
+        if heartbeat_age_secs < other_session_quiet_secs {
+            return Err(PriorSessionHeartbeatStillRecent {
+                session_id: most_recent_other_session.session_id.clone(),
+                heartbeat_age_secs,
+                required_quiet_secs: other_session_quiet_secs,
+            });
+        }
     }
     Ok(())
 }
@@ -222,8 +221,27 @@ mod tests {
             },
         ];
 
-        validate_session_live_and_others_quiet(&summary, 1_000, "live", 100, 600)
+        validate_session_live_and_others_quiet(&summary, 1_000, "live", 600)
             .expect("live session is recent and other session is quiet");
+    }
+
+    #[test]
+    fn validate_session_live_and_others_quiet_accepts_boundary_ages() {
+        let summary = vec![
+            GuardianSessionInfo {
+                session_id: "live".into(),
+                first_heartbeat: 820,
+                last_heartbeat: 820,
+            },
+            GuardianSessionInfo {
+                session_id: "old".into(),
+                first_heartbeat: 400,
+                last_heartbeat: 400,
+            },
+        ];
+
+        validate_session_live_and_others_quiet(&summary, 1_000, "live", 600)
+            .expect("boundary ages satisfy the heartbeat requirements");
     }
 
     #[test]
@@ -234,9 +252,16 @@ mod tests {
             last_heartbeat: 200,
         }];
 
-        let err = validate_session_live_and_others_quiet(&summary, 1_000, "live", 100, 600)
+        let err = validate_session_live_and_others_quiet(&summary, 1_000, "live", 600)
             .expect_err("must require heartbeat for live session");
-        assert!(err.to_string().contains("no heartbeat logs found"));
+        assert_eq!(
+            err,
+            CurrentSessionHeartbeatNotLive {
+                session_id: "live".into(),
+                heartbeat_age_secs: None,
+                retry_after_secs: HEARTBEAT_INTERVAL.as_secs(),
+            }
+        );
     }
 
     #[test]
@@ -247,13 +272,20 @@ mod tests {
             last_heartbeat: 800,
         }];
 
-        let err = validate_session_live_and_others_quiet(&summary, 1_000, "live", 100, 600)
+        let err = validate_session_live_and_others_quiet(&summary, 1_000, "live", 600)
             .expect_err("must reject stale live session");
-        assert!(err.to_string().contains("stale"));
+        assert_eq!(
+            err,
+            CurrentSessionHeartbeatNotLive {
+                session_id: "live".into(),
+                heartbeat_age_secs: Some(200),
+                retry_after_secs: HEARTBEAT_INTERVAL.as_secs(),
+            }
+        );
     }
 
     #[test]
-    fn validate_session_live_and_others_quiet_fails_when_other_session_active() {
+    fn validate_session_live_and_others_quiet_reports_most_recent_other_heartbeat() {
         let summary = vec![
             GuardianSessionInfo {
                 session_id: "live".into(),
@@ -261,14 +293,26 @@ mod tests {
                 last_heartbeat: 990,
             },
             GuardianSessionInfo {
-                session_id: "other".into(),
+                session_id: "other-older".into(),
+                first_heartbeat: 920,
+                last_heartbeat: 920,
+            },
+            GuardianSessionInfo {
+                session_id: "other-newer".into(),
                 first_heartbeat: 950,
                 last_heartbeat: 950,
             },
         ];
 
-        let err = validate_session_live_and_others_quiet(&summary, 1_000, "live", 100, 100)
-            .expect_err("must reject active other session");
-        assert!(err.to_string().contains("sessions are still active"));
+        let err = validate_session_live_and_others_quiet(&summary, 1_000, "live", 100)
+            .expect_err("must reject a recent heartbeat from another session");
+        assert_eq!(
+            err,
+            PriorSessionHeartbeatStillRecent {
+                session_id: "other-newer".into(),
+                heartbeat_age_secs: 50,
+                required_quiet_secs: 100,
+            }
+        );
     }
 }
