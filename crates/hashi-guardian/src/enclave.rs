@@ -389,20 +389,11 @@ impl Enclave {
             .expect("lifecycle lock poisoned")
     }
 
-    /// Require an exact mode and lifecycle stage, naming the operation in any
-    /// resulting error.
-    pub fn require_lifecycle(
-        &self,
-        operation: &str,
-        expected: EnclaveLifecycle,
-    ) -> GuardianResult<()> {
+    /// Require an exact mode and lifecycle stage.
+    pub fn require_lifecycle(&self, expected: EnclaveLifecycle) -> GuardianResult<()> {
         let actual = self.lifecycle();
         if actual != expected {
-            return Err(LifecycleMismatch {
-                operation: operation.into(),
-                expected,
-                actual,
-            });
+            return Err(LifecycleMismatch { expected, actual });
         }
         Ok(())
     }
@@ -420,7 +411,6 @@ impl Enclave {
             .expect("lifecycle lock poisoned");
         if *lifecycle != expected {
             return Err(LifecycleMismatch {
-                operation: "advance_lifecycle_into".into(),
                 expected,
                 actual: *lifecycle,
             });
@@ -479,10 +469,9 @@ impl Enclave {
         }
     }
 
-    /// Require the activated withdraw lifecycle, naming the operation in any
-    /// resulting error.
-    pub fn require_fully_initialized(&self, operation: &str) -> GuardianResult<()> {
-        self.require_lifecycle(operation, WithdrawStage::Activated.into())
+    /// Require the activated withdraw lifecycle.
+    pub fn require_fully_initialized(&self) -> GuardianResult<()> {
+        self.require_lifecycle(WithdrawStage::Activated.into())
     }
 
     // ========================================================================

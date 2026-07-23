@@ -92,9 +92,7 @@ impl GuardianHarness {
             .map_err(|e| anyhow::anyhow!("activate guardian enclave: {e:?}"))?;
 
         anyhow::ensure!(
-            self.enclave
-                .require_fully_initialized("guardian_harness::finalize")
-                .is_ok(),
+            self.enclave.require_fully_initialized().is_ok(),
             "guardian did not reach active state"
         );
         Ok(())

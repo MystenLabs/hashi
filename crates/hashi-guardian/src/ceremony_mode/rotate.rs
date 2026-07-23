@@ -21,7 +21,7 @@ pub async fn rotate_kps(
 ) -> GuardianResult<GuardianSigned<RotateKpsResponse>> {
     info!("/rotate_kps - Received request.");
 
-    enclave.require_lifecycle("rotate_kps", CeremonyStage::OperatorInitialized.into())?;
+    enclave.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
 
     let (encrypted_old_shares, old_instance, state) = request.into_parts();
     let old_t = old_instance.threshold();

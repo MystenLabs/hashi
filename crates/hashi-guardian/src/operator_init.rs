@@ -65,8 +65,7 @@ impl OIWithdrawModeInstall {
             GuardianReader::from_s3_client(logger.clone(), config.pcr_allowlist().clone());
         let ceremony_state = reader
             .read_latest_ceremony_state(BuildPolicy::AnyAllowlisted)
-            .await
-            .map_err(|e| InvalidInputs(format!("read latest ceremony and KP share state: {e}")))?
+            .await?
             .ok_or_else(|| InvalidInputs("no ceremony log found for withdraw init".into()))?;
 
         Ok(Self::from_parts(config, ceremony_state, genesis_state))
@@ -135,7 +134,7 @@ pub async fn operator_init(
         EnclaveMode::Ceremony => CeremonyStage::Uninitialized.into(),
         EnclaveMode::Withdraw => WithdrawStage::Uninitialized.into(),
     };
-    enclave.require_lifecycle("operator_init", uninitialized)?;
+    enclave.require_lifecycle(uninitialized)?;
     info!("Lifecycle stage validated.");
 
     // ---- Validate & build: Nothing in this phase mutates enclave state, so any

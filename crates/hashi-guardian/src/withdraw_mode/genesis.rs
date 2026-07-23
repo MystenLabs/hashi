@@ -13,8 +13,7 @@ pub(super) async fn ensure_no_serving_committee(enclave: &Enclave) -> GuardianRe
 
     if reader
         .read_latest_committee(BuildPolicy::AnyAllowlisted)
-        .await
-        .map_err(|e| InvalidInputs(format!("read latest committee before genesis write: {e}")))?
+        .await?
         .is_some()
     {
         return Err(InvalidInputs(

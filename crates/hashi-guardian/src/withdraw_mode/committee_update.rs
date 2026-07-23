@@ -24,7 +24,7 @@ pub async fn update_committee(
     enclave: Arc<Enclave>,
     signed: HashiSigned<CommitteeTransitionRequest>,
 ) -> GuardianResult<u64> {
-    enclave.require_fully_initialized("update_committee")?;
+    enclave.require_fully_initialized()?;
 
     let current = enclave.state.get_committee()?;
     let current_epoch = current.epoch();
@@ -266,8 +266,8 @@ mod tests {
             .expect_err("bad middle handoff must error");
 
         assert!(
-            matches!(err, GuardianError::InvalidInputs(_)),
-            "expected InvalidInputs, got {err:?}"
+            matches!(err, GuardianError::Unauthenticated(_)),
+            "expected Unauthenticated, got {err:?}"
         );
         assert_eq!(enclave.state.get_committee().unwrap().epoch(), 7);
     }
@@ -281,8 +281,8 @@ mod tests {
             .await
             .expect_err("mismatched signing epoch must error");
         assert!(
-            matches!(err, GuardianError::InvalidInputs(_)),
-            "expected InvalidInputs, got {err:?}"
+            matches!(err, GuardianError::Unauthenticated(_)),
+            "expected Unauthenticated, got {err:?}"
         );
         assert_eq!(enclave.state.get_committee().unwrap().epoch(), 5);
     }

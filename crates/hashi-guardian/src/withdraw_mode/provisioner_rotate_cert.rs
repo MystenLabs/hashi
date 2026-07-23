@@ -11,7 +11,6 @@ use crate::s3_reader::BuildPolicy;
 use crate::Enclave;
 use hashi_types::guardian::crypto::decrypt_share;
 use hashi_types::guardian::crypto::encrypt_share_for_provisioner;
-use hashi_types::guardian::GuardianError::InternalError;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianError::Unauthenticated;
 use hashi_types::guardian::GuardianResult;
@@ -32,7 +31,7 @@ pub async fn provisioner_rotate_cert(
         .verify()
         .map_err(|error| Unauthenticated(error.to_string()))?;
 
-    enclave.require_fully_initialized("provisioner_rotate_cert")?;
+    enclave.require_fully_initialized()?;
 
     let live_session_id = enclave.s3_session_id();
     if request.expected_session_id() != &live_session_id {
@@ -52,8 +51,7 @@ pub async fn provisioner_rotate_cert(
 
     let latest_state = reader
         .read_latest_ceremony_state(BuildPolicy::AnyAllowlisted)
-        .await
-        .map_err(|e| InternalError(format!("read latest ceremony state: {e}")))?
+        .await?
         .ok_or_else(|| InvalidInputs("no ceremony log found during cert rotation".into()))?;
     let enclave_btc_pubkey = enclave.config.enclave_btc_pubkey()?;
     if latest_state.btc_master_pubkey != enclave_btc_pubkey {

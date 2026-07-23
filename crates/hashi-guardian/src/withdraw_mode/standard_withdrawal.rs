@@ -70,7 +70,7 @@ async fn normal_withdrawal_inner(
     OwnedMutexGuard<RateLimiter>,
 )> {
     // 0) Validation
-    enclave.require_fully_initialized("standard_withdrawal")?;
+    enclave.require_fully_initialized()?;
 
     // 1) Verify certificate (before acquiring limiter lock)
     let committee = enclave.state.get_committee()?;
@@ -221,9 +221,7 @@ mod tests {
         activate_enclave_for_testing(&enclave, committee, limiter_config, limiter_state)
             .expect("activate_enclave_for_testing should succeed on a fresh enclave");
 
-        assert!(enclave
-            .require_fully_initialized("standard_withdrawal")
-            .is_ok());
+        assert!(enclave.require_fully_initialized().is_ok());
         (enclave, captures)
     }
 
@@ -235,10 +233,9 @@ mod tests {
         assert!(matches!(
             result,
             Err(GuardianError::LifecycleMismatch {
-                operation,
                 expected: EnclaveLifecycle::Withdraw(WithdrawStage::Activated),
                 actual: EnclaveLifecycle::Withdraw(WithdrawStage::Uninitialized),
-            }) if operation == "standard_withdrawal"
+            })
         ));
     }
 

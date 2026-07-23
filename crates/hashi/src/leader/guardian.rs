@@ -76,23 +76,25 @@ impl LeaderService {
         let rpc_elapsed = rpc_start.elapsed().as_secs_f64();
 
         let response_pb = rpc_result.map_err(|status| {
-            let (rpc_outcome, retry_label) = if status.message().contains("seq mismatch") {
-                (
+            let (rpc_outcome, retry_label) = match status.code() {
+                tonic::Code::Aborted => (
                     crate::metrics::GUARDIAN_RPC_OUTCOME_SEQ_MISMATCH,
                     "GuardianSeqMismatch",
-                )
-            } else if status.message().contains("Rate limit exceeded") {
-                warn!("Guardian rate-limited withdrawal, will retry later");
-                (
-                    crate::metrics::GUARDIAN_RPC_OUTCOME_RATE_LIMITED,
-                    "GuardianRateLimited",
-                )
-            } else {
-                error!("Guardian call failed: {}", status.message());
-                (
-                    crate::metrics::GUARDIAN_RPC_OUTCOME_UNAVAILABLE,
-                    "GuardianUnavailable",
-                )
+                ),
+                tonic::Code::ResourceExhausted => {
+                    warn!("Guardian rate-limited withdrawal, will retry later");
+                    (
+                        crate::metrics::GUARDIAN_RPC_OUTCOME_RATE_LIMITED,
+                        "GuardianRateLimited",
+                    )
+                }
+                _ => {
+                    error!("Guardian call failed: {}", status.message());
+                    (
+                        crate::metrics::GUARDIAN_RPC_OUTCOME_UNAVAILABLE,
+                        "GuardianUnavailable",
+                    )
+                }
             };
             Self::record_guardian_rpc_outcome(inner, rpc_outcome, rpc_elapsed);
             inner

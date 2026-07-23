@@ -17,7 +17,6 @@ use hashi_types::guardian::RateLimiter;
 use hashi_types::guardian::WithdrawStage;
 use std::sync::Arc;
 use tracing::info;
-use GuardianError::InternalError;
 use GuardianError::InvalidInputs;
 
 /// S3-derived activation state ready for its fail-stop commit.
@@ -52,16 +51,12 @@ impl OAInstall {
 
         let committee: HashiCommittee = reader
             .read_latest_committee(BuildPolicy::AnyAllowlisted)
-            .await
-            .map_err(|e| InternalError(format!("read latest serving committee: {e}")))?
+            .await?
             .ok_or_else(|| InvalidInputs("no committee-update or genesis record found".into()))?
             .try_into()
             .map_err(|e| InvalidInputs(format!("invalid serving committee: {e}")))?;
 
-        let limiter_state = reader
-            .recover_limiter_state(&limiter_config)
-            .await
-            .map_err(|e| InvalidInputs(format!("recover limiter state: {e}")))?;
+        let limiter_state = reader.recover_limiter_state(&limiter_config).await?;
         let rate_limiter = RateLimiter::new(limiter_config, limiter_state)?;
         let sharing_seq = armed_instance.sharing_seq();
         let committee_epoch = committee.epoch();
@@ -101,10 +96,7 @@ pub async fn operator_activate(
 ) -> GuardianResult<()> {
     info!("/operator_activate - Received request.");
 
-    enclave.require_lifecycle(
-        "operator_activate",
-        WithdrawStage::ProvisionerInitialized.into(),
-    )?;
+    enclave.require_lifecycle(WithdrawStage::ProvisionerInitialized.into())?;
     info!("Lifecycle stage validated.");
 
     // ---- Validate & build: Nothing in this phase mutates enclave state, so any

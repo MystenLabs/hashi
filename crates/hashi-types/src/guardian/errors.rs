@@ -28,9 +28,12 @@ pub enum GuardianError {
     /// The guardian build does not match the configured current build.
     BuildNotCurrent(String),
     LifecycleMismatch {
-        operation: String,
         expected: EnclaveLifecycle,
         actual: EnclaveLifecycle,
+    },
+    LimiterSequenceMismatch {
+        expected: u64,
+        actual: u64,
     },
     RateLimitExceeded,
     /// A service condition known to be temporary and safe for callers to retry.
@@ -77,13 +80,13 @@ impl std::fmt::Display for GuardianError {
             GuardianError::Unauthenticated(e) => write!(f, "Unauthenticated: {}", e),
             GuardianError::BuildNotAllowlisted(e) => write!(f, "BuildNotAllowlisted: {}", e),
             GuardianError::BuildNotCurrent(e) => write!(f, "BuildNotCurrent: {}", e),
-            GuardianError::LifecycleMismatch {
-                operation,
-                expected,
-                actual,
-            } => write!(
+            GuardianError::LifecycleMismatch { expected, actual } => write!(
                 f,
-                "LifecycleMismatch: {operation} requires {expected:?}, but enclave is {actual:?}"
+                "LifecycleMismatch: expected {expected:?}, but enclave is {actual:?}"
+            ),
+            GuardianError::LimiterSequenceMismatch { expected, actual } => write!(
+                f,
+                "LimiterSequenceMismatch: expected {expected}, got {actual}"
             ),
             GuardianError::RateLimitExceeded => write!(f, "Rate limit exceeded"),
             GuardianError::Unavailable(e) => write!(f, "Unavailable: {}", e),

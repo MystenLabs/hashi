@@ -93,10 +93,7 @@ pub async fn provisioner_init(
 ) -> GuardianResult<()> {
     info!("/provisioner_init - Received request.");
 
-    enclave.require_lifecycle(
-        "provisioner_init",
-        WithdrawStage::OperatorInitialized.into(),
-    )?;
+    enclave.require_lifecycle(WithdrawStage::OperatorInitialized.into())?;
     info!("Lifecycle stage validated.");
 
     // ---- Validate & build: Nothing in this phase mutates enclave state, so any

@@ -204,7 +204,7 @@ mod tests {
     fn summarize_heartbeats_rejects_non_heartbeat_logs() {
         let err = summarize_heartbeats_by_session(vec![non_heartbeat_log()])
             .expect_err("must reject non-heartbeat logs");
-        assert!(err.to_string().contains("non-heartbeat logs"));
+        assert!(err.to_string().contains("non-heartbeat log"));
     }
 
     #[test]
