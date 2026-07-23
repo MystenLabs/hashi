@@ -47,7 +47,6 @@ pub struct Metrics {
     pub guardian_limiter_validate_total: IntCounterVec,
     pub guardian_limiter_apply_total: IntCounterVec,
     pub guardian_limiter_anchor_events_total: IntCounter,
-    pub guardian_limiter_anchor_events_skipped_total: IntCounter,
     pub guardian_limiter_batch_truncated_total: IntCounter,
     pub guardian_limiter_batch_stuck_head_total: IntCounter,
     pub guardian_finalize_deferred_total: IntCounter,
@@ -57,6 +56,11 @@ pub struct Metrics {
 
     /// Guardian's committee epoch as of the leader's last reconcile.
     pub guardian_current_committee_epoch: IntGauge,
+
+    // Lossless object-mirror metrics
+    pub watcher_applied_txns_total: IntCounter,
+    pub watcher_unrouted_objects_total: IntCounter,
+    pub watcher_state_watermark: IntGauge,
 
     // Kyoto (Bitcoin light client) metrics
     pub kyoto_connected_peers: IntGauge,
@@ -283,6 +287,24 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            watcher_applied_txns_total: register_int_counter_with_registry!(
+                "hashi_watcher_applied_txns_total",
+                "Hashi-relevant transactions applied to the object mirror",
+                registry,
+            )
+            .unwrap(),
+            watcher_unrouted_objects_total: register_int_counter_with_registry!(
+                "hashi_watcher_unrouted_objects_total",
+                "Changed objects the object mirror could not route to a known container",
+                registry,
+            )
+            .unwrap(),
+            watcher_state_watermark: register_int_gauge_with_registry!(
+                "hashi_watcher_state_watermark",
+                "Checkpoint through which the object mirror is complete",
+                registry,
+            )
+            .unwrap(),
 
             // Guardian / local-limiter metrics
             guardian_enabled: register_int_gauge_with_registry!(
@@ -362,13 +384,7 @@ impl Metrics {
             .unwrap(),
             guardian_limiter_anchor_events_total: register_int_counter_with_registry!(
                 "hashi_guardian_limiter_anchor_events_total",
-                "Total on-chain WithdrawalSigned observations applied to the local guardian-limiter",
-                registry,
-            )
-            .unwrap(),
-            guardian_limiter_anchor_events_skipped_total: register_int_counter_with_registry!(
-                "hashi_guardian_limiter_anchor_events_skipped_total",
-                "WithdrawalSigned observations skipped as duplicates (checkpoint redelivery or bootstrap replay)",
+                "Total on-chain fully-signed transitions applied to the local guardian-limiter",
                 registry,
             )
             .unwrap(),

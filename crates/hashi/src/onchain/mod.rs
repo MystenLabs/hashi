@@ -8,7 +8,6 @@ use fastcrypto::bls12381::min_pk::BLS12381PublicKey;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use futures::TryStreamExt;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
@@ -48,6 +47,9 @@ const BROADCAST_CHANNEL_CAPACITY: usize = 100;
 /// the gRPC decode limit; the SDK still pages through every entry.
 const SCRAPE_PAGE_SIZE: u32 = 1000;
 
+mod apply;
+mod mirror;
+mod route;
 pub mod types;
 mod watcher;
 
@@ -90,8 +92,14 @@ struct Inner {
     ids: HashiIds,
     client: Client,
     sender: broadcast::Sender<Notification>,
-    /// The checkpoint information that this state is recent to
+    /// The clock position: the latest checkpoint the unfiltered clock
+    /// stream has observed. Drives the leader tick, timestamps, and Sui
+    /// epoch-change detection; advances regardless of Hashi activity.
     checkpoint: watch::Sender<CheckpointInfo>,
+    /// The state watermark: the checkpoint through which the object
+    /// mirror has applied every Hashi transaction. Never reported ahead
+    /// of what has been applied; drives `wait_until_checkpoint`.
+    state_watermark: watch::Sender<u64>,
     state: RwLock<State>,
     tls_private_key: Option<ed25519_dalek::SigningKey>,
     grpc_max_decoding_message_size: Option<usize>,
@@ -100,26 +108,25 @@ struct Inner {
     /// `LocalLimiter` carries its own `RwLock<LimiterState>`, so we just
     /// need set-once semantics for the slot itself.
     local_limiter: OnceLock<Arc<crate::guardian_limiter::LocalLimiter>>,
-    /// Pinged by the watcher after a reconnect rescrape, so the reconcile
-    /// loop can re-align the local limiter immediately.
+    /// Pinged by the watcher after a mirror re-bootstrap (the replay
+    /// failure fallback), so the reconcile loop can re-align the local
+    /// limiter immediately — a re-bootstrap can swallow the fully-signed
+    /// transitions that advance it.
     guardian_reconcile_notify: Arc<tokio::sync::Notify>,
     /// Checkpoint floor for cleanup-GC scrapes: raised to the checkpoint of
     /// each landed cleanup tx so the next scrape cannot be served state
     /// from before it (the watcher cursor alone may lag that checkpoint).
     utxo_scrape_floor: std::sync::atomic::AtomicU64,
-    /// Cadence of the watcher's on-chain config poll.
-    config_poll_interval: std::time::Duration,
 }
 
 #[derive(Debug)]
 pub struct State {
     package_versions: BTreeMap<u64, Address>,
-    package_ids: BTreeSet<Address>,
     hashi: types::Hashi,
     withdrawal_signed_at_ms: BTreeMap<Address, u64>,
 }
 
-#[derive(serde_derive::Serialize)]
+#[derive(serde_derive::Serialize, serde_derive::Deserialize)]
 struct TobKey {
     epoch: u64,
     batch_index: Option<u32>,
@@ -133,7 +140,6 @@ impl OnchainState {
         tls_private_key: Option<ed25519_dalek::SigningKey>,
         grpc_max_decoding_message_size: Option<usize>,
         metrics: Option<Arc<crate::metrics::Metrics>>,
-        config_poll_interval: Option<std::time::Duration>,
     ) -> Result<(Self, Service)> {
         let mut client = crate::sui_rpc_client::new_sui_rpc_client(sui_rpc_url)?;
         // The scrape client reads the full on-chain state (the largest
@@ -142,7 +148,7 @@ impl OnchainState {
             client = client.with_max_decoding_message_size(limit);
         }
 
-        let (mut state, checkpoint) = State::scrape(client.clone(), ids).await?;
+        let (mut state, checkpoint, seed) = State::scrape(client.clone(), ids).await?;
         if let Some(tls_private_key) = &tls_private_key {
             state
                 .hashi
@@ -161,20 +167,19 @@ impl OnchainState {
 
         let (sender, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         let (checkpoint, _) = watch::channel(checkpoint);
+        let (state_watermark, _) = watch::channel(seed.floor);
         let state = Inner {
             ids,
             client: client.clone(),
             sender,
             checkpoint,
+            state_watermark,
             state: RwLock::new(state),
             tls_private_key,
             grpc_max_decoding_message_size,
             metrics: metrics.clone(),
             local_limiter: OnceLock::new(),
             guardian_reconcile_notify: Arc::new(tokio::sync::Notify::new()),
-            config_poll_interval: config_poll_interval.unwrap_or(std::time::Duration::from_millis(
-                crate::config::DEFAULT_ONCHAIN_CONFIG_POLL_INTERVAL_MS,
-            )),
             utxo_scrape_floor: std::sync::atomic::AtomicU64::new(0),
         }
         .pipe(Arc::new)
@@ -184,7 +189,7 @@ impl OnchainState {
         // The watcher rebuilds its client on every reconnect, so hand it the URL.
         let sui_rpc_url = sui_rpc_url.to_owned();
         let service = Service::new().spawn_aborting(async move {
-            watcher::watcher(sui_rpc_url, watcher_state, metrics).await;
+            watcher::watcher(sui_rpc_url, watcher_state, seed, metrics).await;
             Ok(())
         });
 
@@ -197,10 +202,6 @@ impl OnchainState {
 
     pub(crate) fn grpc_max_decoding_message_size(&self) -> Option<usize> {
         self.0.grpc_max_decoding_message_size
-    }
-
-    pub(crate) fn config_poll_interval(&self) -> std::time::Duration {
-        self.0.config_poll_interval
     }
 
     fn notify(&self, notification: Notification) {
@@ -225,12 +226,13 @@ impl OnchainState {
     /// would let coin selection re-pick a locked input and pay for an
     /// aborted tx).
     ///
-    /// The GC scans this snapshot instead of the mirror because the mirror
-    /// can overstate pending cleanups (`cleanup_spent_utxos` emits no event
-    /// the watcher could apply, so another leader's cleanup is invisible),
-    /// and every overstated id becomes a paid on-chain no-op. Only
-    /// `utxo_records` is fetched — cleanup never consults the ever-growing
-    /// `spent_utxos` tombstone history.
+    /// With the object mirror applying `cleanup_spent_utxos` deletions
+    /// directly, this out-of-band read is obsolete — the cleanup step of
+    /// the lossless-watcher plan switches the GC to decide from the
+    /// mirror (gated on `wait_until_checkpoint`) and deletes this scrape
+    /// and the `utxo_scrape_floor` machinery. Only `utxo_records` is
+    /// fetched — cleanup never consults the ever-growing `spent_utxos`
+    /// tombstone history.
     ///
     /// Every response — the `BitcoinState` wrapper AND each pagination page
     /// — must be at or past the watcher's checkpoint cursor, re-sampled per
@@ -251,7 +253,7 @@ impl OnchainState {
         &self,
     ) -> Result<BTreeMap<types::UtxoId, types::UtxoRecord>> {
         let client = self.client();
-        let (scrape_height, bitcoin_state) =
+        let (scrape_height, _version, bitcoin_state) =
             fetch_bitcoin_state(client.clone(), self.hashi_id(), self.package_id_original())
                 .await?;
         let floor = self
@@ -335,11 +337,47 @@ impl OnchainState {
         self.0.checkpoint.borrow().height
     }
 
-    /// Wait until the watcher reaches `target_seq`. Caller wraps with
+    /// The checkpoint through which the object mirror has applied every
+    /// Hashi transaction.
+    pub fn state_watermark(&self) -> u64 {
+        *self.0.state_watermark.borrow()
+    }
+
+    /// Advance the state watermark (monotonic). Only the mirror loop
+    /// calls this, from server coverage claims and applied transactions.
+    fn advance_state_watermark(&self, covered: u64) {
+        self.0.state_watermark.send_if_modified(|current| {
+            if covered <= *current {
+                return false;
+            }
+            *current = covered;
+            true
+        });
+        if let Some(metrics) = &self.0.metrics {
+            metrics
+                .watcher_state_watermark
+                .set(self.state_watermark() as i64);
+        }
+    }
+
+    /// Wait until the object mirror reflects every Hashi transaction
+    /// through checkpoint `target_seq`. Caller wraps with
     /// `tokio::time::timeout` for a bound.
+    ///
+    /// One deliberate softness: a transaction applied at checkpoint C
+    /// counts C as covered even though later Hashi transactions of the
+    /// same checkpoint may still be in flight in the same delivery
+    /// burst (they apply milliseconds later). Callers waiting on the
+    /// checkpoint of a transaction they themselves executed therefore
+    /// resolve as soon as that checkpoint's first Hashi transaction
+    /// lands, which in the common single-transaction case is exactly
+    /// their own.
     pub async fn wait_until_checkpoint(&self, target_seq: u64) {
-        let mut rx = self.subscribe_checkpoint();
-        while rx.borrow().height < target_seq {
+        let mut rx = self.0.state_watermark.subscribe();
+        loop {
+            if *rx.borrow_and_update() >= target_seq {
+                return;
+            }
             if rx.changed().await.is_err() {
                 return;
             }
@@ -383,41 +421,8 @@ impl OnchainState {
         self.0.checkpoint.send_replace(info);
     }
 
-    fn try_advance_checkpoint(&self, info: CheckpointInfo) -> bool {
-        self.0.checkpoint.send_if_modified(|current| {
-            if scrape_is_stale(info.height, current.height) {
-                return false;
-            }
-            *current = info;
-            true
-        })
-    }
-
-    fn install_scraped_state(
-        &self,
-        checkpoint_info: CheckpointInfo,
-        hashi: types::Hashi,
-    ) -> Result<()> {
-        if !self.try_advance_checkpoint(checkpoint_info) {
-            anyhow::bail!(
-                "stale full-state rescrape: scrape at checkpoint {} is behind the \
-                 freshness floor {}",
-                checkpoint_info.height,
-                self.latest_checkpoint_height(),
-            );
-        }
-        self.replace_hashi_state(hashi);
-        Ok(())
-    }
-
     pub fn package_id_original(&self) -> Address {
         self.0.ids.package_id
-    }
-
-    pub async fn rescrape(&self) -> Result<()> {
-        let (checkpoint_info, hashi) =
-            scrape_hashi(self.client(), self.hashi_id(), self.package_id_original()).await?;
-        self.install_scraped_state(checkpoint_info, hashi)
     }
 
     pub(crate) async fn scrape_committee_for_epoch(&self, epoch: u64) -> Result<Option<Committee>> {
@@ -448,11 +453,11 @@ impl OnchainState {
         self.state_mut().hashi = hashi;
     }
 
-    fn add_package_version(&self, version: u64, package_id: Address) {
-        let mut state = self.state_mut();
-        //TODO should we assert that this version is exactly the next one?
-        state.package_versions.insert(version, package_id);
-        state.package_ids.insert(package_id);
+    /// Replace the package-version map after an on-chain upgrade. The
+    /// mirror's `PackageUpgraded` effect carries only the new package
+    /// id; versions are reconciled from `list_package_versions`.
+    fn set_package_versions(&self, package_versions: BTreeMap<u64, Address>) {
+        self.state_mut().package_versions = package_versions;
     }
 
     pub fn client(&self) -> Client {
@@ -859,22 +864,23 @@ impl State {
         &self.hashi
     }
 
-    async fn scrape(client: Client, ids: HashiIds) -> Result<(Self, CheckpointInfo)> {
-        let (package_versions, (checkpoint_info, hashi)) = tokio::try_join!(
+    async fn scrape(
+        client: Client,
+        ids: HashiIds,
+    ) -> Result<(Self, CheckpointInfo, route::MirrorSeed)> {
+        let (package_versions, (checkpoint_info, hashi, seed)) = tokio::try_join!(
             scrape_package_versions(client.clone(), ids.package_id),
             scrape_hashi(client, ids.hashi_object_id, ids.package_id),
         )?;
 
-        let package_ids = package_versions.values().cloned().collect();
-
         Ok((
             State {
                 package_versions,
-                package_ids,
                 hashi,
                 withdrawal_signed_at_ms: BTreeMap::new(),
             },
             checkpoint_info,
+            seed,
         ))
     }
 }
@@ -903,14 +909,48 @@ async fn scrape_package_versions(
     Ok(package_versions)
 }
 
-/// Fetch the `BitcoinState` dynamic field hanging off the Hashi object.
-/// Returns the checkpoint height the response was served at alongside the
-/// state, so callers can judge the read's freshness.
-async fn fetch_bitcoin_state(
-    mut client: Client,
-    hashi_object_id: Address,
-    package_id: Address,
-) -> Result<(u64, move_types::BitcoinState)> {
+/// Page through `list_dynamic_fields` manually, collecting every field
+/// and the minimum checkpoint height across the responses. The height
+/// feeds the mirror's replay floor, which the auto-paginating stream
+/// helper cannot surface.
+async fn scrape_dynamic_field_pages(
+    client: &Client,
+    parent: Address,
+    mask: FieldMask,
+) -> Result<(u64, Vec<DynamicField>)> {
+    let mut fields = Vec::new();
+    let mut min_height = u64::MAX;
+    let mut page_token: Option<bytes::Bytes> = None;
+    loop {
+        let mut request = ListDynamicFieldsRequest::default()
+            .with_parent(parent)
+            .with_page_size(SCRAPE_PAGE_SIZE)
+            .with_read_mask(mask.clone());
+        if let Some(token) = page_token.take() {
+            request = request.with_page_token(token);
+        }
+        let response = client
+            .clone()
+            .state_client()
+            .list_dynamic_fields(request)
+            .await?;
+        let height = response
+            .checkpoint_height()
+            .ok_or_else(|| anyhow!("response missing X_SUI_CHECKPOINT_HEIGHT header"))?;
+        min_height = min_height.min(height);
+        let page = response.into_inner();
+        fields.extend(page.dynamic_fields);
+        match page.next_page_token {
+            Some(token) => page_token = Some(token),
+            None => break,
+        }
+    }
+    Ok((min_height, fields))
+}
+
+/// The derived object id of the `BitcoinState` dynamic field hanging
+/// off the Hashi root.
+fn bitcoin_state_field_id(hashi_object_id: Address, package_id: Address) -> Address {
     let bitcoin_state_key = move_types::BitcoinStateKey { dummy_field: false };
     let bitcoin_state_key_type = TypeTag::Struct(Box::new(StructTag::new(
         package_id,
@@ -918,21 +958,35 @@ async fn fetch_bitcoin_state(
         Identifier::from_static("BitcoinStateKey"),
         vec![],
     )));
-    let bitcoin_state_field_id = hashi_object_id.derive_dynamic_child_id(
+    hashi_object_id.derive_dynamic_child_id(
         &bitcoin_state_key_type,
         &bitcoin_state_key.to_bcs().unwrap(),
-    );
+    )
+}
+
+/// Fetch the `BitcoinState` dynamic field hanging off the Hashi object.
+/// Returns the checkpoint height the response was served at and the
+/// field object's version alongside the state, so callers can judge the
+/// read's freshness and seed the mirror's object index.
+async fn fetch_bitcoin_state(
+    mut client: Client,
+    hashi_object_id: Address,
+    package_id: Address,
+) -> Result<(u64, u64, move_types::BitcoinState)> {
+    let field_id = bitcoin_state_field_id(hashi_object_id, package_id);
     let bitcoin_state_response = client
         .ledger_client()
         .get_object(
-            GetObjectRequest::new(&bitcoin_state_field_id).with_read_mask(FieldMask::from_paths([
+            GetObjectRequest::new(&field_id).with_read_mask(FieldMask::from_paths([
                 Object::path_builder().contents().finish(),
+                Object::path_builder().version(),
             ])),
         )
         .await?;
     let checkpoint_height = bitcoin_state_response
         .checkpoint_height()
         .ok_or_else(|| anyhow!("response missing X_SUI_CHECKPOINT_HEIGHT header"))?;
+    let version = bitcoin_state_response.get_ref().object().version();
     let bitcoin_state_field: move_types::Field<
         move_types::BitcoinStateKey,
         move_types::BitcoinState,
@@ -942,18 +996,14 @@ async fn fetch_bitcoin_state(
         .contents()
         .deserialize()
         .map_err(|e| anyhow!("failed to deserialize BitcoinState: {e}"))?;
-    Ok((checkpoint_height, bitcoin_state_field.value))
-}
-
-fn scrape_is_stale(scrape_height: u64, floor: u64) -> bool {
-    scrape_height < floor
+    Ok((checkpoint_height, version, bitcoin_state_field.value))
 }
 
 async fn scrape_hashi(
     mut client: Client,
     hashi_object_id: Address,
     package_id: Address,
-) -> Result<(CheckpointInfo, types::Hashi)> {
+) -> Result<(CheckpointInfo, types::Hashi, route::MirrorSeed)> {
     let response = client
         .ledger_client()
         .get_object(
@@ -977,6 +1027,19 @@ async fn scrape_hashi(
             .ok_or_else(|| anyhow!("response missing X_SUI_EPOCH header"))?,
     };
 
+    let root_version = response.get_ref().object().version();
+    let root: move_types::Hashi = response.get_ref().object().contents().deserialize()?;
+
+    let mut seed = route::MirrorSeed::new(
+        hashi_object_id,
+        bitcoin_state_field_id(hashi_object_id, package_id),
+    );
+    seed.routing.register_package(package_id);
+    seed.observe_height(checkpoint_info.height);
+    seed.routing.set_root_containers(&root);
+    seed.index
+        .record(hashi_object_id, root_version, route::TrackedKind::HashiRoot);
+
     let move_types::Hashi {
         id,
         committees,
@@ -986,18 +1049,27 @@ async fn scrape_hashi(
         proposals,
         tob,
         num_consumed_presigs,
-    } = response.get_ref().object().contents().deserialize()?;
+    } = root;
 
-    let (_, bitcoin_state) = fetch_bitcoin_state(client.clone(), id, package_id).await?;
+    let (bitcoin_state_height, bitcoin_state_version, bitcoin_state) =
+        fetch_bitcoin_state(client.clone(), id, package_id).await?;
+    seed.observe_height(bitcoin_state_height);
+    seed.routing.set_bitcoin_state_containers(&bitcoin_state);
+    seed.index.record(
+        seed.routing.bitcoin_state_field_id(),
+        bitcoin_state_version,
+        route::TrackedKind::BitcoinStateField,
+    );
 
     let (
-        member_info,
-        (committees_per_epoch, committee_handoffs),
-        treasury,
-        deposit_queue,
-        withdrawal_queue,
-        utxo_pool,
-        proposals,
+        (member_seed, member_info),
+        (committee_seed, (committees_per_epoch, committee_handoffs)),
+        (treasury_seed, treasury),
+        (deposit_seed, deposit_queue),
+        (withdrawal_seed, withdrawal_queue),
+        (utxo_seed, utxo_pool),
+        (proposal_seed, proposals),
+        tob_seed,
     ) = tokio::try_join!(
         scrape_all_member_info(client.clone(), committees.members.id),
         scrape_committees(client.clone(), committees.committees.id),
@@ -1006,7 +1078,20 @@ async fn scrape_hashi(
         scrape_withdrawal_queue(client.clone(), bitcoin_state.withdrawal_queue),
         scrape_utxo_pool(client.clone(), bitcoin_state.utxo_pool),
         scrape_proposals(client.clone(), proposals),
+        scrape_tob_entries(client.clone(), tob.id),
     )?;
+    for container_seed in [
+        member_seed,
+        committee_seed,
+        treasury_seed,
+        deposit_seed,
+        withdrawal_seed,
+        utxo_seed,
+        proposal_seed,
+        tob_seed,
+    ] {
+        seed.absorb(container_seed);
+    }
 
     let mut committee_set =
         types::CommitteeSet::new(committees.members.id, committees.committees.id);
@@ -1032,32 +1117,38 @@ async fn scrape_hashi(
             tob_id: tob.id,
             num_consumed_presigs,
         },
+        seed,
     ))
 }
 
-/// Re-fetch only the `config` field from the Hashi Move object.
-///
-/// This is a lightweight alternative to the full `scrape_hashi` that avoids
-/// re-reading all nested dynamic fields (members, committees, treasury, etc.).
-/// Used by the watcher to refresh in-memory config when an `UpdateConfig`
-/// proposal is executed.
-pub(crate) async fn scrape_hashi_config(
-    mut client: Client,
-    hashi_object_id: Address,
-) -> Result<types::Config> {
-    let response =
-        client
-            .ledger_client()
-            .get_object(GetObjectRequest::new(&hashi_object_id).with_read_mask(
-                FieldMask::from_paths([Object::path_builder().contents().finish()]),
-            ))
-            .await?;
-
-    let move_types::Hashi {
-        config, versioning, ..
-    } = response.get_ref().object().contents().deserialize()?;
-
-    Ok(convert_move_config(config, versioning))
+/// Enumerate the tob bag's entries only to register each entry's inner
+/// `LinkedTable` UID (its children are dealer submission nodes) as a
+/// known-ignored container, and to seed the entry field ids.
+async fn scrape_tob_entries(client: Client, tob_id: Address) -> Result<route::ContainerSeed> {
+    let mask = FieldMask::from_paths([
+        DynamicField::path_builder().field_id(),
+        DynamicField::path_builder().value().finish(),
+        DynamicField::path_builder().field_object().version(),
+    ]);
+    let (height, fields) = scrape_dynamic_field_pages(&client, tob_id, mask).await?;
+    let mut seed = route::ContainerSeed {
+        height,
+        ..Default::default()
+    };
+    for field in &fields {
+        let certs: move_types::EpochCertsV1 = field
+            .value()
+            .deserialize()
+            .map_err(|e| anyhow!("failed to deserialize EpochCertsV1: {e}"))?;
+        let field_id: Address = field.field_id().parse()?;
+        seed.entries.push((
+            field_id,
+            field.field_object().version(),
+            route::TrackedKind::Ignored,
+        ));
+        seed.interior.push((certs.certs.id, route::Slot::TobCerts));
+    }
+    Ok(seed)
 }
 
 fn convert_move_config(
@@ -1074,28 +1165,30 @@ fn convert_move_config(
 async fn scrape_treasury(
     client: Client,
     treasury: move_types::Treasury,
-) -> Result<types::Treasury> {
+) -> Result<(route::ContainerSeed, types::Treasury)> {
+    let container = treasury.objects.id;
+    let mask = FieldMask::from_paths([
+        DynamicField::path_builder().name().finish(),
+        DynamicField::path_builder().field_id(),
+        DynamicField::path_builder().field_object().version(),
+        DynamicField::path_builder().child_object().object_id(),
+        DynamicField::path_builder().child_object().version(),
+        DynamicField::path_builder().child_object().object_type(),
+        DynamicField::path_builder()
+            .child_object()
+            .contents()
+            .finish(),
+    ]);
+    let (height, fields) = scrape_dynamic_field_pages(&client, container, mask).await?;
+    let mut seed = route::ContainerSeed {
+        height,
+        ..Default::default()
+    };
+
     let mut treasury_caps: BTreeMap<TypeTag, types::TreasuryCap> = BTreeMap::new();
     let mut metadata_caps: BTreeMap<TypeTag, types::MetadataCap> = BTreeMap::new();
 
-    let mut stream = client
-        .list_dynamic_fields(
-            ListDynamicFieldsRequest::default()
-                .with_parent(treasury.objects.id)
-                .with_page_size(SCRAPE_PAGE_SIZE)
-                .with_read_mask(FieldMask::from_paths([
-                    DynamicField::path_builder().name().finish(),
-                    DynamicField::path_builder().value().finish(),
-                    DynamicField::path_builder().child_object().object_type(),
-                    DynamicField::path_builder()
-                        .child_object()
-                        .contents()
-                        .finish(),
-                ])),
-        )
-        .pipe(Box::pin);
-
-    while let Some(field) = stream.try_next().await? {
+    for field in &fields {
         let object_type = field.child_object().object_type();
         let type_tag: TypeTag = match object_type.parse() {
             Ok(t) => t,
@@ -1107,99 +1200,105 @@ async fn scrape_treasury(
             }
         };
         let contents = field.child_object().contents().value();
+        let wrapper_id: Address = field.field_id().parse()?;
+        let child_id: Address = field.child_object().object_id().parse()?;
+        let child_version = field.child_object().version();
 
-        if let Some(treasury_cap) = types::TreasuryCap::try_from_contents(&type_tag, contents) {
-            treasury_caps.insert(treasury_cap.coin_type.clone(), treasury_cap);
+        let kind = if let Some(treasury_cap) =
+            types::TreasuryCap::try_from_contents(&type_tag, contents)
+        {
+            let coin_type = treasury_cap.coin_type.clone();
+            treasury_caps.insert(coin_type.clone(), treasury_cap);
+            route::TrackedKind::TreasuryCap(coin_type)
         } else if let Some(metadata_cap) =
             types::MetadataCap::try_from_contents(&type_tag, contents)
         {
-            metadata_caps.insert(metadata_cap.coin_type.clone(), metadata_cap);
+            let coin_type = metadata_cap.coin_type.clone();
+            metadata_caps.insert(coin_type.clone(), metadata_cap);
+            route::TrackedKind::MetadataCap(coin_type)
         } else {
             tracing::warn!("unknown type stored in treasury");
-        }
+            continue;
+        };
+        seed.entries.push((
+            wrapper_id,
+            field.field_object().version(),
+            route::TrackedKind::DofWrapper { container },
+        ));
+        seed.entries.push((child_id, child_version, kind));
     }
 
-    Ok(types::Treasury {
-        id: treasury.objects.id,
-        treasury_caps,
-        metadata_caps,
-    })
+    Ok((
+        seed,
+        types::Treasury {
+            id: container,
+            treasury_caps,
+            metadata_caps,
+        },
+    ))
 }
 
-pub(super) async fn fetch_treasury_cap(
-    client: &mut Client,
-    treasury_cap_id: Address,
-) -> Result<types::TreasuryCap> {
-    let response =
-        client
-            .ledger_client()
-            .get_object(GetObjectRequest::new(&treasury_cap_id).with_read_mask(
-                FieldMask::from_paths([Object::path_builder().contents().finish()]),
-            ))
-            .await?;
-
-    let object = response.into_inner();
-    let type_tag = object.object().contents().name().parse()?;
-    let contents = object.object().contents().value();
-
-    types::TreasuryCap::try_from_contents(&type_tag, contents)
-        .ok_or_else(|| anyhow!("failed to parse TreasuryCap from object {treasury_cap_id}"))
+/// Convert the raw Move `MemberInfo` into the enriched mirror shape
+/// (parsed BLS key, URI, TLS key, and encryption key).
+fn convert_move_member_info(info: move_types::MemberInfo) -> types::MemberInfo {
+    let move_types::MemberInfo {
+        validator_address,
+        operator_address,
+        next_epoch_public_key,
+        endpoint_url,
+        tls_public_key,
+        next_epoch_encryption_public_key,
+        extra_fields: _,
+    } = info;
+    types::MemberInfo {
+        validator_address,
+        operator_address,
+        next_epoch_public_key: convert_move_uncompressed_g1_pubkey(&next_epoch_public_key),
+        endpoint_url: endpoint_url.try_into().ok(),
+        tls_public_key: tls_public_key.as_slice().try_into().ok(),
+        next_epoch_encryption_public_key: parse_encryption_public_key(
+            next_epoch_encryption_public_key.as_slice(),
+        )
+        .map(Into::into),
+    }
 }
 
 async fn scrape_all_member_info(
     client: Client,
     member_info_id: Address,
-) -> Result<BTreeMap<Address, types::MemberInfo>> {
-    let member_info: BTreeMap<Address, types::MemberInfo> = client
-        .list_dynamic_fields(
-            ListDynamicFieldsRequest::default()
-                .with_parent(member_info_id)
-                .with_page_size(SCRAPE_PAGE_SIZE)
-                .with_read_mask(FieldMask::from_paths([
-                    DynamicField::path_builder().name().finish(),
-                    DynamicField::path_builder().value().finish(),
-                ])),
-        )
-        .and_then(|field| async move {
-            let info: move_types::MemberInfo = field
-                .value()
-                .deserialize()
-                .map_err(|e| tonic::Status::from_error(e.into()))?;
-
-            Ok(info)
-        })
-        .map_ok(
-            |move_types::MemberInfo {
-                 validator_address,
-                 operator_address,
-                 next_epoch_public_key,
-                 endpoint_url,
-                 tls_public_key,
-                 next_epoch_encryption_public_key,
-                 extra_fields: _,
-             }| {
-                let info = types::MemberInfo {
-                    validator_address,
-                    operator_address,
-                    next_epoch_public_key: convert_move_uncompressed_g1_pubkey(
-                        &next_epoch_public_key,
-                    ),
-                    endpoint_url: endpoint_url.try_into().ok(),
-                    tls_public_key: tls_public_key.as_slice().try_into().ok(),
-                    next_epoch_encryption_public_key: parse_encryption_public_key(
-                        next_epoch_encryption_public_key.as_slice(),
-                    )
-                    .map(Into::into),
-                };
-
-                (info.validator_address, info)
-            },
-        )
-        .try_collect()
-        .await?;
-    Ok(member_info)
+) -> Result<(route::ContainerSeed, BTreeMap<Address, types::MemberInfo>)> {
+    let mask = FieldMask::from_paths([
+        DynamicField::path_builder().name().finish(),
+        DynamicField::path_builder().value().finish(),
+        DynamicField::path_builder().field_id(),
+        DynamicField::path_builder().field_object().version(),
+    ]);
+    let (height, fields) = scrape_dynamic_field_pages(&client, member_info_id, mask).await?;
+    let mut seed = route::ContainerSeed {
+        height,
+        ..Default::default()
+    };
+    let mut member_info = BTreeMap::new();
+    for field in &fields {
+        let info: move_types::MemberInfo = field
+            .value()
+            .deserialize()
+            .map_err(|e| anyhow!("failed to deserialize MemberInfo: {e}"))?;
+        let info = convert_move_member_info(info);
+        let field_id: Address = field.field_id().parse()?;
+        seed.entries.push((
+            field_id,
+            field.field_object().version(),
+            route::TrackedKind::Member(info.validator_address),
+        ));
+        member_info.insert(info.validator_address, info);
+    }
+    Ok((seed, member_info))
 }
 
+/// Fetch a single validator's `MemberInfo` dynamic field. Not part of
+/// the watcher: used by transaction building to decide between
+/// registering and updating a validator.
 pub(crate) async fn scrape_member_info(
     mut client: Client,
     member_info_id: Address,
@@ -1227,130 +1326,13 @@ pub(crate) async fn scrape_member_info(
         .deserialize()
         .map_err(|e| tonic::Status::from_error(e.into()))?;
 
-    let move_types::MemberInfo {
-        validator_address,
-        operator_address,
-        next_epoch_public_key,
-        endpoint_url,
-        tls_public_key,
-        next_epoch_encryption_public_key,
-        extra_fields: _,
-    } = field.value;
-
-    let info = types::MemberInfo {
-        validator_address,
-        operator_address,
-        next_epoch_public_key: convert_move_uncompressed_g1_pubkey(&next_epoch_public_key),
-        endpoint_url: endpoint_url.try_into().ok(),
-        tls_public_key: tls_public_key.as_slice().try_into().ok(),
-        next_epoch_encryption_public_key: parse_encryption_public_key(
-            next_epoch_encryption_public_key.as_slice(),
-        )
-        .map(Into::into),
-    };
-    Ok(info)
+    Ok(convert_move_member_info(field.value))
 }
 
-async fn scrape_committees(
-    client: Client,
-    committees_id: Address,
-) -> Result<(
-    BTreeMap<u64, Committee>,
-    BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>>,
-)> {
-    let entries: Vec<CommitteeBagEntry> = client
-        .list_dynamic_fields(
-            ListDynamicFieldsRequest::default()
-                .with_parent(committees_id)
-                .with_page_size(SCRAPE_PAGE_SIZE)
-                .with_read_mask(FieldMask::from_paths([
-                    DynamicField::path_builder().name().finish(),
-                    DynamicField::path_builder().value().finish(),
-                    DynamicField::path_builder().value_type(),
-                ])),
-        )
-        .and_then(|field| async move {
-            let value_type: TypeTag = field
-                .value_type_opt()
-                .ok_or_else(|| tonic::Status::internal("missing dynamic field value_type"))?
-                .parse()
-                .map_err(|e| tonic::Status::internal(format!("invalid value_type: {e}")))?;
-            let TypeTag::Struct(struct_tag) = &value_type else {
-                return Err(tonic::Status::internal(format!(
-                    "unexpected committee bag value type: {value_type:?}"
-                )));
-            };
-            match struct_tag.name().as_str() {
-                "Committee" => {
-                    let committee: move_types::Committee = field
-                        .value()
-                        .deserialize()
-                        .map_err(|e| tonic::Status::from_error(e.into()))?;
-                    Ok(CommitteeBagEntry::Committee(committee))
-                }
-                "CommitteeHandoff" => {
-                    let key: move_types::CommitteeHandoffKey = field
-                        .name()
-                        .deserialize()
-                        .map_err(|e| tonic::Status::from_error(e.into()))?;
-                    let handoff: move_types::CommitteeHandoff = field
-                        .value()
-                        .deserialize()
-                        .map_err(|e| tonic::Status::from_error(e.into()))?;
-                    Ok(CommitteeBagEntry::CommitteeHandoff(key.epoch, handoff))
-                }
-                _ => Err(tonic::Status::internal(format!(
-                    "unexpected committee bag value type: {value_type:?}"
-                ))),
-            }
-        })
-        .try_collect()
-        .await?;
-
-    let mut move_committees = BTreeMap::new();
-    let mut raw_handoffs = BTreeMap::new();
-    for entry in entries {
-        match entry {
-            CommitteeBagEntry::Committee(move_committee) => {
-                let epoch = move_committee.epoch;
-                move_committees.insert(epoch, move_committee);
-            }
-            CommitteeBagEntry::CommitteeHandoff(from_epoch, handoff) => {
-                raw_handoffs.insert(from_epoch, handoff);
-            }
-        }
-    }
-
-    let handoffs = raw_handoffs
-        .into_iter()
-        .map(|(from_epoch, handoff)| {
-            let new_committee = move_committees
-                .get(&handoff.next_epoch)
-                .ok_or_else(|| {
-                    anyhow!(
-                        "committee handoff for epoch {from_epoch} references missing committee {}",
-                        handoff.next_epoch
-                    )
-                })?
-                .clone();
-            let signed = convert_move_committee_handoff(handoff, new_committee)
-                .map_err(|e| anyhow!("invalid committee handoff for epoch {from_epoch}: {e}"))?;
-            Ok((from_epoch, signed))
-        })
-        .collect::<Result<BTreeMap<_, _>>>()?;
-    let committees = move_committees
-        .into_iter()
-        .map(|(epoch, committee)| (epoch, convert_move_committee(committee)))
-        .collect();
-
-    Ok((committees, handoffs))
-}
-
-enum CommitteeBagEntry {
-    Committee(move_types::Committee),
-    CommitteeHandoff(u64, move_types::CommitteeHandoff),
-}
-
+/// Fetch a single epoch's `Committee` dynamic field. Not part of the
+/// watcher: used by the fresh-member rejoin path to read a committee
+/// the mirror may not hold. Surfaces the gRPC `NotFound` status so the
+/// caller can distinguish a missing committee from a failed read.
 async fn scrape_committee(
     mut client: Client,
     committees_id: Address,
@@ -1378,6 +1360,100 @@ async fn scrape_committee(
         .map_err(|e| tonic::Status::from_error(e.into()))?;
 
     Ok(convert_move_committee(field.value))
+}
+
+async fn scrape_committees(
+    client: Client,
+    committees_id: Address,
+) -> Result<(
+    route::ContainerSeed,
+    (
+        BTreeMap<u64, Committee>,
+        BTreeMap<u64, SignedMessage<CommitteeTransitionRequest>>,
+    ),
+)> {
+    let mask = FieldMask::from_paths([
+        DynamicField::path_builder().name().finish(),
+        DynamicField::path_builder().value().finish(),
+        DynamicField::path_builder().value_type(),
+        DynamicField::path_builder().field_id(),
+        DynamicField::path_builder().field_object().version(),
+    ]);
+    let (height, fields) = scrape_dynamic_field_pages(&client, committees_id, mask).await?;
+    let mut seed = route::ContainerSeed {
+        height,
+        ..Default::default()
+    };
+
+    let mut move_committees = BTreeMap::new();
+    let mut raw_handoffs = BTreeMap::new();
+    for field in &fields {
+        let value_type: TypeTag = field
+            .value_type_opt()
+            .ok_or_else(|| anyhow!("missing dynamic field value_type"))?
+            .parse()
+            .map_err(|e| anyhow!("invalid value_type: {e}"))?;
+        let TypeTag::Struct(struct_tag) = &value_type else {
+            anyhow::bail!("unexpected committee bag value type: {value_type:?}");
+        };
+        let field_id: Address = field.field_id().parse()?;
+        let field_version = field.field_object().version();
+        match struct_tag.name().as_str() {
+            "Committee" => {
+                let committee: move_types::Committee = field
+                    .value()
+                    .deserialize()
+                    .map_err(|e| anyhow!("failed to deserialize Committee: {e}"))?;
+                seed.entries.push((
+                    field_id,
+                    field_version,
+                    route::TrackedKind::Committee(committee.epoch),
+                ));
+                move_committees.insert(committee.epoch, committee);
+            }
+            "CommitteeHandoff" => {
+                let key: move_types::CommitteeHandoffKey = field
+                    .name()
+                    .deserialize()
+                    .map_err(|e| anyhow!("failed to deserialize CommitteeHandoffKey: {e}"))?;
+                let handoff: move_types::CommitteeHandoff = field
+                    .value()
+                    .deserialize()
+                    .map_err(|e| anyhow!("failed to deserialize CommitteeHandoff: {e}"))?;
+                seed.entries.push((
+                    field_id,
+                    field_version,
+                    route::TrackedKind::CommitteeHandoff(key.epoch),
+                ));
+                raw_handoffs.insert(key.epoch, handoff);
+            }
+            _ => anyhow::bail!("unexpected committee bag value type: {value_type:?}"),
+        }
+    }
+
+    let handoffs = raw_handoffs
+        .into_iter()
+        .map(|(from_epoch, handoff)| {
+            let new_committee = move_committees
+                .get(&handoff.next_epoch)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "committee handoff for epoch {from_epoch} references missing committee {}",
+                        handoff.next_epoch
+                    )
+                })?
+                .clone();
+            let signed = convert_move_committee_handoff(handoff, new_committee)
+                .map_err(|e| anyhow!("invalid committee handoff for epoch {from_epoch}: {e}"))?;
+            Ok((from_epoch, signed))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let committees = move_committees
+        .into_iter()
+        .map(|(epoch, committee)| (epoch, convert_move_committee(committee)))
+        .collect();
+
+    Ok((seed, (committees, handoffs)))
 }
 
 fn convert_move_committee_member(
@@ -1432,271 +1508,248 @@ fn convert_move_uncompressed_g1_pubkey(uncompressed_g1: &[u8]) -> BLS12381Public
     BLS12381PublicKey::from_bytes(pubkey.to_bytes().as_slice()).unwrap()
 }
 
+/// Scrape an `ObjectBag` whose children all BCS-decode as `T`, seeding
+/// the wrapper and child index entries. `kind_of` names what each child
+/// means to the mirror.
+async fn scrape_object_bag<T, F>(
+    client: &Client,
+    container: Address,
+    kind_of: F,
+) -> Result<(route::ContainerSeed, Vec<T>)>
+where
+    T: serde::de::DeserializeOwned,
+    F: Fn(&T) -> route::TrackedKind,
+{
+    let mask = FieldMask::from_paths([
+        DynamicField::path_builder().name().finish(),
+        DynamicField::path_builder().field_id(),
+        DynamicField::path_builder().field_object().version(),
+        DynamicField::path_builder().child_object().object_id(),
+        DynamicField::path_builder().child_object().version(),
+        DynamicField::path_builder()
+            .child_object()
+            .contents()
+            .finish(),
+    ]);
+    let (height, fields) = scrape_dynamic_field_pages(client, container, mask).await?;
+    let mut seed = route::ContainerSeed {
+        height,
+        ..Default::default()
+    };
+    let mut values = Vec::with_capacity(fields.len());
+    for field in &fields {
+        let value: T = field
+            .child_object()
+            .contents()
+            .deserialize()
+            .map_err(|e| anyhow!("failed to deserialize ObjectBag child: {e}"))?;
+        let wrapper_id: Address = field.field_id().parse()?;
+        let child_id: Address = field.child_object().object_id().parse()?;
+        seed.entries.push((
+            wrapper_id,
+            field.field_object().version(),
+            route::TrackedKind::DofWrapper { container },
+        ));
+        seed.entries
+            .push((child_id, field.child_object().version(), kind_of(&value)));
+        values.push(value);
+    }
+    Ok((seed, values))
+}
+
 async fn scrape_deposit_requests(
     client: Client,
     deposit_queue: move_types::DepositRequestQueue,
-) -> Result<types::DepositRequestQueue> {
+) -> Result<(route::ContainerSeed, types::DepositRequestQueue)> {
     let deposit_queue_id = deposit_queue.requests.id;
-    let requests: BTreeMap<Address, types::DepositRequest> = client
-        .list_dynamic_fields(
-            ListDynamicFieldsRequest::default()
-                .with_parent(deposit_queue_id)
-                .with_page_size(SCRAPE_PAGE_SIZE)
-                .with_read_mask(FieldMask::from_paths([
-                    DynamicField::path_builder().name().finish(),
-                    DynamicField::path_builder()
-                        .child_object()
-                        .contents()
-                        .finish(),
-                ])),
-        )
-        .and_then(|field| async move {
-            let request: types::DepositRequest = field
-                .child_object()
-                .contents()
-                .deserialize()
-                .map_err(|e| tonic::Status::from_error(e.into()))?;
-            Ok((request.id, request))
+    let (seed, values) =
+        scrape_object_bag::<types::DepositRequest, _>(&client, deposit_queue_id, |request| {
+            route::TrackedKind::DepositRequest(request.id)
         })
-        .try_collect()
         .await?;
-
-    let deposit_requests = types::DepositRequestQueue {
-        id: deposit_queue_id,
-        requests,
-        processed_id: deposit_queue.processed.id,
-    };
-
-    Ok(deposit_requests)
+    Ok((
+        seed,
+        types::DepositRequestQueue {
+            id: deposit_queue_id,
+            requests: values.into_iter().map(|r| (r.id, r)).collect(),
+            processed_id: deposit_queue.processed.id,
+        },
+    ))
 }
 
 async fn scrape_withdrawal_queue(
     client: Client,
     withdrawal_queue: move_types::WithdrawalRequestQueue,
-) -> Result<types::WithdrawalRequestQueue> {
-    let (requests, withdrawal_txns) = tokio::try_join!(
-        scrape_withdrawal_requests(client.clone(), withdrawal_queue.requests.id),
-        scrape_withdrawal_txns(client.clone(), withdrawal_queue.withdrawal_txns.id),
+) -> Result<(route::ContainerSeed, types::WithdrawalRequestQueue)> {
+    let ((mut requests_seed, requests), (txns_seed, withdrawal_txns)) = tokio::try_join!(
+        scrape_object_bag::<types::WithdrawalRequest, _>(
+            &client,
+            withdrawal_queue.requests.id,
+            |request| route::TrackedKind::WithdrawalRequest(request.id),
+        ),
+        scrape_object_bag::<types::WithdrawalTransaction, _>(
+            &client,
+            withdrawal_queue.withdrawal_txns.id,
+            |txn| route::TrackedKind::WithdrawalTxn(txn.id),
+        ),
     )?;
+    requests_seed.merge(txns_seed);
 
-    Ok(types::WithdrawalRequestQueue {
-        requests_id: withdrawal_queue.requests.id,
-        requests,
-        processed_id: withdrawal_queue.processed.id,
-        withdrawal_txns_id: withdrawal_queue.withdrawal_txns.id,
-        withdrawal_txns,
-        confirmed_txns_id: withdrawal_queue.confirmed_txns.id,
-    })
-}
-
-async fn scrape_withdrawal_requests(
-    client: Client,
-    requests_id: Address,
-) -> Result<BTreeMap<Address, types::WithdrawalRequest>> {
-    let requests: BTreeMap<Address, types::WithdrawalRequest> = client
-        .list_dynamic_fields(
-            ListDynamicFieldsRequest::default()
-                .with_parent(requests_id)
-                .with_page_size(SCRAPE_PAGE_SIZE)
-                .with_read_mask(FieldMask::from_paths([
-                    DynamicField::path_builder().name().finish(),
-                    DynamicField::path_builder()
-                        .child_object()
-                        .contents()
-                        .finish(),
-                ])),
-        )
-        .and_then(|field| async move {
-            let request: types::WithdrawalRequest =
-                field
-                    .child_object()
-                    .contents()
-                    .deserialize()
-                    .map_err(|e| tonic::Status::from_error(e.into()))?;
-            Ok((request.id, request))
-        })
-        .try_collect()
-        .await?;
-
-    Ok(requests)
-}
-
-async fn scrape_withdrawal_txns(
-    client: Client,
-    withdrawal_txns_id: Address,
-) -> Result<BTreeMap<Address, types::WithdrawalTransaction>> {
-    let withdrawal_txns: BTreeMap<Address, types::WithdrawalTransaction> = client
-        .list_dynamic_fields(
-            ListDynamicFieldsRequest::default()
-                .with_parent(withdrawal_txns_id)
-                .with_page_size(SCRAPE_PAGE_SIZE)
-                .with_read_mask(FieldMask::from_paths([
-                    DynamicField::path_builder().name().finish(),
-                    DynamicField::path_builder()
-                        .child_object()
-                        .contents()
-                        .finish(),
-                ])),
-        )
-        .and_then(|field| async move {
-            let txn: types::WithdrawalTransaction =
-                field
-                    .child_object()
-                    .contents()
-                    .deserialize()
-                    .map_err(|e| tonic::Status::from_error(e.into()))?;
-            Ok((txn.id, txn))
-        })
-        .try_collect()
-        .await?;
-
-    Ok(withdrawal_txns)
-}
-
-/// Fetch a single WithdrawalTransaction by its object ID.
-/// WithdrawalTransaction has `key`, so it's stored as a child object in the
-/// ObjectBag and can be fetched directly by its ID.
-pub(super) async fn fetch_withdrawal_txn(
-    client: &mut Client,
-    withdrawal_txn_id: Address,
-) -> Result<types::WithdrawalTransaction> {
-    let response = client
-        .ledger_client()
-        .get_object(GetObjectRequest::new(&withdrawal_txn_id).with_read_mask(
-            FieldMask::from_paths([Object::path_builder().contents().finish()]),
-        ))
-        .await?;
-
-    let txn: types::WithdrawalTransaction = response
-        .into_inner()
-        .object()
-        .contents()
-        .deserialize()
-        .map_err(|e| anyhow!("failed to deserialize WithdrawalTransaction: {e}"))?;
-
-    Ok(txn)
+    Ok((
+        requests_seed,
+        types::WithdrawalRequestQueue {
+            requests_id: withdrawal_queue.requests.id,
+            requests: requests.into_iter().map(|r| (r.id, r)).collect(),
+            processed_id: withdrawal_queue.processed.id,
+            withdrawal_txns_id: withdrawal_queue.withdrawal_txns.id,
+            withdrawal_txns: withdrawal_txns.into_iter().map(|t| (t.id, t)).collect(),
+            confirmed_txns_id: withdrawal_queue.confirmed_txns.id,
+        },
+    ))
 }
 
 async fn scrape_utxo_pool(
     client: Client,
     utxo_pool: move_types::UtxoPool,
-) -> Result<types::UtxoPool> {
-    let (utxo_records, spent_utxos) = tokio::try_join!(
+) -> Result<(route::ContainerSeed, types::UtxoPool)> {
+    let ((mut records_seed, utxo_records), (spent_seed, spent_utxos)) = tokio::try_join!(
         scrape_utxo_records(client.clone(), utxo_pool.utxo_records.id),
         scrape_spent_utxos(client.clone(), utxo_pool.spent_utxos.id),
     )?;
+    records_seed.merge(spent_seed);
 
-    Ok(types::UtxoPool {
-        utxo_records_id: utxo_pool.utxo_records.id,
-        utxo_records,
-        spent_utxos_id: utxo_pool.spent_utxos.id,
-        spent_utxos,
-    })
+    Ok((
+        records_seed,
+        types::UtxoPool {
+            utxo_records_id: utxo_pool.utxo_records.id,
+            utxo_records,
+            spent_utxos_id: utxo_pool.spent_utxos.id,
+            spent_utxos,
+        },
+    ))
+}
+
+fn plain_field_mask() -> FieldMask {
+    FieldMask::from_paths([
+        DynamicField::path_builder().name().finish(),
+        DynamicField::path_builder().value().finish(),
+        DynamicField::path_builder().field_id(),
+        DynamicField::path_builder().field_object().version(),
+    ])
 }
 
 async fn scrape_utxo_records(
     client: Client,
     utxo_records_id: Address,
-) -> Result<BTreeMap<types::UtxoId, types::UtxoRecord>> {
-    let utxo_records: BTreeMap<types::UtxoId, types::UtxoRecord> = client
-        .list_dynamic_fields(
-            ListDynamicFieldsRequest::default()
-                .with_parent(utxo_records_id)
-                .with_page_size(SCRAPE_PAGE_SIZE)
-                .with_read_mask(FieldMask::from_paths([
-                    DynamicField::path_builder().name().finish(),
-                    DynamicField::path_builder().value().finish(),
-                ])),
-        )
-        .and_then(|field| async move {
-            let record: types::UtxoRecord = field
-                .value()
-                .deserialize()
-                .map_err(|e| tonic::Status::from_error(e.into()))?;
-            Ok((record.utxo.id, record))
-        })
-        .try_collect()
-        .await?;
-
-    Ok(utxo_records)
+) -> Result<(
+    route::ContainerSeed,
+    BTreeMap<types::UtxoId, types::UtxoRecord>,
+)> {
+    let (height, fields) =
+        scrape_dynamic_field_pages(&client, utxo_records_id, plain_field_mask()).await?;
+    let mut seed = route::ContainerSeed {
+        height,
+        ..Default::default()
+    };
+    let mut utxo_records = BTreeMap::new();
+    for field in &fields {
+        let record: types::UtxoRecord = field
+            .value()
+            .deserialize()
+            .map_err(|e| anyhow!("failed to deserialize UtxoRecord: {e}"))?;
+        let field_id: Address = field.field_id().parse()?;
+        seed.entries.push((
+            field_id,
+            field.field_object().version(),
+            route::TrackedKind::UtxoRecord(record.utxo.id),
+        ));
+        utxo_records.insert(record.utxo.id, record);
+    }
+    Ok((seed, utxo_records))
 }
 
 async fn scrape_spent_utxos(
     client: Client,
     spent_utxos_id: Address,
-) -> Result<BTreeMap<types::UtxoId, u64>> {
-    let spent_utxos: BTreeMap<types::UtxoId, u64> = client
-        .list_dynamic_fields(
-            ListDynamicFieldsRequest::default()
-                .with_parent(spent_utxos_id)
-                .with_page_size(SCRAPE_PAGE_SIZE)
-                .with_read_mask(FieldMask::from_paths([
-                    DynamicField::path_builder().name().finish(),
-                    DynamicField::path_builder().value().finish(),
-                ])),
-        )
-        .and_then(|field| async move {
-            let utxo_id: types::UtxoId = field
-                .name()
-                .deserialize()
-                .map_err(|e| tonic::Status::from_error(e.into()))?;
-            let spent_epoch: u64 = field
-                .value()
-                .deserialize()
-                .map_err(|e| tonic::Status::from_error(e.into()))?;
-            Ok((utxo_id, spent_epoch))
-        })
-        .try_collect()
-        .await?;
-
-    Ok(spent_utxos)
+) -> Result<(route::ContainerSeed, BTreeMap<types::UtxoId, u64>)> {
+    let (height, fields) =
+        scrape_dynamic_field_pages(&client, spent_utxos_id, plain_field_mask()).await?;
+    let mut seed = route::ContainerSeed {
+        height,
+        ..Default::default()
+    };
+    let mut spent_utxos = BTreeMap::new();
+    for field in &fields {
+        let utxo_id: types::UtxoId = field
+            .name()
+            .deserialize()
+            .map_err(|e| anyhow!("failed to deserialize UtxoId: {e}"))?;
+        let spent_epoch: u64 = field
+            .value()
+            .deserialize()
+            .map_err(|e| anyhow!("failed to deserialize spent epoch: {e}"))?;
+        let field_id: Address = field.field_id().parse()?;
+        seed.entries.push((
+            field_id,
+            field.field_object().version(),
+            route::TrackedKind::SpentUtxo(utxo_id),
+        ));
+        spent_utxos.insert(utxo_id, spent_epoch);
+    }
+    Ok((seed, spent_utxos))
 }
 
 async fn scrape_proposals(
     client: Client,
     proposals: move_types::Proposals,
-) -> Result<types::Proposals> {
+) -> Result<(route::ContainerSeed, types::Proposals)> {
     let active_id = proposals.active.id;
     let executed_id = proposals.executed.id;
-    let (active, executed) = tokio::try_join!(
-        scrape_proposal_bag(client.clone(), proposals.active),
-        scrape_proposal_bag(client, proposals.executed),
+    let ((mut active_seed, active), (executed_seed, executed)) = tokio::try_join!(
+        scrape_proposal_bag(client.clone(), proposals.active, false),
+        scrape_proposal_bag(client, proposals.executed, true),
     )?;
-    Ok(types::Proposals {
-        active_id,
-        executed_id,
-        active,
-        executed,
-    })
+    active_seed.merge(executed_seed);
+    Ok((
+        active_seed,
+        types::Proposals {
+            active_id,
+            executed_id,
+            active,
+            executed,
+        },
+    ))
 }
 
 async fn scrape_proposal_bag(
     client: Client,
     bag: move_types::ObjectBag,
-) -> Result<BTreeMap<Address, types::Proposal>> {
-    let mut proposals: BTreeMap<Address, types::Proposal> = BTreeMap::new();
-
+    executed: bool,
+) -> Result<(route::ContainerSeed, BTreeMap<Address, types::Proposal>)> {
     // Proposals live in a `0x2::object_bag::ObjectBag`, so each entry's
     // payload is a standalone child object. Read `child_object` directly —
     // fullnode gRPC populates `child_object.object_type` + BCS `contents`
     // for dynamic-object-field kinds.
-    let mut stream = client
-        .list_dynamic_fields(
-            ListDynamicFieldsRequest::default()
-                .with_parent(bag.id)
-                .with_page_size(SCRAPE_PAGE_SIZE)
-                .with_read_mask(FieldMask::from_paths([
-                    DynamicField::path_builder().name().finish(),
-                    DynamicField::path_builder().child_object().object_type(),
-                    DynamicField::path_builder()
-                        .child_object()
-                        .contents()
-                        .finish(),
-                ])),
-        )
-        .pipe(Box::pin);
+    let mask = FieldMask::from_paths([
+        DynamicField::path_builder().name().finish(),
+        DynamicField::path_builder().field_id(),
+        DynamicField::path_builder().field_object().version(),
+        DynamicField::path_builder().child_object().object_id(),
+        DynamicField::path_builder().child_object().version(),
+        DynamicField::path_builder().child_object().object_type(),
+        DynamicField::path_builder()
+            .child_object()
+            .contents()
+            .finish(),
+    ]);
+    let (height, fields) = scrape_dynamic_field_pages(&client, bag.id, mask).await?;
+    let mut seed = route::ContainerSeed {
+        height,
+        ..Default::default()
+    };
+    let mut proposals: BTreeMap<Address, types::Proposal> = BTreeMap::new();
 
-    while let Some(field) = stream.try_next().await? {
+    for field in &fields {
         // `child_object.object_type` is the fully-qualified type, e.g.
         //   <package>::proposal::Proposal<<package>::update_config::UpdateConfig>
         let object_type = field.child_object().object_type();
@@ -1710,64 +1763,58 @@ async fn scrape_proposal_bag(
                 continue;
             }
         };
-        let proposal_type = parse_proposal_type(&type_tag);
-
-        // Deserialize proposal based on the proposal type
-        let contents: &[u8] = field.child_object().contents().value();
-        let result: Option<(Address, u64)> = match &proposal_type {
-            types::ProposalType::UpdateConfig => {
-                bcs::from_bytes::<move_types::Proposal<move_types::UpdateConfig>>(contents)
-                    .ok()
-                    .map(|p| (p.id, p.created_timestamp_ms))
-            }
-            types::ProposalType::EnableVersion => {
-                bcs::from_bytes::<move_types::Proposal<move_types::EnableVersion>>(contents)
-                    .ok()
-                    .map(|p| (p.id, p.created_timestamp_ms))
-            }
-            types::ProposalType::DisableVersion => {
-                bcs::from_bytes::<move_types::Proposal<move_types::DisableVersion>>(contents)
-                    .ok()
-                    .map(|p| (p.id, p.created_timestamp_ms))
-            }
-            types::ProposalType::Upgrade => {
-                bcs::from_bytes::<move_types::Proposal<move_types::Upgrade>>(contents)
-                    .ok()
-                    .map(|p| (p.id, p.created_timestamp_ms))
-            }
-            types::ProposalType::EmergencyPause => {
-                bcs::from_bytes::<move_types::Proposal<move_types::EmergencyPause>>(contents)
-                    .ok()
-                    .map(|p| (p.id, p.created_timestamp_ms))
-            }
-            types::ProposalType::AbortReconfig => {
-                bcs::from_bytes::<move_types::Proposal<move_types::AbortReconfig>>(contents)
-                    .ok()
-                    .map(|p| (p.id, p.created_timestamp_ms))
-            }
-            types::ProposalType::UpdateGuardian => {
-                bcs::from_bytes::<move_types::Proposal<move_types::UpdateGuardian>>(contents)
-                    .ok()
-                    .map(|p| (p.id, p.created_timestamp_ms))
-            }
-            types::ProposalType::Unknown(_) => None,
-        };
-
-        if let Some((id, timestamp_ms)) = result {
-            proposals.insert(
-                id,
-                types::Proposal {
-                    id,
-                    timestamp_ms,
-                    proposal_type,
+        if let Some(proposal) = decode_proposal(&type_tag, field.child_object().contents().value())
+        {
+            let wrapper_id: Address = field.field_id().parse()?;
+            let child_id: Address = field.child_object().object_id().parse()?;
+            seed.entries.push((
+                wrapper_id,
+                field.field_object().version(),
+                route::TrackedKind::DofWrapper { container: bag.id },
+            ));
+            seed.entries.push((
+                child_id,
+                field.child_object().version(),
+                route::TrackedKind::Proposal {
+                    executed,
+                    id: proposal.id,
                 },
-            );
+            ));
+            proposals.insert(proposal.id, proposal);
         } else {
             tracing::warn!("Failed to deserialize proposal with type {:?}", type_tag);
         }
     }
 
-    Ok(proposals)
+    Ok((seed, proposals))
+}
+
+/// Decode a `Proposal<T>` object into the lightweight mirror shape,
+/// dispatching the BCS layout on the type parameter `T`. Returns `None`
+/// for unknown proposal types or undecodable contents.
+fn decode_proposal(type_tag: &TypeTag, contents: &[u8]) -> Option<types::Proposal> {
+    fn parse<T: serde::de::DeserializeOwned>(contents: &[u8]) -> Option<(Address, u64)> {
+        bcs::from_bytes::<move_types::Proposal<T>>(contents)
+            .ok()
+            .map(|p| (p.id, p.created_timestamp_ms))
+    }
+
+    let proposal_type = parse_proposal_type(type_tag);
+    let (id, timestamp_ms) = match &proposal_type {
+        types::ProposalType::UpdateConfig => parse::<move_types::UpdateConfig>(contents),
+        types::ProposalType::EnableVersion => parse::<move_types::EnableVersion>(contents),
+        types::ProposalType::DisableVersion => parse::<move_types::DisableVersion>(contents),
+        types::ProposalType::Upgrade => parse::<move_types::Upgrade>(contents),
+        types::ProposalType::EmergencyPause => parse::<move_types::EmergencyPause>(contents),
+        types::ProposalType::AbortReconfig => parse::<move_types::AbortReconfig>(contents),
+        types::ProposalType::UpdateGuardian => parse::<move_types::UpdateGuardian>(contents),
+        types::ProposalType::Unknown(_) => None,
+    }?;
+    Some(types::Proposal {
+        id,
+        timestamp_ms,
+        proposal_type,
+    })
 }
 
 pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
@@ -1798,13 +1845,6 @@ pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
         ("update_guardian", "UpdateGuardian") => types::ProposalType::UpdateGuardian,
         _ => types::ProposalType::Unknown(format!("{}::{}", inner_tag.module(), inner_tag.name())),
     }
-}
-
-pub trait MoveType {
-    const PACKAGE_VERSION: u64 = 1;
-    const MODULE: &'static str;
-    const NAME: &'static str;
-    const MODULE_NAME: (&'static str, &'static str) = (Self::MODULE, Self::NAME);
 }
 
 #[cfg(test)]

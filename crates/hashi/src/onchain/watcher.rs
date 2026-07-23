@@ -1,35 +1,30 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::BTreeSet;
+//! The watcher's two streams.
+//!
+//! 1. The clock stream (here): an unfiltered checkpoint subscription
+//!    with a minimal scalar mask. It keeps [`CheckpointInfo`] — the
+//!    leader tick, timestamps, and Sui epoch-change detection — fresh
+//!    regardless of Hashi activity, and costs a few scalar fields per
+//!    checkpoint.
+//! 2. The state stream ([`super::mirror`]): the filtered transaction
+//!    stream that applies every Hashi-touching transaction's changed
+//!    objects to the mirror.
+
 use std::sync::Arc;
-use std::time::Duration;
 
 use futures::StreamExt;
-use hashi_types::move_types::AbortReconfig;
-use hashi_types::move_types::Burned;
-use hashi_types::move_types::HashiEvent;
-use hashi_types::move_types::Minted;
-use hashi_types::move_types::MpcSig;
-use sui_rpc::Client;
 use sui_rpc::field::FieldMask;
 use sui_rpc::field::FieldMaskUtil;
 use sui_rpc::proto::proto_to_timestamp_ms;
 use sui_rpc::proto::sui::rpc::v2::Checkpoint;
 use sui_rpc::proto::sui::rpc::v2::SubscribeCheckpointsRequest;
 
-use sui_sdk_types::TypeTag;
-
 use crate::metrics::Metrics;
 use crate::onchain::CheckpointInfo;
 use crate::onchain::Notification;
 use crate::onchain::OnchainState;
-use crate::onchain::scrape_member_info;
-use crate::onchain::types::DepositRequest;
-use crate::onchain::types::Proposal;
-use crate::onchain::types::ProposalType;
-use crate::onchain::types::WithdrawalRequest;
-use crate::withdrawals::withdrawal_limiter_consumption_amount;
 
 /// Reconnect if the checkpoint stream goes silent this long. A half-open h2
 /// stream yields neither an item nor an error, so an unbounded read hangs — the
@@ -37,85 +32,57 @@ use crate::withdrawals::withdrawal_limiter_consumption_amount;
 /// server silently stopped sending checkpoints.
 const CHECKPOINT_STREAM_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// How often to unconditionally rescrape the full on-chain state. The event
-/// stream can drift from chain state (e.g. writes that emit no event, such as
-/// `cleanup_spent_utxos`); a periodic rescrape bounds how long any such drift
-/// can persist.
-const PERIODIC_RESCRAPE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const RECONNECT_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
 
-#[tracing::instrument(name = "watcher", skip_all)]
-pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<Arc<Metrics>>) {
-    let subscription_read_mask = FieldMask::from_paths([
+/// Run the clock stream and the object mirror side by side.
+pub async fn watcher(
+    sui_rpc_url: String,
+    state: OnchainState,
+    seed: super::route::MirrorSeed,
+    metrics: Option<Arc<Metrics>>,
+) {
+    tokio::join!(
+        clock_watcher(sui_rpc_url.clone(), state.clone(), metrics.clone()),
+        super::mirror::run(sui_rpc_url, state, seed, metrics),
+    );
+}
+
+#[tracing::instrument(name = "clock_watcher", skip_all)]
+async fn clock_watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<Arc<Metrics>>) {
+    let read_mask = FieldMask::from_paths([
         Checkpoint::path_builder().sequence_number(),
         Checkpoint::path_builder().summary().timestamp(),
         Checkpoint::path_builder().summary().epoch(),
-        Checkpoint::path_builder()
-            .transactions()
-            .events()
-            .events()
-            .contents()
-            .finish(),
-        Checkpoint::path_builder().transactions().digest(),
-        Checkpoint::path_builder()
-            .transactions()
-            .effects()
-            .status()
-            .finish(),
     ]);
 
-    let mut rescrape_state = false;
-    // Boot scrape just populated the snapshot; start the poll clocks from here.
-    let mut last_config_refresh = std::time::Instant::now();
-    let mut last_rescrape = std::time::Instant::now();
-
     loop {
-        // Reconnect with a fresh client each iteration. Re-subscribing on the
-        // same channel can reuse a wedged h2 connection — the one whose stream
-        // just stalled — and silently hang again; a new client forces a clean
-        // connection. Reconnects are rare, so the extra setup cost is fine.
+        // Reconnect with a fresh client each iteration: re-subscribing on
+        // the same channel can reuse a wedged h2 connection — the one
+        // whose stream just stalled — and silently hang again.
         let mut client = match crate::sui_rpc_client::new_sui_rpc_client(&sui_rpc_url) {
             Ok(client) => client,
             Err(e) => {
                 tracing::warn!("error creating Sui RPC client: {e}");
-                rescrape_state = true;
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(RECONNECT_DELAY).await;
                 continue;
             }
         };
-        // Same decode limit as the bootstrap scrape — this client does the
-        // reconnect rescrape, which reads the full (large) on-chain state.
-        if let Some(limit) = state.grpc_max_decoding_message_size() {
-            client = client.with_max_decoding_message_size(limit);
-        }
 
         let mut subscription = match client
             .subscription_client()
             .subscribe_checkpoints(
-                SubscribeCheckpointsRequest::default()
-                    .with_read_mask(subscription_read_mask.clone()),
+                SubscribeCheckpointsRequest::default().with_read_mask(read_mask.clone()),
             )
             .await
         {
             Ok(subscription) => subscription,
             Err(e) => {
                 tracing::warn!("error trying to subscribe to checkpoints: {e}");
-                rescrape_state = true;
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(RECONNECT_DELAY).await;
                 continue;
             }
         }
         .into_inner();
-
-        // Rescrape the chain state in the event our subscription broke
-        if rescrape_state {
-            if let Err(e) = rescrape_hashi_state(&client, &state, metrics.as_ref()).await {
-                tracing::warn!("error trying to rescrape hashi's state: {e}");
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                continue;
-            }
-            last_config_refresh = std::time::Instant::now();
-            last_rescrape = std::time::Instant::now();
-        }
 
         while let Ok(Some(item)) =
             tokio::time::timeout(CHECKPOINT_STREAM_STALL_TIMEOUT, subscription.next()).await
@@ -128,8 +95,8 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
                 }
             };
 
-            let ckpt = checkpoint.cursor();
-            tracing::trace!("received checkpoint {ckpt}");
+            let height = checkpoint.cursor();
+            tracing::trace!("received checkpoint {height}");
             let timestamp_ms = checkpoint
                 .checkpoint()
                 .summary()
@@ -142,41 +109,9 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
                 tracing::debug!("Sui epoch changed from {previous_epoch} to {epoch}");
                 state.notify(Notification::SuiEpochChanged(epoch));
             }
-            let mut events = Vec::new();
-            {
-                let state = state.state();
 
-                for txn in checkpoint.checkpoint().transactions() {
-                    // Skip txns that were not successful
-                    if !txn.effects().status().success() {
-                        continue;
-                    }
-
-                    for event in txn.events().events() {
-                        match HashiEvent::try_parse(&state.package_ids, event.contents()) {
-                            Ok(Some(event)) => {
-                                tracing::debug!("found event {:?}", event);
-                                events.push(event);
-                            }
-                            Ok(None) => {}
-                            Err(e) => tracing::error!("unable to parse event: {e}"),
-                        }
-                    }
-                }
-            }
-
-            handle_events(&mut client, &state, timestamp_ms, &events).await;
-
-            if last_config_refresh.elapsed() >= state.config_poll_interval()
-                && launch_pending(&state)
-            {
-                refresh_config_if_changed(&client, &state).await;
-                last_config_refresh = std::time::Instant::now();
-            }
-
-            // Finally update the latest checkpoint info
             state.update_latest_checkpoint_info(CheckpointInfo {
-                height: ckpt,
+                height,
                 timestamp_ms,
                 epoch,
             });
@@ -184,704 +119,12 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
             if let Some(metrics) = &metrics {
                 metrics.update_onchain_state(&state);
             }
-
-            // Unconditional periodic rescrape. Runs on the watcher task, so
-            // it can't race event application; any checkpoints the scrape
-            // already included are replayed by the stream afterward, which
-            // re-applies them as no-ops. On failure, just wait for the next
-            // interval — the reconnect rescrape still guards correctness.
-            if last_rescrape.elapsed() >= PERIODIC_RESCRAPE_INTERVAL {
-                if let Err(e) = rescrape_hashi_state(&client, &state, metrics.as_ref()).await {
-                    tracing::warn!("periodic rescrape of hashi's state failed: {e}");
-                } else {
-                    last_config_refresh = std::time::Instant::now();
-                }
-                last_rescrape = std::time::Instant::now();
-            }
         }
 
-        // The stream stalled, errored, or closed. Loop to rebuild the client,
-        // re-subscribe, and rescrape to recover any gap we missed.
-        tracing::warn!("checkpoint stream ended; reconnecting Sui client and rescraping");
-        rescrape_state = true;
-    }
-}
-
-/// Scrape the full on-chain state and install it as the new snapshot. Used
-/// both after a reconnect (to recover any gap the stream missed) and on the
-/// periodic rescrape interval (to heal drift from eventless writes).
-async fn rescrape_hashi_state(
-    client: &Client,
-    state: &OnchainState,
-    metrics: Option<&Arc<Metrics>>,
-) -> anyhow::Result<()> {
-    let (checkpoint_info, hashi) = super::scrape_hashi(
-        client.clone(),
-        state.hashi_id(),
-        state.package_id_original(),
-    )
-    .await?;
-    state.install_scraped_state(checkpoint_info, hashi)?;
-    if let Some(metrics) = metrics {
-        metrics.update_onchain_state(state);
-    }
-    // Rescrape gapped the event-driven limiter; trigger an eager reconcile.
-    state.request_limiter_reconcile();
-    Ok(())
-}
-
-/// The poll only exists to catch `finish_publish` (guardian url + BTC key,
-/// written with no event); every other config write emits `ProposalExecuted`.
-/// Once both fields are in the snapshot the launch has landed: stop polling.
-fn launch_pending(state: &OnchainState) -> bool {
-    let state = state.state();
-    let config = &state.hashi().config;
-    config.guardian_url().is_none() || config.guardian_btc_public_key().is_none()
-}
-
-/// Runs on the watcher task, so it can't race the event-driven config
-/// refresh; bounded so a wedged connection can't hang the checkpoint loop.
-async fn refresh_config_if_changed(client: &Client, state: &OnchainState) {
-    let scrape = super::scrape_hashi_config(client.clone(), state.hashi_id());
-    let config = match tokio::time::timeout(Duration::from_secs(10), scrape).await {
-        Ok(Ok(config)) => config,
-        Ok(Err(e)) => {
-            tracing::warn!("error polling on-chain config: {e}");
-            return;
-        }
-        Err(_) => {
-            tracing::warn!("timed out polling on-chain config");
-            return;
-        }
-    };
-    let mut state = state.state_mut();
-    if state.hashi.config != config {
-        state.hashi.config = config;
-        tracing::info!("on-chain config changed; snapshot refreshed by periodic poll");
-    }
-}
-
-async fn handle_events(
-    client: &mut Client,
-    state: &OnchainState,
-    checkpoint_timestamp_ms: u64,
-    events: &[HashiEvent],
-) {
-    if events.is_empty() {
-        return;
-    }
-
-    let mut validator_updates = BTreeSet::new();
-
-    for event in events {
-        match event {
-            HashiEvent::ValidatorRegistered(validator_registered) => {
-                validator_updates.insert(validator_registered.validator);
-            }
-            HashiEvent::ValidatorUpdated(validator_updated) => {
-                validator_updates.insert(validator_updated.validator);
-            }
-            HashiEvent::VoteCast(_) => {}
-            HashiEvent::VoteRemoved(_) => {}
-            HashiEvent::ProposalCreated(proposal_created_event) => {
-                let proposal = Proposal {
-                    id: proposal_created_event.proposal_id,
-                    timestamp_ms: proposal_created_event.timestamp_ms,
-                    proposal_type: parse_proposal_type_from_type_tag(
-                        &proposal_created_event.proposal_type,
-                    ),
-                };
-                state
-                    .state_mut()
-                    .hashi
-                    .proposals
-                    .active
-                    .insert(proposal.id, proposal);
-            }
-            HashiEvent::ProposalDeleted(proposal_deleted_event) => {
-                state
-                    .state_mut()
-                    .hashi
-                    .proposals
-                    .active
-                    .remove(&proposal_deleted_event.proposal_id);
-            }
-            HashiEvent::ProposalExecuted(proposal_executed_event) => {
-                // Move the entry from `active` to `executed` to mirror
-                // the on-chain dual-bag layout. Scope the write lock so
-                // it's released before the async config refetch below.
-                {
-                    let mut state_lock = state.state_mut();
-                    let proposals = &mut state_lock.hashi.proposals;
-                    if let Some(proposal) = proposals
-                        .active
-                        .remove(&proposal_executed_event.proposal_id)
-                    {
-                        proposals
-                            .executed
-                            .insert(proposal_executed_event.proposal_id, proposal);
-                    }
-                }
-
-                // When an UpdateConfig or EmergencyPause proposal executes,
-                // the Hashi object's config field changes on-chain. Re-fetch
-                // the config from the Hashi object to keep the in-memory
-                // state current. (The event now carries the typed `data`,
-                // so this could be applied directly in the future.)
-                if matches!(
-                    parse_proposal_type_from_type_tag(&proposal_executed_event.proposal_type),
-                    ProposalType::UpdateConfig
-                        | ProposalType::EmergencyPause
-                        | ProposalType::UpdateGuardian
-                ) {
-                    match super::scrape_hashi_config(client.clone(), state.hashi_id()).await {
-                        Ok(config) => {
-                            state.state_mut().hashi.config = config;
-                            tracing::info!(
-                                "on-chain config refreshed after config-changing proposal"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "failed to refresh config after config-changing proposal: {e}"
-                            );
-                        }
-                    }
-                }
-
-                if matches!(
-                    parse_proposal_type_from_type_tag(&proposal_executed_event.proposal_type),
-                    ProposalType::AbortReconfig
-                ) {
-                    match bcs::from_bytes::<AbortReconfig>(&proposal_executed_event.data_bcs) {
-                        Ok(abort_reconfig) => {
-                            let mut state = state.state_mut();
-                            state
-                                .hashi
-                                .committees
-                                .committees_mut()
-                                .remove(&abort_reconfig.epoch);
-                            state.hashi.committees.set_pending_epoch_change(None);
-                        }
-                        Err(e) => {
-                            tracing::error!("unable to decode AbortReconfig proposal data: {e}");
-                        }
-                    }
-                }
-            }
-            HashiEvent::QuorumReached(_) => {}
-            HashiEvent::PackageUpgraded(package_upgraded_event) => {
-                state.add_package_version(
-                    package_upgraded_event.version,
-                    package_upgraded_event.package,
-                );
-            }
-            HashiEvent::Minted(Minted { coin_type, .. })
-            | HashiEvent::Burned(Burned { coin_type, .. }) => {
-                refresh_treasury_cap_supply(client, state, coin_type).await;
-            }
-            HashiEvent::DepositRequested(deposit_requested_event) => {
-                tracing::info!(deposit_request_id = %deposit_requested_event.request_id, "Deposit request detected");
-                let deposit_request = DepositRequest {
-                    id: deposit_requested_event.request_id,
-                    sender: deposit_requested_event.requester_address,
-                    created_timestamp_ms: deposit_requested_event.timestamp_ms,
-                    sui_tx_digest: deposit_requested_event.sui_tx_digest,
-                    utxo: super::types::Utxo {
-                        id: deposit_requested_event.utxo_id,
-                        amount: deposit_requested_event.amount,
-                        derivation_path: deposit_requested_event.derivation_path,
-                    },
-                    approval_cert: None,
-                    approved_timestamp_ms: None,
-                    confirmed_timestamp_ms: None,
-                };
-                state
-                    .state_mut()
-                    .hashi
-                    .deposit_queue
-                    .requests
-                    .insert(deposit_request.id, deposit_request);
-            }
-            HashiEvent::DepositApproved(deposit_approved_event) => {
-                tracing::info!(deposit_request_id = %deposit_approved_event.request_id, "Deposit approved");
-                let mut state = state.state_mut();
-                // Stamp the in-memory request so the leader's next pass
-                // knows it's already approved and only needs to call
-                // `confirm_deposit` once the time-delay elapses. The
-                // event carries the same Sui-clock timestamp the
-                // on-chain request stores, so the local view matches
-                // the on-chain value exactly.
-                if let Some(request) = state
-                    .hashi
-                    .deposit_queue
-                    .requests
-                    .get_mut(&deposit_approved_event.request_id)
-                {
-                    request.approval_cert = Some(deposit_approved_event.cert.clone());
-                    request.approved_timestamp_ms =
-                        Some(deposit_approved_event.approved_timestamp_ms);
-                }
-            }
-            HashiEvent::DepositConfirmed(deposit_confirmed_event) => {
-                tracing::info!(deposit_request_id = %deposit_confirmed_event.request_id, "Deposit confirmed");
-                let mut state = state.state_mut();
-
-                let utxo = deposit_confirmed_event.utxo.clone();
-
-                state
-                    .hashi
-                    .deposit_queue
-                    .requests
-                    .remove(&deposit_confirmed_event.request_id);
-                state.hashi.utxo_pool.utxo_records.insert(
-                    utxo.id,
-                    super::types::UtxoRecord {
-                        utxo,
-                        produced_by: None,
-                        spent_by: None,
-                        spent_epoch: None,
-                    },
-                );
-            }
-            HashiEvent::ExpiredDepositDeleted(expired_deposit_deleted_event) => {
-                tracing::info!(deposit_request_id = %expired_deposit_deleted_event.request_id, "Expired deposit deleted");
-                state
-                    .state_mut()
-                    .hashi
-                    .deposit_queue
-                    .requests
-                    .remove(&expired_deposit_deleted_event.request_id);
-            }
-            HashiEvent::WithdrawalRequested(withdrawal_requested_event) => {
-                tracing::info!(withdrawal_request_id = %withdrawal_requested_event.request_id, "Withdrawal request detected");
-                let withdrawal_request = WithdrawalRequest {
-                    id: withdrawal_requested_event.request_id,
-                    sender: withdrawal_requested_event.requester_address,
-                    btc_amount: withdrawal_requested_event.btc_amount,
-                    bitcoin_address: withdrawal_requested_event.bitcoin_address.clone(),
-                    created_timestamp_ms: withdrawal_requested_event.timestamp_ms,
-                    status: super::types::WithdrawalStatus::Requested,
-                    approval_cert: None,
-                    approved_timestamp_ms: None,
-                    withdrawal_txn_id: None,
-                    sui_tx_digest: withdrawal_requested_event.sui_tx_digest,
-                    btc: withdrawal_requested_event.btc_amount,
-                };
-                state
-                    .state_mut()
-                    .hashi
-                    .withdrawal_queue
-                    .requests
-                    .insert(withdrawal_request.id, withdrawal_request);
-            }
-            HashiEvent::WithdrawalApproved(event) => {
-                tracing::info!(withdrawal_request_id = %event.request_id, "Withdrawal approved");
-                if let Some(request) = state
-                    .state_mut()
-                    .hashi
-                    .withdrawal_queue
-                    .requests
-                    .get_mut(&event.request_id)
-                {
-                    request.status = super::types::WithdrawalStatus::Approved;
-                }
-            }
-            HashiEvent::WithdrawalPickedForProcessing(event) => {
-                tracing::info!(withdrawal_txn_id = %event.withdrawal_txn_id, "Withdrawal picked for processing");
-                // Remove requests from the queue
-                {
-                    let mut state = state.state_mut();
-                    for request_id in &event.request_ids {
-                        state.hashi.withdrawal_queue.requests.remove(request_id);
-                    }
-                }
-
-                // Fetch the full withdrawal transaction from chain
-                match super::fetch_withdrawal_txn(client, event.withdrawal_txn_id).await {
-                    Ok(txn) => {
-                        state
-                            .state_mut()
-                            .hashi
-                            .withdrawal_queue
-                            .withdrawal_txns
-                            .insert(txn.id, txn);
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            withdrawal_txn_id = %event.withdrawal_txn_id,
-                            "Failed to fetch withdrawal transaction: {e}",
-                        );
-                    }
-                }
-
-                // Lock each input UTXO in the pool and insert the pending
-                // change UTXOs (if any) so they are immediately selectable.
-                {
-                    let mut state = state.state_mut();
-                    for input in &event.inputs {
-                        if let Some(record) = state.hashi.utxo_pool.utxo_records.get_mut(&input.id)
-                        {
-                            record.spent_by = Some(event.withdrawal_txn_id);
-                        }
-                    }
-                    // Change outputs are the trailing outputs: change output `j`
-                    // sits at vout `withdrawal_outputs.len() + j`.
-                    let base_vout = event.withdrawal_outputs.len() as u32;
-                    for (j, change_output) in event.change_outputs.iter().enumerate() {
-                        let change_utxo_id = super::types::UtxoId {
-                            txid: event.txid,
-                            vout: base_vout + j as u32,
-                        };
-                        let change_utxo = super::types::Utxo {
-                            id: change_utxo_id,
-                            amount: change_output.amount,
-                            derivation_path: None,
-                        };
-                        state.hashi.utxo_pool.utxo_records.insert(
-                            change_utxo_id,
-                            super::types::UtxoRecord {
-                                utxo: change_utxo,
-                                produced_by: Some(event.withdrawal_txn_id),
-                                spent_by: None,
-                                spent_epoch: None,
-                            },
-                        );
-                    }
-                }
-            }
-            HashiEvent::WithdrawalSigned(event) => {
-                tracing::info!(withdrawal_txn_id = %event.withdrawal_txn_id, "Withdrawal signatures stored on-chain");
-                // Watcher is the sole mutator of the local limiter
-                // post-bootstrap; advance it inline with the mirror update.
-                // Advance uses the event's checkpoint timestamp (~sign-time)
-                // rather than `txn.created_timestamp_ms` (creation time) to stay in
-                // lockstep with the guardian's `last_updated_at`.
-                // Gate on `signatures.is_none()` for idempotency across checkpoint redelivery and bootstrap replay.
-                let (limiter_inputs, pick_to_sign_ms) = {
-                    let mut state = state.state_mut();
-                    state
-                        .withdrawal_signed_at_ms
-                        .insert(event.withdrawal_txn_id, checkpoint_timestamp_ms);
-                    match state
-                        .hashi
-                        .withdrawal_queue
-                        .withdrawal_txns
-                        .get_mut(&event.withdrawal_txn_id)
-                    {
-                        Some(txn) if !txn.is_fully_signed() => {
-                            // Reflect the finalized 2-of-2 witness in-memory: mark
-                            // every input Signed and attach guardian sigs — together
-                            // those make `is_fully_signed()` derive true.
-                            txn.signing.signatures = event
-                                .signatures
-                                .iter()
-                                .cloned()
-                                .map(MpcSig::Signed)
-                                .collect();
-                            txn.guardian_signatures = Some(event.guardian_signatures.clone());
-                            let amount_sats = withdrawal_limiter_consumption_amount(txn);
-                            let timestamp_secs = checkpoint_timestamp_ms / 1000;
-                            let pick_to_sign =
-                                checkpoint_timestamp_ms.saturating_sub(txn.created_timestamp_ms);
-                            (Some((amount_sats, timestamp_secs)), Some(pick_to_sign))
-                        }
-                        _ => (None, None),
-                    }
-                };
-                if limiter_inputs.is_none() {
-                    tracing::debug!(
-                        withdrawal_txn_id = %event.withdrawal_txn_id,
-                        "Skipping limiter apply: WithdrawalSigned for already-signed txn"
-                    );
-                    if let Some(metrics) = state.metrics() {
-                        metrics.guardian_limiter_anchor_events_skipped_total.inc();
-                    }
-                }
-                if let Some(d) = pick_to_sign_ms
-                    && let Some(metrics) = state.metrics()
-                {
-                    metrics
-                        .withdrawal_duration_seconds
-                        .with_label_values(&["pick_to_sign"])
-                        .observe(Duration::from_millis(d).as_secs_f64());
-                }
-                if let Some((amount_sats, timestamp_secs)) = limiter_inputs {
-                    if let Some(limiter) = state.local_limiter() {
-                        let seq = limiter.next_seq();
-                        let result = limiter.apply_consume(seq, timestamp_secs, amount_sats);
-                        if let Some(metrics) = state.metrics() {
-                            metrics.record_limiter_apply(&result);
-                        }
-                        match &result {
-                            Ok(()) => {
-                                if let Some(metrics) = state.metrics() {
-                                    metrics.guardian_limiter_anchor_events_total.inc();
-                                    metrics.record_limiter_state(
-                                        &limiter.snapshot(),
-                                        limiter.config(),
-                                    );
-                                }
-                                tracing::info!(
-                                    seq,
-                                    amount_sats,
-                                    timestamp_secs,
-                                    withdrawal_txn_id = %event.withdrawal_txn_id,
-                                    "Local limiter advanced from on-chain WithdrawalSigned",
-                                );
-                            }
-                            Err(e) => {
-                                if let Some(metrics) = state.metrics() {
-                                    metrics.guardian_limiter_drifted.set(1);
-                                }
-                                tracing::error!(
-                                    ?e,
-                                    seq,
-                                    withdrawal_txn_id = %event.withdrawal_txn_id,
-                                    "Local limiter apply_consume failed; node is now drifted from guardian"
-                                );
-                            }
-                        }
-                    } else if let Some(metrics) = state.metrics() {
-                        metrics
-                            .guardian_limiter_apply_total
-                            .with_label_values(&[
-                                crate::metrics::GUARDIAN_LIMITER_OUTCOME_NO_LIMITER,
-                            ])
-                            .inc();
-                    }
-                }
-            }
-            HashiEvent::WithdrawalInputsSigned(event) => {
-                tracing::info!(
-                    withdrawal_txn_id = %event.withdrawal_txn_id,
-                    signed_count = event.signed_count,
-                    num_inputs = event.num_inputs,
-                    "Withdrawal input signatures committed on-chain",
-                );
-                // The committed per-input signatures live on the object; refresh
-                // the local mirror so the next leader tick resumes from the
-                // up-to-date unsigned set.
-                match super::fetch_withdrawal_txn(client, event.withdrawal_txn_id).await {
-                    Ok(txn) => {
-                        state
-                            .state_mut()
-                            .hashi
-                            .withdrawal_queue
-                            .withdrawal_txns
-                            .insert(txn.id, txn);
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            withdrawal_txn_id = %event.withdrawal_txn_id,
-                            "Failed to refresh withdrawal signing batch: {e}",
-                        );
-                    }
-                }
-            }
-            HashiEvent::WithdrawalPresigsReassigned(event) => {
-                tracing::info!(
-                    withdrawal_txn_id = %event.withdrawal_txn_id,
-                    epoch = event.epoch,
-                    presig_start_index = event.presig_start_index,
-                    "Withdrawal presigs reassigned on-chain",
-                );
-                // Per-input presig indices changed in the batch; refresh from chain.
-                match super::fetch_withdrawal_txn(client, event.withdrawal_txn_id).await {
-                    Ok(txn) => {
-                        state
-                            .state_mut()
-                            .hashi
-                            .withdrawal_queue
-                            .withdrawal_txns
-                            .insert(txn.id, txn);
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            withdrawal_txn_id = %event.withdrawal_txn_id,
-                            "Failed to refresh withdrawal transaction: {e}",
-                        );
-                    }
-                }
-            }
-            HashiEvent::WithdrawalConfirmed(event) => {
-                tracing::info!(withdrawal_txn_id = %event.withdrawal_txn_id, "Withdrawal confirmed on-chain");
-                let (sign_to_confirm_ms, total_ms) = {
-                    let mut state = state.state_mut();
-
-                    // Promote the change UTXOs from pending to confirmed by
-                    // clearing `produced_by`. The UTXOs were already inserted at
-                    // commit time; input UTXOs are marked spent via UtxoSpent
-                    // and their records then stay in the mirror until a full
-                    // rescrape (reconnect or restart) — nothing prunes them.
-                    // The cleanup GC deliberately decides from a fresh chain
-                    // snapshot rather than these records, so the staleness is
-                    // cosmetic (spent_by stays set, excluding them from coin
-                    // selection).
-                    for change_utxo_id in &event.change_utxo_ids {
-                        if let Some(record) =
-                            state.hashi.utxo_pool.utxo_records.get_mut(change_utxo_id)
-                        {
-                            record.produced_by = None;
-                        }
-                    }
-
-                    let signed_at = state
-                        .withdrawal_signed_at_ms
-                        .remove(&event.withdrawal_txn_id);
-                    let pick_at = state
-                        .hashi
-                        .withdrawal_queue
-                        .withdrawal_txns
-                        .remove(&event.withdrawal_txn_id)
-                        .map(|txn| txn.created_timestamp_ms);
-                    (
-                        signed_at.map(|s| checkpoint_timestamp_ms.saturating_sub(s)),
-                        pick_at.map(|p| checkpoint_timestamp_ms.saturating_sub(p)),
-                    )
-                };
-                if let Some(metrics) = state.metrics() {
-                    if let Some(d) = sign_to_confirm_ms {
-                        metrics
-                            .withdrawal_duration_seconds
-                            .with_label_values(&["sign_to_confirm"])
-                            .observe(Duration::from_millis(d).as_secs_f64());
-                    }
-                    if let Some(d) = total_ms {
-                        metrics
-                            .withdrawal_duration_seconds
-                            .with_label_values(&["total"])
-                            .observe(Duration::from_millis(d).as_secs_f64());
-                    }
-                }
-            }
-            HashiEvent::UtxoSpent(utxo_spent_event) => {
-                let mut state = state.state_mut();
-                // Mark the local record as spent so the orphan scanner can discover it.
-                if let Some(record) = state
-                    .hashi
-                    .utxo_pool
-                    .utxo_records
-                    .get_mut(&utxo_spent_event.utxo_id)
-                {
-                    record.spent_epoch = Some(utxo_spent_event.spent_epoch);
-                }
-                state
-                    .hashi
-                    .utxo_pool
-                    .spent_utxos
-                    .insert(utxo_spent_event.utxo_id, utxo_spent_event.spent_epoch);
-            }
-            HashiEvent::ReconfigStarted(start_reconfig_event) => {
-                let epoch = start_reconfig_event.epoch;
-                // Fetch new committee
-                let committees_id = state.state().hashi().committees.committees_id();
-                //TODO maybe include info in the event
-                match super::scrape_committee(client.clone(), committees_id, epoch).await {
-                    Ok(committee) => {
-                        {
-                            let mut state = state.state_mut();
-                            state
-                                .hashi
-                                .committees
-                                .committees_mut()
-                                .insert(epoch, committee);
-                            state.hashi.committees.set_pending_epoch_change(Some(epoch));
-                        }
-                        state.notify(Notification::StartReconfig(epoch));
-                    }
-                    Err(e) => tracing::error!(
-                        epoch,
-                        "failed to scrape committee on ReconfigStarted; skipping (rescrape recovers): {e}"
-                    ),
-                }
-            }
-            HashiEvent::ReconfigEnded(end_reconfig_event) => {
-                let committees_id = state.state().hashi().committees.committees_id();
-                let scraped_committees =
-                    super::scrape_committees(client.clone(), committees_id).await;
-                let mut state = state.state_mut();
-                match scraped_committees {
-                    Ok((committees, committee_handoffs)) => {
-                        state
-                            .hashi
-                            .committees
-                            .set_committees(committees)
-                            .set_committee_handoffs(committee_handoffs);
-                    }
-                    Err(e) => tracing::error!(
-                        from_epoch = end_reconfig_event.from_epoch,
-                        "failed to scrape committee handoffs after ReconfigEnded: {e}"
-                    ),
-                }
-                state
-                    .hashi
-                    .committees
-                    .set_epoch(end_reconfig_event.epoch)
-                    .set_pending_epoch_change(None)
-                    .set_mpc_public_key(end_reconfig_event.mpc_public_key.clone());
-            }
-        }
-    }
-
-    let members_id = state.state().hashi().committees.members_id();
-    for validator in validator_updates {
-        match scrape_member_info(client.clone(), members_id, validator).await {
-            Ok(info) => {
-                state.state_mut().hashi.committees.update_validator(info);
-                state.notify(Notification::ValidatorInfoUpdated(validator));
-            }
-            Err(e) => tracing::error!("unable to query validator {validator}'s info: {e}"),
-        }
-    }
-}
-
-async fn refresh_treasury_cap_supply(
-    client: &mut Client,
-    state: &OnchainState,
-    coin_type: &TypeTag,
-) {
-    let treasury_cap_id = state
-        .state()
-        .hashi
-        .treasury
-        .treasury_caps
-        .get(coin_type)
-        .map(|tc| tc.id);
-
-    let Some(id) = treasury_cap_id else {
-        return;
-    };
-
-    match super::fetch_treasury_cap(client, id).await {
-        Ok(treasury_cap) => {
-            state
-                .state_mut()
-                .hashi
-                .treasury
-                .treasury_caps
-                .insert(coin_type.clone(), treasury_cap);
-        }
-        Err(e) => {
-            tracing::error!("failed to fetch treasury cap for {coin_type}: {e}");
-        }
-    }
-}
-
-/// Parse the proposal type from the TypeTag extracted from the event's phantom type parameter.
-fn parse_proposal_type_from_type_tag(type_tag: &TypeTag) -> ProposalType {
-    let TypeTag::Struct(struct_tag) = type_tag else {
-        return ProposalType::Unknown(format!("{:?}", type_tag));
-    };
-
-    match (struct_tag.module().as_str(), struct_tag.name().as_str()) {
-        ("update_config", "UpdateConfig") => ProposalType::UpdateConfig,
-        ("enable_version", "EnableVersion") => ProposalType::EnableVersion,
-        ("disable_version", "DisableVersion") => ProposalType::DisableVersion,
-        ("upgrade", "Upgrade") => ProposalType::Upgrade,
-        ("emergency_pause", "EmergencyPause") => ProposalType::EmergencyPause,
-        ("abort_reconfig", "AbortReconfig") => ProposalType::AbortReconfig,
-        ("update_guardian", "UpdateGuardian") => ProposalType::UpdateGuardian,
-        _ => ProposalType::Unknown(format!("{}::{}", struct_tag.module(), struct_tag.name())),
+        // The stream stalled, errored, or closed. Loop to rebuild the
+        // client and re-subscribe; the clock carries no state, so
+        // nothing needs recovering.
+        tracing::warn!("clock checkpoint stream ended; reconnecting");
+        tokio::time::sleep(RECONNECT_DELAY).await;
     }
 }

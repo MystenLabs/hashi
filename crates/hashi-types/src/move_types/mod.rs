@@ -15,24 +15,74 @@ use sui_sdk_types::bcs::ToBcs;
 
 use crate::bitcoin_txid::BitcoinTxid;
 
+/// A Rust mirror of a Move struct, identified by its module and name.
+///
+/// `matches` deliberately ignores the package address: a hashi package
+/// upgrade changes the address while `hashi::module::Name` remains the
+/// same struct. Callers that need package filtering (e.g. event
+/// parsing) check the address separately.
 pub trait MoveType {
-    const PACKAGE_VERSION: u64 = 1;
     const MODULE: &'static str;
     const NAME: &'static str;
+    /// The number of type parameters the struct tag must carry.
+    const TYPE_PARAMS: usize = 0;
     const MODULE_NAME: (&'static str, &'static str) = (Self::MODULE, Self::NAME);
+
+    fn matches(tag: &StructTag) -> bool {
+        tag.module() == Self::MODULE
+            && tag.name() == Self::NAME
+            && tag.type_params().len() == Self::TYPE_PARAMS
+    }
 }
 
-/// Validates that the event's StructTag matches the expected module/name for `T`
-/// and extracts the single type parameter.
+/// Validates that the event's StructTag matches `T` and extracts the
+/// single type parameter.
 fn extract_type_param<T: MoveType>(event_type: &StructTag) -> Result<TypeTag, anyhow::Error> {
-    if event_type.module() == T::MODULE
-        && event_type.name() == T::NAME
+    if T::matches(event_type)
         && let [type_param] = event_type.type_params()
     {
         Ok(type_param.to_owned())
     } else {
         Err(anyhow::anyhow!("invalid {}", T::NAME))
     }
+}
+
+/// True when the struct tag is the Sui framework's
+/// `0x2::dynamic_field::Field` (any type parameters).
+pub fn is_dynamic_field(tag: &StructTag) -> bool {
+    tag.address() == &Address::TWO
+        && tag.module() == "dynamic_field"
+        && tag.name() == "Field"
+        && tag.type_params().len() == 2
+}
+
+/// True when the struct tag is a `Field<_, V>` whose value-side `V` is
+/// the struct `<module>::<name>` from any package. The package address
+/// of `V` is ignored so package upgrades don't invalidate the match.
+pub fn is_field_with_value(tag: &StructTag, module: &str, name: &str) -> bool {
+    if !is_dynamic_field(tag) {
+        return false;
+    }
+    let Some(TypeTag::Struct(value)) = tag.type_params().get(1) else {
+        return false;
+    };
+    value.module() == module && value.name() == name
+}
+
+/// True when the struct tag is a dynamic object field wrapper —
+/// `0x2::dynamic_field::Field<0x2::dynamic_object_field::Wrapper<K>, ID>`.
+/// The wrapper is the intermediate object that owns a DOF's value
+/// object; its contents hold the value's object id.
+pub fn is_dof_wrapper(tag: &StructTag) -> bool {
+    if !is_dynamic_field(tag) {
+        return false;
+    }
+    let Some(TypeTag::Struct(name_type)) = tag.type_params().first() else {
+        return false;
+    };
+    name_type.address() == &Address::TWO
+        && name_type.module() == "dynamic_object_field"
+        && name_type.name() == "Wrapper"
 }
 
 /// Rust version of the Move hashi::hashi::Hashi type.
@@ -956,6 +1006,7 @@ impl ProposalCreated {
 impl MoveType for ProposalCreated {
     const MODULE: &'static str = "proposal";
     const NAME: &'static str = "ProposalCreated";
+    const TYPE_PARAMS: usize = 1;
 }
 
 impl From<ProposalCreated> for HashiEvent {
@@ -986,6 +1037,7 @@ impl VoteCast {
 impl MoveType for VoteCast {
     const MODULE: &'static str = "proposal";
     const NAME: &'static str = "VoteCast";
+    const TYPE_PARAMS: usize = 1;
 }
 
 impl From<VoteCast> for HashiEvent {
@@ -1016,6 +1068,7 @@ impl VoteRemoved {
 impl MoveType for VoteRemoved {
     const MODULE: &'static str = "proposal";
     const NAME: &'static str = "VoteRemoved";
+    const TYPE_PARAMS: usize = 1;
 }
 
 impl From<VoteRemoved> for HashiEvent {
@@ -1044,6 +1097,7 @@ impl ProposalDeleted {
 impl MoveType for ProposalDeleted {
     const MODULE: &'static str = "proposal";
     const NAME: &'static str = "ProposalDeleted";
+    const TYPE_PARAMS: usize = 1;
 }
 
 impl From<ProposalDeleted> for HashiEvent {
@@ -1083,6 +1137,7 @@ impl ProposalExecuted {
 impl MoveType for ProposalExecuted {
     const MODULE: &'static str = "proposal";
     const NAME: &'static str = "ProposalExecuted";
+    const TYPE_PARAMS: usize = 1;
 }
 
 impl From<ProposalExecuted> for HashiEvent {
@@ -1111,6 +1166,7 @@ impl QuorumReached {
 impl MoveType for QuorumReached {
     const MODULE: &'static str = "proposal";
     const NAME: &'static str = "QuorumReached";
+    const TYPE_PARAMS: usize = 1;
 }
 
 impl From<QuorumReached> for HashiEvent {
@@ -1145,6 +1201,7 @@ pub struct Minted {
 impl MoveType for Minted {
     const MODULE: &'static str = "treasury";
     const NAME: &'static str = "Minted";
+    const TYPE_PARAMS: usize = 1;
 }
 
 impl Minted {
@@ -1172,6 +1229,7 @@ pub struct Burned {
 impl MoveType for Burned {
     const MODULE: &'static str = "treasury";
     const NAME: &'static str = "Burned";
+    const TYPE_PARAMS: usize = 1;
 }
 
 impl Burned {
@@ -1546,6 +1604,153 @@ impl TryFrom<Committee> for crate::committee::Committee {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use sui_sdk_types::Identifier;
+
+    fn tag(address: Address, module: &str, name: &str, type_params: Vec<TypeTag>) -> StructTag {
+        StructTag::new(
+            address,
+            Identifier::new(module).unwrap(),
+            Identifier::new(name).unwrap(),
+            type_params,
+        )
+    }
+
+    fn hashi_package() -> Address {
+        Address::from_hex("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+            .unwrap()
+    }
+
+    fn field_tag(name_type: TypeTag, value_type: TypeTag) -> StructTag {
+        tag(
+            Address::TWO,
+            "dynamic_field",
+            "Field",
+            vec![name_type, value_type],
+        )
+    }
+
+    fn member_info_value() -> TypeTag {
+        TypeTag::Struct(Box::new(tag(
+            hashi_package(),
+            "committee_set",
+            "MemberInfo",
+            vec![],
+        )))
+    }
+
+    #[test]
+    fn move_type_matches_ignores_package_address() {
+        for address in [hashi_package(), Address::TWO] {
+            let t = tag(address, "committee_set", "MemberInfo", vec![]);
+            assert!(MemberInfo::matches(&t));
+        }
+    }
+
+    #[test]
+    fn move_type_matches_rejects_wrong_module_name_or_arity() {
+        let wrong_module = tag(hashi_package(), "committee", "MemberInfo", vec![]);
+        assert!(!MemberInfo::matches(&wrong_module));
+
+        let wrong_name = tag(hashi_package(), "committee_set", "Committee", vec![]);
+        assert!(!MemberInfo::matches(&wrong_name));
+
+        let wrong_arity = tag(
+            hashi_package(),
+            "committee_set",
+            "MemberInfo",
+            vec![TypeTag::U64],
+        );
+        assert!(!MemberInfo::matches(&wrong_arity));
+    }
+
+    #[test]
+    fn typed_event_matches_requires_one_type_param() {
+        let bare = tag(hashi_package(), "proposal", "ProposalCreated", vec![]);
+        assert!(!ProposalCreated::matches(&bare));
+
+        let typed = tag(
+            hashi_package(),
+            "proposal",
+            "ProposalCreated",
+            vec![TypeTag::U64],
+        );
+        assert!(ProposalCreated::matches(&typed));
+    }
+
+    #[test]
+    fn is_dynamic_field_requires_framework_field_shape() {
+        assert!(is_dynamic_field(&field_tag(
+            TypeTag::Address,
+            member_info_value()
+        )));
+
+        // Same shape but not in the Sui framework package.
+        let impostor = tag(
+            hashi_package(),
+            "dynamic_field",
+            "Field",
+            vec![TypeTag::Address, member_info_value()],
+        );
+        assert!(!is_dynamic_field(&impostor));
+
+        // The framework Field always has exactly two type parameters.
+        let wrong_arity = tag(Address::TWO, "dynamic_field", "Field", vec![TypeTag::U64]);
+        assert!(!is_dynamic_field(&wrong_arity));
+
+        let not_a_field = tag(hashi_package(), "committee_set", "MemberInfo", vec![]);
+        assert!(!is_dynamic_field(&not_a_field));
+    }
+
+    #[test]
+    fn is_field_with_value_matches_the_value_side_only() {
+        let member_field = field_tag(TypeTag::Address, member_info_value());
+        assert!(is_field_with_value(
+            &member_field,
+            "committee_set",
+            "MemberInfo"
+        ));
+        assert!(!is_field_with_value(
+            &member_field,
+            "committee",
+            "Committee"
+        ));
+
+        // A primitive value side never matches a struct query.
+        let primitive_value = field_tag(TypeTag::Address, TypeTag::U64);
+        assert!(!is_field_with_value(
+            &primitive_value,
+            "committee_set",
+            "MemberInfo"
+        ));
+    }
+
+    #[test]
+    fn is_dof_wrapper_detects_the_wrapper_name_type() {
+        let wrapper_name = TypeTag::Struct(Box::new(tag(
+            Address::TWO,
+            "dynamic_object_field",
+            "Wrapper",
+            vec![TypeTag::Address],
+        )));
+        let wrapper = field_tag(wrapper_name, TypeTag::Address);
+        assert!(is_dof_wrapper(&wrapper));
+        // A DOF wrapper is still a plain dynamic field structurally.
+        assert!(is_dynamic_field(&wrapper));
+
+        // A plain dynamic field is not a DOF wrapper.
+        let plain = field_tag(TypeTag::Address, member_info_value());
+        assert!(!is_dof_wrapper(&plain));
+
+        // A Wrapper name type from outside the framework doesn't count.
+        let impostor_name = TypeTag::Struct(Box::new(tag(
+            hashi_package(),
+            "dynamic_object_field",
+            "Wrapper",
+            vec![TypeTag::Address],
+        )));
+        assert!(!is_dof_wrapper(&field_tag(impostor_name, TypeTag::Address)));
+    }
 
     #[test]
     fn committee_mpc_config_carried_verbatim_through_bcs() {
