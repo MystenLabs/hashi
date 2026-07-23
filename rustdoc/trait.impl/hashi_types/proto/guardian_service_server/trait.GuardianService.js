@@ -1,0 +1,9 @@
+(function() {
+    const implementors = Object.fromEntries([["hashi_guardian",[["impl <a class=\"trait\" href=\"hashi_types/proto/guardian_service_server/trait.GuardianService.html\" title=\"trait hashi_types::proto::guardian_service_server::GuardianService\">GuardianService</a> for <a class=\"struct\" href=\"hashi_guardian/rpc/struct.GuardianGrpc.html\" title=\"struct hashi_guardian::rpc::GuardianGrpc\">GuardianGrpc</a>",0]]],["hashi_guardian_proxy",[["impl <a class=\"trait\" href=\"hashi_types/proto/guardian_service_server/trait.GuardianService.html\" title=\"trait hashi_types::proto::guardian_service_server::GuardianService\">GuardianService</a> for <a class=\"struct\" href=\"hashi_guardian_proxy/forward/struct.Forwarding.html\" title=\"struct hashi_guardian_proxy::forward::Forwarding\">Forwarding</a>",0],["impl&lt;S, L&gt; <a class=\"trait\" href=\"hashi_types/proto/guardian_service_server/trait.GuardianService.html\" title=\"trait hashi_types::proto::guardian_service_server::GuardianService\">GuardianService</a> for <a class=\"struct\" href=\"hashi_guardian_proxy/cache/struct.CachingGuardianGrpc.html\" title=\"struct hashi_guardian_proxy::cache::CachingGuardianGrpc\">CachingGuardianGrpc</a>&lt;S, L&gt;<div class=\"where\">where\n    S: <a class=\"trait\" href=\"hashi_types/proto/guardian_service_server/trait.GuardianService.html\" title=\"trait hashi_types::proto::guardian_service_server::GuardianService\">GuardianService</a>,\n    L: <a class=\"trait\" href=\"hashi_guardian_proxy/widlog/trait.LogStore.html\" title=\"trait hashi_guardian_proxy::widlog::LogStore\">LogStore</a>,</div>",0]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":59,"fragment_lengths":[370,1190]}
