@@ -74,6 +74,14 @@ The bump is a version-number change, not a migration.
   from the proto `Object.bcs` field; classification comes from
   `changed_objects.output_state` (`OBJECT_WRITE` upsert /
   `DOES_NOT_EXIST` removal).
+- Since protocol v76 (`minimize_child_object_mutations`) the runtime
+  fingerprints child-object writes and records a value-identical write
+  as a read: the object appears in `unchanged_loaded_runtime_objects`
+  at its unchanged version, never in `changed_objects`. Genuine value
+  changes are unaffected. Consequence: a no-op update (e.g.
+  re-submitting the current TLS key) produces no object change and
+  therefore no mirror transition or notification, even though the
+  legacy event (`ValidatorUpdated`) still fires on-chain.
 
 ### Current-state constraints (from the consumer map)
 
