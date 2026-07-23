@@ -1663,6 +1663,135 @@ mod tests {
         Ok(())
     }
 
+    /// Kill-and-reconnect: sever one node's Sui RPC connection, land
+    /// Hashi transactions during the outage, and verify the watcher's
+    /// replay path — not a re-bootstrap from a fresh scrape — recovers
+    /// them once the connection returns.
+    ///
+    /// The outage transactions are inert update-config proposals:
+    /// created but never voted on, each touches the Hashi root (so the
+    /// filtered stream must deliver it) and lands in the active
+    /// proposals bag where the recovered mirror must show it.
+    #[tokio::test]
+    async fn test_watcher_replay_recovers_outage_transactions() -> Result<()> {
+        use hashi::cli::client::CreateProposalParams;
+        use hashi::cli::client::build_create_proposal_transaction;
+        use hashi::cli::upgrade::extract_proposal_id_from_response;
+
+        init_test_logging();
+        info!("=== Starting Watcher Kill-and-Reconnect Replay Test ===");
+
+        const PROXIED_NODE: usize = 3;
+        let networks = TestNetworksBuilder::new()
+            .with_nodes(4)
+            .with_sui_rpc_proxy_for_node(PROXIED_NODE)
+            .build()
+            .await?;
+        networks.hashi_network.nodes()[0]
+            .wait_for_mpc_key(Duration::from_secs(60))
+            .await?;
+
+        let proxied = networks.hashi_network.nodes()[PROXIED_NODE].hashi().clone();
+        let proxy = networks
+            .hashi_network
+            .sui_rpc_proxy()
+            .expect("proxy configured via the builder");
+        assert_eq!(proxied.metrics.watcher_rebootstrap_total.get(), 0);
+
+        info!("Severing node {PROXIED_NODE}'s Sui RPC connection...");
+        proxy.sever();
+
+        // Land the proposals through a healthy node's connection.
+        let healthy = networks.hashi_network.nodes()[0].hashi().clone();
+        let hashi_ids = networks.hashi_network.ids();
+        let mut executor = SuiTxExecutor::from_config(&healthy.config, healthy.onchain_state())?;
+        let creator = executor.sender();
+        let mut proposal_ids = Vec::new();
+        let mut last_checkpoint = 0u64;
+        for i in 0..3u64 {
+            let builder = build_create_proposal_transaction(
+                hashi_ids,
+                creator,
+                CreateProposalParams::UpdateConfig {
+                    // Never voted on or executed, so the values are inert.
+                    key: "bitcoin_deposit_time_delay_ms".to_string(),
+                    value: hashi_types::move_types::ConfigValue::U64(i),
+                    metadata: vec![],
+                },
+            );
+            let response = executor.execute(builder).await?;
+            assert!(
+                response.transaction().effects().status().success(),
+                "update_config::propose transaction failed: {:?}",
+                response.transaction().effects().status()
+            );
+            proposal_ids.push(extract_proposal_id_from_response(&response)?);
+            last_checkpoint = response
+                .transaction()
+                .checkpoint_opt()
+                .ok_or_else(|| anyhow!("propose response missing checkpoint"))?;
+        }
+        info!(
+            "Landed {} proposals during the outage; last at checkpoint {last_checkpoint}",
+            proposal_ids.len()
+        );
+
+        // Positive control: the outage must have been real.
+        let severed_watermark = proxied.onchain_state().state_watermark();
+        assert!(
+            severed_watermark < last_checkpoint,
+            "the severed node's watermark ({severed_watermark}) covers the outage \
+             transactions (checkpoint {last_checkpoint}); the outage was not effective"
+        );
+        {
+            let state = proxied.onchain_state().state();
+            let active = state.hashi().proposals.active();
+            for id in &proposal_ids {
+                assert!(
+                    !active.contains_key(id),
+                    "the severed node saw proposal {id} during the outage"
+                );
+            }
+        }
+
+        info!("Restoring the connection...");
+        proxy.restore();
+
+        // The watcher reconnects and replays the gap; the state watermark
+        // passing the last landed checkpoint proves coverage, and the
+        // replay applies transactions before claiming it.
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            proxied
+                .onchain_state()
+                .wait_until_checkpoint(last_checkpoint),
+        )
+        .await
+        .map_err(|_| anyhow!("timed out waiting for the severed node to catch up via replay"))?;
+
+        {
+            let state = proxied.onchain_state().state();
+            let active = state.hashi().proposals.active();
+            for id in &proposal_ids {
+                assert!(
+                    active.contains_key(id),
+                    "proposal {id} landed during the outage was not recovered by replay"
+                );
+            }
+        }
+
+        // The recovery must have come from the replay path, not the
+        // fresh-scrape fallback.
+        assert_eq!(
+            proxied.metrics.watcher_rebootstrap_total.get(),
+            0,
+            "the mirror re-bootstrapped from a scrape instead of replaying the gap"
+        );
+
+        info!("=== Watcher Kill-and-Reconnect Replay Test Passed ===");
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_mpc_config_defaults_match_rust() -> Result<()> {
         init_test_logging();
