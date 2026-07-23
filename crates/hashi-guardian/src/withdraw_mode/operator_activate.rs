@@ -46,8 +46,7 @@ impl OAInstall {
 
         reader
             .ensure_session_live_and_others_quiet(&enclave.s3_session_id())
-            .await
-            .map_err(|e| InvalidInputs(format!("heartbeat activation check failed: {e}")))?;
+            .await?;
 
         let committee: HashiCommittee = reader
             .read_latest_committee(BuildPolicy::AnyAllowlisted)
