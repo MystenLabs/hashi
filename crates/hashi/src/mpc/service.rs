@@ -626,7 +626,7 @@ impl MpcService {
                 anyhow::ensure!(
                     batch_start >= num_consumed,
                     "nonce batch {batch_index} at start {batch_start} read sub-floor below cursor \
-                     {num_consumed} — partial cert fetch",
+                     {num_consumed} — partial cert fetch or quorum-excluded certs",
                 );
                 break;
             };
@@ -749,7 +749,7 @@ impl MpcService {
                     return Ok(None);
                 }
                 let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
-                certified_nonce_weight(mpc_manager, &certs)
+                avid_certified_nonce_weight(mpc_manager, batch_index, &certs)
             }
         };
         if weight < floor {
@@ -984,7 +984,7 @@ impl MpcService {
             anyhow::ensure!(
                 weight >= floor,
                 "nonce batch {batch_index} for epoch {epoch} refetched below floor \
-                 ({weight} < {floor}); certificate set shrank during recovery",
+                 ({weight} < {floor}); certificate set shrank or certs were quorum-excluded",
             );
             Ok(presig_count(weight as usize, params, batch_size_per_weight))
         };
@@ -1028,7 +1028,11 @@ impl MpcService {
                     ));
                 }
                 let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
-                let expected_size = expected_from(certified_nonce_weight(mpc_manager, &certs))?;
+                let expected_size = expected_from(avid_certified_nonce_weight(
+                    mpc_manager,
+                    batch_index,
+                    &certs,
+                ))?;
                 let mut prefetched = PrefetchedTobChannel::new(certs);
                 let outputs = MpcManager::run_nonce_generation(
                     mpc_manager,
@@ -1639,6 +1643,18 @@ fn certified_nonce_weight<T>(
         .read()
         .unwrap()
         .certified_nonce_dealers_from_certs(certs)
+        .1
+}
+
+fn avid_certified_nonce_weight(
+    mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
+    batch_index: u32,
+    certs: &[(sui_sdk_types::Address, CertificateV1)],
+) -> u32 {
+    mpc_manager
+        .read()
+        .unwrap()
+        .avid_certified_nonce_dealers_from_certs(batch_index, certs)
         .1
 }
 
