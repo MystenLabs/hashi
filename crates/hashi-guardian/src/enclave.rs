@@ -21,6 +21,7 @@ use hashi_types::guardian::GuardianError::Unavailable;
 use hashi_types::guardian::*;
 use hpke::Serializable;
 use serde::Serialize;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
@@ -40,11 +41,9 @@ pub struct Enclave {
     pub state: EnclaveState,
     /// Temporary state retained until operator activation commits.
     temporary_init_state: RwLock<Option<TemporaryInitState>>,
-    /// Serializes lifecycle and control-plane transitions so concurrent callers
-    /// cannot race a check-then-set. Held across each handler.
-    /// TODO: Ensure this lock is not released if the RPC is cancelled while a
-    /// detached state mutation is still being persisted.
-    pub control_lock: tokio::sync::Mutex<()>,
+    /// Serializes lifecycle and control-plane transitions so concurrent
+    /// operations cannot race a check-then-set.
+    control_lock: tokio::sync::Mutex<()>,
 }
 
 /// Configuration set during initialization (immutable after set)
@@ -85,7 +84,7 @@ pub struct EnclaveState {
 /// Inputs needed only between operator initialization and activation.
 /// The enclave drops this entire capability when activation commits.
 #[derive(Clone)]
-pub(crate) struct TemporaryInitState {
+pub struct TemporaryInitState {
     pub ceremony_state: CeremonyState,
     pub genesis_state: Option<GenesisState>,
     pub config_hash: [u8; 32],
@@ -303,7 +302,7 @@ impl EnclaveState {
 
 impl Enclave {
     // ========================================================================
-    // Construction & Lifecycle
+    // Construction
     // ========================================================================
 
     pub fn new(
@@ -325,6 +324,56 @@ impl Enclave {
             control_lock: tokio::sync::Mutex::new(()),
         }
     }
+
+    // ========================================================================
+    // Task Spawning
+    // ========================================================================
+
+    /// Spawn a root-owned Tokio task so caller cancellation only detaches the
+    /// waiter and does not cancel accepted work. Use this when the task needs
+    /// no serialization or owns a narrower lock for the state it mutates.
+    /// E.g., used in `standard_withdrawal` that owns a separate serialization lock inside.
+    pub async fn spawn_task<Input, Output, Task, Fut>(
+        self: Arc<Self>,
+        input: Input,
+        task: Task,
+    ) -> GuardianResult<Output>
+    where
+        Input: Send + 'static,
+        Output: Send + 'static,
+        Task: FnOnce(Arc<Self>, Input) -> Fut + Send + 'static,
+        Fut: Future<Output = GuardianResult<Output>> + Send + 'static,
+    {
+        tokio::spawn(async move { task(self, input).await })
+            .await
+            .expect("guardian task failed")
+    }
+
+    /// Spawn a root-owned Tokio task that holds the control lock while running.
+    /// Use this for lifecycle and control-plane transitions whose shared-state
+    /// checks and mutations must not interleave with another control task.
+    pub async fn spawn_control_task<Input, Output, Task, Fut>(
+        self: Arc<Self>,
+        input: Input,
+        task: Task,
+    ) -> GuardianResult<Output>
+    where
+        Input: Send + 'static,
+        Output: Send + 'static,
+        Task: FnOnce(Arc<Self>, Input) -> Fut + Send + 'static,
+        Fut: Future<Output = GuardianResult<Output>> + Send + 'static,
+    {
+        self.spawn_task(input, move |enclave, input| async move {
+            let task_enclave = enclave.clone();
+            let _guard = enclave.control_lock.lock().await;
+            task(task_enclave, input).await
+        })
+        .await
+    }
+
+    // ========================================================================
+    // Lifecycle
+    // ========================================================================
 
     /// Which flows this enclave serves (fixed at boot).
     pub fn mode(&self) -> EnclaveMode {
@@ -577,7 +626,7 @@ impl Enclave {
     /// Keep this as the only accessor for `TemporaryInitState`. Its readers are
     /// restricted to provisioner initialization, operator activation, and
     /// status reporting; active request handlers must not depend on it.
-    pub(crate) fn temporary_init_state(&self) -> GuardianResult<TemporaryInitState> {
+    pub fn temporary_init_state(&self) -> GuardianResult<TemporaryInitState> {
         self.temporary_init_state
             .read()
             .expect("temporary initialization lock poisoned")
@@ -586,7 +635,7 @@ impl Enclave {
     }
 
     /// Operator initialization is the sole installer of temporary state.
-    pub(crate) fn set_temporary_init_state(&self, state: TemporaryInitState) -> GuardianResult<()> {
+    pub fn set_temporary_init_state(&self, state: TemporaryInitState) -> GuardianResult<()> {
         let mut slot = self
             .temporary_init_state
             .write()
@@ -607,7 +656,7 @@ impl Enclave {
             .is_some()
     }
 
-    pub(crate) fn clear_temporary_init_state(&self) {
+    pub fn clear_temporary_init_state(&self) {
         self.temporary_init_state
             .write()
             .expect("temporary initialization lock poisoned")
@@ -621,7 +670,7 @@ impl Enclave {
 
     /// Construct a verified reader with the enclave's fixed S3 client and PCR
     /// allowlist. Each operation gets a fresh, operation-scoped session cache.
-    pub(crate) fn new_guardian_reader(&self) -> GuardianResult<GuardianReader> {
+    pub fn new_guardian_reader(&self) -> GuardianResult<GuardianReader> {
         let s3 = self.config.s3_logger()?.clone();
         let pcr_allowlist = self
             .config
@@ -640,7 +689,7 @@ impl Enclave {
             .ok_or_else(|| InvalidInputs("Limiter config is uninitialized".into()))
     }
 
-    pub(crate) fn install_config(
+    pub fn install_config(
         &self,
         network: Network,
         hashi_btc_master_pubkey: HashiMasterG,

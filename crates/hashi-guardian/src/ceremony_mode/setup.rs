@@ -19,9 +19,6 @@ pub async fn setup_new_key(
 ) -> GuardianResult<GuardianSigned<SetupNewKeyResponse>> {
     info!("/setup_new_key - Received request.");
 
-    // Serialize the whole ceremony. The exact lifecycle check prevents setup
-    // and rotation from interleaving and rejects another ceremony afterward.
-    let _guard = enclave.control_lock.lock().await;
     enclave.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
 
     let params = request.params();

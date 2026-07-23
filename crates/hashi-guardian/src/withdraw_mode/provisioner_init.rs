@@ -93,9 +93,6 @@ pub async fn provisioner_init(
 ) -> GuardianResult<()> {
     info!("/provisioner_init - Received request.");
 
-    // Serialize so concurrent callers can't race the check-then-finalize below.
-    let _guard = enclave.control_lock.lock().await;
-
     enclave.require_lifecycle(WithdrawStage::OperatorInitialized.into())?;
     info!("Lifecycle stage validated.");
 

@@ -113,21 +113,15 @@ impl GuardianS3Client {
         self.write_at_key(&key, &log, object_lock_duration).await
     }
 
-    /// Retry an immutable log write through the grace period, then abort. The
-    /// worker is detached so caller cancellation cannot abandon an in-flight PUT.
+    /// Retry an immutable log write through the grace period, then abort.
+    /// State-changing RPCs call this from their root-owned task.
     pub async fn write_log_record_or_abort(&self, log: LogRecord) -> GuardianResult<()> {
-        let writer = self.clone();
-        tokio::spawn(async move {
-            writer
-                .write_log_record_or_abort_inner(
-                    log,
-                    MAX_S3_WRITE_FAILURE_INTERVAL,
-                    S3_WRITE_RETRY_INTERVAL,
-                )
-                .await
-        })
+        self.write_log_record_or_abort_inner(
+            log,
+            MAX_S3_WRITE_FAILURE_INTERVAL,
+            S3_WRITE_RETRY_INTERVAL,
+        )
         .await
-        .expect("S3 log writer task failed")
     }
 
     async fn write_log_record_or_abort_inner(

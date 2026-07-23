@@ -101,8 +101,6 @@ pub async fn operator_activate(
 ) -> GuardianResult<()> {
     info!("/operator_activate - Received request.");
 
-    let _guard = enclave.control_lock.lock().await;
-
     enclave.require_lifecycle(WithdrawStage::ProvisionerInitialized.into())?;
     info!("Lifecycle stage validated.");
 

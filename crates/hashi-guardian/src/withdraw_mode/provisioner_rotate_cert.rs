@@ -29,9 +29,6 @@ pub async fn provisioner_rotate_cert(
     let signer_fingerprint = signed_request.signer_fingerprint().to_hex();
     let request = signed_request.verify()?;
 
-    // Serialize the read-latest-state + append-next-state sequence.
-    let _guard = enclave.control_lock.lock().await;
-
     if !enclave.is_fully_initialized() {
         return Err(InvalidInputs(
             "provisioner_rotate_cert requires operator_activate complete".into(),
