@@ -257,8 +257,9 @@ impl GuardianReader {
         build_policy: BuildPolicy,
         history_check: HistoryCheck,
     ) -> anyhow::Result<KpShareStateLogMessage> {
-        // KP-share locks are short-lived and expected to expire. Their contents
-        // remain authenticatable through the enclave signature verified below.
+        // KP-share locks are short-lived and expected to expire. Expiry permits
+        // deletion but does not cause it; while an object remains, its contents
+        // are authenticatable through the enclave signature verified below.
         let record = self
             .s3
             .get_log_record_inner(key, LockCheck::Skipped, history_check)

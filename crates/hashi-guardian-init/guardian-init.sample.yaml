@@ -34,6 +34,10 @@ guardian_s3:
   region: "us-east-1"
   access_key:
   secret_key:
+  # S3 object-lock retention class. One of: devnet, mainnet, testnet.
+  # TODO(s3-retention): Should this be replaced by, or derived from, a
+  # repository-wide Hashi network identifier?
+  retention_environment: "testnet"
 
 hashi:
   # Sui RPC URL used to fetch Hashi on-chain state.

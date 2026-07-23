@@ -202,6 +202,7 @@ async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
     // TODO(testnet-wipe): Replace the full GuardianInfo snapshot with a
     // purpose-built OI payload containing only the data readers and KPs need;
     // the evolving status response should not define the durable log schema.
+    // Include the retention environment in that payload for audit provenance.
     enclave
         .log_init(OIGuardianInfo(Box::new(enclave.info().await)))
         .await

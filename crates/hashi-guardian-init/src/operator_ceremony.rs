@@ -39,6 +39,7 @@ use crate::guardian_info::verified_live_guardian_info;
 /// `tracing` so the operator can follow exactly what is happening.
 pub async fn run(cfg: Config) -> Result<()> {
     let guardian_s3 = cfg.guardian_s3.resolve().await?;
+    let retention_environment = guardian_s3.retention_environment;
 
     info!(
         phase = "setup",
@@ -47,6 +48,7 @@ pub async fn run(cfg: Config) -> Result<()> {
         certificate_count = cfg.kp_roster.cert_count(),
         bucket = guardian_s3.bucket_name(),
         region = guardian_s3.region(),
+        ?retention_environment,
         endpoint = %cfg.guardian_endpoint,
         sui_rpc = %cfg.hashi.sui_rpc,
         package_id = %cfg.hashi.hashi_ids.package_id,

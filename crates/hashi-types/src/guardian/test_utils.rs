@@ -206,6 +206,7 @@ impl OperatorInitRequest {
                 bucket: "bucket".into(),
                 region: "us-east-1".into(),
             },
+            retention_environment: super::S3RetentionEnvironment::Testnet,
         };
         OperatorInitRequest::new_withdraw_mode(s3_config, InitConfig::mock_for_testing(None), None)
     }
@@ -430,6 +431,7 @@ impl S3Config {
             secret_key: "test-secret-key".to_string(),
             session_token: None,
             bucket_info: S3BucketInfo::mock_for_testing(),
+            retention_environment: super::S3RetentionEnvironment::Testnet,
         }
     }
 }

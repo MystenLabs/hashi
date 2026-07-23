@@ -5,16 +5,9 @@
 //! with the session id, timestamp, and (for signed logs) the guardian signature.
 //! The object key and lock duration are derived from the wrapped message.
 
-use super::S3_OBJECT_LOCK_DURATION_CEREMONY;
-use super::S3_OBJECT_LOCK_DURATION_COMMITTEE_UPDATE;
-use super::S3_OBJECT_LOCK_DURATION_GENESIS;
-use super::S3_OBJECT_LOCK_DURATION_HEARTBEAT;
-use super::S3_OBJECT_LOCK_DURATION_INIT;
-use super::S3_OBJECT_LOCK_DURATION_KP_SHARES;
-use super::S3_OBJECT_LOCK_DURATION_WITHDRAW;
+use super::S3ObjectLockPolicy;
 use super::message::LogMessage;
 use super::message::LogMessageV1;
-use super::message::LogType;
 use super::message::ObjectKeyPattern;
 use super::message::VersionedLogMessage;
 use crate::guardian::BuildPcrs;
@@ -207,16 +200,8 @@ impl LogRecord {
         &self.object_key
     }
 
-    pub fn object_lock_duration(&self) -> Duration {
-        match self.message.log_type() {
-            LogType::Init => S3_OBJECT_LOCK_DURATION_INIT,
-            LogType::Heartbeat => S3_OBJECT_LOCK_DURATION_HEARTBEAT,
-            LogType::Withdrawal => S3_OBJECT_LOCK_DURATION_WITHDRAW,
-            LogType::Ceremony => S3_OBJECT_LOCK_DURATION_CEREMONY,
-            LogType::KpShareState => S3_OBJECT_LOCK_DURATION_KP_SHARES,
-            LogType::CommitteeUpdate => S3_OBJECT_LOCK_DURATION_COMMITTEE_UPDATE,
-            LogType::Genesis => S3_OBJECT_LOCK_DURATION_GENESIS,
-        }
+    pub fn object_lock_duration(&self, policy: S3ObjectLockPolicy) -> Duration {
+        policy.duration_for(self.message.log_type())
     }
 
     fn signed(
@@ -384,6 +369,7 @@ mod tests {
     use crate::guardian::KpShareStateLogMessage;
     use crate::guardian::LimiterState;
     use crate::guardian::LogMessageV2;
+    use crate::guardian::MAINNET_S3_OBJECT_LOCK_POLICY;
     use crate::guardian::NitroAttestation;
     use crate::guardian::RotateKpsResponse;
     use crate::guardian::SecretSharingInstance;
@@ -392,6 +378,7 @@ mod tests {
     use crate::guardian::StandardWithdrawalRequest;
     use crate::guardian::StandardWithdrawalRequestWire;
     use crate::guardian::StandardWithdrawalResponse;
+    use crate::guardian::TESTNET_S3_OBJECT_LOCK_POLICY;
     use crate::guardian::WithdrawalID;
     use crate::guardian::WithdrawalLogMessage;
     use bitcoin::Network;
@@ -1015,8 +1002,8 @@ mod tests {
             "kp-shares/00000000000000000007/00000000000000000003-session-d.json"
         );
         assert_eq!(
-            log.object_lock_duration(),
-            S3_OBJECT_LOCK_DURATION_KP_SHARES
+            log.object_lock_duration(TESTNET_S3_OBJECT_LOCK_POLICY),
+            TESTNET_S3_OBJECT_LOCK_POLICY.short_lived
         );
     }
 
@@ -1040,7 +1027,10 @@ mod tests {
 
         assert_eq!(log.object_key(), GenesisLogMessage::object_key());
         assert_eq!(log.object_key(), "genesis/record.json");
-        assert_eq!(log.object_lock_duration(), S3_OBJECT_LOCK_DURATION_GENESIS);
+        assert_eq!(
+            log.object_lock_duration(MAINNET_S3_OBJECT_LOCK_POLICY),
+            MAINNET_S3_OBJECT_LOCK_POLICY.long_lived
+        );
     }
 
     #[test]

@@ -1894,7 +1894,7 @@ pub struct SignedSetupNewKeyResponse {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OperatorInitRequest {
-    /// S3 access keys
+    /// S3 connection and retention config.
     #[prost(message, optional, tag = "1")]
     pub s3_config: ::core::option::Option<S3Config>,
     /// Withdraw-mode stable init config (absent for a ceremony enclave). The enclave
@@ -1924,6 +1924,9 @@ pub struct S3Config {
     pub region: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag = "5")]
     pub session_token: ::core::option::Option<::prost::alloc::string::String>,
+    /// Hashi deployment class used to select the Guardian S3 object-lock policy.
+    #[prost(enumeration = "S3RetentionEnvironment", tag = "6")]
+    pub retention_environment: i32,
 }
 /// One KP's signed contribution toward ProvisionerInit. The relay may pre-verify
 /// and buffer these submissions, but the enclave is the authoritative verifier.
@@ -2234,6 +2237,38 @@ impl WithdrawStage {
                 Some(Self::ProvisionerInitialized)
             }
             "WITHDRAW_STAGE_ACTIVATED" => Some(Self::Activated),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum S3RetentionEnvironment {
+    Unspecified = 0,
+    Mainnet = 1,
+    Testnet = 2,
+    Devnet = 3,
+}
+impl S3RetentionEnvironment {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "S3_RETENTION_ENVIRONMENT_UNSPECIFIED",
+            Self::Mainnet => "S3_RETENTION_ENVIRONMENT_MAINNET",
+            Self::Testnet => "S3_RETENTION_ENVIRONMENT_TESTNET",
+            Self::Devnet => "S3_RETENTION_ENVIRONMENT_DEVNET",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "S3_RETENTION_ENVIRONMENT_UNSPECIFIED" => Some(Self::Unspecified),
+            "S3_RETENTION_ENVIRONMENT_MAINNET" => Some(Self::Mainnet),
+            "S3_RETENTION_ENVIRONMENT_TESTNET" => Some(Self::Testnet),
+            "S3_RETENTION_ENVIRONMENT_DEVNET" => Some(Self::Devnet),
             _ => None,
         }
     }
