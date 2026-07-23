@@ -557,6 +557,33 @@ impl TxOptions {
 }
 
 #[cfg(test)]
+mod explorer_tx_url_tests {
+    use super::explorer_tx_url;
+
+    #[test]
+    fn maps_known_networks() {
+        assert_eq!(
+            explorer_tx_url("https://fullnode.testnet.sui.io:443", "D1gest").as_deref(),
+            Some("https://devxplorer.io/?network=testnet&search=D1gest"),
+        );
+        assert_eq!(
+            explorer_tx_url("https://fullnode.mainnet.sui.io:443", "D1gest").as_deref(),
+            Some("https://devxplorer.io/?network=mainnet&search=D1gest"),
+        );
+        assert_eq!(
+            explorer_tx_url("https://fullnode.devnet.sui.io:443", "D1gest").as_deref(),
+            Some("https://devxplorer.io/?network=devnet&search=D1gest"),
+        );
+    }
+
+    #[test]
+    fn unknown_networks_have_no_link() {
+        assert_eq!(explorer_tx_url("http://127.0.0.1:9000", "D1gest"), None);
+        assert_eq!(explorer_tx_url("http://localhost:9000", "D1gest"), None);
+    }
+}
+
+#[cfg(test)]
 mod tx_options_tests {
     use super::TxOptions;
     use crate::sui_tx_executor::TxMode;
@@ -657,6 +684,11 @@ pub struct PublishOpts {
     /// Skip confirmation prompts
     #[clap(long, short = 'y')]
     pub yes: bool,
+
+    /// Build and simulate the publish transaction without executing it;
+    /// report the gas estimate and exit.
+    #[clap(long)]
+    pub dry_run: bool,
 }
 
 /// Options for the `launch` subcommand.
@@ -746,6 +778,13 @@ pub struct LaunchOpts {
     #[clap(long, conflicts_with = "serialize_unsigned")]
     pub status: bool,
 
+    /// Build and simulate the launch transaction without executing it;
+    /// report the gas estimate and exit. Like
+    /// --serialize-unsigned-transaction, no private key is required (pass
+    /// --sender when no keypair is configured).
+    #[clap(long, conflicts_with_all = ["serialize_unsigned", "status"])]
+    pub dry_run: bool,
+
     /// Enable verbose output
     #[clap(long, short)]
     pub verbose: bool,
@@ -781,6 +820,11 @@ pub struct RegisterOpts {
     /// deprecated alias.)
     #[clap(long = "serialize-unsigned-transaction", alias = "print-only")]
     pub serialize_unsigned: bool,
+
+    /// Build and simulate the registration transaction without executing it;
+    /// report the gas estimate and exit.
+    #[clap(long, conflicts_with = "serialize_unsigned")]
+    pub dry_run: bool,
 
     /// Enable verbose output
     #[clap(long, short)]
@@ -1151,11 +1195,101 @@ pub fn print_warning(msg: &str) {
     print_detail(&format!("{} {}", "⚠".yellow().bold(), msg));
 }
 
+/// DevXplorer deep-link for a transaction digest, or `None` when the RPC URL
+/// does not map to a network the explorer serves (e.g. localnet).
+pub fn explorer_tx_url(sui_rpc_url: &str, digest: &str) -> Option<String> {
+    let network = if sui_rpc_url.contains("testnet") {
+        "testnet"
+    } else if sui_rpc_url.contains("devnet") {
+        "devnet"
+    } else if sui_rpc_url.contains("mainnet") {
+        "mainnet"
+    } else {
+        return None;
+    };
+    Some(format!(
+        "https://devxplorer.io/?network={network}&search={digest}"
+    ))
+}
+
+/// Print a transaction digest with its explorer deep-link (when the network
+/// has one) so the result can be verified in a browser with one click.
+pub fn print_tx_digest(sui_rpc_url: &str, digest: &str) {
+    print_detail(&format!(
+        "\n{} Transaction submitted: {}",
+        "✓".green(),
+        digest.cyan()
+    ));
+    if let Some(url) = explorer_tx_url(sui_rpc_url, digest) {
+        print_detail(&format!("  {} {}", "Explorer:".dimmed(), url.cyan()));
+    }
+}
+
+/// Sign an already-built `transaction`, submit it, and wait for the
+/// checkpoint; errors (labelled with `label`) if on-chain execution failed.
+/// Used by the CLI commands that build a full `Transaction` up front
+/// (`register` / `launch`) instead of going through
+/// [`finalize`](crate::sui_tx_executor::finalize).
+async fn execute_built_tx(
+    client: &mut sui_rpc::Client,
+    signer: &sui_crypto::simple::SimpleKeypair,
+    transaction: sui_sdk_types::Transaction,
+    label: &str,
+) -> anyhow::Result<Box<sui_rpc::proto::sui::rpc::v2::ExecuteTransactionResponse>> {
+    use sui_crypto::SuiSigner as _;
+    use sui_rpc::field::FieldMask;
+    use sui_rpc::field::FieldMaskUtil as _;
+    use sui_rpc::proto::sui::rpc::v2::ExecuteTransactionRequest;
+
+    let signature = signer.sign_transaction(&transaction)?;
+    let response = client
+        .execute_transaction_and_wait_for_checkpoint(
+            ExecuteTransactionRequest::new(transaction.into())
+                .with_signatures(vec![signature.into()])
+                .with_read_mask(FieldMask::from_str("*")),
+            std::time::Duration::from_secs(30),
+        )
+        .await?
+        .into_inner();
+    anyhow::ensure!(
+        response.transaction().effects().status().success(),
+        "{label} transaction failed: {:?}",
+        response.transaction().effects().status()
+    );
+    Ok(Box::new(response))
+}
+
+/// Digest of the transaction that created (or last mutated) `object_id` —
+/// for a freshly published package this is the publish transaction itself.
+async fn object_previous_transaction(
+    client: &mut sui_rpc::Client,
+    object_id: sui_sdk_types::Address,
+) -> anyhow::Result<String> {
+    use sui_rpc::field::FieldMask;
+    use sui_rpc::field::FieldMaskUtil as _;
+    use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
+
+    let response = client
+        .ledger_client()
+        .get_object(
+            GetObjectRequest::new(&object_id)
+                .with_read_mask(FieldMask::from_paths(["previous_transaction"])),
+        )
+        .await?
+        .into_inner();
+    let object = response
+        .object
+        .ok_or_else(|| anyhow::anyhow!("object {object_id} not found"))?;
+    Ok(object.previous_transaction().to_owned())
+}
+
 /// Render the result of a finalized transaction and return the execution
 /// response when one was produced (execute mode only). The serialized unsigned
 /// transaction is the only thing written to stdout; everything else is a note.
+/// `sui_rpc_url` is used to derive the explorer deep-link for the digest.
 pub fn print_tx_outcome(
     outcome: crate::sui_tx_executor::TxOutcome,
+    sui_rpc_url: &str,
 ) -> Option<Box<sui_rpc::proto::sui::rpc::v2::ExecuteTransactionResponse>> {
     use crate::sui_tx_executor::TxOutcome;
     match outcome {
@@ -1197,12 +1331,7 @@ pub fn print_tx_outcome(
             None
         }
         TxOutcome::Executed(response) => {
-            let digest = response.transaction().digest();
-            print_detail(&format!(
-                "\n{} Transaction submitted: {}",
-                "✓".green(),
-                digest.to_string().cyan()
-            ));
+            print_tx_digest(sui_rpc_url, response.transaction().digest());
             Some(response)
         }
     }
@@ -1248,6 +1377,29 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
         compiled.modules.len()
     ));
 
+    if opts.dry_run {
+        let mut client = crate::sui_rpc_client::new_sui_rpc_client(&opts.sui_rpc_url)?;
+        print_info("Simulating publish transaction (dry-run)...");
+        // Mirrors the PTB `publish_package` sends: publish the modules and
+        // transfer the resulting UpgradeCap to the sender. `build` resolves
+        // gas via the fullnode dry-run, so a failing publish errors here.
+        let mut builder = sui_transaction_builder::TransactionBuilder::new();
+        builder.set_sender(sender);
+        let upgrade_cap = builder.publish(compiled.modules, compiled.dependencies);
+        let sender_arg = builder.pure(&sender);
+        builder.transfer_objects(vec![upgrade_cap], sender_arg);
+        let transaction = builder.build(&mut client).await?;
+        print_tx_outcome(
+            crate::sui_tx_executor::TxOutcome::Simulated {
+                sender,
+                gas_budget: transaction.gas_payment.budget,
+                gas_price: transaction.gas_payment.price,
+            },
+            &opts.sui_rpc_url,
+        );
+        return Ok(());
+    }
+
     if !opts.yes {
         print_info("This will publish the package (1 transaction).");
         print_info("Use --yes / -y to skip this prompt.");
@@ -1269,6 +1421,14 @@ pub async fn run_publish(opts: PublishOpts) -> anyhow::Result<()> {
         ids,
         upgrade_cap_id,
     } = crate::publish::publish_package(&mut client, &signer, compiled).await?;
+    // `publish_package` does not surface its execution response, so recover
+    // the publish digest from the fresh package's `previous_transaction`.
+    match object_previous_transaction(&mut client, ids.package_id).await {
+        Ok(digest) => print_tx_digest(&opts.sui_rpc_url, &digest),
+        Err(error) => print_warning(&format!(
+            "published, but could not fetch the publish tx digest: {error:#}"
+        )),
+    }
     print_success(&format!("package_id:      {}", ids.package_id));
     print_success(&format!("hashi_object_id: {}", ids.hashi_object_id));
     print_success(&format!("upgrade_cap_id:  {upgrade_cap_id}"));
@@ -1474,11 +1634,15 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
         (None, Some(sender)) => sender.parse()?,
         (Some(_), Some(_)) => anyhow::bail!("pass either --keypair or --sender, not both"),
         (None, None) => anyhow::bail!(
-            "pass --keypair, or --sender together with --serialize-unsigned-transaction"
+            "pass --keypair, or --sender together with \
+             --serialize-unsigned-transaction / --dry-run"
         ),
     };
-    if signer.is_none() && !opts.serialize_unsigned {
-        anyhow::bail!("--sender requires --serialize-unsigned-transaction (no key to sign with)");
+    if signer.is_none() && !opts.serialize_unsigned && !opts.dry_run {
+        anyhow::bail!(
+            "--sender requires --serialize-unsigned-transaction or --dry-run \
+             (no key to sign with)"
+        );
     }
     print_info(&format!("Sender (UpgradeCap owner): {sender}"));
 
@@ -1492,7 +1656,7 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
     };
     print_info(&format!("UpgradeCap: {upgrade_cap_id}"));
 
-    if opts.serialize_unsigned {
+    if opts.serialize_unsigned || opts.dry_run {
         let tx = crate::publish::build_finish_publish_tx(
             &mut client,
             sender,
@@ -1503,7 +1667,19 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
             &bitcoin_overrides,
         )
         .await?;
-        println!("{}", tx.to_bcs_base64()?);
+        if opts.serialize_unsigned {
+            println!("{}", tx.to_bcs_base64()?);
+        } else {
+            print_info("Simulated launch transaction (hashi::finish_publish) — not executed.");
+            print_tx_outcome(
+                crate::sui_tx_executor::TxOutcome::Simulated {
+                    sender,
+                    gas_budget: tx.gas_payment.budget,
+                    gas_price: tx.gas_payment.price,
+                },
+                &opts.sui_rpc_url,
+            );
+        }
         return Ok(());
     }
 
@@ -1526,9 +1702,9 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
 
     let signer = signer.expect("presence checked during sender resolution");
     print_info("Sending launch transaction (hashi::finish_publish) ...");
-    crate::publish::finish_publish(
+    let transaction = crate::publish::build_finish_publish_tx(
         &mut client,
-        &signer,
+        sender,
         &ids,
         upgrade_cap_id,
         &bitcoin_chain_id,
@@ -1536,6 +1712,9 @@ pub async fn run_launch(opts: LaunchOpts) -> anyhow::Result<()> {
         &bitcoin_overrides,
     )
     .await?;
+    let response =
+        execute_built_tx(&mut client, &signer, transaction, "launch (finish_publish)").await?;
+    print_tx_digest(&opts.sui_rpc_url, response.transaction().digest());
     print_success("finish_publish executed — genesis unlocked. Validators will now run DKG.");
     Ok(())
 }
@@ -1603,9 +1782,10 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
     print_info(&format!("Validator address: {validator_address}"));
     print_info(&format!("Sui RPC: {sui_rpc_url}"));
 
-    if opts.serialize_unsigned {
-        // Build the transaction and print as base64 without executing.
-        // No private key is required for this path.
+    if opts.serialize_unsigned || opts.dry_run {
+        // Build the transaction without executing: print it as base64
+        // (serialize) or report the simulated gas estimate (dry-run).
+        // No private key is required for either path.
         let mut client = crate::sui_rpc_client::new_sui_rpc_client(&sui_rpc_url)?;
         let hashi_ids = config.hashi_ids();
 
@@ -1622,9 +1802,19 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
         .await?;
 
         match transaction {
-            Some(tx) => {
+            Some(tx) if opts.serialize_unsigned => {
                 let tx_base64 = tx.to_bcs_base64()?;
                 println!("{tx_base64}");
+            }
+            Some(tx) => {
+                print_tx_outcome(
+                    crate::sui_tx_executor::TxOutcome::Simulated {
+                        sender: tx.sender,
+                        gas_budget: tx.gas_payment.budget,
+                        gas_price: tx.gas_payment.price,
+                    },
+                    &sui_rpc_url,
+                );
             }
             None => print_info("Validator metadata is already up-to-date; nothing to do."),
         }
@@ -1643,20 +1833,31 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
         }
     }
 
-    let client = crate::sui_rpc_client::new_sui_rpc_client(&sui_rpc_url)?;
+    let mut client = crate::sui_rpc_client::new_sui_rpc_client(&sui_rpc_url)?;
     let signer = config.operator_private_key()?;
     let hashi_ids = config.hashi_ids();
-    let mut executor = crate::sui_tx_executor::SuiTxExecutor::new(client, signer, hashi_ids);
+    let sender = signer.verifying_key().derive_address();
 
     print_info("Registering validator ...");
-    let updated = executor
-        .execute_register_or_update_validator(&config, operator_address, None, None)
-        .await?;
+    let transaction = crate::sui_tx_executor::build_register_or_update_validator_tx(
+        &mut client,
+        &hashi_ids,
+        &config,
+        operator_address,
+        Some(sender),
+        None,
+        None,
+    )
+    .await?;
 
-    if updated {
-        print_success("Validator registered/updated successfully");
-    } else {
-        print_info("Validator metadata is already up-to-date; nothing to do.");
+    match transaction {
+        Some(transaction) => {
+            let response =
+                execute_built_tx(&mut client, &signer, transaction, "register_validator").await?;
+            print_tx_digest(&sui_rpc_url, response.transaction().digest());
+            print_success("Validator registered/updated successfully");
+        }
+        None => print_info("Validator metadata is already up-to-date; nothing to do."),
     }
     Ok(())
 }

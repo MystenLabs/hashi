@@ -214,7 +214,7 @@ async fn request(
     )
     .await?;
 
-    if let Some(response) = crate::cli::print_tx_outcome(outcome) {
+    if let Some(response) = crate::cli::print_tx_outcome(outcome, &config.sui_rpc_url) {
         let request_id = crate::sui_tx_executor::deposit_request_id_from_response(&response)?;
         print_success(&format!("Deposit request created: {request_id}"));
     }
