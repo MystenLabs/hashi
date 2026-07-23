@@ -27,6 +27,8 @@
 use super::GuardianReader;
 use crate::s3_client::GuardianS3Client;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
+use hashi_types::guardian::GuardianError::InvalidGuardianLog;
+use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
 use hashi_types::guardian::LogMessage;
@@ -47,7 +49,7 @@ impl GuardianReader {
     pub async fn recover_limiter_state(
         &mut self,
         limiter_config: &LimiterConfig,
-    ) -> anyhow::Result<LimiterState> {
+    ) -> GuardianResult<LimiterState> {
         let Some(mut cursor) = find_latest_success_bucket(self.s3()).await? else {
             // The search covers the complete S3 withdrawal history, so this
             // branch is reachable only if no withdrawal has ever succeeded.
@@ -66,7 +68,9 @@ impl GuardianReader {
             .flatten()
             .max_by_key(|s| s.next_seq)
             .ok_or_else(|| {
-                anyhow::anyhow!("latest success bucket contained no verified Success logs")
+                InvalidGuardianLog(
+                    "latest success bucket contained no verified Success logs".into(),
+                )
             })?;
         let state = cap_limiter_state_to_config(recovered_state, limiter_config);
         info!(
@@ -85,7 +89,7 @@ impl GuardianReader {
 /// order at each level. Returns `None` if no Success log exists anywhere.
 async fn find_latest_success_bucket(
     s3_client: &GuardianS3Client,
-) -> anyhow::Result<Option<S3HourScopedDirectory>> {
+) -> GuardianResult<Option<S3HourScopedDirectory>> {
     let root = format!("{}/", S3_DIR_WITHDRAW);
     let years = list_subdirs_desc(s3_client, &root).await?;
     for year in years {
@@ -96,7 +100,12 @@ async fn find_latest_success_bucket(
                 let hours = list_subdirs_desc(s3_client, &day).await?;
                 for hour in hours {
                     if hour_bucket_has_success(s3_client, &hour).await? {
-                        return Ok(Some(S3HourScopedDirectory::from_path(&hour)?));
+                        let dir = S3HourScopedDirectory::from_path(&hour).map_err(|e| {
+                            InvalidGuardianLog(format!(
+                                "invalid withdrawal-log directory {hour}: {e}"
+                            ))
+                        })?;
+                        return Ok(Some(dir));
                     }
                 }
             }
@@ -108,11 +117,8 @@ async fn find_latest_success_bucket(
 async fn list_subdirs_desc(
     s3_client: &GuardianS3Client,
     prefix: &str,
-) -> anyhow::Result<Vec<String>> {
-    let mut subs = s3_client
-        .list_common_prefixes(prefix)
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+) -> GuardianResult<Vec<String>> {
+    let mut subs = s3_client.list_common_prefixes(prefix).await?;
     subs.sort_by(|a, b| b.cmp(a));
     Ok(subs)
 }
@@ -120,11 +126,10 @@ async fn list_subdirs_desc(
 async fn hour_bucket_has_success(
     s3_client: &GuardianS3Client,
     bucket: &str,
-) -> anyhow::Result<bool> {
+) -> GuardianResult<bool> {
     let keys = s3_client
         .validate_prefix_history_and_list_keys(&format!("{bucket}success-"))
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+        .await?;
     Ok(!keys.is_empty())
 }
 

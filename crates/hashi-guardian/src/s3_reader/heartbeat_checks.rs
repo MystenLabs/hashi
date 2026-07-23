@@ -8,6 +8,9 @@ use crate::OTHER_SESSION_QUIET_PERIOD;
 use hashi_types::guardian::time_utils::now_timestamp_secs;
 use hashi_types::guardian::time_utils::unix_millis_to_seconds;
 use hashi_types::guardian::time_utils::UnixSeconds;
+use hashi_types::guardian::GuardianError::InvalidGuardianLog;
+use hashi_types::guardian::GuardianError::InvalidInputs;
+use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::VerifiedLogRecord;
@@ -21,7 +24,7 @@ impl GuardianReader {
     pub async fn ensure_session_live_and_others_quiet(
         &mut self,
         live_session: &str,
-    ) -> anyhow::Result<()> {
+    ) -> GuardianResult<()> {
         let recent_heartbeats = self.read_recent_heartbeat_logs().await?;
         let summary = summarize_heartbeats_by_session(recent_heartbeats)?;
         let now = now_timestamp_secs();
@@ -48,7 +51,7 @@ impl GuardianReader {
         Ok(())
     }
 
-    async fn read_recent_heartbeat_logs(&mut self) -> anyhow::Result<Vec<VerifiedLogRecord>> {
+    async fn read_recent_heartbeat_logs(&mut self) -> GuardianResult<Vec<VerifiedLogRecord>> {
         // Read from the previous, current, and next hour-scoped prefixes to
         // cover clock-boundary cases and moderate clock skew.
         let one_hour_ago = now_timestamp_secs().saturating_sub(60 * 60);
@@ -71,12 +74,14 @@ struct GuardianSessionInfo {
 
 fn summarize_heartbeats_by_session(
     logs: Vec<VerifiedLogRecord>,
-) -> anyhow::Result<Vec<GuardianSessionInfo>> {
+) -> GuardianResult<Vec<GuardianSessionInfo>> {
     let mut map: BTreeMap<SessionID, (UnixSeconds, UnixSeconds)> = BTreeMap::new();
 
     for log in logs {
         if !matches!(log.message, LogMessage::Heartbeat(..)) {
-            anyhow::bail!("non-heartbeat logs found");
+            return Err(InvalidGuardianLog(
+                "non-heartbeat log found under the heartbeat prefix".into(),
+            ));
         }
 
         let ts = unix_millis_to_seconds(log.timestamp_ms);
@@ -106,19 +111,21 @@ fn validate_session_live_and_others_quiet(
     live_session: &str,
     live_session_max_age_secs: UnixSeconds,
     other_session_quiet_secs: UnixSeconds,
-) -> anyhow::Result<()> {
+) -> GuardianResult<()> {
     let live_session_info = summary
         .iter()
         .find(|s| s.session_id.as_str() == live_session)
-        .ok_or_else(|| anyhow::anyhow!("no heartbeat logs found for session {live_session}"))?;
+        .ok_or_else(|| {
+            InvalidInputs(format!(
+                "no heartbeat logs found for session {live_session}"
+            ))
+        })?;
     let live_session_age_secs = now.saturating_sub(live_session_info.last_heartbeat);
     if live_session_age_secs > live_session_max_age_secs {
-        anyhow::bail!(
+        return Err(InvalidInputs(format!(
             "session {} is stale: last heartbeat {}s ago (expected <= {}s)",
-            live_session,
-            live_session_age_secs,
-            live_session_max_age_secs
-        );
+            live_session, live_session_age_secs, live_session_max_age_secs
+        )));
     }
 
     let active_sessions = summary
@@ -131,11 +138,11 @@ fn validate_session_live_and_others_quiet(
         })
         .collect::<Vec<_>>();
     if !active_sessions.is_empty() {
-        anyhow::bail!(
+        return Err(InvalidInputs(format!(
             "sessions are still active within {}s: {}",
             other_session_quiet_secs,
             active_sessions.join(", ")
-        );
+        )));
     }
     Ok(())
 }
