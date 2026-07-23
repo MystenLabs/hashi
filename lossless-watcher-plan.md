@@ -406,13 +406,15 @@ Evaluate — mirror reads could replace on-demand fetches:
   both fetchers. Cost: cert payloads are large and read-mostly-once
   per epoch/batch, so weigh mirror memory against the on-demand
   latency they currently pay.
-- Rejoin committee read: `scrape_committee` /
+- ~~Rejoin committee read: `scrape_committee` /
   `scrape_committee_for_epoch` (`onchain/mod.rs`, added by the
-  auto-heal rejoin path in `mpc/service.rs`). The mirror holds every
-  epoch's committee, and the rejoin loop already retries, so a mirror
-  read suffices; the chain read buys only sub-second freshness over
-  the watermark. Replaceable once the rejoin flow tolerates reading
-  state as of the watermark (or waits on it).
+  auto-heal rejoin path in `mpc/service.rs`).~~ **Replaced
+  2026-07-23.** The rejoin loop reads the mirror's committee map;
+  freshness comes from `execute_register_or_update_validator`
+  returning the registration's landed checkpoint (as `Option<u64>`)
+  and the loop waiting for the watermark to pass it before checking
+  whether the target epoch's committee froze without the replacement
+  keys. Both scrape functions are deleted.
 
 Keep — justified reads outside the mirror's scope:
 
@@ -443,9 +445,18 @@ Keep — justified reads outside the mirror's scope:
   audit before cutover and against the live mirror after it. The
   eventless-write assertion landed with the step 7 GC switch: the
   withdrawal e2e flow waits for every node's mirror to absorb the
-  `cleanup_spent_utxos` deletions (no event, no rescrape). Still worth
-  adding: a kill-and-reconnect test that lands transactions during the
-  outage and asserts the replay path (not re-bootstrap) recovers them.
+  `cleanup_spent_utxos` deletions (no event, no rescrape). The
+  kill-and-reconnect test landed with the step 7 follow-ups
+  (`test_watcher_replay_recovers_outage_transactions`): a severable
+  TCP proxy in front of one node's Sui RPC, three root-touching
+  proposals landed during the outage, and the assertion that the
+  mirror recovers them with `hashi_watcher_rebootstrap_total == 0`.
+  Writing it surfaced a reconnect-coverage bug: the replay target was
+  sampled from the clock stream, which the same outage freezes — if
+  the mirror's floor had caught up to the stale height, replay was
+  skipped and a later coverage claim ratcheted the watermark over the
+  gap. The mirror now demands the clock advance two checkpoints past a
+  post-subscribe snapshot before trusting it as the replay target.
 - Metrics to watch in staging: unrouted-objects counter, replay-window
   length on reconnects, `hashi_watcher_state_watermark` lag against
   `hashi_latest_checkpoint_height`.
