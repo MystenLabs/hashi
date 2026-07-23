@@ -1216,6 +1216,13 @@ impl MpcService {
             }
         }
         drop(_end_reconfig_timer);
+        if !self.reconfig_target_live(target_epoch) {
+            info!(
+                "handle_reconfig: epoch {target_epoch} no longer pending nor current; \
+                 skipping key registration, backup, and pruning"
+            );
+            return;
+        }
         let next_epoch = target_epoch + 1;
         if let Err(e) = self.inner.prepare_and_register_keys(next_epoch).await {
             warn!(
