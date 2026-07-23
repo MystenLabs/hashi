@@ -19,3 +19,4 @@ failure-output = "immediate-final"
 success-output = "never"
 # Don't stop on first failure - run all tests
 fail-fast = false
+slow-timeout = { period = "120s", terminate-after = 10 }
