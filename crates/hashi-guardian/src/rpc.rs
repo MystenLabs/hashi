@@ -32,6 +32,8 @@ pub struct GuardianGrpc {
 fn to_status(e: GuardianError) -> Status {
     match e {
         InvalidInputs(msg) => Status::invalid_argument(msg),
+        Unauthenticated(msg) => Status::unauthenticated(msg),
+        GuardianBuildNotAccepted(msg) => Status::failed_precondition(msg),
         LifecycleMismatch {
             operation,
             expected,
@@ -42,6 +44,7 @@ fn to_status(e: GuardianError) -> Status {
         InternalError(msg) => Status::internal(msg),
         Unavailable(msg) => Status::unavailable(msg),
         S3Error(msg) => Status::internal(msg),
+        InvalidGuardianLog(msg) => Status::internal(msg),
         RateLimitExceeded => Status::resource_exhausted("Rate limit exceeded"),
     }
 }

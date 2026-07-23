@@ -151,7 +151,9 @@ fn verify_signed_submissions(
         .iter()
         .map(|signed| {
             let signer_fingerprint = signed.signer_fingerprint().to_hex();
-            signed.verify_signature()?;
+            signed
+                .verify_signature()
+                .map_err(|e| GuardianError::Unauthenticated(e.to_string()))?;
             let submission = &signed.data;
 
             if submission.expected_session_id() != live_session_id.as_str() {
@@ -584,7 +586,7 @@ mod tests {
             .provision(ProvisionerInitRequest(submissions))
             .await
             .expect_err("should fail");
-        assert!(matches!(err, InvalidInputs(_)));
+        assert!(matches!(err, Unauthenticated(_)));
     }
 
     #[tokio::test]

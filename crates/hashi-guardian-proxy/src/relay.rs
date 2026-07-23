@@ -17,7 +17,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use hashi_types::guardian::GetGuardianInfoResponse;
-use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::KpSigned;
 use hashi_types::guardian::SessionID;
 use hashi_types::guardian::SingleProvisionerInitRequest;
@@ -147,14 +146,7 @@ fn verify_kp_submission(
     }
     signed_request
         .verify_signature()
-        .map_err(kp_signature_error_status)
-}
-
-fn kp_signature_error_status(error: GuardianError) -> Status {
-    match error {
-        GuardianError::InvalidInputs(msg) => Status::unauthenticated(msg),
-        other => Status::unauthenticated(other.to_string()),
-    }
+        .map_err(|error| Status::unauthenticated(error.to_string()))
 }
 
 fn done() -> Response<proto::SingleProvisionerInitResponse> {

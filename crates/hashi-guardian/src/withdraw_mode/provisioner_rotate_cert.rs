@@ -13,6 +13,7 @@ use hashi_types::guardian::crypto::decrypt_share;
 use hashi_types::guardian::crypto::encrypt_share_for_provisioner;
 use hashi_types::guardian::GuardianError::InternalError;
 use hashi_types::guardian::GuardianError::InvalidInputs;
+use hashi_types::guardian::GuardianError::Unauthenticated;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::GuardianSigned;
 use hashi_types::guardian::KpSigned;
@@ -27,7 +28,9 @@ pub async fn provisioner_rotate_cert(
     info!("/provisioner_rotate_cert - Received request.");
 
     let signer_fingerprint = signed_request.signer_fingerprint().to_hex();
-    let request = signed_request.verify()?;
+    let request = signed_request
+        .verify()
+        .map_err(|e| Unauthenticated(e.to_string()))?;
 
     enclave.require_fully_initialized("provisioner_rotate_cert")?;
 

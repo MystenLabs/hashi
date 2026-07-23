@@ -11,7 +11,7 @@ use super::message::LogMessageV1;
 use super::message::ObjectKeyPattern;
 use super::message::VersionedLogMessage;
 use crate::guardian::BuildPcrs;
-use crate::guardian::GuardianError::InvalidInputs;
+use crate::guardian::GuardianError::InvalidGuardianLog;
 use crate::guardian::GuardianPubKey;
 use crate::guardian::GuardianResult;
 use crate::guardian::GuardianSignKeyPair;
@@ -250,7 +250,7 @@ impl LogRecord {
         pub_key: &GuardianPubKey,
     ) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
         if self.message.is_allowed_unsigned() {
-            return Err(InvalidInputs(
+            return Err(InvalidGuardianLog(
                 "expected signed log record but message is unsigned".into(),
             ));
         }
@@ -260,22 +260,27 @@ impl LogRecord {
         let signature = self
             .signature
             .as_ref()
-            .ok_or_else(|| InvalidInputs("missing log signature".into()))?;
-        verify_intent(&self.signing_payload(), timestamp_ms, signature, pub_key)?;
+            .ok_or_else(|| InvalidGuardianLog("missing log signature".into()))?;
+        verify_intent(&self.signing_payload(), timestamp_ms, signature, pub_key)
+            .map_err(|e| InvalidGuardianLog(format!("invalid log signature: {e}")))?;
 
-        Ok((self.session_id, timestamp_ms, self.message.into_current()?))
+        let message = self
+            .message
+            .into_current()
+            .map_err(|e| InvalidGuardianLog(format!("log schema conversion failed: {e}")))?;
+        Ok((self.session_id, timestamp_ms, message))
     }
 
     /// Validates the unsigned OI-attestation record's envelope and canonical
     /// session. The Nitro attestation itself must be authenticated separately.
     pub fn validate_unsigned(self) -> GuardianResult<(SessionID, UnixMillis, LogMessage)> {
         if !self.message.is_allowed_unsigned() {
-            return Err(InvalidInputs(
+            return Err(InvalidGuardianLog(
                 "expected unsigned log record but message requires a signature".into(),
             ));
         }
         if self.signature.is_some() {
-            return Err(InvalidInputs(
+            return Err(InvalidGuardianLog(
                 "unsigned log record must not contain a signature".into(),
             ));
         }
@@ -292,18 +297,18 @@ impl LogRecord {
             unreachable!("is_allowed_unsigned only permits OIAttestationUnsigned");
         };
         self.validate_session_id(signing_public_key)?;
-        Ok((
-            self.session_id,
-            self.timestamp_ms,
-            self.message.into_current()?,
-        ))
+        let message = self
+            .message
+            .into_current()
+            .map_err(|e| InvalidGuardianLog(format!("log schema conversion failed: {e}")))?;
+        Ok((self.session_id, self.timestamp_ms, message))
     }
 
     /// Rejects a record whose signed intended key differs from the key at which
     /// the S3 reader found it.
     pub fn validate_actual_object_key(&self, actual_object_key: &str) -> GuardianResult<()> {
         if self.object_key != actual_object_key {
-            return Err(InvalidInputs(format!(
+            return Err(InvalidGuardianLog(format!(
                 "S3 object key mismatch: record contains {}, actual key is {actual_object_key}",
                 self.object_key
             )));
@@ -317,13 +322,13 @@ impl LogRecord {
             .object_key_pattern(&self.session_id, self.timestamp_ms)
         {
             ObjectKeyPattern::Fixed(expected) if self.object_key != expected => {
-                return Err(InvalidInputs(format!(
+                return Err(InvalidGuardianLog(format!(
                     "non-canonical S3 object key: got {}, expected {expected}",
                     self.object_key
                 )));
             }
             ObjectKeyPattern::RandomSuffix(prefix) if !self.object_key.starts_with(&prefix) => {
-                return Err(InvalidInputs(format!(
+                return Err(InvalidGuardianLog(format!(
                     "non-canonical S3 object key: got {}, expected prefix {prefix}",
                     self.object_key
                 )));
@@ -336,7 +341,7 @@ impl LogRecord {
     fn validate_session_id(&self, signing_public_key: &GuardianPubKey) -> GuardianResult<()> {
         let canonical_session_id = SessionID::from_signing_pubkey(signing_public_key);
         if self.session_id != canonical_session_id {
-            return Err(InvalidInputs(format!(
+            return Err(InvalidGuardianLog(format!(
                 "session ID mismatch: record contains {}, signing public key derives {canonical_session_id}",
                 self.session_id
             )));
