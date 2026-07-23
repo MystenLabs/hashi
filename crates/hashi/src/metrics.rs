@@ -61,6 +61,7 @@ pub struct Metrics {
     pub watcher_applied_txns_total: IntCounter,
     pub watcher_unrouted_objects_total: IntCounter,
     pub watcher_state_watermark: IntGauge,
+    pub watcher_rebootstrap_total: IntCounter,
 
     // Kyoto (Bitcoin light client) metrics
     pub kyoto_connected_peers: IntGauge,
@@ -302,6 +303,13 @@ impl Metrics {
             watcher_state_watermark: register_int_gauge_with_registry!(
                 "hashi_watcher_state_watermark",
                 "Checkpoint through which the object mirror is complete",
+                registry,
+            )
+            .unwrap(),
+            watcher_rebootstrap_total: register_int_counter_with_registry!(
+                "hashi_watcher_rebootstrap_total",
+                "Times the object mirror was re-bootstrapped from a fresh scrape after a failed \
+                 replay (the lossy fallback; reconnects normally recover via replay alone)",
                 registry,
             )
             .unwrap(),
