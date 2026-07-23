@@ -29,6 +29,7 @@ pub mod metrics;
 pub mod metrics_push;
 pub mod mpc;
 pub mod onchain;
+pub mod protocol_config;
 pub mod publish;
 pub mod storage;
 pub mod sui_rpc_client;
@@ -1236,7 +1237,11 @@ impl std::fmt::Display for ServerVersion {
     }
 }
 
-fn assert_test_only_config(sui_chain_id: &str, bitcoin_chain_id: &str, field_name: &str) {
+pub(crate) fn assert_test_only_config(
+    sui_chain_id: &str,
+    bitcoin_chain_id: &str,
+    field_name: &str,
+) {
     assert!(
         sui_chain_id != constants::SUI_MAINNET_CHAIN_ID
             && sui_chain_id != constants::SUI_TESTNET_CHAIN_ID

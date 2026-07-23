@@ -13,7 +13,7 @@
 /// package's global config and is also pinned per-epoch onto a `Committee`.
 module hashi::config;
 
-use hashi::config_value::{Self, Value};
+use hashi::{config_registry::{Self, ConfigRegistry}, config_value::{Self, Value}};
 use std::string::String;
 use sui::vec_map::{Self, VecMap};
 
@@ -62,6 +62,73 @@ public(package) fun empty(): Config {
     Config { config: vec_map::empty() }
 }
 
+/// Register the specs for the keys `create` seeds. `paused` is non-removable
+/// because `paused()` reads it with `get` (removal would abort every
+/// `assert_unpaused`); the emergency thresholds are basis points.
+public(package) fun register_core_keys(registry: &mut ConfigRegistry) {
+    registry.register(
+        PAUSED_KEY,
+        config_registry::new_spec(
+            false,
+            true,
+            false,
+            option::none(),
+            option::none(),
+            option::none(),
+        ),
+    );
+    registry.register(
+        EMERGENCY_PAUSE_THRESHOLD_BPS_KEY,
+        config_registry::new_spec(
+            false,
+            true,
+            false,
+            option::none(),
+            option::some(10000),
+            option::none(),
+        ),
+    );
+    registry.register(
+        EMERGENCY_UNPAUSE_THRESHOLD_BPS_KEY,
+        config_registry::new_spec(
+            false,
+            true,
+            false,
+            option::none(),
+            option::some(10000),
+            option::none(),
+        ),
+    );
+}
+
+/// Register the specs for the guardian keys `finish_publish` sets. The BTC
+/// public key is write-once at the registry layer too: `update_config` must
+/// never bypass `set_guardian_btc_public_key`'s immutability or length check.
+public(package) fun register_guardian_keys(registry: &mut ConfigRegistry) {
+    registry.register(
+        GUARDIAN_URL_KEY,
+        config_registry::new_spec(
+            false,
+            true,
+            false,
+            option::none(),
+            option::none(),
+            option::none(),
+        ),
+    );
+    registry.register(
+        GUARDIAN_BTC_PUBLIC_KEY_KEY,
+        config_registry::new_spec(
+            false,
+            false,
+            false,
+            option::none(),
+            option::none(),
+            option::some(GUARDIAN_BTC_PUBLIC_KEY_LEN),
+        ),
+    );
+}
+
 /// Read a config value by key. Exposed to other modules in the package
 /// (e.g. btc_config) so they can define domain-specific accessors.
 public(package) fun get(self: &Config, key: vector<u8>): Value {
@@ -75,6 +142,11 @@ public(package) fun try_get(self: &Config, key: vector<u8>): Option<Value> {
     } else {
         option::none()
     }
+}
+
+/// Keys in insertion order.
+public(package) fun keys(self: &Config): vector<String> {
+    self.config.keys()
 }
 
 /// Returns true if `key` is present.
@@ -92,6 +164,24 @@ public(package) fun upsert(self: &mut Config, key: vector<u8>, value: Value) {
     };
 
     self.config.insert(key, value);
+}
+
+/// Snapshot every `pinned` registered key present in `self`, in registry
+/// insertion order — the canonical order the off-chain pipeline carries
+/// verbatim into the signed committee. A registered-but-absent key (possible
+/// only via removal) is skipped, not aborted, so it can't brick reconfig.
+public(package) fun pin(self: &Config, registry: &ConfigRegistry): Config {
+    let mut pinned = empty();
+    registry.pinned_keys().do!(|key| {
+        self.try_get(*key.as_bytes()).do!(|v| pinned.upsert(*key.as_bytes(), v));
+    });
+    pinned
+}
+
+/// Remove a key. Aborts if absent — callers guard existence via the registry
+/// (registered => present).
+public(package) fun remove(self: &mut Config, key: &String) {
+    self.config.remove(key);
 }
 
 /// Returns true when `key` exists in the config and `value` has the

@@ -1860,6 +1860,64 @@ pub fn build_cancel_withdrawal(
     builder
 }
 
+fn build_protocol_version_capabilities(
+    builder: &mut TransactionBuilder,
+    package_id: Address,
+    supported_max: u64,
+) -> sui_transaction_builder::Argument {
+    let sui_framework = Address::from_static("0x2");
+    let move_stdlib = Address::from_static("0x1");
+    let string_type = TypeTag::Struct(Box::new(StructTag::new(
+        move_stdlib,
+        Identifier::from_static("string"),
+        Identifier::from_static("String"),
+        vec![],
+    )));
+    let value_type = TypeTag::Struct(Box::new(StructTag::new(
+        package_id,
+        Identifier::from_static("config_value"),
+        Identifier::from_static("Value"),
+        vec![],
+    )));
+    let map = builder.move_call(
+        Function::new(
+            sui_framework,
+            Identifier::from_static("vec_map"),
+            Identifier::from_static("empty"),
+        )
+        .with_type_args(vec![string_type.clone(), value_type.clone()]),
+        vec![],
+    );
+    for (key, version) in [
+        (
+            "supported_protocol_version_min",
+            crate::protocol_config::MIN_SUPPORTED_PROTOCOL_VERSION,
+        ),
+        ("supported_protocol_version_max", supported_max),
+    ] {
+        let key_arg = builder.pure(&key.to_string());
+        let version_arg = builder.pure(&version);
+        let value = builder.move_call(
+            Function::new(
+                package_id,
+                Identifier::from_static("config_value"),
+                Identifier::from_static("new_u64"),
+            ),
+            vec![version_arg],
+        );
+        builder.move_call(
+            Function::new(
+                sui_framework,
+                Identifier::from_static("vec_map"),
+                Identifier::from_static("insert"),
+            )
+            .with_type_args(vec![string_type.clone(), value_type.clone()]),
+            vec![map, key_arg, value],
+        );
+    }
+    map
+}
+
 /// Build a transaction to register and/or update validator metadata.
 ///
 /// Fetches the validator's current onchain state via `client`. If the validator is not yet
@@ -2070,6 +2128,28 @@ pub async fn build_register_or_update_validator_tx(
                 Identifier::from_static("update_operator_address"),
             ),
             vec![hashi_arg, validator_address_arg, operator_arg],
+        );
+        has_calls = true;
+    }
+
+    // Gate on `max` only: the advertised `min` is pinned to
+    // MIN_SUPPORTED_PROTOCOL_VERSION (a constant), and on-chain `member_supports`
+    // treats an absent/genesis min as "no lower bound", so it never needs
+    // re-advertising. If MIN_SUPPORTED ever becomes dynamic, also gate on min.
+    let advertised_max = onchain_member
+        .as_ref()
+        .and_then(|m| m.supported_protocol_version_max);
+    let supported_max = crate::protocol_config::supported_max(config);
+    if advertised_max != Some(supported_max) {
+        let capabilities_arg =
+            build_protocol_version_capabilities(&mut builder, hashi_ids.package_id, supported_max);
+        builder.move_call(
+            Function::new(
+                hashi_ids.package_id,
+                Identifier::from_static("validator"),
+                Identifier::from_static("update_capabilities"),
+            ),
+            vec![hashi_arg, validator_address_arg, capabilities_arg],
         );
         has_calls = true;
     }

@@ -48,6 +48,8 @@ pub struct Hashi {
     pub tob: Bag,
     /// Number of presignatures consumed in the current epoch.
     pub num_consumed_presigs: u64,
+    pub config_registry: ConfigRegistry,
+    pub pending_config_updates: VecMap<String, PendingUpdate>,
 }
 
 /// Rust version of the Move hashi::bitcoin_state::BitcoinStateKey type.
@@ -222,12 +224,17 @@ pub enum ConfigValue {
     Bytes(Vec<u8>),
 }
 
-/// MPC parameter keys, in the canonical order Move's `mpc_config::pin` writes
+/// MPC parameter keys, in the canonical order Move's `config::pin` writes
 /// them. Load-bearing for [`Config::from_mpc_params`].
 const KEY_MPC_THRESHOLD_IN_BASIS_POINTS: &str = "mpc_threshold_in_basis_points";
 const KEY_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: &str = "mpc_weight_reduction_allowed_delta";
 const KEY_MPC_MAX_FAULTY_IN_BASIS_POINTS: &str = "mpc_max_faulty_in_basis_points";
 const KEY_MPC_NONCE_GENERATION_PROTOCOL: &str = "mpc_nonce_generation_protocol";
+const KEY_HASHI_PROTOCOL_VERSION: &str = "hashi_protocol_version";
+pub const GENESIS_HASHI_PROTOCOL_VERSION: u64 = 1;
+/// Reserved member-capability keys (mirrors `hashi::protocol_version`).
+pub const KEY_SUPPORTED_PROTOCOL_VERSION_MIN: &str = "supported_protocol_version_min";
+pub const KEY_SUPPORTED_PROTOCOL_VERSION_MAX: &str = "supported_protocol_version_max";
 
 /// Default MPC threshold in basis points. Mirrors `DEFAULT_THRESHOLD_IN_BASIS_POINTS`
 /// in `mpc_config.move`.
@@ -238,6 +245,32 @@ pub const DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA: u16 = 800;
 pub const DEFAULT_MPC_MAX_FAULTY_IN_BASIS_POINTS: u16 = 3333;
 /// Mirrors `VANILLA_NONCE_GENERATION_PROTOCOL` in `mpc_config.move`.
 pub const VANILLA_MPC_NONCE_GENERATION_PROTOCOL: u16 = 0;
+
+/// Rust version of the Move hashi::config_registry::ConfigKeySpec type.
+/// Field order mirrors the Move struct (BCS).
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct ConfigKeySpec {
+    pub pinned: bool,
+    pub updatable: bool,
+    pub removable: bool,
+    pub min: Option<u64>,
+    pub max: Option<u64>,
+    pub max_len: Option<u64>,
+    pub extensions: VecMap<String, ConfigValue>,
+}
+
+/// Rust version of the Move hashi::config_registry::PendingUpdate type.
+#[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct PendingUpdate {
+    pub value: ConfigValue,
+    pub activate_at_epoch: u64,
+}
+
+/// Rust version of the Move hashi::config_registry::ConfigRegistry type.
+#[derive(Debug, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct ConfigRegistry {
+    pub specs: VecMap<String, ConfigKeySpec>,
+}
 
 /// Rust version of the Move hashi::config::Config type: a general-purpose,
 /// order-preserving key-value store (`VecMap<String, Value>`). Embedded both as
@@ -287,9 +320,9 @@ impl Config {
     // ===== MPC parameters (mirror Move's `mpc_config` accessors) =====
 
     /// Build a config holding the MPC parameters, inserting the full key set in
-    /// the same fixed order as Move's `mpc_config::pin`. For synthetic
-    /// committees only (tests, fallbacks); the scrape/wire paths carry the
-    /// on-chain config verbatim via [`Config::from_entries`].
+    /// the same fixed order as Move's `config::pin`. For synthetic committees
+    /// only (tests, fallbacks); the scrape/wire paths carry the on-chain config
+    /// verbatim via [`Config::from_entries`].
     pub fn from_mpc_params(
         threshold_in_basis_points: u16,
         weight_reduction_allowed_delta: u16,
@@ -342,6 +375,20 @@ impl Config {
             KEY_MPC_NONCE_GENERATION_PROTOCOL,
             VANILLA_MPC_NONCE_GENERATION_PROTOCOL,
         )
+    }
+
+    pub fn hashi_protocol_version(&self) -> u64 {
+        self.get_u64(KEY_HASHI_PROTOCOL_VERSION, GENESIS_HASHI_PROTOCOL_VERSION)
+    }
+
+    pub fn try_u64(&self, key: &str) -> Option<u64> {
+        self.0
+            .iter()
+            .find(|(k, _)| k == key)
+            .and_then(|(_, v)| match v {
+                ConfigValue::U64(n) => Some(*n),
+                _ => None,
+            })
     }
 
     fn mpc_param(&self, key: &str, default: u16) -> u16 {
@@ -707,6 +754,35 @@ pub struct Proposal<T> {
 #[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
 pub struct UpdateConfig {
     pub entries: VecMap<String, ConfigValue>,
+}
+
+/// Rust version of the Move hashi::config_keys::AddConfigKey type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct AddConfigKey {
+    pub key: String,
+    pub value: ConfigValue,
+    pub spec: ConfigKeySpec,
+}
+
+/// Rust version of the Move hashi::config_keys::UpdateConfigKeySpec type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct UpdateConfigKeySpec {
+    pub key: String,
+    pub spec: ConfigKeySpec,
+}
+
+/// Rust version of the Move hashi::config_keys::RemoveConfigKey type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct RemoveConfigKey {
+    pub key: String,
+}
+
+/// Rust version of the Move hashi::config_keys::ScheduleConfigUpdate type.
+#[derive(Debug, Clone, serde_derive::Deserialize, serde_derive::Serialize)]
+pub struct ScheduleConfigUpdate {
+    pub key: String,
+    pub value: ConfigValue,
+    pub activate_at_epoch: u64,
 }
 
 /// Rust version of the Move hashi::enable_version::EnableVersion type.
@@ -1569,7 +1645,9 @@ mod tests {
     /// Pins the exact BCS bytes of a committee's pinned config so a change to the
     /// canonical key order, the `ConfigValue` encoding, or the entry set is
     /// caught here rather than silently breaking handoff-cert verification.
-    /// The expected vector must equal what Move's `mpc_config::pin` produces.
+    /// The expected vector must equal what Move's `config::pin` produces for
+    /// these MPC keys (the full pinned committee also carries the protocol
+    /// version).
     #[test]
     fn committee_mpc_config_bcs_is_pinned() {
         let mpc = Config::from_mpc_params(3334, 800, 3333, 1);

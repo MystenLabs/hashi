@@ -65,16 +65,32 @@ entry fun start_reconfig(
     // Assert that we are not already reconfiguring
     assert!(!self.committee_set().is_reconfiguring());
     assert_genesis_launch_authorized(self);
-    // Pin the current MPC parameters so they stay fixed for the new epoch even
-    // if governance changes them mid-epoch.
-    let config = hashi::mpc_config::pin(self.config());
+    // Commit due scheduled updates before the snapshot so the epoch's
+    // committee pins the values active for that epoch.
+    self.commit_pending_config_updates(ctx.epoch());
+    // Pin the governed epoch parameters so mid-epoch governance changes don't
+    // affect the active committee.
+    let config = self.config().pin(self.config_registry());
+    let version_ceiling = hashi::protocol_version::ceiling(self.config());
+    let version_buffer_bps = hashi::protocol_version::buffer_bps(self.config());
     let epoch = self
         .committee_set_mut()
         .start_reconfig(
             sui_system,
             config,
+            version_ceiling,
+            version_buffer_bps,
             ctx,
         );
+    // The advance rule wrote only the pinned copy; mirror it back so the next
+    // reconfig's pin starts from the advanced version.
+    let pinned_version = hashi::protocol_version::current(self
+        .committee_set()
+        .get_committee(epoch)
+        .config());
+    if (pinned_version != hashi::protocol_version::current(self.config())) {
+        hashi::protocol_version::set(self.config_mut(), pinned_version);
+    };
     sui::event::emit(ReconfigStarted { epoch });
 }
 

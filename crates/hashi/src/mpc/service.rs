@@ -1128,6 +1128,37 @@ impl MpcService {
             self.sleep_if_still_pending(target_epoch).await;
             return;
         }
+        let pinned_version = self
+            .inner
+            .onchain_state()
+            .state()
+            .hashi()
+            .committees
+            .committees()
+            .get(&target_epoch)
+            .map(|c| c.config().hashi_protocol_version());
+        // Fail closed: if the target committee is not yet observed locally we
+        // cannot confirm its pinned version is supported, so refuse and retry
+        // rather than assume genesis (a version every binary accepts).
+        let Some(pinned_version) = pinned_version else {
+            error!(
+                "refusing to participate in reconfig for epoch {target_epoch}: \
+                 target committee not yet observed locally; retrying"
+            );
+            self.sleep_if_still_pending(target_epoch).await;
+            return;
+        };
+        if !crate::protocol_config::is_supported(&self.inner.config, pinned_version) {
+            error!(
+                "refusing to participate in reconfig for epoch {target_epoch}: this binary \
+                 supports protocol versions {}..={} but the epoch is pinned to {pinned_version}; \
+                 upgrade the node",
+                crate::protocol_config::MIN_SUPPORTED_PROTOCOL_VERSION,
+                crate::protocol_config::supported_max(&self.inner.config),
+            );
+            self.sleep_if_still_pending(target_epoch).await;
+            return;
+        }
         let metrics = &self.inner.metrics;
         let _reconfig_timer = metrics
             .mpc_reconfig_total_duration_seconds

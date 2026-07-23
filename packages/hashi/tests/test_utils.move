@@ -132,6 +132,7 @@ public fun create_hashi_with_weighted_committee(
     let mut config = hashi::config::create();
     hashi::btc_config::init_defaults(&mut config);
     hashi::mpc_config::init_defaults(&mut config);
+    hashi::protocol_version::init_defaults(&mut config);
 
     // Create versioning (version gating + upgrade cap)
     let versioning = hashi::versioning::create();
@@ -216,6 +217,20 @@ public fun sign_certificate(
 }
 
 // ======== Proposal Creation Helpers ========
+
+/// Creates a single-entry update_config proposal and returns its ID.
+public fun create_update_config_proposal(
+    hashi: &mut Hashi,
+    validator_address: address,
+    key: vector<u8>,
+    value: hashi::config_value::Value,
+    clock: &Clock,
+    ctx: &mut TxContext,
+): ID {
+    let mut entries = vec_map::empty();
+    entries.insert(key.to_string(), value);
+    update_config::propose(hashi, validator_address, entries, vec_map::empty(), clock, ctx)
+}
 
 /// Creates a deposit minimum update proposal and returns its ID.
 public fun create_deposit_minimum_proposal(

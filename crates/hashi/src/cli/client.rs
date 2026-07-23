@@ -40,6 +40,37 @@ pub enum CreateProposalParams {
         value: hashi_types::move_types::ConfigValue,
         metadata: Vec<(String, String)>,
     },
+    AddConfigKey {
+        key: String,
+        value: hashi_types::move_types::ConfigValue,
+        pinned: bool,
+        updatable: bool,
+        removable: bool,
+        min: Option<u64>,
+        max: Option<u64>,
+        max_len: Option<u64>,
+        metadata: Vec<(String, String)>,
+    },
+    UpdateConfigKeySpec {
+        key: String,
+        pinned: bool,
+        updatable: bool,
+        removable: bool,
+        min: Option<u64>,
+        max: Option<u64>,
+        max_len: Option<u64>,
+        metadata: Vec<(String, String)>,
+    },
+    RemoveConfigKey {
+        key: String,
+        metadata: Vec<(String, String)>,
+    },
+    ScheduleConfigUpdate {
+        key: String,
+        value: ConfigValue,
+        activate_at_epoch: u64,
+        metadata: Vec<(String, String)>,
+    },
     UpdateMpcConfig {
         threshold_bps: Option<u64>,
         max_faulty_bps: Option<u64>,
@@ -296,6 +327,28 @@ impl HashiClient {
                             bcs::from_bytes(value_bytes).context("deserialize UpdateConfig")?;
                         (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
                     }
+                    ProposalType::AddConfigKey => {
+                        let p: move_types::Proposal<move_types::AddConfigKey> =
+                            bcs::from_bytes(value_bytes).context("deserialize AddConfigKey")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
+                    ProposalType::UpdateConfigKeySpec => {
+                        let p: move_types::Proposal<move_types::UpdateConfigKeySpec> =
+                            bcs::from_bytes(value_bytes)
+                                .context("deserialize UpdateConfigKeySpec")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
+                    ProposalType::RemoveConfigKey => {
+                        let p: move_types::Proposal<move_types::RemoveConfigKey> =
+                            bcs::from_bytes(value_bytes).context("deserialize RemoveConfigKey")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
+                    ProposalType::ScheduleConfigUpdate => {
+                        let p: move_types::Proposal<move_types::ScheduleConfigUpdate> =
+                            bcs::from_bytes(value_bytes)
+                                .context("deserialize ScheduleConfigUpdate")?;
+                        (p.creator, p.votes, p.quorum_threshold_bps, p.metadata)
+                    }
                     ProposalType::EnableVersion => {
                         let p: move_types::Proposal<move_types::EnableVersion> =
                             bcs::from_bytes(value_bytes).context("deserialize EnableVersion")?;
@@ -473,6 +526,14 @@ impl HashiClient {
 
         let module_name = match proposal_type {
             ProposalType::UpdateConfig => "update_config",
+            ProposalType::AddConfigKey
+            | ProposalType::UpdateConfigKeySpec
+            | ProposalType::RemoveConfigKey
+            | ProposalType::ScheduleConfigUpdate => {
+                anyhow::bail!(
+                    "config-key proposals are executed via their dedicated config_keys::execute_* entry"
+                );
+            }
             ProposalType::EnableVersion => "enable_version",
             ProposalType::DisableVersion => "disable_version",
             ProposalType::EmergencyPause => "emergency_pause",
@@ -573,6 +634,132 @@ pub fn build_create_proposal_transaction(
                     hashi_arg,
                     validator_address_arg,
                     entries_arg,
+                    metadata_arg,
+                    clock_arg,
+                ],
+            );
+        }
+        CreateProposalParams::AddConfigKey {
+            key,
+            value,
+            pinned,
+            updatable,
+            removable,
+            min,
+            max,
+            max_len,
+            metadata,
+        } => {
+            let key_arg = builder.pure(&key);
+            let value_arg = build_config_value(&mut builder, hashi_ids.package_id, &value);
+            let pinned_arg = builder.pure(&pinned);
+            let updatable_arg = builder.pure(&updatable);
+            let removable_arg = builder.pure(&removable);
+            let min_arg = builder.pure(&min);
+            let max_arg = builder.pure(&max);
+            let max_len_arg = builder.pure(&max_len);
+            let metadata_arg = build_metadata(&mut builder, &metadata);
+            builder.move_call(
+                Function::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("config_keys"),
+                    Identifier::from_static("propose_add"),
+                ),
+                vec![
+                    hashi_arg,
+                    validator_address_arg,
+                    key_arg,
+                    value_arg,
+                    pinned_arg,
+                    updatable_arg,
+                    removable_arg,
+                    min_arg,
+                    max_arg,
+                    max_len_arg,
+                    metadata_arg,
+                    clock_arg,
+                ],
+            );
+        }
+        CreateProposalParams::UpdateConfigKeySpec {
+            key,
+            pinned,
+            updatable,
+            removable,
+            min,
+            max,
+            max_len,
+            metadata,
+        } => {
+            let key_arg = builder.pure(&key);
+            let pinned_arg = builder.pure(&pinned);
+            let updatable_arg = builder.pure(&updatable);
+            let removable_arg = builder.pure(&removable);
+            let min_arg = builder.pure(&min);
+            let max_arg = builder.pure(&max);
+            let max_len_arg = builder.pure(&max_len);
+            let metadata_arg = build_metadata(&mut builder, &metadata);
+            builder.move_call(
+                Function::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("config_keys"),
+                    Identifier::from_static("propose_update_spec"),
+                ),
+                vec![
+                    hashi_arg,
+                    validator_address_arg,
+                    key_arg,
+                    pinned_arg,
+                    updatable_arg,
+                    removable_arg,
+                    min_arg,
+                    max_arg,
+                    max_len_arg,
+                    metadata_arg,
+                    clock_arg,
+                ],
+            );
+        }
+        CreateProposalParams::RemoveConfigKey { key, metadata } => {
+            let key_arg = builder.pure(&key);
+            let metadata_arg = build_metadata(&mut builder, &metadata);
+            builder.move_call(
+                Function::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("config_keys"),
+                    Identifier::from_static("propose_remove"),
+                ),
+                vec![
+                    hashi_arg,
+                    validator_address_arg,
+                    key_arg,
+                    metadata_arg,
+                    clock_arg,
+                ],
+            );
+        }
+        CreateProposalParams::ScheduleConfigUpdate {
+            key,
+            value,
+            activate_at_epoch,
+            metadata,
+        } => {
+            let key_arg = builder.pure(&key);
+            let value_arg = build_config_value(&mut builder, hashi_ids.package_id, &value);
+            let epoch_arg = builder.pure(&activate_at_epoch);
+            let metadata_arg = build_metadata(&mut builder, &metadata);
+            builder.move_call(
+                Function::new(
+                    hashi_ids.package_id,
+                    Identifier::from_static("config_keys"),
+                    Identifier::from_static("propose_schedule"),
+                ),
+                vec![
+                    hashi_arg,
+                    validator_address_arg,
+                    key_arg,
+                    value_arg,
+                    epoch_arg,
                     metadata_arg,
                     clock_arg,
                 ],
@@ -878,6 +1065,10 @@ pub fn get_proposal_type_arg(
     let (module, name) = match proposal_type {
         ProposalType::Upgrade => ("upgrade", "Upgrade"),
         ProposalType::UpdateConfig => ("update_config", "UpdateConfig"),
+        ProposalType::AddConfigKey => ("config_keys", "AddConfigKey"),
+        ProposalType::UpdateConfigKeySpec => ("config_keys", "UpdateConfigKeySpec"),
+        ProposalType::RemoveConfigKey => ("config_keys", "RemoveConfigKey"),
+        ProposalType::ScheduleConfigUpdate => ("config_keys", "ScheduleConfigUpdate"),
         ProposalType::EnableVersion => ("enable_version", "EnableVersion"),
         ProposalType::DisableVersion => ("disable_version", "DisableVersion"),
         ProposalType::EmergencyPause => ("emergency_pause", "EmergencyPause"),

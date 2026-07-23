@@ -541,6 +541,116 @@ pub async fn create_update_mpc_config_proposal(
 }
 
 /// Parse a CLI config value string like "u64:1000" or "bool:true" into a ConfigValueParam.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_add_config_key_proposal(
+    config: &CliConfig,
+    key: &str,
+    value_str: &str,
+    pinned: bool,
+    updatable: bool,
+    removable: bool,
+    min: Option<u64>,
+    max: Option<u64>,
+    max_len: Option<u64>,
+    metadata: Vec<(String, String)>,
+    tx_opts: &TxOptions,
+) -> Result<()> {
+    let value = parse_config_value(value_str)
+        .context("Invalid value format. Use type:value, e.g. u64:1000 or bool:true")?;
+    prompt_continue("create this add-config-key proposal", tx_opts).await?;
+    let mut client = HashiClient::new(config).await?;
+    let tx = client.build_create_proposal_transaction(CreateProposalParams::AddConfigKey {
+        key: key.to_string(),
+        value,
+        pinned,
+        updatable,
+        removable,
+        min,
+        max,
+        max_len,
+        metadata,
+    })?;
+    print_info("Transaction: config_keys::propose_add");
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    print_created_proposal_id(response.as_ref());
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_update_config_key_spec_proposal(
+    config: &CliConfig,
+    key: &str,
+    pinned: bool,
+    updatable: bool,
+    removable: bool,
+    min: Option<u64>,
+    max: Option<u64>,
+    max_len: Option<u64>,
+    metadata: Vec<(String, String)>,
+    tx_opts: &TxOptions,
+) -> Result<()> {
+    prompt_continue("create this update-config-key-spec proposal", tx_opts).await?;
+    let mut client = HashiClient::new(config).await?;
+    let tx =
+        client.build_create_proposal_transaction(CreateProposalParams::UpdateConfigKeySpec {
+            key: key.to_string(),
+            pinned,
+            updatable,
+            removable,
+            min,
+            max,
+            max_len,
+            metadata,
+        })?;
+    print_info("Transaction: config_keys::propose_update_spec");
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    print_created_proposal_id(response.as_ref());
+    Ok(())
+}
+
+pub async fn create_remove_config_key_proposal(
+    config: &CliConfig,
+    key: &str,
+    metadata: Vec<(String, String)>,
+    tx_opts: &TxOptions,
+) -> Result<()> {
+    prompt_continue("create this remove-config-key proposal", tx_opts).await?;
+    let mut client = HashiClient::new(config).await?;
+    let tx = client.build_create_proposal_transaction(CreateProposalParams::RemoveConfigKey {
+        key: key.to_string(),
+        metadata,
+    })?;
+    print_info("Transaction: config_keys::propose_remove");
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    print_created_proposal_id(response.as_ref());
+    Ok(())
+}
+
+pub async fn create_schedule_config_update_proposal(
+    config: &CliConfig,
+    key: &str,
+    value_str: &str,
+    activate_at_epoch: u64,
+    metadata: Vec<(String, String)>,
+    tx_opts: &TxOptions,
+) -> Result<()> {
+    let value = parse_config_value(value_str)
+        .context("Invalid value format. Use type:value, e.g. u64:1000 or bool:true")?;
+    prompt_continue("create this schedule-config-update proposal", tx_opts).await?;
+    let mut client = HashiClient::new(config).await?;
+    let tx =
+        client.build_create_proposal_transaction(CreateProposalParams::ScheduleConfigUpdate {
+            key: key.to_string(),
+            value,
+            activate_at_epoch,
+            metadata,
+        })?;
+    print_info("Transaction: config_keys::propose_schedule");
+    let response = execute_or_simulate(&mut client, tx, tx_opts).await?;
+    print_created_proposal_id(response.as_ref());
+    Ok(())
+}
+
 fn parse_config_value(s: &str) -> Result<hashi_types::move_types::ConfigValue> {
     use hashi_types::move_types::ConfigValue;
 

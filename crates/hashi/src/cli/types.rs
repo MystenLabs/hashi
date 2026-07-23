@@ -51,6 +51,10 @@ pub mod display {
         match proposal_type {
             ProposalType::Upgrade => "Upgrade".to_string(),
             ProposalType::UpdateConfig => "UpdateConfig".to_string(),
+            ProposalType::AddConfigKey => "AddConfigKey".to_string(),
+            ProposalType::UpdateConfigKeySpec => "UpdateConfigKeySpec".to_string(),
+            ProposalType::RemoveConfigKey => "RemoveConfigKey".to_string(),
+            ProposalType::ScheduleConfigUpdate => "ScheduleConfigUpdate".to_string(),
             ProposalType::EnableVersion => "EnableVersion".to_string(),
             ProposalType::DisableVersion => "DisableVersion".to_string(),
             ProposalType::EmergencyPause => "EmergencyPause".to_string(),

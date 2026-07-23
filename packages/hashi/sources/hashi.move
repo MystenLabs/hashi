@@ -15,6 +15,7 @@ use hashi::{
     committee::{CertifiedMessage, Committee, CommitteeSignature},
     committee_set::CommitteeSet,
     config::Config,
+    config_registry::{ConfigRegistry, PendingUpdate},
     proposals::{Self, Proposals},
     threshold,
     treasury::Treasury,
@@ -48,6 +49,12 @@ public struct Hashi has key {
     /// Number of presignatures consumed in the current epoch.
     /// Used by recovering nodes to derive `(batch_index, index_in_batch)`.
     num_consumed_presigs: u64,
+    /// Governed metadata for config keys. Appended (with the field below) so
+    /// the Rust mirror, which deserializes by field order, only ever appends.
+    config_registry: ConfigRegistry,
+    /// Scheduled value changes, committed into `config` by the reconfig whose
+    /// next epoch reaches each entry's activation epoch.
+    pending_config_updates: sui::vec_map::VecMap<std::string::String, PendingUpdate>,
 }
 
 // ~~~~~~~ Entry Functions ~~~~~~~
@@ -87,6 +94,11 @@ entry fun finish_publish(
 
     self.config_mut().set_guardian_url(guardian_url);
     self.config_mut().set_guardian_btc_public_key(guardian_btc_public_key);
+
+    // Register the keys set above so the registry mirrors the config key set
+    // (registered => present); the duplicate-abort also makes this call-once.
+    hashi::btc_config::register_chain_id_key(&mut self.config_registry);
+    hashi::config::register_guardian_keys(&mut self.config_registry);
 
     if (bitcoin_confirmation_threshold.is_some()) {
         hashi::btc_config::set_bitcoin_confirmation_threshold(
@@ -157,6 +169,50 @@ public(package) fun id(self: &Hashi): &UID {
 
 public(package) fun config(self: &Hashi): &Config {
     &self.config
+}
+
+public(package) fun config_registry(self: &Hashi): &ConfigRegistry {
+    &self.config_registry
+}
+
+public(package) fun config_registry_mut(self: &mut Hashi): &mut ConfigRegistry {
+    &mut self.config_registry
+}
+
+public(package) fun pending_config_updates(
+    self: &Hashi,
+): &sui::vec_map::VecMap<std::string::String, PendingUpdate> {
+    &self.pending_config_updates
+}
+
+public(package) fun pending_config_updates_mut(
+    self: &mut Hashi,
+): &mut sui::vec_map::VecMap<std::string::String, PendingUpdate> {
+    &mut self.pending_config_updates
+}
+
+/// Commit scheduled updates due by `next_epoch` into the global config. Run
+/// before `pin` so a value scheduled for epoch E is snapshotted by the
+/// reconfig that forms E's committee.
+public(package) fun commit_pending_config_updates(self: &mut Hashi, next_epoch: u64) {
+    let due = self.pending_config_updates.keys().filter!(|key| {
+        hashi::config_registry::pending_activate_at_epoch(
+            self.pending_config_updates.get(key),
+        ) <= next_epoch
+    });
+    due.do!(|key| {
+        let (_, pending) = self.pending_config_updates.remove(&key);
+        let value = hashi::config_registry::pending_value(&pending);
+        // Re-validate against the current spec (it may have narrowed or the
+        // key been removed since scheduling); drop stale entries rather than
+        // abort, which would brick start_reconfig.
+        if (
+            self.config.is_valid_config_update(&key, &value)
+                && self.config_registry.is_valid_update(&key, &value)
+        ) {
+            self.config.upsert(*key.as_bytes(), value);
+        };
+    });
 }
 
 public(package) fun config_mut(self: &mut Hashi): &mut Config {
@@ -248,6 +304,7 @@ fun init(ctx: &mut TxContext) {
             let mut config = hashi::config::create();
             hashi::btc_config::init_defaults(&mut config);
             hashi::mpc_config::init_defaults(&mut config);
+            hashi::protocol_version::init_defaults(&mut config);
             config
         },
         versioning: versioning::create(),
@@ -255,6 +312,15 @@ fun init(ctx: &mut TxContext) {
         proposals: proposals::create(ctx),
         tob: bag::new(ctx),
         num_consumed_presigs: 0,
+        config_registry: {
+            let mut registry = hashi::config_registry::empty();
+            hashi::config::register_core_keys(&mut registry);
+            hashi::btc_config::register_keys(&mut registry);
+            hashi::mpc_config::register_keys(&mut registry);
+            hashi::protocol_version::register_keys(&mut registry);
+            registry
+        },
+        pending_config_updates: sui::vec_map::empty(),
     };
 
     df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
@@ -297,9 +363,28 @@ public fun create_for_testing(
         proposals,
         tob,
         num_consumed_presigs: 0,
+        // Same registry as `init`; tests that need the post-launch keys call
+        // `register_launch_keys_for_testing` (or run finish_publish).
+        config_registry: {
+            let mut registry = hashi::config_registry::empty();
+            hashi::config::register_core_keys(&mut registry);
+            hashi::btc_config::register_keys(&mut registry);
+            hashi::mpc_config::register_keys(&mut registry);
+            hashi::protocol_version::register_keys(&mut registry);
+            registry
+        },
+        pending_config_updates: sui::vec_map::empty(),
     };
     df::add(&mut hashi.id, bitcoin_state::key(), bitcoin_state::new(ctx));
     hashi
+}
+
+#[test_only]
+/// Registers the keys `finish_publish` would register, for tests that set
+/// launch keys via the config setters instead of running finish_publish.
+public fun register_launch_keys_for_testing(self: &mut Hashi) {
+    hashi::btc_config::register_chain_id_key(&mut self.config_registry);
+    hashi::config::register_guardian_keys(&mut self.config_registry);
 }
 
 #[test_only]

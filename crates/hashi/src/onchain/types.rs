@@ -387,6 +387,10 @@ pub struct MemberInfo {
     /// This public key can be rotated but will only take effect at the
     /// beginning of the next epoch.
     pub next_epoch_encryption_public_key: Option<EncryptionPublicKey>,
+
+    /// The max protocol version this member's binary advertised support for
+    /// (from `extra_fields`); `None` if never advertised.
+    pub supported_protocol_version_max: Option<u64>,
 }
 
 impl fmt::Debug for MemberInfo {
@@ -488,6 +492,10 @@ pub struct Proposal {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProposalType {
     UpdateConfig,
+    AddConfigKey,
+    UpdateConfigKeySpec,
+    RemoveConfigKey,
+    ScheduleConfigUpdate,
     EnableVersion,
     DisableVersion,
     Upgrade,
@@ -501,6 +509,10 @@ impl ProposalType {
     pub fn as_str(&self) -> &str {
         match self {
             ProposalType::UpdateConfig => "update_config",
+            ProposalType::AddConfigKey => "add_config_key",
+            ProposalType::UpdateConfigKeySpec => "update_config_key_spec",
+            ProposalType::RemoveConfigKey => "remove_config_key",
+            ProposalType::ScheduleConfigUpdate => "schedule_config_update",
             ProposalType::EnableVersion => "enable_version",
             ProposalType::DisableVersion => "disable_version",
             ProposalType::Upgrade => "upgrade",
@@ -514,6 +526,10 @@ impl ProposalType {
     pub fn all_labels() -> &'static [&'static str] {
         &[
             "update_config",
+            "add_config_key",
+            "update_config_key_spec",
+            "remove_config_key",
+            "schedule_config_update",
             "enable_version",
             "disable_version",
             "upgrade",

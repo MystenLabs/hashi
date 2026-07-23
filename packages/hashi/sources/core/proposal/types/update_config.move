@@ -3,12 +3,13 @@
 
 /// Governance proposal for updating entries in the global config. A proposal
 /// carries a map of key/value entries; on execution every entry must refer to
-/// an existing key with a matching value type (and pass MPC-config range
-/// validation) before being upserted, so governance can tune parameters but
-/// never introduce unknown keys or change an entry's type.
+/// an existing key with a matching value type and satisfy its registry spec
+/// (updatable + value constraints) before being upserted, so governance can
+/// tune parameters but never introduce unknown keys, change an entry's type,
+/// or overwrite a write-once key.
 module hashi::update_config;
 
-use hashi::{config_value::Value, hashi::Hashi, mpc_config, proposal};
+use hashi::{config_value::Value, hashi::Hashi, proposal};
 use std::string::String;
 use sui::{clock::Clock, vec_map::VecMap};
 
@@ -59,7 +60,7 @@ public fun execute(hashi: &mut Hashi, proposal_id: ID, clock: &Clock) {
     keys.zip_do!(values, |key, value| {
         assert!(
             hashi.config().is_valid_config_update(&key, &value)
-                && mpc_config::is_valid_value(&key, &value),
+                && hashi.config_registry().is_valid_update(&key, &value),
             EInvalidConfigEntry,
         );
         hashi.config_mut().upsert(*key.as_bytes(), value);

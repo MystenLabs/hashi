@@ -986,6 +986,9 @@ async fn scrape_hashi(
         proposals,
         tob,
         num_consumed_presigs,
+        // Chain-side governance metadata; nothing node-side consumes these yet.
+        config_registry: _,
+        pending_config_updates: _,
     } = response.get_ref().object().contents().deserialize()?;
 
     let (_, bitcoin_state) = fetch_bitcoin_state(client.clone(), id, package_id).await?;
@@ -1176,7 +1179,7 @@ async fn scrape_all_member_info(
                  endpoint_url,
                  tls_public_key,
                  next_epoch_encryption_public_key,
-                 extra_fields: _,
+                 extra_fields,
              }| {
                 let info = types::MemberInfo {
                     validator_address,
@@ -1190,6 +1193,8 @@ async fn scrape_all_member_info(
                         next_epoch_encryption_public_key.as_slice(),
                     )
                     .map(Into::into),
+                    supported_protocol_version_max: extra_fields
+                        .try_u64(move_types::KEY_SUPPORTED_PROTOCOL_VERSION_MAX),
                 };
 
                 (info.validator_address, info)
@@ -1234,7 +1239,7 @@ pub(crate) async fn scrape_member_info(
         endpoint_url,
         tls_public_key,
         next_epoch_encryption_public_key,
-        extra_fields: _,
+        extra_fields,
     } = field.value;
 
     let info = types::MemberInfo {
@@ -1247,6 +1252,8 @@ pub(crate) async fn scrape_member_info(
             next_epoch_encryption_public_key.as_slice(),
         )
         .map(Into::into),
+        supported_protocol_version_max: extra_fields
+            .try_u64(move_types::KEY_SUPPORTED_PROTOCOL_VERSION_MAX),
     };
     Ok(info)
 }
@@ -1720,6 +1727,26 @@ async fn scrape_proposal_bag(
                     .ok()
                     .map(|p| (p.id, p.created_timestamp_ms))
             }
+            types::ProposalType::AddConfigKey => {
+                bcs::from_bytes::<move_types::Proposal<move_types::AddConfigKey>>(contents)
+                    .ok()
+                    .map(|p| (p.id, p.created_timestamp_ms))
+            }
+            types::ProposalType::UpdateConfigKeySpec => {
+                bcs::from_bytes::<move_types::Proposal<move_types::UpdateConfigKeySpec>>(contents)
+                    .ok()
+                    .map(|p| (p.id, p.created_timestamp_ms))
+            }
+            types::ProposalType::RemoveConfigKey => {
+                bcs::from_bytes::<move_types::Proposal<move_types::RemoveConfigKey>>(contents)
+                    .ok()
+                    .map(|p| (p.id, p.created_timestamp_ms))
+            }
+            types::ProposalType::ScheduleConfigUpdate => {
+                bcs::from_bytes::<move_types::Proposal<move_types::ScheduleConfigUpdate>>(contents)
+                    .ok()
+                    .map(|p| (p.id, p.created_timestamp_ms))
+            }
             types::ProposalType::EnableVersion => {
                 bcs::from_bytes::<move_types::Proposal<move_types::EnableVersion>>(contents)
                     .ok()
@@ -1790,6 +1817,10 @@ pub(crate) fn parse_proposal_type(type_tag: &TypeTag) -> types::ProposalType {
 
     match (inner_tag.module().as_str(), inner_tag.name().as_str()) {
         ("update_config", "UpdateConfig") => types::ProposalType::UpdateConfig,
+        ("config_keys", "AddConfigKey") => types::ProposalType::AddConfigKey,
+        ("config_keys", "UpdateConfigKeySpec") => types::ProposalType::UpdateConfigKeySpec,
+        ("config_keys", "RemoveConfigKey") => types::ProposalType::RemoveConfigKey,
+        ("config_keys", "ScheduleConfigUpdate") => types::ProposalType::ScheduleConfigUpdate,
         ("enable_version", "EnableVersion") => types::ProposalType::EnableVersion,
         ("disable_version", "DisableVersion") => types::ProposalType::DisableVersion,
         ("upgrade", "Upgrade") => types::ProposalType::Upgrade,

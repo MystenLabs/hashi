@@ -217,6 +217,72 @@ pub enum CreateProposalCommands {
         metadata: MetadataArgs,
     },
 
+    /// Propose adding a new governed config key with its spec.
+    AddConfigKey {
+        /// The new config key.
+        key: String,
+        /// The initial value. Prefix with the type: u64:123, bool:true.
+        value: String,
+        /// Snapshot this key into every epoch's committee config.
+        #[clap(long)]
+        pinned: bool,
+        /// Governance may change this key's value (write-once if unset).
+        #[clap(long)]
+        updatable: bool,
+        /// Governance may remove this key (rejected for write-once keys).
+        #[clap(long)]
+        removable: bool,
+        /// Inclusive min for u64 values.
+        #[clap(long)]
+        min: Option<u64>,
+        /// Inclusive max for u64 values.
+        #[clap(long)]
+        max: Option<u64>,
+        /// Max length for bytes/string values.
+        #[clap(long)]
+        max_len: Option<u64>,
+        #[clap(flatten)]
+        metadata: MetadataArgs,
+    },
+
+    /// Propose replacing a config key's spec (e.g. to widen a range).
+    UpdateConfigKeySpec {
+        key: String,
+        #[clap(long)]
+        pinned: bool,
+        #[clap(long)]
+        updatable: bool,
+        #[clap(long)]
+        removable: bool,
+        #[clap(long)]
+        min: Option<u64>,
+        #[clap(long)]
+        max: Option<u64>,
+        #[clap(long)]
+        max_len: Option<u64>,
+        #[clap(flatten)]
+        metadata: MetadataArgs,
+    },
+
+    /// Propose removing a governed config key.
+    RemoveConfigKey {
+        key: String,
+        #[clap(flatten)]
+        metadata: MetadataArgs,
+    },
+
+    /// Propose a value change to a pinned key that activates at a future epoch.
+    ScheduleConfigUpdate {
+        key: String,
+        /// The new value. Prefix with the type: u64:123, bool:true.
+        value: String,
+        /// The epoch at which the value takes effect (must be in the future).
+        #[clap(long)]
+        activate_at_epoch: u64,
+        #[clap(flatten)]
+        metadata: MetadataArgs,
+    },
+
     /// Propose updating MPC parameters (`t`, `f`, `allowed_delta`,
     /// `nonce_generation_protocol`) in one transaction.
     UpdateMpcConfig {
@@ -916,6 +982,81 @@ pub async fn run(opts: CliGlobalOpts, command: CliCommand) -> anyhow::Result<()>
                         &config,
                         &key,
                         &value,
+                        parse_metadata(metadata.metadata),
+                        &tx_opts,
+                    )
+                    .await?;
+                }
+                CreateProposalCommands::AddConfigKey {
+                    key,
+                    value,
+                    pinned,
+                    updatable,
+                    removable,
+                    min,
+                    max,
+                    max_len,
+                    metadata,
+                } => {
+                    commands::proposal::create_add_config_key_proposal(
+                        &config,
+                        &key,
+                        &value,
+                        pinned,
+                        updatable,
+                        removable,
+                        min,
+                        max,
+                        max_len,
+                        parse_metadata(metadata.metadata),
+                        &tx_opts,
+                    )
+                    .await?;
+                }
+                CreateProposalCommands::UpdateConfigKeySpec {
+                    key,
+                    pinned,
+                    updatable,
+                    removable,
+                    min,
+                    max,
+                    max_len,
+                    metadata,
+                } => {
+                    commands::proposal::create_update_config_key_spec_proposal(
+                        &config,
+                        &key,
+                        pinned,
+                        updatable,
+                        removable,
+                        min,
+                        max,
+                        max_len,
+                        parse_metadata(metadata.metadata),
+                        &tx_opts,
+                    )
+                    .await?;
+                }
+                CreateProposalCommands::RemoveConfigKey { key, metadata } => {
+                    commands::proposal::create_remove_config_key_proposal(
+                        &config,
+                        &key,
+                        parse_metadata(metadata.metadata),
+                        &tx_opts,
+                    )
+                    .await?;
+                }
+                CreateProposalCommands::ScheduleConfigUpdate {
+                    key,
+                    value,
+                    activate_at_epoch,
+                    metadata,
+                } => {
+                    commands::proposal::create_schedule_config_update_proposal(
+                        &config,
+                        &key,
+                        &value,
+                        activate_at_epoch,
                         parse_metadata(metadata.metadata),
                         &tx_opts,
                     )

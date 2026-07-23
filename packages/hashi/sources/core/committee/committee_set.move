@@ -236,6 +236,8 @@ public(package) fun start_reconfig(
     self: &mut CommitteeSet,
     sui_system: &sui_system::sui_system::SuiSystemState,
     config: Config,
+    version_ceiling: u64,
+    version_buffer_bps: u64,
     ctx: &TxContext,
 ): u64 {
     // We can't trigger reconfig if we are already reconfiguring
@@ -250,6 +252,8 @@ public(package) fun start_reconfig(
     let committee = self.new_committee_from_validator_set(
         sui_system,
         config,
+        version_ceiling,
+        version_buffer_bps,
         ctx,
     );
 
@@ -360,6 +364,43 @@ public(package) fun is_reconfiguring(self: &CommitteeSet): bool {
 
 // ~~~~~~~ Private Functions ~~~~~~~
 
+/// Merge advertised capabilities into the member's extension slot: reserved
+/// entries are refreshed while unrelated future entries survive.
+public(package) fun set_capabilities(
+    self: &mut CommitteeSet,
+    validator_address: address,
+    capabilities: sui::vec_map::VecMap<String, hashi::config_value::Value>,
+    ctx: &TxContext,
+) {
+    let member = self.member_mut(validator_address);
+    assert!(member.is_authorized(ctx));
+    let (keys, values) = capabilities.into_keys_values();
+    keys.zip_do!(values, |key, value| {
+        member.extra_fields.upsert(*key.as_bytes(), value);
+    });
+}
+
+#[test_only]
+public(package) fun add_bare_member_for_testing(self: &mut CommitteeSet, validator: address) {
+    self.insert_member(MemberInfo {
+        validator_address: validator,
+        operator_address: validator,
+        next_epoch_public_key: g1_to_uncompressed_g1(&sui::bls12381::g1_identity()),
+        endpoint_url: std::vector::empty().to_string(),
+        tls_public_key: std::vector::empty(),
+        next_epoch_encryption_public_key: std::vector::empty(),
+        extra_fields: config::empty(),
+    });
+}
+
+#[test_only]
+public(package) fun member_capabilities_for_testing(
+    self: &CommitteeSet,
+    validator: address,
+): &Config {
+    &self.member(validator).extra_fields
+}
+
 fun member(self: &CommitteeSet, validator_address: address): &MemberInfo {
     &self.members[validator_address]
 }
@@ -387,7 +428,9 @@ fun remove_committee(self: &mut CommitteeSet, epoch: u64): Committee {
 fun new_committee_from_validator_set(
     self: &CommitteeSet,
     sui_system: &sui_system::sui_system::SuiSystemState,
-    config: Config,
+    mut config: Config,
+    version_ceiling: u64,
+    version_buffer_bps: u64,
     ctx: &TxContext,
 ): Committee {
     let epoch = ctx.epoch();
@@ -395,6 +438,9 @@ fun new_committee_from_validator_set(
     let g1_identity = g1_to_uncompressed_g1(&sui::bls12381::g1_identity());
 
     let mut committee_members = vector[];
+    let current_version = hashi::protocol_version::current(&config);
+    let mut total_weight = 0;
+    let mut version_support_weight = 0;
 
     while (!validator_set.is_empty()) {
         let (validator_address, weight) = validator_set.pop();
@@ -424,6 +470,27 @@ fun new_committee_from_validator_set(
         );
 
         committee_members.push_back(committee_member);
+        total_weight = total_weight + weight;
+        if (hashi::protocol_version::member_supports(&member.extra_fields, current_version + 1)) {
+            version_support_weight = version_support_weight + weight;
+        };
+    };
+
+    // Advance the pinned protocol version before the committee snapshots the
+    // config: the epoch's committee must carry the version its epoch runs.
+    let next_version = hashi::protocol_version::next_version(
+        current_version,
+        version_ceiling,
+        version_support_weight,
+        total_weight,
+        hashi::threshold::weight_threshold(
+            total_weight,
+            hashi::mpc_config::threshold_in_basis_points(&config),
+        ),
+        version_buffer_bps,
+    );
+    if (next_version != current_version) {
+        hashi::protocol_version::set(&mut config, next_version);
     };
 
     // XXX do we sort by address or weight?
