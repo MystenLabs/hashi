@@ -35,6 +35,8 @@ use crate::mpc::SigningManager;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::mpc::types::CertificateV1;
 use crate::mpc::types::MpcOutputRecoveryOutcome;
+use crate::mpc::types::NonceCertTimestamp;
+use crate::mpc::types::NonceCertToVerify;
 use crate::mpc::types::NonceGenerationProtocol;
 use crate::mpc::types::ProtocolType;
 use crate::onchain::Notification;
@@ -54,11 +56,11 @@ const MAX_PROTOCOL_ATTEMPTS: u32 = 3;
 const START_RECONFIG_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const RECONFIG_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 const RECONCILE_TICK: Duration = Duration::from_secs(15);
+const NONCE_WINDOW_WAIT_POLL: Duration = Duration::from_millis(200);
+const NONCE_WINDOW_WAIT_SLACK: Duration = Duration::from_secs(30);
 const MAX_KEY_REREGISTRATION_BUMPS: u32 = 3;
 const NONCE_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
-/// Move `hashi::reconfig::ENotReconfiguring`, matched by its clever-error
-/// constant name (the `#[error]` abort code encodes a source line, so the
-/// numeric code is not stable).
+/// Move `hashi::reconfig::ENotReconfiguring`.
 const RECONFIG_E_NOT_RECONFIGURING: &str = "ENotReconfiguring";
 
 #[derive(Clone)]
@@ -485,11 +487,16 @@ impl MpcService {
             .mpc_total_duration_seconds
             .with_label_values(&[MPC_LABEL_NONCE_GENERATION])
             .start_timer();
+        let chain_time_ms = {
+            let onchain_state = self.inner.onchain_state().clone();
+            move || onchain_state.latest_checkpoint_timestamp_ms()
+        };
         let nonce_result = MpcManager::run_nonce_generation(
             &mpc_manager,
             batch_index,
             &p2p_channel,
             &mut tob_channel,
+            &chain_time_ms,
             metrics,
         )
         .await;
@@ -724,7 +731,7 @@ impl MpcService {
         let weight = match protocol {
             NonceGenerationProtocol::Vanilla => {
                 let Some(certs) = onchain_state
-                    .fetch_certs(
+                    .fetch_stamped_certs(
                         epoch,
                         Some(batch_index),
                         move_types::ProtocolType::NonceGeneration,
@@ -938,6 +945,59 @@ impl MpcService {
         Ok(())
     }
 
+    async fn fetch_final_nonce_certs(
+        onchain_state: &crate::onchain::OnchainState,
+        mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
+        epoch: u64,
+        batch_index: u32,
+    ) -> anyhow::Result<
+        Vec<(
+            sui_sdk_types::Address,
+            move_types::StampedDealerSubmissionV1,
+        )>,
+    > {
+        loop {
+            let certs = onchain_state
+                .fetch_stamped_certs(
+                    epoch,
+                    Some(batch_index),
+                    move_types::ProtocolType::NonceGeneration,
+                )
+                .await?
+                .unwrap_or_default();
+            let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
+            let (cutoff_ms, window_ms) = {
+                let mgr = mpc_manager.read().unwrap();
+                (
+                    mgr.nonce_collection_cutoff_ms(&certs),
+                    mgr.mpc_config.nonce_accumulation_window_ms,
+                )
+            };
+            match cutoff_ms {
+                Some(cutoff_ms) if onchain_state.latest_checkpoint_timestamp_ms() <= cutoff_ms => {
+                    let deadline = Duration::from_millis(window_ms) + NONCE_WINDOW_WAIT_SLACK;
+                    let wait = async {
+                        while onchain_state.latest_checkpoint_timestamp_ms() <= cutoff_ms {
+                            // `latest_checkpoint_timestamp_ms` only advances once per checkpoint (~200 ms).
+                            tokio::time::sleep(NONCE_WINDOW_WAIT_POLL).await;
+                        }
+                    };
+                    if tokio::time::timeout(deadline, wait).await.is_err() {
+                        warn!(
+                            "fetch_final_nonce_certs: checkpoint clock stalled below window cutoff \
+                             {cutoff_ms} for epoch {epoch} batch {batch_index} after {deadline:?}; \
+                             failing recovery to retry on the next tick"
+                        );
+                        anyhow::bail!(
+                            "nonce window did not close for epoch {epoch} batch {batch_index}"
+                        );
+                    }
+                }
+                _ => return Ok(certs),
+            }
+        }
+    }
+
     async fn recover_presignatures_from_certs(
         &self,
         mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
@@ -973,58 +1033,58 @@ impl MpcService {
                 batch_size_per_weight,
             ))
         };
-        let (outputs, expected_size) = match protocol {
+        let certs =
+            Self::fetch_final_nonce_certs(&onchain_state, mpc_manager, epoch, batch_index).await?;
+        if certs.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No nonce gen certificates on TOB for epoch {epoch} batch {batch_index}"
+            ));
+        }
+        let expected_size = expected_from(certified_nonce_weight(mpc_manager, &certs))?;
+        let outputs = match protocol {
             NonceGenerationProtocol::Vanilla => {
-                let certs = onchain_state
-                    .fetch_certs(
-                        epoch,
-                        Some(batch_index),
-                        move_types::ProtocolType::NonceGeneration,
-                    )
-                    .await?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "No nonce gen certificates on TOB for epoch {epoch} batch {batch_index}"
-                        )
-                    })?;
-                let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
-                let expected_size = expected_from(certified_nonce_weight(mpc_manager, &certs))?;
-                let outputs = MpcManager::reconstruct_presignatures_with_complaint_recovery(
+                MpcManager::reconstruct_presignatures_with_complaint_recovery(
                     mpc_manager,
                     epoch,
                     batch_index,
                     &certs,
                     &p2p_channel,
                 )
-                .await?;
-                (outputs, Some(expected_size))
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("nonce recovery from certs failed for epoch {epoch} batch {batch_index}: {e}")
+                })?
             }
             NonceGenerationProtocol::Avid => {
-                let certs = fetch_certificates(
-                    &onchain_state,
-                    epoch,
-                    Some(batch_index),
-                    move_types::ProtocolType::NonceGeneration,
-                )
-                .await?;
-                if certs.is_empty() {
-                    return Err(anyhow::anyhow!(
-                        "No nonce gen certificates on TOB for epoch {epoch} batch {batch_index}"
-                    ));
-                }
-                let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
-                let expected_size = expected_from(certified_nonce_weight(mpc_manager, &certs))?;
-                let mut prefetched = PrefetchedTobChannel::new(certs);
-                let outputs = MpcManager::run_nonce_generation(
+                let avid_certs: Vec<(sui_sdk_types::Address, CertificateV1)> = certs
+                    .iter()
+                    .filter_map(|(dealer, stamped)| {
+                        let cert = stamped.to_dealer_certificate(epoch).ok()?;
+                        Some((
+                            *dealer,
+                            CertificateV1::NonceGeneration {
+                                batch_index,
+                                cert,
+                                timestamp_ms: stamped.timestamp_ms,
+                            },
+                        ))
+                    })
+                    .collect();
+                let chain_time_ms = {
+                    let onchain_state = onchain_state.clone();
+                    move || onchain_state.latest_checkpoint_timestamp_ms()
+                };
+                let mut prefetched = PrefetchedTobChannel::new(avid_certs);
+                MpcManager::run_nonce_generation(
                     mpc_manager,
                     batch_index,
                     &p2p_channel,
                     &mut prefetched,
+                    &chain_time_ms,
                     &self.inner.metrics,
                 )
                 .await
-                .map_err(|e| anyhow::anyhow!("AVID nonce recovery from certs failed: {e}"))?;
-                (outputs, Some(expected_size))
+                .map_err(|e| anyhow::anyhow!("AVID nonce recovery from certs failed: {e}"))?
             }
         };
         if outputs.is_empty() {
@@ -1034,14 +1094,12 @@ impl MpcService {
         }
         let presignatures = Presignatures::new(outputs, batch_size_per_weight, params, use_legacy)
             .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
-        if let Some(expected) = expected_size {
-            anyhow::ensure!(
-                presignatures.len() == expected,
-                "Reconstructed nonce batch {batch_index} for epoch {epoch} has {} presigs but \
-                 certificates imply {expected}; message-incomplete reconstruction",
-                presignatures.len(),
-            );
-        }
+        anyhow::ensure!(
+            presignatures.len() == expected_size,
+            "Reconstructed nonce batch {batch_index} for epoch {epoch} has {} presigs but \
+             certificates imply {expected_size}; message-incomplete reconstruction",
+            presignatures.len(),
+        );
         Ok(presignatures)
     }
 
@@ -1616,15 +1674,16 @@ pub(crate) fn presig_count(
     total_weight.saturating_sub(consumed) * batch_size_per_weight as usize
 }
 
-fn certified_nonce_weight<T>(
+fn certified_nonce_weight<T: NonceCertTimestamp>(
     mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
     certs: &[(sui_sdk_types::Address, T)],
 ) -> u32 {
     mpc_manager
         .read()
         .unwrap()
-        .certified_nonce_dealers_from_certs(certs)
+        .window_certified_nonce_dealers(certs)
         .1
+        .weight()
 }
 
 enum ReconfigSubmissionErrorKind {

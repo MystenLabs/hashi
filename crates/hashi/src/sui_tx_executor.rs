@@ -1188,9 +1188,9 @@ impl SuiTxExecutor {
         let (inner_cert, function_name, batch_index) = match cert {
             CertificateV1::Dkg(c) => (c, "submit_dkg_cert", None),
             CertificateV1::Rotation(c) => (c, "submit_rotation_cert", None),
-            CertificateV1::NonceGeneration { batch_index, cert } => {
-                (cert, "submit_nonce_cert", Some(*batch_index))
-            }
+            CertificateV1::NonceGeneration {
+                batch_index, cert, ..
+            } => (cert, "submit_nonce_cert", Some(*batch_index)),
         };
         tracing::Span::current().record("cert_kind", function_name);
 
@@ -1218,6 +1218,14 @@ impl SuiTxExecutor {
         let cert_arg =
             build_committee_signature_arg(&mut builder, self.hashi_ids.package_id, committee_sig);
         args.extend([dealer_arg, message_hash_arg, cert_arg]);
+        if batch_index.is_some() {
+            let clock_arg = builder.object(
+                ObjectInput::new(SUI_CLOCK_OBJECT_ID)
+                    .as_shared()
+                    .with_mutable(false),
+            );
+            args.push(clock_arg);
+        }
         builder.move_call(
             Function::new(
                 self.hashi_ids.package_id,

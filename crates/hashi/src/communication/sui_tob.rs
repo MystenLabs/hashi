@@ -104,18 +104,42 @@ pub async fn fetch_certificates(
     batch_index: Option<u32>,
     protocol_type: ProtocolType,
 ) -> Result<Vec<(Address, CertificateV1)>, TobError> {
-    let Some(raw_certs) = onchain_state
-        .fetch_certs(epoch, batch_index, protocol_type)
-        .await
-        .map_err(|e| TobError::RpcError(e.to_string()))?
-    else {
-        return Ok(vec![]);
-    };
-    let mut certificates = Vec::with_capacity(raw_certs.len());
-    for (dealer, cert) in raw_certs {
-        let inner_cert = DealerMessagesHash::from_onchain_cert(&cert, epoch)
-            .map_err(|e| TobError::InvalidCertificate(e.to_string()))?;
-        let cert = CertificateV1::new(protocol_type, batch_index, inner_cert);
+    let raw: Vec<(Address, hashi_types::move_types::DealerSubmissionV1, u64)> =
+        if protocol_type == ProtocolType::NonceGeneration {
+            let Some(certs) = onchain_state
+                .fetch_stamped_certs(epoch, batch_index, protocol_type)
+                .await
+                .map_err(|e| TobError::RpcError(e.to_string()))?
+            else {
+                return Ok(vec![]);
+            };
+            certs
+                .into_iter()
+                .map(|(dealer, stamped)| (dealer, stamped.submission, stamped.timestamp_ms))
+                .collect()
+        } else {
+            let Some(certs) = onchain_state
+                .fetch_certs(epoch, batch_index, protocol_type)
+                .await
+                .map_err(|e| TobError::RpcError(e.to_string()))?
+            else {
+                return Ok(vec![]);
+            };
+            certs
+                .into_iter()
+                .map(|(dealer, submission)| (dealer, submission, 0u64))
+                .collect()
+        };
+    let mut certificates = Vec::with_capacity(raw.len());
+    for (dealer, submission, timestamp_ms) in raw {
+        let inner_cert = match DealerMessagesHash::from_onchain_cert(&submission, epoch) {
+            Ok(inner_cert) => inner_cert,
+            Err(e) => {
+                tracing::warn!("Skipping malformed dealer cert from {dealer}: {e}");
+                continue;
+            }
+        };
+        let cert = CertificateV1::new(protocol_type, batch_index, inner_cert, timestamp_ms);
         certificates.push((dealer, cert));
     }
     Ok(certificates)
@@ -145,9 +169,10 @@ impl OrderedBroadcastChannel<CertificateV1> for PrefetchedTobChannel {
     }
 
     async fn receive(&mut self) -> ChannelResult<CertificateV1> {
-        self.certs
-            .pop_front()
-            .ok_or_else(|| ChannelError::Other("replayed certificate stream exhausted".into()))
+        match self.certs.pop_front() {
+            Some(cert) => Ok(cert),
+            None => std::future::pending().await,
+        }
     }
 
     async fn certified_dealers(&mut self) -> Vec<Address> {
