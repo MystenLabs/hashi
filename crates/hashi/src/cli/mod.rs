@@ -1653,7 +1653,7 @@ pub async fn run_register(opts: RegisterOpts) -> anyhow::Result<()> {
         .execute_register_or_update_validator(&config, operator_address, None, None)
         .await?;
 
-    if updated {
+    if updated.is_some() {
         print_success("Validator registered/updated successfully");
     } else {
         print_info("Validator metadata is already up-to-date; nothing to do.");

@@ -309,17 +309,6 @@ impl OnchainState {
         self.0.ids.package_id
     }
 
-    pub(crate) async fn scrape_committee_for_epoch(&self, epoch: u64) -> Result<Option<Committee>> {
-        let committees_id = self.state().hashi().committees.committees_id();
-        match scrape_committee(self.client(), committees_id, epoch).await {
-            Ok(committee) => Ok(Some(committee)),
-            Err(e) => match e.downcast_ref::<tonic::Status>() {
-                Some(status) if status.code() == tonic::Code::NotFound => Ok(None),
-                _ => Err(e),
-            },
-        }
-    }
-
     /// Apply committee config from `Inner` to the given hashi state and replace the current
     /// state in a single write lock acquisition.
     fn replace_hashi_state(&self, mut hashi: types::Hashi) {
@@ -1211,39 +1200,6 @@ pub(crate) async fn scrape_member_info(
         .map_err(|e| tonic::Status::from_error(e.into()))?;
 
     Ok(convert_move_member_info(field.value))
-}
-
-/// Fetch a single epoch's `Committee` dynamic field. Not part of the
-/// watcher: used by the fresh-member rejoin path to read a committee
-/// the mirror may not hold. Surfaces the gRPC `NotFound` status so the
-/// caller can distinguish a missing committee from a failed read.
-async fn scrape_committee(
-    mut client: Client,
-    committees_id: Address,
-    epoch: u64,
-) -> Result<Committee> {
-    let field_id = committees_id.derive_dynamic_child_id(&TypeTag::U64, &epoch.to_bcs().unwrap());
-
-    let response = client
-        .ledger_client()
-        .get_object(
-            GetObjectRequest::new(&field_id).with_read_mask(FieldMask::from_paths([
-                Object::path_builder().owner().finish(),
-                Object::path_builder().contents().finish(),
-                Object::path_builder().object_id(),
-                Object::path_builder().version(),
-            ])),
-        )
-        .await?
-        .into_inner();
-
-    let field: move_types::Field<u64, move_types::Committee> = response
-        .object()
-        .contents()
-        .deserialize()
-        .map_err(|e| tonic::Status::from_error(e.into()))?;
-
-    Ok(convert_move_committee(field.value))
 }
 
 async fn scrape_committees(

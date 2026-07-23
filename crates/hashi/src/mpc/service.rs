@@ -887,17 +887,47 @@ impl MpcService {
                 "no DB encryption or signing key matches the current committee record; \
                  registering fresh keys for epoch {target} so the node rejoins at that reconfig"
             );
-            if let Err(e) = self.inner.prepare_and_register_keys(target).await {
-                warn!("failed to register replacement keys for epoch {target}: {e}; will retry");
-                return;
+            let landed_at = match self.inner.prepare_and_register_keys(target).await {
+                Ok(landed_at) => landed_at,
+                Err(e) => {
+                    warn!(
+                        "failed to register replacement keys for epoch {target}: {e}; will retry"
+                    );
+                    return;
+                }
+            };
+            // The snapshot check below reads the mirror, so the mirror must
+            // first reflect the registration that just landed: a lagging
+            // view could show the epoch-`target` committee as not yet
+            // snapshotted when it was in fact already frozen without the
+            // replacement keys, ending the bump loop one epoch short.
+            if let Some(landed_at) = landed_at {
+                const VISIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
+                if tokio::time::timeout(
+                    VISIBILITY_TIMEOUT,
+                    self.inner.onchain_state().wait_until_checkpoint(landed_at),
+                )
+                .await
+                .is_err()
+                {
+                    warn!(
+                        "mirror did not reach the key-registration checkpoint {landed_at} within \
+                         {VISIBILITY_TIMEOUT:?}; re-verifying next tick"
+                    );
+                    return;
+                }
             }
-            match self
+            let frozen = self
                 .inner
                 .onchain_state()
-                .scrape_committee_for_epoch(target)
-                .await
-            {
-                Ok(Some(frozen)) if self.inner.committee_key_lost(&frozen, me) => {
+                .state()
+                .hashi()
+                .committees
+                .committees()
+                .get(&target)
+                .cloned();
+            match frozen {
+                Some(frozen) if self.inner.committee_key_lost(&frozen, me) => {
                     self.inner.metrics.mpc_key_reregistration_bumps_total.inc();
                     info!(
                         "epoch {target} committee already snapshotted without replacement keys; \
@@ -906,7 +936,7 @@ impl MpcService {
                     );
                     target += 1;
                 }
-                Ok(Some(frozen)) => {
+                Some(frozen) => {
                     if frozen.members().iter().any(|m| m.validator_address() == me) {
                         info!("replacement keys frozen into the epoch {target} committee");
                     } else {
@@ -918,19 +948,12 @@ impl MpcService {
                     *self.replacement_keys_target_epoch.lock().unwrap() = Some(target);
                     return;
                 }
-                Ok(None) => {
+                None => {
                     info!(
                         "replacement keys registered; the epoch {target} committee is not yet \
                          snapshotted and will include them"
                     );
                     *self.replacement_keys_target_epoch.lock().unwrap() = Some(target);
-                    return;
-                }
-                Err(e) => {
-                    warn!(
-                        "cannot verify the epoch {target} committee after key registration: {e}; \
-                         re-verifying next tick"
-                    );
                     return;
                 }
             }
