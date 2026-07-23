@@ -6,7 +6,6 @@
 use anyhow::Context;
 use anyhow::Result;
 use bitcoin::address::NetworkUnchecked;
-use bitcoin::hashes::Hash;
 use colored::Colorize;
 use hashi_types::bitcoin::BitcoinAddress;
 use hashi_types::bitcoin::witness_program_from_address;
@@ -19,6 +18,7 @@ use crate::cli::config::CliConfig;
 use crate::cli::print_info;
 use crate::cli::print_success;
 use crate::cli::types::display;
+use crate::onchain::types::WithdrawalTransaction;
 
 pub async fn run(action: WithdrawCommands, config: &CliConfig, tx_opts: &TxOptions) -> Result<()> {
     match action {
@@ -86,7 +86,7 @@ async fn request(
         .context("Withdrawal address does not match the configured Bitcoin network")?;
     let destination_bytes = witness_program_from_address(&btc_addr)?;
 
-    let mut client = sui_rpc::Client::new(&config.sui_rpc_url)?;
+    let mut client = crate::sui_rpc_client::new_sui_rpc_client(&config.sui_rpc_url)?;
 
     // A single request supports all tx modes (execute / dry-run /
     // serialize-unsigned) via the builder + finalize path.
@@ -206,7 +206,7 @@ async fn cancel(config: &CliConfig, tx_opts: &TxOptions, request_id: &str) -> Re
         TxMode::Execute => print_info("Cancelling withdrawal..."),
     }
 
-    let mut client = sui_rpc::Client::new(&config.sui_rpc_url)?;
+    let mut client = crate::sui_rpc_client::new_sui_rpc_client(&config.sui_rpc_url)?;
     let outcome = crate::sui_tx_executor::finalize(
         &mut client,
         signer.as_ref(),
@@ -297,8 +297,7 @@ async fn status(config: &CliConfig, request_id: &str) -> Result<()> {
         .iter()
         .find(|p| p.request_ids.contains(&req_addr))
     {
-        let txid_bytes: [u8; 32] = pw.id.into();
-        let txid = bitcoin::Txid::from_byte_array(txid_bytes);
+        let txid: bitcoin::Txid = pw.txid.into();
         let is_signed = pw.is_fully_signed();
         let signed_inputs = pw.signing.signed_count();
         let num_inputs = pw.signing.num_inputs();
@@ -388,18 +387,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                 })
                 .collect();
 
-            let withdrawal_txns: Vec<_> = pending
-                .iter()
-                .map(|pw| {
-                    let txid_bytes: [u8; 32] = pw.id.into();
-                    let txid = bitcoin::Txid::from_byte_array(txid_bytes);
-                    serde_json::json!({
-                        "txid": txid.to_string(),
-                        "status": if pw.is_fully_signed() { "signed" } else { "committed" },
-                        "request_count": pw.request_ids.len(),
-                    })
-                })
-                .collect();
+            let withdrawal_txns: Vec<_> = pending.iter().map(withdrawal_txn_row).collect();
 
             println!(
                 "{}",
@@ -452,8 +440,7 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
                     }
                     println!("  {}", "Pending Broadcast:".bold().underline());
                     for pw in &pending {
-                        let txid_bytes: [u8; 32] = pw.id.into();
-                        let txid = bitcoin::Txid::from_byte_array(txid_bytes);
+                        let txid: bitcoin::Txid = pw.txid.into();
                         let status = if pw.is_fully_signed() {
                             "Signed"
                         } else {
@@ -481,4 +468,74 @@ async fn list(config: &CliConfig, output_format: OutputFormat) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The JSON row for one in-flight withdrawal transaction.
+///
+/// The Bitcoin txid comes from the `txid` field; `pw.id` is the Sui object ID
+/// of the `WithdrawalTransaction` and is unrelated to the Bitcoin txid.
+fn withdrawal_txn_row(pw: &WithdrawalTransaction) -> serde_json::Value {
+    let txid: bitcoin::Txid = pw.txid.into();
+    serde_json::json!({
+        "txid": txid.to_string(),
+        "status": if pw.is_fully_signed() { "signed" } else { "committed" },
+        "request_count": pw.request_ids.len(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use hashi_types::move_types::MpcSig;
+    use hashi_types::move_types::SigningBatch;
+
+    use super::*;
+
+    /// A withdrawal transaction whose Sui object ID and Bitcoin txid are
+    /// distinct, so a mix-up between the two shows up in assertions.
+    fn withdrawal_txn(fully_signed: bool) -> WithdrawalTransaction {
+        let txid = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2fc77ab847d46d3298b06f"
+            .parse()
+            .unwrap();
+        WithdrawalTransaction {
+            id: sui_sdk_types::Address::new([0xAA; 32]),
+            txid,
+            request_ids: vec![
+                sui_sdk_types::Address::new([0x01; 32]),
+                sui_sdk_types::Address::new([0x02; 32]),
+            ],
+            inputs: vec![],
+            withdrawal_outputs: vec![],
+            change_outputs: vec![],
+            created_timestamp_ms: 0,
+            signed_timestamp_ms: fully_signed.then_some(1),
+            confirmed_timestamp_ms: None,
+            randomness: vec![],
+            signing: SigningBatch {
+                signatures: vec![if fully_signed {
+                    MpcSig::Signed(vec![0u8; 64])
+                } else {
+                    MpcSig::Pending(0)
+                }],
+                epoch: 0,
+            },
+            guardian_signatures: fully_signed.then(|| vec![vec![0u8; 64]]),
+        }
+    }
+
+    #[test]
+    fn withdrawal_txn_row_reports_bitcoin_txid_not_object_id() {
+        let row = withdrawal_txn_row(&withdrawal_txn(true));
+        assert_eq!(
+            row["txid"],
+            "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2fc77ab847d46d3298b06f"
+        );
+        assert_eq!(row["status"], "signed");
+        assert_eq!(row["request_count"], 2);
+    }
+
+    #[test]
+    fn withdrawal_txn_row_reports_committed_until_fully_signed() {
+        let row = withdrawal_txn_row(&withdrawal_txn(false));
+        assert_eq!(row["status"], "committed");
+    }
 }

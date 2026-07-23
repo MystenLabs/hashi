@@ -53,7 +53,13 @@ next_event_delays:
 # clock_skew: 300
 
 guardian:
-  s3_bucket: "hashi-guardian-logs"
+  access_key: "AWS_ACCESS_KEY_ID"
+  secret_key: "AWS_SECRET_ACCESS_KEY"
+  session_token:
+  bucket_info:
+    bucket: "hashi-guardian-logs"
+    region: "us-east-1"
+  retention_environment: "testnet"
 
 sui:
   rpc_url: "https://fullnode.testnet.sui.io:443"

@@ -8,17 +8,18 @@ use super::message::KpShareStateLogMessage;
 use crate::bitcoin::BitcoinPubkey;
 use crate::guardian::GuardianError;
 use crate::guardian::GuardianResult;
-use crate::guardian::KPEncryptedShares;
+use crate::guardian::KPEncryptedSharesRoster;
 use crate::guardian::SecretSharingInstance;
 use crate::guardian::SetupNewKeyResponse;
+use serde::Serialize;
 
 /// The current ceremony result together with its latest encrypted KP share state.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CeremonyState {
     pub secret_sharing_instance: SecretSharingInstance,
     pub btc_master_pubkey: BitcoinPubkey,
     pub cert_seq: u64,
-    pub encrypted_shares: KPEncryptedShares,
+    pub encrypted_shares: KPEncryptedSharesRoster,
 }
 
 impl CeremonyState {
@@ -48,12 +49,12 @@ impl CeremonyState {
         secret_sharing_instance: SecretSharingInstance,
         btc_master_pubkey: BitcoinPubkey,
         cert_seq: u64,
-        encrypted_shares: KPEncryptedShares,
+        encrypted_shares: KPEncryptedSharesRoster,
     ) -> GuardianResult<Self> {
-        if encrypted_shares.len() != secret_sharing_instance.num_shares() {
+        if encrypted_shares.share_count() != secret_sharing_instance.num_shares() {
             return Err(GuardianError::InternalError(format!(
                 "encrypted share count ({}) differs from ceremony num_shares ({})",
-                encrypted_shares.len(),
+                encrypted_shares.share_count(),
                 secret_sharing_instance.num_shares()
             )));
         }
@@ -110,6 +111,20 @@ mod tests {
     use crate::guardian::GuardianSigned;
 
     #[test]
+    fn serialization_includes_all_encrypted_shares() {
+        let response = GuardianSigned::<SetupNewKeyResponse>::mock_for_testing().data;
+        let expected_share_count = response.encrypted_shares.share_count();
+        let state = CeremonyState::from(response);
+
+        let json = serde_json::to_value(&state).unwrap();
+
+        assert_eq!(
+            json["encrypted_shares"].as_array().unwrap().len(),
+            expected_share_count
+        );
+    }
+
+    #[test]
     fn new_rejects_mismatched_sharing_seq() {
         let response = GuardianSigned::<SetupNewKeyResponse>::mock_for_testing().data;
         let sharing_seq = response.secret_sharing_instance.sharing_seq();
@@ -133,7 +148,11 @@ mod tests {
                 instance: response.secret_sharing_instance,
                 btc_master_pubkey: response.btc_master_pubkey,
             },
-            KpShareStateLogMessage::new(sharing_seq, 0, KPEncryptedShares::new(vec![]).unwrap()),
+            KpShareStateLogMessage::new(
+                sharing_seq,
+                0,
+                KPEncryptedSharesRoster::new(vec![]).unwrap(),
+            ),
         )
         .unwrap_err();
         assert!(format!("{err}").contains("encrypted share count"), "{err}");

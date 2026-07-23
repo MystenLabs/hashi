@@ -7,6 +7,7 @@
 //! `withdraw::provisioner_init`.
 
 use crate::attestation::get_attestation;
+use crate::enclave::TemporaryInitState;
 use crate::s3_reader::BuildPolicy;
 use crate::s3_reader::GuardianReader;
 use crate::Enclave;
@@ -18,25 +19,47 @@ use std::sync::Arc;
 use tracing::info;
 use GuardianError::*;
 
-/// The withdraw-mode arming state to install, built from `InitConfig`.
-pub(crate) struct InitInstall {
-    init_config: InitConfig,
-    ceremony_state: CeremonyState,
+/// Complete operator-init state ready for its fail-stop commit.
+pub struct OIInstall {
+    logger: GuardianS3Client,
+    withdraw_mode: Option<OIWithdrawModeInstall>,
 }
 
-impl InitInstall {
-    pub(crate) fn from_parts(config: InitConfig, ceremony_state: CeremonyState) -> Self {
+/// Withdraw-mode arming state built from `InitConfig` and the ceremony logs.
+pub struct OIWithdrawModeInstall {
+    init_config: InitConfig,
+    ceremony_state: CeremonyState,
+    genesis_state: Option<GenesisState>,
+}
+
+impl OIInstall {
+    fn new(logger: GuardianS3Client, withdraw_mode: Option<OIWithdrawModeInstall>) -> Self {
         Self {
-            init_config: config,
+            logger,
+            withdraw_mode,
+        }
+    }
+}
+
+impl OIWithdrawModeInstall {
+    pub fn from_parts(
+        init_config: InitConfig,
+        ceremony_state: CeremonyState,
+        genesis_state: Option<GenesisState>,
+    ) -> Self {
+        Self {
+            init_config,
             ceremony_state,
+            genesis_state,
         }
     }
 
     /// Build the arming bundle from the stable config and S3-derived ceremony +
-    /// KP share state. Shared by `operator_init` and tests.
-    pub(crate) async fn from_config(
+    /// KP share state.
+    pub async fn from_config(
         logger: &GuardianS3Client,
         config: InitConfig,
+        genesis_state: Option<GenesisState>,
     ) -> GuardianResult<Self> {
         let mut reader =
             GuardianReader::from_s3_client(logger.clone(), config.pcr_allowlist().clone());
@@ -46,23 +69,18 @@ impl InitInstall {
             .map_err(|e| InvalidInputs(format!("read latest ceremony and KP share state: {e}")))?
             .ok_or_else(|| InvalidInputs("no ceremony log found for withdraw init".into()))?;
 
-        Ok(Self::from_parts(config, ceremony_state))
+        Ok(Self::from_parts(config, ceremony_state, genesis_state))
     }
 
     /// Install the bundle onto a fresh enclave. Infallible by design (see the
     /// `operator_init` invariant): every set runs once on a fresh enclave.
-    pub(crate) fn install_into(self, enclave: &Enclave) {
-        let network = self.init_config.network();
-        let hashi_btc_master_pubkey = self.init_config.hashi_btc_master_pubkey();
-
-        info!("Setting bitcoin network to {:?}.", network);
-        enclave
-            .config
-            .set_bitcoin_network(network)
-            .expect("Unable to set network");
+    pub fn install_into(self, enclave: &Enclave) {
+        let config_hash = self.init_config.digest();
+        let (limiter_config, hashi_btc_master_pubkey, pcr_allowlist, network) =
+            self.init_config.into_parts();
 
         info!(
-            "Storing secret-sharing instance: n={}, t={}, {} commitments.",
+            "Setting secret-sharing instance: n={}, t={}, {} commitments.",
             self.ceremony_state.secret_sharing_instance.num_shares(),
             self.ceremony_state.secret_sharing_instance.threshold(),
             self.ceremony_state
@@ -70,20 +88,29 @@ impl InitInstall {
                 .commitments()
                 .len()
         );
+        if let Some(genesis_state) = &self.genesis_state {
+            info!(
+                genesis_state_hash = hex::encode(genesis_state.digest()),
+                "Storing genesis state."
+            );
+        }
         enclave
-            .set_ceremony_state(self.ceremony_state)
-            .expect("Unable to set ceremony state");
+            .set_temporary_init_state(TemporaryInitState {
+                ceremony_state: self.ceremony_state,
+                genesis_state: self.genesis_state,
+                config_hash,
+            })
+            .expect("Unable to set temporary initialization state");
 
-        info!("Setting init config.");
+        info!(?network, "Setting enclave configuration.");
         enclave
-            .set_init_config(self.init_config)
-            .expect("Unable to set init config");
-
-        info!("Setting hashi BTC master pubkey.");
-        enclave
-            .config
-            .set_hashi_btc_pk(hashi_btc_master_pubkey)
-            .expect("Unable to set hashi BTC master pubkey");
+            .install_config(
+                network,
+                hashi_btc_master_pubkey,
+                pcr_allowlist,
+                limiter_config,
+            )
+            .expect("Unable to set enclave configuration");
     }
 }
 
@@ -96,20 +123,20 @@ impl InitInstall {
 /// untouched and retryable. The mutation then happens entirely in
 /// `commit_operator_init`, which returns `()` — it cannot report an error, so a
 /// half-mutated enclave is never observed via an `Err`.
+/// Validate and commit operator initialization under the cancellation-safe
+/// control lock so concurrent callers cannot race the check-then-commit.
 pub async fn operator_init(
     enclave: Arc<Enclave>,
     request: OperatorInitRequest,
 ) -> GuardianResult<()> {
     info!("/operator_init - Received request.");
 
-    // Serialize so concurrent callers can't race the check-then-commit below.
-    let _guard = enclave.control_lock.lock().await;
-
     let uninitialized = match enclave.mode() {
         EnclaveMode::Ceremony => CeremonyStage::Uninitialized.into(),
         EnclaveMode::Withdraw => WithdrawStage::Uninitialized.into(),
     };
     enclave.require_lifecycle(uninitialized)?;
+    info!("Lifecycle stage validated.");
 
     // ---- Validate & build: Nothing in this phase mutates enclave state, so any
     // error here leaves the enclave untouched. ----
@@ -117,18 +144,24 @@ pub async fn operator_init(
     // A withdraw-mode enclave must carry the config and a ceremony enclave must not.
     request.validate(enclave.mode())?;
 
-    let (s3_config, init_config) = request.into_parts();
+    let (s3_config, init_config, genesis_state) = request.into_parts();
     let logger = GuardianS3Client::new_checked(&s3_config).await?;
     info!("S3 connectivity check complete.");
 
     // Build the withdraw-mode install bundle up front; `None` for a ceremony enclave.
-    let withdraw = match init_config {
-        Some(config) => Some(InitInstall::from_config(&logger, config).await?),
+    let withdraw_mode = match init_config {
+        Some(config) => {
+            Some(OIWithdrawModeInstall::from_config(&logger, config, genesis_state).await?)
+        }
         None => None,
     };
+    let install = OIInstall::new(logger, withdraw_mode);
 
     // ---- All-or-nothing Commit: Nothing in this phase errors out. ----
-    commit_operator_init(&enclave, logger, withdraw).await;
+    info!("Committing S3 logger and mode-specific initialization state.");
+    commit_operator_init(&enclave, install).await;
+
+    info!("Operator initialization complete.");
     Ok(())
 }
 
@@ -136,21 +169,20 @@ pub async fn operator_init(
 /// Infallible by design (returns `()`, see the `operator_init` invariant): every
 /// `set` here runs on a fresh enclave under the control lock, and the I/O steps
 /// (attestation, S3 logging) panic on failure rather than return.
-async fn commit_operator_init(
-    enclave: &Enclave,
-    logger: GuardianS3Client,
-    withdraw: Option<InitInstall>,
-) {
-    info!("Storing S3 configuration.");
+async fn commit_operator_init(enclave: &Enclave, install: OIInstall) {
+    let OIInstall {
+        logger,
+        withdraw_mode,
+    } = install;
+
     enclave
         .config
         .set_s3_logger(logger)
         .expect("Unable to set logger");
 
-    // Withdraw-mode arming state (InitConfig, BTC master pubkey, instance,
-    // network, config_hash); a ceremony enclave installs none of it.
-    if let Some(install) = withdraw {
-        install.install_into(enclave);
+    // A ceremony enclave has no withdraw-mode arming state.
+    if let Some(withdraw_mode) = withdraw_mode {
+        withdraw_mode.install_into(enclave);
     }
 
     // Log to S3!
@@ -167,6 +199,10 @@ async fn commit_operator_init(
     // 2) Share commitments help KPs confirm that the right private key will be constructed.
     // This pre-transition snapshot reports `Uninitialized`; successfully
     // writing it completes operator initialization.
+    // TODO(testnet-wipe): Replace the full GuardianInfo snapshot with a
+    // purpose-built OI payload containing only the data readers and KPs need;
+    // the evolving status response should not define the durable log schema.
+    // Include the retention environment in that payload for audit provenance.
     enclave
         .log_init(OIGuardianInfo(Box::new(enclave.info().await)))
         .await
@@ -179,51 +215,94 @@ async fn commit_operator_init(
     enclave
         .advance_lifecycle_into(initialized)
         .expect("operator_init should advance an uninitialized enclave");
-
-    info!("Operator initialization complete.");
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::CapturedPuts;
 
     /// Run commit_operator_init on a fresh enclave for the given mode (withdraw =>
     /// carries the InitConfig install bundle; ceremony => none).
-    async fn commit_for_mode(mode: EnclaveMode) -> Arc<Enclave> {
+    async fn commit_for_mode(mode: EnclaveMode) -> (Arc<Enclave>, CapturedPuts) {
         let enclave = Arc::new(Enclave::new(
             GuardianSignKeyPair::new(rand::thread_rng()),
             GuardianEncKeyPair::random(&mut rand::thread_rng()),
             mode,
         ));
 
-        let withdraw = match mode {
+        let (logger, captures) = crate::test_utils::mock_logger_capturing();
+        let install = match mode {
             EnclaveMode::Withdraw => {
                 let config = InitConfig::mock_for_testing(None);
                 let args = crate::test_utils::OperatorInitTestArgs::default();
-                Some(InitInstall::from_parts(config, args.ceremony_state))
+                OIInstall::new(
+                    logger,
+                    Some(OIWithdrawModeInstall::from_parts(
+                        config,
+                        args.ceremony_state,
+                        None,
+                    )),
+                )
             }
-            EnclaveMode::Ceremony => None,
+            EnclaveMode::Ceremony => OIInstall::new(logger, None),
         };
 
-        commit_operator_init(&enclave, crate::test_utils::mock_logger(), withdraw).await;
-        enclave
+        commit_operator_init(&enclave, install).await;
+        (enclave, captures)
+    }
+
+    fn assert_operator_init_logs(
+        enclave: &Enclave,
+        captures: &CapturedPuts,
+        expected_lifecycle: EnclaveLifecycle,
+    ) {
+        let captured = captures.lock().unwrap();
+        assert_eq!(captured.len(), 2, "operator init should write two records");
+        let session_id = enclave.s3_session_id();
+        assert_eq!(
+            captured[0].0,
+            InitLogMessage::attestation_object_key(&session_id)
+        );
+        assert_eq!(
+            captured[1].0,
+            InitLogMessage::guardian_info_object_key(&session_id)
+        );
+
+        let attestation: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
+        assert!(matches!(
+            attestation.message,
+            VersionedLogMessage::V2(LogMessage::Init(message))
+                if matches!(*message, OIAttestationUnsigned { .. })
+        ));
+
+        let guardian_info: LogRecord = serde_json::from_slice(&captured[1].1).unwrap();
+        let VersionedLogMessage::V2(LogMessage::Init(message)) = guardian_info.message else {
+            panic!("expected V2 init record");
+        };
+        let OIGuardianInfo(info) = *message else {
+            panic!("expected operator-init GuardianInfo record");
+        };
+        assert_eq!(info.lifecycle, expected_lifecycle);
     }
 
     #[tokio::test]
     async fn commit_marks_operator_init_complete_withdraw_mode() {
-        let enclave = commit_for_mode(EnclaveMode::Withdraw).await;
+        let (enclave, captures) = commit_for_mode(EnclaveMode::Withdraw).await;
         assert_eq!(
             enclave.lifecycle(),
             WithdrawStage::OperatorInitialized.into()
         );
+        assert_operator_init_logs(&enclave, &captures, WithdrawStage::Uninitialized.into());
     }
 
     #[tokio::test]
     async fn commit_marks_operator_init_complete_ceremony_mode() {
-        let enclave = commit_for_mode(EnclaveMode::Ceremony).await;
+        let (enclave, captures) = commit_for_mode(EnclaveMode::Ceremony).await;
         assert_eq!(
             enclave.lifecycle(),
             CeremonyStage::OperatorInitialized.into()
         );
+        assert_operator_init_logs(&enclave, &captures, CeremonyStage::Uninitialized.into());
     }
 }

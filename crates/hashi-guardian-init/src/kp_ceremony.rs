@@ -8,14 +8,12 @@ use anyhow::Result;
 use anyhow::anyhow;
 use hashi_guardian::s3_reader::BuildPolicy;
 use hashi_guardian::s3_reader::GuardianReader;
-use hashi_types::pgp::PgpPublicCert;
-use hashi_types::pgp::load_certs;
+use std::path::Path;
 use tracing::info;
 
 use crate::config::Config;
-use crate::kp_roster::decrypt_share;
-use crate::kp_roster::ensure_cert_in_roster;
-use crate::kp_roster::verify_encrypted_share_recipients;
+use crate::kp_roster::decrypt_kp_share_copies;
+use crate::kp_roster::load_kp_cert;
 
 /// Verify this KP can fetch and decrypt its ceremony share.
 ///
@@ -24,10 +22,11 @@ use crate::kp_roster::verify_encrypted_share_recipients;
 /// reader cache, and both the `ceremony/` audit entry and `kp-shares/` recovery
 /// entry are verified under it. Each step is logged.
 ///
-/// Security: the ciphertext is piped into `gpg --decrypt` over stdin and the
-/// plaintext streams back over stdout; neither ciphertext nor plaintext is
-/// written to disk by this flow.
-pub async fn run(cfg: Config) -> Result<()> {
+/// Security: the ceremony state containing the encrypted shares is saved to the
+/// requested path. Each ciphertext is piped into `gpg --decrypt` over stdin and
+/// the plaintext streams back over stdout; neither ciphertext nor plaintext is
+/// separately written to disk by this flow.
+pub async fn run(cfg: Config, encrypted_shares_path: &Path) -> Result<()> {
     cfg.kp_roster.validate()?;
     let guardian_s3 = cfg.guardian_s3.resolve().await?;
 
@@ -45,32 +44,39 @@ pub async fn run(cfg: Config) -> Result<()> {
 
     info!(
         phase = "roster load",
-        cert_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
-        "loading + validating full KP cert roster",
+        share_count = cfg.kp_roster.kp_pgp_cert_paths.len(),
+        certificate_count = cfg.kp_roster.cert_count(),
+        "loading + validating full KP certificate roster",
     );
-    let certs = load_certs(&cfg.kp_roster.kp_pgp_cert_paths)?;
+    let certs_roster = cfg.kp_roster.load_certs_roster()?;
     info!(
         phase = "roster load",
-        cert_count = certs.len(),
-        "KP cert roster loaded"
+        share_count = certs_roster.num_kps(),
+        certificate_count = cfg.kp_roster.cert_count(),
+        "KP certificate roster loaded"
     );
 
-    // Load this KP's cert. Its fingerprint finds our share in `kp-shares/`, and
-    // the cert itself lets us confirm the ciphertext is genuinely encrypted to
-    // us before we touch the yubikey.
+    // The selected cert identifies this KP's roster entry. Ceremony validation
+    // then exercises every cert assigned to that KP/share.
     let kp_pgp_cert_path = cfg.require_kp_pgp_cert_path("key-provisioner ceremony")?;
-    let cert_armored = std::fs::read_to_string(kp_pgp_cert_path)
-        .with_context(|| format!("read KP cert at {}", kp_pgp_cert_path.display()))?;
-    let kp_cert = PgpPublicCert::new(cert_armored)
-        .with_context(|| format!("invalid PGP cert at {}", kp_pgp_cert_path.display()))?;
-    let want_fp = kp_cert.fingerprint();
+    let kp_cert = load_kp_cert(kp_pgp_cert_path)?;
+    let kp_certs = certs_roster
+        .certs_for_fingerprint(&kp_cert.fingerprint())
+        .with_context(|| {
+            format!(
+                "this KP's cert (fingerprint {}) is not among the configured \
+                 kp_roster.kp_pgp_cert_paths",
+                kp_cert.fingerprint()
+            )
+        })?;
+    let fingerprints = kp_certs.fingerprints();
     info!(
         phase = "setup",
-        fingerprint = %want_fp,
-        kp_cert_path = %kp_pgp_cert_path.display(),
-        "loaded this KP's cert",
+        selected_fingerprint = %kp_cert.fingerprint(),
+        certificate_count = kp_certs.pgp_certs().len(),
+        fingerprints = ?fingerprints,
+        "identified this KP's complete roster entry",
     );
-    ensure_cert_in_roster(&kp_cert, &certs)?;
 
     // 1. Discover and verify the latest ceremony from the immutable log
     //    (attestation-verified once via the reader's session-key cache).
@@ -101,75 +107,27 @@ pub async fn run(cfg: Config) -> Result<()> {
         cert_seq = state.cert_seq,
         n = state.secret_sharing_instance.num_shares(),
         t = state.secret_sharing_instance.threshold(),
-        share_count = state.encrypted_shares.len(),
+        share_count = state.encrypted_shares.share_count(),
+        ciphertext_count = state.encrypted_shares.ciphertext_count(),
         "discovered + validated latest ceremony state",
     );
 
-    // 2. Confirm every share is addressed only to its labeled KP cert.
+    // 2. Confirm every PGP-encrypted share is addressed to the expected KP cert set.
     info!(
         phase = "roster verify",
-        share_count = state.encrypted_shares.len(),
-        "verifying every share is addressed only to its labeled KP cert (without decrypting)",
+        share_count = state.encrypted_shares.share_count(),
+        ciphertext_count = state.encrypted_shares.ciphertext_count(),
+        "verifying every PGP-encrypted share against the expected KP cert sets (without decrypting)",
     );
-    verify_encrypted_share_recipients(&state, &certs)?;
+    state.encrypted_shares.verify_recipients(&certs_roster)?;
     info!(
         phase = "roster verify",
         "ceremony/ and kp-shares/ logs verified against expected params and KP certs",
     );
 
-    // 3. Find this KP's share by exact fingerprint match (both sides derive
-    //    from `Fingerprint::to_hex` over the same key, so they're canonical
-    //    and identical). The matched share carries its own crypto `id`.
-    let want_fp_hex = want_fp.to_hex();
-    let share = state
-        .encrypted_shares
-        .iter()
-        .find(|s| s.recipient_fingerprint == want_fp_hex)
-        .ok_or_else(|| {
-            anyhow!(
-                "no share in the kp-shares log is labeled for this KP's fingerprint \
-                 {want_fp} (labeled fingerprints: {:?})",
-                state
-                    .encrypted_shares
-                    .iter()
-                    .map(|s| s.recipient_fingerprint.clone())
-                    .collect::<Vec<_>>()
-            )
-        })?;
-    let share_id = share.id;
-    info!(
-        phase = "share find",
-        share_id = share_id.get(),
-        fingerprint = %share.recipient_fingerprint,
-        "located this KP's encrypted share",
-    );
-
-    // 4. Decrypt the share with the yubikey via gpg. The ciphertext is piped
-    //    into gpg over stdin; decrypted bytes stream back into memory.
-    info!(
-        phase = "share decrypt",
-        share_id = share_id.get(),
-        "decrypting share via yubikey (ciphertext piped via stdin; plaintext in memory)",
-    );
-    let reconstructed = decrypt_share(share)?;
-    info!(
-        phase = "share decrypt",
-        share_id = share_id.get(),
-        "decrypted share via yubikey",
-    );
-
-    // 5. Verify the decrypted share's commitment is in the set: proves the
-    //    bytes we decrypted are a valid share of the guardian's BTC key.
-    info!(
-        phase = "commitment verify",
-        share_id = share_id.get(),
-        "verifying decrypted share against its commitment",
-    );
-    state
-        .secret_sharing_instance
-        .commitments()
-        .verify_share(&reconstructed)
-        .map_err(|e| anyhow!("decrypted share does not match its commitment: {e:?}"))?;
+    // 3. Decrypt and commitment-check every ciphertext in this KP's roster entry.
+    let reconstructed = decrypt_kp_share_copies(&state, kp_certs.pgp_certs())?;
+    let share_id = reconstructed.id;
     let expected_commitment = state
         .secret_sharing_instance
         .commitments()
@@ -188,14 +146,32 @@ pub async fn run(cfg: Config) -> Result<()> {
         "decrypted share matches its commitment",
     );
 
+    // 4. Save the ceremony state only after every verification step succeeds.
+    let ceremony_state_bytes =
+        serde_json::to_vec(&state).context("serialize ceremony state with encrypted shares")?;
+    std::fs::write(encrypted_shares_path, ceremony_state_bytes).with_context(|| {
+        format!(
+            "write ceremony state with encrypted shares to {}",
+            encrypted_shares_path.display()
+        )
+    })?;
+    info!(
+        phase = "share save",
+        path = %encrypted_shares_path.display(),
+        share_count = state.encrypted_shares.share_count(),
+        ciphertext_count = state.encrypted_shares.ciphertext_count(),
+        "saved ceremony state with encrypted shares",
+    );
+
     info!(
         phase = "summary",
         share_id = share_id.get(),
         sharing_seq = state.secret_sharing_instance.sharing_seq(),
         cert_seq = state.cert_seq,
-        fingerprint = %want_fp,
+        certificate_count = kp_certs.pgp_certs().len(),
+        fingerprints = ?fingerprints,
         commitment = hex::encode(&expected_commitment.digest),
-        "ceremony share verified",
+        "ceremony share verified through every certificate in this KP's roster entry",
     );
     Ok(())
 }

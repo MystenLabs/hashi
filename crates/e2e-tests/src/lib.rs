@@ -2080,6 +2080,145 @@ mod tests {
         Ok(())
     }
 
+    async fn scrape_registered_encryption_key(
+        state: &hashi::onchain::OnchainState,
+        hashi_object_id: sui_sdk_types::Address,
+        validator: sui_sdk_types::Address,
+    ) -> Result<Vec<u8>> {
+        use sui_rpc::field::FieldMask;
+        use sui_rpc::field::FieldMaskUtil;
+        use sui_rpc::proto::sui::rpc::v2::GetObjectRequest;
+        use sui_rpc::proto::sui::rpc::v2::Object;
+        use sui_sdk_types::bcs::ToBcs;
+
+        let read_mask = FieldMask::from_paths([
+            Object::path_builder().contents().finish(),
+            Object::path_builder().object_id(),
+        ]);
+        let mut client = state.client();
+        let response = client
+            .ledger_client()
+            .get_object(GetObjectRequest::new(&hashi_object_id).with_read_mask(read_mask.clone()))
+            .await?
+            .into_inner();
+        let hashi_move: hashi_types::move_types::Hashi = response
+            .object()
+            .contents()
+            .deserialize()
+            .map_err(|e| anyhow::anyhow!("failed to deserialize Hashi object: {e}"))?;
+
+        let field_id = hashi_move.committees.members.id.derive_dynamic_child_id(
+            &sui_sdk_types::TypeTag::Address,
+            &validator.to_bcs().unwrap(),
+        );
+        let response = client
+            .ledger_client()
+            .get_object(GetObjectRequest::new(&field_id).with_read_mask(read_mask))
+            .await?
+            .into_inner();
+        let field: hashi_types::move_types::Field<
+            sui_sdk_types::Address,
+            hashi_types::move_types::MemberInfo,
+        > = response
+            .object()
+            .contents()
+            .deserialize()
+            .map_err(|e| anyhow::anyhow!("failed to deserialize member info: {e}"))?;
+        Ok(field.value.next_epoch_encryption_public_key)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_encryption_key_loss_re_registers_and_rejoins_next_epoch() -> Result<()> {
+        const TEST_NUM_NODES: usize = 4;
+        const REREGISTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+        const HEAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive(tracing::Level::INFO.into()),
+            )
+            .try_init()
+            .ok();
+
+        let mut test_networks = TestNetworksBuilder::new()
+            .with_nodes(TEST_NUM_NODES)
+            .build()
+            .await?;
+
+        let nodes = test_networks.hashi_network().nodes();
+        let mpc_key_futures: Vec<_> = nodes
+            .iter()
+            .map(|node| node.wait_for_mpc_key(DKG_TIMEOUT))
+            .collect();
+        let results: Vec<Result<()>> = futures::future::join_all(mpc_key_futures).await;
+        for (i, result) in results.into_iter().enumerate() {
+            result.unwrap_or_else(|e| panic!("Node {i} DKG failed: {e}"));
+        }
+        let epoch = nodes[0].current_epoch().unwrap();
+        wait_for_signing_manager(nodes, epoch, DKG_TIMEOUT).await?;
+
+        let validator = nodes[0].validator_address();
+        let hashi_object_id = test_networks.hashi_network().ids().hashi_object_id;
+        let original_key = scrape_registered_encryption_key(
+            nodes[0].hashi().onchain_state(),
+            hashi_object_id,
+            validator,
+        )
+        .await?;
+        assert!(
+            !original_key.is_empty(),
+            "node0 must have a registered encryption key after DKG"
+        );
+
+        let node0 = &mut test_networks.hashi_network_mut().nodes_mut()[0];
+        node0.shutdown().await;
+        let db_path = node0.config().db.clone().expect("db path not set");
+        std::fs::remove_dir_all(&db_path)?;
+        node0.start().await?;
+
+        let nodes = test_networks.hashi_network().nodes();
+        let deadline = tokio::time::Instant::now() + REREGISTER_TIMEOUT;
+        loop {
+            let current = scrape_registered_encryption_key(
+                nodes[0].hashi().onchain_state(),
+                hashi_object_id,
+                validator,
+            )
+            .await?;
+            if !current.is_empty() && current != original_key {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "node0 never re-registered a fresh encryption key"
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+
+        let next_epoch = epoch + 1;
+        test_networks.sui_network.force_close_epoch().await?;
+        let nodes = test_networks.hashi_network().nodes();
+        wait_for_rotation(nodes, next_epoch).await;
+        wait_for_signing_manager(nodes, next_epoch, HEAL_TIMEOUT).await?;
+        assert_nodes_agree_on_mpc_key(nodes).await;
+
+        let request_id = sui_sdk_types::Address::ZERO;
+        let results = sign_on_all_nodes(
+            nodes,
+            b"msg-after-key-loss-heal",
+            next_epoch,
+            request_id,
+            0,
+            None,
+        )
+        .await;
+        assert_all_signatures_match(results);
+
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_mid_protocol_restart_recovery() -> Result<()> {
         const TEST_NUM_NODES: usize = 4;

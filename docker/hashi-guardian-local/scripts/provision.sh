@@ -3,11 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Provision the withdraw-mode guardian against the running localnet:
-#   1. `operator provision` -> boots the guardian into withdraw mode with the
-#      stable config + MPC master G (reads them from the localnet Sui RPC),
-#   2. `key-provisioner provision` x THRESHOLD -> each KP decrypts its share and
-#      submits it to the proxy relay (SingleProvisionerInit); the relay batches a
-#      threshold-many into the guardian's ProvisionerInit,
+#   1. `operator provision --do-genesis` -> boots the guardian into withdraw
+#      mode with the stable config + MPC master G (reads them from the localnet
+#      Sui RPC),
+#   2. `key-provisioner provision --do-genesis` x THRESHOLD -> each KP decrypts
+#      its share and submits it to the proxy relay (SingleProvisionerInit); the
+#      relay batches a threshold-many into the guardian's ProvisionerInit,
 #   3. `operator activate` -> derives live ActivationState from S3 and activates
 #      the fully provisioned standby.
 #
@@ -23,8 +24,8 @@ set -euo pipefail
 # bridge), NOT the proxy — init RPCs must not be cached.
 render_config "${WITHDRAW_GUARDIAN_ENDPOINT:-http://host:3000}" ""
 
-echo "== operator provision =="
-hashi-guardian-init operator provision --config "${CONFIG}"
+echo "== operator provision --do-genesis =="
+hashi-guardian-init operator provision --config "${CONFIG}" --do-genesis
 
 echo
 echo "== key-provisioner provision x ${THRESHOLD} (via the proxy relay) =="
@@ -32,7 +33,7 @@ for i in $(seq 1 "${THRESHOLD}"); do
   echo "-- KP ${i}/${THRESHOLD} --"
   # Each KP uses its own cert; shares are submitted to relay_endpoint (the proxy).
   render_config "${WITHDRAW_GUARDIAN_ENDPOINT:-http://host:3000}" "${CERTS_DIR}/kp${i}.asc"
-  hashi-guardian-init key-provisioner provision --config "${CONFIG}"
+  hashi-guardian-init key-provisioner provision --config "${CONFIG}" --do-genesis
 done
 
 operator_activate() {

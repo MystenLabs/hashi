@@ -25,6 +25,7 @@ use hashi_types::committee::Committee;
 use hashi_types::committee::MemberSignature;
 use hashi_types::committee::SignedMessage;
 use hashi_types::move_types::DealerSubmissionV1;
+use hashi_types::move_types::StampedDealerSubmissionV1;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -496,6 +497,52 @@ impl DealerMessagesHash {
 }
 
 pub type DealerCertificate = SignedMessage<DealerMessagesHash>;
+
+pub(crate) trait NonceCertToVerify {
+    fn to_dealer_certificate(&self, epoch: u64) -> MpcResult<DealerCertificate>;
+}
+
+impl NonceCertToVerify for DealerSubmissionV1 {
+    fn to_dealer_certificate(&self, epoch: u64) -> MpcResult<DealerCertificate> {
+        DealerMessagesHash::from_onchain_cert(self, epoch)
+    }
+}
+
+impl NonceCertToVerify for CertificateV1 {
+    fn to_dealer_certificate(&self, _epoch: u64) -> MpcResult<DealerCertificate> {
+        match self {
+            CertificateV1::NonceGeneration { cert, .. } => Ok(cert.clone()),
+            _ => Err(MpcError::InvalidCertificate(
+                "expected a nonce-generation certificate".into(),
+            )),
+        }
+    }
+}
+
+impl NonceCertToVerify for StampedDealerSubmissionV1 {
+    fn to_dealer_certificate(&self, epoch: u64) -> MpcResult<DealerCertificate> {
+        self.submission.to_dealer_certificate(epoch)
+    }
+}
+
+pub(crate) trait NonceCertTimestamp {
+    fn nonce_timestamp_ms(&self) -> u64;
+}
+
+impl NonceCertTimestamp for StampedDealerSubmissionV1 {
+    fn nonce_timestamp_ms(&self) -> u64 {
+        self.timestamp_ms
+    }
+}
+
+impl NonceCertTimestamp for CertificateV1 {
+    fn nonce_timestamp_ms(&self) -> u64 {
+        match self {
+            CertificateV1::NonceGeneration { timestamp_ms, .. } => *timestamp_ms,
+            _ => 0,
+        }
+    }
+}
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]

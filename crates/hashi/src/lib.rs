@@ -31,6 +31,7 @@ pub mod mpc;
 pub mod onchain;
 pub mod publish;
 pub mod storage;
+pub mod sui_rpc_client;
 pub mod sui_tx_executor;
 pub mod tls;
 pub mod utxo_pool;
@@ -176,6 +177,9 @@ impl Hashi {
     }
 
     pub fn set_mpc_manager(&self, manager: mpc::MpcManager) {
+        self.metrics
+            .mpc_manager_epoch
+            .set(manager.mpc_config.epoch as i64);
         match self.mpc_manager.get() {
             Some(lock) => {
                 // RwLock::write only fails if poisoned (a thread panicked while holding the lock).
@@ -405,9 +409,50 @@ impl Hashi {
             .ok_or_else(|| {
                 anyhow!(
                     "no DB encryption key matches committee record for epoch {epoch}; \
-                     operator intervention needed (re-register, possibly DB recovery)"
+                     restore the node DB to rejoin this epoch — otherwise replacement \
+                     keys are registered automatically and the node rejoins at the next \
+                     reconfig"
                 )
             })
+    }
+
+    pub(crate) fn committee_encryption_key_lost(
+        &self,
+        committee: &hashi_types::committee::Committee,
+        validator_address: sui_sdk_types::Address,
+    ) -> bool {
+        committee
+            .members()
+            .iter()
+            .find(|m| m.validator_address() == validator_address)
+            .is_some_and(|m| {
+                matches!(
+                    self.db
+                        .find_encryption_key_matching(m.encryption_public_key()),
+                    Ok(None)
+                )
+            })
+    }
+
+    pub(crate) fn committee_signing_key_lost(
+        &self,
+        committee: &hashi_types::committee::Committee,
+        validator_address: sui_sdk_types::Address,
+    ) -> bool {
+        committee
+            .members()
+            .iter()
+            .find(|m| m.validator_address() == validator_address)
+            .is_some_and(|m| matches!(self.db.find_signing_key_matching(m.public_key()), Ok(None)))
+    }
+
+    pub(crate) fn committee_key_lost(
+        &self,
+        committee: &hashi_types::committee::Committee,
+        validator_address: sui_sdk_types::Address,
+    ) -> bool {
+        self.committee_encryption_key_lost(committee, validator_address)
+            || self.committee_signing_key_lost(committee, validator_address)
     }
 
     pub fn prepare_signing_key(&self, epoch: u64) -> anyhow::Result<Bls12381PrivateKey> {
@@ -439,7 +484,9 @@ impl Hashi {
             .ok_or_else(|| {
                 anyhow!(
                     "no DB signing key matches committee record for epoch {epoch}; \
-                     operator intervention needed (re-register, possibly DB recovery)"
+                     restore the node DB to rejoin this epoch — otherwise replacement \
+                     keys are registered automatically and the node rejoins at the next \
+                     reconfig"
                 )
             })
     }
@@ -492,6 +539,15 @@ impl Hashi {
                             .iter()
                             .any(|m| m.validator_address() == validator_address)
                         {
+                            Ok(None)
+                        } else if self
+                            .committee_encryption_key_lost(prev_committee, validator_address)
+                        {
+                            tracing::warn!(
+                                previous_epoch = prev_ep,
+                                "previous-epoch encryption key lost; continuing without it \
+                                 (party-only: cannot deal previous shares)"
+                            );
                             Ok(None)
                         } else {
                             Err(e)
@@ -588,7 +644,7 @@ impl Hashi {
         use sui_rpc::proto::sui::rpc::v2::GetServiceInfoRequest;
 
         let sui_rpc_url = self.config.sui_rpc.as_deref().unwrap();
-        let mut client = sui_rpc::Client::new(sui_rpc_url)?;
+        let mut client = sui_rpc_client::new_sui_rpc_client(sui_rpc_url)?;
 
         let service_info = client
             .ledger_client()
@@ -837,6 +893,7 @@ impl Hashi {
         let backup_service = backup_service.start();
         let mpc_service = mpc_service.start();
         let guardian_bootstrap_service = self.clone().start_guardian_bootstrap();
+        let sui_balance_service = self.clone().start_sui_balance_metric();
 
         let service = Service::new()
             .merge(onchain_service)
@@ -845,7 +902,8 @@ impl Hashi {
             .merge(leader_service)
             .merge(backup_service)
             .merge(mpc_service)
-            .merge(guardian_bootstrap_service);
+            .merge(guardian_bootstrap_service)
+            .merge(sui_balance_service);
 
         Ok(service)
     }
@@ -1035,6 +1093,47 @@ impl Hashi {
                 "Local guardian limiter bucket reconciled after watcher rescrape",
             );
         }
+    }
+
+    /// Poll the operator gas wallet's total SUI balance (owned coins plus
+    /// address balance — `sui client gas` misses the latter) into
+    /// `hashi_sui_balance`, so operators can alert on drain before
+    /// transactions start failing gas selection.
+    fn start_sui_balance_metric(self: Arc<Self>) -> Service {
+        const BALANCE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+        Service::new().spawn_aborting(async move {
+            // -1 = never sampled; keeps a `0 <= balance < threshold` alert
+            // from firing on nodes where this poller is disabled or has not
+            // yet succeeded (the gauge would otherwise read a false 0).
+            self.metrics.sui_balance.set(-1);
+            let owner = match self.config.operator_private_key() {
+                Ok(key) => key.verifying_key().derive_address(),
+                Err(e) => {
+                    tracing::info!("SUI balance metric disabled; operator key unavailable: {e}");
+                    return Ok(());
+                }
+            };
+            let request = sui_rpc::proto::sui::rpc::v2::GetBalanceRequest::default()
+                .with_owner(owner)
+                .with_coin_type(sui_sdk_types::StructTag::sui());
+            let mut client = self.onchain_state().client();
+            let mut interval = tokio::time::interval(BALANCE_POLL_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                match client.state_client().get_balance(request.clone()).await {
+                    Ok(response) => {
+                        if let Some(balance) = response.into_inner().balance.and_then(|b| b.balance)
+                        {
+                            self.metrics
+                                .sui_balance
+                                .set(balance.min(i64::MAX as u64) as i64);
+                        }
+                    }
+                    Err(e) => tracing::debug!("failed to fetch operator SUI balance: {e}"),
+                }
+            }
+        })
     }
 
     fn start_guardian_bootstrap(self: Arc<Self>) -> Service {
@@ -1421,6 +1520,62 @@ mod test {
     }
 
     #[test]
+    fn committee_encryption_key_lost_detects_missing_key() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let validator_address = Address::new([1u8; 32]);
+        let bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
+        let unknown_enc_pub = EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(
+            &mut rand::thread_rng(),
+        ));
+        let committee = one_member_committee(5, validator_address, bls_pub, unknown_enc_pub);
+        assert!(hashi.committee_encryption_key_lost(&committee, validator_address));
+    }
+
+    #[test]
+    fn committee_encryption_key_lost_false_when_key_present() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let validator_address = Address::new([1u8; 32]);
+        let bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
+        let enc_pub = hashi.prepare_encryption_key(5).unwrap();
+        let committee = one_member_committee(5, validator_address, bls_pub, enc_pub);
+        assert!(!hashi.committee_encryption_key_lost(&committee, validator_address));
+    }
+
+    #[test]
+    fn committee_signing_key_lost_detects_missing_key() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let validator_address = Address::new([1u8; 32]);
+        let unknown_bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
+        let enc_pub = hashi.prepare_encryption_key(5).unwrap();
+        let committee = one_member_committee(5, validator_address, unknown_bls_pub, enc_pub);
+        assert!(hashi.committee_signing_key_lost(&committee, validator_address));
+        assert!(hashi.committee_key_lost(&committee, validator_address));
+        assert!(!hashi.committee_encryption_key_lost(&committee, validator_address));
+    }
+
+    #[test]
+    fn committee_signing_key_lost_false_when_key_present() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let validator_address = Address::new([1u8; 32]);
+        let bls_pub = hashi.prepare_signing_key(5).unwrap().public_key();
+        let enc_pub = hashi.prepare_encryption_key(5).unwrap();
+        let committee = one_member_committee(5, validator_address, bls_pub, enc_pub);
+        assert!(!hashi.committee_signing_key_lost(&committee, validator_address));
+        assert!(!hashi.committee_key_lost(&committee, validator_address));
+    }
+
+    #[test]
+    fn committee_encryption_key_lost_false_when_not_in_committee() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
+        let enc_pub = EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(
+            &mut rand::thread_rng(),
+        ));
+        let committee = one_member_committee(5, Address::new([2u8; 32]), bls_pub, enc_pub);
+        assert!(!hashi.committee_encryption_key_lost(&committee, Address::new([1u8; 32])));
+    }
+
+    #[test]
     fn resolve_previous_encryption_key_at_late_genesis_returns_none() {
         let (hashi, _tmpdir) = new_hashi_for_test();
         let validator_address = Address::new([1u8; 32]);
@@ -1447,6 +1602,47 @@ mod test {
         );
     }
 
+    #[test]
+    fn resolve_previous_encryption_key_lost_key_returns_none() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let validator_address = Address::new([1u8; 32]);
+        let unknown_enc_pub = EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(
+            &mut rand::thread_rng(),
+        ));
+        let target_epoch = 3;
+        let previous_committee = one_member_committee(
+            2,
+            validator_address,
+            Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key(),
+            unknown_enc_pub,
+        );
+        let new_committee = one_member_committee(
+            target_epoch,
+            validator_address,
+            Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key(),
+            hashi.prepare_encryption_key(target_epoch).unwrap(),
+        );
+
+        let mut committee_set =
+            crate::onchain::types::CommitteeSet::new(Address::ZERO, Address::ZERO);
+        committee_set
+            .set_epoch(2)
+            .set_pending_epoch_change(Some(target_epoch));
+        committee_set.set_committees(
+            [(2, previous_committee), (target_epoch, new_committee)]
+                .into_iter()
+                .collect(),
+        );
+
+        let result = hashi
+            .resolve_previous_encryption_key(&committee_set, target_epoch, validator_address)
+            .expect("definitive previous-key loss must relax to None, not error");
+        assert!(
+            result.is_none(),
+            "lost previous key must yield None (fresh-member path)"
+        );
+    }
+
     #[allow(clippy::field_reassign_with_default)]
     #[tokio::test]
     async fn tls() {
@@ -1456,7 +1652,8 @@ mod test {
         config.db = Some(tmpdir.path().into());
         let tls_public_key = config.tls_public_key().unwrap();
 
-        let hashi = Hashi::new(server_version, None, config).unwrap();
+        let registry = prometheus::Registry::new();
+        let hashi = Hashi::new_with_registry(server_version, None, config, &registry).unwrap();
 
         let (local_addr, _http_service) = crate::grpc::HttpService::new(hashi).start().await;
 
@@ -1467,10 +1664,19 @@ mod test {
         let client_auth_server = Client::new(&address, client_tls_config).unwrap();
         let client_no_auth = Client::new_no_auth(&address).unwrap();
 
-        let resp = client_auth_server.get_service_info().await.unwrap();
-        dbg!(resp);
-        let resp = client_no_auth.get_service_info().await.unwrap();
-        dbg!(resp);
+        let resp = client_auth_server
+            .get_service_info()
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.server.as_deref(), Some("unknown/unknown"));
+
+        let resp = client_no_auth
+            .get_service_info()
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.server.as_deref(), Some("unknown/unknown"));
 
         //         loop {
         //             let resp = client

@@ -96,6 +96,7 @@ pub struct Metrics {
     pub withdrawals_finalized_total: IntCounter,
     pub presig_pool_remaining: IntGauge,
     pub sui_tx_submissions_total: IntCounterVec,
+    pub sui_balance: IntGauge,
 
     pub is_leader: IntGauge,
     pub leader_retries_total: IntCounterVec,
@@ -113,6 +114,12 @@ pub struct Metrics {
     pub mpc_sign_failures_total: IntCounterVec,
     /// Post-restart key recoveries that found suspicious local state
     pub mpc_recovery_suspicious_total: IntCounter,
+    /// Ticks where no DB encryption key matched the current committee record
+    pub mpc_committee_key_lost_total: IntCounter,
+    /// Snapshot races observed by the lost-key heal (registration landed after
+    /// the target committee froze; re-targeted one epoch later)
+    pub mpc_key_reregistration_bumps_total: IntCounter,
+    pub mpc_manager_epoch: IntGauge,
     pub mpc_avid_rounds_total: IntCounterVec,
     pub mpc_avid_complaints_recovered_total: IntCounter,
 
@@ -618,6 +625,13 @@ impl Metrics {
                 registry,
             )
             .unwrap(),
+            sui_balance: register_int_gauge_with_registry!(
+                "hashi_sui_balance",
+                "Operator gas wallet SUI balance in MIST, totaled across owned \
+                 coins and the address balance",
+                registry,
+            )
+            .unwrap(),
             is_leader: register_int_gauge_with_registry!(
                 "hashi_is_leader",
                 "Whether this node is the current leader (1) or not (0)",
@@ -682,6 +696,26 @@ impl Metrics {
                 "hashi_mpc_recovery_suspicious_total",
                 "Post-restart key recoveries where local state contradicted the on-chain key \
                  (suspicious) and the node observed the epoch",
+                registry,
+            )
+            .unwrap(),
+            mpc_key_reregistration_bumps_total: register_int_counter_with_registry!(
+                "hashi_mpc_key_reregistration_bumps_total",
+                "Snapshot races observed by the lost-key heal (registration landed after the \
+                 target committee froze; re-targeted one epoch later)",
+                registry,
+            )
+            .unwrap(),
+            mpc_committee_key_lost_total: register_int_counter_with_registry!(
+                "hashi_mpc_committee_key_lost_total",
+                "Ticks where no DB encryption or signing key matched the node's current \
+                 committee record (replacement keys are registered for the next epoch)",
+                registry,
+            )
+            .unwrap(),
+            mpc_manager_epoch: register_int_gauge_with_registry!(
+                "hashi_mpc_manager_epoch",
+                "Epoch of the MpcManager",
                 registry,
             )
             .unwrap(),

@@ -1716,9 +1716,6 @@ pub struct GetGuardianInfoResponse {
     /// Signed guardian info (includes server version, encryption pubkey, and optional S3/bucket info).
     #[prost(message, optional, tag = "3")]
     pub signed_info: ::core::option::Option<SignedGuardianInfo>,
-    /// Encrypted shares from the latest ceremony (empty if none yet).
-    #[prost(message, repeated, tag = "4")]
-    pub encrypted_shares: ::prost::alloc::vec::Vec<KpEncryptedShare>,
 }
 /// Guardian-signed wrapper around `GuardianInfoData`.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1769,6 +1766,9 @@ pub struct GuardianInfoData {
     /// guardian's own BTC key). Set after operator_init.
     #[prost(bytes = "bytes", optional, tag = "10")]
     pub mpc_master_g: ::core::option::Option<::prost::bytes::Bytes>,
+    /// Digest of the optional GenesisState pinned during operator_init.
+    #[prost(bytes = "bytes", optional, tag = "13")]
+    pub genesis_state_hash: ::core::option::Option<::prost::bytes::Bytes>,
     /// Signed enclave mode and its current lifecycle stage.
     #[prost(oneof = "guardian_info_data::Lifecycle", tags = "11, 12")]
     pub lifecycle: ::core::option::Option<guardian_info_data::Lifecycle>,
@@ -1805,16 +1805,22 @@ pub struct S3BucketInfo {
     #[prost(string, optional, tag = "2")]
     pub region: ::core::option::Option<::prost::alloc::string::String>,
 }
-/// Untrusted wire DTO. Converted to a validated domain request in the server.
+/// One KP's accepted OpenPGP certs. A KP can have multiple certs for the
+/// same secret-share id.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SetupNewKeyRequest {
-    /// Armored OpenPGP certificates for key provisioners. Length must equal `num_shares`.
+pub struct KpPgpCertSet {
+    /// Armored OpenPGP certificates for one key provisioner.
     #[prost(string, repeated, tag = "1")]
-    pub key_provisioner_pgp_certs: ::prost::alloc::vec::Vec<
-        ::prost::alloc::string::String,
-    >,
-    /// Total number of shares to split the new BTC key into. Must match
-    /// `key_provisioner_pgp_certs.len()`.
+    pub pgp_certs: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// Untrusted wire DTO. Converted to a validated domain request in the server.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SetupNewKeyRequest {
+    /// OpenPGP cert sets for key provisioners. Length must equal `num_shares`.
+    #[prost(message, repeated, tag = "1")]
+    pub key_provisioner_pgp_cert_sets: ::prost::alloc::vec::Vec<KpPgpCertSet>,
+    /// Total number of shares to split the new BTC key into. Must match the number
+    /// of KP cert sets, not the total number of certs.
     #[prost(uint32, optional, tag = "2")]
     pub num_shares: ::core::option::Option<u32>,
     /// Reconstruction threshold. Must satisfy `2 <= threshold <= num_shares`.
@@ -1843,16 +1849,17 @@ pub struct GuardianEncryptedShare {
     #[prost(message, optional, tag = "2")]
     pub ciphertext: ::core::option::Option<HpkeCiphertext>,
 }
-/// OpenPGP-encrypted secret share sent to a key provisioner.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct KpEncryptedShare {
+/// All PGP-encrypted copies of one KP share.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SingleKpEncryptedShares {
     #[prost(message, optional, tag = "1")]
     pub id: ::core::option::Option<GuardianShareId>,
-    #[prost(string, optional, tag = "2")]
-    pub armored_ciphertext: ::core::option::Option<::prost::alloc::string::String>,
-    /// Fingerprint of the recipient PGP cert this share is encrypted to.
-    #[prost(string, optional, tag = "3")]
-    pub recipient_fingerprint: ::core::option::Option<::prost::alloc::string::String>,
+    /// Recipient PGP fingerprint to armored ciphertext.
+    #[prost(map = "string, string", tag = "2")]
+    pub ciphertexts: ::std::collections::HashMap<
+        ::prost::alloc::string::String,
+        ::prost::alloc::string::String,
+    >,
 }
 /// Commitment to a secret share.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1866,7 +1873,7 @@ pub struct GuardianShareCommitment {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SetupNewKeyResponseData {
     #[prost(message, repeated, tag = "1")]
-    pub encrypted_shares: ::prost::alloc::vec::Vec<KpEncryptedShare>,
+    pub encrypted_shares: ::prost::alloc::vec::Vec<SingleKpEncryptedShares>,
     #[prost(message, optional, tag = "2")]
     pub secret_sharing_instance: ::core::option::Option<SecretSharingInstance>,
     /// x-only BTC master pubkey (32 bytes); lets the operator publish it on-chain pre-provision.
@@ -1887,23 +1894,24 @@ pub struct SignedSetupNewKeyResponse {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct OperatorInitRequest {
-    /// S3 access keys
+    /// S3 connection and retention config.
     #[prost(message, optional, tag = "1")]
     pub s3_config: ::core::option::Option<S3Config>,
     /// Withdraw-mode stable init config (absent for a ceremony enclave). The enclave
     /// exposes its digest via GuardianInfo; KPs bind it into signed PI submissions.
     #[prost(message, optional, tag = "4")]
     pub init_config: ::core::option::Option<InitConfig>,
+    /// First-deploy state to be authorized by KPs during provisioner_init.
+    #[prost(message, optional, tag = "5")]
+    pub genesis_state: ::core::option::Option<GenesisState>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct OperatorInitResponse {}
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct OperatorWriteGenesisRequest {
+pub struct GenesisState {
     #[prost(message, optional, tag = "1")]
     pub committee: ::core::option::Option<Committee>,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct OperatorWriteGenesisResponse {}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct S3Config {
     #[prost(string, optional, tag = "1")]
@@ -1916,6 +1924,9 @@ pub struct S3Config {
     pub region: ::core::option::Option<::prost::alloc::string::String>,
     #[prost(string, optional, tag = "5")]
     pub session_token: ::core::option::Option<::prost::alloc::string::String>,
+    /// Hashi deployment class used to select the Guardian S3 object-lock policy.
+    #[prost(enumeration = "S3RetentionEnvironment", tag = "6")]
+    pub retention_environment: i32,
 }
 /// One KP's signed contribution toward ProvisionerInit. The relay may pre-verify
 /// and buffer these submissions, but the enclave is the authoritative verifier.
@@ -1938,6 +1949,9 @@ pub struct SignedSingleProvisionerInitRequest {
     /// The operator-init config hash the KP independently recomputed and verified.
     #[prost(bytes = "bytes", optional, tag = "5")]
     pub expected_config_hash: ::core::option::Option<::prost::bytes::Bytes>,
+    /// The optional genesis state hash the KP independently recomputed and verified.
+    #[prost(bytes = "bytes", optional, tag = "6")]
+    pub expected_genesis_state_hash: ::core::option::Option<::prost::bytes::Bytes>,
 }
 /// Assembled from the current KPs' signed submissions by the relay once it has
 /// collected enough. The enclave re-verifies every submission before using any
@@ -2008,6 +2022,48 @@ pub struct LimiterConfig {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProvisionerInitResponse {}
+/// Replace one certificate in a KP roster entry. This does not change the BTC
+/// key, sharing instance, commitments, share ids, or threshold.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SignedProvisionerRotateCertRequest {
+    /// Armored replacement cert.
+    #[prost(string, tag = "1")]
+    pub new_kp_pgp_cert: ::prost::alloc::string::String,
+    /// The same plaintext share, HPKE-encrypted to the guardian.
+    #[prost(message, optional, tag = "2")]
+    pub encrypted_share: ::core::option::Option<GuardianEncryptedShare>,
+    /// The guardian session id the KP pinned before encrypting the share.
+    #[prost(string, tag = "3")]
+    pub expected_session_id: ::prost::alloc::string::String,
+    /// Armored authorizing KP cert and detached signature over the intent-tagged
+    /// ProvisionerRotateCertRequest payload.
+    #[prost(string, tag = "4")]
+    pub signer_cert: ::prost::alloc::string::String,
+    #[prost(string, tag = "5")]
+    pub kp_signature: ::prost::alloc::string::String,
+    /// Latest kp-shares cert_seq observed and authorized by the caller.
+    #[prost(uint64, optional, tag = "6")]
+    pub expected_cert_seq: ::core::option::Option<u64>,
+    /// Fingerprint of the current cert to replace. The signing cert may be this
+    /// cert or another cert assigned to the same KP/share entry.
+    #[prost(string, tag = "7")]
+    pub target_kp_pgp_fingerprint: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SignedProvisionerRotateCertResponse {
+    /// New cert_seq written under kp-shares/{sharing_seq}/.
+    #[prost(uint64, optional, tag = "1")]
+    pub cert_seq: ::core::option::Option<u64>,
+    /// The changed KP entry after replacing one certificate ciphertext.
+    #[prost(message, optional, tag = "2")]
+    pub encrypted_shares: ::core::option::Option<SingleKpEncryptedShares>,
+    /// Milliseconds since Unix epoch.
+    #[prost(uint64, optional, tag = "3")]
+    pub timestamp_ms: ::core::option::Option<u64>,
+    /// Signature over (intent || data || timestamp).
+    #[prost(bytes = "bytes", optional, tag = "4")]
+    pub signature: ::core::option::Option<::prost::bytes::Bytes>,
+}
 /// Assembled by the operator from the current KPs' encrypted old shares plus the
 /// shared rotation target. Each old share binds the same state digest as HPKE
 /// AAD, so the enclave only decrypts submissions that agree on the target.
@@ -2016,9 +2072,9 @@ pub struct ProvisionerInitResponse {}
 pub struct RotateKpsRequest {
     #[prost(message, repeated, tag = "1")]
     pub encrypted_old_shares: ::prost::alloc::vec::Vec<GuardianEncryptedShare>,
-    /// Armored OpenPGP certificates for the new KP set. Length must equal new_num_shares.
-    #[prost(string, repeated, tag = "2")]
-    pub new_kp_pgp_certs: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// OpenPGP cert sets for the new KP set. Length must equal new_num_shares.
+    #[prost(message, repeated, tag = "2")]
+    pub new_kp_pgp_cert_sets: ::prost::alloc::vec::Vec<KpPgpCertSet>,
     #[prost(uint32, optional, tag = "3")]
     pub new_num_shares: ::core::option::Option<u32>,
     #[prost(uint32, optional, tag = "4")]
@@ -2032,7 +2088,7 @@ pub struct RotateKpsRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct RotateKpsResponseData {
     #[prost(message, repeated, tag = "1")]
-    pub encrypted_shares: ::prost::alloc::vec::Vec<KpEncryptedShare>,
+    pub encrypted_shares: ::prost::alloc::vec::Vec<SingleKpEncryptedShares>,
 }
 /// Application-layer signed response.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -2181,6 +2237,38 @@ impl WithdrawStage {
                 Some(Self::ProvisionerInitialized)
             }
             "WITHDRAW_STAGE_ACTIVATED" => Some(Self::Activated),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum S3RetentionEnvironment {
+    Unspecified = 0,
+    Mainnet = 1,
+    Testnet = 2,
+    Devnet = 3,
+}
+impl S3RetentionEnvironment {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "S3_RETENTION_ENVIRONMENT_UNSPECIFIED",
+            Self::Mainnet => "S3_RETENTION_ENVIRONMENT_MAINNET",
+            Self::Testnet => "S3_RETENTION_ENVIRONMENT_TESTNET",
+            Self::Devnet => "S3_RETENTION_ENVIRONMENT_DEVNET",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "S3_RETENTION_ENVIRONMENT_UNSPECIFIED" => Some(Self::Unspecified),
+            "S3_RETENTION_ENVIRONMENT_MAINNET" => Some(Self::Mainnet),
+            "S3_RETENTION_ENVIRONMENT_TESTNET" => Some(Self::Testnet),
+            "S3_RETENTION_ENVIRONMENT_DEVNET" => Some(Self::Devnet),
             _ => None,
         }
     }
@@ -2423,36 +2511,6 @@ pub mod guardian_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
-        /// Bootstrap genesis committee: operator-trusted, first deploy only.
-        pub async fn operator_write_genesis(
-            &mut self,
-            request: impl tonic::IntoRequest<super::OperatorWriteGenesisRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::OperatorWriteGenesisResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
-            let codec = tonic_prost::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/sui.hashi.v1alpha.GuardianService/OperatorWriteGenesis",
-            );
-            let mut req = request.into_request();
-            req.extensions_mut()
-                .insert(
-                    GrpcMethod::new(
-                        "sui.hashi.v1alpha.GuardianService",
-                        "OperatorWriteGenesis",
-                    ),
-                );
-            self.inner.unary(req, path, codec).await
-        }
         /// Provisioner initialization: submit the current KPs' signed share contributions.
         pub async fn provisioner_init(
             &mut self,
@@ -2479,6 +2537,36 @@ pub mod guardian_service_client {
                     GrpcMethod::new(
                         "sui.hashi.v1alpha.GuardianService",
                         "ProvisionerInit",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        /// KP-facing: replace one OpenPGP cert wrapping an already-committed share.
+        pub async fn provisioner_rotate_cert(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SignedProvisionerRotateCertRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignedProvisionerRotateCertResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/sui.hashi.v1alpha.GuardianService/ProvisionerRotateCert",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "sui.hashi.v1alpha.GuardianService",
+                        "ProvisionerRotateCert",
                     ),
                 );
             self.inner.unary(req, path, codec).await
@@ -2654,20 +2742,20 @@ pub mod guardian_service_server {
             tonic::Response<super::OperatorInitResponse>,
             tonic::Status,
         >;
-        /// Bootstrap genesis committee: operator-trusted, first deploy only.
-        async fn operator_write_genesis(
-            &self,
-            request: tonic::Request<super::OperatorWriteGenesisRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::OperatorWriteGenesisResponse>,
-            tonic::Status,
-        >;
         /// Provisioner initialization: submit the current KPs' signed share contributions.
         async fn provisioner_init(
             &self,
             request: tonic::Request<super::ProvisionerInitRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ProvisionerInitResponse>,
+            tonic::Status,
+        >;
+        /// KP-facing: replace one OpenPGP cert wrapping an already-committed share.
+        async fn provisioner_rotate_cert(
+            &self,
+            request: tonic::Request<super::SignedProvisionerRotateCertRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SignedProvisionerRotateCertResponse>,
             tonic::Status,
         >;
         /// Operator activation: derive live serving state and make an armed standby active.
@@ -2960,55 +3048,6 @@ pub mod guardian_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/sui.hashi.v1alpha.GuardianService/OperatorWriteGenesis" => {
-                    #[allow(non_camel_case_types)]
-                    struct OperatorWriteGenesisSvc<T: GuardianService>(pub Arc<T>);
-                    impl<
-                        T: GuardianService,
-                    > tonic::server::UnaryService<super::OperatorWriteGenesisRequest>
-                    for OperatorWriteGenesisSvc<T> {
-                        type Response = super::OperatorWriteGenesisResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
-                        fn call(
-                            &mut self,
-                            request: tonic::Request<super::OperatorWriteGenesisRequest>,
-                        ) -> Self::Future {
-                            let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as GuardianService>::operator_write_genesis(
-                                        &inner,
-                                        request,
-                                    )
-                                    .await
-                            };
-                            Box::pin(fut)
-                        }
-                    }
-                    let accept_compression_encodings = self.accept_compression_encodings;
-                    let send_compression_encodings = self.send_compression_encodings;
-                    let max_decoding_message_size = self.max_decoding_message_size;
-                    let max_encoding_message_size = self.max_encoding_message_size;
-                    let inner = self.inner.clone();
-                    let fut = async move {
-                        let method = OperatorWriteGenesisSvc(inner);
-                        let codec = tonic_prost::ProstCodec::default();
-                        let mut grpc = tonic::server::Grpc::new(codec)
-                            .apply_compression_config(
-                                accept_compression_encodings,
-                                send_compression_encodings,
-                            )
-                            .apply_max_message_size_config(
-                                max_decoding_message_size,
-                                max_encoding_message_size,
-                            );
-                        let res = grpc.unary(method, req).await;
-                        Ok(res)
-                    };
-                    Box::pin(fut)
-                }
                 "/sui.hashi.v1alpha.GuardianService/ProvisionerInit" => {
                     #[allow(non_camel_case_types)]
                     struct ProvisionerInitSvc<T: GuardianService>(pub Arc<T>);
@@ -3040,6 +3079,58 @@ pub mod guardian_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = ProvisionerInitSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/sui.hashi.v1alpha.GuardianService/ProvisionerRotateCert" => {
+                    #[allow(non_camel_case_types)]
+                    struct ProvisionerRotateCertSvc<T: GuardianService>(pub Arc<T>);
+                    impl<
+                        T: GuardianService,
+                    > tonic::server::UnaryService<
+                        super::SignedProvisionerRotateCertRequest,
+                    > for ProvisionerRotateCertSvc<T> {
+                        type Response = super::SignedProvisionerRotateCertResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::SignedProvisionerRotateCertRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as GuardianService>::provisioner_rotate_cert(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ProvisionerRotateCertSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

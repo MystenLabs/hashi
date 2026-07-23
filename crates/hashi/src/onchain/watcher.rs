@@ -37,6 +37,12 @@ use crate::withdrawals::withdrawal_limiter_consumption_amount;
 /// server silently stopped sending checkpoints.
 const CHECKPOINT_STREAM_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// How often to unconditionally rescrape the full on-chain state. The event
+/// stream can drift from chain state (e.g. writes that emit no event, such as
+/// `cleanup_spent_utxos`); a periodic rescrape bounds how long any such drift
+/// can persist.
+const PERIODIC_RESCRAPE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 #[tracing::instrument(name = "watcher", skip_all)]
 pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<Arc<Metrics>>) {
     let subscription_read_mask = FieldMask::from_paths([
@@ -58,15 +64,16 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
     ]);
 
     let mut rescrape_state = false;
-    // Boot scrape just populated the snapshot; start the poll clock from here.
+    // Boot scrape just populated the snapshot; start the poll clocks from here.
     let mut last_config_refresh = std::time::Instant::now();
+    let mut last_rescrape = std::time::Instant::now();
 
     loop {
         // Reconnect with a fresh client each iteration. Re-subscribing on the
         // same channel can reuse a wedged h2 connection — the one whose stream
         // just stalled — and silently hang again; a new client forces a clean
         // connection. Reconnects are rare, so the extra setup cost is fine.
-        let mut client = match Client::new(&sui_rpc_url) {
+        let mut client = match crate::sui_rpc_client::new_sui_rpc_client(&sui_rpc_url) {
             Ok(client) => client,
             Err(e) => {
                 tracing::warn!("error creating Sui RPC client: {e}");
@@ -101,30 +108,13 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
 
         // Rescrape the chain state in the event our subscription broke
         if rescrape_state {
-            match super::scrape_hashi(
-                client.clone(),
-                state.hashi_id(),
-                state.package_id_original(),
-            )
-            .await
-            {
-                Ok((checkpoint_info, hashi)) => {
-                    state.replace_hashi_state(hashi);
-                    state.update_latest_checkpoint_info(checkpoint_info);
-                    if let Some(metrics) = &metrics {
-                        metrics.update_onchain_state(&state);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("error trying to rescrape hashi's state: {e}");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    continue;
-                }
+            if let Err(e) = rescrape_hashi_state(&client, &state, metrics.as_ref()).await {
+                tracing::warn!("error trying to rescrape hashi's state: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                continue;
             }
-
-            // Rescrape gapped the event-driven limiter; trigger an eager reconcile.
-            state.request_limiter_reconcile();
             last_config_refresh = std::time::Instant::now();
+            last_rescrape = std::time::Instant::now();
         }
 
         while let Ok(Some(item)) =
@@ -194,6 +184,20 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
             if let Some(metrics) = &metrics {
                 metrics.update_onchain_state(&state);
             }
+
+            // Unconditional periodic rescrape. Runs on the watcher task, so
+            // it can't race event application; any checkpoints the scrape
+            // already included are replayed by the stream afterward, which
+            // re-applies them as no-ops. On failure, just wait for the next
+            // interval — the reconnect rescrape still guards correctness.
+            if last_rescrape.elapsed() >= PERIODIC_RESCRAPE_INTERVAL {
+                if let Err(e) = rescrape_hashi_state(&client, &state, metrics.as_ref()).await {
+                    tracing::warn!("periodic rescrape of hashi's state failed: {e}");
+                } else {
+                    last_config_refresh = std::time::Instant::now();
+                }
+                last_rescrape = std::time::Instant::now();
+            }
         }
 
         // The stream stalled, errored, or closed. Loop to rebuild the client,
@@ -201,6 +205,29 @@ pub async fn watcher(sui_rpc_url: String, state: OnchainState, metrics: Option<A
         tracing::warn!("checkpoint stream ended; reconnecting Sui client and rescraping");
         rescrape_state = true;
     }
+}
+
+/// Scrape the full on-chain state and install it as the new snapshot. Used
+/// both after a reconnect (to recover any gap the stream missed) and on the
+/// periodic rescrape interval (to heal drift from eventless writes).
+async fn rescrape_hashi_state(
+    client: &Client,
+    state: &OnchainState,
+    metrics: Option<&Arc<Metrics>>,
+) -> anyhow::Result<()> {
+    let (checkpoint_info, hashi) = super::scrape_hashi(
+        client.clone(),
+        state.hashi_id(),
+        state.package_id_original(),
+    )
+    .await?;
+    state.install_scraped_state(checkpoint_info, hashi)?;
+    if let Some(metrics) = metrics {
+        metrics.update_onchain_state(state);
+    }
+    // Rescrape gapped the event-driven limiter; trigger an eager reconcile.
+    state.request_limiter_reconcile();
+    Ok(())
 }
 
 /// The poll only exists to catch `finish_publish` (guardian url + BTC key,
@@ -684,7 +711,13 @@ async fn handle_events(
 
                     // Promote the change UTXOs from pending to confirmed by
                     // clearing `produced_by`. The UTXOs were already inserted at
-                    // commit time; input UTXOs are removed via UtxoSpent.
+                    // commit time; input UTXOs are marked spent via UtxoSpent
+                    // and their records then stay in the mirror until a full
+                    // rescrape (reconnect or restart) — nothing prunes them.
+                    // The cleanup GC deliberately decides from a fresh chain
+                    // snapshot rather than these records, so the staleness is
+                    // cosmetic (spent_by stays set, excluding them from coin
+                    // selection).
                     for change_utxo_id in &event.change_utxo_ids {
                         if let Some(record) =
                             state.hashi.utxo_pool.utxo_records.get_mut(change_utxo_id)
@@ -744,19 +777,24 @@ async fn handle_events(
                 // Fetch new committee
                 let committees_id = state.state().hashi().committees.committees_id();
                 //TODO maybe include info in the event
-                let committee = super::scrape_committee(client.clone(), committees_id, epoch)
-                    .await
-                    .unwrap();
-                {
-                    let mut state = state.state_mut();
-                    state
-                        .hashi
-                        .committees
-                        .committees_mut()
-                        .insert(epoch, committee);
-                    state.hashi.committees.set_pending_epoch_change(Some(epoch));
+                match super::scrape_committee(client.clone(), committees_id, epoch).await {
+                    Ok(committee) => {
+                        {
+                            let mut state = state.state_mut();
+                            state
+                                .hashi
+                                .committees
+                                .committees_mut()
+                                .insert(epoch, committee);
+                            state.hashi.committees.set_pending_epoch_change(Some(epoch));
+                        }
+                        state.notify(Notification::StartReconfig(epoch));
+                    }
+                    Err(e) => tracing::error!(
+                        epoch,
+                        "failed to scrape committee on ReconfigStarted; skipping (rescrape recovers): {e}"
+                    ),
                 }
-                state.notify(Notification::StartReconfig(epoch));
             }
             HashiEvent::ReconfigEnded(end_reconfig_event) => {
                 let committees_id = state.state().hashi().committees.committees_id();

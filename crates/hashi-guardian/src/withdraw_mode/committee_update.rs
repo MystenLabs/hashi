@@ -3,7 +3,6 @@
 
 use crate::withdraw_mode::verify_hashi_cert;
 use crate::Enclave;
-use hashi_types::committee::certificate_threshold;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GuardianError;
@@ -26,9 +25,6 @@ pub async fn update_committee(
     enclave: Arc<Enclave>,
     signed: HashiSigned<CommitteeTransitionRequest>,
 ) -> GuardianResult<u64> {
-    // Serialize so a stalled call can't roll the committee backwards.
-    let _guard = enclave.control_lock.lock().await;
-
     if !enclave.is_fully_initialized() {
         return Err(EnclaveUninitialized);
     }
@@ -42,12 +38,7 @@ pub async fn update_committee(
         return Ok(current_epoch);
     }
 
-    // Match hashi's leader, which bails its sig collection at
-    // `certificate_threshold(from_committee.total_weight())`. Using a
-    // higher (configured) threshold here would reject otherwise-valid
-    // certs.
-    let threshold = certificate_threshold(current.total_weight());
-    if let Err(e) = verify_hashi_cert(current.clone(), threshold, &signed) {
+    if let Err(e) = verify_hashi_cert(&current, &signed) {
         log_failure(&enclave, current_epoch, &signed, &e).await?;
         return Err(e);
     }

@@ -187,7 +187,6 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         post,
         &session_id,
         signing_pub_key,
-        standby.config_hash,
         standby.enclave_btc_pubkey,
         committee_epoch,
         limiter_state,
@@ -350,6 +349,10 @@ fn verify_oi_info_matches_provisioned_standby(
         "OI GuardianInfo config_hash differs from live standby GuardianInfo"
     );
     ensure!(
+        oi_info.genesis_state_hash == live_info.genesis_state_hash,
+        "OI GuardianInfo genesis_state_hash differs from live standby GuardianInfo"
+    );
+    ensure!(
         oi_info.untrusted_git_revision == live_info.untrusted_git_revision,
         "OI GuardianInfo git revision differs from live standby GuardianInfo"
     );
@@ -368,7 +371,6 @@ fn verify_activated_info(
     post: VerifiedGuardianInfo,
     expected_session_id: &str,
     expected_signing_key: hashi_types::guardian::GuardianPubKey,
-    expected_config_hash: [u8; 32],
     expected_enclave_btc_pubkey: hashi_types::bitcoin::BitcoinPubkey,
     expected_committee_epoch: u64,
     expected_limiter_state: hashi_types::guardian::LimiterState,
@@ -386,10 +388,6 @@ fn verify_activated_info(
     ensure!(
         post.info.lifecycle == WithdrawStage::Activated.into(),
         "guardian is not an activated withdraw enclave"
-    );
-    ensure!(
-        post.info.config_hash == Some(expected_config_hash),
-        "Guardian config_hash changed during operator activation"
     );
     ensure!(
         post.info.enclave_btc_pubkey == Some(expected_enclave_btc_pubkey),

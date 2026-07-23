@@ -1,11 +1,16 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::GuardianError::InvalidInputs;
-use super::GuardianResult;
+use super::errors::GuardianError::InvalidInputs;
+use super::errors::GuardianResult;
+use super::kp_certs_roster::KPFingerprint;
+use super::kp_certs_roster::KpCerts;
+use super::kp_certs_roster::KpCertsRoster;
 use crate::bitcoin::BTC_LIB;
 use crate::pgp::PgpPublicCert;
+use crate::pgp::cert_owns_key_handle;
 use crate::pgp::encrypt_armored;
+use crate::pgp::pgp_message_recipients;
 use blake2::Blake2b;
 use blake2::Digest;
 use blake2::digest::consts::U32;
@@ -16,17 +21,18 @@ use hpke::aead::AesGcm256;
 use hpke::kdf::HkdfSha384;
 use hpke::kem::X25519HkdfSha256;
 use k256::CompressedPoint;
-use k256::FieldBytes;
 use k256::ProjectivePoint;
 use k256::Scalar;
+use k256::Secp256k1;
 use k256::elliptic_curve::Field;
-use k256::elliptic_curve::PrimeField;
+use k256::elliptic_curve::ScalarPrimitive;
 use k256::elliptic_curve::group::GroupEncoding;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::num::NonZeroU16;
 use tracing::info;
@@ -101,83 +107,19 @@ pub struct GuardianEncryptedShare {
     pub ciphertext: Ciphertext,
 }
 
-/// A key-provisioner's PGP fingerprint as bare uppercase hex — the string
-/// form persisted in ceremony artifacts (share labels, log rosters). For
-/// comparing fingerprints, prefer the canonical [`crate::pgp::Fingerprint`].
-pub type KPFingerprint = String;
-
+/// The encrypted copies of one secret share assigned to one KP, with one
+/// ciphertext per accepted certificate.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct KPEncryptedShare {
+pub struct KPEncryptedShares {
     pub id: ShareID,
-    /// Fingerprint of the recipient PGP cert this share is encrypted to. An
-    /// explicit, signed label so a KP can find their share by their own
-    /// fingerprint instead of by positional index.
-    pub recipient_fingerprint: KPFingerprint,
-    pub armored_ciphertext: String,
+    /// Recipient PGP fingerprint to armored ciphertext.
+    pub ciphertexts_by_fingerprint: BTreeMap<KPFingerprint, String>,
 }
 
+/// The complete encrypted-share roster for a ceremony, canonicalized by share
+/// id. Each entry contains one KP's ciphertexts.
 #[derive(Serialize, Debug, Clone, PartialEq)]
-pub struct KPEncryptedShares(Vec<KPEncryptedShare>);
-
-impl KPEncryptedShares {
-    pub fn new(mut shares: Vec<KPEncryptedShare>) -> GuardianResult<Self> {
-        if shares.len() > MAX_NUM_SHARES {
-            return Err(InvalidInputs(format!(
-                "{} encrypted shares must be at most u16::MAX",
-                shares.len()
-            )));
-        }
-
-        shares.sort_by_key(|s| s.id);
-        let ids: Vec<u16> = shares.iter().map(|s| s.id.get()).collect();
-        let expected: Vec<u16> = (1..=shares.len() as u16).collect();
-        if ids != expected {
-            return Err(InvalidInputs(format!(
-                "encrypted share ids are not exactly 1..={}: got {ids:?}",
-                shares.len()
-            )));
-        }
-
-        Ok(Self(shares))
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &KPEncryptedShare> {
-        self.0.iter()
-    }
-
-    pub fn as_slice(&self) -> &[KPEncryptedShare] {
-        &self.0
-    }
-
-    pub fn into_vec(self) -> Vec<KPEncryptedShare> {
-        self.0
-    }
-
-    /// Recipient PGP fingerprints ordered by share id.
-    pub fn recipient_roster(&self) -> Vec<KPFingerprint> {
-        self.iter()
-            .map(|s| s.recipient_fingerprint.clone())
-            .collect()
-    }
-}
-
-impl<'de> Deserialize<'de> for KPEncryptedShares {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let shares = Vec::<KPEncryptedShare>::deserialize(deserializer)?;
-        Self::new(shares).map_err(serde::de::Error::custom)
-    }
-}
+pub struct KPEncryptedSharesRoster(Vec<KPEncryptedShares>);
 
 pub type DigestBytes = Vec<u8>;
 
@@ -344,6 +286,230 @@ impl GuardianEncKeyPair {
     pub fn public_key(&self) -> &EncPubKey {
         &self.pk
     }
+}
+
+impl KPEncryptedShares {
+    /// Verify that this share has exactly one ciphertext per expected cert and
+    /// that every ciphertext targets only keys owned by its keyed cert.
+    pub fn verify_recipients(&self, certs: &KpCerts) -> GuardianResult<()> {
+        let expected_fingerprints = certs.fingerprints();
+        let actual_fingerprints = self
+            .ciphertexts_by_fingerprint
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        if actual_fingerprints != expected_fingerprints {
+            return Err(InvalidInputs(format!(
+                "encrypted share recipient roster differs for share id {}: expected {:?}, got \
+                 {:?}",
+                self.id.get(),
+                expected_fingerprints,
+                actual_fingerprints
+            )));
+        }
+
+        for cert in certs.pgp_certs() {
+            let fingerprint = cert.fingerprint().to_hex();
+            let ciphertext = self
+                .ciphertexts_by_fingerprint
+                .get(&fingerprint)
+                .expect("fingerprint rosters were checked for equality");
+            verify_pgp_ciphertext_recipient(self.id, &fingerprint, ciphertext, cert)?;
+        }
+        Ok(())
+    }
+}
+
+impl KPEncryptedSharesRoster {
+    pub fn new(mut shares: Vec<KPEncryptedShares>) -> GuardianResult<Self> {
+        shares.sort_by_key(|s| s.id);
+
+        if shares.len() > MAX_NUM_SHARES {
+            return Err(InvalidInputs(format!(
+                "{} shares must be at most u16::MAX",
+                shares.len()
+            )));
+        }
+        let ids: Vec<u16> = shares.iter().map(|s| s.id.get()).collect();
+        let expected: Vec<u16> = (1..=shares.len() as u16).collect();
+        if ids != expected {
+            return Err(InvalidInputs(format!(
+                "encrypted share ids are not exactly 1..={}: got {ids:?}",
+                shares.len()
+            )));
+        }
+
+        let mut seen_fingerprints = HashSet::new();
+        for share in &shares {
+            if share.ciphertexts_by_fingerprint.is_empty() {
+                return Err(InvalidInputs(format!(
+                    "encrypted share id {} must have at least one PGP ciphertext",
+                    share.id.get()
+                )));
+            }
+            for fingerprint in share.ciphertexts_by_fingerprint.keys() {
+                if !seen_fingerprints.insert(fingerprint.clone()) {
+                    return Err(InvalidInputs(format!(
+                        "duplicate encrypted share recipient fingerprint {}",
+                        fingerprint
+                    )));
+                }
+            }
+        }
+
+        Ok(Self(shares))
+    }
+
+    /// Number of secret shares, not the number of cert-wrapped
+    /// ciphertexts. A KP may have multiple ciphertexts for the same share id.
+    pub fn share_count(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn ciphertext_count(&self) -> usize {
+        self.0
+            .iter()
+            .map(|share| share.ciphertexts_by_fingerprint.len())
+            .sum()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &KPEncryptedShares> {
+        self.0.iter()
+    }
+
+    pub fn into_vec(self) -> Vec<KPEncryptedShares> {
+        self.0
+    }
+
+    pub fn find_by_fingerprint(&self, fingerprint: &str) -> Option<(&KPEncryptedShares, &str)> {
+        self.iter().find_map(|share| {
+            share
+                .ciphertexts_by_fingerprint
+                .get(fingerprint)
+                .map(|ciphertext| (share, ciphertext.as_str()))
+        })
+    }
+
+    /// Replace one certificate-specific ciphertext while preserving every
+    /// other KP/share entry and revalidating global fingerprint uniqueness.
+    pub fn replace_recipient(
+        self,
+        current_fingerprint: &str,
+        new_fingerprint: KPFingerprint,
+        new_ciphertext: String,
+    ) -> GuardianResult<(Self, KPEncryptedShares)> {
+        if new_fingerprint == current_fingerprint {
+            return Err(InvalidInputs(format!(
+                "replacement KP fingerprint {new_fingerprint} must differ from the current \
+                 fingerprint"
+            )));
+        }
+        if self.find_by_fingerprint(&new_fingerprint).is_some() {
+            return Err(InvalidInputs(format!(
+                "new KP fingerprint {new_fingerprint} is already present in the encrypted share \
+                 roster"
+            )));
+        }
+
+        let mut shares = self.0;
+        let share = shares
+            .iter_mut()
+            .find(|share| {
+                share
+                    .ciphertexts_by_fingerprint
+                    .contains_key(current_fingerprint)
+            })
+            .ok_or_else(|| {
+                InvalidInputs(format!(
+                    "current KP fingerprint {current_fingerprint} is not present in the \
+                     encrypted share roster"
+                ))
+            })?;
+        share
+            .ciphertexts_by_fingerprint
+            .remove(current_fingerprint)
+            .expect("the current fingerprint was located in this entry");
+        share
+            .ciphertexts_by_fingerprint
+            .insert(new_fingerprint, new_ciphertext);
+        let changed_share = share.clone();
+        Ok((Self::new(shares)?, changed_share))
+    }
+
+    /// Recipient PGP fingerprints grouped by share id.
+    pub fn recipient_roster(&self) -> Vec<Vec<KPFingerprint>> {
+        let mut grouped: Vec<Vec<KPFingerprint>> = Vec::with_capacity(self.share_count());
+        for share in &self.0 {
+            grouped.push(share.ciphertexts_by_fingerprint.keys().cloned().collect());
+        }
+        grouped
+    }
+
+    /// Verify every encrypted share against the certs assigned to its share id.
+    pub fn verify_recipients(&self, certs_roster: &KpCertsRoster) -> GuardianResult<()> {
+        if self.share_count() != certs_roster.num_kps() {
+            return Err(InvalidInputs(format!(
+                "expected {} KP cert roster entries, got {} encrypted shares",
+                certs_roster.num_kps(),
+                self.share_count()
+            )));
+        }
+
+        for share in self.iter() {
+            let certs = certs_roster
+                .certs_for_share(share.id)
+                .expect("encrypted share ids are exactly 1..=roster length");
+            share.verify_recipients(certs)?;
+        }
+        Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for KPEncryptedSharesRoster {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let shares = Vec::<KPEncryptedShares>::deserialize(deserializer)?;
+        Self::new(shares).map_err(serde::de::Error::custom)
+    }
+}
+
+fn verify_pgp_ciphertext_recipient(
+    share_id: ShareID,
+    recipient_fingerprint: &str,
+    ciphertext: &str,
+    expected_cert: &PgpPublicCert,
+) -> GuardianResult<()> {
+    let recipients = pgp_message_recipients(ciphertext).map_err(|e| {
+        InvalidInputs(format!(
+            "failed to parse PGP recipients for share id {}: {e}",
+            share_id.get()
+        ))
+    })?;
+    if recipients.is_empty() {
+        return Err(InvalidInputs(format!(
+            "share id {} has no PGP recipients",
+            share_id.get()
+        )));
+    }
+    for handle in &recipients {
+        if !cert_owns_key_handle(expected_cert, handle) {
+            return Err(InvalidInputs(format!(
+                "share id {} (keyed by {}) is encrypted to key {handle}, which is not in that \
+                 cert",
+                share_id.get(),
+                recipient_fingerprint
+            )));
+        }
+    }
+    info!(
+        share_id = share_id.get(),
+        fingerprint = %recipient_fingerprint,
+        recipient_count = recipients.len(),
+        "verified encrypted share targets only its keyed recipient cert"
+    );
+    Ok(())
 }
 
 pub fn to_scalar(id: ShareID) -> Scalar {
@@ -526,33 +692,46 @@ pub fn encrypt_share<R: CryptoRng + RngCore>(
 }
 
 /// Split `sk` into `params.num_shares()` shares with reconstruction threshold
-/// `params.threshold()`, encrypt each to the matching KP OpenPGP cert, and
-/// compute the corresponding commitments. Share ID `i` (1..=N) is paired with
-/// `kp_certs[i-1]`.
+/// `params.threshold()`, encrypt each share to every cert in the matching KP
+/// cert collection, and compute one commitment per share. The roster assigns
+/// its entry at position `i` to share ID `i + 1`.
 ///
 /// # Panics
 ///
-/// Panics if `kp_certs.len() != params.num_shares()`.
+/// Panics if `kp_certs_roster.num_kps() != params.num_shares()`.
 pub fn split_and_encrypt_for_kps<R: CryptoRng + RngCore>(
     sk: &k256::SecretKey,
-    kp_certs: &[PgpPublicCert],
+    kp_certs_roster: &KpCertsRoster,
     params: &SecretSharingParams,
     rng: &mut R,
-) -> (KPEncryptedShares, ShareCommitments) {
+) -> (KPEncryptedSharesRoster, ShareCommitments) {
     assert_eq!(
-        kp_certs.len(),
+        kp_certs_roster.num_kps(),
         params.num_shares(),
-        "SetupNewKeyRequest validation ensures one KP cert per share",
+        "request validation ensures one KP cert collection per share",
     );
     let shares = split_secret(sk, params, rng);
     let n = params.num_shares();
     let mut encrypted_shares = Vec::with_capacity(n);
     let mut commitments = Vec::with_capacity(n);
-    for (share, cert) in shares.iter().zip(kp_certs.iter()) {
-        encrypted_shares.push(encrypt_share_for_provisioner(share, cert));
+    for (share, cert_set) in shares.iter().zip(kp_certs_roster.iter()) {
+        let ciphertexts_by_fingerprint = cert_set
+            .pgp_certs()
+            .iter()
+            .map(|cert| {
+                (
+                    cert.fingerprint().to_hex(),
+                    encrypt_share_for_provisioner(share, cert),
+                )
+            })
+            .collect();
+        encrypted_shares.push(KPEncryptedShares {
+            id: share.id,
+            ciphertexts_by_fingerprint,
+        });
         commitments.push(commit_share(share));
     }
-    let encrypted_shares = KPEncryptedShares::new(encrypted_shares)
+    let encrypted_shares = KPEncryptedSharesRoster::new(encrypted_shares)
         .expect("split_secret produces share ids exactly 1..=n");
     let commitments =
         ShareCommitments::new(commitments).expect("share IDs 1..=n are unique by construction");
@@ -560,13 +739,9 @@ pub fn split_and_encrypt_for_kps<R: CryptoRng + RngCore>(
 }
 
 /// Encrypt a share for delivery to a key provisioner using OpenPGP ASCII armor.
-pub fn encrypt_share_for_provisioner(share: &Share, cert: &PgpPublicCert) -> KPEncryptedShare {
-    KPEncryptedShare {
-        id: share.id,
-        recipient_fingerprint: cert.fingerprint().to_hex(),
-        armored_ciphertext: encrypt_armored(&share.value.to_bytes(), cert)
-            .expect("PgpPublicCert validation ensures OpenPGP encryption works"),
-    }
+pub fn encrypt_share_for_provisioner(share: &Share, cert: &PgpPublicCert) -> String {
+    encrypt_armored(&share.value.to_bytes(), cert)
+        .expect("PgpPublicCert validation ensures OpenPGP encryption works")
 }
 
 /// Decrypt an encrypted share with optional AAD
@@ -576,15 +751,13 @@ pub fn decrypt_share(
     aad: Option<&[u8; 32]>,
 ) -> GuardianResult<Share> {
     let serialized_share = decrypt(&encrypted_share.ciphertext, sk, aad)?;
-    let result: Option<Scalar> =
-        Scalar::from_repr(*FieldBytes::from_slice(&serialized_share)).into();
-    match result {
-        Some(x) => Ok(Share {
-            id: encrypted_share.id,
-            value: x,
-        }),
-        None => Err(InvalidInputs("Failed to deserialize share".into())),
-    }
+    let value = ScalarPrimitive::<Secp256k1>::from_slice(&serialized_share)
+        .map(Scalar::from)
+        .map_err(|_| InvalidInputs("Failed to deserialize share".into()))?;
+    Ok(Share {
+        id: encrypted_share.id,
+        value,
+    })
 }
 
 /// Decrypt each submission under optional `aad`, verify it against `commitments`,
@@ -644,6 +817,28 @@ mod tests {
             decrypt(&ciphertext, keypair.secret_key(), wrong_aad)
                 .is_err_and(|x| matches!(x, InvalidInputs(_)))
         );
+    }
+
+    #[test]
+    fn decrypt_share_rejects_wrong_plaintext_length() {
+        let keypair = GuardianEncKeyPair::random(&mut rand::thread_rng());
+        for len in [31, 33] {
+            let encrypted_share = GuardianEncryptedShare {
+                id: ShareID::new(1).unwrap(),
+                ciphertext: encrypt(
+                    &vec![0; len],
+                    keypair.public_key(),
+                    None,
+                    &mut rand::thread_rng(),
+                )
+                .unwrap(),
+            };
+
+            let Err(err) = decrypt_share(&encrypted_share, keypair.secret_key(), None) else {
+                panic!("{len}-byte plaintext must be rejected");
+            };
+            assert!(matches!(err, InvalidInputs(_)), "{err:?}");
+        }
     }
 
     // Verify secret reconstruction with varying number of shares (0 to n).
@@ -744,11 +939,32 @@ mod tests {
         );
     }
 
-    fn test_kp_encrypted_share(id: u16) -> KPEncryptedShare {
-        KPEncryptedShare {
+    fn test_kp_encrypted_shares(id: u16) -> KPEncryptedShares {
+        test_kp_encrypted_shares_for_fingerprint(id, format!("fingerprint-{id}"))
+    }
+
+    fn test_kp_encrypted_shares_for_fingerprint(
+        id: u16,
+        recipient_fingerprint: String,
+    ) -> KPEncryptedShares {
+        test_kp_encrypted_shares_for_fingerprints(id, vec![recipient_fingerprint])
+    }
+
+    fn test_kp_encrypted_shares_for_fingerprints(
+        id: u16,
+        recipient_fingerprints: Vec<String>,
+    ) -> KPEncryptedShares {
+        KPEncryptedShares {
             id: NonZeroU16::new(id).unwrap(),
-            recipient_fingerprint: format!("fingerprint-{id}"),
-            armored_ciphertext: "-----BEGIN PGP MESSAGE-----\n\n-----END PGP MESSAGE-----".into(),
+            ciphertexts_by_fingerprint: recipient_fingerprints
+                .into_iter()
+                .map(|recipient_fingerprint| {
+                    (
+                        recipient_fingerprint,
+                        "-----BEGIN PGP MESSAGE-----\n\n-----END PGP MESSAGE-----".into(),
+                    )
+                })
+                .collect(),
         }
     }
 
@@ -851,50 +1067,116 @@ mod tests {
     }
 
     #[test]
-    fn kp_encrypted_shares_canonicalizes_by_share_id() {
-        let shares = KPEncryptedShares::new(vec![
-            test_kp_encrypted_share(3),
-            test_kp_encrypted_share(1),
-            test_kp_encrypted_share(2),
+    fn kp_encrypted_shares_roster_canonicalizes_by_share_id_then_fingerprint() {
+        let shares = KPEncryptedSharesRoster::new(vec![
+            test_kp_encrypted_shares(3),
+            test_kp_encrypted_shares_for_fingerprints(
+                2,
+                vec!["fingerprint-2".into(), "fingerprint-2b".into()],
+            ),
+            test_kp_encrypted_shares(1),
         ])
         .unwrap();
 
-        let ids = shares.iter().map(|s| s.id.get()).collect::<Vec<_>>();
-        assert_eq!(ids, vec![1, 2, 3]);
+        let entries = shares
+            .iter()
+            .map(|s| {
+                (
+                    s.id.get(),
+                    s.ciphertexts_by_fingerprint
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries,
+            vec![
+                (1, vec!["fingerprint-1"]),
+                (2, vec!["fingerprint-2", "fingerprint-2b"]),
+                (3, vec!["fingerprint-3"]),
+            ]
+        );
+        assert_eq!(shares.share_count(), 3);
+        assert_eq!(shares.ciphertext_count(), 4);
         assert_eq!(
             shares.recipient_roster(),
-            vec!["fingerprint-1", "fingerprint-2", "fingerprint-3"]
+            vec![
+                vec!["fingerprint-1".to_string()],
+                vec!["fingerprint-2".to_string(), "fingerprint-2b".to_string()],
+                vec!["fingerprint-3".to_string()],
+            ]
         );
     }
 
     #[test]
-    fn kp_encrypted_shares_rejects_wrong_share_ids() {
-        let err = KPEncryptedShares::new(vec![
-            test_kp_encrypted_share(1),
-            test_kp_encrypted_share(2),
-            test_kp_encrypted_share(4),
+    fn kp_encrypted_shares_roster_rejects_wrong_share_ids() {
+        let err = KPEncryptedSharesRoster::new(vec![
+            test_kp_encrypted_shares(1),
+            test_kp_encrypted_shares(2),
+            test_kp_encrypted_shares(4),
         ])
         .expect_err("ids [1, 2, 4] are not exactly 1..=n");
         assert!(format!("{err}").contains("share ids"), "{err}");
     }
 
     #[test]
-    fn kp_encrypted_shares_deserialize_through_validation() {
-        let json = serde_json::to_string(&vec![
-            test_kp_encrypted_share(2),
-            test_kp_encrypted_share(1),
+    fn kp_encrypted_shares_roster_replaces_one_recipient_and_preserves_the_rest() {
+        let shares = KPEncryptedSharesRoster::new(vec![
+            test_kp_encrypted_shares_for_fingerprints(1, vec!["a".into(), "b".into()]),
+            test_kp_encrypted_shares_for_fingerprints(2, vec!["c".into()]),
         ])
         .unwrap();
-        let shares: KPEncryptedShares = serde_json::from_str(&json).unwrap();
+
+        let (rotated, changed) = shares
+            .clone()
+            .replace_recipient("a", "d".into(), "new ciphertext".into())
+            .unwrap();
+        assert_eq!(changed.id.get(), 1);
+        assert_eq!(
+            changed
+                .ciphertexts_by_fingerprint
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["b", "d"]
+        );
+        assert_eq!(rotated.ciphertext_count(), 3);
+        assert!(rotated.find_by_fingerprint("a").is_none());
+        assert!(rotated.find_by_fingerprint("b").is_some());
+        assert!(rotated.find_by_fingerprint("c").is_some());
+        assert!(rotated.find_by_fingerprint("d").is_some());
+
+        let err = shares
+            .clone()
+            .replace_recipient("a", "c".into(), "collision".into())
+            .unwrap_err();
+        assert!(format!("{err}").contains("already present"), "{err}");
+
+        let err = shares
+            .replace_recipient("a", "a".into(), "same fingerprint".into())
+            .unwrap_err();
+        assert!(format!("{err}").contains("must differ"), "{err}");
+    }
+
+    #[test]
+    fn kp_encrypted_shares_roster_deserialize_through_validation() {
+        let json = serde_json::to_string(&vec![
+            test_kp_encrypted_shares(2),
+            test_kp_encrypted_shares(1),
+        ])
+        .unwrap();
+        let shares: KPEncryptedSharesRoster = serde_json::from_str(&json).unwrap();
         let ids = shares.iter().map(|s| s.id.get()).collect::<Vec<_>>();
         assert_eq!(ids, vec![1, 2]);
 
         let bad_json = serde_json::to_string(&vec![
-            test_kp_encrypted_share(1),
-            test_kp_encrypted_share(1),
+            test_kp_encrypted_shares(1),
+            test_kp_encrypted_shares(1),
         ])
         .unwrap();
-        let err = serde_json::from_str::<KPEncryptedShares>(&bad_json).unwrap_err();
+        let err = serde_json::from_str::<KPEncryptedSharesRoster>(&bad_json).unwrap_err();
         assert!(err.to_string().contains("encrypted share ids"), "{err}");
     }
 

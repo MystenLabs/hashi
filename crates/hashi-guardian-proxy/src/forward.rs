@@ -1,12 +1,14 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Forwards the four node-facing `GuardianService` RPCs to the enclave guardian
+//! Forwards the node/KP-facing `GuardianService` RPCs to the enclave guardian
 //! and rejects the operator/ceremony surface with `PERMISSION_DENIED`: the proxy
 //! is internet-facing and `OperatorInit` is one-shot and unauthenticated, so
 //! exposing it would let anyone wedge the guardian. Wrapped by
 //! [`crate::cache::CachingGuardianGrpc`] to cache `StandardWithdrawal`.
 
+use hashi_types::guardian::KpSigned;
+use hashi_types::guardian::ProvisionerRotateCertRequest;
 use hashi_types::proto;
 use hashi_types::proto::guardian_service_client::GuardianServiceClient;
 use hashi_types::proto::guardian_service_server::GuardianService;
@@ -35,6 +37,17 @@ fn denied(rpc: &str) -> Status {
         "{rpc} is not served by the guardian proxy; operator/ceremony calls reach the \
          guardian directly and KP shares use SingleProvisionerInit"
     ))
+}
+
+fn verify_provisioner_rotate_cert_signature(
+    request: &proto::SignedProvisionerRotateCertRequest,
+) -> Result<(), Status> {
+    let signed_request = KpSigned::<ProvisionerRotateCertRequest>::try_from(request.clone())
+        .map_err(|e| Status::invalid_argument(format!("malformed request: {e}")))?;
+    signed_request
+        .verify()
+        .map_err(|e| Status::unauthenticated(e.to_string()))?;
+    Ok(())
 }
 
 // Each method clones the cheap channel-backed client and forwards the whole
@@ -69,6 +82,20 @@ impl GuardianService for Forwarding {
         self.client.clone().update_committee_chain(request).await
     }
 
+    async fn provisioner_rotate_cert(
+        &self,
+        request: Request<proto::SignedProvisionerRotateCertRequest>,
+    ) -> Result<Response<proto::SignedProvisionerRotateCertResponse>, Status> {
+        // Admission control only: reject unsigned or corrupt traffic before an
+        // enclave round-trip. The enclave repeats verification and authorizes
+        // the signer against the latest encrypted-share roster.
+        // TODO: Once proxy authorization uses the S3-backed roster, check the
+        // signer here and invalidate the cached roster after a successful
+        // rotation so the next request observes the replacement cert.
+        verify_provisioner_rotate_cert_signature(request.get_ref())?;
+        self.client.clone().provisioner_rotate_cert(request).await
+    }
+
     // --- Rejected: operator/ceremony surface ---
 
     async fn operator_init(
@@ -76,13 +103,6 @@ impl GuardianService for Forwarding {
         _request: Request<proto::OperatorInitRequest>,
     ) -> Result<Response<proto::OperatorInitResponse>, Status> {
         Err(denied("OperatorInit"))
-    }
-
-    async fn operator_write_genesis(
-        &self,
-        _request: Request<proto::OperatorWriteGenesisRequest>,
-    ) -> Result<Response<proto::OperatorWriteGenesisResponse>, Status> {
-        Err(denied("OperatorWriteGenesis"))
     }
 
     async fn setup_new_key(
@@ -118,6 +138,13 @@ impl GuardianService for Forwarding {
 mod tests {
     use super::*;
     use crate::cache::CachingGuardianGrpc;
+    use hashi_types::guardian::proto_conversions::guardian_encrypted_share_to_pb;
+    use hashi_types::guardian::Ciphertext;
+    use hashi_types::guardian::GuardianEncryptedShare;
+    use hashi_types::guardian::ShareID;
+    use hashi_types::pgp::test_utils::mock_pgp_keypair;
+    use hashi_types::pgp::test_utils::sign_detached_in_process;
+    use hashi_types::pgp::PgpPublicCert;
     use hashi_types::proto::guardian_service_server::GuardianServiceServer;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
@@ -170,17 +197,17 @@ mod tests {
         ) -> Result<Response<proto::OperatorInitResponse>, Status> {
             unimplemented!("a real guardian would serve this; the proxy must never reach it")
         }
-        async fn operator_write_genesis(
-            &self,
-            _: Request<proto::OperatorWriteGenesisRequest>,
-        ) -> Result<Response<proto::OperatorWriteGenesisResponse>, Status> {
-            unimplemented!("a real guardian would serve this; the proxy must never reach it")
-        }
         async fn provisioner_init(
             &self,
             _: Request<proto::ProvisionerInitRequest>,
         ) -> Result<Response<proto::ProvisionerInitResponse>, Status> {
             unimplemented!("a real guardian would serve this; the proxy must never reach it")
+        }
+        async fn provisioner_rotate_cert(
+            &self,
+            _: Request<proto::SignedProvisionerRotateCertRequest>,
+        ) -> Result<Response<proto::SignedProvisionerRotateCertResponse>, Status> {
+            unimplemented!("not exercised by tests")
         }
         async fn operator_activate(
             &self,
@@ -296,12 +323,6 @@ mod tests {
         assert_eq!(denied.code(), tonic::Code::PermissionDenied);
 
         let denied = proxy
-            .operator_write_genesis(Request::new(proto::OperatorWriteGenesisRequest::default()))
-            .await
-            .expect_err("operator_write_genesis must be denied");
-        assert_eq!(denied.code(), tonic::Code::PermissionDenied);
-
-        let denied = proxy
             .provisioner_init(Request::new(proto::ProvisionerInitRequest::default()))
             .await
             .expect_err("provisioner_init must be denied");
@@ -318,5 +339,35 @@ mod tests {
             .await
             .expect_err("rotate_kps must be denied");
         assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[test]
+    fn verifies_provisioner_rotate_cert_signature_before_forwarding() {
+        let (cert_armored, secret_armored) = mock_pgp_keypair();
+        let cert = PgpPublicCert::new(cert_armored.clone()).unwrap();
+        let mut request = proto::SignedProvisionerRotateCertRequest {
+            new_kp_pgp_cert: cert_armored.clone(),
+            encrypted_share: Some(guardian_encrypted_share_to_pb(GuardianEncryptedShare {
+                id: ShareID::new(1).unwrap(),
+                ciphertext: Ciphertext {
+                    encapsulated_key: vec![1, 2, 3],
+                    aes_ciphertext: vec![4, 5, 6],
+                },
+            })),
+            expected_session_id: "session".into(),
+            signer_cert: cert_armored,
+            kp_signature: "placeholder".into(),
+            expected_cert_seq: Some(0),
+            target_kp_pgp_fingerprint: cert.fingerprint().to_hex(),
+        };
+        let domain = KpSigned::<ProvisionerRotateCertRequest>::try_from(request.clone()).unwrap();
+        request.kp_signature =
+            sign_detached_in_process(&secret_armored, &KpSigned::signed_bytes(&domain.data));
+
+        verify_provisioner_rotate_cert_signature(&request).unwrap();
+
+        request.target_kp_pgp_fingerprint.push('0');
+        let err = verify_provisioner_rotate_cert_signature(&request).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 }

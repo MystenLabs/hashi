@@ -4,7 +4,6 @@
 use super::verify_hashi_cert;
 use crate::Enclave;
 use bitcoin::Txid;
-use hashi_types::committee::certificate_threshold;
 use hashi_types::guardian::now_timestamp_secs;
 use hashi_types::guardian::GuardianError;
 use hashi_types::guardian::GuardianError::EnclaveUninitialized;
@@ -45,8 +44,9 @@ pub async fn standard_withdrawal(
                 response: response.clone(),
                 post_state,
             };
-            log_withdrawal_success(enclave.clone(), wid, msg, limiter_guard).await?;
-            // <-- Limiter guard drops upon log_withdrawal_success return. Next withdrawal can begin.
+            log_withdrawal_success(enclave.as_ref(), wid, msg, limiter_guard).await?;
+            // The limiter guard is retained through the durable log and released
+            // when `log_withdrawal_success` returns. The next withdrawal may now begin.
             Ok(enclave.sign(response))
         }
         Err(withdraw_err) => {
@@ -77,10 +77,9 @@ async fn normal_withdrawal_inner(
 
     // 1) Verify certificate (before acquiring limiter lock)
     let committee = enclave.state.get_committee()?;
-    let threshold = certificate_threshold(committee.total_weight());
 
     info!("Verifying request certificate.");
-    verify_hashi_cert(committee, threshold, &signed_request)?;
+    verify_hashi_cert(&committee, &signed_request)?;
     info!("Request certificate verified.");
 
     let (_, request) = signed_request.into_parts();
@@ -132,24 +131,19 @@ async fn normal_withdrawal_inner(
 }
 
 async fn log_withdrawal_success(
-    enclave: Arc<Enclave>,
+    enclave: &Enclave,
     wid: WithdrawalID,
     msg: WithdrawalLogMessage,
     limiter_guard: OwnedMutexGuard<RateLimiter>,
 ) -> GuardianResult<()> {
-    // The task owns the limiter guard and continues if the RPC future is cancelled.
-    // In production, exhausting the write grace period panics and the process-wide
-    // panic hook aborts the enclave.
-    tokio::spawn(async move {
-        enclave
-            .log_withdraw(msg)
-            .await
-            .expect("withdrawal log write failed");
-        info!("Withdrawal {} logged.", wid);
-        drop(limiter_guard);
-    })
-    .await
-    .expect("withdrawal log task failed");
+    enclave
+        .log_withdraw(msg)
+        .await
+        .expect("withdrawal log write failed");
+    info!("Withdrawal {} logged.", wid);
+    // Rust would drop this guard at function exit; the explicit drop documents
+    // that the next withdrawal may enter only after this one is durably logged.
+    drop(limiter_guard);
     Ok(())
 }
 
@@ -182,7 +176,10 @@ mod tests {
     use hashi_types::guardian::InitConfig;
     use hashi_types::guardian::LimiterConfig;
     use hashi_types::guardian::LimiterState;
+    use hashi_types::guardian::LogMessage;
+    use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::StandardWithdrawalRequest;
+    use hashi_types::guardian::VersionedLogMessage;
     use hashi_types::guardian::WithdrawStage;
 
     /// Sets up an enclave with a single committee and token bucket limiter.
@@ -190,7 +187,7 @@ mod tests {
         network: Network,
         committee: HashiCommittee,
         max_bucket_capacity_sats: u64,
-    ) -> Arc<Enclave> {
+    ) -> (Arc<Enclave>, crate::test_utils::CapturedPuts) {
         let hashi_kp = create_btc_keypair_for_test(&[6u8; 32]);
         let hashi_btc_master_pubkey =
             hashi_master_g_from_btc_xonly_for_test(&hashi_kp.x_only_public_key().0);
@@ -206,8 +203,11 @@ mod tests {
 
         // operator_init installs standby config; test activation installs the
         // committee and limiter before withdrawals.
+        let (logger, captures) = crate::test_utils::mock_logger_capturing();
         let enclave = Enclave::create_operator_initialized_with(
-            OperatorInitTestArgs::default().with_config(config),
+            OperatorInitTestArgs::default()
+                .with_s3_logger(logger)
+                .with_config(config),
         )
         .await;
 
@@ -224,7 +224,7 @@ mod tests {
             .expect("activate_enclave_for_testing should succeed on a fresh enclave");
 
         assert!(enclave.is_fully_initialized());
-        enclave
+        (enclave, captures)
     }
 
     #[tokio::test]
@@ -245,7 +245,7 @@ mod tests {
             .gross_outflow_amount()
             .to_sat();
         // Set request amount as the max bucket capacity
-        let enclave =
+        let (enclave, _captures) =
             setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
 
         let result = normal_withdrawal_inner(enclave, signed_request).await;
@@ -262,7 +262,7 @@ mod tests {
         );
         let amount_sats = req1.message().utxos().gross_outflow_amount().to_sat();
         // Bucket capacity == one withdrawal, so second will be rejected.
-        let enclave =
+        let (enclave, captures) =
             setup_fully_initialized_enclave(Network::Regtest, committee, amount_sats).await;
 
         let first = standard_withdrawal(enclave.clone(), req1).await;
@@ -280,5 +280,44 @@ mod tests {
             second.unwrap_err(),
             GuardianError::RateLimitExceeded
         ));
+
+        let captured = captures.lock().unwrap();
+        assert_eq!(
+            captured.len(),
+            2,
+            "both withdrawal outcomes should be logged"
+        );
+        let success: LogRecord = serde_json::from_slice(&captured[0].1).unwrap();
+        assert_eq!(captured[0].0, success.object_key());
+        let VersionedLogMessage::V2(LogMessage::Withdrawal(message)) = success.message else {
+            panic!("expected V2 withdrawal record");
+        };
+        let WithdrawalLogMessage::Success {
+            request_data,
+            post_state,
+            ..
+        } = *message
+        else {
+            panic!("expected successful withdrawal record");
+        };
+        assert_eq!(request_data.seq, 0);
+        assert_eq!(post_state.next_seq, 1);
+        assert_eq!(post_state.num_tokens_available, 0);
+
+        let failure: LogRecord = serde_json::from_slice(&captured[1].1).unwrap();
+        assert_eq!(captured[1].0, failure.object_key());
+        let VersionedLogMessage::V2(LogMessage::Withdrawal(message)) = failure.message else {
+            panic!("expected V2 withdrawal record");
+        };
+        let WithdrawalLogMessage::Failure {
+            request_data,
+            error,
+            ..
+        } = *message
+        else {
+            panic!("expected failed withdrawal record");
+        };
+        assert_eq!(request_data.seq, 1);
+        assert_eq!(error, GuardianError::RateLimitExceeded);
     }
 }

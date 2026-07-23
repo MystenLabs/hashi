@@ -11,15 +11,19 @@ The production guardian initialization flow is split by actor:
 
 ```bash
 cargo run -p hashi-guardian-init -- operator ceremony --config guardian-init.sample.yaml
-cargo run -p hashi-guardian-init -- key-provisioner ceremony --config guardian-init.sample.yaml
+cargo run -p hashi-guardian-init -- key-provisioner ceremony --config guardian-init.sample.yaml --encrypted-shares-path /secure/path/kp-shares.json
 cargo run -p hashi-guardian-init -- operator provision --config guardian-init.sample.yaml
 cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-init.sample.yaml
 cargo run -p hashi-guardian-init -- operator activate --config guardian-init.sample.yaml
+cargo run -p hashi-guardian-init -- key-provisioner rotate-cert --config guardian-init.sample.yaml --target-kp-pgp-fingerprint 0123456789ABCDEF0123456789ABCDEF01234567 --new-kp-pgp-cert-path /path/to/kp3-new.asc
 ```
 
-Each KP generates a PGP key on a yubikey and exports the public cert to the
-operator; the key ceremony and provisioning flow is then driven through these
-commands. All production commands read the same unified config file; see
+On first deploy, add `--do-genesis` to the `operator provision` command and
+every `key-provisioner provision` command. Omit it for replacement deployments.
+
+Each KP generates one or more PGP keys on yubikeys and exports the public certs
+to the operator; the key ceremony and provisioning flow is then driven through
+these commands. All production commands read the same unified config file; see
 [`guardian-init.sample.yaml`](guardian-init.sample.yaml).
 
 For a fully-local end-to-end run of this flow (local sui node + a dockerized
@@ -41,12 +45,14 @@ ceremony commands both read it.
 Drives a fresh **ceremony-mode** guardian through the one-time genesis BTC key
 setup (`sharing_seq = 0`). It connects over gRPC and: `operator_init` (ceremony mode, S3-only) →
 `setup_new_key` → verifies the response signature and shape → confirms each
-encrypted share is addressed only to its labeled KP cert (PKESK recipients,
-parsed without decrypting) → cross-checks the guardian's `ceremony/` audit log
-and `kp-shares/` recovery log.
+share's recipient roster matches its expected KP cert set and each
+PGP-encrypted ciphertext targets its keyed cert (parsed without decrypting) →
+cross-checks the guardian's `ceremony/` audit log and `kp-shares/` recovery log.
 
-Each share is labeled with its recipient cert's `recipient_fingerprint`, so a KP
-finds their share by fingerprint (not positional index).
+`kp_roster.kp_pgp_cert_paths` has one entry per KP/share id; each entry
+may contain multiple PGP cert paths for that KP. Each encrypted copy is keyed
+by its recipient cert's fingerprint, so a KP finds its encrypted share by
+fingerprint.
 
 ```bash
 cargo run -p hashi-guardian-init -- operator ceremony --config guardian-init.sample.yaml
@@ -61,10 +67,12 @@ Confirms a KP can fetch and decrypt their share from the latest setup or
 rotation ceremony. Trust is anchored to the guardian's S3 attestation log (no
 gRPC to the live guardian): it discovers the latest ceremony and KP-share state
 from S3, verifies each record against its writing session's attested signing
-pubkey and the expected `n`/`t`, confirms every encrypted share is addressed
-only to its labeled KP cert, finds the share labeled for this KP's cert
-fingerprint, decrypts via the yubikey (`gpg --decrypt`), and verifies the
-decrypted share against its commitment.
+pubkey and the expected `n`/`t`, and confirms each share's recipient roster and
+PGP-encrypted ciphertexts match the expected KP cert sets. It then uses
+`kp_pgp_cert_path` to identify this KP's roster entry and decrypts and
+commitment-checks the copy for every cert in that entry. After verification it
+saves the full ceremony state, including every KP's encrypted shares and the
+public ceremony data, to the requested path.
 
 The operator `run` command verifies live `/info` signed info and Nitro
 attestation against the configured current build before trusting the session
@@ -72,11 +80,16 @@ signing key. The KP `verify` command anchors trust to the S3 `init/`
 attestation log before verifying the ceremony and share logs under that
 attested session key.
 
-Only the share's **ciphertext** is written to disk (a temp file, deleted on
-drop); the decrypted scalar lives only in memory.
+Each ciphertext in the selected roster entry is piped from memory to `gpg` over
+stdin. No temporary ciphertext or plaintext file is written locally; only the
+verified ceremony state containing the encrypted shares is persisted.
+
+The selected `kp_pgp_cert_path` must name one member of the KP/share entry.
+Ceremony validation derives the complete cert set from `kp_roster`, so a local
+subset cannot accidentally skip one of this KP's configured YubiKeys.
 
 ```bash
-cargo run -p hashi-guardian-init -- key-provisioner ceremony --config guardian-init.sample.yaml
+cargo run -p hashi-guardian-init -- key-provisioner ceremony --config guardian-init.sample.yaml --encrypted-shares-path /secure/path/kp-shares.json
 ```
 
 Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
@@ -98,18 +111,25 @@ It:
    `genesis/` record if one already exists.
 4. Builds the withdraw-mode `InitConfig` from limiter config, on-chain MPC
    master `G`, the KP PCR allowlist, and configured Bitcoin network.
-5. Calls withdraw-mode `OperatorInit` with guardian S3 config and `InitConfig`;
-   the enclave reads and pins the latest complete ceremony and KP-share state.
-6. On first deploy only, writes the on-chain committee to `genesis/record.json`
-   through `OperatorWriteGenesis`.
+5. Requires the observed serving-committee state to agree with the
+   `--do-genesis` intent marker. On first deploy, the flag causes it to build an
+   optional `GenesisState` from the current on-chain committee; otherwise a
+   serving committee must already exist.
+6. Calls withdraw-mode `OperatorInit` with guardian S3 config, `InitConfig`, and
+   the optional genesis state; the enclave pins all three inputs plus the latest
+   complete ceremony and KP-share state.
 7. Verifies the live and S3-logged `GuardianInfo` match the installed ceremony
    instance and stable config.
-8. Prints the `config_hash` that key provisioners must verify before submitting
-   shares.
+8. Prints the config and optional genesis hashes that key provisioners must
+   verify before submitting shares.
 
 ```bash
 cargo run -p hashi-guardian-init -- operator provision --config guardian-init.sample.yaml
 ```
+
+On first deploy, add `--do-genesis`. The flag is purely an explicit intent
+marker; the committee still comes from on-chain state and requires threshold KP
+authorization during PI.
 
 Config: see [`guardian-init.sample.yaml`](guardian-init.sample.yaml). This
 command uses `guardian_endpoint`, `guardian_s3`, `bitcoin_network`, `hashi`,
@@ -117,10 +137,11 @@ command uses `guardian_endpoint`, `guardian_s3`, `bitcoin_network`, `hashi`,
 
 ## key-provisioner provision
 
-A one-shot flow run by a key provisioner when a new guardian instance is
-brought up to replace one that went down. Each KP decrypts through their
-yubikey-backed gpg setup; plaintext never touches disk, but the raw share scalar
-is held in this process' memory long enough to verify and re-encrypt it. It:
+A one-shot flow run by a key provisioner for a new guardian instance, either on
+first deploy or when replacing a guardian that went down. Each KP decrypts
+through their yubikey-backed gpg setup; plaintext never touches disk, but the
+raw share scalar is held in this process' memory long enough to verify and
+re-encrypt it. It:
 
 1. Fetches and verifies the relay/standby endpoint's signed `GuardianInfo`
    (attestation-anchored), pinning the standby session.
@@ -134,26 +155,70 @@ is held in this process' memory long enough to verify and re-encrypt it. It:
 4. Recomputes the stable `InitConfig` from limiter config, on-chain MPC master
    `G`, PCR allowlist, and network, then confirms its `config_hash` matches the
    enclave.
-5. Reads this KP's encrypted share from the latest `kp-shares/{seq}/` state,
-   verifies every share's recipients against the
-   roster, finds the one labeled for this KP's cert fingerprint, decrypts it via
-   the yubikey (`gpg --decrypt` over a pipe; the plaintext stays in memory and
-   never touches disk), and verifies the decrypted share against its commitment.
-6. HPKE-encrypts the decrypted share to the new guardian's `encryption_pubkey`
+5. Requires the observed serving-committee state to agree with the
+   `--do-genesis` intent marker. With the flag, independently derives the
+   current on-chain committee's `genesis_state_hash`; confirms the optional hash
+   matches the enclave.
+6. Reads this KP's PGP-encrypted share from the latest `kp-shares/{seq}/`
+   state, verifies each encrypted copy's recipient against the roster, then
+   decrypts and commitment-checks only the copy selected by
+   `kp_pgp_cert_path` (`gpg --decrypt` over a pipe; the plaintext stays in
+   memory and never touches disk).
+7. HPKE-encrypts the decrypted share to the new guardian's `encryption_pubkey`
    from its `GuardianInfo`.
-7. Signs the exact `(session, config_hash, encrypted share)` submission and sends
-   it to the configured relay endpoint. The relay pre-verifies and collects
-   T-of-N distinct submissions; the enclave then authoritatively re-verifies
-   every signature and request binding before completing `ProvisionerInit`.
+8. Signs the exact `(session, config_hash, optional genesis_state_hash,
+   encrypted share)` submission and sends it to the configured relay endpoint.
+   The relay pre-verifies and collects T-of-N distinct submissions; the enclave
+   then authoritatively re-verifies every signature and request binding before
+   completing `ProvisionerInit`. On first deploy, that same threshold authorizes
+   writing the committee to `genesis/record.json`.
 
 ```bash
 cargo run -p hashi-guardian-init -- key-provisioner provision --config guardian-init.sample.yaml
 ```
 
+On first deploy, each KP adds `--do-genesis`. The flag is purely an intent
+marker; the signed optional genesis hash remains the authorization.
+
 See [`guardian-init.sample.yaml`](guardian-init.sample.yaml) for the unified
 config. This command uses `kp_pgp_cert_path`, `relay_endpoint`, `hashi`,
 `kp_roster`, and `limiter_config`. The MPC committee verifying key `G` is fetched
 from on-chain Hashi state.
+
+## key-provisioner rotate-cert
+
+Replaces one OpenPGP cert in this KP's roster entry for the active guardian
+without changing the BTC key, sharing instance, threshold, share id, or any of
+the KP's other certificates.
+
+It:
+
+1. Loads the signing cert from `kp_pgp_cert_path` and the current roster from
+   `kp_roster`. The signing cert and target fingerprint must belong to the same
+   KP/share entry. They may identify the same cert for a planned rotation or
+   different certs when replacing a lost YubiKey. The replacement cert must not
+   collide with another roster fingerprint.
+2. Fetches and verifies the active guardian's `GuardianInfo` through
+   `relay_endpoint`, then requires its BTC public key to match the latest
+   attested `ceremony/` log and uses that log's sharing instance.
+3. Reads and verifies the latest `kp-shares/{sharing_seq}/` state against the
+   current roster, decrypts the signing cert's copy, and verifies the share
+   commitment.
+4. HPKE-encrypts the same share to the guardian, signs the request with the
+   signing cert, binds the target fingerprint and observed `cert_seq` to reject
+   stale updates, and calls `ProvisionerRotateCert` through the relay.
+5. Verifies the guardian-signed response and the next `kp-shares/` snapshot,
+   including that only the targeted certificate ciphertext changed.
+
+```bash
+cargo run -p hashi-guardian-init -- key-provisioner rotate-cert \
+  --config guardian-init.sample.yaml \
+  --target-kp-pgp-fingerprint 0123456789ABCDEF0123456789ABCDEF01234567 \
+  --new-kp-pgp-cert-path /path/to/kp3-new.asc
+```
+
+After success, replace the path matching the target fingerprint with the new
+path in `kp_roster`. If `kp_pgp_cert_path` names the target cert, update it too.
 
 ## operator activate
 

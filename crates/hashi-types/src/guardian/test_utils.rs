@@ -11,14 +11,17 @@ use super::HashiCommittee;
 use super::HashiCommitteeMember;
 use super::HashiSigned;
 use super::InitConfig;
-use super::KPEncryptedShare;
 use super::KPEncryptedShares;
+use super::KPEncryptedSharesRoster;
+use super::KpCerts;
+use super::KpCertsRoster;
 use super::KpSigned;
 use super::LimiterConfig;
 use super::NitroAttestation;
 use super::OperatorInitRequest;
 use super::PcrAllowlist;
 use super::ProvisionerInitRequest;
+use super::ProvisionerRotateCertResponse;
 use super::RotateKpsResponse;
 use super::S3BucketInfo;
 use super::S3Config;
@@ -92,6 +95,7 @@ impl GetGuardianInfoResponse {
             }),
             encryption_pubkey: vec![0u8; 32],
             config_hash: None,
+            genesis_state_hash: None,
             untrusted_git_revision: "unknown".to_string(),
             enclave_btc_pubkey: None,
             limiter_state: None,
@@ -104,15 +108,25 @@ impl GetGuardianInfoResponse {
             NitroAttestation::new("abcd".as_bytes().to_vec()),
             signing_pub_key,
             GuardianSigned::new(info, &signing_key, 1234),
-            dummy_encrypted_shares(),
         )
     }
 }
 
 impl SetupNewKeyRequest {
     pub fn mock_for_testing() -> Self {
-        SetupNewKeyRequest::new(mock_pgp_certs(TEST_N), TEST_N, TEST_T).unwrap()
+        SetupNewKeyRequest::new(mock_kp_certs_roster(TEST_N), TEST_N, TEST_T).unwrap()
     }
+}
+
+pub fn mock_kp_certs_roster(n: usize) -> KpCertsRoster {
+    KpCertsRoster::new(mock_kp_certs(n)).unwrap()
+}
+
+pub fn mock_kp_certs(n: usize) -> Vec<KpCerts> {
+    mock_pgp_certs(n)
+        .into_iter()
+        .map(|cert| KpCerts::new(vec![cert]).unwrap())
+        .collect()
 }
 
 fn dummy_commitments() -> ShareCommitments {
@@ -125,14 +139,17 @@ fn dummy_commitments() -> ShareCommitments {
     ShareCommitments::new(commitments).unwrap()
 }
 
-fn dummy_encrypted_shares() -> KPEncryptedShares {
-    KPEncryptedShares::new(
+fn dummy_encrypted_shares() -> KPEncryptedSharesRoster {
+    KPEncryptedSharesRoster::new(
         (0..TEST_N)
-            .map(|i| KPEncryptedShare {
+            .map(|i| KPEncryptedShares {
                 id: NonZeroU16::new((i + 1) as u16).unwrap(),
-                recipient_fingerprint: format!("DUMMY FINGERPRINT {i}"),
-                armored_ciphertext: "-----BEGIN PGP MESSAGE-----\n\n-----END PGP MESSAGE-----"
-                    .into(),
+                ciphertexts_by_fingerprint: [(
+                    format!("DUMMY FINGERPRINT {i}"),
+                    "-----BEGIN PGP MESSAGE-----\n\n-----END PGP MESSAGE-----".into(),
+                )]
+                .into_iter()
+                .collect(),
             })
             .collect(),
     )
@@ -164,6 +181,21 @@ impl GuardianSigned<RotateKpsResponse> {
     }
 }
 
+impl GuardianSigned<ProvisionerRotateCertResponse> {
+    pub fn mock_for_testing() -> Self {
+        let response = ProvisionerRotateCertResponse {
+            cert_seq: 7,
+            encrypted_shares: dummy_encrypted_shares()
+                .into_vec()
+                .into_iter()
+                .next()
+                .expect("dummy shares should be non-empty"),
+        };
+        let signing_key = SigningKey::from([1u8; 32]);
+        GuardianSigned::new(response, &signing_key, 0)
+    }
+}
+
 impl OperatorInitRequest {
     pub fn mock_for_testing() -> Self {
         let s3_config = super::S3Config {
@@ -174,8 +206,9 @@ impl OperatorInitRequest {
                 bucket: "bucket".into(),
                 region: "us-east-1".into(),
             },
+            retention_environment: super::S3RetentionEnvironment::Testnet,
         };
-        OperatorInitRequest::new_withdraw_mode(s3_config, InitConfig::mock_for_testing(None))
+        OperatorInitRequest::new_withdraw_mode(s3_config, InitConfig::mock_for_testing(None), None)
     }
 }
 
@@ -190,8 +223,12 @@ impl ProvisionerInitRequest {
             },
         };
         let (cert_armored, _) = crate::pgp::test_utils::mock_pgp_keypair();
-        let request =
-            SingleProvisionerInitRequest::new("mock-session".into(), [7u8; 32], encrypted_share);
+        let request = SingleProvisionerInitRequest::new(
+            "mock-session".into(),
+            [7u8; 32],
+            None,
+            encrypted_share,
+        );
         ProvisionerInitRequest(vec![KpSigned {
             data: request,
             signer_cert: crate::pgp::PgpPublicCert::new(cert_armored).unwrap(),
@@ -394,6 +431,7 @@ impl S3Config {
             secret_key: "test-secret-key".to_string(),
             session_token: None,
             bucket_info: S3BucketInfo::mock_for_testing(),
+            retention_environment: super::S3RetentionEnvironment::Testnet,
         }
     }
 }

@@ -4,12 +4,14 @@
 //! MPC (Multi-Party Computation) Service
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Context;
 use fastcrypto::serde_helpers::ToFromByteArray;
 use fastcrypto::traits::ToFromBytes;
 use futures::future::join_all;
+use std::collections::HashSet;
 use sui_futures::service::Service;
 use sui_rpc::proto::sui::rpc::v2::execution_error::ExecutionErrorKind;
 use tokio::sync::watch;
@@ -33,6 +35,8 @@ use crate::mpc::SigningManager;
 use crate::mpc::rpc::RpcP2PChannel;
 use crate::mpc::types::CertificateV1;
 use crate::mpc::types::MpcOutputRecoveryOutcome;
+use crate::mpc::types::NonceCertTimestamp;
+use crate::mpc::types::NonceCertToVerify;
 use crate::mpc::types::NonceGenerationProtocol;
 use crate::mpc::types::ProtocolType;
 use crate::onchain::Notification;
@@ -50,9 +54,11 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PROTOCOL_ATTEMPTS: u32 = 3;
 const START_RECONFIG_POLL_INTERVAL: Duration = Duration::from_millis(500);
-const MPC_RECONFIG_TIMEOUT: Duration = Duration::from_secs(600);
+const RECONFIG_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 const RECONCILE_TICK: Duration = Duration::from_secs(15);
 const NONCE_WINDOW_WAIT_POLL: Duration = Duration::from_millis(200);
+const MAX_KEY_REREGISTRATION_BUMPS: u32 = 3;
+const NONCE_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Move `hashi::reconfig::ENotReconfiguring`.
 const RECONFIG_E_NOT_RECONFIGURING: &str = "ENotReconfiguring";
 
@@ -95,6 +101,7 @@ pub struct MpcService {
     refill_rx: watch::Receiver<u32>,
     reconciling: Arc<tokio::sync::Mutex<()>>,
     backup_handle: crate::backup::BackupHandle,
+    replacement_keys_target_epoch: Mutex<Option<u64>>,
 }
 
 impl MpcService {
@@ -108,6 +115,7 @@ impl MpcService {
             refill_rx,
             reconciling: Arc::new(tokio::sync::Mutex::new(())),
             backup_handle,
+            replacement_keys_target_epoch: Mutex::new(None),
         };
         let handle = MpcHandle { key_ready_rx };
         (service, handle)
@@ -138,6 +146,10 @@ impl MpcService {
             self.try_submit_genesis_reconfig().await;
         } else if self.inner.is_in_current_committee() {
             loop {
+                if let Some(epoch) = self.get_pending_epoch_change() {
+                    self.handle_reconfig(epoch).await;
+                    continue;
+                }
                 self.sync_if_stale().await;
                 let epoch = self.inner.onchain_state().epoch();
                 if self.inner.signing_manager_for(epoch).is_some() {
@@ -184,18 +196,26 @@ impl MpcService {
                 }
                 Ok(()) = self.refill_rx.changed() => {
                     let next_batch = *self.refill_rx.borrow();
-                    for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
-                        match self.refill_presignatures(next_batch).await {
-                            Ok(()) => break,
-                            Err(e) => {
-                                error!(
-                                    "Presignature refill attempt {attempt}/{MAX_PROTOCOL_ATTEMPTS} failed: {e}"
-                                );
-                                if attempt < MAX_PROTOCOL_ATTEMPTS {
-                                    tokio::time::sleep(RETRY_INTERVAL).await;
-                                }
-                            }
-                        }
+                    self.refill_with_retries(next_batch).await;
+                }
+            }
+        }
+    }
+
+    async fn refill_with_retries(&self, next_batch: u32) {
+        for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
+            if let Err(e) = self.bail_if_reconfig_pending() {
+                info!("presignature refill stopped: {e}");
+                return;
+            }
+            match self.refill_presignatures(next_batch).await {
+                Ok(()) => break,
+                Err(e) => {
+                    error!(
+                        "Presignature refill attempt {attempt}/{MAX_PROTOCOL_ATTEMPTS} failed: {e}"
+                    );
+                    if attempt < MAX_PROTOCOL_ATTEMPTS {
+                        tokio::time::sleep(RETRY_INTERVAL).await;
                     }
                 }
             }
@@ -418,7 +438,8 @@ impl MpcService {
             None,
             move_types::ProtocolType::Dkg,
             signer,
-        );
+        )
+        .with_idle_timeout(RECONFIG_RECEIVE_IDLE_TIMEOUT);
         let output = MpcManager::run_dkg(
             &mpc_manager,
             &p2p_channel,
@@ -458,7 +479,8 @@ impl MpcService {
             Some(batch_index),
             move_types::ProtocolType::NonceGeneration,
             signer,
-        );
+        )
+        .with_idle_timeout(NONCE_RECEIVE_IDLE_TIMEOUT);
         let metrics = &self.inner.metrics;
         let _timer = metrics
             .mpc_total_duration_seconds
@@ -521,8 +543,25 @@ impl MpcService {
         Ok(())
     }
 
+    fn bail_if_reconfig_pending(&self) -> anyhow::Result<()> {
+        match self.get_pending_epoch_change() {
+            Some(p) => anyhow::bail!("superseded by pending reconfig to epoch {p}"),
+            None => Ok(()),
+        }
+    }
+
+    fn reconfig_target_live(&self, target_epoch: u64) -> bool {
+        let state = self.inner.onchain_state().state();
+        let committees = &state.hashi().committees;
+        reconfig_target_live(
+            committees.pending_epoch_change(),
+            committees.epoch(),
+            target_epoch,
+        )
+    }
+
     async fn recover_presigning_state(&self, output: &MpcOutput) -> anyhow::Result<()> {
-        let (num_consumed, epoch, committee) = {
+        let (num_consumed, epoch, committee, pending) = {
             let state = self.inner.onchain_state().state();
             let hashi = state.hashi();
             let num_consumed = hashi.num_consumed_presigs;
@@ -533,13 +572,31 @@ impl MpcService {
                 .get(&epoch)
                 .ok_or_else(|| anyhow::anyhow!("No committee found for epoch {epoch}"))?
                 .clone();
-            (num_consumed, epoch, committee)
+            let mut pending: HashSet<u64> = HashSet::new();
+            for txn in hashi.withdrawal_queue.withdrawal_txns().values() {
+                if txn.signing_epoch() != epoch {
+                    continue;
+                }
+                for signature in &txn.signing.signatures {
+                    if let move_types::MpcSig::Pending(index) = signature {
+                        anyhow::ensure!(
+                            *index < num_consumed,
+                            "pending presig index {index} is not below allocation cursor {num_consumed}",
+                        );
+                        anyhow::ensure!(
+                            pending.insert(*index),
+                            "pending presig index {index} is assigned more than once",
+                        );
+                    }
+                }
+            }
+            (num_consumed, epoch, committee, pending)
         };
         let mpc_manager = self
             .inner
             .mpc_manager()
             .ok_or_else(|| anyhow::anyhow!("MpcManager not initialized"))?;
-        let (batch_size_per_weight, params) = {
+        let (batch_size_per_weight, params, use_legacy, protocol, floor) = {
             let mgr = mpc_manager.read().unwrap();
             (
                 mgr.batch_size_per_weight,
@@ -547,50 +604,168 @@ impl MpcService {
                     t: mgr.mpc_config.threshold,
                     f: mgr.mpc_config.max_faulty,
                 },
+                mgr.mpc_config.presignature_derivation_version.use_legacy(),
+                mgr.mpc_config.nonce_generation_protocol,
+                mgr.required_nonce_weight(),
             )
         };
-        // Walk through batches to find the one containing `num_consumed`.
-        // Each batch can have a different size with unequal committee weights.
+        let mut boundaries: Vec<(u32, u64, usize)> = Vec::new();
         let mut batch_start = 0u64;
         let mut batch_index = 0u32;
-        let presignatures = loop {
+        loop {
+            self.bail_if_reconfig_pending()?;
+            let size = self
+                .nonce_batch_size_from_certs(
+                    &mpc_manager,
+                    epoch,
+                    batch_index,
+                    protocol,
+                    params,
+                    use_legacy,
+                    batch_size_per_weight,
+                    floor,
+                )
+                .await?;
+            let Some(size) = size else {
+                anyhow::ensure!(
+                    batch_start >= num_consumed,
+                    "nonce batch {batch_index} at start {batch_start} read sub-floor below cursor \
+                     {num_consumed} — partial cert fetch",
+                );
+                break;
+            };
+            boundaries.push((batch_index, batch_start, size));
+            if num_consumed < batch_start + size as u64 {
+                break;
+            }
+            batch_start += size as u64;
+            batch_index += 1;
+        }
+        anyhow::ensure!(
+            !boundaries.is_empty(),
+            "no certified nonce batches to recover for epoch {epoch} at cursor {num_consumed}",
+        );
+        let recovered_end = boundaries
+            .last()
+            .map_or(0, |&(_, start, size)| start + size as u64);
+        let first_pending = boundaries
+            .iter()
+            .position(|&(_, start, size)| {
+                let end = start + size as u64;
+                pending.iter().any(|&p| p >= start && p < end)
+            })
+            .unwrap_or_else(|| boundaries.len().saturating_sub(1));
+        let mut retained: Vec<(Presignatures, u32, u64)> = Vec::new();
+        // TODO(IOP-529): Avoid the double cert-fetch in presig recovery.
+        for &(bidx, start, size) in boundaries.iter().skip(first_pending) {
+            self.bail_if_reconfig_pending()?;
             let presigs = self
                 .recover_presignatures_from_certs(
                     &mpc_manager,
                     epoch,
-                    batch_index,
+                    bidx,
                     batch_size_per_weight,
                     params,
                 )
                 .await?;
-            let size = presigs.len() as u64;
-            if num_consumed < batch_start + size {
-                break presigs;
-            }
-            batch_start += size;
-            batch_index += 1;
-        };
-        let batch_size = presignatures.len();
+            anyhow::ensure!(
+                presigs.len() == size,
+                "batch {bidx} boundary size {size} (Phase 1) != reconstructed len {} (Phase 2)",
+                presigs.len(),
+            );
+            retained.push((presigs, bidx, start));
+        }
+        anyhow::ensure!(
+            self.inner.onchain_state().epoch() == epoch,
+            "epoch changed during presigning recovery",
+        );
+        let latest_cursor = self
+            .inner
+            .onchain_state()
+            .state()
+            .hashi()
+            .num_consumed_presigs;
+        anyhow::ensure!(
+            latest_cursor <= recovered_end,
+            "cursor {latest_cursor} advanced past recovered end {recovered_end} during recovery",
+        );
         let address = self.inner.config.validator_address()?;
-        let signing_manager = SigningManager::new(
+        let retained_count = retained.len();
+        let signing_manager = SigningManager::new_recovered(
             address,
             committee,
             output.threshold,
             output.key_shares.clone(),
             output.public_key,
-            presignatures,
-            batch_index,
-            batch_start,
+            retained,
+            num_consumed,
+            &pending,
             PRESIG_REFILL_DIVISOR,
             self.refill_tx.clone(),
-        );
+        )?;
         self.inner.store_signing_manager(signing_manager);
         info!(
-            "Recovered presigning state: batch_index={batch_index}, \
-             batch_start={batch_start}, batch_size={batch_size} \
-             (num_consumed_presigs={num_consumed})."
+            "Recovered presigning state: {retained_count} of {} batch(es) retained from \
+             first_pending_batch={first_pending}, recovered_end={recovered_end}, \
+             num_consumed_presigs={num_consumed}, pending={}",
+            boundaries.len(),
+            pending.len(),
         );
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn nonce_batch_size_from_certs(
+        &self,
+        mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
+        epoch: u64,
+        batch_index: u32,
+        protocol: NonceGenerationProtocol,
+        params: Parameters,
+        use_legacy: bool,
+        batch_size_per_weight: u16,
+        floor: u32,
+    ) -> anyhow::Result<Option<usize>> {
+        let onchain_state = self.inner.onchain_state().clone();
+        let weight = match protocol {
+            NonceGenerationProtocol::Vanilla => {
+                let Some(certs) = onchain_state
+                    .fetch_stamped_certs(
+                        epoch,
+                        Some(batch_index),
+                        move_types::ProtocolType::NonceGeneration,
+                    )
+                    .await?
+                else {
+                    return Ok(None);
+                };
+                let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
+                certified_nonce_weight(mpc_manager, &certs)
+            }
+            NonceGenerationProtocol::Avid => {
+                let certs = fetch_certificates(
+                    &onchain_state,
+                    epoch,
+                    Some(batch_index),
+                    move_types::ProtocolType::NonceGeneration,
+                )
+                .await?;
+                if certs.is_empty() {
+                    return Ok(None);
+                }
+                let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
+                certified_nonce_weight(mpc_manager, &certs)
+            }
+        };
+        if weight < floor {
+            return Ok(None);
+        }
+        Ok(Some(presig_count(
+            weight as usize,
+            params,
+            use_legacy,
+            batch_size_per_weight,
+        )))
     }
 
     async fn sync_if_stale(&self) {
@@ -613,7 +788,15 @@ impl MpcService {
         let output = match self.recover_mpc_state().await {
             Ok(output) => output,
             Err(e) => {
+                if let Some(p) = self.get_pending_epoch_change() {
+                    info!(
+                        "sync_if_stale: recover_mpc_state for epoch {epoch} superseded by \
+                         pending reconfig to {p} ({e})"
+                    );
+                    return;
+                }
                 error!("sync_if_stale: recover_mpc_state failed for epoch {epoch}: {e}");
+                self.re_register_keys_if_lost().await;
                 return;
             }
         };
@@ -622,6 +805,26 @@ impl MpcService {
                 info!("sync_if_stale: recovered epoch {epoch} via certs path");
             }
             Err(certs_err) => {
+                if let Some(p) = self.get_pending_epoch_change() {
+                    info!(
+                        "sync_if_stale: recovery for epoch {epoch} superseded by pending \
+                         reconfig to {p} ({certs_err})"
+                    );
+                    return;
+                }
+                let num_consumed = self
+                    .inner
+                    .onchain_state()
+                    .state()
+                    .hashi()
+                    .num_consumed_presigs;
+                if num_consumed > 0 {
+                    error!(
+                        "sync_if_stale: recovery failed for epoch {epoch} at cursor \
+                         {num_consumed} ({certs_err}); retrying on the next tick (no genesis fallback)"
+                    );
+                    return;
+                }
                 info!(
                     "sync_if_stale: certs path failed for epoch {epoch} ({certs_err}), \
                      falling back to protocol"
@@ -634,6 +837,97 @@ impl MpcService {
             }
         }
         let _ = self.key_ready_tx.send(Some(output.public_key));
+    }
+
+    async fn re_register_keys_if_lost(&self) {
+        let committee = self
+            .inner
+            .onchain_state()
+            .state()
+            .hashi()
+            .committees
+            .current_committee()
+            .cloned();
+        let Some(committee) = committee else { return };
+        let Ok(me) = self.inner.config.validator_address() else {
+            return;
+        };
+        if !self.inner.committee_key_lost(&committee, me) {
+            return;
+        }
+        self.inner.metrics.mpc_committee_key_lost_total.inc();
+        let mut target = match self.inner.next_reconfig_epoch().await {
+            Ok(target) => target,
+            Err(e) => {
+                warn!("cannot determine next reconfig epoch for key re-registration: {e}");
+                return;
+            }
+        };
+        for _ in 0..MAX_KEY_REREGISTRATION_BUMPS {
+            if self
+                .replacement_keys_target_epoch
+                .lock()
+                .unwrap()
+                .is_some_and(|recorded| recorded >= target)
+            {
+                return;
+            }
+            warn!(
+                "no DB encryption or signing key matches the current committee record; \
+                 registering fresh keys for epoch {target} so the node rejoins at that reconfig"
+            );
+            if let Err(e) = self.inner.prepare_and_register_keys(target).await {
+                warn!("failed to register replacement keys for epoch {target}: {e}; will retry");
+                return;
+            }
+            match self
+                .inner
+                .onchain_state()
+                .scrape_committee_for_epoch(target)
+                .await
+            {
+                Ok(Some(frozen)) if self.inner.committee_key_lost(&frozen, me) => {
+                    self.inner.metrics.mpc_key_reregistration_bumps_total.inc();
+                    info!(
+                        "epoch {target} committee already snapshotted without replacement keys; \
+                         re-targeting {}",
+                        target + 1
+                    );
+                    target += 1;
+                }
+                Ok(Some(frozen)) => {
+                    if frozen.members().iter().any(|m| m.validator_address() == me) {
+                        info!("replacement keys frozen into the epoch {target} committee");
+                    } else {
+                        warn!(
+                            "not a member of the epoch {target} committee; replacement keys \
+                             registered for a future committee"
+                        );
+                    }
+                    *self.replacement_keys_target_epoch.lock().unwrap() = Some(target);
+                    return;
+                }
+                Ok(None) => {
+                    info!(
+                        "replacement keys registered; the epoch {target} committee is not yet \
+                         snapshotted and will include them"
+                    );
+                    *self.replacement_keys_target_epoch.lock().unwrap() = Some(target);
+                    return;
+                }
+                Err(e) => {
+                    warn!(
+                        "cannot verify the epoch {target} committee after key registration: {e}; \
+                         re-verifying next tick"
+                    );
+                    return;
+                }
+            }
+        }
+        warn!(
+            "replacement keys still excluded after {MAX_KEY_REREGISTRATION_BUMPS} registration \
+             attempts; will retry next tick"
+        );
     }
 
     async fn refill_presignatures(&self, batch_index: u32) -> anyhow::Result<()> {
@@ -670,6 +964,7 @@ impl MpcService {
                 )
                 .await?
                 .unwrap_or_default();
+            let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
             let cutoff_ms = {
                 let mgr = mpc_manager.read().unwrap();
                 mgr.nonce_collection_cutoff_ms(&certs)
@@ -700,12 +995,26 @@ impl MpcService {
             epoch,
             MPC_LABEL_NONCE_GENERATION,
         );
-        let (protocol, use_legacy) = {
+        let (protocol, use_legacy, floor) = {
             let mgr = mpc_manager.read().unwrap();
             (
                 mgr.mpc_config.nonce_generation_protocol,
                 mgr.mpc_config.presignature_derivation_version.use_legacy(),
+                mgr.required_nonce_weight(),
             )
+        };
+        let expected_from = |weight: u32| -> anyhow::Result<usize> {
+            anyhow::ensure!(
+                weight >= floor,
+                "nonce batch {batch_index} for epoch {epoch} refetched below floor \
+                 ({weight} < {floor}); certificate set shrank during recovery",
+            );
+            Ok(presig_count(
+                weight as usize,
+                params,
+                use_legacy,
+                batch_size_per_weight,
+            ))
         };
         let certs =
             Self::fetch_final_nonce_certs(&onchain_state, mpc_manager, epoch, batch_index).await?;
@@ -714,6 +1023,7 @@ impl MpcService {
                 "No nonce gen certificates on TOB for epoch {epoch} batch {batch_index}"
             ));
         }
+        let expected_size = expected_from(certified_nonce_weight(mpc_manager, &certs))?;
         let outputs = match protocol {
             NonceGenerationProtocol::Vanilla => {
                 MpcManager::reconstruct_presignatures_with_complaint_recovery(
@@ -729,36 +1039,25 @@ impl MpcService {
                 })?
             }
             NonceGenerationProtocol::Avid => {
-                let certs: Vec<(sui_sdk_types::Address, CertificateV1)> = {
-                    let mgr = mpc_manager.read().unwrap();
-                    certs
-                        .iter()
-                        .filter_map(|(dealer, stamped)| {
-                            let cert =
-                                mgr.verify_onchain_nonce_cert(dealer, &stamped.submission)?;
-                            Some((
-                                *dealer,
-                                CertificateV1::NonceGeneration {
-                                    batch_index,
-                                    cert,
-                                    timestamp_ms: stamped.timestamp_ms,
-                                },
-                            ))
-                        })
-                        .collect()
-                };
-                mpc_manager
-                    .read()
-                    .unwrap()
-                    .assert_replay_reaches_nonce_floor(&certs)
-                    .map_err(|e| {
-                        anyhow::anyhow!("cannot replay epoch {epoch} batch {batch_index}: {e}")
-                    })?;
+                let avid_certs: Vec<(sui_sdk_types::Address, CertificateV1)> = certs
+                    .iter()
+                    .filter_map(|(dealer, stamped)| {
+                        let cert = stamped.to_dealer_certificate(epoch).ok()?;
+                        Some((
+                            *dealer,
+                            CertificateV1::NonceGeneration {
+                                batch_index,
+                                cert,
+                                timestamp_ms: stamped.timestamp_ms,
+                            },
+                        ))
+                    })
+                    .collect();
                 let chain_time_ms = {
                     let onchain_state = onchain_state.clone();
                     move || onchain_state.latest_checkpoint_timestamp_ms()
                 };
-                let mut prefetched = PrefetchedTobChannel::new(certs);
+                let mut prefetched = PrefetchedTobChannel::new(avid_certs);
                 MpcManager::run_nonce_generation(
                     mpc_manager,
                     batch_index,
@@ -776,8 +1075,15 @@ impl MpcService {
                 "No valid nonce outputs after reconstruction for epoch {epoch} batch {batch_index}"
             ));
         }
-        Presignatures::new(outputs, batch_size_per_weight, params, use_legacy)
-            .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))
+        let presignatures = Presignatures::new(outputs, batch_size_per_weight, params, use_legacy)
+            .map_err(|e| anyhow::anyhow!("Failed to create presignatures: {e}"))?;
+        anyhow::ensure!(
+            presignatures.len() == expected_size,
+            "Reconstructed nonce batch {batch_index} for epoch {epoch} has {} presigs but \
+             certificates imply {expected_size}; message-incomplete reconstruction",
+            presignatures.len(),
+        );
+        Ok(presignatures)
     }
 
     async fn try_submit_start_reconfig(&self, sui_epoch: u64) {
@@ -898,21 +1204,9 @@ impl MpcService {
                 .with_label_values(&[protocol_label])
                 .start_timer();
             let result = if run_dkg {
-                tokio::time::timeout(MPC_RECONFIG_TIMEOUT, self.run_dkg(target_epoch))
-                    .await
-                    .unwrap_or_else(|_| {
-                        Err(anyhow::anyhow!(
-                            "DKG timed out after {MPC_RECONFIG_TIMEOUT:?}"
-                        ))
-                    })
+                self.run_dkg(target_epoch).await
             } else {
-                tokio::time::timeout(MPC_RECONFIG_TIMEOUT, self.run_key_rotation(target_epoch))
-                    .await
-                    .unwrap_or_else(|_| {
-                        Err(anyhow::anyhow!(
-                            "Key rotation timed out after {MPC_RECONFIG_TIMEOUT:?}"
-                        ))
-                    })
+                self.run_key_rotation(target_epoch).await
             };
             drop(_timer);
             match result {
@@ -926,6 +1220,10 @@ impl MpcService {
                 }
             }
         };
+        if !self.reconfig_target_live(target_epoch) {
+            info!("handle_reconfig: epoch {target_epoch} aborted after protocol completion");
+            return;
+        }
         let _ = self.key_ready_tx.send(Some(output.public_key));
         info!("MPC key ready for epoch {target_epoch}, submitting end_reconfig");
         let _end_reconfig_timer = metrics
@@ -996,6 +1294,13 @@ impl MpcService {
             .prune_messages_below(target_epoch, &pruning_references)
         {
             error!("Failed to prune old MPC messages below epoch {target_epoch}: {e}");
+        }
+        if !self.reconfig_target_live(target_epoch) {
+            info!(
+                "handle_reconfig: epoch {target_epoch} no longer pending nor current; \
+                 skipping signing setup"
+            );
+            return;
         }
         let _prepare_signing_timer = metrics
             .mpc_prepare_signing_duration_seconds
@@ -1073,7 +1378,8 @@ impl MpcService {
             None,
             move_types::ProtocolType::KeyRotation,
             signer,
-        );
+        )
+        .with_idle_timeout(RECONFIG_RECEIVE_IDLE_TIMEOUT);
         let output = MpcManager::run_key_rotation(
             &mpc_manager,
             &previous_certs,
@@ -1336,6 +1642,33 @@ impl MpcService {
     }
 }
 
+/// TODO(IOP-528): Fold into fastcrypto.
+pub(crate) fn presig_count(
+    total_weight: usize,
+    params: Parameters,
+    use_legacy: bool,
+    batch_size_per_weight: u16,
+) -> usize {
+    let consumed = if use_legacy {
+        params.f as usize
+    } else {
+        params.t as usize - 1
+    };
+    total_weight.saturating_sub(consumed) * batch_size_per_weight as usize
+}
+
+fn certified_nonce_weight<T: NonceCertTimestamp>(
+    mpc_manager: &Arc<std::sync::RwLock<MpcManager>>,
+    certs: &[(sui_sdk_types::Address, T)],
+) -> u32 {
+    mpc_manager
+        .read()
+        .unwrap()
+        .window_certified_nonce_dealers(certs)
+        .1
+        .weight()
+}
+
 enum ReconfigSubmissionErrorKind {
     NonMoveAbort,
     NonRetryableMoveAbort,
@@ -1381,5 +1714,47 @@ fn classify_reconfig_submission_error(err: &anyhow::Error) -> ReconfigSubmission
             ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted
         }
         _ => ReconfigSubmissionErrorKind::NonRetryableMoveAbort,
+    }
+}
+
+#[cfg(test)]
+mod presig_count_tests {
+    use super::Parameters;
+    use super::presig_count;
+
+    #[test]
+    fn matches_height_times_batch_width() {
+        let params = Parameters { t: 3, f: 1 };
+        // height = W - (t - 1)
+        assert_eq!(presig_count(5, params, false, 2), (5 - 2) * 2);
+        assert_eq!(presig_count(3, params, false, 7), 7);
+        // height = W - f
+        assert_eq!(presig_count(5, params, true, 2), (5 - 1) * 2);
+        assert_eq!(presig_count(10, params, true, 4), (10 - 1) * 4);
+    }
+
+    #[test]
+    fn saturates_below_floor_without_underflow() {
+        let params = Parameters { t: 3, f: 1 };
+        assert_eq!(presig_count(1, params, false, 2), 0);
+        assert_eq!(presig_count(0, params, true, 5), 0);
+    }
+}
+
+fn reconfig_target_live(pending: Option<u64>, current_epoch: u64, target_epoch: u64) -> bool {
+    pending == Some(target_epoch) || current_epoch == target_epoch
+}
+
+#[cfg(test)]
+mod reconfig_target_tests {
+    use super::reconfig_target_live;
+
+    #[test]
+    fn live_while_pending_or_current_only() {
+        assert!(reconfig_target_live(Some(6), 5, 6));
+        assert!(reconfig_target_live(None, 6, 6));
+        assert!(!reconfig_target_live(None, 5, 6));
+        assert!(!reconfig_target_live(Some(7), 5, 6));
+        assert!(!reconfig_target_live(None, 7, 6));
     }
 }

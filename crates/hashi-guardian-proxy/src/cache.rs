@@ -35,11 +35,11 @@ use hashi_types::bitcoin::BitcoinPubkey;
 use hashi_types::bitcoin::BitcoinSignature;
 use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::bitcoin::BTC_LIB;
-use hashi_types::guardian::proto_conversions::pb_to_signed_standard_withdrawal_request_wire;
 use hashi_types::guardian::AddressValidation;
 use hashi_types::guardian::GetGuardianInfoResponse;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::HashiSigned;
+use hashi_types::guardian::SignedStandardWithdrawalRequestWire;
 use hashi_types::guardian::StandardWithdrawalRequest;
 use hashi_types::guardian::WithdrawalID;
 use hashi_types::proto;
@@ -252,7 +252,7 @@ fn verify_recorded_signatures(
     master_g: &HashiMasterG,
     network: Network,
 ) -> anyhow::Result<()> {
-    let wire = pb_to_signed_standard_withdrawal_request_wire(request.clone())
+    let wire = SignedStandardWithdrawalRequestWire::try_from(request.clone())
         .map_err(|e| anyhow::anyhow!("parse request: {e:?}"))?;
     let signed = HashiSigned::<StandardWithdrawalRequest>::validate_addr(wire, network)
         .map_err(|e| anyhow::anyhow!("validate request: {e:?}"))?;
@@ -329,18 +329,18 @@ where
         self.inner.operator_init(request).await
     }
 
-    async fn operator_write_genesis(
-        &self,
-        request: Request<proto::OperatorWriteGenesisRequest>,
-    ) -> Result<Response<proto::OperatorWriteGenesisResponse>, Status> {
-        self.inner.operator_write_genesis(request).await
-    }
-
     async fn provisioner_init(
         &self,
         request: Request<proto::ProvisionerInitRequest>,
     ) -> Result<Response<proto::ProvisionerInitResponse>, Status> {
         self.inner.provisioner_init(request).await
+    }
+
+    async fn provisioner_rotate_cert(
+        &self,
+        request: Request<proto::SignedProvisionerRotateCertRequest>,
+    ) -> Result<Response<proto::SignedProvisionerRotateCertResponse>, Status> {
+        self.inner.provisioner_rotate_cert(request).await
     }
 
     async fn operator_activate(
@@ -417,7 +417,6 @@ mod tests {
     use hashi_types::guardian::proto_conversions::signed_standard_withdrawal_request_to_pb;
     use hashi_types::guardian::GuardianSignKeyPair;
     use hashi_types::guardian::GuardianSigned;
-    use hashi_types::guardian::KPEncryptedShares;
     use hashi_types::guardian::LimiterState;
     use hashi_types::guardian::NitroAttestation;
     use hashi_types::guardian::StandardWithdrawalResponse;
@@ -487,16 +486,16 @@ mod tests {
         ) -> Result<Response<proto::OperatorInitResponse>, Status> {
             unimplemented!("not exercised by tests")
         }
-        async fn operator_write_genesis(
-            &self,
-            _: Request<proto::OperatorWriteGenesisRequest>,
-        ) -> Result<Response<proto::OperatorWriteGenesisResponse>, Status> {
-            unimplemented!("not exercised by tests")
-        }
         async fn provisioner_init(
             &self,
             _: Request<proto::ProvisionerInitRequest>,
         ) -> Result<Response<proto::ProvisionerInitResponse>, Status> {
+            unimplemented!("not exercised by tests")
+        }
+        async fn provisioner_rotate_cert(
+            &self,
+            _: Request<proto::SignedProvisionerRotateCertRequest>,
+        ) -> Result<Response<proto::SignedProvisionerRotateCertResponse>, Status> {
             unimplemented!("not exercised by tests")
         }
         async fn operator_activate(
@@ -578,6 +577,7 @@ mod tests {
             bucket_info: None,
             encryption_pubkey: vec![0u8; 32],
             config_hash: None,
+            genesis_state_hash: None,
             untrusted_git_revision: "test".to_string(),
             enclave_btc_pubkey: Some(enclave_btc_pubkey),
             limiter_state: Some(LimiterState {
@@ -594,7 +594,6 @@ mod tests {
             NitroAttestation::new(vec![1, 2, 3]),
             signing_key.verification_key(),
             signed_info,
-            KPEncryptedShares::new(vec![]).expect("empty shares"),
         );
         get_guardian_info_response_to_pb(domain)
     }

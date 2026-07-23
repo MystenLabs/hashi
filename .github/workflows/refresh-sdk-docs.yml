@@ -1,17 +1,18 @@
 name: refresh-sdk-docs
 
 # Keeps design/docs/ts-sdk.mdx in sync with the README of the public
-# MystenLabs/hashi-ts-sdk repo. The fetch script pulls the README anonymously and
-# reformats it into the Docusaurus page; if the result differs from what's
-# committed, this workflow pushes the change to main, which triggers the existing
-# gh-pages workflow to rebuild and redeploy the docs site.
+# MystenLabs/ts-sdks monorepo, package packages/hashi (the SDK moved there from
+# the now-deprecated MystenLabs/hashi-ts-sdk repo). The fetch script pulls the
+# README anonymously and reformats it into the Docusaurus page; if the result
+# differs from what's committed, this workflow pushes the change to main, which
+# triggers the existing gh-pages workflow to rebuild and redeploy the docs site.
 #
 # Triggers:
 #   - schedule:            nightly safety net so docs never drift far
 #   - workflow_dispatch:   manual "refresh now" button
 #   - repository_dispatch: fired by the SDK repo on release (event type
 #                          `sdk-release`) for near-immediate refresh. Wiring that
-#                          up in hashi-ts-sdk is optional — see below.
+#                          up in ts-sdks is optional — see below.
 
 on:
   schedule:
@@ -53,14 +54,14 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add design/docs/ts-sdk.mdx
-          git commit -m "docs: refresh TypeScript SDK page from hashi-ts-sdk README"
+          git commit -m "docs: refresh TypeScript SDK page from ts-sdks packages/hashi README"
           git push
           echo "Pushed refreshed docs/ts-sdk.mdx — gh-pages will rebuild."
 
 # ---------------------------------------------------------------------------
 # Optional: refresh immediately when the SDK publishes a release.
 #
-# Add a step like this to a workflow in MystenLabs/hashi-ts-sdk (e.g. its
+# Add a step like this to a workflow in MystenLabs/ts-sdks (e.g. its
 # release/changesets job). It needs a token (a fine-grained PAT or GitHub App
 # token) with `contents: write` on THIS repo, stored as a secret there:
 #

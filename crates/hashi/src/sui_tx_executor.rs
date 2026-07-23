@@ -1619,9 +1619,15 @@ impl SuiTxExecutor {
         skip_all,
         fields(utxo_count = utxo_ids.len()),
     )]
-    pub async fn execute_cleanup_spent_utxos(&mut self, utxo_ids: &[UtxoId]) -> anyhow::Result<()> {
+    /// Returns the highest checkpoint the cleanup transactions landed in,
+    /// so the caller can floor subsequent freshness checks past them.
+    pub async fn execute_cleanup_spent_utxos(
+        &mut self,
+        utxo_ids: &[UtxoId],
+    ) -> anyhow::Result<u64> {
         const MAX_PER_TX: usize = 400;
 
+        let mut max_checkpoint = 0;
         for chunk in utxo_ids.chunks(MAX_PER_TX) {
             let mut builder = TransactionBuilder::new();
             let hashi_arg = builder.object(
@@ -1671,8 +1677,12 @@ impl SuiTxExecutor {
                     response.transaction().effects().status()
                 );
             }
+            let checkpoint = response.transaction().checkpoint_opt().ok_or_else(|| {
+                anyhow::anyhow!("cleanup_spent_utxos response missing checkpoint")
+            })?;
+            max_checkpoint = max_checkpoint.max(checkpoint);
         }
-        Ok(())
+        Ok(max_checkpoint)
     }
 }
 

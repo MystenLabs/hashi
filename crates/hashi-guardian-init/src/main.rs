@@ -11,6 +11,7 @@ mod guardian_info;
 mod kp_ceremony;
 mod kp_provision;
 mod kp_roster;
+mod kp_rotate_cert;
 mod operator_activate;
 mod operator_ceremony;
 mod operator_provision;
@@ -55,6 +56,9 @@ enum OperatorCommand {
         /// Path to operator provision YAML config file.
         #[arg(long)]
         config: PathBuf,
+        /// Explicitly bootstrap the first serving committee during PI.
+        #[arg(long)]
+        do_genesis: bool,
     },
     /// Activate a provisioner-initialized withdraw-mode guardian.
     Activate {
@@ -66,17 +70,35 @@ enum OperatorCommand {
 
 #[derive(Subcommand)]
 enum KeyProvisionerCommand {
+    /// Replace one cert in this KP's roster entry.
+    RotateCert {
+        /// Path to key-provisioner YAML config file.
+        #[arg(long)]
+        config: PathBuf,
+        /// Fingerprint of the current OpenPGP cert being replaced.
+        #[arg(long)]
+        target_kp_pgp_fingerprint: String,
+        /// Path to the replacement armored OpenPGP public cert.
+        #[arg(long)]
+        new_kp_pgp_cert_path: PathBuf,
+    },
     /// Verify this KP can fetch and decrypt its encrypted ceremony share from guardian S3.
     Ceremony {
         /// Path to key-provisioner ceremony YAML config file.
         #[arg(long)]
         config: PathBuf,
+        /// Path at which to save the ceremony state containing the encrypted shares.
+        #[arg(long)]
+        encrypted_shares_path: PathBuf,
     },
     /// Run a key provisioner's init checks and submit its share to the relay.
     Provision {
         /// Path to key-provisioner provision YAML config file.
         #[arg(long)]
         config: PathBuf,
+        /// Explicitly authorize first-deploy genesis in this PI submission.
+        #[arg(long)]
+        do_genesis: bool,
     },
 }
 
@@ -103,9 +125,9 @@ async fn main() -> anyhow::Result<()> {
                 let cfg = config::Config::load_yaml(&config)?;
                 operator_ceremony::run(cfg).await?;
             }
-            OperatorCommand::Provision { config } => {
+            OperatorCommand::Provision { config, do_genesis } => {
                 let cfg = config::Config::load_yaml(&config)?;
-                operator_provision::run(cfg).await?;
+                operator_provision::run(cfg, do_genesis).await?;
             }
             OperatorCommand::Activate { config } => {
                 let cfg = config::Config::load_yaml(&config)?;
@@ -113,13 +135,24 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Command::KeyProvisioner { command } => match command {
-            KeyProvisionerCommand::Ceremony { config } => {
+            KeyProvisionerCommand::Ceremony {
+                config,
+                encrypted_shares_path,
+            } => {
                 let cfg = config::Config::load_yaml(&config)?;
-                kp_ceremony::run(cfg).await?;
+                kp_ceremony::run(cfg, &encrypted_shares_path).await?;
             }
-            KeyProvisionerCommand::Provision { config } => {
+            KeyProvisionerCommand::Provision { config, do_genesis } => {
                 let cfg = config::Config::load_yaml(&config)?;
-                kp_provision::run(cfg).await?;
+                kp_provision::run(cfg, do_genesis).await?;
+            }
+            KeyProvisionerCommand::RotateCert {
+                config,
+                target_kp_pgp_fingerprint,
+                new_kp_pgp_cert_path,
+            } => {
+                let cfg = config::Config::load_yaml(&config)?;
+                kp_rotate_cert::run(cfg, target_kp_pgp_fingerprint, new_kp_pgp_cert_path).await?;
             }
         },
         Command::Tools { command } => match command {
@@ -127,4 +160,49 @@ async fn main() -> anyhow::Result<()> {
         },
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_provisioner_ceremony_requires_encrypted_shares_path() {
+        let result = Cli::try_parse_from([
+            "hashi-guardian-init",
+            "key-provisioner",
+            "ceremony",
+            "--config",
+            "config.yaml",
+        ]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn key_provisioner_ceremony_accepts_encrypted_shares_path() {
+        let cli = Cli::try_parse_from([
+            "hashi-guardian-init",
+            "key-provisioner",
+            "ceremony",
+            "--config",
+            "config.yaml",
+            "--encrypted-shares-path",
+            "kp-shares.json",
+        ])
+        .unwrap();
+
+        let Command::KeyProvisioner {
+            command:
+                KeyProvisionerCommand::Ceremony {
+                    config,
+                    encrypted_shares_path,
+                },
+        } = cli.command
+        else {
+            panic!("expected key-provisioner ceremony command");
+        };
+        assert_eq!(config, PathBuf::from("config.yaml"));
+        assert_eq!(encrypted_shares_path, PathBuf::from("kp-shares.json"));
+    }
 }

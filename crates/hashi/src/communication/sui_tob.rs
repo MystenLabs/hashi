@@ -24,6 +24,7 @@ use crate::sui_tx_executor::SuiTxExecutor;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const TX_CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
+const FETCH_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Error)]
 pub enum TobError {
@@ -53,6 +54,7 @@ pub struct SuiTobChannel {
     batch_index: Option<u32>,
     protocol_type: ProtocolType,
     signer: SimpleKeypair,
+    idle_timeout: Option<Duration>,
     /// Dealers we've already returned certificates for
     seen_dealers: HashSet<Address>,
     /// Cached certificates not yet returned
@@ -75,9 +77,15 @@ impl SuiTobChannel {
             batch_index,
             protocol_type,
             signer,
+            idle_timeout: None,
             seen_dealers: HashSet::new(),
             pending_certs: VecDeque::new(),
         }
+    }
+
+    pub fn with_idle_timeout(mut self, idle_timeout: Duration) -> Self {
+        self.idle_timeout = Some(idle_timeout);
+        self
     }
 
     fn create_executor(&self) -> SuiTxExecutor {
@@ -96,7 +104,6 @@ pub async fn fetch_certificates(
     batch_index: Option<u32>,
     protocol_type: ProtocolType,
 ) -> Result<Vec<(Address, CertificateV1)>, TobError> {
-    // Only nonce certs are stamped (`StampedDealerSubmissionV1`); DKG/rotation are `DealerSubmissionV1`.
     let raw: Vec<(Address, hashi_types::move_types::DealerSubmissionV1, u64)> =
         if protocol_type == ProtocolType::NonceGeneration {
             let Some(certs) = onchain_state
@@ -209,19 +216,34 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     }
 
     async fn receive(&mut self) -> ChannelResult<CertificateV1> {
+        let wait_started = tokio::time::Instant::now();
         loop {
             if let Some(cert) = self.pending_certs.pop_front() {
                 return Ok(cert);
             }
             // TODO: Optimize by checking table size first to avoid redundant fetches.
-            let all_certs = fetch_certificates(
-                &self.onchain_state,
-                self.epoch,
-                self.batch_index,
-                self.protocol_type,
+            let all_certs = match tokio::time::timeout(
+                FETCH_STALL_TIMEOUT,
+                fetch_certificates(
+                    &self.onchain_state,
+                    self.epoch,
+                    self.batch_index,
+                    self.protocol_type,
+                ),
             )
             .await
-            .map_err(ChannelError::from)?;
+            {
+                Ok(result) => result.map_err(ChannelError::from)?,
+                Err(_) => {
+                    tracing::warn!(
+                        "{:?} TOB cert fetch for epoch {} stalled >{:?}; retrying",
+                        self.protocol_type,
+                        self.epoch,
+                        FETCH_STALL_TIMEOUT,
+                    );
+                    Vec::new()
+                }
+            };
             for (dealer, cert) in all_certs {
                 if !self.seen_dealers.contains(&dealer) {
                     self.seen_dealers.insert(dealer);
@@ -229,17 +251,51 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                 }
             }
             if self.pending_certs.is_empty() {
+                let (onchain_epoch, pending) = {
+                    let state = self.onchain_state.state();
+                    let committees = &state.hashi().committees;
+                    (committees.epoch(), committees.pending_epoch_change())
+                };
+                if tob_wait_superseded(self.protocol_type, self.epoch, onchain_epoch, pending) {
+                    tracing::info!(
+                        "aborting {:?} TOB wait for epoch {}: superseded (onchain epoch \
+                         {onchain_epoch}, pending epoch change {pending:?})",
+                        self.protocol_type,
+                        self.epoch,
+                    );
+                    return Err(ChannelError::Superseded(format!(
+                        "{:?} TOB wait for epoch {} (onchain epoch {onchain_epoch}, \
+                         pending epoch change {pending:?})",
+                        self.protocol_type, self.epoch,
+                    )));
+                }
+                if let Some(idle_timeout) = self.idle_timeout
+                    && wait_started.elapsed() >= idle_timeout
+                {
+                    tracing::info!(
+                        "aborting {:?} TOB wait for epoch {}: no certificate in {:?} \
+                         ({} dealers seen)",
+                        self.protocol_type,
+                        self.epoch,
+                        idle_timeout,
+                        self.seen_dealers.len(),
+                    );
+                    return Err(ChannelError::Timeout);
+                }
                 tokio::time::sleep(POLL_INTERVAL).await;
             }
         }
     }
 
     async fn certified_dealers(&mut self) -> Vec<Address> {
-        if let Ok(all_certs) = fetch_certificates(
-            &self.onchain_state,
-            self.epoch,
-            self.batch_index,
-            self.protocol_type,
+        if let Ok(Ok(all_certs)) = tokio::time::timeout(
+            FETCH_STALL_TIMEOUT,
+            fetch_certificates(
+                &self.onchain_state,
+                self.epoch,
+                self.batch_index,
+                self.protocol_type,
+            ),
         )
         .await
         {
@@ -251,5 +307,50 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
             }
         }
         self.seen_dealers.iter().copied().collect()
+    }
+}
+
+fn tob_wait_superseded(
+    protocol_type: ProtocolType,
+    channel_epoch: u64,
+    onchain_epoch: u64,
+    pending_epoch_change: Option<u64>,
+) -> bool {
+    match protocol_type {
+        ProtocolType::NonceGeneration => {
+            matches!(pending_epoch_change, Some(p) if p != channel_epoch)
+                || onchain_epoch > channel_epoch
+        }
+        ProtocolType::Dkg | ProtocolType::KeyRotation => {
+            matches!(pending_epoch_change, Some(p) if p != channel_epoch)
+                || (pending_epoch_change.is_none() && onchain_epoch != channel_epoch)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nonce_wait_superseded_only_by_other_reconfig_or_passed_epoch() {
+        let p = ProtocolType::NonceGeneration;
+        assert!(!tob_wait_superseded(p, 5, 5, None));
+        assert!(!tob_wait_superseded(p, 5, 4, Some(5)));
+        assert!(!tob_wait_superseded(p, 5, 4, None));
+        assert!(tob_wait_superseded(p, 5, 5, Some(6)));
+        assert!(tob_wait_superseded(p, 5, 4, Some(6)));
+        assert!(tob_wait_superseded(p, 5, 6, None));
+    }
+
+    #[test]
+    fn rotation_wait_bound_to_its_own_pending_target() {
+        for p in [ProtocolType::KeyRotation, ProtocolType::Dkg] {
+            assert!(!tob_wait_superseded(p, 6, 5, Some(6)));
+            assert!(!tob_wait_superseded(p, 6, 6, None));
+            assert!(tob_wait_superseded(p, 6, 6, Some(7)));
+            assert!(tob_wait_superseded(p, 6, 5, None));
+            assert!(tob_wait_superseded(p, 6, 5, Some(7)));
+        }
     }
 }

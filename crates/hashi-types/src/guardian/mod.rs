@@ -4,6 +4,7 @@
 pub mod attestation;
 pub mod crypto;
 pub mod errors;
+pub mod kp_certs_roster;
 pub mod lifecycle;
 pub mod log;
 pub mod proto_conversions;
@@ -55,6 +56,7 @@ pub use ed25519_consensus::Signature as GuardianSignature;
 pub use ed25519_consensus::SigningKey as GuardianSignKeyPair;
 pub use ed25519_consensus::VerificationKey as GuardianPubKey;
 pub use errors::*;
+pub use kp_certs_roster::*;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
 use serde::Deserialize;
@@ -74,13 +76,7 @@ use std::ops::Deref;
 pub struct OperatorInitRequest {
     s3_config: S3Config,
     init_config: Option<InitConfig>,
-}
-
-/// Operator-trusted one-time bootstrap request for `genesis/record.json`.
-/// The operator must source the committee from on-chain state during first deploy.
-#[derive(Debug, Clone, PartialEq)]
-pub struct OperatorWriteGenesisRequest {
-    committee: crate::move_types::Committee,
+    genesis_state: Option<GenesisState>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -91,9 +87,6 @@ pub struct GetGuardianInfoResponse {
     signing_pub_key: GuardianPubKey,
     /// Signed guardian info
     signed_info: GuardianSigned<GuardianInfo>,
-    /// Encrypted shares from the ceremony (empty in non-ceremony mode); KPs
-    /// fetch their share here and verify it against the instance commitments.
-    encrypted_shares: KPEncryptedShares,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -101,7 +94,6 @@ pub struct VerifiedGuardianInfo {
     pub info: GuardianInfo,
     pub signing_pub_key: GuardianPubKey,
     pub session_id: SessionID,
-    pub encrypted_shares: KPEncryptedShares,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -136,8 +128,15 @@ pub struct GuardianInfo {
     /// own BTC key). Set after operator_init; lets KPs verify it directly.
     #[serde(with = "crate::guardian::serde_utils::option_mpc_master_g")]
     pub mpc_master_g: Option<HashiMasterG>,
-    // TODO: report the full committee too, so its membership is directly
-    // verifiable from GuardianInfo; it's large, though.
+    /// Digest of the optional genesis state pinned during operator init. KPs
+    /// independently derive and bind it into their signed PI submissions.
+    /// Trailing and omitted when absent to preserve pre-genesis signing bytes.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::guardian::serde_utils::option_hex_32"
+    )]
+    pub genesis_state_hash: Option<[u8; 32]>,
 }
 
 // ---------------------------------------
@@ -157,6 +156,13 @@ pub struct InitConfig {
     pcr_allowlist: PcrAllowlist,
     /// BTC network.
     network: Network,
+}
+
+/// Optional first-deploy state pinned by the operator during OI and authorized
+/// by KPs as part of their signed PI submissions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GenesisState {
+    committee: crate::move_types::Committee,
 }
 
 /// Live serving state derived during operator activation. Its `digest()` is the
@@ -186,6 +192,8 @@ pub struct SingleProvisionerInitRequest {
     expected_session_id: SessionID,
     #[serde(with = "hex::serde")]
     expected_config_hash: [u8; 32],
+    #[serde(with = "crate::guardian::serde_utils::option_hex_32")]
+    expected_genesis_state_hash: Option<[u8; 32]>,
     encrypted_share: GuardianEncryptedShare,
 }
 
@@ -206,8 +214,6 @@ pub struct StandardWithdrawalRequest {
     /// Timestamp in unix seconds (used for rate limiting)
     timestamp_secs: u64,
     /// Monotonic sequence number for ordering
-    /// TODO: rename to `withdraw_seq` (and `LimiterState.next_seq` →
-    /// `next_withdraw_seq`) to disambiguate from `SecretSharingInstance.sharing_seq`.
     seq: u64,
 }
 
@@ -239,14 +245,14 @@ impl crate::intent::IntentMessage for CommitteeTransitionRequest {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SetupNewKeyRequest {
-    key_provisioner_pgp_certs: Vec<PgpPublicCert>,
+    key_provisioner_certs_roster: KpCertsRoster,
     params: SecretSharingParams,
 }
 
 /// `EnclaveSigned<T>`
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SetupNewKeyResponse {
-    pub encrypted_shares: KPEncryptedShares,
+    pub encrypted_shares: KPEncryptedSharesRoster,
     pub secret_sharing_instance: SecretSharingInstance,
     /// x-only BTC master pubkey, surfaced so the operator can publish it on-chain
     /// as `guardian_btc_public_key` before the guardian is provisioned.
@@ -258,8 +264,6 @@ pub struct SetupNewKeyResponse {
 /// rotation target `state`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RotateKpsRequest {
-    // TODO: Use the same unique-id wrapper as ProvisionerInitRequest once we
-    // centralize validation for submitted guardian share batches.
     encrypted_old_shares: Vec<GuardianEncryptedShare>,
     old_instance: SecretSharingInstance,
     state: RotateKpsState,
@@ -270,15 +274,36 @@ pub struct RotateKpsRequest {
 /// ones that agree on it. Old/new (`n`, `t`) may differ.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RotateKpsState {
-    /// OpenPGP certs for the new KP set, sorted to a canonical order
-    /// (see `RotateKpsState::new`). Length equals `new_params.num_shares()`.
-    new_kp_pgp_certs: Vec<PgpPublicCert>,
+    /// Ordered OpenPGP certificate roster for the new KPs. Its length equals
+    /// `new_params.num_shares()`.
+    new_kp_certs_roster: KpCertsRoster,
     new_params: SecretSharingParams,
 }
 
 /// `EnclaveSigned<T>`. The new KP set's encrypted shares, returned by `rotate_kps`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RotateKpsResponse {
+    pub encrypted_shares: KPEncryptedSharesRoster,
+}
+
+/// `KpSigned<ProvisionerRotateCertRequest>`. Replaces one certificate in a KP
+/// roster entry without changing the BTC key, sharing instance,
+/// commitments, share ids, or threshold. The signing certificate may be the
+/// target or another certificate assigned to the same KP/share entry.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProvisionerRotateCertRequest {
+    expected_session_id: SessionID,
+    expected_cert_seq: u64,
+    target_kp_pgp_fingerprint: KPFingerprint,
+    new_kp_pgp_cert: PgpPublicCert,
+    encrypted_share: GuardianEncryptedShare,
+}
+
+/// `GuardianSigned<ProvisionerRotateCertResponse>`. Returned after the guardian appends
+/// the next `kp-shares/` certificate-state snapshot.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ProvisionerRotateCertResponse {
+    pub cert_seq: u64,
     pub encrypted_shares: KPEncryptedShares,
 }
 
@@ -361,6 +386,7 @@ pub struct S3Config {
     pub secret_key: String,
     pub session_token: Option<String>,
     pub bucket_info: S3BucketInfo,
+    pub retention_environment: S3RetentionEnvironment,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -385,27 +411,26 @@ impl S3Config {
 
 impl SetupNewKeyRequest {
     pub fn new(
-        pgp_certs: Vec<PgpPublicCert>,
+        kp_certs_roster: KpCertsRoster,
         num_shares: usize,
         threshold: usize,
     ) -> GuardianResult<Self> {
         let params = SecretSharingParams::new(num_shares, threshold)?;
-        if pgp_certs.len() != params.num_shares() {
+        if kp_certs_roster.num_kps() != params.num_shares() {
             return Err(InvalidInputs(format!(
-                "expected {} OpenPGP certificates, got {}",
+                "expected {} KP OpenPGP cert roster entries, got {}",
                 params.num_shares(),
-                pgp_certs.len()
+                kp_certs_roster.num_kps()
             )));
         }
-        ensure_unique_pgp_cert_fingerprints(&pgp_certs)?;
         Ok(Self {
-            key_provisioner_pgp_certs: pgp_certs,
+            key_provisioner_certs_roster: kp_certs_roster,
             params,
         })
     }
 
-    pub fn pgp_certs(&self) -> &[PgpPublicCert] {
-        &self.key_provisioner_pgp_certs
+    pub fn kp_certs_roster(&self) -> &KpCertsRoster {
+        &self.key_provisioner_certs_roster
     }
 
     pub fn params(&self) -> &SecretSharingParams {
@@ -421,33 +446,26 @@ impl SetupNewKeyRequest {
     }
 }
 
-fn ensure_unique_pgp_cert_fingerprints(pgp_certs: &[PgpPublicCert]) -> GuardianResult<()> {
-    let mut seen = std::collections::HashSet::with_capacity(pgp_certs.len());
-    for cert in pgp_certs {
-        let fingerprint = cert.fingerprint();
-        if !seen.insert(fingerprint.clone()) {
-            return Err(InvalidInputs(format!(
-                "duplicate OpenPGP certificate fingerprint {fingerprint}"
-            )));
-        }
-    }
-    Ok(())
-}
-
 impl OperatorInitRequest {
     /// Build a ceremony-mode request (S3 only).
     pub fn new_ceremony_mode(s3_config: S3Config) -> Self {
         Self {
             s3_config,
             init_config: None,
+            genesis_state: None,
         }
     }
 
     /// Build a withdraw-mode request carrying the stable operator config.
-    pub fn new_withdraw_mode(s3_config: S3Config, init_config: InitConfig) -> Self {
+    pub fn new_withdraw_mode(
+        s3_config: S3Config,
+        init_config: InitConfig,
+        genesis_state: Option<GenesisState>,
+    ) -> Self {
         Self {
             s3_config,
             init_config: Some(init_config),
+            genesis_state,
         }
     }
 
@@ -459,25 +477,30 @@ impl OperatorInitRequest {
         self.init_config.as_ref()
     }
 
-    /// `init_config` must be present iff the enclave runs in withdraw mode.
+    /// `init_config` must be present iff the enclave runs in withdraw mode;
+    /// optional genesis state is withdraw-only.
     pub fn validate(&self, mode: EnclaveMode) -> GuardianResult<()> {
-        match (mode, self.init_config.is_some()) {
-            (EnclaveMode::Withdraw, false) => Err(InvalidInputs(
+        match (
+            mode,
+            self.init_config.is_some(),
+            self.genesis_state.is_some(),
+        ) {
+            (EnclaveMode::Withdraw, false, _) => Err(InvalidInputs(
                 "withdraw-mode operator_init requires an InitConfig".into(),
             )),
-            (EnclaveMode::Ceremony, true) => Err(InvalidInputs(
-                "ceremony-mode operator_init must carry only S3 config".into(),
-            )),
+            (EnclaveMode::Ceremony, true, _) | (EnclaveMode::Ceremony, false, true) => Err(
+                InvalidInputs("ceremony-mode operator_init must carry only S3 config".into()),
+            ),
             _ => Ok(()),
         }
     }
 
-    pub fn into_parts(self) -> (S3Config, Option<InitConfig>) {
-        (self.s3_config, self.init_config)
+    pub fn into_parts(self) -> (S3Config, Option<InitConfig>, Option<GenesisState>) {
+        (self.s3_config, self.init_config, self.genesis_state)
     }
 }
 
-impl OperatorWriteGenesisRequest {
+impl GenesisState {
     pub fn new(committee: HashiCommittee) -> Self {
         Self {
             committee: (&committee).into(),
@@ -488,12 +511,13 @@ impl OperatorWriteGenesisRequest {
         Self { committee }
     }
 
-    pub fn committee(&self) -> &crate::move_types::Committee {
-        &self.committee
-    }
-
     pub fn into_committee(self) -> crate::move_types::Committee {
         self.committee
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        let bytes = bcs::to_bytes(self).expect("serialization should work");
+        Blake2b::<U32>::digest(bytes).into()
     }
 }
 
@@ -611,6 +635,7 @@ impl SingleProvisionerInitRequest {
     pub fn build_from_share<R: CryptoRng + RngCore>(
         expected_session_id: SessionID,
         expected_config_hash: [u8; 32],
+        expected_genesis_state_hash: Option<[u8; 32]>,
         share: &Share,
         enclave_pub_key: &EncPubKey,
         rng: &mut R,
@@ -618,6 +643,7 @@ impl SingleProvisionerInitRequest {
         Self::new(
             expected_session_id,
             expected_config_hash,
+            expected_genesis_state_hash,
             encrypt_share(share, enclave_pub_key, None, rng),
         )
     }
@@ -625,11 +651,13 @@ impl SingleProvisionerInitRequest {
     pub fn new(
         expected_session_id: SessionID,
         expected_config_hash: [u8; 32],
+        expected_genesis_state_hash: Option<[u8; 32]>,
         encrypted_share: GuardianEncryptedShare,
     ) -> Self {
         Self {
             expected_session_id,
             expected_config_hash,
+            expected_genesis_state_hash,
             encrypted_share,
         }
     }
@@ -646,10 +674,22 @@ impl SingleProvisionerInitRequest {
         &self.expected_config_hash
     }
 
-    pub fn into_parts(self) -> (SessionID, [u8; 32], GuardianEncryptedShare) {
+    pub fn expected_genesis_state_hash(&self) -> Option<[u8; 32]> {
+        self.expected_genesis_state_hash
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        SessionID,
+        [u8; 32],
+        Option<[u8; 32]>,
+        GuardianEncryptedShare,
+    ) {
         (
             self.expected_session_id,
             self.expected_config_hash,
+            self.expected_genesis_state_hash,
             self.encrypted_share,
         )
     }
@@ -657,39 +697,34 @@ impl SingleProvisionerInitRequest {
 
 impl RotateKpsState {
     pub fn new(
-        new_kp_pgp_certs: Vec<PgpPublicCert>,
+        new_kp_certs_roster: KpCertsRoster,
         new_num_shares: usize,
         new_threshold: usize,
     ) -> GuardianResult<Self> {
         let new_params = SecretSharingParams::new(new_num_shares, new_threshold)?;
-        if new_kp_pgp_certs.len() != new_params.num_shares() {
+        if new_kp_certs_roster.num_kps() != new_params.num_shares() {
             return Err(InvalidInputs(format!(
-                "expected {} new KP certs, got {}",
+                "expected {} new KP cert roster entries, got {}",
                 new_params.num_shares(),
-                new_kp_pgp_certs.len()
+                new_kp_certs_roster.num_kps()
             )));
         }
-        ensure_unique_pgp_cert_fingerprints(&new_kp_pgp_certs)?;
-        // Sort to a canonical order so the serialized state's digest (which all
-        // T old KPs must agree on) is independent of submission order.
-        let mut new_kp_pgp_certs = new_kp_pgp_certs;
-        new_kp_pgp_certs.sort();
         Ok(Self {
-            new_kp_pgp_certs,
+            new_kp_certs_roster,
             new_params,
         })
     }
 
-    pub fn new_kp_pgp_certs(&self) -> &[PgpPublicCert] {
-        &self.new_kp_pgp_certs
+    pub fn new_kp_certs_roster(&self) -> &KpCertsRoster {
+        &self.new_kp_certs_roster
     }
 
     pub fn new_params(&self) -> &SecretSharingParams {
         &self.new_params
     }
 
-    pub fn into_parts(self) -> (Vec<PgpPublicCert>, SecretSharingParams) {
-        (self.new_kp_pgp_certs, self.new_params)
+    pub fn into_parts(self) -> (KpCertsRoster, SecretSharingParams) {
+        (self.new_kp_certs_roster, self.new_params)
     }
 
     pub fn digest(&self) -> [u8; 32] {
@@ -747,6 +782,89 @@ impl RotateKpsRequest {
     }
 }
 
+impl ProvisionerRotateCertRequest {
+    pub fn new<R: CryptoRng + RngCore>(
+        expected_session_id: SessionID,
+        expected_cert_seq: u64,
+        target_kp_pgp_fingerprint: KPFingerprint,
+        new_kp_pgp_cert: PgpPublicCert,
+        share: &Share,
+        enclave_pub_key: &EncPubKey,
+        rng: &mut R,
+    ) -> Self {
+        let encrypted_share = encrypt_share(share, enclave_pub_key, None, rng);
+        Self {
+            expected_session_id,
+            expected_cert_seq,
+            target_kp_pgp_fingerprint,
+            new_kp_pgp_cert,
+            encrypted_share,
+        }
+    }
+
+    pub(crate) fn from_encrypted_share(
+        expected_session_id: SessionID,
+        expected_cert_seq: u64,
+        target_kp_pgp_fingerprint: KPFingerprint,
+        new_kp_pgp_cert: PgpPublicCert,
+        encrypted_share: GuardianEncryptedShare,
+    ) -> Self {
+        Self {
+            expected_session_id,
+            expected_cert_seq,
+            target_kp_pgp_fingerprint,
+            new_kp_pgp_cert,
+            encrypted_share,
+        }
+    }
+
+    pub fn share_id(&self) -> ShareID {
+        self.encrypted_share.id
+    }
+
+    pub fn new_kp_pgp_cert(&self) -> &PgpPublicCert {
+        &self.new_kp_pgp_cert
+    }
+
+    pub fn target_kp_pgp_fingerprint(&self) -> &str {
+        &self.target_kp_pgp_fingerprint
+    }
+
+    pub fn new_recipient_fingerprint(&self) -> KPFingerprint {
+        self.new_kp_pgp_cert.fingerprint().to_hex()
+    }
+
+    pub fn encrypted_share(&self) -> &GuardianEncryptedShare {
+        &self.encrypted_share
+    }
+
+    pub fn expected_session_id(&self) -> &SessionID {
+        &self.expected_session_id
+    }
+
+    pub fn expected_cert_seq(&self) -> u64 {
+        self.expected_cert_seq
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        SessionID,
+        u64,
+        KPFingerprint,
+        PgpPublicCert,
+        GuardianEncryptedShare,
+    ) {
+        (
+            self.expected_session_id,
+            self.expected_cert_seq,
+            self.target_kp_pgp_fingerprint,
+            self.new_kp_pgp_cert,
+            self.encrypted_share,
+        )
+    }
+}
+
 impl StandardWithdrawalRequest {
     pub fn new(wid: WithdrawalID, utxos: TxUTXOs, timestamp_secs: u64, seq: u64) -> Self {
         Self {
@@ -779,13 +897,11 @@ impl GetGuardianInfoResponse {
         attestation: NitroAttestation,
         signing_pub_key: GuardianPubKey,
         signed_info: GuardianSigned<GuardianInfo>,
-        encrypted_shares: KPEncryptedShares,
     ) -> Self {
         Self {
             attestation,
             signing_pub_key,
             signed_info,
-            encrypted_shares,
         }
     }
 
@@ -815,7 +931,6 @@ impl GetGuardianInfoResponse {
             info,
             signing_pub_key: self.signing_pub_key,
             session_id: SessionID::from_signing_pubkey(&self.signing_pub_key),
-            encrypted_shares: self.encrypted_shares.clone(),
         })
     }
 
@@ -995,32 +1110,23 @@ mod tests {
 
     #[test]
     fn rotate_kps_state_new_rejects_wrong_cert_count() {
-        let mut certs = test_utils::mock_pgp_certs(5);
-        certs.pop();
+        let mut cert_sets = test_utils::mock_kp_certs(5);
+        cert_sets.pop();
+        let certs_roster = KpCertsRoster::new(cert_sets).unwrap();
         assert!(matches!(
-            RotateKpsState::new(certs, 5, 3).unwrap_err(),
+            RotateKpsState::new(certs_roster, 5, 3).unwrap_err(),
             InvalidInputs(_)
         ));
     }
 
     #[test]
-    fn rotate_kps_state_new_rejects_duplicate_certs() {
-        let mut certs = test_utils::mock_pgp_certs(5);
-        certs[1] = certs[0].clone();
+    fn kp_certs_roster_rejects_duplicate_certs() {
+        let mut cert_sets = test_utils::mock_kp_certs(5);
+        cert_sets[1] = cert_sets[0].clone();
         assert!(matches!(
-            RotateKpsState::new(certs, 5, 3).unwrap_err(),
+            KpCertsRoster::new(cert_sets).unwrap_err(),
             InvalidInputs(_)
         ));
-    }
-
-    #[test]
-    fn setup_new_key_request_rejects_duplicate_cert_fingerprints() {
-        let mut certs = test_utils::mock_pgp_certs(5);
-        certs[1] = certs[0].clone();
-        let err = SetupNewKeyRequest::new(certs, 5, 3).unwrap_err();
-        assert!(
-            matches!(err, InvalidInputs(msg) if msg.contains("duplicate OpenPGP certificate fingerprint"))
-        );
     }
 
     #[test]
@@ -1093,13 +1199,12 @@ mod tests {
     }
 
     #[test]
-    fn rotate_kps_state_digest_is_order_independent() {
-        let certs = test_utils::mock_pgp_certs(5);
-        let reversed: Vec<PgpPublicCert> = certs.iter().rev().cloned().collect();
-        let a = RotateKpsState::new(certs, 5, 3).unwrap();
-        let b = RotateKpsState::new(reversed, 5, 3).unwrap();
-        // Same set, different input order ⇒ identical canonical form and digest.
-        assert_eq!(a.new_kp_pgp_certs(), b.new_kp_pgp_certs());
-        assert_eq!(a.digest(), b.digest());
+    fn rotate_kps_state_digest_commits_to_roster_order() {
+        let cert_sets = test_utils::mock_kp_certs(5);
+        let reversed: Vec<KpCerts> = cert_sets.iter().rev().cloned().collect();
+        let a = RotateKpsState::new(KpCertsRoster::new(cert_sets).unwrap(), 5, 3).unwrap();
+        let b = RotateKpsState::new(KpCertsRoster::new(reversed).unwrap(), 5, 3).unwrap();
+        assert_ne!(a.new_kp_certs_roster(), b.new_kp_certs_roster());
+        assert_ne!(a.digest(), b.digest());
     }
 }

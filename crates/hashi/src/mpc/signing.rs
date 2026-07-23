@@ -150,6 +150,73 @@ impl SigningManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_recovered(
+        address: Address,
+        committee: Committee,
+        threshold: u16,
+        key_shares: avss::SharesForNode,
+        verifying_key: G,
+        retained: Vec<(Presignatures, u32, u64)>,
+        num_consumed: u64,
+        pending: &HashSet<u64>,
+        refill_divisor: usize,
+        refill_tx: Arc<watch::Sender<u32>>,
+    ) -> anyhow::Result<Self> {
+        let mut batches = Vec::with_capacity(retained.len());
+        let mut covered_pending = 0usize;
+        for (presignatures, batch_index, start_index) in retained {
+            let pool: Vec<Option<(Vec<S>, G)>> = presignatures
+                .enumerate()
+                .map(|(i, presig)| {
+                    let global = start_index + i as u64;
+                    let is_pending = pending.contains(&global);
+                    if global >= num_consumed || is_pending {
+                        if is_pending {
+                            covered_pending += 1;
+                        }
+                        Some(presig)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            tracing::info!(
+                "Recovered presig batch installed: address={address}, batch_index={batch_index}, \
+                 start_index={start_index}, size={}, enabled={}, fingerprint={}",
+                pool.len(),
+                pool.iter().filter(|s| s.is_some()).count(),
+                presig_pool_fingerprint(pool.iter().flatten().map(|(_, nonce)| nonce)),
+            );
+            batches.push(PresigBatch {
+                pool,
+                start_index,
+                batch_index,
+            });
+        }
+        anyhow::ensure!(
+            covered_pending == pending.len(),
+            "recovered signing manager covers {covered_pending} of {} pending presig indices",
+            pending.len(),
+        );
+        Ok(Self {
+            config: Arc::new(SigningEpochConfig {
+                address,
+                committee,
+                threshold,
+                key_shares,
+                verifying_key,
+                refill_divisor,
+            }),
+            state: RwLock::new(SigningPoolState {
+                batches,
+                partial_signing_outputs: HashMap::new(),
+                next_batch: None,
+            }),
+            refill_tx,
+        })
+    }
+
     pub fn set_next_batch(&self, presignatures: Presignatures) {
         self.state.write().unwrap().next_batch = Some(presignatures);
     }
@@ -1328,6 +1395,137 @@ mod tests {
             t,
             rng,
         }
+    }
+
+    #[test]
+    fn test_new_recovered_retains_pending_batch_and_gates_slots() {
+        let n: u16 = 4;
+        let f = (n - 1) / 3;
+        let t = f + 1;
+        let mut rng = StdRng::seed_from_u64(7);
+
+        let encryption_keys: Vec<_> = (0..n)
+            .map(|_| EncryptionPrivateKey::new(&mut rng))
+            .collect();
+        let members: Vec<_> = (0..n as usize)
+            .map(|i| {
+                CommitteeMember::new(
+                    test_address(i),
+                    hashi_types::committee::Bls12381PrivateKey::generate(&mut rng).public_key(),
+                    EncryptionPublicKey::from_private_key(&encryption_keys[i]),
+                    1,
+                )
+            })
+            .collect();
+        let committee = Committee::new(members, 100, 3334u16, 0u16, 3333u16, 0);
+
+        let sk = S::rand(&mut rng);
+        let vk = G::generator() * sk;
+        let sk_shares = mock_shares(&mut rng, sk, t, n);
+
+        let batch_size_per_weight: u16 = 10;
+        let nonces_for_dealer: Vec<(Vec<G>, Vec<Vec<S>>)> = (0..n)
+            .map(|_| {
+                let nonces: Vec<S> = (0..batch_size_per_weight)
+                    .map(|_| S::rand(&mut rng))
+                    .collect();
+                let public_keys: Vec<G> = nonces.iter().map(|s| G::generator() * *s).collect();
+                let nonce_shares: Vec<Vec<S>> = nonces
+                    .iter()
+                    .map(|&nonce| {
+                        mock_shares(&mut rng, nonce, t, n)
+                            .iter()
+                            .map(|e| e.value)
+                            .collect()
+                    })
+                    .collect();
+                (public_keys, nonce_shares)
+            })
+            .collect();
+
+        let index = ShareIndex::new(1).unwrap();
+        let outputs: Vec<batch_avss::ReceiverOutput> = (0..n as usize)
+            .map(|j| batch_avss::ReceiverOutput {
+                my_shares: batch_avss::SharesForNode {
+                    shares: vec![batch_avss::ShareBatch {
+                        index,
+                        batch: (0..batch_size_per_weight as usize)
+                            .map(|l| nonces_for_dealer[j].1[l][0])
+                            .collect(),
+                        blinding_share: S::zero(),
+                    }],
+                },
+                public_keys: nonces_for_dealer[j].0.clone(),
+            })
+            .collect();
+        let params = Parameters { t, f };
+        let new_batch =
+            || Presignatures::new(outputs.clone(), batch_size_per_weight, params, true).unwrap();
+        let size0 = new_batch().len() as u64;
+        assert!(size0 > 6, "batch must be large enough for the index math");
+
+        let num_consumed = size0 + 5;
+        let pending: HashSet<u64> = HashSet::from([3u64]);
+        let (refill_tx, _rx) = watch::channel(0u32);
+        let mgr = SigningManager::new_recovered(
+            test_address(0),
+            committee.clone(),
+            t,
+            avss::SharesForNode {
+                shares: vec![sk_shares[0].clone()],
+            },
+            vk,
+            vec![(new_batch(), 0, 0), (new_batch(), 1, size0)],
+            num_consumed,
+            &pending,
+            crate::constants::PRESIG_REFILL_DIVISOR,
+            Arc::new(refill_tx),
+        )
+        .unwrap();
+
+        {
+            let state = mgr.state.read().unwrap();
+            assert_eq!(
+                state.batches.len(),
+                2,
+                "batch 0 (referenced by pending) must be retained, not dropped"
+            );
+            let b0 = &state.batches[0];
+            assert!(b0.pool[3].is_some(), "pending index 3 stays enabled");
+            assert!(
+                b0.pool[0].is_none(),
+                "consumed non-pending index 0 is disabled (reuse guard)"
+            );
+            let b1 = &state.batches[1];
+            assert!(
+                b1.pool[5].is_some(),
+                "slot at the cursor (size0 + 5) is enabled"
+            );
+            assert!(
+                b1.pool[0].is_none(),
+                "consumed non-pending slot in batch 1 is disabled"
+            );
+        }
+
+        let (refill_tx2, _rx2) = watch::channel(0u32);
+        let err = SigningManager::new_recovered(
+            test_address(0),
+            committee,
+            t,
+            avss::SharesForNode {
+                shares: vec![sk_shares[0].clone()],
+            },
+            vk,
+            vec![(new_batch(), 1, size0)], // batch 0 dropped
+            num_consumed,
+            &pending, // pending {3} lives in the dropped batch 0
+            crate::constants::PRESIG_REFILL_DIVISOR,
+            Arc::new(refill_tx2),
+        );
+        assert!(
+            err.is_err(),
+            "must reject a rebuild that fails to cover a pending index"
+        );
     }
 
     #[test]

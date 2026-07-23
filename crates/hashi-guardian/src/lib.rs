@@ -23,11 +23,11 @@ pub mod attestation;
 pub mod ceremony_mode;
 pub mod enclave;
 pub mod info;
-pub mod operator_activate;
 pub mod operator_init;
 pub mod rpc;
 pub mod s3_client; // used by the monitor
 pub mod s3_reader; // verified read layer; used by the monitor + init tooling
+pub mod task_spawner;
 pub mod withdraw_mode;
 
 #[cfg(any(test, feature = "test-utils"))]

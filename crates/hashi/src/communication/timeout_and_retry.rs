@@ -31,6 +31,7 @@ fn retry_policy() -> ExponentialBuilder {
         .with_min_delay(RETRY_MIN_DELAY)
         .with_max_delay(RETRY_MAX_DELAY)
         .with_max_times(MAX_RETRIES)
+        .with_jitter()
 }
 
 async fn with_timeout<T>(fut: impl Future<Output = ChannelResult<T>>) -> ChannelResult<T> {
