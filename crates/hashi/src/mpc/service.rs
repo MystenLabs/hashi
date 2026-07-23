@@ -1513,8 +1513,25 @@ impl MpcService {
                         );
                         return Ok(());
                     }
-                    ReconfigSubmissionErrorKind::NonRetryableMoveAbort
-                    | ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted => {
+                    ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted => {
+                        // Another node's end_reconfig closed the reconfig
+                        // window before our handoff landed; the handoff cert
+                        // is already recorded on-chain, so there is nothing
+                        // left to submit.
+                        warn!(
+                            "submit_committee_handoff submission for epoch {epoch} found reconfig already completed; waiting for the watcher to observe it: {e}"
+                        );
+                        self.wait_for_epoch_change_visibility(epoch).await;
+                        if self.get_pending_epoch_change() != Some(epoch) {
+                            return Ok(());
+                        }
+                        Err(e).with_context(|| {
+                            format!(
+                                "submit_committee_handoff submission for epoch {epoch} failed with ENotReconfiguring, but epoch is still pending after waiting for the watcher"
+                            )
+                        })?;
+                    }
+                    ReconfigSubmissionErrorKind::NonRetryableMoveAbort => {
                         Err(e).with_context(|| {
                             format!(
                                 "submit_committee_handoff submission for epoch {epoch} failed with non-retryable error"
@@ -1644,6 +1661,7 @@ fn certified_nonce_weight<T>(
         .1
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum ReconfigSubmissionErrorKind {
     NonMoveAbort,
     NonRetryableMoveAbort,
@@ -1685,7 +1703,12 @@ fn classify_reconfig_submission_error(err: &anyhow::Error) -> ReconfigSubmission
         (Some("committee_set"), Some("set_pending_committee_handoff_cert"), _) => {
             ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted
         }
-        (Some("reconfig"), Some("end_reconfig"), Some(RECONFIG_E_NOT_RECONFIGURING)) => {
+        // Every `reconfig` entry point asserts `ENotReconfiguring` when the
+        // reconfig window has already closed — `end_reconfig` and
+        // `submit_committee_handoff` both raise it when another node's
+        // end_reconfig lands first — so match the constant regardless of
+        // which function raised it.
+        (Some("reconfig"), _, Some(RECONFIG_E_NOT_RECONFIGURING)) => {
             ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted
         }
         _ => ReconfigSubmissionErrorKind::NonRetryableMoveAbort,
@@ -1713,6 +1736,116 @@ mod presig_count_tests {
         let params = Parameters { t: 3, f: 1 };
         assert_eq!(presig_count(1, params, false, 2), 0);
         assert_eq!(presig_count(0, params, true, 5), 0);
+    }
+}
+
+#[cfg(test)]
+mod reconfig_abort_classifier_tests {
+    use sui_rpc::proto::sui::rpc::v2::CleverError;
+    use sui_rpc::proto::sui::rpc::v2::ExecutionError;
+    use sui_rpc::proto::sui::rpc::v2::ExecutionStatus;
+    use sui_rpc::proto::sui::rpc::v2::MoveAbort;
+    use sui_rpc::proto::sui::rpc::v2::MoveLocation;
+    use sui_rpc::proto::sui::rpc::v2::execution_error::ExecutionErrorKind;
+
+    use super::ReconfigSubmissionErrorKind;
+    use super::classify_reconfig_submission_error;
+    use crate::sui_tx_executor::TransactionExecutionError;
+
+    fn move_abort_error(
+        module: &str,
+        function: &str,
+        constant_name: Option<&str>,
+    ) -> anyhow::Error {
+        let mut abort = MoveAbort::default().with_location(
+            MoveLocation::default()
+                .with_module(module)
+                .with_function_name(function),
+        );
+        if let Some(name) = constant_name {
+            abort = abort.with_clever_error(CleverError::default().with_constant_name(name));
+        }
+        let status = ExecutionStatus::default().with_success(false).with_error(
+            ExecutionError::default()
+                .with_kind(ExecutionErrorKind::MoveAbort)
+                .with_abort(abort),
+        );
+        TransactionExecutionError::new_for_test("test", status).into()
+    }
+
+    #[test]
+    fn not_reconfiguring_from_end_reconfig_is_already_completed() {
+        let err = move_abort_error("reconfig", "end_reconfig", Some("ENotReconfiguring"));
+        assert_eq!(
+            classify_reconfig_submission_error(&err),
+            ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted
+        );
+    }
+
+    /// The losing side of the handoff race: another node's end_reconfig
+    /// closed the reconfig window, so our submit_committee_handoff aborts
+    /// with ENotReconfiguring. This must classify as benign, not as a
+    /// non-retryable abort that panics the node.
+    #[test]
+    fn not_reconfiguring_from_submit_committee_handoff_is_already_completed() {
+        let err = move_abort_error(
+            "reconfig",
+            "submit_committee_handoff",
+            Some("ENotReconfiguring"),
+        );
+        assert_eq!(
+            classify_reconfig_submission_error(&err),
+            ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted
+        );
+    }
+
+    /// Classification must see through the anyhow context layers the
+    /// submission paths add before the caller re-classifies.
+    #[test]
+    fn classification_sees_through_context_chains() {
+        let err = move_abort_error(
+            "reconfig",
+            "submit_committee_handoff",
+            Some("ENotReconfiguring"),
+        )
+        .context("submit_committee_handoff submission for epoch 1 failed");
+        assert_eq!(
+            classify_reconfig_submission_error(&err),
+            ReconfigSubmissionErrorKind::EndReconfigAlreadyCompleted
+        );
+    }
+
+    #[test]
+    fn cert_already_set_abort_is_already_submitted() {
+        // The assert in committee_set has no error constant, so no clever
+        // error is rendered.
+        let err = move_abort_error("committee_set", "set_pending_committee_handoff_cert", None);
+        assert_eq!(
+            classify_reconfig_submission_error(&err),
+            ReconfigSubmissionErrorKind::CommitteeHandoffAlreadySubmitted
+        );
+    }
+
+    #[test]
+    fn other_reconfig_module_aborts_are_non_retryable() {
+        let err = move_abort_error(
+            "reconfig",
+            "submit_committee_handoff",
+            Some("EInitialReconfig"),
+        );
+        assert_eq!(
+            classify_reconfig_submission_error(&err),
+            ReconfigSubmissionErrorKind::NonRetryableMoveAbort
+        );
+    }
+
+    #[test]
+    fn plain_errors_are_non_move_abort() {
+        let err = anyhow::anyhow!("connection reset by peer");
+        assert_eq!(
+            classify_reconfig_submission_error(&err),
+            ReconfigSubmissionErrorKind::NonMoveAbort
+        );
     }
 }
 
