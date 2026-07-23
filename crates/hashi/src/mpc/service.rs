@@ -4,6 +4,7 @@
 //! MPC (Multi-Party Computation) Service
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -53,6 +54,7 @@ const MAX_PROTOCOL_ATTEMPTS: u32 = 3;
 const START_RECONFIG_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const MPC_RECONFIG_TIMEOUT: Duration = Duration::from_secs(600);
 const RECONCILE_TICK: Duration = Duration::from_secs(15);
+const MAX_KEY_REREGISTRATION_BUMPS: u32 = 3;
 /// Move `hashi::reconfig::ENotReconfiguring`, matched by its clever-error
 /// constant name (the `#[error]` abort code encodes a source line, so the
 /// numeric code is not stable).
@@ -97,6 +99,7 @@ pub struct MpcService {
     refill_rx: watch::Receiver<u32>,
     reconciling: Arc<tokio::sync::Mutex<()>>,
     backup_handle: crate::backup::BackupHandle,
+    replacement_keys_target_epoch: Mutex<Option<u64>>,
 }
 
 impl MpcService {
@@ -110,12 +113,12 @@ impl MpcService {
             refill_rx,
             reconciling: Arc::new(tokio::sync::Mutex::new(())),
             backup_handle,
+            replacement_keys_target_epoch: Mutex::new(None),
         };
         let handle = MpcHandle { key_ready_rx };
         (service, handle)
     }
 
-    /// Start the MPC service and return a `Service` for lifecycle management.
     pub fn start(self) -> Service {
         Service::new().spawn_aborting(async move {
             self.run().await;
@@ -141,6 +144,10 @@ impl MpcService {
             self.try_submit_genesis_reconfig().await;
         } else if self.inner.is_in_current_committee() {
             loop {
+                if let Some(epoch) = self.get_pending_epoch_change() {
+                    self.handle_reconfig(epoch).await;
+                    continue;
+                }
                 self.sync_if_stale().await;
                 let epoch = self.inner.onchain_state().epoch();
                 if self.inner.signing_manager_for(epoch).is_some() {
@@ -746,6 +753,7 @@ impl MpcService {
             Ok(output) => output,
             Err(e) => {
                 error!("sync_if_stale: recover_mpc_state failed for epoch {epoch}: {e}");
+                self.re_register_keys_if_lost().await;
                 return;
             }
         };
@@ -779,6 +787,97 @@ impl MpcService {
             }
         }
         let _ = self.key_ready_tx.send(Some(output.public_key));
+    }
+
+    async fn re_register_keys_if_lost(&self) {
+        let committee = self
+            .inner
+            .onchain_state()
+            .state()
+            .hashi()
+            .committees
+            .current_committee()
+            .cloned();
+        let Some(committee) = committee else { return };
+        let Ok(me) = self.inner.config.validator_address() else {
+            return;
+        };
+        if !self.inner.committee_key_lost(&committee, me) {
+            return;
+        }
+        self.inner.metrics.mpc_committee_key_lost_total.inc();
+        let mut target = match self.inner.next_reconfig_epoch().await {
+            Ok(target) => target,
+            Err(e) => {
+                warn!("cannot determine next reconfig epoch for key re-registration: {e}");
+                return;
+            }
+        };
+        for _ in 0..MAX_KEY_REREGISTRATION_BUMPS {
+            if self
+                .replacement_keys_target_epoch
+                .lock()
+                .unwrap()
+                .is_some_and(|recorded| recorded >= target)
+            {
+                return;
+            }
+            warn!(
+                "no DB encryption or signing key matches the current committee record; \
+                 registering fresh keys for epoch {target} so the node rejoins at that reconfig"
+            );
+            if let Err(e) = self.inner.prepare_and_register_keys(target).await {
+                warn!("failed to register replacement keys for epoch {target}: {e}; will retry");
+                return;
+            }
+            match self
+                .inner
+                .onchain_state()
+                .scrape_committee_for_epoch(target)
+                .await
+            {
+                Ok(Some(frozen)) if self.inner.committee_key_lost(&frozen, me) => {
+                    self.inner.metrics.mpc_key_reregistration_bumps_total.inc();
+                    info!(
+                        "epoch {target} committee already snapshotted without replacement keys; \
+                         re-targeting {}",
+                        target + 1
+                    );
+                    target += 1;
+                }
+                Ok(Some(frozen)) => {
+                    if frozen.members().iter().any(|m| m.validator_address() == me) {
+                        info!("replacement keys frozen into the epoch {target} committee");
+                    } else {
+                        warn!(
+                            "not a member of the epoch {target} committee; replacement keys \
+                             registered for a future committee"
+                        );
+                    }
+                    *self.replacement_keys_target_epoch.lock().unwrap() = Some(target);
+                    return;
+                }
+                Ok(None) => {
+                    info!(
+                        "replacement keys registered; the epoch {target} committee is not yet \
+                         snapshotted and will include them"
+                    );
+                    *self.replacement_keys_target_epoch.lock().unwrap() = Some(target);
+                    return;
+                }
+                Err(e) => {
+                    warn!(
+                        "cannot verify the epoch {target} committee after key registration: {e}; \
+                         re-verifying next tick"
+                    );
+                    return;
+                }
+            }
+        }
+        warn!(
+            "replacement keys still excluded after {MAX_KEY_REREGISTRATION_BUMPS} registration \
+             attempts; will retry next tick"
+        );
     }
 
     async fn refill_presignatures(&self, batch_index: u32) -> anyhow::Result<()> {

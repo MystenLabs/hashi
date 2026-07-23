@@ -406,9 +406,50 @@ impl Hashi {
             .ok_or_else(|| {
                 anyhow!(
                     "no DB encryption key matches committee record for epoch {epoch}; \
-                     operator intervention needed (re-register, possibly DB recovery)"
+                     restore the node DB to rejoin this epoch — otherwise replacement \
+                     keys are registered automatically and the node rejoins at the next \
+                     reconfig"
                 )
             })
+    }
+
+    pub(crate) fn committee_encryption_key_lost(
+        &self,
+        committee: &hashi_types::committee::Committee,
+        validator_address: sui_sdk_types::Address,
+    ) -> bool {
+        committee
+            .members()
+            .iter()
+            .find(|m| m.validator_address() == validator_address)
+            .is_some_and(|m| {
+                matches!(
+                    self.db
+                        .find_encryption_key_matching(m.encryption_public_key()),
+                    Ok(None)
+                )
+            })
+    }
+
+    pub(crate) fn committee_signing_key_lost(
+        &self,
+        committee: &hashi_types::committee::Committee,
+        validator_address: sui_sdk_types::Address,
+    ) -> bool {
+        committee
+            .members()
+            .iter()
+            .find(|m| m.validator_address() == validator_address)
+            .is_some_and(|m| matches!(self.db.find_signing_key_matching(m.public_key()), Ok(None)))
+    }
+
+    pub(crate) fn committee_key_lost(
+        &self,
+        committee: &hashi_types::committee::Committee,
+        validator_address: sui_sdk_types::Address,
+    ) -> bool {
+        self.committee_encryption_key_lost(committee, validator_address)
+            || self.committee_signing_key_lost(committee, validator_address)
     }
 
     pub fn prepare_signing_key(&self, epoch: u64) -> anyhow::Result<Bls12381PrivateKey> {
@@ -440,7 +481,9 @@ impl Hashi {
             .ok_or_else(|| {
                 anyhow!(
                     "no DB signing key matches committee record for epoch {epoch}; \
-                     operator intervention needed (re-register, possibly DB recovery)"
+                     restore the node DB to rejoin this epoch — otherwise replacement \
+                     keys are registered automatically and the node rejoins at the next \
+                     reconfig"
                 )
             })
     }
@@ -493,6 +536,15 @@ impl Hashi {
                             .iter()
                             .any(|m| m.validator_address() == validator_address)
                         {
+                            Ok(None)
+                        } else if self
+                            .committee_encryption_key_lost(prev_committee, validator_address)
+                        {
+                            tracing::warn!(
+                                previous_epoch = prev_ep,
+                                "previous-epoch encryption key lost; continuing without it \
+                                 (party-only: cannot deal previous shares)"
+                            );
                             Ok(None)
                         } else {
                             Err(e)
@@ -1465,6 +1517,62 @@ mod test {
     }
 
     #[test]
+    fn committee_encryption_key_lost_detects_missing_key() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let validator_address = Address::new([1u8; 32]);
+        let bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
+        let unknown_enc_pub = EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(
+            &mut rand::thread_rng(),
+        ));
+        let committee = one_member_committee(5, validator_address, bls_pub, unknown_enc_pub);
+        assert!(hashi.committee_encryption_key_lost(&committee, validator_address));
+    }
+
+    #[test]
+    fn committee_encryption_key_lost_false_when_key_present() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let validator_address = Address::new([1u8; 32]);
+        let bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
+        let enc_pub = hashi.prepare_encryption_key(5).unwrap();
+        let committee = one_member_committee(5, validator_address, bls_pub, enc_pub);
+        assert!(!hashi.committee_encryption_key_lost(&committee, validator_address));
+    }
+
+    #[test]
+    fn committee_signing_key_lost_detects_missing_key() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let validator_address = Address::new([1u8; 32]);
+        let unknown_bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
+        let enc_pub = hashi.prepare_encryption_key(5).unwrap();
+        let committee = one_member_committee(5, validator_address, unknown_bls_pub, enc_pub);
+        assert!(hashi.committee_signing_key_lost(&committee, validator_address));
+        assert!(hashi.committee_key_lost(&committee, validator_address));
+        assert!(!hashi.committee_encryption_key_lost(&committee, validator_address));
+    }
+
+    #[test]
+    fn committee_signing_key_lost_false_when_key_present() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let validator_address = Address::new([1u8; 32]);
+        let bls_pub = hashi.prepare_signing_key(5).unwrap().public_key();
+        let enc_pub = hashi.prepare_encryption_key(5).unwrap();
+        let committee = one_member_committee(5, validator_address, bls_pub, enc_pub);
+        assert!(!hashi.committee_signing_key_lost(&committee, validator_address));
+        assert!(!hashi.committee_key_lost(&committee, validator_address));
+    }
+
+    #[test]
+    fn committee_encryption_key_lost_false_when_not_in_committee() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let bls_pub = Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key();
+        let enc_pub = EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(
+            &mut rand::thread_rng(),
+        ));
+        let committee = one_member_committee(5, Address::new([2u8; 32]), bls_pub, enc_pub);
+        assert!(!hashi.committee_encryption_key_lost(&committee, Address::new([1u8; 32])));
+    }
+
+    #[test]
     fn resolve_previous_encryption_key_at_late_genesis_returns_none() {
         let (hashi, _tmpdir) = new_hashi_for_test();
         let validator_address = Address::new([1u8; 32]);
@@ -1488,6 +1596,47 @@ mod test {
         assert!(
             result.is_none(),
             "previous_encryption_key must be None at late genesis (no prior epoch exists)"
+        );
+    }
+
+    #[test]
+    fn resolve_previous_encryption_key_lost_key_returns_none() {
+        let (hashi, _tmpdir) = new_hashi_for_test();
+        let validator_address = Address::new([1u8; 32]);
+        let unknown_enc_pub = EncryptionPublicKey::from_private_key(&EncryptionPrivateKey::new(
+            &mut rand::thread_rng(),
+        ));
+        let target_epoch = 3;
+        let previous_committee = one_member_committee(
+            2,
+            validator_address,
+            Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key(),
+            unknown_enc_pub,
+        );
+        let new_committee = one_member_committee(
+            target_epoch,
+            validator_address,
+            Bls12381PrivateKey::generate(&mut rand::thread_rng()).public_key(),
+            hashi.prepare_encryption_key(target_epoch).unwrap(),
+        );
+
+        let mut committee_set =
+            crate::onchain::types::CommitteeSet::new(Address::ZERO, Address::ZERO);
+        committee_set
+            .set_epoch(2)
+            .set_pending_epoch_change(Some(target_epoch));
+        committee_set.set_committees(
+            [(2, previous_committee), (target_epoch, new_committee)]
+                .into_iter()
+                .collect(),
+        );
+
+        let result = hashi
+            .resolve_previous_encryption_key(&committee_set, target_epoch, validator_address)
+            .expect("definitive previous-key loss must relax to None, not error");
+        assert!(
+            result.is_none(),
+            "lost previous key must yield None (fresh-member path)"
         );
     }
 
