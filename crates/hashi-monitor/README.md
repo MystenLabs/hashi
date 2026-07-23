@@ -54,6 +54,7 @@ next_event_delays:
 
 guardian:
   s3_bucket: "hashi-guardian-logs"
+  retention_environment: "testnet"
 
 sui:
   rpc_url: "https://fullnode.testnet.sui.io:443"

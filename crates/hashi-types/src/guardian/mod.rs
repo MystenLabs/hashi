@@ -386,6 +386,7 @@ pub struct S3Config {
     pub secret_key: String,
     pub session_token: Option<String>,
     pub bucket_info: S3BucketInfo,
+    pub retention_environment: S3RetentionEnvironment,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

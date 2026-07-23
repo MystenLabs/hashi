@@ -12,6 +12,7 @@ use hashi::onchain::OnchainState;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::S3BucketInfo;
 use hashi_types::guardian::S3Config;
+use hashi_types::guardian::S3RetentionEnvironment;
 use serde::Deserialize;
 
 use crate::kp_roster::KpRosterConfig;
@@ -118,6 +119,9 @@ pub struct GuardianInitS3Config {
     pub region: String,
     pub access_key: Option<String>,
     pub secret_key: Option<String>,
+    // TODO(s3-retention): Should this be replaced by, or derived from, a
+    // repository-wide Hashi network identifier?
+    pub retention_environment: S3RetentionEnvironment,
 }
 
 impl GuardianInitS3Config {
@@ -163,6 +167,7 @@ impl GuardianInitS3Config {
                 bucket: self.bucket.clone(),
                 region: self.region.clone(),
             },
+            retention_environment: self.retention_environment,
         })
     }
 }

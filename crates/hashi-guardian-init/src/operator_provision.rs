@@ -25,6 +25,7 @@ use crate::guardian_info::verified_live_guardian_info;
 pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
     cfg.kp_roster.validate()?;
     let guardian_s3 = cfg.guardian_s3.resolve().await?;
+    let retention_environment = guardian_s3.retention_environment;
     let allowlist = cfg.kp_roster.pcr_allowlist();
 
     info!(
@@ -33,6 +34,7 @@ pub async fn run(cfg: Config, do_genesis: bool) -> anyhow::Result<()> {
         region = guardian_s3.region(),
         endpoint = %cfg.guardian_endpoint,
         bitcoin_network = ?cfg.bitcoin_network,
+        ?retention_environment,
         num_shares = cfg.kp_roster.num_shares,
         threshold = cfg.kp_roster.threshold,
         limiter_refill_rate = cfg.limiter_config.refill_rate,

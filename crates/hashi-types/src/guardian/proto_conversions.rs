@@ -188,7 +188,7 @@ impl TryFrom<pb::OperatorInitRequest> for OperatorInitRequest {
                 ))
             })
             .transpose()?;
-        // `init_config` present ⇔ withdraw mode; absent ⇔ ceremony (S3 only).
+        // `init_config` present ⇔ withdraw mode; absent ⇔ ceremony.
         match req.init_config.map(InitConfig::try_from).transpose()? {
             Some(init_config) => Ok(OperatorInitRequest::new_withdraw_mode(
                 s3_config,
@@ -1122,6 +1122,8 @@ impl TryFrom<pb::S3Config> for super::S3Config {
         let secret_key = cfg.secret_key.ok_or_else(|| missing("secret_key"))?;
         let bucket_name = cfg.bucket_name.ok_or_else(|| missing("bucket_name"))?;
         let region = cfg.region.ok_or_else(|| missing("region"))?;
+        let retention_environment =
+            super::S3RetentionEnvironment::try_from(cfg.retention_environment)?;
 
         Ok(Self {
             access_key,
@@ -1131,6 +1133,7 @@ impl TryFrom<pb::S3Config> for super::S3Config {
                 bucket: bucket_name,
                 region,
             },
+            retention_environment,
         })
     }
 }
@@ -1142,6 +1145,7 @@ fn s3_config_to_pb(cfg: super::S3Config) -> pb::S3Config {
         bucket_name: Some(cfg.bucket_info.bucket),
         region: Some(cfg.bucket_info.region),
         session_token: cfg.session_token,
+        retention_environment: cfg.retention_environment.into(),
     }
 }
 
@@ -1162,6 +1166,31 @@ fn network_to_pb(n: super::Network) -> GuardianResult<i32> {
         super::Network::Regtest => Ok(pb::Network::Regtest as i32),
         super::Network::Signet => Ok(pb::Network::Signet as i32),
         _ => Err(InvalidInputs(format!("invalid network: enum value {n}"))),
+    }
+}
+
+impl TryFrom<i32> for super::S3RetentionEnvironment {
+    type Error = GuardianError;
+
+    fn try_from(environment: i32) -> Result<Self, Self::Error> {
+        match pb::S3RetentionEnvironment::try_from(environment) {
+            Ok(pb::S3RetentionEnvironment::Devnet) => Ok(Self::Devnet),
+            Ok(pb::S3RetentionEnvironment::Mainnet) => Ok(Self::Mainnet),
+            Ok(pb::S3RetentionEnvironment::Testnet) => Ok(Self::Testnet),
+            Ok(pb::S3RetentionEnvironment::Unspecified) | Err(_) => Err(InvalidInputs(format!(
+                "invalid S3 retention environment: enum value {environment}"
+            ))),
+        }
+    }
+}
+
+impl From<super::S3RetentionEnvironment> for i32 {
+    fn from(environment: super::S3RetentionEnvironment) -> Self {
+        match environment {
+            super::S3RetentionEnvironment::Devnet => pb::S3RetentionEnvironment::Devnet as i32,
+            super::S3RetentionEnvironment::Mainnet => pb::S3RetentionEnvironment::Mainnet as i32,
+            super::S3RetentionEnvironment::Testnet => pb::S3RetentionEnvironment::Testnet as i32,
+        }
     }
 }
 

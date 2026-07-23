@@ -8,6 +8,7 @@ use aws_sdk_s3::error::DisplayErrorContext;
 use hashi_types::guardian::LogRecord;
 use hashi_types::guardian::S3BucketInfo;
 use hashi_types::guardian::S3Config;
+use hashi_types::guardian::S3ObjectLockPolicy;
 use std::collections::BTreeSet;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -35,10 +36,12 @@ const S3_WRITE_RETRY_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub struct GuardianS3Client {
-    /// S3 config: bucket name, region, API keys
+    /// S3 connection and retention config.
     config: S3Config,
     /// S3 client
     client: S3Client,
+    /// Expected object-lock policy for this Guardian deployment.
+    object_lock_policy: S3ObjectLockPolicy,
 }
 
 impl GuardianS3Client {
@@ -78,6 +81,7 @@ impl GuardianS3Client {
         Self {
             client,
             config: config.clone(),
+            object_lock_policy: S3ObjectLockPolicy::for_environment(config.retention_environment),
         }
     }
 
@@ -91,7 +95,12 @@ impl GuardianS3Client {
     /// This is intended for unit tests that use a mock S3 Client.
     /// This is not put behind cfg(test) as tests in the enclave crate also use it.
     pub fn from_client_for_tests(config: S3Config, client: S3Client) -> Self {
-        Self { client, config }
+        let object_lock_policy = S3ObjectLockPolicy::for_environment(config.retention_environment);
+        Self {
+            client,
+            config,
+            object_lock_policy,
+        }
     }
 
     // ========================================================================
@@ -109,7 +118,7 @@ impl GuardianS3Client {
     /// Attempt one immutable log write, relying on the AWS SDK retry policy.
     pub async fn write_log_record(&self, log: LogRecord) -> GuardianResult<()> {
         let key = log.object_key().to_string();
-        let object_lock_duration = log.object_lock_duration();
+        let object_lock_duration = self.object_lock_duration(&log);
         self.write_at_key(&key, &log, object_lock_duration).await
     }
 
@@ -130,7 +139,7 @@ impl GuardianS3Client {
         max_failure_interval: Duration,
         retry_interval: Duration,
     ) -> GuardianResult<()> {
-        let object_lock_duration = log.object_lock_duration();
+        let object_lock_duration = self.object_lock_duration(&log);
         let key = log.object_key();
         let write_until_success = async {
             loop {
@@ -151,6 +160,10 @@ impl GuardianS3Client {
                 key, max_failure_interval
             ),
         }
+    }
+
+    fn object_lock_duration(&self, log: &LogRecord) -> Duration {
+        log.object_lock_duration(self.object_lock_policy)
     }
 
     /// Write a value to S3 at an explicit key.
@@ -362,7 +375,7 @@ impl GuardianS3Client {
 
 /// Controls whether an S3 read requires Compliance-mode object-lock metadata.
 pub(crate) enum LockCheck {
-    /// Reject the object unless Compliance lock metadata is present.
+    /// Reject the object unless its Compliance lock is still unexpired.
     Required,
     /// Do not inspect lock metadata. Used for signed records whose short lock
     /// is expected to expire, such as KP-share state.
@@ -568,13 +581,15 @@ impl GuardianS3Client {
                 ))
             })?;
 
-        // NOTE: When required, we are explicitly assuming locks are unexpired.
         if matches!(lock_check, LockCheck::Required)
-            && (response.object_lock_mode() != Some(&ObjectLockMode::Compliance)
-                || response.object_lock_retain_until_date().is_none())
+            && !has_unexpired_compliance_lock(
+                response.object_lock_mode(),
+                response.object_lock_retain_until_date(),
+                SystemTime::now(),
+            )
         {
             return Err(S3Error(format!(
-                "Missing or invalid object lock metadata for key {}",
+                "Missing, invalid, or expired object lock metadata for key {}",
                 key
             )));
         }
@@ -597,11 +612,7 @@ impl GuardianS3Client {
         Ok(record)
     }
 
-    /// Reads an immutable-log object, asserting its Compliance lock metadata is
-    /// present but not that it is unexpired.
-    /// TODO: also reject when `retain_until <= now` — once the lock lapses the
-    /// version check below no longer detects tampering (see
-    /// `validate_prefix_history_and_list_keys`).
+    /// Reads an immutable-log object, asserting its Compliance lock is unexpired.
     pub(crate) async fn get_log_record(&self, key: &str) -> GuardianResult<LogRecord> {
         self.get_log_record_inner(key, LockCheck::Required, HistoryCheck::Required)
             .await
@@ -659,6 +670,18 @@ impl GuardianS3Client {
     }
 }
 
+// TODO(testnet-wipe): Once legacy seven-day logs are gone, also verify that the
+// retain-until date covers the record timestamp plus this log type's duration
+// from `object_lock_policy`.
+fn has_unexpired_compliance_lock(
+    mode: Option<&ObjectLockMode>,
+    retain_until: Option<&DateTime>,
+    now: SystemTime,
+) -> bool {
+    mode == Some(&ObjectLockMode::Compliance)
+        && retain_until.is_some_and(|retain_until| *retain_until > DateTime::from(now))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,6 +704,7 @@ mod tests {
                 bucket: "bucket".to_string(),
                 region: "us-east-1".to_string(),
             },
+            retention_environment: hashi_types::guardian::S3RetentionEnvironment::Testnet,
         };
         GuardianS3Client::from_client_for_tests(config, client)
     }
@@ -896,5 +920,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(put_flaky.num_calls(), 3);
+    }
+
+    #[test]
+    fn compliance_lock_expiry_is_strict() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let expired = DateTime::from(now - Duration::from_secs(1));
+        let expires_now = DateTime::from(now);
+        let unexpired = DateTime::from(now + Duration::from_secs(1));
+
+        assert!(!has_unexpired_compliance_lock(
+            Some(&ObjectLockMode::Compliance),
+            Some(&expired),
+            now,
+        ));
+        assert!(!has_unexpired_compliance_lock(
+            Some(&ObjectLockMode::Compliance),
+            Some(&expires_now),
+            now,
+        ));
+        assert!(has_unexpired_compliance_lock(
+            Some(&ObjectLockMode::Compliance),
+            Some(&unexpired),
+            now,
+        ));
+    }
+
+    #[tokio::test]
+    async fn required_read_rejects_expired_compliance_lock() {
+        let get_expired = mock!(Client::get_object)
+            .match_requests(|req| req.bucket() == Some("bucket") && req.key() == Some("key"))
+            .then_output(|| {
+                GetObjectOutput::builder()
+                    .object_lock_mode(ObjectLockMode::Compliance)
+                    .object_lock_retain_until_date(DateTime::from(
+                        SystemTime::now() - Duration::from_secs(1),
+                    ))
+                    .body(ByteStream::from_static(b"not read"))
+                    .build()
+            });
+        let client = mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[&get_expired]);
+        let logger = mk_logger_with_client(client);
+
+        let error = logger
+            .get_log_record_inner("key", LockCheck::Required, HistoryCheck::AlreadyChecked)
+            .await
+            .expect_err("an expired required lock must be rejected");
+
+        assert!(
+            matches!(error, S3Error(message) if message.contains("expired object lock metadata"))
+        );
+        assert_eq!(get_expired.num_calls(), 1);
     }
 }

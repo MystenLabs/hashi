@@ -222,7 +222,7 @@ message SignedSetupNewKeyResponse {
 // =======================
 
 message OperatorInitRequest {
-  // S3 access keys
+  // S3 connection and retention config.
   S3Config s3_config = 1;
 
   // Withdraw-mode stable init config (absent for a ceremony enclave). The enclave
@@ -235,6 +235,13 @@ message OperatorInitRequest {
 
 message OperatorInitResponse {}
 
+enum S3RetentionEnvironment {
+  S3_RETENTION_ENVIRONMENT_UNSPECIFIED = 0;
+  S3_RETENTION_ENVIRONMENT_MAINNET = 1;
+  S3_RETENTION_ENVIRONMENT_TESTNET = 2;
+  S3_RETENTION_ENVIRONMENT_DEVNET = 3;
+}
+
 message GenesisState {
   Committee committee = 1;
 }
@@ -245,6 +252,8 @@ message S3Config {
   optional string bucket_name = 3;
   optional string region = 4;
   optional string session_token = 5;
+  // Hashi deployment class used to select the Guardian S3 object-lock policy.
+  S3RetentionEnvironment retention_environment = 6;
 }
 
 enum Network {
