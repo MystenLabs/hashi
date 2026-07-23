@@ -21,6 +21,9 @@ const DEFAULT_MAX_FAULTY_IN_BASIS_POINTS: u64 = 3333;
 
 const VANILLA_NONCE_GENERATION_PROTOCOL: u64 = 0;
 
+// DEVNET-ONLY EXPERIMENTAL BRANCH — DO NOT MERGE.
+const AVID_NONCE_GENERATION_PROTOCOL: u64 = 1;
+
 const MAX_BPS: u64 = 10000;
 
 const KEY_THRESHOLD_IN_BASIS_POINTS: vector<u8> = b"mpc_threshold_in_basis_points";
@@ -89,7 +92,7 @@ public(package) fun init_defaults(config: &mut Config) {
     );
     config.upsert(
         KEY_NONCE_GENERATION_PROTOCOL,
-        config_value::new_u64(VANILLA_NONCE_GENERATION_PROTOCOL),
+        config_value::new_u64(AVID_NONCE_GENERATION_PROTOCOL),
     );
 }
 
