@@ -11,6 +11,7 @@ mod tests {
     use futures::StreamExt;
     use hashi::sui_tx_executor::SuiTxExecutor;
     use hashi_types::bitcoin::BitcoinAddress;
+    use hashi_types::move_types::ProtocolType;
     use hashi_types::move_types::WithdrawalConfirmed;
     use hashi_types::move_types::WithdrawalPickedForProcessing;
     use hashi_types::move_types::WithdrawalSigned;
@@ -2449,6 +2450,142 @@ mod tests {
         assert_no_unrouted_objects(&networks);
 
         info!("=== Watcher Kill-and-Reconnect Replay Test Passed ===");
+        Ok(())
+    }
+
+    /// The leader's TOB cert GC prunes nonce buckets once the current
+    /// epoch is two past theirs, while key-generation buckets ride out
+    /// their longer retention floor: run genesis DKG, wait for the
+    /// presig refill to write genesis-epoch nonce buckets, advance the
+    /// Hashi epoch twice (two forced Sui epoch closes, each completing
+    /// a rotation), and verify the expired nonce buckets disappear from
+    /// every node's mirror and from the chain — with the genesis DKG
+    /// bucket retained, the survivors still in parity, and nothing
+    /// unrouted.
+    #[tokio::test]
+    async fn test_leader_destroys_expired_tob_cert_buckets() -> Result<()> {
+        init_test_logging();
+        info!("=== Starting TOB Cert GC E2E Test ===");
+
+        let mut networks = TestNetworksBuilder::new().with_nodes(4).build().await?;
+        for node in networks.hashi_network.nodes() {
+            node.wait_for_mpc_key(Duration::from_secs(120)).await?;
+        }
+
+        let state = networks.hashi_network.nodes()[0]
+            .hashi()
+            .onchain_state()
+            .clone();
+        let genesis_epoch = state.epoch();
+        assert!(
+            state.tob_bucket_keys().iter().any(
+                |(key, _)| key.epoch == genesis_epoch && key.protocol_type == ProtocolType::Dkg
+            ),
+            "expected a genesis DKG bucket after DKG"
+        );
+
+        // The presig refill writes the nonce buckets the GC will prune;
+        // wait for the first ones rather than racing the refill loop.
+        info!("Waiting for genesis-epoch nonce buckets from the presig refill...");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        let genesis_nonce_batches: Vec<u32> = loop {
+            let batches: Vec<u32> = state
+                .tob_bucket_keys()
+                .into_iter()
+                .filter_map(|(key, _)| {
+                    (key.epoch == genesis_epoch
+                        && key.protocol_type == ProtocolType::NonceGeneration)
+                        .then_some(key.batch_index)
+                        .flatten()
+                })
+                .collect();
+            if !batches.is_empty() {
+                break batches;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!("no genesis-epoch nonce bucket appeared in the mirror");
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        };
+        info!("Genesis nonce batches present: {genesis_nonce_batches:?}");
+
+        // Two epoch advances put the genesis nonce buckets past the
+        // Move floor (`current_epoch >= epoch + 2`); the key-generation
+        // retention floor is longer, so the DKG bucket must survive.
+        for step in 1..=2u64 {
+            info!("Forcing Sui epoch close {step}/2...");
+            networks.sui_network.force_close_epoch().await?;
+            let target = genesis_epoch + step;
+            for node in networks.hashi_network.nodes() {
+                node.wait_for_epoch(target, Duration::from_secs(180))
+                    .await?;
+            }
+            info!("All nodes rotated into epoch {target}");
+        }
+
+        // The leader GC runs on its checkpoint tick; wait until every
+        // node's mirror shows no expired nonce bucket left.
+        info!("Waiting for the leader to prune the expired nonce buckets...");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        'wait: loop {
+            let current = state.epoch();
+            let laggard =
+                networks
+                    .hashi_network
+                    .nodes()
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, node)| {
+                        let expired: Vec<_> = node
+                            .hashi()
+                            .onchain_state()
+                            .tob_bucket_keys()
+                            .into_iter()
+                            .filter(|(key, _)| {
+                                key.protocol_type == ProtocolType::NonceGeneration
+                                    && current >= key.epoch.saturating_add(2)
+                            })
+                            .collect();
+                        (!expired.is_empty()).then_some((index, expired))
+                    });
+            let Some((index, expired)) = laggard else {
+                break 'wait;
+            };
+            if tokio::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "node {index}'s mirror still holds expired nonce buckets: {expired:?}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        info!("Expired nonce buckets are gone from every node's mirror");
+
+        // Chain truth: the genesis nonce buckets must be gone on-chain
+        // too, not just from the mirrors — and the genesis DKG bucket
+        // must still exist, held by the key-generation retention floor.
+        for batch_index in genesis_nonce_batches {
+            let onchain = state
+                .fetch_nonce_certs_stamped_or_bare(genesis_epoch, Some(batch_index))
+                .await?;
+            assert!(
+                onchain.is_none(),
+                "genesis nonce bucket (batch {batch_index}) still exists on-chain"
+            );
+        }
+        let dkg_bucket = state
+            .fetch_certs(genesis_epoch, None, ProtocolType::Dkg)
+            .await?;
+        assert!(
+            dkg_bucket.is_some(),
+            "the genesis DKG bucket was pruned below its retention floor"
+        );
+
+        // The destroy deletions routed cleanly, and the surviving
+        // buckets still match the chain.
+        assert_no_unrouted_objects(&networks);
+        assert_tob_mirror_parity(&networks).await?;
+
+        info!("=== TOB Cert GC E2E Test Passed ===");
         Ok(())
     }
 
