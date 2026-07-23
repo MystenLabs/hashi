@@ -170,6 +170,9 @@ async fn ensure_bootstrapped(
     state.advance_state_watermark(seed.floor);
     *mirror = Some(Mirror::from_seed(seed));
     state.request_limiter_reconcile();
+    if let Some(metrics) = state.metrics() {
+        metrics.watcher_rebootstrap_total.inc();
+    }
     Ok(())
 }
 
@@ -210,7 +213,7 @@ async fn run_transactions(
         .context("timed out waiting for the first transaction frame")?
         .context("transaction stream closed before the first frame")??;
     ensure_bootstrapped(&client, state, mirror).await?;
-    let target = state.latest_checkpoint_height();
+    let target = fresh_replay_target(state).await?;
 
     if let Err(e) = replay_transactions(&mut client, &filter, state, mirror, metrics, target).await
     {
@@ -248,6 +251,35 @@ async fn run_transactions(
         // progress frames carry `Watermark.checkpoint` periodically
         // (observed every 25 checkpoints on quiet filters) — plus each
         // applied transaction's own checkpoint.
+    }
+}
+
+/// A replay target that upper-bounds the live subscription's start.
+///
+/// The clock height is served by an independent stream that may itself
+/// still be recovering from the same outage that broke the state
+/// stream; sampling it blindly can return a frozen pre-outage height.
+/// If the mirror's floor had caught up to that stale height, replay
+/// would be skipped entirely and a later coverage claim (which speaks
+/// only for the new subscription, live from the tip) would ratchet the
+/// watermark straight over the outage gap — silently dropping its
+/// transactions. Demanding the clock advance by two checkpoints beyond
+/// a snapshot taken after the subscription opened proves the observed
+/// height is fresh, at or past the chain tip at subscription-open
+/// time. On a halted or still-broken clock this times out and the
+/// caller retries the whole connection rather than guessing.
+async fn fresh_replay_target(state: &OnchainState) -> Result<u64> {
+    let mut rx = state.subscribe_checkpoint();
+    let start = rx.borrow_and_update().height;
+    loop {
+        let height = rx.borrow_and_update().height;
+        if height >= start + 2 {
+            return Ok(height);
+        }
+        tokio::time::timeout(STREAM_STALL_TIMEOUT, rx.changed())
+            .await
+            .context("clock did not advance; cannot bound the replay target")?
+            .context("clock checkpoint channel closed")?;
     }
 }
 
