@@ -295,6 +295,11 @@ impl TransactionExecutionError {
     pub(crate) fn status(&self) -> &ExecutionStatus {
         &self.status
     }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(function: &'static str, status: ExecutionStatus) -> Self {
+        Self { function, status }
+    }
 }
 
 /// Set the sender and gas overrides on `builder`, then finish it according to
