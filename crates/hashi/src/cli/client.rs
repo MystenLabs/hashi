@@ -101,6 +101,8 @@ pub struct HashiClient {
     hashi_ids: HashiIds,
     /// Optional executor for signing and submitting transactions
     executor: Option<SuiTxExecutor>,
+    /// The RPC endpoint this client talks to (used for explorer deep-links)
+    sui_rpc_url: String,
 }
 
 impl HashiClient {
@@ -151,12 +153,18 @@ impl HashiClient {
             onchain_state,
             hashi_ids,
             executor,
+            sui_rpc_url: config.sui_rpc_url.clone(),
         })
     }
 
     /// Get the Hashi IDs
     pub fn hashi_ids(&self) -> &HashiIds {
         &self.hashi_ids
+    }
+
+    /// The RPC endpoint this client talks to
+    pub fn sui_rpc_url(&self) -> &str {
+        &self.sui_rpc_url
     }
 
     /// Check if transaction execution is available (keypair is configured)
