@@ -3843,6 +3843,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
+name = "loadtest"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bitcoin",
+ "clap",
+ "corepc-client",
+ "hashi",
+ "hashi-types",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "sui-rpc",
+ "sui-sdk-types",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
