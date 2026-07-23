@@ -34,11 +34,14 @@ pub use crate::move_types::DEFAULT_MPC_WEIGHT_REDUCTION_ALLOWED_DELTA;
 pub use crate::move_types::VANILLA_MPC_NONCE_GENERATION_PROTOCOL;
 
 // TODO: Read threshold from on-chain config once it is made configurable.
+// Ben: do we need this?
 const THRESHOLD_NUMERATOR: u64 = 2;
 const THRESHOLD_DENOMINATOR: u64 = 3;
 
 /// Matches Move's `threshold::certificate_threshold`.
+// Ben: shouldn't this be dynamic base on f & t?
 pub fn certificate_threshold(total_weight: u64) -> u64 {
+    // Ben: this should be ceil, not floor (10000 -> 6667)
     total_weight * THRESHOLD_NUMERATOR / THRESHOLD_DENOMINATOR
 }
 
@@ -293,6 +296,9 @@ impl Committee {
     /// Verify an [CommitteeSignature]. If you also need to verify the weight, you can either
     /// get the weight of the signature with [CommitteeSignature::weight] or use the [Self::verify_signature_and_weight]
     /// function.
+    
+    // Ben: Scary as a public function: do we really need this to be public? all calls should either check a signer or a weighted cert
+    // also, should we have here a reduced weights verify?
     pub fn verify_signature<T: IntentMessage>(
         &self,
         signed_message: &SignedMessage<T>,
@@ -544,6 +550,8 @@ pub struct BlsSignatureAggregator<'a, T> {
     bitmap: BitMap,
     signed_weight: u64,
     message: T,
+    // Ben: This struct is very confusing, we either use it with signed_weight OR (signed_reduced_weight, reduced_weights), but never both.
+    // It should be an enum and simpler accessors.
     reduced_weights: Option<HashMap<Address, u16>>,
     signed_reduced_weight: u16,
 }

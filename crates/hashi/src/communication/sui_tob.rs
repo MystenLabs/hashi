@@ -47,6 +47,7 @@ impl From<TobError> for ChannelError {
     }
 }
 
+// Ben: It is not a general channel, but per protocol - maybe call it SuiTobChannelPerProtocol
 pub struct SuiTobChannel {
     hashi_ids: HashiIds,
     onchain_state: OnchainState,
@@ -180,6 +181,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
         .await
         .map_err(ChannelError::from)?;
         if existing.iter().any(|(d, _)| *d == dealer) {
+            // Ben: check it is the same cert or warn
             return Ok(());
         }
 
