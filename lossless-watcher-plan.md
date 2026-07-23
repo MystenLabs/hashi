@@ -363,12 +363,22 @@ revertible.
    dropped after clean burn-in). Notifications and the limiter now come
    from apply's `Effect`s; `wait_until_checkpoint` waits on the state
    watermark.
-7. **Cleanup and follow-ups.** Switch the cleanup GC to decide from the
-   mirror and delete `scrape_utxo_records_snapshot`,
-   `raise_utxo_scrape_floor`, and the `utxo_scrape_floor` field (the
-   mirror's watermark replaces the per-page freshness floor); evaluate
-   the remaining read points below. (The event mask never made it into
-   the transaction stream, so there is nothing to drop there.)
+7. **Cleanup and follow-ups.** The GC switch is done: the cleanup GC
+   decides from the mirror, and `scrape_utxo_records_snapshot`,
+   `raise_utxo_scrape_floor`, and the `utxo_scrape_floor` field are
+   deleted. The per-page freshness floor became two watermark waits in
+   the GC task: before scanning, the mirror must pass the arming
+   confirm's checkpoint (plumbed through
+   `WithdrawalBroadcastOutcome::ConfirmedOnSui` — without it, a scan
+   racing the watcher would find nothing and disarm, stranding the
+   spent records until the next confirm); after a cleanup lands, the
+   mirror must pass its checkpoint so the re-armed scan cannot re-pay
+   for the removed records. The withdrawal e2e flow now asserts the
+   eventless path end to end: the leader GC cleans from its mirror and
+   every node's mirror absorbs the `cleanup_spent_utxos` deletions
+   (`wait_for_spent_utxo_cleanup`). Still open: evaluate the remaining
+   read points below. (The event mask never made it into the
+   transaction stream, so there is nothing to drop there.)
 
 ### Remaining chain-read points (audited 2026-07-23)
 
@@ -377,13 +387,14 @@ bootstrap, with the step 7 verdict for each.
 
 Delete — the mirror replaces them:
 
-- `scrape_utxo_records_snapshot` + `raise_utxo_scrape_floor` +
+- ~~`scrape_utxo_records_snapshot` + `raise_utxo_scrape_floor` +
   `utxo_scrape_floor` (`onchain/mod.rs`, consumed by
-  `leader/garbage_collection.rs`). The mirror applies
-  `cleanup_spent_utxos` Field deletions directly; gate the GC's
-  decision on `wait_until_checkpoint` past the last landed cleanup
-  instead of the per-page freshness floor. Also retires the GC's use
-  of `fetch_bitcoin_state`.
+  `leader/garbage_collection.rs`).~~ **Deleted 2026-07-23.** The mirror
+  applies `cleanup_spent_utxos` Field deletions directly; the GC's
+  decision is gated on `wait_until_checkpoint` past the arming
+  confirm's checkpoint (and past its own landed cleanup) instead of
+  the per-page freshness floor. Also retired the GC's use of
+  `fetch_bitcoin_state`.
 
 Evaluate — mirror reads could replace on-demand fetches:
 
@@ -429,12 +440,12 @@ Keep — justified reads outside the mirror's scope:
   idempotency).
 - e2e (`ulimit -n 4096 &&` for bitcoind): the full
   deposit/withdrawal/reconfig flows ran against the shadow's divergence
-  audit before cutover and against the live mirror after it. Still
-  worth adding: a kill-and-reconnect test that lands transactions
-  during the outage and asserts the replay path (not re-bootstrap)
-  recovers them, and an eventless-write test that performs
-  `cleanup_spent_utxos` and asserts the mirror updates without a
-  rescrape (natural to add with the step 7 GC switch).
+  audit before cutover and against the live mirror after it. The
+  eventless-write assertion landed with the step 7 GC switch: the
+  withdrawal e2e flow waits for every node's mirror to absorb the
+  `cleanup_spent_utxos` deletions (no event, no rescrape). Still worth
+  adding: a kill-and-reconnect test that lands transactions during the
+  outage and asserts the replay path (not re-bootstrap) recovers them.
 - Metrics to watch in staging: unrouted-objects counter, replay-window
   length on reconnects, `hashi_watcher_state_watermark` lag against
   `hashi_latest_checkpoint_height`.
