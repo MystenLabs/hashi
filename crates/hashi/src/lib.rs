@@ -345,7 +345,13 @@ impl Hashi {
         })
     }
 
-    pub async fn prepare_and_register_keys(self: &Arc<Self>, epoch: u64) -> anyhow::Result<()> {
+    /// Returns the checkpoint the registration transaction landed in, or
+    /// `None` if the on-chain record already matched and no transaction
+    /// was needed.
+    pub async fn prepare_and_register_keys(
+        self: &Arc<Self>,
+        epoch: u64,
+    ) -> anyhow::Result<Option<u64>> {
         let keys = self.prepare_next_epoch_keys(epoch)?;
         let mut executor = sui_tx_executor::SuiTxExecutor::from_hashi(self.clone())?;
         executor
@@ -356,7 +362,6 @@ impl Hashi {
                 Some(&keys.signing_private_key),
             )
             .await
-            .map(|_| ())
     }
 
     pub(crate) fn backup_after_epoch_change(&self, epoch: u64) -> anyhow::Result<Option<PathBuf>> {
@@ -846,8 +851,8 @@ impl Hashi {
             )
             .await
         {
-            Ok(true) => tracing::info!("Validator registered/updated on-chain"),
-            Ok(false) => tracing::debug!("Validator metadata is already up-to-date"),
+            Ok(Some(_)) => tracing::info!("Validator registered/updated on-chain"),
+            Ok(None) => tracing::debug!("Validator metadata is already up-to-date"),
             Err(e) => tracing::warn!("Failed to register/update validator metadata: {e}"),
         }
 
