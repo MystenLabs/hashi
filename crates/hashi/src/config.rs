@@ -346,7 +346,9 @@ impl Config {
     }
 
     pub fn bitcoin_start_height(&self) -> u32 {
-        self.bitcoin_start_height.unwrap_or(800_000)
+        self.bitcoin_start_height.unwrap_or_else(|| {
+            crate::btc_monitor::config::default_start_height(self.bitcoin_network())
+        })
     }
 
     pub fn bitcoin_rpc_auth(&self) -> corepc_client::client_sync::Auth {
@@ -621,6 +623,33 @@ mod tests {
             config.withdrawal_max_batch_size(),
             crate::utxo_pool::CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS
         );
+    }
+
+    #[test]
+    fn bitcoin_start_height_defaults_per_network() {
+        // Unset on Signet uses the Signet deployment anchor, not the 800k default.
+        let signet = Config {
+            bitcoin_chain_id: Some(crate::constants::BITCOIN_SIGNET_CHAIN_ID.to_string()),
+            bitcoin_start_height: None,
+            ..Config::default()
+        };
+        assert_eq!(signet.bitcoin_start_height(), 297_756);
+
+        // Unset on Mainnet keeps the existing default.
+        let mainnet = Config {
+            bitcoin_chain_id: Some(crate::constants::BITCOIN_MAINNET_CHAIN_ID.to_string()),
+            bitcoin_start_height: None,
+            ..Config::default()
+        };
+        assert_eq!(mainnet.bitcoin_start_height(), 800_000);
+
+        // An explicit value always wins.
+        let overridden = Config {
+            bitcoin_chain_id: Some(crate::constants::BITCOIN_SIGNET_CHAIN_ID.to_string()),
+            bitcoin_start_height: Some(123_456),
+            ..Config::default()
+        };
+        assert_eq!(overridden.bitcoin_start_height(), 123_456);
     }
 
     #[test]
