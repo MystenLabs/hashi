@@ -1141,7 +1141,40 @@ impl MpcService {
             }
             let needs_fresh_manager = match self.inner.mpc_manager() {
                 None => true,
-                Some(mgr) => mgr.read().unwrap().mpc_config.epoch != target_epoch,
+                Some(mgr) => {
+                    let (manager_epoch, manager_committee) = {
+                        let mgr = mgr.read().unwrap();
+                        (mgr.mpc_config.epoch, mgr.committee.clone())
+                    };
+                    let (stale, target_committee_present) = {
+                        let state = self.inner.onchain_state().state();
+                        let target_committee =
+                            state.hashi().committees.committees().get(&target_epoch);
+                        (
+                            manager_stale_for_target(
+                                manager_epoch,
+                                &manager_committee,
+                                target_epoch,
+                                target_committee,
+                            ),
+                            target_committee.is_some(),
+                        )
+                    };
+                    if stale && manager_epoch == target_epoch {
+                        if target_committee_present {
+                            info!(
+                                "MPC manager for epoch {target_epoch} was built from a \
+                                 superseded committee snapshot; rebuilding"
+                            );
+                        } else {
+                            info!(
+                                "committee for epoch {target_epoch} is no longer on the \
+                                 mirror (abort in flight?)"
+                            );
+                        }
+                    }
+                    stale
+                }
             };
             if needs_fresh_manager {
                 let setup_result = if run_dkg {
@@ -1703,6 +1736,15 @@ fn reconfig_target_live(pending: Option<u64>, current_epoch: u64, target_epoch: 
     pending == Some(target_epoch) || current_epoch == target_epoch
 }
 
+fn manager_stale_for_target(
+    manager_epoch: u64,
+    manager_committee: &Committee,
+    target_epoch: u64,
+    target_committee: Option<&Committee>,
+) -> bool {
+    manager_epoch != target_epoch || target_committee != Some(manager_committee)
+}
+
 #[cfg(test)]
 mod reconfig_target_tests {
     use super::reconfig_target_live;
@@ -1714,5 +1756,40 @@ mod reconfig_target_tests {
         assert!(!reconfig_target_live(None, 5, 6));
         assert!(!reconfig_target_live(Some(7), 5, 6));
         assert!(!reconfig_target_live(None, 7, 6));
+    }
+}
+
+#[cfg(test)]
+mod manager_reuse_tests {
+    use super::Committee;
+    use super::manager_stale_for_target;
+
+    fn committee(epoch: u64, threshold_bps: u16) -> Committee {
+        Committee::new(vec![], epoch, threshold_bps, 0, 5_000, 0)
+    }
+
+    #[test]
+    fn reusable_only_for_same_epoch_and_identical_snapshot() {
+        let mgr = committee(6, 10_000);
+        assert!(!manager_stale_for_target(
+            6,
+            &mgr,
+            6,
+            Some(&committee(6, 10_000))
+        ));
+        assert!(manager_stale_for_target(
+            5,
+            &mgr,
+            6,
+            Some(&committee(6, 10_000))
+        ));
+        // Same epoch, different snapshot: abort + re-start repinned the config.
+        assert!(manager_stale_for_target(
+            6,
+            &mgr,
+            6,
+            Some(&committee(6, 9_999))
+        ));
+        assert!(manager_stale_for_target(6, &mgr, 6, None));
     }
 }
