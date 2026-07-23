@@ -55,7 +55,7 @@ const START_RECONFIG_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const MPC_RECONFIG_TIMEOUT: Duration = Duration::from_secs(600);
 const RECONCILE_TICK: Duration = Duration::from_secs(15);
 const MAX_KEY_REREGISTRATION_BUMPS: u32 = 3;
-const ARM_TIMEOUT: Duration = Duration::from_secs(900);
+const NONCE_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Move `hashi::reconfig::ENotReconfiguring`, matched by its clever-error
 /// constant name (the `#[error]` abort code encodes a source line, so the
 /// numeric code is not stable).
@@ -101,12 +101,6 @@ pub struct MpcService {
     reconciling: Arc<tokio::sync::Mutex<()>>,
     backup_handle: crate::backup::BackupHandle,
     replacement_keys_target_epoch: Mutex<Option<u64>>,
-}
-
-async fn timeboxed(label: &str, fut: impl Future<Output = ()>) {
-    if tokio::time::timeout(ARM_TIMEOUT, fut).await.is_err() {
-        warn!("{label} exceeded {ARM_TIMEOUT:?} and was aborted to keep the MPC loop responsive");
-    }
 }
 
 impl MpcService {
@@ -155,7 +149,7 @@ impl MpcService {
                     self.handle_reconfig(epoch).await;
                     continue;
                 }
-                timeboxed("sync_if_stale", self.sync_if_stale()).await;
+                self.sync_if_stale().await;
                 let epoch = self.inner.onchain_state().epoch();
                 if self.inner.signing_manager_for(epoch).is_some() {
                     break;
@@ -183,11 +177,7 @@ impl MpcService {
                                 self.handle_reconfig(epoch).await;
                             }
                             Notification::SuiEpochChanged(sui_epoch) => {
-                                timeboxed(
-                                    "try_submit_start_reconfig",
-                                    self.try_submit_start_reconfig(sui_epoch),
-                                )
-                                .await;
+                                self.try_submit_start_reconfig(sui_epoch).await;
                             }
                             _ => {}
                         },
@@ -198,14 +188,14 @@ impl MpcService {
                     }
                 }
                 Ok(()) = checkpoint_rx.changed() => {
-                    timeboxed("sync_if_stale", self.sync_if_stale()).await;
+                    self.sync_if_stale().await;
                 }
                 _ = reconcile_tick.tick() => {
-                    timeboxed("sync_if_stale", self.sync_if_stale()).await;
+                    self.sync_if_stale().await;
                 }
                 Ok(()) = self.refill_rx.changed() => {
                     let next_batch = *self.refill_rx.borrow();
-                    timeboxed("presignature refill", self.refill_with_retries(next_batch)).await;
+                    self.refill_with_retries(next_batch).await;
                 }
             }
         }
@@ -213,6 +203,10 @@ impl MpcService {
 
     async fn refill_with_retries(&self, next_batch: u32) {
         for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
+            if let Err(e) = self.bail_if_reconfig_pending() {
+                info!("presignature refill stopped: {e}");
+                return;
+            }
             match self.refill_presignatures(next_batch).await {
                 Ok(()) => break,
                 Err(e) => {
@@ -483,7 +477,8 @@ impl MpcService {
             Some(batch_index),
             move_types::ProtocolType::NonceGeneration,
             signer,
-        );
+        )
+        .with_idle_timeout(NONCE_RECEIVE_IDLE_TIMEOUT);
         let metrics = &self.inner.metrics;
         let _timer = metrics
             .mpc_total_duration_seconds
@@ -541,6 +536,23 @@ impl MpcService {
         Ok(())
     }
 
+    fn bail_if_reconfig_pending(&self) -> anyhow::Result<()> {
+        match self.get_pending_epoch_change() {
+            Some(p) => anyhow::bail!("superseded by pending reconfig to epoch {p}"),
+            None => Ok(()),
+        }
+    }
+
+    fn reconfig_target_live(&self, target_epoch: u64) -> bool {
+        let state = self.inner.onchain_state().state();
+        let committees = &state.hashi().committees;
+        reconfig_target_live(
+            committees.pending_epoch_change(),
+            committees.epoch(),
+            target_epoch,
+        )
+    }
+
     async fn recover_presigning_state(&self, output: &MpcOutput) -> anyhow::Result<()> {
         let (num_consumed, epoch, committee, pending) = {
             let state = self.inner.onchain_state().state();
@@ -594,6 +606,7 @@ impl MpcService {
         let mut batch_start = 0u64;
         let mut batch_index = 0u32;
         loop {
+            self.bail_if_reconfig_pending()?;
             let size = self
                 .nonce_batch_size_from_certs(
                     &mpc_manager,
@@ -638,6 +651,7 @@ impl MpcService {
         let mut retained: Vec<(Presignatures, u32, u64)> = Vec::new();
         // TODO(IOP-529): Avoid the double cert-fetch in presig recovery.
         for &(bidx, start, size) in boundaries.iter().skip(first_pending) {
+            self.bail_if_reconfig_pending()?;
             let presigs = self
                 .recover_presignatures_from_certs(
                     &mpc_manager,
@@ -777,6 +791,13 @@ impl MpcService {
                 info!("sync_if_stale: recovered epoch {epoch} via certs path");
             }
             Err(certs_err) => {
+                if let Some(p) = self.get_pending_epoch_change() {
+                    info!(
+                        "sync_if_stale: recovery for epoch {epoch} superseded by pending \
+                         reconfig to {p} ({certs_err})"
+                    );
+                    return;
+                }
                 let num_consumed = self
                     .inner
                     .onchain_state()
@@ -1162,6 +1183,12 @@ impl MpcService {
                 }
             }
         };
+        if self.get_pending_epoch_change() != Some(target_epoch)
+            && self.inner.onchain_state().epoch() != target_epoch
+        {
+            info!("handle_reconfig: epoch {target_epoch} aborted after protocol completion");
+            return;
+        }
         let _ = self.key_ready_tx.send(Some(output.public_key));
         info!("MPC key ready for epoch {target_epoch}, submitting end_reconfig");
         let _end_reconfig_timer = metrics
@@ -1233,22 +1260,19 @@ impl MpcService {
         {
             error!("Failed to prune old MPC messages below epoch {target_epoch}: {e}");
         }
+        if !self.reconfig_target_live(target_epoch) {
+            info!(
+                "handle_reconfig: epoch {target_epoch} no longer pending nor current; \
+                 skipping signing setup"
+            );
+            return;
+        }
         let _prepare_signing_timer = metrics
             .mpc_prepare_signing_duration_seconds
             .with_label_values(&[protocol_label])
             .start_timer();
         for attempt in 1..=MAX_PROTOCOL_ATTEMPTS {
-            let attempt_result = tokio::time::timeout(
-                ARM_TIMEOUT,
-                self.prepare_signing(target_epoch, &output),
-            )
-            .await
-            .unwrap_or_else(|_| {
-                Err(anyhow::anyhow!(
-                    "prepare_signing exceeded {ARM_TIMEOUT:?}; aborted (sync_if_stale recovers)"
-                ))
-            });
-            match attempt_result {
+            match self.prepare_signing(target_epoch, &output).await {
                 Ok(()) => break,
                 Err(e) => {
                     error!(
@@ -1677,5 +1701,23 @@ mod presig_count_tests {
         let params = Parameters { t: 3, f: 1 };
         assert_eq!(presig_count(1, params, false, 2), 0);
         assert_eq!(presig_count(0, params, true, 5), 0);
+    }
+}
+
+fn reconfig_target_live(pending: Option<u64>, current_epoch: u64, target_epoch: u64) -> bool {
+    pending == Some(target_epoch) || current_epoch == target_epoch
+}
+
+#[cfg(test)]
+mod reconfig_target_tests {
+    use super::reconfig_target_live;
+
+    #[test]
+    fn live_while_pending_or_current_only() {
+        assert!(reconfig_target_live(Some(6), 5, 6));
+        assert!(reconfig_target_live(None, 6, 6));
+        assert!(!reconfig_target_live(None, 5, 6));
+        assert!(!reconfig_target_live(Some(7), 5, 6));
+        assert!(!reconfig_target_live(None, 7, 6));
     }
 }

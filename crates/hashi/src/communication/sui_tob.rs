@@ -53,6 +53,7 @@ pub struct SuiTobChannel {
     batch_index: Option<u32>,
     protocol_type: ProtocolType,
     signer: SimpleKeypair,
+    idle_timeout: Option<Duration>,
     /// Dealers we've already returned certificates for
     seen_dealers: HashSet<Address>,
     /// Cached certificates not yet returned
@@ -75,9 +76,15 @@ impl SuiTobChannel {
             batch_index,
             protocol_type,
             signer,
+            idle_timeout: None,
             seen_dealers: HashSet::new(),
             pending_certs: VecDeque::new(),
         }
+    }
+
+    pub fn with_idle_timeout(mut self, idle_timeout: Duration) -> Self {
+        self.idle_timeout = Some(idle_timeout);
+        self
     }
 
     fn create_executor(&self) -> SuiTxExecutor {
@@ -183,6 +190,7 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
     }
 
     async fn receive(&mut self) -> ChannelResult<CertificateV1> {
+        let wait_started = tokio::time::Instant::now();
         loop {
             if let Some(cert) = self.pending_certs.pop_front() {
                 return Ok(cert);
@@ -209,11 +217,30 @@ impl OrderedBroadcastChannel<CertificateV1> for SuiTobChannel {
                     (committees.epoch(), committees.pending_epoch_change())
                 };
                 if tob_wait_superseded(self.protocol_type, self.epoch, onchain_epoch, pending) {
+                    tracing::info!(
+                        "aborting {:?} TOB wait for epoch {}: superseded (onchain epoch \
+                         {onchain_epoch}, pending epoch change {pending:?})",
+                        self.protocol_type,
+                        self.epoch,
+                    );
                     return Err(ChannelError::Superseded(format!(
                         "{:?} TOB wait for epoch {} (onchain epoch {onchain_epoch}, \
                          pending epoch change {pending:?})",
                         self.protocol_type, self.epoch,
                     )));
+                }
+                if let Some(idle_timeout) = self.idle_timeout
+                    && wait_started.elapsed() >= idle_timeout
+                {
+                    tracing::info!(
+                        "aborting {:?} TOB wait for epoch {}: no certificate in {:?} \
+                         ({} dealers seen)",
+                        self.protocol_type,
+                        self.epoch,
+                        idle_timeout,
+                        self.seen_dealers.len(),
+                    );
+                    return Err(ChannelError::Timeout);
                 }
                 tokio::time::sleep(POLL_INTERVAL).await;
             }
