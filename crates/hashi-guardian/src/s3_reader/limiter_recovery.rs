@@ -27,7 +27,7 @@
 use super::GuardianReader;
 use crate::s3_client::GuardianS3Client;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
-use hashi_types::guardian::GuardianError::InvalidGuardianLog;
+use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::LimiterConfig;
 use hashi_types::guardian::LimiterState;
@@ -68,9 +68,7 @@ impl GuardianReader {
             .flatten()
             .max_by_key(|s| s.next_seq)
             .ok_or_else(|| {
-                InvalidGuardianLog(
-                    "latest success bucket contained no verified Success logs".into(),
-                )
+                InvalidS3Log("latest success bucket contained no verified Success logs".into())
             })?;
         let state = cap_limiter_state_to_config(recovered_state, limiter_config);
         info!(
@@ -101,9 +99,7 @@ async fn find_latest_success_bucket(
                 for hour in hours {
                     if hour_bucket_has_success(s3_client, &hour).await? {
                         let dir = S3HourScopedDirectory::from_path(&hour).map_err(|e| {
-                            InvalidGuardianLog(format!(
-                                "invalid withdrawal-log directory {hour}: {e}"
-                            ))
+                            InvalidS3Log(format!("invalid withdrawal-log directory {hour}: {e}"))
                         })?;
                         return Ok(Some(dir));
                     }

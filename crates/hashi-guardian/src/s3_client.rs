@@ -20,14 +20,11 @@ use aws_sdk_s3::types::ObjectLockEnabled;
 use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::Client as S3Client;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
-use hashi_types::guardian::GuardianError;
-use hashi_types::guardian::GuardianError::GuardianBuildNotAccepted;
-use hashi_types::guardian::GuardianError::InvalidGuardianLog;
+use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::InitLogMessage;
 use hashi_types::guardian::PcrAllowlist;
-use hashi_types::guardian::VerificationError;
 use hashi_types::guardian::VerifiedSessionInfo;
 use serde::Serialize;
 use tracing::info;
@@ -37,18 +34,6 @@ use tracing::warn;
 const MAX_RETRY_ATTEMPTS: u32 = 5;
 /// Delay between application-level retries of an immutable S3 log write.
 const S3_WRITE_RETRY_INTERVAL: Duration = Duration::from_secs(10);
-
-fn guardian_log_verification_error(
-    context: impl std::fmt::Display,
-    error: VerificationError,
-) -> GuardianError {
-    match error {
-        VerificationError::Invalid(message) => InvalidGuardianLog(format!("{context}: {message}")),
-        VerificationError::PcrMismatch(message) => {
-            GuardianBuildNotAccepted(format!("{context}: {message}"))
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct GuardianS3Client {
@@ -619,7 +604,7 @@ impl GuardianS3Client {
         })?;
 
         let record = serde_json::from_slice::<LogRecord>(&bytes.into_bytes()).map_err(|e| {
-            InvalidGuardianLog(format!(
+            InvalidS3Log(format!(
                 "Failed to deserialize object {} into target type: {}",
                 key, e
             ))
@@ -658,7 +643,7 @@ impl GuardianS3Client {
                 _ => None,
             })
             .ok_or_else(|| {
-                InvalidGuardianLog(format!("expected OIAttestationUnsigned at key {att_key}"))
+                InvalidS3Log(format!("expected OIAttestationUnsigned at key {att_key}"))
             })?;
 
         // 2. GuardianInfo, signature-verified under that pubkey → the reported build.
@@ -671,9 +656,7 @@ impl GuardianS3Client {
                 InitLogMessage::OIGuardianInfo(info) => Some(*info),
                 _ => None,
             })
-            .ok_or_else(|| {
-                InvalidGuardianLog(format!("expected OIGuardianInfo at key {info_key}"))
-            })?;
+            .ok_or_else(|| InvalidS3Log(format!("expected OIGuardianInfo at key {info_key}")))?;
 
         // 3. Anchor the pubkey and pin PCR0 to the allowlist entry for the
         //    reported build. This replays a logged attestation whose short-lived
@@ -682,9 +665,7 @@ impl GuardianS3Client {
         let build_pcrs = allowlist.resolve(&info.untrusted_git_revision)?.clone();
         attestation
             .verify_replay(&signing_pubkey, &build_pcrs)
-            .map_err(|e| {
-                guardian_log_verification_error(format!("attestation at key {att_key}"), e)
-            })?;
+            .map_err(|e| InvalidS3Log(format!("attestation at key {att_key}: {e}")))?;
 
         Ok(VerifiedSessionInfo {
             signing_pubkey,

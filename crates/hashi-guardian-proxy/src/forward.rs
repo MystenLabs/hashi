@@ -46,7 +46,7 @@ fn verify_provisioner_rotate_cert_signature(
         .map_err(|e| Status::invalid_argument(format!("malformed request: {e}")))?;
     signed_request
         .verify()
-        .map_err(|e| Status::unauthenticated(e.to_string()))?;
+        .map_err(|error| Status::unauthenticated(error.to_string()))?;
     Ok(())
 }
 

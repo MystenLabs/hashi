@@ -919,10 +919,10 @@ impl GetGuardianInfoResponse {
     pub fn verify_live(
         &self,
         expected_build: &BuildPcrs,
-    ) -> VerificationResult<VerifiedGuardianInfo> {
+    ) -> CryptoVerificationResult<VerifiedGuardianInfo> {
         let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
         if info.untrusted_git_revision != expected_build.git_revision() {
-            return Err(VerificationError::pcr_mismatch(format!(
+            return Err(CryptoVerificationError::new(format!(
                 "guardian info reports build '{}', expected current build '{}'",
                 info.untrusted_git_revision,
                 expected_build.git_revision()
@@ -1146,12 +1146,15 @@ mod tests {
 
         let current_build = allowlist.resolve("current").unwrap();
         assert_eq!(current_build.pcr0(), &[0]);
-        assert!(allowlist.is_current_build(current_build));
         let prev_build = allowlist.resolve("prev-1").unwrap();
         assert_eq!(prev_build.pcr0(), &[1]);
-        assert!(!allowlist.is_current_build(prev_build));
         let prev2_build = allowlist.resolve("prev-2").unwrap();
         assert_eq!(prev2_build.pcr0(), &[2]);
+
+        assert!(matches!(
+            allowlist.resolve("missing").unwrap_err(),
+            BuildNotAllowlisted(message) if message.contains("build 'missing'")
+        ));
     }
 
     #[test]
@@ -1201,7 +1204,7 @@ mod tests {
         let prev_build = allowlist.resolve("prev").unwrap();
         assert!(matches!(
             allowlist.require_current_build(prev_build).unwrap_err(),
-            GuardianBuildNotAccepted(message)
+            BuildNotCurrent(message)
                 if message.contains("build 'prev'") && message.contains("build 'current'")
         ));
     }

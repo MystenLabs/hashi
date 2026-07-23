@@ -21,7 +21,7 @@ use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GenesisLogMessage;
-use hashi_types::guardian::GuardianError::InvalidGuardianLog;
+use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::KpShareStateLogMessage;
@@ -178,9 +178,7 @@ impl GuardianReader {
         self.enforce_build_policy(build_policy, &build_pcrs)?;
         let session_id = record.session_id;
         let LogMessage::Ceremony(msg) = record.message else {
-            return Err(InvalidGuardianLog(format!(
-                "expected a ceremony log at {key}"
-            )));
+            return Err(InvalidS3Log(format!("expected a ceremony log at {key}")));
         };
         log_verified_read(&key, &session_id);
         Ok(Some(*msg))
@@ -214,7 +212,7 @@ impl GuardianReader {
             .read_kp_share_state_log_at_key(&key, build_policy, HistoryCheck::AlreadyChecked)
             .await?;
         if msg.sharing_seq != sharing_seq {
-            return Err(InvalidGuardianLog(format!(
+            return Err(InvalidS3Log(format!(
                 "sharing_seq mismatch: {} != {}",
                 msg.sharing_seq, sharing_seq
             )));
@@ -259,9 +257,7 @@ impl GuardianReader {
         self.enforce_build_policy(build_policy, &record.build_pcrs)?;
         let session_id = record.session_id;
         let LogMessage::KpShareState(msg) = record.message else {
-            return Err(InvalidGuardianLog(format!(
-                "expected a kp-shares log at {key}"
-            )));
+            return Err(InvalidS3Log(format!("expected a kp-shares log at {key}")));
         };
         log_verified_read(key, &session_id);
         Ok(*msg)
@@ -283,7 +279,7 @@ impl GuardianReader {
             .read_latest_kp_share_state_log(sharing_seq, build_policy)
             .await?
             .ok_or_else(|| {
-                InvalidGuardianLog(format!(
+                InvalidS3Log(format!(
                     "no kp-shares log found for latest ceremony sharing_seq {sharing_seq}"
                 ))
             })?;
@@ -327,14 +323,14 @@ impl GuardianReader {
         self.enforce_build_policy(build_policy, &record.build_pcrs)?;
         let session_id = record.session_id;
         let LogMessage::CommitteeUpdate(msg) = record.message else {
-            return Err(InvalidGuardianLog(format!(
+            return Err(InvalidS3Log(format!(
                 "expected a committee-update log at {key}"
             )));
         };
         let committee = match *msg {
             CommitteeUpdateLogMessage::Success { new_committee, .. } => new_committee,
             CommitteeUpdateLogMessage::Failure { .. } => {
-                return Err(InvalidGuardianLog(format!(
+                return Err(InvalidS3Log(format!(
                     "lex-last non-failure key resolved to a Failure log at {key}"
                 )));
             }
@@ -358,7 +354,7 @@ impl GuardianReader {
             return Ok(None);
         }
         if keys != [key.clone()] {
-            return Err(InvalidGuardianLog(format!(
+            return Err(InvalidS3Log(format!(
                 "expected exactly one genesis record at {key}, found {keys:?}"
             )));
         }
@@ -367,9 +363,7 @@ impl GuardianReader {
         self.enforce_build_policy(build_policy, &record.build_pcrs)?;
         let session_id = record.session_id;
         let LogMessage::Genesis(msg) = record.message else {
-            return Err(InvalidGuardianLog(format!(
-                "expected a genesis log at {key}"
-            )));
+            return Err(InvalidS3Log(format!("expected a genesis log at {key}")));
         };
         log_verified_read(&key, &session_id);
         Ok(Some(*msg))

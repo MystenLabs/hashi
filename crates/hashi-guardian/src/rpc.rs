@@ -33,7 +33,7 @@ fn to_status(e: GuardianError) -> Status {
     match e {
         InvalidInputs(msg) => Status::invalid_argument(msg),
         Unauthenticated(msg) => Status::unauthenticated(msg),
-        GuardianBuildNotAccepted(msg) => Status::failed_precondition(msg),
+        BuildNotAllowlisted(msg) | BuildNotCurrent(msg) => Status::failed_precondition(msg),
         LifecycleMismatch {
             operation,
             expected,
@@ -41,11 +41,11 @@ fn to_status(e: GuardianError) -> Status {
         } => Status::failed_precondition(format!(
             "{operation} requires {expected:?}, but enclave is {actual:?}"
         )),
+        RateLimitExceeded => Status::resource_exhausted("Rate limit exceeded"),
+        S3Error(msg) => Status::internal(msg),
+        InvalidS3Log(msg) => Status::internal(msg),
         InternalError(msg) => Status::internal(msg),
         Unavailable(msg) => Status::unavailable(msg),
-        S3Error(msg) => Status::internal(msg),
-        InvalidGuardianLog(msg) => Status::internal(msg),
-        RateLimitExceeded => Status::resource_exhausted("Rate limit exceeded"),
     }
 }
 

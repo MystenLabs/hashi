@@ -8,8 +8,8 @@ use crate::OTHER_SESSION_QUIET_PERIOD;
 use hashi_types::guardian::time_utils::now_timestamp_secs;
 use hashi_types::guardian::time_utils::unix_millis_to_seconds;
 use hashi_types::guardian::time_utils::UnixSeconds;
-use hashi_types::guardian::GuardianError::InvalidGuardianLog;
 use hashi_types::guardian::GuardianError::InvalidInputs;
+use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::LogMessage;
 use hashi_types::guardian::SessionID;
@@ -79,7 +79,7 @@ fn summarize_heartbeats_by_session(
 
     for log in logs {
         if !matches!(log.message, LogMessage::Heartbeat(..)) {
-            return Err(InvalidGuardianLog(
+            return Err(InvalidS3Log(
                 "non-heartbeat log found under the heartbeat prefix".into(),
             ));
         }

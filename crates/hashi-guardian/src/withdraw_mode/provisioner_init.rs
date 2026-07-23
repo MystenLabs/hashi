@@ -153,7 +153,7 @@ fn verify_signed_submissions(
             let signer_fingerprint = signed.signer_fingerprint().to_hex();
             signed
                 .verify_signature()
-                .map_err(|e| GuardianError::Unauthenticated(e.to_string()))?;
+                .map_err(|error| GuardianError::Unauthenticated(error.to_string()))?;
             let submission = &signed.data;
 
             if submission.expected_session_id() != live_session_id.as_str() {
@@ -211,6 +211,7 @@ mod tests {
     use crate::OperatorInitTestArgs;
     use hashi_types::guardian::GuardianError::InvalidInputs;
     use hashi_types::guardian::GuardianError::LifecycleMismatch;
+    use hashi_types::guardian::GuardianError::Unauthenticated;
     use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use hashi_types::pgp::test_utils::sign_detached_in_process;
     use hashi_types::pgp::PgpPublicCert;

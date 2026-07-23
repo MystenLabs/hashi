@@ -30,7 +30,7 @@ pub async fn provisioner_rotate_cert(
     let signer_fingerprint = signed_request.signer_fingerprint().to_hex();
     let request = signed_request
         .verify()
-        .map_err(|e| Unauthenticated(e.to_string()))?;
+        .map_err(|error| Unauthenticated(error.to_string()))?;
 
     enclave.require_fully_initialized("provisioner_rotate_cert")?;
 
