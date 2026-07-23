@@ -642,11 +642,14 @@ async fn register_onchain(client: sui_rpc::Client, config: &HashiConfig) -> Resu
         .map(|_| ())
 }
 
-pub async fn update_tls_public_key(client: sui_rpc::Client, config: &HashiConfig) -> Result<()> {
+pub async fn update_tls_public_key(
+    client: sui_rpc::Client,
+    config: &HashiConfig,
+    tls_public_key: Vec<u8>,
+) -> Result<()> {
     let hashi_ids = config.hashi_ids();
     let private_key = config.operator_private_key()?;
     let validator_address = config.validator_address()?;
-    let tls_key = config.tls_public_key()?;
 
     let mut executor = hashi::sui_tx_executor::SuiTxExecutor::new(client, private_key, hashi_ids);
 
@@ -658,7 +661,7 @@ pub async fn update_tls_public_key(client: sui_rpc::Client, config: &HashiConfig
             .with_mutable(true),
     );
     let validator_address_arg = builder.pure(&validator_address);
-    let tls_key_arg = builder.pure(&tls_key.as_bytes().to_vec());
+    let tls_key_arg = builder.pure(&tls_public_key);
 
     builder.move_call(
         Function::new(

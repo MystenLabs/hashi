@@ -2163,6 +2163,7 @@ dependencies = [
  "clap",
  "colored",
  "corepc-client",
+ "ed25519-dalek",
  "fastcrypto",
  "fastcrypto-tbls",
  "futures",

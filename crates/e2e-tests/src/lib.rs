@@ -1415,12 +1415,20 @@ mod tests {
             .wait_for_mpc_key(DKG_TIMEOUT)
             .await?;
 
-        // Validate subscribing works by just updating a validator's onchain info
+        // Validate subscribing works by updating a validator's onchain info.
+        // The key must actually differ from the registered one: protocol v76's
+        // minimize_child_object_mutations fingerprints child writes and elides
+        // value-identical ones from effects, so re-submitting the current key
+        // is a no-op the object mirror correctly does not notify about.
         let mut reciever = state.subscribe();
 
         let client = test_networks.sui_network().client.clone();
         let v1_config = &test_networks.hashi_network().nodes()[0].hashi().config;
-        super::hashi_network::update_tls_public_key(client, v1_config)
+        let new_tls_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng())
+            .verifying_key()
+            .to_bytes()
+            .to_vec();
+        super::hashi_network::update_tls_public_key(client, v1_config, new_tls_key)
             .await
             .unwrap();
 
