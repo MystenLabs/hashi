@@ -57,6 +57,7 @@ const START_RECONFIG_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const RECONFIG_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 const RECONCILE_TICK: Duration = Duration::from_secs(15);
 const NONCE_WINDOW_WAIT_POLL: Duration = Duration::from_millis(200);
+const NONCE_WINDOW_WAIT_SLACK: Duration = Duration::from_secs(30);
 const MAX_KEY_REREGISTRATION_BUMPS: u32 = 3;
 const NONCE_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Move `hashi::reconfig::ENotReconfiguring`.
@@ -965,15 +966,31 @@ impl MpcService {
                 .await?
                 .unwrap_or_default();
             let certs = MpcManager::verified_nonce_certs(mpc_manager, epoch, certs).await;
-            let cutoff_ms = {
+            let (cutoff_ms, window_ms) = {
                 let mgr = mpc_manager.read().unwrap();
-                mgr.nonce_collection_cutoff_ms(&certs)
+                (
+                    mgr.nonce_collection_cutoff_ms(&certs),
+                    mgr.mpc_config.nonce_accumulation_window_ms,
+                )
             };
             match cutoff_ms {
                 Some(cutoff_ms) if onchain_state.latest_checkpoint_timestamp_ms() <= cutoff_ms => {
-                    while onchain_state.latest_checkpoint_timestamp_ms() <= cutoff_ms {
-                        // `latest_checkpoint_timestamp_ms` only advances once per checkpoint (~200 ms).
-                        tokio::time::sleep(NONCE_WINDOW_WAIT_POLL).await;
+                    let deadline = Duration::from_millis(window_ms) + NONCE_WINDOW_WAIT_SLACK;
+                    let wait = async {
+                        while onchain_state.latest_checkpoint_timestamp_ms() <= cutoff_ms {
+                            // `latest_checkpoint_timestamp_ms` only advances once per checkpoint (~200 ms).
+                            tokio::time::sleep(NONCE_WINDOW_WAIT_POLL).await;
+                        }
+                    };
+                    if tokio::time::timeout(deadline, wait).await.is_err() {
+                        warn!(
+                            "fetch_final_nonce_certs: checkpoint clock stalled below window cutoff \
+                             {cutoff_ms} for epoch {epoch} batch {batch_index} after {deadline:?}; \
+                             failing recovery to retry on the next tick"
+                        );
+                        anyhow::bail!(
+                            "nonce window did not close for epoch {epoch} batch {batch_index}"
+                        );
                     }
                 }
                 _ => return Ok(certs),
