@@ -25,6 +25,7 @@ pub mod guardian_harness;
 pub mod hashi_network;
 mod publish;
 pub mod sui_network;
+pub mod tcp_proxy;
 pub mod test_helpers;
 pub mod upgrade_flow;
 
@@ -201,6 +202,14 @@ impl TestNetworksBuilder {
         self.hashi_builder = self
             .hashi_builder
             .with_batch_size_per_weight(batch_size_per_weight);
+        self
+    }
+
+    /// Route the given node's Sui RPC connection through a severable
+    /// proxy (`hashi_network.sui_rpc_proxy()`), so a test can simulate a
+    /// fullnode outage for that node alone.
+    pub fn with_sui_rpc_proxy_for_node(mut self, node_index: usize) -> Self {
+        self.hashi_builder = self.hashi_builder.with_sui_rpc_proxy_for_node(node_index);
         self
     }
 
