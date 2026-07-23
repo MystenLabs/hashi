@@ -17,6 +17,7 @@ use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::bitcoin::TxUTXOs;
 use hashi_types::guardian::GuardianError::InternalError;
 use hashi_types::guardian::GuardianError::InvalidInputs;
+use hashi_types::guardian::GuardianError::LifecycleMismatch;
 use hashi_types::guardian::GuardianError::Unavailable;
 use hashi_types::guardian::*;
 use hpke::Serializable;
@@ -392,9 +393,7 @@ impl Enclave {
     pub fn require_lifecycle(&self, expected: EnclaveLifecycle) -> GuardianResult<()> {
         let actual = self.lifecycle();
         if actual != expected {
-            return Err(InvalidInputs(format!(
-                "expected enclave lifecycle {expected:?}, got {actual:?}"
-            )));
+            return Err(LifecycleMismatch { expected, actual });
         }
         Ok(())
     }
@@ -411,10 +410,10 @@ impl Enclave {
             .write()
             .expect("lifecycle lock poisoned");
         if *lifecycle != expected {
-            return Err(InvalidInputs(format!(
-                "expected enclave lifecycle {expected:?}, got {:?}",
-                *lifecycle
-            )));
+            return Err(LifecycleMismatch {
+                expected,
+                actual: *lifecycle,
+            });
         }
         self.assert_state_installed_for(next);
         *lifecycle = next;
@@ -470,8 +469,9 @@ impl Enclave {
         }
     }
 
-    pub fn is_fully_initialized(&self) -> bool {
-        self.lifecycle() == WithdrawStage::Activated.into()
+    /// Require the activated withdraw lifecycle.
+    pub fn require_fully_initialized(&self) -> GuardianResult<()> {
+        self.require_lifecycle(WithdrawStage::Activated.into())
     }
 
     // ========================================================================

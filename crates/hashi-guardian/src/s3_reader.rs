@@ -14,7 +14,6 @@
 use crate::s3_client::GuardianS3Client;
 use crate::s3_client::HistoryCheck;
 use crate::s3_client::LockCheck;
-use anyhow::Context;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
 use hashi_types::guardian::time_utils::UnixSeconds;
 use hashi_types::guardian::BuildPcrs;
@@ -22,6 +21,7 @@ use hashi_types::guardian::CeremonyLogMessage;
 use hashi_types::guardian::CeremonyState;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GenesisLogMessage;
+use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianInfo;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::KpShareStateLogMessage;
@@ -83,11 +83,8 @@ pub struct GuardianReader {
 }
 
 impl GuardianReader {
-    pub async fn new(config: &S3Config, allowlist: PcrAllowlist) -> anyhow::Result<Self> {
-        let s3 = GuardianS3Client::new_checked(config)
-            .await
-            .map_err(|e| anyhow::anyhow!(e))
-            .context("failed to verify guardian S3 connectivity")?;
+    pub async fn new(config: &S3Config, allowlist: PcrAllowlist) -> GuardianResult<Self> {
+        let s3 = GuardianS3Client::new_checked(config).await?;
         Ok(Self::from_s3_client(s3, allowlist))
     }
 
@@ -109,13 +106,10 @@ impl GuardianReader {
 
     fn enforce_build_policy(
         &self,
-        context: &str,
         build_policy: BuildPolicy,
         build_pcrs: &BuildPcrs,
-    ) -> anyhow::Result<()> {
-        build_policy
-            .enforce(&self.cache.allowlist, build_pcrs)
-            .map_err(|e| anyhow::anyhow!("{context} PCR check: {e:?}"))
+    ) -> GuardianResult<()> {
+        build_policy.enforce(&self.cache.allowlist, build_pcrs)
     }
 
     /// Read and verify every record in `dir`, resolving each writing session's
@@ -125,12 +119,8 @@ impl GuardianReader {
     pub async fn read_logs_in_dir(
         &mut self,
         dir: &S3HourScopedDirectory,
-    ) -> anyhow::Result<Vec<VerifiedLogRecord>> {
-        let all_logs = self
-            .s3
-            .list_all_log_records_in_dir(dir)
-            .await
-            .with_context(|| format!("failed to list guardian logs in {dir}"))?;
+    ) -> GuardianResult<Vec<VerifiedLogRecord>> {
+        let all_logs = self.s3.list_all_log_records_in_dir(dir).await?;
 
         let mut out = Vec::with_capacity(all_logs.len());
         for log in all_logs {
@@ -146,13 +136,13 @@ impl GuardianReader {
         &mut self,
         session_id: &str,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<VerifiedSessionInfo> {
+    ) -> GuardianResult<VerifiedSessionInfo> {
         let session_info = self
             .cache
             .get_or_load_session_info(&self.s3, session_id)
             .await?
             .clone();
-        self.enforce_build_policy("session", build_policy, &session_info.build_pcrs)?;
+        self.enforce_build_policy(build_policy, &session_info.build_pcrs)?;
         Ok(session_info)
     }
 
@@ -161,7 +151,7 @@ impl GuardianReader {
         &mut self,
         session_id: &str,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<GuardianInfo> {
+    ) -> GuardianResult<GuardianInfo> {
         Ok(self.get_session_info(session_id, build_policy).await?.info)
     }
 
@@ -174,7 +164,7 @@ impl GuardianReader {
     async fn read_latest_ceremony_log(
         &mut self,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<Option<CeremonyLogMessage>> {
+    ) -> GuardianResult<Option<CeremonyLogMessage>> {
         let keys = self
             .s3
             .validate_prefix_history_and_list_keys(&format!("{}/", S3_DIR_CEREMONY))
@@ -185,10 +175,10 @@ impl GuardianReader {
         let record = self.s3.get_log_record(&key).await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
         let build_pcrs = record.build_pcrs.clone();
-        self.enforce_build_policy("ceremony log", build_policy, &build_pcrs)?;
+        self.enforce_build_policy(build_policy, &build_pcrs)?;
         let session_id = record.session_id;
         let LogMessage::Ceremony(msg) = record.message else {
-            anyhow::bail!("expected a ceremony log at {key}");
+            return Err(InvalidS3Log(format!("expected a ceremony log at {key}")));
         };
         log_verified_read(&key, &session_id);
         Ok(Some(*msg))
@@ -207,7 +197,7 @@ impl GuardianReader {
         &mut self,
         sharing_seq: u64,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<Option<KpShareStateLogMessage>> {
+    ) -> GuardianResult<Option<KpShareStateLogMessage>> {
         let prefix = KpShareStateLogMessage::object_key_dir(sharing_seq);
         let keys = self
             .s3
@@ -222,11 +212,10 @@ impl GuardianReader {
             .read_kp_share_state_log_at_key(&key, build_policy, HistoryCheck::AlreadyChecked)
             .await?;
         if msg.sharing_seq != sharing_seq {
-            anyhow::bail!(
+            return Err(InvalidS3Log(format!(
                 "sharing_seq mismatch: {} != {}",
-                msg.sharing_seq,
-                sharing_seq
-            );
+                msg.sharing_seq, sharing_seq
+            )));
         }
         Ok(Some(msg))
     }
@@ -242,7 +231,7 @@ impl GuardianReader {
         sharing_seq: u64,
         cert_seq: u64,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<KpShareStateLogMessage> {
+    ) -> GuardianResult<KpShareStateLogMessage> {
         let key = KpShareStateLogMessage::object_key(session_id, sharing_seq, cert_seq);
         // Unlike the latest-state path, this direct read has not already
         // checked an enclosing prefix, so validate this exact key's history.
@@ -256,7 +245,7 @@ impl GuardianReader {
         key: &str,
         build_policy: BuildPolicy,
         history_check: HistoryCheck,
-    ) -> anyhow::Result<KpShareStateLogMessage> {
+    ) -> GuardianResult<KpShareStateLogMessage> {
         // KP-share locks are short-lived and expected to expire. Expiry permits
         // deletion but does not cause it; while an object remains, its contents
         // are authenticatable through the enclave signature verified below.
@@ -265,10 +254,10 @@ impl GuardianReader {
             .get_log_record_inner(key, LockCheck::Skipped, history_check)
             .await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
-        self.enforce_build_policy("kp-shares log", build_policy, &record.build_pcrs)?;
+        self.enforce_build_policy(build_policy, &record.build_pcrs)?;
         let session_id = record.session_id;
         let LogMessage::KpShareState(msg) = record.message else {
-            anyhow::bail!("expected a kp-shares log at {key}");
+            return Err(InvalidS3Log(format!("expected a kp-shares log at {key}")));
         };
         log_verified_read(key, &session_id);
         Ok(*msg)
@@ -281,7 +270,7 @@ impl GuardianReader {
     pub async fn read_latest_ceremony_state(
         &mut self,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<Option<CeremonyState>> {
+    ) -> GuardianResult<Option<CeremonyState>> {
         let Some(ceremony) = self.read_latest_ceremony_log(build_policy).await? else {
             return Ok(None);
         };
@@ -289,8 +278,10 @@ impl GuardianReader {
         let kp_share_state = self
             .read_latest_kp_share_state_log(sharing_seq, build_policy)
             .await?
-            .with_context(|| {
-                format!("no kp-shares log found for latest ceremony sharing_seq {sharing_seq}")
+            .ok_or_else(|| {
+                InvalidS3Log(format!(
+                    "no kp-shares log found for latest ceremony sharing_seq {sharing_seq}"
+                ))
             })?;
         Ok(Some(CeremonyState::new(ceremony, kp_share_state).expect(
             "ceremony and KP share state must have a consistent shape",
@@ -303,7 +294,7 @@ impl GuardianReader {
     pub async fn read_latest_committee(
         &mut self,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<Option<Committee>> {
+    ) -> GuardianResult<Option<Committee>> {
         if let Some(committee) = self.read_latest_committee_update(build_policy).await? {
             return Ok(Some(committee));
         }
@@ -319,7 +310,7 @@ impl GuardianReader {
     async fn read_latest_committee_update(
         &mut self,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<Option<Committee>> {
+    ) -> GuardianResult<Option<Committee>> {
         let keys = self
             .s3
             .validate_prefix_history_and_list_keys(&format!("{}/", S3_DIR_COMMITTEE_UPDATE))
@@ -329,15 +320,19 @@ impl GuardianReader {
         };
         let record = self.s3.get_log_record(&key).await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
-        self.enforce_build_policy("committee-update log", build_policy, &record.build_pcrs)?;
+        self.enforce_build_policy(build_policy, &record.build_pcrs)?;
         let session_id = record.session_id;
         let LogMessage::CommitteeUpdate(msg) = record.message else {
-            anyhow::bail!("expected a committee-update log at {key}");
+            return Err(InvalidS3Log(format!(
+                "expected a committee-update log at {key}"
+            )));
         };
         let committee = match *msg {
             CommitteeUpdateLogMessage::Success { new_committee, .. } => new_committee,
             CommitteeUpdateLogMessage::Failure { .. } => {
-                anyhow::bail!("lex-last non-failure key resolved to a Failure log at {key}")
+                return Err(InvalidS3Log(format!(
+                    "lex-last non-failure key resolved to a Failure log at {key}"
+                )));
             }
         };
         log_verified_read(&key, &session_id);
@@ -349,7 +344,7 @@ impl GuardianReader {
     async fn read_genesis_log(
         &mut self,
         build_policy: BuildPolicy,
-    ) -> anyhow::Result<Option<GenesisLogMessage>> {
+    ) -> GuardianResult<Option<GenesisLogMessage>> {
         let key = GenesisLogMessage::object_key();
         let keys = self
             .s3
@@ -359,14 +354,16 @@ impl GuardianReader {
             return Ok(None);
         }
         if keys != [key.clone()] {
-            anyhow::bail!("expected exactly one genesis record at {key}, found {keys:?}");
+            return Err(InvalidS3Log(format!(
+                "expected exactly one genesis record at {key}, found {keys:?}"
+            )));
         }
         let record = self.s3.get_log_record(&key).await?;
         let record = self.cache.verify_record(&self.s3, record).await?;
-        self.enforce_build_policy("genesis log", build_policy, &record.build_pcrs)?;
+        self.enforce_build_policy(build_policy, &record.build_pcrs)?;
         let session_id = record.session_id;
         let LogMessage::Genesis(msg) = record.message else {
-            anyhow::bail!("expected a genesis log at {key}");
+            return Err(InvalidS3Log(format!("expected a genesis log at {key}")));
         };
         log_verified_read(&key, &session_id);
         Ok(Some(*msg))
@@ -399,7 +396,7 @@ impl GuardianSessionCache {
         &mut self,
         s3: &GuardianS3Client,
         session_id: &str,
-    ) -> anyhow::Result<&VerifiedSessionInfo> {
+    ) -> GuardianResult<&VerifiedSessionInfo> {
         if !self.sessions.contains_key(session_id) {
             let session_info = s3
                 .get_verified_session_info(session_id, &self.allowlist)
@@ -414,22 +411,18 @@ impl GuardianSessionCache {
         &mut self,
         s3: &GuardianS3Client,
         record: LogRecord,
-    ) -> anyhow::Result<VerifiedLogRecord> {
+    ) -> GuardianResult<VerifiedLogRecord> {
         let object_key = record.object_key.clone();
         let session_id = record.session_id.clone();
         let session_info = self.get_or_load_session_info(s3, &session_id).await?;
-        record
-            .verify(&session_info.signing_pubkey)
-            .map(|(session_id, timestamp_ms, message)| {
-                VerifiedLogRecord::new(
-                    object_key,
-                    session_id,
-                    timestamp_ms,
-                    message,
-                    session_info.build_pcrs.clone(),
-                )
-            })
-            .with_context(|| "failed to verify guardian enclave signature")
+        let (session_id, timestamp_ms, message) = record.verify(&session_info.signing_pubkey)?;
+        Ok(VerifiedLogRecord::new(
+            object_key,
+            session_id,
+            timestamp_ms,
+            message,
+            session_info.build_pcrs.clone(),
+        ))
     }
 }
 

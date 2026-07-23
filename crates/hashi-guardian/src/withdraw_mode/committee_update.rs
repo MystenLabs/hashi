@@ -6,7 +6,6 @@ use crate::Enclave;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GuardianError;
-use hashi_types::guardian::GuardianError::EnclaveUninitialized;
 use hashi_types::guardian::GuardianError::InternalError;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
@@ -25,9 +24,7 @@ pub async fn update_committee(
     enclave: Arc<Enclave>,
     signed: HashiSigned<CommitteeTransitionRequest>,
 ) -> GuardianResult<u64> {
-    if !enclave.is_fully_initialized() {
-        return Err(EnclaveUninitialized);
-    }
+    enclave.require_fully_initialized()?;
 
     let current = enclave.state.get_committee()?;
     let current_epoch = current.epoch();
@@ -269,8 +266,8 @@ mod tests {
             .expect_err("bad middle handoff must error");
 
         assert!(
-            matches!(err, GuardianError::InvalidInputs(_)),
-            "expected InvalidInputs, got {err:?}"
+            matches!(err, GuardianError::Unauthenticated(_)),
+            "expected Unauthenticated, got {err:?}"
         );
         assert_eq!(enclave.state.get_committee().unwrap().epoch(), 7);
     }
@@ -284,8 +281,8 @@ mod tests {
             .await
             .expect_err("mismatched signing epoch must error");
         assert!(
-            matches!(err, GuardianError::InvalidInputs(_)),
-            "expected InvalidInputs, got {err:?}"
+            matches!(err, GuardianError::Unauthenticated(_)),
+            "expected Unauthenticated, got {err:?}"
         );
         assert_eq!(enclave.state.get_committee().unwrap().epoch(), 5);
     }

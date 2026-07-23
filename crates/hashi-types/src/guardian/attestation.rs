@@ -5,9 +5,14 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeSet;
 
+#[cfg(not(any(test, feature = "non-enclave-dev")))]
+use super::CryptoVerificationError;
+use super::CryptoVerificationResult;
 use super::GuardianInfo;
 use super::GuardianPubKey;
 use super::GuardianResult;
+use super::errors::GuardianError::BuildNotAllowlisted;
+use super::errors::GuardianError::BuildNotCurrent;
 use super::errors::GuardianError::InvalidInputs;
 #[cfg(not(any(test, feature = "non-enclave-dev")))]
 use super::time_utils::now_timestamp_ms;
@@ -39,7 +44,7 @@ impl NitroAttestation {
         &self,
         signing_pubkey: &GuardianPubKey,
         build_pcrs: &BuildPcrs,
-    ) -> GuardianResult<()> {
+    ) -> CryptoVerificationResult<()> {
         self.verify_at(signing_pubkey, build_pcrs, VerifyTime::Now)
     }
 
@@ -54,7 +59,7 @@ impl NitroAttestation {
         &self,
         signing_pubkey: &GuardianPubKey,
         build_pcrs: &BuildPcrs,
-    ) -> GuardianResult<()> {
+    ) -> CryptoVerificationResult<()> {
         self.verify_at(signing_pubkey, build_pcrs, VerifyTime::DocumentTimestamp)
     }
 
@@ -63,7 +68,7 @@ impl NitroAttestation {
         signing_pubkey: &GuardianPubKey,
         build_pcrs: &BuildPcrs,
         verify_time: VerifyTime,
-    ) -> GuardianResult<()> {
+    ) -> CryptoVerificationResult<()> {
         #[cfg(any(test, feature = "non-enclave-dev"))]
         {
             let _ = (signing_pubkey, build_pcrs, verify_time);
@@ -90,28 +95,30 @@ impl NitroAttestation {
             // always_include_required_pcrs). The last keeps PCR0 in `pcr_map` even if
             // zero, so the pin below can't be bypassed by a missing entry.
             let (signature, signed_message, doc) =
-                parse_nitro_attestation(&self.0, true, true, true)
-                    .map_err(|e| InvalidInputs(format!("attestation parse failed: {e}")))?;
+                parse_nitro_attestation(&self.0, true, true, true).map_err(|e| {
+                    CryptoVerificationError::new(format!("attestation parse failed: {e}"))
+                })?;
             let timestamp_ms = match verify_time {
                 VerifyTime::Now => now_timestamp_ms(),
                 VerifyTime::DocumentTimestamp => doc.timestamp,
             };
-            verify_nitro_attestation(&signature, &signed_message, &doc, timestamp_ms)
-                .map_err(|e| InvalidInputs(format!("attestation verification failed: {e}")))?;
+            verify_nitro_attestation(&signature, &signed_message, &doc, timestamp_ms).map_err(
+                |e| CryptoVerificationError::new(format!("attestation verification failed: {e}")),
+            )?;
 
             let attested = doc
                 .public_key
-                .ok_or_else(|| InvalidInputs("attestation has no public_key".into()))?;
+                .ok_or_else(|| CryptoVerificationError::new("attestation has no public_key"))?;
             if attested != signing_pubkey.to_bytes() {
-                return Err(InvalidInputs(
-                    "attestation public_key does not match the session signing pubkey".into(),
+                return Err(CryptoVerificationError::new(
+                    "attestation public_key does not match the session signing pubkey",
                 ));
             }
 
             // Pin PCR0 (the whole EIF image hash).
             if doc.pcr_map.get(&0).map(Vec::as_slice) != Some(build_pcrs.pcr0()) {
-                return Err(InvalidInputs(
-                    "attestation PCR0 does not match the expected enclave image".into(),
+                return Err(CryptoVerificationError::new(
+                    "attestation PCR0 does not match the expected enclave image",
                 ));
             }
             Ok(())
@@ -212,6 +219,9 @@ impl PcrAllowlist {
     }
 
     /// The `BuildPcrs` whose revision is `git_revision`.
+    ///
+    /// A missing revision may indicate either incomplete configured build
+    /// history or a build that was never approved.
     pub fn resolve(&self, git_revision: &str) -> GuardianResult<&BuildPcrs> {
         if self.current_build.git_revision == git_revision {
             return Ok(&self.current_build);
@@ -223,23 +233,20 @@ impl PcrAllowlist {
         {
             return Ok(prev_build);
         }
-        Err(InvalidInputs(format!(
-            "enclave reports build '{git_revision}' not present in PCR allowlist"
+        Err(BuildNotAllowlisted(format!(
+            "guardian reports build '{git_revision}', which is not present in the PCR allowlist"
         )))
     }
 
-    pub fn is_current_build(&self, build_pcrs: &BuildPcrs) -> bool {
-        self.current_build == *build_pcrs
-    }
-
     pub fn require_current_build(&self, build_pcrs: &BuildPcrs) -> GuardianResult<()> {
-        if self.is_current_build(build_pcrs) {
+        if self.current_build == *build_pcrs {
             Ok(())
         } else {
-            Err(InvalidInputs(
-                "guardian attestation matched a non-current build, but current build is required"
-                    .into(),
-            ))
+            Err(BuildNotCurrent(format!(
+                "guardian build '{}' does not match the required current build '{}'",
+                build_pcrs.git_revision(),
+                self.current_build.git_revision()
+            )))
         }
     }
 }

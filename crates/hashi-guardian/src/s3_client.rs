@@ -20,6 +20,7 @@ use aws_sdk_s3::types::ObjectLockEnabled;
 use aws_sdk_s3::types::ObjectLockMode;
 use aws_sdk_s3::Client as S3Client;
 use hashi_types::guardian::s3_utils::S3HourScopedDirectory;
+use hashi_types::guardian::GuardianError::InvalidS3Log;
 use hashi_types::guardian::GuardianError::S3Error;
 use hashi_types::guardian::GuardianResult;
 use hashi_types::guardian::InitLogMessage;
@@ -603,7 +604,7 @@ impl GuardianS3Client {
         })?;
 
         let record = serde_json::from_slice::<LogRecord>(&bytes.into_bytes()).map_err(|e| {
-            S3Error(format!(
+            InvalidS3Log(format!(
                 "Failed to deserialize object {} into target type: {}",
                 key, e
             ))
@@ -641,7 +642,9 @@ impl GuardianS3Client {
                 } => Some((attestation, signing_public_key)),
                 _ => None,
             })
-            .ok_or_else(|| S3Error(format!("expected OIAttestationUnsigned at key {att_key}")))?;
+            .ok_or_else(|| {
+                InvalidS3Log(format!("expected OIAttestationUnsigned at key {att_key}"))
+            })?;
 
         // 2. GuardianInfo, signature-verified under that pubkey → the reported build.
         let info_key = InitLogMessage::guardian_info_object_key(session_id);
@@ -653,14 +656,16 @@ impl GuardianS3Client {
                 InitLogMessage::OIGuardianInfo(info) => Some(*info),
                 _ => None,
             })
-            .ok_or_else(|| S3Error(format!("expected OIGuardianInfo at key {info_key}")))?;
+            .ok_or_else(|| InvalidS3Log(format!("expected OIGuardianInfo at key {info_key}")))?;
 
         // 3. Anchor the pubkey and pin PCR0 to the allowlist entry for the
         //    reported build. This replays a logged attestation whose short-lived
         //    leaf cert has typically expired, so the chain is checked at the
         //    document's own signed timestamp, not now.
         let build_pcrs = allowlist.resolve(&info.untrusted_git_revision)?.clone();
-        attestation.verify_replay(&signing_pubkey, &build_pcrs)?;
+        attestation
+            .verify_replay(&signing_pubkey, &build_pcrs)
+            .map_err(|e| InvalidS3Log(format!("attestation at key {att_key}: {e}")))?;
 
         Ok(VerifiedSessionInfo {
             signing_pubkey,

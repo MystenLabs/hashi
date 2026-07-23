@@ -25,7 +25,7 @@ pub async fn verified_live_guardian_info(
         .map_err(|e| anyhow!("decode GetGuardianInfoResponse: {e:?}"))?;
     info_resp
         .verify_live(current_build)
-        .map_err(|e| anyhow!("verify GuardianInfo attestation/signature: {e:?}"))
+        .map_err(|e| anyhow!("verify GuardianInfo attestation/signature: {e}"))
 }
 
 /// The OI log captures the final pre-transition snapshot. Apart from the

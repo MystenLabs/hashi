@@ -916,10 +916,13 @@ impl GetGuardianInfoResponse {
     /// - the Nitro attestation has a valid signature;
     /// - the certificate chain is valid now;
     /// - the attested public key and PCR0 match `signing_pub_key` and `expected_build`.
-    pub fn verify_live(&self, expected_build: &BuildPcrs) -> GuardianResult<VerifiedGuardianInfo> {
+    pub fn verify_live(
+        &self,
+        expected_build: &BuildPcrs,
+    ) -> CryptoVerificationResult<VerifiedGuardianInfo> {
         let info = self.signed_info.clone().verify(&self.signing_pub_key)?;
         if info.untrusted_git_revision != expected_build.git_revision() {
-            return Err(InvalidInputs(format!(
+            return Err(CryptoVerificationError::new(format!(
                 "guardian info reports build '{}', expected current build '{}'",
                 info.untrusted_git_revision,
                 expected_build.git_revision()
@@ -1101,11 +1104,12 @@ mod tests {
         sig_bytes[0] ^= 0xff;
         resp.signed_info.signature = GuardianSignature::from(sig_bytes);
 
-        assert!(matches!(
+        assert_eq!(
             resp.verify_live(&BuildPcrs::new("test-revision", vec![0]))
-                .unwrap_err(),
-            InvalidInputs(_)
-        ));
+                .unwrap_err()
+                .to_string(),
+            "signature invalid"
+        );
     }
 
     #[test]
@@ -1142,12 +1146,15 @@ mod tests {
 
         let current_build = allowlist.resolve("current").unwrap();
         assert_eq!(current_build.pcr0(), &[0]);
-        assert!(allowlist.is_current_build(current_build));
         let prev_build = allowlist.resolve("prev-1").unwrap();
         assert_eq!(prev_build.pcr0(), &[1]);
-        assert!(!allowlist.is_current_build(prev_build));
         let prev2_build = allowlist.resolve("prev-2").unwrap();
         assert_eq!(prev2_build.pcr0(), &[2]);
+
+        assert!(matches!(
+            allowlist.resolve("missing").unwrap_err(),
+            BuildNotAllowlisted(message) if message.contains("build 'missing'")
+        ));
     }
 
     #[test]
@@ -1195,7 +1202,11 @@ mod tests {
         allowlist.require_current_build(current_build).unwrap();
 
         let prev_build = allowlist.resolve("prev").unwrap();
-        assert!(allowlist.require_current_build(prev_build).is_err());
+        assert!(matches!(
+            allowlist.require_current_build(prev_build).unwrap_err(),
+            BuildNotCurrent(message)
+                if message.contains("build 'prev'") && message.contains("build 'current'")
+        ));
     }
 
     #[test]
