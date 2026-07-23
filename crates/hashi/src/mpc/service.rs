@@ -52,7 +52,7 @@ const RETRY_INTERVAL: Duration = Duration::from_secs(10);
 const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PROTOCOL_ATTEMPTS: u32 = 3;
 const START_RECONFIG_POLL_INTERVAL: Duration = Duration::from_millis(500);
-const MPC_RECONFIG_TIMEOUT: Duration = Duration::from_secs(600);
+const RECONFIG_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 const RECONCILE_TICK: Duration = Duration::from_secs(15);
 const MAX_KEY_REREGISTRATION_BUMPS: u32 = 3;
 const NONCE_RECEIVE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -437,7 +437,8 @@ impl MpcService {
             None,
             move_types::ProtocolType::Dkg,
             signer,
-        );
+        )
+        .with_idle_timeout(RECONFIG_RECEIVE_IDLE_TIMEOUT);
         let output = MpcManager::run_dkg(
             &mpc_manager,
             &p2p_channel,
@@ -1155,21 +1156,9 @@ impl MpcService {
                 .with_label_values(&[protocol_label])
                 .start_timer();
             let result = if run_dkg {
-                tokio::time::timeout(MPC_RECONFIG_TIMEOUT, self.run_dkg(target_epoch))
-                    .await
-                    .unwrap_or_else(|_| {
-                        Err(anyhow::anyhow!(
-                            "DKG timed out after {MPC_RECONFIG_TIMEOUT:?}"
-                        ))
-                    })
+                self.run_dkg(target_epoch).await
             } else {
-                tokio::time::timeout(MPC_RECONFIG_TIMEOUT, self.run_key_rotation(target_epoch))
-                    .await
-                    .unwrap_or_else(|_| {
-                        Err(anyhow::anyhow!(
-                            "Key rotation timed out after {MPC_RECONFIG_TIMEOUT:?}"
-                        ))
-                    })
+                self.run_key_rotation(target_epoch).await
             };
             drop(_timer);
             match result {
@@ -1183,9 +1172,7 @@ impl MpcService {
                 }
             }
         };
-        if self.get_pending_epoch_change() != Some(target_epoch)
-            && self.inner.onchain_state().epoch() != target_epoch
-        {
+        if !self.reconfig_target_live(target_epoch) {
             info!("handle_reconfig: epoch {target_epoch} aborted after protocol completion");
             return;
         }
@@ -1343,7 +1330,8 @@ impl MpcService {
             None,
             move_types::ProtocolType::KeyRotation,
             signer,
-        );
+        )
+        .with_idle_timeout(RECONFIG_RECEIVE_IDLE_TIMEOUT);
         let output = MpcManager::run_key_rotation(
             &mpc_manager,
             &previous_certs,

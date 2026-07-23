@@ -279,7 +279,8 @@ fn tob_wait_superseded(
                 || onchain_epoch > channel_epoch
         }
         ProtocolType::Dkg | ProtocolType::KeyRotation => {
-            pending_epoch_change != Some(channel_epoch)
+            matches!(pending_epoch_change, Some(p) if p != channel_epoch)
+                || (pending_epoch_change.is_none() && onchain_epoch != channel_epoch)
         }
     }
 }
@@ -303,6 +304,8 @@ mod tests {
     fn rotation_wait_bound_to_its_own_pending_target() {
         for p in [ProtocolType::KeyRotation, ProtocolType::Dkg] {
             assert!(!tob_wait_superseded(p, 6, 5, Some(6)));
+            assert!(!tob_wait_superseded(p, 6, 6, None));
+            assert!(tob_wait_superseded(p, 6, 6, Some(7)));
             assert!(tob_wait_superseded(p, 6, 5, None));
             assert!(tob_wait_superseded(p, 6, 5, Some(7)));
         }
