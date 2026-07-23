@@ -32,6 +32,9 @@ pub enum ChannelError {
     #[error("Receive timeout")]
     Timeout,
 
+    #[error("Wait superseded: {0}")]
+    Superseded(String),
+
     #[error("Channel closed")]
     Closed,
 

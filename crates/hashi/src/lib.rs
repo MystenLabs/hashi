@@ -177,6 +177,9 @@ impl Hashi {
     }
 
     pub fn set_mpc_manager(&self, manager: mpc::MpcManager) {
+        self.metrics
+            .mpc_manager_epoch
+            .set(manager.mpc_config.epoch as i64);
         match self.mpc_manager.get() {
             Some(lock) => {
                 // RwLock::write only fails if poisoned (a thread panicked while holding the lock).

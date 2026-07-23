@@ -119,6 +119,7 @@ pub struct Metrics {
     /// Snapshot races observed by the lost-key heal (registration landed after
     /// the target committee froze; re-targeted one epoch later)
     pub mpc_key_reregistration_bumps_total: IntCounter,
+    pub mpc_manager_epoch: IntGauge,
     pub mpc_avid_rounds_total: IntCounterVec,
     pub mpc_avid_complaints_recovered_total: IntCounter,
 
@@ -709,6 +710,12 @@ impl Metrics {
                 "hashi_mpc_committee_key_lost_total",
                 "Ticks where no DB encryption or signing key matched the node's current \
                  committee record (replacement keys are registered for the next epoch)",
+                registry,
+            )
+            .unwrap(),
+            mpc_manager_epoch: register_int_gauge_with_registry!(
+                "hashi_mpc_manager_epoch",
+                "Epoch of the MpcManager",
                 registry,
             )
             .unwrap(),
