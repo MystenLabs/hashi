@@ -1,0 +1,253 @@
+name: Publish Hashi Testnet Release
+
+on:
+  push:
+    branches: [testnet]
+
+permissions:
+  actions: read
+  attestations: write
+  contents: write
+  id-token: write
+
+jobs:
+  deterministic-build:
+    uses: ./.github/workflows/deterministic-build.yml
+    with:
+      hashi_only: true
+
+  publish:
+    name: Verify and publish testnet release
+    needs: deterministic-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      IMAGE: mysten/hashi
+      RELEASE_TAG: testnet-${{ github.sha }}
+    steps:
+      - name: Download verified binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # pin@v4
+        with:
+          name: hashi-ubuntu-latest-binary
+          path: release
+
+      - name: Download verified checksum
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # pin@v4
+        with:
+          name: hashi-ubuntu-latest-sha256
+          path: release
+
+      - name: Prepare release assets
+        run: |
+          set -euo pipefail
+          EXPECTED_HASH=$(awk '{print $1}' release/hashi.sha256)
+          ACTUAL_HASH=$(sha256sum release/hashi | awk '{print $1}')
+          if [ "$ACTUAL_HASH" != "$EXPECTED_HASH" ]; then
+            echo "Downloaded binary hash does not match the verified build hash"
+            exit 1
+          fi
+
+          mv release/hashi release/hashi-linux-amd64
+          chmod +x release/hashi-linux-amd64
+          printf '%s  %s\n' "$ACTUAL_HASH" hashi-linux-amd64 > release/SHA256SUMS
+          echo "binary_hash=$ACTUAL_HASH" >> "$GITHUB_ENV"
+
+      - name: Dispatch Docker image build
+        env:
+          GH_TOKEN: ${{ secrets.DOCKER_BINARY_BUILDS_DISPATCH }}
+        run: |
+          gh workflow run hashi-build-image.yml \
+            --repo MystenLabs/sui-operations \
+            --ref main \
+            -f hashi_commit="$GITHUB_SHA" \
+            -f push_to_dockerhub=true \
+            -f additional_tags="$RELEASE_TAG" \
+            -f caller_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+      - name: Wait for Docker image build
+        env:
+          GH_TOKEN: ${{ secrets.DOCKER_BINARY_BUILDS_DISPATCH }}
+        run: |
+          set -euo pipefail
+          CALLER_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          EXPECTED_TITLE="Build Hashi image (${GITHUB_SHA}) [caller ${CALLER_ID}]"
+          RUNS_ENDPOINT="repos/MystenLabs/sui-operations/actions/workflows/hashi-build-image.yml/runs"
+          OPERATIONS_RUN_ID=
+
+          for attempt in $(seq 1 60); do
+            if RUNS=$(gh api --method GET "$RUNS_ENDPOINT" \
+              -f event=workflow_dispatch \
+              -f per_page=100); then
+              OPERATIONS_RUN_ID=$(jq -r --arg title "$EXPECTED_TITLE" \
+                '[.workflow_runs[] | select(.display_title == $title)][0].id // empty' <<< "$RUNS")
+            else
+              echo "Failed to list sui-operations workflow runs; retrying"
+            fi
+            if [ -n "$OPERATIONS_RUN_ID" ]; then
+              break
+            fi
+            echo "Waiting for the sui-operations workflow run (attempt $attempt/60)"
+            sleep 10
+          done
+          if [ -z "$OPERATIONS_RUN_ID" ]; then
+            echo "Timed out finding the dispatched sui-operations workflow run"
+            exit 1
+          fi
+
+          for attempt in $(seq 1 270); do
+            if ! RUN=$(gh api "repos/MystenLabs/sui-operations/actions/runs/$OPERATIONS_RUN_ID"); then
+              echo "Failed to inspect sui-operations run $OPERATIONS_RUN_ID; retrying"
+              sleep 20
+              continue
+            fi
+            STATUS=$(jq -r .status <<< "$RUN")
+            CONCLUSION=$(jq -r '.conclusion // empty' <<< "$RUN")
+            OPERATIONS_RUN_URL=$(jq -r .html_url <<< "$RUN")
+            if [ "$STATUS" = completed ]; then
+              if [ "$CONCLUSION" != success ]; then
+                echo "sui-operations build concluded with $CONCLUSION: $OPERATIONS_RUN_URL"
+                exit 1
+              fi
+              echo "operations_run_url=$OPERATIONS_RUN_URL" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "Waiting for sui-operations run $OPERATIONS_RUN_ID ($STATUS, attempt $attempt/270)"
+            sleep 20
+          done
+          echo "Timed out waiting for sui-operations run $OPERATIONS_RUN_ID"
+          exit 1
+
+      - name: Verify published image binary
+        env:
+          BINARY_URL: https://storage.googleapis.com/mysten-hashi-binaries/${{ github.sha }}/hashi
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error --location "$BINARY_URL" --output release/image-hashi; then
+              IMAGE_BINARY_HASH=$(sha256sum release/image-hashi | awk '{print $1}')
+              if [ "$IMAGE_BINARY_HASH" != "$binary_hash" ]; then
+                echo "Published image binary hash does not match the release binary"
+                exit 1
+              fi
+              exit 0
+            fi
+            echo "Waiting for the image binary (attempt $attempt/30)"
+            sleep 20
+          done
+          echo "Timed out waiting for the image binary"
+          exit 1
+
+      - name: Resolve published image digest
+        run: |
+          set -euo pipefail
+          TAG_URL="https://hub.docker.com/v2/repositories/$IMAGE/tags/$RELEASE_TAG"
+          for attempt in $(seq 1 30); do
+            if RESPONSE=$(curl --fail --silent --show-error "$TAG_URL"); then
+              IMAGE_DIGEST=$(jq -r '.digest // empty' <<< "$RESPONSE")
+              if [ -n "$IMAGE_DIGEST" ]; then
+                echo "image_digest=$IMAGE_DIGEST" >> "$GITHUB_ENV"
+                exit 0
+              fi
+            fi
+            echo "Waiting for $IMAGE:$RELEASE_TAG (attempt $attempt/30)"
+            sleep 20
+          done
+          echo "Timed out waiting for the Docker image"
+          exit 1
+
+      - name: Attest release binary
+        id: attest
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # pin@v3.0.0
+        with:
+          subject-path: release/hashi-linux-amd64
+
+      - name: Write release notes
+        env:
+          ATTESTATION_URL: ${{ steps.attest.outputs.attestation-url }}
+        run: |
+          cat > release/notes.md <<EOF
+          Automated Hashi testnet release.
+
+          | Artifact | Identity |
+          | --- | --- |
+          | Source commit | [\`${GITHUB_SHA}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}) |
+          | Binary platform | \`linux/amd64\` |
+          | Binary SHA-256 | \`${binary_hash}\` |
+          | Docker image | \`${IMAGE}:${RELEASE_TAG}\` |
+          | Docker digest | \`${image_digest}\` |
+          | Provenance | [GitHub attestation](${ATTESTATION_URL}) |
+          | Image build | [sui-operations workflow](${operations_run_url}) |
+          | Workflow run | [${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) |
+
+          Verify the downloaded binary:
+
+          \`\`\`sh
+          sha256sum --check SHA256SUMS
+          gh attestation verify hashi-linux-amd64 --repo ${GITHUB_REPOSITORY}
+          \`\`\`
+
+          This release publishes artifacts only. It does not deploy Hashi.
+          EOF
+
+      - name: Publish GitHub prerelease
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SHORT_SHA=${GITHUB_SHA:0:8}
+          TAG_RESPONSE=$(mktemp)
+          TAG_STATUS=$(curl --silent --show-error \
+            --output "$TAG_RESPONSE" \
+            --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}")
+          case "$TAG_STATUS" in
+            200)
+              TAG_COMMIT=$(jq -r .sha "$TAG_RESPONSE")
+              if [ "$TAG_COMMIT" != "$GITHUB_SHA" ]; then
+                echo "Release tag $RELEASE_TAG points to $TAG_COMMIT instead of $GITHUB_SHA"
+                exit 1
+              fi
+              ;;
+            404)
+              TAG_COMMIT=
+              ;;
+            *)
+              echo "Failed to inspect release tag $RELEASE_TAG (HTTP $TAG_STATUS)"
+              cat "$TAG_RESPONSE"
+              exit 1
+              ;;
+          esac
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            if [ -z "$TAG_COMMIT" ]; then
+              echo "Release $RELEASE_TAG exists without a resolvable Git tag"
+              exit 1
+            fi
+            gh release upload "$RELEASE_TAG" \
+              release/hashi-linux-amd64 \
+              release/SHA256SUMS \
+              --clobber
+            gh release edit "$RELEASE_TAG" \
+              --prerelease \
+              --title "Hashi testnet $SHORT_SHA" \
+              --notes-file release/notes.md
+          elif [ -n "$TAG_COMMIT" ]; then
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --prerelease \
+              --title "Hashi testnet $SHORT_SHA" \
+              --notes-file release/notes.md \
+              release/hashi-linux-amd64 \
+              release/SHA256SUMS
+          else
+            gh release create "$RELEASE_TAG" \
+              --target "$GITHUB_SHA" \
+              --prerelease \
+              --title "Hashi testnet $SHORT_SHA" \
+              --notes-file release/notes.md \
+              release/hashi-linux-amd64 \
+              release/SHA256SUMS
+          fi

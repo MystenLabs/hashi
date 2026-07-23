@@ -1237,39 +1237,44 @@ The following capabilities are planned but not yet available.
 
 ---
 
-## 12. Publishing a release (Mysten)
+## 12. Testnet releases
 
-This section is for **Mysten release engineers**; operators can ignore it. A release is cut at a commit sha on `main` and ships on two channels: the container image (Artifact Registry for Mysten-managed deploys, Docker Hub for everyone else) and the deterministic binary (§1.3).
+Testnet releases are available at [github.com/MystenLabs/hashi/releases](https://github.com/MystenLabs/hashi/releases). Each release is labeled `Hashi testnet <short-sha>` and tagged `testnet-<full-sha>`.
 
-### 12.1 Container image
+### 12.1 Binary
 
-Dispatch `hashi-build-image.yml` in sui-operations at the release commit:
-
-```bash
-gh workflow run hashi-build-image.yml -R MystenLabs/sui-operations --ref main \
-  -f hashi_commit=<sha> \
-  -f push_to_dockerhub=true
-```
-
-A single run builds the image once and pushes both `us-central1-docker.pkg.dev/cryptic-bolt-398315/hashi/hashi:<sha>` and the public `mysten/hashi:<sha>`, and drops the raw binary at `https://storage.googleapis.com/mysten-hashi-binaries/<sha>/hashi` (public). Artifact Registry rejects anonymous pulls — Docker Hub is the operator-facing channel; bare-metal operators use the deterministic binary (§12.2), and the GCS drop is internal. Confirm the tag is live:
+Download `hashi-linux-amd64` and `SHA256SUMS` from the same release into one directory. Verify that the binary's SHA-256 matches the checksum published with the release:
 
 ```bash
-curl -s https://hub.docker.com/v2/repositories/mysten/hashi/tags/<sha> | jq -r .digest
+sha256sum --check SHA256SUMS
 ```
 
-### 12.2 Deterministic binary
-
-Dispatch `deterministic-build.yml` in this repo at the same commit; it builds `out/hashi` on two runner generations and fails on any hash mismatch. Publish the artifacts under the sui-releases convention:
+The command must print `hashi-linux-amd64: OK`. Do not run the binary if the check fails. The computed hash can also be inspected directly and compared with the binary SHA-256 shown in the release notes:
 
 ```bash
-gh workflow run deterministic-build.yml -R MystenLabs/hashi --ref main
-gh run download <run-id> -R MystenLabs/hashi \
-  -n hashi-ubuntu-latest-binary -n hashi-ubuntu-latest-sha256
-aws s3 cp hashi-ubuntu-latest-binary/hashi        s3://sui-releases/<sha>/hashi
-aws s3 cp hashi-ubuntu-latest-sha256/hashi.sha256 s3://sui-releases/<sha>/hashi.sha256
+sha256sum hashi-linux-amd64
 ```
 
-Operators download from `https://sui-releases.s3.us-east-1.amazonaws.com/<sha>/hashi` and can reproduce the checksum themselves (§1.3).
+After the hash matches, verify that GitHub Actions produced the binary and make it executable:
+
+```bash
+gh attestation verify hashi-linux-amd64 --repo MystenLabs/hashi
+chmod +x hashi-linux-amd64
+```
+
+### 12.2 Container image
+
+The matching public image uses the same release tag:
+
+```bash
+docker pull mysten/hashi:testnet-<full-sha>
+```
+
+The release notes include the image's immutable OCI digest. Pin that digest when a deployment must remain on the exact image regardless of tags:
+
+```text
+mysten/hashi@sha256:<digest>
+```
 
 ### 12.3 Rolling the Mysten testnet nodes
 
