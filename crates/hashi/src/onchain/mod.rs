@@ -9,6 +9,7 @@ use fastcrypto::serde_helpers::ToFromByteArray;
 use futures::TryStreamExt;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::RwLock;
@@ -652,6 +653,19 @@ impl OnchainState {
             .active_utxos()
             .map(|(_, utxo)| utxo.clone())
             .collect()
+    }
+
+    pub fn find_spent_or_active_utxo_ids(
+        &self,
+        utxo_ids: impl IntoIterator<Item = types::UtxoId>,
+    ) -> HashSet<types::UtxoId> {
+        let mut utxo_ids: HashSet<_> = utxo_ids.into_iter().collect();
+        let state = self.state();
+        let utxo_pool = &state.hashi().utxo_pool;
+        utxo_ids.retain(|id| {
+            utxo_pool.utxo_records().contains_key(id) || utxo_pool.spent_utxos().contains_key(id)
+        });
+        utxo_ids
     }
 
     pub fn withdrawal_txn(&self, id: &Address) -> Option<types::WithdrawalTransaction> {

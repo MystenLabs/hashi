@@ -10,6 +10,7 @@ use crate::deposits::UnapprovedDepositError;
 use crate::deposits::UnapprovedDepositErrorKind;
 use crate::onchain::types::DepositConfirmationMessage;
 use crate::onchain::types::DepositRequest;
+use crate::onchain::types::UtxoId;
 use crate::sui_tx_executor::SuiTxExecutor;
 use hashi_types::committee::BlsSignatureAggregator;
 use hashi_types::committee::CommitteeMember;
@@ -131,8 +132,8 @@ impl LeaderService {
         let current_epoch = self.inner.onchain_state().epoch();
 
         let mut deposit_requests = self.inner.onchain_state().deposit_requests();
-        deposit_requests.sort_by_key(|r| r.created_timestamp_ms);
-        let approved_deposit_requests: Vec<_> = deposit_requests
+        deposit_requests.sort_by_key(|r| (r.created_timestamp_ms, r.id));
+        let mut deposit_confirmation_candidates: Vec<_> = deposit_requests
             .into_iter()
             .filter(|request| !self.never_retry_deposit_ids.contains(&request.id))
             .filter(|request| {
@@ -143,9 +144,29 @@ impl LeaderService {
             })
             .collect();
 
-        let approved_deposit_ids: Vec<Address> = approved_deposit_requests
+        let spent_or_active_utxo_ids = self.inner.onchain_state().find_spent_or_active_utxo_ids(
+            deposit_confirmation_candidates.iter().map(|r| r.utxo.id),
+        );
+        let (utxo_already_used_count, duplicate_utxo_count) =
+            filter_deposit_confirmation_candidates(
+                &mut deposit_confirmation_candidates,
+                &spent_or_active_utxo_ids,
+            );
+
+        self.inner
+            .metrics
+            .approved_deposit_requests_ignored
+            .with_label_values(&["duplicate_utxo"])
+            .set(duplicate_utxo_count as i64);
+        self.inner
+            .metrics
+            .approved_deposit_requests_ignored
+            .with_label_values(&["utxo_already_used"])
+            .set(utxo_already_used_count as i64);
+
+        let approved_deposit_ids: Vec<Address> = deposit_confirmation_candidates
             .iter()
-            .map(|request| request.id)
+            .map(|r| r.id)
             .collect();
         self.approved_deposit_retry_tracker
             .prune(&approved_deposit_ids);
@@ -155,7 +176,7 @@ impl LeaderService {
             .with_label_values(&["approved_deposit_confirmation"])
             .set(self.approved_deposit_retry_tracker.in_backoff_count(now_ms) as i64);
 
-        for deposit_request in approved_deposit_requests {
+        for deposit_request in deposit_confirmation_candidates {
             let deposit_id = deposit_request.id;
             if self.inflight_deposits.contains(&deposit_id) {
                 continue;
@@ -490,5 +511,73 @@ fn deposit_request_to_proto(req: &DepositRequest) -> SignDepositConfirmationRequ
         timestamp_ms: req.created_timestamp_ms,
         requester_address: req.sender.as_bytes().to_vec().into(),
         sui_tx_digest: req.sui_tx_digest.as_bytes().to_vec().into(),
+    }
+}
+
+fn filter_deposit_confirmation_candidates(
+    candidates: &mut Vec<DepositRequest>,
+    spent_or_active_utxo_ids: &HashSet<UtxoId>,
+) -> (usize, usize) {
+    // Remove requests for spent or active UTXOs and count them.
+    let count_before_filter = candidates.len();
+    candidates.retain(|r| !spent_or_active_utxo_ids.contains(&r.utxo.id));
+    let utxo_already_used_count = count_before_filter - candidates.len();
+
+    // Keep the first request per UTXO and count later duplicates.
+    let count_before_filter = candidates.len();
+    let mut selected_utxo_ids = HashSet::new();
+    candidates.retain(|r| selected_utxo_ids.insert(r.utxo.id));
+    let duplicate_utxo_count = count_before_filter - candidates.len();
+
+    (utxo_already_used_count, duplicate_utxo_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::onchain::types::Utxo;
+    use sui_sdk_types::Digest;
+
+    fn deposit_request(request_id: u8, utxo_id: u8) -> DepositRequest {
+        DepositRequest {
+            id: Address::new([request_id; 32]),
+            sender: Address::ZERO,
+            created_timestamp_ms: request_id.into(),
+            sui_tx_digest: Digest::new([request_id; 32]),
+            utxo: Utxo {
+                id: UtxoId {
+                    txid: Address::new([utxo_id; 32]).into(),
+                    vout: 0,
+                },
+                amount: 1_000,
+                derivation_path: None,
+            },
+            approval_cert: None,
+            approved_timestamp_ms: None,
+            confirmed_timestamp_ms: None,
+        }
+    }
+
+    #[test]
+    fn filters_used_and_duplicate_deposit_confirmation_candidates() {
+        let used = deposit_request(1, 1);
+        let first = deposit_request(2, 2);
+        let distinct = deposit_request(3, 3);
+        let used_duplicate = deposit_request(4, 1);
+        let duplicate = deposit_request(5, 2);
+        let spent_or_active_utxo_ids = HashSet::from([used.utxo.id]);
+        let mut candidates = vec![
+            used,
+            first.clone(),
+            distinct.clone(),
+            used_duplicate,
+            duplicate,
+        ];
+
+        let counts =
+            filter_deposit_confirmation_candidates(&mut candidates, &spent_or_active_utxo_ids);
+
+        assert_eq!(candidates, vec![first, distinct]);
+        assert_eq!(counts, (2, 1));
     }
 }
