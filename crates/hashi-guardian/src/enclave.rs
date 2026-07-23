@@ -17,6 +17,7 @@ use hashi_types::bitcoin::HashiMasterG;
 use hashi_types::bitcoin::TxUTXOs;
 use hashi_types::guardian::GuardianError::InternalError;
 use hashi_types::guardian::GuardianError::InvalidInputs;
+use hashi_types::guardian::GuardianError::LifecycleMismatch;
 use hashi_types::guardian::GuardianError::Unavailable;
 use hashi_types::guardian::*;
 use hpke::Serializable;
@@ -388,13 +389,20 @@ impl Enclave {
             .expect("lifecycle lock poisoned")
     }
 
-    /// Require an exact mode and lifecycle stage.
-    pub fn require_lifecycle(&self, expected: EnclaveLifecycle) -> GuardianResult<()> {
+    /// Require an exact mode and lifecycle stage, naming the operation in any
+    /// resulting error.
+    pub fn require_lifecycle(
+        &self,
+        operation: &str,
+        expected: EnclaveLifecycle,
+    ) -> GuardianResult<()> {
         let actual = self.lifecycle();
         if actual != expected {
-            return Err(InvalidInputs(format!(
-                "expected enclave lifecycle {expected:?}, got {actual:?}"
-            )));
+            return Err(LifecycleMismatch {
+                operation: operation.into(),
+                expected,
+                actual,
+            });
         }
         Ok(())
     }
@@ -411,10 +419,11 @@ impl Enclave {
             .write()
             .expect("lifecycle lock poisoned");
         if *lifecycle != expected {
-            return Err(InvalidInputs(format!(
-                "expected enclave lifecycle {expected:?}, got {:?}",
-                *lifecycle
-            )));
+            return Err(LifecycleMismatch {
+                operation: "advance_lifecycle_into".into(),
+                expected,
+                actual: *lifecycle,
+            });
         }
         self.assert_state_installed_for(next);
         *lifecycle = next;
@@ -470,8 +479,10 @@ impl Enclave {
         }
     }
 
-    pub fn is_fully_initialized(&self) -> bool {
-        self.lifecycle() == WithdrawStage::Activated.into()
+    /// Require the activated withdraw lifecycle, naming the operation in any
+    /// resulting error.
+    pub fn require_fully_initialized(&self, operation: &str) -> GuardianResult<()> {
+        self.require_lifecycle(operation, WithdrawStage::Activated.into())
     }
 
     // ========================================================================

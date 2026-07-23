@@ -135,7 +135,7 @@ pub async fn operator_init(
         EnclaveMode::Ceremony => CeremonyStage::Uninitialized.into(),
         EnclaveMode::Withdraw => WithdrawStage::Uninitialized.into(),
     };
-    enclave.require_lifecycle(uninitialized)?;
+    enclave.require_lifecycle("operator_init", uninitialized)?;
     info!("Lifecycle stage validated.");
 
     // ---- Validate & build: Nothing in this phase mutates enclave state, so any

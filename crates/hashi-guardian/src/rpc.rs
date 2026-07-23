@@ -32,11 +32,17 @@ pub struct GuardianGrpc {
 fn to_status(e: GuardianError) -> Status {
     match e {
         InvalidInputs(msg) => Status::invalid_argument(msg),
+        LifecycleMismatch {
+            operation,
+            expected,
+            actual,
+        } => Status::failed_precondition(format!(
+            "{operation} requires {expected:?}, but enclave is {actual:?}"
+        )),
         InternalError(msg) => Status::internal(msg),
         Unavailable(msg) => Status::unavailable(msg),
         S3Error(msg) => Status::internal(msg),
-        EnclaveUninitialized => Status::failed_precondition("Enclave is not fully initialized"),
-        RateLimitExceeded => Status::internal("Rate limit exceeded"),
+        RateLimitExceeded => Status::resource_exhausted("Rate limit exceeded"),
     }
 }
 

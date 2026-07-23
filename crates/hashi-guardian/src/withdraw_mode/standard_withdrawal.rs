@@ -6,7 +6,6 @@ use crate::Enclave;
 use bitcoin::Txid;
 use hashi_types::guardian::now_timestamp_secs;
 use hashi_types::guardian::GuardianError;
-use hashi_types::guardian::GuardianError::EnclaveUninitialized;
 use hashi_types::guardian::GuardianError::InternalError;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
@@ -71,9 +70,7 @@ async fn normal_withdrawal_inner(
     OwnedMutexGuard<RateLimiter>,
 )> {
     // 0) Validation
-    if !enclave.is_fully_initialized() {
-        return Err(EnclaveUninitialized);
-    }
+    enclave.require_fully_initialized("standard_withdrawal")?;
 
     // 1) Verify certificate (before acquiring limiter lock)
     let committee = enclave.state.get_committee()?;
@@ -172,6 +169,7 @@ mod tests {
     use bitcoin::Network;
     use hashi_types::bitcoin::create_btc_keypair_for_test;
     use hashi_types::bitcoin::hashi_master_g_from_btc_xonly_for_test;
+    use hashi_types::guardian::EnclaveLifecycle;
     use hashi_types::guardian::HashiCommittee;
     use hashi_types::guardian::InitConfig;
     use hashi_types::guardian::LimiterConfig;
@@ -223,7 +221,9 @@ mod tests {
         activate_enclave_for_testing(&enclave, committee, limiter_config, limiter_state)
             .expect("activate_enclave_for_testing should succeed on a fresh enclave");
 
-        assert!(enclave.is_fully_initialized());
+        assert!(enclave
+            .require_fully_initialized("standard_withdrawal")
+            .is_ok());
         (enclave, captures)
     }
 
@@ -232,7 +232,14 @@ mod tests {
         let enclave = Enclave::create_with_random_keys();
         let signed_request = StandardWithdrawalRequest::mock_signed_for_testing(Network::Regtest);
         let result = normal_withdrawal_inner(enclave, signed_request).await;
-        assert!(matches!(result, Err(EnclaveUninitialized)));
+        assert!(matches!(
+            result,
+            Err(GuardianError::LifecycleMismatch {
+                operation,
+                expected: EnclaveLifecycle::Withdraw(WithdrawStage::Activated),
+                actual: EnclaveLifecycle::Withdraw(WithdrawStage::Uninitialized),
+            }) if operation == "standard_withdrawal"
+        ));
     }
 
     #[tokio::test]

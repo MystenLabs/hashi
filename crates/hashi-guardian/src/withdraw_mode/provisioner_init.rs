@@ -93,7 +93,10 @@ pub async fn provisioner_init(
 ) -> GuardianResult<()> {
     info!("/provisioner_init - Received request.");
 
-    enclave.require_lifecycle(WithdrawStage::OperatorInitialized.into())?;
+    enclave.require_lifecycle(
+        "provisioner_init",
+        WithdrawStage::OperatorInitialized.into(),
+    )?;
     info!("Lifecycle stage validated.");
 
     // ---- Validate & build: Nothing in this phase mutates enclave state, so any
@@ -205,6 +208,7 @@ mod tests {
     use super::*;
     use crate::OperatorInitTestArgs;
     use hashi_types::guardian::GuardianError::InvalidInputs;
+    use hashi_types::guardian::GuardianError::LifecycleMismatch;
     use hashi_types::pgp::test_utils::mock_pgp_keypair;
     use hashi_types::pgp::test_utils::sign_detached_in_process;
     use hashi_types::pgp::PgpPublicCert;
@@ -407,8 +411,6 @@ mod tests {
             WithdrawStage::ProvisionerInitialized.into(),
             "provisioner init complete"
         );
-        assert!(!ctx.enclave.is_fully_initialized(), "not active before OA");
-
         let captured = ctx.captures.lock().unwrap();
         assert_eq!(
             captured.len(),
@@ -472,7 +474,7 @@ mod tests {
             .provision(ctx.request(&ctx.shares[..TEST_T]))
             .await
             .expect_err("should reject");
-        assert!(matches!(err, InvalidInputs(_)));
+        assert!(matches!(err, LifecycleMismatch { .. }));
     }
 
     #[tokio::test]
@@ -504,7 +506,7 @@ mod tests {
         let err = provisioner_init(enclave, ProvisionerInitRequest(vec![]))
             .await
             .expect_err("should fail");
-        assert!(matches!(err, InvalidInputs(_)));
+        assert!(matches!(err, LifecycleMismatch { .. }));
     }
 
     #[tokio::test]

@@ -21,7 +21,7 @@ pub async fn rotate_kps(
 ) -> GuardianResult<GuardianSigned<RotateKpsResponse>> {
     info!("/rotate_kps - Received request.");
 
-    enclave.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
+    enclave.require_lifecycle("rotate_kps", CeremonyStage::OperatorInitialized.into())?;
 
     let (encrypted_old_shares, old_instance, state) = request.into_parts();
     let old_t = old_instance.threshold();
@@ -134,6 +134,7 @@ mod tests {
     use hashi_types::guardian::crypto::split_secret;
     use hashi_types::guardian::test_utils::mock_kp_certs_roster;
     use hashi_types::guardian::GuardianError::InvalidInputs;
+    use hashi_types::guardian::GuardianError::LifecycleMismatch;
     use hashi_types::guardian::LogMessage;
     use hashi_types::guardian::LogRecord;
     use hashi_types::guardian::VersionedLogMessage;
@@ -338,7 +339,7 @@ mod tests {
         // A second call is rejected outright — no re-split.
         let req2 = build_request(&shares[..TEST_T], &enclave, &old_instance, build_state());
         let err = rotate_kps(enclave, req2).await.expect_err("should reject");
-        assert!(matches!(err, InvalidInputs(_)));
+        assert!(matches!(err, LifecycleMismatch { .. }));
 
         let captured = captures.lock().unwrap();
         let count = captured
@@ -478,6 +479,6 @@ mod tests {
         .unwrap();
         let req = RotateKpsRequest::new(submissions, old_instance, state);
         let err = rotate_kps(enclave, req).await.expect_err("should fail");
-        assert!(matches!(err, InvalidInputs(_)));
+        assert!(matches!(err, LifecycleMismatch { .. }));
     }
 }

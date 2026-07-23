@@ -19,7 +19,7 @@ pub async fn setup_new_key(
 ) -> GuardianResult<GuardianSigned<SetupNewKeyResponse>> {
     info!("/setup_new_key - Received request.");
 
-    enclave.require_lifecycle(CeremonyStage::OperatorInitialized.into())?;
+    enclave.require_lifecycle("setup_new_key", CeremonyStage::OperatorInitialized.into())?;
 
     let params = request.params();
     let n = params.num_shares();

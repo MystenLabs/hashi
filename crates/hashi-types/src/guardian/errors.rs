@@ -4,17 +4,21 @@
 use serde::Deserialize;
 use serde::Serialize;
 
+use super::lifecycle::EnclaveLifecycle;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GuardianError {
     InternalError(String),
     /// Internal errors related to S3
     S3Error(String),
     InvalidInputs(String),
-    EnclaveUninitialized,
+    LifecycleMismatch {
+        operation: String,
+        expected: EnclaveLifecycle,
+        actual: EnclaveLifecycle,
+    },
     RateLimitExceeded,
-    /// A temporary service condition that callers may retry.
-    // TODO: Audit other transient guardian failures and map retryable cases to
-    // `Unavailable` where appropriate.
+    /// A service condition known to be temporary and safe for callers to retry.
     Unavailable(String),
 }
 
@@ -26,8 +30,15 @@ impl std::fmt::Display for GuardianError {
             GuardianError::InternalError(e) => write!(f, "InternalError: {}", e),
             GuardianError::Unavailable(e) => write!(f, "Unavailable: {}", e),
             GuardianError::InvalidInputs(e) => write!(f, "InvalidInputs: {}", e),
+            GuardianError::LifecycleMismatch {
+                operation,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "LifecycleMismatch: {operation} requires {expected:?}, but enclave is {actual:?}"
+            ),
             GuardianError::S3Error(e) => write!(f, "S3Error: {}", e),
-            GuardianError::EnclaveUninitialized => write!(f, "Enclave is not fully initialized"),
             GuardianError::RateLimitExceeded => write!(f, "Rate limit exceeded"),
         }
     }

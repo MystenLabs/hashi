@@ -6,7 +6,6 @@ use crate::Enclave;
 use hashi_types::guardian::CommitteeTransitionRequest;
 use hashi_types::guardian::CommitteeUpdateLogMessage;
 use hashi_types::guardian::GuardianError;
-use hashi_types::guardian::GuardianError::EnclaveUninitialized;
 use hashi_types::guardian::GuardianError::InternalError;
 use hashi_types::guardian::GuardianError::InvalidInputs;
 use hashi_types::guardian::GuardianResult;
@@ -25,9 +24,7 @@ pub async fn update_committee(
     enclave: Arc<Enclave>,
     signed: HashiSigned<CommitteeTransitionRequest>,
 ) -> GuardianResult<u64> {
-    if !enclave.is_fully_initialized() {
-        return Err(EnclaveUninitialized);
-    }
+    enclave.require_fully_initialized("update_committee")?;
 
     let current = enclave.state.get_committee()?;
     let current_epoch = current.epoch();

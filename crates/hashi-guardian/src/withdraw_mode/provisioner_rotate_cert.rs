@@ -29,11 +29,7 @@ pub async fn provisioner_rotate_cert(
     let signer_fingerprint = signed_request.signer_fingerprint().to_hex();
     let request = signed_request.verify()?;
 
-    if !enclave.is_fully_initialized() {
-        return Err(InvalidInputs(
-            "provisioner_rotate_cert requires operator_activate complete".into(),
-        ));
-    }
+    enclave.require_fully_initialized("provisioner_rotate_cert")?;
 
     let live_session_id = enclave.s3_session_id();
     if request.expected_session_id() != &live_session_id {
