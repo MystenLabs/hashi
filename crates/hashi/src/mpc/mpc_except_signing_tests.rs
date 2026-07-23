@@ -12381,6 +12381,105 @@ async fn test_run_as_avid_nonce_party_rederives_after_restart() {
     );
 }
 
+#[test]
+fn test_avid_recovery_sizing_skips_sub_quorum_certs() {
+    let setup = TestSetup::with_weights_avid(&[4, 3, 2, 1]);
+    let mut mgr = setup.create_manager(0);
+    let batch_index = 3u32;
+    let total = mgr.mpc_config.nodes.total_weight() as u32;
+    let vote_quorum = total - mgr.mpc_config.max_faulty as u32;
+
+    let weight_of = |signers: &[usize]| -> u32 {
+        signers
+            .iter()
+            .map(|&s| mgr.mpc_config.nodes.weight_of(s as u16).unwrap() as u32)
+            .sum()
+    };
+    let make_cert = |dealer_idx: usize, signers: &[usize]| -> (Address, CertificateV1) {
+        let dealer_address = setup.address(dealer_idx);
+        let message = DealerMessagesHash {
+            dealer_address,
+            messages_hash: MessageHash::from([dealer_idx as u8 + 1; 32]),
+        };
+        let mut aggregator = BlsSignatureAggregator::new(setup.committee(), message.clone());
+        for &s in signers {
+            let sig = setup.signing_keys[s].sign(setup.epoch(), setup.address(s), &message);
+            aggregator.add_signature(sig).unwrap();
+        }
+        (
+            dealer_address,
+            CertificateV1::NonceGeneration {
+                batch_index,
+                cert: aggregator.finish().unwrap(),
+            },
+        )
+    };
+
+    let sub_quorum = [2usize];
+    let in_band = [0usize, 1, 3];
+    let all = [0usize, 1, 2, 3];
+    assert!(
+        weight_of(&sub_quorum) < vote_quorum,
+        "params must give a below-vote-quorum band or this test proves nothing"
+    );
+    assert!(
+        weight_of(&in_band) >= vote_quorum && weight_of(&in_band) < total,
+        "params must give a between-quorums band or this test proves nothing"
+    );
+
+    let certs = vec![
+        make_cert(3, &sub_quorum),
+        make_cert(0, &all),
+        make_cert(1, &in_band),
+        make_cert(2, &all),
+    ];
+
+    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(batch_index, &certs);
+    assert!(
+        !certified.contains(&setup.address(3)),
+        "cert below the vote quorum must not be counted by sizing"
+    );
+    assert!(certified.contains(&setup.address(0)));
+    assert!(
+        certified.contains(&setup.address(1)),
+        "over-vote-quorum cert with locally unknown kind stays counted"
+    );
+    assert!(
+        weight >= mgr.required_nonce_weight(),
+        "sizing must reach the floor from admissible certs despite the skipped one"
+    );
+
+    let (blind, _) = mgr.certified_nonce_dealers_from_certs(&certs);
+    assert!(blind.contains(&setup.address(3)));
+
+    let (_, mismatched) = make_cert(0, &all);
+    let scrambled = vec![(setup.address(3), mismatched)];
+    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(batch_index, &scrambled);
+    assert!(
+        certified.is_empty() && weight == 0,
+        "table/message dealer mismatch must not be sized"
+    );
+
+    mgr.pulled_avid_cert_kinds.insert(
+        (batch_index, setup.address(1)),
+        (MessageHash::from([2u8; 32]), CertKind::AvssVote),
+    );
+    mgr.pulled_avid_cert_kinds.insert(
+        (batch_index, setup.address(2)),
+        (MessageHash::from([0xEE; 32]), CertKind::AvssVote),
+    );
+    let (certified, weight) = mgr.avid_certified_nonce_dealers_from_certs(batch_index, &certs);
+    assert!(
+        !certified.contains(&setup.address(1)),
+        "in-band cert with a pulled AvssVote resolution must be excluded"
+    );
+    assert!(
+        certified.contains(&setup.address(2)),
+        "a cached kind for a different digest must not exclude the cert"
+    );
+    assert_eq!(weight, weight_of(&[0, 2]));
+}
+
 #[tokio::test]
 async fn test_run_as_avid_nonce_party_laggard_pulls_and_decodes() {
     let setup = TestSetup::new_avid(6);
