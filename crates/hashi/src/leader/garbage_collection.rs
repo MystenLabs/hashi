@@ -12,11 +12,13 @@ use crate::onchain::types::UtxoRecord;
 use crate::sui_tx_executor::SuiTxExecutor;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 use sui_sdk_types::Address;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
+use tracing::warn;
 
 const MAX_DEPOSIT_REQUEST_AGE_MS: u64 = 1000 * 60 * 60 * 24; // 1 day
 const DEPOSIT_REQUEST_DELETE_DELAY_MS: u64 = 1000 * 60; // 1 minute
@@ -169,11 +171,10 @@ impl LeaderService {
     }
 
     /// If a cleanup scan is due and no task is in-flight, spawn a background
-    /// task that scrapes a task-local snapshot of the on-chain UTXO records,
-    /// scans it for spent-but-uncleaned entries, and cleans them. The scan
-    /// is armed at boot (crash-between-confirm-and-cleanup recovery),
-    /// whenever a withdrawal confirms on Sui, and after a task that did
-    /// work or failed.
+    /// task that scans the object mirror for spent-but-uncleaned UTXO
+    /// records and cleans them. The scan is armed at boot
+    /// (crash-between-confirm-and-cleanup recovery), whenever a withdrawal
+    /// confirms on Sui, and after a task that did work or failed.
     pub(super) fn check_cleanup_spent_utxos(&mut self, checkpoint_timestamp_ms: u64) {
         if self.utxo_cleanup_gc_task.is_some() {
             debug!("UTXO cleanup GC task already in-flight, skipping");
@@ -191,24 +192,48 @@ impl LeaderService {
 
         self.utxo_cleanup_scan_needed = false;
         let inner = self.inner.clone();
+        let scan_target = self.utxo_cleanup_scan_target;
         self.utxo_cleanup_gc_task = Some(AbortOnDropHandle::new(tokio::task::spawn(async move {
-            Self::cleanup_spent_utxos(inner).await
+            Self::cleanup_spent_utxos(inner, scan_target).await
         })));
     }
 
-    /// Scrape a fresh task-local snapshot of the on-chain UTXO pool, then
-    /// clean every record it shows as spent-but-uncleaned. Returns how many
-    /// UTXOs were cleaned so the caller can decide whether to re-arm the
-    /// scan (more work may exist past the per-GC cap).
+    /// Scan the object mirror for spent-but-uncleaned UTXO records and
+    /// clean them. Returns how many UTXOs were cleaned so the caller can
+    /// decide whether to re-arm the scan (more work may exist past the
+    /// per-GC cap).
     ///
-    /// Deciding from a fresh chain read — never from the shared mirror — is
-    /// what makes the tx worth paying for: the mirror overstates pending
-    /// cleanups whenever another leader cleaned records (`cleanup_spent`
-    /// emits no event), and submitting from it re-cleans those records as
-    /// paid on-chain no-ops. The mirror itself is left untouched; the
-    /// watcher task is its sole writer.
-    async fn cleanup_spent_utxos(inner: Arc<crate::Hashi>) -> anyhow::Result<usize> {
-        let utxo_records = inner.onchain_state().scrape_utxo_records_snapshot().await?;
+    /// The mirror applies `cleanup_spent` Field deletions directly (the
+    /// object mirror sees every write, eventless or not), so deciding from
+    /// it is safe: another leader's cleanup shows up within the watcher's
+    /// stream lag rather than never, as under the event-driven watcher.
+    /// The freshness guarantee the old out-of-band scrape's per-page
+    /// checkpoint floor provided is supplied by two watermark waits: past
+    /// `scan_target` (the arming confirm's checkpoint) before reading, so
+    /// the scan sees the spent markings that armed it, and past the landed
+    /// cleanup's checkpoint before returning, so the re-armed scan cannot
+    /// re-see (and re-pay for) the records this tx just removed.
+    async fn cleanup_spent_utxos(
+        inner: Arc<crate::Hashi>,
+        scan_target: u64,
+    ) -> anyhow::Result<usize> {
+        const VISIBILITY_TIMEOUT: Duration = Duration::from_secs(30);
+        if tokio::time::timeout(
+            VISIBILITY_TIMEOUT,
+            inner.onchain_state().wait_until_checkpoint(scan_target),
+        )
+        .await
+        .is_err()
+        {
+            // Failing (rather than scanning stale) routes through the retry
+            // tracker: backoff, re-arm, and a fresh attempt once the mirror
+            // catches up.
+            anyhow::bail!(
+                "mirror did not reach the cleanup scan target checkpoint {scan_target} within \
+                 {VISIBILITY_TIMEOUT:?}"
+            );
+        }
+        let utxo_records = inner.onchain_state().utxo_records();
         let utxo_ids = find_spent_utxos_pending_cleanup(&utxo_records);
         if utxo_ids.is_empty() {
             return Ok(0);
@@ -220,9 +245,19 @@ impl LeaderService {
         );
         let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
         let landed_at = executor.execute_cleanup_spent_utxos(&utxo_ids).await?;
-        // Floor the next scrape past this cleanup's checkpoint so a lagging
-        // read can't re-show (and re-pay for) the records it just removed.
-        inner.onchain_state().raise_utxo_scrape_floor(landed_at);
+        if tokio::time::timeout(
+            VISIBILITY_TIMEOUT,
+            inner.onchain_state().wait_until_checkpoint(landed_at),
+        )
+        .await
+        .is_err()
+        {
+            warn!(
+                landed_at,
+                "Timeout waiting for the mirror to reach the cleanup checkpoint; \
+                 the next scan may resubmit already-cleaned records"
+            );
+        }
         info!(
             utxo_count = utxo_ids.len(),
             "Successfully cleaned up spent UTXOs",
@@ -344,7 +379,7 @@ impl LeaderService {
 /// Capped at [`MAX_UTXO_CLEANUPS_PER_GC`]; the remainder is picked up by a
 /// later scan.
 ///
-/// Pure-data core of the cleanup task's scan over its scraped snapshot,
+/// Pure-data core of the cleanup task's scan over the mirror's records,
 /// extracted so it can be unit-tested without RPC or a full `LeaderService`.
 fn find_spent_utxos_pending_cleanup(utxo_records: &BTreeMap<UtxoId, UtxoRecord>) -> Vec<UtxoId> {
     utxo_records

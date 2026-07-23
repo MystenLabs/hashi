@@ -38,7 +38,10 @@ use tracing::trace;
 use tracing::warn;
 
 pub(super) enum WithdrawalBroadcastOutcome {
-    ConfirmedOnSui,
+    /// Carries the checkpoint the confirm transaction landed in, so the
+    /// cleanup scan can wait for the mirror to reflect the spent-UTXO
+    /// markings before deciding.
+    ConfirmedOnSui { checkpoint: u64 },
     WaitForNextBitcoinBlock,
 }
 
@@ -1046,14 +1049,19 @@ impl LeaderService {
         result: WithdrawalBroadcastResult,
     ) -> anyhow::Result<()> {
         match result {
-            Ok(WithdrawalBroadcastOutcome::ConfirmedOnSui) => {
+            Ok(WithdrawalBroadcastOutcome::ConfirmedOnSui { checkpoint }) => {
                 self.withdrawal_broadcast_retry_tracker
                     .clear(&withdrawal_id);
                 // The confirm tx marked the input UTXOs spent on-chain; arm
                 // the cleanup scan rather than queueing the ids — the scan
-                // re-reads on-chain state before paying for a cleanup, which
-                // keeps stale or duplicated ids from becoming no-op txs.
+                // re-reads the mirror before paying for a cleanup, which
+                // keeps stale or duplicated ids from becoming no-op txs. The
+                // scan target makes the mirror read wait past this confirm:
+                // a scan from a mirror that has not applied it yet would
+                // find nothing and disarm, stranding the spent records
+                // until the next confirm.
                 self.utxo_cleanup_scan_needed = true;
+                self.utxo_cleanup_scan_target = self.utxo_cleanup_scan_target.max(checkpoint);
             }
             Ok(WithdrawalBroadcastOutcome::WaitForNextBitcoinBlock) => {
                 self.withdrawal_broadcast_retry_tracker
@@ -1108,7 +1116,7 @@ impl LeaderService {
                     confirmations,
                     "Withdrawal tx confirmed, proceeding to on-chain confirmation"
                 );
-                Self::confirm_withdrawal_on_sui(&inner, &txn)
+                let checkpoint = Self::confirm_withdrawal_on_sui(&inner, &txn)
                     .await
                     .map_err(|e| {
                         WithdrawalBroadcastError::new(
@@ -1116,7 +1124,7 @@ impl LeaderService {
                             e,
                         )
                     })?;
-                return Ok(WithdrawalBroadcastOutcome::ConfirmedOnSui);
+                return Ok(WithdrawalBroadcastOutcome::ConfirmedOnSui { checkpoint });
             }
             Ok(TxStatus::Confirmed { confirmations }) => {
                 debug!(
@@ -1233,10 +1241,11 @@ impl LeaderService {
 
     /// Collects a confirmation certificate and submits the finalized withdrawal to Sui.
     #[tracing::instrument(level = "info", skip_all, fields(withdrawal_txn_id = %txn.id))]
+    /// Returns the checkpoint the confirm transaction landed in.
     async fn confirm_withdrawal_on_sui(
         inner: &Arc<Hashi>,
         txn: &WithdrawalTransaction,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         let members = inner
             .onchain_state()
             .current_committee_members()
@@ -1247,7 +1256,7 @@ impl LeaderService {
 
         Self::submit_confirm_withdrawal(inner, &txn.id, &confirmation_cert)
             .await
-            .inspect(|()| {
+            .inspect(|_| {
                 inner
                     .metrics
                     .sui_tx_submissions_total
@@ -1261,9 +1270,7 @@ impl LeaderService {
                     .sui_tx_submissions_total
                     .with_label_values(&["confirm_withdrawal", "failure"])
                     .inc();
-            })?;
-
-        Ok(())
+            })
     }
 
     /// Collects enough committee signatures to certify that a withdrawal can be confirmed.
@@ -1359,21 +1366,22 @@ impl LeaderService {
     }
 
     /// Submits the withdrawal confirmation certificate to Sui.
+    /// Returns the checkpoint the confirm transaction landed in.
     async fn submit_confirm_withdrawal(
         inner: &Arc<Hashi>,
         withdrawal_txn_id: &Address,
         cert: &CommitteeSignature,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<u64> {
         info!("Confirming withdrawal {:?}", withdrawal_txn_id);
 
         let mut executor = SuiTxExecutor::from_hashi(inner.clone())?;
-        executor
+        let checkpoint = executor
             .execute_confirm_withdrawal(withdrawal_txn_id, cert)
             .await?;
 
         info!("Successfully confirmed withdrawal {:?}", withdrawal_txn_id);
 
-        Ok(())
+        Ok(checkpoint)
     }
 }
 

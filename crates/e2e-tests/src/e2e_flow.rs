@@ -34,6 +34,7 @@ mod tests {
     use crate::test_helpers::lookup_vout;
     use crate::test_helpers::txid_to_address;
     use crate::test_helpers::wait_for_deposit_confirmation;
+    use crate::test_helpers::wait_for_spent_utxo_cleanup;
 
     const MAX_TX_SIZE_BYTES: usize = 131_072;
     const MAX_SERIALIZED_TX_EFFECTS_SIZE_BYTES: usize = 524_288;
@@ -644,6 +645,11 @@ mod tests {
             Duration::from_secs(30),
         )
         .await?;
+
+        // The confirm marked the withdrawal's inputs spent; the leader's GC
+        // must now clean them from its mirror, and the eventless cleanup
+        // deletions must reach every node's mirror via the object stream.
+        wait_for_spent_utxo_cleanup(&networks, Duration::from_secs(60)).await?;
 
         let guardian_state = networks
             .guardian_harness

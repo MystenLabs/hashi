@@ -198,6 +198,51 @@ pub async fn create_deposit_and_wait(
     Ok(hbtc_recipient)
 }
 
+/// Wait until every node's object mirror shows the spent withdrawal
+/// inputs cleaned up: at least one `spent_utxos` tombstone exists and no
+/// `utxo_records` entry is still marked spent.
+///
+/// The cleanup transaction (`cleanup_spent_utxos`) emits no event, so
+/// this passing proves both halves of the eventless-write path: the
+/// leader's GC decided on the cleanup from its mirror, and every node's
+/// mirror applied the resulting Field deletions from the object stream
+/// alone — no rescrape exists to paper over a miss.
+pub async fn wait_for_spent_utxo_cleanup(
+    networks: &TestNetworks,
+    timeout: Duration,
+) -> Result<()> {
+    info!("Waiting for the spent-UTXO cleanup to reach every node's mirror...");
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let laggard = networks
+            .hashi_network
+            .nodes()
+            .iter()
+            .enumerate()
+            .find_map(|(index, node)| {
+                let state = node.hashi().onchain_state();
+                let pending = state
+                    .utxo_records()
+                    .values()
+                    .filter(|record| record.spent_epoch.is_some())
+                    .count();
+                let tombstones = state.spent_utxos_entries().len();
+                (pending > 0 || tombstones == 0).then_some((index, pending, tombstones))
+            });
+        let Some((index, pending, tombstones)) = laggard else {
+            info!("Every node's mirror shows the spent UTXOs cleaned up");
+            return Ok(());
+        };
+        if std::time::Instant::now() >= deadline {
+            return Err(anyhow!(
+                "Timeout after {timeout:?} waiting for the spent-UTXO cleanup: node {index}'s \
+                 mirror still shows {pending} spent record(s) and {tombstones} tombstone(s)"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
 /// Mines one block per second on Bitcoin regtest until stopped.
 /// Stops automatically when dropped.
 pub struct BackgroundMiner {
