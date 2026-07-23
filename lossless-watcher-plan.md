@@ -363,12 +363,63 @@ revertible.
    dropped after clean burn-in). Notifications and the limiter now come
    from apply's `Effect`s; `wait_until_checkpoint` waits on the state
    watermark.
-7. **Cleanup and follow-ups.** Drop events from the read mask (keep
-   parsing only for logs if wanted); switch the cleanup GC to decide
-   from the mirror and delete `scrape_utxo_records_snapshot`,
+7. **Cleanup and follow-ups.** Switch the cleanup GC to decide from the
+   mirror and delete `scrape_utxo_records_snapshot`,
    `raise_utxo_scrape_floor`, and the `utxo_scrape_floor` field (the
-   mirror's watermark replaces the per-page freshness floor); decide on
-   TOB cert mirroring; remove dead scrape helpers.
+   mirror's watermark replaces the per-page freshness floor); evaluate
+   the remaining read points below. (The event mask never made it into
+   the transaction stream, so there is nothing to drop there.)
+
+### Remaining chain-read points (audited 2026-07-23)
+
+Every place the node still reads Sui state outside the mirror's
+bootstrap, with the step 7 verdict for each.
+
+Delete — the mirror replaces them:
+
+- `scrape_utxo_records_snapshot` + `raise_utxo_scrape_floor` +
+  `utxo_scrape_floor` (`onchain/mod.rs`, consumed by
+  `leader/garbage_collection.rs`). The mirror applies
+  `cleanup_spent_utxos` Field deletions directly; gate the GC's
+  decision on `wait_until_checkpoint` past the last landed cleanup
+  instead of the per-page freshness floor. Also retires the GC's use
+  of `fetch_bitcoin_state`.
+
+Evaluate — mirror reads could replace on-demand fetches:
+
+- TOB certs: `fetch_epoch_certs` / `fetch_certs` (`onchain/mod.rs`),
+  used by `mpc/service.rs` (cert collection, two sites) and
+  `communication/sui_tob.rs`. The routing table already tracks tob
+  entries and their `LinkedTable` interiors as known-ignored;
+  mirroring `EpochCertsV1` and dealer submission nodes would delete
+  both fetchers. Cost: cert payloads are large and read-mostly-once
+  per epoch/batch, so weigh mirror memory against the on-demand
+  latency they currently pay.
+- Rejoin committee read: `scrape_committee` /
+  `scrape_committee_for_epoch` (`onchain/mod.rs`, added by the
+  auto-heal rejoin path in `mpc/service.rs`). The mirror holds every
+  epoch's committee, and the rejoin loop already retries, so a mirror
+  read suffices; the chain read buys only sub-second freshness over
+  the watermark. Replaceable once the rejoin flow tolerates reading
+  state as of the watermark (or waits on it).
+
+Keep — justified reads outside the mirror's scope:
+
+- The bootstrap scrape and the replay-failure fallback (`scrape_hashi`
+  and its helpers) — the mirror's own seed, by design.
+- `scrape_package_versions` — boot plus the `PackageUpgraded`
+  reconcile; package objects are immutable, and the version map needs
+  the index API, not object contents.
+- `build_register_or_update_validator_tx`'s root read and
+  `scrape_member_info` (`sui_tx_executor.rs`) — pre-write freshness
+  for the register-vs-update decision, and shared with standalone CLI
+  invocations that have no running mirror.
+- Gas and balance reads (`get_balance`, `list_owned_objects` in
+  `sui_tx_executor.rs`, the SUI-balance metric poll in `lib.rs`) —
+  wallet state, not bridge state.
+- CLI commands, `publish.rs`, guardian-init, and internal-tools —
+  operator tooling that runs one-shot reads or a boot scrape without a
+  long-running watcher.
 
 ## Testing
 
@@ -376,12 +427,14 @@ revertible.
   interleaving of {scrape snapshot, replayed transactions, live frames}
   with duplicates converges to the same mirror (version-guard
   idempotency).
-- e2e (`ulimit -n 4096 &&` for bitcoind): full deposit/withdrawal/reconfig
-  flow with the shadow comparison enabled and
-  `hashi_watcher_divergence_total == 0` asserted at the end; a
-  kill-and-reconnect test that lands transactions during the outage and
-  asserts the replay path (not rescrape) recovers them; an eventless-write
-  test that performs `cleanup_spent_utxos` and asserts the mirror updates
-  without a rescrape.
-- Metrics to watch in staging: divergence counter, unrouted-objects
-  counter, replay-window length on reconnects.
+- e2e (`ulimit -n 4096 &&` for bitcoind): the full
+  deposit/withdrawal/reconfig flows ran against the shadow's divergence
+  audit before cutover and against the live mirror after it. Still
+  worth adding: a kill-and-reconnect test that lands transactions
+  during the outage and asserts the replay path (not re-bootstrap)
+  recovers them, and an eventless-write test that performs
+  `cleanup_spent_utxos` and asserts the mirror updates without a
+  rescrape (natural to add with the step 7 GC switch).
+- Metrics to watch in staging: unrouted-objects counter, replay-window
+  length on reconnects, `hashi_watcher_state_watermark` lag against
+  `hashi_latest_checkpoint_height`.
