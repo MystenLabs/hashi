@@ -1308,8 +1308,9 @@ mod tests {
             let checkpoint = match item {
                 Ok(checkpoint) => checkpoint,
                 Err(e) => {
-                    debug!("Error in checkpoint stream: {}", e);
-                    continue;
+                    return Err(anyhow!(
+                        "Checkpoint stream failed while waiting for {event_name}: {e}"
+                    ));
                 }
             };
             for txn in checkpoint.checkpoint().transactions() {
@@ -1334,7 +1335,6 @@ mod tests {
                     }
                 }
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         Err(anyhow!("Checkpoint subscription ended unexpectedly"))
     }
@@ -2163,7 +2163,7 @@ mod tests {
     ///
     /// Test outline:
     /// 1. Create 400 deposits (one UTXO each).
-    /// 2. Submit 40 withdrawal requests; low-fee consolidation fills the
+    /// 2. Submit 40 withdrawal requests; consolidation fills the
     ///    400-input cap.
     /// 3. Assert commit, sign, and confirm transactions are under all Sui
     ///    limits (tx size, effects size, runtime objects).
@@ -2202,9 +2202,9 @@ mod tests {
         // --- Create 400 Bitcoin deposits ---
         // Each deposit is 40,000 sats (above the 30,000 on-chain minimum),
         // totalling 16,000,000 sats. The withdrawals request
-        // 40 x 30,001 = 1,200,040 sats. Coin selection picks enough UTXOs
-        // for value and consolidation at low fee rates pulls in the rest up
-        // to the 400-input cap.
+        // 40 x 200,001 = 8,000,040 sats, requiring 201 UTXOs for value.
+        // Moderate-fee consolidation can add up to 200 more inputs, so it
+        // pulls in the remaining 199 UTXOs and reaches the 400-input cap.
         let deposit_amount_sats = 40_000u64;
         // With 400 inputs and 64-byte Schnorr signatures, the BCS-encoded
         // signatures vector is ~26 KiB -- well above the 16 KiB per-pure-arg
@@ -2303,7 +2303,7 @@ mod tests {
         drop(_deposit_miner);
 
         // --- Submit 40 withdrawal requests ---
-        let withdrawal_amount_sats = 30_001u64;
+        let withdrawal_amount_sats = 200_001u64;
         info!(
             "Submitting {} withdrawal requests of {} sats each...",
             num_withdrawals, withdrawal_amount_sats
@@ -2384,7 +2384,7 @@ mod tests {
             num_withdrawals,
         );
 
-        // With 400 UTXOs at 40,000 sats and 1,200,040 sats of withdrawals,
+        // With 400 UTXOs at 40,000 sats and 8,000,040 sats of withdrawals,
         // coin selection should pick most UTXOs for value and consolidate the
         // rest. Verify that enough inputs were selected to exceed the old
         // 16 KiB per-pure-arg limit (~252 signatures at 65 BCS bytes each).
