@@ -88,7 +88,9 @@ impl Hashi {
         deposit_request: &DepositRequest,
     ) -> Result<(), UnapprovedDepositError> {
         let state = self.onchain_state().state();
-        let deposit_queue = &state.hashi().deposit_queue;
+        let hashi = state.hashi();
+        let current_epoch = hashi.committees.epoch();
+        let deposit_queue = &hashi.deposit_queue;
         match deposit_queue.requests().get(&deposit_request.id) {
             None => {
                 return Err(UnapprovedDepositError::InvalidOnchainRequest(anyhow!(
@@ -114,7 +116,6 @@ impl Hashi {
                 // already approved by the current committee. The on-chain
                 // `approve_deposit` would reject it anyway, so we don't
                 // want to waste a signature exchange or a transaction.
-                let current_epoch = self.onchain_state().epoch();
                 if let Some(cert) = &onchain_request.approval_cert
                     && cert.epoch == current_epoch
                 {
@@ -123,7 +124,7 @@ impl Hashi {
             }
         }
 
-        let utxo_pool = &state.hashi().utxo_pool;
+        let utxo_pool = &hashi.utxo_pool;
         if utxo_pool
             .utxo_records()
             .contains_key(&deposit_request.utxo.id)
