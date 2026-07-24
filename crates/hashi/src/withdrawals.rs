@@ -435,8 +435,7 @@ impl Hashi {
                 .btc_monitor()
                 .get_recent_fee_rate(self.config.withdrawal_fee_conf_target())
                 .await?;
-            let clamped_fee_rate =
-                std::cmp::max(kyoto_fee_rate, self.config.withdrawal_min_fee_rate());
+            let clamped_fee_rate = std::cmp::max(kyoto_fee_rate, self.effective_min_fee_rate());
 
             let (ancestor_weight, ancestor_fee) = unconfirmed_ancestor_package(
                 self,
@@ -1091,6 +1090,18 @@ impl Hashi {
 
     // --- UTXO selection and tx crafting ---
 
+    /// The configured fee-rate floor, capped at the high-fee threshold.
+    ///
+    /// Leader and validator must derive this identically: the leader builds
+    /// to it and the validator prices its ceiling from it, so an uncapped
+    /// value on either side would put them on different fee policies. It
+    /// also keeps `clamp`, which panics when inverted, well-formed.
+    fn effective_min_fee_rate(&self) -> FeeRate {
+        self.config
+            .withdrawal_min_fee_rate()
+            .min(CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD)
+    }
+
     /// Build an unsigned Bitcoin transaction for a withdrawal. This is used both
     /// by the leader when initially crafting the tx, and by validators when
     /// verifying that a proposed `WithdrawalTxCommitment` produces the expected txid.
@@ -1137,8 +1148,7 @@ impl Hashi {
             .await
             .map_err(|e| WithdrawalCommitmentError::FeeEstimateFailed(anyhow!(e)))?;
         let max_fee_rate = CoinSelectionParams::DEFAULT_HIGH_FEE_RATE_THRESHOLD;
-        // Cap the configured floor at the ceiling: `clamp` panics if inverted.
-        let min_fee_rate = self.config.withdrawal_min_fee_rate().min(max_fee_rate);
+        let min_fee_rate = self.effective_min_fee_rate();
         let fee_rate = kyoto_fee_rate.clamp(min_fee_rate, max_fee_rate);
 
         let change_address = self
@@ -1600,8 +1610,13 @@ fn unconfirmed_ancestor_depth(
 /// counting each ancestor once.
 ///
 /// Mirrors `unconfirmed_ancestor_depth`: anything still in
-/// `withdrawal_txns` is treated as unconfirmed, so validation needs no
-/// Bitcoin round-trip.
+/// `withdrawal_txns` is treated as unconfirmed, so validation stays
+/// deterministic across the committee with no Bitcoin round-trip. Entries
+/// linger until the finality threshold, so an ancestor already in a block
+/// still contributes a deficit here even though CPFP cannot boost it.
+/// That only widens the fee *ceiling* — the binding limit is the on-chain
+/// per-request cap — but it makes this an upper bound on the leader's
+/// figure rather than a match for it.
 fn unconfirmed_ancestor_package(
     hashi: &Hashi,
     records: &[&UtxoRecord],
@@ -1666,11 +1681,19 @@ fn build_ancestor_chain(
     utxo_records: &BTreeMap<UtxoId, UtxoRecord>,
 ) -> Vec<AncestorTx> {
     let mut chain = Vec::new();
+    let mut seen: std::collections::HashSet<Address> = std::collections::HashSet::new();
     let mut queue = std::collections::VecDeque::new();
     queue.push_back((producing_id, 0usize));
 
     while let Some((wid, depth)) = queue.pop_front() {
         if depth >= MAX_ANCESTOR_DEPTH {
+            continue;
+        }
+
+        // The ancestor set is a DAG, not a tree: a batch spending two
+        // change outputs of the same parent would otherwise record it
+        // twice and double its weight and fee in the CPFP arithmetic.
+        if !seen.insert(wid) {
             continue;
         }
 
@@ -1687,6 +1710,7 @@ fn build_ancestor_chain(
         let output_total: u64 = txn.all_outputs().iter().map(|o| o.amount).sum();
 
         chain.push(AncestorTx {
+            id: wid,
             confirmations,
             tx_weight: signed_weight_of(&tx, txn.inputs.len()),
             tx_fee: input_total.saturating_sub(output_total),

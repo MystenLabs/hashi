@@ -115,6 +115,11 @@ impl SpendPath {
 /// ancestor.
 #[derive(Clone, Debug)]
 pub struct AncestorTx {
+    /// Identity of the withdrawal that produced this transaction.
+    ///
+    /// Selected inputs can descend from a shared parent, and the CPFP
+    /// arithmetic is only correct if that parent is counted once.
+    pub id: Address,
     /// Number of confirmations. `0` means the transaction is in the
     /// mempool only (not yet included in a block). Values `1..N`
     /// mean it has been included but has not yet reached the
@@ -748,6 +753,12 @@ pub fn select_coins(
                 // Also ensure that if this UTXO were to be selected, the resulting unconfirmed
                 // chain depth would be less than the max relay limit
                 && u.status.mempool_chain_depth() < MAX_ANCESTOR_DEPTH
+                // A candidate whose ancestors alone fill the package budget can
+                // never be spent. Skip it here rather than letting it fail the
+                // whole selection: it is picked first (largest-first), so one
+                // stalled chain would otherwise block every withdrawal that the
+                // remaining confirmed UTXOs could have funded.
+                && u.status.unconfirmed_ancestor_weight() < params.max_ancestor_package_weight
         })
         .collect();
     pool.sort_by(|a, b| b.amount.cmp(&a.amount).then_with(|| a.id.cmp(&b.id)));
@@ -969,17 +980,33 @@ impl<'a> TransactionBuilder<'a> {
         raw_change
     }
 
-    /// Combined weight of every unconfirmed ancestor of the selected
-    /// inputs.
+    /// Every unconfirmed ancestor of the selected inputs, each counted
+    /// once.
     ///
-    /// Inputs sharing a parent count it once each, so this can
-    /// overestimate. Both callers fail safe on an overestimate — a
-    /// tighter bound, a larger fee — and deduplicating would require
-    /// tracking ancestor identity.
-    fn unconfirmed_ancestor_weight(&self) -> Weight {
+    /// Deduplication is load-bearing, not tidiness. Two inputs can share
+    /// a parent, and counting it twice adds `fee_rate × weight − fee` to
+    /// the deficit a second time. For a parent paying *above* the target
+    /// that term is negative, so the duplicate credits its surplus twice
+    /// and can cancel out a genuinely underpaying ancestor — leaving the
+    /// package below the target rate it was supposed to reach.
+    fn unconfirmed_ancestors(&self) -> Vec<&AncestorTx> {
+        let mut seen = std::collections::HashSet::new();
         self.inputs
             .iter()
-            .map(|u| u.status.unconfirmed_ancestor_weight())
+            .filter_map(|u| match &u.status {
+                UtxoStatus::Confirmed => None,
+                UtxoStatus::Pending { chain } => Some(chain.iter()),
+            })
+            .flatten()
+            .filter(|a| a.confirmations == 0 && seen.insert(a.id))
+            .collect()
+    }
+
+    /// Combined weight of the unconfirmed ancestors, counted once each.
+    fn unconfirmed_ancestor_weight(&self) -> Weight {
+        self.unconfirmed_ancestors()
+            .iter()
+            .map(|a| a.tx_weight)
             .sum()
     }
 
@@ -1059,12 +1086,9 @@ impl<'a> TransactionBuilder<'a> {
     ///
     /// Returns 0 if the ancestors already pay enough.
     fn cpfp_deficit(&self) -> u64 {
-        let ancestor_weight: Weight = self.unconfirmed_ancestor_weight();
-        let ancestor_fee: u64 = self
-            .inputs
-            .iter()
-            .map(|u| u.status.unconfirmed_ancestor_fee())
-            .sum();
+        let ancestors = self.unconfirmed_ancestors();
+        let ancestor_weight: Weight = ancestors.iter().map(|a| a.tx_weight).sum();
+        let ancestor_fee: u64 = ancestors.iter().map(|a| a.tx_fee).sum();
 
         let needed_ancestor_fee = fee_for_weight(self.fee_rate, ancestor_weight);
         needed_ancestor_fee.saturating_sub(ancestor_fee)

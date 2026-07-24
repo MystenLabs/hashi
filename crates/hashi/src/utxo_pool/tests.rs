@@ -53,6 +53,17 @@ fn confirmed_utxo_with_vout(vout: u32, amount: u64) -> UtxoCandidate {
     }
 }
 
+/// Distinct identity for a test ancestor. Ancestors are deduplicated by
+/// id, so fixtures that expect their weights and fees to sum must not
+/// share one.
+fn ancestor_id(utxo: u8, idx: usize) -> Address {
+    let mut b = [0u8; 32];
+    b[0] = utxo;
+    b[1] = idx as u8;
+    b[2] = 0xa1;
+    Address::new(b)
+}
+
 /// Creates a pending UTXO with one 0-confirmation ancestor (mempool
 /// depth 1). The ancestor has weight 1000 WU and fee 500 sat.
 fn pending_utxo(n: u8, amount: u64) -> UtxoCandidate {
@@ -62,6 +73,7 @@ fn pending_utxo(n: u8, amount: u64) -> UtxoCandidate {
         spend_path: SpendPath::TaprootScriptPath2of2,
         status: UtxoStatus::Pending {
             chain: vec![AncestorTx {
+                id: ancestor_id(n, 0),
                 confirmations: 0,
                 tx_weight: Weight::from_wu(1000),
                 tx_fee: 500,
@@ -74,7 +86,9 @@ fn pending_utxo(n: u8, amount: u64) -> UtxoCandidate {
 /// Each ancestor has weight 1000 WU and fee `fee_per_ancestor` sat.
 fn pending_utxo_deep(n: u8, amount: u64, depth: usize, fee_per_ancestor: u64) -> UtxoCandidate {
     let chain = (0..depth)
-        .map(|_| AncestorTx {
+        .enumerate()
+        .map(|(i, _)| AncestorTx {
+            id: ancestor_id(n, i),
             confirmations: 0,
             tx_weight: Weight::from_wu(1000),
             tx_fee: fee_per_ancestor,
@@ -93,7 +107,9 @@ fn pending_utxo_deep(n: u8, amount: u64, depth: usize, fee_per_ancestor: u64) ->
 fn pending_utxo_mixed(n: u8, amount: u64, ancestors: &[(u32, u64, u64)]) -> UtxoCandidate {
     let chain = ancestors
         .iter()
-        .map(|&(confirmations, weight_wu, fee)| AncestorTx {
+        .enumerate()
+        .map(|(i, &(confirmations, weight_wu, fee))| AncestorTx {
+            id: ancestor_id(n, i),
             confirmations,
             tx_weight: Weight::from_wu(weight_wu),
             tx_fee: fee,
@@ -340,6 +356,7 @@ fn test_cpfp_pending_utxo_increases_fee() {
         spend_path: SpendPath::TaprootScriptPath2of2,
         status: UtxoStatus::Pending {
             chain: vec![AncestorTx {
+                id: ancestor_id(1, 0),
                 confirmations: 0,
                 tx_weight: Weight::from_wu(4000),
                 tx_fee: 10, // very low fee ancestor
@@ -395,6 +412,7 @@ fn test_cpfp_multiple_pending_utxos_summed() {
         spend_path: SpendPath::TaprootScriptPath2of2,
         status: UtxoStatus::Pending {
             chain: vec![AncestorTx {
+                id: ancestor_id(1, 0),
                 confirmations: 0,
                 tx_weight: Weight::from_wu(2000),
                 tx_fee: 100, // underpaying
@@ -407,6 +425,7 @@ fn test_cpfp_multiple_pending_utxos_summed() {
         spend_path: SpendPath::TaprootScriptPath2of2,
         status: UtxoStatus::Pending {
             chain: vec![AncestorTx {
+                id: ancestor_id(2, 0),
                 confirmations: 0,
                 tx_weight: Weight::from_wu(3000),
                 tx_fee: 150, // also underpaying
@@ -811,7 +830,8 @@ fn arb_pending_utxo() -> impl Strategy<Value = UtxoCandidate> {
     )
         .prop_map(|(id, amount, depth, fee_per_ancestor)| {
             let chain = (0..depth)
-                .map(|_| AncestorTx {
+                .map(|i| AncestorTx {
+                    id: ancestor_id(id, i),
                     confirmations: 0,
                     tx_weight: Weight::from_wu(1000),
                     tx_fee: fee_per_ancestor,
@@ -1285,6 +1305,7 @@ fn test_cpfp_no_deficit_for_well_paying_ancestor() {
         spend_path: SpendPath::TaprootScriptPath2of2,
         status: UtxoStatus::Pending {
             chain: vec![AncestorTx {
+                id: ancestor_id(1, 0),
                 confirmations: 0,
                 tx_weight: Weight::from_wu(1000),
                 tx_fee: 2000,
@@ -1329,6 +1350,7 @@ fn test_cpfp_deficit_exhausts_fee_cap() {
         spend_path: SpendPath::TaprootScriptPath2of2,
         status: UtxoStatus::Pending {
             chain: vec![AncestorTx {
+                id: ancestor_id(1, 0),
                 confirmations: 0,
                 tx_weight: Weight::from_wu(400_000), // huge ancestor
                 tx_fee: 1,                           // almost zero fee
@@ -1339,6 +1361,9 @@ fn test_cpfp_deficit_exhausts_fee_cap() {
     let requests = vec![make_request(1, 100_000, 0)];
     let params = CoinSelectionParams {
         max_fee_per_request: 5_000, // tight budget
+        // Leave the package budget out of it: this covers the fee cap,
+        // and the default would filter the heavy ancestor out first.
+        max_ancestor_package_weight: Weight::from_wu(800_000),
         ..default_params()
     };
     let result = select_coins(&[heavy_low_fee], &requests, &params, default_fee_rate());
@@ -1392,6 +1417,7 @@ fn test_fund_balance_with_cpfp() {
         spend_path: SpendPath::TaprootScriptPath2of2,
         status: UtxoStatus::Pending {
             chain: vec![AncestorTx {
+                id: ancestor_id(1, 0),
                 confirmations: 0,
                 tx_weight: Weight::from_wu(5000),
                 tx_fee: 100, // severely underpaying
@@ -1799,16 +1825,20 @@ fn test_min_fee_rate_floor_exceeds_relay_minimum() {
     );
 }
 
-/// Ancestors pushing the cluster past the package budget must be refused
-/// before signing; Bitcoin would reject the broadcast otherwise.
+/// Ancestors that individually fit but jointly overflow the package
+/// budget must be refused before signing; Bitcoin would reject the
+/// broadcast otherwise. A single oversized candidate is filtered out
+/// earlier, so this exercises the combined case.
 #[test]
 fn test_ancestor_package_weight_limit_rejects_oversized_cluster() {
-    let over = CoinSelectionParams::DEFAULT_MAX_ANCESTOR_PACKAGE_WEIGHT.to_wu() + 4_000;
-    // Fee is generous so the weight bound, not the CPFP deficit, binds.
-    let bloated = pending_utxo_mixed(1, 50_000_000, &[(0, over, 10_000_000)]);
+    let half = CoinSelectionParams::DEFAULT_MAX_ANCESTOR_PACKAGE_WEIGHT.to_wu() * 2 / 3;
+    // Fees are generous so the weight bound, not the CPFP deficit, binds.
+    let a = pending_utxo_mixed(1, 600_000, &[(0, half, 10_000_000)]);
+    let b = pending_utxo_mixed(2, 600_000, &[(0, half, 10_000_000)]);
+    // One request large enough that both candidates are required.
     let requests = vec![make_request(1, 1_000_000, 0)];
 
-    let err = select_coins(&[bloated], &requests, &default_params(), default_fee_rate())
+    let err = select_coins(&[a, b], &requests, &default_params(), default_fee_rate())
         .expect_err("selection must refuse an oversized ancestor package");
 
     assert!(
@@ -1818,6 +1848,78 @@ fn test_ancestor_package_weight_limit_rejects_oversized_cluster() {
         ),
         "expected ExceedsMaxAncestorPackageWeight, got {err:?}"
     );
+}
+
+/// A pending UTXO whose ancestors alone fill the budget can never be
+/// spent. Because selection is largest-first it would be picked every
+/// time, so it must be skipped rather than failing the batch — otherwise
+/// one stalled settlement wedges every withdrawal that the remaining
+/// confirmed UTXOs could have funded.
+#[test]
+fn test_infeasible_pending_candidate_is_skipped_not_fatal() {
+    let over = CoinSelectionParams::DEFAULT_MAX_ANCESTOR_PACKAGE_WEIGHT.to_wu() + 4_000;
+    let stalled = pending_utxo_mixed(1, 100_000_000, &[(0, over, 1_000)]);
+    let usable = confirmed_utxo(2, 5_000_000);
+    let requests = vec![make_request(1, 1_000_000, 0)];
+
+    let result = select_coins(
+        &[stalled, usable],
+        &requests,
+        &default_params(),
+        default_fee_rate(),
+    )
+    .expect("the confirmed UTXO should still fund the batch");
+
+    assert_eq!(
+        result.inputs.len(),
+        1,
+        "only the usable UTXO should be spent"
+    );
+    assert_eq!(
+        result.inputs[0].id,
+        make_utxo_id(2),
+        "the stalled candidate must not be selected"
+    );
+    assert_conservation(&result);
+}
+
+/// Inputs sharing a parent must count it once. A parent paying above the
+/// target carries a fee surplus; crediting it twice can cancel out a
+/// genuinely underpaying ancestor and leave the package short.
+#[test]
+fn test_shared_ancestor_counted_once() {
+    let over_payer = (0u32, 1_000u64, 2_000u64); // 250 vB @ 8 sat/vB, target is 5
+    let under_payer = (0u32, 1_000u64, 100u64); //  250 vB @ 0.4 sat/vB
+    let requests = vec![make_request(1, 2_500_000, 0)];
+
+    let fee_for = |share_parent: bool| {
+        let a = pending_utxo_mixed(1, 1_000_000, &[over_payer]);
+        let mut b = pending_utxo_mixed(2, 1_000_000, &[over_payer]);
+        if share_parent {
+            let parent = match &a.status {
+                UtxoStatus::Pending { chain } => chain[0].id,
+                _ => unreachable!(),
+            };
+            if let UtxoStatus::Pending { chain } = &mut b.status {
+                chain[0].id = parent;
+            }
+        }
+        let c = pending_utxo_mixed(3, 1_000_000, &[under_payer]);
+        select_coins(&[a, b, c], &requests, &default_params(), default_fee_rate())
+            .expect("selection should succeed")
+    };
+
+    let deduped = fee_for(true);
+    let double_counted = fee_for(false);
+
+    assert!(
+        deduped.fee > double_counted.fee,
+        "counting the shared parent once must charge more ({} vs {}): \
+         double-crediting its surplus cancels the underpayer's deficit",
+        deduped.fee,
+        double_counted.fee
+    );
+    assert_conservation(&deduped);
 }
 
 /// The budget must sit under Bitcoin's cluster limit so we never build a
