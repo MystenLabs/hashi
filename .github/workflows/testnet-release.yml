@@ -211,7 +211,7 @@ jobs:
                 exit 1
               fi
               ;;
-            404)
+            404|422)
               TAG_COMMIT=
               ;;
             *)
