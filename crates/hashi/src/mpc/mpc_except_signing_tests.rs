@@ -12192,22 +12192,27 @@ fn test_serve_avid_nonce_retrieval() {
     assert!(matches!(result, Err(MpcError::NotFound(_))));
 }
 
-#[tokio::test]
-async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
-    let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[16, 1, 1, 1, 1, 1]);
-    let batch_index = 0u32;
-    let dealer_addr = setup.address(0);
-    let mut dealer = setup.create_manager(0);
+/// Deals `dealer_index`'s optimistic AVID messages to every other member,
+/// returning the confirm signatures (the dealer's own first, then members in
+/// index order) with the target they sign.
+fn avid_confirm_signatures(
+    setup: &TestSetup,
+    managers: &mut HashMap<Address, MpcManager>,
+    dealer_index: usize,
+    batch_index: u32,
+    rng: &mut impl fastcrypto::traits::AllowedRng,
+) -> (Vec<MemberSignature>, DealerMessagesHash) {
+    let dealer_addr = setup.address(dealer_index);
+    let mut dealer = managers.remove(&dealer_addr).expect("dealer manager");
     let flow = dealer
-        .prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
+        .prepare_avid_nonce_dealer_flow(batch_index, rng)
         .unwrap();
-
-    let mut managers: HashMap<Address, MpcManager> = (1..6)
-        .map(|i| (setup.address(i), setup.create_manager(i)))
-        .collect();
+    let epoch = dealer.mpc_config.epoch;
     let mut sigs = vec![flow.my_signature.clone()];
-    for i in 1..6 {
+    for i in 0..setup.committee().members().len() {
+        if i == dealer_index {
+            continue;
+        }
         let addr = setup.address(i);
         let (_, msg) = flow
             .recipient_messages
@@ -12217,17 +12222,34 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
             .clone();
         let response = managers
             .get_mut(&addr)
-            .unwrap()
+            .expect("recipient manager")
             .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg })
             .unwrap();
-        sigs.push(MemberSignature::new(
-            dealer.mpc_config.epoch,
-            addr,
-            response.signature,
-        ));
+        sigs.push(MemberSignature::new(epoch, addr, response.signature));
     }
-    let make_cert = |take: usize| {
-        let mut agg = BlsSignatureAggregator::new(setup.committee(), flow.confirm_target.clone());
+    managers.insert(dealer_addr, dealer);
+    (sigs, flow.confirm_target)
+}
+
+#[tokio::test]
+async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
+    let mut rng = rand::thread_rng();
+    // W=16, t=6, f=4: the W-f floor (12) takes both dealers (6+6), and each
+    // dealer's weight (6) is under the t+f quorum (10), so certs need peers.
+    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
+    let batch_index = 0u32;
+    let dealer_addr = setup.address(0);
+    let second_dealer_addr = setup.address(2);
+    let mut managers: HashMap<Address, MpcManager> = (0..6)
+        .map(|i| (setup.address(i), setup.create_manager(i)))
+        .collect();
+    let (sigs, confirm_target) =
+        avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
+    let (second_sigs, second_target) =
+        avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
+
+    let make_cert = |target: &DealerMessagesHash, sigs: &[MemberSignature], take: usize| {
+        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
         for sig in sigs.iter().take(take) {
             agg.add_signature(sig.clone()).unwrap();
         }
@@ -12236,14 +12258,16 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
             cert: agg.finish().unwrap(),
         }
     };
-    let thin_cert = make_cert(3); // weight 16 + 1 + 1 = 18 < 21
-    let full_cert = make_cert(6); // weight 21
+    let thin_cert = make_cert(&confirm_target, &sigs, 3); // weight 6 + 1 + 6 = 13 < 16
+    let full_cert = make_cert(&confirm_target, &sigs, 6); // weight 16
+    let second_full_cert = make_cert(&second_target, &second_sigs, 6);
 
     // The party (node 1, holding its output) must ignore the thin Confirm cert and consume the
     // full one — the fast path is only consume-safe at full weight.
     let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
-    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![thin_cert, full_cert]);
+    let mut mock_tob =
+        MockOrderedBroadcastChannel::new(vec![thin_cert, full_cert, second_full_cert]);
     let metrics = test_metrics();
     let certified = MpcManager::run_as_avid_nonce_party(
         &party,
@@ -12255,7 +12279,11 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
     .await
     .unwrap();
 
-    assert_eq!(certified, HashSet::from([dealer_addr]));
+    assert_eq!(
+        certified,
+        HashSet::from([dealer_addr, second_dealer_addr]),
+        "the floor takes both dealers, so neither alone can satisfy it"
+    );
     assert_eq!(
         mock_tob.pending_messages(),
         Some(0),
@@ -12274,50 +12302,37 @@ async fn test_run_as_avid_nonce_party_consumes_full_cert_and_ignores_thin() {
 #[tokio::test]
 async fn test_run_as_avid_nonce_party_rederives_after_restart() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[16, 1, 1, 1, 1, 1]);
+    // W=16, f=4: the W-f floor (12) takes both dealers (6+6).
+    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
-    let mut dealer = setup.create_manager(0);
-    let flow = dealer
-        .prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
-        .unwrap();
+    let second_dealer_addr = setup.address(2);
 
     let store = SharedMemoryStore::new();
-    let mut managers: HashMap<Address, MpcManager> = (2..6)
+    let mut managers: HashMap<Address, MpcManager> = (0..6)
+        .filter(|i| *i != 1)
         .map(|i| (setup.address(i), setup.create_manager(i)))
         .collect();
     managers.insert(
         setup.address(1),
         setup.create_manager_with_store(1, Box::new(store.clone())),
     );
-    let mut sigs = vec![flow.my_signature.clone()];
-    for i in 1..6 {
-        let addr = setup.address(i);
-        let (_, msg) = flow
-            .recipient_messages
-            .iter()
-            .find(|(a, _)| *a == addr)
-            .unwrap()
-            .clone();
-        let response = managers
-            .get_mut(&addr)
-            .unwrap()
-            .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg })
-            .unwrap();
-        sigs.push(MemberSignature::new(
-            dealer.mpc_config.epoch,
-            addr,
-            response.signature,
-        ));
-    }
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), flow.confirm_target.clone());
-    for sig in sigs {
-        agg.add_signature(sig).unwrap();
-    }
-    let full_cert = CertificateV1::NonceGeneration {
-        batch_index,
-        cert: agg.finish().unwrap(),
+    let (sigs, confirm_target) =
+        avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
+    let (second_sigs, second_target) =
+        avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
+    let make_full_cert = |target: &DealerMessagesHash, sigs: Vec<MemberSignature>| {
+        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        for sig in sigs {
+            agg.add_signature(sig).unwrap();
+        }
+        CertificateV1::NonceGeneration {
+            batch_index,
+            cert: agg.finish().unwrap(),
+        }
     };
+    let full_cert = make_full_cert(&confirm_target, sigs);
+    let second_full_cert = make_full_cert(&second_target, second_sigs);
 
     managers.remove(&setup.address(1));
     let restarted = setup.create_manager_with_store(1, Box::new(store.clone()));
@@ -12325,7 +12340,7 @@ async fn test_run_as_avid_nonce_party_rederives_after_restart() {
 
     let party = Arc::new(RwLock::new(restarted));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
-    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![full_cert]);
+    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![full_cert, second_full_cert]);
     let certified = MpcManager::run_as_avid_nonce_party(
         &party,
         batch_index,
@@ -12336,7 +12351,11 @@ async fn test_run_as_avid_nonce_party_rederives_after_restart() {
     .await
     .unwrap();
 
-    assert_eq!(certified, HashSet::from([dealer_addr]));
+    assert_eq!(
+        certified,
+        HashSet::from([dealer_addr, second_dealer_addr]),
+        "the floor takes both dealers, so neither alone can satisfy it"
+    );
     assert!(
         party
             .read()
@@ -12409,14 +12428,19 @@ async fn test_run_as_avid_nonce_party_laggard_pulls_and_decodes() {
 
 #[tokio::test]
 async fn test_run_as_avid_nonce_party_voter_resolves_vote_cert_locally() {
-    let setup = TestSetup::with_weights_avid(&[16, 1, 1, 1, 1, 1]);
+    // W=16, t=6, f=4: each dealer (6) is under the t+f confirm quorum (10) so it
+    // must collect peers, and the W-f floor (12) takes both dealers' certs.
+    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
+    let second_dealer_addr = setup.address(2);
+    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![]);
+
+    // Weighted pessimistic round: node 5 is unreachable, so a Vote cert posts.
     let others: HashMap<_, _> = (1..5)
         .map(|i| (setup.address(i), setup.create_manager(i)))
         .collect();
     let dealer_p2p = MockP2PChannel::new(others, dealer_addr);
-    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![]);
     let dealer = Arc::new(RwLock::new(setup.create_manager(0)));
     MpcManager::run_as_avid_nonce_dealer(
         &dealer,
@@ -12429,7 +12453,27 @@ async fn test_run_as_avid_nonce_party_voter_resolves_vote_cert_locally() {
     .unwrap();
     assert_eq!(mock_tob.pending_messages(), Some(1), "Vote cert published");
 
+    // The second dealer's round needs node 0's weight to reach the vote quorum.
     let mut voters = std::mem::take(&mut *dealer_p2p.managers.lock().unwrap());
+    let second_dealer = Arc::new(RwLock::new(voters.remove(&second_dealer_addr).unwrap()));
+    voters.insert(setup.address(0), setup.create_manager(0));
+    let second_p2p = MockP2PChannel::new(voters, second_dealer_addr);
+    MpcManager::run_as_avid_nonce_dealer(
+        &second_dealer,
+        batch_index,
+        &second_p2p,
+        &mut mock_tob,
+        &test_metrics(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        mock_tob.pending_messages(),
+        Some(2),
+        "both dealers' Vote certs published"
+    );
+
+    let mut voters = std::mem::take(&mut *second_p2p.managers.lock().unwrap());
     let party = Arc::new(RwLock::new(voters.remove(&setup.address(1)).unwrap()));
     {
         let mgr = party.read().unwrap();
@@ -12449,53 +12493,44 @@ async fn test_run_as_avid_nonce_party_voter_resolves_vote_cert_locally() {
     )
     .await
     .unwrap();
-    assert_eq!(certified, HashSet::from([dealer_addr]));
+    assert_eq!(
+        certified,
+        HashSet::from([dealer_addr, second_dealer_addr]),
+        "the floor takes both dealers, so neither alone can satisfy it"
+    );
 }
 
 #[tokio::test]
 async fn test_run_nonce_generation_avid_consumes_and_converts() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[16, 1, 1, 1, 1, 1]);
+    // W=16, f=4: the W-f floor (12) takes both dealers (6+6).
+    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
-    let mut dealer = setup.create_manager(0);
-    let flow = dealer
-        .prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
-        .unwrap();
-
-    let mut managers: HashMap<Address, MpcManager> = (1..6)
+    let second_dealer_addr = setup.address(2);
+    let mut managers: HashMap<Address, MpcManager> = (0..6)
         .map(|i| (setup.address(i), setup.create_manager(i)))
         .collect();
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), flow.confirm_target.clone());
-    agg.add_signature(flow.my_signature.clone()).unwrap();
-    for i in 1..6 {
-        let addr = setup.address(i);
-        let (_, msg) = flow
-            .recipient_messages
-            .iter()
-            .find(|(a, _)| *a == addr)
-            .unwrap()
-            .clone();
-        let response = managers
-            .get_mut(&addr)
-            .unwrap()
-            .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg })
-            .unwrap();
-        agg.add_signature(MemberSignature::new(
-            dealer.mpc_config.epoch,
-            addr,
-            response.signature,
-        ))
-        .unwrap();
-    }
-    let cert = CertificateV1::NonceGeneration {
-        batch_index,
-        cert: agg.finish().unwrap(),
+    let (sigs, confirm_target) =
+        avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
+    let (second_sigs, second_target) =
+        avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
+    let make_full_cert = |target: &DealerMessagesHash, sigs: Vec<MemberSignature>| {
+        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        for sig in sigs {
+            agg.add_signature(sig).unwrap();
+        }
+        CertificateV1::NonceGeneration {
+            batch_index,
+            cert: agg.finish().unwrap(),
+        }
     };
+    let cert = make_full_cert(&confirm_target, sigs);
+    let second_cert = make_full_cert(&second_target, second_sigs);
 
     let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
-    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![cert]);
+    let mut mock_tob = MockOrderedBroadcastChannel::new(vec![cert, second_cert]);
     let outputs = MpcManager::run_nonce_generation(
         &party,
         batch_index,
@@ -12506,11 +12541,15 @@ async fn test_run_nonce_generation_avid_consumes_and_converts() {
     .await
     .unwrap();
 
-    assert_eq!(outputs.len(), 1, "one certified dealer consumed");
+    assert_eq!(outputs.len(), 2, "both certified dealers consumed");
     let mgr = party.read().unwrap();
     assert!(
         mgr.dealer_avid_nonce_outputs
             .contains_key(&(batch_index, dealer_addr))
+    );
+    assert!(
+        mgr.dealer_avid_nonce_outputs
+            .contains_key(&(batch_index, second_dealer_addr))
     );
 }
 
@@ -12649,47 +12688,37 @@ fn test_decoded_shares_match_optimistic_shares() {
 #[tokio::test]
 async fn test_run_nonce_generation_avid_recovers_from_replayed_certs() {
     let mut rng = rand::thread_rng();
-    let setup = TestSetup::with_weights_avid(&[16, 1, 1, 1, 1, 1]);
+    // W=16, f=4: the W-f floor (12) takes both dealers (6+6).
+    let setup = TestSetup::with_weights_avid(&[6, 1, 6, 1, 1, 1]);
     let batch_index = 0u32;
     let dealer_addr = setup.address(0);
-    let mut dealer = setup.create_manager(0);
-    let flow = dealer
-        .prepare_avid_nonce_dealer_flow(batch_index, &mut rng)
-        .unwrap();
-
-    let mut managers: HashMap<Address, MpcManager> = (1..6)
+    let second_dealer_addr = setup.address(2);
+    let mut managers: HashMap<Address, MpcManager> = (0..6)
         .map(|i| (setup.address(i), setup.create_manager(i)))
         .collect();
-    let mut agg = BlsSignatureAggregator::new(setup.committee(), flow.confirm_target.clone());
-    agg.add_signature(flow.my_signature.clone()).unwrap();
-    for i in 1..6 {
-        let addr = setup.address(i);
-        let (_, msg) = flow
-            .recipient_messages
-            .iter()
-            .find(|(a, _)| *a == addr)
-            .unwrap()
-            .clone();
-        let response = managers
-            .get_mut(&addr)
-            .unwrap()
-            .handle_send_messages_request(dealer_addr, &SendMessagesRequest { messages: msg })
-            .unwrap();
-        agg.add_signature(MemberSignature::new(
-            dealer.mpc_config.epoch,
-            addr,
-            response.signature,
-        ))
-        .unwrap();
-    }
-    let cert = CertificateV1::NonceGeneration {
-        batch_index,
-        cert: agg.finish().unwrap(),
+    let (sigs, confirm_target) =
+        avid_confirm_signatures(&setup, &mut managers, 0, batch_index, &mut rng);
+    let (second_sigs, second_target) =
+        avid_confirm_signatures(&setup, &mut managers, 2, batch_index, &mut rng);
+    let make_full_cert = |target: &DealerMessagesHash, sigs: Vec<MemberSignature>| {
+        let mut agg = BlsSignatureAggregator::new(setup.committee(), target.clone());
+        for sig in sigs {
+            agg.add_signature(sig).unwrap();
+        }
+        CertificateV1::NonceGeneration {
+            batch_index,
+            cert: agg.finish().unwrap(),
+        }
     };
+    let cert = make_full_cert(&confirm_target, sigs);
+    let second_cert = make_full_cert(&second_target, second_sigs);
 
     let party = Arc::new(RwLock::new(managers.remove(&setup.address(1)).unwrap()));
     let mock_p2p = MockP2PChannel::new(managers, setup.address(1));
-    let mut prefetched = crate::communication::PrefetchedTobChannel::new(vec![(dealer_addr, cert)]);
+    let mut prefetched = crate::communication::PrefetchedTobChannel::new(vec![
+        (dealer_addr, cert),
+        (second_dealer_addr, second_cert),
+    ]);
     let outputs = MpcManager::run_nonce_generation(
         &party,
         batch_index,
@@ -12700,11 +12729,15 @@ async fn test_run_nonce_generation_avid_recovers_from_replayed_certs() {
     .await
     .unwrap();
 
-    assert_eq!(outputs.len(), 1, "one certified dealer recovered");
+    assert_eq!(outputs.len(), 2, "both certified dealers recovered");
     let mgr = party.read().unwrap();
     assert!(
         mgr.dealer_avid_nonce_outputs
             .contains_key(&(batch_index, dealer_addr))
+    );
+    assert!(
+        mgr.dealer_avid_nonce_outputs
+            .contains_key(&(batch_index, second_dealer_addr))
     );
     assert!(
         mgr.public_messages_store
