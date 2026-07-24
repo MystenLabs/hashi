@@ -1850,16 +1850,23 @@ mod tests {
 
     #[test]
     fn withdrawal_flow_budget_at_absolute_cap() {
-        assert_eq!(CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS, 70);
+        assert_eq!(CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS, 40);
+        assert_eq!(CoinSelectionParams::DEFAULT_MAX_INPUTS, 400);
         assert_eq!(
-            safe_withdrawal_commit_max_inputs(70, 700),
-            700,
-            "70 requests × 10 inputs = 700, exactly fits the 922 commit budget",
+            safe_withdrawal_commit_max_inputs(
+                CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS,
+                CoinSelectionParams::DEFAULT_MAX_INPUTS,
+            ),
+            400,
+            "the default input cap limits the commit to 400 inputs",
         );
         assert_eq!(
-            safe_withdrawal_flow_max_inputs(70, 700),
-            700,
-            "commit and per-request budgets align at 70 requests / 700 inputs",
+            safe_withdrawal_flow_max_inputs(
+                CoinSelectionParams::MAX_WITHDRAWAL_REQUESTS,
+                CoinSelectionParams::DEFAULT_MAX_INPUTS,
+            ),
+            400,
+            "40 requests × 10 inputs/request limits the flow to 400 inputs",
         );
     }
 
@@ -1869,15 +1876,6 @@ mod tests {
             safe_withdrawal_flow_max_inputs(10, CoinSelectionParams::DEFAULT_MAX_INPUTS),
             10 * CoinSelectionParams::DEFAULT_INPUT_BUDGET,
             "at low request counts, the per-request input budget is binding",
-        );
-    }
-
-    #[test]
-    fn withdrawal_flow_budget_at_default_batch_size() {
-        assert_eq!(
-            safe_withdrawal_flow_max_inputs(50, CoinSelectionParams::DEFAULT_MAX_INPUTS),
-            500,
-            "50 requests × 10 inputs/request = 500, per-request budget is binding",
         );
     }
 }
